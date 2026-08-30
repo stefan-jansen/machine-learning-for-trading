@@ -120,7 +120,7 @@ def option_accounting_parameters(signal: dict[str, Any]) -> dict[str, Any]:
             if exit_at_max_days is None
             else "ask_for_buy_to_close_at_holding_limit"
         ),
-        "delisted_contract_exit": "ask_for_buy_to_close_at_last_quoted_mark",
+        "delisted_contract_exit": "ask_for_buy_to_close_on_first_unquoted_session_at_prior_mark",
         "hedge_liquidation": "final_observation_close",
     }
 
@@ -216,8 +216,9 @@ def _price_end_of_session_quotes(chain: pl.DataFrame) -> pl.DataFrame:
     exactly 0.0 on every one of the 1,705 fully unquoted rows in the window, including ones that
     are not remotely worthless, so the delta is a filler rather than a measurement and cannot
     carry the argument. An unquoted leg makes its session one the position cannot be marked at,
-    which :func:`_load_option_lifecycle` handles by settling the position at the last session it
-    can be marked at, rather than by inventing a price for it.
+    which :func:`_load_option_lifecycle` handles by not remarking the position that day, rather
+    than by inventing a price for it. Where no quote ever returns, it books the exit on the
+    first unquoted session against the mark the previous one carried.
 
     ``_source_quoted`` records what the vendor wrote, before this rule rewrites it. Whether a
     session can be marked at all is a fact about the source, and reading it back off the priced
@@ -252,8 +253,8 @@ def _defective_lifecycle_contracts(
     defect and must not remove anything from a selection: doing so would condition the realized
     portfolio on a corporate action nobody knew about at entry, throw away the P&L the position
     earned before it, and hand the missing weight to the names that happened to survive.
-    :func:`_load_option_lifecycle` settles such a position at the last session it can be marked
-    at instead.
+    :func:`_load_option_lifecycle` books a liquidation on the first unquoted session instead,
+    against the previous session's mark.
     """
     if contract_returns.is_empty():
         return contract_returns
@@ -410,8 +411,8 @@ def _defective_lifecycle_contracts(
     # A session the vendor quoted neither leg on is not a defect and does not reject anything.
     # It is what a corporate action leaves behind, either for good once the position continues
     # under an adjusted strike this chain does not carry, or for the single session around the
-    # event date. The position is still entered; `_load_option_lifecycle` settles it at the last
-    # session it can be marked at.
+    # event date. The position is still entered; `_load_option_lifecycle` leaves it unmarked
+    # where quotes resume, and liquidates it on that session where they do not.
     defective = (
         (pl.col("_half_quoted_dates").fill_null(0) > 0)
         | (pl.col("_observed_dates").fill_null(0) != pl.col("_fully_quoted_dates").fill_null(0))
@@ -664,42 +665,182 @@ def _load_option_lifecycle(
         ]
     )
     paired = calls.join(puts, on=["date", "symbol", "strike", "expiration"], how="inner")
+    if paired.filter(
+        (pl.col("underlying_price") - pl.col("put_underlying_price")).abs() > 1e-10
+    ).height:
+        raise ValueError("call and put rows disagree on the underlying settlement price")
+
     # Where the position ends, and the two ways it can end are not the same event.
     #
-    # Normally it ends at expiration, where the straddle settles in cash at the intrinsic value
-    # of its legs. Expiration is a known date, so marking intrinsic there reads no future.
+    # It normally ends at expiration, where the straddle settles in cash at the intrinsic value
+    # of its legs. Intrinsic needs only the underlying price and the strike, and either leg
+    # carries the underlying, so the settlement row is built from whichever leg the chain still
+    # quotes rather than from a pair. Expiration is a known date, so marking intrinsic there
+    # reads no future - and it is the only place intrinsic is the correct mark.
     #
     # A contract a corporate action adjusts stops being quoted before then, and the adjusted
-    # strike the position continues under is not in this chain. The holder discovers that on the
-    # first session no quote arrives, and liquidates against the last mark they had. Calling that
-    # a cash settlement, as this did, made it free: settlement pays no exit spread because there
-    # is no market to trade against, whereas a liquidation is a trade and pays one. The two are
-    # separated here so the accounting downstream can charge what each actually costs.
-    final_session = (
-        paired.filter(pl.col("date") <= pl.col("expiration"))
-        .group_by(["symbol", "strike", "expiration"])
-        .agg(pl.col("date").max().alias("_final_date"))
+    # strike the position continues under is not in this chain. The holder cannot know which
+    # session was the last one on the day it happens; they discover it on the first session no
+    # quote arrives. So the exit is booked on that session, against the mark the previous
+    # session carried, crossed to the side the trade executes on. Booking it on the last quoted
+    # session instead dates the exit by hindsight, whether it is marked at the mid there (an
+    # exit that crosses no spread) or at the ask there (a fill at a price the holder had no
+    # reason to take while the contract was still quoting).
+    #
+    # After that session the proceeds are cash. `_aggregate_portfolio` divides by a fixed
+    # `n_roll` rather than by a count of surviving positions, so a contract that stops appearing
+    # contributes zero on its own weight for the rest of the holding period, which is what
+    # holding cash is. Emitting rows to say so would state it twice, and reweighting the
+    # survivors would say something else entirely.
+    # A session the chain quoted one leg on, before expiration, is a defect rather than an end.
+    # The two look alike downstream - neither yields a paired row - but they are different
+    # claims about the data: a chain that quoted nothing has stopped carrying the contract,
+    # while a chain that quoted one leg still carries it and lost the other. Reading the second
+    # as a termination would let a half-written session end a position early and book a
+    # liquidation against it. Expiration is exempt for the reason rule 2 gives: the settlement
+    # is intrinsic, so a leg the chain drops there is the worthless one and its absence says
+    # nothing about the contract.
+    entry_window = cohorts.group_by(["symbol", "strike", "expiration"]).agg(
+        pl.col("entry_date").min().alias("_held_from")
     )
-    lifecycle = (
-        paired.join(final_session, on=["symbol", "strike", "expiration"], how="left")
+    half_quoted = (
+        raw_lookup.filter(pl.col("_source_quoted"))
+        .group_by(["date", "symbol", "strike", "expiration"])
+        .len(name="_quoted_legs")
+        .join(entry_window, on=["symbol", "strike", "expiration"], how="inner")
+        .filter(
+            (pl.col("_quoted_legs") == 1)
+            & (pl.col("date") >= pl.col("_held_from"))
+            & (pl.col("date") < pl.col("expiration"))
+        )
+    )
+    if not half_quoted.is_empty():
+        raise ValueError(
+            f"raw option lifecycle is missing {half_quoted.height} contract-leg dates "
+            f"(first: {half_quoted.select('date', 'symbol').head(5).to_dicts()})"
+        )
+
+    quote_columns = [
+        "date",
+        "symbol",
+        "strike",
+        "expiration",
+        "call_mid",
+        "call_bid",
+        "call_ask",
+        "call_delta",
+        "put_mid",
+        "put_bid",
+        "put_ask",
+        "put_delta",
+        "underlying_price",
+    ]
+    marked = (
+        paired.filter(pl.col("date") < pl.col("expiration"))
+        .select(quote_columns)
+        .with_columns(cash_settled=pl.lit(False), liquidated=pl.lit(False))
+    )
+
+    at_expiry = raw_lookup.filter(pl.col("date") == pl.col("expiration"))
+    expiry_underlying = at_expiry.group_by(["symbol", "strike", "expiration"]).agg(
+        pl.col("underlying_price").min().alias("_underlying_low"),
+        pl.col("underlying_price").max().alias("_underlying_high"),
+    )
+    if expiry_underlying.filter(
+        (pl.col("_underlying_high") - pl.col("_underlying_low")).abs() > 1e-10
+    ).height:
+        raise ValueError("option legs disagree on the underlying settlement price at expiration")
+    settled = (
+        expiry_underlying.select(
+            pl.col("expiration").alias("date"),
+            "symbol",
+            "strike",
+            "expiration",
+            pl.col("_underlying_low").alias("underlying_price"),
+        )
         .with_columns(
-            _is_final=pl.col("date") == pl.col("_final_date"),
-            _expires=pl.col("_final_date") == pl.col("expiration"),
+            call_mid=(pl.col("underlying_price") - pl.col("strike")).clip(lower_bound=0.0),
+            put_mid=(pl.col("strike") - pl.col("underlying_price")).clip(lower_bound=0.0),
+        )
+        .with_columns(
+            # Cash settlement is not a trade, so the settlement row carries no executable
+            # sides to cross and no delta to hedge. Writing the intrinsic mid into the bid and
+            # ask says that directly; leaving the quoted ones there would let a later cost rule
+            # find a spread on a session where there is no market to pay one to.
+            call_bid=pl.col("call_mid"),
+            call_ask=pl.col("call_mid"),
+            call_delta=pl.lit(0.0),
+            put_bid=pl.col("put_mid"),
+            put_ask=pl.col("put_mid"),
+            put_delta=pl.lit(0.0),
+            cash_settled=pl.lit(True),
+            liquidated=pl.lit(False),
+        )
+        .select(*quote_columns, "cash_settled", "liquidated")
+    )
+
+    contract_keys = ["symbol", "strike", "expiration"]
+    sessions = (
+        pl.concat(calendars)
+        .unique()
+        .sort("date")
+        .with_row_index("_session")
+        .select("date", pl.col("_session").cast(pl.Int64))
+    )
+    last_marked = marked.group_by(contract_keys).agg(pl.col("date").max().alias("_last_marked"))
+    liquidating = last_marked.join(
+        settled.select(contract_keys), on=contract_keys, how="anti"
+    ).join(
+        sessions.select(pl.col("date").alias("_last_marked"), "_session"),
+        on="_last_marked",
+        how="inner",
+    )
+    liquidation_rows = (
+        liquidating.with_columns(_session=pl.col("_session") + 1)
+        .join(
+            sessions.select(pl.col("date").alias("_liquidation_date"), "_session"),
+            on="_session",
+            how="inner",
+        )
+        .filter(pl.col("_liquidation_date") <= pl.col("expiration"))
+        .join(
+            marked,
+            left_on=[*contract_keys, "_last_marked"],
+            right_on=[*contract_keys, "date"],
+            how="inner",
+        )
+        .with_columns(
+            date=pl.col("_liquidation_date"),
+            # The straddle is bought back here, so it holds no delta into the next session.
+            call_delta=pl.lit(0.0),
+            put_delta=pl.lit(0.0),
+            cash_settled=pl.lit(False),
+            liquidated=pl.lit(True),
+        )
+        .select(*quote_columns, "cash_settled", "liquidated")
+    )
+
+    # Rule 4 of the straddle-lifecycle rule: a position that can be neither settled nor
+    # liquidated is not dropped, it stops the run. Dropping it would report a portfolio that
+    # silently excluded a position the strategy held.
+    unendable = contracts.join(
+        pl.concat([settled.select(contract_keys), liquidation_rows.select(contract_keys)]).unique(),
+        on=contract_keys,
+        how="anti",
+    )
+    if not unendable.is_empty():
+        raise ValueError(
+            f"{unendable.height} selected option contracts can be neither settled at expiration "
+            f"nor liquidated against a prior mark "
+            f"(first: {unendable.head(5).to_dicts()})"
+        )
+
+    lifecycle = (
+        pl.concat([marked, settled, liquidation_rows])
+        .with_columns(
+            instr_mid=pl.col("call_mid") + pl.col("put_mid"),
             instr_delta=pl.col("call_delta") + pl.col("put_delta"),
         )
-        .with_columns(
-            cash_settled=pl.col("_is_final") & pl.col("_expires"),
-            liquidated=pl.col("_is_final") & ~pl.col("_expires"),
-        )
-        .with_columns(
-            call_mid=pl.when(pl.col("cash_settled"))
-            .then((pl.col("underlying_price") - pl.col("strike")).clip(lower_bound=0.0))
-            .otherwise(pl.col("call_mid")),
-            put_mid=pl.when(pl.col("cash_settled"))
-            .then((pl.col("strike") - pl.col("underlying_price")).clip(lower_bound=0.0))
-            .otherwise(pl.col("put_mid")),
-        )
-        .with_columns(instr_mid=pl.col("call_mid") + pl.col("put_mid"))
         .select(
             [
                 "date",
@@ -717,19 +858,11 @@ def _load_option_lifecycle(
                 "put_delta",
                 "instr_delta",
                 "underlying_price",
-                "put_underlying_price",
                 "cash_settled",
                 "liquidated",
-                "_final_date",
-                "_expires",
             ]
         )
     )
-    if lifecycle.filter(
-        (pl.col("underlying_price") - pl.col("put_underlying_price")).abs() > 1e-10
-    ).height:
-        raise ValueError("call and put rows disagree on the underlying settlement price")
-
     cohort_keys = cohorts.select(
         pl.col("timestamp").alias("cohort_feature_date"),
         "symbol",
@@ -739,31 +872,16 @@ def _load_option_lifecycle(
         "entry_call_mid",
         "entry_put_mid",
     ).unique()
-    calendar = pl.concat(calendars).unique()
-    settles_on = lifecycle.filter(pl.col("cash_settled") | pl.col("liquidated")).select(
-        "symbol", "strike", "expiration", pl.col("date").alias("_final_date")
-    )
-    expected = (
-        cohort_keys.join(settles_on, on=["symbol", "strike", "expiration"], how="inner")
-        .join(calendar, how="cross")
-        .filter(pl.col("date").is_between(pl.col("entry_date"), pl.col("_final_date")))
-        .select(
-            "cohort_feature_date",
-            "symbol",
-            "strike",
-            "expiration",
-            "entry_date",
-            "date",
-        )
-    )
-    observed = (
-        cohort_keys.join(lifecycle, on=["symbol", "strike", "expiration"], how="inner")
-        .filter(pl.col("date").is_between(pl.col("entry_date"), pl.col("_final_date")))
-        .select(expected.columns)
-    )
-    missing = expected.join(observed, on=expected.columns, how="anti")
-    if not missing.is_empty():
-        raise ValueError(f"selected option contracts are missing {missing.height} lifecycle dates")
+    # No session-by-session completeness check between entry and the end of the position.
+    #
+    # It used to require a row on every calendar session in that window, which made a single
+    # unquoted session mid-life reject a run that `_select_cohorts` had already accepted - the
+    # two disagreed about the same contract, and the lifecycle was the one that raised. A
+    # session the vendor quoted neither leg on is not a defect; it is a session the position
+    # cannot be marked at. Where quotes resume, the position simply is not remarked that day
+    # and the move is recognised when they do. Where they never resume, the session after the
+    # last marked one is the liquidation booked above. What still has to hold is that the
+    # position is marked on its entry date and that it ends, and both are checked below.
     endpoints = cohort_keys.join(
         lifecycle, on=["symbol", "strike", "expiration"], how="inner"
     ).filter(pl.col("date") == pl.col("entry_date"))
@@ -783,9 +901,7 @@ def _load_option_lifecycle(
     )
     if expiry_keys.height != cohort_keys.height:
         raise ValueError("selected option contracts do not all have an end-of-position observation")
-    return lifecycle.drop("put_underlying_price", "_final_date", "_expires").sort(
-        ["symbol", "strike", "expiration", "date"]
-    )
+    return lifecycle.sort(["symbol", "strike", "expiration", "date"])
 
 
 _load_daily_contract_mids = _load_option_lifecycle
@@ -934,10 +1050,11 @@ def _compute_cohort_daily_pnl(
         ).fill_null(0.0),
     )
 
-    # A liquidation pays the spread in every mode, not only the round-trip one. The position is
-    # bought back against the last mark the chain carried, which for a short straddle crosses to
-    # the ask, plus commission - the same price a round-trip exit pays, because it is the same
-    # trade. Only the expiration session is free, and only because cash settlement is not a trade.
+    # A liquidation pays the spread in every mode, not only the round-trip one. The liquidation
+    # row sits on the first session the chain quoted nothing and carries the previous session's
+    # quote, so this crosses that mark to the ask a buy-to-close executes at, plus commission -
+    # the same price a round-trip exit pays, because it is the same trade. Only the expiration
+    # session is free, and only because cash settlement is not a trade.
     if exit_at_max_days is None:
         daily = daily.with_columns(
             exit_cost_norm=(

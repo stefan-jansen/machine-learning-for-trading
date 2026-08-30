@@ -387,6 +387,13 @@ def test_cash_settlement_and_stateful_delta_hedge(tmp_path: Path) -> None:
 
 
 def test_lifecycle_rejects_a_missing_contract_leg_date(tmp_path: Path) -> None:
+    """One quoted leg is a defect, not the end of the position.
+
+    A chain that quotes neither leg has stopped carrying the contract; a chain that quotes one
+    still carries it and has lost the other. Both fail to produce a paired row, so the lifecycle
+    has to tell them apart explicitly - otherwise a half-written session would end the position
+    early and book a liquidation against it.
+    """
     raw_dir = tmp_path / "raw"
     _write_raw_options(raw_dir)
     raw_path = raw_dir / "year=2024.parquet"
@@ -395,7 +402,7 @@ def test_lifecycle_rejects_a_missing_contract_leg_date(tmp_path: Path) -> None:
     ).write_parquet(raw_path)
     cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
 
-    with pytest.raises(ValueError, match="missing 1 lifecycle dates"):
+    with pytest.raises(ValueError, match="missing 1 contract-leg dates"):
         _load_option_lifecycle(cohorts, raw_dir)
 
 
@@ -991,16 +998,21 @@ def test_a_lifecycle_gap_does_not_shape_the_decision_universe(tmp_path: Path) ->
 
 
 def _chain_with_a_terminated_contract(raw_dir: Path) -> None:
-    """A is quoted from entry until the session before expiry; B is quoted throughout.
+    """A is quoted on its entry session only; B is quoted throughout.
 
     That is the shape a corporate action leaves in this chain: the contract is adjusted onto a
     strike the slice does not carry, so its quotes stop and never resume. The calendar still
-    holds the expiration session, because B is quoted on it.
+    holds 2024-01-09 and the expiration session, because B is quoted on both.
+
+    A stops after 2024-01-08 rather than after 2024-01-09 so that the session the exit is booked
+    on, the first with no quote, falls strictly inside the holding period. Stopping a day later
+    would put it on the expiration session itself, where a liquidation and a cash settlement
+    would be indistinguishable by date and the test could not tell which rule had fired.
     """
     _write_raw_options(raw_dir)
     chain = pl.read_parquet(raw_dir / "year=2024.parquet")
     runner_up = chain.with_columns(symbol=pl.lit("B"))
-    ended = chain.filter(pl.col("date") < date(2024, 1, 10))
+    ended = chain.filter(pl.col("date") < date(2024, 1, 9))
     pl.concat([ended, runner_up]).write_parquet(raw_dir / "year=2024.parquet")
 
 
@@ -1026,8 +1038,12 @@ def test_a_contract_ended_by_a_corporate_action_is_liquidated_not_settled(
 
     What it is *not* is a cash settlement. Settlement happens at expiration, at intrinsic,
     against no counterparty. This is a trade against the last mark the chain carried, and the
-    accounting has to charge it as one - which is the distinction the previous version of this
-    test did not draw and the one the gate objected to.
+    accounting has to charge it as one.
+
+    The exit is dated to the first session with no quote, not to the last session with one. On
+    the last quoted session the holder has no reason to act and no way to know it was the last;
+    they learn that the following morning. Dating it a day earlier picks the exit date with
+    hindsight, which is what the gate objected to.
     """
     raw_dir = tmp_path / "raw"
     _chain_with_a_terminated_contract(raw_dir)
@@ -1040,12 +1056,20 @@ def test_a_contract_ended_by_a_corporate_action_is_liquidated_not_settled(
     ended = lifecycle.filter(pl.col("liquidated"))
     assert ended.get_column("date").to_list() == [date(2024, 1, 9)]
     assert ended.get_column("date").item() < ended.get_column("expiration").item()
+    # The exit is booked against the mark the previous session carried, so the liquidation row
+    # repeats 2024-01-08's quote rather than inventing one for a session nothing was quoted on.
+    prior = lifecycle.filter(pl.col("date") == date(2024, 1, 8))
+    assert ended.get_column("call_mid").item() == prior.get_column("call_mid").item()
+    assert ended.get_column("call_ask").item() == prior.get_column("call_ask").item()
+    assert ended.get_column("put_mid").item() == prior.get_column("put_mid").item()
+    # A bought-back straddle carries no delta into the sessions that follow.
+    assert ended.get_column("instr_delta").item() == 0.0
     # Nothing reached expiry, so nothing settled.
     assert lifecycle.filter(pl.col("cash_settled")).is_empty()
 
 
 def test_a_liquidated_contract_pays_the_exit_spread(tmp_path: Path) -> None:
-    """A buy-to-close against the last quoted mark costs the spread, like any other exit.
+    """A buy-to-close against the previous session's mark costs the spread, like any other exit.
 
     Marking it out at the midpoint for free was the defect: it made a position the market
     stopped quoting cheaper to leave than one the strategy chose to leave, which is backwards.
@@ -1068,6 +1092,102 @@ def test_a_liquidated_contract_pays_the_exit_spread(tmp_path: Path) -> None:
     charged = daily.filter(pl.col("exit_cost_norm") > 0.0)
     assert charged.get_column("date").to_list() == [date(2024, 1, 9)]
     assert charged.get_column("liquidated").to_list() == [True]
+
+
+def test_a_position_survives_an_interior_session_nobody_quoted(tmp_path: Path) -> None:
+    """A gap in the middle of a life is an unmarked session, not the end of the position.
+
+    This is the end-to-end version deliberately: cohort selection already accepted a contract
+    with an interior gap, and the lifecycle then refused it, so the two disagreed about the same
+    data and a run could pass selection and die later. Stopping at `_select_cohorts` would not
+    have caught that. The test therefore loads the lifecycle and computes the daily P&L across
+    the gap.
+
+    Nothing is invented for the unquoted session. The position simply is not remarked, so the
+    move across the gap is recognised on the session quotes resume - which here is expiration,
+    where the straddle settles at intrinsic.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    chain = pl.read_parquet(raw_dir / "year=2024.parquet")
+    # B keeps the calendar intact; A loses both legs on the interior session only.
+    runner_up = chain.with_columns(symbol=pl.lit("B"))
+    gapped = chain.filter(pl.col("date") != date(2024, 1, 9))
+    pl.concat([gapped, runner_up]).write_parquet(raw_dir / "year=2024.parquet")
+    predictions, contract_returns = _two_names()
+
+    cohorts = _select_cohorts(predictions, contract_returns, top_k=1, raw_options_dir=raw_dir)
+    assert cohorts.get_column("symbol").to_list() == ["A"]
+
+    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
+    assert lifecycle.get_column("date").to_list() == [date(2024, 1, 8), date(2024, 1, 10)]
+    # It reached expiration, so it settled. A gap that closes is not a liquidation.
+    assert lifecycle.filter(pl.col("liquidated")).is_empty()
+    assert lifecycle.filter(pl.col("cash_settled")).get_column("date").to_list() == [
+        date(2024, 1, 10)
+    ]
+
+    daily = _compute_cohort_daily_pnl(
+        cohorts,
+        lifecycle,
+        delta_hedge=False,
+        hedge_spread_bps=0.0,
+        equity_commission_per_share=0.0,
+        option_commission_per_contract=0.0,
+        delta_threshold=0.1,
+    )
+    assert daily.height == 2
+    # Cash settlement is not a trade, so nothing is charged for leaving.
+    assert daily.get_column("exit_cost_norm").to_list() == pytest.approx([0.0, 0.0])
+    # Entry straddle is 6.0 + 4.0 = 10.0; settlement is max(101 - 100, 0) + 0 = 1.0. The short
+    # position gains the whole 9.0 decline, recognised on the session quotes resume.
+    assert daily.get_column("premium_pnl_norm").to_list() == pytest.approx([0.0, 0.9])
+
+
+def test_expiration_settles_from_whichever_leg_the_chain_still_quotes(tmp_path: Path) -> None:
+    """Intrinsic needs the underlying and the strike, and either leg carries the underlying.
+
+    Requiring a pair at expiration dropped the settlement row whenever the chain stopped
+    quoting the worthless leg, which is exactly when it tends to stop. The position then had no
+    end and the run either truncated it or refused it, for a leg whose price is not read.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    chain = pl.read_parquet(raw_dir / "year=2024.parquet")
+    single_leg = chain.filter(
+        ~((pl.col("date") == date(2024, 1, 10)) & (pl.col("call_put") == "P"))
+    )
+    single_leg.write_parquet(raw_dir / "year=2024.parquet")
+    cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
+
+    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
+    settled = lifecycle.filter(pl.col("cash_settled"))
+    assert settled.get_column("date").to_list() == [date(2024, 1, 10)]
+    # Settled at intrinsic from the underlying and the strike, not from the surviving quote.
+    assert settled.get_column("call_mid").item() == pytest.approx(1.0)
+    assert settled.get_column("put_mid").item() == pytest.approx(0.0)
+    assert lifecycle.filter(pl.col("liquidated")).is_empty()
+
+
+def test_a_position_that_can_be_neither_settled_nor_liquidated_stops_the_run(
+    tmp_path: Path,
+) -> None:
+    """Rule 4: refuse, rather than drop the position and report the rest.
+
+    Dropping it would publish a portfolio that silently excluded a position the strategy held,
+    which is the same defect as reweighting the survivors, arrived at by omission.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    chain = pl.read_parquet(raw_dir / "year=2024.parquet")
+    # The chain stops for every name before expiration, so there is no later session to book a
+    # liquidation on and no expiration session to settle at.
+    truncated = chain.filter(pl.col("date") < date(2024, 1, 10))
+    truncated.write_parquet(raw_dir / "year=2024.parquet")
+    cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
+
+    with pytest.raises(ValueError, match="neither settled at expiration nor liquidated"):
+        _load_option_lifecycle(cohorts, raw_dir)
 
 
 def test_a_corporate_action_does_not_reweight_the_names_beside_it(tmp_path: Path) -> None:
