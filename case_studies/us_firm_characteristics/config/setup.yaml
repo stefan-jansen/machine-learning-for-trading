@@ -344,7 +344,7 @@ backtest:
     top_n_predictions:
       signal: 0                 # all predictions at the equal-weight baseline
       allocation: 10            # top-10 model configs by equal-weight baseline Sharpe
-      cost_sensitivity: 1       # top-1 of {signal+allocation} per label
+      cost_sensitivity: 1       # top-1 of {allocation+risk_overlay} per label
       risk_overlay: 1           # top-1 of {signal+allocation} per label
     # Skip MVO/HRP when allocator runtime is the bottleneck (intraday CSes).
     expensive_allocators_skip: false

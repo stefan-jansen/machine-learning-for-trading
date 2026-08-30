@@ -393,9 +393,11 @@ print(repr(explorer))
 # %% [markdown]
 # ### The upper tail of the surface
 #
-# The ten highest validation Sharpes among the runs that stayed solvent, with the
-# model that produced each and how many names a side it was traded at. Read this as the shape
-# of the tail rather than as a selection: these are the ten largest draws from a
+# The ten strongest solvent runs after each configuration is capped to two slots, with
+# the model that produced each and how many names a side it was traded at. It is not
+# simply the ten highest Sharpes: a configuration's later checkpoints are near-copies of
+# its best, and uncapped they arrive together and fill the table. Read this as the shape
+# of the tail rather than as a selection: these are among the largest draws from a
 # sweep of hundreds, so the largest is biased upward by however many were tried.
 # The deflated Sharpe below is the first correction for that, and the strategy
 # analysis notebook is where the selection is confronted properly. These are already

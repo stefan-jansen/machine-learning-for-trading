@@ -38,8 +38,10 @@
 #
 # **Book Reference:** Chapter 18, Sections 18.2-18.5
 #
-# **Prerequisites:** the Chapter 16 backtest and Chapter 17 allocation notebooks,
-# whose registered runs decide which strategy is swept here.
+# **Prerequisites:** the Chapter 16 backtest, the Chapter 17 allocation notebook and
+# [`13_risk_management`](13_risk_management.ipynb). Cost sensitivity is the last rung of
+# the ladder: it sweeps the single best configuration out of the allocation and risk
+# stages together, so risk management runs before it rather than after.
 
 # %%
 """US Firm Characteristics: Costs."""
@@ -122,14 +124,25 @@ def _solvent_hashes(hashes):
     """
     if not hashes:
         return set()
-    placeholders = ", ".join("?" for _ in hashes)
+    # In chunks, because the pool is every ranked run and SQLite's default limit on host
+    # parameters is 999 on some supported builds. One IN clause over the whole pool raises
+    # "too many SQL variables" there while working here, which is the worst way for it to
+    # fail: on a reader's machine and not on the author's.
+    solvent: set[str] = set()
+    chunk = 500
     with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
-        rows = conn.execute(
-            f"SELECT backtest_hash FROM backtest_metrics "
-            f"WHERE backtest_hash IN ({placeholders}) AND max_drawdown > -1.0",
-            hashes,
-        ).fetchall()
-    return {row[0] for row in rows}
+        for start in range(0, len(hashes), chunk):
+            part = hashes[start : start + chunk]
+            placeholders = ", ".join("?" for _ in part)
+            solvent.update(
+                row[0]
+                for row in conn.execute(
+                    f"SELECT backtest_hash FROM backtest_metrics "
+                    f"WHERE backtest_hash IN ({placeholders}) AND max_drawdown > -1.0",
+                    part,
+                )
+            )
+    return solvent
 
 
 def _resolve_pre_cost_runs(
@@ -147,14 +160,17 @@ def _resolve_pre_cost_runs(
     the registry itself: the ranking is what it decides, and it can then be exercised without
     a database. Passing None applies no solvency filter.
 
-    The pool is the whole ladder up to the risk overlay, and cost sensitivity runs on the
-    single best configuration out of it. `risk_overlay` was missing before, so the cost
-    curve described the pre-overlay winner - a configuration the case study does not ship.
-    `cost_sensitivity` is deliberately absent: pooling it would let a cost-charged run
-    re-enter the selection it is meant to be the consequence of.
+    The pool is `allocation` UNION `risk_overlay`, and cost sensitivity runs on the single
+    best configuration out of it. The union is the point. The risk stage registers a row
+    per named control and none for the un-overlaid strategy, so drawing from
+    `risk_overlay` alone would force an overlay onto the carrier even where every control
+    hurt it - the notebook would settle an empirical question by the shape of its query.
+    Including `allocation` lets a position-sizing configuration with no overlay win, which
+    is a real outcome rather than a fallback.
 
-    Where the overlay stage registers nothing, as it does here, the best of this pool is a
-    position-sizing configuration with no overlay. That is the outcome, not a fallback.
+    `signal` is out: a raw baseline that was never carried into sizing would skip a rung of
+    the ladder. `cost_sensitivity` is out too - pooling it would let a cost-charged run
+    re-enter the selection it is the consequence of.
 
     `ranked_pool` asks each stage for its whole ranked list rather than its top `top_n`.
     Truncating first and filtering after would let an insolvent leader take the slot a solvent
@@ -169,7 +185,7 @@ def _resolve_pre_cost_runs(
             stage=stage,
             top_n=ranked_pool,
         )
-        for stage in ("signal", "allocation", "risk_overlay")
+        for stage in ("allocation", "risk_overlay")
     ]
     candidates = [frame for frame in candidates if not frame.is_empty()]
     if not candidates:
@@ -200,6 +216,29 @@ else:
         spec = json.loads(row["spec_json"])
         alloc = strategy_view(spec).get("allocation", {}).get("method", "equal_weight")
         print(f"  Sharpe={row['sharpe']:.3f}  alloc={alloc}  bt_hash={row['backtest_hash'][:8]}")
+
+    # Whether the overlay earned its place, reported rather than assumed. The risk stage
+    # files a row per named control and none for the un-overlaid strategy, so the two sides
+    # have to be read separately and differenced. A negative difference is the stage saying
+    # its controls did not help, which is a result and not a failure.
+    _best = {}
+    for _stage in ("risk_overlay", "allocation"):
+        _frame = resolve_best_backtest_runs(
+            CASE_STUDY_ID, LABEL, split="validation", stage=_stage, top_n=1
+        )
+        _best[_stage] = None if _frame.is_empty() else _frame["sharpe"][0]
+    if _best["risk_overlay"] is None:
+        print(
+            "  Risk overlay: no run registered, so the carrier above is un-overlaid. This "
+            "case study declares position-level controls only and runs the vectorized "
+            "path, where none of them can act."
+        )
+    else:
+        _delta = _best["risk_overlay"] - _best["allocation"]
+        print(
+            f"  Best overlaid {_best['risk_overlay']:.3f} vs best un-overlaid "
+            f"{_best['allocation']:.3f}, difference {_delta:+.3f}"
+        )
 
 # %%
 prices = load_backtest_prices_for(CASE_STUDY_ID, LABEL, split="validation", max_symbols=MAX_SYMBOLS)
