@@ -337,8 +337,11 @@ splits = generate_cv_splits(
     case_study_id=CASE_STUDY_ID,
     label_buffer=LABEL_BUFFER,
 )
-if MAX_FOLDS > 0:
-    splits = splits[:MAX_FOLDS]
+# `MAX_FOLDS` is applied after the holdout is derived, not here. The holdout fold takes the
+# next id after the canonical set, so truncating first would let a reduced run hand it an id
+# that a full run gives to a validation fold - and `05_evaluation`, reading the canonical
+# geometry, would then read holdout-fitted features as that validation fold's.
+canonical_splits = splits
 
 # The holdout fold, appended here rather than inferred downstream. A holdout fit needs
 # FEATURES, and a split definition is not one: the three models below are fitted per fold, so
@@ -373,7 +376,10 @@ _holdout_cv = build_holdout_cv(
                         "val_start": str(split["val_start"]),
                         "val_end": str(split["val_end"]),
                     }
-                    for split in splits
+                    # The complete canonical set, never the reduced one. The holdout id is
+                    # derived from these, so a reduced run must still see all of them or it
+                    # gets an id a full run assigns to a validation fold.
+                    for split in canonical_splits
                 ]
             }
         },
@@ -384,7 +390,10 @@ _holdout_cv = build_holdout_cv(
 )
 _holdout_fold = _holdout_cv["folds"][0]
 HOLDOUT_FOLD_ID = int(_holdout_fold["fold"])
-assert HOLDOUT_FOLD_ID not in {int(split["fold"]) for split in splits}, (
+if MAX_FOLDS > 0:
+    splits = canonical_splits[:MAX_FOLDS]
+
+assert HOLDOUT_FOLD_ID not in {int(split["fold"]) for split in canonical_splits}, (
     "the derived holdout fold reuses a validation fold id, so its features would join "
     "against a fold fitted on a window that ends before the holdout opens"
 )
@@ -1476,7 +1485,13 @@ def _regime_duration(test_states: np.ndarray) -> np.ndarray:
 
 
 # %%
-def _fit_hmm_fold(portfolio_df: pl.DataFrame, split: dict[str, str], fold_idx: int):
+def _fit_hmm_fold(
+    portfolio_df: pl.DataFrame,
+    split: dict[str, str],
+    fold_idx: int,
+    *,
+    describe_evaluation: bool = True,
+):
     """Estimate on training rows, run forward over train and evaluation, return both.
 
     Returns ``(fold_df, params)`` where ``params`` carries the estimated quantities in the
@@ -1539,11 +1554,19 @@ def _fit_hmm_fold(portfolio_df: pl.DataFrame, split: dict[str, str], fold_idx: i
     )
     fold_df = fold_df.filter(emitted)
 
-    test_states = path_states[path["timestamp"].to_numpy() >= test_start]
-    for k in range(2):
-        label = "Lower-carry" if k == 0 else "Higher-carry"
-        frac = (test_states == k).mean() if len(test_states) > 0 else 0
-        print(f"  {label} state holds on {frac:.1%} of the evaluation sessions")
+    # The mix over the evaluation window, printed for the walk-forward periods and withheld
+    # for the holdout period. For that period the evaluation window IS the holdout, so the
+    # two lines below would be a description of holdout data - a regime split rendered into
+    # the notebook, read by whoever tunes the next thing. The features themselves are
+    # written either way; what is withheld is the summary of them.
+    if describe_evaluation:
+        test_states = path_states[path["timestamp"].to_numpy() >= test_start]
+        for k in range(2):
+            label = "Lower-carry" if k == 0 else "Higher-carry"
+            frac = (test_states == k).mean() if len(test_states) > 0 else 0
+            print(f"  {label} state holds on {frac:.1%} of the evaluation sessions")
+    else:
+        print("  evaluation-window regime mix withheld: this period's window is the holdout")
 
     # `order` is ascending in mean carry, so order[1] is the higher-carry state.
     low, high = int(order[0]), int(order[1])
@@ -1572,8 +1595,11 @@ hmm_fold_params = []
 
 for split in artifact_splits:
     print(f"\nPeriod {split['fold']}:")
-    _series = portfolio_carry_full if int(split["fold"]) == HOLDOUT_FOLD_ID else portfolio_carry
-    result, params = _fit_hmm_fold(_series, split, split["fold"])
+    _is_holdout = int(split["fold"]) == HOLDOUT_FOLD_ID
+    _series = portfolio_carry_full if _is_holdout else portfolio_carry
+    result, params = _fit_hmm_fold(
+        _series, split, split["fold"], describe_evaluation=not _is_holdout
+    )
     if result is not None:
         hmm_results.append(result)
         hmm_fold_params.append(params)
@@ -1823,9 +1849,14 @@ if len(hmm_pl) > 0:
 # imply.
 
 # %%
-if hmm_fold_params:
-    hmm_param_df = pl.DataFrame(hmm_fold_params).sort("fold")
-    print("\nEstimated parameters per period, states ordered by average carry:")
+# The walk-forward periods only. Every quantity here is estimated on training rows that end
+# before the holdout opens, so none of it is a holdout statistic - but the table is read as a
+# description of the evaluation design, and the holdout period is not part of that design. Its
+# parameters are still checked, above, against its own train_end.
+_validation_params = [p for p in hmm_fold_params if p["fold"] != HOLDOUT_FOLD_ID]
+if _validation_params:
+    hmm_param_df = pl.DataFrame(_validation_params).sort("fold")
+    print("\nEstimated parameters per walk-forward period, states ordered by average carry:")
     hmm_param_display = (
         hmm_param_df.with_columns(
             (1.0 / (1.0 - pl.col("persist_low"))).round(1).alias("run_low"),
@@ -2051,13 +2082,24 @@ for col in temporal_cols:
 # downstream can silently multiply rows. No period's rows escape its own window. And the
 # columns carrying a value on a holdout-dated row are exactly the ones allowed to.
 #
-# That last check is the one worth reading closely, because the answer is not "none".
-# ARIMA and the hidden Markov model estimate parameters and are confined to their period,
-# so every holdout-dated cell they own has to be empty, and the assertion enforces it.
+# That last check is the one worth reading closely, because the answer depends on which
+# period the row sits in, and the check now asks about both.
+#
+# ARIMA and the hidden Markov model estimate parameters, so in the **walk-forward periods**
+# every holdout-dated cell they own has to be empty: those periods estimate on windows that
+# end before the holdout opens, and a value there would be a fit reaching past its own
+# evaluation window. In the **holdout period** those same cells have to be filled, because
+# that period exists to carry the vintage a holdout evaluation reads - its coefficients are
+# estimated at the last session before the holdout opens and rolled forward frozen. An empty
+# holdout period is the failure this check was rewritten to catch: asserted over the whole
+# frame, "no fitted column has a holdout-dated value" is satisfied perfectly by a holdout
+# period that emitted nothing at all.
+#
 # The spectral features estimate nothing and read a backward-looking window, so their
-# holdout-dated cells are filled on purpose - a later stage evaluating on the holdout
-# needs them, and there is nothing about them that could have come from the future. The
-# cell prints the count per column, which is where that distinction becomes visible.
+# holdout-dated cells are filled in every period - a later stage evaluating on the holdout
+# needs them, and there is nothing about them that could have come from the future. The cell
+# prints the count per column and per period class, which is where the distinction becomes
+# visible.
 
 # %%
 key = ["fold", "timestamp", "product", "position"]
