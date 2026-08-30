@@ -524,10 +524,15 @@ def _holdout_lineage_for(
         # to the holdout rows that share a training run and checkpoint, so this filters on the
         # identity the row actually has.
         #
-        # It reaches a holdout scored from the same trained model, and not one produced by a
-        # *retrain*, which registers its own training hash and so shares no key with the
-        # validation identity that was retired. Connecting those two is a lineage question the
-        # registry does not currently answer; see REVIEW.md, "Backtest and strategy".
+        # It reaches a holdout scored from the same trained model. One produced by the
+        # canonical *retrain* registers its own training hash and shares no key with the
+        # validation identity that was retired - measured: no holdout training spec in any
+        # registry here references a validation identity, so there is nothing to join on.
+        #
+        # What prevents a retired carrier from reaching a holdout is upstream instead:
+        # `holdout.select_best_models` ranks over published members only, so a retrain created
+        # from here on descends from a live carrier by construction. Holdout rows written
+        # before that are stale artifacts of an earlier selection, and they are regenerated.
         clauses.append("p.prediction_hash NOT IN (SELECT value FROM json_each(?))")
         params.append(json.dumps(sorted(retired_hashes)))
     spec_clauses, spec_params = _full_strategy_clauses(strategy_spec)
