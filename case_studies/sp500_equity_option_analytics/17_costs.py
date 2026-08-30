@@ -121,7 +121,7 @@ print(
 # `run_log` are symlinks: true in a maintainer worktree, false in every clean clone and CI run.
 # `CASE_DIR` is already the directory this notebook resolved, including under a preview, so
 # asking it directly answers for the registry the rest of the notebook reads.
-_study = Study.at(CASE_DIR, case_study=CASE_STUDY_ID, entry_point="16_costs")
+_study = Study.at(CASE_DIR, case_study=CASE_STUDY_ID, entry_point="17_costs")
 _members, _population_notes = prediction_members_in_force(_study)
 for _note in _population_notes:
     print(_note)
@@ -506,5 +506,5 @@ fig.show()
 #    It establishes that this validation result is not an artifact of one cost assumption, which
 #    is a narrower and more defensible claim.
 #
-# **Next:** [`17_risk_management`](17_risk_management.ipynb) tests risk overlays on the same
+# **Next:** [`18_strategy_analysis`](18_strategy_analysis.ipynb) tests risk overlays on the same
 # eligible validation lineage. See Chapter 19 for the risk-control framework.

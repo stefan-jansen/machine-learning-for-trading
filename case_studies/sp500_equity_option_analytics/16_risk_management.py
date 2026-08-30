@@ -35,7 +35,7 @@
 # **Book reference:** Chapter 19, Sections 19.3-19.6.
 #
 # **Prerequisites:** `15_portfolio_management` and the cost diagnostics in
-# `16_costs`. Signals form after Friday's close and execute at the next
+# `17_costs`. Signals form after Friday's close and execute at the next
 # available open, normally Monday. The current-constituent universe retains
 # survivorship bias. Results describe this retrospective roster during the
 # development window, not the historical index-membership process or a
@@ -147,7 +147,7 @@ print(f"Case study: {CASE_STUDY_ID}; label: {RISK_LABEL}; selected lineages: {TO
 # `run_log` are symlinks: true in a maintainer worktree, false in every clean clone and CI run.
 # `CASE_DIR` is already the directory this notebook resolved, including under a preview, so
 # asking it directly answers for the registry the rest of the notebook reads.
-_study = Study.at(CASE_DIR, case_study=CASE_STUDY_ID, entry_point="17_risk_management")
+_study = Study.at(CASE_DIR, case_study=CASE_STUDY_ID, entry_point="16_risk_management")
 _members, _population_notes = prediction_members_in_force(_study)
 for _note in _population_notes:
     print(_note)

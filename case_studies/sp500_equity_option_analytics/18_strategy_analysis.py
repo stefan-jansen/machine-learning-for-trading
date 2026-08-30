@@ -35,7 +35,7 @@
 #
 # **Book reference:** Chapter 20, Sections 20.1, 20.6, and 20.7.
 #
-# **Prerequisites:** notebooks `14_backtest` through `17_risk_management` and
+# **Prerequisites:** notebooks `14_backtest` through `17_costs` and
 # their corrected v3.1 registry rows. This notebook is read-only: it trains no
 # model, runs no backtest, and writes no registry result.
 #
