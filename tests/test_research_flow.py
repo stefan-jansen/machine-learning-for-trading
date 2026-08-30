@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from contextlib import closing
+from copy import deepcopy
 from datetime import date
 from pathlib import Path
 
@@ -13,6 +14,24 @@ from case_studies.research import CandidateSet, PredictionResult, Result, Strate
 from case_studies.utils import conformal
 from tests.test_research_registry import _predictions, _training_spec
 from tests.test_research_workspace import _seed_release
+
+
+def _expectation_from_lock(lock):
+    """The holdout expectation a locked run states, derived from the lock it already holds.
+
+    `Strategy` no longer reads `research_locks`; the caller says what it expects. For a locked
+    run that is the lock's own contract, restated - so these tests exercise the same guarantee
+    they always did, now stated by the caller rather than looked up.
+    """
+    from case_studies.research.strategy import HoldoutExpectation, strategy_projection
+
+    return HoldoutExpectation(
+        training_hash=str(lock.record["holdout_training_hash"]),
+        checkpoint_kind=str(lock.record["checkpoint_kind"]),
+        checkpoint_value=lock.record["checkpoint_value"],
+        strategy=strategy_projection(deepcopy(lock.record["strategy_spec"])),
+        validation_prediction_hash=str(lock.record["prediction_hash"]),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -376,8 +395,15 @@ def test_locked_rolling_allocator_holdout_preserves_warmup_and_transitions_once(
         predictions=holdout_frame,
         expected_keys=holdout_expected,
     )
-    with pytest.raises(ValueError, match="locked retraining contract"):
-        study.strategy(prediction=wrong_checkpoint, **request)
+    # The same guarantee, now stated by the caller: the expectation names checkpoint 3 and this
+    # prediction is checkpoint 4 of the same training run. They share a training hash and a
+    # strategy specification, so the checkpoint is the only thing separating them.
+    with pytest.raises(ValueError, match="holdout prediction is training"):
+        study.strategy(
+            prediction=wrong_checkpoint,
+            holdout_expectation=_expectation_from_lock(lock),
+            **request,
+        )
 
     holdout_prediction = study.results.publish_predictions(
         holdout_training,
@@ -389,14 +415,20 @@ def test_locked_rolling_allocator_holdout_preserves_warmup_and_transitions_once(
     )
     holdout_backtest = study.strategy(
         prediction=holdout_prediction,
+        holdout_expectation=_expectation_from_lock(lock),
         **request,
     ).run()
 
     with pytest.raises(ValueError, match="canonical holdout prices"):
-        study.strategy(prediction=holdout_prediction, **request).run(prices=holdout_prices)
-    with pytest.raises(ValueError, match="locked validation strategy"):
         study.strategy(
             prediction=holdout_prediction,
+            holdout_expectation=_expectation_from_lock(lock),
+            **request,
+        ).run(prices=holdout_prices)
+    with pytest.raises(ValueError, match="selected validation strategy"):
+        study.strategy(
+            prediction=holdout_prediction,
+            holdout_expectation=_expectation_from_lock(lock),
             signal={"method": "equal_weight_top_k", "top_k": 2},
             allocation={"method": "inverse_vol", "vol_window": 2},
             execution_mode="vectorized",
@@ -516,7 +548,9 @@ def test_locked_conformal_holdout_uses_validation_residuals(
         expected_keys=holdout_frame.select("symbol", "timestamp", "fold_id"),
     )
 
-    holdout_backtest = study.strategy(prediction=holdout_prediction, **request).run()
+    holdout_backtest = study.strategy(
+        prediction=holdout_prediction, holdout_expectation=_expectation_from_lock(lock), **request
+    ).run()
     widths = pl.read_parquet(
         study.root
         / "run_log"

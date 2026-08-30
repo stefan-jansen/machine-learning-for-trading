@@ -138,36 +138,6 @@ def _locked_training_spec(validation_spec: dict[str, Any], holdout_spec: dict[st
     return project_training_identity(holdout_spec)
 
 
-def _locked_strategy_projection(spec: dict[str, Any]) -> dict[str, Any]:
-    projected = deepcopy(spec)
-    projected.pop("_runtime_backtest_config", None)
-    metadata = projected.get("backtest_config", {}).get("metadata")
-    if isinstance(metadata, dict):
-        metadata.pop("prediction_hash", None)
-    input_identity = projected.get("input_identity")
-    if isinstance(input_identity, dict):
-        input_identity.pop("prices", None)
-        input_identity.pop("funding_rates", None)
-        # An input identity holding nothing but the runtime-resolved entries just removed
-        # projects to `{}`, while a strategy that declared no input identity at all projects to
-        # the key being absent. The two describe the same strategy and must hash the same, so
-        # the empty remainder is dropped rather than left as an empty dict.
-        if not input_identity:
-            projected.pop("input_identity")
-    decision = projected.get("decision_artifact")
-    if isinstance(decision, dict):
-        decision.pop("hash", None)
-        decision.pop("artifact_digest", None)
-        source_identity = decision.get("source_identity")
-        if isinstance(source_identity, dict):
-            declared_inputs = source_identity.get("declared_inputs")
-            if isinstance(declared_inputs, dict):
-                declared_inputs.pop("prediction_hashes", None)
-                declared_inputs.pop("prices", None)
-            source_identity.pop("clean_replay_digest", None)
-    return projected
-
-
 def _valid_holdout_decision(
     study: Study,
     locked_spec: dict[str, Any],
@@ -343,6 +313,8 @@ class Lifecycle:
         holdout_prediction_hash: str,
         holdout_backtest_hash: str,
     ) -> tuple[ResearchLock, TrainingResult, PredictionResult, BacktestResult]:
+        from .strategy import strategy_projection
+
         lock = self.open(lock_hash)
         if lock.state != LifecycleState.LOCKED.value:
             raise ValueError("holdout evaluation requires a LOCKED research lock")
@@ -381,8 +353,8 @@ class Lifecycle:
                 backtest_spec,
                 prediction.hash,
             )
-            and _locked_strategy_projection(backtest_spec)
-            == _locked_strategy_projection(lock.record["strategy_spec"])
+            and strategy_projection(backtest_spec)
+            == strategy_projection(lock.record["strategy_spec"])
         )
         if not valid:
             raise ValueError(

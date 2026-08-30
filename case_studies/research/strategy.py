@@ -211,6 +211,80 @@ def strategy_warmup_periods(strategy_spec: dict[str, Any]) -> int:
     return int(value)
 
 
+def strategy_projection(spec: dict[str, Any]) -> dict[str, Any]:
+    """One strategy specification reduced to what two runs of it must agree on.
+
+    Removed are exactly the fields that legitimately differ between two executions of the same
+    strategy over different intervals: the prediction hash, the price and funding digests, and
+    the decision artifact's own hashes. Everything else is kept, transaction costs included.
+
+    This is what makes "the same strategy on a different window" a decidable question, and it is
+    the comparison a holdout replay has to satisfy. It lived in the research-lock module and was
+    private to it, which is why a holdout produced outside that transaction had no way to state
+    the guarantee at all.
+    """
+    projected = deepcopy(spec)
+    projected.pop("_runtime_backtest_config", None)
+    metadata = projected.get("backtest_config", {}).get("metadata")
+    if isinstance(metadata, dict):
+        metadata.pop("prediction_hash", None)
+    input_identity = projected.get("input_identity")
+    if isinstance(input_identity, dict):
+        input_identity.pop("prices", None)
+        input_identity.pop("funding_rates", None)
+        # An input identity holding nothing but the runtime-resolved entries just removed
+        # projects to `{}`, while a strategy that declared no input identity at all projects to
+        # the key being absent. The two describe the same strategy and must hash the same, so
+        # the empty remainder is dropped rather than left as an empty dict.
+        if not input_identity:
+            projected.pop("input_identity")
+    decision = projected.get("decision_artifact")
+    if isinstance(decision, dict):
+        decision.pop("hash", None)
+        decision.pop("artifact_digest", None)
+        source_identity = decision.get("source_identity")
+        if isinstance(source_identity, dict):
+            declared_inputs = source_identity.get("declared_inputs")
+            if isinstance(declared_inputs, dict):
+                declared_inputs.pop("prediction_hashes", None)
+                declared_inputs.pop("prices", None)
+            source_identity.pop("clean_replay_digest", None)
+    return projected
+
+
+@dataclass(frozen=True)
+class HoldoutExpectation:
+    """What a caller asserts about the holdout lineage it is asking to be executed.
+
+    A holdout backtest is only evidence if it ran the selected configuration, refitted on the
+    holdout interval, under the selected strategy. Nothing in a holdout prediction says which
+    configuration was selected, so that fact has to arrive from outside. The research-lock layer
+    supplied it by requiring a pre-registered row, which made an authorization token a
+    prerequisite for a computation and made a wrong holdout uncorrectable. This carries the same
+    three facts without the token, and the caller states them.
+
+    ``training_hash`` is the holdout retrain's own identity - not the validation model's, which
+    a genuine retrain never shares. ``checkpoint_kind`` and ``checkpoint_value`` pin which
+    checkpoint of that retrain is being executed, because one training run registers one
+    prediction set per declared checkpoint and they are otherwise indistinguishable here.
+    ``strategy`` is :func:`strategy_projection` of the selected validation strategy: matching
+    the model alone would let a caller replay a different strategy on the right model, which is
+    a different route to the same wrong answer. ``validation_prediction_hash`` is the prediction
+    a conformal allocator calibrates its holdout widths from, which is a property of the
+    selection and was the last thing on this path still being read out of the lock.
+
+    Callers derive all four from the immutable candidate set rather than recording them - see
+    ``case_studies.research.holdout.resolve_holdout_selection`` - so the expectation is a
+    function of the selection, not a second copy of it that can go stale.
+    """
+
+    training_hash: str
+    checkpoint_kind: str
+    checkpoint_value: int | None
+    strategy: dict[str, Any]
+    validation_prediction_hash: str
+
+
 @dataclass(frozen=True)
 class Strategy:
     study: Study
@@ -224,16 +298,7 @@ class Strategy:
     execution_mode: str | None = None
     min_weight_change: float | None = None
     min_trade_value: float | None = None
-
-    def _active_lock_record(self) -> dict[str, Any]:
-        db_path = self.study.root / "run_log" / "registry.db"
-        with closing(sqlite3.connect(db_path)) as db:
-            row = db.execute(
-                "SELECT lock_json FROM research_locks WHERE state = 'LOCKED' LIMIT 1"
-            ).fetchone()
-        if row is None:
-            raise ValueError("holdout strategy execution requires a LOCKED research lock")
-        return json.loads(row[0])
+    holdout_expectation: HoldoutExpectation | None = None
 
     def __post_init__(self) -> None:
         if self.prediction.study != self.study:
@@ -250,15 +315,33 @@ class Strategy:
         if split == "validation":
             return
         if split != "holdout" or self.prediction.execution_tier != "canonical":
-            raise ValueError("strategy execution requires validation or locked holdout predictions")
-        lock_record = self._active_lock_record()
-        matches_lock = (
-            prediction_record["training_hash"] == lock_record.get("holdout_training_hash")
-            and prediction_record["checkpoint_kind"] == lock_record.get("checkpoint_kind")
-            and prediction_record["checkpoint_value"] == lock_record.get("checkpoint_value")
+            raise ValueError(
+                "strategy execution requires validation or canonical holdout predictions"
+            )
+        # A holdout execution states what it expects, and there is no default. Falling back to
+        # "any canonical holdout prediction" would leave the constructor accepting a holdout
+        # produced from a configuration nobody selected, which is the failure the research lock
+        # was standing in front of - so the absence of an expectation is a refusal, not a
+        # permissive path. Callers on the research API derive it from the immutable candidate
+        # set; see `holdout.resolve_holdout_selection`.
+        expected = self.holdout_expectation
+        if expected is None:
+            raise ValueError(
+                "holdout strategy execution requires a holdout_expectation naming the retrain's "
+                "training hash, its checkpoint and the selected strategy projection"
+            )
+        actual = (
+            prediction_record["training_hash"],
+            prediction_record["checkpoint_kind"],
+            prediction_record["checkpoint_value"],
         )
-        if not matches_lock:
-            raise ValueError("holdout prediction does not match the locked retraining contract")
+        wanted = (expected.training_hash, expected.checkpoint_kind, expected.checkpoint_value)
+        if actual != wanted:
+            raise ValueError(
+                f"holdout prediction is training {actual[0]} at checkpoint {actual[1]}="
+                f"{actual[2]}, but the caller expects training {wanted[0]} at "
+                f"{wanted[1]}={wanted[2]}"
+            )
 
     @property
     def split(self) -> Literal["validation", "holdout"]:
@@ -280,6 +363,7 @@ class Strategy:
             "execution_mode",
             "min_weight_change",
             "min_trade_value",
+            "holdout_expectation",
         }
         unknown = set(request) - supported
         if unknown:
@@ -305,6 +389,7 @@ class Strategy:
             execution_mode=request.get("execution_mode"),
             min_weight_change=request.get("min_weight_change"),
             min_trade_value=request.get("min_trade_value"),
+            holdout_expectation=request.get("holdout_expectation"),
         )
 
     @property
@@ -463,11 +548,13 @@ class Strategy:
             }
         resolved = ensure_conformal_calibration_identity(spec)
         if self.split == "holdout":
-            from .lifecycle import _locked_strategy_projection
-
-            locked = self._active_lock_record()["strategy_spec"]
-            if _locked_strategy_projection(resolved) != _locked_strategy_projection(locked):
-                raise ValueError("holdout strategy does not match the locked validation strategy")
+            expected = self.holdout_expectation
+            if expected is None:
+                raise ValueError("holdout strategy execution requires a holdout_expectation")
+            if strategy_projection(resolved) != expected.strategy:
+                raise ValueError(
+                    "the holdout strategy does not match the selected validation strategy"
+                )
         return resolved
 
     def _funding_rates(self, prices: pl.DataFrame) -> pl.DataFrame | None:
@@ -657,10 +744,15 @@ class Strategy:
         spec = self._build_spec(resolved_prices, case_config, contract_specs)
         allocation = spec.get("strategy", {}).get("allocation", {})
         if self.split == "holdout" and allocation.get("method") == "conformal_weighted":
-            lock_record = self._active_lock_record()
+            # The calibration source is the selected VALIDATION prediction, which is a fact about
+            # the selection rather than about this execution, so it comes from the caller's
+            # expectation. __post_init__ has already refused a holdout without one.
+            expected = self.holdout_expectation
+            if expected is None:
+                raise ValueError("holdout strategy execution requires a holdout_expectation")
             compute_holdout_conformal_widths(
                 self.study.case_study,
-                lock_record["prediction_hash"],
+                expected.validation_prediction_hash,
                 self.prediction.hash,
                 alpha=float(allocation.get("alpha", 0.2)),
                 min_calibration_n=int(allocation["min_calibration_n"]),

@@ -102,8 +102,8 @@ class LockedStrategyReplay:
 
         from . import strategy as strategy_module
         from .contracts import ExecutionTier
-        from .lifecycle import _locked_strategy_projection
         from .results import Result
+        from .strategy import strategy_projection
 
         locked_spec = deepcopy(self.lock.record["strategy_spec"])
         warmup = strategy_module.strategy_warmup_periods(locked_spec)
@@ -116,9 +116,22 @@ class LockedStrategyReplay:
         decision = (
             self.decision_replay.publish(prediction, prices) if self.decision_replay else None
         )
+        # The lock's contract, restated as the expectation `Strategy` now requires from every
+        # caller. Reading it off the lock keeps this path's guarantee exactly where it was while
+        # `Strategy` itself stops reading `research_locks`: what the lock knows, the caller now
+        # says. A lock-free caller derives the same four facts from its candidate set.
+        from .strategy import HoldoutExpectation, strategy_projection
+
         strategy = self.lock.study.strategy(
             prediction=prediction,
             decision=decision,
+            holdout_expectation=HoldoutExpectation(
+                training_hash=str(self.lock.record["holdout_training_hash"]),
+                checkpoint_kind=str(self.lock.record["checkpoint_kind"]),
+                checkpoint_value=self.lock.record["checkpoint_value"],
+                strategy=strategy_projection(deepcopy(self.lock.record["strategy_spec"])),
+                validation_prediction_hash=str(self.lock.record["prediction_hash"]),
+            ),
             **self.request,
         )
         # The loader keys cme_futures prices on `product`, while the allocator and
@@ -196,7 +209,7 @@ class LockedStrategyReplay:
             spec["backtest_config"]["account"]["allow_short_selling"] = (
                 resolved_allow_short_selling(spec, weights)
             )
-        if _locked_strategy_projection(spec) != _locked_strategy_projection(locked_spec):
+        if strategy_projection(spec) != strategy_projection(locked_spec):
             raise ValueError("holdout strategy reconstruction changed the locked computation")
 
         calendar_block = spec["backtest_config"].get("calendar")

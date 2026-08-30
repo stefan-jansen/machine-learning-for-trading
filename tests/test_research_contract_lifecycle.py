@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -20,6 +21,24 @@ from tests.test_research_contract_catalog import _publish, _resolved_spec
 from tests.test_research_flow import _patch_holdout_prices, _prices
 from tests.test_research_registry import _predictions
 from tests.test_research_workspace import _seed_release
+
+
+def _expectation_from_lock(lock):
+    """The holdout expectation a locked run states, derived from the lock it already holds.
+
+    `Strategy` no longer reads `research_locks`; the caller says what it expects. For a locked
+    run that is the lock's own contract, restated - so these tests exercise the same guarantee
+    they always did, now stated by the caller rather than looked up.
+    """
+    from case_studies.research.strategy import HoldoutExpectation, strategy_projection
+
+    return HoldoutExpectation(
+        training_hash=str(lock.record["holdout_training_hash"]),
+        checkpoint_kind=str(lock.record["checkpoint_kind"]),
+        checkpoint_value=lock.record["checkpoint_value"],
+        strategy=strategy_projection(deepcopy(lock.record["strategy_spec"])),
+        validation_prediction_hash=str(lock.record["prediction_hash"]),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -609,7 +628,9 @@ def test_holdout_stages_then_transitions_in_one_atomic_transaction(
         predictions=holdout_frame,
         expected_keys=holdout_frame.select("symbol", "timestamp", "fold_id"),
     )
-    holdout_backtest = study.strategy(prediction=holdout_prediction, **request).run()
+    holdout_backtest = study.strategy(
+        prediction=holdout_prediction, holdout_expectation=_expectation_from_lock(lock), **request
+    ).run()
 
     staged = study.lifecycle.stage_holdout(
         lock.hash,
@@ -663,14 +684,14 @@ def test_holdout_stages_then_transitions_in_one_atomic_transaction(
 def test_a_strategy_whose_only_declared_inputs_are_runtime_resolved_matches_one_with_none() -> None:
     """The projection has to erase runtime-resolved inputs, not leave the shape they were in.
 
-    `_locked_strategy_projection` compares a strategy being executed against the one the lock
+    `strategy_projection` compares a strategy being executed against the one the lock
     recorded, and it removes `prices` and `funding_rates` first because both are resolved at run
     time and would otherwise differ on every replay. A strategy that declared nothing else is
     then left with `input_identity: {}`, while one that declared no input identity at all is
     left with the key absent. The two describe the same strategy, so the comparison must not
     separate them - and it did, which made a crypto holdout replay refuse against its own lock.
     """
-    from case_studies.research.lifecycle import _locked_strategy_projection
+    from case_studies.research.strategy import strategy_projection
 
     runtime_only = {
         "chapter": "ch19",
@@ -678,9 +699,7 @@ def test_a_strategy_whose_only_declared_inputs_are_runtime_resolved_matches_one_
     }
     nothing_declared = {"chapter": "ch19"}
 
-    assert _locked_strategy_projection(runtime_only) == _locked_strategy_projection(
-        nothing_declared
-    )
+    assert strategy_projection(runtime_only) == strategy_projection(nothing_declared)
 
     # A declared input that is NOT runtime-resolved still separates them, or the projection
     # would erase a real difference along with the noise.
@@ -688,6 +707,4 @@ def test_a_strategy_whose_only_declared_inputs_are_runtime_resolved_matches_one_
         "chapter": "ch19",
         "input_identity": {"prices": "sha256:abc", "decision_grid": "sha256:123"},
     }
-    assert _locked_strategy_projection(with_real_input) != _locked_strategy_projection(
-        nothing_declared
-    )
+    assert strategy_projection(with_real_input) != strategy_projection(nothing_declared)
