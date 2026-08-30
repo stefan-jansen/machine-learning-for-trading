@@ -30,13 +30,18 @@
 # up: there is no cash position for the book to move into. The execution path therefore refuses a
 # risk block rather than accept one it would silently discard. The controls that do govern this
 # strategy - the delta-hedge threshold, the settlement convention, the entry cost model, how many
-# weekly cohorts run at once - are part of the strategy specification itself and were set in
-# `12_backtest` and `14_costs`.
+# weekly cohorts run at once - are fields of the strategy specification itself, fixed in
+# `12_backtest`; `15_costs` afterwards varies one of them to measure what the result depends on.
 #
 # So this case study declares no risk-overlay variants, and this notebook is where that is
 # checked rather than assumed. It resolves the candidate set that came out of
 # `13_portfolio_management`, shows that the configured risk request set is empty, demonstrates that
 # a risk request would be refused if one were configured, and confirms it wrote nothing.
+#
+# This is the third of the four backtest stages, and the last one that could add a run to the
+# candidate pool. It registers none, so the pool `15_costs` prices and `16_strategy_analysis`
+# reports is the one `13_portfolio_management` left. Costs runs after this notebook rather than
+# beside it so that the last stage to select is the last stage to run.
 #
 # **Learning objectives**
 #
@@ -47,7 +52,9 @@
 #
 # **Book reference**: Chapter 19
 #
-# **Prerequisites**: the finalized candidate set published by `13_portfolio_management`.
+# **Prerequisites**: the finalized candidate set published by
+# [`13_portfolio_management`](13_portfolio_management.ipynb), and through it
+# [`12_backtest`](12_backtest.ipynb).
 
 # %%
 """Validate the empty S&P 500 options risk-overlay request boundary."""

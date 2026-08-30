@@ -30,7 +30,7 @@
 # held varies across requests.
 #
 # The run publishes a named, immutable population of backtest results. `13_portfolio_management`
-# and `14_costs` resolve that population by name and build on it, and `16_strategy_analysis` is
+# and `15_costs` resolve that population by name and build on it, and `16_strategy_analysis` is
 # where the results are ranked and interpreted.
 #
 # **Learning objectives**
@@ -145,7 +145,10 @@ population_summary
 # relaxed, and here it cannot be. `execution_delay: next_session_close` in `config/setup.yaml`
 # records the same fact for the engine, which resolves it to the `next_bar` execution mode.
 # - **Expiration** - where the position is closed, in cash, at the intrinsic value of the two
-#   legs. There is no exit trade and therefore no exit-side option spread.
+#   legs. Cash settlement is not a trade, so a contract that reaches expiration pays no exit-side
+#   option spread. A contract whose quote history ends before its expiration date does not reach
+#   it: the engine buys that position back at the last quoted ask and charges the exit spread and
+#   commission, because that is the same trade at the same price a round-trip exit would pay.
 #
 # The net delta of the straddle is measured at every session close in between, and the underlying
 # hedge is traded only when that delta breaches its threshold, so the price series the backtest
@@ -233,7 +236,7 @@ show_plotly_with_alt(
 # The universe filter is a separate restriction and is not swept here. `setup.yaml` pins the
 # canonical strategy to the liquid subset - the fifth of the option surface with the tightest
 # quoted half-spread on each decision date - because the round-trip cost on the full surface
-# consumes the premium the strategy collects. `14_costs` is where the full surface is priced
+# consumes the premium the strategy collects. `15_costs` is where the full surface is priced
 # against the liquid one.
 
 # %%
@@ -377,4 +380,4 @@ show_plotly_with_alt(
 # **Known limitations**: every result is a validation-period estimate with no interval attached,
 # so nothing here supports a statement about which family or concentration is better. The
 # liquid-universe restriction is a modelling assumption inherited from the configuration, and
-# its cost is quantified in `14_costs` rather than tested here.
+# its cost is quantified in `15_costs` rather than tested here.

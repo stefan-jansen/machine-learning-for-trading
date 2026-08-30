@@ -24,9 +24,14 @@
 #
 # Two things make option costs different from the equity convention used elsewhere in the book.
 # They are denominated as a share of the option premium rather than in basis points of notional,
-# because the premium and the notional differ by more than an order of magnitude. And the
-# hold-to-expiry construction pays the spread only on the way in: the position is settled in cash
-# at intrinsic value, so there is no exit trade to cross a spread on.
+# because the premium and the notional differ by more than an order of magnitude. And under the
+# hold-to-expiry construction almost every position pays the spread only on the way in: a contract
+# that reaches expiration settles in cash at intrinsic value, and cash settlement is not a trade,
+# so there is no exit quote to cross. The exception is a contract whose chain ends before its
+# expiration date, which the engine buys back at the last quoted ask and charges an exit spread and
+# commission for. That is a small minority of positions, so the entry fill is still where almost
+# all of the friction on this axis sits, but the curve below is not a pure entry-cost curve and the
+# grid moves both charges together: `option_spread_fraction` is the same field on the way out.
 #
 # Cost variants are diagnostics. They never join the candidate set a strategy is selected from,
 # because varying the cost assumption after the fact and keeping the most favourable answer is a
@@ -43,7 +48,12 @@
 #
 # **Book reference**: Chapter 18
 #
-# **Prerequisites**: the complete baseline population published by `12_backtest`.
+# **Prerequisites**: [`14_risk_management`](14_risk_management.ipynb), which is the last stage that
+# could add a run to the candidate pool and registers none, and through it
+# [`13_portfolio_management`](13_portfolio_management.ipynb) and
+# [`12_backtest`](12_backtest.ipynb). This runs last of the four backtest stages, after everything
+# that selects, so that no later stage can re-rank the strategies whose cost sensitivity it
+# reports. What it reads is the complete baseline population published by `12_backtest`.
 
 # %%
 """Execute the declared S&P 500 options cost-sensitivity population."""
@@ -208,7 +218,8 @@ print(
 #
 # Each request resolves its own contracts, because the universe restriction changes which symbols
 # are eligible and the concentration changes how many are held. The engine validates the paired
-# option lifecycle, the cash settlement, the retained hedge and every cost input before publishing.
+# option lifecycle, that every selected contract ends either by cash settlement or by liquidation,
+# the retained hedge, and every cost input before publishing.
 
 # %%
 execution = run_official_backtest_requests(
@@ -299,8 +310,10 @@ show_plotly_with_alt(
 # - A cost is stated in the unit its instrument is quoted in. A basis-point-of-notional convention
 #   applied to an option premium misstates the friction by the ratio between premium and notional,
 #   which for an at-the-money straddle is large.
-# - Holding to expiration removes the exit-side spread entirely, so the entry fill is where
-#   execution quality shows up. That is a property of the construction, not of the model.
+# - Holding to expiration removes the exit-side spread for every position that reaches it, so the
+#   entry fill is where nearly all execution quality shows up. That is a property of the
+#   construction, not of the model - and it is a property of reaching expiration, not of intending
+#   to: a contract whose chain ends first is bought back and pays the exit side like any other.
 # - A sensitivity grid is evidence about robustness only while it stays outside the set a strategy
 #   is selected from. Once a cost assumption can be chosen after seeing the result, the grid has
 #   become a search.

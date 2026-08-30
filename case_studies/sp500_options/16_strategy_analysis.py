@@ -28,7 +28,8 @@
 # the final available session of each Friday week, the underlying delta
 # hedged whenever it breaches its threshold, settle at intrinsic value at
 # expiration, full per-leg costs (entry-side option spread, underlying hedge
-# spread on each session the hedge trades, no exit-leg option trade). Every metric is reported with its
+# spread on each session the hedge trades, and an exit-leg option trade only
+# where a contract's chain ends before its expiration date). Every metric is reported with its
 # block-bootstrap 95% CI; paired holdout comparisons via
 # `backtest_paired_metrics` are required before the notebook reports them.
 # Cross-case-study comparison is reserved for Chapter 20.
@@ -45,7 +46,7 @@
 # "cost model validity" theme in the cross-case-study synthesis.
 #
 # **Prerequisites**: case-study pipeline through `12_backtest` and
-# `14_costs`; the locked registry at
+# `15_costs`; the locked registry at
 # `case_studies/sp500_options/run_log/registry.db`.
 #
 # **Scope**: registry-read only - no training, no re-backtesting, no
@@ -157,8 +158,9 @@ def _fmt(val: float | None, fmt: str = ".4f") -> str:
 # entry on the equal-weight top-5 cross-section under `linear/ridge_a10000000.0`
 # on `ret_to_expiry`, daily delta hedge
 # through the underlying, hold to expiry, full per-leg costs on entry-side
-# option spread plus daily underlying hedge spread (no exit-leg option
-# trade). The current canonical rank-1 is this equal-weight baseline itself
+# option spread plus daily underlying hedge spread, and an exit-leg option
+# trade only where a contract's chain ends before its expiration date. The
+# current canonical rank-1 is this equal-weight baseline itself
 # (allocator is None); the family/config/allocator triplet is resolved
 # from the registry below and printed alongside its identifiers. The
 # liquid universe pin (`UNIVERSE_RESTRICTIONS`) excludes the higher-Sharpe
@@ -361,7 +363,7 @@ print(f"  CI status: {ci_status(ic_lo, ic_hi)}")
 #    spread (settle at intrinsic), so this gate is materially weakened
 #    relative to the bps-cost variants - but the entry-leg spread alone
 #    remains the dominant friction. The specification block reports the
-#    current entry and hedge cost totals; the `14_costs` sweep quantifies
+#    current entry and hedge cost totals; the `15_costs` sweep quantifies
 #    the slope against the share of the quoted spread paid on entry.
 #
 # In addition, the strategy-analysis notebook evaluates two universal gates in §9:
@@ -377,7 +379,7 @@ print(f"  CI status: {ci_status(ic_lo, ic_hi)}")
 # under HTM accounting. The rank-1 lineage anchors a multi-stage path
 # (signal → allocation → optional risk overlay) at the training-hash
 # level. § 5 says why the standard bps cost-grid is the wrong unit for
-# option premium returns and points at the `14_costs` population, which
+# option premium returns and points at the `15_costs` population, which
 # runs the sweep in fractions of the quoted half-spread instead.
 
 # %%
@@ -511,7 +513,7 @@ print(
     "cross-section (eq_w_topk); the allocation stage overlays a within-"
     "cross-section weighting on the HTM cohort accounting; the risk_overlay "
     "stage layers position-level controls on top of the allocator weights. "
-    "The cost sweep lives in `14_costs`, in fractions of the quoted "
+    "The cost sweep lives in `15_costs`, in fractions of the quoted "
     "half-spread (the standard bps cost-grid is the wrong unit for option "
     "premium returns)."
 )
@@ -747,7 +749,8 @@ fig.show()
 #
 # The equal-weight baseline sweep on this case study now runs on a single label
 # - `ret_to_expiry` - under HTM cost accounting (entry-side option
-# spread + daily underlying hedge spread, no exit-leg option trade).
+# spread + daily underlying hedge spread, plus an exit-leg option trade only
+# where a contract's chain ends before its expiration date).
 # Four legacy diagnostic labels (`fwd_ret_5d`, `fwd_ret_10d`,
 # `fwd_ret_dh_5d`, `fwd_ret_dh_10d`) were dropped from the sweep on
 # 2026-05-17: they routed through the vectorized backtest path that
@@ -835,7 +838,7 @@ if fold_df.height > 1:
 # The standard `BacktestExplorer.cost_sensitivity()` curve is denominated in bps per leg, which is
 # the right convention for equities and futures but the wrong unit for options: a 10% spread on a
 # 4% premium is 40 bps of notional, well inside the "positive Sharpe" zone of any equity sweep and
-# ruinous for the actual P&L. `14_costs` runs the cost sweep in fractions of the quoted half-spread
+# ruinous for the actual P&L. `15_costs` runs the cost sweep in fractions of the quoted half-spread
 # instead, executes it through the same engine as every other backtest, and publishes it as the
 # named population `sp500-options-cost-sensitivity-validation-v1`. It reports the resulting Sharpe
 # surface across families, universes and spread fractions there, each point with its

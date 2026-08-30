@@ -2248,17 +2248,17 @@ case_studies/sp500_options/13_portfolio_management:
   awaiting_rebuild:
     needs: {of: sp500_options, backtest_stage: signal}
     issue: 500
-case_studies/sp500_options/14_costs:
-  # An empty entry between two skipped siblings, which read as deliberate and did nothing. A
-  # preview run needs WORKSPACE plus the exact PREVIEW_BASELINE_HASHES of preview backtests, and
-  # those are 12_backtest's output - the same dependency 13 and 15 declare, one stage further on.
-  awaiting_rebuild:
-    needs: {of: sp500_options, backtest_stage: signal}
-    issue: 501
-case_studies/sp500_options/15_risk_management:
+case_studies/sp500_options/14_risk_management:
   awaiting_rebuild:
     needs: {of: sp500_options, backtest_stage: allocation}
     issue: 502
+case_studies/sp500_options/15_costs:
+  # An empty entry between two skipped siblings, which read as deliberate and did nothing. A
+  # preview run needs WORKSPACE plus the exact PREVIEW_BASELINE_HASHES of preview backtests, and
+  # those are 12_backtest's output - the same dependency 13 and 14 declare, one stage further on.
+  awaiting_rebuild:
+    needs: {of: sp500_options, backtest_stage: signal}
+    issue: 501
 case_studies/sp500_options/16_strategy_analysis:
   awaiting_rebuild:
     needs: {of: sp500_options, backtest_stage: allocation}

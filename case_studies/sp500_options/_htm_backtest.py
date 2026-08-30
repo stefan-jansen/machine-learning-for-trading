@@ -19,9 +19,12 @@ Strategy as declared in ``config/setup.yaml``:
   stock: if the straddle's |net delta| exceeds ``delta_threshold``, trade shares
   to push net delta back toward zero.
 - Let the straddle cash-settle at expiry (no market exit → no exit bid-ask).
+  A contract whose quote history ends before its expiration date never reaches
+  that settlement and is bought back at its last quoted ask instead.
 - Transaction costs applied: entry option bid-ask on both legs, per-contract
-  option commission on both legs (entry only — HTM has no exit), per-hedge
-  spread and per-share commission on every hedge rebalance.
+  option commission on both legs, per-hedge spread and per-share commission on
+  every hedge rebalance, and an exit option bid-ask plus commission on the
+  contracts that are bought back rather than settled.
 
 Capital model: the entry cadence is weekly Friday but each cohort holds ~30 days,
 so at steady state 5 cohorts are open simultaneously. Each cohort is sized at

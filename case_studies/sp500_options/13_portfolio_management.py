@@ -235,8 +235,8 @@ print(f"{requests.height} requests: {shortlist.height} baselines x {len(allocato
 #
 # Each request republishes its own decision artifact, because the allocator changes the weights the
 # contracts are held at and therefore changes what was traded. The engine then validates the paired
-# option lifecycle, the cash settlement, the retained hedge and the cost accounting before the
-# result is published.
+# option lifecycle, that every selected contract ends either by cash settlement or by liquidation,
+# the retained hedge, and the cost accounting before the result is published.
 #
 # The finished results are appended to the frozen baseline set, producing a second named set that
 # holds everything selection may consider. Extending creates a new set rather than mutating the old

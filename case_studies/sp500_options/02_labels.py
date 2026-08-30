@@ -905,7 +905,7 @@ for name in LABEL_NAMES:
 #    fact about the cross-section that a mean-level argument about the premium would miss.
 #
 # **Known limitations.** Mid-to-mid pricing is not what a trader receives; the entry
-# half-spread and the commission are swept in `14_costs.py`, and the primary label avoids
+# half-spread and the commission are swept in `15_costs.py`, and the primary label avoids
 # the exit half-spread only because cash settlement needs no closing trade. The delta hedge
 # is rebalanced at the close and charges nothing for doing so. The universe is every name
 # with a quoted matched-strike straddle, with the liquidity screen applied downstream rather
