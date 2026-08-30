@@ -1003,10 +1003,17 @@ def resolved_registry_path(
 # reported unreachable on MAX_FOLDS and MAX_SYMBOLS, which do reach them.
 TRANSLATION_TARGET = "PREVIEW_REDUCTIONS"
 
-PREVIEW_TRANSLATED_PARAMETERS: dict[str, tuple[str, Callable[[Any], Any]]] = {
-    "MAX_FOLDS": ("folds", lambda value: list(range(int(value)))),
-    "MAX_SYMBOLS": ("max_symbols", int),
-    "TRAIN_SAMPLE_FRAC": ("train_sample_frac", float),
+# The third element is every reduction name that states the same quantity. A translated default
+# is dropped when the notebook's own mapping already carries one of them, because two consumers
+# read this mapping and they do not spell the fold count the same way: the model families take
+# `folds`, an explicit list, and the DML resolver takes `n_folds`, a count, and rejects any key
+# outside its four (`case_studies/utils/causal.py:_DML_PREVIEW_FIELDS`). Without the aliases the
+# `MAX_FOLDS` in `_QUICK_PARAMS` reached a complete causal mapping as a fifth key and
+# `resolve_causal_request` refused the request before any fit.
+PREVIEW_TRANSLATED_PARAMETERS: dict[str, tuple[str, Callable[[Any], Any], tuple[str, ...]]] = {
+    "MAX_FOLDS": ("folds", lambda value: list(range(int(value))), ("folds", "n_folds")),
+    "MAX_SYMBOLS": ("max_symbols", int, ("max_symbols",)),
+    "TRAIN_SAMPLE_FRAC": ("train_sample_frac", float, ("train_sample_frac",)),
 }
 
 
@@ -1021,10 +1028,11 @@ def _collect_preview_reductions(parameters: dict) -> dict:
     """
     resolved = dict(parameters)
     reductions = dict(resolved.get("PREVIEW_REDUCTIONS") or {})
-    for name, (key, cast) in PREVIEW_TRANSLATED_PARAMETERS.items():
+    for name, (key, cast, aliases) in PREVIEW_TRANSLATED_PARAMETERS.items():
         value = resolved.pop(name, None)
-        if value is not None:
-            reductions.setdefault(key, cast(value))
+        if value is None or any(alias in reductions for alias in aliases):
+            continue
+        reductions[key] = cast(value)
     # A preview run that reduces nothing is a canonical run wearing the wrong tier, and the
     # request builder rejects it. Reducing the universe is the reduction that always applies.
     if not reductions:
