@@ -393,12 +393,19 @@ pl.DataFrame(
 # been fitted, selected or measured on it. The registry holds no holdout prediction set, so there
 # is no holdout number to report and none is implied by anything above.
 #
-# It takes three steps, in this order and only once: refit the selected configuration on
-# training plus validation, predict the holdout window, and run that one configuration through
-# the same backtest specification. What makes it a holdout is that the selection is
-# already fixed - the pool above is frozen and immutable, so the configuration cannot be
-# re-chosen after the holdout result is seen. Every step of the funnel exists to make that
-# sentence true.
+# It takes three steps, in this order: refit the selected configuration on training plus
+# validation, predict the holdout window, and run that one configuration through the same
+# backtest specification. That is [`17_holdout_predictions`](17_holdout_predictions.ipynb) and
+# [`18_holdout_backtest`](18_holdout_backtest.ipynb).
+#
+# What makes it a holdout is that the selection is already fixed - the pool above is frozen
+# and immutable, so the configuration cannot be re-chosen after the holdout result is seen.
+# Every step of the funnel exists to make that sentence true.
+#
+# It is not that the window may only ever be measured once. The rule forbids selecting on the
+# holdout, not recomputing it: a result found to be wrong is deleted and produced again, and
+# what the two notebooks guard is that only one generation is readable at a time, so nobody
+# downstream can quote whichever number they prefer.
 
 # %%
 holdout_predictions = study.predictions.table().filter(pl.col("split") == "holdout")
