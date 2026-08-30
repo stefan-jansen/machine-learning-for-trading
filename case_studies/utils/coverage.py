@@ -464,7 +464,10 @@ def _coverage(
             if next_start <= end:
                 continue
             unaccounted = [
-                s for s in _sessions_between(case_study, label, end, next_start, case_dir)
+                s
+                for s in _sessions_between(
+                    case_study, label, end, next_start, case_dir, decision_axis
+                )
             ]
             if unaccounted:
                 gaps.append(
@@ -508,10 +511,24 @@ def _coverage(
 
 
 def _sessions_between(
-    case_study: str, label: str, after: date, before: date, case_dir: Path | None
+    case_study: str,
+    label: str,
+    after: date,
+    before: date,
+    case_dir: Path | None,
+    decision_axis: pl.Series | None = None,
 ) -> list:
-    """Sessions strictly between two dates, from the label artifact's own axis."""
+    """Sessions strictly between two dates, from the label artifact's own axis.
+
+    ``decision_axis`` narrows it the same way it narrows the per-fold expectation, and for the
+    same reason: a feed outage between two folds leaves the label artifact carrying sessions no
+    model could have decided at, and reporting them as unaccounted for is the gate answering a
+    question about the feed as though it were about the folds.
+    """
     axis = _sealed(case_study, label, _session_axis(case_study, label, case_dir))
+    if decision_axis is not None:
+        observable = _normalize_time(decision_axis.unique())
+        axis = axis.filter(axis.is_in(observable.implode()))
     as_dates = axis.dt.date() if axis.dtype != pl.Date else axis
     keep = (as_dates > after) & (as_dates < before)
     return axis.filter(keep).to_list()
