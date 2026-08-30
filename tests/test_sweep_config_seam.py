@@ -142,16 +142,31 @@ class TestQuarantinePolicy:
 
 
 def test_crypto_long_short_grid_keeps_only_disjoint_selections() -> None:
+    """A long-short k needs 2k names, so the declared grid is filtered by the cross-section.
+
+    Crypto's median tradeable cross-section is 19 perps, which seats k=3 and k=5 on both
+    sides and cannot seat k=10 - the long and short legs would have to share names. The
+    point of the test is that the filtering happens at all: a declared k that the panel
+    cannot support must be dropped rather than silently producing overlapping legs.
+    """
+    declared = load_sweep("crypto_perps_funding")["top_k_grid"]["fwd_ret_8h"]
+    assert declared == [3, 5, 10]
+
     schemes = get_entry_schemes_for(
         "crypto_perps_funding",
         "fwd_ret_8h",
         n_assets=19,
         long_short=True,
     )
-
     top_k = [scheme["top_k"] for scheme in schemes if scheme["method"] == "equal_weight_top_k"]
-    assert top_k == [5]
-    assert load_sweep("crypto_perps_funding")["top_k_grid"]["fwd_ret_8h"] == [5, 10]
+    assert top_k == [3, 5]
+    assert [k for k in declared if k not in top_k] == [10]
+
+    # 20 names is the first cross-section that seats the whole declared grid.
+    seated = get_entry_schemes_for(
+        "crypto_perps_funding", "fwd_ret_8h", n_assets=20, long_short=True
+    )
+    assert [s["top_k"] for s in seated if s["method"] == "equal_weight_top_k"] == declared
 
 
 # ---------------------------------------------------------------------------

@@ -473,6 +473,25 @@ def _boundary_iso(moment: pd.Timestamp) -> str:
     return moment.isoformat()
 
 
+def _on_panel_clock(moment: pd.Timestamp, zone: Any) -> pd.Timestamp:
+    """Read a boundary on the clock the panel keeps its own observations on.
+
+    ``evaluation.holdout_start`` is a date, and a date is not a moment until something says
+    which clock it is read on. The fold boundaries are moments, taken from the panel, so an
+    intraday panel carries them tz-aware; pandas then refuses to compare the two rather than
+    assuming a zone, and the derivation raises ``Cannot compare tz-naive and tz-aware
+    timestamps`` before it computes anything. Every daily case study escaped it because its
+    panel is tz-naive, which is why this surfaced first on ``crypto_perps_funding``.
+
+    Localizing rather than converting is what keeps the declaration meaning what it says: the
+    window is declared in the calendar the case study trades on, so 2024-01-01 is midnight on
+    that calendar and not midnight UTC shifted into it.
+    """
+    if zone is None or moment.tzinfo is not None:
+        return moment
+    return moment.tz_localize(zone)
+
+
 def build_holdout_cv(
     validation_spec: Mapping[str, Any],
     *,
@@ -541,10 +560,18 @@ def build_holdout_cv(
 
     folds = _validation_folds(validation_spec)
     validation_cv = dict(validation_spec["computation"]["cv"])
-    train_start = earliest_train_start(folds)
+    observations = sorted({pd.Timestamp(str(value)) for value in timeline})
+    if len(observations) < 2:
+        raise ValueError("holdout CV derivation needs at least two observations to measure cadence")
+    # Every boundary below is compared against these observations, so they are what decides
+    # the clock. Resolved once, here, rather than at each comparison: a fold set and a window
+    # that reach this function on different clocks have to be reconciled in one place or the
+    # reconciliation is a thing to remember at four call sites.
+    panel_zone = observations[0].tz
+    train_start = _on_panel_clock(earliest_train_start(folds), panel_zone)
     floor_applied = None
     if train_start_floor is not None:
-        floor = pd.Timestamp(train_start_floor)
+        floor = _on_panel_clock(pd.Timestamp(train_start_floor), panel_zone)
         if floor > train_start:
             # Recorded, not silent: the clamp changes the interval the lock is taken over, so a
             # reader of the spec has to be able to see that the window is the producer's and why.
@@ -561,10 +588,23 @@ def build_holdout_cv(
     # leaks for no label. `widest_label_buffer` carries the argument. The selected label still
     # supplies the horizon check below, which this now satisfies by construction.
     buffer, buffer_label = widest_label_buffer(case_study, setup)
-    holdout_open = pd.Timestamp(holdout_start)
-    observations = sorted({pd.Timestamp(str(value)) for value in timeline})
-    if len(observations) < 2:
-        raise ValueError("holdout CV derivation needs at least two observations to measure cadence")
+    holdout_open = _on_panel_clock(pd.Timestamp(holdout_start), panel_zone)
+    holdout_close = _on_panel_clock(pd.Timestamp(holdout_end), panel_zone)
+    # `evaluation.holdout_end` is a DATE, and a date on an intraday panel means the whole of that
+    # day. Parsed, it is that date at midnight, and every window filter downstream is
+    # `timestamp <= val_end`, so the final session sorts after the boundary and is dropped from
+    # the interval the holdout is evaluated over. `utils/modeling.py::_inclusive_end_of` says the
+    # same thing with a nanosecond sentinel; this says it with an observation the panel actually
+    # holds, which is what `train_end` already is and what makes the fold readable as a pair of
+    # settlements rather than one settlement and a fencepost.
+    #
+    # A daily panel is untouched by construction: its last observation of that date IS midnight,
+    # so the widening condition is false and the rendering does not move. That matters because
+    # this value is inside the hashed fold, and `fx_pairs` and `sp500_equity_option_analytics`
+    # each hold a research lock derived from it. ml4t/agent-workspace#986.
+    within_close = [value for value in observations if value.date() <= holdout_close.date()]
+    if within_close and within_close[-1] > holdout_close:
+        holdout_close = within_close[-1]
 
     # Counted in OBSERVATIONS and stepped back along the panel's own dates, never subtracted as
     # calendar time. `utils/cv_splits.py` already carries this bug's epitaph: "21D" as a
@@ -627,8 +667,8 @@ def build_holdout_cv(
         "fold": max(int(entry["fold"]) for entry in folds) + 1,
         "train_start": _boundary_iso(train_start),
         "train_end": _boundary_iso(train_end),
-        "val_start": _boundary_iso(pd.Timestamp(holdout_start)),
-        "val_end": _boundary_iso(pd.Timestamp(holdout_end)),
+        "val_start": _boundary_iso(holdout_open),
+        "val_end": _boundary_iso(holdout_close),
     }
     identity = value_digest(pl.DataFrame([fold]))
     if identity == validation_cv.get("identity"):
@@ -652,6 +692,42 @@ def build_holdout_cv(
     }
 
 
+def build_holdout_training_spec(
+    study: Any,
+    validation_spec: Mapping[str, Any],
+    *,
+    timeline: Sequence[Any],
+    case_study: str | None = None,
+) -> dict[str, Any]:
+    """Re-key one validation training specification onto the derived holdout fold.
+
+    Three steps have to happen together and in this order, and each of them already refuses
+    on its own terms: derive the holdout interval from the case study's declared window,
+    bound its training start at whatever the family's features actually reach, and recompute
+    the fields the resolver derived per validation fold. Doing two of the three produces a
+    specification that looks complete and fits the wrong estimator - a manifest describing
+    the validation folds, or a training window half of which has no features - so they are
+    one call rather than three a caller assembles.
+
+    This takes a ``study`` and a specification, not a lock. A holdout fit is a computation,
+    and the question of how many times a case study may run one is a separate question about
+    its lifecycle: :func:`evaluate_holdout` is the answer for a case study that wants the
+    holdout spent once and calls this to build what it locks, and a case study whose holdout
+    notebooks re-run like any other stage calls this directly.
+
+    Returns a new specification; ``validation_spec`` is not modified.
+    """
+    holdout_spec = deepcopy(dict(validation_spec))
+    holdout_spec["computation"]["cv"] = build_holdout_cv(
+        validation_spec,
+        case_study=str(case_study if case_study is not None else study.case_study),
+        timeline=timeline,
+        train_start_floor=_holdout_training_floor(study, validation_spec),
+    )
+    _rekey_holdout_spec(study, holdout_spec, dict(validation_spec))
+    return holdout_spec
+
+
 @dataclass(frozen=True)
 class HoldoutOutcome:
     """One case study's holdout evaluation, and whether this call is what produced it."""
@@ -662,35 +738,6 @@ class HoldoutOutcome:
     @property
     def lineage(self) -> dict[str, str]:
         return self.lock.study.lifecycle.holdout_lineage(self.lock.hash)
-
-
-def build_holdout_training_spec(
-    study: Any,
-    validation_spec: Mapping[str, Any],
-    *,
-    timeline: Sequence[Any],
-    case_study: str | None = None,
-) -> dict[str, Any]:
-    """The training specification that refits *validation_spec* on the holdout interval.
-
-    The two steps are inseparable and were previously reachable only from inside the lock
-    transaction: derive the one holdout fold from the panel's own observation grid, then re-key
-    every field the holdout changes. Splitting them across callers is how two case studies end
-    up with holdout specifications that differ in a field neither notebook mentions.
-
-    The holdout interval is stepped back along the observation grid rather than the calendar:
-    training ends a whole label buffer, counted in observations, before the holdout opens, so
-    the last training label's outcome cannot resolve inside the holdout.
-    """
-    holdout_spec = deepcopy(dict(validation_spec))
-    holdout_spec["computation"]["cv"] = build_holdout_cv(
-        validation_spec,
-        case_study=str(case_study if case_study is not None else study.case_study),
-        timeline=timeline,
-        train_start_floor=_holdout_training_floor(study, validation_spec),
-    )
-    _rekey_holdout_spec(study, holdout_spec, validation_spec)
-    return holdout_spec
 
 
 @dataclass(frozen=True)
@@ -922,7 +969,10 @@ def evaluate_holdout(
 
     validation_spec = training.spec()
     holdout_spec = build_holdout_training_spec(
-        study, validation_spec, timeline=timeline, case_study=case_study
+        study,
+        validation_spec,
+        timeline=timeline,
+        case_study=case_study,
     )
 
     # selection_evidence is hashed into the lock identity, so anything put here that is already

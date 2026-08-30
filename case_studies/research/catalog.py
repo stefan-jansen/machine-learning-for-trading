@@ -67,6 +67,7 @@ RESERVED_COLUMNS: dict[str, Any] = {
     "execution_tier": pl.String,
     "approval": pl.String,
     "complete": pl.Boolean,
+    "decision_key_digest": pl.String,
     "created_at": pl.String,
     "metrics_computed_at": pl.String,
     "artifact_available": pl.Boolean,
@@ -223,6 +224,7 @@ def _registry_rows(root: Path, origin: str, *, immutable: bool = False) -> list[
             _select("created_at", prediction_columns, "p"),
             _select("status", coverage_columns, "c"),
             _select("n_folds_expected", coverage_columns, "c"),
+            _select("actual_key_digest", coverage_columns, "c"),
             _select("prediction_hash", metric_columns, "m"),
             _select("computed_at", metric_columns, "m"),
             _select("task_type", metric_columns, "m"),
@@ -348,6 +350,7 @@ def _registry_rows(root: Path, origin: str, *, immutable: bool = False) -> list[
             "execution_tier": record["t_execution_tier"] or "canonical",
             "approval": "unapproved",
             "complete": complete,
+            "decision_key_digest": record["c_actual_key_digest"],
             "created_at": record["p_created_at"],
             "metrics_computed_at": record["m_computed_at"],
             "artifact_available": artifact.is_file(),
@@ -589,7 +592,11 @@ def _backtest_registry_rows(
             "artifact_available": returns_artifact.is_file(),
             "signal_method": signal.get("method"),
             "allocation_method": allocation.get("method"),
-            "risk_method": risk.get("method"),
+            # `name`, not `method`: a risk control is declared under `strategy.risk.name`,
+            # unlike signal and allocation which spell theirs `method`. Reading `method`
+            # here left the column NULL for every backtest ever registered, so a risk
+            # overlay was indistinguishable from an unprotected book in any catalog read.
+            "risk_method": risk.get("name"),
             "decision_artifact_hash": decision.get("hash"),
             **{metric: record[f"bm_{metric}"] for metric in _BACKTEST_METRIC_COLUMNS},
             "metrics_json": canonical_json(metrics),
@@ -747,6 +754,7 @@ class PredictionCatalog:
         *,
         name: str,
         comparison_contract: dict[str, Any] | None = None,
+        supersedes: str | None = None,
     ) -> CandidateSet:
         """Freeze exact authoritative prediction members selected with Polars."""
         from .comparison import CandidateSet
@@ -761,6 +769,7 @@ class PredictionCatalog:
             name,
             members,
             comparison_contract=comparison_contract,
+            supersedes=supersedes,
         )
 
 
@@ -827,6 +836,7 @@ class BacktestCatalog:
         *,
         name: str,
         comparison_contract: dict[str, Any] | None = None,
+        supersedes: str | None = None,
     ) -> CandidateSet:
         """Freeze exact authoritative backtest members selected with Polars."""
         from .comparison import CandidateSet
@@ -841,4 +851,5 @@ class BacktestCatalog:
             name,
             members,
             comparison_contract=comparison_contract,
+            supersedes=supersedes,
         )

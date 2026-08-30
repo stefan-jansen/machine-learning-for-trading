@@ -1262,3 +1262,42 @@ def test_a_member_list_that_actually_differs_still_needs_its_predecessor(tmp_pat
 
     with pytest.raises(ValueError, match="supersedes"):
         snapshot_official_models(study, [request(2.0)], population_name="ipca-v1")
+
+
+def test_a_sweep_that_computes_nothing_reports_that_it_computed_nothing(tmp_path: Path) -> None:
+    """A re-run served entirely from the registry must not report the full count as work.
+
+    `len(execution.results)` counts what the sweep resolved, not what it did. Every member of
+    a second identical sweep is served from cache, so a summary built on that length reports
+    the same number as the cold run and reads exactly like it - a wrong number indistinguishable
+    from a right one. A reader cannot tell a real sweep from a no-op, and neither can anyone
+    checking whether a re-run did anything.
+
+    `run_backtests` has always recorded per member whether it was computed or reused; nothing
+    surfaced it.
+
+    The fix is not to replace the length with the computed count, which would answer the
+    maintainer's question in the reader's slot: a published page saying "0 computed" is a true
+    record of that execution and a misleading record of what the stage contains. The notebooks
+    print both facts on separate lines, so this pins both - the length stays the stage-facing
+    number across a warm re-run, and the two counts move.
+    """
+    study = _study(tmp_path)
+    first = _publish_prediction(study, alpha=1.0, checkpoint=1)
+    second = _publish_prediction(study, alpha=2.0, checkpoint=2)
+    selected = study.predictions.table().filter(pl.col("prediction_hash").is_in([first, second]))
+    sweep = dict(
+        predictions=selected,
+        signal={"method": "equal_weight_top_k", "top_k": 1},
+        prices=_prices(),
+    )
+
+    cold = run_backtests(study, **sweep)
+
+    assert (cold.n_computed, cold.n_reused) == (2, 0)
+
+    warm = run_backtests(study, **sweep)
+
+    assert len(warm.results) == 2, "the re-run still resolves both members"
+    assert (warm.n_computed, warm.n_reused) == (0, 2)
+    assert {r.hash for r in warm.results} == {r.hash for r in cold.results}
