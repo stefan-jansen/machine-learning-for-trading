@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1042,6 +1043,7 @@ class BacktestExplorer:
         *,
         prediction_hash: str | None = None,
         prediction_hashes: tuple[str, ...] | list[str] | None = None,
+        parents: Iterable[tuple[str, str, object]] | None = None,
     ) -> pl.DataFrame:
         """Load risk overlay results and compute impact vs the baseline each one modified.
 
@@ -1056,6 +1058,14 @@ class BacktestExplorer:
             Restrict to overlays on these predictions. An overlay is a change to
             one allocation, so pooling overlays from predictions the caller did
             not sweep measures rules against strategies it never built.
+        parents : sequence of (prediction_hash, allocator, top_k), optional
+            Restrict to overlays sitting on these allocation specifications. A
+            prediction has one allocation *stage* and several allocation *parents*,
+            distinguished by allocator and ``top_k``; scoping on the prediction
+            alone admits overlays on combinations the caller did not advance, and
+            those can rank among the reported leaders. ``top_k`` is compared as
+            written in the spec, so ``None`` matches a spec that carries no
+            ``top_k`` rather than matching everything.
 
         Returns
         -------
@@ -1146,6 +1156,16 @@ class BacktestExplorer:
             )
 
         result = pl.DataFrame(rows)
+        if parents is not None:
+            wanted = {(str(h), str(a), k) for h, a, k in parents}
+            result = result.filter(
+                pl.struct("prediction_hash", "allocator", "top_k").map_elements(
+                    lambda r: (r["prediction_hash"], r["allocator"], r["top_k"]) in wanted,
+                    return_dtype=pl.Boolean,
+                )
+            )
+            if result.is_empty():
+                return result
 
         # Compute baseline: the no-overlay Sharpe the overlays are measured
         # against. Registry-wide (unpinned) this is the best allocation-stage

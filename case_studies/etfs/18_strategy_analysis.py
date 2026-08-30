@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -203,11 +203,23 @@ def _derived_table_state() -> tuple[set[str], set[str]]:
 
 
 def _stale_derived_rows(live: list[str]) -> tuple[int, int]:
-    """Derived rows whose leader or challenger backtest ran on a retired prediction.
+    """Derived rows built over anything this notebook does not report as live.
 
     Presence of every enum value says the tables were built; it does not say they were built
     over the population this notebook reports. A refit retires the generation a previous run
     led with, and its cohort and paired rows survive intact under those same enum values.
+
+    A leader and a challenger are the visible halves. A cohort is also stale when a retired
+    prediction is one of the variants the correction was computed over - the leader can be
+    live while the trial count and the deflated Sharpe are not - and a pair is also stale
+    when its benchmark side is retired, which is the side the difference is measured
+    against. `member_digest` records the cohort's members, so a cohort whose digest is
+    absent cannot be shown to be live either and is recomputed rather than trusted.
+
+    Cohort membership is not queryable here - `backtest_runs` carries neither label nor
+    family - so the membership test is that the cohort's stage still holds a retired
+    backtest at all. `compute_and_register` refreshes the whole table rather than one row,
+    so triggering it too readily costs a recompute and can never report a stale number.
     """
     with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as db:
         tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -216,8 +228,16 @@ def _stale_derived_rows(live: list[str]) -> tuple[int, int]:
             db.execute(
                 """
                 SELECT COUNT(*) FROM cohort_metrics cm
-                JOIN backtest_runs b ON b.backtest_hash = cm.leader_hash
-                WHERE b.prediction_hash NOT IN (SELECT value FROM json_each(?))
+                WHERE cm.member_digest IS NULL
+                   OR cm.leader_hash IN (
+                          SELECT backtest_hash FROM backtest_runs
+                          WHERE prediction_hash NOT IN (SELECT value FROM json_each(?1))
+                      )
+                   OR EXISTS (
+                          SELECT 1 FROM backtest_runs r
+                          WHERE r.stage IS cm.stage
+                            AND r.prediction_hash NOT IN (SELECT value FROM json_each(?1))
+                      )
                 """,
                 (payload,),
             ).fetchone()[0]
@@ -228,8 +248,14 @@ def _stale_derived_rows(live: list[str]) -> tuple[int, int]:
             db.execute(
                 """
                 SELECT COUNT(*) FROM backtest_paired_metrics pm
-                JOIN backtest_runs b ON b.backtest_hash = pm.challenger_hash
-                WHERE b.prediction_hash NOT IN (SELECT value FROM json_each(?))
+                WHERE pm.challenger_hash IN (
+                          SELECT backtest_hash FROM backtest_runs
+                          WHERE prediction_hash NOT IN (SELECT value FROM json_each(?1))
+                      )
+                   OR pm.benchmark_hash IN (
+                          SELECT backtest_hash FROM backtest_runs
+                          WHERE prediction_hash NOT IN (SELECT value FROM json_each(?1))
+                      )
                 """,
                 (payload,),
             ).fetchone()[0]

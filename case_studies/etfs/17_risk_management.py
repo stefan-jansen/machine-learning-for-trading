@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -358,7 +358,21 @@ else:
 # the rule found the losses worth avoiding, or merely closed positions.
 
 # %% tags=["results"]
-risk_df = explorer.risk_impact(prediction_hashes=top_combos["prediction_hash"].to_list())
+# Scoped to the allocation parents this run advanced, not to their predictions. A prediction
+# carries several allocation combinations - the allocator and `top_k` distinguish them - so
+# scoping on the prediction alone admits overlays on combinations outside `top_combos`, and
+# those can surface among the reported leaders.
+_parents = []
+for _row in top_combos.iter_rows(named=True):
+    _view = strategy_view(json.loads(_row["spec_json"]))
+    _parents.append(
+        (
+            _row["prediction_hash"],
+            _view.get("allocation", {}).get("method", "equal_weight"),
+            _view.get("signal", {}).get("top_k"),
+        )
+    )
+risk_df = explorer.risk_impact(parents=_parents)
 if risk_df.is_empty():
     raise RuntimeError("the risk-overlay stage registered no readable rows")
 # An overlay whose parent allocation is not in the registry has nothing to be a change *to*, so
