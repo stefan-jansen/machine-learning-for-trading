@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -40,6 +42,7 @@ from case_studies.utils.analytics import DISPLAY_NAMES
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_returns
 from case_studies.utils.registry.registration import register_paired_metrics
+from case_studies.utils.strategy_analysis import training_run_fitted_for_the_holdout
 from case_studies.utils.uncertainty import (
     SIGNAL_BASELINE_BY_CASE_STUDY,
     STAGE_SEQUENCE,
@@ -474,16 +477,26 @@ def _holdout_lineage_for(
         if prefer_prediction_hash is not None:
             carrier = db.execute(
                 """
-                SELECT training_hash, checkpoint_value, checkpoint_kind
-                FROM prediction_sets WHERE prediction_hash = ?
+                SELECT t.family, t.config_name, t.label,
+                       p.checkpoint_value, p.checkpoint_kind
+                FROM prediction_sets p
+                JOIN training_runs t ON t.training_hash = p.training_hash
+                WHERE p.prediction_hash = ?
                 """,
                 (prefer_prediction_hash,),
             ).fetchone()
             if carrier is not None:
-                row = db.execute(
+                # Matched on the declared configuration, not on the carrier's training
+                # hash. A holdout prediction produced correctly carries a NEW training
+                # identity - the same configuration refitted on the holdout fold - so
+                # matching on the validation training hash finds only a holdout scored
+                # from the validation-fitted model. ``select_holdout_self_backtest``
+                # reads back the hash this branch writes the ``val_rank1_self`` pair
+                # under, so the two apply the same rule.
+                rows_ = db.execute(
                     f"""
                     SELECT t.family, t.config_name, t.label,
-                           p.prediction_hash, b.backtest_hash
+                           p.prediction_hash, b.backtest_hash, t.spec_json
                     FROM prediction_sets p
                     JOIN training_runs t ON p.training_hash = t.training_hash
                     JOIN backtest_runs b ON p.prediction_hash = b.prediction_hash
@@ -491,21 +504,29 @@ def _holdout_lineage_for(
                                              ('signal','allocation','risk_overlay','holdout')
                     JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
                     WHERE {where_sql}
-                      AND p.training_hash = ?
+                      AND t.family = ?
+                      AND t.config_name = ?
+                      AND t.label = ?
                       AND p.checkpoint_value IS ?
                       AND p.checkpoint_kind IS ?
                     ORDER BY b.backtest_hash
-                    LIMIT 1
                     """,
-                    params + [carrier[0], carrier[1], carrier[2]],
-                ).fetchone()
-                if row:
-                    return dict(row)
+                    params + list(carrier),
+                ).fetchall()
+                for candidate in rows_:
+                    if training_run_fitted_for_the_holdout(candidate["spec_json"]):
+                        resolved = dict(candidate)
+                        resolved.pop("spec_json")
+                        return resolved
 
-        row = db.execute(
+        # The fallback keeps its Sharpe ordering, but only over runs that were actually
+        # refitted for the holdout. A model fitted on the validation folds is not a
+        # holdout result whatever its Sharpe, so it cannot be reached by ranking.
+        row = None
+        for candidate in db.execute(
             f"""
             SELECT t.family, t.config_name, t.label,
-                   p.prediction_hash, b.backtest_hash
+                   p.prediction_hash, b.backtest_hash, t.spec_json
             FROM prediction_sets p
             JOIN training_runs t ON p.training_hash = t.training_hash
             JOIN backtest_runs b ON p.prediction_hash = b.prediction_hash
@@ -513,13 +534,16 @@ def _holdout_lineage_for(
             JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
             WHERE {where_sql}
             ORDER BY bm.sharpe DESC NULLS LAST
-            LIMIT 1
             """,
             params,
-        ).fetchone()
+        ).fetchall():
+            if training_run_fitted_for_the_holdout(candidate["spec_json"]):
+                row = dict(candidate)
+                row.pop("spec_json")
+                break
     finally:
         db.close()
-    return dict(row) if row else None
+    return row
 
 
 def _val_backtest_for_lineage(cs: str, family: str, config_name: str, label: str) -> str | None:
@@ -701,6 +725,7 @@ def populate_paired_metrics(
     label_restriction: frozenset[str] | None = None,
     rung: dict | None = None,
     carrier_pin_predicate: pl.Expr | None = None,
+    carrier: Mapping[str, Any] | None = None,
     periods_per_year: int | None = None,
     verbose: bool = True,
     replace_all: bool = False,
@@ -723,6 +748,15 @@ def populate_paired_metrics(
       study's own ``evaluation.periods_per_year`` declaration rather than to a
       cadence, so a caller that omits it gets its own scale instead of someone
       else's.
+    * ``carrier`` — a ``resolve_canonical_rank1_lineage`` result. When given, pairs
+      #2-6 use its validation and holdout backtests instead of re-ranking the
+      registry here. Pair #1 is unaffected: it is about the signal leader, not the
+      carrier. Omitting it keeps the legacy ranking, which is not the canonical
+      selection - it orders on raw Sharpe and applies neither the common-support
+      re-ranking nor the restrictions the resolver holds - so a caller that can
+      resolve the lineage should pass it. The rung-pinned case studies
+      (sp500_options, nasdaq100_microstructure) restrict on a dimension the resolver
+      does not know, which is why this is a parameter rather than the default.
 
     ``replace_all`` makes the call a complete snapshot: pairs it did not write are
     deleted, so a rebuild under a different selection does not leave the previous
@@ -868,7 +902,23 @@ def populate_paired_metrics(
         subset=["prediction_hash"], keep="first", maintain_order=True
     )
 
-    leader = cand.row(0, named=True)
+    if carrier is None:
+        leader = cand.row(0, named=True)
+    else:
+        # The caller resolved the carrier through ``resolve_canonical_rank1_lineage``, so
+        # it is used rather than re-ranked. The two disagree in practice and not only in
+        # principle: the ranking above is on raw Sharpe, while the canonical resolver
+        # re-ranks conformal candidates on exact common timestamp support. On
+        # us_firm_characteristics that is the difference between a retired
+        # ``walk_forward_v2`` run and the ``walk_forward_v3`` one that replaced it, and
+        # the pairs were written against a carrier the case study does not report.
+        leader = {
+            "backtest_hash": carrier["val_backtest_hash"],
+            "prediction_hash": carrier["val_prediction_hash"],
+            "label": carrier["label"],
+            "family": carrier["family"],
+            "config_name": carrier["config_name"],
+        }
     leader_hash = leader["backtest_hash"]
     leader_phash = leader["prediction_hash"]
     leader_label = leader.get("label")
@@ -892,14 +942,27 @@ def populate_paired_metrics(
     # The carrier's training hash and checkpoint are both resolved inside
     # ``_holdout_lineage_for`` from this one prediction hash, so the same-lineage
     # preference cannot be half-applied by a caller.
-    ho_lineage = _holdout_lineage_for(
-        cs,
-        leader_label,
-        strategy_spec=val_spec,
-        label_restriction=label_restriction,
-        rung=rung,
-        prefer_prediction_hash=leader_phash,
-    )
+    if carrier is None:
+        ho_lineage = _holdout_lineage_for(
+            cs,
+            leader_label,
+            strategy_spec=val_spec,
+            label_restriction=label_restriction,
+            rung=rung,
+            prefer_prediction_hash=leader_phash,
+        )
+    elif carrier.get("holdout_backtest_hash") is None:
+        ho_lineage = None
+    else:
+        # Same rule as the leader: the caller's lineage is the answer. Its holdout is the
+        # refit of this exact configuration, which is what makes pair #3 a comparison of
+        # one strategy across two periods rather than of two models.
+        ho_lineage = {
+            "backtest_hash": carrier["holdout_backtest_hash"],
+            "label": carrier["label"],
+            "family": carrier["family"],
+            "config_name": carrier["config_name"],
+        }
     ho_hash = ho_lineage["backtest_hash"] if ho_lineage else None
     ho_label = ho_lineage["label"] if ho_lineage else leader_label
     chal_ho = _aligned_returns(cs, ho_hash) if ho_hash else None
