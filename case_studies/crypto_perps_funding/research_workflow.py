@@ -322,6 +322,32 @@ def preview_prediction_candidates(
     return candidates
 
 
+def _preview_traded_backtests(study: Study, label: str) -> pl.DataFrame:
+    """This workspace's own baseline and allocation results for one label, minus the flat ones.
+
+    A book that never opened a position books a return of exactly zero on every session, so it
+    reports Sharpe 0.0 - which beats every losing strategy in a field where the reduced fixture
+    makes them all lose. `14_portfolio_management` keeps that out of the canonical funnel by
+    admitting only results that traded every declared fold; the preview has no fold calendar to
+    apply, so it applies the part of the rule it can and drops what never traded at all.
+
+    Measured: a reduced `conformal_weighted` run has too little history to calibrate a width, so
+    it holds nothing for the whole span and registers 0 trades. Ranked on Sharpe it won its
+    label, every overlay of it was identical to it in every digit, and `16_risk_management`
+    raised the guard that exists to catch a control the engine never installed - which is a true
+    statement about a book with no positions and a false one about the engine.
+    """
+    return study.backtests.table(include_preview=True).filter(
+        (pl.col("label") == label)
+        & (pl.col("split") == "validation")
+        & (pl.col("execution_tier") == "preview")
+        & pl.col("stage").is_in(["signal", "allocation"])
+        & pl.col("complete")
+        & pl.col("sharpe").is_not_null()
+        & (pl.col("num_trades") > 0)
+    )
+
+
 def allocation_pool(study: Study, *, label: str, canonical: bool) -> list[str]:
     """The backtest identities `crypto-signal-allocation-{label}` admits, for one label.
 
@@ -337,17 +363,12 @@ def allocation_pool(study: Study, *, label: str, canonical: bool) -> list[str]:
 
     if canonical:
         return list(CandidateSet.one(study, name=f"crypto-signal-allocation-{label}").members)
-    rows = study.backtests.table(include_preview=True).filter(
-        (pl.col("label") == label)
-        & (pl.col("split") == "validation")
-        & (pl.col("execution_tier") == "preview")
-        & pl.col("stage").is_in(["signal", "allocation"])
-        & pl.col("complete")
-    )
+    rows = _preview_traded_backtests(study, label)
     if rows.is_empty():
         raise RuntimeError(
-            f"no complete preview baseline or allocation backtest for {label} in this "
-            "workspace; 13_backtest and 14_portfolio_management have to run in it first"
+            f"no preview baseline or allocation backtest for {label} traded in this "
+            "workspace; 13_backtest and 14_portfolio_management have to run in it first, "
+            "and at least one of their results has to open a position"
         )
     return rows.get_column("backtest_hash").to_list()
 
@@ -373,22 +394,14 @@ def selected_allocation_result(study: Study, *, label: str, canonical: bool):
         return CandidateSet.one(
             study, name=f"crypto-signal-allocation-{label}"
         ).best_validation_sharpe()
-    rows = (
-        study.backtests.table(include_preview=True)
-        .filter(
-            (pl.col("label") == label)
-            & (pl.col("split") == "validation")
-            & (pl.col("execution_tier") == "preview")
-            & pl.col("stage").is_in(["signal", "allocation"])
-            & pl.col("complete")
-            & pl.col("sharpe").is_not_null()
-        )
-        .sort("sharpe", "backtest_hash", descending=[True, False])
+    rows = _preview_traded_backtests(study, label).sort(
+        "sharpe", "backtest_hash", descending=[True, False]
     )
     if rows.is_empty():
         raise RuntimeError(
-            f"no complete preview baseline or allocation backtest for {label} in this "
-            "workspace; 13_backtest and 14_portfolio_management have to run in it first"
+            f"no preview baseline or allocation backtest for {label} traded in this "
+            "workspace; 13_backtest and 14_portfolio_management have to run in it first, "
+            "and at least one of their results has to open a position"
         )
     return Result.open(study, rows.item(0, "backtest_hash"), include_preview=True)
 
