@@ -16,10 +16,10 @@
 # %% [markdown]
 # # CME Futures: Portfolio Allocation
 #
-# The signal stage ranks complete configurations by equal-weight validation backtest Sharpe. For
+# The baseline stage ranks complete configurations by equal-weight validation backtest Sharpe. For
 # each label, this notebook retains the strongest checkpoint and signal concentration for each of
 # the configured number of distinct model configurations, then evaluates the declared alternative
-# allocators. Equal weight is not among them: it is the baseline stage itself, and because
+# position sizing methods. Equal weight is not among them: it is the baseline itself, and because
 # `stage` is not part of `backtest_hash`, running it again here produces a row hashing
 # identically to its baseline parent, so one of the two is silently lost. Measured in this
 # case study's own pre-rebuild store: 48 rows stamped `stage='signal'` while carrying
@@ -76,10 +76,10 @@ universe = product_universe_table()
 universe
 
 # %% [markdown]
-# ## How many signal configurations the allocators run on
+# ## How many baseline configurations the position sizing methods run on
 #
 # Canonical takes the shortlist size from `setup.yaml`, which is the declared width of the
-# allocation stage. A preview cannot: it backtests a bounded slice of the signal stage, so the
+# allocation stage. A preview cannot: it backtests a bounded slice of the baseline stage, so the
 # canonical width names more distinct configurations than its pool contains and
 # `shortlist_signal_configurations` refuses - correctly, since silently returning fewer is the
 # quiet shrinking that strictness exists to prevent. The preview therefore declares its own
