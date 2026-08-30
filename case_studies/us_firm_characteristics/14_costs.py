@@ -168,7 +168,7 @@ def _resolve_pre_cost_runs(
 
     Those three stages are not a free choice. They are exactly what
     `resolve_canonical_rank1_lineage` selects over (`strategy_analysis.py:248`) and what
-    `17_strategy_analysis` declares as `_ELIGIBLE_STAGES`. Pool anything narrower and the
+    `15_strategy_analysis` declares as `_ELIGIBLE_STAGES`. Pool anything narrower and the
     two selections can name different configurations: if a solvent baseline beats every
     allocator, the cost curve describes a strategy the chapter does not report, and the
     strategy-analysis notebook finds no cost rows for the carrier it selected. Whatever the
@@ -493,8 +493,6 @@ if not cost_df.is_empty():
 # These are validation months throughout. Nothing here reads or selects on the holdout
 # period, which stays untouched until the strategy analysis notebook.
 #
-# **Next:** [`15_holdout_predictions`](15_holdout_predictions.ipynb) retrains the
-# configuration selected here on everything up to the holdout window, and
-# [`16_holdout_backtest`](16_holdout_backtest.ipynb) runs it once on the untouched period.
-# Risk management is no longer next: it ran before this notebook, and its result is one of
-# the three stages the selection above drew from.
+# **Next:** [`15_strategy_analysis`](15_strategy_analysis.ipynb), which reads this sweep
+# back alongside the holdout. Risk management is no longer next: it ran before this
+# notebook, and its result is one of the three stages the selection above drew from.
