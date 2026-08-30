@@ -70,6 +70,16 @@ EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 # Whether a holdout generation for a DIFFERENT configuration may be superseded by this run.
 # Off by default: see section 3.
+#
+# The flag exists because the holdout is not a one-shot resource, which is a ruling and not
+# an oversight. What the rule against consulting the holdout forbids is SELECTING on it: the
+# configuration evaluated here is chosen by validation backtest Sharpe, and no holdout number
+# feeds back into that choice. It says nothing about how many times the evaluation may be
+# computed, and a wrong result is deleted and re-run rather than left standing because it was
+# observed. Reading the rule as a physical constraint is what produced a lock layer around
+# this window, and it is being removed. The guard here is against something narrower and real:
+# two generations readable at once, so nobody downstream has to choose between them and nobody
+# can quote whichever number they prefer.
 REPLACE_HOLDOUT = False
 
 # %%

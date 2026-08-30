@@ -188,25 +188,20 @@ print(f"Holdout prediction: {HOLDOUT_PREDICTION_HASH}")
 # forward. The step count comes from the reviewed table in `conformal.py`, which records
 # the label horizon; it carried 1 for these labels, which discarded the last month of
 # calibration against a leak the label cannot have.
+#
+# The embargo is derived here because the backtest identity below is built from it. The
+# widths themselves are NOT written here: writing them replaces the artifact the already
+# registered run was sized by, and the replacement guard in section 3 can still refuse this
+# run afterwards. That order left the registered holdout pointing at a calibration that no
+# longer existed, so the write moved below the guard and nothing is overwritten until this
+# run is cleared to register.
 
 # %% tags=["results"]
 allocation = strategy_view(json.loads(carrier["spec_json"])).get("allocation") or {}
-if allocation.get("method") == "conformal_weighted":
-    embargo_steps = holdout_conformal_embargo_steps(CASE_STUDY_ID, LABEL)
-    widths = compute_holdout_conformal_widths(
-        CASE_STUDY_ID,
-        carrier["val_prediction_hash"],
-        HOLDOUT_PREDICTION_HASH,
-        alpha=float(allocation.get("alpha", 0.2)),
-        min_calibration_n=int(allocation["min_calibration_n"]),
-        embargo_steps=embargo_steps,
-        write=True,
-    )
-    print(
-        f"Conformal widths: {widths.height:,} rows over "
-        f"{widths['symbol'].n_unique():,} names, embargo {embargo_steps} observation(s)"
-    )
-    print(f"  calibration_n: median {widths['calibration_n'].median():.0f}")
+NEEDS_CALIBRATION = allocation.get("method") == "conformal_weighted"
+embargo_steps = holdout_conformal_embargo_steps(CASE_STUDY_ID, LABEL) if NEEDS_CALIBRATION else 0
+if NEEDS_CALIBRATION:
+    print(f"Conformal carrier: embargo {embargo_steps} observation(s), widths written below.")
 else:
     print(f"Allocator {allocation.get('method', 'equal_weight')!r} needs no calibration.")
 
@@ -254,7 +249,7 @@ spec["chapter"] = "ch20"
 # Recorded by the notebook rather than inside `run_backtest`, because callers elsewhere
 # construct and hash their own resolved specifications and compare the runner's answer to
 # them; a runner that added a key after that would make those comparisons fail.
-if allocation.get("method") == "conformal_weighted":
+if NEEDS_CALIBRATION:
     spec = ensure_conformal_calibration_identity(spec, holdout_embargo_steps=embargo_steps)
 
 # The window carries one backtest at a time, for the same reason `15` lets it carry one
@@ -293,6 +288,24 @@ if superseded_backtests and not REPLACE_HOLDOUT:
 for backtest_hash in superseded_backtests:
     print(f"REPLACING holdout backtest {backtest_hash}")
     _delete_holdout_backtest(CASE_DIR, backtest_hash)
+
+# The guard has passed, so this run will register and the widths it is sized by are the
+# ones that belong beside this prediction set.
+if NEEDS_CALIBRATION:
+    widths = compute_holdout_conformal_widths(
+        CASE_STUDY_ID,
+        carrier["val_prediction_hash"],
+        HOLDOUT_PREDICTION_HASH,
+        alpha=float(allocation.get("alpha", 0.2)),
+        min_calibration_n=int(allocation["min_calibration_n"]),
+        embargo_steps=embargo_steps,
+        write=True,
+    )
+    print(
+        f"Conformal widths: {widths.height:,} rows over "
+        f"{widths['symbol'].n_unique():,} names, embargo {embargo_steps} observation(s)"
+    )
+    print(f"  calibration_n: median {widths['calibration_n'].median():.0f}")
 
 result = run_backtest(
     CASE_STUDY_ID,
