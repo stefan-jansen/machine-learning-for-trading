@@ -402,6 +402,31 @@ def population_supersedes(study: Study, *, name: str, declared: str | None) -> s
     return declared if declared in (current.supersedes, current.hash) else None
 
 
+def supersedes_for_run(
+    study: Study,
+    *,
+    population_name: str,
+    declared: str | None,
+    execution_tier: str,
+) -> str | None:
+    """Resolve the ``supersedes`` hash a model-execution run should pass.
+
+    Notebooks declare the hash their published population replaced as a literal in the parameter
+    cell, so that running the committed ``.py`` as it stands recomputes the population on record.
+    Whether that literal may be offered is :func:`population_supersedes`' decision, and this
+    function is the model-execution entry point to it: it adds the one thing that decision cannot
+    see, which is the tier the run was planned in.
+
+    A preview run is discarded with its workspace, has no lineage to extend, and
+    ``run_model_population`` refuses one that carries a hash. Answering that here keeps the tier
+    check out of the notebooks - the stage spec forbids a notebook branching on
+    ``EXECUTION_TIER`` - and avoids a registry read that could only return nothing.
+    """
+    if execution_tier != "canonical":
+        return None
+    return population_supersedes(study, name=population_name, declared=declared)
+
+
 def _lineage(
     case_dir: Path, member_kind: str
 ) -> tuple[list[tuple[str, str, str | None]], dict[str, set[str]]]:

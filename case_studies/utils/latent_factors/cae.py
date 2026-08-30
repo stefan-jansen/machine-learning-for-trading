@@ -10,6 +10,10 @@ import numpy as np
 from case_studies.utils.latent_factors.common import TaskType
 from case_studies.utils.latent_factors.library_bridge import run_cae_fold_with_library
 
+# Bumped when a change to this module would change a fitted CAE result. It enters
+# every cae training identity through `adapter._source_identity`, which declares behaviour
+# rather than hashing these bytes - see that function for why.
+
 
 def run_cae_fold(
     chars_train: np.ndarray,

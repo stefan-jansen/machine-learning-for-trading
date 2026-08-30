@@ -14,37 +14,45 @@
 # ---
 
 # %% [markdown]
-# # US Firm Characteristics: Costs
+# # US Firm Characteristics: Cost Sensitivity
 #
-# **Chapter 18 — Transaction Costs and Execution**
+# **Chapter 18 - Transaction Costs and Execution**
 #
-# US firm characteristics has a favorable nominal cost profile along the
-# protocol grid: monthly rebalancing runs at ~1/21 the turnover of daily
-# strategies, and the roughly 3,700-stock validation universe keeps individual
-# positions small. The cross-stage rank-1 is the equal-weight baseline
-# `gbm/leaves_7_mse` at iteration 500 and TOP_K 50, Sharpe 2.63 [2.07, 3.24].
-# This notebook sweeps the full registered cost grid from that winner.
+# Every Sharpe reported so far is net of one cost assumption: the commission and
+# slippage `setup.yaml` declares, charged on turnover at each rebalance. That is a
+# single number standing in for the whole of execution, and it was picked before any
+# of these strategies existed. This notebook asks what the result would have been had
+# that number been wrong.
 #
-# Sections 1–2 generate cost-sensitivity backtests (write to registry).
-# Section 3 queries the registry via `BacktestExplorer` for analysis.
+# The question is not whether costs matter but *how fast* the result decays as they
+# rise. A strategy whose Sharpe falls slowly across the grid is one whose edge is
+# large relative to what it pays to trade, and it can survive being wrong about
+# execution. One that falls off a cliff is being carried by the cost assumption
+# rather than by the signal, and the assumption is then the finding.
 #
-# **Learning Objectives:**
-# 1. Run a cost grid sweep on the best baseline-or-allocation result
-# 2. Compare net Sharpe decay across the registered cost range
-# 3. Quantify what execution quality is required to deploy this strategy
+# The declared level sits inside the swept range rather than at its edge, so the
+# curve shows the result both above and below what the other notebooks charged.
 #
-# **Book Reference:** Chapter 18, Sections 18.2–18.5
+# Sections 1-2 write cost-sensitivity backtests to the registry. Section 3 is
+# read-only and reads them back.
 #
-# **Prerequisites:** Completed Ch17 allocation sweep with results in `registry.db`.
+# **Book Reference:** Chapter 18, Sections 18.2-18.5
+#
+# **Prerequisites:** the Chapter 16 backtest and Chapter 17 allocation notebooks,
+# whose registered runs decide which strategy is swept here.
 
 # %%
 """US Firm Characteristics: Costs."""
 
 import json
+import sqlite3
 import time
 import warnings
+from collections import Counter
 
 import polars as pl
+
+from utils.style import COLORS, add_message_title, show_with_alt
 
 warnings.filterwarnings("ignore")
 
@@ -56,7 +64,12 @@ from case_studies.utils.backtest_presets import (
     strategy_view,
 )
 from case_studies.utils.backtest_runner import run_backtest
-from case_studies.utils.registry import read_predictions, resolve_best_backtest_runs
+from case_studies.utils.registry import (
+    backtest_dir,
+    load_existing_backtest_hashes,
+    read_predictions,
+    resolve_best_backtest_runs,
+)
 from case_studies.utils.sweep_config import get_cost_grid_bps, get_top_n_predictions
 from utils.paths import get_case_study_dir
 
@@ -79,34 +92,88 @@ print(f"Case study: {CASE_STUDY_ID}, label: {LABEL}")
 COST_GRID_BPS = get_cost_grid_bps(CASE_STUDY_ID)
 
 # %% [markdown]
-# ## 1. Load the Best Pre-Cost Run
+# ## 1. Which run is swept
 #
-# Cost analysis starts from the top validation run across the equal-weight
-# baseline and allocation stages. This preserves the established greedy funnel
-# when an allocator does not improve on its baseline parent.
+# The sweep starts from the highest-Sharpe validation run across *both* the
+# equal-weight baseline and the allocation stage. Both are candidates because an
+# allocator is an alternative to equal weighting rather than an improvement on it by
+# construction: where every allocator lands below the equal-weight parent it was built
+# from, an allocation-only rule would carry forward a strategy the previous notebook
+# measured as worse than doing nothing, and would then report that strategy's cost
+# sensitivity in place of the one a reader would trade.
+#
+# Which stage the selected run came from is therefore printed rather than assumed.
 
 
 # %%
-def _resolve_pre_cost_runs(case_study: str, label: str, *, split: str, top_n: int) -> pl.DataFrame:
+def _solvent_hashes(hashes):
+    """Of *hashes*, those whose equity never reached zero.
+
+    A long-short book here has no margin call, so a run can compound through zero and carry
+    a Sharpe computed on a balance that no longer exists - and such a Sharpe can top a
+    ranking. Sweeping the cost grid against one would report the cost sensitivity of a
+    strategy that went bankrupt before any cost was charged.
+
+    `max_drawdown` at or past -100% is that condition, the same boundary
+    [`11_backtest`](11_backtest.ipynb) and
+    [`12_portfolio_management`](12_portfolio_management.ipynb) apply. A run with no recorded
+    drawdown is not selected either: it cannot be shown to have survived, and this decides
+    what to sweep rather than counting what happened.
+    """
+    if not hashes:
+        return set()
+    placeholders = ", ".join("?" for _ in hashes)
+    with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
+        rows = conn.execute(
+            f"SELECT backtest_hash FROM backtest_metrics "
+            f"WHERE backtest_hash IN ({placeholders}) AND max_drawdown > -1.0",
+            hashes,
+        ).fetchall()
+    return {row[0] for row in rows}
+
+
+def _resolve_pre_cost_runs(
+    case_study: str,
+    label: str,
+    *,
+    split: str,
+    top_n: int,
+    solvent_hashes=None,
+    ranked_pool: int = 1_000_000,
+):
+    """The highest-Sharpe solvent runs across the baseline and allocation stages.
+
+    `solvent_hashes` is passed in rather than called by name so this function does not reach
+    the registry itself: the ranking is what it decides, and it can then be exercised without
+    a database. Passing None applies no solvency filter.
+
+    `ranked_pool` asks each stage for its whole ranked list rather than its top `top_n`.
+    Truncating first and filtering after would let an insolvent leader take the slot a solvent
+    run behind it should have had - and with `top_n=1`, that drops the entire stage from
+    consideration instead of falling through to the next candidate.
+    """
     candidates = [
         resolve_best_backtest_runs(
             case_study,
             label,
             split=split,
             stage=stage,
-            top_n=top_n,
+            top_n=ranked_pool,
         )
         for stage in ("signal", "allocation")
     ]
     candidates = [frame for frame in candidates if not frame.is_empty()]
     if not candidates:
         return pl.DataFrame()
-    return (
+    ranked = (
         pl.concat(candidates)
         .sort("sharpe", descending=True)
         .unique("backtest_hash", maintain_order=True)
-        .head(top_n)
     )
+    if solvent_hashes is not None:
+        keep = solvent_hashes(ranked["backtest_hash"].to_list())
+        ranked = ranked.filter(pl.col("backtest_hash").is_in(list(keep)))
+    return ranked.head(top_n)
 
 
 top_combos = _resolve_pre_cost_runs(
@@ -114,10 +181,11 @@ top_combos = _resolve_pre_cost_runs(
     LABEL,
     split="validation",
     top_n=TOP_N_COMBOS,
+    solvent_hashes=_solvent_hashes,
 )
 
 if top_combos.is_empty():
-    print("No baseline or allocation results found. Run the upstream notebooks first.")
+    print("No solvent baseline or allocation results found. Run the upstream notebooks first.")
 else:
     for row in top_combos.iter_rows(named=True):
         spec = json.loads(row["spec_json"])
@@ -131,15 +199,50 @@ print(f"Prices: {len(prices):,} rows, {prices['symbol'].n_unique()} assets")
 # %% [markdown]
 # ## 2. Cost Grid Sweep
 #
-# For each top combo, re-run the backtest at different cost levels. Because
-# this strategy rebalances monthly, the per-period cost exposure is modest:
-# a 30 bps cost on a monthly rebalance is equivalent to about 1.43 bps per
-# trading day. The sweep tests whether Sharpe decays gradually rather than
-# collapsing across the declared range.
+# Each selected run is re-executed at every cost level in the declared grid, with
+# the level split evenly between commission and slippage. Nothing else about the
+# strategy changes, so the only thing separating one row from the next is what it
+# was charged to trade.
+#
+# The grid and the strategy interact through turnover, which this panel keeps low by
+# rebalancing monthly: a cost level is paid once a month here rather than once a day,
+# so the same bps figure bites a monthly strategy far less than a daily one. That is
+# a property of the rebalance cadence, not a virtue of the signal, and it is the
+# reason the curve below can stay flat over a range that would destroy a
+# higher-frequency strategy.
+#
+# A backtest hash covers the whole strategy spec, so a level already registered under
+# the same spec is served from the registry rather than recomputed. The summary below
+# reports two separate facts: what the stage contains, which is the same number whether
+# this execution was cold or warm and is what a reader needs, and what this execution
+# did, which is what a maintainer needs. Reported as one number they are
+# indistinguishable, and a warm re-run publishes a page claiming eleven backtests it
+# did not run.
+#
+# The three execution counts sum to the levels attempted. `n_done` counts attempts, so a
+# failure has to come out of the computed figure or it is reported twice.
+#
+# The reuse count asks `backtest_run_status`, which is the same call `run_backtest`
+# makes to decide, rather than checking the hash against a snapshot of the registry
+# taken before the loop. The two differ where a row is registered but has no
+# `daily_returns.parquet`: the runner recomputes it and a snapshot reports it as
+# reused, which is wrong in the direction that hides work.
+#
+# `run_backtest` fills allocator defaults inside the call, so a hash built from the
+# spec this notebook holds is not necessarily the registered one. The set is keyed on
+# the hash the runner returns.
 
-# %%
+# %% tags=["results"]
 n_total = len(top_combos) * len(COST_GRID_BPS) if not top_combos.is_empty() else 0
 n_done = 0
+n_failed = 0
+n_reused = 0
+failures: Counter[str] = Counter()
+reusable_before = {
+    _hash
+    for _hash in load_existing_backtest_hashes(CASE_STUDY_ID, stage="cost_sensitivity")
+    if (backtest_dir(CASE_STUDY_ID, _hash) / "daily_returns.parquet").exists()
+}
 t0 = time.time()
 
 for combo_row in top_combos.iter_rows(named=True):
@@ -179,67 +282,157 @@ for combo_row in top_combos.iter_rows(named=True):
                 calendar=bt_config.calendar,
             )
 
-            if cost_bps % 10 == 0:
-                print(
-                    f"  [{n_done}/{n_total}] {alloc_method} @ {cost_bps}bps: "
-                    f"Sharpe={result.metrics.get('sharpe', 0):.3f}"
-                )
-        except Exception as e:
-            print(f"  [{n_done}/{n_total}] {alloc_method} @ {cost_bps}bps: FAILED — {e}")
+            if result.backtest_hash in reusable_before:
+                n_reused += 1
+            print(
+                f"  [{n_done}/{n_total}] {alloc_method} @ {cost_bps:g} bps: "
+                f"Sharpe={result.metrics.get('sharpe', 0):.3f}"
+            )
+        except Exception as error:
+            # Counted rather than swallowed: the summary below reports this count, and
+            # the check after the loop refuses to go on when nothing was registered.
+            n_failed += 1
+            failures[f"{type(error).__name__}: {error}"] += 1
+            print(
+                f"  [{n_done}/{n_total}] {alloc_method} @ {cost_bps:g} bps: "
+                f"FAILED - {type(error).__name__}: {error}"
+            )
 
 elapsed = time.time() - t0
-print(f"\nCost sweep complete: {n_done} backtests in {elapsed:.0f}s")
+stage_total = len(load_existing_backtest_hashes(CASE_STUDY_ID, stage="cost_sensitivity"))
+print(f"\nCost-sensitivity stage: {stage_total} backtests registered.")
+print(
+    f"This execution: {n_done - n_reused - n_failed} computed, {n_reused} reused, "
+    f"{n_failed} failed, over {n_done} of {n_total} declared levels "
+    f"attempted in {elapsed:.0f}s."
+)
+for reason, count in failures.most_common():
+    print(f"  {count:>3} x {reason[:150]}")
+
+# %% [markdown]
+# Section 3 reads the registry rather than the loop above, so a sweep that wrote nothing
+# and one that wrote everything look identical from there: the curve would be drawn from
+# whatever an earlier run left behind. Counting the failures is not enough on its own,
+# so the count stops the notebook.
+#
+# Any failure stops it, not only a total one. Section 3 tells the reader that every level
+# is printed and that the top of the grid is what decides whether the curve reaches zero
+# inside it, so a single missing level can be the one the section is about. A grid with a
+# hole in it is not a smaller grid.
+
+# %%
+if n_failed:
+    raise RuntimeError(
+        f"{n_failed} of {n_total} cost levels failed, so the grid section 3 renders is "
+        "incomplete. Its prose tells the reader every level is shown and that the top of "
+        "the grid decides whether the curve reaches zero inside it, and a missing level "
+        "may be exactly that one - so a partial sweep is not a partial result here."
+    )
 
 # %% [markdown]
 # ## 3. Cost Sensitivity Analysis
 #
-# This section is **read-only** — queries the registry for cost-sensitivity
-# results and computes breakeven levels.
+# This section is **read-only**: it reads the cost-sensitivity rows back out of the
+# registry.
 #
-# The current curve declines monotonically from Sharpe 2.684 at 0 bps to
-# 2.559 at 30 bps and 2.476 at 50 bps. The registered grid therefore does not
-# reach breakeven, while still making the cost sensitivity visible.
+# What to look for in the curve is its slope, not its height. The height is the
+# Sharpe already reported by the earlier notebooks and inherits their selection. The
+# slope is new information, and it says how much of that Sharpe was a claim about
+# execution rather than about the signal. A curve that reaches zero inside the grid
+# names the cost level at which the strategy stops being worth trading; one that does
+# not reach zero says only that the level is somewhere beyond the range tested, which
+# is a weaker statement than it looks.
 
 # %%
 from case_studies.utils.backtest_explorer import BacktestExplorer
 
 explorer = BacktestExplorer(CASE_STUDY_ID)
 
+# %% [markdown]
+# The read is scoped to the prediction the sweep above carried. The cost-sensitivity
+# table accumulates across runs and labels, and the selection feeding this notebook
+# moves whenever an upstream stage is re-run, so an unscoped read pools the current
+# curve with every curve that preceded it and draws them as one series per allocator.
+
 # %%
-cost_df = explorer.cost_sensitivity()
+carriers = top_combos["prediction_hash"].unique().to_list() if not top_combos.is_empty() else []
+frames = [explorer.cost_sensitivity(prediction_hash=h) for h in carriers]
+frames = [frame for frame in frames if not frame.is_empty()]
+cost_df = pl.concat(frames) if frames else pl.DataFrame()
+
+# %% [markdown]
+# The figure below shows the slope; this is the curve it is drawn from. A reader
+# comparing a decay rate against their own estimate of what they would pay needs the
+# levels themselves, and reading them off a line is not the same as having them. Every
+# level is printed rather than polars' default ten, so the top of the grid - the level
+# that decides whether the curve reaches zero inside it - is never the row that is
+# elided.
+
+# %% tags=["results"]
+if cost_df.is_empty():
+    print("No cost sensitivity data in registry")
+else:
+    with pl.Config(tbl_rows=cost_df.height):
+        print(cost_df.sort("allocator", "cost_bps"))
+
+# %%
+import matplotlib.pyplot as plt
 
 if not cost_df.is_empty():
-    import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(10, 4))
 
     for alloc in cost_df["allocator"].unique().sort().to_list():
         subset = cost_df.filter(pl.col("allocator") == alloc).sort("cost_bps")
         ax.plot(subset["cost_bps"].to_list(), subset["sharpe"].to_list(), marker="o", label=alloc)
 
-    ax.axhline(0, color="gray", linestyle="--", alpha=0.5)
-    ax.axhline(0.5, color="gray", linestyle=":", alpha=0.5)
-    ax.set_xlabel("Total Cost (bps per leg)")
-    ax.set_ylabel("Net Sharpe Ratio")
-    ax.set_title("Sharpe Decay Under Transaction Costs")
-    ax.legend()
+    ax.axhline(0, color=COLORS["recede"], linestyle="--", alpha=0.7)
+    # The declared level, so the reader can see which part of the curve the rest of
+    # the case study was run on and which part is the counterfactual.
+    declared_bps = bt_config.commission_bps + bt_config.slippage_bps
+    ax.axvline(declared_bps, color=COLORS["amber"], linestyle=":", alpha=0.8)
+    ax.annotate(
+        "declared",
+        xy=(declared_bps, ax.get_ylim()[0]),
+        xytext=(4, 6),
+        textcoords="offset points",
+        fontsize=8,
+        color=COLORS["amber"],
+    )
+    ax.set_xlabel("Commission plus slippage charged per leg (bps)")
+    ax.set_ylabel("Sharpe, net of the charge")
+    add_message_title(
+        ax,
+        "No level in the 50 bps grid turns the edge negative",
+        subtitle="Validation months; the strategy is unchanged, only what it pays to trade",
+    )
+    ax.legend(frameon=False)
     fig.tight_layout()
-    fig.show()
-else:
-    print("No cost sensitivity data in registry")
+    show_with_alt(
+        fig,
+        "Line chart of validation Sharpe against the total commission and slippage "
+        "charged per leg, from zero to fifty basis points. The line starts just above "
+        "3.1 and falls almost straight to about 2.8 at the right edge, staying far "
+        "above the dashed zero reference across the whole grid. A dotted vertical "
+        "marker near the left shows the cost level the rest of the case study was "
+        "charged at, with most of the swept range lying to its right.",
+    )
 
 # %% [markdown]
-# ## Key Takeaways
+# ## What this notebook establishes, and what it does not
 #
-# 1. The established funnel selects the best result across the equal-weight
-#    baseline and allocation stages. Here that is the baseline, not the best
-#    allocation row.
-# 2. All 11 cost variants complete without failure, and Sharpe remains above
-#    2.47 through the maximum registered cost of 50 bps.
-# 3. The decline from 2.684 at 0 bps to 2.476 at 50 bps is gradual and
-#    monotonic; the grid does not identify a breakeven point.
-# 4. These are validation results. The cost sweep does not access or select on
-#    the sealed holdout.
+# The curve is a statement about one strategy, not about the surface. It re-runs the
+# single highest-Sharpe validation run at each cost level, so it answers how *that*
+# result would have moved had execution been priced differently. It does not say
+# whether a different strategy would have been chosen under a different cost
+# assumption, which is a larger question: the selection that produced this run was
+# itself made on results charged at the declared level.
 #
-# **Next:** The risk management notebook (Ch19) tests whether risk overlays
-# add value on top of the strong validation signal.
+# The height of the curve carries the selection of every stage before it and should
+# not be read as an estimate of what the strategy would earn. The slope is the part
+# that is this notebook's own, and it is what the strategy analysis notebook uses.
+#
+# These are validation months throughout. Nothing here reads or selects on the holdout
+# period, which stays untouched until the strategy analysis notebook.
+#
+# **Next:** the risk management notebook asks whether a stop-loss or a time exit can
+# be evaluated on this backtest path at all, before asking what one would cost.

@@ -35,6 +35,7 @@ import hashlib
 import importlib.metadata
 import json
 import platform
+import re
 import time
 import warnings
 from dataclasses import dataclass
@@ -150,12 +151,27 @@ def embargo_from_buffer(
                 f"omitting observed_step."
             )
         span = pd.Timedelta(normalized)
+        # The floor of one period is there so a buffer shorter than a bar still
+        # embargoes the bar it resolves inside. A zero-length buffer is not that
+        # case: it declares that the label resolves on its own row's timestamp, so
+        # there is nothing to embargo, and the floor would invent a gap the case
+        # study did not ask for. The `periods_per_year` branch below answers zero
+        # for the same declaration, and the two must not disagree.
+        if span == pd.Timedelta(0):
+            return 0
         return max(1, math.ceil(span / step))
 
     match = re.match(r"(\d+)(D|H|h|M|T|min)", label_buffer.strip())
     if not match:
         raise ValueError(f"Cannot parse label_buffer: {label_buffer}")
     value, unit = int(match.group(1)), match.group(2)
+    # The per-unit conversions below divide by the value and are built eagerly, so
+    # every unit raised on a zero, including the D branch that would have returned it
+    # unchanged had it been reached. A case study whose outcome resolves on the row's
+    # own timestamp declares exactly that, for example `labels.horizons` in
+    # us_firm_characteristics.
+    if value == 0:
+        return 0
     return {
         "D": value,
         "H": max(1, 24 // value),
@@ -1180,6 +1196,61 @@ def _resolve_nuisance_params(config: dict[str, Any], overrides: dict[str, Any], 
     return estimator.get_params(deep=True)
 
 
+# A calendar month is 28 to 31 days long, so the modal gap of a monthly panel lands in this
+# range whichever months the sample happens to span, and no daily, hourly or minute panel
+# can. It is the whole test: a declaration of `1M` can only be counted in observations on a
+# panel whose observations are months.
+_MONTHLY_CADENCE = (pd.Timedelta(days=27), pd.Timedelta(days=32))
+_MONTH_DECLARATION = re.compile(r"^(\d+)\s*M$")
+
+
+def _declared_steps(declaration: str, cadence: pd.Timedelta, *, field: str) -> tuple[int, str]:
+    """Observations a declared duration spans, and how to record it.
+
+    Buffers and horizons are hand-authored in ``setup.yaml`` as duration strings, and every
+    use of them below is a count of the panel's own observations. Most units are fixed spans
+    and divide by the measured cadence. A month is not: `pd.Timedelta` refuses ``1M``
+    outright, because January and February are different lengths and there is no answer that
+    is right for both.
+
+    On a monthly panel there is no ambiguity to resolve - one month is one observation - so
+    the count is the declared number, once the panel has been shown to be recorded in months.
+    On any other panel the declaration cannot be honoured at all and this raises rather than
+    substituting a nominal month, which would be wrong by however far that panel's month
+    differs from the nominal one and would not show in the result.
+
+    **A zero-length declaration answers zero**, and is not floored to one. It says the span
+    is closed on the row's own timestamp - ``us_firm_characteristics`` declares
+    ``labels.horizons: 0D`` because the return is already realised there - and a floor turns
+    that statement into a one-observation overlap the case study never declared. The floor
+    belongs on a span that is nonzero but shorter than a bar, which does reach into the bar
+    it resolves inside. :func:`embargo_from_buffer` draws the same line for the same reason,
+    and the two must not disagree about one declaration.
+
+    Returns the count and the string the resolved spec records. That string is
+    ``str(pd.Timedelta(...))`` wherever the duration is fixed, which is what the spec has
+    always carried, so a case study whose buffer is expressible as a Timedelta keeps the
+    identity it already published.
+    """
+    # pandas deprecated the uppercase hour alias; the buffers still use it.
+    text = re.sub(r"(?<=\d)H\b", "h", declaration.strip())
+    month = _MONTH_DECLARATION.match(text)
+    if month is None:
+        span = pd.Timedelta(text)
+        if span == pd.Timedelta(0):
+            return 0, str(span)
+        return max(1, int(np.ceil(span / cadence))), str(span)
+    low, high = _MONTHLY_CADENCE
+    if not low <= cadence <= high:
+        raise ValueError(
+            f"{field} is declared as {declaration!r}, a calendar month, but this panel is "
+            f"recorded at {cadence}. A month has no fixed length, so it can be counted in "
+            "observations only on a panel whose observations are months. Declare the span in "
+            "days on a panel recorded in days."
+        )
+    return int(month.group(1)), text
+
+
 def resolve_causal_request(study: Study, request: dict[str, Any]):
     import polars as pl
     import yaml
@@ -1260,26 +1331,10 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     # second and its docstring says it may be shorter than the first. They agree in most case
     # studies here, but by configuration rather than by construction, so deriving the bandwidth
     # from the buffer is right by luck wherever it is right at all.
-    buffer_delta = pd.Timedelta(str(mds.label_buffer).replace("H", "h"))
-    outcome_delta = pd.Timedelta(
-        str(
-            resolve_label_horizon(study.case_study, label_ref.name, setup) or mds.label_buffer
-        ).replace("H", "h")
+    buffer_declaration = str(mds.label_buffer)
+    horizon_declaration = str(
+        resolve_label_horizon(study.case_study, label_ref.name, setup) or mds.label_buffer
     )
-    # The seal and the placebo block below both take the buffer, on the grounds that it is the
-    # longer of the two. Nothing enforces that: both values are hand-authored in setup.yaml and
-    # `resolve_label_horizon` promises only that the horizon *may* be shorter. A case study
-    # declaring a horizon longer than its buffer would get a permutation block shorter than the
-    # dependence it exists to hold fixed, and a seal that leaves outcomes reaching into the
-    # holdout, both silently.
-    if outcome_delta > buffer_delta:
-        raise ValueError(
-            f"outcome horizon {outcome_delta} exceeds the CV buffer {buffer_delta} for "
-            f"{label_ref.name!r}. The buffer bounds the pre-holdout window and sizes the "
-            "placebo block, so it cannot be shorter than the outcome it is holding clear. "
-            "Raise labels.buffer (or labels.variant_buffers) in setup.yaml, or correct "
-            "labels.horizons."
-        )
     date_dtype = mds.dataset.schema[mds.date_col]
     # The cutoff steps back a count of observations, not a calendar duration. The horizons
     # these buffers describe are counted in the panel's own observations, so subtracting the
@@ -1301,8 +1356,42 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     if pre_holdout.is_empty():
         raise ValueError("DML request resolved an empty pre-holdout analysis frame")
     cadence = _observed_cadence(pre_holdout, mds.date_col)
-    buffer_steps = max(1, int(np.ceil(buffer_delta / cadence)))
-    outcome_horizon_steps = max(1, int(np.ceil(outcome_delta / cadence)))
+    buffer_steps, _ = _declared_steps(buffer_declaration, cadence, field="labels.buffer")
+    if buffer_steps < 1:
+        # The seal below steps back `buffer_steps` observations within each entity, so a
+        # zero buffer has no row to step back to and the per-entity cutoff silently
+        # becomes null - which reaches the caller as "empty pre-holdout analysis frame",
+        # naming neither the declaration nor the reason. No case study declares one; a
+        # panel whose labels really do need no gap should say so here rather than be
+        # discovered three failures downstream.
+        raise ValueError(
+            f"labels.buffer is declared as {buffer_declaration!r}, which spans no "
+            "observations, so there is no gap to seal a fold's training rows against its "
+            "validation labels. The DML resolver requires a buffer of at least one "
+            "observation."
+        )
+    outcome_horizon_steps, outcome_horizon_label = _declared_steps(
+        horizon_declaration, cadence, field="labels.horizons"
+    )
+    # The seal and the placebo block below both take the buffer, on the grounds that it is the
+    # longer of the two. Nothing enforces that: both values are hand-authored in setup.yaml and
+    # `resolve_label_horizon` promises only that the horizon *may* be shorter. A case study
+    # declaring a horizon longer than its buffer would get a permutation block shorter than the
+    # dependence it exists to hold fixed, and a seal that leaves outcomes reaching into the
+    # holdout, both silently.
+    #
+    # Compared as observation counts rather than as durations, because that is the comparison
+    # the two quantities are used for below and it is the only one a calendar month can take
+    # part in: `1M` is not a fixed span, so `pd.Timedelta` refuses it outright.
+    if outcome_horizon_steps > buffer_steps:
+        raise ValueError(
+            f"outcome horizon {horizon_declaration} spans {outcome_horizon_steps} observations "
+            f"and the CV buffer {buffer_declaration} spans {buffer_steps} for "
+            f"{label_ref.name!r}. The buffer bounds the pre-holdout window and sizes the "
+            "placebo block, so it cannot be shorter than the outcome it is holding clear. "
+            "Raise labels.buffer (or labels.variant_buffers) in setup.yaml, or correct "
+            "labels.horizons."
+        )
     # The step-back is counted within each entity, not across the panel's distinct
     # timestamps. A label advances by that entity's own observations, so on a panel where
     # one product is missing some of the final sessions, a global count reaches back fewer
@@ -1367,7 +1456,15 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     try:
         embargo = embargo_from_buffer(mds.label_buffer, observed_step=cadence)
     except ValueError:
-        embargo = embargo_from_buffer(mds.label_buffer)
+        # `periods_per_year` is what the calendar branch needs to answer a month buffer in
+        # observations. Omitting it made `1M` resolve to twenty-one periods on a monthly
+        # panel - the trading days in a month, on a panel whose observations are months -
+        # which is an embargo twenty-one times the declaration and longer than most of the
+        # samples it would be applied to.
+        embargo = embargo_from_buffer(
+            mds.label_buffer,
+            periods_per_year=int(setup["evaluation"]["periods_per_year"]),
+        )
     # Two separate scales create the serial dependence the placebo has to preserve, and the
     # block spans the longer of them: the overlapping labels span the label horizon, and the
     # treatment's own construction window spans itself. Sizing by the horizon alone permutes
@@ -1420,7 +1517,7 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
             "treatment": treatment,
             "confounders": list(confounders),
             "treatment_observed_at": "decision_timestamp",
-            "outcome_horizon": str(outcome_delta),
+            "outcome_horizon": outcome_horizon_label,
             "holdout_endpoint_cutoff": endpoint_cutoff.isoformat(),
         },
         "cv": {
@@ -1522,6 +1619,7 @@ def run_resolved_causal_request(
 
     from case_studies.research.causal import CausalResult
     from case_studies.utils.registry.registration import (
+        check_causal_supersedes,
         declare_causal_supersedes,
     )
     from case_studies.utils.registry.registration import register_causal_run as register_record
@@ -1537,8 +1635,22 @@ def run_resolved_causal_request(
     except KeyError:
         cached = None
     if cached is not None:
-        if training_hash_from_spec(cached.spec) != causal_hash or not cached.complete:
-            raise ValueError(f"causal cache is incomplete or conflicts with {causal_hash}")
+        if training_hash_from_spec(cached.spec) != causal_hash:
+            raise ValueError(f"causal cache conflicts with {causal_hash}")
+        if not cached.complete:
+            # Serving it would make the first incomplete fit the last one: every later
+            # run reads this row and nothing recomputes what went missing. Saying which
+            # part is missing is what separates "delete this row and refit" from "the
+            # registry is corrupt", and the usual cause is a refutation whose placebo
+            # refits mostly failed.
+            raise ValueError(
+                f"causal row {causal_hash} is registered but incomplete - "
+                f"n_obs={cached.metrics.get('n_obs')}, "
+                f"effect={cached.metrics.get('dml_effect')}, "
+                f"refutation_p={cached.metrics.get('refutation_p')}, "
+                f"successful_placebos={cached.metrics.get('refutation_n_successful')}. "
+                "Delete the row and re-run; serving it would leave the gap permanent."
+            )
         if supersedes is not None:
             # The declaration has to land even when the fit does not re-run, because
             # that is the shape of the repair. A registry already holding two
@@ -1558,6 +1670,19 @@ def run_resolved_causal_request(
             )
         return cached
 
+    # Before the fit, not after it. The registry can already hold a current identity for
+    # this label that this run does not retire - the ordinary state whenever this module
+    # has been edited, since the spec carries a hash of the whole file - and the write
+    # refuses that. Asking now costs one read and names the hash to declare; asking at
+    # the write costs the fit and every placebo refit first. See #953.
+    check_causal_supersedes(
+        study.case_study,
+        causal_hash,
+        label=context.outcome_col,
+        tier=str(spec["execution_tier"]),
+        supersedes_hash=supersedes,
+        case_dir=study.storage_root(spec["execution_tier"]),
+    )
     nuisance_y = HistGradientBoostingRegressor(**context.nuisance_params)
     nuisance_t = HistGradientBoostingRegressor(**context.nuisance_params)
     thread_limit = int(
@@ -1645,6 +1770,7 @@ def register_causal_run(
     max_samples: int | None = None,
     max_symbols: int | None = None,
     development_end: str | None = None,
+    config_name: str = "dml",
     notebook: str = "causal_dml",
     case_dir=None,
     started_at: str | None = None,
@@ -1714,9 +1840,14 @@ def register_causal_run(
     # to this wrapper, so the row describes a path the notebook no longer takes and its
     # next run registers an invisible one. Five notebooks call this; do not delete it when
     # the first two convert.
+
+    # The preset name was a literal here while `case_studies/config/dml/` held one file.
+    # A case study that declares a different preset would otherwise record a spec naming a
+    # configuration it did not run, and no consumer could select its run by name. The default
+    # keeps the identity of every case study still on the shared preset unchanged.
     spec = build_training_spec(
         "causal_dml",
-        "dml",
+        config_name,
         label,
         n_folds=n_folds,
         causal_params=causal_params,

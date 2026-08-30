@@ -159,7 +159,7 @@ def _runtime_identity() -> dict[str, str]:
     }
 
 
-def _runtime_provenance(study: Study) -> dict[str, Any]:
+def _runtime_provenance(study: Study, *, notebook: str | None = None) -> dict[str, Any]:
     try:
         commit = subprocess.check_output(
             ["git", "-C", str(study.release_root), "rev-parse", "HEAD"],
@@ -169,13 +169,22 @@ def _runtime_provenance(study: Study) -> dict[str, Any]:
         ).strip()
     except (OSError, subprocess.SubprocessError):
         commit = "unknown"
-    return {
+    record: dict[str, Any] = {
         "entry_point": "case_studies.utils.linear",
         "packages": _runtime_identity(),
         "platform": platform.platform(),
         "python": platform.python_version(),
         "source_commit": commit,
     }
+    # `notebook_path` says which notebook produced a row; `entry_point` says which module ran.
+    # Different questions, and the module is legitimately shared - several notebooks call this one,
+    # so `entry_point` cannot name a notebook and should not try. Both sit in
+    # `registry/specs.py:_V2_PROVENANCE_FIELDS`, so neither reaches the training identity. Absent
+    # when the caller names no notebook: a holdout reconstruction is not a notebook run, and a
+    # wrong notebook name would be worse than none.
+    if notebook:
+        record["notebook_path"] = notebook
+    return record
 
 
 def _normalize_folds(splits: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
@@ -556,7 +565,7 @@ def _load_batch_base(
         "splits": splits,
         "cv_record": cv_record,
         "expected": expected,
-        "runtime_provenance": _runtime_provenance(study),
+        "runtime_provenance": _runtime_provenance(study, notebook=request.get("notebook")),
     }
 
 
