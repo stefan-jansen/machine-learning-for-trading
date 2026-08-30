@@ -7,7 +7,7 @@ from .causal import (
     causal_supersedes,
     supersedes_for,
 )
-from .comparison import CandidateSet
+from .comparison import CandidateSet, candidate_set_supersedes
 from .configs import (
     declared_labels,
     load_model_configs,
@@ -125,6 +125,7 @@ __all__ = [
     "planned_model_plan",
     "prediction_rows_at",
     "primary_label",
+    "candidate_set_supersedes",
     "population_supersedes",
     "research_name",
     "resolved_model_plan",

@@ -541,6 +541,21 @@ def build_holdout_cv(
     buffer, buffer_label = widest_label_buffer(case_study, setup)
     holdout_open = _on_panel_clock(pd.Timestamp(holdout_start), panel_zone)
     holdout_close = _on_panel_clock(pd.Timestamp(holdout_end), panel_zone)
+    # `evaluation.holdout_end` is a DATE, and a date on an intraday panel means the whole of that
+    # day. Parsed, it is that date at midnight, and every window filter downstream is
+    # `timestamp <= val_end`, so the final session sorts after the boundary and is dropped from
+    # the interval the holdout is evaluated over. `utils/modeling.py::_inclusive_end_of` says the
+    # same thing with a nanosecond sentinel; this says it with an observation the panel actually
+    # holds, which is what `train_end` already is and what makes the fold readable as a pair of
+    # settlements rather than one settlement and a fencepost.
+    #
+    # A daily panel is untouched by construction: its last observation of that date IS midnight,
+    # so the widening condition is false and the rendering does not move. That matters because
+    # this value is inside the hashed fold, and `fx_pairs` and `sp500_equity_option_analytics`
+    # each hold a research lock derived from it. ml4t/agent-workspace#986.
+    within_close = [value for value in observations if value.date() <= holdout_close.date()]
+    if within_close and within_close[-1] > holdout_close:
+        holdout_close = within_close[-1]
 
     # Counted in OBSERVATIONS and stepped back along the panel's own dates, never subtracted as
     # calendar time. `utils/cv_splits.py` already carries this bug's epitaph: "21D" as a
@@ -635,22 +650,23 @@ def build_holdout_training_spec(
     timeline: Sequence[Any],
     case_study: str | None = None,
 ) -> dict[str, Any]:
-    """The spec that refits one selected configuration on the holdout fold.
+    """Re-key one validation training specification onto the derived holdout fold.
 
-    A holdout prediction is not the validation model scored on a later window. It is the
-    same declared configuration fitted again on everything available before that window,
-    and the difference is the whole point of the exercise: a model whose parameters were
-    chosen while looking at the validation folds has already seen what it is being judged
-    on. So the CV interval is replaced by the derived holdout fold and every fold-derived
-    field is recomputed against it - the eligibility manifest, and any parameter the family
-    resolves from a fold's own training rows.
+    Three steps have to happen together and in this order, and each of them already refuses
+    on its own terms: derive the holdout interval from the case study's declared window,
+    bound its training start at whatever the family's features actually reach, and recompute
+    the fields the resolver derived per validation fold. Doing two of the three produces a
+    specification that looks complete and fits the wrong estimator - a manifest describing
+    the validation folds, or a training window half of which has no features - so they are
+    one call rather than three a caller assembles.
 
-    ``validation_spec`` is not modified. What comes back is a new spec with a new training
-    identity, which is what makes the retrain visible in the registry rather than implied.
+    This takes a ``study`` and a specification, not a lock. A holdout fit is a computation,
+    and the question of how many times a case study may run one is a separate question about
+    its lifecycle: :func:`evaluate_holdout` is the answer for a case study that wants the
+    holdout spent once and calls this to build what it locks, and a case study whose holdout
+    notebooks re-run like any other stage calls this directly.
 
-    This is the derivation :func:`evaluate_holdout` performs before it locks. It is public
-    because the lock is no longer part of the sequence: the holdout is re-runnable, so a
-    case study that needs the retrain does not need the lifecycle around it.
+    Returns a new specification; ``validation_spec`` is not modified.
     """
     holdout_spec = deepcopy(dict(validation_spec))
     holdout_spec["computation"]["cv"] = build_holdout_cv(
