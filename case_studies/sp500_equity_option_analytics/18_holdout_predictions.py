@@ -86,7 +86,6 @@ from case_studies.utils.backtest_presets import strategy_view
 from case_studies.utils.notebook_contracts import prediction_members_in_force
 from case_studies.utils.registry import resolve_best_backtest_runs
 from case_studies.utils.registry.specs import training_hash_from_spec
-from utils.paths import get_case_study_dir
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "sp500_equity_option_analytics"
@@ -102,8 +101,6 @@ LABEL = ""
 # parameter wins; otherwise the case study's own declaration does.
 
 # %%
-CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
-REGISTRY_DB = CASE_DIR / "run_log" / "registry.db"
 bt_config = get_backtest_config(CASE_STUDY_ID)
 HOLDOUT_LABEL = LABEL or bt_config.primary_label
 print(f"Case study: {CASE_STUDY_ID}; label: {HOLDOUT_LABEL}")
@@ -121,6 +118,15 @@ study = open_study(
     workspace=WORKSPACE or None,
     entry_point="18_holdout_predictions",
 )
+# Both derived from the opened study rather than from `get_case_study_dir`. `open_study`
+# activates the tier and, given a WORKSPACE, roots this run somewhere other than the case
+# directory - so a path resolved before the call names a different registry and a different set
+# of artifacts than every read and write after it. One of those was the candidate-set presence
+# check; there were four more registry queries and the artifact scan behind it. Binding them
+# here means the notebook cannot hold two answers to "which registry is this".
+CASE_DIR = study.root
+REGISTRY_DB = CASE_DIR / "run_log" / "registry.db"
+print(f"Registry: {REGISTRY_DB}")
 # %% [markdown]
 # ## 1. Read the selection out of the frozen candidate set
 #
@@ -151,12 +157,8 @@ CANDIDATE_SET_NAME = f"{CASE_STUDY_ID}:holdout-candidates"
 # a refit that left two generations live and needs a person to say which supersedes which,
 # silently down the live-ranking path. So the fallback is chosen on absence, and every way a
 # recorded set can be wrong propagates from the unguarded call below.
-# Asked of the registry the resolution will read, which is the study's own root. On a run given
-# a WORKSPACE that is not the case directory `REGISTRY_DB` was resolved from, the two are
-# different databases, and checking one to decide whether to query the other is how a present
-# set gets reported absent.
 try:
-    with sqlite3.connect(study.root / "run_log" / "registry.db") as _db:
+    with sqlite3.connect(REGISTRY_DB) as _db:
         _recorded_sets = _db.execute(
             "SELECT COUNT(*) FROM candidate_sets WHERE name = ?", (CANDIDATE_SET_NAME,)
         ).fetchone()[0]
