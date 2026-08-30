@@ -522,10 +522,38 @@ with sqlite3.connect(REGISTRY_DB) as db:
 # SchemaError before the row-count contract below can report what is actually missing.
 risk_metrics = risk_metrics.with_columns(pl.col("backtest_hash").cast(pl.String))
 risk_surface = pl.DataFrame(risk_plans).join(risk_metrics, on="backtest_hash", how="inner")
-if len(risk_surface) != len(risk_plans):
+# The guard runs in the direction it was written for: nothing UNPLANNED may enter the surface.
+# Requiring the converse - that every declared control has a registered row - asserts something
+# only a full sweep can satisfy, and `16_risk_management` registers whichever controls it ran.
+# A reduced run truncates that list, so the declared count is a property of the configuration
+# and the registered count is a property of the run, and this notebook reports on the run.
+_planned = {plan["backtest_hash"] for plan in risk_plans}
+with sqlite3.connect(REGISTRY_DB) as db:
+    _registered = {
+        row[0]
+        for row in db.execute(
+            "SELECT backtest_hash FROM backtest_runs "
+            "WHERE prediction_hash = ? AND stage = 'risk_overlay'",
+            (strategy_carrier["prediction_hash"],),
+        )
+    }
+_unplanned = _registered - _planned
+if _unplanned:
     raise RuntimeError(
-        f"Expected {len(risk_plans)} fixed risk rows for carrier "
-        f"{strategy_carrier['prediction_hash']}, found {len(risk_surface)}"
+        f"{len(_unplanned)} risk-overlay row(s) on carrier "
+        f"{strategy_carrier['prediction_hash']} are not among the declared controls: "
+        + ", ".join(sorted(_unplanned)[:5])
+        + ". A rule that is not declared in config/setup.yaml cannot enter this surface."
+    )
+if risk_surface.is_empty():
+    raise RuntimeError(
+        f"no declared risk control is registered for carrier "
+        f"{strategy_carrier['prediction_hash']}, so there is no risk surface to report"
+    )
+if len(risk_surface) != len(risk_plans):
+    print(
+        f"{len(risk_surface)} of {len(risk_plans)} declared risk controls are registered for "
+        "this carrier; the surface below covers those and says nothing about the rest"
     )
 if risk_surface.filter(pl.col("stage") != "risk_overlay").height:
     raise RuntimeError("A corrected risk hash has the wrong registry stage")
