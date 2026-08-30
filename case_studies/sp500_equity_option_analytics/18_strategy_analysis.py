@@ -803,6 +803,15 @@ with sqlite3.connect(REGISTRY_DB) as db:
         "SELECT lock_hash, holdout_training_hash, holdout_prediction_hash, holdout_backtest_hash "
         "FROM holdout_evaluations"
     ).fetchall()
+    # Holdout PREDICTIONS, asked for on their own. `holdout_rows` above joins through
+    # `backtest_runs` and `backtest_metrics`, so a prediction registered against the holdout
+    # window with no backtest yet does not appear in it - and that prediction is what spends
+    # the window. Deciding "has a holdout been taken" from the join therefore answers "no"
+    # for a case study that has already spent one and merely has not backtested it.
+    holdout_prediction_rows = db.execute(
+        "SELECT prediction_hash, training_hash, created_at FROM prediction_sets "
+        "WHERE split = 'holdout' ORDER BY created_at"
+    ).fetchall()
     # The strategy the funnel actually ends on, compared whole rather than on three fields.
     CARRIER_BACKTEST_SPEC = json.loads(
         db.execute(
@@ -826,12 +835,30 @@ with sqlite3.connect(REGISTRY_DB) as db:
 # leave it unable to say so.
 if len(lock_rows) > 1:
     raise RuntimeError(f"{len(lock_rows)} research locks; a holdout resolves to exactly one")
-HOLDOUT_UNSEALED = bool(holdout_rows) and not lock_rows
+# Spent is decided by the prediction, not by the backtest. The backtest is what makes the
+# result readable; the prediction is what consumed the window.
+HOLDOUT_SPENT = bool(holdout_prediction_rows)
+HOLDOUT_UNSEALED = HOLDOUT_SPENT and not lock_rows
+# A lock with no holdout prediction against it is the opposite case and a legitimate one:
+# `fx_pairs` holds exactly that, a window sealed and not yet spent. It is not an error and
+# not a result.
+LOCK_PENDING = bool(lock_rows) and not HOLDOUT_SPENT
 if HOLDOUT_UNSEALED:
     print(
-        f"{len(holdout_rows)} holdout backtest(s) and no research lock naming them. The "
-        "window was spent, and nothing records which selection it was spent on, so no "
-        "out-of-sample claim can be attached to the carrier below."
+        f"{len(holdout_prediction_rows)} holdout prediction set(s) and no research lock "
+        "naming them. The window was spent, and nothing records which selection it was "
+        "spent on, so no out-of-sample claim can be attached to the carrier below."
+        + (
+            ""
+            if holdout_rows
+            else " None of them carries a backtest yet, so there is no result to read either."
+        )
+    )
+if LOCK_PENDING:
+    print(
+        f"Research lock {lock_rows[0][0]} is {lock_rows[0][2]} and no holdout prediction has "
+        "been registered against it. The window is sealed and unspent: there is no "
+        "out-of-sample result to report, and that is the intended state rather than a gap."
     )
 
 lock = json.loads(lock_rows[0][1]) if lock_rows else {}
@@ -860,12 +887,17 @@ if LOCK_HASH is not None and not LOCK_FINALIZED:
 SEALED_TRAINING_HASH = lock.get("holdout_training_hash")
 sealed_spec = (lock.get("holdout_training_spec") or {}).get("computation") or {}
 published_spec = published_full_spec.get("computation") or {}
-HOLDOUT_ASSESSABLE = bool(lock_rows and sealed_spec and published_spec)
+# A pending lock is excluded here deliberately: there is a lock and a spec, so every field
+# below could be compared, but there is no holdout result to compare them for. Assessing a
+# window that has not been spent would produce a verdict about nothing.
+HOLDOUT_ASSESSABLE = bool(lock_rows and sealed_spec and published_spec) and not LOCK_PENDING
 if not HOLDOUT_ASSESSABLE:
     print(
         "Holdout status not assessable from this registry: "
         + (
-            "no research lock, and holdout rows that none of them seals"
+            "the lock is sealed and unspent, so there is no holdout result yet"
+            if LOCK_PENDING
+            else "no research lock, and holdout rows that none of them seals"
             if HOLDOUT_UNSEALED
             else "it holds no research lock, so no holdout has been taken here"
             if not lock_rows
@@ -944,10 +976,20 @@ if LOCK_FINALIZED:
     _sealed = [row for row in holdout_rows if row[0] == _pinned_backtest]
 else:
     _sealed = [row for row in holdout_rows if row[2] == SEALED_TRAINING_HASH]
-if HOLDOUT_ASSESSABLE and not _sealed:
+# Refuse only where the registry contradicts itself. A finalized lineage pins a backtest
+# hash, so that backtest not being there is damage. An unfinalized lock naming a training
+# hash whose holdout has been predicted but not yet backtested is not damage - it is a run
+# caught between two writes, and reporting it is more use than raising on it.
+if LOCK_FINALIZED and not _sealed:
     raise RuntimeError(
-        f"the research lock names holdout training {SEALED_TRAINING_HASH}, and no holdout "
-        "backtest in the registry runs on it: the sealed evaluation cannot be read back"
+        f"holdout_evaluations pins backtest {FINALIZED[LOCK_HASH][2]} for lock {LOCK_HASH}, "
+        "and the registry does not hold it: the finalized lineage cannot be read back"
+    )
+if HOLDOUT_ASSESSABLE and not _sealed:
+    print(
+        f"The lock names holdout training {SEALED_TRAINING_HASH} and "
+        f"{len(holdout_prediction_rows)} holdout prediction(s) exist, but no holdout backtest "
+        "runs on that fit. The window is spent and its result has not been computed."
     )
 if len(_sealed) > 1:
     raise RuntimeError(f"{len(_sealed)} holdout backtests run on the sealed fit; expected one")
@@ -1280,6 +1322,8 @@ assessment = pl.DataFrame(
             "status": (
                 "UNSEALED"
                 if HOLDOUT_UNSEALED
+                else "PENDING"
+                if LOCK_PENDING
                 else "NOT ASSESSED"
                 if sealed_holdout is None
                 else "PASS"
@@ -1298,9 +1342,15 @@ assessment = pl.DataFrame(
                 else "INCONCLUSIVE"
             ),
             "evidence": (
-                f"{len(holdout_rows)} holdout backtest(s) sealed by no lock"
+                f"{len(holdout_prediction_rows)} holdout prediction(s) sealed by no lock"
                 if HOLDOUT_UNSEALED
-                else "no research lock in this registry; no holdout has been taken"
+                else f"lock {LOCK_HASH} sealed and unspent"
+                if LOCK_PENDING
+                else (
+                    "no research lock in this registry; no holdout has been taken"
+                    if not HOLDOUT_SPENT
+                    else "the window is spent and no backtest computes its result"
+                )
                 if sealed_holdout is None
                 else (
                     f"sealed {sealed_holdout['sharpe']:.3f} ["

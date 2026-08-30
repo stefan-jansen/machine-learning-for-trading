@@ -77,7 +77,7 @@ import polars as pl
 import torch  # cudart preload - required before ml4t.diagnostic imports # noqa: F401
 import yaml
 
-from case_studies.research import Study
+from case_studies.research import CausalResult, Study
 from case_studies.utils.latent_factors import load_fold_extras
 from case_studies.utils.model_analysis import (
     best_model_per_family_fast,
@@ -501,7 +501,12 @@ if _causal_db.exists():
     from case_studies.utils.registry.store import current_causal_identities
 
     with sqlite3.connect(_causal_db) as _coverage_con:
-        _causal_primary_count = len(current_causal_identities(_coverage_con, label=PRIMARY_LABEL))
+        # Exactly one, which is the reader's rule: `CausalResult.one` refuses an ambiguous
+        # label rather than choosing between two current identities. Counting "one or more"
+        # here would mark the family covered on a registry whose evidence Section 7 then
+        # declines to show, which is the same disagreement one step earlier.
+        _causal_current = current_causal_identities(_coverage_con, label=PRIMARY_LABEL)
+        _causal_primary_count = 1 if len(_causal_current) == 1 else 0
 else:
     _causal_primary_count = 0
 causal_families = ["causal_dml"] if _causal_primary_count else []
@@ -1495,6 +1500,32 @@ if _db_path.exists():
                 causal_rows.append(d)
             else:
                 causal_unresolvable.append((d["causal_hash"], _spec_json, _supersedes))
+
+# Membership in `current_causal_identities` is necessary and not sufficient. `CausalResult.one`
+# is what a reader actually calls, and it resolves only when exactly ONE current identity
+# exists for the label - it refuses on an ambiguous registry rather than picking - and the
+# result it hands back carries a `complete` contract of its own. Two current identities would
+# have put two estimates in the table below with nothing distinguishing them, and gate counts
+# computed out of two; an incomplete one would have counted as causal coverage. Neither is
+# something the membership check can see, so the reader's own resolution is run here too.
+CAUSAL_RESOLUTION = ""
+if causal_rows:
+    try:
+        _resolved = CausalResult.one(study, label=PRIMARY_LABEL)
+    except ValueError as _err:
+        CAUSAL_RESOLUTION = str(_err)
+        causal_rows = []
+    else:
+        if not _resolved.metrics.get("refutation_class"):
+            CAUSAL_RESOLUTION = (
+                f"{_resolved.hash} resolves but carries no refutation verdict, so it is not "
+                "complete causal evidence"
+            )
+            causal_rows = []
+        else:
+            causal_rows = [row for row in causal_rows if row["causal_hash"] == _resolved.hash]
+if CAUSAL_RESOLUTION:
+    print(f"No causal evidence is reported: {CAUSAL_RESOLUTION}")
 
 if causal_unresolvable:
     # Why each one is excluded, rather than one explanation applied to all of them.
