@@ -77,7 +77,13 @@ from case_studies.crypto_perps_funding.research_workflow import (
     ALL_LABELS,
     freeze_official_model_population,
 )
-from case_studies.research import CandidateSet, Result, open_study, run_backtests
+from case_studies.research import (
+    CandidateSet,
+    Result,
+    open_study,
+    run_backtests,
+    superseded_members,
+)
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
     get_rebalance_step,
@@ -99,6 +105,13 @@ POPULATION_SUFFIX = "v1"
 # parameter, and this one publishes the case-wide list they feed. Left empty on a first run and
 # on any re-run whose membership is unchanged; the refusal names the hash to put here.
 SUPERSEDES_POPULATION: str = ""
+# The baseline sweep publishes one population per (label, entry rule), so a run that changes
+# them cannot name the generation it retires with a single value the way the model population
+# can. Keyed by population name; the refusal prints the name and the hash to put here.
+SUPERSEDES_BACKTESTS: dict[str, str] = {}
+# The candidate set each label hands downstream is a third generation-bearing name, one per
+# label. Keyed the same way; the refusal prints the name and the hash.
+SUPERSEDES_CANDIDATES: dict[str, str] = {}
 
 # %%
 study = open_study(
@@ -140,6 +153,19 @@ if EXECUTION_TIER == "canonical" and not WORKSPACE:
 catalog = study.predictions.table().filter(
     (pl.col("split") == "validation") & pl.col("label").is_in(labels)
 )
+# `identity_status` is the schema version a row was written under, not the generation its
+# producer still publishes. A model notebook that refits leaves the generation it replaced
+# in the registry, complete and current under a column that has not moved, so the filter
+# above returns both. Backtesting both does not fail: it sweeps twice, ranks a retired
+# identity against a live one, and carries whichever wins into every stage downstream.
+retired = superseded_members(study, member_kind="prediction")
+if retired:
+    offered = catalog.height
+    catalog = catalog.filter(~pl.col("prediction_hash").is_in(list(retired)))
+    print(f"Retired by a later generation, left out of the sweep: {offered - catalog.height:,}")
+if catalog.is_empty():
+    raise RuntimeError("every registered validation prediction belongs to a retired generation")
+
 if catalog.filter(~pl.col("complete")).height:
     raise RuntimeError("the validation prediction catalog contains incomplete members")
 if catalog.get_column("identity_status").n_unique() != 1:
@@ -491,13 +517,15 @@ for label in labels:
     label_rows = catalog.filter(pl.col("label") == label)
     for scheme in schemes_by_label[label]:
         signal = {key: value for key, value in scheme.items() if key != "name"}
+        signal_population = f"crypto-signal-{label}-{scheme['name']}-{POPULATION_SUFFIX}"
         execution = run_backtests(
             study,
             predictions=label_rows,
             signal=signal,
             prices=prices,
             chapter="ch16",
-            population_name=f"crypto-signal-{label}-{scheme['name']}-{POPULATION_SUFFIX}",
+            population_name=signal_population,
+            supersedes=SUPERSEDES_BACKTESTS.get(signal_population),
         )
         executions.append((label, scheme["name"], execution))
         print(
@@ -524,7 +552,13 @@ for label in labels:
         if member_label == label
         for result in execution.results
     ]
-    candidates = CandidateSet.create(study, f"crypto-signal-{label}", members)
+    candidate_set_name = f"crypto-signal-{label}"
+    candidates = CandidateSet.create(
+        study,
+        candidate_set_name,
+        members,
+        supersedes=SUPERSEDES_CANDIDATES.get(candidate_set_name),
+    )
     print(f"{candidates.name}: {len(candidates.members)} members")
 
 # %% [markdown]
