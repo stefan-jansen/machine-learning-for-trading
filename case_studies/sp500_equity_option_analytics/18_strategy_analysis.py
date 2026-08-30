@@ -1038,39 +1038,44 @@ CHECKPOINT_MATCHES = bool(
     and tuple(CARRIER_CHECKPOINT) == SEALED_CHECKPOINT
 )
 IDENTITY_MATCHES = HOLDOUT_ASSESSABLE and current_training_hash == SEALED_TRAINING_HASH
-# The lock has to predate the holdout *run*, not the row that records it. `created_at` on
-# `prediction_sets` is the registration write, which happens after the fit returns, so a
-# lock taken at any point during a run that had already started still precedes it. The
-# execution-start record that would settle this is `training_runs.started_at`, and on this
-# lineage it is NULL, so the start is derived from the two fields that are populated:
-# `created_at` minus `elapsed_s`. Both of the derivation's error terms push the true start
-# earlier - `elapsed_s` measures the fit rather than the whole cell, and `created_at` is the
-# write that follows it - so the derived start is an upper bound on when work began.
-# Only a recorded start can establish this, and the reason is worth stating because the
-# derivation below looks like it could substitute for one and cannot. `created_at` minus
-# `elapsed_s` is an *upper* bound on when the fit began: both of its error terms push the
-# true start earlier. An upper bound can show that work began before some instant; it can
-# never show that work began after one. So `lock < derived_start` would not prove the lock
-# came first - the real start may sit anywhere earlier, including before the lock - and
-# treating it as proof would let a spent holdout read as sealed. With `started_at` NULL the
-# seal is unproven, and that is the answer, not a missing one.
+# The bound is asymmetric, and both halves of that asymmetry carry information. The true
+# start is at or before `created_at - elapsed_s`, so:
+#
+#   bound BEFORE the lock  ->  the true start is before the lock too. The seal is
+#                              DEMONSTRABLY BROKEN, not merely unattested.
+#   bound AT OR AFTER it   ->  the true start may sit on either side. Unproven.
+#
+# The first case is what this registry is in. An earlier pass here reported it as "unproven",
+# which understated it: an upper bound cannot show a run started *after* an instant, but it
+# can certainly show it started *before* one, and that is the direction that fails a seal.
 SEALED_BEFORE_SPENT = False
+SEAL_STATE = "no-holdout"
 SEAL_BASIS = "no sealed holdout to check"
 if sealed_holdout and sealed_holdout["lock_taken_at"]:
     _lock_at = pd.Timestamp(sealed_holdout["lock_taken_at"])
     if HOLDOUT_TRAINING_STARTED_AT is not None:
         SEALED_BEFORE_SPENT = _lock_at < pd.Timestamp(HOLDOUT_TRAINING_STARTED_AT)
-        SEAL_BASIS = "training_runs.started_at, recorded"
-    elif HOLDOUT_TRAINING_DERIVED_START is not None:
-        # Reported, never credited. It happens to fall before the lock here, which is
-        # evidence against the seal rather than for it, but the verdict does not rest on it.
+        SEAL_STATE = "recorded"
         SEAL_BASIS = (
-            "unproven - started_at is NULL, and created_at - elapsed_s bounds the start from "
-            "above only, which cannot show the run started after the lock; that bound falls "
-            f"{'before' if _lock_at > HOLDOUT_TRAINING_DERIVED_START else 'after'} the lock"
+            "training_runs.started_at is recorded, so the ordering is read rather than bounded"
         )
+    elif HOLDOUT_TRAINING_DERIVED_START is not None:
+        if _lock_at > HOLDOUT_TRAINING_DERIVED_START:
+            SEAL_STATE = "broken"
+            SEAL_BASIS = (
+                "started_at is NULL, but created_at - elapsed_s bounds the start from "
+                "above and that bound falls before the lock, so the run had already begun when "
+                "the lock was written"
+            )
+        else:
+            SEAL_STATE = "unproven"
+            SEAL_BASIS = (
+                "started_at is NULL, and created_at - elapsed_s bounds the start "
+                "from above only, which cannot show the run started after the lock"
+            )
     else:
-        SEAL_BASIS = "unprovable: no started_at and no elapsed_s on the holdout training run"
+        SEAL_STATE = "unprovable"
+        SEAL_BASIS = "neither started_at nor elapsed_s on the holdout training run"
 
 print(f"Published carrier training hash: {current_training_hash}")
 print(f"Sealed holdout training hash:    {SEALED_TRAINING_HASH or 'none'} (lock {LOCK_HASH})")
@@ -1109,7 +1114,7 @@ if sealed_holdout is not None:
         f"Lock taken {sealed_holdout['lock_taken_at']}; {_when}; holdout row written "
         f"{sealed_holdout['holdout_written_at']}"
     )
-    print(f"Seal basis: {SEAL_BASIS}")
+    print(f"Seal: {SEAL_STATE} - {SEAL_BASIS}")
     print(f"Lock shown to predate the holdout run: {SEALED_BEFORE_SPENT}")
 pl.DataFrame([sealed_holdout] if sealed_holdout else [])
 
@@ -1141,45 +1146,40 @@ print(f"Substantive identity divergence: {SUBSTANTIVE_DIVERGENCE or 'none'}")
 # accounted for, and it is empty: the model specification, the label artifact, the feature
 # names and the validation CV identity the selection was made on are the same.
 #
-# The seal cannot be shown to have held, and getting that right took two passes. The first
-# compared the lock against `prediction_sets.created_at` and concluded it held. That proves
-# nothing: `created_at` is the registration write and lands after the fit returns, so a lock
-# taken at any point during a run already in progress still precedes it. The question is when
-# the run began.
+# What a seal has to show, and what this registry can show. The lock must be taken before
+# the holdout *runs*, not before the row recording it is written: `prediction_sets.created_at`
+# lands after the fit returns, so a lock written at any point during a run already in progress
+# still precedes it. The field that settles the question is `training_runs.started_at`.
 #
-# `training_runs.started_at` is the field that answers it, and it is NULL on this lineage.
-# Nothing else in the registry substitutes. `created_at` minus `elapsed_s` is the obvious
-# candidate and it does not work, for a reason worth stating exactly: both of its error terms
-# push the true start earlier, so it bounds the start from *above*. An upper bound can show
-# work began before some instant; it can never show work began after one, which is the
-# direction a seal needs. Reading `lock < derived_start` as proof would let a holdout that
-# was already running when its lock was written read as properly sealed.
+# Where that field is NULL, `created_at` minus `elapsed_s` is the only remaining handle, and
+# it is asymmetric. Both of its error terms push the true start earlier, so it bounds the
+# start from above - which means it can show a run began *before* some instant and can never
+# show one began *after*. A bound falling before the lock therefore demonstrates a broken
+# seal; a bound falling after it demonstrates nothing either way. The cell above prints which
+# of those cases this registry is in, along with the timestamps it was decided from.
 #
-# Here that bound falls about ten seconds before the lock, which is evidence against the seal
-# rather than for it, and it is printed above for that reason. The verdict rests on neither
-# side of it: with `started_at` NULL the ordering is unproven, and unproven is the answer.
+# Whatever the state, it is not a claim about whether the holdout was visible during
+# selection. The run is a retrain on pre-holdout data of a selection already fixed. It is a
+# claim about whether the registry can demonstrate the ordering the seal exists to guarantee,
+# and a seal nothing can check is not doing the work a seal is for.
 #
-# What this is not. It is not evidence the holdout was visible during selection - the run is a
-# retrain on pre-holdout data of a selection already fixed. It is that the registry cannot
-# demonstrate the ordering the seal exists to guarantee, and a seal nothing can check is not
-# doing the work a seal is for.
+# A second thing a lock alone does not establish. `finalize_holdout` is what validates that a
+# training, prediction and backtest hash belong together and records the triple in
+# `holdout_evaluations`; a lock left at `LOCKED` has had none of that done to it, and the
+# pairing is then read from the lock's own declaration rather than from anything that checked
+# it. `Lineage finalized by finalize_holdout` above says which case this registry is in, and
+# the gate requires it for any status above INCONCLUSIVE.
 #
-# A second thing nothing establishes. `research_locks` still reads `LOCKED` rather than
-# `HOLDOUT_EVALUATED`, and `holdout_evaluations` holds no row for it, so `finalize_holdout`
-# never ran and nothing outside this notebook has validated that the training, prediction and
-# backtest hashes belong together. The pairing above is read from the lock's own declaration.
-# That is why the gate below cannot return PASS however well the rest of the comparison goes.
+# Taken together these decide what the Sharpe above can be used for. A sealed holdout on the
+# published fit, finalized, with the lock demonstrably first, is an out-of-sample result. Any
+# of those missing and it is a number with a provenance qualification attached - reportable,
+# because suppressing it would be its own distortion, and not a basis for an out-of-sample
+# claim. `_holdout_qualifier` below names every condition that is short, and the gate's
+# evidence column carries that list rather than a verdict the reader has to take on trust.
 #
-# That is enough to report the number and not enough to claim it. A different training hash
-# with no supersession row linking it to the published one is, by the registry's own rule, a
-# generation this case study no longer publishes, and the sealed fit's weights were never
-# re-derived under the current identity scheme. They cannot be: a holdout is spent once, and
-# re-taking this one to close the bookkeeping gap would turn the window into another
-# selection round, which is the one thing it must not become. So the Sharpe above is an
-# out-of-sample number for a fit that specifies the same computation as the published
-# carrier, carries a different identity, sits on a lineage `finalize_holdout` never recorded,
-# and cannot be shown to have started after its own lock. It is reported on exactly those
-# terms and supports no out-of-sample claim.
+# None of it can be repaired by running the holdout again. It is spent once, and re-taking it
+# to close a bookkeeping gap would turn the window into another selection round, which is the
+# one thing it must not become.
 
 # %% [markdown]
 # ## 5. Publication assessment
@@ -1204,7 +1204,11 @@ def _holdout_qualifier() -> str:
     if not VALIDATION_CV_MATCHES:
         short.append("a different validation CV")
     if not SEALED_BEFORE_SPENT:
-        short.append(f"the lock is not shown to predate the run ({SEAL_BASIS})")
+        short.append(
+            "the run demonstrably began before the lock"
+            if SEAL_STATE == "broken"
+            else f"the lock is not shown to predate the run ({SEAL_STATE})"
+        )
     if SUBSTANTIVE_DIVERGENCE:
         short.append(f"identity diverges on {', '.join(SUBSTANTIVE_DIVERGENCE)}")
     if not IDENTITY_MATCHES:
