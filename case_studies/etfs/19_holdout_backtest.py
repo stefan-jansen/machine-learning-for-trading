@@ -73,9 +73,6 @@ CASE_STUDY_ID = "etfs"
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 MAX_SYMBOLS = 0
-# Whether a holdout backtest of a DIFFERENT strategy may be superseded by this run. Off by
-# default, and the same switch `18_holdout_predictions` uses for the model side.
-REPLACE_HOLDOUT = False
 
 # %%
 study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -92,22 +89,6 @@ def _registered_holdout_backtests(case_dir, prediction_hash):
             (prediction_hash,),
         ).fetchall()
     return [backtest_hash for (backtest_hash,) in rows]
-
-
-def _delete_holdout_backtest(case_dir, backtest_hash):
-    """Remove one registered holdout backtest and the rows derived from it.
-
-    Same rule as `18_holdout_predictions`' replacement of a superseded generation: a holdout
-    result that has been observed and then left readable beside its replacement is still a
-    number someone can quote.
-    """
-    with sqlite3.connect(str(case_dir / "run_log" / "registry.db")) as conn:
-        conn.execute(
-            "DELETE FROM backtest_paired_metrics WHERE challenger_hash = ? OR benchmark_hash = ?",
-            (backtest_hash, backtest_hash),
-        )
-        conn.execute("DELETE FROM backtest_metrics WHERE backtest_hash = ?", (backtest_hash,))
-        conn.execute("DELETE FROM backtest_runs WHERE backtest_hash = ?", (backtest_hash,))
 
 
 # %% [markdown]
@@ -214,10 +195,12 @@ else:
 # over the risk block the carrier carries, which would otherwise file this as another risk
 # overlay.
 #
-# **The window carries one backtest at a time**, for the same reason 18 lets it carry one
-# prediction generation at a time. 18's guard is on the model - the training identity and the
-# checkpoint - and it cannot see this one: a changed allocator, overlay, cost level or
-# calibration produces the same holdout predictions and a different result from them.
+# **The window carries one backtest**, for the same reason 18 lets it carry one prediction
+# generation. 18's guard is on the model - the training identity and the checkpoint - and it
+# cannot see this one: a changed allocator, overlay, cost level or calibration produces the
+# same holdout predictions and a different result from them. Like 18's, this guard refuses
+# rather than offering a replacement, because deleting a result that has been seen does not
+# unsee it.
 #
 # The test is the backtest hash, not a field-by-field comparison. Every input that changes the
 # result is in that hash by construction, and a guard naming fields instead has to be right
@@ -254,16 +237,15 @@ prospective_hash = backtest_run_status(CASE_STUDY_ID, HOLDOUT_PREDICTION_HASH, s
 superseded_backtests = sorted(
     set(_registered_holdout_backtests(CASE_DIR, HOLDOUT_PREDICTION_HASH)) - {prospective_hash}
 )
-if superseded_backtests and not REPLACE_HOLDOUT:
+if superseded_backtests:
     raise RuntimeError(
         "the holdout window already carries a backtest of a different configuration: "
         + ", ".join(superseded_backtests)
-        + f". This run would register {prospective_hash} and has not run. Set "
-        "REPLACE_HOLDOUT=True to discard the earlier one, or leave the selection where it was."
+        + f". This run would register {prospective_hash} and has not run. Same rule as "
+        "18_holdout_predictions: discarding the earlier result would not undo having observed "
+        "it, so there is no switch here. Leave the selection where it was, or retire the "
+        "earlier evaluation through the registry's lifecycle."
     )
-for backtest_hash in superseded_backtests:
-    print(f"REPLACING holdout backtest {backtest_hash}")
-    _delete_holdout_backtest(CASE_DIR, backtest_hash)
 
 # The guard has passed, so this run will register and the widths it is sized by are the ones
 # that belong beside this prediction set.
@@ -375,7 +357,8 @@ print(
 # optimistic by construction, and this notebook inherits that pool without correcting for it.
 # The deflation is [`20_strategy_analysis`](20_strategy_analysis.ipynb)'s.
 #
-# The holdout stays re-runnable. If the selection changes, this generation is deleted and
-# another is produced; it is not a resource that has been spent.
+# Re-running this notebook against the same carrier is free and idempotent - the backtest hash
+# is unchanged and the registered run is served back. A different carrier is refused, for the
+# reason 18 gives.
 #
 # **Next:** [`20_strategy_analysis`](20_strategy_analysis.ipynb).

@@ -1650,14 +1650,22 @@ case_studies/etfs/17_costs:
     TOP_N_COMBOS: 2
   timeout: 600
 case_studies/etfs/18_holdout_predictions:
+  # Canonical, not preview. `reconstruct_locked_model_request` refuses any spec whose
+  # execution_tier is not canonical, and the harness injects EXECUTION_TIER="preview" for
+  # any notebook that declares it - so the default routing fails this notebook on its first
+  # fit. 19 and 20 follow it, because a holdout resolved in one tier and read in another is
+  # two registries.
+  research_preview: false
   # Refits the selected configuration over the holdout fold - one training run, no sweep. The
   # budget is a single GBM fit over the full history before the window, on 24 funds.
   timeout: 900
 case_studies/etfs/19_holdout_backtest:
+  research_preview: false
   # One backtest over the holdout window, on the engine path this case study's trailing-stop
   # carrier requires.
   timeout: 600
 case_studies/etfs/20_strategy_analysis:
+  research_preview: false
   timeout: 900
 case_studies/fx_pairs/01_feasibility_analysis:
   timeout: 120
