@@ -17,6 +17,7 @@ from case_studies.utils.uncertainty import (
     STAGE_BASELINE,
     STAGE_CARRIER_BLOCK,
     STAGE_SEQUENCE,
+    carried_blocks,
     descends_from,
 )
 
@@ -129,10 +130,56 @@ def test_a_risk_overlay_on_a_different_allocator_does_not_descend():
     assert not descends_from(other, alloc_leader, "allocation")
 
 
-def test_every_stage_descends_from_signal():
-    """Every stage carries a signal, so the signal stage constrains nothing."""
-    for spec in ({"allocation": _ALLOC}, {"risk": _RISK}, {"costs": {}}):
-        assert descends_from(spec, {"signal": {"method": "top_k"}}, "signal")
+_SIGNAL = {"method": "top_k", "top_k": 20}
+
+
+def test_an_allocation_on_a_different_signal_does_not_descend_from_it():
+    """A shared prediction hash fixes the predictions and nothing else.
+
+    Signal-stage runs vary the signal method and top_k, so two independently selected
+    leaders can differ in the one place the stage comparison holds fixed. Checking only
+    the block the baseline's own stage introduces passes this.
+    """
+    signal_leader = {"signal": _SIGNAL}
+    other = {"signal": {"method": "top_k", "top_k": 50}, "allocation": _ALLOC}
+    assert not descends_from(other, signal_leader, "signal")
+
+
+def test_a_risk_overlay_on_a_different_signal_does_not_descend():
+    """The mismatch is upstream of the block risk_overlay introduces."""
+    alloc_leader = {"signal": _SIGNAL, "allocation": _ALLOC}
+    other = {"signal": {"method": "long_short"}, "allocation": _ALLOC, "risk": _RISK}
+    assert not descends_from(other, alloc_leader, "allocation")
+
+
+def test_a_cost_run_on_a_different_allocator_does_not_descend_from_the_risk_leader():
+    """Two blocks upstream of the one risk_overlay introduces."""
+    risk_leader = {"signal": _SIGNAL, "allocation": _ALLOC, "risk": _RISK}
+    other = {
+        "signal": _SIGNAL,
+        "allocation": {"method": "equal_weight"},
+        "risk": _RISK,
+        "costs": {"commission_bps": 5},
+    }
+    assert not descends_from(other, risk_leader, "risk_overlay")
+
+
+def test_descent_holds_when_the_whole_prefix_matches():
+    risk_leader = {"signal": _SIGNAL, "allocation": _ALLOC, "risk": _RISK}
+    child = {**risk_leader, "costs": {"commission_bps": 5}}
+    assert descends_from(child, risk_leader, "risk_overlay")
+
+
+def test_the_prefix_grows_with_the_stage():
+    assert carried_blocks("signal") == ("signal",)
+    assert carried_blocks("allocation") == ("signal", "allocation")
+    assert carried_blocks("risk_overlay") == ("signal", "allocation", "risk")
+
+
+def test_cost_sensitivity_introduces_no_block_because_it_is_terminal():
+    """Nothing is built on top of a cost sweep, so it carries the risk prefix unchanged."""
+    assert "cost_sensitivity" not in STAGE_CARRIER_BLOCK
+    assert carried_blocks("cost_sensitivity") == carried_blocks("risk_overlay")
 
 
 def test_the_carrier_blocks_name_real_stages():

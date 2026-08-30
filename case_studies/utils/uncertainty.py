@@ -155,13 +155,21 @@ STAGE_SEQUENCE: tuple[str, ...] = (
 )
 
 
-#: The block of a strategy spec each stage is defined by. A backtest at a later stage is
-#: built on an earlier one only if it carries the earlier stage's block unchanged.
-#: ``signal`` has no entry: every stage carries a signal, so it constrains nothing.
+#: The block of a strategy spec each stage introduces. ``cost_sensitivity`` has no entry
+#: because it is terminal - nothing is ever built on top of a cost sweep.
 STAGE_CARRIER_BLOCK: dict[str, str] = {
+    "signal": "signal",
     "allocation": "allocation",
     "risk_overlay": "risk",
 }
+
+
+def carried_blocks(stage: str) -> tuple[str, ...]:
+    """Every strategy block a backtest at ``stage`` has inherited or introduced."""
+    if stage not in STAGE_SEQUENCE:
+        return ()
+    upto = STAGE_SEQUENCE[: STAGE_SEQUENCE.index(stage) + 1]
+    return tuple(STAGE_CARRIER_BLOCK[s] for s in upto if s in STAGE_CARRIER_BLOCK)
 
 
 def descends_from(challenger: dict, baseline: dict, baseline_stage: str) -> bool:
@@ -173,14 +181,14 @@ def descends_from(challenger: dict, baseline: dict, baseline_stage: str) -> bool
     costs. Comparing those two attributes the whole difference between two unrelated
     strategies to whichever stage happens to come second in the chain.
 
-    A challenger descends from the baseline when it carries the baseline stage's own
-    block unchanged. A stage with no declared block (``signal``) constrains nothing and
-    every later stage descends from it.
+    Descent requires the challenger to match the baseline on the *whole prefix* the
+    baseline carries, not only on the block its own stage introduced. A shared
+    prediction hash fixes the predictions and nothing else: signal-stage runs vary
+    the signal method and ``top_k``, so an allocation leader can differ from the
+    signal leader in the one place the comparison is meant to hold fixed. Checking a
+    single block would pass it.
     """
-    block = STAGE_CARRIER_BLOCK.get(baseline_stage)
-    if block is None:
-        return True
-    return challenger.get(block) == baseline.get(block)
+    return all(challenger.get(b) == baseline.get(b) for b in carried_blocks(baseline_stage))
 
 
 STAGE_BASELINE: dict[str, str] = {
@@ -1338,6 +1346,7 @@ def _sortino(arr: np.ndarray, periods_per_year: float) -> float:
 __all__ = [
     "STAGE_BASELINE",
     "STAGE_CARRIER_BLOCK",
+    "carried_blocks",
     "STAGE_SEQUENCE",
     "descends_from",
     "SIGNAL_BASELINE_BY_CASE_STUDY",

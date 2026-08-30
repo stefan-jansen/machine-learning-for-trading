@@ -838,8 +838,10 @@ import numpy as np
 
 from case_studies.utils.uncertainty import (
     SIGNAL_BASELINE_BY_CASE_STUDY,
+    STAGE_SEQUENCE,
     compute_independent_diff_uncertainty,
     compute_paired_uncertainty,
+    descends_from,
 )
 
 
@@ -1683,16 +1685,22 @@ for cs, explorer in explorers.items():
                 )
             )
 
-    # Pairs #4–6: stage transitions on the validation rank-1 lineage
+    # Stage transitions on the validation rank-1 lineage. Consecutive *present* stages of
+    # STAGE_SEQUENCE, and only where the later one was actually built on the earlier - the
+    # same rule `populate_paired_metrics` applies, because both write this table.
     lineage = explorer.champion_lineage(leader_phash)
-    for prev_stage, this_stage, kind in [
-        ("signal", "allocation", "signal_leader"),
-        ("allocation", "cost_sensitivity", "allocation_leader"),
-        ("cost_sensitivity", "risk_overlay", "cost_sensitivity_leader"),
-    ]:
-        prev_entry = lineage.get(prev_stage)
-        this_entry = lineage.get(this_stage)
-        if not prev_entry or not this_entry:
+    present = [s for s in STAGE_SEQUENCE if lineage.get(s)]
+    for prev_stage, this_stage in zip(present, present[1:]):
+        kind = f"{prev_stage}_leader"
+        prev_entry = lineage[prev_stage]
+        this_entry = lineage[this_stage]
+        if not descends_from(
+            this_entry.get("_strategy", {}), prev_entry.get("_strategy", {}), prev_stage
+        ):
+            print(
+                f"  skip {prev_stage} -> {this_stage}: the {this_stage} leader is not "
+                f"built on the {prev_stage} leader"
+            )
             continue
         prev_hash = prev_entry["backtest_hash"]
         this_hash = this_entry["backtest_hash"]
