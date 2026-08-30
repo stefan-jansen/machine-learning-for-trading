@@ -19,7 +19,15 @@ CATALOG_VERSION = 1
 _METRIC_COLUMNS = (
     "ic_mean",
     "ic_std",
+    # Two different statistics, and the difference is the difference between ten numbers and a
+    # hundred. `ic_t` is computed over the fold-level mean ICs - ten of them for a ten-fold run -
+    # and `registry/metrics.py` calls it a diagnostic in terms. `ic_t_hac` is the inferential one:
+    # Newey-West on the per-date IC series, which is what a reader means by a t-statistic on an IC.
+    # `auc_t_hac` was already carried and its IC counterpart was not, so a notebook wanting the
+    # inferential statistic had only the diagnostic to reach for, and reaching for it while calling
+    # it Newey-West is a mistake this column exists to stop.
     "ic_t",
+    "ic_t_hac",
     # Validation dates that produced a defined cross-sectional IC. A configuration whose
     # predictions collapse to near-constant on some folds yields no IC on those dates, so its
     # ic_mean is measured over fewer of them and is not comparable to a full-coverage one.

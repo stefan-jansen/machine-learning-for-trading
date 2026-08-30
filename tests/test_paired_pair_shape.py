@@ -186,7 +186,12 @@ def test_the_producer_gives_every_stage_transition_the_default_shape(
                 for stage in ("signal", "allocation", "cost_sensitivity", "risk_overlay")
             }
 
-    paired_metrics.populate_paired_metrics("unit_cs", _Explorer(), verbose=False)
+    # `unit_cs` is synthetic and has no config/setup.yaml, so the annualization factor
+    # is stated here. `populate_paired_metrics` reads it from the case study's own
+    # declaration when omitted, and this test is about the pair shape, not the scale.
+    paired_metrics.populate_paired_metrics(
+        "unit_cs", _Explorer(), periods_per_year=252, verbose=False
+    )
 
     transitions = {
         kind: overlay

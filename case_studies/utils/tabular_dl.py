@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 import polars as pl
+import yaml
 
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
@@ -58,6 +59,10 @@ from utils.modeling import RANDOM_SEED, seed_everything
 
 _TABM_PREVIEW_FIELDS = {"checkpoint_interval", "folds", "max_symbols", "n_epochs"}
 _TABM_IMBALANCE_METHODS = {"balanced", "none"}
+# What a case study gets when its setup.yaml declares no `modeling.tabular_dl` block. Eight of the
+# nine declare none, so these are the values every existing TabM identity was fitted under.
+DEFAULT_TABM_DEVICE = "cuda"
+DEFAULT_TABM_NUM_THREADS = 8
 TABM_RUNNER_VERSION = 1
 TABM_STATE_VERSION = 1
 
@@ -109,7 +114,7 @@ def _tabm_runtime_identity() -> dict[str, str]:
     }
 
 
-def _tabm_runtime_provenance(study: Study) -> dict[str, Any]:
+def _tabm_runtime_provenance(study: Study, *, notebook: str | None = None) -> dict[str, Any]:
     try:
         commit = subprocess.check_output(
             ["git", "-C", str(study.release_root), "rev-parse", "HEAD"],
@@ -119,13 +124,22 @@ def _tabm_runtime_provenance(study: Study) -> dict[str, Any]:
         ).strip()
     except (OSError, subprocess.SubprocessError):
         commit = "unknown"
-    return {
+    record: dict[str, Any] = {
         "entry_point": "case_studies.utils.tabular_dl",
         "packages": _tabm_runtime_identity(),
         "platform": platform.platform(),
         "python": platform.python_version(),
         "source_commit": commit,
     }
+    # `notebook_path` says which notebook produced a row; `entry_point` says which module ran.
+    # Different questions, and the module is legitimately shared - several notebooks call this one,
+    # so `entry_point` cannot name a notebook and should not try. Both sit in
+    # `registry/specs.py:_V2_PROVENANCE_FIELDS`, so neither reaches the training identity. Absent
+    # when the caller names no notebook: a holdout reconstruction is not a notebook run, and a
+    # wrong notebook name would be worse than none.
+    if notebook:
+        record["notebook_path"] = notebook
+    return record
 
 
 def _normalize_splits(splits: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
@@ -298,8 +312,7 @@ def _resolve_model_request_from_materialized(
             if field in reductions:
                 config[field] = int(reductions[field])
         _tabm_checkpoint_epochs(config)
-    device = str(request["overrides"].get("device", "cuda"))
-    num_threads = int(request["overrides"].get("num_threads", 8))
+    device, num_threads = _tabm_execution_settings(study, request["overrides"])
     runtime = tabm_runtime_spec(device, num_threads=num_threads)
     expected = _tabm_expected_keys(mds, splits)
     input_lineage = mds.input_lineage
@@ -425,7 +438,7 @@ def _materialize_tabm_request_group(study: Study, request: dict[str, Any]):
         label_ref,
         mds,
         configured_by_name,
-        _tabm_runtime_provenance(study),
+        _tabm_runtime_provenance(study, notebook=request.get("notebook")),
     )
 
 
@@ -1533,6 +1546,36 @@ def tabm_runtime_spec(
         "num_threads": num_threads,
         "seed": seed,
     }
+
+
+def _tabm_execution_settings(study: Study, overrides: Mapping[str, Any]) -> tuple[str, int]:
+    """Resolve the declared TabM backend, with a request override taking precedence.
+
+    Both values reach ``computation.numerics`` and are therefore part of a training identity, not
+    provenance recorded beside one: a network's arithmetic depends on the device it runs on and on
+    how many host threads reduce a batch, so a CUDA fit and a CPU fit of the same configuration
+    are different computations and must hash differently.
+
+    That is exactly why the declaration has to be read. Until this function existed the resolver
+    took ``cuda`` and 8 from its own defaults and consulted ``setup.yaml`` nowhere, so a case study
+    declaring ``device: cpu`` would have trained on CUDA and published members whose recorded
+    device says otherwise - silently, because ``resolve_torch_device`` only refuses a device the
+    host lacks and the host has one. ``_gbm_execution_settings`` reads its equivalent block and
+    this is the same shape.
+    """
+    setup_path = study.root / "config" / "setup.yaml"
+    declared: dict[str, Any] = {}
+    if setup_path.is_file():
+        setup = yaml.safe_load(setup_path.read_text()) or {}
+        declared = (setup.get("modeling") or {}).get("tabular_dl") or {}
+    config = {
+        **declared,
+        **{key: overrides[key] for key in ("device", "num_threads") if key in overrides},
+    }
+    num_threads = int(config.get("num_threads", DEFAULT_TABM_NUM_THREADS))
+    if num_threads < 1:
+        raise ValueError("modeling.tabular_dl.num_threads must be at least 1")
+    return str(config.get("device", DEFAULT_TABM_DEVICE)), num_threads
 
 
 def _tabm_checkpoint_epochs(config: dict[str, Any]) -> tuple[int, ...]:

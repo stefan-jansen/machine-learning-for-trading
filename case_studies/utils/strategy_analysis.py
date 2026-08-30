@@ -381,6 +381,21 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
     try:
         candidates = db.execute(val_sql, params).fetchall()
         if not candidates:
+            # Name the restriction that emptied the set. A pin is the one whose
+            # failure is silent and total: it is a backtest-hash prefix, a hash
+            # covers the whole strategy spec, and a rebuilt sweep produces new
+            # ones - so a pin entered against an earlier registry matches nothing
+            # and this is the first cell of the notebook that touches it. Reporting
+            # only the label filter sent the reader to LABEL_RESTRICTIONS, which
+            # was not the cause.
+            if carrier_pin:
+                raise RuntimeError(
+                    f"Carrier pin {carrier_pin!r} for {case_study} matches no validation "
+                    f"backtest in {db_path}. A pin is a backtest-hash prefix and every "
+                    "hash changes when the sweep is rebuilt, so a pin outlives at most "
+                    "one rebuild. Re-derive it from the current registry, or remove the "
+                    "entry from CARRIER_PINS to select by validation Sharpe."
+                )
             raise RuntimeError(
                 f"No validation rank-1 candidate for {case_study} (label_filter={label_filter})"
             )

@@ -37,7 +37,6 @@ REPO = Path(__file__).resolve().parent.parent
 # Delete an entry when its notebook is converted; the test below fails if one is
 # converted and left here.
 UNCONVERTED = {
-    "case_studies/us_firm_characteristics/09_causal_dml.py",
     "case_studies/nasdaq100_microstructure/12_causal_dml.py",
     "case_studies/sp500_options/10_causal_dml.py",
     "case_studies/sp500_equity_option_analytics/12_causal_dml.py",

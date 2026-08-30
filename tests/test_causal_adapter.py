@@ -831,7 +831,11 @@ def test_a_horizon_longer_than_its_buffer_is_refused(tmp_path, monkeypatch) -> N
         tmp_path, monkeypatch, label_buffer="8H", label_horizon="24H"
     )
 
-    with pytest.raises(ValueError, match="exceeds the CV buffer"):
+    # Matched on the claim rather than on the phrasing of the comparison. The two spans are
+    # now compared as observation counts rather than as durations, because a calendar month
+    # is not a fixed span and `pd.Timedelta` refuses it, so a regex tied to how the numbers
+    # are worded fails on a message that says the same thing.
+    with pytest.raises(ValueError, match="cannot be shorter than the outcome it is holding"):
         study.causal(
             method="dml",
             label=label.name,

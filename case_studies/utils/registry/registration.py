@@ -1766,6 +1766,51 @@ def declare_causal_supersedes(
         db.close()
 
 
+def check_causal_supersedes(
+    case_study: str,
+    causal_hash: str,
+    *,
+    label: str,
+    tier: str,
+    supersedes_hash: str | None,
+    case_dir: Path | None = None,
+) -> None:
+    """Raise now what :func:`register_causal_run` would raise after the fit.
+
+    The refusal it wraps is correct and stays where it is; only its timing is the
+    problem. A causal identity moves whenever ``case_studies/utils/causal.py`` changes,
+    because the resolved spec carries a hash of that whole file, so an ordinary edit to
+    the shared resolver leaves every case study on it registering a second identity for
+    its label. The run then misses the cache, pays the full DML fit and every placebo
+    refit, and is refused at the write for naming no predecessor - which is an hour on
+    this panel to be told a hash the registry could have named before the first fold.
+
+    This calls the write-time rule itself rather than restating it. Two copies of this
+    condition would decide what may be written and what is worth starting, and a
+    disagreement between them either refuses a run that would have registered or starts
+    one that cannot. The one place they differ is unavoidable and harmless: another
+    writer can change the registry while the fit runs, so passing here is not a promise
+    that the write will succeed. ``register_causal_run`` remains the authority.
+    """
+    if case_dir is None:
+        case_dir = _case_dir(case_study)
+    db = _open_registry(case_dir)
+    try:
+        _enforce_causal_supersedes(
+            db,
+            causal_hash=causal_hash,
+            label=label,
+            tier=tier,
+            supersedes_hash=supersedes_hash,
+            is_repair=db.execute(
+                "SELECT 1 FROM causal_runs WHERE causal_hash = ?", (causal_hash,)
+            ).fetchone()
+            is not None,
+        )
+    finally:
+        db.close()
+
+
 def _enforce_causal_supersedes(
     db,
     *,

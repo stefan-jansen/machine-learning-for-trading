@@ -233,3 +233,7 @@ case_studies/.preview/
 
 # tearsheets 18_strategy_analysis writes to its OUTPUT_DIR (a run output, not source)
 case_studies/ch20_*/
+
+# Papermill writes `.<stem>.papermill.<pid>.ipynb` beside the notebook while it executes and
+# leaves it behind if the run is killed. It is never a deliverable.
+.*.papermill.*.ipynb

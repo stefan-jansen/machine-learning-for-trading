@@ -57,6 +57,7 @@ from .population import (
     split_retired_members,
     superseded_members,
     superseded_members_at,
+    supersedes_for_run,
 )
 from .results import BacktestResult, PredictionResult, Result, TrainingResult
 from .strategy import Strategy, strategy_warmup_periods
@@ -90,6 +91,7 @@ __all__ = [
     "PlannedBacktest",
     "PlannedModel",
     "OfficialPopulation",
+    "supersedes_for_run",
     "ResearchLock",
     "ResolvedModelRequest",
     "ResolvedCausalRequest",
