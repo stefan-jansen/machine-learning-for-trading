@@ -108,11 +108,16 @@ def option_accounting_parameters(signal: dict[str, Any]) -> dict[str, Any]:
         "exit_at_max_days": exit_at_max_days,
         "entry_quote": "bid_for_short_call_and_put",
         "daily_mark": "paired_midpoint",
+        # Two behaviours, so two names. A position held to expiry settles in cash at intrinsic;
+        # one whose contract a corporate action removes from the chain is bought back against
+        # the last mark the chain carried. Declaring only the first would put two behaviours
+        # under one identity, which is what makes a backtest hash stop meaning anything.
         "settlement": (
             "cash_intrinsic_at_expiration"
             if exit_at_max_days is None
             else "ask_for_buy_to_close_at_holding_limit"
         ),
+        "delisted_contract_exit": "ask_for_buy_to_close_at_last_quoted_mark",
         "hedge_liquidation": "final_observation_close",
     }
 
@@ -656,12 +661,17 @@ def _load_option_lifecycle(
         ]
     )
     paired = calls.join(puts, on=["date", "symbol", "strike", "expiration"], how="inner")
-    # Where the position ends. Normally that is expiration, where the straddle settles in cash
-    # at the intrinsic value of its two legs. A contract adjusted by a corporate action stops
-    # being quoted before then, and the adjusted strike the position continues under is not in
-    # this chain, so the position is marked out at the last session both legs were quoted on -
-    # which is what a holder who cannot follow the adjustment can actually do, and which keeps
-    # the P&L the position earned up to that point instead of discarding the whole decision.
+    # Where the position ends, and the two ways it can end are not the same event.
+    #
+    # Normally it ends at expiration, where the straddle settles in cash at the intrinsic value
+    # of its legs. Expiration is a known date, so marking intrinsic there reads no future.
+    #
+    # A contract a corporate action adjusts stops being quoted before then, and the adjusted
+    # strike the position continues under is not in this chain. The holder discovers that on the
+    # first session no quote arrives, and liquidates against the last mark they had. Calling that
+    # a cash settlement, as this did, made it free: settlement pays no exit spread because there
+    # is no market to trade against, whereas a liquidation is a trade and pays one. The two are
+    # separated here so the accounting downstream can charge what each actually costs.
     final_session = (
         paired.filter(pl.col("date") <= pl.col("expiration"))
         .group_by(["symbol", "strike", "expiration"])
@@ -670,15 +680,19 @@ def _load_option_lifecycle(
     lifecycle = (
         paired.join(final_session, on=["symbol", "strike", "expiration"], how="left")
         .with_columns(
-            cash_settled=pl.col("date") == pl.col("_final_date"),
+            _is_final=pl.col("date") == pl.col("_final_date"),
             _expires=pl.col("_final_date") == pl.col("expiration"),
             instr_delta=pl.col("call_delta") + pl.col("put_delta"),
         )
         .with_columns(
-            call_mid=pl.when(pl.col("cash_settled") & pl.col("_expires"))
+            cash_settled=pl.col("_is_final") & pl.col("_expires"),
+            liquidated=pl.col("_is_final") & ~pl.col("_expires"),
+        )
+        .with_columns(
+            call_mid=pl.when(pl.col("cash_settled"))
             .then((pl.col("underlying_price") - pl.col("strike")).clip(lower_bound=0.0))
             .otherwise(pl.col("call_mid")),
-            put_mid=pl.when(pl.col("cash_settled") & pl.col("_expires"))
+            put_mid=pl.when(pl.col("cash_settled"))
             .then((pl.col("strike") - pl.col("underlying_price")).clip(lower_bound=0.0))
             .otherwise(pl.col("put_mid")),
         )
@@ -702,6 +716,7 @@ def _load_option_lifecycle(
                 "underlying_price",
                 "put_underlying_price",
                 "cash_settled",
+                "liquidated",
                 "_final_date",
                 "_expires",
             ]
@@ -722,7 +737,7 @@ def _load_option_lifecycle(
         "entry_put_mid",
     ).unique()
     calendar = pl.concat(calendars).unique()
-    settles_on = lifecycle.filter(pl.col("cash_settled")).select(
+    settles_on = lifecycle.filter(pl.col("cash_settled") | pl.col("liquidated")).select(
         "symbol", "strike", "expiration", pl.col("date").alias("_final_date")
     )
     expected = (
@@ -757,12 +772,14 @@ def _load_option_lifecycle(
     ).height:
         raise ValueError("contract-return entry quotes disagree with the raw option lifecycle")
     expiry_keys = cohort_keys.select("cohort_feature_date", "symbol", "strike", "expiration").join(
-        lifecycle.filter(pl.col("cash_settled")).select("symbol", "strike", "expiration"),
+        lifecycle.filter(pl.col("cash_settled") | pl.col("liquidated")).select(
+            "symbol", "strike", "expiration"
+        ),
         on=["symbol", "strike", "expiration"],
         how="semi",
     )
     if expiry_keys.height != cohort_keys.height:
-        raise ValueError("selected option contracts do not all have cash-settlement inputs")
+        raise ValueError("selected option contracts do not all have an end-of-position observation")
     return lifecycle.drop("put_underlying_price", "_final_date", "_expires").sort(
         ["symbol", "strike", "expiration", "date"]
     )
@@ -828,12 +845,15 @@ def _compute_cohort_daily_pnl(
         settlement_coverage = daily.group_by(partition).agg(
             pl.col("date").max().alias("last_date"),
             pl.col("cash_settled").last().alias("cash_settled"),
+            pl.col("liquidated").last().alias("liquidated"),
         )
-        # Every position ends in a settlement. Where that settlement falls is the contract's
-        # own business - expiration for all but the ones a corporate action ended early - so
-        # what is checked is that the last session carries one, not that it is the expiry.
-        if settlement_coverage.filter(~pl.col("cash_settled")).height:
-            raise ValueError("option lifecycle does not settle every selected contract")
+        # Every position ends, and the check is that its last session says how. Expiration for
+        # all but the ones a corporate action ended early, a liquidation for those. What is
+        # refused is a position that simply stops with neither - a lifecycle that runs out of
+        # rows is a position nothing valued, and rule 4 of the straddle-lifecycle rule says a
+        # run that cannot be valued honestly does not publish.
+        if settlement_coverage.filter(~(pl.col("cash_settled") | pl.col("liquidated"))).height:
+            raise ValueError("option lifecycle does not end every selected contract")
 
     # Round-trip mode: cap the holding window at entry + exit_at_max_days
     # trading days (day 1 = entry, so we keep ranks 1 .. exit_at_max_days+1).
@@ -911,7 +931,29 @@ def _compute_cohort_daily_pnl(
         ).fill_null(0.0),
     )
 
-    if exit_at_max_days is not None:
+    # A liquidation pays the spread in every mode, not only the round-trip one. The position is
+    # bought back against the last mark the chain carried, which for a short straddle crosses to
+    # the ask, plus commission - the same price a round-trip exit pays, because it is the same
+    # trade. Only the expiration session is free, and only because cash settlement is not a trade.
+    if exit_at_max_days is None:
+        daily = daily.with_columns(
+            exit_cost_norm=(
+                pl.when(pl.col("liquidated"))
+                .then(
+                    (
+                        option_spread_fraction
+                        * (
+                            (pl.col("call_ask") - pl.col("call_mid"))
+                            + (pl.col("put_ask") - pl.col("put_mid"))
+                        )
+                        + (2.0 * option_commission_per_contract / option_contract_multiplier)
+                    )
+                    / pl.col("entry_straddle_mid")
+                )
+                .otherwise(0.0)
+            ).fill_null(0.0),
+        )
+    else:
         daily = daily.with_columns(
             exit_cost_norm=(
                 # No exit bid-ask on the expiration session: the straddle cash-settles
@@ -936,8 +978,6 @@ def _compute_cohort_daily_pnl(
                 .otherwise(0.0)
             ).fill_null(0.0),
         )
-    else:
-        daily = daily.with_columns(exit_cost_norm=pl.lit(0.0))
 
     return daily.select(
         [
@@ -949,6 +989,7 @@ def _compute_cohort_daily_pnl(
             "date",
             "weight",
             "cash_settled",
+            "liquidated",
             "hedge_position",
             "hedge_trade",
             "premium_pnl_norm",

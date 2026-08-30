@@ -441,7 +441,7 @@ def test_a_crossed_quote_before_expiration_is_still_rejected(tmp_path: Path) -> 
         _load_option_lifecycle(cohorts, raw_dir)
 
 
-def test_supplied_lifecycle_cannot_drop_cash_settlement(tmp_path: Path) -> None:
+def test_supplied_lifecycle_cannot_drop_the_end_of_a_position(tmp_path: Path) -> None:
     raw_dir = tmp_path / "raw"
     _write_raw_options(raw_dir)
     cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
@@ -449,7 +449,7 @@ def test_supplied_lifecycle_cannot_drop_cash_settlement(tmp_path: Path) -> None:
         pl.col("date") < pl.col("expiration")
     )
 
-    with pytest.raises(ValueError, match="settle every selected contract"):
+    with pytest.raises(ValueError, match="end every selected contract"):
         _compute_cohort_daily_pnl(
             cohorts,
             lifecycle,
@@ -1014,15 +1014,20 @@ def _two_names() -> tuple[pl.DataFrame, pl.DataFrame]:
     return predictions, contract_returns
 
 
-def test_a_contract_ended_by_a_corporate_action_is_still_entered(tmp_path: Path) -> None:
-    """The position is opened and marked out where the quotes stop, not withheld.
+def test_a_contract_ended_by_a_corporate_action_is_liquidated_not_settled(
+    tmp_path: Path,
+) -> None:
+    """The position is opened, then bought back where the quotes stop. It is not withheld.
 
     A outscores B and its contract stops being quoted before expiration, which is what a
     corporate action leaves in this chain: the position continues under an adjusted strike the
     slice does not carry. Withholding the position would condition the realized portfolio on an
     event nobody knew about at entry and would throw away the P&L it earned before that event.
-    So it is entered, and it settles on the last session both legs were quoted on - which is
-    what a holder who cannot follow the adjustment can actually do.
+
+    What it is *not* is a cash settlement. Settlement happens at expiration, at intrinsic,
+    against no counterparty. This is a trade against the last mark the chain carried, and the
+    accounting has to charge it as one - which is the distinction the previous version of this
+    test did not draw and the one the gate objected to.
     """
     raw_dir = tmp_path / "raw"
     _chain_with_a_terminated_contract(raw_dir)
@@ -1032,9 +1037,37 @@ def test_a_contract_ended_by_a_corporate_action_is_still_entered(tmp_path: Path)
     assert cohorts.get_column("symbol").to_list() == ["A"]
 
     lifecycle = _load_option_lifecycle(cohorts, raw_dir)
-    settled = lifecycle.filter(pl.col("cash_settled"))
-    assert settled.get_column("date").to_list() == [date(2024, 1, 9)]
-    assert settled.get_column("date").item() < settled.get_column("expiration").item()
+    ended = lifecycle.filter(pl.col("liquidated"))
+    assert ended.get_column("date").to_list() == [date(2024, 1, 9)]
+    assert ended.get_column("date").item() < ended.get_column("expiration").item()
+    # Nothing reached expiry, so nothing settled.
+    assert lifecycle.filter(pl.col("cash_settled")).is_empty()
+
+
+def test_a_liquidated_contract_pays_the_exit_spread(tmp_path: Path) -> None:
+    """A buy-to-close against the last quoted mark costs the spread, like any other exit.
+
+    Marking it out at the midpoint for free was the defect: it made a position the market
+    stopped quoting cheaper to leave than one the strategy chose to leave, which is backwards.
+    """
+    raw_dir = tmp_path / "raw"
+    _chain_with_a_terminated_contract(raw_dir)
+    predictions, contract_returns = _two_names()
+
+    cohorts = _select_cohorts(predictions, contract_returns, top_k=1, raw_options_dir=raw_dir)
+    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
+    daily = _compute_cohort_daily_pnl(
+        cohorts,
+        lifecycle,
+        delta_hedge=False,
+        hedge_spread_bps=0.0,
+        equity_commission_per_share=0.0,
+        option_commission_per_contract=0.0,
+        delta_threshold=0.1,
+    )
+    charged = daily.filter(pl.col("exit_cost_norm") > 0.0)
+    assert charged.get_column("date").to_list() == [date(2024, 1, 9)]
+    assert charged.get_column("liquidated").to_list() == [True]
 
 
 def test_a_corporate_action_does_not_reweight_the_names_beside_it(tmp_path: Path) -> None:
