@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import json
 import re
-import sqlite3
-from contextlib import closing
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
@@ -24,11 +21,7 @@ from case_studies.utils.backtest_presets import (
     strategy_view,
 )
 from case_studies.utils.backtest_runner import precompute_weights, run_backtest
-from case_studies.utils.conformal import (
-    compute_holdout_conformal_widths,
-    ensure_conformal_calibration_identity,
-    holdout_conformal_embargo_steps,
-)
+from case_studies.utils.conformal import ensure_conformal_calibration_identity
 from case_studies.utils.registry import backtest_hash_from_parts, canonical_json, compute_hash
 from case_studies.utils.sweep_config import get_allocator_lookback
 
@@ -225,16 +218,6 @@ class Strategy:
     min_weight_change: float | None = None
     min_trade_value: float | None = None
 
-    def _active_lock_record(self) -> dict[str, Any]:
-        db_path = self.study.root / "run_log" / "registry.db"
-        with closing(sqlite3.connect(db_path)) as db:
-            row = db.execute(
-                "SELECT lock_json FROM research_locks WHERE state = 'LOCKED' LIMIT 1"
-            ).fetchone()
-        if row is None:
-            raise ValueError("holdout strategy execution requires a LOCKED research lock")
-        return json.loads(row[0])
-
     def __post_init__(self) -> None:
         if self.prediction.study != self.study:
             raise ValueError("prediction belongs to another study")
@@ -245,20 +228,11 @@ class Strategy:
                 raise ValueError("decision artifact belongs to another study")
             if tuple(self.decision.spec["prediction_hashes"]) != (self.prediction.hash,):
                 raise ValueError("decision artifact must declare exactly the selected prediction")
-        prediction_record = self.prediction.registry_record()
-        split = prediction_record["split"]
-        if split == "validation":
-            return
-        if split != "holdout" or self.prediction.execution_tier != "canonical":
-            raise ValueError("strategy execution requires validation or locked holdout predictions")
-        lock_record = self._active_lock_record()
-        matches_lock = (
-            prediction_record["training_hash"] == lock_record.get("holdout_training_hash")
-            and prediction_record["checkpoint_kind"] == lock_record.get("checkpoint_kind")
-            and prediction_record["checkpoint_value"] == lock_record.get("checkpoint_value")
-        )
-        if not matches_lock:
-            raise ValueError("holdout prediction does not match the locked retraining contract")
+        split = self.prediction.registry_record()["split"]
+        if split not in {"validation", "holdout"}:
+            raise ValueError(
+                f"strategy execution requires validation or holdout predictions, got {split!r}"
+            )
 
     @property
     def split(self) -> Literal["validation", "holdout"]:
@@ -347,7 +321,7 @@ class Strategy:
     def resolve(self, *, prices: pl.DataFrame | None = None) -> dict[str, Any]:
         self.study.activate(ExecutionTier(self.prediction.execution_tier))
         if self.split == "holdout" and prices is not None:
-            raise ValueError("locked holdout strategy must load canonical holdout prices")
+            raise ValueError("holdout strategy must load canonical holdout prices")
         case_config = get_backtest_config(self.study.case_study)
         reader_supplied = prices is not None
         resolved_prices = prices
@@ -461,14 +435,49 @@ class Strategy:
                 "engine_key": "symbol",
                 "mapping": "one_to_one_at_backtest_boundary",
             }
-        resolved = ensure_conformal_calibration_identity(spec)
-        if self.split == "holdout":
-            from .lifecycle import _locked_strategy_projection
+        return ensure_conformal_calibration_identity(spec)
 
-            locked = self._active_lock_record()["strategy_spec"]
-            if _locked_strategy_projection(resolved) != _locked_strategy_projection(locked):
-                raise ValueError("holdout strategy does not match the locked validation strategy")
-        return resolved
+    def _require_validation_calibrated_widths(self, spec: dict[str, Any]) -> None:
+        """Refuse a conformal holdout whose widths were not calibrated on validation residuals.
+
+        A conformal allocator sizes by an interval width, and a width is a quantile of the
+        residuals it was calibrated on. Calibrating it on the holdout's own residuals sizes
+        positions using the outcome being evaluated, which is the one thing the holdout has to
+        be free of.
+
+        The check is needed because the absence of the artifact is not a safe state:
+        ``load_conformal_widths`` auto-generates from the prediction set it is asked about when
+        the file is missing, so an unwritten holdout would silently self-calibrate rather than
+        fail. ``compute_holdout_conformal_widths`` stamps ``fold_id = -1`` on what it writes, and
+        that is the only marker distinguishing widths taken from validation residuals from widths
+        taken from the holdout's own - so it is what is checked, rather than mere existence.
+        """
+        if self.split != "holdout":
+            return
+        allocation = spec.get("strategy", {}).get("allocation") or {}
+        if allocation.get("method") != "conformal_weighted":
+            return
+        widths_path = (
+            self.study.root
+            / "run_log"
+            / "predictions"
+            / self.prediction.hash
+            / "conformal_widths.parquet"
+        )
+        if not widths_path.is_file():
+            raise ValueError(
+                f"conformal holdout {self.prediction.hash} has no widths artifact. Call "
+                "case_studies.utils.conformal.compute_holdout_conformal_widths with the "
+                "validation prediction hash before running the backtest; letting the allocator "
+                "load them would calibrate on the holdout's own residuals."
+            )
+        folds = set(pl.read_parquet(widths_path).get_column("fold_id").unique().to_list())
+        if folds != {-1}:
+            raise ValueError(
+                f"conformal holdout {self.prediction.hash} carries widths with fold_id {sorted(folds)}, "
+                "which means they were calibrated on the holdout's own residuals rather than on "
+                "validation. Recompute with compute_holdout_conformal_widths."
+            )
 
     def _funding_rates(self, prices: pl.DataFrame) -> pl.DataFrame | None:
         if self.study.case_study != "crypto_perps_funding":
@@ -655,18 +664,7 @@ class Strategy:
         )
         case_config = get_backtest_config(self.study.case_study)
         spec = self._build_spec(resolved_prices, case_config, contract_specs)
-        allocation = spec.get("strategy", {}).get("allocation", {})
-        if self.split == "holdout" and allocation.get("method") == "conformal_weighted":
-            lock_record = self._active_lock_record()
-            compute_holdout_conformal_widths(
-                self.study.case_study,
-                lock_record["prediction_hash"],
-                self.prediction.hash,
-                alpha=float(allocation.get("alpha", 0.2)),
-                min_calibration_n=int(allocation["min_calibration_n"]),
-                embargo_steps=holdout_conformal_embargo_steps(self.study.case_study, self.label),
-                write=True,
-            )
+        self._require_validation_calibrated_widths(spec)
         tier = ExecutionTier(self.prediction.execution_tier)
         self.study.activate(tier)
         decision_weights = self._decision_weights(resolved_prices)

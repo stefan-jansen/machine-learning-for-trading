@@ -800,50 +800,52 @@ def test_selection_catalog_rejects_a_candidate_the_catalog_does_not_describe(
         research_workflow.selection_catalog(study, members)
 
 
-def test_holdout_evidence_is_empty_until_the_lifecycle_is_locked(tmp_path: Path) -> None:
+def test_holdout_evidence_is_empty_before_a_holdout_is_registered(tmp_path: Path) -> None:
     study = _study(tmp_path)
 
     assert research_workflow.holdout_evidence(study).is_empty()
 
 
-def test_holdout_evidence_reports_the_lock_and_its_single_evaluation(tmp_path: Path) -> None:
+def test_holdout_evidence_reports_every_registered_holdout_lineage(tmp_path: Path) -> None:
+    """Two generations on the window are two rows, not one the query picks.
+
+    The registry is append-only and a case study that re-ran its holdout under a different
+    configuration holds both. Resolving that silently would let a reader quote whichever
+    number they preferred without knowing there was a choice, so every lineage is listed.
+    """
     study = _study(tmp_path)
-    lock_record = {
-        "candidate_set_hash": "set-1",
-        "label": "fwd_ret_5d",
-        "checkpoint_kind": "epoch",
-        "checkpoint_value": 20,
-        "validation_backtest_hash": "bt-validation",
-    }
     with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        for training_hash, config_name in (("tr-a", "lasso_f0.85"), ("tr-b", "ridge_f0.90")):
+            db.execute(
+                "INSERT INTO training_runs (training_hash, spec_json, family, config_name, "
+                "label, created_at) VALUES (?,?,?,?,?,?)",
+                (training_hash, "{}", "linear", config_name, "fwd_ret_5d", "2026-08-15T00:00:00Z"),
+            )
+        for prediction_hash, training_hash in (("pr-a", "tr-a"), ("pr-b", "tr-b")):
+            db.execute(
+                "INSERT INTO prediction_sets (prediction_hash, training_hash, split, "
+                "checkpoint_kind, checkpoint_value, created_at) VALUES (?,?,?,?,?,?)",
+                (prediction_hash, training_hash, "holdout", "epoch", 20, "2026-08-15T00:00:00Z"),
+            )
         db.execute(
-            "INSERT INTO research_locks (lock_hash, lock_json, state, created_at) VALUES (?,?,?,?)",
-            ("lock-1", json.dumps(lock_record), "LOCKED", "2026-08-15T00:00:00Z"),
+            "INSERT INTO backtest_runs (backtest_hash, prediction_hash, started_at, created_at) "
+            "VALUES (?,?,?,?)",
+            ("bt-a", "pr-a", "2026-08-15T01:00:00Z", "2026-08-15T01:00:00Z"),
+        )
+        db.execute(
+            "INSERT INTO backtest_metrics (backtest_hash, sharpe, computed_at) VALUES (?,?,?)",
+            ("bt-a", 0.75, "2026-08-15T01:00:00Z"),
         )
 
-    pending = research_workflow.holdout_evidence(study)
-    assert pending.height == 1
-    assert pending.item(0, "state") == "LOCKED"
-    assert pending.item(0, "label") == "fwd_ret_5d"
-    assert pending.item(0, "checkpoint_value") == 20
-    assert pending.item(0, "holdout_backtest_hash") is None
-
-    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
-        db.execute(
-            "INSERT INTO holdout_evaluations (lock_hash, holdout_training_hash, "
-            "holdout_prediction_hash, holdout_backtest_hash, evaluated_at) VALUES (?,?,?,?,?)",
-            ("lock-1", "tr-holdout", "pr-holdout", "bt-holdout", "2026-08-15T01:00:00Z"),
-        )
-        db.execute(
-            "UPDATE research_locks SET state = ? WHERE lock_hash = ?",
-            ("HOLDOUT_EVALUATED", "lock-1"),
-        )
-
-    evaluated = research_workflow.holdout_evidence(study)
-    assert evaluated.height == 1
-    assert evaluated.item(0, "state") == "HOLDOUT_EVALUATED"
-    assert evaluated.item(0, "holdout_backtest_hash") == "bt-holdout"
-    assert evaluated.item(0, "evaluated_at") == "2026-08-15T01:00:00Z"
+    evidence = research_workflow.holdout_evidence(study)
+    assert evidence.height == 2
+    by_prediction = {row["prediction_hash"]: row for row in evidence.iter_rows(named=True)}
+    assert by_prediction["pr-a"]["backtest_hash"] == "bt-a"
+    assert by_prediction["pr-a"]["sharpe"] == 0.75
+    assert by_prediction["pr-a"]["config_name"] == "lasso_f0.85"
+    assert by_prediction["pr-a"]["checkpoint_value"] == 20
+    # Registered, not yet backtested: the row is still reported, with the backtest absent.
+    assert by_prediction["pr-b"]["backtest_hash"] is None
 
 
 def test_official_model_catalog_forwards_the_population_it_supersedes(

@@ -1239,12 +1239,12 @@ def selection_catalog(study: Study, members: Iterable[str]) -> pl.DataFrame:
 
 
 def holdout_evidence(study: Study) -> pl.DataFrame:
-    """Return the research lock and the one holdout evaluation it authorizes, if any.
+    """Return every holdout lineage the registry holds: prediction set, model, backtest.
 
-    The lock is what makes the holdout usable once: it records the candidate set, the
-    selected validation backtest and the retraining contract before any holdout artifact
-    exists. Reading it here is how the analysis shows which configuration the holdout ran
-    on without being able to choose a different one.
+    The holdout runs the configuration selected on the validation backtests, and this reads
+    back what was actually registered for it. Every row is listed rather than one preferred,
+    because a registry that holds two holdout generations is a fact a reader has to be able to
+    see rather than something a query should quietly resolve.
     """
     database = study.root / "run_log" / "registry.db"
     if not database.is_file():
@@ -1254,30 +1254,43 @@ def holdout_evidence(study: Study) -> pl.DataFrame:
             row[0]
             for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
         }
-        if "research_locks" not in names:
+        if "prediction_sets" not in names:
             return pl.DataFrame()
         rows = db.execute(
-            "SELECT l.lock_hash, l.state, l.lock_json, e.holdout_training_hash, "
-            "e.holdout_prediction_hash, e.holdout_backtest_hash, e.evaluated_at "
-            "FROM research_locks l "
-            "LEFT JOIN holdout_evaluations e ON e.lock_hash = l.lock_hash"
+            "SELECT p.prediction_hash, p.training_hash, p.checkpoint_kind, p.checkpoint_value, "
+            "t.family, t.config_name, t.label, b.backtest_hash, bm.sharpe, b.started_at "
+            "FROM prediction_sets p "
+            "JOIN training_runs t ON t.training_hash = p.training_hash "
+            "LEFT JOIN backtest_runs b ON b.prediction_hash = p.prediction_hash "
+            "LEFT JOIN backtest_metrics bm ON bm.backtest_hash = b.backtest_hash "
+            "WHERE p.split = 'holdout' "
+            "ORDER BY p.prediction_hash, b.backtest_hash"
         ).fetchall()
-    records = []
-    for lock_hash, state, lock_json, training, prediction, backtest, evaluated_at in rows:
-        lock = json.loads(lock_json)
-        records.append(
+    return pl.DataFrame(
+        [
             {
-                "lock_hash": lock_hash,
-                "state": state,
-                "label": lock.get("label"),
-                "checkpoint_kind": lock.get("checkpoint_kind"),
-                "checkpoint_value": lock.get("checkpoint_value"),
-                "candidate_set_hash": lock.get("candidate_set_hash"),
-                "validation_backtest_hash": lock.get("validation_backtest_hash"),
-                "holdout_training_hash": training,
-                "holdout_prediction_hash": prediction,
-                "holdout_backtest_hash": backtest,
-                "evaluated_at": evaluated_at,
+                "prediction_hash": prediction_hash,
+                "training_hash": training_hash,
+                "checkpoint_kind": checkpoint_kind,
+                "checkpoint_value": checkpoint_value,
+                "family": family,
+                "config_name": config_name,
+                "label": label,
+                "backtest_hash": backtest_hash,
+                "sharpe": sharpe,
+                "registered_at": started_at,
             }
-        )
-    return pl.DataFrame(records)
+            for (
+                prediction_hash,
+                training_hash,
+                checkpoint_kind,
+                checkpoint_value,
+                family,
+                config_name,
+                label,
+                backtest_hash,
+                sharpe,
+                started_at,
+            ) in rows
+        ]
+    )

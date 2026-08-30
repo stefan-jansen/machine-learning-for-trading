@@ -20,7 +20,6 @@ import pandas as pd
 import pytest
 
 from case_studies.research.holdout import build_holdout_cv
-from case_studies.research.lifecycle import _locked_training_spec
 from utils.artifact_specs import load_setup_config
 
 # Newest first, which is the order generate_cv_splits returns and the order the trap depends on:
@@ -223,33 +222,24 @@ def test_folds_missing_a_boundary_are_named_rather_than_read_as_none() -> None:
         build_holdout_cv(spec, case_study="us_firm_characteristics", timeline=MONTH_ENDS)
 
 
-def test_the_derived_interval_satisfies_the_lock_contract_it_will_be_checked_against() -> None:
-    """The derivation is only correct if ``lifecycle.lock`` accepts what it produces.
+def test_the_derived_interval_is_a_new_one_and_not_the_validation_interval() -> None:
+    """The derivation is only a retrain if the interval it produces is a different interval.
 
-    ``_locked_training_spec`` is the real gate: it requires the holdout spec to differ from the
-    selected validation spec in the CV interval and in nothing else, and to carry an explicit,
-    distinct interval. Asserting against it rather than against a restatement of the derivation
-    is what makes this a test of the contract instead of a mirror of the code.
+    The training identity is computed over the CV block, so a derivation that returned the
+    validation interval unchanged would register the holdout under the validation training hash
+    and serve the already-fitted model from the registry. The refit would not happen, and
+    nothing downstream would say so - the prediction set would carry ``split='holdout'`` and a
+    model chosen while looking at the folds it is being judged against. Asserting that the
+    identity moves is what makes that failure loud.
     """
     validation = _validation_spec()
-    holdout = deepcopy(validation)
-    holdout["computation"]["cv"] = build_holdout_cv(
+    holdout_cv = build_holdout_cv(
         validation, case_study="us_firm_characteristics", timeline=MONTH_ENDS
     )
 
-    locked = _locked_training_spec(validation, holdout)
-
-    assert locked["computation"]["cv"]["split"] == "holdout"
-    assert locked["computation"]["cv"]["identity"] != validation["computation"]["cv"]["identity"]
-
-
-def test_the_lock_refuses_a_holdout_interval_identical_to_the_validation_one() -> None:
-    """The failure direction of the test above: an unchanged interval must not pass."""
-    validation = _validation_spec()
-    unchanged = deepcopy(validation)
-
-    with pytest.raises(ValueError, match="explicit, distinct CV interval"):
-        _locked_training_spec(validation, unchanged)
+    assert holdout_cv["split"] == "holdout"
+    assert holdout_cv["identity"] != validation["computation"]["cv"]["identity"]
+    assert holdout_cv["folds"] != validation["computation"]["cv"]["folds"]
 
 
 class _TemporalStub:

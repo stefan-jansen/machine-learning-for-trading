@@ -268,23 +268,6 @@ CREATE TABLE IF NOT EXISTS candidate_set_members (
     UNIQUE (set_hash, member_hash)
 );
 
-CREATE TABLE IF NOT EXISTS research_locks (
-    lock_hash  TEXT PRIMARY KEY,
-    lock_json  TEXT NOT NULL,
-    state      TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_research_singleton ON research_locks((1));
-
-CREATE TABLE IF NOT EXISTS holdout_evaluations (
-    lock_hash               TEXT PRIMARY KEY REFERENCES research_locks(lock_hash),
-    holdout_training_hash   TEXT NOT NULL,
-    holdout_prediction_hash TEXT NOT NULL,
-    holdout_backtest_hash   TEXT NOT NULL,
-    fitted_state_digest     TEXT,
-    evaluated_at            TEXT NOT NULL
-);
 
 CREATE TABLE IF NOT EXISTS execution_attempts (
     attempt_id          TEXT PRIMARY KEY,
@@ -348,15 +331,6 @@ CREATE TABLE IF NOT EXISTS decision_artifacts (
     created_at          TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS holdout_staging (
-    lock_hash               TEXT PRIMARY KEY REFERENCES research_locks(lock_hash),
-    holdout_training_hash   TEXT NOT NULL,
-    holdout_prediction_hash TEXT NOT NULL,
-    holdout_backtest_hash   TEXT NOT NULL,
-    fitted_state_digest     TEXT,
-    lineage_digest          TEXT NOT NULL,
-    staged_at               TEXT NOT NULL
-);
 """
 
 
@@ -736,10 +710,6 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
         for column, sql_type in backtest_columns.items():
             if column not in cols:
                 db.execute(f"ALTER TABLE backtest_runs ADD COLUMN {column} {sql_type}")
-
-    for table in ("holdout_staging", "holdout_evaluations"):
-        if table in tables and not _table_has_column(db, table, "fitted_state_digest"):
-            db.execute(f"ALTER TABLE {table} ADD COLUMN fitted_state_digest TEXT")
 
     # The number of successful placebo draws decides whether the refutation could have
     # rejected at all: the plus-one correction floors the p-value at 1 / (n + 1), so at
