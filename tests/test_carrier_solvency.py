@@ -34,7 +34,8 @@ def _registry(
         db.executescript(
             """
             CREATE TABLE training_runs (
-                training_hash TEXT PRIMARY KEY, config_name TEXT, family TEXT, label TEXT
+                training_hash TEXT PRIMARY KEY, config_name TEXT, family TEXT, label TEXT,
+                spec_json TEXT
             );
             CREATE TABLE prediction_sets (
                 prediction_hash TEXT PRIMARY KEY, training_hash TEXT, split TEXT,
@@ -47,7 +48,7 @@ def _registry(
                 backtest_hash TEXT PRIMARY KEY, sharpe REAL, max_drawdown REAL
             );
             CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL);
-            INSERT INTO training_runs VALUES ('train_us', 'owner_config', 'gbm', 'fwd_ret_1m');
+            INSERT INTO training_runs VALUES ('train_us', 'owner_config', 'gbm', 'fwd_ret_1m', NULL);
             INSERT INTO prediction_sets VALUES ('pred_us', 'train_us', 'validation', NULL, NULL);
             INSERT INTO fold_metrics VALUES ('pred_us', 0.02);
             """

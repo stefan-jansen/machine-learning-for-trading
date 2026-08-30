@@ -2577,7 +2577,7 @@ case_studies/us_firm_characteristics/13_risk_management:
     MAX_SYMBOLS: 5
     TOP_N_COMBOS: 1
   timeout: 600
-case_studies/us_firm_characteristics/15_strategy_analysis:
+case_studies/us_firm_characteristics/17_strategy_analysis:
   skip: true
   skip_reason: "Test-data load_firm_characteristics() returns 80 firms/day; the NB's liquidity-profile section requires >=100 firms/day. The notebook reads the registry and the feature panel, not the price panel, so no parameter reduces it - it needs an expanded test-data fixture (>=100 firms)."
 data/equities/market/microstructure/dataset_card:
