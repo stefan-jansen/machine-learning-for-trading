@@ -52,14 +52,18 @@ warnings.filterwarnings("ignore")
 from case_studies.research import open_study
 from case_studies.research.holdout import build_holdout_training_spec
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
-from case_studies.utils.backtest_presets import ensure_backtest_spec, strategy_view
-from case_studies.utils.backtest_runner import run_backtest
+from case_studies.utils.backtest_presets import (
+    ensure_backtest_spec,
+    serializable_backtest_spec,
+    strategy_view,
+)
+from case_studies.utils.backtest_runner import resolved_allow_short_selling, run_backtest
 from case_studies.utils.conformal import (
     compute_holdout_conformal_widths,
     ensure_conformal_calibration_identity,
     holdout_conformal_embargo_steps,
 )
-from case_studies.utils.registry import read_predictions
+from case_studies.utils.registry import backtest_run_status, read_predictions
 from case_studies.utils.strategy_analysis import resolve_solvent_carrier
 from utils.paths import get_case_study_dir
 
@@ -261,14 +265,34 @@ if allocation.get("method") == "conformal_weighted":
 # The test is the backtest hash, not a field-by-field comparison. Every input that changes
 # the result is in that hash by construction, and a guard naming fields instead has to be
 # right about all of them - it was written first as a `strategy` comparison and missed the
-# cost configuration and the embargo identity sitting outside that block.
+# cost configuration and the calibration identity, both of which sit outside that block.
 #
-# Which means the run has to happen before the question can be asked, since the hash is
-# what the run returns. So a refused run is undone: the row it registered is deleted and
-# the registry is left exactly as it was found.
-before = {
-    row["backtest_hash"] for row in _registered_holdout_backtests(CASE_DIR, HOLDOUT_PREDICTION_HASH)
-}
+# The hash is resolved before anything runs, so nothing is evaluated on the holdout before
+# the question is answered. It comes from `backtest_run_status`, which is the call the
+# runner itself makes to decide whether a spec is already registered - asking it is the
+# only way to be sure the guard and the runner agree about identity, and reconstructing the
+# hash from parts here did not: it predicted f23ff90cf518 against the runner's b2acfd5420c8.
+# The run asserts the two still agree afterwards, because a guard that had quietly stopped
+# predicting the hash would let everything through while looking correct.
+spec["backtest_config"]["account"]["allow_short_selling"] = resolved_allow_short_selling(spec, None)
+prospective_hash = backtest_run_status(CASE_STUDY_ID, HOLDOUT_PREDICTION_HASH, spec).backtest_hash
+superseded_backtests = sorted(
+    {
+        row["backtest_hash"]
+        for row in _registered_holdout_backtests(CASE_DIR, HOLDOUT_PREDICTION_HASH)
+    }
+    - {prospective_hash}
+)
+if superseded_backtests and not REPLACE_HOLDOUT:
+    raise RuntimeError(
+        "the holdout window already carries a backtest of a different configuration: "
+        + ", ".join(superseded_backtests)
+        + f". This run would register {prospective_hash} and has not run. Set "
+        "REPLACE_HOLDOUT=True to discard the earlier one, or leave the selection where it was."
+    )
+for backtest_hash in superseded_backtests:
+    print(f"REPLACING holdout backtest {backtest_hash}")
+    _delete_holdout_backtest(CASE_DIR, backtest_hash)
 
 result = run_backtest(
     CASE_STUDY_ID,
@@ -281,20 +305,13 @@ result = run_backtest(
     initial_cash=bt_config.initial_cash,
     calendar=bt_config.calendar,
 )
-superseded_backtests = sorted(before - {result.backtest_hash})
-if superseded_backtests and not REPLACE_HOLDOUT:
-    _delete_holdout_backtest(CASE_DIR, result.backtest_hash)
+if result.backtest_hash != prospective_hash:
     raise RuntimeError(
-        "the holdout window already carries a backtest of a different configuration: "
-        + ", ".join(superseded_backtests)
-        + f". This run would add {result.backtest_hash}; it has been removed again and the "
-        "registry is as it was. Set REPLACE_HOLDOUT=True to discard the earlier one, or "
-        "leave the selection where it was."
+        f"the guard predicted {prospective_hash} and the runner registered "
+        f"{result.backtest_hash}. The guard decides what may run on the holdout, so a guard "
+        "that no longer reproduces the runner's identity is not a smaller problem than the "
+        "one it was written for."
     )
-for backtest_hash in superseded_backtests:
-    print(f"REPLACING holdout backtest {backtest_hash}")
-    _delete_holdout_backtest(CASE_DIR, backtest_hash)
-
 print(f"Holdout backtest: {result.backtest_hash}")
 
 # %% [markdown]
