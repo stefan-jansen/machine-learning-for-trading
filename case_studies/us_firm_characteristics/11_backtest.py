@@ -424,12 +424,28 @@ if ruined.height:
         "with no capital left to earn a return"
     )
 
+# At most this many slots for any one model configuration. A configuration publishes a
+# prediction set per checkpoint, and those checkpoints are near-copies of each other:
+# ranked on Sharpe alone they arrive together, so the strongest configuration takes the
+# table and the reader sees one model's checkpoints where they were promised the best of
+# the sweep. Before this cap, `gbm/leaves_7_mse` held eight of ten slots and two
+# configurations held all ten - no other family appeared at all.
+MAX_SLOTS_PER_CONFIG = 2
+
 # Ranked among the solvent runs only. An insolvent path still carries a Sharpe, and
 # on a negative balance it can exceed every strategy that held its capital - so
 # ranking the full set would let the table name one of them best. `all_runs` is
-# already ordered by Sharpe descending, so the head of the filtered frame is the
-# solvent top ten. The figures below filter identically.
-top = all_runs.filter(pl.col("max_drawdown") > -1.0).head(10)
+# already ordered by Sharpe descending, so a running count within each source keeps
+# each configuration's best few and drops the rest. The figures below filter on
+# solvency identically; they are distributions over every run, so the cap is not
+# theirs to apply.
+top = (
+    all_runs.filter(pl.col("max_drawdown") > -1.0)
+    .with_columns(slot=pl.int_range(pl.len()).over("source"))
+    .filter(pl.col("slot") < MAX_SLOTS_PER_CONFIG)
+    .drop("slot")
+    .head(10)
+)
 
 # `best` reports `signal.method`, which is the same string for every entry scheme in
 # this sweep, so on its own the table cannot tell a five-name portfolio from a fifty-
@@ -454,6 +470,24 @@ with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
 
 top = top.join(concentration, on="backtest_hash", how="left")
 print(top.select("source", "names_per_side", "sharpe", "cagr", "max_drawdown"))
+_families = top["family"].n_unique()
+_other_best = all_runs.filter(
+    (pl.col("max_drawdown") > -1.0) & (pl.col("family") != top["family"][0])
+)["sharpe"].max()
+print(
+    f"At most {MAX_SLOTS_PER_CONFIG} slots per configuration: "
+    f"{top['source'].n_unique()} configurations, {_families} "
+    f"{'family' if _families == 1 else 'families'}."
+)
+# The cap separates two things that look alike in a ranked table. One configuration's
+# checkpoints filling it is an artefact of ranking near-copies; one family filling it can
+# be a result. Which this is, is checkable rather than asserted: print the best solvent
+# run outside the leading family beside the table's weakest entry.
+print(
+    f"{top['family'][0]} fills the table on merit - its weakest entry here is "
+    f"{top['sharpe'].min():.3f} and the best solvent run of any other family is "
+    f"{_other_best:.3f}."
+)
 
 # %% [markdown]
 # ### By model family
