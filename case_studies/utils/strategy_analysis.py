@@ -247,8 +247,10 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
 
     Cross-stage validation rank-1 is selected over stage IN (signal,
     allocation, risk_overlay) with LABEL_RESTRICTIONS applied where defined.
-    When a ``walk_forward_v2`` conformal candidate is present, every candidate
-    is re-ranked on exact common timestamp support. Holdout match is by
+    When a conformal candidate is present at any calibration version, every
+    candidate - conformal or not - is re-ranked on exact common timestamp
+    support, because a conformal allocator abstains until it is calibrated and
+    books zeros over the abstention. Holdout match is by
     training_hash on the rank-1's prediction set. Use this in every strategy_analysis notebook
     rather than hardcoding hashes - hardcoded hashes go stale every time the
     sweep is rebuilt, and queries that forget LABEL_RESTRICTIONS surface the
@@ -345,30 +347,28 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
     finally:
         db.close()
 
-    def _is_strict_conformal(row: tuple[Any, ...]) -> bool:
-        # `walk_forward_v2` is a literal on purpose, and must not be replaced with
-        # CALIBRATION_VERSION. v2 is the calibration that abstains on the earliest fold, so a
-        # v2 conformal candidate covers fewer periods than the allocators it is ranked against
-        # and the whole field has to be re-ranked on common support. v3 calibrates from the
-        # fold's own elapsed history and does not abstain, so a v3 candidate needs no such
-        # rescue. Tracking the constant would switch the guard off for every case study still
-        # holding v2 widths - which is the moment it is load-bearing.
+    def _is_conformal(row: tuple[Any, ...]) -> bool:
+        # Every conformal calibration abstains, and the version decides only for how long.
+        # `walk_forward_v2` sits out the earliest fold entirely, because it calibrates from
+        # whole earlier folds and the earliest has none. `walk_forward_v3` calibrates from the
+        # fold's own elapsed history, which shortens the abstention to a warm-up - three
+        # decisions on an 8-hourly grid - and does not remove it. A candidate that holds
+        # nothing for its first N decisions books N returns of exactly zero and is ranked
+        # against allocators measured over the full span, so the field has to be re-ranked on
+        # common support either way.
+        #
+        # Reading the version here decided two things and was right about neither. As the
+        # trigger it switched the alignment off for a field of v3 candidates, which still need
+        # it. As the eligibility test it discarded every v3 conformal candidate from a field
+        # that also held a v2 one, which removes a live result from the comparison rather than
+        # aligning it. The version is now read by neither: the property that matters is that a
+        # conformal candidate is present, and it is asked directly.
         strategy = json.loads(row[8]).get("strategy", {})
         allocation = strategy.get("allocation") or {}
-        return (
-            allocation.get("method") == "conformal_weighted"
-            and allocation.get("calibration_version") == "walk_forward_v2"
-        )
+        return allocation.get("method") == "conformal_weighted"
 
-    strict_conformal_present = any(_is_strict_conformal(row) for row in candidates)
-    if strict_conformal_present:
-        candidates = [
-            row
-            for row in candidates
-            if (json.loads(row[8]).get("strategy", {}).get("allocation") or {}).get("method")
-            != "conformal_weighted"
-            or _is_strict_conformal(row)
-        ]
+    conformal_present = any(_is_conformal(row) for row in candidates)
+    if conformal_present:
         from case_studies.utils.uncertainty import periods_per_year_from_setup
 
         common_ranking = rank_backtests_on_common_support(
