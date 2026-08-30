@@ -103,7 +103,7 @@ from case_studies.utils.strategy_analysis import (
     select_holdout_self_backtest,
     write_strategy_assessment,
 )
-from case_studies.utils.uncertainty import STAGE_SEQUENCE
+from case_studies.utils.uncertainty import STAGE_SEQUENCE, descends_from
 from utils.paths import get_case_study_dir, get_output_dir
 
 # %% tags=["parameters"]
@@ -353,6 +353,22 @@ for stage_name in STAGE_SEQUENCE:
 for prev_stage, stage_name in zip(present, present[1:]):
     kind = f"{prev_stage}_leader"
     stage_info = lineage[stage_name]
+    # champion_lineage selects each stage independently, so two entries can be
+    # siblings rather than parent and child. The producer writes a paired row
+    # only where the later stage carries the earlier one's whole strategy
+    # prefix; asking for one it declined to write is normal, and the reason is
+    # worth naming rather than reporting as a missing row.
+    if not descends_from(
+        stage_info.get("_strategy", {}),
+        lineage[prev_stage].get("_strategy", {}),
+        prev_stage,
+    ):
+        print(
+            f"Stage {stage_name}: not paired against {kind} - this run does not "
+            f"descend from the {prev_stage} leader, so the two are siblings and "
+            f"the difference between them is not a stage effect."
+        )
+        continue
     pair = load_paired_metrics(
         CASE_STUDY,
         challenger_hash=stage_info["backtest_hash"],
@@ -373,33 +389,20 @@ for prev_stage, stage_name in zip(present, present[1:]):
     print()
 
 # %% [markdown]
-# Three pipeline transitions are populated for the rank-1 lineage:
+# Read the transitions printed above against the order the backtests run:
+# positions are sized, risk controls are applied to the sized strategy, and
+# costs are charged against the strategy that survives both. Each printed row
+# compares a stage against the leader of the stage before it, so a positive
+# `sharpe_diff` is what that one step added and nothing else.
 #
-# - **signal → allocation**: risk-parity allocation lifts Sharpe from
-#   0.89 (equal-weight top-20) to 1.03 (diff +0.145, CI [−0.097,
-#   +0.422], p=0.27). The CI straddles zero but `prob_challenger_wins`
-#   of 0.886 indicates that risk-parity weighting outperforms equal
-#   weighting under most bootstrap draws — directional evidence even
-#   though the two-sided test does not reject.
-# - **allocation → cost_sensitivity**: re-running the rank-1 allocator
-#   at the cost-stage's 0-bps reference lifts Sharpe from 1.03 to 1.08
-#   (diff +0.046, CI [+0.037, +0.059], p < 0.001). The CI is tight and
-#   excludes zero — this transition reflects the cost regime drop from
-#   the signal/allocation 10-bps baseline to the cost-stage's 0-bps
-#   reference, not a methodological change in sizing.
-# - **cost_sensitivity → risk_overlay**: an MAE-calibrated trailing
-#   stop (`trailing_mae_p25_h20_4p3pct`) raises Sharpe from 1.08 to
-#   1.33 (diff +0.254, CI [−0.272, +0.704], p=0.31). The point
-#   estimate is positive but the CI straddles zero, so the overlay's
-#   contribution is not statistically resolved at the validation-window
-#   sample.
-#
-# The waterfall reads as cumulatively positive, with the
-# allocation→cost-sensitivity transition the only step whose CI
-# excludes zero. The rank-1 lineage carries through the pipeline, but
-# the signal→allocation and cost→risk-overlay choices each sit inside
-# the bootstrap uncertainty band of the prior stage — useful context
-# for the deployment decision in §9.
+# Two readings need care. A confidence interval that straddles zero means the
+# step's contribution is not resolved at this sample - the point estimate still
+# says which way it leaned, and `prob_challenger_wins` says how often it led
+# across bootstrap draws, but neither is a rejection. And a transition reported
+# as siblings rather than a pair is not a gap in the evidence: the two stages
+# were selected independently and the later one does not carry the earlier
+# one's configuration, so their difference mixes the stage with everything else
+# that differs between them, and no paired row is written for it.
 
 # %%
 conc_df = explorer.concentration_curve(TOP_PHASH)

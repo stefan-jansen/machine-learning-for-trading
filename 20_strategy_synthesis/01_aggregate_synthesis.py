@@ -1034,9 +1034,12 @@ print(f"\npaired={len(paired_rows)}/{len(explorers)}, skipped={len(paired_skips)
 # 2. signal rank-1 (holdout) ↔ equal-weight (holdout window)
 # 3. holdout rank-1 ↔ validation rank-1 (same lineage decay; min-length
 #    truncation since the windows are disjoint)
-# 4. allocation rank-1 ↔ signal rank-1 (same window, stage transition)
-# 5. cost-sensitivity rank-1 ↔ allocation rank-1 (same window)
-# 6. risk-overlay rank-1 ↔ cost-sensitivity rank-1 (same window)
+# 4-6. one pair per consecutive stage transition the prediction actually has,
+#    in ``STAGE_SEQUENCE`` order: allocation ↔ signal, risk-overlay ↔
+#    allocation, cost-sensitivity ↔ risk-overlay. A case study that did not
+#    run a stage yields fewer pairs, and a stage that does not carry the
+#    previous stage's configuration yields none for that transition - the two
+#    were selected independently and their difference is not a stage effect.
 #
 # Pair #3 truncates both series to ``min(len(val), len(ho))`` to satisfy
 # ``compute_paired_uncertainty``'s equal-length precondition. The CI is
