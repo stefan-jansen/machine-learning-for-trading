@@ -247,7 +247,7 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
 
     Cross-stage validation rank-1 is selected over stage IN (signal,
     allocation, risk_overlay) with LABEL_RESTRICTIONS applied where defined.
-    When a ``walk_forward_v2`` conformal candidate is present, every candidate
+    When a conformal candidate at the current calibration version is present, every candidate
     is re-ranked on exact common timestamp support. Holdout match is by
     training_hash on the rank-1's prediction set. Use this in every strategy_analysis notebook
     rather than hardcoding hashes - hardcoded hashes go stale every time the
@@ -331,11 +331,16 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
         db.close()
 
     def _is_strict_conformal(row: tuple[Any, ...]) -> bool:
+        # The current calibration, not a literal. Pinning the version here means the
+        # re-ranking silently stops applying the moment the calibration is corrected,
+        # which is exactly when it matters.
+        from case_studies.utils.conformal import CALIBRATION_VERSION
+
         strategy = json.loads(row[8]).get("strategy", {})
         allocation = strategy.get("allocation") or {}
         return (
             allocation.get("method") == "conformal_weighted"
-            and allocation.get("calibration_version") == "walk_forward_v2"
+            and allocation.get("calibration_version") == CALIBRATION_VERSION
         )
 
     strict_conformal_present = any(_is_strict_conformal(row) for row in candidates)
