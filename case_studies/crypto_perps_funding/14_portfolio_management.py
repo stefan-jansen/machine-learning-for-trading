@@ -529,8 +529,10 @@ for label in labels:
         results.filter(
             pl.col("backtest_hash").is_in(admitted.get_column("backtest_hash").implode())
         ),
-        name=f"crypto-signal-allocation-{label}",
-        supersedes=SUPERSEDES.get(label),
+        name=(set_name := f"crypto-signal-allocation-{label}"),
+        # Keyed by label, and also by the full set name, which is what the refusal prints.
+        # Pasting back the name it names is the obvious thing to try, and it used to miss.
+        supersedes=SUPERSEDES.get(set_name) or SUPERSEDES.get(label),
     )
     print(
         f"{members.name}: {len(members.members)} members traded folds {full}; "
