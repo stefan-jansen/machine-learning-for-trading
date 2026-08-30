@@ -307,12 +307,33 @@ def decision_clock() -> pl.DataFrame:
 
 
 CLOCK = decision_clock()
+CLOCK_DTYPE = CLOCK.schema["timestamp"]
+
+
+def on_clock_dtype(frame: pl.DataFrame) -> pl.DataFrame:
+    """One timestamp dtype, so a join on it cannot silently match nothing.
+
+    100 of this case study's 677 prediction artifacts - every `deep_learning` validation set
+    for the two return labels - carry a naive microsecond timestamp where the other 577 carry
+    ms/UTC, because the sequence path round-trips the frame through pandas and pandas drops the
+    zone. The instants are the same. A naive value is therefore read as the UTC it is, rather
+    than the zone being dropped from everything, which would hide the difference; and the
+    replace comes before the cast, because casting a naive column to a zoned dtype converts it
+    instead of stamping it.
+    """
+    dtype = frame.schema["timestamp"]
+    if dtype == CLOCK_DTYPE:
+        return frame
+    stamp = pl.col("timestamp")
+    if getattr(dtype, "time_zone", None) is None:
+        stamp = stamp.dt.replace_time_zone("UTC")
+    return frame.with_columns(stamp.cast(CLOCK_DTYPE))
 
 
 # %%
 def holding_slots(timeline: pl.DataFrame, step: int) -> list[int]:
     """The distinct clock distances between decisions `step` positions apart inside a fold."""
-    located = timeline.join(CLOCK, on="timestamp", how="left")
+    located = on_clock_dtype(timeline).join(CLOCK, on="timestamp", how="left")
     if located.get_column("slot").null_count():
         stray = located.filter(pl.col("slot").is_null()).get_column("timestamp")
         raise RuntimeError(
