@@ -38,14 +38,16 @@
 #
 # **Book Reference:** Chapter 18, Sections 18.2-18.5
 #
-# **Prerequisites:** the Chapter 16 backtest and Chapter 17 allocation notebooks,
-# whose registered runs decide which strategy is swept here.
+# **Prerequisites:** the Chapter 16 backtest, the Chapter 17 allocation notebook and
+# [`13_risk_management`](13_risk_management.ipynb). Cost sensitivity runs last of the
+# selection stages: it sweeps the configuration the case study reports, which is chosen
+# across the baseline, allocation and risk-overlay stages together, so risk management
+# runs before it rather than after.
 
 # %%
 """US Firm Characteristics: Costs."""
 
 import json
-import sqlite3
 import time
 import warnings
 from collections import Counter
@@ -70,20 +72,18 @@ from case_studies.utils.registry import (
     read_predictions,
     resolve_best_backtest_runs,
 )
-from case_studies.utils.sweep_config import get_cost_grid_bps, get_top_n_predictions
+from case_studies.utils.strategy_analysis import resolve_solvent_carrier
+from case_studies.utils.sweep_config import get_cost_grid_bps
 from utils.paths import get_case_study_dir
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_firm_characteristics"
 LABEL = ""
 MAX_SYMBOLS = 0
-TOP_N_COMBOS = None
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 bt_config = get_backtest_config(CASE_STUDY_ID)
-if TOP_N_COMBOS is None:
-    TOP_N_COMBOS = get_top_n_predictions(CASE_STUDY_ID, "cost_sensitivity")
 if not LABEL:
     LABEL = bt_config.primary_label
 
@@ -94,103 +94,64 @@ COST_GRID_BPS = get_cost_grid_bps(CASE_STUDY_ID)
 # %% [markdown]
 # ## 1. Which run is swept
 #
-# The sweep starts from the highest-Sharpe validation run across *both* the
-# equal-weight baseline and the allocation stage. Both are candidates because an
-# allocator is an alternative to equal weighting rather than an improvement on it by
-# construction: where every allocator lands below the equal-weight parent it was built
-# from, an allocation-only rule would carry forward a strategy the previous notebook
-# measured as worse than doing nothing, and would then report that strategy's cost
-# sensitivity in place of the one a reader would trade.
+# The sweep runs one configuration: the one this case study reports. That is the
+# validation rank-1 `resolve_canonical_rank1_lineage` selects, and it is read here through
+# `resolve_solvent_carrier` rather than ranked again.
 #
-# Which stage the selected run came from is therefore printed rather than assumed.
-
+# Ranking it again is what this notebook used to do, and a second ranking is not the same
+# selection even when it names the same stages. The canonical resolver re-ranks
+# `walk_forward_v2` conformal candidates on exact common timestamp support and applies
+# `LABEL_RESTRICTIONS`, `UNIVERSE_RESTRICTIONS` and `CARRIER_PINS`; a Sharpe ordering beside
+# it does none of those. Where the two disagreed, this notebook would sweep a strategy the
+# case study does not report, and [`17_strategy_analysis`](17_strategy_analysis.ipynb) would
+# find no cost rows for the one it does.
+#
+# `resolve_solvent_carrier` also refuses a carrier whose equity reached zero. This book is
+# long-short with no margin call, so a run can compound through zero and carry a Sharpe
+# computed on a balance that no longer exists - and such a Sharpe can top a ranking. It
+# raises rather than quietly sweeping the runner-up, because substituting a different
+# configuration is the divergence the shared resolver exists to remove.
+#
+# Which stage the carrier came from is printed rather than assumed.
 
 # %%
-def _solvent_hashes(hashes):
-    """Of *hashes*, those whose equity never reached zero.
+carrier = resolve_solvent_carrier(CASE_STUDY_ID)
 
-    A long-short book here has no margin call, so a run can compound through zero and carry
-    a Sharpe computed on a balance that no longer exists - and such a Sharpe can top a
-    ranking. Sweeping the cost grid against one would report the cost sensitivity of a
-    strategy that went bankrupt before any cost was charged.
+# The label is the carrier's, not the case study's declared primary. They are the same here,
+# and reading it from the carrier is what keeps the prices and the predictions loaded below
+# on the same label the swept configuration was fitted and ranked on.
+if carrier["label"] != LABEL:
+    print(f"Carrier is on {carrier['label']}, not the declared primary label {LABEL}.")
+    LABEL = carrier["label"]
 
-    `max_drawdown` at or past -100% is that condition, the same boundary
-    [`11_backtest`](11_backtest.ipynb) and
-    [`12_portfolio_management`](12_portfolio_management.ipynb) apply. A run with no recorded
-    drawdown is not selected either: it cannot be shown to have survived, and this decides
-    what to sweep rather than counting what happened.
-    """
-    if not hashes:
-        return set()
-    placeholders = ", ".join("?" for _ in hashes)
-    with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
-        rows = conn.execute(
-            f"SELECT backtest_hash FROM backtest_metrics "
-            f"WHERE backtest_hash IN ({placeholders}) AND max_drawdown > -1.0",
-            hashes,
-        ).fetchall()
-    return {row[0] for row in rows}
-
-
-def _resolve_pre_cost_runs(
-    case_study: str,
-    label: str,
-    *,
-    split: str,
-    top_n: int,
-    solvent_hashes=None,
-    ranked_pool: int = 1_000_000,
-):
-    """The highest-Sharpe solvent runs across the baseline and allocation stages.
-
-    `solvent_hashes` is passed in rather than called by name so this function does not reach
-    the registry itself: the ranking is what it decides, and it can then be exercised without
-    a database. Passing None applies no solvency filter.
-
-    `ranked_pool` asks each stage for its whole ranked list rather than its top `top_n`.
-    Truncating first and filtering after would let an insolvent leader take the slot a solvent
-    run behind it should have had - and with `top_n=1`, that drops the entire stage from
-    consideration instead of falling through to the next candidate.
-    """
-    candidates = [
-        resolve_best_backtest_runs(
-            case_study,
-            label,
-            split=split,
-            stage=stage,
-            top_n=ranked_pool,
-        )
-        for stage in ("signal", "allocation")
-    ]
-    candidates = [frame for frame in candidates if not frame.is_empty()]
-    if not candidates:
-        return pl.DataFrame()
-    ranked = (
-        pl.concat(candidates)
-        .sort("sharpe", descending=True)
-        .unique("backtest_hash", maintain_order=True)
-    )
-    if solvent_hashes is not None:
-        keep = solvent_hashes(ranked["backtest_hash"].to_list())
-        ranked = ranked.filter(pl.col("backtest_hash").is_in(list(keep)))
-    return ranked.head(top_n)
-
-
-top_combos = _resolve_pre_cost_runs(
-    CASE_STUDY_ID,
-    LABEL,
-    split="validation",
-    top_n=TOP_N_COMBOS,
-    solvent_hashes=_solvent_hashes,
+print(
+    f"  Sharpe={carrier['val_sharpe']:.3f}  stage={carrier['val_stage']}  "
+    f"family={carrier['family']}  config={carrier['config_name']}  "
+    f"max_drawdown={carrier['max_drawdown']:.3f}  bt_hash={carrier['val_backtest_hash'][:8]}"
 )
 
-if top_combos.is_empty():
-    print("No solvent baseline or allocation results found. Run the upstream notebooks first.")
+# Whether the overlay earned its place, reported rather than assumed. The risk stage files a
+# row per named control and none for the un-overlaid strategy, so the two sides have to be
+# read separately and differenced. A negative difference is the stage saying its controls did
+# not help, which is a result and not a failure.
+_best = {}
+for _stage in ("risk_overlay", "allocation"):
+    _frame = resolve_best_backtest_runs(
+        CASE_STUDY_ID, LABEL, split="validation", stage=_stage, top_n=1
+    )
+    _best[_stage] = None if _frame.is_empty() else _frame["sharpe"][0]
+if _best["risk_overlay"] is None:
+    print(
+        "  Risk overlay: no run registered, so the carrier above is un-overlaid. This "
+        "case study declares position-level controls only and runs the vectorized "
+        "path, where none of them can act."
+    )
 else:
-    for row in top_combos.iter_rows(named=True):
-        spec = json.loads(row["spec_json"])
-        alloc = strategy_view(spec).get("allocation", {}).get("method", "equal_weight")
-        print(f"  Sharpe={row['sharpe']:.3f}  alloc={alloc}  bt_hash={row['backtest_hash'][:8]}")
+    _delta = _best["risk_overlay"] - _best["allocation"]
+    print(
+        f"  Best overlaid {_best['risk_overlay']:.3f} vs best un-overlaid "
+        f"{_best['allocation']:.3f}, difference {_delta:+.3f}"
+    )
 
 # %%
 prices = load_backtest_prices_for(CASE_STUDY_ID, LABEL, split="validation", max_symbols=MAX_SYMBOLS)
@@ -233,11 +194,12 @@ print(f"Prices: {len(prices):,} rows, {prices['symbol'].n_unique()} assets")
 # the hash the runner returns.
 
 # %% tags=["results"]
-n_total = len(top_combos) * len(COST_GRID_BPS) if not top_combos.is_empty() else 0
+n_total = len(COST_GRID_BPS)
 n_done = 0
 n_failed = 0
 n_reused = 0
 failures: Counter[str] = Counter()
+swept_hashes: list[str] = []
 reusable_before = {
     _hash
     for _hash in load_existing_backtest_hashes(CASE_STUDY_ID, stage="cost_sensitivity")
@@ -245,58 +207,57 @@ reusable_before = {
 }
 t0 = time.time()
 
-for combo_row in top_combos.iter_rows(named=True):
-    pred_hash = combo_row["prediction_hash"]
-    base_spec = ensure_backtest_spec(
-        CASE_STUDY_ID,
-        bt_config,
-        json.loads(combo_row["spec_json"]),
-        prices=prices,
-        prediction_hash=pred_hash,
-        initial_cash=bt_config.initial_cash,
+pred_hash = carrier["val_prediction_hash"]
+base_spec = ensure_backtest_spec(
+    CASE_STUDY_ID,
+    bt_config,
+    json.loads(carrier["spec_json"]),
+    prices=prices,
+    prediction_hash=pred_hash,
+    initial_cash=bt_config.initial_cash,
+)
+alloc_method = strategy_view(base_spec).get("allocation", {}).get("method", "equal_weight")
+predictions = read_predictions(CASE_STUDY_ID, pred_hash)
+
+for cost_bps in COST_GRID_BPS:
+    n_done += 1
+
+    spec = set_backtest_costs_bps(
+        clone_backtest_spec(base_spec),
+        commission_bps=cost_bps / 2,
+        slippage_bps=cost_bps / 2,
     )
-    alloc_method = strategy_view(base_spec).get("allocation", {}).get("method", "equal_weight")
+    spec["chapter"] = "ch18"
 
-    predictions = read_predictions(CASE_STUDY_ID, pred_hash)
-
-    for cost_bps in COST_GRID_BPS:
-        n_done += 1
-
-        spec = set_backtest_costs_bps(
-            clone_backtest_spec(base_spec),
-            commission_bps=cost_bps / 2,
-            slippage_bps=cost_bps / 2,
+    try:
+        result = run_backtest(
+            CASE_STUDY_ID,
+            pred_hash,
+            spec,
+            prices=prices,
+            predictions=predictions,
+            label=LABEL,
+            register=True,
+            initial_cash=bt_config.initial_cash,
+            calendar=bt_config.calendar,
         )
-        spec["chapter"] = "ch18"
 
-        try:
-            result = run_backtest(
-                CASE_STUDY_ID,
-                pred_hash,
-                spec,
-                prices=prices,
-                predictions=predictions,
-                label=LABEL,
-                register=True,
-                initial_cash=bt_config.initial_cash,
-                calendar=bt_config.calendar,
-            )
-
-            if result.backtest_hash in reusable_before:
-                n_reused += 1
-            print(
-                f"  [{n_done}/{n_total}] {alloc_method} @ {cost_bps:g} bps: "
-                f"Sharpe={result.metrics.get('sharpe', 0):.3f}"
-            )
-        except Exception as error:
-            # Counted rather than swallowed: the summary below reports this count, and
-            # the check after the loop refuses to go on when nothing was registered.
-            n_failed += 1
-            failures[f"{type(error).__name__}: {error}"] += 1
-            print(
-                f"  [{n_done}/{n_total}] {alloc_method} @ {cost_bps:g} bps: "
-                f"FAILED - {type(error).__name__}: {error}"
-            )
+        swept_hashes.append(result.backtest_hash)
+        if result.backtest_hash in reusable_before:
+            n_reused += 1
+        print(
+            f"  [{n_done}/{n_total}] {alloc_method} @ {cost_bps:g} bps: "
+            f"Sharpe={result.metrics.get('sharpe', 0):.3f}"
+        )
+    except Exception as error:
+        # Counted rather than swallowed: the summary below reports this count, and
+        # the check after the loop refuses to go on when nothing was registered.
+        n_failed += 1
+        failures[f"{type(error).__name__}: {error}"] += 1
+        print(
+            f"  [{n_done}/{n_total}] {alloc_method} @ {cost_bps:g} bps: "
+            f"FAILED - {type(error).__name__}: {error}"
+        )
 
 elapsed = time.time() - t0
 stage_total = len(load_existing_backtest_hashes(CASE_STUDY_ID, stage="cost_sensitivity"))
@@ -349,16 +310,20 @@ from case_studies.utils.backtest_explorer import BacktestExplorer
 explorer = BacktestExplorer(CASE_STUDY_ID)
 
 # %% [markdown]
-# The read is scoped to the prediction the sweep above carried. The cost-sensitivity
-# table accumulates across runs and labels, and the selection feeding this notebook
-# moves whenever an upstream stage is re-run, so an unscoped read pools the current
-# curve with every curve that preceded it and draws them as one series per allocator.
+# The read is scoped to the backtests the sweep above registered, not to the prediction
+# they were run on. The cost-sensitivity table accumulates across runs and labels, and the
+# selection feeding this notebook moves whenever an upstream stage is re-run, so an
+# unscoped read pools the current curve with every curve that preceded it and draws them
+# as one series per allocator.
+#
+# A prediction is not a strategy, so scoping by prediction is not enough here. The retired
+# `walk_forward_v2` conformal sweep and the `walk_forward_v3` one that replaced it were run
+# on the same prediction set, both are in the registry, and both are `conformal_weighted` -
+# so a read scoped by prediction returns twenty-two rows under one allocator name and draws
+# two generations as one line.
 
 # %%
-carriers = top_combos["prediction_hash"].unique().to_list() if not top_combos.is_empty() else []
-frames = [explorer.cost_sensitivity(prediction_hash=h) for h in carriers]
-frames = [frame for frame in frames if not frame.is_empty()]
-cost_df = pl.concat(frames) if frames else pl.DataFrame()
+cost_df = explorer.cost_sensitivity(backtest_hashes=swept_hashes)
 
 # %% [markdown]
 # The figure below shows the slope; this is the curve it is drawn from. A reader
@@ -410,8 +375,8 @@ if not cost_df.is_empty():
     show_with_alt(
         fig,
         "Line chart of validation Sharpe against the total commission and slippage "
-        "charged per leg, from zero to fifty basis points. The line starts just above "
-        "3.1 and falls almost straight to about 2.8 at the right edge, staying far "
+        "charged per leg, from zero to fifty basis points. The line starts just under "
+        "2.95 and falls almost straight to about 2.65 at the right edge, staying far "
         "above the dashed zero reference across the whole grid. A dotted vertical "
         "marker near the left shows the cost level the rest of the case study was "
         "charged at, with most of the swept range lying to its right.",
@@ -434,5 +399,9 @@ if not cost_df.is_empty():
 # These are validation months throughout. Nothing here reads or selects on the holdout
 # period, which stays untouched until the strategy analysis notebook.
 #
-# **Next:** the risk management notebook asks whether a stop-loss or a time exit can
-# be evaluated on this backtest path at all, before asking what one would cost.
+# **Next:** [`15_holdout_predictions`](15_holdout_predictions.ipynb), which refits the
+# configuration swept above on the history before the holdout window;
+# [`16_holdout_backtest`](16_holdout_backtest.ipynb) trades it, and
+# [`17_strategy_analysis`](17_strategy_analysis.ipynb) reads this sweep back alongside the
+# holdout. Risk management is no longer next: it ran before this notebook, and its result
+# is one of the stages the selection above drew from.

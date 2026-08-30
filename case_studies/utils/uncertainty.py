@@ -27,8 +27,14 @@ used by the Ch20 paired-bootstrap synthesis:
 
 - ``signal``  → equal-weight benchmark (per case study, registered separately)
 - ``allocation``    → ``signal`` leader of the same (label, family)
-- ``cost_sensitivity`` → ``signal`` leader (no costs)
-- ``risk_overlay``  → ``cost_sensitivity`` leader (with costs, no risk overlay)
+- ``risk_overlay``  → ``allocation`` leader (sized, no overlay)
+- ``cost_sensitivity`` → ``risk_overlay`` leader (sized and overlaid, frictionless)
+
+Each stage is benchmarked against the leader of the stage before it, so the
+chain follows the order the backtest sequence runs: size positions, apply risk
+controls, then measure what realistic costs take off the winner. A stage that a
+case study has not run is skipped, and the benchmark falls back to the nearest
+earlier stage that has rows.
 
 Per-case-study baselines for the signal stage live in
 :data:`SIGNAL_BASELINE_BY_CASE_STUDY`; populate this when the equal-weight
@@ -139,11 +145,57 @@ def resolve_block_length(
 # ---------------------------------------------------------------------------
 
 
+#: Stage order of the backtest sequence. Each stage's benchmark is the leader of
+#: the nearest preceding stage that has rows.
+STAGE_SEQUENCE: tuple[str, ...] = (
+    "signal",
+    "allocation",
+    "risk_overlay",
+    "cost_sensitivity",
+)
+
+
+#: The block of a strategy spec each stage introduces. ``cost_sensitivity`` has no entry
+#: because it is terminal - nothing is ever built on top of a cost sweep.
+STAGE_CARRIER_BLOCK: dict[str, str] = {
+    "signal": "signal",
+    "allocation": "allocation",
+    "risk_overlay": "risk",
+}
+
+
+def carried_blocks(stage: str) -> tuple[str, ...]:
+    """Every strategy block a backtest at ``stage`` has inherited or introduced."""
+    if stage not in STAGE_SEQUENCE:
+        return ()
+    upto = STAGE_SEQUENCE[: STAGE_SEQUENCE.index(stage) + 1]
+    return tuple(STAGE_CARRIER_BLOCK[s] for s in upto if s in STAGE_CARRIER_BLOCK)
+
+
+def descends_from(challenger: dict, baseline: dict, baseline_stage: str) -> bool:
+    """Is ``challenger`` a strategy built on top of ``baseline``?
+
+    `champion_lineage` takes the best backtest at each stage independently, so its
+    entries can be siblings rather than parent and child - two strategies that branch
+    off the same allocation carrier, say, one adding a risk overlay and one sweeping
+    costs. Comparing those two attributes the whole difference between two unrelated
+    strategies to whichever stage happens to come second in the chain.
+
+    Descent requires the challenger to match the baseline on the *whole prefix* the
+    baseline carries, not only on the block its own stage introduced. A shared
+    prediction hash fixes the predictions and nothing else: signal-stage runs vary
+    the signal method and ``top_k``, so an allocation leader can differ from the
+    signal leader in the one place the comparison is meant to hold fixed. Checking a
+    single block would pass it.
+    """
+    return all(challenger.get(b) == baseline.get(b) for b in carried_blocks(baseline_stage))
+
+
 STAGE_BASELINE: dict[str, str] = {
     "signal": "equal_weight",
     "allocation": "signal_leader",
-    "cost_sensitivity": "signal_leader",
-    "risk_overlay": "cost_sensitivity_leader",
+    "risk_overlay": "allocation_leader",
+    "cost_sensitivity": "risk_overlay_leader",
 }
 
 
@@ -1293,6 +1345,10 @@ def _sortino(arr: np.ndarray, periods_per_year: float) -> float:
 
 __all__ = [
     "STAGE_BASELINE",
+    "STAGE_CARRIER_BLOCK",
+    "carried_blocks",
+    "STAGE_SEQUENCE",
+    "descends_from",
     "SIGNAL_BASELINE_BY_CASE_STUDY",
     "resolve_block_length",
     "compute_backtest_uncertainty",

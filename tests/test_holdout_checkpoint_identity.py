@@ -22,8 +22,17 @@ from case_studies.utils.registry.store import REGISTRY_SCHEMA_SQL
 from case_studies.utils.strategy_analysis import select_holdout_self_backtest
 
 TRAINING_HASH = "t_gbm_leaves_7_mae"
+# The holdout side is a different training run: the same declared configuration refitted
+# on the holdout fold. That is what a correct holdout is, and it is why neither resolver
+# can match on the validation training hash.
+HOLDOUT_TRAINING_HASH = "t_gbm_leaves_7_mae_holdout"
 STRATEGY = {"signal": {"method": "score_weighted_top_k", "top_k": 10}}
 OTHER_STRATEGY = {"signal": {"method": "score_weighted_top_k", "top_k": 20}}
+
+VALIDATION_TRAINING_SPEC = json.dumps({"computation": {"cv": {"folds": [{"fold": "0"}]}}})
+HOLDOUT_TRAINING_SPEC = json.dumps(
+    {"computation": {"cv": {"split": "holdout", "folds": [{"fold": "1"}]}}}
+)
 
 
 def _spec(strategy: dict) -> str:
@@ -44,11 +53,17 @@ def _build_registry(case_dir, *, checkpoints=(200, 400), holdout_sharpes=(0.4, 1
     run_log.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(str(run_log / "registry.db"))
     db.executescript(REGISTRY_SCHEMA_SQL)
-    db.execute(
-        "INSERT INTO training_runs (training_hash, family, label, config_name, created_at)"
-        " VALUES (?, 'gbm', 'fwd_ret_21d', 'leaves_7_mae', '2026-08-16T00:00:00+00:00')",
-        (TRAINING_HASH,),
-    )
+    for training_hash, training_spec in (
+        (TRAINING_HASH, VALIDATION_TRAINING_SPEC),
+        (HOLDOUT_TRAINING_HASH, HOLDOUT_TRAINING_SPEC),
+    ):
+        db.execute(
+            "INSERT INTO training_runs (training_hash, family, label, config_name, spec_json,"
+            " created_at)"
+            " VALUES (?, 'gbm', 'fwd_ret_21d', 'leaves_7_mae', ?,"
+            " '2026-08-16T00:00:00+00:00')",
+            (training_hash, training_spec),
+        )
     for checkpoint, holdout_sharpe in zip(checkpoints, holdout_sharpes, strict=True):
         # A configuration with no checkpoint dimension stores NULL in *both*
         # columns, which is what the linear and GBM holdout rows look like. Binding
@@ -62,7 +77,13 @@ def _build_registry(case_dir, *, checkpoints=(200, 400), holdout_sharpes=(0.4, 1
                 "INSERT INTO prediction_sets (prediction_hash, training_hash,"
                 " checkpoint_value, checkpoint_kind, split, created_at)"
                 " VALUES (?, ?, ?, ?, ?, '2026-08-16T00:00:00+00:00')",
-                (pred, TRAINING_HASH, checkpoint, checkpoint_kind, split),
+                (
+                    pred,
+                    TRAINING_HASH if split == "validation" else HOLDOUT_TRAINING_HASH,
+                    checkpoint,
+                    checkpoint_kind,
+                    split,
+                ),
             )
             db.execute(
                 "INSERT INTO backtest_runs (backtest_hash, prediction_hash, spec_json,"
@@ -191,3 +212,34 @@ def test_an_ambiguous_pinned_lineage_raises_rather_than_choosing(case_study):
 
     with pytest.raises(ValueError, match="ambiguous"):
         select_holdout_self_backtest("etfs", "b_validation_200")
+
+
+def test_a_validation_fitted_holdout_is_matched_by_neither_resolver(case_study):
+    """The shape this fixture used to have, and the defect both resolvers now reject.
+
+    Predictions land on the holdout window, but the training run that made them declares
+    the validation folds - so its parameters were chosen while looking at the period it is
+    being judged against. Matching on the carrier's training hash is what used to find it,
+    and it is the only thing that rule could find.
+    """
+    _build_registry(case_study, checkpoints=(200,), holdout_sharpes=(0.4,))
+    db = sqlite3.connect(str(case_study / "run_log" / "registry.db"))
+    db.execute(
+        "UPDATE prediction_sets SET training_hash = ? WHERE prediction_hash = 'p_holdout_200'",
+        (TRAINING_HASH,),
+    )
+    db.commit()
+    db.close()
+
+    assert select_holdout_self_backtest("etfs", "b_validation_200") is None
+    assert (
+        _holdout_lineage_for(
+            "etfs",
+            "fwd_ret_21d",
+            strategy_spec=STRATEGY,
+            label_restriction=None,
+            rung=None,
+            prefer_prediction_hash="p_validation_200",
+        )
+        is None
+    )
