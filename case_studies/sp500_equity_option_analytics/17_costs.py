@@ -204,10 +204,33 @@ else:
             f"no candidate set {CANDIDATE_SET_NAME!r} in this registry and no eligible "
             "validation backtests to rank, so there is no selection to carry forward"
         )
-    SELECTED = _study.results.open(
-        _live.sort("sharpe", descending=True).row(0, named=True)["backtest_hash"]
-    )
-    FIELD_HASHES = _live["backtest_hash"].to_list()
+    # The same eligibility the freeze applies. `CandidateSet.create` refuses partial members,
+    # so the frozen path cannot select an incomplete backtest; `resolve_best_backtest_runs`
+    # ranks on registered metrics and has no such filter, so without this the two paths choose
+    # from different fields and the fallback can pick a row whose artifacts are not all there.
+    # Walked in Sharpe order and stopped at the first complete row, so the usual case costs
+    # one open rather than one per candidate.
+    _ranked = _live.sort("sharpe", descending=True)
+    SELECTED = None
+    _skipped = []
+    for _row in _ranked.iter_rows(named=True):
+        _candidate = _study.results.open(_row["backtest_hash"])
+        _reason = _candidate.completeness()
+        if _reason is None:
+            SELECTED = _candidate
+            break
+        _skipped.append(f"{_row['backtest_hash']} ({_reason})")
+    if SELECTED is None:
+        raise RuntimeError(
+            f"all {_ranked.height} eligible validation backtests are incomplete, so there is "
+            "no selection to carry forward: " + "; ".join(_skipped[:5])
+        )
+    if _skipped:
+        print(
+            f"Skipped {len(_skipped)} higher-Sharpe row(s) whose artifacts are incomplete: "
+            + "; ".join(_skipped[:3])
+        )
+    FIELD_HASHES = _ranked["backtest_hash"].to_list()
     FIELD_NAME = "live ranking (no frozen set in this registry)"
     SELECTION_SOURCE = f"{FIELD_NAME} over {len(FIELD_HASHES)} eligible backtests"
 print(f"Selection read from the {SELECTION_SOURCE}")
