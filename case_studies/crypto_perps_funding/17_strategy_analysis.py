@@ -81,6 +81,10 @@ study = open_study(
     "crypto_perps_funding", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None
 )
 labels = list(LABELS) if LABELS else list(ALL_LABELS)
+# Where this run's own results are written and read back from: the released case directory on a
+# canonical run, the isolated preview directory otherwise. `study.root` is the released one in
+# both tiers, so a preview that reads it is reading somebody else's registry.
+STORAGE_ROOT = study.storage_root(study.execution_tier)
 periods_per_year = periods_per_year_from_setup("crypto_perps_funding")
 
 # %% [markdown]
@@ -342,7 +346,7 @@ show_plotly_with_alt(
 
 # %% tags=["results"]
 with closing(
-    sqlite3.connect(f"file:{study.root / 'run_log' / 'registry.db'}?mode=ro", uri=True)
+    sqlite3.connect(f"file:{STORAGE_ROOT / 'run_log' / 'registry.db'}?mode=ro", uri=True)
 ) as db:
     funding_row = db.execute(
         "SELECT funding_pnl, funding_events, funding_settlements FROM backtest_metrics "

@@ -76,13 +76,13 @@ from plotly.subplots import make_subplots
 from case_studies.crypto_perps_funding.research_workflow import (
     ALL_LABELS,
     freeze_official_model_population,
+    preview_prediction_candidates,
 )
 from case_studies.research import (
     CandidateSet,
     Result,
     open_study,
     run_backtests,
-    superseded_members,
 )
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
@@ -92,6 +92,7 @@ from case_studies.utils.backtest_loaders import (
 from case_studies.utils.coverage import check_prediction_coverage
 from case_studies.utils.sweep_config import get_entry_schemes_for
 from utils.artifact_specs import load_setup_config
+from utils.paths import get_case_study_dir
 from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
@@ -112,6 +113,12 @@ SUPERSEDES_BACKTESTS: dict[str, str] = {}
 # The candidate set each label hands downstream is a third generation-bearing name, one per
 # label. Keyed the same way; the refusal prints the name and the hash.
 SUPERSEDES_CANDIDATES: dict[str, str] = {}
+# How many prediction sets a preview run backtests per label. A preview reads the predictions
+# its own model notebooks wrote into its workspace, and what it is proving is that the chain
+# executes rather than that the sweep is wide, so it is capped instead of taking whatever the
+# reduced fits happened to leave. Read only on a preview run; a canonical run backtests the
+# declared population and nothing else.
+PREVIEW_MAX_PREDICTIONS = 4
 
 # %%
 study = open_study(
@@ -130,11 +137,13 @@ labels = list(LABELS) if LABELS else list(ALL_LABELS)
 # contain. If a configuration is declared and missing, or present and incomplete, the check two
 # cells down fails here rather than producing a baseline over a silently smaller set.
 #
-# Freezing is a canonical-run step. A run against a private workspace reads the released
-# predictions and adds its own; it does not redeclare the published population.
+# Freezing is a canonical-run step. A preview run against a private workspace backtests the
+# predictions its own model notebooks wrote there; it does not read the released population and
+# does not redeclare it.
 
 # %%
-if EXECUTION_TIER == "canonical" and not WORKSPACE:
+CANONICAL_RUN = EXECUTION_TIER == "canonical" and not WORKSPACE
+if CANONICAL_RUN:
     prediction_population = freeze_official_model_population(
         study, supersedes=SUPERSEDES_POPULATION or None
     )
@@ -144,27 +153,39 @@ if EXECUTION_TIER == "canonical" and not WORKSPACE:
     )
 
 # %% [markdown]
-# The catalog is the registry read as one frame: one row per prediction set, with the
-# configuration that produced it, the checkpoint it was written at, and whether every fold and
-# every expected row is present. `complete` is the column that matters before a backtest -
-# a prediction set missing a fold would produce an equity curve with a hole in it and no error.
+# The catalog is what gets backtested, and on a canonical run it is **the declared population
+# read back**, not the registry filtered down to it. The distinction is the whole point of
+# freezing: a query returns whatever is registered under a set of predicates, and the registry
+# is immutable, so a superseded generation's rows are still there and still `complete`. Filtering
+# by `split`, `label` and `complete` therefore returns both generations, and a sweep over both
+# ranks a retired identity against a live one and carries whichever wins into every stage
+# downstream. Reading the population back cannot do that: it is a fixed list of hashes, declared
+# before this notebook ran.
+#
+# The membership check is the other half. A declared member with no registry row means the
+# population names something the model notebooks never produced, and that has to fail here rather
+# than produce a baseline over a silently smaller set.
 
 # %% tags=["results"]
-catalog = study.predictions.table().filter(
-    (pl.col("split") == "validation") & pl.col("label").is_in(labels)
-)
-# `identity_status` is the schema version a row was written under, not the generation its
-# producer still publishes. A model notebook that refits leaves the generation it replaced
-# in the registry, complete and current under a column that has not moved, so the filter
-# above returns both. Backtesting both does not fail: it sweeps twice, ranks a retired
-# identity against a live one, and carries whichever wins into every stage downstream.
-retired = superseded_members(study, member_kind="prediction")
-if retired:
-    offered = catalog.height
-    catalog = catalog.filter(~pl.col("prediction_hash").is_in(list(retired)))
-    print(f"Retired by a later generation, left out of the sweep: {offered - catalog.height:,}")
+if CANONICAL_RUN:
+    declared = list(prediction_population.members)
+    catalog = (
+        study.predictions.table()
+        .filter(pl.col("prediction_hash").is_in(declared))
+        .filter(pl.col("label").is_in(labels))
+    )
+    absent = set(declared) - set(catalog.get_column("prediction_hash").to_list())
+    if absent and set(labels) == set(ALL_LABELS):
+        raise RuntimeError(
+            f"{len(absent)} declared population members have no registry row, "
+            f"first {sorted(absent)[0]}"
+        )
+    if catalog.filter(pl.col("split") != "validation").height:
+        raise RuntimeError("the declared model population contains a non-validation member")
+else:
+    catalog = preview_prediction_candidates(study, labels=labels, limit=PREVIEW_MAX_PREDICTIONS)
 if catalog.is_empty():
-    raise RuntimeError("every registered validation prediction belongs to a retired generation")
+    raise RuntimeError("no validation prediction sets to backtest")
 
 if catalog.filter(~pl.col("complete")).height:
     raise RuntimeError("the validation prediction catalog contains incomplete members")
@@ -203,8 +224,23 @@ catalog.group_by("family", "label").agg(
 #   sitting inside the first one's window, so `fwd_ret_24h` advances three slots and the
 #   eight-hour labels advance one.
 #
-# The check below reads the decision times out of the prediction sets and confirms that every
-# interval between consecutive decisions inside a fold is exactly the label's horizon.
+# The check below reads the decision times out of the prediction sets and confirms that
+# consecutive decisions inside a fold are exactly one rebalance step apart.
+#
+# **A step apart on the panel's own clock, not eight hours apart on the calendar.** The two
+# readings agree wherever the panel is contiguous and diverge exactly where it is not, and this
+# panel is not: `features/financial.parquet` carries a 57-day hole opening 2021-08-27, an outage
+# in the premium-index feed. That hole sits in fold 1's *training* window, so a calendar check
+# happens to pass today - and would have failed, on correct data and a correctly fitted model,
+# had the outage fallen a year later. A missing settlement is a fact about the exchange feed;
+# what the decision clock claims is that the model decided at every settlement the panel holds
+# and at no other moment, and a gap the panel itself has is not a violation of that.
+#
+# So each decision is located on the panel's settlement index, and the check is that the index
+# advances by `step` and never by anything else. This is strictly the stronger reading: it also
+# refuses a decision at a timestamp the panel does not hold at all, which a gap-tolerant calendar
+# check would wave through, and it refuses a fabricated grid whose stride happens to be a whole
+# multiple of the horizon.
 #
 # It cannot read one set and let it speak for the label. The `complete` column two cells up is a
 # verdict on each member taken by itself, so a member registered as complete against a different
@@ -243,7 +279,7 @@ def decision_grids(label: str) -> pl.DataFrame:
 def decision_timeline(prediction_hash: str) -> pl.DataFrame:
     """Return the distinct fold and decision timestamps one prediction set was written at."""
     return (
-        Result.open(study, prediction_hash)
+        Result.open(study, prediction_hash, include_preview=not CANONICAL_RUN)
         .load()
         .select("fold", "timestamp")
         .unique()
@@ -252,14 +288,58 @@ def decision_timeline(prediction_hash: str) -> pl.DataFrame:
 
 
 # %%
+def decision_clock() -> pl.DataFrame:
+    """Every settlement the feature panel holds, numbered. The clock decisions are read on.
+
+    The panel rather than the label file: a model decides where it has features, and the two
+    differ here by the 57-day premium-index outage, which the label file does not have because a
+    forward return is computed from prices alone.
+    """
+    panel = (
+        pl.read_parquet(
+            get_case_study_dir("crypto_perps_funding") / "features" / "financial.parquet"
+        )
+        .select("timestamp")
+        .unique()
+        .sort("timestamp")
+    )
+    return panel.with_row_index("slot")
+
+
+CLOCK = decision_clock()
+
+
+# %%
+def holding_slots(timeline: pl.DataFrame, step: int) -> list[int]:
+    """The distinct clock distances between decisions `step` positions apart inside a fold."""
+    located = timeline.join(CLOCK, on="timestamp", how="left")
+    if located.get_column("slot").null_count():
+        stray = located.filter(pl.col("slot").is_null()).get_column("timestamp")
+        raise RuntimeError(
+            f"{stray.len()} decisions sit at timestamps the feature panel does not hold, "
+            f"first {stray.min()}"
+        )
+    return (
+        located.sort("fold", "slot")
+        .with_columns(pl.col("slot").shift(-step).over("fold").alias("exit"))
+        .drop_nulls("exit")
+        .select((pl.col("exit") - pl.col("slot")).alias("advanced"))
+        .get_column("advanced")
+        .unique()
+        .sort()
+        .to_list()
+    )
+
+
 def holding_periods(timeline: pl.DataFrame, step: int) -> list[timedelta]:
-    """Return the distinct gaps between decisions `step` slots apart inside a fold."""
+    """The distinct calendar gaps between decisions `step` slots apart, for the table below."""
     return (
         timeline.with_columns(pl.col("timestamp").shift(-step).over("fold").alias("exit"))
         .drop_nulls("exit")
         .select((pl.col("exit") - pl.col("timestamp")).alias("held"))
         .get_column("held")
         .unique()
+        .sort()
         .to_list()
     )
 
@@ -288,13 +368,14 @@ for label in labels:
     expected_gap = timedelta(hours=int(horizon.removesuffix("H")))
     for grid in decision_grids(label).iter_rows(named=True):
         timeline = decision_timeline(grid["reference"])
-        held = holding_periods(timeline, step)
-        if held != [expected_gap]:
+        advanced = holding_slots(timeline, step)
+        if advanced != [step]:
             raise RuntimeError(
                 f"{label} grid {grid['decision_key_digest'][:12]} "
                 f"({'/'.join(grid['families'])}, {grid['prediction_sets']} prediction sets, "
-                f"reference {grid['reference']}): decision intervals {held} do not match "
-                f"horizon {horizon}"
+                f"reference {grid['reference']}): decisions advance {advanced} settlements on "
+                f"the panel's clock, not the {step} its {horizon} horizon declares "
+                f"(calendar gaps {holding_periods(timeline, step)})"
             )
         intervals.append(
             {
@@ -306,6 +387,10 @@ for label in labels:
                 "fill": decision["execution_delay"],
                 "outcome_horizon": horizon,
                 "rebalance_step_slots": step,
+                # The calendar gaps the clock check just accepted. One value on a contiguous
+                # stretch of the panel; a second, larger one wherever the panel has a hole, which
+                # is the difference between the two readings shown rather than described.
+                "calendar_gaps": [str(gap) for gap in holding_periods(timeline, step)],
                 "decision_times": timeline.height,
                 "first_decision": _utc(timeline.get_column("timestamp").min()),
                 "last_decision": _utc(timeline.get_column("timestamp").max()),
@@ -324,19 +409,28 @@ pl.DataFrame(intervals).sort("label", "grid")
 # the fit moves every peer together.
 #
 # `check_prediction_coverage` compares against the declaration instead: the fold boundaries in
-# `config/setup.yaml`, and the sessions the label artifact actually holds inside them. It asks
-# that the folds present are the folds declared, that every declared session carries a row, and
-# that the declared folds account for the whole window.
+# `config/setup.yaml`, and the sessions inside them. It asks that the folds present are the folds
+# declared, that every declared session carries a row, and that the declared folds account for the
+# whole window.
+#
+# Which sessions it declares is the same question the clock check just answered, and it gets the
+# same answer. Left to itself the gate takes them from the label artifact, and a forward return
+# survives a premium-index outage that every feature built on that feed does not - so the label
+# file declares 2,189 validation sessions where the panel holds fewer. Passing the panel as the
+# decision axis is what stops the gate reporting a model incomplete for not predicting where it
+# was blind. It narrows and never widens: a timestamp the panel has and the label file does not is
+# still not a session.
 
 # %% tags=["results"]
 coverage = [
     (
         grid,
         check_prediction_coverage(
-            Result.open(study, grid["reference"]).load(),
+            Result.open(study, grid["reference"], include_preview=not CANONICAL_RUN).load(),
             "crypto_perps_funding",
             label,
             case_dir=study.root,
+            decision_axis=CLOCK.get_column("timestamp"),
         ),
     )
     for label in labels
@@ -434,7 +528,7 @@ feasibility
 # %%
 widest_grid = decision_grids(labels[0]).row(0, named=True)
 breadth = (
-    Result.open(study, widest_grid["reference"])
+    Result.open(study, widest_grid["reference"], include_preview=not CANONICAL_RUN)
     .load()
     .group_by("timestamp")
     .len()
@@ -524,8 +618,11 @@ for label in labels:
             signal=signal,
             prices=prices,
             chapter="ch16",
-            population_name=signal_population,
-            supersedes=SUPERSEDES_BACKTESTS.get(signal_population),
+            # A population is canonical by definition and is written to the shared registry
+            # whatever tier is active, so a preview run names none and the stages below read
+            # its executions directly instead.
+            population_name=signal_population if CANONICAL_RUN else None,
+            supersedes=SUPERSEDES_BACKTESTS.get(signal_population) if CANONICAL_RUN else None,
         )
         executions.append((label, scheme["name"], execution))
         print(
@@ -543,8 +640,13 @@ for label in labels:
 # every baseline for that label, across both entry rules, and
 # [`14_portfolio_management`](14_portfolio_management.ipynb) opens it by name rather than being
 # handed a list of hashes.
+#
+# A candidate set is canonical too - `CandidateSet.create` refuses a preview member - so a
+# preview run leaves the funnel's named pools alone and the stages downstream read its backtest
+# catalog directly.
 
 # %%
+signal_candidate_members: dict[str, list[str]] = {}
 for label in labels:
     members = [
         result
@@ -553,13 +655,18 @@ for label in labels:
         for result in execution.results
     ]
     candidate_set_name = f"crypto-signal-{label}"
-    candidates = CandidateSet.create(
-        study,
-        candidate_set_name,
-        members,
-        supersedes=SUPERSEDES_CANDIDATES.get(candidate_set_name),
-    )
-    print(f"{candidates.name}: {len(candidates.members)} members")
+    if CANONICAL_RUN:
+        candidates = CandidateSet.create(
+            study,
+            candidate_set_name,
+            members,
+            supersedes=SUPERSEDES_CANDIDATES.get(candidate_set_name),
+        )
+        signal_candidate_members[label] = list(candidates.members)
+        print(f"{candidates.name}: {len(candidates.members)} members")
+    else:
+        signal_candidate_members[label] = [result.hash for result in members]
+        print(f"{candidate_set_name} (preview): {len(members)} members, not frozen")
 
 # %% [markdown]
 # ## 5. What came out
@@ -570,13 +677,22 @@ for label in labels:
 # population, and the count of configurations above zero says how much of it made money at all.
 # `avg_turnover` is the fraction of the book replaced at an average rebalance, which is what the
 # commission and slippage columns are charged on.
+#
+# The rows are the ones this run just registered, named by hash, and not every signal-stage row
+# the registry holds. The registry keeps every generation ever run, so the wider read reports a
+# retired generation's backtests alongside the live one: the rendered notebook said 346
+# `fwd_ret_8h` backtests per rule after executing 262, and every median and spread below was
+# computed over the union.
 
 # %% tags=["results"]
-results = study.backtests.table().filter(
-    (pl.col("stage") == "signal")
-    & (pl.col("split") == "validation")
-    & pl.col("label").is_in(labels)
+swept = [result.hash for _, _, execution in executions for result in execution.results]
+results = study.backtests.table(include_preview=not CANONICAL_RUN).filter(
+    pl.col("backtest_hash").is_in(swept)
 )
+if results.height != len(swept):
+    raise RuntimeError(
+        f"{len(swept)} backtests were executed and {results.height} read back from the registry"
+    )
 if results.filter(~pl.col("complete")).height:
     raise RuntimeError("the signal-stage backtest catalog contains incomplete members")
 

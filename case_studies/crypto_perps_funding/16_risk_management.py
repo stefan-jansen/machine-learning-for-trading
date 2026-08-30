@@ -59,14 +59,20 @@ import json
 import plotly.graph_objects as go
 import polars as pl
 
-from case_studies.crypto_perps_funding.research_workflow import ALL_LABELS
-from case_studies.research import CandidateSet, Result, open_study, run_backtests
+from case_studies.crypto_perps_funding.research_workflow import (
+    ALL_LABELS,
+    allocation_pool,
+    selected_allocation_result,
+)
+from case_studies.research import Result, open_study, run_backtests
 from case_studies.research.strategy import strategy_warmup_periods
 from case_studies.utils.backtest_loaders import load_backtest_prices_for
+from case_studies.utils.strategy_analysis import rank_returns_on_common_support
 from case_studies.utils.sweep_config import (
     get_portfolio_risk_controls,
     get_position_risk_controls,
 )
+from case_studies.utils.uncertainty import periods_per_year_from_setup
 from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
@@ -81,6 +87,13 @@ study = open_study(
     "crypto_perps_funding", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None
 )
 labels = list(LABELS) if LABELS else list(ALL_LABELS)
+# Where this run's own results are written and read back from: the released case directory on a
+# canonical run, the isolated preview directory otherwise. `study.root` is the released one in
+# both tiers, so a preview that reads it is reading somebody else's registry.
+STORAGE_ROOT = study.storage_root(study.execution_tier)
+# A canonical run reads the funnel's frozen sets and publishes its own; a preview run against a
+# private workspace reads and writes only what it produced there.
+CANONICAL_RUN = EXECUTION_TIER == "canonical" and not WORKSPACE
 
 # %% [markdown]
 # ## 1. What the overlay is applied to
@@ -96,17 +109,25 @@ labels = list(LABELS) if LABELS else list(ALL_LABELS)
 # allocation result independently.
 
 # %%
-chosen_by_label = {}
-for label in labels:
-    candidates = CandidateSet.one(study, name=f"crypto-signal-allocation-{label}")
-    chosen_by_label[label] = candidates.best_validation_sharpe()
+chosen_by_label = {
+    label: selected_allocation_result(study, label=label, canonical=CANONICAL_RUN)
+    for label in labels
+}
+# The pool each winner was chosen from. Kept because the paired difference below is taken
+# against the unprotected result of the same generation, not against whatever the registry
+# happens to hold under that label.
+allocation_pool_hashes = [
+    member
+    for label in labels
+    for member in allocation_pool(study, label=label, canonical=CANONICAL_RUN)
+]
 
 # %% [markdown]
 # One row per label: the configuration each overlay is measured against, and the no-overlay
 # numbers the paired difference is taken from.
 
 # %% tags=["results"]
-backtests = study.backtests.table()
+backtests = study.backtests.table(include_preview=not CANONICAL_RUN)
 baseline = backtests.filter(
     pl.col("backtest_hash").is_in([result.hash for result in chosen_by_label.values()])
 ).select(
@@ -203,6 +224,7 @@ def as_risk_spec(control: dict) -> dict:
 
 
 # %%
+overlays = []
 for label in labels:
     chosen = chosen_by_label[label]
     strategy = chosen.spec()["strategy"]
@@ -211,7 +233,7 @@ for label in labels:
     prices = load_backtest_prices_for(
         "crypto_perps_funding", label, split="validation", warmup_periods=warmup
     )
-    predictions = study.predictions.table().filter(
+    predictions = study.predictions.table(include_preview=not CANONICAL_RUN).filter(
         pl.col("prediction_hash") == chosen.spec()["backtest_config"]["metadata"]["prediction_hash"]
     )
     if predictions.height != 1:
@@ -225,8 +247,13 @@ for label in labels:
             risk=as_risk_spec(control),
             prices=prices,
             chapter="ch19",
-            population_name=f"crypto-risk-{label}-{control['name']}-{POPULATION_SUFFIX}",
+            population_name=(
+                f"crypto-risk-{label}-{control['name']}-{POPULATION_SUFFIX}"
+                if CANONICAL_RUN
+                else None
+            ),
         )
+        overlays.extend(result.hash for result in execution.results)
         print(
             f"{label} / {control['name']}: {len(execution.results)} backtests registered\n"
             f"  this execution: {execution.n_computed} computed, "
@@ -247,7 +274,7 @@ for label in labels:
 def fold_windows(prediction_hash: str) -> pl.DataFrame:
     """First and last decision date of each validation fold, in date order."""
     return (
-        Result.open(study, prediction_hash)
+        Result.open(study, prediction_hash, include_preview=not CANONICAL_RUN)
         .load()
         .group_by("fold")
         .agg(
@@ -262,7 +289,7 @@ def fold_windows(prediction_hash: str) -> pl.DataFrame:
 def traded_folds(backtest_hash: str, windows: pl.DataFrame) -> tuple[int, ...]:
     """Which validation folds one registered result actually held a position in."""
     returns = pl.read_parquet(
-        study.root / "run_log" / "backtest" / backtest_hash / "daily_returns.parquet"
+        STORAGE_ROOT / "run_log" / "backtest" / backtest_hash / "daily_returns.parquet"
     )
     column = next(name for name in returns.columns if name != "timestamp")
     active = returns.filter(pl.col(column) != 0).select(pl.col("timestamp").dt.date().alias("day"))
@@ -280,10 +307,17 @@ windows_by_label = {
     label: fold_windows(chosen.spec()["backtest_config"]["metadata"]["prediction_hash"])
     for label, chosen in chosen_by_label.items()
 }
-results = study.backtests.table().filter(
-    (pl.col("split") == "validation")
-    & pl.col("label").is_in(labels)
-    & pl.col("stage").is_in(["signal", "allocation", "risk_overlay"])
+# The predecessor set's members plus this run's own overlays, named by hash. Reading
+# `stage IN (signal, allocation, risk_overlay)` off the registry instead folds every retired
+# generation of all three back into the grid, and a superseded result is not a candidate: the
+# final set frozen below would then carry results no live comparison produced.
+in_play = list(
+    {result.hash for result in chosen_by_label.values()}
+    | set(allocation_pool_hashes)
+    | set(overlays)
+)
+results = study.backtests.table(include_preview=not CANONICAL_RUN).filter(
+    pl.col("backtest_hash").is_in(in_play)
 )
 # A risk_overlay row whose specification carries no position rule was run without the control it
 # is registered under. The engine reads `strategy.risk.position_rules` and installs nothing when
@@ -360,6 +394,7 @@ no_overlay = keyed.filter(
     pl.col("max_drawdown").alias("baseline_drawdown"),
     pl.col("num_trades").alias("baseline_trades"),
     pl.col("traded_folds").alias("baseline_traded_folds"),
+    pl.col("backtest_hash").alias("baseline_backtest_hash"),
 )
 if no_overlay.get_column("baseline_key").n_unique() != no_overlay.height:
     raise RuntimeError("two selected baselines share one specification")
@@ -372,10 +407,60 @@ overlay = (
         (pl.col("num_trades") - pl.col("baseline_trades")).alias("extra_trades"),
     )
 )
-comparable = overlay.filter(pl.col("traded_folds") == pl.col("baseline_traded_folds"))
+# Every overlay is compared, and each pair is read on the sessions both results priced.
+#
+# The previous form kept only overlays whose `traded_folds` matched their baseline's, and that
+# is the wrong question asked in the right spirit. The right requirement is that a paired
+# difference be taken over one sample; the filter asked instead that the overlay's exposure
+# equal the baseline's, which is a different thing whenever the control does its job. Fourteen
+# of these are stop losses, trailing stops and time exits: a control that fires exits the
+# position, and an exited position is not held for the rest of the fold. So the filter removed
+# exactly the controls the stage exists to evaluate, and removed the ones that bound hardest
+# first. It bound on nothing in the published run - 56 of 56 comparable - which is why reading
+# the output could never have found it.
+#
+# Both Sharpes come from `rank_returns_on_common_support`, over the intersection of the two
+# registered return series. The exposure difference becomes `sessions_dropped`, a column beside
+# the result, rather than a reason to drop the row.
+PERIODS_PER_YEAR = int(periods_per_year_from_setup("crypto_perps_funding"))
+
+
+def paired_on_common_support(overlay_hash: str, baseline_hash: str) -> dict[str, float]:
+    """Each side's Sharpe on the sessions both priced, and how many that is."""
+    frames = {
+        result_hash: pl.read_parquet(
+            STORAGE_ROOT / "run_log" / "backtest" / result_hash / "daily_returns.parquet"
+        )
+        for result_hash in (overlay_hash, baseline_hash)
+    }
+    ranked = rank_returns_on_common_support(frames, periods_per_year=PERIODS_PER_YEAR)
+    by_hash = {row["backtest_hash"]: row for row in ranked.iter_rows(named=True)}
+    shared = int(ranked.get_column("n_periods")[0])
+    return {
+        "backtest_hash": overlay_hash,
+        "paired_sharpe": float(by_hash[overlay_hash]["sharpe"]),
+        "paired_baseline_sharpe": float(by_hash[baseline_hash]["sharpe"]),
+        "shared_sessions": shared,
+        "sessions_dropped": int(frames[baseline_hash].height - shared),
+    }
+
+
+comparable = overlay.join(
+    pl.DataFrame(
+        [
+            paired_on_common_support(row["backtest_hash"], row["baseline_backtest_hash"])
+            for row in overlay.iter_rows(named=True)
+        ]
+    ),
+    on="backtest_hash",
+    how="inner",
+).with_columns((pl.col("paired_sharpe") - pl.col("paired_baseline_sharpe")).alias("sharpe_change"))
+if comparable.height != overlay.height:
+    raise RuntimeError("an overlay lost its pair on the common-support join")
+dropped = comparable.filter(pl.col("sessions_dropped") > 0)
 print(
-    f"{comparable.height} of {overlay.height} overlay results traded the same folds as their "
-    "baseline and are comparable to it"
+    f"{comparable.height} overlay results, each compared to its baseline on the sessions both "
+    f"priced; {dropped.height} exited early enough to price fewer than their baseline"
 )
 if comparable.filter(pl.col("control_type").is_null()).height:
     raise RuntimeError(
@@ -403,6 +488,8 @@ comparable.select(
     "max_drawdown",
     "drawdown_change",
     "extra_trades",
+    "shared_sessions",
+    "sessions_dropped",
 ).sort("label", "sharpe_change", descending=[False, True])
 
 # %% [markdown]
@@ -479,19 +566,26 @@ for label in labels:
     full = "+".join(str(fold) for fold in windows_by_label[label].get_column("fold").to_list())
     admitted = label_rows.filter(pl.col("traded_folds") == full)
     excluded = label_rows.height - admitted.height
-    members = study.backtests.freeze(
-        results.filter(
-            pl.col("backtest_hash").is_in(admitted.get_column("backtest_hash").implode())
-        ),
-        name=(set_name := f"crypto-final-validation-{label}"),
-        # Keyed by label, and also by the full set name, which is what the refusal prints.
-        # Pasting back the name it names is the obvious thing to try, and it used to miss.
-        supersedes=SUPERSEDES.get(set_name) or SUPERSEDES.get(label),
-    )
-    print(
-        f"{members.name}: {len(members.members)} members traded folds {full}; "
-        f"{excluded} excluded for trading fewer"
-    )
+    set_name = f"crypto-final-validation-{label}"
+    if CANONICAL_RUN:
+        members = study.backtests.freeze(
+            results.filter(
+                pl.col("backtest_hash").is_in(admitted.get_column("backtest_hash").implode())
+            ),
+            name=set_name,
+            # Keyed by label, and also by the full set name, which is what the refusal prints.
+            # Pasting back the name it names is the obvious thing to try, and it used to miss.
+            supersedes=SUPERSEDES.get(set_name) or SUPERSEDES.get(label),
+        )
+        print(
+            f"{members.name}: {len(members.members)} members traded folds {full}; "
+            f"{excluded} excluded for trading fewer"
+        )
+    else:
+        print(
+            f"{set_name} (preview): {admitted.height} members traded folds {full}; "
+            f"{excluded} excluded for trading fewer, not frozen"
+        )
 
 # %% [markdown]
 # ## 6. What to notice

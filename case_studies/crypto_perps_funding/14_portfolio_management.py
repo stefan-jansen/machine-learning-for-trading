@@ -62,7 +62,7 @@ import plotly.graph_objects as go
 import polars as pl
 
 from case_studies.crypto_perps_funding.research_workflow import ALL_LABELS
-from case_studies.research import Result, open_study, run_backtests
+from case_studies.research import CandidateSet, Result, open_study, run_backtests
 from case_studies.research.strategy import strategy_warmup_periods
 from case_studies.utils.backtest_loaders import load_backtest_prices_for
 from case_studies.utils.registry.queries import resolve_best_predictions
@@ -94,7 +94,15 @@ study = open_study(
 )
 setup = load_setup_config("crypto_perps_funding")
 labels = list(LABELS) if LABELS else list(ALL_LABELS)
+# Where this run's own results are written and read back from: the released case directory on a
+# canonical run, the isolated preview directory otherwise. `study.root` is the released one in
+# both tiers, so a preview that reads it is reading somebody else's registry.
+STORAGE_ROOT = study.storage_root(study.execution_tier)
 n_assets = int(setup["universe"]["n_assets"])
+# A canonical run publishes the funnel's named pools; a preview run against a private
+# workspace reads and writes only its own results and names none of them. Both are the same
+# sweep - the tier decides what is declared, never what is computed.
+CANONICAL_RUN = EXECUTION_TIER == "canonical" and not WORKSPACE
 
 # %% [markdown]
 # ## 1. Which baselines advance
@@ -115,8 +123,42 @@ n_assets = int(setup["universe"]["n_assets"])
 # here.
 #
 # `resolve_best_predictions` is the one implementation of that rule, shared by every case study.
+#
+# **It is asked about one population, not about the registry.** `13_backtest` froze the baselines
+# each label hands on as `crypto-signal-{label}`, and that set is the whole of what may advance.
+# Ranking without it reads every signal backtest the registry holds, which includes the sweeps a
+# corrected re-run retired: those rows are immutable and their predictions are still current, so
+# no filter on the prediction side can exclude them, and `MAX(sharpe)` over a configuration then
+# ranks it on a number no live result carries. The set's members are backtest identities, and
+# `backtest_hashes` is where they go.
 
 # %%
+if CANONICAL_RUN:
+    signal_members = {
+        label: set(CandidateSet.one(study, name=f"crypto-signal-{label}").members)
+        for label in labels
+    }
+else:
+    # A preview run has no frozen set to open, because a candidate set is canonical. Its
+    # equivalent is the signal backtests its own 13_backtest wrote into this workspace.
+    preview_signal = study.backtests.table(include_preview=True).filter(
+        (pl.col("stage") == "signal")
+        & (pl.col("split") == "validation")
+        & (pl.col("execution_tier") == "preview")
+        & pl.col("label").is_in(labels)
+    )
+    if preview_signal.is_empty():
+        raise RuntimeError(
+            "no preview signal backtests in this workspace; 13_backtest has to run in the "
+            "same workspace before this notebook"
+        )
+    signal_members = {
+        label: set(
+            preview_signal.filter(pl.col("label") == label).get_column("backtest_hash").to_list()
+        )
+        for label in labels
+    }
+
 top_n = get_top_n_predictions("crypto_perps_funding", "allocation")
 # `vertical_relaxed`, because `checkpoint_value` is Null-typed for a label whose survivors
 # are all final-checkpoint models and Int64 for one that advanced a boosted model on a
@@ -131,7 +173,11 @@ survivors = pl.concat(
             stage="signal",
             top_n=top_n,
             checkpoints_per_config=1,
-            case_dir=study.root,
+            # The registry this run is writing to, which is the preview one on a preview run.
+            # `study.root` is the released case directory in both tiers, so passing it made a
+            # preview ask the canonical registry about backtests it never wrote there.
+            case_dir=study.storage_root(study.execution_tier),
+            backtest_hashes=signal_members[label],
         )
         for label in labels
     ],
@@ -145,7 +191,7 @@ if survivors.is_empty():
 # so the shortlist can be read against the population it came from rather than in isolation.
 
 # %% tags=["results"]
-catalog = study.predictions.table().filter(
+catalog = study.predictions.table(include_preview=not CANONICAL_RUN).filter(
     pl.col("prediction_hash").is_in(survivors.get_column("prediction_hash").implode())
 )
 if catalog.height != survivors.height:
@@ -268,6 +314,7 @@ schemes_by_label = {
 }
 
 # %%
+allocations = []
 for label in labels:
     label_rows = catalog.filter(pl.col("label") == label)
     for scheme in schemes_by_label[label]:
@@ -285,9 +332,12 @@ for label in labels:
                 allocation=allocator,
                 prices=prices_by_key[(label, warmup)],
                 chapter="ch17",
-                population_name=allocation_population,
-                supersedes=SUPERSEDES_ALLOCATION.get(allocation_population),
+                population_name=allocation_population if CANONICAL_RUN else None,
+                supersedes=(
+                    SUPERSEDES_ALLOCATION.get(allocation_population) if CANONICAL_RUN else None
+                ),
             )
+            allocations.append((label, scheme["name"], allocator["method"], execution))
             print(
                 f"{label} / {scheme['name']} / {allocator['method']}: "
                 f"{len(execution.results)} backtests registered\n"
@@ -304,10 +354,16 @@ for label in labels:
 # the walk-forward split numbers folds as it builds them - so the list is written oldest first.
 
 # %%
-results = study.backtests.table().filter(
-    (pl.col("split") == "validation")
-    & pl.col("label").is_in(labels)
-    & pl.col("stage").is_in(["signal", "allocation"])
+# The rows are named: the baselines the frozen signal set admits, plus the allocation
+# backtests this run just registered. Reading `stage IN (signal, allocation)` off the registry
+# instead would fold every retired generation of both stages back into the grid, and a
+# superseded result is not a candidate.
+allocation_hashes = {
+    result.hash for _, _, _, execution in allocations for result in execution.results
+}
+in_play = set().union(*signal_members.values()) | allocation_hashes
+results = study.backtests.table(include_preview=not CANONICAL_RUN).filter(
+    pl.col("backtest_hash").is_in(list(in_play))
 )
 if results.filter(~pl.col("complete")).height:
     raise RuntimeError("the backtest catalog contains incomplete members")
@@ -340,7 +396,7 @@ def fold_windows(label: str) -> pl.DataFrame:
     """
     reference = catalog.filter(pl.col("label") == label).sort("prediction_hash")
     return (
-        Result.open(study, reference.item(0, "prediction_hash"))
+        Result.open(study, reference.item(0, "prediction_hash"), include_preview=not CANONICAL_RUN)
         .load()
         .group_by("fold")
         .agg(
@@ -355,7 +411,7 @@ def fold_windows(label: str) -> pl.DataFrame:
 def traded_folds(backtest_hash: str, windows: pl.DataFrame) -> tuple[int, ...]:
     """Which validation folds one registered result actually held a position in."""
     returns = pl.read_parquet(
-        study.root / "run_log" / "backtest" / backtest_hash / "daily_returns.parquet"
+        STORAGE_ROOT / "run_log" / "backtest" / backtest_hash / "daily_returns.parquet"
     )
     column = next(name for name in returns.columns if name != "timestamp")
     active = returns.filter(pl.col(column) != 0).select(pl.col("timestamp").dt.date().alias("day"))
@@ -518,6 +574,7 @@ show_plotly_with_alt(
 # The error raised on a changed set names the predecessor hash to pass.
 
 # %%
+admitted_by_label: dict[str, list[str]] = {}
 for label in labels:
     label_rows = keyed.filter(pl.col("label") == label)
     # Every fold the label declares, in date order - not the most common value observed, which
@@ -525,19 +582,28 @@ for label in labels:
     full = "+".join(str(fold) for fold in windows_by_label[label].get_column("fold").to_list())
     admitted = label_rows.filter(pl.col("traded_folds") == full)
     excluded = label_rows.height - admitted.height
-    members = study.backtests.freeze(
-        results.filter(
-            pl.col("backtest_hash").is_in(admitted.get_column("backtest_hash").implode())
-        ),
-        name=(set_name := f"crypto-signal-allocation-{label}"),
-        # Keyed by label, and also by the full set name, which is what the refusal prints.
-        # Pasting back the name it names is the obvious thing to try, and it used to miss.
-        supersedes=SUPERSEDES.get(set_name) or SUPERSEDES.get(label),
-    )
-    print(
-        f"{members.name}: {len(members.members)} members traded folds {full}; "
-        f"{excluded} excluded for trading fewer"
-    )
+    set_name = f"crypto-signal-allocation-{label}"
+    if CANONICAL_RUN:
+        members = study.backtests.freeze(
+            results.filter(
+                pl.col("backtest_hash").is_in(admitted.get_column("backtest_hash").implode())
+            ),
+            name=set_name,
+            # Keyed by label, and also by the full set name, which is what the refusal prints.
+            # Pasting back the name it names is the obvious thing to try, and it used to miss.
+            supersedes=SUPERSEDES.get(set_name) or SUPERSEDES.get(label),
+        )
+        admitted_by_label[label] = list(members.members)
+        print(
+            f"{members.name}: {len(members.members)} members traded folds {full}; "
+            f"{excluded} excluded for trading fewer"
+        )
+    else:
+        admitted_by_label[label] = admitted.get_column("backtest_hash").to_list()
+        print(
+            f"{set_name} (preview): {len(admitted_by_label[label])} members traded folds "
+            f"{full}; {excluded} excluded for trading fewer, not frozen"
+        )
 
 # %% [markdown]
 # ## 6. What to notice

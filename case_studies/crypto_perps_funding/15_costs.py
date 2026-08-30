@@ -59,8 +59,11 @@ from contextlib import closing
 import plotly.graph_objects as go
 import polars as pl
 
-from case_studies.crypto_perps_funding.research_workflow import ALL_LABELS
-from case_studies.research import CandidateSet, open_study, run_backtests
+from case_studies.crypto_perps_funding.research_workflow import (
+    ALL_LABELS,
+    selected_allocation_result,
+)
+from case_studies.research import open_study, run_backtests
 from case_studies.research.strategy import strategy_warmup_periods
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.sweep_config import get_cost_grid_bps
@@ -77,6 +80,13 @@ study = open_study(
     "crypto_perps_funding", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None
 )
 labels = list(LABELS) if LABELS else list(ALL_LABELS)
+# Where this run's own results are written and read back from: the released case directory on a
+# canonical run, the isolated preview directory otherwise. `study.root` is the released one in
+# both tiers, so a preview that reads it is reading somebody else's registry.
+STORAGE_ROOT = study.storage_root(study.execution_tier)
+# A canonical run reads the funnel's frozen sets and publishes its own; a preview run against a
+# private workspace reads and writes only what it produced there.
+CANONICAL_RUN = EXECUTION_TIER == "canonical" and not WORKSPACE
 case_config = get_backtest_config("crypto_perps_funding")
 
 # %% [markdown]
@@ -93,10 +103,10 @@ case_config = get_backtest_config("crypto_perps_funding")
 # resolves a name to exactly one identity or raises.
 
 # %%
-chosen_by_label = {}
-for label in labels:
-    candidates = CandidateSet.one(study, name=f"crypto-signal-allocation-{label}")
-    chosen_by_label[label] = candidates.best_validation_sharpe()
+chosen_by_label = {
+    label: selected_allocation_result(study, label=label, canonical=CANONICAL_RUN)
+    for label in labels
+}
 
 # %% [markdown]
 # One row per label. `stage` says whether the surviving configuration came from the baseline or
@@ -104,7 +114,7 @@ for label in labels:
 # where no allocator beat it.
 
 # %% tags=["results"]
-backtests = study.backtests.table()
+backtests = study.backtests.table(include_preview=not CANONICAL_RUN)
 selected = backtests.filter(
     pl.col("backtest_hash").is_in([result.hash for result in chosen_by_label.values()])
 ).select(
@@ -168,6 +178,7 @@ print(
 # differently, and the difference would be attributed to the cost level.
 
 # %%
+cost_runs = []
 for label in labels:
     chosen = chosen_by_label[label]
     strategy = chosen.spec()["strategy"]
@@ -176,7 +187,7 @@ for label in labels:
     prices = load_backtest_prices_for(
         "crypto_perps_funding", label, split="validation", warmup_periods=warmup
     )
-    predictions = study.predictions.table().filter(
+    predictions = study.predictions.table(include_preview=not CANONICAL_RUN).filter(
         pl.col("prediction_hash") == chosen.spec()["backtest_config"]["metadata"]["prediction_hash"]
     )
     if predictions.height != 1:
@@ -194,8 +205,11 @@ for label in labels:
             },
             prices=prices,
             chapter="ch18",
-            population_name=f"crypto-cost-{label}-{level:g}bps-{POPULATION_SUFFIX}",
+            population_name=(
+                f"crypto-cost-{label}-{level:g}bps-{POPULATION_SUFFIX}" if CANONICAL_RUN else None
+            ),
         )
+        cost_runs.extend(result.hash for result in execution.results)
         print(
             f"{label} @ {level:g} bps: {len(execution.results)} backtests registered\n"
             f"  this execution: {execution.n_computed} computed, "
@@ -235,19 +249,20 @@ def funding_metrics(study_root) -> pl.DataFrame:
 # %%
 commission_rate = pl.col("spec_json").str.json_path_match("$.backtest_config.commission.rate")
 slippage_rate = pl.col("spec_json").str.json_path_match("$.backtest_config.slippage.rate")
+# Named by hash, and not read back as "every cost_sensitivity row for these labels". The
+# registry keeps every generation, so a run whose selected configuration changed - because the
+# candidate set it came from was superseded - leaves the previous configuration's cost cells in
+# place, and the row-count check below then fails on a valid re-run while the curve it did draw
+# would have mixed two configurations.
 curve = (
-    study.backtests.table()
-    .filter(
-        (pl.col("stage") == "cost_sensitivity")
-        & (pl.col("split") == "validation")
-        & pl.col("label").is_in(labels)
-    )
+    study.backtests.table(include_preview=not CANONICAL_RUN)
+    .filter(pl.col("backtest_hash").is_in(cost_runs))
     .with_columns(
         ((commission_rate.cast(pl.Float64) + slippage_rate.cast(pl.Float64)) * 10_000)
         .round(6)
         .alias("cost_bps")
     )
-    .join(funding_metrics(study.root), on="backtest_hash", how="left")
+    .join(funding_metrics(STORAGE_ROOT), on="backtest_hash", how="left")
     .sort("label", "cost_bps")
 )
 if curve.filter(pl.col("funding_pnl").is_null()).height:
