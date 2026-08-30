@@ -55,6 +55,8 @@
 
 import sqlite3
 from contextlib import closing
+from copy import deepcopy
+from typing import Any
 
 import plotly.graph_objects as go
 import polars as pl
@@ -188,8 +190,34 @@ print(
 # Prices are loaded with the warmup its allocator needs, which is the same window the
 # allocation stage gave it. A moment-based allocator that saw less history here would weight
 # differently, and the difference would be attributed to the cost level.
+#
+# Every sibling is then audited against the result it came from. The audit removes only the two
+# cost fields and the chapter label; every remaining field must match. Reading the strategy back
+# is what makes the sweep right, and this is what makes a sweep that is wrong unpublishable -
+# a dropped block does not change the row count, and without the audit nothing would notice.
+
 
 # %%
+def _non_cost_projection(spec: dict[str, Any]) -> dict[str, Any]:
+    """Everything about a backtest that sweeping the cost level must not change.
+
+    Passing `risk` is what makes the sibling right; comparing the projections is what makes
+    getting it wrong impossible to publish. A dropped strategy block leaves a run that
+    succeeds, registers the expected number of rows and prices a different configuration, so
+    the check has to be on the specification rather than on the count.
+    """
+    projected = deepcopy(spec)
+    projected.pop("chapter", None)
+    projected.pop("_runtime_backtest_config", None)
+    config = projected.get("backtest_config", {})
+    config.pop("commission", None)
+    config.pop("slippage", None)
+    metadata = config.get("metadata")
+    if isinstance(metadata, dict):
+        metadata.pop("chapter", None)
+    return projected
+
+
 cost_runs = []
 for label in labels:
     chosen = chosen_by_label[label]
@@ -227,6 +255,11 @@ for label in labels:
                 f"crypto-cost-{label}-{level:g}bps-{POPULATION_SUFFIX}" if CANONICAL_RUN else None
             ),
         )
+        for result in execution.results:
+            if _non_cost_projection(result.spec()) != _non_cost_projection(chosen.spec()):
+                raise RuntimeError(
+                    f"{label} @ {level:g} bps: a cost sibling changed a non-cost strategy field"
+                )
         cost_runs.extend(result.hash for result in execution.results)
         print(
             f"{label} @ {level:g} bps: {len(execution.results)} backtests registered\n"
