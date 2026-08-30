@@ -74,7 +74,13 @@ from utils.style import COLORS, show_plotly_with_alt
 LABELS: list[str] = []
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
-SUPERSEDES: str = ""
+# The generation of `crypto-final-selection` this run replaces. Its membership is the union of
+# the four final validation sets, and those moved in `16_risk_management` when the grid their
+# admission rule is applied to stopped being every row the registry holds for the label - so
+# this pool moves with them. Recorded here rather than passed at run time: `supersedes` is part
+# of what identifies the generation, so a re-run declaring nothing computes a different hash
+# from the row on record and is refused (ml4t/agent-workspace#879).
+SUPERSEDES: str = "8270e5b544f9"
 
 # %%
 study = open_study(
