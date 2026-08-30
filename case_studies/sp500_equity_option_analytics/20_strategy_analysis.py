@@ -386,17 +386,59 @@ risk_plans = []
 # the same frozen set, on the same predictions, with the same allocator and concentration, and
 # no overlay.
 CARRIER_SPEC = json.loads(strategy_carrier["spec_json"])
-no_overlay_rows = candidate_frame.filter(
-    (pl.col("prediction_hash") == strategy_carrier["prediction_hash"])
-    & (pl.col("allocator") == strategy_carrier["allocator"])
-    & (pl.col("top_k") == strategy_carrier["top_k"])
-    & pl.col("risk").is_null()
-)
+
+
+def _un_overlaid_parents(frame: pl.DataFrame) -> pl.DataFrame:
+    """Rows in ``frame`` that are this carrier's strategy without the overlay."""
+    return frame.filter(
+        (pl.col("prediction_hash") == strategy_carrier["prediction_hash"])
+        & (pl.col("allocator") == strategy_carrier["allocator"])
+        & (pl.col("top_k") == strategy_carrier["top_k"])
+        & pl.col("risk").is_null()
+    )
+
+
+# The field first, because a parent that competed is the right comparison. But the parent is a
+# fact about the carrier rather than about the field - 16_risk_management laid this overlay over
+# it - so where the field does not carry it, the registry is asked directly. The two differ
+# whenever the field is narrower than the registry: a reduced sweep registers the overlay and
+# leaves its un-overlaid sibling outside the eligible set, and requiring field membership would
+# refuse to score an overlay whose baseline exists and is complete.
+no_overlay_rows = _un_overlaid_parents(candidate_frame)
+PARENT_SOURCE = "the frozen field"
+if no_overlay_rows.height != 1:
+    with sqlite3.connect(REGISTRY_DB) as db:
+        _sibling_rows = db.execute(
+            """
+            SELECT b.backtest_hash, b.prediction_hash, b.spec_json, m.sharpe
+            FROM backtest_runs b JOIN backtest_metrics m USING(backtest_hash)
+            WHERE b.prediction_hash = ? AND m.sharpe IS NOT NULL
+            """,
+            (strategy_carrier["prediction_hash"],),
+        ).fetchall()
+    _siblings = pl.DataFrame(
+        [
+            {
+                "backtest_hash": h,
+                "prediction_hash": ph,
+                "spec_json": sj,
+                "sharpe": sharpe,
+                "allocator": (strategy_view(json.loads(sj)).get("allocation") or {}).get(
+                    "method", "equal_weight"
+                ),
+                "top_k": (strategy_view(json.loads(sj)).get("signal") or {}).get("top_k"),
+                "risk": (strategy_view(json.loads(sj)).get("risk") or {}).get("name"),
+            }
+            for h, ph, sj, sharpe in _sibling_rows
+        ]
+    )
+    no_overlay_rows = _un_overlaid_parents(_siblings) if _siblings.height else _siblings
+    PARENT_SOURCE = "the registry, outside the eligible field"
 if no_overlay_rows.height != 1:
     raise RuntimeError(
         f"the carrier {strategy_carrier['backtest_hash']} has {no_overlay_rows.height} "
-        "un-overlaid parents in the frozen candidate set, not one, so its overlay cannot be "
-        "scored against the strategy it was laid over"
+        "un-overlaid parents, not one, in the frozen field or in the registry, so its overlay "
+        "cannot be scored against the strategy it was laid over"
     )
 NO_OVERLAY = no_overlay_rows.row(0, named=True)
 NO_OVERLAY_HASH = NO_OVERLAY["backtest_hash"]
@@ -406,7 +448,8 @@ if strategy_carrier["risk"] is None and strategy_carrier["backtest_hash"] != NO_
         f"{NO_OVERLAY_HASH} against {strategy_carrier['backtest_hash']}"
     )
 print(
-    f"Un-overlaid parent {NO_OVERLAY_HASH} at validation Sharpe {NO_OVERLAY['sharpe']:.3f}"
+    f"Un-overlaid parent {NO_OVERLAY_HASH} from {PARENT_SOURCE} "
+    f"at validation Sharpe {NO_OVERLAY['sharpe']:.3f}"
     + (
         f"; the carrier adds {strategy_carrier['risk']} for "
         f"{strategy_carrier['sharpe'] - NO_OVERLAY['sharpe']:+.3f}"
