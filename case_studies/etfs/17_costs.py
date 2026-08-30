@@ -127,6 +127,8 @@ WORKSPACE: str = ""
 # default.
 
 # %%
+# Configuration only. Anything that reads the registry resolves the directory at call time,
+# because `Study.activate()` moves the output root for a preview run and this binding predates it.
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 bt_config = get_backtest_config(CASE_STUDY_ID)
 if TOP_N_COMBOS is None:
@@ -320,8 +322,18 @@ SWEPT_COST_HASHES: set[str] = set()
 
 
 def _stage_of(backtest_hash: str) -> str | None:
-    """The stage one backtest was actually registered under, read back from the registry."""
-    with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
+    """The stage one backtest was actually registered under, read back from the registry.
+
+    The directory is resolved here rather than reused from `CASE_DIR`, which is bound above
+    the first `open_study` call. `Study.activate()` re-points the output root at
+    `<workspace>/.preview` for a preview run, so a preview sweep registers into a registry
+    that `CASE_DIR` does not name - and this check would then read the canonical database,
+    find none of the hashes it just wrote, and report every one of them misfiled. Resolving
+    at call time is what `resolve_best_backtest_runs` and `load_existing_backtest_hashes`
+    already do, so this reads the same database the rest of the notebook does.
+    """
+    registry = get_case_study_dir(CASE_STUDY_ID) / "run_log" / "registry.db"
+    with sqlite3.connect(str(registry)) as conn:
         row = conn.execute(
             "SELECT stage FROM backtest_runs WHERE backtest_hash = ?", (backtest_hash,)
         ).fetchone()
