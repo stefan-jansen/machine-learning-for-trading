@@ -151,8 +151,12 @@ CANDIDATE_SET_NAME = f"{CASE_STUDY_ID}:holdout-candidates"
 # a refit that left two generations live and needs a person to say which supersedes which,
 # silently down the live-ranking path. So the fallback is chosen on absence, and every way a
 # recorded set can be wrong propagates from the unguarded call below.
+# Asked of the registry the resolution will read, which is the study's own root. On a run given
+# a WORKSPACE that is not the case directory `REGISTRY_DB` was resolved from, the two are
+# different databases, and checking one to decide whether to query the other is how a present
+# set gets reported absent.
 try:
-    with sqlite3.connect(REGISTRY_DB) as _db:
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as _db:
         _recorded_sets = _db.execute(
             "SELECT COUNT(*) FROM candidate_sets WHERE name = ?", (CANDIDATE_SET_NAME,)
         ).fetchone()[0]
