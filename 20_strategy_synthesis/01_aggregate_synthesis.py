@@ -230,6 +230,15 @@ _CLUSTER_RUNG_RESTRICTIONS: dict[str, dict[str, object]] = {
 }
 
 
+def _retired(cs: str) -> frozenset[str]:
+    """Identities a later generation retired, from the same helper `populate_paired_metrics`
+    uses. Both write `backtest_paired_metrics`, so a disagreement here would let a Chapter 20
+    run overwrite the corrected pairs with a retired lineage."""
+    from case_studies.utils.paired_metrics import _retired_prediction_hashes
+
+    return _retired_prediction_hashes(cs)
+
+
 def _best_pinned(explorer: "BacktestExplorer", cs: str, stage: str, top_n: int) -> pl.DataFrame:
     """`explorer.best` for a stage, fetching enough rows that a rung-restricted
     cohort survives the post-hoc predicate filter.
@@ -890,10 +899,13 @@ for cs, explorer in explorers.items():
     # Cross-stage rank-1 (signal/allocation/risk_overlay), mirroring
     # holdout.py::HOLDOUT_SELECTION_STAGES. Dedup by prediction_hash so the
     # leader corresponds to a distinct trained model.
+    retired = _retired(cs)
     cand = pl.concat(
         [explorer.best(stage=s, top_n=2000) for s in ("signal", "allocation", "risk_overlay")],
         how="diagonal_relaxed",
     )
+    if retired and "prediction_hash" in cand.columns:
+        cand = cand.filter(~pl.col("prediction_hash").is_in(list(retired)))
     if cand.is_empty() or "backtest_hash" not in cand.columns:
         paired_skips.append({"case_study": cs, "reason": "no_signal_stage_candidates"})
         continue
@@ -1106,10 +1118,13 @@ def _val_rank1_full_spec(cs: str) -> dict | None:
     explorer = explorers.get(cs)
     if explorer is None:
         return None
+    retired = _retired(cs)
     cand = pl.concat(
         [explorer.best(stage=s, top_n=2000) for s in ("signal", "allocation", "risk_overlay")],
         how="diagonal_relaxed",
     )
+    if retired and "prediction_hash" in cand.columns:
+        cand = cand.filter(~pl.col("prediction_hash").is_in(list(retired)))
     if cand.is_empty() or "backtest_hash" not in cand.columns:
         return None
     if "family" in cand.columns:
@@ -1141,7 +1156,11 @@ def _val_rank1_full_spec(cs: str) -> dict | None:
                 continue
             spec_clauses, spec_params = _full_strategy_clauses(spec)
             ho_clauses = ["p.split = 'holdout'"] + spec_clauses
+            if _retired(cs):
+                ho_clauses.append("p.prediction_hash NOT IN (SELECT value FROM json_each(?))")
             ho_params: list[object] = list(spec_params)
+            if _retired(cs):
+                ho_params.append(json.dumps(sorted(_retired(cs))))
             if label_restriction:
                 placeholders = ",".join("?" for _ in label_restriction)
                 ho_clauses.append(f"t.label IN ({placeholders})")
@@ -1296,6 +1315,9 @@ def _holdout_lineage_for(
     rung = _CLUSTER_RUNG_RESTRICTIONS.get(cs)
     clauses = ["p.split = 'holdout'"]
     params: list[object] = []
+    if _retired(cs):
+        clauses.append("p.prediction_hash NOT IN (SELECT value FROM json_each(?))")
+        params.append(json.dumps(sorted(_retired(cs))))
     if label_restriction:
         placeholders = ",".join("?" for _ in label_restriction)
         clauses.append(f"t.label IN ({placeholders})")
@@ -1389,10 +1411,18 @@ def _val_backtest_for_lineage(cs: str, family: str, config_name: str, label: str
               AND t.family = ?
               AND t.config_name = ?
               AND t.label = ?
+              {scope}
             ORDER BY bm.sharpe DESC NULLS LAST
             LIMIT 1
-            """,
-            (family, config_name, label),
+            """.format(
+                scope=(
+                    " AND p.prediction_hash NOT IN (SELECT value FROM json_each(?))"
+                    if _retired(cs)
+                    else ""
+                )
+            ),
+            (family, config_name, label)
+            + ((json.dumps(sorted(_retired(cs))),) if _retired(cs) else ()),
         ).fetchone()
     finally:
         db.close()
