@@ -434,6 +434,90 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
     }
 
 
+INSOLVENT_MAX_DRAWDOWN = -1.0
+"""Drawdown at or past which a run's equity reached zero.
+
+A long-short book with no margin call keeps compounding through zero, so every
+metric a run reports after that point is arithmetic on a balance that no longer
+exists - including a Sharpe high enough to top a ranking.
+"""
+
+
+def resolve_solvent_carrier(case_study: str, *, require_solvent: bool = True) -> dict[str, Any]:
+    """The configuration downstream notebooks run, with its spec and drawdown.
+
+    Cost sensitivity, holdout prediction and holdout backtest all have to run the
+    configuration the case study reports, and that configuration is
+    ``resolve_canonical_rank1_lineage``'s validation rank-1. Each notebook ranking
+    the registry for itself is a standing divergence class rather than a
+    hypothetical one: the canonical resolver re-ranks ``walk_forward_v2`` conformal
+    candidates on exact common timestamp support and applies LABEL_RESTRICTIONS,
+    UNIVERSE_RESTRICTIONS and CARRIER_PINS, and a plain Sharpe ranking beside it
+    does none of those. When the two disagree, the cost curve describes a strategy
+    the chapter does not report and the strategy-analysis notebook finds no cost
+    rows for the carrier it selected.
+
+    Solvency is checked here rather than inside the canonical resolver because the
+    two questions are different: the resolver decides which configuration the case
+    study is about, and this decides whether that configuration is one anything can
+    be measured on. An insolvent or unmeasured carrier raises. It deliberately does
+    not fall through to the runner-up - that would hand downstream notebooks a
+    configuration the chapter does not report, which is the divergence this
+    function exists to close. Selecting past a bankrupt rank-1 is a decision for
+    whoever owns the sweep, taken by fixing the sweep or pinning a carrier.
+
+    Returns ``resolve_canonical_rank1_lineage``'s dict with ``spec_json`` and
+    ``max_drawdown`` for the validation rank-1 added.
+    """
+    import sqlite3
+
+    from utils.paths import get_case_study_dir
+
+    lineage = resolve_canonical_rank1_lineage(case_study)
+    backtest_hash = lineage["val_backtest_hash"]
+
+    db_path = get_case_study_dir(case_study) / "run_log" / "registry.db"
+    db = sqlite3.connect(str(db_path))
+    try:
+        row = db.execute(
+            """
+            SELECT b.spec_json, bm.max_drawdown
+            FROM backtest_runs b
+            LEFT JOIN backtest_metrics bm ON bm.backtest_hash = b.backtest_hash
+            WHERE b.backtest_hash = ?
+            """,
+            (backtest_hash,),
+        ).fetchone()
+    finally:
+        db.close()
+    if row is None:
+        raise RuntimeError(
+            f"Canonical rank-1 {backtest_hash} for {case_study} is not in backtest_runs "
+            f"of {db_path}. The resolver and this lookup read the same registry, so this "
+            "means the registry changed under the process."
+        )
+    spec_json, max_drawdown = row
+
+    if require_solvent:
+        if max_drawdown is None:
+            raise RuntimeError(
+                f"Canonical rank-1 {backtest_hash} for {case_study} has no recorded "
+                "max_drawdown, so it cannot be shown to have survived. Re-run the backtest "
+                "so its metrics are registered, rather than sweeping a run whose equity path "
+                "is unknown."
+            )
+        if max_drawdown <= INSOLVENT_MAX_DRAWDOWN:
+            raise RuntimeError(
+                f"Canonical rank-1 {backtest_hash} for {case_study} reached zero equity "
+                f"(max_drawdown={max_drawdown:.4f}). Its Sharpe of {lineage['val_sharpe']:.3f} "
+                "is computed on a balance that no longer exists, so nothing measured "
+                "downstream of it means anything. Fix the sweep, or pin a carrier in "
+                "CARRIER_PINS, rather than selecting past this row silently."
+            )
+
+    return {**lineage, "spec_json": spec_json, "max_drawdown": max_drawdown}
+
+
 # ---------------------------------------------------------------------------
 # Spine CI / kill-gate helpers (tri-state contract)
 # ---------------------------------------------------------------------------
