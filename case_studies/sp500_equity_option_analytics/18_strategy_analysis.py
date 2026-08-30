@@ -52,6 +52,7 @@ import sqlite3
 import warnings
 
 import matplotlib.pyplot as plt
+import pandas as pd
 import polars as pl
 
 warnings.filterwarnings("ignore")
@@ -787,6 +788,15 @@ with sqlite3.connect(REGISTRY_DB) as db:
         "SELECT checkpoint_kind, checkpoint_value FROM prediction_sets WHERE prediction_hash = ?",
         (strategy_carrier["prediction_hash"],),
     ).fetchone()
+    # When the holdout fit actually ran, as opposed to when its row was written.
+    _holdout_timing = (
+        db.execute(
+            "SELECT started_at, elapsed_s, created_at FROM training_runs WHERE training_hash = ?",
+            (json.loads(lock_rows[0][1])["holdout_training_hash"],),
+        ).fetchone()
+        if lock_rows
+        else None
+    )
     # `finalize_holdout` is what turns a staged lineage into a recorded one, and it is the
     # only writer of this table. Read it rather than inferring finality from a hash match.
     finalized_rows = db.execute(
@@ -827,6 +837,12 @@ if HOLDOUT_UNSEALED:
 lock = json.loads(lock_rows[0][1]) if lock_rows else {}
 LOCK_HASH, LOCK_STATE = (lock_rows[0][0], lock_rows[0][2]) if lock_rows else (None, None)
 LOCK_TAKEN_AT = lock_rows[0][3] if lock_rows else None
+HOLDOUT_TRAINING_STARTED_AT = _holdout_timing[0] if _holdout_timing else None
+HOLDOUT_TRAINING_DERIVED_START = (
+    pd.Timestamp(_holdout_timing[2]) - pd.Timedelta(seconds=float(_holdout_timing[1]))
+    if _holdout_timing and _holdout_timing[1] is not None and _holdout_timing[2] is not None
+    else None
+)
 # Two separate questions, and only the first is about this notebook's own reading. A lock at
 # `LOCKED` means `stage_holdout`/`finalize_holdout` never ran, so `_validated_holdout_lineage`
 # never checked the triple and `holdout_evaluations` holds no row pinning it. The holdout
@@ -962,15 +978,38 @@ if _sealed:
         "lock_taken_at": LOCK_TAKEN_AT,
         "holdout_written_at": _row[10],
     }
+
     # The whole identity-bearing strategy projection, not three fields of it. Signal
     # construction, rebalance cadence, minimum trade size and the risk rule's own parameters
     # all change what was run, and an allocator/top_k/risk-name comparison passes over every
     # one of them.
-    STRATEGY_MATCHES = _sealed_strategy == strategy_view(CARRIER_BACKTEST_SPEC)
+    # `strategy_view` returns the `strategy` block only, which leaves out `backtest_config` -
+    # the cost schedule, fill timing, calendar, account and cash policy, every one of which
+    # changes what was run. The comparison below is over the whole specification instead.
+    #
+    # Two fields are removed first, and only two. Both of them *name the prediction set the
+    # backtest consumed*, so they cannot agree between a validation run and a holdout run and
+    # would make every comparison fail for the one reason that carries no information:
+    # `input_identity` at the top level, and `backtest_config.metadata.prediction_hash`
+    # nested inside it. Nothing else is dropped - `metadata` also carries `chapter`,
+    # `fill_timing`, `cadence` and `preset_path`, and those are compared.
+    def _comparable_spec(spec: dict) -> dict:
+        pruned = {k: v for k, v in spec.items() if k != "input_identity"}
+        config = dict(pruned.get("backtest_config") or {})
+        if "metadata" in config:
+            config["metadata"] = {
+                k: v for k, v in config["metadata"].items() if k != "prediction_hash"
+            }
+            pruned["backtest_config"] = config
+        return pruned
+
+    _sealed_comparable = _comparable_spec(json.loads(_row[5]))
+    _carrier_comparable = _comparable_spec(CARRIER_BACKTEST_SPEC)
+    STRATEGY_MATCHES = _sealed_comparable == _carrier_comparable
     _strategy_differs_on = sorted(
         key
-        for key in set(_sealed_strategy) | set(strategy_view(CARRIER_BACKTEST_SPEC))
-        if _sealed_strategy.get(key) != strategy_view(CARRIER_BACKTEST_SPEC).get(key)
+        for key in set(_sealed_comparable) | set(_carrier_comparable)
+        if _sealed_comparable.get(key) != _carrier_comparable.get(key)
     )
 else:
     sealed_holdout = None
@@ -986,17 +1025,26 @@ CHECKPOINT_MATCHES = bool(
     and tuple(CARRIER_CHECKPOINT) == SEALED_CHECKPOINT
 )
 IDENTITY_MATCHES = HOLDOUT_ASSESSABLE and current_training_hash == SEALED_TRAINING_HASH
-# The lock has to predate the holdout, or it records a window that was already open when it
-# was sealed. This is the whole difference between a sealed holdout and an after-the-fact
-# one, and it is the check that separates this registry from `us_firm_characteristics`,
-# which spent a holdout with no lock at all (#985). Both timestamps are printed so the
-# ordering can be read rather than taken on the boolean.
-SEALED_BEFORE_SPENT = bool(
-    sealed_holdout
-    and sealed_holdout["lock_taken_at"]
-    and sealed_holdout["holdout_written_at"]
-    and str(sealed_holdout["lock_taken_at"]) < str(sealed_holdout["holdout_written_at"])
-)
+# The lock has to predate the holdout *run*, not the row that records it. `created_at` on
+# `prediction_sets` is the registration write, which happens after the fit returns, so a
+# lock taken at any point during a run that had already started still precedes it. The
+# execution-start record that would settle this is `training_runs.started_at`, and on this
+# lineage it is NULL, so the start is derived from the two fields that are populated:
+# `created_at` minus `elapsed_s`. Both of the derivation's error terms push the true start
+# earlier - `elapsed_s` measures the fit rather than the whole cell, and `created_at` is the
+# write that follows it - so the derived start is an upper bound on when work began.
+SEALED_BEFORE_SPENT = False
+SEAL_BASIS = "no sealed holdout to check"
+if sealed_holdout and sealed_holdout["lock_taken_at"]:
+    _lock_at = pd.Timestamp(sealed_holdout["lock_taken_at"])
+    if HOLDOUT_TRAINING_STARTED_AT is not None:
+        SEALED_BEFORE_SPENT = _lock_at < pd.Timestamp(HOLDOUT_TRAINING_STARTED_AT)
+        SEAL_BASIS = "training_runs.started_at, recorded"
+    elif HOLDOUT_TRAINING_DERIVED_START is not None:
+        SEALED_BEFORE_SPENT = _lock_at < HOLDOUT_TRAINING_DERIVED_START
+        SEAL_BASIS = "derived from created_at - elapsed_s; started_at is NULL"
+    else:
+        SEAL_BASIS = "unprovable: no started_at and no elapsed_s on the holdout training run"
 
 print(f"Published carrier training hash: {current_training_hash}")
 print(f"Sealed holdout training hash:    {SEALED_TRAINING_HASH or 'none'} (lock {LOCK_HASH})")
@@ -1023,9 +1071,11 @@ if sealed_holdout is not None:
     )
     print(f"Lineage finalized by finalize_holdout: {LOCK_FINALIZED}")
     print(
-        f"Lock taken {sealed_holdout['lock_taken_at']}, holdout written "
-        f"{sealed_holdout['holdout_written_at']} - sealed before spent: {SEALED_BEFORE_SPENT}"
+        f"Lock taken {sealed_holdout['lock_taken_at']}; holdout fit began "
+        f"{HOLDOUT_TRAINING_STARTED_AT or HOLDOUT_TRAINING_DERIVED_START} "
+        f"({SEAL_BASIS}); holdout row written {sealed_holdout['holdout_written_at']}"
     )
+    print(f"Lock predates the holdout run: {SEALED_BEFORE_SPENT}")
 pl.DataFrame([sealed_holdout] if sealed_holdout else [])
 
 # %%
@@ -1073,9 +1123,11 @@ print(f"Substantive identity divergence: {SUBSTANTIVE_DIVERGENCE or 'none'}")
 # generation this case study no longer publishes, and the sealed fit's weights were never
 # re-derived under the current identity scheme. They cannot be: a holdout is spent once, and
 # re-taking this one to close the bookkeeping gap would turn the window into another
-# selection round, which is the one thing it must not become. So the Sharpe above is the
-# out-of-sample result for a fit that specifies the same computation as the published carrier
-# and carries a different identity, and it is reported on exactly those terms.
+# selection round, which is the one thing it must not become. So the Sharpe above is an
+# out-of-sample number for a fit that specifies the same computation as the published
+# carrier, carries a different identity, sits on a lineage `finalize_holdout` never recorded,
+# and cannot be shown to have started after its own lock. It is reported on exactly those
+# terms and supports no out-of-sample claim.
 
 # %% [markdown]
 # ## 5. Publication assessment
@@ -1100,7 +1152,7 @@ def _holdout_qualifier() -> str:
     if not VALIDATION_CV_MATCHES:
         short.append("a different validation CV")
     if not SEALED_BEFORE_SPENT:
-        short.append("the lock does not predate the holdout")
+        short.append(f"the lock is not shown to predate the run ({SEAL_BASIS})")
     if SUBSTANTIVE_DIVERGENCE:
         short.append(f"identity diverges on {', '.join(SUBSTANTIVE_DIVERGENCE)}")
     if not IDENTITY_MATCHES:
@@ -1153,6 +1205,11 @@ assessment = pl.DataFrame(
             # published. `STRATEGY_MATCHES` and `IDENTITY_MATCHES` are computed in section 4
             # and carry the two halves of that question.
             "gate": "Holdout on the published fit",
+            # PASS needs every one of them: the same fit, the same checkpoint of it, the
+            # same backtest, a lock demonstrably taken before the run, and a lineage
+            # `finalize_holdout` has recorded. QUALIFIED is the weaker claim - the same
+            # computation under a training identity the case study has since replaced. Short
+            # of either, INCONCLUSIVE, and `_holdout_qualifier` names what is short.
             "status": (
                 "UNSEALED"
                 if HOLDOUT_UNSEALED
@@ -1160,8 +1217,16 @@ assessment = pl.DataFrame(
                 if sealed_holdout is None
                 else "PASS"
                 if IDENTITY_MATCHES
+                and CHECKPOINT_MATCHES
+                and STRATEGY_MATCHES
+                and SEALED_BEFORE_SPENT
+                and LOCK_FINALIZED
                 else "QUALIFIED"
-                if STRATEGY_MATCHES and VALIDATION_CV_MATCHES and not SUBSTANTIVE_DIVERGENCE
+                if CHECKPOINT_MATCHES
+                and STRATEGY_MATCHES
+                and VALIDATION_CV_MATCHES
+                and SEALED_BEFORE_SPENT
+                and not SUBSTANTIVE_DIVERGENCE
                 else "INCONCLUSIVE"
             ),
             "evidence": (
@@ -1172,14 +1237,7 @@ assessment = pl.DataFrame(
                 else (
                     f"sealed {sealed_holdout['sharpe']:.3f} ["
                     f"{sealed_holdout['sharpe_ci_lo']:.3f}, "
-                    f"{sealed_holdout['sharpe_ci_hi']:.3f}]"
-                    + (
-                        "; same training identity"
-                        if IDENTITY_MATCHES
-                        else "; same computation, different identity"
-                        if STRATEGY_MATCHES and VALIDATION_CV_MATCHES and not SUBSTANTIVE_DIVERGENCE
-                        else f"; diverges on {', '.join(SUBSTANTIVE_DIVERGENCE) or 'strategy'}"
-                    )
+                    f"{sealed_holdout['sharpe_ci_hi']:.3f}]" + _holdout_qualifier()
                 )
             ),
         },
