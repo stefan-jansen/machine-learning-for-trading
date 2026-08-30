@@ -110,6 +110,16 @@ class StrategyReplay:
     def run(self, prediction: PredictionResult) -> BacktestResult:
         if prediction.study != self.study:
             raise ValueError("holdout prediction belongs to another study")
+        # This method loads holdout prices unconditionally, and `Strategy` exempts validation
+        # predictions from the holdout contract - correctly, because validation runs are ranked
+        # against each other and re-run freely. Handed a validation prediction, the two rules
+        # combine into a backtest of validation scores against holdout prices that no check
+        # would catch. The split is therefore refused here, where the prices are chosen.
+        split = prediction.registry_record()["split"]
+        if split != "holdout":
+            raise ValueError(
+                f"the holdout replay requires a holdout prediction, and this one is {split!r}"
+            )
         from case_studies.utils.artifact_digest import value_digest
         from case_studies.utils.backtest_presets import serializable_backtest_spec
         from case_studies.utils.backtest_runner import resolved_allow_short_selling
@@ -820,7 +830,7 @@ class HoldoutSelection:
         own: a cost sibling changes commission and slippage, which live under ``backtest_config``,
         so it shares the whole strategy block with the run it was derived from.
 
-        The comparison is therefore ``_locked_strategy_projection``, which is the specification
+        The comparison is therefore ``strategy_projection``, which is the specification
         with exactly the fields that must differ between the two intervals removed - the
         prediction hash, the price and funding digests, the decision artifact's own hashes - and
         everything else kept, costs included. That is not a projection chosen here: it is the one
@@ -834,8 +844,6 @@ class HoldoutSelection:
         that one does not need producing - :meth:`StrategyReplay.run` resolves by full identity,
         price digest included, and is the only thing that can answer that question.
         """
-        from .lifecycle import _locked_strategy_projection
-
         prediction = self.holdout_prediction
         if prediction is None:
             return None
@@ -844,13 +852,13 @@ class HoldoutSelection:
         )
         if rows.is_empty():
             return None
-        expected = _locked_strategy_projection(self.validation_backtest.spec())
+        expected = strategy_projection(self.validation_backtest.spec())
         matched = []
         for backtest_hash in sorted(set(rows.get_column("backtest_hash"))):
             opened = self.study.results.open(backtest_hash)
             if not isinstance(opened, BacktestResult):
                 raise TypeError("the holdout lineage resolved a non-backtest result")
-            if _locked_strategy_projection(opened.spec()) == expected:
+            if strategy_projection(opened.spec()) == expected:
                 matched.append(opened)
         if not matched:
             return None

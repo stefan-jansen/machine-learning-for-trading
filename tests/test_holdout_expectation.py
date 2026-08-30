@@ -19,9 +19,30 @@ from typing import Any
 
 import pytest
 
-from case_studies.research.strategy import HoldoutExpectation, Strategy
+from case_studies.research.strategy import (
+    HoldoutExpectation,
+    Strategy,
+    strategy_projection,
+)
 
 SELECTED_STRATEGY: dict[str, Any] = {"strategy": {"signal": {"name": "rank"}}, "version": 2}
+
+
+@dataclass
+class _Hashed:
+    """Something with a hash, which is all `expectation()` reads off a prediction."""
+
+    hash: str
+
+
+@dataclass
+class _Spec:
+    """Something with a `spec()`, which is all `expectation()` reads off a backtest."""
+
+    _spec: dict[str, Any]
+
+    def spec(self) -> dict[str, Any]:
+        return self._spec
 
 
 @dataclass
@@ -145,23 +166,64 @@ def test_a_preview_holdout_prediction_is_refused_before_the_expectation_is_read(
         _strategy(prediction, _expectation())
 
 
-def test_a_selection_derives_its_own_expectation_rather_than_reading_the_prediction() -> None:
-    """The expectation comes from the selection, never from the thing it is checking.
+def test_a_selection_derives_its_expectation_from_the_selection_not_the_prediction() -> None:
+    """The expectation comes from the selection, never from the thing it gates.
 
-    Building it from the holdout prediction's own record would make every comparison in
-    `Strategy.__post_init__` compare a value with itself, so the contract would pass on any
-    prediction handed to it and the tests above would still be green. `HoldoutSelection` derives
-    `holdout_training_hash` from the immutable candidate set - it is the identity the retrain
-    WILL have, computed before the retrain exists - which is what makes the comparison capable
-    of failing.
+    Built from the holdout prediction's own record, every comparison in
+    `Strategy.__post_init__` would compare a value with itself: the contract would accept any
+    prediction handed to it and every other test in this file would still pass. So the fields
+    here are all made distinguishable - the selection carries one set of values, and a decoy
+    prediction record carries another - and the assertion is that the expectation reports the
+    selection's.
     """
     from case_studies.research.holdout import HoldoutSelection
 
-    derived = HoldoutSelection.expectation.__doc__ or ""
-    assert "immutable candidate set" in derived
+    validation_backtest = _Spec({"strategy": {"signal": {"name": "rank"}}, "version": 2})
+    selection = HoldoutSelection(
+        study=object(),
+        candidate_set=object(),
+        validation_backtest=validation_backtest,  # type: ignore[arg-type]
+        validation_prediction=_Hashed("VALIDATION-PREDICTION"),  # type: ignore[arg-type]
+        validation_training=object(),
+        label="fwd_ret_21d",
+        checkpoint_kind="SELECTION-KIND",
+        checkpoint_value=7,
+        holdout_training_spec={"computation": {}},
+        holdout_training_hash="SELECTION-TRAINING",
+    )
 
-    fields = set(HoldoutSelection.__dataclass_fields__)
-    # The four facts the contract needs are all resolved onto the selection itself, so
-    # `expectation()` reads them rather than querying the prediction it is about to gate.
-    assert {"holdout_training_hash", "checkpoint_kind", "checkpoint_value"} <= fields
-    assert "validation_backtest" in fields and "validation_prediction" in fields
+    expectation = selection.expectation()
+
+    assert expectation.training_hash == "SELECTION-TRAINING"
+    assert expectation.checkpoint_kind == "SELECTION-KIND"
+    assert expectation.checkpoint_value == 7
+    assert expectation.validation_prediction_hash == "VALIDATION-PREDICTION"
+    # The projection of the selected validation strategy, not the raw spec: costs are kept and
+    # the fields that must differ between the two windows are dropped.
+    assert expectation.strategy == strategy_projection(validation_backtest.spec())
+
+
+def test_the_expectation_tracks_the_selection_when_the_selection_changes() -> None:
+    """Re-deriving after an upstream rebuild yields the current contract, not the retired one.
+
+    This is the property a research lock does not have, and it is why fx_pairs' rebuilt lineage
+    was refused by a lock recording a selection that no longer existed.
+    """
+    from case_studies.research.holdout import HoldoutSelection
+
+    def _selection(training_hash: str) -> HoldoutSelection:
+        return HoldoutSelection(
+            study=object(),
+            candidate_set=object(),
+            validation_backtest=_Spec(SELECTED_STRATEGY),  # type: ignore[arg-type]
+            validation_prediction=_Hashed("v"),  # type: ignore[arg-type]
+            validation_training=object(),
+            label="fwd_ret_21d",
+            checkpoint_kind="final",
+            checkpoint_value=None,
+            holdout_training_spec={"computation": {}},
+            holdout_training_hash=training_hash,
+        )
+
+    assert _selection("3cffc6db6c25").expectation().training_hash == "3cffc6db6c25"
+    assert _selection("b02411b28bc5").expectation().training_hash == "b02411b28bc5"
