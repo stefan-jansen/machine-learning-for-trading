@@ -127,7 +127,11 @@ CANDIDATE_SET_NAME = f"{CASE_STUDY_ID}:holdout-candidates"
 try:
     CANDIDATES = CandidateSet.one(_study, name=CANDIDATE_SET_NAME)
     SELECTED = CANDIDATES.best_validation_sharpe()
-    SELECTION_SOURCE = f"frozen candidate set {CANDIDATES.hash} ({len(CANDIDATES.members)} members)"
+    if CANDIDATES.member_kind != "backtest":
+        raise RuntimeError("the holdout selection requires a backtest candidate set")
+    FIELD_HASHES = list(CANDIDATES.members)
+    FIELD_NAME = f"frozen candidate set {CANDIDATES.hash}"
+    SELECTION_SOURCE = f"{FIELD_NAME} ({len(FIELD_HASHES)} members)"
 except (ValueError, LookupError):
     CANDIDATES = None
     _live = pl.concat(
@@ -152,9 +156,9 @@ except (ValueError, LookupError):
     SELECTED = _study.results.open(
         _live.sort("sharpe", descending=True).row(0, named=True)["backtest_hash"]
     )
-    SELECTION_SOURCE = (
-        f"live ranking of {_live.height} eligible backtests - no frozen set in this registry"
-    )
+    FIELD_HASHES = _live["backtest_hash"].to_list()
+    FIELD_NAME = "live ranking (no frozen set in this registry)"
+    SELECTION_SOURCE = f"{FIELD_NAME} over {len(FIELD_HASHES)} eligible backtests"
 print(f"Selection read from the {SELECTION_SOURCE}")
 
 if not SELECTED.complete:
@@ -171,7 +175,7 @@ with sqlite3.connect(REGISTRY_DB) as db:
         (CARRIER_PREDICTION_HASH,),
     ).fetchone()
 print(
-    f"Candidate set {CANDIDATES.hash} with {len(CANDIDATES.members)} members selects "
+    f"{FIELD_NAME} with {len(FIELD_HASHES)} members selects "
     f"{model_source(*_carrier_source)} with "
     f"{(CARRIER_STRATEGY.get('allocation') or {}).get('method', 'equal_weight')} allocation, "
     f"top-{(CARRIER_STRATEGY.get('signal') or {}).get('top_k')}, "

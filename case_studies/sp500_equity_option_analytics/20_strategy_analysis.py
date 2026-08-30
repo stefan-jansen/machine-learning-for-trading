@@ -162,7 +162,11 @@ CANDIDATE_SET_NAME = f"{CASE_STUDY}:holdout-candidates"
 try:
     CANDIDATES = CandidateSet.one(_study, name=CANDIDATE_SET_NAME)
     SELECTED = CANDIDATES.best_validation_sharpe()
-    SELECTION_SOURCE = f"frozen candidate set {CANDIDATES.hash} ({len(CANDIDATES.members)} members)"
+    if CANDIDATES.member_kind != "backtest":
+        raise RuntimeError("the holdout selection requires a backtest candidate set")
+    FIELD_HASHES = list(CANDIDATES.members)
+    FIELD_NAME = f"frozen candidate set {CANDIDATES.hash}"
+    SELECTION_SOURCE = f"{FIELD_NAME} ({len(FIELD_HASHES)} members)"
 except (ValueError, LookupError):
     CANDIDATES = None
     _live = pl.concat(
@@ -187,9 +191,9 @@ except (ValueError, LookupError):
     SELECTED = _study.results.open(
         _live.sort("sharpe", descending=True).row(0, named=True)["backtest_hash"]
     )
-    SELECTION_SOURCE = (
-        f"live ranking of {_live.height} eligible backtests - no frozen set in this registry"
-    )
+    FIELD_HASHES = _live["backtest_hash"].to_list()
+    FIELD_NAME = "live ranking (no frozen set in this registry)"
+    SELECTION_SOURCE = f"{FIELD_NAME} over {len(FIELD_HASHES)} eligible backtests"
 print(f"Selection read from the {SELECTION_SOURCE}")
 
 if not SELECTED.complete:
@@ -201,7 +205,7 @@ if SELECTED.execution_tier != "canonical":
 # so the field the carrier is judged against is the field it was selected from. Sharpe lives in
 # `backtest_metrics` rather than on the run row, so it is joined here once.
 # `members` is a tuple of hashes, not of results, so each is opened once here.
-_member_hashes = list(CANDIDATES.members)
+_member_hashes = list(FIELD_HASHES)
 with sqlite3.connect(REGISTRY_DB) as db:
     _member_metrics = dict(
         db.execute(
@@ -240,7 +244,7 @@ baseline_pool = candidate_frame.filter(
     (pl.col("allocator") == "equal_weight") & pl.col("risk").is_null()
 )
 print(
-    f"Candidate set {CANDIDATES.hash}: {len(CANDIDATES.members)} members "
+    f"{FIELD_NAME}: {len(FIELD_HASHES)} members "
     f"({baseline_pool.height} equal-weight baselines), selected {SELECTED.hash} "
     f"at validation Sharpe {strategy_carrier['sharpe']:.3f}"
 )

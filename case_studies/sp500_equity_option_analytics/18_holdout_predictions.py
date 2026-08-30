@@ -147,7 +147,11 @@ CANDIDATE_SET_NAME = f"{CASE_STUDY_ID}:holdout-candidates"
 try:
     CANDIDATES = CandidateSet.one(study, name=CANDIDATE_SET_NAME)
     SELECTED = CANDIDATES.best_validation_sharpe()
-    SELECTION_SOURCE = f"frozen candidate set {CANDIDATES.hash} ({len(CANDIDATES.members)} members)"
+    if CANDIDATES.member_kind != "backtest":
+        raise RuntimeError("the holdout selection requires a backtest candidate set")
+    FIELD_HASHES = list(CANDIDATES.members)
+    FIELD_NAME = f"frozen candidate set {CANDIDATES.hash}"
+    SELECTION_SOURCE = f"{FIELD_NAME} ({len(FIELD_HASHES)} members)"
 except (ValueError, LookupError):
     CANDIDATES = None
     _live = pl.concat(
@@ -172,12 +176,10 @@ except (ValueError, LookupError):
     SELECTED = study.results.open(
         _live.sort("sharpe", descending=True).row(0, named=True)["backtest_hash"]
     )
-    SELECTION_SOURCE = (
-        f"live ranking of {_live.height} eligible backtests - no frozen set in this registry"
-    )
+    FIELD_HASHES = _live["backtest_hash"].to_list()
+    FIELD_NAME = "live ranking (no frozen set in this registry)"
+    SELECTION_SOURCE = f"{FIELD_NAME} over {len(FIELD_HASHES)} eligible backtests"
 print(f"Selection read from the {SELECTION_SOURCE}")
-if CANDIDATES.member_kind != "backtest":
-    raise RuntimeError("the holdout selection requires a backtest candidate set")
 
 if not SELECTED.complete:
     raise RuntimeError(f"the selected validation backtest {SELECTED.hash} is incomplete")
@@ -194,7 +196,7 @@ CHECKPOINT_VALUE = _prediction_record["checkpoint_value"]
 
 _strategy = strategy_view(SELECTED.spec())
 print(
-    f"Candidate set {CANDIDATES.hash} with {len(CANDIDATES.members)} members selects "
+    f"{FIELD_NAME} with {len(FIELD_HASHES)} members selects "
     f"{VALIDATION_SPEC['family']}/{VALIDATION_SPEC.get('config_name')} with "
     f"{(_strategy.get('allocation') or {}).get('method', 'equal_weight')} allocation, "
     f"top-{(_strategy.get('signal') or {}).get('top_k')}, "
@@ -267,8 +269,8 @@ pl.DataFrame(
             "checkpoint",
         ],
         "value": [
-            CANDIDATES.hash,
-            str(len(CANDIDATES.members)),
+            FIELD_NAME,
+            str(len(FIELD_HASHES)),
             SELECTED.hash,
             str(VALIDATION_SPEC["family"]),
             str(VALIDATION_SPEC.get("config_name") or ""),
