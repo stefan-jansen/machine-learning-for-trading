@@ -825,8 +825,11 @@ def _reference_panels(cs_dir: Path, hash_rows: list, survives, entity_col: str, 
             groups.setdefault((split, label), []).append(p_hash)
         elif (cs_dir / "run_log" / "predictions" / p_hash / "predictions.parquet").is_file():
             fallback_groups.setdefault((split, label), []).append(p_hash)
+    fallback_only = set()
     for key, hashes in fallback_groups.items():
-        groups.setdefault(key, hashes)
+        if key not in groups:
+            groups[key] = hashes
+            fallback_only.add(key)
 
     panels = {}
     for key, hashes in groups.items():
@@ -837,6 +840,12 @@ def _reference_panels(cs_dir: Path, hash_rows: list, survives, entity_col: str, 
             )
             entity = next((c for c in ENTITY_COLUMN_CANDIDATES if c in frame.columns), None)
             if entity is None or not {"timestamp", "actual"} <= set(frame.columns):
+                continue
+            # A rewritten artifact is only worth keeping as the panel because it
+            # carries a real decision grid. One with a single timestamp carries no
+            # grid - it is the placeholder a superseded set leaves behind - so the
+            # group is better served by the fabricated one than by inheriting it.
+            if key in fallback_only and frame["timestamp"].n_unique() < 2:
                 continue
             # Only ever compared for equality, so stringifying the identifiers is
             # enough and keeps a column carrying nulls from raising in sorted().
