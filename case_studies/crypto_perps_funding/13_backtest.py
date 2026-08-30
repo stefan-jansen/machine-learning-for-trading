@@ -174,8 +174,20 @@ if CANONICAL_RUN:
         .filter(pl.col("prediction_hash").is_in(declared))
         .filter(pl.col("label").is_in(labels))
     )
-    absent = set(declared) - set(catalog.get_column("prediction_hash").to_list())
-    if absent and set(labels) == set(ALL_LABELS):
+    # Every declared member has a registry row, asked of the declaration and not of the catalog.
+    # The catalog is narrowed to the requested labels, so comparing against it reports the other
+    # labels' members as missing on a narrowed run; suppressing the check on a narrowed run
+    # instead lets a requested label's member go missing in silence, which is what it exists to
+    # catch. Asked this way it holds either way, because a population member that nothing
+    # registered is a declaration the model notebooks never produced.
+    registered = set(
+        study.predictions.table()
+        .filter(pl.col("prediction_hash").is_in(declared))
+        .get_column("prediction_hash")
+        .to_list()
+    )
+    absent = set(declared) - registered
+    if absent:
         raise RuntimeError(
             f"{len(absent)} declared population members have no registry row, "
             f"first {sorted(absent)[0]}"

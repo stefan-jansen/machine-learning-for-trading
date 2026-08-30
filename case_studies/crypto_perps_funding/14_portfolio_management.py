@@ -61,8 +61,17 @@
 import plotly.graph_objects as go
 import polars as pl
 
-from case_studies.crypto_perps_funding.research_workflow import ALL_LABELS
-from case_studies.research import CandidateSet, Result, open_study, run_backtests
+from case_studies.crypto_perps_funding.research_workflow import (
+    ALL_LABELS,
+    candidate_set_supersedes,
+)
+from case_studies.research import (
+    CandidateSet,
+    Result,
+    open_study,
+    population_supersedes,
+    run_backtests,
+)
 from case_studies.research.strategy import strategy_warmup_periods
 from case_studies.utils.backtest_loaders import load_backtest_prices_for
 from case_studies.utils.registry.queries import resolve_best_predictions
@@ -374,9 +383,16 @@ for label in labels:
                 prices=prices_by_key[(label, warmup)],
                 chapter="ch17",
                 population_name=allocation_population if CANONICAL_RUN else None,
-                supersedes=(
-                    SUPERSEDES_ALLOCATION.get(allocation_population) if CANONICAL_RUN else None
-                ),
+                # Resolved, not offered. The declaration below is committed source and is wrong
+                # on a reader's clean clone, where the registry holds no generation to supersede
+                # and `create` refuses a first version that claims to replace one.
+                supersedes=population_supersedes(
+                    study,
+                    name=allocation_population,
+                    declared=SUPERSEDES_ALLOCATION.get(allocation_population),
+                )
+                if CANONICAL_RUN
+                else None,
             )
             allocations.append((label, scheme["name"], allocator["method"], execution))
             print(
@@ -632,7 +648,10 @@ for label in labels:
             name=set_name,
             # Keyed by label, and also by the full set name, which is what the refusal prints.
             # Pasting back the name it names is the obvious thing to try, and it used to miss.
-            supersedes=SUPERSEDES.get(set_name) or SUPERSEDES.get(label),
+            # Resolved for the same reason the allocation lineage above is.
+            supersedes=candidate_set_supersedes(
+                study, name=set_name, declared=SUPERSEDES.get(set_name) or SUPERSEDES.get(label)
+            ),
         )
         admitted_by_label[label] = list(members.members)
         print(

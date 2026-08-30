@@ -62,9 +62,10 @@ import polars as pl
 from case_studies.crypto_perps_funding.research_workflow import (
     ALL_LABELS,
     allocation_pool,
+    candidate_set_supersedes,
     selected_allocation_result,
 )
-from case_studies.research import Result, open_study, run_backtests
+from case_studies.research import Result, open_study, population_supersedes, run_backtests
 from case_studies.research.strategy import strategy_warmup_periods
 from case_studies.utils.backtest_loaders import load_backtest_prices_for
 from case_studies.utils.strategy_analysis import rank_returns_on_common_support
@@ -264,10 +265,17 @@ for label in labels:
             prices=prices,
             chapter="ch19",
             population_name=(
-                f"crypto-risk-{label}-{control['name']}-{POPULATION_SUFFIX}"
+                (risk_population := f"crypto-risk-{label}-{control['name']}-{POPULATION_SUFFIX}")
                 if CANONICAL_RUN
                 else None
             ),
+            # No declaration is carried for these today; resolving it anyway is what keeps the
+            # call correct if one is ever added, on a clean clone as well as on this registry.
+            supersedes=population_supersedes(
+                study, name=risk_population, declared=SUPERSEDES.get(risk_population)
+            )
+            if CANONICAL_RUN
+            else None,
         )
         overlays.extend(result.hash for result in execution.results)
         print(
@@ -436,13 +444,30 @@ overlay = (
 # the output could never have found it.
 #
 # Both Sharpes come from `rank_returns_on_common_support`, over the intersection of the two
-# registered return series. The exposure difference becomes `sessions_dropped`, a column beside
-# the result, rather than a reason to drop the row.
+# registered return series, and what the control took off the book becomes `sessions_flattened`
+# beside the result rather than a reason to drop the row. That count is read from the returns
+# themselves - sessions where the baseline booked a return and the overlay booked exactly zero -
+# and not from a difference in row counts: a backtest prices every session it was run over, so a
+# flat session is a zero rather than a missing row, and an overlay that exits early keeps its
+# baseline's dates. Counting missing rows would report zero for every control and call it
+# exposure.
 PERIODS_PER_YEAR = int(periods_per_year_from_setup("crypto_perps_funding"))
 
 
 def paired_on_common_support(overlay_hash: str, baseline_hash: str) -> dict[str, float]:
-    """Each side's Sharpe on the sessions both priced, and how many that is."""
+    """Each side's Sharpe on the sessions both priced, and what the control took off the book.
+
+    Two counts, and they answer different questions. ``shared_sessions`` is the support the two
+    Sharpes are computed on. ``sessions_flattened`` is exposure: the sessions where the baseline
+    booked a return and the overlay booked exactly zero, which is what a control that fires does
+    to the book.
+
+    The second is not the first subtracted from anything. A backtest prices every session it was
+    run over, and a flat session is priced as a return of zero rather than left out, so an
+    overlay that exits early keeps the same rows as its baseline and the supports stay equal.
+    Reading a missing row as a fired control would report zero for every control here and say it
+    had measured exposure.
+    """
     frames = {
         result_hash: pl.read_parquet(
             STORAGE_ROOT / "run_log" / "backtest" / result_hash / "daily_returns.parquet"
@@ -452,12 +477,21 @@ def paired_on_common_support(overlay_hash: str, baseline_hash: str) -> dict[str,
     ranked = rank_returns_on_common_support(frames, periods_per_year=PERIODS_PER_YEAR)
     by_hash = {row["backtest_hash"]: row for row in ranked.iter_rows(named=True)}
     shared = int(ranked.get_column("n_periods")[0])
+
+    def _returns(frame: pl.DataFrame) -> pl.DataFrame:
+        column = next(name for name in frame.columns if name != "timestamp")
+        return frame.select("timestamp", pl.col(column).alias("value"))
+
+    paired = _returns(frames[overlay_hash]).join(
+        _returns(frames[baseline_hash]), on="timestamp", how="inner", suffix="_baseline"
+    )
+    flattened = paired.filter((pl.col("value") == 0.0) & (pl.col("value_baseline") != 0.0)).height
     return {
         "backtest_hash": overlay_hash,
         "paired_sharpe": float(by_hash[overlay_hash]["sharpe"]),
         "paired_baseline_sharpe": float(by_hash[baseline_hash]["sharpe"]),
         "shared_sessions": shared,
-        "sessions_dropped": int(frames[baseline_hash].height - shared),
+        "sessions_flattened": int(flattened),
     }
 
 
@@ -473,10 +507,11 @@ comparable = overlay.join(
 ).with_columns((pl.col("paired_sharpe") - pl.col("paired_baseline_sharpe")).alias("sharpe_change"))
 if comparable.height != overlay.height:
     raise RuntimeError("an overlay lost its pair on the common-support join")
-dropped = comparable.filter(pl.col("sessions_dropped") > 0)
+flattening = comparable.filter(pl.col("sessions_flattened") > 0)
 print(
     f"{comparable.height} overlay results, each compared to its baseline on the sessions both "
-    f"priced; {dropped.height} exited early enough to price fewer than their baseline"
+    f"priced; {flattening.height} took the book flat on at least one session their baseline "
+    "was exposed on"
 )
 if comparable.filter(pl.col("control_type").is_null()).height:
     raise RuntimeError(
@@ -505,7 +540,7 @@ comparable.select(
     "drawdown_change",
     "extra_trades",
     "shared_sessions",
-    "sessions_dropped",
+    "sessions_flattened",
 ).sort("label", "sharpe_change", descending=[False, True])
 
 # %% [markdown]
@@ -591,7 +626,11 @@ for label in labels:
             name=set_name,
             # Keyed by label, and also by the full set name, which is what the refusal prints.
             # Pasting back the name it names is the obvious thing to try, and it used to miss.
-            supersedes=SUPERSEDES.get(set_name) or SUPERSEDES.get(label),
+            # Resolved rather than offered: on a reader's clean clone there is no generation to
+            # supersede and `create` refuses a first version that claims to replace one.
+            supersedes=candidate_set_supersedes(
+                study, name=set_name, declared=SUPERSEDES.get(set_name) or SUPERSEDES.get(label)
+            ),
         )
         print(
             f"{members.name}: {len(members.members)} members traded folds {full}; "

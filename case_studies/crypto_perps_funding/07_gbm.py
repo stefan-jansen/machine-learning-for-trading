@@ -89,6 +89,7 @@ from case_studies.research import (
     primary_label,
     resolved_model_plan,
     run_model_population,
+    supersedes_for_run,
 )
 from utils.style import COLORS, show_plotly_with_alt
 
@@ -251,8 +252,23 @@ plan.select(
 
 # %%
 population_name = POPULATION_NAME or "crypto_perps_funding-gbm-validation-v1"
+# The declaration is resolved rather than offered. It is committed source and has to be right in
+# three situations the notebook cannot tell apart: a reader's clean clone, where `run_log/` is
+# gitignored and `create` refuses a first generation that claims to supersede something; this
+# author's re-run, where the generation in force is the one this declaration produced and offering
+# the hash recomputes it; and a refit, where the declaration names the tip. `supersedes_for_run`
+# decides all three, and answers the tier as well - a preview is discarded with its workspace and
+# has no lineage to extend.
 execution, population = run_model_population(
-    study, resolved, population_name=population_name, supersedes=SUPERSEDES_POPULATION or None
+    study,
+    resolved,
+    population_name=population_name,
+    supersedes=supersedes_for_run(
+        study,
+        population_name=population_name,
+        declared=SUPERSEDES_POPULATION,
+        execution_tier=EXECUTION_TIER,
+    ),
 )
 
 print(f"{len(execution.runs)} configurations fitted")

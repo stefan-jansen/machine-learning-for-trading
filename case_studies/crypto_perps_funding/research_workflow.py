@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import json
 import os
+import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -346,6 +347,42 @@ def _preview_traded_backtests(study: Study, label: str) -> pl.DataFrame:
         & pl.col("sharpe").is_not_null()
         & (pl.col("num_trades") > 0)
     )
+
+
+def candidate_set_supersedes(study: Study, *, name: str, declared: str | None) -> str | None:
+    """Whether a declared candidate-set generation may be offered to ``CandidateSet.create``.
+
+    The same decision :func:`case_studies.research.population_supersedes` makes for an official
+    population, applied to a candidate set, and it exists because the declaration is committed
+    source that has to be right in three situations the notebook cannot tell apart:
+
+    - **A clean clone.** ``run_log/`` is gitignored, so a reader starts with an empty registry -
+      often with no ``candidate_sets`` table at all. ``create`` refuses a first generation that
+      claims to supersede something, so the declared hash is withheld and the reader's run
+      publishes generation one. This is the ordinary case for anyone who is not the author.
+    - **The re-run.** The generation in force is the one this declaration produced, so
+      ``current.supersedes == declared`` and offering the hash resolves to the set already
+      published rather than writing a new one.
+    - **The refit.** The declaration names the tip itself, and offering it publishes the next
+      generation over that tip.
+
+    Anything else is withheld, and ``create`` then refuses and names the hash it requires, which
+    is a better answer than this function guessing.
+    """
+    from case_studies.research import CandidateSet
+
+    if not declared:
+        return None
+    try:
+        current = CandidateSet.one(study, name=name)
+    except (ValueError, KeyError, sqlite3.OperationalError):
+        # No generation under this name, or no table at all: `one` raises `ValueError` when the
+        # name resolves to other than exactly one head, `open` raises `KeyError` for a hash the
+        # table does not hold, and a clean clone has no `candidate_sets` table for either to read.
+        return None
+    if declared in (current.supersedes, current.hash):
+        return declared
+    return None
 
 
 def allocation_pool(study: Study, *, label: str, canonical: bool) -> list[str]:

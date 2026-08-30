@@ -55,7 +55,10 @@ from contextlib import closing
 import plotly.graph_objects as go
 import polars as pl
 
-from case_studies.crypto_perps_funding.research_workflow import ALL_LABELS
+from case_studies.crypto_perps_funding.research_workflow import (
+    ALL_LABELS,
+    candidate_set_supersedes,
+)
 from case_studies.research import (
     HORIZON_DEPENDENT_PROTOCOL_FIELDS,
     CandidateSet,
@@ -115,12 +118,15 @@ pool_members = []
 for label in labels:
     candidates = CandidateSet.one(study, name=f"crypto-final-validation-{label}")
     pool_members.extend(Result.open(study, member) for member in candidates.members)
+POOL_NAME = "crypto-final-selection"
 pool = CandidateSet.create(
     study,
-    "crypto-final-selection",
+    POOL_NAME,
     pool_members,
     comparison_contract={"comparable_fields": list(HORIZON_DEPENDENT_PROTOCOL_FIELDS)},
-    supersedes=SUPERSEDES or None,
+    # Resolved rather than offered, for the reason `14` and `16` record: the declaration is
+    # committed source and a reader's clean clone has no generation for it to replace.
+    supersedes=candidate_set_supersedes(study, name=POOL_NAME, declared=SUPERSEDES),
 )
 print(f"{len(pool.members)} candidates across {len(labels)} labels")
 
