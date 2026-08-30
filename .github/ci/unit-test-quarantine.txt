@@ -39,6 +39,9 @@
 # test file is gated the moment it is added, which is what this file inverting
 # the default is for.
 #
+# `test_gbm_holdout_rekey` was added on 2026-08-30 with the GBM holdout re-keying
+# hook. It imports `case_studies/utils/gbm.py`, which is the boundary itself.
+#
 # `test_holdout_expected_keys` loads `20_strategy_synthesis/holdout.py`, whose
 # module scope reaches lightgbm and torch through the family training paths it
 # dispatches to. It tests two pure functions and needs none of that, but the
@@ -54,6 +57,7 @@ tests/test_deep_model_state.py
 tests/test_dl_device_contract.py
 tests/test_dl_force_retrain_identity.py
 tests/test_gbm_classification_target.py
+tests/test_gbm_holdout_rekey.py
 tests/test_gbm_identity.py
 tests/test_gbm_runtime.py
 tests/test_holdout_expected_keys.py
