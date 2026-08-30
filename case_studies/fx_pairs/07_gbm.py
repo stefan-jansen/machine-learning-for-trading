@@ -100,7 +100,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
-SUPERSEDES_POPULATION: str = "06e9ea03f2f2"
+SUPERSEDES_POPULATION: str = "23abc9ef1009"
 
 # %%
 study = open_study("fx_pairs", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
