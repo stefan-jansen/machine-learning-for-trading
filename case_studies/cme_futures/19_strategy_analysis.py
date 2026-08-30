@@ -36,7 +36,7 @@
 # evaluated on the selected configuration alone, one time, and it may disagree with the validation
 # result. That disagreement is an outcome to report, not a reason to select again.
 #
-# Prerequisites: `13_backtest`, `14_portfolio_management`, `15_costs`, and `16_risk_management`.
+# Prerequisites: `13_backtest`, `14_portfolio_management`, `15_risk_management`, and `16_costs`.
 
 # %%
 """Select and describe one CME futures case-study configuration."""

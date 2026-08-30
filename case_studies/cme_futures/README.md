@@ -92,9 +92,9 @@ uv run python case_studies/cme_futures/11_causal_dml.py
 uv run python case_studies/cme_futures/12_model_analysis.py
 uv run python case_studies/cme_futures/13_backtest.py
 uv run python case_studies/cme_futures/14_portfolio_management.py
-uv run python case_studies/cme_futures/15_costs.py
-uv run python case_studies/cme_futures/16_risk_management.py
-uv run python case_studies/cme_futures/17_strategy_analysis.py
+uv run python case_studies/cme_futures/15_risk_management.py
+uv run python case_studies/cme_futures/16_costs.py
+uv run python case_studies/cme_futures/19_strategy_analysis.py
 ```
 
 ## Run Log
