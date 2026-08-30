@@ -163,7 +163,25 @@ class _Explorer:
         )
 
     def champion_lineage(self, prediction_hash):
-        return {stage: {"backtest_hash": f"bt_{stage}"} for stage in self._stages}
+        # Each entry carries the blocks of every stage up to and including its own, so the
+        # chain descends. Without real blocks the producer's descent gate would compare two
+        # empty dicts and pass no matter what the rule said.
+        blocks = {
+            "signal": {"signal": {"method": "top_k"}},
+            "allocation": {"allocation": {"method": "risk_parity"}},
+            "risk_overlay": {"risk": {"name": "trailing_5pct"}},
+            "cost_sensitivity": {"costs": {"commission_bps": 5}},
+        }
+        lineage = {}
+        carried: dict = {}
+        for stage in STAGE_SEQUENCE:
+            carried = {**carried, **blocks[stage]}
+            if stage in self._stages:
+                lineage[stage] = {
+                    "backtest_hash": f"bt_{stage}",
+                    "_strategy": dict(carried),
+                }
+        return lineage
 
 
 def test_the_producer_gives_every_stage_transition_the_default_shape(
@@ -264,3 +282,40 @@ def test_the_producer_reports_the_sample_the_bootstrap_ran_on(captured: list[dic
     # measured before a second trim shortened it.
     used, _ = joint_returns(captured[0]["challenger"], captured[0]["baseline"])
     assert used.size == row["n_overlap"]
+
+
+def test_the_producer_will_not_pair_two_stages_that_branched_separately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The etfs shape: costs cloned the allocation carrier, not the selected overlay.
+
+    `champion_lineage` takes the best backtest at each stage independently, so those two
+    entries are siblings. Booking their difference as the cost of trading would attribute
+    the entire risk overlay to transaction costs.
+    """
+    seen: list[tuple[str, bool]] = []
+
+    def spy(*args, **kwargs):
+        seen.append((args[3], kwargs.get("challenger_overlays_baseline", False)))
+        return {"kind": args[3]}
+
+    monkeypatch.setattr(paired_metrics, "_populate_pair", spy)
+    monkeypatch.setattr(paired_metrics, "_aligned_returns", lambda cs, h: _returns([0.001] * 60))
+    monkeypatch.setattr(paired_metrics, "_val_rank1_full_spec", lambda *a, **k: None)
+    monkeypatch.setattr(paired_metrics, "_holdout_lineage_for", lambda *a, **k: None)
+    monkeypatch.setattr(paired_metrics, "_benchmark_returns_from_artifact", lambda *a, **k: None)
+
+    class _Sibling(_Explorer):
+        def champion_lineage(self, prediction_hash):
+            lineage = super().champion_lineage(prediction_hash)
+            # The cost run branched off allocation and never took the overlay.
+            lineage["cost_sensitivity"]["_strategy"].pop("risk")
+            return lineage
+
+    paired_metrics.populate_paired_metrics(
+        "unit_cs", _Sibling(), periods_per_year=252, verbose=False
+    )
+
+    kinds = [kind for kind, _ in seen if kind.endswith("_leader")]
+    assert "allocation_leader" in kinds
+    assert "risk_overlay_leader" not in kinds

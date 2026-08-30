@@ -13,7 +13,12 @@ import sqlite3
 import pytest
 
 from case_studies.utils.cohort_metrics import _resolve_baseline_hash
-from case_studies.utils.uncertainty import STAGE_BASELINE, STAGE_SEQUENCE
+from case_studies.utils.uncertainty import (
+    STAGE_BASELINE,
+    STAGE_CARRIER_BLOCK,
+    STAGE_SEQUENCE,
+    descends_from,
+)
 
 LABEL = "fwd_ret_5d"
 
@@ -91,3 +96,45 @@ def test_every_stage_resolves_to_a_benchmark_rather_than_none(stage):
     """No stage may resolve to None: a missing baseline is silent, not loud."""
     db = _db({s: 1.0 for s in STAGE_SEQUENCE})
     assert _resolve_baseline_hash(db, stage, LABEL) is not None
+
+
+# ---------------------------------------------------------------------------
+# A later stage is only comparable to an earlier one it was actually built on.
+# ---------------------------------------------------------------------------
+
+_ALLOC = {"method": "risk_parity"}
+_RISK = {"name": "trailing_5pct"}
+
+
+def test_a_cost_run_built_on_the_risk_carrier_descends_from_it():
+    risk_leader = {"allocation": _ALLOC, "risk": _RISK}
+    cost_run = {"allocation": _ALLOC, "risk": _RISK, "costs": {"commission_bps": 5}}
+    assert descends_from(cost_run, risk_leader, "risk_overlay")
+
+
+def test_a_cost_run_that_cloned_the_allocation_carrier_does_not():
+    """The etfs shape: costs and risk branch off allocation independently.
+
+    Pairing these two would book the entire difference between two unrelated
+    strategies - one overlaid, one not - as the cost of trading.
+    """
+    risk_leader = {"allocation": _ALLOC, "risk": _RISK}
+    cost_run = {"allocation": _ALLOC, "costs": {"commission_bps": 5}}
+    assert not descends_from(cost_run, risk_leader, "risk_overlay")
+
+
+def test_a_risk_overlay_on_a_different_allocator_does_not_descend():
+    alloc_leader = {"allocation": _ALLOC}
+    other = {"allocation": {"method": "equal_weight"}, "risk": _RISK}
+    assert not descends_from(other, alloc_leader, "allocation")
+
+
+def test_every_stage_descends_from_signal():
+    """Every stage carries a signal, so the signal stage constrains nothing."""
+    for spec in ({"allocation": _ALLOC}, {"risk": _RISK}, {"costs": {}}):
+        assert descends_from(spec, {"signal": {"method": "top_k"}}, "signal")
+
+
+def test_the_carrier_blocks_name_real_stages():
+    for stage in STAGE_CARRIER_BLOCK:
+        assert stage in STAGE_SEQUENCE

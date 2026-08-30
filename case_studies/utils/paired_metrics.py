@@ -45,6 +45,7 @@ from case_studies.utils.uncertainty import (
     STAGE_SEQUENCE,
     compute_independent_diff_uncertainty,
     compute_paired_uncertainty,
+    descends_from,
     joint_returns,
 )
 from utils.paths import get_case_study_dir
@@ -996,9 +997,21 @@ def populate_paired_metrics(
     present = [s for s in STAGE_SEQUENCE if lineage.get(s)]
     for prev_stage, this_stage in zip(present, present[1:]):
         kind = f"{prev_stage}_leader"
-        prev_entry = lineage.get(prev_stage)
-        this_entry = lineage.get(this_stage)
-        if not prev_entry or not this_entry:
+        prev_entry = lineage[prev_stage]
+        this_entry = lineage[this_stage]
+        # Only pair a stage with one actually built on it. `champion_lineage` picks the
+        # best backtest at each stage independently, so on a case study whose cost sweep
+        # clones an allocation carrier rather than the selected risk overlay, the risk and
+        # cost entries are siblings - and pairing them would book the whole difference
+        # between two unrelated strategies as the cost of trading.
+        if not descends_from(
+            this_entry.get("_strategy", {}), prev_entry.get("_strategy", {}), prev_stage
+        ):
+            if verbose:
+                print(
+                    f"  skip {prev_stage} -> {this_stage}: the {this_stage} leader is not "
+                    f"built on the {prev_stage} leader"
+                )
             continue
         prev_hash = prev_entry["backtest_hash"]
         this_hash = this_entry["backtest_hash"]

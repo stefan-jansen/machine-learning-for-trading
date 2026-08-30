@@ -155,6 +155,34 @@ STAGE_SEQUENCE: tuple[str, ...] = (
 )
 
 
+#: The block of a strategy spec each stage is defined by. A backtest at a later stage is
+#: built on an earlier one only if it carries the earlier stage's block unchanged.
+#: ``signal`` has no entry: every stage carries a signal, so it constrains nothing.
+STAGE_CARRIER_BLOCK: dict[str, str] = {
+    "allocation": "allocation",
+    "risk_overlay": "risk",
+}
+
+
+def descends_from(challenger: dict, baseline: dict, baseline_stage: str) -> bool:
+    """Is ``challenger`` a strategy built on top of ``baseline``?
+
+    `champion_lineage` takes the best backtest at each stage independently, so its
+    entries can be siblings rather than parent and child - two strategies that branch
+    off the same allocation carrier, say, one adding a risk overlay and one sweeping
+    costs. Comparing those two attributes the whole difference between two unrelated
+    strategies to whichever stage happens to come second in the chain.
+
+    A challenger descends from the baseline when it carries the baseline stage's own
+    block unchanged. A stage with no declared block (``signal``) constrains nothing and
+    every later stage descends from it.
+    """
+    block = STAGE_CARRIER_BLOCK.get(baseline_stage)
+    if block is None:
+        return True
+    return challenger.get(block) == baseline.get(block)
+
+
 STAGE_BASELINE: dict[str, str] = {
     "signal": "equal_weight",
     "allocation": "signal_leader",
@@ -1309,7 +1337,9 @@ def _sortino(arr: np.ndarray, periods_per_year: float) -> float:
 
 __all__ = [
     "STAGE_BASELINE",
+    "STAGE_CARRIER_BLOCK",
     "STAGE_SEQUENCE",
+    "descends_from",
     "SIGNAL_BASELINE_BY_CASE_STUDY",
     "resolve_block_length",
     "compute_backtest_uncertainty",

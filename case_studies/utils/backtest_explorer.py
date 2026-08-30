@@ -1488,6 +1488,11 @@ class BacktestExplorer:
                 pos_rules = risk.get("position_rules", [])
                 entry["risk_type"] = pos_rules[0].get("type", "") if pos_rules else ""
 
+            # The stage-defining block, kept so a consumer can test whether a later
+            # stage's entry is actually built on this one. `champion_lineage` picks the
+            # best backtest at each stage independently, so two entries can be siblings
+            # rather than parent and child - see `stage_carrier_blocks`.
+            entry["_strategy"] = strategy
             result[stage_name] = entry
 
         return result
