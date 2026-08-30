@@ -299,6 +299,28 @@ else:
         "challenger is live, nothing recomputed"
     )
 
+# Both producers are additive: they write the rows this run's population produces and leave
+# every other row where it is. So the rebuild above cannot remove a cohort or a pair built over
+# a generation that has since been retired, and re-checking only which *kinds* are present would
+# report a table that still holds them as clean. The staleness check is run again and its
+# residual stated.
+#
+# Neither producer is asked to prune. `_prune_paired_metrics` deletes the complement of what a
+# run wrote, and a run scoped to one label's live predictions has not written the pairs Chapter
+# 20 registered for the other labels - pruning to that partial set would delete them. The rows
+# are inert for this notebook either way: every reader below resolves a pair by an explicit
+# challenger hash taken from the live lineage, never by scanning the table, so a stale row has
+# nothing here that would read it. It is stated rather than ignored because that is a property
+# of this notebook's readers and not of the table.
+residual_cohort, residual_paired = _stale_derived_rows(LIVE_PREDICTIONS)
+if residual_cohort or residual_paired:
+    print(
+        f"derived tables still hold {residual_cohort} cohort row(s) and {residual_paired} "
+        "pair(s) from retired generations; no reader below resolves either"
+    )
+else:
+    print("derived tables hold no rows from retired generations")
+
 have_kinds, have_cohorts = _derived_table_state()
 STILL_MISSING_KINDS = sorted(set(PAIRED_KINDS) - have_kinds)
 if STILL_MISSING_KINDS:

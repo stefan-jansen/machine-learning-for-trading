@@ -467,13 +467,17 @@ print(concentration.pivot(on="allocator", index="top_k", values="avg_sharpe"))
 # completed - so a truncated allocator cannot lead the table on the easier subset it finished.
 # The ranking is taken deep and cut to ten afterwards rather than asked for ten and filtered,
 # which would return fewer than ten rows whenever an excluded row was inside the top ten.
+#
+# The sort is re-applied after the join because a semi-join carries no ordering guarantee: it
+# returns the left rows that matched, in whatever order the join produced them, so `head(10)`
+# on the unsorted result would be ten eligible rows rather than the ten leading ones.
 _leaders = explorer.best(
     stage="allocation", top_n=100000, label=LABEL, prediction_hashes=ADVANCED_PREDICTIONS
 )
 if INCOMPLETE_ALLOCATORS:
     _leaders = _leaders.join(
         allocation_rows.select("backtest_hash"), on="backtest_hash", how="semi"
-    )
+    ).sort("sharpe", descending=True, nulls_last=True)
 _leaders.head(10).select("source", "signal_method", "sharpe", "cagr", "max_drawdown")
 
 # %% [markdown]
