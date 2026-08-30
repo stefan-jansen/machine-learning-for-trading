@@ -21,7 +21,10 @@ from case_studies.utils.backtest_presets import (
     strategy_view,
 )
 from case_studies.utils.backtest_runner import precompute_weights, run_backtest
-from case_studies.utils.conformal import ensure_conformal_calibration_identity
+from case_studies.utils.conformal import (
+    CALIBRATION_VERSION,
+    ensure_conformal_calibration_identity,
+)
 from case_studies.utils.registry import backtest_hash_from_parts, canonical_json, compute_hash
 from case_studies.utils.sweep_config import get_allocator_lookback
 
@@ -471,12 +474,32 @@ class Strategy:
                 "validation prediction hash before running the backtest; letting the allocator "
                 "load them would calibrate on the holdout's own residuals."
             )
-        folds = set(pl.read_parquet(widths_path).get_column("fold_id").unique().to_list())
+        widths = pl.read_parquet(widths_path)
+        folds = set(widths.get_column("fold_id").unique().to_list())
         if folds != {-1}:
             raise ValueError(
-                f"conformal holdout {self.prediction.hash} carries widths with fold_id {sorted(folds)}, "
-                "which means they were calibrated on the holdout's own residuals rather than on "
-                "validation. Recompute with compute_holdout_conformal_widths."
+                f"conformal holdout {self.prediction.hash} carries widths with fold_id "
+                f"{sorted(folds)}, which means they were calibrated on the holdout's own "
+                "residuals rather than on validation. Recompute with "
+                "compute_holdout_conformal_widths."
+            )
+        # The calibration version has to be CURRENT, not merely present. `fold_id` alone is not
+        # sufficient: `load_conformal_widths` regenerates an artifact that carries no row at the
+        # current version, and it regenerates through `compute_conformal_widths`, which
+        # self-calibrates on the prediction set it is handed. So widths stamped `fold_id = -1`
+        # under a superseded version pass a fold check here and are then silently replaced,
+        # during the run, by holdout-calibrated ones. Checking the version closes that.
+        versions = (
+            set(widths.get_column("calibration_version").unique().to_list())
+            if "calibration_version" in widths.columns
+            else set()
+        )
+        if versions != {CALIBRATION_VERSION}:
+            raise ValueError(
+                f"conformal holdout {self.prediction.hash} carries widths at calibration "
+                f"version(s) {sorted(versions) or 'none'}, not {CALIBRATION_VERSION!r}. The "
+                "allocator's loader would regenerate them from the holdout's own residuals "
+                "rather than refuse. Recompute with compute_holdout_conformal_widths."
             )
 
     def _funding_rates(self, prices: pl.DataFrame) -> pl.DataFrame | None:

@@ -427,3 +427,19 @@ def test_conformal_holdout_requires_widths_calibrated_on_validation_residuals(
     # count is per-symbol rather than pooled.
     assert widths.get_column("calibration_n").unique().to_list() == [23]
     assert holdout_backtest.complete
+
+    # `fold_id = -1` alone is not enough. `load_conformal_widths` REGENERATES an artifact that
+    # carries no row at the current calibration version, and it regenerates through
+    # `compute_conformal_widths`, which self-calibrates on the prediction set it is handed. So
+    # widths stamped for the holdout under a superseded version would pass a fold check and then
+    # be silently replaced, mid-run, by holdout-calibrated ones. Restaging exactly that state:
+    widths_path = (
+        study.root
+        / "run_log"
+        / "predictions"
+        / holdout_prediction.hash
+        / "conformal_widths.parquet"
+    )
+    widths.with_columns(calibration_version=pl.lit("walk_forward_v1")).write_parquet(widths_path)
+    with pytest.raises(ValueError, match="calibration version"):
+        study.strategy(prediction=holdout_prediction, **request).run()

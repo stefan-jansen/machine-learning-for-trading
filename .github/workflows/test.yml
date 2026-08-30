@@ -102,6 +102,10 @@ jobs:
               # notebooks; nothing covered the code underneath all of them.
               - 'case_studies/research/**'
               - 'case_studies/utils/**'
+              # And the presets they load. A case-study pipeline reads its shared model and
+              # backtest configuration from here, so a config-only change alters what every
+              # pipeline does while touching no code path the two filters above cover.
+              - 'case_studies/config/**'
               - 'data/**'
               - 'pyproject.toml'
               - '.github/workflows/test.yml'

@@ -46,10 +46,15 @@ import numpy as np
 import polars as pl
 
 from case_studies.research import BacktestResult, CandidateSet, Study
+from case_studies.research.holdout import build_holdout_training_spec
 from case_studies.research.strategy import strategy_warmup_periods
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.backtest_loaders import load_backtest_prices_for
-from case_studies.utils.registry import load_backtest_metrics, load_paired_metrics
+from case_studies.utils.registry import (
+    load_backtest_metrics,
+    load_paired_metrics,
+    training_hash_from_spec,
+)
 from case_studies.utils.registry.specs import project_training_identity
 from case_studies.utils.strategy_analysis import select_holdout_self_backtest
 from utils.style import COLORS
@@ -297,6 +302,7 @@ if holdout_prediction.registry_record()["training_hash"] != holdout_training.has
 
 # %% tags=["results"]
 
+selected_label = selected_training.spec()["label"]
 selected_checkpoint = (
     selected_prediction_record["checkpoint_kind"],
     selected_prediction_record["checkpoint_value"],
@@ -314,6 +320,34 @@ if holdout_checkpoint != selected_checkpoint:
 if holdout_training.hash == selected_training.hash:
     raise ValueError(
         "the holdout carries the validation training identity, which means it was not refitted"
+    )
+
+# The resolver matches on the declared configuration - family, config name, label, checkpoint -
+# and on the strategy specification. That is enough to find the replay and not enough to prove it
+# is the SAME configuration: a refit under changed feature artifacts or changed model parameters
+# keeps its config_name and would match. So the derived specification is rebuilt here from the
+# selected validation spec and its identity compared against the one the holdout registered
+# under. The training hash covers the feature lineage, the model parameters and the CV interval,
+# so agreement is the whole claim rather than a sample of it. Disagreement means the holdout on
+# file answers a different question from the one the validation selection asked.
+expected_holdout_spec = build_holdout_training_spec(
+    study,
+    selected_training.spec(),
+    timeline=(
+        pl.read_parquet(study.root / "labels" / f"{selected_label}.parquet")
+        .get_column("timestamp")
+        .unique()
+        .sort()
+        .to_list()
+    ),
+    case_study=CASE_STUDY_ID,
+)
+expected_holdout_hash = training_hash_from_spec(expected_holdout_spec)
+if holdout_training.hash != expected_holdout_hash:
+    raise ValueError(
+        f"the registered holdout refit {holdout_training.hash} is not the one this validation "
+        f"selection derives ({expected_holdout_hash}); its feature lineage, model parameters or "
+        "training interval differ from the selected configuration's"
     )
 if holdout_backtest.registry_record()["prediction_hash"] != holdout_prediction.hash:
     raise ValueError("holdout backtest and prediction lineage disagree")
@@ -347,7 +381,6 @@ holdout_runtime_provenance = json.loads(holdout_training_record.get("runtime_jso
 if not holdout_training_record.get("git_commit") or not holdout_runtime_provenance:
     raise ValueError("holdout training lacks operational provenance")
 
-selected_label = selected_training.spec()["label"]
 if holdout_training.spec()["label"] != selected_label:
     raise ValueError("holdout label differs from the selected label")
 
