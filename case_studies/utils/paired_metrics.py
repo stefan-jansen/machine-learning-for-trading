@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterable
 from pathlib import Path
 
 import numpy as np
@@ -106,7 +107,11 @@ def rung_for(cs: str) -> dict | None:
 
 
 def _best_for_rung(
-    explorer: BacktestExplorer, stage: str, rung: dict | None, top_n: int = 2000
+    explorer: BacktestExplorer,
+    stage: str,
+    rung: dict | None,
+    top_n: int = 2000,
+    prediction_hashes: list[str] | None = None,
 ) -> pl.DataFrame:
     """``explorer.best`` for a stage, fetching enough rows that the pin survives.
 
@@ -120,7 +125,11 @@ def _best_for_rung(
     dropped it, which is why every pinned selection here has to go through this helper rather
     than call ``explorer.best`` directly.
     """
-    return explorer.best(stage=stage, top_n=1_000_000 if rung is not None else top_n)
+    return explorer.best(
+        stage=stage,
+        top_n=1_000_000 if rung is not None else top_n,
+        prediction_hashes=prediction_hashes,
+    )
 
 
 def _apply_rung_restriction(df: pl.DataFrame, rung: dict | None) -> pl.DataFrame:
@@ -707,6 +716,7 @@ def populate_paired_metrics(
     verbose: bool = True,
     replace_all: bool = False,
     write_case_dir: Path | None = None,
+    prediction_hashes: Iterable[str] | None = None,
 ) -> list[dict]:
     """Compute all six paired-bootstrap pair types for ``cs`` and register them.
 
@@ -736,12 +746,19 @@ def populate_paired_metrics(
     the Ch20 producer builds); each pair is also written to
     ``backtest_paired_metrics`` via ``register_paired_metrics``.
 
+    ``prediction_hashes`` restricts every candidate read to that population. A pair is a
+    comparison between two strategies the caller reports; selecting either side from the
+    whole registry lets a retired generation be the challenger or the benchmark, and the
+    difference is then measured against a strategy its own publisher replaced. Detecting
+    those rows and rebuilding without this would write them back unchanged.
+
     ``write_case_dir`` redirects the registry *write* to an alternate case dir
     (reads still come from the live tree) — used by the verification harness to
     write into a temp registry copy non-destructively.
     """
     if explorer is None:
         explorer = BacktestExplorer(cs)
+    live = list(prediction_hashes) if prediction_hashes is not None else None
     ppy = _PPY_BY_FREQ.get(freq, 252)
     rows: list[dict] = []
     written_keys: set[tuple[str, str]] = set()
@@ -754,7 +771,7 @@ def populate_paired_metrics(
 
     # -- Pair #1: signal rank-1 (overall) ↔ equal-weight (overall) -----------
     cand = pl.concat(
-        [_best_for_rung(explorer, s, rung) for s in _PAIRED_STAGES],
+        [_best_for_rung(explorer, s, rung, prediction_hashes=live) for s in _PAIRED_STAGES],
         how="diagonal_relaxed",
     )
     skip_pair1 = False
@@ -831,7 +848,7 @@ def populate_paired_metrics(
 
     # -- Pairs #2-6: holdout + stage transitions -----------------------------
     cand = pl.concat(
-        [_best_for_rung(explorer, s, rung) for s in _PAIRED_STAGES],
+        [_best_for_rung(explorer, s, rung, prediction_hashes=live) for s in _PAIRED_STAGES],
         how="diagonal_relaxed",
     )
     if cand.is_empty() or "backtest_hash" not in cand.columns:

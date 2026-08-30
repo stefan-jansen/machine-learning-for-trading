@@ -29,9 +29,11 @@ diluted by thousands of dead full-universe rows in the selection-bias K.
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import time
+from collections.abc import Iterable
 from pathlib import Path
 
 import numpy as np
@@ -60,6 +62,12 @@ _DEGENERATE_CLAUSE = degenerate_prediction_sql("ps.prediction_hash")
 # Optional gated scope: when set, the three cohort listers additionally require
 # the backtest's signal-stage universe_filter to equal this value.
 _UNIVERSE_FILTER_CLAUSE = "json_extract(br.spec_json, '$.strategy.signal.universe_filter') = ?"
+
+# Optional scope to the population the caller reports. A cohort is "how many variants were
+# tried", so a retired generation left in it inflates K and can lead the cohort outright; the
+# correction is then computed over a variant the caller excludes. Without this, a notebook that
+# detects stale cohort rows and asks for a rebuild gets the same rows written back.
+_LIVE_POPULATION_CLAUSE = " AND ps.prediction_hash IN (SELECT value FROM json_each(?))"
 
 
 def _registry_db(cs: str) -> Path:
@@ -149,7 +157,9 @@ def _per_fold_sharpe_by_variant(db: sqlite3.Connection, hashes: list[str]) -> di
 
 
 def _list_family_cohorts(
-    db: sqlite3.Connection, universe_filter: str | None = None
+    db: sqlite3.Connection,
+    universe_filter: str | None = None,
+    prediction_hashes: list[str] | None = None,
 ) -> list[tuple[str, str, str, list[str]]]:
     """Return [(stage, label, family, [hash, ...])] for each per-family cohort.
 
@@ -160,6 +170,8 @@ def _list_family_cohorts(
     """
     extra = f" AND {_UNIVERSE_FILTER_CLAUSE}" if universe_filter else ""
     params = (universe_filter,) if universe_filter else ()
+    extra += _LIVE_POPULATION_CLAUSE if prediction_hashes is not None else ""
+    params += (json.dumps(list(prediction_hashes)),) if prediction_hashes is not None else ()
     rows = db.execute(
         f"""
         SELECT br.stage, tr.label, tr.family, br.backtest_hash
@@ -179,11 +191,15 @@ def _list_family_cohorts(
 
 
 def _list_stagelabel_cohorts(
-    db: sqlite3.Connection, universe_filter: str | None = None
+    db: sqlite3.Connection,
+    universe_filter: str | None = None,
+    prediction_hashes: list[str] | None = None,
 ) -> list[tuple[str, str, list[str]]]:
     """Per ``_list_family_cohorts``: validation-split only."""
     extra = f" AND {_UNIVERSE_FILTER_CLAUSE}" if universe_filter else ""
     params = (universe_filter,) if universe_filter else ()
+    extra += _LIVE_POPULATION_CLAUSE if prediction_hashes is not None else ""
+    params += (json.dumps(list(prediction_hashes)),) if prediction_hashes is not None else ()
     rows = db.execute(
         f"""
         SELECT br.stage, tr.label, br.backtest_hash
@@ -203,7 +219,9 @@ def _list_stagelabel_cohorts(
 
 
 def _list_label_cohorts(
-    db: sqlite3.Connection, universe_filter: str | None = None
+    db: sqlite3.Connection,
+    universe_filter: str | None = None,
+    prediction_hashes: list[str] | None = None,
 ) -> list[tuple[str, list[str]]]:
     # Exclude cost_sensitivity: those rows are perturbation analyses on a
     # fixed strategy spec, not alternative strategies. They must not inflate
@@ -212,6 +230,8 @@ def _list_label_cohorts(
     # Restricted to validation split per ``_list_family_cohorts``.
     extra = f" AND {_UNIVERSE_FILTER_CLAUSE}" if universe_filter else ""
     params = (universe_filter,) if universe_filter else ()
+    extra += _LIVE_POPULATION_CLAUSE if prediction_hashes is not None else ""
+    params += (json.dumps(list(prediction_hashes)),) if prediction_hashes is not None else ()
     rows = db.execute(
         f"""
         SELECT tr.label, br.backtest_hash
@@ -323,6 +343,7 @@ def compute_and_register(
     universe_filter: str | None = None,
     verbose: bool = True,
     case_dir: Path | None = None,
+    prediction_hashes: Iterable[str] | None = None,
 ) -> dict[str, int]:
     """Compute all cohorts for ``cs`` and persist them to ``cohort_metrics``.
 
@@ -334,12 +355,16 @@ def compute_and_register(
     Returns a per-granularity count dict, e.g.
     ``{"family": 6, "stagelabel": 4, "label": 2, "errors": 0,
     "dangling_pruned": 0}``.
+
+    ``prediction_hashes`` restricts every cohort to that population, so a caller reporting
+    a live population gets corrections computed over it rather than over the whole registry.
     """
     db_path = (case_dir / "run_log" / "registry.db") if case_dir else _registry_db(cs)
     if not db_path.exists():
         logger.warning("no registry for %s", cs)
         return {"family": 0, "stagelabel": 0, "label": 0, "errors": 0, "dangling_pruned": 0}
 
+    live = list(prediction_hashes) if prediction_hashes is not None else None
     counts = {"family": 0, "stagelabel": 0, "label": 0, "errors": 0}
     ppy = periods_per_year_from_setup(cs)
     cohort_rows: list[dict] = []
@@ -366,7 +391,7 @@ def compute_and_register(
                 lambda r: dict(stage=None, label=r[0], family=None, hashes=r[1]),
             ),
         ):
-            cohorts = lister(db, universe_filter)
+            cohorts = lister(db, universe_filter, live)
             if verbose:
                 print(f"  {cohort_type}: {len(cohorts)} cohorts", flush=True)
             if universe_filter is not None and not cohorts:

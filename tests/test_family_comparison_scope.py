@@ -261,3 +261,33 @@ def test_a_cohort_of_the_same_size_but_different_members_is_withheld(tmp_path) -
     assert swapped["dsr_pvalue"] is None
     assert swapped["pbo"] is None
     assert swapped["sharpe"] is not None, "the uncorrected Sharpe is unaffected"
+
+
+def test_a_rebuild_scoped_to_the_population_leaves_the_retired_out(tmp_path) -> None:
+    """Detecting a stale cohort is only half of it: the rebuild must not write it back.
+
+    `compute_and_register` listed every registered validation prediction, so a notebook
+    that found rows led by or computed over a retired generation and asked for a rebuild
+    got the same population and the same rows.
+    """
+    from case_studies.utils.cohort_metrics import _list_family_cohorts
+
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        unscoped = {
+            (stage, label, family): sorted(hashes)
+            for stage, label, family, hashes in _list_family_cohorts(db)
+        }
+        scoped = {
+            (stage, label, family): sorted(hashes)
+            for stage, label, family, hashes in _list_family_cohorts(
+                db, None, ["full_a", "tabular"]
+            )
+        }
+
+    assert unscoped, "the fixture has cohorts to begin with"
+    assert all(len(h) >= 2 for h in unscoped.values())
+    # gbm's cohort loses full_b and drops below two members, so it is not a cohort at all
+    # under this population - the correction it would carry was for a wider sweep.
+    assert not any(family == "gbm" for _, _, family in scoped)

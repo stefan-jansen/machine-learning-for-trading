@@ -275,7 +275,7 @@ if missing_cohorts or stale_cohort:
         if missing_cohorts
         else f"{stale_cohort} row(s) led by a retired prediction"
     )
-    counts = compute_and_register(CASE_STUDY)
+    counts = compute_and_register(CASE_STUDY, prediction_hashes=LIVE_PREDICTIONS)
     print(
         f"cohort_metrics: recomputed {sum(counts.values())} rows across {sorted(counts)} ({reason})"
     )
@@ -290,7 +290,7 @@ if missing_kinds or stale_paired:
         if missing_kinds
         else f"{stale_paired} pair(s) challenged by a retired prediction"
     )
-    rows = populate_paired_metrics(CASE_STUDY)
+    rows = populate_paired_metrics(CASE_STUDY, prediction_hashes=LIVE_PREDICTIONS)
     written = sum(1 for r in rows if "skip" not in r)
     print(f"backtest_paired_metrics: wrote {written} pairs ({reason})")
 else:
