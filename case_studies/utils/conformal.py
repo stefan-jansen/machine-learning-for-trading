@@ -396,9 +396,16 @@ def compute_conformal_widths(
     grid = preds.select("timestamp").unique().sort("timestamp").with_row_index("step")
     preds = preds.join(grid, on="timestamp", how="inner")
 
+    # The entity literal carries the source column's dtype rather than whatever polars infers
+    # from the Python value. `join_asof` compares its `by` columns by dtype and raises on a
+    # mismatch, and a panel keyed on integer identifiers - permnos on us_firm_characteristics -
+    # infers Int32 from an unannotated literal against a UInt32 column.
+    entity_dtype = preds.schema[id_col]
     per_entity = pl.concat(
         [
-            _expanding_calibration(group, alpha=alpha).with_columns(pl.lit(entity).alias(id_col))
+            _expanding_calibration(group, alpha=alpha).with_columns(
+                pl.lit(entity, dtype=entity_dtype).alias(id_col)
+            )
             for (entity,), group in preds.group_by([id_col], maintain_order=True)
         ]
     )
