@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ from case_studies.utils.notebook_contracts import (
     filter_active_model_rows,
     full_coverage_prediction_sql,
 )
+from case_studies.utils.uncertainty import STAGE_SEQUENCE
 
 # Sentinel distinguishing "no filter" from "match exit_at_max_days IS NULL".
 _UNSET = object()
@@ -806,7 +808,7 @@ class BacktestExplorer:
             return df
 
         # Take best Sharpe per stage
-        stage_order = {"signal": 0, "allocation": 1, "cost_sensitivity": 2, "risk_overlay": 3}
+        stage_order = {s: i for i, s in enumerate(STAGE_SEQUENCE)}
         best_per_stage = df.sort("sharpe", descending=True).group_by("stage").first()
 
         # Sort by pipeline order
@@ -953,7 +955,12 @@ class BacktestExplorer:
     # cost_sensitivity: breakeven analysis from registry
     # -----------------------------------------------------------------
 
-    def cost_sensitivity(self, *, prediction_hash: str | None = None) -> pl.DataFrame:
+    def cost_sensitivity(
+        self,
+        *,
+        prediction_hash: str | None = None,
+        backtest_hashes: Iterable[str] | None = None,
+    ) -> pl.DataFrame:
         """Load cost sensitivity results from the cost_sensitivity stage.
 
         Only the bps (``commission.model='percentage'``) regime is returned;
@@ -970,6 +977,15 @@ class BacktestExplorer:
             studies with a pinned carrier (e.g. nasdaq's cost-feasible
             ensemble) must scope to the carrier so the full-universe
             cost-defeat demonstration rows do not pool into the headline.
+        backtest_hashes : iterable of str, optional
+            When provided, restrict to exactly these cost rows. A prediction is
+            not a strategy: several configurations share one prediction set, and
+            a superseded generation stays in the registry under the same
+            prediction hash as the one that replaced it - on
+            us_firm_characteristics the retired ``walk_forward_v2`` conformal
+            sweep and its ``walk_forward_v3`` replacement both do. Scoping by
+            prediction then draws two generations as one curve. Pass the hashes
+            the sweep registered when the curve must describe one strategy.
 
         Returns
         -------
@@ -977,7 +993,16 @@ class BacktestExplorer:
             Columns: cost_bps, sharpe, max_drawdown, allocator
         """
         pred_clause = "" if prediction_hash is None else " AND b.prediction_hash = ?"
-        params = () if prediction_hash is None else (prediction_hash,)
+        params: tuple = () if prediction_hash is None else (prediction_hash,)
+        hash_clause = ""
+        if backtest_hashes is not None:
+            selected = tuple(dict.fromkeys(backtest_hashes))
+            if not selected:
+                # An empty selection is an empty curve, not an unscoped one. Falling through
+                # to no clause would return every cost row in the registry.
+                return pl.DataFrame()
+            hash_clause = f" AND b.backtest_hash IN ({', '.join('?' for _ in selected)})"
+            params = params + selected
         df = self._query(
             f"""
             SELECT
@@ -990,7 +1015,7 @@ class BacktestExplorer:
               AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
               AND json_extract(b.spec_json, '$.backtest_config.commission.model') = 'percentage'
-              {pred_clause}
+              {pred_clause}{hash_clause}
             """,
             params,
         )
@@ -1445,7 +1470,7 @@ class BacktestExplorer:
             return {}
 
         result: dict[str, dict] = {}
-        stage_order = ["signal", "allocation", "cost_sensitivity", "risk_overlay"]
+        stage_order = list(STAGE_SEQUENCE)
 
         for stage_name in stage_order:
             stage_df = df.filter(pl.col("stage") == stage_name)
@@ -1487,6 +1512,11 @@ class BacktestExplorer:
                 pos_rules = risk.get("position_rules", [])
                 entry["risk_type"] = pos_rules[0].get("type", "") if pos_rules else ""
 
+            # The stage-defining block, kept so a consumer can test whether a later
+            # stage's entry is actually built on this one. `champion_lineage` picks the
+            # best backtest at each stage independently, so two entries can be siblings
+            # rather than parent and child - see `stage_carrier_blocks`.
+            entry["_strategy"] = strategy
             result[stage_name] = entry
 
         return result

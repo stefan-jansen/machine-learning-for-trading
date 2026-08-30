@@ -727,10 +727,12 @@ print(
 # FX Pairs enters the pipeline negative (-0.00) and stays marginal through
 # allocation. US Firms and Crypto Perps post the highest signal-stage Sharpes
 # (2.75, 2.09), and US Firms carries that signal forward to a 1.77 holdout.
-# ETFs progresses 0.89 → 1.03 → 1.08 → 1.21 across signal → allocation →
-# cost_sensitivity → risk_overlay, with each stage adding incremental Sharpe
-# for that case study. Of the six case studies whose val rank-1 lands at the
-# risk-overlay stage, every managed Sharpe exceeds 1. NASDAQ-100 is excluded
+# The lineage table below traces each rank-1 prediction across the stages in
+# the order the backtests run: baseline, allocation, risk overlay, then the
+# cost sweep charged against whatever survived. A Sharpe that rises from one
+# column to the next is what that stage added, and only where the later stage
+# carries the earlier one's configuration - the paired rows above say which
+# transitions meet that test. NASDAQ-100 is excluded
 # from that comparison in v3.0 because its timing-corrected broad cost and risk
 # grids are deferred to v3.1.
 
@@ -838,8 +840,10 @@ import numpy as np
 
 from case_studies.utils.uncertainty import (
     SIGNAL_BASELINE_BY_CASE_STUDY,
+    STAGE_SEQUENCE,
     compute_independent_diff_uncertainty,
     compute_paired_uncertainty,
+    descends_from,
 )
 
 
@@ -1032,9 +1036,12 @@ print(f"\npaired={len(paired_rows)}/{len(explorers)}, skipped={len(paired_skips)
 # 2. signal rank-1 (holdout) ↔ equal-weight (holdout window)
 # 3. holdout rank-1 ↔ validation rank-1 (same lineage decay; min-length
 #    truncation since the windows are disjoint)
-# 4. allocation rank-1 ↔ signal rank-1 (same window, stage transition)
-# 5. cost-sensitivity rank-1 ↔ allocation rank-1 (same window)
-# 6. risk-overlay rank-1 ↔ cost-sensitivity rank-1 (same window)
+# 4-6. one pair per consecutive stage transition the prediction actually has,
+#    in ``STAGE_SEQUENCE`` order: allocation ↔ signal, risk-overlay ↔
+#    allocation, cost-sensitivity ↔ risk-overlay. A case study that did not
+#    run a stage yields fewer pairs, and a stage that does not carry the
+#    previous stage's configuration yields none for that transition - the two
+#    were selected independently and their difference is not a stage effect.
 #
 # Pair #3 truncates both series to ``min(len(val), len(ho))`` to satisfy
 # ``compute_paired_uncertainty``'s equal-length precondition. The CI is
@@ -1683,16 +1690,22 @@ for cs, explorer in explorers.items():
                 )
             )
 
-    # Pairs #4–6: stage transitions on the validation rank-1 lineage
+    # Stage transitions on the validation rank-1 lineage. Consecutive *present* stages of
+    # STAGE_SEQUENCE, and only where the later one was actually built on the earlier - the
+    # same rule `populate_paired_metrics` applies, because both write this table.
     lineage = explorer.champion_lineage(leader_phash)
-    for prev_stage, this_stage, kind in [
-        ("signal", "allocation", "signal_leader"),
-        ("allocation", "cost_sensitivity", "allocation_leader"),
-        ("cost_sensitivity", "risk_overlay", "cost_sensitivity_leader"),
-    ]:
-        prev_entry = lineage.get(prev_stage)
-        this_entry = lineage.get(this_stage)
-        if not prev_entry or not this_entry:
+    present = [s for s in STAGE_SEQUENCE if lineage.get(s)]
+    for prev_stage, this_stage in zip(present, present[1:]):
+        kind = f"{prev_stage}_leader"
+        prev_entry = lineage[prev_stage]
+        this_entry = lineage[this_stage]
+        if not descends_from(
+            this_entry.get("_strategy", {}), prev_entry.get("_strategy", {}), prev_stage
+        ):
+            print(
+                f"  skip {prev_stage} -> {this_stage}: the {this_stage} leader is not "
+                f"built on the {prev_stage} leader"
+            )
             continue
         prev_hash = prev_entry["backtest_hash"]
         this_hash = this_entry["backtest_hash"]
@@ -1734,8 +1747,9 @@ extra_paired_df
 # Summary by `benchmark_kind` shows which extension pair types landed for
 # which CSs. ``equal_weight_holdout_side_artifact`` and ``val_rank1_self``
 # are universal (modulo holdout availability); stage-transition pairs
-# (``signal_leader``, ``allocation_leader``, ``cost_sensitivity_leader``)
-# vary by CS pipeline coverage. CSs pinned at the signal stage (e.g.
+# (one ``<stage>_leader`` per stage that has a successor in
+# ``STAGE_SEQUENCE``: ``signal_leader``, ``allocation_leader``,
+# ``risk_overlay_leader``) vary by CS pipeline coverage. CSs pinned at the signal stage (e.g.
 # ``sp500_options`` Rung-2) will surface zero stage-transition rows.
 
 # %% [markdown]
@@ -1857,7 +1871,7 @@ for cs, explorer in explorers.items():
         "pred_hash": pred_hash,
         "signal_source": signal_source,
     }
-    stage_order = ["signal", "allocation", "cost_sensitivity", "risk_overlay"]
+    stage_order = list(STAGE_SEQUENCE)
     for stage in stage_order:
         if stage == "signal":
             # Use the scope-filtered best_signal directly; progression() does
@@ -1890,10 +1904,7 @@ if not lineage_df.is_empty():
         lineage_df.select(
             "case_study",
             "signal_source",
-            "signal_sharpe",
-            "allocation_sharpe",
-            "cost_sensitivity_sharpe",
-            "risk_overlay_sharpe",
+            *[f"{stage}_sharpe" for stage in STAGE_SEQUENCE],
         )
     )
 

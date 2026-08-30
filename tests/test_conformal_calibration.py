@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -201,7 +202,7 @@ def test_calibration_contract_changes_backtest_identity() -> None:
     assert backtest_hash_from_parts("pred", legacy) != backtest_hash_from_parts("pred", corrected)
 
 
-def test_legacy_width_artifact_must_be_preserved_before_regeneration(
+def test_a_legacy_width_artifact_is_regenerated_rather_than_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     case_dir = tmp_path / "case_studies" / "demo"
@@ -219,20 +220,28 @@ def test_legacy_width_artifact_must_be_preserved_before_regeneration(
     ).write_parquet(legacy_path)
     monkeypatch.setattr(conformal, "get_case_study_dir", lambda _: case_dir)
 
-    with pytest.raises(ValueError, match="preserve it in the pre-fix snapshot"):
-        conformal.compute_conformal_widths(
-            "demo", "candidate", min_calibration_n=3, embargo_steps=2, write=True
-        )
+    conformal.compute_conformal_widths(
+        "demo", "candidate", min_calibration_n=3, embargo_steps=2, write=True
+    )
+
+    written = pl.read_parquet(legacy_path)
+    assert "calibration_version" in written.columns
+    assert written["calibration_version"].unique().to_list() == [conformal.CALIBRATION_VERSION]
+    # The legacy row is gone rather than merged: it carried no version, so nothing could
+    # tell its widths from the current contract's once both sat in one file.
+    assert written.filter(pl.col("width") == 2.0).is_empty()
 
 
-def test_a_superseded_calibration_version_is_refused_rather_than_mixed(
+def test_a_superseded_calibration_version_is_replaced_rather_than_mixed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Widths from the retired contract must not sit beside widths from the current one.
 
     The artifact carries no per-row provenance beyond its version, so a file holding both
     would size some decisions on prior-fold-only widths and some on embargoed expanding
-    ones with nothing to tell them apart.
+    ones with nothing to tell them apart. The writer therefore supersedes the retired rows.
+    Refusing instead is what took us_firm_characteristics' conformal stage down on
+    2026-08-30 and made the recovery eleven manual file moves.
     """
     case_dir = tmp_path / "case_studies" / "demo"
     _write_predictions(case_dir, _panel_rows())
@@ -251,10 +260,15 @@ def test_a_superseded_calibration_version_is_refused_rather_than_mixed(
     ).write_parquet(superseded)
     monkeypatch.setattr(conformal, "get_case_study_dir", lambda _: case_dir)
 
-    with pytest.raises(ValueError, match="Refusing to mix conformal calibration versions"):
-        conformal.compute_conformal_widths(
-            "demo", "candidate", min_calibration_n=3, embargo_steps=2, write=True
-        )
+    conformal.compute_conformal_widths(
+        "demo", "candidate", min_calibration_n=3, embargo_steps=2, write=True
+    )
+
+    written = pl.read_parquet(superseded)
+    assert written["calibration_version"].unique().to_list() == [conformal.CALIBRATION_VERSION]
+    # The v2 row is replaced, not kept beside the current one. Mixing is still wrong; the
+    # correction is to supersede rather than to refuse and wait for a person.
+    assert written.filter(pl.col("width") == 2.0).is_empty()
 
 
 def test_locked_width_retry_rejects_conflict_without_replacing_artifact(tmp_path: Path) -> None:
@@ -390,3 +404,81 @@ def test_widths_compute_on_a_panel_keyed_by_integer_identifiers(
     assert not widths.is_empty()
     assert widths.schema["symbol"] == pl.UInt32
     assert set(widths["symbol"].unique().to_list()) == {1001, 1002}
+
+
+def test_the_holdout_embargo_is_part_of_the_backtest_identity() -> None:
+    """Two embargoes are two calibrations, so they must not share a backtest hash.
+
+    The widths are an input to the backtest and the embargo decides them, but the widths
+    live in an artifact beside the prediction set and nothing in the strategy specification
+    named them. Changing the embargo therefore left the hash where it was, and the registry
+    refused to overwrite the registered run rather than accepting either result - which is
+    how the state announced itself, and it announced a conflict rather than a number.
+    """
+    spec = {
+        "version": 2,
+        "strategy": {"allocation": {"method": "conformal_weighted", "min_calibration_n": 30}},
+        "backtest_config": {"cash": {"initial": 1_000_000.0}},
+    }
+    zero = conformal.ensure_conformal_calibration_identity(spec, holdout_embargo_steps=0)
+    one = conformal.ensure_conformal_calibration_identity(spec, holdout_embargo_steps=1)
+
+    assert zero["input_identity"]["conformal_holdout_embargo_steps"] == 0
+    assert one["input_identity"]["conformal_holdout_embargo_steps"] == 1
+    assert zero != one
+
+    # It sits outside `strategy` because that block is what a holdout replay is matched to
+    # its validation carrier by. The two run the same strategy; the embargo is a property
+    # of calibrating across the boundary between them.
+    assert zero["strategy"] == one["strategy"]
+
+    # A validation run records nothing: the embargo has no meaning within validation, and
+    # writing it there would rehash every registered conformal backtest for no difference.
+    assert (
+        "calibration"
+        not in conformal.ensure_conformal_calibration_identity(spec)["backtest_config"]
+    )
+
+
+def test_a_carrier_fitted_under_a_retired_calibration_is_refused() -> None:
+    """Selection ranks on Sharpe and cannot see calibration versions.
+
+    So a backtest fitted under a retired contract stays selectable after the contract is
+    corrected, and nothing downstream can run it. The refusal happens where the carrier is
+    resolved rather than where the run fails, so the message names the cause.
+    """
+    from case_studies.utils import strategy_analysis
+
+    retired = json.dumps(
+        {
+            "strategy": {
+                "allocation": {
+                    "name": "conformal_weighted",
+                    "calibration_version": "walk_forward_v2",
+                }
+            }
+        }
+    )
+    with pytest.raises(RuntimeError, match="current contract is 'walk_forward_v3'"):
+        strategy_analysis._assert_carrier_calibration_is_current("demo", "abc123", retired)
+
+
+def test_a_carrier_on_the_current_calibration_passes() -> None:
+    from case_studies.utils import strategy_analysis
+    from case_studies.utils.conformal import CALIBRATION_VERSION
+
+    current = json.dumps(
+        {
+            "strategy": {
+                "allocation": {
+                    "name": "conformal_weighted",
+                    "calibration_version": CALIBRATION_VERSION,
+                }
+            }
+        }
+    )
+    strategy_analysis._assert_carrier_calibration_is_current("demo", "abc123", current)
+    # A non-conformal allocator records no calibration version and must not be refused.
+    strategy_analysis._assert_carrier_calibration_is_current(
+        "demo", "abc123", json.dumps({"strategy": {"allocation": {"name": "equal_weight"}}})
+    )

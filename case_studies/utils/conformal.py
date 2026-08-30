@@ -89,9 +89,15 @@ HOLDOUT_CONFORMAL_EMBARGO_STEPS: dict[str, int] = {
     "us_equities_panel/fwd_ret_5d": 5,
     "us_equities_panel/fwd_ret_1d": 1,
     "us_equities_panel/fwd_ret_21d": 21,
-    "us_firm_characteristics/fwd_ret_1m_win": 1,
-    "us_firm_characteristics/fwd_ret_1m": 1,
-    "us_firm_characteristics/fwd_class_1m": 1,
+    # Zero because the horizon is zero. us_firm_characteristics dates each row by the month
+    # the return was earned, and `labels.horizons` in its setup.yaml declares `0D` for all
+    # three, so the outcome is already realised at the observation and no residual reaches
+    # into the holdout window. The entries were 1, which is not a conservative reading of
+    # this table - the table records the label horizon, and a value above it discards the
+    # last month of calibration for a leak the label cannot have.
+    "us_firm_characteristics/fwd_ret_1m_win": 0,
+    "us_firm_characteristics/fwd_ret_1m": 0,
+    "us_firm_characteristics/fwd_class_1m": 0,
 }
 
 
@@ -175,8 +181,34 @@ def holdout_conformal_embargo_steps(case_study: str, label: str) -> int:
         ) from error
 
 
-def ensure_conformal_calibration_identity(strategy_spec: dict[str, Any]) -> dict[str, Any]:
-    """Return a spec whose conformal allocation carries its full identity."""
+def ensure_conformal_calibration_identity(
+    strategy_spec: dict[str, Any],
+    *,
+    holdout_embargo_steps: int | None = None,
+) -> dict[str, Any]:
+    """Return a spec whose conformal allocation carries its full identity.
+
+    ``holdout_embargo_steps`` belongs here rather than only in the widths artifact, and
+    only for a holdout run. The widths are an input to the backtest and the embargo decides
+    them, so a spec that omits it gives two different calibrations one identity: change the
+    embargo, re-run, and the hash does not move. The registry then refuses to overwrite the
+    registered run - which is how the state announces itself, and the announcement is a
+    conflict rather than a number, so nothing is silently wrong. But the correct behaviour
+    is a different hash for a different calibration, which is what recording it gives.
+
+    It is recorded under ``input_identity``, which is where the specification already
+    records the digests of things a backtest consumed rather than declared - the price
+    frame, the funding rates. The widths are one of those, and the embargo is what decides
+    them. It is deliberately not in the allocation block: that block is what a holdout
+    replay is matched to its validation carrier by, and the two run the same strategy, so
+    putting it there made every holdout spec differ from its own carrier and
+    ``select_holdout_self_backtest`` stopped matching. It is not a ``backtest_config``
+    section either - that schema is closed, and adding one is rejected by name.
+
+    Pass it only on the holdout path. The embargo applies at the validation-to-holdout
+    boundary and has no meaning within validation, so adding it to a validation spec would
+    change every registered conformal hash to record something that did not affect it.
+    """
     spec = copy.deepcopy(strategy_spec)
     strategy = spec.get("strategy")
     if not isinstance(strategy, dict):
@@ -194,6 +226,9 @@ def ensure_conformal_calibration_identity(strategy_spec: dict[str, Any]) -> dict
     allocation["calibration_version"] = CALIBRATION_VERSION
     allocation.setdefault("min_calibration_n", DEFAULT_MIN_CALIBRATION_N)
     allocation.setdefault("sparse_fallback", POOLED_FALLBACK)
+    if holdout_embargo_steps is not None:
+        identity = spec.setdefault("input_identity", {})
+        identity["conformal_holdout_embargo_steps"] = int(holdout_embargo_steps)
     return spec
 
 
@@ -247,16 +282,29 @@ def _write_widths(
             # ComputeError — treat any unreadable file as "no prior widths".
             existing = None
         if existing is not None:
-            if "calibration_version" not in existing.columns:
+            # A superseded artifact is REPLACED, not refused. Both refusals below used
+            # to be unconditional, and their message told the caller to snapshot the file
+            # and delete it by hand. That made a corrected calibration unusable until a
+            # person intervened in every lane holding a stale artifact: on 2026-08-30 it
+            # took us_firm_characteristics' whole conformal stage down - all 52 backtests,
+            # 11 of 11 cost levels, including the canonical rank-1 - and the recovery was
+            # eleven manual file moves. Superseding IS the intended outcome of a
+            # calibration fix, so the writer performs it.
+            #
+            # `immutable` keeps the old behaviour and must: a locked artifact is pinned by
+            # digest, and silently rewriting one would break the pin it exists to hold.
+            legacy = "calibration_version" not in existing.columns
+            versions = set() if legacy else set(existing["calibration_version"].unique().to_list())
+            superseded = legacy or (versions and versions != {CALIBRATION_VERSION})
+            if superseded and immutable:
                 raise ValueError(
-                    f"Legacy conformal artifact at {path}; preserve it in the pre-fix "
-                    "snapshot and remove it from the live candidate before regeneration"
+                    f"locked conformal artifact at {path} holds a superseded calibration "
+                    f"{sorted(versions) or 'with no version column'}; it cannot be rewritten "
+                    "in place because the lock pins it by digest"
                 )
-            versions = set(existing["calibration_version"].unique().to_list())
-            if versions != {CALIBRATION_VERSION}:
-                raise ValueError(
-                    f"Refusing to mix conformal calibration versions in {path}: {versions}"
-                )
+            if superseded:
+                existing = None
+        if existing is not None:
             # Float equality on alpha is fine here: we write Float64 and read
             # back Float64; both sides round-trip bit-identically through parquet.
             same_alpha = existing.filter(pl.col("alpha") == alpha)
@@ -682,7 +730,8 @@ def load_conformal_widths(
     on a fresh prediction set should compute widths up-front.
     """
     path = _predictions_dir(case_study, prediction_hash) / "conformal_widths.parquet"
-    if not path.exists():
+
+    def _generate() -> None:
         compute_conformal_widths(
             case_study,
             prediction_hash,
@@ -690,7 +739,30 @@ def load_conformal_widths(
             label=label,
             embargo_steps=embargo_steps,
         )
+
+    if not path.exists():
+        _generate()
     df = pl.read_parquet(path)
+
+    # An artifact holding only a superseded calibration is REGENERATED, not refused.
+    # Auto-generation used to be conditional on the file being absent, so a lane that had
+    # computed widths before a calibration fix could never move past it: the read raised
+    # "No widths for calibration_version=..." and the write refused to mix versions, and
+    # the only way through was to move the file aside by hand. That is the loop this has
+    # been round several times. Regenerating is what the caller wanted in every one of
+    # them, and it is safe because the widths are derived from the prediction set, which
+    # has not changed - only the rule for calibrating against it has.
+    #
+    # Only when the CURRENT version was asked for. A caller naming an older version is
+    # asking a question about history and gets the honest empty answer.
+    stale = (
+        "calibration_version" not in df.columns
+        or df.filter(pl.col("calibration_version") == calibration_version).is_empty()
+    )
+    if stale and calibration_version == CALIBRATION_VERSION:
+        _generate()
+        df = pl.read_parquet(path)
+
     if "calibration_version" not in df.columns:
         raise ValueError(
             f"Legacy conformal artifact at {path}; preserve and regenerate it before use"

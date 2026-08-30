@@ -514,6 +514,7 @@ print(top10.select("source", "allocator", "names_per_side", "sharpe", "cagr", "m
 # names are held, so a cost assumption that is too low flatters the more active rule
 # specifically. A comparison run at a single cost level cannot show that.
 #
-# **Next:** the costs notebook takes the single highest-Sharpe run out of this grid
-# and the baseline together, re-runs it across a range of cost assumptions, and reads
-# how fast its Sharpe decays as the charge rises.
+# **Next:** [`13_risk_management`](13_risk_management.ipynb), which tries leaving
+# positions early. The costs notebook runs after it, on the one configuration this case
+# study reports - selected across the baseline, this grid and the risk stage together -
+# and reads how fast that configuration's Sharpe decays as the charge rises.

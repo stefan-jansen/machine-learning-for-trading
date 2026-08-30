@@ -38,8 +38,9 @@
 # **Book reference**: Chapter 20, §20.1 (the §9 handoff feeds Ch20's
 # cross-case-study aggregation).
 #
-# **Prerequisites**: case-study pipeline through `14_risk_management`; the
-# locked registry (`case_studies/us_firm_characteristics/run_log/registry.db`).
+# **Prerequisites**: case-study pipeline through
+# [`16_holdout_backtest`](16_holdout_backtest.ipynb); the registry
+# (`case_studies/us_firm_characteristics/run_log/registry.db`).
 #
 # **Scope**: no training or re-backtesting. The case-study pipeline registers
 # the derived paired-metrics rows before this notebook runs, after which the
@@ -85,6 +86,7 @@ from ml4t.diagnostic.visualization.portfolio.risk_plots import plot_rolling_shar
 # %%
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_metrics, load_benchmark_returns
+from case_studies.utils.conformal import CALIBRATION_VERSION
 from case_studies.utils.external_benchmarks import (
     align_to_strategy as align_external_benchmark,
 )
@@ -194,18 +196,25 @@ def _fmt(val: float | None, fmt: str = ".4f") -> str:
 # file, and the registry is what every published number in this case study is read
 # from. So they run only when something this notebook needs is absent.
 #
-# What "absent" means is the two closure kinds §6 reads, not a row count. A row count
-# is the wrong predicate in exactly the situation this case study is in: the validation
-# pairs can be written before any holdout backtest exists, after which the table is
-# non-empty forever and the holdout pairs are never produced, so §1 raises
-# `Incomplete holdout closure pairs` on every subsequent run with the guard declining
-# to repopulate.
+# What "absent" means is the closure §6 actually reads: a `val_rank1_self` pair whose
+# challenger is the holdout backtest this notebook resolves. Neither weaker predicate
+# works, and both were tried here. A row count is non-empty forever once the validation
+# pairs are written, so the holdout pairs are never produced. The set of benchmark kinds
+# present is non-empty forever once ANY holdout has been paired - including a superseded
+# one - so re-running the holdout on a corrected configuration leaves the table carrying
+# the previous generation's pairs and §6 raises `Incomplete holdout closure pairs` while
+# the guard declines to repopulate. That is exactly what happened when this case study's
+# holdout was regenerated.
 
 # %%
 from case_studies.utils.cohort_metrics import compute_and_register
 from case_studies.utils.paired_metrics import populate_paired_metrics
 
 _db = CASE_DIR / "run_log" / "registry.db"
+# Resolved before the guard because the guard asks about this holdout, not about holdouts
+# in general. §6 re-resolves it and checks the two agree.
+_lineage = resolve_canonical_rank1_lineage(CASE_STUDY)
+_expected_holdout = _lineage["holdout_backtest_hash"]
 with sqlite3.connect(str(_db)) as _con:
     _tables = {r[0] for r in _con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     _n_cohorts = (
@@ -221,7 +230,11 @@ with sqlite3.connect(str(_db)) as _con:
     _kinds_present = (
         {
             row[0]
-            for row in _con.execute("SELECT DISTINCT benchmark_kind FROM backtest_paired_metrics")
+            for row in _con.execute(
+                "SELECT DISTINCT benchmark_kind FROM backtest_paired_metrics "
+                "WHERE challenger_hash IS ?",
+                (_expected_holdout,),
+            )
         }
         if "backtest_paired_metrics" in _tables
         else set()
@@ -229,7 +242,13 @@ with sqlite3.connect(str(_db)) as _con:
 REQUIRED_PAIR_KINDS = {"val_rank1_self", "equal_weight_holdout_side_artifact"}
 if _n_cohorts == 0 or not REQUIRED_PAIR_KINDS.issubset(_kinds_present):
     _cohort_counts = compute_and_register(CASE_STUDY)
-    _paired_rows = populate_paired_metrics(CASE_STUDY, periods_per_year=PERIODS_PER_YEAR)
+    # The lineage is passed rather than re-derived inside. Left to itself the populator
+    # ranks the registry on raw Sharpe, which is a fourth selector beside the resolver,
+    # this notebook and the costs sweep - and here it picked the retired conformal
+    # generation, so the pairs described a carrier the case study does not report.
+    _paired_rows = populate_paired_metrics(
+        CASE_STUDY, periods_per_year=PERIODS_PER_YEAR, carrier=_lineage
+    )
     _n_cohorts = sum(_cohort_counts[k] for k in ("family", "stagelabel", "label"))
     _n_pairs = sum(1 for row in _paired_rows if "skip" not in row)
     print(f"cohort_metrics: {_n_cohorts} rows; backtest_paired_metrics: {_n_pairs} pairs (written)")
@@ -377,10 +396,13 @@ print(f"  CI status: {ci_status(ic_lo, ic_hi)}")
 
 
 # %% [markdown]
-# The holdout resolver requires an exact strategy-specification match, so the
-# holdout run is determined by the selected validation run rather than chosen. Any
-# looser rule would let an allocator be picked on its holdout performance,
-# which spends the one holdout this case study has.
+# The holdout run is determined by the selected validation run rather than chosen. The
+# resolver requires an exact strategy-specification match, the same checkpoint, and a
+# training run whose own CV declares the holdout fold - so what it returns is
+# [`15_holdout_predictions`](15_holdout_predictions.ipynb)' refit traded by
+# [`16_holdout_backtest`](16_holdout_backtest.ipynb), and not a model fitted on the
+# validation folds and scored here. Any looser rule would let an allocator be picked on
+# its holdout performance, which is selection wearing the clothes of evaluation.
 
 
 # %%
@@ -634,22 +656,30 @@ with sqlite3.connect(str(_db)) as _con:
         _ELIGIBLE_STAGES,
     ).fetchall()
 
-# The uncorrected conformal calibration is superseded and is not a candidate; the
-# equal-weight side has no such distinction to make.
+# A superseded conformal calibration is not a candidate; the equal-weight side has no such
+# distinction to make. The current contract is read from `CALIBRATION_VERSION` rather than
+# written out here: this line named `walk_forward_v2` as the strict rule, and when the
+# fleet moved to `walk_forward_v3` the literal stopped matching anything and the notebook
+# refused with "no conformal candidate is registered" - which reads as an absent sweep and
+# was a stale string.
 equal_weight_hashes = [row[0] for row in _sizing_candidates if row[1] == "equal_weight"]
-strict_conformal_hashes = [
+current_conformal_hashes = [
     row[0]
     for row in _sizing_candidates
-    if row[1] == "conformal_weighted" and row[2] == "walk_forward_v2"
+    if row[1] == "conformal_weighted" and row[2] == CALIBRATION_VERSION
 ]
-if not strict_conformal_hashes:
-    raise RuntimeError("No walk_forward_v2 conformal candidate is registered.")
+if not current_conformal_hashes:
+    raise RuntimeError(
+        f"No conformal candidate at the current calibration {CALIBRATION_VERSION!r} is "
+        "registered. Re-run 12_portfolio_management: the registry's conformal generation "
+        "predates the current contract and cannot be executed."
+    )
 if not equal_weight_hashes:
     raise RuntimeError("No equal-weight baseline candidate is registered.")
 
 sizing_ranking = rank_backtests_on_common_support(
     CASE_STUDY,
-    sorted({TOP_HASH, *equal_weight_hashes, *strict_conformal_hashes}),
+    sorted({TOP_HASH, *equal_weight_hashes, *current_conformal_hashes}),
     periods_per_year=PERIODS_PER_YEAR,
 )
 _allocator_of = {row[0]: row[1] for row in _sizing_candidates}

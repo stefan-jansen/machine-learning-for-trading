@@ -30,6 +30,7 @@ import polars as pl
 
 from case_studies.utils.carrier_pins import CARRIER_PINS
 from case_studies.utils.notebook_contracts import degenerate_prediction_sql
+from case_studies.utils.uncertainty import STAGE_SEQUENCE
 
 # ---------------------------------------------------------------------------
 # Canonical rank-1 resolution (LABEL_RESTRICTIONS-aware)
@@ -149,6 +150,25 @@ def rank_backtests_on_common_support(
     return rank_returns_on_common_support(returns_by_hash, periods_per_year=periods_per_year)
 
 
+def training_run_fitted_for_the_holdout(training_spec_json: str | None) -> bool:
+    """True when a training run's own CV declares the holdout fold.
+
+    This is what separates a refit from a validation-fitted model scored on a later
+    window. It is read from the training specification rather than inferred from the
+    prediction set's split, because the split says where the predictions land and says
+    nothing about what the model saw while fitting - a model fitted on the validation
+    folds can publish predictions over the holdout window, and that is exactly the
+    mistake the holdout exists to rule out.
+
+    A run with no recorded specification answers False: it cannot be shown to have been
+    refitted, and the holdout lineage is not a place to assume.
+    """
+    if not training_spec_json:
+        return False
+    cv = (json.loads(training_spec_json).get("computation") or {}).get("cv") or {}
+    return cv.get("split") == "holdout"
+
+
 def select_holdout_self_backtest(
     case_study: str,
     val_backtest_hash: str,
@@ -209,35 +229,55 @@ def select_holdout_self_backtest(
             return None
         training_hash, checkpoint_value, checkpoint_kind = train_row
 
+        configuration = db.execute(
+            "SELECT family, config_name, label FROM training_runs WHERE training_hash = ?",
+            (training_hash,),
+        ).fetchone()
+        if configuration is None:
+            return None
+
         # ``IS`` is SQLite's null-safe equality: a configuration with no
         # checkpoint dimension stores NULL on both sides and must still match,
         # while ``=`` would drop it.
+        #
+        # The join is on the declared configuration rather than on the validation
+        # training hash. A holdout prediction produced correctly carries a NEW
+        # training identity - it is the same configuration refitted on the holdout
+        # fold, and the identity covers the CV interval - so matching on the
+        # validation training hash can only ever find a holdout scored from the
+        # validation-fitted model, which is the thing the holdout exists to avoid.
         candidates = db.execute(
             """
-            SELECT b.backtest_hash, b.spec_json
+            SELECT b.backtest_hash, b.spec_json, t.training_hash, t.spec_json
             FROM backtest_runs b
             JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
-            WHERE p.training_hash = ?
-              AND p.split = 'holdout'
+            JOIN training_runs t ON t.training_hash = p.training_hash
+            WHERE p.split = 'holdout'
               AND p.checkpoint_value IS ?
               AND p.checkpoint_kind IS ?
+              AND t.family = ?
+              AND t.config_name = ?
+              AND t.label = ?
             ORDER BY b.backtest_hash
             """,
-            (training_hash, checkpoint_value, checkpoint_kind),
+            (checkpoint_value, checkpoint_kind, *configuration),
         ).fetchall()
 
-    matched = [
-        bh
-        for bh, spec_json in candidates
-        if json.loads(spec_json).get("strategy", {}) == val_strategy
-    ]
+    matched = sorted(
+        {
+            bh
+            for bh, spec_json, _, training_spec_json in candidates
+            if json.loads(spec_json).get("strategy", {}) == val_strategy
+            and training_run_fitted_for_the_holdout(training_spec_json)
+        }
+    )
     if not matched:
         return None
-    if len(set(matched)) > 1:
+    if len(matched) > 1:
         raise ValueError(
-            f"holdout replay for {val_backtest_hash} is ambiguous: "
-            f"{sorted(set(matched))} share training_hash {training_hash}, "
-            f"checkpoint {checkpoint_kind}={checkpoint_value} and one strategy spec"
+            f"holdout replay for {val_backtest_hash} is ambiguous: {matched} are all "
+            f"{configuration[0]}/{configuration[1]} on {configuration[2]}, refitted for the "
+            f"holdout at checkpoint {checkpoint_kind}={checkpoint_value}, with one strategy spec"
         )
     return matched[0]
 
@@ -450,7 +490,7 @@ def resolve_solvent_carrier(case_study: str, *, require_solvent: bool = True) ->
     configuration the case study reports, and that configuration is
     ``resolve_canonical_rank1_lineage``'s validation rank-1. Each notebook ranking
     the registry for itself is a standing divergence class rather than a
-    hypothetical one: the canonical resolver re-ranks ``walk_forward_v2`` conformal
+    hypothetical one: the canonical resolver re-ranks strict-conformal
     candidates on exact common timestamp support and applies LABEL_RESTRICTIONS,
     UNIVERSE_RESTRICTIONS and CARRIER_PINS, and a plain Sharpe ranking beside it
     does none of those. When the two disagree, the cost curve describes a strategy
@@ -515,7 +555,50 @@ def resolve_solvent_carrier(case_study: str, *, require_solvent: bool = True) ->
                 "CARRIER_PINS, rather than selecting past this row silently."
             )
 
+    _assert_carrier_calibration_is_current(case_study, backtest_hash, spec_json)
+
     return {**lineage, "spec_json": spec_json, "max_drawdown": max_drawdown}
+
+
+def _assert_carrier_calibration_is_current(
+    case_study: str, backtest_hash: str, spec_json: str | None
+) -> None:
+    """Refuse a carrier whose conformal calibration the code will not run.
+
+    Selection ranks on Sharpe and knows nothing about calibration versions, so a
+    backtest fitted under a retired contract stays selectable after the contract is
+    corrected. Nothing downstream can execute it - ``run_backtest`` refuses a
+    non-current ``calibration_version`` outright - so the first sign is a whole stage
+    failing on a configuration that ranked first. On ``us_firm_characteristics``,
+    2026-08-30, all 52 conformal backtests were the retired version and 11 of 11 cost
+    levels died; the v3 refit happened to win on merit, so the wrong carrier was never
+    actually carried, but nothing would have caught it if it had not.
+
+    This raises rather than selecting past the row. Excluding retired rows inside the
+    resolver would change which configuration seven case studies report, silently, and
+    that is a decision for whoever owns the sweep - taken by re-running the stage under
+    the current calibration, not by a filter nobody sees.
+    """
+    import json
+
+    from case_studies.utils.conformal import CALIBRATION_VERSION
+
+    if not spec_json:
+        return
+    try:
+        allocation = (json.loads(spec_json).get("strategy") or {}).get("allocation") or {}
+    except (TypeError, ValueError):
+        return
+    recorded = allocation.get("calibration_version")
+    if recorded is None or recorded == CALIBRATION_VERSION:
+        return
+    raise RuntimeError(
+        f"Canonical rank-1 {backtest_hash} for {case_study} was fitted under conformal "
+        f"calibration {recorded!r}, and the current contract is {CALIBRATION_VERSION!r}. "
+        "Nothing downstream can execute it. Re-run the allocation stage so the sweep "
+        "holds current-calibration candidates, rather than measuring costs or a holdout "
+        "on a configuration that cannot be reproduced."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -793,7 +876,7 @@ def plot_sharpe_waterfall(
     -------
     plt.Figure
     """
-    stage_order = ["signal", "allocation", "cost_sensitivity", "risk_overlay"]
+    stage_order = list(STAGE_SEQUENCE)
     stage_labels = {
         "signal": "Signal",
         "allocation": "Allocation",
