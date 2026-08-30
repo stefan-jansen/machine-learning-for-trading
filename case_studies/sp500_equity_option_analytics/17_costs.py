@@ -199,18 +199,6 @@ print(
     + f", validation Sharpe {winner['sharpe']:.3f}"
 )
 
-# %%
-prices = load_backtest_prices_for(
-    CASE_STUDY_ID,
-    COST_LABEL,
-    split="validation",
-    warmup_periods=warmup_periods_for(CASE_STUDY_ID),
-    max_symbols=MAX_SYMBOLS,
-)
-print(
-    f"Price support: {len(prices):,} rows across {prices['symbol'].n_unique()} historical symbols"
-)
-
 # %% [markdown]
 # The line above names the strategy this sweep stresses - its source, allocator, concentration and
 # allocation-stage Sharpe at the case study's configured one-way charge. That charge is per leg,

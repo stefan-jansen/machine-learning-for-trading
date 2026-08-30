@@ -867,16 +867,63 @@ with sqlite3.connect(REGISTRY_DB) as db:
 if carrier_source is None or carrier_checkpoint is None:
     raise RuntimeError(f"the carrier lineage {carrier_training_hash} is not in this registry")
 
-CARRIER_STRATEGY = strategy_view(json.loads(strategy_carrier["spec_json"]))
+
+def _without(value, path: tuple[str, ...]):
+    """``value`` with ``path`` removed, leaving every sibling in place."""
+    if not isinstance(value, dict) or path[0] not in value:
+        return value
+    pruned = dict(value)
+    if len(path) == 1:
+        pruned.pop(path[0])
+    else:
+        pruned[path[0]] = _without(pruned[path[0]], path[1:])
+    return pruned
+
+
+# The whole backtest specification, not the strategy block. `strategy_view` returns signal,
+# allocation and risk and stops there, so a comparison built on it accepts a holdout run at
+# different commissions, slippage, fill timing or stop behaviour as the carrier's own result -
+# and those are exactly the settings a holdout has to hold fixed for its number to be comparable.
+# What legitimately differs between the two runs is the predictions it consumed and the price
+# panel it was sliced to, so only those are projected out.
+BACKTEST_VARYING_PATHS = (
+    ("_runtime_backtest_config",),
+    ("input_identity",),
+    ("backtest_config", "metadata", "prediction_hash"),
+    ("backtest_config", "metadata", "preset_path"),
+)
+
+
+def _comparable_backtest(spec: dict) -> dict:
+    projected = spec
+    for path in BACKTEST_VARYING_PATHS:
+        projected = _without(projected, path)
+    return projected
+
+
+CARRIER_BACKTEST = _comparable_backtest(json.loads(strategy_carrier["spec_json"]))
 CARRIER_TRAINING_SPEC = json.loads(carrier_source[3])
-# The fields a holdout refit is allowed to differ in. Everything else - the estimator, its
-# parameters, the feature artifacts it pins, the label it was fitted against - has to be
-# identical, because a holdout that changed any of them is not this configuration re-measured.
-REKEYED_FIELDS = ("cv", "expected_prediction_keys", "macro_context")
+# Exactly what a holdout refit re-keys, and nothing more. The list is
+# `case_studies/research/holdout.py::_FOLD_DERIVED_FIELDS` plus the CV interval itself, and it is
+# subfield-precise on purpose: dropping the whole `macro_context` would accept an SDF holdout
+# fitted on different macro inputs, and keeping all of `model` would reject the legitimate
+# holdout of any configuration whose parameters are resolved per fold. Everything outside these
+# - the estimator, its parameters, the artifacts it pins, the label - has to be identical,
+# because a holdout that changed any of them is not this configuration re-measured.
+REKEYED_PATHS = (
+    ("cv",),
+    ("expected_prediction_keys",),
+    ("model", "effective_params_by_fold"),
+    ("macro_context", "resolved_fold_digest"),
+    ("task", "imbalance", "effective_class_weights_by_fold"),
+)
 
 
 def _comparable_computation(spec: dict) -> dict:
-    return {k: v for k, v in spec["computation"].items() if k not in REKEYED_FIELDS}
+    computation = spec["computation"]
+    for path in REKEYED_PATHS:
+        computation = _without(computation, path)
+    return computation
 
 
 def is_this_carriers_holdout(row) -> bool:
@@ -886,8 +933,10 @@ def is_this_carriers_holdout(row) -> bool:
     say the same estimator against the same target. The training specification outside the
     re-keyed fields says the same computation over the same pinned artifacts - matching on names
     alone would accept a fit against a retired feature artifact. The checkpoint says the same
-    point on the schedule that selection was made at. And the strategy projection says the same
-    portfolio was built from it, which is what 19_holdout_backtest runs.
+    point on the schedule that selection was made at. And the backtest specification outside the
+    predictions and the price panel says the same portfolio was built the same way - the same
+    allocator and concentration, and also the same costs, fill timing and stop behaviour, which
+    a strategy-block comparison would have let vary.
 
     The training hash itself cannot be compared: a holdout refit is a different interval and
     therefore a different identity, always and by construction.
@@ -903,7 +952,7 @@ def is_this_carriers_holdout(row) -> bool:
     holdout_cv = json.loads(row[13])["computation"].get("cv") or {}
     if holdout_cv.get("split") != "holdout":
         return False
-    return strategy_view(json.loads(row[5])) == CARRIER_STRATEGY
+    return _comparable_backtest(json.loads(row[5])) == CARRIER_BACKTEST
 
 
 matching = [r for r in holdout_rows if is_this_carriers_holdout(r)]
@@ -911,8 +960,10 @@ if len(matching) > 1:
     raise RuntimeError(
         f"{len(matching)} holdout rows match this carrier: "
         + ", ".join(r[0] for r in matching)
-        + ". Delete the superseded ones; two holdout results for one configuration cannot both "
-        "be the out-of-sample evidence for it."
+        + ". Two holdout results for one configuration cannot both be the out-of-sample "
+        "evidence for it, and this notebook will not pick between them. Both rows stay in the "
+        "registry - they are the record that the window was read twice - and the case study "
+        "has to say which read it is publishing and why."
     )
 holdout_result = matching[-1] if matching else None
 

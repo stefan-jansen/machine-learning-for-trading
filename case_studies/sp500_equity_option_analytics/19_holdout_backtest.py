@@ -324,8 +324,41 @@ holdout_strategy_spec = clone_backtest_spec(
 )
 HOLDOUT_BACKTEST_HASH = backtest_hash_from_parts(HOLDOUT_PREDICTION_HASH, holdout_strategy_spec)
 
-carried = strategy_view(holdout_strategy_spec)
-validation_carried = CARRIER_STRATEGY
+# The whole backtest specification, not the strategy block. `strategy_view` returns signal,
+# allocation and risk and stops there, so a check built on it would pass a holdout run at
+# different commissions, slippage, fill timing or stop behaviour - and holding those fixed is
+# most of what makes the holdout number comparable to the validation one. What legitimately
+# differs between the two runs is the predictions consumed and the price panel sliced to, so
+# only those are projected out.
+BACKTEST_VARYING_PATHS = (
+    ("_runtime_backtest_config",),
+    ("input_identity",),
+    ("backtest_config", "metadata", "prediction_hash"),
+    ("backtest_config", "metadata", "preset_path"),
+)
+
+
+def _without(value, path: tuple[str, ...]):
+    """``value`` with ``path`` removed, leaving every sibling in place."""
+    if not isinstance(value, dict) or path[0] not in value:
+        return value
+    pruned = dict(value)
+    if len(path) == 1:
+        pruned.pop(path[0])
+    else:
+        pruned[path[0]] = _without(pruned[path[0]], path[1:])
+    return pruned
+
+
+def _comparable_backtest(spec: dict) -> dict:
+    projected = spec
+    for path in BACKTEST_VARYING_PATHS:
+        projected = _without(projected, path)
+    return projected
+
+
+carried = _comparable_backtest(holdout_strategy_spec)
+validation_carried = _comparable_backtest(CARRIER_SPEC)
 if carried != validation_carried:
     moved = sorted(
         key

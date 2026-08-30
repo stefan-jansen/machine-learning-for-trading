@@ -384,6 +384,12 @@ print(
 # label is looking at a window that has been read more than once, and should
 # discount the out-of-sample claim accordingly. That is a judgement the page
 # hands to the reader with the evidence, rather than one a lock makes for them.
+#
+# Which is why the superseded lineages stay in the registry. Deleting them would
+# clear the warning without restoring anything: the window would still have been
+# read, and the only record that it was would be gone. A registry holding three
+# holdout fits for one label is telling the truth about what happened to that
+# window, and that is worth more than a page that looks clean.
 
 # %%
 with sqlite3.connect(REGISTRY_DB) as db:
@@ -400,9 +406,11 @@ else:
     print(
         f"{len(HOLDOUT_LINEAGES)} holdout training identities exist for "
         f"{VALIDATION_SPEC['label']}: {', '.join(sorted(HOLDOUT_LINEAGES))}. The 2021 window has "
-        "been fitted against more than one selection, so it is no longer a clean out-of-sample "
-        "read. Delete the lineages that no longer describe the pipeline, or report the result "
-        "as what it is."
+        "been fitted against more than one selection. Every result below is therefore a "
+        "second-or-later read of a window that has already been seen, and none of them is a "
+        "clean out-of-sample number. Report it as what it is, and do not delete the other "
+        "lineages to make this message go away - they are the only record that the window was "
+        "read more than once."
     )
 
 # %%
