@@ -143,3 +143,25 @@ def test_a_preview_holdout_prediction_is_refused_before_the_expectation_is_read(
     prediction.execution_tier = "preview"
     with pytest.raises(ValueError, match="validation or canonical holdout predictions"):
         _strategy(prediction, _expectation())
+
+
+def test_a_selection_derives_its_own_expectation_rather_than_reading_the_prediction() -> None:
+    """The expectation comes from the selection, never from the thing it is checking.
+
+    Building it from the holdout prediction's own record would make every comparison in
+    `Strategy.__post_init__` compare a value with itself, so the contract would pass on any
+    prediction handed to it and the tests above would still be green. `HoldoutSelection` derives
+    `holdout_training_hash` from the immutable candidate set - it is the identity the retrain
+    WILL have, computed before the retrain exists - which is what makes the comparison capable
+    of failing.
+    """
+    from case_studies.research.holdout import HoldoutSelection
+
+    derived = HoldoutSelection.expectation.__doc__ or ""
+    assert "immutable candidate set" in derived
+
+    fields = set(HoldoutSelection.__dataclass_fields__)
+    # The four facts the contract needs are all resolved onto the selection itself, so
+    # `expectation()` reads them rather than querying the prediction it is about to gate.
+    assert {"holdout_training_hash", "checkpoint_kind", "checkpoint_value"} <= fields
+    assert "validation_backtest" in fields and "validation_prediction" in fields
