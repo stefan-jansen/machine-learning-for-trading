@@ -110,13 +110,27 @@ pl.DataFrame(
 # writing a second one.
 
 # %% tags=["results"]
-existing = selection.holdout_backtest
-if existing is not None:
-    holdout_backtest = existing
-    print(f"Holdout backtest {holdout_backtest.hash} already registered; replay not re-run.")
-else:
-    holdout_backtest = selection.strategy_replay().run(holdout_prediction)
-    print(f"Holdout backtest {holdout_backtest.hash} produced.")
+# The replay runs unconditionally rather than being skipped when a backtest is already
+# registered. Resolving one by lineage cannot stand in for running it: the identity a replay
+# produces includes the digest of the price panel it actually loaded, and the projection a
+# lineage lookup can compare excludes that digest by construction - it has to, because prices
+# are the one input that legitimately differs between the validation and holdout windows. So a
+# backtest built from a superseded price artifact matches the lineage and would be reported as
+# this holdout's result. `run` resolves the registered result by full identity and returns it
+# when it is complete, so this is idempotent and cheap when nothing has changed, and it writes
+# a new result when the prices did.
+_already = selection.holdout_backtest
+holdout_backtest = selection.strategy_replay().run(holdout_prediction)
+if _already is not None and _already.hash != holdout_backtest.hash:
+    raise RuntimeError(
+        f"holdout backtest {_already.hash} was registered for this lineage, but replaying it "
+        f"now produces {holdout_backtest.hash}; an input the lineage does not cover has "
+        "changed, most likely the price artifact"
+    )
+print(
+    f"Holdout backtest {holdout_backtest.hash} "
+    f"{'resolved by identity' if _already is not None else 'produced'}."
+)
 
 record = holdout_backtest.registry_record()
 if record["prediction_hash"] != holdout_prediction.hash:

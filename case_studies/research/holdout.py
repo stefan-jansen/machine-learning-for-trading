@@ -809,8 +809,15 @@ class HoldoutSelection:
         with exactly the fields that must differ between the two intervals removed - the
         prediction hash, the price and funding digests, the decision artifact's own hashes - and
         everything else kept, costs included. That is not a projection chosen here: it is the one
-        :meth:`StrategyReplay.run` asserts the reconstructed holdout specification still matches,
-        so the backtest this selects is the one that replay produces, and nothing else can be.
+        :meth:`StrategyReplay.run` asserts the reconstructed holdout specification still matches.
+
+        What this therefore CANNOT decide is whether the backtest it returns was built from the
+        current price artifact, because the projection excludes the price digest by construction:
+        prices are the one input that legitimately differs between the two windows, so a lineage
+        comparison has nothing to compare them against. A backtest produced from a superseded
+        price panel matches this and is returned. Use it to read back a holdout, never to decide
+        that one does not need producing - :meth:`StrategyReplay.run` resolves by full identity,
+        price digest included, and is the only thing that can answer that question.
         """
         from .lifecycle import _locked_strategy_projection
 
