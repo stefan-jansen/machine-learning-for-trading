@@ -119,9 +119,11 @@ chosen_by_label = {
 }
 
 # %% [markdown]
-# One row per label. `stage` says whether the surviving configuration came from the baseline or
-# from the allocation grid - equal weight remains eligible, and a label where it wins is a label
-# where no allocator beat it.
+# One row per label. `stage` says which of the three earlier stages the surviving configuration
+# came from: the baseline, the allocation grid, or the risk overlays. Equal weight remains
+# eligible, and a label where it wins is a label where no allocator beat it; a label whose stage
+# is `risk_overlay` is one where a control survived, and the sweep below prices it with that
+# control in place.
 
 # %% tags=["results"]
 backtests = study.backtests.table(include_preview=not CANONICAL_RUN)
@@ -193,6 +195,11 @@ for label in labels:
     chosen = chosen_by_label[label]
     strategy = chosen.spec()["strategy"]
     allocation = strategy.get("allocation")
+    # Carried, not dropped. Risk management runs before this stage, so the selected
+    # configuration can be a risk overlay; re-pricing it without its control would sweep a
+    # different strategy from the one the previous stage chose and report the difference as
+    # a cost effect.
+    risk = strategy.get("risk")
     warmup = strategy_warmup_periods({"allocation": allocation} if allocation else {})
     prices = load_backtest_prices_for(
         "crypto_perps_funding", label, split="validation", warmup_periods=warmup
@@ -208,6 +215,7 @@ for label in labels:
             predictions=predictions,
             signal=strategy["signal"],
             allocation=allocation,
+            risk=risk,
             costs={
                 "model": "percentage",
                 "commission_bps": level / 2,
