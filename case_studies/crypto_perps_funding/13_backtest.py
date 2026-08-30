@@ -67,7 +67,7 @@
 """Run the equal-weight baseline for every declared crypto perpetuals prediction set."""
 
 import json
-from datetime import timedelta
+from datetime import UTC, timedelta
 
 import plotly.graph_objects as go
 import polars as pl
@@ -93,6 +93,12 @@ LABELS: list[str] = []
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 POPULATION_SUFFIX = "v1"
+# The generation of `crypto-validation-predictions-v1` this run replaces, when it replaces one.
+# Re-declaring a population under a name that already exists with different members is refused
+# unless the run says which generation it supersedes: the model notebooks each take the same
+# parameter, and this one publishes the case-wide list they feed. Left empty on a first run and
+# on any re-run whose membership is unchanged; the refusal names the hash to put here.
+SUPERSEDES_POPULATION: str = ""
 
 # %%
 study = open_study(
@@ -116,7 +122,9 @@ labels = list(LABELS) if LABELS else list(ALL_LABELS)
 
 # %%
 if EXECUTION_TIER == "canonical" and not WORKSPACE:
-    prediction_population = freeze_official_model_population(study)
+    prediction_population = freeze_official_model_population(
+        study, supersedes=SUPERSEDES_POPULATION or None
+    )
     print(
         f"declared population {prediction_population.name}: "
         f"{len(prediction_population.members)} prediction sets"
@@ -230,6 +238,19 @@ def holding_periods(timeline: pl.DataFrame, step: int) -> list[timedelta]:
     )
 
 
+def _utc(moment):
+    """One zone for the summary below, whatever the artifact it came from carried.
+
+    100 of this case study's 677 prediction artifacts - every deep_learning validation set
+    for fwd_ret_8h and fwd_ret_24h - carry a naive microsecond timestamp where the other 577
+    carry ms/UTC, because the sequence path round-trips the frame through pandas and pandas
+    drops the zone. The instants are the same: stamping one naive set UTC reproduces the
+    linear set's 2189 decision times exactly, all of them. So this reads a naive value as the
+    UTC it is, rather than dropping the zone from everything and hiding the difference.
+    """
+    return moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment.astimezone(UTC)
+
+
 # %% tags=["results"]
 decision = setup["decision"]
 intervals = []
@@ -260,8 +281,8 @@ for label in labels:
                 "outcome_horizon": horizon,
                 "rebalance_step_slots": step,
                 "decision_times": timeline.height,
-                "first_decision": timeline.get_column("timestamp").min(),
-                "last_decision": timeline.get_column("timestamp").max(),
+                "first_decision": _utc(timeline.get_column("timestamp").min()),
+                "last_decision": _utc(timeline.get_column("timestamp").max()),
             }
         )
 pl.DataFrame(intervals).sort("label", "grid")
