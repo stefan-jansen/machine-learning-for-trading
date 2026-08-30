@@ -2570,7 +2570,6 @@ case_studies/us_firm_characteristics/12_portfolio_management:
 case_studies/us_firm_characteristics/14_costs:
   parameters:
     MAX_SYMBOLS: 5
-    TOP_N_COMBOS: 1
   timeout: 600
 case_studies/us_firm_characteristics/13_risk_management:
   parameters:

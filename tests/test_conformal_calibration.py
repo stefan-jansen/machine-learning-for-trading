@@ -362,3 +362,31 @@ def test_a_missing_prediction_still_names_the_directory_it_was_expected_in(
 
     with pytest.raises(FileNotFoundError, match=str(workspace)):
         conformal.compute_conformal_widths("demo", "candidate", write=False)
+
+
+def test_widths_compute_on_a_panel_keyed_by_integer_identifiers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An entity column that is not a string must still calibrate.
+
+    `join_asof` matches its `by` columns by dtype. The per-entity calibration table builds
+    its key from a Python value, so an unannotated literal infers Int32 and a panel keyed on
+    UInt32 identifiers - permnos, on us_firm_characteristics - raises rather than sizing
+    anything. Every conformal cell of that case study's allocation stage failed on it.
+    """
+    rows = [{**row, "symbol": 1001 if row["symbol"] == "A" else 1002} for row in _panel_rows()]
+    case_dir = tmp_path / "case_studies" / "demo"
+    pred_dir = case_dir / "run_log" / "predictions" / "candidate"
+    pred_dir.mkdir(parents=True)
+    pl.DataFrame(rows).with_columns(pl.col("symbol").cast(pl.UInt32)).write_parquet(
+        pred_dir / "predictions.parquet"
+    )
+    monkeypatch.setattr(conformal, "get_case_study_dir", lambda _: case_dir)
+
+    widths = conformal.compute_conformal_widths(
+        "demo", "candidate", min_calibration_n=3, embargo_steps=2, alpha=0.0, write=False
+    )
+
+    assert not widths.is_empty()
+    assert widths.schema["symbol"] == pl.UInt32
+    assert set(widths["symbol"].unique().to_list()) == {1001, 1002}
