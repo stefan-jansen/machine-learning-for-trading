@@ -230,3 +230,6 @@ case_studies/*/catalog/*.json
 
 # generated preview fixtures (tests/generate_intermediates.py)
 case_studies/.preview/
+
+# tearsheets 18_strategy_analysis writes to its OUTPUT_DIR (a run output, not source)
+case_studies/ch20_*/
