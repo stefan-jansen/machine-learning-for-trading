@@ -2674,18 +2674,23 @@ case_studies/us_firm_characteristics/12_portfolio_management:
     MAX_SYMBOLS: 5
     TOP_N_PREDICTIONS: 2
   timeout: 300
-case_studies/us_firm_characteristics/13_costs:
+case_studies/us_firm_characteristics/14_costs:
   parameters:
     MAX_SYMBOLS: 5
-    TOP_N_COMBOS: 1
   timeout: 600
-case_studies/us_firm_characteristics/14_risk_management:
+case_studies/us_firm_characteristics/13_risk_management:
   parameters:
     MAX_RISK_VARIANTS: 3
     MAX_SYMBOLS: 5
     TOP_N_COMBOS: 1
   timeout: 600
-case_studies/us_firm_characteristics/15_strategy_analysis:
+case_studies/us_firm_characteristics/15_holdout_predictions:
+  skip: true
+  skip_reason: "Refits the case study's canonical validation rank-1 on the holdout fold, and the test-data registry holds no validation backtests for us_firm_characteristics - resolve_canonical_rank1_lineage raises 'No validation rank-1 candidate'. No parameter reduces it: there is nothing to refit until the sweep has run."
+case_studies/us_firm_characteristics/16_holdout_backtest:
+  skip: true
+  skip_reason: "Trades 15_holdout_predictions' prediction set, so it inherits that notebook's prerequisite - a registry carrying the validation sweep and the holdout refit, neither of which the test data builds."
+case_studies/us_firm_characteristics/17_strategy_analysis:
   skip: true
   skip_reason: "Test-data load_firm_characteristics() returns 80 firms/day; the NB's liquidity-profile section requires >=100 firms/day. The notebook reads the registry and the feature panel, not the price panel, so no parameter reduces it - it needs an expanded test-data fixture (>=100 firms)."
 data/equities/market/microstructure/dataset_card:

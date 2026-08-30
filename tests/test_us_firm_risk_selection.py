@@ -11,7 +11,7 @@ def _load_selector():
         Path(__file__).parents[1]
         / "case_studies"
         / "us_firm_characteristics"
-        / "14_risk_management.py"
+        / "13_risk_management.py"
     ).read_text()
     module = ast.parse(source)
     function = next(
@@ -21,7 +21,7 @@ def _load_selector():
     )
     namespace: dict[str, object] = {"pl": pl}
     exec(
-        compile(ast.Module(body=[function], type_ignores=[]), "14_risk_management.py", "exec"),
+        compile(ast.Module(body=[function], type_ignores=[]), "13_risk_management.py", "exec"),
         namespace,
     )
     return namespace["_resolve_pre_risk_runs"], namespace
