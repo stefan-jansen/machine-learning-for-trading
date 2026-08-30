@@ -21,8 +21,8 @@ def _load_selector():
     return namespace["_resolve_pre_cost_runs"], namespace
 
 
-def test_cost_parent_is_the_best_of_allocation_and_risk_overlay() -> None:
-    """Cost sensitivity sweeps the winner of the risk stage, not of the stage before it.
+def test_cost_parent_is_the_best_across_the_canonical_stages() -> None:
+    """Cost sensitivity sweeps the winner across the three stages the canonical rank-1 uses.
 
     The union is what makes an un-overlaid configuration reachable: the risk stage files a
     row per named control and none for the strategy without one, so drawing from
@@ -46,13 +46,13 @@ def test_cost_parent_is_the_best_of_allocation_and_risk_overlay() -> None:
     namespace["resolve_best_backtest_runs"] = fake_resolver
     result = selector("us_firm_characteristics", "fwd_ret_1m", split="validation", top_n=1)
 
-    assert calls == ["allocation", "risk_overlay"]
+    assert calls == ["signal", "allocation", "risk_overlay"]
     # The un-overlaid allocation run is stronger here, so it is what gets swept.
     assert result["backtest_hash"].to_list() == ["allocation_hash"]
 
 
-def test_signal_stage_is_not_in_the_pool() -> None:
-    """A raw baseline never carried into sizing would skip a rung of the ladder."""
+def test_cost_rows_are_not_in_the_pool() -> None:
+    """The pool must match the canonical selection, and must exclude cost rows."""
     selector, namespace = _load_selector()
     calls: list[str] = []
 
@@ -69,7 +69,7 @@ def test_signal_stage_is_not_in_the_pool() -> None:
 
     namespace["resolve_best_backtest_runs"] = fake_resolver
     selector("us_firm_characteristics", "fwd_ret_1m", split="validation", top_n=1)
-    assert "signal" not in calls
+    assert "cost_sensitivity" not in calls
     assert "cost_sensitivity" not in calls
 
 

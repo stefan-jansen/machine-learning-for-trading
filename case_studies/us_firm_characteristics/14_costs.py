@@ -40,8 +40,9 @@
 #
 # **Prerequisites:** the Chapter 16 backtest, the Chapter 17 allocation notebook and
 # [`13_risk_management`](13_risk_management.ipynb). Cost sensitivity is the last rung of
-# the ladder: it sweeps the single best configuration out of the allocation and risk
-# stages together, so risk management runs before it rather than after.
+# the selection ladder: it sweeps the single best configuration across the baseline,
+# allocation and risk-overlay stages together - the same three the canonical rank-1 is
+# selected over - so risk management runs before it rather than after.
 
 # %%
 """US Firm Characteristics: Costs."""
@@ -96,13 +97,15 @@ COST_GRID_BPS = get_cost_grid_bps(CASE_STUDY_ID)
 # %% [markdown]
 # ## 1. Which run is swept
 #
-# The sweep starts from the highest-Sharpe validation run across *both* the
-# equal-weight baseline and the allocation stage. Both are candidates because an
-# allocator is an alternative to equal weighting rather than an improvement on it by
-# construction: where every allocator lands below the equal-weight parent it was built
-# from, an allocation-only rule would carry forward a strategy the previous notebook
-# measured as worse than doing nothing, and would then report that strategy's cost
-# sensitivity in place of the one a reader would trade.
+# The sweep starts from the highest-Sharpe validation run across all three selection
+# stages: the equal-weight baseline, the allocation stage and the risk overlay. All three
+# are candidates because each later stage is an alternative to the one before it rather
+# than an improvement on it by construction. Where every allocator lands below the
+# equal-weight parent it was built from, an allocation-only rule would carry forward a
+# strategy the earlier notebook measured as worse than doing nothing; and where every risk
+# control hurts, an overlay-only rule would charge costs against an overlay the sweep just
+# found unhelpful. Both are decided by measurement here rather than by which stages the
+# query happens to name.
 #
 # Which stage the selected run came from is therefore printed rather than assumed.
 
@@ -160,17 +163,25 @@ def _resolve_pre_cost_runs(
     the registry itself: the ranking is what it decides, and it can then be exercised without
     a database. Passing None applies no solvency filter.
 
-    The pool is `allocation` UNION `risk_overlay`, and cost sensitivity runs on the single
-    best configuration out of it. The union is the point. The risk stage registers a row
-    per named control and none for the un-overlaid strategy, so drawing from
-    `risk_overlay` alone would force an overlay onto the carrier even where every control
-    hurt it - the notebook would settle an empirical question by the shape of its query.
-    Including `allocation` lets a position-sizing configuration with no overlay win, which
-    is a real outcome rather than a fallback.
+    The pool is `signal`, `allocation` and `risk_overlay`, and cost sensitivity runs on the
+    single best configuration out of it.
 
-    `signal` is out: a raw baseline that was never carried into sizing would skip a rung of
-    the ladder. `cost_sensitivity` is out too - pooling it would let a cost-charged run
-    re-enter the selection it is the consequence of.
+    Those three stages are not a free choice. They are exactly what
+    `resolve_canonical_rank1_lineage` selects over (`strategy_analysis.py:248`) and what
+    `17_strategy_analysis` declares as `_ELIGIBLE_STAGES`. Pool anything narrower and the
+    two selections can name different configurations: if a solvent baseline beats every
+    allocator, the cost curve describes a strategy the chapter does not report, and the
+    strategy-analysis notebook finds no cost rows for the carrier it selected. Whatever the
+    canonical pool becomes, this one follows it.
+
+    Breadth is also what keeps the risk question empirical. The risk stage files a row per
+    named control and none for the un-overlaid strategy, so a pool of `risk_overlay` alone
+    would force an overlay onto the carrier even where every control hurt it - deciding by
+    the shape of a query what the sweep is supposed to measure. `signal` and `allocation`
+    are how an un-overlaid configuration wins when it deserves to.
+
+    `cost_sensitivity` stays out: pooling it would let a cost-charged run re-enter the
+    selection it is the consequence of.
 
     `ranked_pool` asks each stage for its whole ranked list rather than its top `top_n`.
     Truncating first and filtering after would let an insolvent leader take the slot a solvent
@@ -185,7 +196,7 @@ def _resolve_pre_cost_runs(
             stage=stage,
             top_n=ranked_pool,
         )
-        for stage in ("allocation", "risk_overlay")
+        for stage in ("signal", "allocation", "risk_overlay")
     ]
     candidates = [frame for frame in candidates if not frame.is_empty()]
     if not candidates:
@@ -482,5 +493,8 @@ if not cost_df.is_empty():
 # These are validation months throughout. Nothing here reads or selects on the holdout
 # period, which stays untouched until the strategy analysis notebook.
 #
-# **Next:** the risk management notebook asks whether a stop-loss or a time exit can
-# be evaluated on this backtest path at all, before asking what one would cost.
+# **Next:** [`15_holdout_predictions`](15_holdout_predictions.ipynb) retrains the
+# configuration selected here on everything up to the holdout window, and
+# [`16_holdout_backtest`](16_holdout_backtest.ipynb) runs it once on the untouched period.
+# Risk management is no longer next: it ran before this notebook, and its result is one of
+# the three stages the selection above drew from.
