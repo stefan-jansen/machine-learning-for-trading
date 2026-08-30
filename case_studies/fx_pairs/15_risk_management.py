@@ -74,7 +74,7 @@ SEED = 42
 RUN_SWEEP = True
 FORCE_REBACKTEST = False
 POPULATION_NAME = ""
-SUPERSEDES_RISK_BACKTESTS: str = ""
+SUPERSEDES_RISK_BACKTESTS: str = "03324937abd9"
 
 # %% [markdown]
 # ## Select the parent strategy

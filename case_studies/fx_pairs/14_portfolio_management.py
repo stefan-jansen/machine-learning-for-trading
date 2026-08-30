@@ -76,7 +76,7 @@ RUN_SWEEP = True
 FORCE_REBACKTEST = False
 POPULATION_NAME = ""
 BASELINE_POPULATION_NAME = None
-SUPERSEDES_ALLOCATION_BACKTESTS: str = ""
+SUPERSEDES_ALLOCATION_BACKTESTS: str = "8a5863966eea"
 
 # %% [markdown]
 # ## Resolve the equal-weight inputs
