@@ -1573,3 +1573,47 @@ def test_the_research_workflow_imports_without_torch() -> None:
     finally:
         builtins.__import__ = real_import
         sys.modules.update(saved)
+
+
+def _exit_costs(raw_dir: Path, *, exit_at_max_days: int) -> list[float]:
+    cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
+    daily = _compute_cohort_daily_pnl(
+        cohorts,
+        _load_option_lifecycle(cohorts, raw_dir),
+        delta_hedge=False,
+        hedge_spread_bps=0.0,
+        equity_commission_per_share=0.0,
+        option_commission_per_contract=0.0,
+        delta_threshold=0.10,
+        option_spread_fraction=1.0,
+        exit_at_max_days=exit_at_max_days,
+    )
+    return daily.get_column("exit_cost_norm").to_list()
+
+
+def test_a_round_trip_that_reaches_expiration_pays_no_exit_spread(tmp_path: Path) -> None:
+    """Cash settlement is not a market exit, so there is no spread to cross.
+
+    The expiration quote is exempt from the crossed-quote check because nothing reads
+    it. Charging an ask-based exit cost there would read it, and on a crossed session
+    ask - mid is negative, which books the exit as a gain.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    _cross_the_call_quote(raw_dir, date(2024, 1, 10))
+
+    # The window covers the whole lifecycle, so the last held session is the expiry.
+    assert _exit_costs(raw_dir, exit_at_max_days=5) == pytest.approx([0.0, 0.0, 0.0])
+
+
+def test_a_round_trip_that_exits_before_expiration_still_pays_the_spread(
+    tmp_path: Path,
+) -> None:
+    """The exemption is the expiration session and nothing wider."""
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+
+    costs = _exit_costs(raw_dir, exit_at_max_days=1)
+
+    assert costs[-1] > 0.0
+    assert costs[:-1] == pytest.approx([0.0] * (len(costs) - 1))

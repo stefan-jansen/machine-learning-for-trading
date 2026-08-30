@@ -914,7 +914,14 @@ def _compute_cohort_daily_pnl(
     if exit_at_max_days is not None:
         daily = daily.with_columns(
             exit_cost_norm=(
-                pl.when(pl.col("_day_rank") == pl.col("_last_rank"))
+                # No exit bid-ask on the expiration session: the straddle cash-settles
+                # there, so there is no market exit to cross a spread on. Charging one
+                # would also read the expiration quote, which _quote_is_ordered exempts
+                # from the crossed-quote check precisely because nothing reads it.
+                pl.when(
+                    (pl.col("_day_rank") == pl.col("_last_rank"))
+                    & (pl.col("date") != pl.col("expiration"))
+                )
                 .then(
                     (
                         option_spread_fraction
