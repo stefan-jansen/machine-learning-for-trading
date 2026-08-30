@@ -27,8 +27,14 @@ used by the Ch20 paired-bootstrap synthesis:
 
 - ``signal``  → equal-weight benchmark (per case study, registered separately)
 - ``allocation``    → ``signal`` leader of the same (label, family)
-- ``cost_sensitivity`` → ``signal`` leader (no costs)
-- ``risk_overlay``  → ``cost_sensitivity`` leader (with costs, no risk overlay)
+- ``risk_overlay``  → ``allocation`` leader (sized, no overlay)
+- ``cost_sensitivity`` → ``risk_overlay`` leader (sized and overlaid, frictionless)
+
+Each stage is benchmarked against the leader of the stage before it, so the
+chain follows the order the backtest sequence runs: size positions, apply risk
+controls, then measure what realistic costs take off the winner. A stage that a
+case study has not run is skipped, and the benchmark falls back to the nearest
+earlier stage that has rows.
 
 Per-case-study baselines for the signal stage live in
 :data:`SIGNAL_BASELINE_BY_CASE_STUDY`; populate this when the equal-weight
@@ -139,11 +145,21 @@ def resolve_block_length(
 # ---------------------------------------------------------------------------
 
 
+#: Stage order of the backtest sequence. Each stage's benchmark is the leader of
+#: the nearest preceding stage that has rows.
+STAGE_SEQUENCE: tuple[str, ...] = (
+    "signal",
+    "allocation",
+    "risk_overlay",
+    "cost_sensitivity",
+)
+
+
 STAGE_BASELINE: dict[str, str] = {
     "signal": "equal_weight",
     "allocation": "signal_leader",
-    "cost_sensitivity": "signal_leader",
-    "risk_overlay": "cost_sensitivity_leader",
+    "risk_overlay": "allocation_leader",
+    "cost_sensitivity": "risk_overlay_leader",
 }
 
 
@@ -1293,6 +1309,7 @@ def _sortino(arr: np.ndarray, periods_per_year: float) -> float:
 
 __all__ = [
     "STAGE_BASELINE",
+    "STAGE_SEQUENCE",
     "SIGNAL_BASELINE_BY_CASE_STUDY",
     "resolve_block_length",
     "compute_backtest_uncertainty",

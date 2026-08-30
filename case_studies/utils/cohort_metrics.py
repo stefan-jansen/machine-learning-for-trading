@@ -45,6 +45,7 @@ from case_studies.utils.registry import register_cohort_metrics
 from case_studies.utils.registry.store import _case_dir, _utc_now
 from case_studies.utils.uncertainty import (
     STAGE_BASELINE,
+    STAGE_SEQUENCE,
     compute_cohort_metrics,
     load_daily_returns_with_timestamp,
     periods_per_year_from_setup,
@@ -109,14 +110,29 @@ def _stage_leader_hash(db: sqlite3.Connection, stage: str, label: str) -> str | 
 
 
 def _resolve_baseline_hash(db: sqlite3.Connection, stage: str, label: str) -> str | None:
+    """Leader of the nearest earlier stage that has rows, or the equal-weight benchmark.
+
+    Any ``<stage>_leader`` kind resolves by name rather than by a hardcoded list, so adding
+    or reordering a stage in :data:`STAGE_SEQUENCE` cannot leave this returning ``None``
+    silently. When the named stage has no backtests for this label - a case study that has
+    not run the risk stage yet - the search walks back through :data:`STAGE_SEQUENCE` and
+    ends at the equal-weight benchmark.
+    """
     kind = STAGE_BASELINE.get(stage, "equal_weight")
     if kind == "equal_weight":
         return _equal_weight_benchmark_hash(db, label)
-    if kind == "signal_leader":
-        return _stage_leader_hash(db, "signal", label)
-    if kind == "cost_sensitivity_leader":
-        return _stage_leader_hash(db, "cost_sensitivity", label)
-    return None
+    if not kind.endswith("_leader"):
+        return None
+    candidate = kind[: -len("_leader")]
+    while candidate in STAGE_SEQUENCE:
+        leader = _stage_leader_hash(db, candidate, label)
+        if leader is not None:
+            return leader
+        idx = STAGE_SEQUENCE.index(candidate)
+        if idx == 0:
+            break
+        candidate = STAGE_SEQUENCE[idx - 1]
+    return _equal_weight_benchmark_hash(db, label)
 
 
 def _per_fold_sharpe_by_variant(db: sqlite3.Connection, hashes: list[str]) -> dict[str, np.ndarray]:

@@ -103,6 +103,7 @@ from case_studies.utils.strategy_analysis import (
     select_holdout_self_backtest,
     write_strategy_assessment,
 )
+from case_studies.utils.uncertainty import STAGE_SEQUENCE
 from utils.paths import get_case_study_dir, get_output_dir
 
 # %% tags=["parameters"]
@@ -342,16 +343,16 @@ fig.show()
 # metrics inline. ETFs is one of the few CSs whose rank-1 prediction has
 # all four pipeline stages registered against it, so each transition has
 # a populated paired row.
-transitions = [
-    ("allocation", "signal_leader"),
-    ("cost_sensitivity", "allocation_leader"),
-    ("risk_overlay", "cost_sensitivity_leader"),
-]
-for stage_name, kind in transitions:
-    stage_info = lineage.get(stage_name)
-    if stage_info is None:
+# The pairs are the consecutive stages this prediction actually has, taken in
+# STAGE_SEQUENCE order, which is the order the backtests run: size positions,
+# apply risk controls, then measure what realistic costs take off the winner.
+present = [s for s in STAGE_SEQUENCE if lineage.get(s)]
+for stage_name in STAGE_SEQUENCE:
+    if lineage.get(stage_name) is None:
         print(f"Stage {stage_name}: not run for this prediction")
-        continue
+for prev_stage, stage_name in zip(present, present[1:]):
+    kind = f"{prev_stage}_leader"
+    stage_info = lineage[stage_name]
     pair = load_paired_metrics(
         CASE_STUDY,
         challenger_hash=stage_info["backtest_hash"],
