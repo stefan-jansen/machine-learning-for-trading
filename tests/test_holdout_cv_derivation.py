@@ -716,6 +716,47 @@ def test_a_floor_that_swallows_the_training_interval_is_refused_not_silently_emp
         )
 
 
+def test_a_reduced_fold_list_numbers_the_holdout_over_a_fold_that_still_exists() -> None:
+    """The id is one past the folds it is GIVEN, so a producer must hand it the complete set.
+
+    `04_model_based_features` writes one row per fold and takes a `MAX_FOLDS` parameter that
+    truncates the list a reduced run iterates. Deriving the holdout fold from the truncated
+    list numbers it with an id a canonical validation fold owns, and the artifact then carries
+    holdout-dated rows under a fold id every consumer joins as validation data. Nothing raises:
+    the row counts and the schema are unchanged, and the leak is silent.
+
+    This states the property that obliges the producer. It cannot fail on the notebook, which
+    is why the notebook derives its geometry from the complete `raw_folds` set and why the
+    executable check belongs in a reduced run of stage 04 - `tests/overrides.yaml` declares no
+    `MAX_FOLDS` for `fx_pairs/04_model_based_features` today, so no reduced run exercises it.
+    """
+    canonical_ids = {int(entry["fold"]) for entry in FOLDS}
+    reduced = deepcopy(FOLDS[:2])
+
+    complete_id = int(
+        _fold(
+            build_holdout_cv(
+                _validation_spec(), case_study="us_firm_characteristics", timeline=MONTH_ENDS
+            )
+        )["fold"]
+    )
+    reduced_id = int(
+        _fold(
+            build_holdout_cv(
+                _validation_spec(folds=reduced),
+                case_study="us_firm_characteristics",
+                timeline=MONTH_ENDS,
+            )
+        )["fold"]
+    )
+
+    assert complete_id == max(canonical_ids) + 1
+    assert complete_id not in canonical_ids
+    # The hazard, stated rather than described: the truncated list yields an id that one of
+    # the folds it dropped still owns.
+    assert reduced_id in canonical_ids
+
+
 # crypto_perps_funding's own grid: 8-hour settlements, tz-aware, which is what every
 # intraday case study's panel looks like. Built here rather than read off the artifact so
 # the test runs on a clean checkout.
