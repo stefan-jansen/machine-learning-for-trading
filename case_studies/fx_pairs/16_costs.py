@@ -16,9 +16,14 @@
 # %% [markdown]
 # # Transaction-Cost Sensitivity - FX Pairs
 #
-# This notebook selects one validation strategy per label from the equal-weight and allocation
-# populations, then changes only its percentage transaction costs. The sensitivity grid does not
-# participate in later model or strategy selection.
+# This notebook selects one validation strategy per label from the equal-weight, allocation and
+# risk-overlay populations, then changes only its percentage transaction costs. The sensitivity
+# grid does not participate in later model or strategy selection.
+#
+# Costs are swept last because a cost curve is only informative about the strategy that would
+# actually be traded, and that strategy is not settled until the risk controls have been measured.
+# Sweeping before the overlay charges the grid against a configuration the next notebook may
+# discard.
 #
 # **Learning objectives**
 #
@@ -45,6 +50,7 @@ from case_studies.research import (
     OfficialPopulation,
     PredictionResult,
     Result,
+    candidate_set_supersedes,
     open_study,
     plan_backtests,
     population_supersedes,
@@ -73,14 +79,33 @@ SEED = 42
 RUN_SWEEP = True
 FORCE_REBACKTEST = False
 POPULATION_NAME = ""
-SUPERSEDES_COST_BACKTESTS: str = ""
+SUPERSEDES_COST_BACKTESTS: str = "fa1d30ceb0f8"
+# The same rule the populations follow: a candidate set is immutable under its name, so a rebuilt
+# upstream generation must name the set it replaces. Keyed by the full set name, which is what the
+# refusal prints. `15_risk_management` states the reasoning once.
+SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
+    "fx_pairs:fwd_ret_1d:pre-cost-strategies": "7da3c99d1e71",
+    "fx_pairs:fwd_ret_5d:pre-cost-strategies": "cd5141886b53",
+    "fx_pairs:fwd_ret_21d:pre-cost-strategies": "16892238f4f8",
+}
 
 # %% [markdown]
 # ## Select one strategy for each label
 #
-# Production selection considers only the signal and allocation populations. Cost variants are
-# descendants of that choice and cannot improve their own chance of selection. Preview mode uses a
-# deterministic allocation request from the reduced catalog and remains outside candidate sets.
+# Production selection considers the signal, allocation and risk-overlay populations together -
+# the same three stages the canonical validation rank-1 is selected over in
+# `case_studies/utils/strategy_analysis.py:resolve_canonical_rank1_lineage`. All three are
+# candidates because each stage is an alternative to the one before it rather than an improvement
+# on it by construction. Naming only the overlays would charge the cost grid against a risk
+# control even where every control measured worse than leaving the position rule alone; naming
+# only signal and allocation would sweep a strategy the risk notebook has already improved on.
+# Which stage the parent came from is printed below rather than assumed, and the gap between the
+# best overlay and the best un-overlaid configuration is printed with it: a negative gap is the
+# measurement that the controls did not help on this label.
+#
+# Cost variants are descendants of that choice and cannot improve their own chance of selection.
+# Preview mode uses a deterministic allocation request from the reduced catalog and remains
+# outside candidate sets.
 
 # %% tags=["results"]
 set_global_seeds(SEED)
@@ -235,11 +260,17 @@ else:
             name=research_name(CASE_STUDY_ID, "allocation-backtests", scope=POPULATION_NAME),
         )
     )
+    risk_overlays = _open_backtests(
+        OfficialPopulation.one(
+            study,
+            name=research_name(CASE_STUDY_ID, "risk-overlay-backtests", scope=POPULATION_NAME),
+        )
+    )
     # The labels come from the upstream populations this run resolved, not from this
     # notebook's own catalog. A narrowed upstream covers fewer labels than the catalog
     # holds, and rebuilding the list locally reproduces the upstream narrowing by
     # convention. Unscoped, the run publishes canonical names and the two must agree.
-    upstream = [*baselines, *allocations]
+    upstream = [*baselines, *allocations, *risk_overlays]
     upstream_labels = sorted({_label(result) for result in upstream})
     if not upstream_labels:
         raise RuntimeError("the upstream populations carry no labels")
@@ -251,18 +282,55 @@ else:
         )
     for label in upstream_labels:
         members = [result for result in upstream if _label(result) == label]
+        _set_name = research_name(
+            CASE_STUDY_ID, f"{label}:pre-cost-strategies", scope=POPULATION_NAME
+        )
         candidates = CandidateSet.create(
             study,
-            name=research_name(
-                CASE_STUDY_ID, f"{label}:pre-cost-strategies", scope=POPULATION_NAME
-            ),
+            name=_set_name,
             members=members,
+            supersedes=candidate_set_supersedes(
+                study, name=_set_name, declared=SUPERSEDES_CANDIDATE_SETS.get(_set_name)
+            ),
         )
         candidate_sets[label] = candidates
         leader = candidates.best_validation_sharpe()
         if not isinstance(leader, BacktestResult):
             raise TypeError("strategy selection did not return a backtest")
         selected_by_label[label] = leader
+
+
+def _overlay_gap(label: str) -> dict[str, object]:
+    """What the risk controls were worth on *label*, in validation Sharpe.
+
+    The parent is chosen across all three stages, so "the overlay won" and "the overlay
+    helped" are the same statement only when an un-overlaid configuration was in the running.
+    Both sides are reported: the best risk overlay, the best signal-or-allocation strategy it
+    was measured against, and the difference. A negative difference is the finding that the
+    controls cost more than they saved on this label, and the selected parent is then
+    un-overlaid.
+    """
+    members = candidate_sets[label].members
+    rows = study.backtests.table().filter(
+        pl.col("backtest_hash").is_in(list(members))
+        & (pl.col("split") == "validation")
+        & pl.col("sharpe").is_not_null()
+    )
+    overlaid = rows.filter(pl.col("stage") == "risk_overlay")
+    un_overlaid = rows.filter(pl.col("stage").is_in(["signal", "allocation"]))
+    best_overlaid = overlaid.get_column("sharpe").max() if overlaid.height else None
+    best_un_overlaid = un_overlaid.get_column("sharpe").max() if un_overlaid.height else None
+    gap = (
+        best_overlaid - best_un_overlaid
+        if best_overlaid is not None and best_un_overlaid is not None
+        else None
+    )
+    return {
+        "best_overlaid_sharpe": best_overlaid,
+        "best_un_overlaid_sharpe": best_un_overlaid,
+        "overlay_gap": gap,
+    }
+
 
 pl.DataFrame(
     [
@@ -271,6 +339,7 @@ pl.DataFrame(
             "backtest_hash": result.hash,
             "prediction_hash": result.registry_record()["prediction_hash"],
             "stage": result.registry_record()["stage"],
+            **(_overlay_gap(label) if label in candidate_sets else {}),
         }
         for label, result in selected_by_label.items()
     ]
