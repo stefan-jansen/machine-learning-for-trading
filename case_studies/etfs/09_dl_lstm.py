@@ -48,6 +48,7 @@ from case_studies.research import (
     primary_label,
     resolved_model_plan,
     run_model_population,
+    split_retired_members,
 )
 from case_studies.utils.analytics import load_best_ic_per_family
 from case_studies.utils.model_analysis import common_sample_daily_ic, load_predictions
@@ -149,7 +150,18 @@ prior_baselines = {}
 baseline_days = {}
 baseline_hashes = {}
 _baselines = load_best_ic_per_family(["linear", "gbm"], case_studies=[CASE_STUDY_ID])
-for row in _baselines.iter_rows(named=True):
+# `load_best_ic_per_family` reads the metrics catalog, which carries no lineage: when
+# `06_linear` or `07_gbm` refits, the generation it replaced stays behind scored and complete,
+# and the family leader read back here can be the retired one. The comparison in section 7 would
+# then measure this network against a baseline its own publisher no longer stands behind.
+# `split_retired_members` asks the population lineage instead, and the retired side is named
+# rather than dropped, so a baseline that disappears is visible as a refit upstream.
+_split = split_retired_members(study, _baselines)
+if not _split.retired.is_empty():
+    print("Retired by their publisher, excluded from the baselines:")
+    for _row in _split.retired.iter_rows(named=True):
+        print(f"  {_row['family']}: {_row['prediction_hash']}")
+for row in _split.live.iter_rows(named=True):
     # The full-coverage linear leader is a Ridge configuration; name it plainly so the comparison
     # below resolves it.
     name = {"linear": "Ridge (Ch11)", "gbm": "GBM (Ch12)"}.get(row["family"])
