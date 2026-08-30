@@ -48,7 +48,10 @@ import polars as pl
 
 from case_studies.research import open_study
 from case_studies.research.holdout import resolve_holdout_selection
-from case_studies.research.models import reconstruct_locked_model_request
+from case_studies.research.models import (
+    reconstruct_locked_model_request,
+    validate_locked_model_run,
+)
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "fx_pairs"
@@ -91,7 +94,7 @@ pl.DataFrame(
             "checkpoint",
             "holdout training identity",
             "holdout train window",
-            "holdout test window",
+            "holdout evaluation window",
         ],
         "value": [
             selection.candidate_set.hash,
@@ -105,7 +108,7 @@ pl.DataFrame(
             f"{selection.checkpoint_kind}={selection.checkpoint_value}",
             selection.holdout_training_hash,
             f"{holdout_fold['train_start']} to {holdout_fold['train_end']}",
-            f"{holdout_fold['test_start']} to {holdout_fold['test_end']}",
+            f"{holdout_fold['val_start']} to {holdout_fold['val_end']}",
         ],
     }
 )
@@ -118,32 +121,51 @@ pl.DataFrame(
 # on and in nothing else. The runner publishes the selected checkpoint alone: a holdout refit that
 # published its whole checkpoint schedule would hand the next notebook a choice, and choosing
 # among holdout checkpoints is selection on the holdout under another name.
+#
+# The fitted state is validated on every run, not only on the run that produced it. A second run
+# reuses the registered identity rather than refitting, and accepting that on the strength of the
+# registry row alone would skip the one check worth keeping: that the weights on disk are what
+# this specification produces, with fold state that agrees.
 
 # %% tags=["results"]
+# The request is reconstructed whether or not the refit has to run, because the fitted state is
+# validated on both paths. A reused prediction is persisted state from an earlier process, and
+# accepting it because a row exists would trust exactly the thing worth checking: that the
+# weights on disk are the ones this specification produces, with fold state that agrees. The
+# runner itself reuses a complete identity rather than refitting, so reconstructing costs a
+# resolution, not a training run.
+request = reconstruct_locked_model_request(
+    study,
+    selection.holdout_training_spec,
+    checkpoint_kind=selection.checkpoint_kind,
+    checkpoint_value=selection.checkpoint_value,
+)
 existing = selection.holdout_prediction
-if existing is not None:
-    prediction = existing
-    print(f"Holdout prediction {prediction.hash} already registered; nothing to refit.")
-else:
-    request = reconstruct_locked_model_request(
-        study,
-        selection.holdout_training_spec,
-        checkpoint_kind=selection.checkpoint_kind,
-        checkpoint_value=selection.checkpoint_value,
+model_run = request.run()
+if model_run.training.hash != selection.holdout_training_hash:
+    raise RuntimeError(
+        f"the holdout refit produced training {model_run.training.hash}, "
+        f"not the derived identity {selection.holdout_training_hash}"
     )
-    model_run = request.run()
-    if model_run.training.hash != selection.holdout_training_hash:
-        raise RuntimeError(
-            f"the holdout refit produced training {model_run.training.hash}, "
-            f"not the derived identity {selection.holdout_training_hash}"
-        )
-    if len(model_run.predictions) != 1:
-        raise RuntimeError(
-            f"the holdout refit published {len(model_run.predictions)} predictions; "
-            "only the selected checkpoint may be published"
-        )
-    prediction = model_run.predictions[0]
-    print(f"Holdout prediction {prediction.hash} refitted and registered.")
+if len(model_run.predictions) != 1:
+    raise RuntimeError(
+        f"the holdout refit published {len(model_run.predictions)} predictions; "
+        "only the selected checkpoint may be published"
+    )
+prediction = model_run.predictions[0]
+fitted_state_digest = validate_locked_model_run(request, model_run)
+if not fitted_state_digest:
+    raise RuntimeError("the holdout model produced no fitted-state digest")
+if existing is not None and existing.hash != prediction.hash:
+    raise RuntimeError(
+        f"holdout prediction {existing.hash} was already registered for training "
+        f"{selection.holdout_training_hash}, but this run resolved {prediction.hash}"
+    )
+print(
+    f"Holdout prediction {prediction.hash} "
+    f"{'reused' if existing is not None else 'refitted and registered'}; "
+    f"fitted state {fitted_state_digest[:12]}."
+)
 
 record = prediction.registry_record()
 if record["split"] != "holdout":

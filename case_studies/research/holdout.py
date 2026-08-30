@@ -750,7 +750,16 @@ class HoldoutSelection:
 
     @property
     def holdout_backtest(self) -> BacktestResult | None:
-        """The registered holdout backtest, or None before the replay has run."""
+        """The registered holdout backtest of the *selected* strategy, or None before the replay.
+
+        One holdout prediction can carry more than one backtest - a cost sibling, an allocation
+        variant, anything a later notebook chose to run against it - so the prediction alone does
+        not identify the result this selection determines. Matching on the resolved strategy
+        block is what identifies it: that is the projection the replay preserves and the one
+        ``19_strategy_analysis`` checks, so selecting on it here cannot admit a backtest that
+        check would then reject. Resolving by prediction alone would silently return an unrelated
+        strategy when exactly one existed, and fail as an ambiguity when several did.
+        """
         prediction = self.holdout_prediction
         if prediction is None:
             return None
@@ -759,15 +768,22 @@ class HoldoutSelection:
         )
         if rows.is_empty():
             return None
-        hashes = sorted(set(rows.get_column("backtest_hash")))
-        if len(hashes) > 1:
+        selected_strategy = self.validation_backtest.spec().get("strategy")
+        matched = []
+        for backtest_hash in sorted(set(rows.get_column("backtest_hash"))):
+            opened = self.study.results.open(backtest_hash)
+            if not isinstance(opened, BacktestResult):
+                raise TypeError("the holdout lineage resolved a non-backtest result")
+            if opened.spec().get("strategy") == selected_strategy:
+                matched.append(opened)
+        if not matched:
+            return None
+        if len(matched) > 1:
             raise ValueError(
-                f"holdout prediction {prediction.hash} resolved {len(hashes)} backtests: {hashes}"
+                f"holdout prediction {prediction.hash} carries {len(matched)} backtests of the "
+                f"selected strategy: {sorted(result.hash for result in matched)}"
             )
-        opened = self.study.results.open(hashes[0])
-        if not isinstance(opened, BacktestResult):
-            raise TypeError("the holdout lineage resolved a non-backtest result")
-        return opened
+        return matched[0]
 
     def strategy_replay(self) -> StrategyReplay:
         """The exact holdout re-run of the selected validation strategy."""

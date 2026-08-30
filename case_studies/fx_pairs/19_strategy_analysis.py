@@ -444,14 +444,14 @@ holdout_identity = pl.DataFrame(
             "holdout prediction",
             "holdout backtest",
             "holdout train window",
-            "holdout test window",
+            "holdout evaluation window",
         ],
         "value": [
             holdout_training.hash,
             holdout_prediction.hash,
             holdout_backtest.hash,
             f"{_holdout_fold['train_start']} to {_holdout_fold['train_end']}",
-            f"{_holdout_fold['test_start']} to {_holdout_fold['test_end']}",
+            f"{_holdout_fold['val_start']} to {_holdout_fold['val_end']}",
         ],
     }
 )

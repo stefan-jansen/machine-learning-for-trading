@@ -119,12 +119,18 @@ else:
     print(f"Holdout backtest {holdout_backtest.hash} produced.")
 
 record = holdout_backtest.registry_record()
-if record["split"] != "holdout":
-    raise RuntimeError(f"the replay published a {record['split']!r} backtest")
 if record["prediction_hash"] != holdout_prediction.hash:
     raise RuntimeError("the holdout backtest does not reference the holdout prediction")
 if not holdout_backtest.complete:
     raise RuntimeError("the holdout backtest is incomplete")
+# The split is a property of the prediction the backtest ran on, so it is read from the catalog
+# view rather than from the `backtest_runs` row, which has no split column of its own.
+_catalog = study.backtests.table().filter(pl.col("backtest_hash") == holdout_backtest.hash)
+if _catalog.height != 1:
+    raise RuntimeError(f"backtest {holdout_backtest.hash} has {_catalog.height} catalog rows")
+_split = _catalog.get_column("split").item()
+if _split != "holdout":
+    raise RuntimeError(f"the replay published a {_split!r} backtest")
 
 # %% [markdown]
 # ## Validation and holdout, side by side
@@ -137,7 +143,10 @@ if not holdout_backtest.complete:
 # %% tags=["results"]
 
 
-REPORTED = ("sharpe", "annual_return", "annual_volatility", "max_drawdown")
+# The registry's own names. "annual_return" and "annual_volatility" are what the quantities are
+# called in prose and neither exists as a column, so asking for them returns nulls that read as a
+# strategy with no return rather than as a query that missed.
+REPORTED = ("sharpe", "cagr", "volatility", "max_drawdown")
 
 
 def _metrics(backtest_hash: str, split: str) -> dict[str, object]:
