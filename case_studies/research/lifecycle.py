@@ -148,6 +148,12 @@ def _locked_strategy_projection(spec: dict[str, Any]) -> dict[str, Any]:
     if isinstance(input_identity, dict):
         input_identity.pop("prices", None)
         input_identity.pop("funding_rates", None)
+        # An input identity holding nothing but the runtime-resolved entries just removed
+        # projects to `{}`, while a strategy that declared no input identity at all projects to
+        # the key being absent. The two describe the same strategy and must hash the same, so
+        # the empty remainder is dropped rather than left as an empty dict.
+        if not input_identity:
+            projected.pop("input_identity")
     decision = projected.get("decision_artifact")
     if isinstance(decision, dict):
         decision.pop("hash", None)

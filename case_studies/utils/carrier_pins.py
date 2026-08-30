@@ -12,8 +12,21 @@ from utils.paths import get_case_study_dir
 
 # These values belong to their case-study owners. Consumers import this mapping
 # rather than copying values or translating them to config-name predicates.
+#
+# A pin overrides the documented selection rule - best validation backtest Sharpe -
+# with a stated a-priori choice, so it is entered only where the owner has a reason
+# that does not come from reading the results. It also has to be re-derived by hand
+# every time that case study's sweep is rebuilt, because a backtest hash covers the
+# whole strategy spec and the rebuild produces new ones. Absence is therefore the
+# normal state: a case study with no entry here selects by the rule and needs no
+# maintenance.
+#
+# `us_firm_characteristics` had an entry until 2026-08-25 and no surviving reason
+# for it. The rebuild left it matching zero rows, which made
+# `resolve_canonical_rank1_lineage` raise on the first substantive cell of that case
+# study's strategy analysis, and the only defensible replacement value was the one
+# the rule already selects - a pin that overrides nothing and goes stale again.
 CARRIER_PINS: dict[str, str] = {
-    "us_firm_characteristics": "e676e1989e1f",
     "sp500_options": "7f32a34d107b",
 }
 

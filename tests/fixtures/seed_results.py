@@ -800,15 +800,36 @@ def _reference_panels(cs_dir: Path, hash_rows: list, survives, entity_col: str, 
     agrees on is what makes the seeded sets joinable with the copied ones rather
     than only with each other.
 
-    Only artifacts this function will not rewrite are eligible, so the panel is one
-    that survives seeding. The dates are subsampled to ``SEEDED_DATE_BUDGET``; they
-    are a subset of the reference's own dates, which the registry places inside the
-    split window, so the split boundary the fabricated grid enforces still holds.
+    Artifacts this function will not rewrite are preferred, so the panel is normally
+    one that survives seeding. A group whose only on-disk artifacts WILL be rewritten
+    still uses one of them as the panel rather than falling back to the fabricated
+    grid: rewriting an artifact onto its own keys changes the scores and not the
+    grid, so the group stays joinable and keeps a real one.
+
+    That fallback is not cosmetic. crypto_perps_funding sets ``rewrite_existing``, so
+    only its cohort leaders survive - and its ``fwd_ret_8h`` leader has no artifact on
+    disk at all. Without the fallback the whole label fell to ``_weekday_grid``, which
+    emits about sixty *dates* across the window, roughly eight weekdays apart. An 8H
+    label cannot live on that grid, and 13_backtest rejected it in CI with
+    "decision intervals [9 days, 10 days, 12 days] do not match horizon 8H" while four
+    real artifacts on the correct 8-hour grid sat in the same group unused.
+
+    The dates are subsampled to ``SEEDED_DATE_BUDGET``; they are a subset of the
+    reference's own dates, which the registry places inside the split window, so the
+    split boundary the fabricated grid enforces still holds.
     """
     groups: dict = {}
+    fallback_groups: dict = {}
     for p_hash, split, label in hash_rows:
         if survives(p_hash):
             groups.setdefault((split, label), []).append(p_hash)
+        elif (cs_dir / "run_log" / "predictions" / p_hash / "predictions.parquet").is_file():
+            fallback_groups.setdefault((split, label), []).append(p_hash)
+    fallback_only = set()
+    for key, hashes in fallback_groups.items():
+        if key not in groups:
+            groups[key] = hashes
+            fallback_only.add(key)
 
     panels = {}
     for key, hashes in groups.items():
@@ -819,6 +840,12 @@ def _reference_panels(cs_dir: Path, hash_rows: list, survives, entity_col: str, 
             )
             entity = next((c for c in ENTITY_COLUMN_CANDIDATES if c in frame.columns), None)
             if entity is None or not {"timestamp", "actual"} <= set(frame.columns):
+                continue
+            # A rewritten artifact is only worth keeping as the panel because it
+            # carries a real decision grid. One with a single timestamp carries no
+            # grid - it is the placeholder a superseded set leaves behind - so the
+            # group is better served by the fabricated one than by inheriting it.
+            if key in fallback_only and frame["timestamp"].n_unique() < 2:
                 continue
             # Only ever compared for equality, so stringifying the identifiers is
             # enough and keeps a column carrying nulls from raising in sorted().
@@ -839,6 +866,31 @@ def _reference_panels(cs_dir: Path, hash_rows: list, survives, entity_col: str, 
     return panels
 
 
+def _intraday_split_skeleton(panels: dict, split, _pl):
+    """A reference panel from another label of the same split, keys and folds only.
+
+    Returned only when the panels this case study has are evenly spaced below a
+    day. On a daily case study the fabricated weekday grid is a reasonable
+    stand-in and labels can legitimately differ; on an intraday one it is not a
+    stand-in at all, and the decision times are a property of the case study
+    rather than of the label.
+    """
+    from datetime import timedelta
+
+    candidates = []
+    for (panel_split, panel_label), panel in sorted(
+        panels.items(), key=lambda item: (str(item[0][0]), str(item[0][1]))
+    ):
+        if panel_split != split or panel_label is None:
+            continue
+        dates = panel["timestamp"].unique().sort()
+        if dates.len() < 2:
+            continue
+        if dates.diff().drop_nulls().min() < timedelta(days=1):
+            candidates.append(panel)
+    return candidates[0] if candidates else None
+
+
 def _subsampled_panel(frame, entity: str, entity_col: str, _pl):
     """A reference artifact reduced to the canonical seeded columns and date budget.
 
@@ -851,10 +903,45 @@ def _subsampled_panel(frame, entity: str, entity_col: str, _pl):
     cme artifact is called to fix a join that already works on values.
     """
     dates = frame["timestamp"].unique().sort()
-    step = max(1, dates.len() // SEEDED_DATE_BUDGET)
-    kept = dates.gather(range(0, dates.len(), step))
-    if kept[-1] != dates[-1]:
-        kept = kept.append(dates[-1:])
+    # A stride is fine on a daily reference, whose own gaps are already uneven
+    # across weekends, and it keeps the seeded panel spanning the whole window.
+    # It is wrong on an evenly spaced INTRADAY reference: crypto_perps_funding
+    # decides every 8 hours, 1956 times, so a stride of 1956 // 60 hands the
+    # seeded sets decisions 10 days 16 hours apart and 13_backtest rejects them
+    # against a horizon of 8H. Nothing about the panel is recoverable after that
+    # - the spacing IS the thing being checked - so a sub-daily reference keeps a
+    # contiguous run at its native spacing instead. Ending at the reference's own
+    # last decision is what the stride already aimed at, and the run stays inside
+    # the split window because every date in it is the reference's own.
+    from datetime import timedelta
+
+    # The SMALLEST gap, not the only gap: a panel already sliced per fold carries a
+    # jump between folds, and requiring a single distinct gap would reject exactly
+    # the intraday panels this exists to recognise.
+    gaps = dates.diff().drop_nulls() if dates.len() > 1 else None
+    evenly_spaced_intraday = gaps is not None and gaps.min() < timedelta(days=1)
+    if evenly_spaced_intraday:
+        # Per fold, not across the panel. A flat tail lands entirely inside the
+        # last fold and the seeded set comes back with n_folds=1, which
+        # expanding-window conformal calibration refuses outright.
+        fold_col = next((c for c in ("fold", "fold_id") if c in frame.columns), None)
+        if fold_col is None:
+            kept = dates.tail(SEEDED_DATE_BUDGET)
+        else:
+            folds = frame[fold_col].unique().sort()
+            per_fold = max(2, SEEDED_DATE_BUDGET // max(1, folds.len()))
+            kept = (
+                frame.group_by(fold_col)
+                .agg(_pl.col("timestamp").unique().sort().tail(per_fold))
+                .explode("timestamp")["timestamp"]
+                .unique()
+                .sort()
+            )
+    else:
+        step = max(1, dates.len() // SEEDED_DATE_BUDGET)
+        kept = dates.gather(range(0, dates.len(), step))
+        if kept[-1] != dates[-1]:
+            kept = kept.append(dates[-1:])
     panel = frame.filter(_pl.col("timestamp").is_in(kept.implode()))
     if "fold" in panel.columns:
         fold = _pl.col("fold")
@@ -869,12 +956,123 @@ def _subsampled_panel(frame, entity: str, entity_col: str, _pl):
             .mod(2)
             .alias("fold")
         )
-    return panel.select(
+    columns = [
         _pl.col(entity).alias(entity_col),
         _pl.col("timestamp"),
         fold.alias("fold"),
         _pl.col("actual"),
-    )
+    ]
+    # A reference artifact of a classification label carries the continuous
+    # evaluation target beside the class one. Dropping it here would leave the
+    # seeded sets of that group to invent a replacement for a column the group
+    # already has, and two members of one group would then disagree about what the
+    # realized return was.
+    if "eval_actual" in panel.columns:
+        columns.append(_pl.col("eval_actual"))
+    return panel.select(columns)
+
+
+def _normalize_prediction_timestamp_zone(cs_dir: Path) -> None:
+    """Put one case study's prediction artifacts in the timezone its labels use.
+
+    `_subsampled_panel` preserves each reference artifact's own dtype, and says
+    why: a seeded set has to meet its reference on an exact join, and a cast on
+    either side of that key silently drops every row. That is right *within* a
+    (split, label) group and says nothing across groups, so when the fixture's own
+    artifacts disagree a notebook that reads two labels together fails:
+
+        SchemaError: failed to determine supertype of datetime[us] and
+                     datetime[us, UTC]
+
+    crypto_perps_funding ships nine artifacts in three dtypes: four `ms, UTC`,
+    four `ms` naive, one `us` naive. Stripping the zone collapses all eight
+    validation artifacts onto one identical grid and the holdout artifact onto its
+    own, so the three are the same instants written three ways.
+
+    The zone comes from the case study's OWN labels rather than from a majority
+    vote or a default, because the labels are what a prediction is ultimately
+    joined against - crypto's are `ms, UTC` throughout, and normalizing the
+    predictions to naive instead traded one collision for another:
+
+        datatypes of join keys don't match - `timestamp`: datetime[ms] on left
+        does not match `timestamp`: datetime[ms, UTC] on right
+
+    Only the zone is touched. The time unit is left alone: the fixture already
+    mixes `ms` and `us` across labels and features without trouble, so unifying it
+    would rewrite artifacts to fix nothing. Values are untouched either way, so
+    the historical-target checks a replay notebook runs against a cohort leader
+    are unaffected - which is what makes it safe to rewrite an artifact that
+    otherwise survives seeding.
+
+    A case study whose artifacts already agree with its labels is not touched.
+    """
+    predictions = cs_dir / "run_log" / "predictions"
+    if not predictions.is_dir():
+        return
+    try:
+        import polars as _pl
+    except ImportError:
+        return
+
+    zone = None
+    for label_file in sorted((cs_dir / "labels").glob("*.parquet")):
+        try:
+            dtype = _pl.read_parquet_schema(label_file).get("timestamp")
+        except Exception:  # noqa: BLE001 - an unreadable label is not ours to fix here
+            continue
+        if isinstance(dtype, _pl.Datetime):
+            zone = dtype.time_zone
+            break
+    if zone is None:
+        return
+
+    for path in sorted(predictions.glob("*/predictions.parquet")):
+        try:
+            dtype = _pl.read_parquet_schema(path).get("timestamp")
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(dtype, _pl.Datetime) or dtype.time_zone == zone:
+            continue
+        frame = _pl.read_parquet(path)
+        column = _pl.col("timestamp")
+        # A naive column carries the same wall clock the zoned ones do, so it is
+        # stamped rather than shifted; a genuinely different zone is converted.
+        if dtype.time_zone is None:
+            frame = frame.with_columns(column.dt.replace_time_zone(zone))
+        else:
+            frame = frame.with_columns(column.dt.convert_time_zone(zone))
+        frame.write_parquet(path)
+
+
+def _drop_stale_conformal_widths(cs_dir: Path) -> None:
+    """Remove a widths artifact that no longer matches the predictions beside it.
+
+    ``load_conformal_widths`` regenerates a missing ``conformal_widths.parquet``,
+    and refuses one that predates the ``calibration_version`` column rather than
+    silently mis-reading it. The fixture ships exactly such a legacy file for
+    crypto_perps_funding/4d279db5157d, which took 14_portfolio_management down at
+    its thirteenth cell.
+
+    A widths file is also stale whenever the predictions next to it were just
+    rewritten - the calibration residuals came from scores that no longer exist -
+    so both are dropped and left to regenerate on demand. Deleting is the whole
+    fix: nothing here has to know how to compute widths.
+    """
+    predictions = cs_dir / "run_log" / "predictions"
+    if not predictions.is_dir():
+        return
+    try:
+        import polars as _pl
+    except ImportError:
+        return
+    for widths in predictions.glob("*/conformal_widths.parquet"):
+        try:
+            columns = _pl.read_parquet_schema(widths).keys()
+        except Exception:  # noqa: BLE001 - an unreadable artifact is a stale one
+            widths.unlink(missing_ok=True)
+            continue
+        if "calibration_version" not in columns:
+            widths.unlink(missing_ok=True)
 
 
 def _record_prediction_artifact_digests(cs_dir: Path) -> None:
@@ -1017,8 +1215,18 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
     symbols = ["SYM0", "SYM1", "SYM2", "SYM3", "SYM4"]
     holdout_start = "2024-01-01"
     entity_col = "symbol"
+    # Labels whose predictions carry a continuous evaluation target beside the class
+    # one. `labels.classification_eval_label` in setup.yaml is where production
+    # decides this: utils.modeling.load_modeling_dataset reads it for a
+    # classification label, and every writer then persists the column as
+    # `eval_actual` (registry/store.py). The mapping holds exactly - across all nine
+    # canonical registries, every artifact of a label named here carries the column
+    # and no other artifact does - so it is also what tells this function which
+    # synthetic artifacts need it.
+    eval_target_labels: set = set()
     if setup_path.exists():
         setup = yaml.safe_load(setup_path.read_text())
+        eval_target_labels = set((setup.get("labels") or {}).get("classification_eval_label") or {})
         universe = setup.get("universe", {})
         assets = universe.get("assets", [])
         if assets:
@@ -1122,6 +1330,12 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
                 "actual": target_rng.normal(0, 0.01, n).tolist(),
             }
         )
+        # This function drew `actual` itself and knows it is a continuous return, so
+        # a classification set on this panel can evaluate against it directly.
+        # Carried on every window rather than only the classification ones: it costs
+        # one column and keeps the panel a single object, so which labels need it is
+        # decided at write time.
+        frame = frame.with_columns(_pl.col("actual").alias("eval_actual"))
         templates[window] = (frame, n)
         return templates[window]
 
@@ -1171,10 +1385,10 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
     # maximum gap None" - max() over an empty join - because the latent set was a
     # fabricated weekday grid over SYM0..SYM4 and the supervised set was an artifact
     # copied from production. Placeholder symbols cannot meet real ones on any key,
-    # so where the fixture already carries an artifact this function will not
-    # rewrite, the seeded sets take its keys, folds and realized targets and
-    # synthesize only the score. Groups with no such artifact keep the fabricated
-    # grid, which is still the only option there.
+    # so where the fixture already carries an artifact, the seeded sets take its
+    # keys, folds and realized targets and synthesize only the score - preferring
+    # one that survives, and otherwise using one that will be rewritten onto its
+    # own keys. Only a group with no artifact at all keeps the fabricated grid.
     reference_panels = _reference_panels(cs_dir, hash_rows, _survives, entity_col, _pl)
 
     for p_hash, split, label in hash_rows:
@@ -1183,6 +1397,21 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         if _survives(p_hash):
             continue
         reference = reference_panels.get((split, label))
+        borrowed = False
+        if reference is None:
+            # A label with no artifact of its own borrows the decision grid of
+            # another label in the same split, but only where the panels this
+            # case study does have are evenly spaced and sub-daily - which is
+            # exactly where the fabricated weekday grid cannot represent the
+            # decisions at all. crypto_perps_funding decides every 8 hours for
+            # every label, and `fwd_dir_8h` is the direction cut of the same
+            # return as `fwd_ret_8h`, so its keys are that label's keys.
+            #
+            # Only the keys and folds are borrowed. `actual` is redrawn below,
+            # because the lending label's realized value is not this label's -
+            # a direction label's target is a class, not a return.
+            reference = _intraday_split_skeleton(reference_panels, split, _pl)
+            borrowed = reference is not None
         if reference is not None:
             template, n = reference, reference.height
         else:
@@ -1190,7 +1419,34 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         pred_dir.mkdir(parents=True, exist_ok=True)
         score_seed = int(hashlib.sha256(p_hash.encode()).hexdigest()[:16], 16)
         scores = np.random.default_rng(score_seed).normal(0, 0.01, n).tolist()
-        template.with_columns(_pl.Series("prediction", scores)).write_parquet(str(pred_file))
+        frame = template.with_columns(_pl.Series("prediction", scores))
+        if borrowed:
+            actual_seed = int(
+                hashlib.sha256(f"actual/{split}/{label}".encode()).hexdigest()[:16], 16
+            )
+            frame = frame.with_columns(
+                _pl.Series("actual", np.random.default_rng(actual_seed).normal(0, 0.01, n).tolist())
+            )
+        if label in eval_target_labels and "eval_actual" not in frame.columns:
+            # The panel is a copied artifact that does not carry the column. Its
+            # `actual` cannot stand in: on a classification set that is the class
+            # label, and a rank correlation against it measures class separation
+            # rather than a ranking against returns - the substitution
+            # 07_case_study_insights refuses to make. Draw a continuous target
+            # instead, per (split, label)
+            # so every set of the group agrees on what the realized return was.
+            group_seed = int(hashlib.sha256(f"{split}/{label}".encode()).hexdigest()[:16], 16)
+            frame = frame.with_columns(
+                _pl.Series(
+                    "eval_actual",
+                    np.random.default_rng(group_seed).normal(0, 0.01, frame.height),
+                )
+            )
+        if label not in eval_target_labels and "eval_actual" in frame.columns:
+            # A regression set never carries it in production, and the panel it was
+            # seeded onto may be a classification artifact that does.
+            frame = frame.drop("eval_actual")
+        frame.write_parquet(str(pred_file))
 
 
 def _seed_causal_json(results_dir: Path, cs_id: str, label: str) -> None:
@@ -1495,6 +1751,8 @@ def seed_results(output_dir: Path, case_study_ids: list[str]) -> None:
         # Backfill prediction parquets for ALL hashes in registry
         # (must run AFTER _seed_registry_db, and also when registry was pre-seeded)
         _backfill_all_prediction_parquets(cs_dir, cs_id)
+        _drop_stale_conformal_widths(cs_dir)
+        _normalize_prediction_timestamp_zone(cs_dir)
         _record_prediction_artifact_digests(cs_dir)
 
         # Backfill daily_returns.parquet for ALL backtest hashes in registry

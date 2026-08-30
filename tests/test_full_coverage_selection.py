@@ -435,3 +435,61 @@ def test_fold_metric_backfill_is_restricted_to_requested_label(tmp_path, monkeyp
 
     assert count == 1
     assert seen == ["bt_full_a"]
+
+
+def test_a_population_whose_only_backtested_run_is_incomplete_refuses(tmp_path) -> None:
+    """An empty frame here says "no backtests"; the truth is "no COMPLETE run was backtested".
+
+    etfs measured this under a preview reduction: a scoped population of six predictions and
+    one backtest, where the maximum coverage belonged to a prediction nothing had backtested.
+    The bar is the population's maximum `ic_n_days`, deliberately - that is what makes a run
+    complete, and computing it over only the backtested rows would let an incomplete run set
+    its own bar and win. So the filter is right to admit nothing, and wrong to say nothing.
+    """
+    import pytest
+
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        # full_a is the coverage bar for gbm/fwd_ret_5d at 4.0 days. Take away its backtest
+        # and the scoped population below has a bar no backtested member can reach.
+        db.execute("DELETE FROM backtest_runs WHERE backtest_hash = 'bt_full_a'")
+        db.execute("DELETE FROM backtest_metrics WHERE backtest_hash = 'bt_full_a'")
+    explorer = BacktestExplorer("test", case_dir=case_dir)
+
+    with pytest.raises(RuntimeError) as raised:
+        explorer.best(top_n=10, label="fwd_ret_5d", prediction_hashes=["partial", "full_a"])
+    message = str(raised.value)
+    assert "coverage bar" in message
+    assert "partial" in message, f"the refusal must name the run it rejected, got: {message}"
+
+    # The same population with its complete member backtested still resolves, and a
+    # population with no backtests at all is still an ordinary empty answer.
+    assert explorer.best(top_n=10, label="fwd_ret_5d", prediction_hashes=["full_b"])[
+        "prediction_hash"
+    ].to_list() == ["full_b"]
+    assert explorer.best(top_n=10, label="fwd_ret_5d", prediction_hashes=["nothing"]).is_empty()
+
+
+def test_an_empty_result_from_another_filter_is_not_blamed_on_the_coverage_bar(
+    tmp_path,
+) -> None:
+    """The refusal must isolate the coverage clause, or it sends the reader after the wrong thing.
+
+    `best` also drops runs that traded nothing and families the case study excludes. If the
+    diagnostic query does not mirror those, a population emptied by one of them is reported
+    as a coverage failure.
+    """
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        db.execute("DELETE FROM backtest_runs WHERE backtest_hash = 'bt_full_a'")
+        db.execute("DELETE FROM backtest_metrics WHERE backtest_hash = 'bt_full_a'")
+        # The one remaining backtested member of the population traded nothing, so `best`
+        # drops it for that reason - not because it sits below the bar.
+        db.execute("UPDATE backtest_metrics SET num_trades = 0 WHERE backtest_hash = 'bt_partial'")
+    explorer = BacktestExplorer("test", case_dir=case_dir)
+
+    assert explorer.best(
+        top_n=10, label="fwd_ret_5d", prediction_hashes=["partial", "full_a"]
+    ).is_empty()
