@@ -106,12 +106,15 @@ def _take_lock(
     *,
     state: str = "HOLDOUT_EVALUATED",
     evaluated_prediction: str | None = "p1",
+    evaluated_backtest: str = "b1",
 ) -> None:
     """Seal a carrier, and optionally record the evaluation the retrain finalized.
 
-    ``holdout_training_hash`` is what the lock *expected*; ``evaluated_prediction`` is what the
-    run actually produced. They are separate arguments because the two can disagree, and the
-    resolver has to follow the second.
+    ``holdout_training_hash`` is what the lock *expected*; ``evaluated_prediction`` and
+    ``evaluated_backtest`` are what the run actually produced. They are separate arguments
+    because they can disagree, and the resolver has to follow the recorded pair - a real
+    ``holdout_backtest_hash``, not a placeholder, because a test that records an unrelated hash
+    cannot tell whether the resolver used it.
     """
     db = sqlite3.connect(case_dir / "run_log" / "registry.db")
     db.execute(
@@ -128,7 +131,14 @@ def _take_lock(
     if evaluated_prediction is not None:
         db.execute(
             "INSERT INTO holdout_evaluations VALUES (?,?,?,?,?,?)",
-            ("lk", holdout_training_hash, evaluated_prediction, "bx", "digest", "2026-01-02"),
+            (
+                "lk",
+                holdout_training_hash,
+                evaluated_prediction,
+                evaluated_backtest,
+                "digest",
+                "2026-01-02",
+            ),
         )
     db.commit()
     db.close()
@@ -167,10 +177,41 @@ def test_the_evaluated_prediction_wins_over_the_expected_training_hash(
             ("p2", "t1", "cfg_a", "b2", 0.1),
         ],
     )
-    _take_lock(case_dir, "t1", evaluated_prediction="p2")
+    _take_lock(case_dir, "t1", evaluated_prediction="p2", evaluated_backtest="b2")
     _install(monkeypatch, case_dir)
 
     assert _lineage()["backtest_hash"] == "b2"
+
+
+def test_the_recorded_backtest_wins_among_siblings_on_one_prediction(monkeypatch, tmp_path) -> None:
+    """One prediction set can carry several backtests, and only one of them was evaluated.
+
+    Pinning the prediction alone leaves the caller choosing among its backtests by the fallback
+    order, which is `backtest_hash` ascending. So the sibling is named `b0` and the evaluated
+    one `b9`: ordering picks `b0`, and only reading `holdout_evaluations` picks `b9`. Naming
+    them the other way round would let the test pass with the pin removed, which is the flaw
+    this case was added to close.
+    """
+    case_dir = _registry(
+        tmp_path,
+        [
+            ("p1", "t1", "cfg_a", "b0", 9.9),
+            ("p1", "t1", "cfg_a", "b9", 0.4),
+        ],
+    )
+    _take_lock(case_dir, "t1", evaluated_prediction="p1", evaluated_backtest="b9")
+    _install(monkeypatch, case_dir)
+
+    assert _lineage()["backtest_hash"] == "b9"
+
+
+def test_a_half_written_evaluation_row_yields_no_holdout(monkeypatch, tmp_path) -> None:
+    """A row naming one side and not the other identifies no single evaluation."""
+    case_dir = _registry(tmp_path, [("p1", "t1", "cfg_a", "b1", 0.4)])
+    _take_lock(case_dir, "t1", evaluated_prediction="p1", evaluated_backtest="")
+    _install(monkeypatch, case_dir)
+
+    assert _lineage() is None
 
 
 def test_a_lock_that_has_not_reached_the_holdout_yields_no_holdout(monkeypatch, tmp_path) -> None:

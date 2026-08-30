@@ -606,32 +606,11 @@ def _seed_registry_db(cs_dir: Path, cs_id: str, primary_label: str) -> None:
                        VALUES (?,?,?,?,?,?)""",
                     (p_hash, t_hash, 100, "final", "validation", FIXTURE_TS),
                 )
-                # `ic_n_days` is written when the registry carries the column, and it is not
-                # optional decoration. `full_coverage_prediction_sql` keeps only the rows whose
-                # coverage equals the maximum for their (split, family, label) and requires the
-                # value to be non-null, so a seeded prediction without one is dropped by every
-                # coverage-aware query - silently, and for a reason that has nothing to do with
-                # what the fixture is exercising. Measured on etfs: 14_backtest swept a preview
-                # population made entirely of seeded rows, backtested all of them, and then
-                # refused to rank any, because not one could be shown to be a complete run.
-                #
-                # The value is the artifact's own date count, so it is true of what
-                # `_backfill_all_prediction_parquets` writes rather than a number chosen to
-                # clear a bar. Every seeded row in a family gets the same one, which is what
-                # makes them all full-coverage by that family's measure.
-                _pm_cols = {
-                    r[1] for r in db.execute("PRAGMA table_info(prediction_metrics)").fetchall()
-                }
-                _metric_cols = ["ic_mean", "ic_std", "ic_t", "n_folds"]
-                _metric_vals = [ic, ic * 0.3, ic / (ic * 0.3), 2]
-                if "ic_n_days" in _pm_cols:
-                    _metric_cols.append("ic_n_days")
-                    _metric_vals.append(SEEDED_DATE_BUDGET)
                 db.execute(
-                    f"""INSERT OR IGNORE INTO prediction_metrics
-                       (prediction_hash, computed_at, {", ".join(_metric_cols)})
-                       VALUES ({", ".join(["?"] * (2 + len(_metric_cols)))})""",
-                    (p_hash, FIXTURE_TS, *_metric_vals),
+                    """INSERT OR IGNORE INTO prediction_metrics
+                       (prediction_hash, computed_at, ic_mean, ic_std, ic_t, n_folds)
+                       VALUES (?,?,?,?,?,?)""",
+                    (p_hash, FIXTURE_TS, ic, ic * 0.3, ic / (ic * 0.3), 2),
                 )
                 # Fold metrics (2 folds) — wide format matching production schema
                 for fold_id in range(2):

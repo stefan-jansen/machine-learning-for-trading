@@ -550,15 +550,18 @@ def _holdout_lineage_for(
         # the evaluation by its own result, and is how a holdout descended from a retired
         # carrier takes the slot.
         #
-        # `locked_holdout_prediction` resolves the exact prediction set the evaluation
-        # finalized rather than the training hash the lock expected; see its docstring for why
-        # the two are not the same question.
-        pinned = locked_holdout_prediction(db, cs)
+        # `locked_holdout_evaluation` resolves the exact prediction set AND backtest the
+        # evaluation finalized, rather than the training hash the lock expected; see its
+        # docstring for why neither substitution is the same question.
+        pinned = locked_holdout_evaluation(db, cs)
         if pinned == NO_LIVE_HOLDOUT:
             return None
         if pinned is not None:
+            pinned_prediction, pinned_backtest = pinned
             clauses.append("p.prediction_hash = ?")
-            params.append(pinned)
+            params.append(pinned_prediction)
+            clauses.append("b.backtest_hash = ?")
+            params.append(pinned_backtest)
             where_sql = " AND ".join(clauses)
 
         # Same-lineage preference: given the validation rank-1's own prediction
@@ -830,12 +833,18 @@ def _populate_pair(
 NO_LIVE_HOLDOUT = "\x00no-live-holdout"
 
 
-def locked_holdout_prediction(db: sqlite3.Connection, cs: str) -> str | None:
-    """The one holdout prediction set this study may report, or why there is none.
+def locked_holdout_evaluation(db: sqlite3.Connection, cs: str) -> tuple[str, str] | str | None:
+    """The one holdout this study may report, as ``(prediction_hash, backtest_hash)``.
 
-    Returns the ``holdout_prediction_hash`` to pin on; :data:`NO_LIVE_HOLDOUT` when a lock
-    exists but names no holdout this study can publish; ``None`` when no lock has been taken
-    at all, which leaves the caller's query unpinned as before.
+    Returns both finalized hashes; :data:`NO_LIVE_HOLDOUT` when a lock exists but names no
+    holdout this study can publish; ``None`` when no lock has been taken at all, which leaves
+    the caller's query unpinned as before.
+
+    **Both hashes, because the prediction alone does not identify the evaluation.** One
+    prediction set can carry several backtests - a replay registered under a different strategy
+    spec, an experimental allocator sharing the holdout prediction - so pinning the prediction
+    still leaves the caller choosing among their backtests by row order, which is the defect
+    one level down from the one this function was written to close.
 
     **The lock's ``holdout_training_hash`` is what was expected, not what was produced.** It is
     written when the carrier is sealed, before the retrain runs, and one training run registers
@@ -874,16 +883,19 @@ def locked_holdout_prediction(db: sqlite3.Connection, cs: str) -> str | None:
         return NO_LIVE_HOLDOUT
     try:
         evaluated = db.execute(
-            "SELECT holdout_prediction_hash FROM holdout_evaluations WHERE lock_hash = ?",
+            "SELECT holdout_prediction_hash, holdout_backtest_hash FROM holdout_evaluations "
+            "WHERE lock_hash = ?",
             (lock_hash,),
         ).fetchone()
     except sqlite3.OperationalError as error:
         if "no such table" not in str(error):
             raise
         return NO_LIVE_HOLDOUT
-    if not evaluated or not evaluated[0]:
+    if not evaluated or not evaluated[0] or not evaluated[1]:
+        # A half-written evaluation row names one side and not the other, which identifies no
+        # single evaluation. That is the same answer as no row at all.
         return NO_LIVE_HOLDOUT
-    return str(evaluated[0])
+    return str(evaluated[0]), str(evaluated[1])
 
 
 def populate_paired_metrics(
