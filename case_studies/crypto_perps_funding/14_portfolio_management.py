@@ -80,13 +80,54 @@ LABELS: list[str] = []
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 POPULATION_SUFFIX = "v1"
-SUPERSEDES: dict[str, str] = {}
+SUPERSEDES: dict[str, str] = {
+    # The four per-label candidate sets this run replaces. Their membership moved for a
+    # different reason from the allocation populations below: the grid the admission rule is
+    # applied to is now the signal set's members plus this run's own executions, where it used
+    # to be every signal and allocation row the registry holds. A superseded generation's rows
+    # are immutable and still complete, so they passed the `traded_folds` admission and entered
+    # a set that is meant to be this generation's.
+    "crypto-signal-allocation-fwd_dir_8h": "51d909e265df",
+    "crypto-signal-allocation-fwd_dir_8h_3c": "b6b86d2e8f47",
+    "crypto-signal-allocation-fwd_ret_24h": "3b1787742734",
+    "crypto-signal-allocation-fwd_ret_8h": "ce6d5c0db04f",
+}
 # Per-allocation-population lineage, keyed by the population's own name. `SUPERSEDES` above is
 # keyed by label and covers the one per-label set frozen at the end; this stage declares one
 # population per (label, scheme, allocator), so a single label key cannot name them. An entry
 # for a name whose members did not change is ignored, so the whole current generation can be
 # passed at once rather than discovered one refusal at a time.
-SUPERSEDES_ALLOCATION: dict[str, str] = {}
+SUPERSEDES_ALLOCATION: dict[str, str] = {
+    # The eighteen `fwd_dir_8h_3c` populations this run replaces, and only those.
+    # Ranking the survivors inside `crypto-signal-fwd_dir_8h_3c` rather than over the whole
+    # registry swapped one member of that label's shortlist - 19d842b00885 out, 9186e7d609a0
+    # in - so every population built on it has a different member list. The other three
+    # labels' shortlists are identical either way and their populations are untouched.
+    #
+    # These are recorded here rather than passed at run time because `supersedes` sits inside
+    # the hashed snapshot: a second generation's hash depends on which generation it replaced,
+    # so a re-run that passes nothing computes a different hash from the row on record and is
+    # refused. That is ml4t/agent-workspace#879, and a lineage held only in a shell command is
+    # how a notebook stops being able to reproduce what it published.
+    "crypto-allocation-fwd_dir_8h_3c-ew_top3-conformal_weighted-v1": "25d807177ac3",
+    "crypto-allocation-fwd_dir_8h_3c-ew_top3-hrp-v1": "e449e80fcae7",
+    "crypto-allocation-fwd_dir_8h_3c-ew_top3-inverse_vol-v1": "93b5fc280b3e",
+    "crypto-allocation-fwd_dir_8h_3c-ew_top3-mvo_ledoit_wolf-v1": "1282799a1328",
+    "crypto-allocation-fwd_dir_8h_3c-ew_top3-risk_parity-v1": "a538d029f34a",
+    "crypto-allocation-fwd_dir_8h_3c-ew_top3-score_weighted-v1": "3083305f8e79",
+    "crypto-allocation-fwd_dir_8h_3c-ew_top5-conformal_weighted-v1": "22532018bf40",
+    "crypto-allocation-fwd_dir_8h_3c-ew_top5-hrp-v1": "96a828520f7f",
+    "crypto-allocation-fwd_dir_8h_3c-ew_top5-inverse_vol-v1": "802a1abee1d1",
+    "crypto-allocation-fwd_dir_8h_3c-ew_top5-mvo_ledoit_wolf-v1": "dadf8ab26a68",
+    "crypto-allocation-fwd_dir_8h_3c-ew_top5-risk_parity-v1": "48cef804e42e",
+    "crypto-allocation-fwd_dir_8h_3c-ew_top5-score_weighted-v1": "014e86d945b7",
+    "crypto-allocation-fwd_dir_8h_3c-quintile_ls-conformal_weighted-v1": "2f4a454f4940",
+    "crypto-allocation-fwd_dir_8h_3c-quintile_ls-hrp-v1": "2bd913a5c4f3",
+    "crypto-allocation-fwd_dir_8h_3c-quintile_ls-inverse_vol-v1": "11c6a88e5e59",
+    "crypto-allocation-fwd_dir_8h_3c-quintile_ls-mvo_ledoit_wolf-v1": "a6804cae114c",
+    "crypto-allocation-fwd_dir_8h_3c-quintile_ls-risk_parity-v1": "4d9e3a96fb99",
+    "crypto-allocation-fwd_dir_8h_3c-quintile_ls-score_weighted-v1": "a6f94f642fd3",
+}
 
 # %%
 study = open_study(
