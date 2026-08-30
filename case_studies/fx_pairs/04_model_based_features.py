@@ -391,8 +391,24 @@ if MAX_FOLDS:
 # `append_holdout_fold_if_needed` sets `train_end` to the boundary itself, unbuffered, so it
 # is not the definition to copy.
 VALIDATION_FOLD_IDS = {f["fold"] for f in folds}
+# Derived from every fold the split routine laid out, not from `folds`, which MAX_FOLDS may
+# have truncated. A reduced run that took the id from the shortened list would number the
+# holdout fold with an id a canonical validation fold already owns, and a consumer joining
+# by fold id would then read holdout-dated rows as validation data. The training start comes
+# from the same set for the same reason: the reduced list is missing the oldest folds, which
+# are exactly the ones that carry the earliest training start.
+_complete_folds = [
+    {
+        "fold": int(split["fold"]),
+        "train_start": pd.Timestamp(split["train_start"]).date(),
+        "train_end": pd.Timestamp(split["train_end"]).date(),
+        "val_start": pd.Timestamp(split["val_start"]).date(),
+        "val_end": pd.Timestamp(split["val_end"]).date(),
+    }
+    for split in raw_folds
+]
 _derived_holdout_cv = build_holdout_cv(
-    {"label": PRIMARY_LABEL, "computation": {"cv": {"folds": folds}}},
+    {"label": PRIMARY_LABEL, "computation": {"cv": {"folds": _complete_folds}}},
     case_study=CASE_STUDY_ID,
     timeline=label_frame.select("timestamp").unique().sort("timestamp").to_series().to_list(),
     label=PRIMARY_LABEL,
@@ -600,10 +616,12 @@ fig.update_layout(
 show_plotly_with_alt(
     fig,
     "One horizontal bar per fold, split into the stretch each fold's models are "
-    "estimated on and the later stretch they are applied to out of sample. The bars step "
-    "up and to the right, fold zero covering the most recent window and the "
-    "highest-numbered fold the oldest. A dashed vertical rule marks where the holdout "
-    "opens, with the region beyond it shaded, and every bar ends to the left of it.",
+    "estimated on and the later stretch they are applied to out of sample. The eight "
+    "validation bars step up and to the right, fold zero covering the most recent window "
+    "and fold seven the oldest, and all eight end to the left of the dashed vertical rule "
+    "that marks where the holdout opens. The last bar is the holdout fold: its estimation "
+    "stretch is the longest of any, ending a label buffer short of the rule, and its "
+    "out-of-sample stretch is the shaded region beyond it.",
 )
 
 
@@ -896,8 +914,9 @@ kalman_drift = max(
 )
 assert kalman_drift < 1e-10, f"Kalman state moved by {kalman_drift:.2e} - not a forward filter"
 print(
-    f"Level-model checks hold across {len(folds)} folds; last emitted date "
-    f"{kalman_df['timestamp'].max()} < holdout start {HOLDOUT_START}; deleting the last "
+    f"Level-model checks hold across {len(folds)} folds; last validation-fold date "
+    f"{_validation_rows['timestamp'].max()} < holdout start {HOLDOUT_START}, "
+    f"holdout fold through {_holdout_rows['timestamp'].max()}; deleting the last "
     f"{len(seal_prices) - cut} observations of {SYMBOLS[0]} moves the first {cut} filtered "
     f"states by {kalman_drift:.2e}"
 )
@@ -1279,8 +1298,9 @@ hmm_drift = float(
 )
 assert hmm_drift < 1e-10, f"filtered probabilities moved by {hmm_drift:.2e} - not filtered"
 print(
-    f"Regime checks hold across {len(folds)} folds; last emitted date "
-    f"{hmm_df['timestamp'].max()} < holdout start {HOLDOUT_START}; deleting the last "
+    f"Regime checks hold across {len(folds)} folds; last validation-fold date "
+    f"{_validation_rows['timestamp'].max()} < holdout start {HOLDOUT_START}, "
+    f"holdout fold through {_holdout_rows['timestamp'].max()}; deleting the last "
     f"{len(seal_obs) - cut} observations of fold {folds[0]['fold']} moves the first {cut} "
     f"probabilities by {hmm_drift:.2e}"
 )
@@ -1419,8 +1439,9 @@ prefix_pred = np.asarray(
 arima_drift = float(np.abs(full_pred[:seal_cut] - prefix_pred).max())
 assert arima_drift < 1e-10, f"forecasts moved by {arima_drift:.2e} - not a forward pass"
 print(
-    f"Return-model checks hold across {len(folds)} folds; last emitted date "
-    f"{arima_df['timestamp'].max()} < holdout start {HOLDOUT_START}; extending "
+    f"Return-model checks hold across {len(folds)} folds; last validation-fold date "
+    f"{_validation_rows['timestamp'].max()} < holdout start {HOLDOUT_START}, "
+    f"holdout fold through {_holdout_rows['timestamp'].max()}; extending "
     f"{SYMBOLS[0]} fold {seal_fold['fold']} from {len(seal_train)} to {len(seal_path)} "
     f"observations moves the fitted parameters by {param_drift:.2e}, and deleting the "
     f"last {len(seal_path) - seal_cut} of them moves the first {seal_cut} forecasts by "
@@ -2199,7 +2220,8 @@ else:
 
 # %% tags=[]
 print(f"Feature columns written:  {len(temporal_feature_cols)}")
-print(f"Walk-forward folds:       {len(folds)}")
+print(f"Walk-forward folds:       {len(VALIDATION_FOLD_IDS)}")
+print(f"Holdout folds:            1 (fold {HOLDOUT_FOLD_ID})")
 if len(eval_summary):
     top_result = eval_summary.row(0, named=True)
     print(f"Columns rankable across pairs:            {len(feature_names)}")
