@@ -54,6 +54,7 @@ import polars as pl
 warnings.filterwarnings("ignore")
 
 from case_studies.research import CandidateSet, Study
+from case_studies.research.holdout import build_holdout_training_spec
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
     load_backtest_prices_for,
@@ -65,13 +66,13 @@ from case_studies.utils.backtest_presets import (
     strategy_view,
 )
 from case_studies.utils.backtest_runner import run_backtest
-from case_studies.utils.cv_window import canonical_window
 from case_studies.utils.notebook_contracts import prediction_members_in_force
 from case_studies.utils.registry import (
     backtest_hash_from_parts,
     model_source,
     read_predictions,
 )
+from case_studies.utils.registry.specs import training_hash_from_spec
 from case_studies.utils.uncertainty import load_daily_returns_with_timestamp
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE, add_message_title
@@ -158,131 +159,80 @@ print(
 # cannot be matched on a training hash, and matching on a family and
 # configuration name would accept a fit of the same model over the wrong window.
 #
-# What identifies the pair is the specification itself. A holdout refit changes
-# the cross-validation interval and the two fields the resolver derives per
-# fold; every other field, including the feature artifacts and the model
-# parameters, is carried across unchanged. So the check below is that difference
-# exactly: the two specifications must differ in those fields and agree
-# everywhere else.
-
+# Rather than compare fields and hope the list is complete, this derives the
+# identity the carrier's configuration *should* have on the holdout, by the same
+# `build_holdout_training_spec` [`18_holdout_predictions`](18_holdout_predictions.ipynb)
+# fits, and requires a registered prediction under exactly that hash. The
+# derivation is deterministic and costs a dataset read rather than a fit, so the
+# two notebooks agree by construction: every boundary, the label buffer, the
+# feature floor, the fold identifier and the request metadata are all inside the
+# hash, and any of them differing makes it a different identity that this will
+# not accept.
 
 # %%
-def _without(value, path: tuple[str, ...]):
-    """``value`` with ``path`` removed, leaving every sibling in place."""
-    if not isinstance(value, dict) or path[0] not in value:
-        return value
-    pruned = dict(value)
-    if len(path) == 1:
-        pruned.pop(path[0])
-    else:
-        pruned[path[0]] = _without(pruned[path[0]], path[1:])
-    return pruned
-
-
-# Exactly what a holdout refit re-keys, subfield-precise: dropping the whole `macro_context`
-# would accept an SDF fit on different macro inputs, and dropping all of `model` would reject
-# the legitimate holdout of any configuration whose parameters resolve per fold.
-REKEYED_PATHS = (
-    ("cv",),
-    ("expected_prediction_keys",),
-    ("model", "effective_params_by_fold"),
-    ("macro_context", "resolved_fold_digest"),
-    ("task", "imbalance", "effective_class_weights_by_fold"),
-)
-
-
-def _comparable_computation(spec: dict) -> dict:
-    computation = spec["computation"]
-    for path in REKEYED_PATHS:
-        computation = _without(computation, path)
-    return computation
-
-
-# Beside `computation` rather than inside it, so they survive any projection of it.
-IDENTITY_FIELDS = ("seed", "execution_tier", "identity_version")
-# Dropping the CV from the comparison would otherwise accept any interval at all, so the
-# interval is checked against the case study's own declaration instead.
-HOLDOUT_WINDOW = canonical_window(CASE_STUDY_ID, HOLDOUT_LABEL, split="holdout")
-if HOLDOUT_WINDOW is None:
-    raise RuntimeError(f"{CASE_STUDY_ID} declares no holdout window for {HOLDOUT_LABEL!r}")
-
 with sqlite3.connect(REGISTRY_DB) as db:
-    holdout_rows = db.execute(
-        "SELECT p.prediction_hash, t.training_hash, t.spec_json, "
-        "       p.checkpoint_kind, p.checkpoint_value "
-        "FROM prediction_sets p JOIN training_runs t USING(training_hash) "
-        "WHERE p.split = 'holdout'"
-    ).fetchall()
-    carrier_training = db.execute(
-        "SELECT t.training_hash, t.spec_json, p.checkpoint_kind, p.checkpoint_value "
-        "FROM prediction_sets p JOIN training_runs t USING(training_hash) "
-        "WHERE p.prediction_hash = ?",
+    carrier_training_hash = db.execute(
+        "SELECT training_hash FROM prediction_sets WHERE prediction_hash = ?",
+        (CARRIER_PREDICTION_HASH,),
+    ).fetchone()[0]
+    VALIDATION_SPEC = json.loads(
+        db.execute(
+            "SELECT spec_json FROM training_runs WHERE training_hash = ?",
+            (carrier_training_hash,),
+        ).fetchone()[0]
+    )
+    carrier_checkpoint = db.execute(
+        "SELECT checkpoint_kind, checkpoint_value FROM prediction_sets WHERE prediction_hash = ?",
         (CARRIER_PREDICTION_HASH,),
     ).fetchone()
+    holdout_rows = db.execute(
+        "SELECT p.prediction_hash, p.training_hash, p.checkpoint_kind, p.checkpoint_value "
+        "FROM prediction_sets p WHERE p.split = 'holdout'"
+    ).fetchall()
 
-carrier_training_hash, carrier_spec_json, carrier_kind, carrier_value = carrier_training
-VALIDATION_SPEC = json.loads(carrier_spec_json)
+# %%
+OBSERVATIONS = (
+    pl.read_parquet(_study.root / "labels" / f"{VALIDATION_SPEC['label']}.parquet")
+    .get_column("timestamp")
+    .unique()
+    .sort()
+    .to_list()
+)
+EXPECTED_HOLDOUT_SPEC = build_holdout_training_spec(
+    _study, VALIDATION_SPEC, timeline=OBSERVATIONS, case_study=CASE_STUDY_ID
+)
+EXPECTED_HOLDOUT_TRAINING = training_hash_from_spec(EXPECTED_HOLDOUT_SPEC)
+_expected_fold = EXPECTED_HOLDOUT_SPEC["computation"]["cv"]["folds"][0]
+print(
+    f"The carrier's holdout fit is {EXPECTED_HOLDOUT_TRAINING}: "
+    f"train {str(_expected_fold['train_start'])[:10]} to {str(_expected_fold['train_end'])[:10]}, "
+    f"evaluate {str(_expected_fold['val_start'])[:10]} to {str(_expected_fold['val_end'])[:10]}"
+)
 
-
-def carries_the_same_configuration(candidate: dict) -> tuple[bool, str]:
-    """Whether ``candidate`` is this carrier's configuration refitted for the holdout."""
-    if candidate.get("family") != VALIDATION_SPEC.get("family"):
-        return False, "different family"
-    if candidate.get("label") != VALIDATION_SPEC.get("label"):
-        return False, "different label"
-    if candidate.get("config_name") != VALIDATION_SPEC.get("config_name"):
-        return False, "different configuration"
-    left = _comparable_computation(candidate)
-    right = _comparable_computation(VALIDATION_SPEC)
-    if left != right:
-        moved = sorted(key for key in set(left) | set(right) if left.get(key) != right.get(key))
-        return False, f"computation differs beyond the re-keyed fields: {moved}"
-    if any(candidate.get(field) != VALIDATION_SPEC.get(field) for field in IDENTITY_FIELDS):
-        return False, "a top-level identity field differs (seed, tier or identity version)"
-    cv = candidate["computation"].get("cv") or {}
-    if cv.get("split") != "holdout":
-        return False, "the fit does not declare the holdout split"
-    folds = cv.get("folds")
-    if not isinstance(folds, list) or len(folds) != 1:
-        return False, "a holdout fit must carry exactly one fold"
-    fold = folds[0]
-    declared_start, declared_end = (str(value)[:10] for value in HOLDOUT_WINDOW)
-    if str(fold.get("val_start"))[:10] != declared_start:
-        return False, f"evaluated from {fold.get('val_start')}, not the declared {declared_start}"
-    if str(fold.get("val_end"))[:10] != declared_end:
-        return False, f"evaluated to {fold.get('val_end')}, not the declared {declared_end}"
-    if str(fold.get("train_end"))[:10] >= declared_start:
-        return False, "training runs into the holdout window"
-    return True, "refit of this carrier over the declared holdout interval"
-
-
-matches, rejected = [], []
-for prediction_hash, training_hash, spec_json, kind, value in holdout_rows:
-    ok, reason = carries_the_same_configuration(json.loads(spec_json))
-    (matches if ok else rejected).append((prediction_hash, training_hash, kind, value, reason))
-
+matches = [row for row in holdout_rows if row[1] == EXPECTED_HOLDOUT_TRAINING]
 if not matches:
     raise RuntimeError(
-        "No holdout prediction set belongs to the selected carrier. Run "
-        "18_holdout_predictions, which refits it; "
+        f"no holdout prediction is registered under {EXPECTED_HOLDOUT_TRAINING}, the identity "
+        f"this carrier's configuration derives. Run 18_holdout_predictions. The registry holds "
         + (
-            "the registry holds "
-            + "; ".join(f"{ph} ({reason})" for ph, _, _, _, reason in rejected)
-            if rejected
-            else "the registry holds no holdout predictions at all"
+            ", ".join(f"{row[0]} (training {row[1]})" for row in holdout_rows)
+            if holdout_rows
+            else "no holdout predictions at all"
         )
     )
 if len(matches) > 1:
     raise RuntimeError(
-        f"{len(matches)} holdout prediction sets match this carrier: "
-        + ", ".join(prediction_hash for prediction_hash, *_ in matches)
+        f"{len(matches)} holdout predictions share training {EXPECTED_HOLDOUT_TRAINING}: "
+        + ", ".join(row[0] for row in matches)
+        + ". A holdout fit publishes exactly the selected checkpoint, so this registry carries "
+        "rows from an older rule."
     )
 
-HOLDOUT_PREDICTION_HASH, HOLDOUT_TRAINING_HASH, holdout_kind, holdout_value, _ = matches[0]
-if (holdout_kind, holdout_value) != (carrier_kind, carrier_value):
+HOLDOUT_PREDICTION_HASH, HOLDOUT_TRAINING_HASH, holdout_kind, holdout_value = matches[0]
+if (holdout_kind, holdout_value) != carrier_checkpoint:
     raise RuntimeError(
         f"the holdout prediction is at {holdout_kind}={holdout_value} but the selection was made "
-        f"on {carrier_kind}={carrier_value}"
+        f"on {carrier_checkpoint[0]}={carrier_checkpoint[1]}"
     )
 print(
     f"Holdout prediction {HOLDOUT_PREDICTION_HASH} from training {HOLDOUT_TRAINING_HASH}, "
@@ -383,6 +333,18 @@ BACKTEST_VARYING_PATHS = (
     ("backtest_config", "metadata", "prediction_hash"),
     ("backtest_config", "metadata", "preset_path"),
 )
+
+
+def _without(value, path: tuple[str, ...]):
+    """``value`` with ``path`` removed, leaving every sibling in place."""
+    if not isinstance(value, dict) or path[0] not in value:
+        return value
+    pruned = dict(value)
+    if len(path) == 1:
+        pruned.pop(path[0])
+    else:
+        pruned[path[0]] = _without(pruned[path[0]], path[1:])
+    return pruned
 
 
 def _comparable_backtest(spec: dict) -> dict:

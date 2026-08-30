@@ -62,6 +62,7 @@ warnings.filterwarnings("ignore")
 
 # %%
 from case_studies.research import CandidateSet, Study
+from case_studies.research.holdout import build_holdout_training_spec
 from case_studies.utils.backtest_loaders import get_backtest_config
 from case_studies.utils.backtest_presets import (
     clone_backtest_spec,
@@ -76,6 +77,7 @@ from case_studies.utils.registry import (
     load_backtest_fold_metrics,
     read_predictions,
 )
+from case_studies.utils.registry.specs import training_hash_from_spec
 from case_studies.utils.sweep_config import (
     get_cost_grid_bps,
     get_cost_grid_half_spread_usd,
@@ -903,92 +905,41 @@ def _comparable_backtest(spec: dict) -> dict:
 
 CARRIER_BACKTEST = _comparable_backtest(json.loads(strategy_carrier["spec_json"]))
 CARRIER_TRAINING_SPEC = json.loads(carrier_source[3])
-# Exactly what a holdout refit re-keys, and nothing more. The list is
-# `case_studies/research/holdout.py::_FOLD_DERIVED_FIELDS` plus the CV interval itself, and it is
-# subfield-precise on purpose: dropping the whole `macro_context` would accept an SDF holdout
-# fitted on different macro inputs, and keeping all of `model` would reject the legitimate
-# holdout of any configuration whose parameters are resolved per fold. Everything outside these
-# - the estimator, its parameters, the artifacts it pins, the label - has to be identical,
-# because a holdout that changed any of them is not this configuration re-measured.
-REKEYED_PATHS = (
-    ("cv",),
-    ("expected_prediction_keys",),
-    ("model", "effective_params_by_fold"),
-    ("macro_context", "resolved_fold_digest"),
-    ("task", "imbalance", "effective_class_weights_by_fold"),
+
+
+# The identity the carrier's configuration *should* have on the holdout, derived rather than
+# approximated by comparing fields. `build_holdout_training_spec` is the same derivation
+# 18_holdout_predictions fits and 19_holdout_backtest checks, so every boundary is inside the
+# hash - the label buffer, the feature floor that bounds the training start, the fold identifier
+# and the request metadata - and a fit differing in any of them is simply a different identity.
+# It costs a dataset read rather than a fit.
+OBSERVATIONS = (
+    pl.read_parquet(_study.root / "labels" / f"{carrier_source[2]}.parquet")
+    .get_column("timestamp")
+    .unique()
+    .sort()
+    .to_list()
 )
-
-
-def _comparable_computation(spec: dict) -> dict:
-    computation = spec["computation"]
-    for path in REKEYED_PATHS:
-        computation = _without(computation, path)
-    return computation
-
-
-HOLDOUT_WINDOW = canonical_window(CASE_STUDY, carrier_source[2], split="holdout")
-if HOLDOUT_WINDOW is None:
-    raise RuntimeError(f"{CASE_STUDY} declares no holdout window for {carrier_source[2]!r}")
-# Top-level identity fields, which sit beside `computation` rather than inside it and so survive
-# any projection of it. A fit at a different seed or in a different execution tier is a different
-# computation wearing the same configuration name.
-IDENTITY_FIELDS = ("family", "label", "config_name", "seed", "execution_tier", "identity_version")
-
-
-def _declares_the_holdout_interval(spec: dict) -> bool:
-    """Whether this fit evaluates the window the case study declares, over one fold.
-
-    The CV is dropped from the specification comparison because a holdout refit is expected to
-    differ there. Dropping it wholesale would then accept any interval at all, so the interval is
-    checked against `config/setup.yaml` here instead: one fold, evaluated over exactly the
-    declared holdout window, with training that ends before it opens. What this does not
-    re-derive is the training START, which depends on the feature artifact's own coverage -
-    `18_holdout_predictions` derives and checks that, and this reads the result.
-    """
-    cv = spec["computation"].get("cv") or {}
-    if cv.get("split") != "holdout":
-        return False
-    folds = cv.get("folds")
-    if not isinstance(folds, list) or len(folds) != 1:
-        return False
-    fold = folds[0]
-    declared_start, declared_end = (str(value) for value in HOLDOUT_WINDOW)
-    if str(fold.get("val_start"))[:10] != declared_start[:10]:
-        return False
-    if str(fold.get("val_end"))[:10] != declared_end[:10]:
-        return False
-    return str(fold.get("train_end"))[:10] < declared_start[:10]
+EXPECTED_HOLDOUT_TRAINING = training_hash_from_spec(
+    build_holdout_training_spec(
+        _study, CARRIER_TRAINING_SPEC, timeline=OBSERVATIONS, case_study=CASE_STUDY
+    )
+)
 
 
 def is_this_carriers_holdout(row) -> bool:
     """The carrier's own configuration, refitted for the holdout, at the selected checkpoint.
 
-    Five things have to agree and the model name is only one. Family, configuration and label
-    say the same estimator against the same target. The training specification outside the
-    re-keyed fields says the same computation over the same pinned artifacts - matching on names
-    alone would accept a fit against a retired feature artifact. The checkpoint says the same
-    point on the schedule that selection was made at. And the backtest specification outside the
-    predictions and the price panel says the same portfolio was built the same way - the same
-    allocator and concentration, and also the same costs, fill timing and stop behaviour, which
-    a strategy-block comparison would have let vary.
-
-    The training hash itself cannot be compared: a holdout refit is a different interval and
-    therefore a different identity, always and by construction.
+    Three things, and the training identity does most of the work: it is derived here from the
+    carrier's own validation specification, so a fit over different dates, at a different seed,
+    in a different tier, or against a retired feature artifact is a different hash and cannot
+    match. The checkpoint says the same point on the schedule that selection was made at. The
+    backtest specification says the same portfolio was built from those predictions, including
+    the costs, fill timing and stop behaviour a strategy-block comparison would let vary.
     """
-    if (row[3], row[4], row[10]) != (carrier_source[0], carrier_source[1], carrier_source[2]):
+    if row[2] != EXPECTED_HOLDOUT_TRAINING:
         return False
     if (row[11], row[12]) != carrier_checkpoint:
-        return False
-    if _comparable_computation(json.loads(row[13])) != _comparable_computation(
-        CARRIER_TRAINING_SPEC
-    ):
-        return False
-    candidate_spec = json.loads(row[13])
-    if any(
-        candidate_spec.get(field) != CARRIER_TRAINING_SPEC.get(field) for field in IDENTITY_FIELDS
-    ):
-        return False
-    if not _declares_the_holdout_interval(candidate_spec):
         return False
     return _comparable_backtest(json.loads(row[5])) == CARRIER_BACKTEST
 
@@ -1005,11 +956,22 @@ if len(matching) > 1:
     )
 holdout_result = matching[-1] if matching else None
 
-# Every holdout lineage on this label, not only the ones that match. A row belonging to some
-# other configuration still means the 2021 window was read, and the notebook that publishes the
-# out-of-sample claim is the one that has to say so - counting only matches would report a
-# second-or-later read as clean evidence because the earlier read is invisible to it.
-WINDOW_READS = {row[2] for row in holdout_rows}
+# Every holdout lineage on this label, counted from `prediction_sets` rather than from the
+# backtest rows above. Two reasons, and the second is the one that bites. A lineage belonging to
+# some other configuration still means the 2021 window was read, so counting only the matches
+# would report a second-or-later read as clean evidence. And a fit that 18 registered but 19
+# never backtested has no row in `backtest_runs` at all - the window was read to produce those
+# predictions just the same, and reading the count off the backtests would miss it entirely.
+with sqlite3.connect(REGISTRY_DB) as db:
+    WINDOW_READS = {
+        row[0]
+        for row in db.execute(
+            "SELECT DISTINCT p.training_hash FROM prediction_sets p "
+            "JOIN training_runs t USING(training_hash) "
+            "WHERE p.split = 'holdout' AND t.label = ?",
+            (carrier_source[2],),
+        )
+    }
 print(f"Carrier: {carrier_source[0]}/{carrier_source[1]} on {carrier_source[2]}")
 if len(WINDOW_READS) > 1:
     print(
