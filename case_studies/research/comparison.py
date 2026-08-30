@@ -28,6 +28,48 @@ def _unsuperseded_hash(db: sqlite3.Connection, name: str) -> str | None:
     return heads[0] if len(heads) == 1 else None
 
 
+def candidate_set_supersedes(study: Study, *, name: str, declared: str | None) -> str | None:
+    """Whether a declared candidate-set generation may be offered to :meth:`CandidateSet.create`.
+
+    The same decision :func:`case_studies.research.population.population_supersedes` makes for an
+    official population, applied to a candidate set. It exists because the declaration is
+    committed source that has to be right in three situations the notebook cannot tell apart:
+
+    - **A clean clone.** ``run_log/`` is gitignored, so a reader starts with an empty registry -
+      often with no ``candidate_sets`` table at all, which raises ``OperationalError`` rather
+      than ``ValueError``. ``create`` refuses a first generation that claims to supersede
+      something, so the declared hash must be withheld and the reader's run publishes generation
+      one. **This is the ordinary case for anyone who is not the author**, and offering the hash
+      unconditionally is what stops a published notebook running for the people it is published
+      for.
+    - **The re-run.** The generation in force is the one this declaration produced, so
+      ``current.supersedes == declared``, and offering the hash resolves to the set already
+      published rather than writing a new one.
+    - **The refit.** The declaration names the tip itself, and offering it publishes the next
+      generation over that tip.
+
+    Anything else is withheld, and ``create`` then refuses and names the hash it requires, which
+    is a better answer than this function guessing.
+
+    ``CandidateSet.create`` already takes and enforces ``supersedes``; what had no shared
+    implementation is this decision, so every notebook that declares a lineage either resolved it
+    itself or - four in ``crypto_perps_funding`` alone - did not resolve it and would have stopped
+    on a reader's first run.
+    """
+    if not declared:
+        return None
+    try:
+        current = CandidateSet.one(study, name=name)
+    except (ValueError, KeyError, sqlite3.OperationalError):
+        # No generation under this name, or no table at all: `one` raises `ValueError` when the
+        # name resolves to other than exactly one head, `open` raises `KeyError` for a hash the
+        # table does not hold, and a clean clone has no `candidate_sets` table for either to read.
+        return None
+    if declared in (current.supersedes, current.hash):
+        return declared
+    return None
+
+
 @dataclass(frozen=True)
 class CandidateSet:
     study: Study
