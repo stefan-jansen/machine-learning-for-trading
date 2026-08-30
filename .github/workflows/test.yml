@@ -93,6 +93,15 @@ jobs:
             # something that had already been tested in ninety seconds.
             shared:
               - 'utils/**'
+              # Every case study imports these two. `case_studies/research/` is the study,
+              # population, candidate-set and holdout machinery; `case_studies/utils/` is the
+              # backtest runner, registry and presets. A change to either can alter what every
+              # case-study pipeline does, and neither was listed - so a change to the module
+              # they all import fanned out zero case-study jobs and reported a green PR that had
+              # exercised none of them. The per-case-study filters below cover a study's own
+              # notebooks; nothing covered the code underneath all of them.
+              - 'case_studies/research/**'
+              - 'case_studies/utils/**'
               - 'data/**'
               - 'pyproject.toml'
               - '.github/workflows/test.yml'
