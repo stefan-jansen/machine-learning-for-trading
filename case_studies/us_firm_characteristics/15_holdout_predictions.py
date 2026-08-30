@@ -116,7 +116,8 @@ def _registered_holdout_generations(case_dir):
     with sqlite3.connect(str(case_dir / "run_log" / "registry.db")) as conn:
         rows = conn.execute(
             """
-            SELECT p.prediction_hash, p.training_hash, t.config_name, t.spec_json
+            SELECT p.prediction_hash, p.training_hash, p.checkpoint_kind, p.checkpoint_value,
+                   t.config_name, t.spec_json
             FROM prediction_sets p
             JOIN training_runs t ON t.training_hash = p.training_hash
             WHERE p.split = 'holdout'
@@ -127,10 +128,23 @@ def _registered_holdout_generations(case_dir):
         {
             "prediction_hash": prediction_hash,
             "training_hash": training_hash,
+            # The checkpoint is part of the configuration, not a detail of it: one training
+            # run publishes one prediction set per declared checkpoint, and moving the
+            # selection from one checkpoint to another is a different configuration
+            # evaluated on the same window. Identity on the training hash alone would see
+            # that as the same generation and let both stand.
+            "checkpoint": (checkpoint_kind, checkpoint_value),
             "config_name": config_name,
             "refitted": training_run_fitted_for_the_holdout(training_spec_json),
         }
-        for prediction_hash, training_hash, config_name, training_spec_json in rows
+        for (
+            prediction_hash,
+            training_hash,
+            checkpoint_kind,
+            checkpoint_value,
+            config_name,
+            training_spec_json,
+        ) in rows
     ]
 
 
@@ -254,10 +268,11 @@ print(f"Holdout training ends {fold['train_end']}, holdout opens {fold['val_star
 
 # %%
 holdout_training_hash = training_hash_from_spec(holdout_spec)
+this_generation = (holdout_training_hash, (CHECKPOINT_KIND, CHECKPOINT_VALUE))
 superseded = [
     row
     for row in _registered_holdout_generations(CASE_DIR)
-    if row["refitted"] and row["training_hash"] != holdout_training_hash
+    if row["refitted"] and (row["training_hash"], row["checkpoint"]) != this_generation
 ]
 if superseded and not REPLACE_HOLDOUT:
     raise RuntimeError(
@@ -267,8 +282,9 @@ if superseded and not REPLACE_HOLDOUT:
             for row in superseded
         )
         + f". This run would evaluate {carrier['config_name']} (training "
-        f"{holdout_training_hash}) on the same window. Set REPLACE_HOLDOUT=True to discard "
-        "the earlier generation, or leave the selection where it was."
+        f"{holdout_training_hash}, checkpoint {CHECKPOINT_KIND}={CHECKPOINT_VALUE}) on the "
+        "same window. Set REPLACE_HOLDOUT=True to discard the earlier generation, or leave "
+        "the selection where it was."
     )
 for row in superseded:
     print(f"REPLACING holdout generation {row['prediction_hash']} ({row['config_name']})")

@@ -1020,9 +1020,23 @@ def run_backtest(
             prediction_hash=prediction_hash,
             initial_cash=initial_cash,
         )
-    from case_studies.utils.conformal import ensure_conformal_calibration_identity
+    from case_studies.utils.conformal import (
+        ensure_conformal_calibration_identity,
+        holdout_conformal_embargo_steps,
+    )
+    from case_studies.utils.cv_window import lookup_split
 
-    strategy_spec = ensure_conformal_calibration_identity(strategy_spec)
+    # The embargo is recorded in the identity only for a holdout run, because that is the
+    # only place it applies. Read from the prediction set's own split rather than from a
+    # caller's assertion: the split is what decides whether the widths were embargoed, and
+    # a notebook that forgot to say so would register a holdout backtest whose hash cannot
+    # tell two calibrations apart.
+    _embargo_steps = None
+    if label and lookup_split(case_study, prediction_hash) == "holdout":
+        _embargo_steps = holdout_conformal_embargo_steps(case_study, label)
+    strategy_spec = ensure_conformal_calibration_identity(
+        strategy_spec, holdout_embargo_steps=_embargo_steps
+    )
     # Re-source initial_cash from the canonical spec. ensure_backtest_spec's
     # idempotent-canonical branch preserves an existing backtest_config.cash.initial
     # (typically $100K from setup.yaml) without overwriting it from the function

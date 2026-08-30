@@ -181,8 +181,32 @@ def holdout_conformal_embargo_steps(case_study: str, label: str) -> int:
         ) from error
 
 
-def ensure_conformal_calibration_identity(strategy_spec: dict[str, Any]) -> dict[str, Any]:
-    """Return a spec whose conformal allocation carries its full identity."""
+def ensure_conformal_calibration_identity(
+    strategy_spec: dict[str, Any],
+    *,
+    holdout_embargo_steps: int | None = None,
+) -> dict[str, Any]:
+    """Return a spec whose conformal allocation carries its full identity.
+
+    ``holdout_embargo_steps`` belongs here rather than only in the widths artifact, and
+    only for a holdout run. The widths are an input to the backtest and the embargo decides
+    them, so a spec that omits it gives two different calibrations one identity: change the
+    embargo, re-run, and the hash does not move. The registry then refuses to overwrite the
+    registered run - which is how the state announces itself, and the announcement is a
+    conflict rather than a number, so nothing is silently wrong. But the correct behaviour
+    is a different hash for a different calibration, which is what recording it gives.
+
+    It is recorded under ``backtest_config.calibration`` rather than in the allocation
+    block, because the allocation block is what the holdout replay is matched to its
+    validation carrier by. The two run the same strategy - the embargo is a property of
+    calibrating across the boundary between them, not of the strategy - so putting it in
+    ``strategy`` would make every holdout spec differ from its own carrier and no lineage
+    resolver would match them.
+
+    Pass it only on the holdout path. The embargo applies at the validation-to-holdout
+    boundary and has no meaning within validation, so adding it to a validation spec would
+    change every registered conformal hash to record something that did not affect it.
+    """
     spec = copy.deepcopy(strategy_spec)
     strategy = spec.get("strategy")
     if not isinstance(strategy, dict):
@@ -200,6 +224,9 @@ def ensure_conformal_calibration_identity(strategy_spec: dict[str, Any]) -> dict
     allocation["calibration_version"] = CALIBRATION_VERSION
     allocation.setdefault("min_calibration_n", DEFAULT_MIN_CALIBRATION_N)
     allocation.setdefault("sparse_fallback", POOLED_FALLBACK)
+    if holdout_embargo_steps is not None:
+        config = spec.setdefault("backtest_config", {})
+        config.setdefault("calibration", {})["holdout_embargo_steps"] = int(holdout_embargo_steps)
     return spec
 
 

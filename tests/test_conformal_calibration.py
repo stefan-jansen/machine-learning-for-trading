@@ -390,3 +390,37 @@ def test_widths_compute_on_a_panel_keyed_by_integer_identifiers(
     assert not widths.is_empty()
     assert widths.schema["symbol"] == pl.UInt32
     assert set(widths["symbol"].unique().to_list()) == {1001, 1002}
+
+
+def test_the_holdout_embargo_is_part_of_the_backtest_identity() -> None:
+    """Two embargoes are two calibrations, so they must not share a backtest hash.
+
+    The widths are an input to the backtest and the embargo decides them, but the widths
+    live in an artifact beside the prediction set and nothing in the strategy specification
+    named them. Changing the embargo therefore left the hash where it was, and the registry
+    refused to overwrite the registered run rather than accepting either result - which is
+    how the state announced itself, and it announced a conflict rather than a number.
+    """
+    spec = {
+        "version": 2,
+        "strategy": {"allocation": {"method": "conformal_weighted", "min_calibration_n": 30}},
+        "backtest_config": {"cash": {"initial": 1_000_000.0}},
+    }
+    zero = conformal.ensure_conformal_calibration_identity(spec, holdout_embargo_steps=0)
+    one = conformal.ensure_conformal_calibration_identity(spec, holdout_embargo_steps=1)
+
+    assert zero["backtest_config"]["calibration"]["holdout_embargo_steps"] == 0
+    assert one["backtest_config"]["calibration"]["holdout_embargo_steps"] == 1
+    assert zero != one
+
+    # It sits outside `strategy` because that block is what a holdout replay is matched to
+    # its validation carrier by. The two run the same strategy; the embargo is a property
+    # of calibrating across the boundary between them.
+    assert zero["strategy"] == one["strategy"]
+
+    # A validation run records nothing: the embargo has no meaning within validation, and
+    # writing it there would rehash every registered conformal backtest for no difference.
+    assert (
+        "calibration"
+        not in conformal.ensure_conformal_calibration_identity(spec)["backtest_config"]
+    )
