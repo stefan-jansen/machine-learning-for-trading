@@ -100,16 +100,14 @@ LABEL = ""
 # different names, so a resolved value cannot overwrite the request that produced it. An injected
 # parameter wins; otherwise the case study's own declaration does.
 
-# %%
-bt_config = get_backtest_config(CASE_STUDY_ID)
-HOLDOUT_LABEL = LABEL or bt_config.primary_label
-print(f"Case study: {CASE_STUDY_ID}; label: {HOLDOUT_LABEL}")
-
-# %% [markdown]
-# This notebook writes to the registry, so it opens the study rather than
-# reading one. `open_study` activates the tier, which is what lets a fit publish
-# a training run and a prediction set under it; the read-only `Study.at` the
-# preceding four notebooks use cannot.
+# This notebook writes to the registry, so it opens the study rather than reading one.
+# `open_study` activates the tier, which is what lets a fit publish a training run and a
+# prediction set under it; the read-only `Study.at` the preceding four notebooks use cannot.
+#
+# **Nothing is resolved before this call.** Activation is what decides which case directory the
+# run reads and writes, so a path, a registry handle or a configuration read beforehand names
+# the released case study while everything after it names the workspace. Every resolved value
+# below is therefore derived from the opened study, and the registry it resolved is printed.
 
 # %%
 study = open_study(
@@ -118,14 +116,11 @@ study = open_study(
     workspace=WORKSPACE or None,
     entry_point="18_holdout_predictions",
 )
-# Both derived from the opened study rather than from `get_case_study_dir`. `open_study`
-# activates the tier and, given a WORKSPACE, roots this run somewhere other than the case
-# directory - so a path resolved before the call names a different registry and a different set
-# of artifacts than every read and write after it. One of those was the candidate-set presence
-# check; there were four more registry queries and the artifact scan behind it. Binding them
-# here means the notebook cannot hold two answers to "which registry is this".
 CASE_DIR = study.root
 REGISTRY_DB = CASE_DIR / "run_log" / "registry.db"
+bt_config = get_backtest_config(CASE_STUDY_ID)
+HOLDOUT_LABEL = LABEL or bt_config.primary_label
+print(f"Case study: {CASE_STUDY_ID}; label: {HOLDOUT_LABEL}")
 print(f"Registry: {REGISTRY_DB}")
 # %% [markdown]
 # ## 1. Read the selection out of the frozen candidate set
