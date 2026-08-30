@@ -215,6 +215,25 @@ def _locked_holdout_backtest(db, val_backtest_hash: str) -> str | None:
     return str(evaluated[0]) if evaluated and evaluated[0] else None
 
 
+def training_run_fitted_for_the_holdout(training_spec_json: str | None) -> bool:
+    """True when a training run's own CV declares the holdout fold.
+
+    This is what separates a refit from a validation-fitted model scored on a later
+    window. It is read from the training specification rather than inferred from the
+    prediction set's split, because the split says where the predictions land and says
+    nothing about what the model saw while fitting - a model fitted on the validation
+    folds can publish predictions over the holdout window, and that is exactly the
+    mistake the holdout exists to rule out.
+
+    A run with no recorded specification answers False: it cannot be shown to have been
+    refitted, and the holdout lineage is not a place to assume.
+    """
+    if not training_spec_json:
+        return False
+    cv = (json.loads(training_spec_json).get("computation") or {}).get("cv") or {}
+    return cv.get("split") == "holdout"
+
+
 def resolve_holdout_self_backtest(
     case_study: str,
     val_backtest_hash: str,
@@ -298,21 +317,43 @@ def resolve_holdout_self_backtest(
             )
         training_hash, checkpoint_value, checkpoint_kind = train_row
 
+        configuration = db.execute(
+            "SELECT family, config_name, label FROM training_runs WHERE training_hash = ?",
+            (training_hash,),
+        ).fetchone()
+        if configuration is None:
+            return HoldoutSelfBacktest(
+                None,
+                f"the training run {training_hash} behind validation backtest "
+                f"{val_backtest_hash} is not registered, so the configuration to look for a "
+                "holdout refit of cannot be named",
+            )
+
         # ``IS`` is SQLite's null-safe equality: a configuration with no
         # checkpoint dimension stores NULL on both sides and must still match,
         # while ``=`` would drop it.
+        #
+        # The join is on the declared configuration rather than on the validation
+        # training hash. A holdout prediction produced correctly carries a NEW
+        # training identity - it is the same configuration refitted on the holdout
+        # fold, and the identity covers the CV interval - so matching on the
+        # validation training hash can only ever find a holdout scored from the
+        # validation-fitted model, which is the thing the holdout exists to avoid.
         candidates = db.execute(
             """
-            SELECT b.backtest_hash, b.spec_json
+            SELECT b.backtest_hash, b.spec_json, t.training_hash, t.spec_json
             FROM backtest_runs b
             JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
-            WHERE p.training_hash = ?
-              AND p.split = 'holdout'
+            JOIN training_runs t ON t.training_hash = p.training_hash
+            WHERE p.split = 'holdout'
               AND p.checkpoint_value IS ?
               AND p.checkpoint_kind IS ?
+              AND t.family = ?
+              AND t.config_name = ?
+              AND t.label = ?
             ORDER BY b.backtest_hash
             """,
-            (training_hash, checkpoint_value, checkpoint_kind),
+            (checkpoint_value, checkpoint_kind, *configuration),
         ).fetchall()
 
     checkpoint = f"checkpoint {checkpoint_kind}={checkpoint_value}"
@@ -320,28 +361,38 @@ def resolve_holdout_self_backtest(
         return HoldoutSelfBacktest(
             None,
             f"no holdout backtest is registered for the configuration behind validation run "
-            f"{val_backtest_hash} (training {training_hash}, {checkpoint}), so the holdout "
-            "has not been evaluated for this case study",
+            f"{val_backtest_hash} ({configuration[0]}/{configuration[1]} on "
+            f"{configuration[2]}, {checkpoint}), so the holdout has not been evaluated for "
+            "this case study",
         )
 
-    matched = [
-        bh
-        for bh, spec_json in candidates
-        if json.loads(spec_json).get("strategy", {}) == val_strategy
-    ]
+    # Two conditions, and the second is the one a lineage match alone cannot express. The
+    # strategy spec has to be the validation run's, so the anchor is a replay of what was
+    # selected rather than a neighbouring allocator that shares the holdout prediction. And
+    # the training run behind it has to have been refitted for the holdout: a model fitted on
+    # the validation folds can publish predictions over the holdout window, and accepting one
+    # would report the exact thing the holdout exists to rule out.
+    matched = sorted(
+        {
+            bh
+            for bh, spec_json, _, training_spec_json in candidates
+            if json.loads(spec_json).get("strategy", {}) == val_strategy
+            and training_run_fitted_for_the_holdout(training_spec_json)
+        }
+    )
     if not matched:
         return HoldoutSelfBacktest(
             None,
-            f"{len(candidates)} holdout backtests are registered for the configuration behind "
-            f"validation run {val_backtest_hash} (training {training_hash}, {checkpoint}), and "
-            "none of them replays that run's strategy, so the anchor is not a replay of what "
-            "was selected",
+            f"{len(candidates)} holdout backtests are registered for "
+            f"{configuration[0]}/{configuration[1]} on {configuration[2]} ({checkpoint}), and "
+            "none of them both replays that run's strategy and comes from a run refitted for "
+            "the holdout, so the anchor is not a replay of what was selected",
         )
-    if len(set(matched)) > 1:
+    if len(matched) > 1:
         raise ValueError(
-            f"holdout replay for {val_backtest_hash} is ambiguous: "
-            f"{sorted(set(matched))} share training_hash {training_hash}, "
-            f"{checkpoint} and one strategy spec"
+            f"holdout replay for {val_backtest_hash} is ambiguous: {matched} are all "
+            f"{configuration[0]}/{configuration[1]} on {configuration[2]}, refitted for the "
+            f"holdout at {checkpoint}, with one strategy spec"
         )
     return HoldoutSelfBacktest(matched[0])
 

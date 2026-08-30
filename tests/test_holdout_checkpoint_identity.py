@@ -25,8 +25,17 @@ from case_studies.utils.strategy_analysis import (
 )
 
 TRAINING_HASH = "t_gbm_leaves_7_mae"
+# The holdout side is a different training run: the same declared configuration refitted
+# on the holdout fold. That is what a correct holdout is, and it is why neither resolver
+# can match on the validation training hash.
+HOLDOUT_TRAINING_HASH = "t_gbm_leaves_7_mae_holdout"
 STRATEGY = {"signal": {"method": "score_weighted_top_k", "top_k": 10}}
 OTHER_STRATEGY = {"signal": {"method": "score_weighted_top_k", "top_k": 20}}
+
+VALIDATION_TRAINING_SPEC = json.dumps({"computation": {"cv": {"folds": [{"fold": "0"}]}}})
+HOLDOUT_TRAINING_SPEC = json.dumps(
+    {"computation": {"cv": {"split": "holdout", "folds": [{"fold": "1"}]}}}
+)
 
 
 def _spec(strategy: dict) -> str:
@@ -47,11 +56,17 @@ def _build_registry(case_dir, *, checkpoints=(200, 400), holdout_sharpes=(0.4, 1
     run_log.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(str(run_log / "registry.db"))
     db.executescript(REGISTRY_SCHEMA_SQL)
-    db.execute(
-        "INSERT INTO training_runs (training_hash, family, label, config_name, created_at)"
-        " VALUES (?, 'gbm', 'fwd_ret_21d', 'leaves_7_mae', '2026-08-16T00:00:00+00:00')",
-        (TRAINING_HASH,),
-    )
+    for training_hash, training_spec in (
+        (TRAINING_HASH, VALIDATION_TRAINING_SPEC),
+        (HOLDOUT_TRAINING_HASH, HOLDOUT_TRAINING_SPEC),
+    ):
+        db.execute(
+            "INSERT INTO training_runs (training_hash, family, label, config_name, spec_json,"
+            " created_at)"
+            " VALUES (?, 'gbm', 'fwd_ret_21d', 'leaves_7_mae', ?,"
+            " '2026-08-16T00:00:00+00:00')",
+            (training_hash, training_spec),
+        )
     for checkpoint, holdout_sharpe in zip(checkpoints, holdout_sharpes, strict=True):
         # A configuration with no checkpoint dimension stores NULL in *both*
         # columns, which is what the linear and GBM holdout rows look like. Binding
@@ -65,7 +80,13 @@ def _build_registry(case_dir, *, checkpoints=(200, 400), holdout_sharpes=(0.4, 1
                 "INSERT INTO prediction_sets (prediction_hash, training_hash,"
                 " checkpoint_value, checkpoint_kind, split, created_at)"
                 " VALUES (?, ?, ?, ?, ?, '2026-08-16T00:00:00+00:00')",
-                (pred, TRAINING_HASH, checkpoint, checkpoint_kind, split),
+                (
+                    pred,
+                    TRAINING_HASH if split == "validation" else HOLDOUT_TRAINING_HASH,
+                    checkpoint,
+                    checkpoint_kind,
+                    split,
+                ),
             )
             db.execute(
                 "INSERT INTO backtest_runs (backtest_hash, prediction_hash, spec_json,"
@@ -222,7 +243,9 @@ def test_an_unevaluated_holdout_is_reported_as_a_state_not_as_a_missing_hash(cas
     # The validation run that was searched for, so the reader can see the search was
     # well formed rather than being told only that something is missing.
     assert "b_validation_200" in resolution.reason
-    assert TRAINING_HASH in resolution.reason
+    # The configuration searched for, which is what the holdout refit is matched on - the
+    # validation training hash cannot appear, because a correct holdout carries a new one.
+    assert "gbm/leaves_7_mae" in resolution.reason
 
 
 def test_a_holdout_that_replays_a_different_strategy_is_a_different_reason(case_study):
@@ -239,7 +262,7 @@ def test_a_holdout_that_replays_a_different_strategy_is_a_different_reason(case_
     resolution = resolve_holdout_self_backtest("etfs", "b_validation_200")
 
     assert not resolution.found
-    assert "none of them replays" in resolution.reason
+    assert "none of them both replays" in resolution.reason
     assert "has not been evaluated" not in resolution.reason
 
 
@@ -275,21 +298,24 @@ def test_a_found_replay_carries_no_reason(case_study):
 # validation `training_hash`, so none of them can find it: the notebook reported the holdout as
 # unevaluated after it had been finalized, which a reader cannot tell apart from "not run yet".
 
-HOLDOUT_TRAINING_HASH = "t_gbm_leaves_7_mae_holdout"
-
 
 def _seal_and_evaluate(case_dir, *, carrier="b_validation_200", state="HOLDOUT_EVALUATED"):
-    """A lock over `carrier`, and the holdout it produced under its own training identity."""
+    """A lock over `carrier`, and the holdout it produced under its own training identity.
+
+    The holdout training run comes from `_build_registry`, which already creates one whose CV
+    declares the holdout fold - the identity a refit produces, and the one the lineage match
+    now requires. This adds only what a sealed evaluation adds: the prediction and backtest it
+    finalized, and the lock and evaluation rows naming them.
+    """
     db = sqlite3.connect(str(case_dir / "run_log" / "registry.db"))
-    db.execute(
-        "INSERT INTO training_runs (training_hash, family, label, config_name, created_at)"
-        " VALUES (?, 'gbm', 'fwd_ret_21d', 'leaves_7_mae', '2026-08-30T00:00:00+00:00')",
-        (HOLDOUT_TRAINING_HASH,),
-    )
+    # A checkpoint the fixture does not use, so the lineage fallback stays unambiguous and
+    # these cases test the one thing they are about: whether the lock is consulted, and whose.
+    # With the same checkpoint the registry holds two indistinguishable holdout replays and the
+    # fallback refuses - correctly, but for a reason that has nothing to do with the lock.
     db.execute(
         "INSERT INTO prediction_sets (prediction_hash, training_hash, checkpoint_value,"
         " checkpoint_kind, split, created_at)"
-        " VALUES ('p_locked_holdout', ?, 200, 'iteration', 'holdout',"
+        " VALUES ('p_locked_holdout', ?, 900, 'iteration', 'holdout',"
         " '2026-08-30T00:00:00+00:00')",
         (HOLDOUT_TRAINING_HASH,),
     )
@@ -343,3 +369,34 @@ def test_a_lock_still_in_progress_is_not_read_as_an_evaluation(case_study):
     _seal_and_evaluate(case_study, state="LOCKED")
 
     assert select_holdout_self_backtest("etfs", "b_validation_200") == "b_holdout_200"
+
+
+def test_a_validation_fitted_holdout_is_matched_by_neither_resolver(case_study):
+    """The shape this fixture used to have, and the defect both resolvers now reject.
+
+    Predictions land on the holdout window, but the training run that made them declares
+    the validation folds - so its parameters were chosen while looking at the period it is
+    being judged against. Matching on the carrier's training hash is what used to find it,
+    and it is the only thing that rule could find.
+    """
+    _build_registry(case_study, checkpoints=(200,), holdout_sharpes=(0.4,))
+    db = sqlite3.connect(str(case_study / "run_log" / "registry.db"))
+    db.execute(
+        "UPDATE prediction_sets SET training_hash = ? WHERE prediction_hash = 'p_holdout_200'",
+        (TRAINING_HASH,),
+    )
+    db.commit()
+    db.close()
+
+    assert select_holdout_self_backtest("etfs", "b_validation_200") is None
+    assert (
+        _holdout_lineage_for(
+            "etfs",
+            "fwd_ret_21d",
+            strategy_spec=STRATEGY,
+            label_restriction=None,
+            rung=None,
+            prefer_prediction_hash="p_validation_200",
+        )
+        is None
+    )

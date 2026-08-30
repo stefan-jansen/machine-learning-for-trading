@@ -73,7 +73,8 @@ def case_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         db.executescript(
             """
             CREATE TABLE training_runs (
-                training_hash TEXT PRIMARY KEY, family TEXT, config_name TEXT, label TEXT
+                training_hash TEXT PRIMARY KEY, family TEXT, config_name TEXT, label TEXT,
+                spec_json TEXT
             );
             CREATE TABLE prediction_sets (
                 prediction_hash TEXT PRIMARY KEY, training_hash TEXT, split TEXT,
@@ -84,7 +85,14 @@ def case_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             );
             CREATE TABLE backtest_metrics (backtest_hash TEXT PRIMARY KEY, sharpe REAL);
             CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL);
-            INSERT INTO training_runs VALUES ('train', 'gbm', 'cfg', 'fwd_ret_1d');
+            -- The spec is what separates a refit from a validation-fitted model scored on
+            -- a later window, so the holdout lineage resolver reads it. This fixture has no
+            -- holdout at all: 'train' declares the validation CV, and its presence is what
+            -- makes the resolver's answer here "no holdout" rather than a missing column.
+            INSERT INTO training_runs VALUES (
+                'train', 'gbm', 'cfg', 'fwd_ret_1d',
+                '{"computation": {"cv": {"split": "validation"}}}'
+            );
             INSERT INTO prediction_sets VALUES ('pred', 'train', 'validation', NULL, NULL);
             INSERT INTO fold_metrics VALUES ('pred', 0.02);
             """
