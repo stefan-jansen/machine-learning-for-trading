@@ -993,7 +993,15 @@ if LOCK_FINALIZED and not _sealed:
 _sealed_predicted = [row for row in holdout_prediction_rows if row[1] == SEALED_TRAINING_HASH]
 _other_fits = sorted({row[1] for row in holdout_prediction_rows} - {SEALED_TRAINING_HASH})
 if HOLDOUT_ASSESSABLE and not _sealed:
-    if _sealed_predicted:
+    if _sealed_predicted and _other_fits:
+        # Both at once, which neither of the single branches below would have said. The
+        # milder fact was taking precedence and hiding the sharper one.
+        print(
+            f"The lock names holdout training {SEALED_TRAINING_HASH}, its holdout prediction "
+            "exists with no backtest on it, AND the window was also spent on other fits "
+            f"({', '.join(_other_fits)}) that the lock does not seal."
+        )
+    elif _sealed_predicted:
         print(
             f"The lock names holdout training {SEALED_TRAINING_HASH}, its holdout prediction "
             "exists, and no backtest runs on it. The window is spent and its result has not "
@@ -1368,8 +1376,10 @@ assessment = pl.DataFrame(
                 else (
                     "no research lock in this registry; no holdout has been taken"
                     if not HOLDOUT_SPENT
+                    else f"sealed fit unbacktested; window also spent on {', '.join(_other_fits)}"
+                    if _other_fits and _sealed_predicted
                     else f"the window was spent on another fit ({', '.join(_other_fits)})"
-                    if _other_fits and not _sealed_predicted
+                    if _other_fits
                     else "the window is spent and no backtest computes its result"
                 )
                 if sealed_holdout is None
