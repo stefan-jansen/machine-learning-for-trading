@@ -2065,7 +2065,20 @@ case_studies/sp500_equity_option_analytics/16_risk_management:
     MAX_SYMBOLS: 5
     TOP_N_COMBOS: 1
   timeout: 600
-case_studies/sp500_equity_option_analytics/18_strategy_analysis:
+case_studies/sp500_equity_option_analytics/18_holdout_predictions:
+  # Not reducible. `reconstruct_locked_request` refuses anything but the canonical tier at
+  # `max_symbols: 0`, because a holdout fit on a reduced panel is not the configuration the
+  # selection ranked. The carrier it refits is a CUDA latent-factor model, and the canonical
+  # registry it reads is one CI does not build, so this runs on dispatch rather than per PR.
+  gpu: true
+  tier: on_demand
+  timeout: 1800
+case_studies/sp500_equity_option_analytics/19_holdout_backtest:
+  # Runs on CPU, but only against the holdout prediction 18 publishes, which a reduced CI
+  # registry never holds. It travels with 18 rather than failing per PR on a missing lineage.
+  tier: on_demand
+  timeout: 600
+case_studies/sp500_equity_option_analytics/20_strategy_analysis:
 case_studies/sp500_options/01_feasibility_analysis:
   timeout: 120
 case_studies/sp500_options/02_labels:

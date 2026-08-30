@@ -20,8 +20,8 @@
 # lineage that ranks first on validation Sharpe among the full-coverage
 # candidates. It asks whether stop losses, trailing stops, or time exits improve
 # validation Sharpe and drawdown relative to the same no-overlay baseline. Every
-# measurement here comes from validation; the 2021 holdout is read in
-# `18_strategy_analysis`.
+# measurement here comes from validation; the 2021 holdout is not read until
+# [`18_holdout_predictions`](18_holdout_predictions.ipynb).
 #
 # **Learning objectives**
 #
@@ -558,9 +558,10 @@ fig_tradeoff.show()
 # 4. Full-validation MAE-calibrated thresholds are excluded from corrected
 #    v3.1 because their thresholds were learned from the same validation paths
 #    used to score them.
-# 5. The predeclared overlays still constitute a selection cohort. The holdout
-#    can be used once on the final carrier, not to choose among them.
+# 5. The predeclared overlays are a selection cohort, and the winner of one is a
+#    validation result. The holdout is what says whether it survives, and it is
+#    read on the final carrier rather than used to choose among these.
 #
-# **Next:** `18_strategy_analysis` locks the corrected validation carrier and
-# compares it with the preserved historical holdout without reading that window
-# a second time on the new lineage. See Chapter 20 for the strategy synthesis framework.
+# **Next:** [`17_costs`](17_costs.ipynb) stresses whichever configuration this stage
+# advances - the best overlay, or the un-overlaid carrier where no overlay helped -
+# across the cost surface. See Chapter 20 for the strategy synthesis framework.

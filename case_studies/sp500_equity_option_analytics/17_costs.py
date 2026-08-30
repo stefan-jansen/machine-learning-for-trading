@@ -84,7 +84,7 @@ from utils.style import COLORS, FIGSIZE, add_message_title
 CASE_STUDY_ID = "sp500_equity_option_analytics"
 LABEL = ""
 MAX_SYMBOLS = 0
-TOP_N_COMBOS = None
+TOP_N_COMBOS = 1
 
 # %% [markdown]
 # ### What is asked for, and what it resolves to
@@ -128,19 +128,31 @@ for _note in _population_notes:
 CURRENT_MEMBERS = _members
 
 # %% [markdown]
-# ## 1. Advance the leading eligible strategy
+# ## 1. Advance the single best configuration out of the risk stage
 #
-# The ranking compares the equal-weight baseline with the active alternative
-# allocators using validation Sharpe and maximum prediction coverage.
+# Cost sensitivity is the last selection stage and it stresses exactly one
+# configuration: whichever survives `16_risk_management`. Running it across a
+# field would answer a question nobody asked, because the field has already been
+# narrowed and what remains to establish is whether the one carrier the case
+# study intends to publish survives its own friction.
+#
+# The pool is the risk-overlay rows *and* the allocation rows they were overlaid
+# on, ranked together. That union is what keeps "no overlay" a possible answer:
+# the risk stage registers a row per control and none for the un-overlaid
+# strategy, so drawing from `stage="risk_overlay"` alone would force an overlay
+# onto the carrier even where every control hurt it. A position-sizing
+# configuration with no risk overlay winning here is a valid outcome and is
+# reported as one, not treated as a stage that failed.
+#
 # Historical rows from removed allocators cannot re-enter the cost stage.
 
 # %%
 active_allocators = {item["method"] for item in get_allocators(CASE_STUDY_ID)}
-baseline_pool = resolve_best_backtest_runs(
+risk_pool = resolve_best_backtest_runs(
     CASE_STUDY_ID,
     COST_LABEL,
     split="validation",
-    stage="signal",
+    stage="risk_overlay",
     top_n=9999,
     prediction_hashes=CURRENT_MEMBERS,
 )
@@ -152,12 +164,21 @@ allocation_pool = resolve_best_backtest_runs(
     top_n=9999,
     prediction_hashes=CURRENT_MEMBERS,
 )
-candidate_pool = pl.concat([baseline_pool, allocation_pool], how="diagonal_relaxed").unique(
+candidate_pool = pl.concat([risk_pool, allocation_pool], how="diagonal_relaxed").unique(
     "backtest_hash"
 )
 candidate_hashes = candidate_pool["prediction_hash"].unique().to_list()
 if not candidate_hashes:
-    raise RuntimeError("No full-coverage baseline or allocation candidates found")
+    raise RuntimeError("No full-coverage risk-overlay or allocation candidates found")
+if risk_pool.is_empty():
+    raise RuntimeError(
+        "No risk-overlay rows: 16_risk_management has not run against the populations in "
+        "force, so there is no risk-stage winner for this notebook to stress"
+    )
+print(
+    f"Candidate pool: {risk_pool.height} risk-overlay row(s) and "
+    f"{allocation_pool.height} allocation row(s) they can be measured against"
+)
 
 # %% [markdown]
 # Model labels come from prediction provenance rather than from free-form
@@ -196,18 +217,38 @@ for row in candidate_pool.iter_rows(named=True):
                 "source": source_by_hash[row["prediction_hash"]],
                 "allocator": allocator,
                 "top_k": strategy.get("signal", {}).get("top_k"),
+                # None where the row is an allocation configuration carrying no overlay. That
+                # is a legitimate winner, so the column has to distinguish "no overlay" from
+                # any named control rather than defaulting to one.
+                "risk": (strategy.get("risk") or {}).get("name"),
             }
         )
 
-if len(eligible_rows) < TOP_N:
-    raise RuntimeError(f"Expected {TOP_N} eligible strategy lineages, found {len(eligible_rows)}")
+if not eligible_rows:
+    raise RuntimeError("No eligible strategy lineage in the risk-overlay or allocation pools")
 
-top_combos = pl.DataFrame(eligible_rows).sort("sharpe", descending=True).head(TOP_N)
-winner = top_combos.row(0, named=True)
+ranked = pl.DataFrame(eligible_rows).sort("sharpe", descending=True)
+winner = ranked.row(0, named=True)
+RISK_HELPED = winner["risk"] is not None
 print(
     f"Selected {winner['source']} with {winner['allocator']} allocation, "
-    f"top-{winner['top_k']}, validation Sharpe {winner['sharpe']:.3f}"
+    f"top-{winner['top_k']}, "
+    + (f"risk overlay {winner['risk']}" if RISK_HELPED else "no risk overlay")
+    + f", validation Sharpe {winner['sharpe']:.3f}"
 )
+# The comparison that makes the line above readable: what the best overlay achieved against
+# the best configuration carrying none. A negative difference is the stage reporting that its
+# controls did not help, which is an outcome and not a failure.
+_best_overlay = ranked.filter(pl.col("risk").is_not_null())
+_best_plain = ranked.filter(pl.col("risk").is_null())
+if _best_overlay.height and _best_plain.height:
+    _o, _p = _best_overlay.row(0, named=True), _best_plain.row(0, named=True)
+    print(
+        f"Best overlay {_o['risk']} Sharpe {_o['sharpe']:.3f} against best un-overlaid "
+        f"{_p['allocator']} Sharpe {_p['sharpe']:.3f} "
+        f"({_o['sharpe'] - _p['sharpe']:+.3f})"
+    )
+top_combos = ranked.head(TOP_N)
 
 # %% [markdown]
 # The line above names the strategy this sweep stresses - its source, allocator, concentration and
@@ -506,5 +547,5 @@ fig.show()
 #    It establishes that this validation result is not an artifact of one cost assumption, which
 #    is a narrower and more defensible claim.
 #
-# **Next:** [`18_strategy_analysis`](18_strategy_analysis.ipynb) tests risk overlays on the same
+# **Next:** [`18_holdout_predictions`](18_holdout_predictions.ipynb) tests risk overlays on the same
 # eligible validation lineage. See Chapter 19 for the risk-control framework.
