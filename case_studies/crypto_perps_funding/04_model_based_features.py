@@ -91,6 +91,7 @@ from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 from threadpoolctl import threadpool_limits
 
+from case_studies.research.holdout import build_holdout_cv
 from case_studies.utils.artifact_digest import value_digest, write_artifact
 from case_studies.utils.temporal import filtered_state_probs, sort_states_by_variance
 from data import load_crypto_perps
@@ -259,13 +260,14 @@ active_folds = [
         date_col="timestamp",
     )
 ]
-FOLDS_BY_DATE = sorted(active_folds, key=lambda item: item["test_start"])
+VALIDATION_FOLDS = list(active_folds)
+VALIDATION_FOLD_IDS = {fold["fold"] for fold in VALIDATION_FOLDS}
 _evaluation = load_evaluation_config(CASE_STUDY_ID)
 holdout_start = pd.Timestamp(_evaluation["holdout_start"], tz="UTC")
 holdout_end = pd.Timestamp(_evaluation["holdout_end"], tz="UTC")
 
-print(f"Walk-forward folds: {len(active_folds)}")
-for f in active_folds:
+print(f"Walk-forward folds: {len(VALIDATION_FOLDS)}")
+for f in VALIDATION_FOLDS:
     embargo = f["test_start"] - f["train_end"]
     label_endpoint = f["test_end"] + pd.Timedelta(LABEL_BUFFER)
     assert embargo >= pd.Timedelta(LABEL_BUFFER)
@@ -277,14 +279,96 @@ for f in active_folds:
     )
 
 # %% [markdown]
-# The holdout is neither fitted on nor emitted, and that is a declared choice rather
-# than something the fold loop happened to do. Both models here are unsupervised - they
-# read prices and funding, never the label - so a fit whose estimation window ends before
-# the holdout could legitimately be run forward across it without seeing anything it
-# should not. This notebook stops at the development folds, and the cost of stopping
-# there is worth stating plainly rather than discovering downstream: the artifact
-# contains no model-based features for holdout dates, so producing them is work for
-# whatever needs them, not a lookup in this file.
+# ### The holdout fold, which is a fold like the others
+#
+# The validation folds are what `generate_cv_splits` lays out. One more is appended here, and it
+# is appended rather than inferred downstream because **a holdout fit needs features, and a split
+# definition is not features**: `utils.modeling.append_holdout_fold_if_needed` adds the geometry
+# to a modeling dataset and produces no rows, so a stage that called it against an artifact
+# written without this found nothing in the holdout window at any fold. That is
+# ml4t/agent-workspace#971, and this is crypto's half of it.
+#
+# Its boundaries are not re-derived here. `build_holdout_cv` is what reconstructs a holdout fit
+# downstream, so it is asked for them: a second construction is a second thing to keep in step,
+# and this seal has already been built more than once.
+#
+# The boundary that matters is `train_end`, and it is not the date the holdout opens. It is one
+# label buffer earlier, counted in settlements along this panel's own grid, so the last training
+# label's outcome window resolves before the holdout rather than inside it. The buffer is the
+# case study's **widest** declared one - `fwd_ret_24h` at 24H, three settlements - because one
+# fold serves every label and the widest is the only choice that leaks for none of them.
+#
+# Nothing else about the notebook changes. Both models are unsupervised, they read prices and
+# funding and never the label, and neither input series is cut at the boundary here - the fold
+# list was the only thing keeping rows out of the holdout window.
+
+# %%
+_derived_holdout_cv = build_holdout_cv(
+    {
+        "label": PRIMARY_LABEL,
+        "computation": {
+            "cv": {
+                "folds": [
+                    {
+                        "fold": f["fold"],
+                        "train_start": str(f["train_start"]),
+                        "train_end": str(f["train_end"]),
+                        "val_start": str(f["test_start"]),
+                        "val_end": str(f["test_end"]),
+                    }
+                    for f in VALIDATION_FOLDS
+                ]
+            }
+        },
+    },
+    case_study=CASE_STUDY_ID,
+    timeline=labels["timestamp"].unique().sort().to_list(),
+    label=PRIMARY_LABEL,
+)
+_derived = _derived_holdout_cv["folds"][0]
+holdout_fold = {
+    "fold": int(_derived["fold"]),
+    "train_start": pd.Timestamp(_derived["train_start"], tz="UTC"),
+    "train_end": pd.Timestamp(_derived["train_end"]).tz_convert("UTC"),
+    "test_start": pd.Timestamp(_derived["val_start"], tz="UTC"),
+    "test_end": pd.Timestamp(_derived["val_end"]).tz_convert("UTC"),
+}
+HOLDOUT_FOLD_ID = holdout_fold["fold"]
+assert HOLDOUT_FOLD_ID not in VALIDATION_FOLD_IDS, (
+    "the holdout fold takes an id a validation fold already owns, so every consumer joining by "
+    "fold id would read holdout-dated rows as validation data"
+)
+assert holdout_fold["train_end"] < holdout_start, (
+    "the holdout fold trains through the boundary, so the last training label resolves inside "
+    "the window it is meant to be judged against"
+)
+assert (holdout_fold["test_start"], holdout_fold["test_end"].date()) == (
+    holdout_start,
+    holdout_end.date(),
+), "the derived holdout interval is not the one setup.yaml declares"
+print(
+    f"Holdout fold {HOLDOUT_FOLD_ID}: fitted on [{holdout_fold['train_start']} to "
+    f"{holdout_fold['train_end']}], run forward over [{holdout_fold['test_start']} to "
+    f"{holdout_fold['test_end']}]; the gap is "
+    f"{_derived_holdout_cv['request']['label_buffer_steps']} settlements, which is "
+    f"{_derived_holdout_cv['request']['label_buffer']} on this grid and the widest buffer "
+    f"{_derived_holdout_cv['request']['label_buffer_label']} declares"
+)
+active_folds = [*VALIDATION_FOLDS, holdout_fold]
+FOLDS_BY_DATE = sorted(active_folds, key=lambda item: item["test_start"])
+
+# %% [markdown]
+# The holdout is fitted on nothing and run forward over everything, which is the same
+# discipline the validation folds get and not a weaker one. Both models here are
+# unsupervised - they read prices and funding, never the label - so a fit whose estimation
+# window ends before the holdout can be run forward across it without seeing anything it
+# should not, and the holdout fold's estimation window ends three settlements before the
+# holdout opens.
+#
+# This notebook used to stop at the development folds and say so. What that cost is now
+# visible: the artifact carried no model-based feature for any holdout date, so a holdout
+# retrain joined fold 0's features - fitted on a window ending years earlier - or found
+# nothing at all, and neither failure raised.
 #
 # The figure is what the assertions above look like drawn. Each fold contributes one
 # bar for the window every parameter is estimated from and one for the window the frozen
@@ -309,7 +393,7 @@ ax.axvspan(
     edgecolor=COLORS["recede"],
     hatch="///",
     linewidth=0.8,
-    label="holdout, neither fitted nor emitted",
+    label="holdout window",
 )
 ax.axvline(holdout_start, color=COLORS["negative"], linewidth=1.2)
 ax.set_xlim(min(f["train_start"] for f in active_folds) - pd.Timedelta(days=30), holdout_end)
@@ -320,14 +404,15 @@ ax.legend(frameon=False, fontsize=7, loc="upper left", ncols=3)
 add_message_title(
     ax,
     "Every parameter comes from the left of its fold's validation bar",
-    subtitle="Estimation and inference windows per fold, and the untouched holdout",
+    subtitle="Estimation and inference windows per fold, the holdout fold among them",
 )
 fig.tight_layout()
 show_with_alt(
     fig,
-    "Horizontal bars for each walk-forward fold: a dark estimation window followed by an "
-    "amber inference window, both ending before a hatched holdout region that begins at "
-    "the configured holdout start date.",
+    "Horizontal bars for each fold: a dark estimation window followed by an amber inference "
+    "window. Every validation fold's pair ends before a hatched holdout region that begins at "
+    "the configured holdout start date; the holdout fold's estimation bar stops just short of "
+    "that boundary and its inference bar is the hatched region itself.",
 )
 
 # %% [markdown]
@@ -406,7 +491,8 @@ coverage = (
     .sort("first", descending=True)
 )
 fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"])
-for fold, color in zip(FOLDS_BY_DATE, (COLORS["recede"], COLORS["amber"]), strict=False):
+_VALIDATION_BY_DATE = [f for f in FOLDS_BY_DATE if f["fold"] in VALIDATION_FOLD_IDS]
+for fold, color in zip(_VALIDATION_BY_DATE, (COLORS["recede"], COLORS["amber"]), strict=False):
     ax.axvspan(
         fold["train_start"],
         fold["train_end"],
@@ -427,7 +513,7 @@ ax.tick_params(axis="y", labelsize=6)
 ax.legend(frameon=False, fontsize=7, loc="lower left")
 add_message_title(
     ax,
-    "The newest listings arrive too late to be fitted in either fold",
+    "The newest listings arrive too late to be fitted in either validation fold",
     subtitle="Available 8-hour bars per perpetual, against the two estimation windows",
 )
 fig.tight_layout()
@@ -832,13 +918,13 @@ regime_view = pl.concat(
             (pl.col("fold") == fold["fold"])
             & pl.col("timestamp").is_between(fold["test_start"], fold["test_end"], closed="both")
         ).join(agg_series, on="timestamp", how="inner")
-        for fold in FOLDS_BY_DATE
+        for fold in _VALIDATION_BY_DATE
     ]
 ).sort("timestamp")
 
 # %%
 fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True)
-for color, fold in zip((COLORS["blue"], COLORS["amber"]), FOLDS_BY_DATE, strict=False):
+for color, fold in zip((COLORS["blue"], COLORS["amber"]), _VALIDATION_BY_DATE, strict=False):
     window = regime_view.filter(pl.col("fold") == fold["fold"])
     stamps = window["timestamp"].to_list()
     axes[0].plot(stamps, window["xs_mean_funding_bps"].to_list(), color=color, linewidth=0.7)
@@ -990,21 +1076,31 @@ show_with_alt(
 
 # %% [markdown] tags=["results"]
 # **The refit is doing something, in both models.** The medians in the tables above move
-# between the two folds, and for the volatility model the later fold's median
-# persistence reaches the boundary the fitting library imposes at 1.0, with the upper
-# half of the interquartile range sitting on it: for at least half the perpetuals, the
-# later fit says a variance shock does not decay inside the fold at all. A fit at that
+# across the three fits, and for the volatility model two of the three - fold 0 and the
+# holdout fold - reach the boundary the fitting library imposes at 1.0, with the upper
+# half of the interquartile range sitting on it: for at least half the perpetuals, those
+# fits say a variance shock does not decay inside the window at all. A fit at that
 # boundary is censored there, so it cannot distinguish "extremely persistent" from
 # "integrated", and that is the second reason to read persistence rather than a single
-# coefficient - $\alpha$ falls and $\beta$ rises between the folds, so either one on its
-# own understates how far the recursion moved.
+# coefficient - median $\alpha$ runs 0.093, 0.076, 0.087 across folds 1, 0 and 2 while
+# $\beta$ runs 0.862, 0.905, 0.917, so either one on its own understates how far the
+# recursion moved.
 #
-# The regime model moves the same way: both expected run lengths are longer in the later
-# fold, so the state the later fit calls calm persists for roughly twice as many
-# settlements as the state the earlier fit gave that name. Neither `garch_cond_vol` nor
-# `hmm_regime_prob_stress` is therefore one variable measured twice. A model that pools
-# both folds is pooling quantities calibrated differently, which is what the fold column
-# in the artifact exists to prevent.
+# The holdout fold is the interesting row, because it is fitted on four years where the
+# validation folds see two. Its persistence is censored at 1.0 like fold 0's, and its
+# median $\gamma$ collapses to 0.004 against 0.035 and 0.034 - on the longest window the
+# asymmetry term all but disappears, which is a statement about how much of it the
+# two-year windows were fitting to their own sample.
+#
+# The regime model moves too, and not monotonically: calm run length is 13.1 settlements
+# in fold 1, 26.7 in fold 0 and 17.4 in the holdout fold, and the stressed state runs
+# 10.2, 14.0 and 10.1. So the state a fit calls calm persists for twice as long in one
+# window as in another, and the longest window does not simply average them. Neither
+# `garch_cond_vol` nor
+# `hmm_regime_prob_stress` is therefore one variable measured three times. A model that
+# pools folds is pooling quantities calibrated differently, which is what the fold column
+# in the artifact exists to prevent - and it is why the holdout fold has to be one of the
+# folds in the file rather than a join against fold 0.
 
 # %% [markdown]
 # ## E. Combine and emit
@@ -1085,7 +1181,35 @@ EXPECTED_TEMPORAL = {
 }
 assert set(temporal_feature_cols) == EXPECTED_TEMPORAL, "the emitted schema is not the contract"
 assert temporal.select("timestamp", "symbol", "fold").is_duplicated().sum() == 0
-assert temporal["timestamp"].max() < holdout_start, "an emitted row reaches the holdout"
+
+# Containment, checked in both directions and per fold class. A one-directional check - "no row
+# reaches the holdout" over the whole frame - can only catch an estimate leaking into a period it
+# should not describe. It cannot catch the opposite failure, which is a holdout window containing
+# nothing at all, and that is the failure this notebook actually had: it passed for months while
+# the artifact carried no holdout-dated row of any kind.
+_validation_rows = temporal.filter(pl.col("fold").is_in(VALIDATION_FOLD_IDS))
+assert _validation_rows["timestamp"].max() < holdout_start, (
+    "a validation fold emitted a holdout-dated row"
+)
+_holdout_rows = temporal.filter(pl.col("fold") == HOLDOUT_FOLD_ID)
+assert _holdout_rows["timestamp"].max() <= holdout_fold["test_end"], (
+    "the holdout fold emitted a row past the end of the holdout window"
+)
+_inside = _holdout_rows.filter(pl.col("timestamp") >= holdout_start)
+assert _inside.height > 0, (
+    "the holdout fold wrote no holdout-dated row, which is the vintage it exists to produce"
+)
+for column in sorted(EXPECTED_TEMPORAL):
+    non_null = _inside.get_column(column).drop_nulls().len()
+    assert non_null > 0, (
+        f"{column} is null on every holdout-dated row, so the fold is present and the feature "
+        "is not - a fit that produced nothing reads exactly like one that was never asked"
+    )
+print(
+    f"Holdout fold {HOLDOUT_FOLD_ID}: {_inside.height:,} rows inside the holdout window, "
+    f"{_inside['symbol'].n_unique()} symbols, "
+    f"{_inside['timestamp'].min()} to {_inside['timestamp'].max()}"
+)
 
 record = write_artifact(
     temporal,
@@ -1095,6 +1219,23 @@ record = write_artifact(
     inputs={
         "financial": FINANCIAL_DIGEST,
         "load_crypto_perps": value_digest(prices),
+    },
+    # The fold set, stated rather than left to be inferred. A reader that finds no
+    # `fold_geometry` here regenerates the folds by calling `generate_cv_splits`, which returns
+    # the cross-validation folds alone - so the holdout fold would be in the parquet and
+    # invisible to every consumer of it. The frame says which fold ids exist and never says what
+    # their boundaries were.
+    metadata={
+        "fold_geometry": [
+            {
+                "fold": fold["fold"],
+                "train_start": str(fold["train_start"]),
+                "train_end": str(fold["train_end"]),
+                "val_start": str(fold["test_start"]),
+                "val_end": str(fold["test_end"]),
+            }
+            for fold in active_folds
+        ]
     },
 )
 print(f"Wrote features/model_based.parquet, {record['n_rows']:,} rows, digest {record['digest']}")
@@ -1159,7 +1300,7 @@ validation_temporal = pl.concat(
             (pl.col("fold") == fold["fold"])
             & pl.col("timestamp").is_between(fold["test_start"], fold["test_end"], closed="both")
         )
-        for fold in active_folds
+        for fold in VALIDATION_FOLDS
     ]
 )
 eval_df = validation_temporal.join(training_frame, on=["timestamp", "symbol"], how="inner").sort(
@@ -1397,8 +1538,11 @@ show_with_alt(
 #   partly on returns that came after it. Validation rows do not: their parameters end
 #   before the validation window opens, which is why the evaluation above is sound. The
 #   alternative is to refit before every training row, which this notebook does not do.
-# - Nothing is emitted for the holdout, so a model that needs these features there has to
-#   fit them, and a join that silently fills them instead will train on imputed values.
+# - The holdout fold's features exist and its geometry is in the sidecar, but a consumer that
+#   regenerates the fold set from `generate_cv_splits` instead of reading `fold_geometry` sees
+#   the validation folds only - so the holdout rows are in the parquet and invisible to it.
+#   `temporal_artifact_fold_boundaries` reads the sidecar first, which is what makes them
+#   reachable; anything hand-rolling the fold list will miss them.
 # - The screen at the end scores each feature on its own, so it says nothing about what
 #   these features contribute inside a model that also holds the other 39. Answering
 #   that needs a with-and-without comparison, and no stage of this pipeline runs one.
