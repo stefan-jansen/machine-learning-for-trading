@@ -8,7 +8,7 @@ import polars as pl
 
 def _load_selector():
     source = (
-        Path(__file__).parents[1] / "case_studies" / "us_firm_characteristics" / "13_costs.py"
+        Path(__file__).parents[1] / "case_studies" / "us_firm_characteristics" / "14_costs.py"
     ).read_text()
     module = ast.parse(source)
     function = next(
@@ -17,7 +17,7 @@ def _load_selector():
         if isinstance(node, ast.FunctionDef) and node.name == "_resolve_pre_cost_runs"
     )
     namespace: dict[str, object] = {"pl": pl}
-    exec(compile(ast.Module(body=[function], type_ignores=[]), "13_costs.py", "exec"), namespace)
+    exec(compile(ast.Module(body=[function], type_ignores=[]), "14_costs.py", "exec"), namespace)
     return namespace["_resolve_pre_cost_runs"], namespace
 
 
@@ -40,7 +40,7 @@ def test_cost_parent_is_best_of_baseline_and_allocation() -> None:
     namespace["resolve_best_backtest_runs"] = fake_resolver
     result = selector("us_firm_characteristics", "fwd_ret_1m", split="validation", top_n=1)
 
-    assert calls == ["signal", "allocation"]
+    assert calls == ["signal", "allocation", "risk_overlay"]
     assert result["backtest_hash"].to_list() == ["signal_hash"]
 
 

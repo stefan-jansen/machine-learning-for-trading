@@ -38,7 +38,7 @@
 # **Book reference**: Chapter 20, §20.1 (the §9 handoff feeds Ch20's
 # cross-case-study aggregation).
 #
-# **Prerequisites**: case-study pipeline through `14_risk_management`; the
+# **Prerequisites**: case-study pipeline through `13_risk_management`; the
 # locked registry (`case_studies/us_firm_characteristics/run_log/registry.db`).
 #
 # **Scope**: no training or re-backtesting. The case-study pipeline registers

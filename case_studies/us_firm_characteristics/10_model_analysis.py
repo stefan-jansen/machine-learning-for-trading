@@ -1300,7 +1300,7 @@ synthesis
 # ### What this notebook does not establish
 #
 # - **Whether the spread survives a real cost model.** The cost columns here apply a
-#   flat per-leg range to a decile spread. [`13_costs`](13_costs.ipynb) applies a cost
+#   flat per-leg range to a decile spread. [`14_costs`](14_costs.ipynb) applies a cost
 #   model that varies with the name and the trade.
 # - **Whether the portfolio is capacity-constrained.** Decile membership takes no
 #   account of how much can be traded in a small name without moving it.

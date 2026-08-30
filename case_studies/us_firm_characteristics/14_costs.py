@@ -147,6 +147,15 @@ def _resolve_pre_cost_runs(
     the registry itself: the ranking is what it decides, and it can then be exercised without
     a database. Passing None applies no solvency filter.
 
+    The pool is the whole ladder up to the risk overlay, and cost sensitivity runs on the
+    single best configuration out of it. `risk_overlay` was missing before, so the cost
+    curve described the pre-overlay winner - a configuration the case study does not ship.
+    `cost_sensitivity` is deliberately absent: pooling it would let a cost-charged run
+    re-enter the selection it is meant to be the consequence of.
+
+    Where the overlay stage registers nothing, as it does here, the best of this pool is a
+    position-sizing configuration with no overlay. That is the outcome, not a fallback.
+
     `ranked_pool` asks each stage for its whole ranked list rather than its top `top_n`.
     Truncating first and filtering after would let an insolvent leader take the slot a solvent
     run behind it should have had - and with `top_n=1`, that drops the entire stage from
@@ -160,7 +169,7 @@ def _resolve_pre_cost_runs(
             stage=stage,
             top_n=ranked_pool,
         )
-        for stage in ("signal", "allocation")
+        for stage in ("signal", "allocation", "risk_overlay")
     ]
     candidates = [frame for frame in candidates if not frame.is_empty()]
     if not candidates:
