@@ -166,6 +166,7 @@ CREATE TABLE IF NOT EXISTS causal_runs (
     confounding_bias_pct REAL,
     refutation_p     REAL,
     refutation_n_successful INTEGER,
+    refutation_placebo_json TEXT,
     spec_json        TEXT,
     notebook         TEXT,
     started_at       TEXT,
@@ -260,7 +261,8 @@ CREATE TABLE IF NOT EXISTS candidate_sets (
     member_kind              TEXT NOT NULL,
     comparison_contract_json TEXT NOT NULL,
     created_at               TEXT NOT NULL,
-    git_commit               TEXT
+    git_commit               TEXT,
+    supersedes_hash          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS candidate_set_members (
@@ -439,15 +441,16 @@ def _infer_stage(
             # Registry not initialized yet — fall through to spec inference.
             pass
     strategy = spec.get("strategy", spec)
-    # The explicit chapter tag is read before the spec content, for the same reason the holdout
-    # split is read before either: a caller that says what a run is outranks anything inferred
-    # from what the run contains. A cost sweep re-prices a carrier without altering it, so when
-    # the carrier came from the risk stage the cloned spec still carries its risk block - and
-    # inferring from that block first would file every point of the cost curve as a new risk
-    # overlay, polluting the stage it was drawn from and leaving `stage='cost_sensitivity'` empty
-    # for the notebook that reads it back. No registered run has ever had both, because the cost
-    # sweeps only began drawing from `risk_overlay` when the stage order was fixed, so this
-    # decides a case that was previously unreachable rather than reclassifying an existing one.
+    # The explicit tag is read before the risk block, because it states what the caller is
+    # doing while the risk block only says what the strategy contains. Once cost sensitivity
+    # runs on the winner of the risk stage - which is the order the backtest sequence now
+    # takes, risk before costs - every cost row carries an overlay, and inferring from the
+    # overlay first made `cost_sensitivity` unreachable for exactly the runs that are cost
+    # sensitivity. Measured on sp500_equity_option_analytics: a 17-point cost surface over a
+    # `trailing_5pct` carrier registered all 17 rows as `risk_overlay`.
+    #
+    # This did not bite while costs and risk were parallel branches off allocation, because a
+    # cost run then carried no overlay and fell through to the tag.
     chapter = spec.get("chapter", "")
     if chapter == "ch18":
         return "cost_sensitivity"
@@ -761,6 +764,23 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
     # specification, so it moves no causal hash and invalidates no registered row.
     if "causal_runs" in tables and not _table_has_column(db, "causal_runs", "supersedes_hash"):
         db.execute("ALTER TABLE causal_runs ADD COLUMN supersedes_hash TEXT")
+
+    # The candidate-set equivalent of the line above. A candidate set is derived from a
+    # registry that moves, so re-running the stage that freezes it produces a second set
+    # under the same name; without a declared predecessor the name resolves to two live
+    # identities and every reader of it raises.
+    if "candidate_sets" in tables and not _table_has_column(
+        db, "candidate_sets", "supersedes_hash"
+    ):
+        db.execute("ALTER TABLE candidate_sets ADD COLUMN supersedes_hash TEXT")
+
+    # The placebo draws behind refutation_p. Only the scalars were stored, so the
+    # permutation-distribution figure every causal notebook draws had no source in the
+    # registry and rendered empty behind its guard while the prose described it.
+    if "causal_runs" in tables and not _table_has_column(
+        db, "causal_runs", "refutation_placebo_json"
+    ):
+        db.execute("ALTER TABLE causal_runs ADD COLUMN refutation_placebo_json TEXT")
 
     # Migration 3: tall → wide metric tables
     if "prediction_metrics" in tables:

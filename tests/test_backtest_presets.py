@@ -94,31 +94,6 @@ def test_backtest_hash_changes_with_resolved_config() -> None:
     )
 
 
-def test_a_cost_sweep_over_a_risk_overlaid_carrier_stays_cost_sensitivity() -> None:
-    """The chapter tag outranks the risk block, or the cost curve files itself as risk overlays.
-
-    A cost sweep re-prices a carrier without altering it, so a carrier selected from the risk
-    stage arrives here with its risk block intact and `chapter="ch18"` added. Inferring from the
-    block first filed every point of the curve as a new `risk_overlay` run - polluting the stage
-    the carrier was drawn from, and leaving `stage='cost_sensitivity'` empty for the notebook that
-    reads the curve back. Unreachable until `etfs/17_costs` began pooling `risk_overlay`.
-    """
-    spec = {
-        "version": 2,
-        "chapter": "ch18",
-        "strategy": {
-            "signal": {"method": "equal_weight_top_k", "top_k": 10},
-            "rebalance": {"mode": "engine", "cadence": "monthly_month_end"},
-            "risk": {"name": "trailing", "position_rules": [{"type": "trailing_stop"}]},
-        },
-        "backtest_config": {"commission": {"rate": 0.0006}, "slippage": {"rate": 0.0004}},
-    }
-
-    assert _infer_stage(spec) == "cost_sensitivity"
-    # The block is still there - it is the carrier being priced, not something to strip.
-    assert strategy_view(spec)["risk"]["name"] == "trailing"
-
-
 def test_stage_inference_supports_v2_specs() -> None:
     spec = {
         "version": 2,
@@ -274,3 +249,43 @@ def test_normalize_prediction_columns_maps_causal_and_legacy_fields() -> None:
     assert "fold_id" in normalized.columns
     assert normalized["y_score"].to_list() == [0.02]
     assert normalized["y_true"].to_list() == [0.01]
+
+
+def test_cost_sensitivity_on_a_risk_overlay_carrier_is_not_read_as_risk_overlay() -> None:
+    """A ch18 cost run keeps its stage when its carrier carries an overlay.
+
+    Cost sensitivity runs on the winner of the risk stage, so once the backtest sequence
+    puts risk before costs every cost row carries a risk block. Inferring from that block
+    before reading the explicit ``chapter`` tag made ``cost_sensitivity`` unreachable for
+    exactly the runs that are cost sensitivity: measured on sp500_equity_option_analytics, a
+    17-point cost surface over a ``trailing_5pct`` carrier registered all 17 rows as
+    ``risk_overlay``. The tag states what the caller is doing; the risk block only says what
+    the strategy contains, so the tag is read first.
+    """
+    spec = {
+        "version": 2,
+        "chapter": "ch18",
+        "strategy": {
+            "signal": {"method": "equal_weight_top_k", "top_k": 5},
+            "rebalance": {"mode": "engine", "cadence": "weekly_friday_close"},
+            "allocation": {"method": "mvo_ledoit_wolf", "top_k": 5},
+            "risk": {"name": "trailing_5pct", "position_rules": [{"type": "trailing_stop"}]},
+        },
+        "backtest_config": {"commission": {"rate": 0.0025}, "slippage": {"rate": 0.0025}},
+    }
+    assert _infer_stage(spec) == "cost_sensitivity"
+
+
+def test_risk_overlay_without_a_cost_tag_is_still_a_risk_overlay() -> None:
+    """The reorder must not swallow the risk stage: no ch18 tag, still risk_overlay."""
+    spec = {
+        "version": 2,
+        "chapter": "ch19",
+        "strategy": {
+            "signal": {"method": "equal_weight_top_k", "top_k": 5},
+            "allocation": {"method": "mvo_ledoit_wolf", "top_k": 5},
+            "risk": {"name": "trailing_5pct", "position_rules": [{"type": "trailing_stop"}]},
+        },
+        "backtest_config": {"commission": {"rate": 0.0006}, "slippage": {"rate": 0.0004}},
+    }
+    assert _infer_stage(spec) == "risk_overlay"

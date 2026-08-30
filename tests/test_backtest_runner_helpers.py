@@ -330,8 +330,10 @@ def test_substitute_continuous_return_dedupe_assertion(
     import case_studies.utils.backtest_runner as br
     import utils as _utils  # type: ignore
 
-    monkeypatch.setattr(_utils, "CASE_STUDIES_DIR", str(tmp_path), raising=False)
-    monkeypatch.setattr(br, "CASE_STUDIES_DIR", str(tmp_path), raising=False)
+    # A Path, not a str: `get_case_study_dir` joins this with `/`, which is how the labels
+    # artifact is now resolved so that output isolation reaches it.
+    monkeypatch.setattr(_utils, "CASE_STUDIES_DIR", Path(tmp_path), raising=False)
+    monkeypatch.setattr(br, "CASE_STUDIES_DIR", Path(tmp_path), raising=False)
 
     with pytest.raises(ValueError, match=r"duplicate \(timestamp, symbol\)"):
         substitute_continuous_return_for_classification(
@@ -374,8 +376,10 @@ def test_substitute_continuous_return_max_null_rate_param(
     import case_studies.utils.backtest_runner as br
     import utils as _utils  # type: ignore
 
-    monkeypatch.setattr(_utils, "CASE_STUDIES_DIR", str(tmp_path), raising=False)
-    monkeypatch.setattr(br, "CASE_STUDIES_DIR", str(tmp_path), raising=False)
+    # A Path, not a str: `get_case_study_dir` joins this with `/`, which is how the labels
+    # artifact is now resolved so that output isolation reaches it.
+    monkeypatch.setattr(_utils, "CASE_STUDIES_DIR", Path(tmp_path), raising=False)
+    monkeypatch.setattr(br, "CASE_STUDIES_DIR", Path(tmp_path), raising=False)
 
     # Default cap (10%) raises: 3/4 = 75% null rate.
     with pytest.raises(ValueError, match=r"exceeds max_null_rate"):
@@ -388,3 +392,57 @@ def test_substitute_continuous_return_max_null_rate_param(
     )
     assert out.height == 1
     assert out["y_true"].to_list() == [0.01]
+
+
+def test_the_continuous_return_label_is_read_from_the_isolated_output_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A label parquet is generated output, so ML4T_OUTPUT_DIR decides where it is read from.
+
+    The configuration stays in the checkout - it is source - and only the artifact moves. The
+    two directories are the same whenever artifacts sit beside the source, which is why reading
+    the checkout was never wrong in production and always wrong under isolation: measured in CI
+    on `crypto_perps_funding` 13_backtest, which raised FileNotFoundError for a label the same
+    run had just written.
+    """
+    cs = "isolated_cs"
+    source = tmp_path / "checkout"
+    (source / cs / "config").mkdir(parents=True)
+    (source / cs / "config" / "setup.yaml").write_text(
+        dedent(
+            """
+            labels:
+              classification_eval_label:
+                fwd_dir_1d: fwd_ret_1d
+            """
+        ).strip()
+    )
+    # Deliberately no labels/ in the checkout: the only copy is in the output root.
+    output = tmp_path / "output"
+    (output / cs / "labels").mkdir(parents=True)
+    d1 = datetime(2024, 1, 2)
+    pl.DataFrame(
+        {"timestamp": [d1, d1], "symbol": ["A", "B"], "fwd_ret_1d": [0.011, 0.031]}
+    ).write_parquet(output / cs / "labels" / "fwd_ret_1d.parquet")
+
+    predictions = pl.DataFrame(
+        {
+            "timestamp": [d1, d1],
+            "symbol": ["A", "B"],
+            "y_score": [0.1, 0.2],
+            "y_true": [1, 0],
+        }
+    )
+
+    import case_studies.utils.backtest_runner as br
+    import utils as _utils  # type: ignore
+
+    monkeypatch.setattr(_utils, "CASE_STUDIES_DIR", source, raising=False)
+    monkeypatch.setattr(br, "CASE_STUDIES_DIR", source, raising=False)
+    monkeypatch.setenv("ML4T_OUTPUT_DIR", str(output))
+
+    out = substitute_continuous_return_for_classification(
+        predictions, case_study=cs, label="fwd_dir_1d"
+    )
+
+    assert out["y_true"].to_list() == [0.011, 0.031]

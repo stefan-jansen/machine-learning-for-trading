@@ -44,7 +44,7 @@ VALID_PREDICTION_SPLITS = frozenset({"validation", "holdout"})
 # Columns a schema migration added, which an immutable row may therefore be missing
 # through no change of its own. Nothing else is filled on NULL: see the comment at the
 # backfill itself for why a nullable column is not the same as a migrated one.
-MIGRATION_BACKFILLED_COLUMNS = frozenset({"refutation_n_successful"})
+MIGRATION_BACKFILLED_COLUMNS = frozenset({"refutation_n_successful", "refutation_placebo_json"})
 MAX_PREDICTION_STD_RATIO = 100.0
 
 
@@ -1926,6 +1926,7 @@ def register_causal_run(
     confounding_bias_pct: float | None,
     refutation_p: float | None,
     refutation_n_successful: int | None = None,
+    refutation_placebo_json: str | None = None,
     spec_json: str,
     notebook: str | None,
     started_at: str | None,
@@ -2072,10 +2073,10 @@ def register_causal_run(
                 causal_hash, label, treatment, confounders_json, embargo,
                 n_folds, n_obs, dml_effect, dml_se_hac, p_value_hac,
                 naive_effect, confounding_bias_pct, refutation_p,
-                refutation_n_successful,
+                refutation_n_successful, refutation_placebo_json,
                 spec_json, notebook, started_at, elapsed_s, git_commit,
                 supersedes_hash, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(causal_hash) DO UPDATE SET
                 label=excluded.label,
                 treatment=excluded.treatment,
@@ -2090,6 +2091,12 @@ def register_causal_run(
                 confounding_bias_pct=excluded.confounding_bias_pct,
                 refutation_p=excluded.refutation_p,
                 refutation_n_successful=excluded.refutation_n_successful,
+                -- Fill-once, like supersedes_hash. A row registered before this column
+                -- existed carries NULL, and a re-registration that recomputes the draws
+                -- should fill it; one that does not must not erase them.
+                refutation_placebo_json=COALESCE(
+                    excluded.refutation_placebo_json, causal_runs.refutation_placebo_json
+                ),
                 spec_json=excluded.spec_json,
                 notebook=excluded.notebook,
                 started_at=excluded.started_at,
@@ -2134,6 +2141,7 @@ def register_causal_run(
                 confounding_bias_pct,
                 refutation_p,
                 refutation_n_successful,
+                refutation_placebo_json,
                 spec_json,
                 notebook,
                 started_at,

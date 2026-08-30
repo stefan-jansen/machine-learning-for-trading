@@ -378,16 +378,29 @@ print(
 # crosses into the shaded region at all.
 #
 # Every bar stops short of the holdout, because this notebook writes features for the
-# walk-forward periods only. A later stage that needs the models fitted through to the
-# holdout as well builds that period itself, from `append_holdout_fold_if_needed`.
+# walk-forward periods only. `append_holdout_fold_if_needed` appends a holdout *fold
+# definition* to a later stage's split list; it fits nothing and writes no feature. So a
+# holdout retrain gets a window to train and predict over, and reads whatever this file
+# already holds inside it.
 #
 # The bars are periods, not the file's row index. Rows are keyed on
 # `(fold, timestamp, product, position)` across the whole price calendar, so rows dated
 # inside the holdout do exist in the file. What keeps them honest is which columns carry
 # a value there, and section E prints that count column by column. A model that reads no
 # forward return is bounded by where its *parameters* came from, so emitting a value
-# **for** a holdout date from parameters estimated entirely before it is exactly what the
-# later stages need.
+# **for** a holdout date from parameters estimated entirely before it is legitimate.
+#
+# **This file has no holdout vintage, and section E is where that shows.** The five
+# `fft_*` columns run to the end of the calendar, because a spectral window over past
+# prices needs no fit. The four that do need one do not: `_arima_walk` cuts its input at
+# `HOLDOUT_START` (C.1) and the hidden Markov model fits and emits within its own period
+# (C.3), so `arima_carry_forecast`, `arima_carry_residual`, `hmm_carry_regime_prob` and
+# `hmm_regime_duration` are null for every holdout-dated row. That is correct for the
+# validation artifact this notebook writes - none of those parameters may see a holdout
+# session - and it means a holdout retrain would fit four of its nine model-based columns
+# on nulls. Producing a holdout vintage is a separate run of this notebook against a
+# fitting window that ends at `HOLDOUT_START` and an emission window that runs past it;
+# it is not something a later stage can derive, and it is not done here.
 
 # %%
 fig = go.Figure()

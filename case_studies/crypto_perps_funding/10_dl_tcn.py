@@ -49,6 +49,11 @@ from case_studies.crypto_perps_funding.research_workflow import (
 
 # %% tags=["parameters"]
 EXECUTION_TIER = "canonical"
+SUPERSEDES_POPULATION: str = ""
+# The generation of this notebook's own checkpoint population that this run replaces, if any.
+# Distinct from SUPERSEDES_POPULATION above, which is the case-wide official model population:
+# the two are separate declarations and a refit can move either without moving the other.
+SUPERSEDES_MODEL_POPULATION: str = ""
 WORKSPACE = os.environ.get("ML4T_OUTPUT_DIR", "")
 LABELS = REGRESSION_LABELS
 PREVIEW_REDUCTIONS = {}
@@ -60,7 +65,9 @@ OVERRIDES = {"device": "cuda"}
 # %%
 study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 official_population = (
-    freeze_official_model_population(study) if EXECUTION_TIER == "canonical" else None
+    freeze_official_model_population(study, supersedes=SUPERSEDES_POPULATION or None)
+    if EXECUTION_TIER == "canonical"
+    else None
 )
 requests = model_request_catalog("deep_learning", labels=LABELS, config_prefix="tcn")
 requests
@@ -109,6 +116,7 @@ if official_population is not None:
 # %% tags=["results"]
 execution = run_model_plan(
     plan,
+    supersedes=SUPERSEDES_MODEL_POPULATION or None,
     population_name="crypto-tcn-validation-predictions-v1"
     if EXECUTION_TIER == "canonical"
     else None,

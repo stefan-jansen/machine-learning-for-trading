@@ -7,7 +7,7 @@ from .causal import (
     causal_supersedes,
     supersedes_for,
 )
-from .comparison import CandidateSet
+from .comparison import CandidateSet, candidate_set_supersedes
 from .configs import (
     declared_labels,
     load_model_configs,
@@ -60,7 +60,13 @@ from .population import (
     superseded_members_at,
     supersedes_for_run,
 )
-from .results import BacktestResult, PredictionResult, Result, TrainingResult
+from .results import (
+    HORIZON_DEPENDENT_PROTOCOL_FIELDS,
+    BacktestResult,
+    PredictionResult,
+    Result,
+    TrainingResult,
+)
 from .strategy import Strategy, strategy_warmup_periods
 from .workspace import Study, open_study
 
@@ -86,6 +92,7 @@ __all__ = [
     "ModelExecution",
     "ModelPlan",
     "ModelRun",
+    "HORIZON_DEPENDENT_PROTOCOL_FIELDS",
     "HoldoutExecution",
     "PredictionResult",
     "PredictionCatalog",
@@ -122,6 +129,7 @@ __all__ = [
     "planned_model_plan",
     "prediction_rows_at",
     "primary_label",
+    "candidate_set_supersedes",
     "population_supersedes",
     "research_name",
     "resolved_model_plan",

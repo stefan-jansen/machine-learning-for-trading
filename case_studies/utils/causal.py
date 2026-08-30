@@ -1608,6 +1608,25 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     return spec, context
 
 
+def _placebo_draws_json(refutation: dict) -> str | None:
+    """Serialize the placebo draws behind ``refutation_p``, or None when there are none.
+
+    ``causal_runs`` stored only the scalars - the p-value and the successful draw count -
+    so the permutation-distribution figure every causal notebook draws had no source in
+    the registry. Each notebook read ``ref.get("placebo_effects", [])`` from an in-memory
+    result, which is populated on the run that fits and empty on every reader afterwards,
+    so the figure rendered blank behind its guard while the prose described it.
+
+    The draws are the evidence for the refutation verdict, not a diagnostic byproduct: a
+    p-value cannot say whether the draws could have rejected at all, and the distribution
+    is what shows a reader the observed effect against what noise produces.
+    """
+    draws = refutation.get("placebo_effects")
+    if not draws:
+        return None
+    return json.dumps([float(value) for value in draws])
+
+
 def run_resolved_causal_request(
     study: Study,
     spec: dict[str, Any],
@@ -1734,6 +1753,7 @@ def run_resolved_causal_request(
         confounding_bias_pct=float(results["confounding_bias_pct"]),
         refutation_p=float(refutation_p) if refutation_p is not None else None,
         refutation_n_successful=int(refutation_n) if refutation_n is not None else None,
+        refutation_placebo_json=_placebo_draws_json(refutation),
         spec_json=canonical_json(spec),
         notebook="case_studies.utils.causal",
         started_at=results.get("started_at"),
@@ -1877,6 +1897,7 @@ def register_causal_run(
         confounding_bias_pct=float(results.get("confounding_bias_pct", 0.0)),
         refutation_p=float(refutation_p) if refutation_p is not None else None,
         refutation_n_successful=int(refutation_n) if refutation_n is not None else None,
+        refutation_placebo_json=_placebo_draws_json(ref),
         spec_json=canonical_json(spec),
         notebook=notebook,
         started_at=started_at or results.get("started_at"),

@@ -10,6 +10,7 @@ import polars as pl
 import pytest
 
 from case_studies.research import CandidateSet, PredictionResult, Result, Strategy, Study
+from case_studies.utils import conformal
 from tests.test_research_registry import _predictions, _training_spec
 from tests.test_research_workspace import _seed_release
 
@@ -168,7 +169,7 @@ def test_strategy_normalizes_conformal_identity_before_hashing(tmp_path: Path) -
     spec = strategy.resolve(prices=_prices())
     allocation = spec["strategy"]["allocation"]
 
-    assert allocation["calibration_version"] == "walk_forward_v2"
+    assert allocation["calibration_version"] == conformal.CALIBRATION_VERSION
     assert allocation["min_calibration_n"] == 30
     assert allocation["sparse_fallback"] == "pooled_prior_oos"
 
