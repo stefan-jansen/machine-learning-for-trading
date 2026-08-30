@@ -42,6 +42,7 @@
 """US Firm Characteristics: Holdout Backtest."""
 
 import json
+import sqlite3
 import warnings
 
 import polars as pl
@@ -55,6 +56,7 @@ from case_studies.utils.backtest_presets import ensure_backtest_spec, strategy_v
 from case_studies.utils.backtest_runner import run_backtest
 from case_studies.utils.conformal import (
     compute_holdout_conformal_widths,
+    ensure_conformal_calibration_identity,
     holdout_conformal_embargo_steps,
 )
 from case_studies.utils.registry import read_predictions
@@ -66,11 +68,45 @@ CASE_STUDY_ID = "us_firm_characteristics"
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 MAX_SYMBOLS = 0
+# Whether a holdout backtest of a DIFFERENT strategy may be superseded by this run. Off by
+# default, and the same switch `15_holdout_predictions` uses for the model side.
+REPLACE_HOLDOUT = False
 
 # %%
 study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 bt_config = get_backtest_config(CASE_STUDY_ID)
+
+
+def _registered_holdout_backtests(case_dir, prediction_hash):
+    """The backtests already registered against one holdout prediction set."""
+    with sqlite3.connect(str(case_dir / "run_log" / "registry.db")) as conn:
+        rows = conn.execute(
+            "SELECT backtest_hash, spec_json FROM backtest_runs WHERE prediction_hash = ? "
+            "ORDER BY backtest_hash",
+            (prediction_hash,),
+        ).fetchall()
+    return [
+        {"backtest_hash": backtest_hash, "strategy": json.loads(spec_json).get("strategy")}
+        for backtest_hash, spec_json in rows
+    ]
+
+
+def _delete_holdout_backtest(case_dir, backtest_hash):
+    """Remove one registered holdout backtest and the rows derived from it.
+
+    Same rule as `15_holdout_predictions`' replacement of a superseded generation: a
+    holdout result that has been observed and then left readable beside its replacement is
+    still a number someone can quote.
+    """
+    with sqlite3.connect(str(case_dir / "run_log" / "registry.db")) as conn:
+        conn.execute(
+            "DELETE FROM backtest_paired_metrics WHERE challenger_hash = ? OR benchmark_hash = ?",
+            (backtest_hash, backtest_hash),
+        )
+        conn.execute("DELETE FROM backtest_metrics WHERE backtest_hash = ?", (backtest_hash,))
+        conn.execute("DELETE FROM backtest_runs WHERE backtest_hash = ?", (backtest_hash,))
+
 
 # %% [markdown]
 # ## 1. The configuration, and the predictions it produced on the holdout
@@ -105,8 +141,6 @@ holdout_spec = build_holdout_training_spec(
 )
 
 # %%
-import sqlite3
-
 from case_studies.utils.registry import training_hash_from_spec
 
 holdout_training_hash = training_hash_from_spec(holdout_spec)
@@ -212,6 +246,33 @@ spec = ensure_backtest_spec(
     initial_cash=bt_config.initial_cash,
 )
 spec["chapter"] = "ch20"
+# The embargo goes into the specification here, before anything hashes it. The widths are
+# an input to this backtest and the embargo decides them, so two embargoes are two results
+# and must not share an identity - which they did: changing it left the hash where it was
+# and the registry refused to overwrite the registered run rather than accept either.
+# Recorded by the notebook rather than inside `run_backtest`, because callers elsewhere
+# construct and hash their own resolved specifications and compare the runner's answer to
+# them; a runner that added a key after that would make those comparisons fail.
+if allocation.get("method") == "conformal_weighted":
+    spec = ensure_conformal_calibration_identity(spec, holdout_embargo_steps=embargo_steps)
+
+# The window carries one backtest at a time, for the same reason `15` lets it carry one
+# prediction generation at a time. `15`'s guard is on the model - the training identity and
+# the checkpoint - and it cannot see this one: a changed allocator, risk overlay or cost
+# assumption produces the same holdout predictions and a different result from them. So the
+# strategy is checked here, against what is already registered on this prediction set.
+_registered = _registered_holdout_backtests(CASE_DIR, HOLDOUT_PREDICTION_HASH)
+_this_strategy = spec.get("strategy")
+superseded_backtests = [row for row in _registered if row["strategy"] != _this_strategy]
+if superseded_backtests and not REPLACE_HOLDOUT:
+    raise RuntimeError(
+        "the holdout window already carries a backtest of a different strategy: "
+        + ", ".join(row["backtest_hash"] for row in superseded_backtests)
+        + ". Set REPLACE_HOLDOUT=True to discard it, or leave the selection where it was."
+    )
+for row in superseded_backtests:
+    print(f"REPLACING holdout backtest {row['backtest_hash']}")
+    _delete_holdout_backtest(CASE_DIR, row["backtest_hash"])
 
 result = run_backtest(
     CASE_STUDY_ID,

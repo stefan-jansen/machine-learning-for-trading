@@ -409,8 +409,8 @@ def test_the_holdout_embargo_is_part_of_the_backtest_identity() -> None:
     zero = conformal.ensure_conformal_calibration_identity(spec, holdout_embargo_steps=0)
     one = conformal.ensure_conformal_calibration_identity(spec, holdout_embargo_steps=1)
 
-    assert zero["backtest_config"]["calibration"]["holdout_embargo_steps"] == 0
-    assert one["backtest_config"]["calibration"]["holdout_embargo_steps"] == 1
+    assert zero["input_identity"]["conformal_holdout_embargo_steps"] == 0
+    assert one["input_identity"]["conformal_holdout_embargo_steps"] == 1
     assert zero != one
 
     # It sits outside `strategy` because that block is what a holdout replay is matched to

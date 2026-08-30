@@ -196,12 +196,14 @@ def ensure_conformal_calibration_identity(
     conflict rather than a number, so nothing is silently wrong. But the correct behaviour
     is a different hash for a different calibration, which is what recording it gives.
 
-    It is recorded under ``backtest_config.calibration`` rather than in the allocation
-    block, because the allocation block is what the holdout replay is matched to its
-    validation carrier by. The two run the same strategy - the embargo is a property of
-    calibrating across the boundary between them, not of the strategy - so putting it in
-    ``strategy`` would make every holdout spec differ from its own carrier and no lineage
-    resolver would match them.
+    It is recorded under ``input_identity``, which is where the specification already
+    records the digests of things a backtest consumed rather than declared - the price
+    frame, the funding rates. The widths are one of those, and the embargo is what decides
+    them. It is deliberately not in the allocation block: that block is what a holdout
+    replay is matched to its validation carrier by, and the two run the same strategy, so
+    putting it there made every holdout spec differ from its own carrier and
+    ``select_holdout_self_backtest`` stopped matching. It is not a ``backtest_config``
+    section either - that schema is closed, and adding one is rejected by name.
 
     Pass it only on the holdout path. The embargo applies at the validation-to-holdout
     boundary and has no meaning within validation, so adding it to a validation spec would
@@ -225,8 +227,8 @@ def ensure_conformal_calibration_identity(
     allocation.setdefault("min_calibration_n", DEFAULT_MIN_CALIBRATION_N)
     allocation.setdefault("sparse_fallback", POOLED_FALLBACK)
     if holdout_embargo_steps is not None:
-        config = spec.setdefault("backtest_config", {})
-        config.setdefault("calibration", {})["holdout_embargo_steps"] = int(holdout_embargo_steps)
+        identity = spec.setdefault("input_identity", {})
+        identity["conformal_holdout_embargo_steps"] = int(holdout_embargo_steps)
     return spec
 
 
