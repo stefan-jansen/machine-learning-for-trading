@@ -280,6 +280,7 @@ def declared_sessions(
     *,
     split: str = "validation",
     case_dir: Path | None = None,
+    decision_axis: pl.Series | None = None,
 ) -> dict[int | None, list]:
     """Sessions each declared fold contains, keyed by fold id (``None`` for holdout).
 
@@ -288,6 +289,19 @@ def declared_sessions(
     trades, rather than from a synthetic calendar, is what makes this work unchanged for
     daily equities, 8-hourly perpetuals and minute-bar microstructure.
 
+    ``decision_axis`` narrows that to the moments a model could actually have decided at,
+    and a caller with a feature panel narrower than its label file has to pass it. The two
+    differ whenever an input feed has an outage: a forward return is computed from prices
+    alone and survives it, while every feature built on the missing feed does not, so the
+    label artifact declares sessions no model was ever in a position to predict.
+    ``crypto_perps_funding`` has two - the premium-index feed is out for 57 days from
+    2021-08-27, and the reduced CI panel loses a further 31 days from 2022-11-02 that the
+    full universe covers from another contract. Without this the gate reports a model
+    incomplete for not predicting where it was blind.
+
+    It narrows and never widens: a timestamp absent from the label artifact is not made a
+    session by appearing in the panel.
+
     For ``split='validation'`` the axis is sealed against the holdout first, so the last
     fold is not expected to predict a session whose outcome lands inside it.
     """
@@ -295,6 +309,14 @@ def declared_sessions(
     axis = _session_axis(case_study, label, case_dir)
     if split != "holdout":
         axis = _sealed(case_study, label, axis)
+    if decision_axis is not None:
+        observable = _normalize_time(decision_axis.unique())
+        axis = axis.filter(axis.is_in(observable.implode()))
+        if axis.is_empty():
+            raise CoverageError(
+                f"{case_study}/{label}: the decision axis and the label artifact share no "
+                "timestamp, so no session could be declared"
+            )
 
     axis_dates = axis.dt.date() if axis.dtype != pl.Date else axis
     frame = pl.DataFrame({"session": axis, "on": axis_dates})
@@ -348,6 +370,7 @@ def _coverage(
     source: str,
     case_dir: Path | None,
     fold_column: tuple[str, ...] | str | None,
+    decision_axis: pl.Series | None = None,
 ) -> CoverageReport:
     if frame.is_empty():
         raise CoverageError(
@@ -359,7 +382,9 @@ def _coverage(
 
     time_col = _time_column(frame.columns)
     windows = _declared_windows(case_study, label, split)
-    expected = declared_sessions(case_study, label, split=split, case_dir=case_dir)
+    expected = declared_sessions(
+        case_study, label, split=split, case_dir=case_dir, decision_axis=decision_axis
+    )
 
     observed = _normalize_time(frame.select(pl.col(time_col)).unique().get_column(time_col))
     observed_set = set(observed.to_list())
@@ -501,6 +526,7 @@ def check_prediction_coverage(
     case_dir: Path | None = None,
     fold_column: tuple[str, ...] | str | None = _FOLD_ALIASES,
     raise_on_gap: bool = True,
+    decision_axis: pl.Series | None = None,
 ) -> CoverageReport:
     """Assert a prediction set covers the declared validation geometry.
 
@@ -516,6 +542,7 @@ def check_prediction_coverage(
         source="predictions",
         case_dir=case_dir,
         fold_column=fold_column,
+        decision_axis=decision_axis,
     )
     if raise_on_gap:
         report.raise_if_incomplete()
@@ -531,6 +558,7 @@ def check_backtest_input_coverage(
     case_dir: Path | None = None,
     fold_column: tuple[str, ...] | str | None = _FOLD_ALIASES,
     raise_on_gap: bool = True,
+    decision_axis: pl.Series | None = None,
 ) -> CoverageReport:
     """Assert the frame a backtest is about to consume still covers the declaration.
 
@@ -550,6 +578,7 @@ def check_backtest_input_coverage(
         source="backtest input",
         case_dir=case_dir,
         fold_column=fold_column,
+        decision_axis=decision_axis,
     )
     if raise_on_gap:
         report.raise_if_incomplete()

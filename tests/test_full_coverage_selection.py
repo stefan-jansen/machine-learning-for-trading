@@ -493,3 +493,85 @@ def test_an_empty_result_from_another_filter_is_not_blamed_on_the_coverage_bar(
     assert explorer.best(
         top_n=10, label="fwd_ret_5d", prediction_hashes=["partial", "full_a"]
     ).is_empty()
+
+
+def _add_retired_sweep(case_dir) -> None:
+    """A second, better-scoring backtest of a still-current prediction.
+
+    This is what a re-swept baseline leaves behind: the registry is immutable, so the
+    entry-rule grid the previous generation was run under keeps its rows, and they belong
+    to predictions that are themselves still live.
+    """
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        db.execute(
+            """
+            INSERT INTO backtest_runs VALUES (
+                'bt_full_b_retired', 'full_b',
+                '{"allocation":{"method":"score_weighted"}}', 'signal'
+            )
+            """
+        )
+        db.execute(
+            "INSERT INTO backtest_metrics VALUES ('bt_full_b_retired', 9.0, 0.1, -0.1, 0.2, 0.1, 1)"
+        )
+
+
+def test_a_retired_sweep_of_a_live_prediction_outranks_it_until_the_backtests_are_named(
+    tmp_path,
+) -> None:
+    """`prediction_hashes` cannot exclude it, because the prediction is not the retired thing."""
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+    _add_retired_sweep(case_dir)
+    live = {"bt_partial", "bt_full_a", "bt_full_b", "bt_tabular"}
+
+    unrestricted = resolve_best_predictions(
+        "test", "fwd_ret_5d", split="validation", case_dir=case_dir, top_n=10
+    )
+    by_prediction = resolve_best_predictions(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        case_dir=case_dir,
+        top_n=10,
+        prediction_hashes={"full_a", "full_b", "tabular"},
+    )
+    by_backtest = resolve_best_predictions(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        case_dir=case_dir,
+        top_n=10,
+        backtest_hashes=live,
+    )
+
+    def sharpe_of(frame, prediction_hash):
+        return frame.filter(pl.col("prediction_hash") == prediction_hash)["sharpe"].item()
+
+    # The retired 9.0 is what both unrestricted reads rank full_b on.
+    assert sharpe_of(unrestricted, "full_b") == 9.0
+    assert sharpe_of(by_prediction, "full_b") == 9.0
+    # Naming the live backtests is the only one that returns the number a current result
+    # actually carries.
+    assert sharpe_of(by_backtest, "full_b") == 0.5
+
+
+def test_naming_every_registered_backtest_changes_nothing(tmp_path) -> None:
+    """The restriction is a filter, not a different ranking rule."""
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+    everything = {"bt_partial", "bt_full_a", "bt_full_b", "bt_tabular"}
+
+    unrestricted = resolve_best_predictions(
+        "test", "fwd_ret_5d", split="validation", case_dir=case_dir, top_n=10
+    )
+    restricted = resolve_best_predictions(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        case_dir=case_dir,
+        top_n=10,
+        backtest_hashes=everything,
+    )
+
+    assert restricted.equals(unrestricted)

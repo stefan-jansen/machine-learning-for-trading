@@ -424,6 +424,25 @@ def _boundary_iso(moment: pd.Timestamp) -> str:
     return moment.isoformat()
 
 
+def _on_panel_clock(moment: pd.Timestamp, zone: Any) -> pd.Timestamp:
+    """Read a boundary on the clock the panel keeps its own observations on.
+
+    ``evaluation.holdout_start`` is a date, and a date is not a moment until something says
+    which clock it is read on. The fold boundaries are moments, taken from the panel, so an
+    intraday panel carries them tz-aware; pandas then refuses to compare the two rather than
+    assuming a zone, and the derivation raises ``Cannot compare tz-naive and tz-aware
+    timestamps`` before it computes anything. Every daily case study escaped it because its
+    panel is tz-naive, which is why this surfaced first on ``crypto_perps_funding``.
+
+    Localizing rather than converting is what keeps the declaration meaning what it says: the
+    window is declared in the calendar the case study trades on, so 2024-01-01 is midnight on
+    that calendar and not midnight UTC shifted into it.
+    """
+    if zone is None or moment.tzinfo is not None:
+        return moment
+    return moment.tz_localize(zone)
+
+
 def build_holdout_cv(
     validation_spec: Mapping[str, Any],
     *,
@@ -492,10 +511,18 @@ def build_holdout_cv(
 
     folds = _validation_folds(validation_spec)
     validation_cv = dict(validation_spec["computation"]["cv"])
-    train_start = earliest_train_start(folds)
+    observations = sorted({pd.Timestamp(str(value)) for value in timeline})
+    if len(observations) < 2:
+        raise ValueError("holdout CV derivation needs at least two observations to measure cadence")
+    # Every boundary below is compared against these observations, so they are what decides
+    # the clock. Resolved once, here, rather than at each comparison: a fold set and a window
+    # that reach this function on different clocks have to be reconciled in one place or the
+    # reconciliation is a thing to remember at four call sites.
+    panel_zone = observations[0].tz
+    train_start = _on_panel_clock(earliest_train_start(folds), panel_zone)
     floor_applied = None
     if train_start_floor is not None:
-        floor = pd.Timestamp(train_start_floor)
+        floor = _on_panel_clock(pd.Timestamp(train_start_floor), panel_zone)
         if floor > train_start:
             # Recorded, not silent: the clamp changes the interval the lock is taken over, so a
             # reader of the spec has to be able to see that the window is the producer's and why.
@@ -512,10 +539,8 @@ def build_holdout_cv(
     # leaks for no label. `widest_label_buffer` carries the argument. The selected label still
     # supplies the horizon check below, which this now satisfies by construction.
     buffer, buffer_label = widest_label_buffer(case_study, setup)
-    holdout_open = pd.Timestamp(holdout_start)
-    observations = sorted({pd.Timestamp(str(value)) for value in timeline})
-    if len(observations) < 2:
-        raise ValueError("holdout CV derivation needs at least two observations to measure cadence")
+    holdout_open = _on_panel_clock(pd.Timestamp(holdout_start), panel_zone)
+    holdout_close = _on_panel_clock(pd.Timestamp(holdout_end), panel_zone)
 
     # Counted in OBSERVATIONS and stepped back along the panel's own dates, never subtracted as
     # calendar time. `utils/cv_splits.py` already carries this bug's epitaph: "21D" as a
@@ -578,8 +603,8 @@ def build_holdout_cv(
         "fold": max(int(entry["fold"]) for entry in folds) + 1,
         "train_start": _boundary_iso(train_start),
         "train_end": _boundary_iso(train_end),
-        "val_start": _boundary_iso(pd.Timestamp(holdout_start)),
-        "val_end": _boundary_iso(pd.Timestamp(holdout_end)),
+        "val_start": _boundary_iso(holdout_open),
+        "val_end": _boundary_iso(holdout_close),
     }
     identity = value_digest(pl.DataFrame([fold]))
     if identity == validation_cv.get("identity"):
