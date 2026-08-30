@@ -628,6 +628,42 @@ def build_holdout_cv(
     }
 
 
+def build_holdout_training_spec(
+    study: Any,
+    validation_spec: Mapping[str, Any],
+    *,
+    timeline: Sequence[Any],
+    case_study: str | None = None,
+) -> dict[str, Any]:
+    """Re-key one validation training specification onto the derived holdout fold.
+
+    Three steps have to happen together and in this order, and each of them already refuses
+    on its own terms: derive the holdout interval from the case study's declared window,
+    bound its training start at whatever the family's features actually reach, and recompute
+    the fields the resolver derived per validation fold. Doing two of the three produces a
+    specification that looks complete and fits the wrong estimator - a manifest describing
+    the validation folds, or a training window half of which has no features - so they are
+    one call rather than three a caller assembles.
+
+    This takes a ``study`` and a specification, not a lock. A holdout fit is a computation,
+    and the question of how many times a case study may run one is a separate question about
+    its lifecycle: :func:`evaluate_holdout` is the answer for a case study that wants the
+    holdout spent once and calls this to build what it locks, and a case study whose holdout
+    notebooks re-run like any other stage calls this directly.
+
+    Returns a new specification; ``validation_spec`` is not modified.
+    """
+    holdout_spec = deepcopy(dict(validation_spec))
+    holdout_spec["computation"]["cv"] = build_holdout_cv(
+        validation_spec,
+        case_study=str(case_study if case_study is not None else study.case_study),
+        timeline=timeline,
+        train_start_floor=_holdout_training_floor(study, validation_spec),
+    )
+    _rekey_holdout_spec(study, holdout_spec, dict(validation_spec))
+    return holdout_spec
+
+
 @dataclass(frozen=True)
 class HoldoutOutcome:
     """One case study's holdout evaluation, and whether this call is what produced it."""
@@ -689,14 +725,12 @@ def evaluate_holdout(
     training = study.results.open(prediction.registry_record()["training_hash"])
 
     validation_spec = training.spec()
-    holdout_spec = deepcopy(validation_spec)
-    holdout_spec["computation"]["cv"] = build_holdout_cv(
+    holdout_spec = build_holdout_training_spec(
+        study,
         validation_spec,
-        case_study=str(case_study if case_study is not None else study.case_study),
         timeline=timeline,
-        train_start_floor=_holdout_training_floor(study, validation_spec),
+        case_study=case_study,
     )
-    _rekey_holdout_spec(study, holdout_spec, validation_spec)
 
     # selection_evidence is hashed into the lock identity, so anything put here that is already
     # recorded elsewhere gives one fact two sources and makes the lock unreproducible by any
