@@ -144,12 +144,16 @@ print(f"Holdout prediction: {HOLDOUT_PREDICTION_HASH}")
 # residuals of the validation prediction set, which is what the allocator would have had
 # standing at the start of the window.
 #
-# The last validation residuals are dropped rather than used. A residual observed at the
-# end of the validation span measures a return that realises one month later, and one
-# month later is inside the holdout window - so keeping it would size holdout positions
-# with holdout price information. The number of observations dropped is the label's
-# horizon on this panel's own grid, one monthly step, read from the reviewed table rather
-# than assumed here.
+# One validation observation is dropped at the boundary, and on this case study that is a
+# margin rather than a requirement. The rule the embargo exists for is that a residual
+# observed at `t` measures a return realising over `(t, t+h]`, so with `h > 0` the last
+# residuals of the validation span reach into the holdout window and would size holdout
+# positions with holdout price information. This panel declares `h = 0D`: each row is
+# dated by the month the return was earned, so the outcome is already realised at the
+# observation and nothing reaches forward. The step count comes from the reviewed table in
+# `conformal.py` rather than from a choice here, and that table records one observation for
+# this label - stricter than the declared horizon, which costs one month of calibration and
+# cannot leak.
 
 # %% tags=["results"]
 allocation = strategy_view(json.loads(carrier["spec_json"])).get("allocation") or {}

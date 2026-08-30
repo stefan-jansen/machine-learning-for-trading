@@ -103,7 +103,7 @@ COST_GRID_BPS = get_cost_grid_bps(CASE_STUDY_ID)
 # `walk_forward_v2` conformal candidates on exact common timestamp support and applies
 # `LABEL_RESTRICTIONS`, `UNIVERSE_RESTRICTIONS` and `CARRIER_PINS`; a Sharpe ordering beside
 # it does none of those. Where the two disagreed, this notebook would sweep a strategy the
-# case study does not report, and [`15_strategy_analysis`](15_strategy_analysis.ipynb) would
+# case study does not report, and [`17_strategy_analysis`](17_strategy_analysis.ipynb) would
 # find no cost rows for the one it does.
 #
 # `resolve_solvent_carrier` also refuses a carrier whose equity reached zero. This book is
@@ -399,6 +399,9 @@ if not cost_df.is_empty():
 # These are validation months throughout. Nothing here reads or selects on the holdout
 # period, which stays untouched until the strategy analysis notebook.
 #
-# **Next:** [`15_strategy_analysis`](15_strategy_analysis.ipynb), which reads this sweep
-# back alongside the holdout. Risk management is no longer next: it ran before this
-# notebook, and its result is one of the three stages the selection above drew from.
+# **Next:** [`15_holdout_predictions`](15_holdout_predictions.ipynb), which refits the
+# configuration swept above on the history before the holdout window;
+# [`16_holdout_backtest`](16_holdout_backtest.ipynb) trades it, and
+# [`17_strategy_analysis`](17_strategy_analysis.ipynb) reads this sweep back alongside the
+# holdout. Risk management is no longer next: it ran before this notebook, and its result
+# is one of the stages the selection above drew from.

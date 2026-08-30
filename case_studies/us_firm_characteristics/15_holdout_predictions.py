@@ -47,6 +47,7 @@
 # %%
 """US Firm Characteristics: Holdout Predictions."""
 
+import sqlite3
 import warnings
 
 import polars as pl
@@ -56,17 +57,55 @@ warnings.filterwarnings("ignore")
 from case_studies.research import open_study
 from case_studies.research.holdout import build_holdout_training_spec
 from case_studies.research.models import reconstruct_locked_model_request
-from case_studies.utils.strategy_analysis import resolve_solvent_carrier
+from case_studies.utils.registry import training_hash_from_spec
+from case_studies.utils.strategy_analysis import (
+    resolve_solvent_carrier,
+    training_run_fitted_for_the_holdout,
+)
 from utils.paths import get_case_study_dir
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_firm_characteristics"
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
+# Whether a holdout generation for a DIFFERENT configuration may be superseded by this run.
+# Off by default: see section 3.
+REPLACE_HOLDOUT = False
 
 # %%
 study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
+
+
+def _registered_holdout_generations(case_dir):
+    """Every holdout prediction set in the registry, and whether its model was refitted.
+
+    `refitted` is read from the training run's own CV rather than from the prediction
+    set's split: the split says where the predictions land, and a model fitted on the
+    validation folds can publish predictions over the holdout window. That is the defect
+    the generation below replaces, and it is why this is the same predicate the canonical
+    lineage resolver applies.
+    """
+    with sqlite3.connect(str(case_dir / "run_log" / "registry.db")) as conn:
+        rows = conn.execute(
+            """
+            SELECT p.prediction_hash, p.training_hash, t.config_name, t.spec_json
+            FROM prediction_sets p
+            JOIN training_runs t ON t.training_hash = p.training_hash
+            WHERE p.split = 'holdout'
+            ORDER BY p.prediction_hash
+            """
+        ).fetchall()
+    return [
+        {
+            "prediction_hash": prediction_hash,
+            "training_hash": training_hash,
+            "config_name": config_name,
+            "refitted": training_run_fitted_for_the_holdout(training_spec_json),
+        }
+        for prediction_hash, training_hash, config_name, training_spec_json in rows
+    ]
+
 
 # %% [markdown]
 # ## 1. Which configuration the holdout runs
@@ -168,6 +207,36 @@ print(f"Holdout training ends {fold['train_end']}, holdout opens {fold['val_star
 # The training identity below is new. It has to be: it covers the CV interval, and the
 # holdout fold is not one of the validation folds. A run that came back with the
 # validation training hash would mean the refit did not happen.
+#
+# **Re-running this notebook on a DIFFERENT configuration is refused unless it is asked
+# for.** The holdout window is re-usable but it is not free: every configuration evaluated
+# on it is one more look at a period the case study reports as unseen, and a second
+# configuration evaluated silently would make that report false. So the check below is on
+# the carrier, not on the notebook. Re-running with the carrier unchanged reproduces the
+# same training identity and the same prediction set - the derivation is deterministic and
+# the identity covers it - and the fit is served from the registry. Re-running after the
+# selection has moved refuses, names both configurations, and points at
+# `REPLACE_HOLDOUT`. Setting that parameter is the deliberate act: it says the earlier
+# generation was wrong rather than that its window is now spare.
+
+# %%
+existing_generations = [
+    row
+    for row in _registered_holdout_generations(CASE_DIR)
+    if row["refitted"] and row["training_hash"] != training_hash_from_spec(holdout_spec)
+]
+if existing_generations and not REPLACE_HOLDOUT:
+    raise RuntimeError(
+        "the holdout already carries a refit of a different configuration: "
+        + ", ".join(
+            f"{row['prediction_hash']} ({row['config_name']}, training {row['training_hash']})"
+            for row in existing_generations
+        )
+        + f". This run would evaluate {carrier['config_name']} "
+        f"(training {training_hash_from_spec(holdout_spec)}) on the same window. Set "
+        "REPLACE_HOLDOUT=True to say the earlier generation is superseded, or leave the "
+        "selection where it was."
+    )
 
 # %% tags=["results"]
 request = reconstruct_locked_model_request(
@@ -214,30 +283,13 @@ print(
 # the registry is immutable and a reader looking at it later will see both.
 
 # %% tags=["results"]
-import sqlite3
-
-with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
-    holdout_rows = conn.execute(
-        """
-        SELECT p.prediction_hash, p.training_hash, t.config_name,
-               EXISTS(
-                   SELECT 1 FROM prediction_sets v
-                   WHERE v.training_hash = p.training_hash AND v.split = 'validation'
-               )
-        FROM prediction_sets p
-        JOIN training_runs t ON t.training_hash = p.training_hash
-        WHERE p.split = 'holdout'
-        ORDER BY p.prediction_hash
-        """
-    ).fetchall()
-for prediction_hash, training_hash, config_name, validation_fitted in holdout_rows:
-    # The test is the training run's own history, not a comparison against this notebook's
-    # carrier: a training run that also published validation predictions was fitted on the
-    # folds the selection was made on, whichever configuration it belongs to.
+for row in _registered_holdout_generations(CASE_DIR):
     note = (
-        "VALIDATION-FITTED - not out of sample" if validation_fitted else "refitted for the holdout"
+        "refitted for the holdout" if row["refitted"] else "VALIDATION-FITTED - not out of sample"
     )
-    print(f"  {prediction_hash}  training={training_hash}  {config_name}  {note}")
+    print(
+        f"  {row['prediction_hash']}  training={row['training_hash']}  {row['config_name']}  {note}"
+    )
 
 # %% [markdown]
 # ## What this notebook establishes, and what it does not

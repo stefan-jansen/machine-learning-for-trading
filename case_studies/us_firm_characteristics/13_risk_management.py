@@ -379,5 +379,7 @@ else:
 # 4. The overlay stage registers nothing and reads no holdout month, so the funnel
 #    enters the strategy analysis carrying the parent run from section 1 unchanged.
 #
-# **Next:** `15_strategy_analysis` confronts the selection this funnel performed and
-# is where the results are interpreted.
+# **Next:** [`14_costs`](14_costs.ipynb), which sweeps the cost grid over the
+# configuration this stage's result is one candidate for.
+# [`17_strategy_analysis`](17_strategy_analysis.ipynb) confronts the selection this funnel
+# performed and is where the results are interpreted.
