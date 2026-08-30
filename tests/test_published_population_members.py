@@ -62,6 +62,24 @@ def test_a_superseded_generation_is_not_published(tmp_path) -> None:
     assert superseded_members_at(case_dir) == frozenset({"old"})
 
 
+def test_a_downstream_name_cannot_restore_what_its_producer_retired(tmp_path) -> None:
+    """Names are independent, so a backtest set can still list a prediction the models refit past.
+
+    Listed by some tip and retired by nobody is the conjunction; the union alone would let the
+    downstream listing put the retired identity back in front of a reader.
+    """
+    case_dir = _registry(
+        tmp_path,
+        [
+            ("gen1", "models", None, ["old"]),
+            ("gen2", "models", "gen1", ["new"]),
+            ("bt1", "backtests", None, ["old", "new"]),
+        ],
+    )
+
+    assert published_members_at(case_dir) == frozenset({"new"})
+
+
 def test_names_are_independent(tmp_path) -> None:
     """One name moving on does not retire another name's members."""
     case_dir = _registry(

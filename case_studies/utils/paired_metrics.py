@@ -520,9 +520,14 @@ def _holdout_lineage_for(
             clauses.append("json_extract(b.spec_json, '$.strategy.signal.exit_at_max_days') = ?")
             params.append(rung["exit_at_max_days"])
     if retired_hashes:
-        # ``_retired_prediction_hashes`` has already carried the recorded validation
-        # retirements across to their holdout siblings, so this filters on the identity the
-        # row actually has.
+        # ``_retired_prediction_hashes`` carries the recorded validation retirements across
+        # to the holdout rows that share a training run and checkpoint, so this filters on the
+        # identity the row actually has.
+        #
+        # It reaches a holdout scored from the same trained model, and not one produced by a
+        # *retrain*, which registers its own training hash and so shares no key with the
+        # validation identity that was retired. Connecting those two is a lineage question the
+        # registry does not currently answer; see REVIEW.md, "Backtest and strategy".
         clauses.append("p.prediction_hash NOT IN (SELECT value FROM json_each(?))")
         params.append(json.dumps(sorted(retired_hashes)))
     spec_clauses, spec_params = _full_strategy_clauses(strategy_spec)

@@ -665,8 +665,15 @@ def published_members_at(
     be asked here, and a caller should fall back to catalog admissibility and say so, rather
     than narrow every query to nothing.
 
-    A forked chain leaves more than one tip standing; the union is taken, matching
+    A forked chain leaves more than one tip standing; the union is taken across tips, matching
     :func:`_retired`, so a fork can only over-admit and never silently drop a live member.
+
+    The union is then reduced by what is retired, and it has to be: names are independent, so
+    a downstream population - a backtest set, a candidate set - can go on listing a prediction
+    that the *model* population which produced it has since refit past. Taking the union alone
+    would let that downstream listing restore an identity its own publisher retired, which is
+    precisely the reading :func:`superseded_members` exists to prevent. Listed by some tip and
+    retired by nobody is the conjunction that answers "may this be reported".
     """
     rows, members = _lineage(Path(case_dir), member_kind)
     if not rows:
@@ -680,7 +687,7 @@ def published_members_at(
         for population_hash, _ in generations:
             if population_hash not in superseded:
                 published |= members.get(population_hash, set())
-    return frozenset(published)
+    return frozenset(published - _retired(rows, members))
 
 
 def superseded_members_at(
