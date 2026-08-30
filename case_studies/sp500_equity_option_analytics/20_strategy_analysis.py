@@ -1125,28 +1125,51 @@ OBSERVATIONS = (
     .sort()
     .to_list()
 )
-EXPECTED_HOLDOUT_TRAINING = training_hash_from_spec(
-    build_holdout_training_spec(
-        _study, CARRIER_TRAINING_SPEC, timeline=OBSERVATIONS, case_study=CASE_STUDY
+# The derivation needs a CURRENT resolved training specification - it re-keys the resolver's
+# per-fold fields onto the holdout fold - so a carrier fitted before that schema cannot be
+# matched this way. Where it can be derived it is the strongest available check and is used;
+# where it cannot, the weaker structural match runs and the notebook says which one answered,
+# because "this is the carrier's holdout" and "this is a holdout of the same configuration" are
+# different claims and the reader is entitled to know which is being made.
+try:
+    EXPECTED_HOLDOUT_TRAINING = training_hash_from_spec(
+        build_holdout_training_spec(
+            _study, CARRIER_TRAINING_SPEC, timeline=OBSERVATIONS, case_study=CASE_STUDY
+        )
     )
-)
+    HOLDOUT_MATCH_BASIS = f"derived training identity {EXPECTED_HOLDOUT_TRAINING}"
+except (ValueError, KeyError, NotImplementedError) as exc:
+    EXPECTED_HOLDOUT_TRAINING = None
+    HOLDOUT_MATCH_BASIS = (
+        f"family, configuration, label, checkpoint and strategy - the holdout identity could "
+        f"not be derived from this carrier's training specification ({exc})"
+    )
+print(f"Holdout rows are matched to the carrier by {HOLDOUT_MATCH_BASIS}")
 
 
 def is_this_carriers_holdout(row) -> bool:
     """The carrier's own configuration, refitted for the holdout, at the selected checkpoint.
 
-    Three things, and the training identity does most of the work: it is derived here from the
-    carrier's own validation specification, so a fit over different dates, at a different seed,
-    in a different tier, or against a retired feature artifact is a different hash and cannot
-    match. The checkpoint says the same point on the schedule that selection was made at. The
-    backtest specification says the same portfolio was built from those predictions, including
-    the costs, fill timing and stop behaviour a strategy-block comparison would let vary.
+    The training identity does most of the work when it can be derived: a fit over different
+    dates, at a different seed, in a different tier, or against a retired feature artifact is a
+    different hash and cannot match. Where it cannot be derived the same three properties are
+    checked directly - same estimator against the same target, over the holdout split - which is
+    weaker because it does not pin the interval.
+
+    Either way the checkpoint must be the one selection was made at, and the backtest
+    specification must describe the same portfolio, including the costs, fill timing and stop
+    behaviour a strategy-block comparison would let vary.
     """
-    if row[2] != EXPECTED_HOLDOUT_TRAINING:
-        return False
     if (row[11], row[12]) != carrier_checkpoint:
         return False
-    return _comparable_backtest(json.loads(row[5])) == CARRIER_BACKTEST
+    if _comparable_backtest(json.loads(row[5])) != CARRIER_BACKTEST:
+        return False
+    if EXPECTED_HOLDOUT_TRAINING is not None:
+        return row[2] == EXPECTED_HOLDOUT_TRAINING
+    if (row[3], row[4], row[10]) != (carrier_source[0], carrier_source[1], carrier_source[2]):
+        return False
+    _cv = (json.loads(row[13])["computation"].get("cv") or {}) if row[13] else {}
+    return _cv.get("split") == "holdout"
 
 
 matching = [r for r in holdout_rows if is_this_carriers_holdout(r)]
