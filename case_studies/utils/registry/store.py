@@ -166,6 +166,7 @@ CREATE TABLE IF NOT EXISTS causal_runs (
     confounding_bias_pct REAL,
     refutation_p     REAL,
     refutation_n_successful INTEGER,
+    refutation_placebo_json TEXT,
     spec_json        TEXT,
     notebook         TEXT,
     started_at       TEXT,
@@ -762,6 +763,14 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
         db, "candidate_sets", "supersedes_hash"
     ):
         db.execute("ALTER TABLE candidate_sets ADD COLUMN supersedes_hash TEXT")
+
+    # The placebo draws behind refutation_p. Only the scalars were stored, so the
+    # permutation-distribution figure every causal notebook draws had no source in the
+    # registry and rendered empty behind its guard while the prose described it.
+    if "causal_runs" in tables and not _table_has_column(
+        db, "causal_runs", "refutation_placebo_json"
+    ):
+        db.execute("ALTER TABLE causal_runs ADD COLUMN refutation_placebo_json TEXT")
 
     # Migration 3: tall → wide metric tables
     if "prediction_metrics" in tables:
