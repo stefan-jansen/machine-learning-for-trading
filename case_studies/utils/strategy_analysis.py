@@ -31,6 +31,7 @@ import polars as pl
 
 from case_studies.utils.carrier_pins import CARRIER_PINS
 from case_studies.utils.notebook_contracts import degenerate_prediction_sql
+from case_studies.utils.uncertainty import STAGE_SEQUENCE
 
 # ---------------------------------------------------------------------------
 # Canonical rank-1 resolution (LABEL_RESTRICTIONS-aware)
@@ -565,7 +566,7 @@ def resolve_solvent_carrier(case_study: str, *, require_solvent: bool = True) ->
     configuration the case study reports, and that configuration is
     ``resolve_canonical_rank1_lineage``'s validation rank-1. Each notebook ranking
     the registry for itself is a standing divergence class rather than a
-    hypothetical one: the canonical resolver re-ranks ``walk_forward_v2`` conformal
+    hypothetical one: the canonical resolver re-ranks strict-conformal
     candidates on exact common timestamp support and applies LABEL_RESTRICTIONS,
     UNIVERSE_RESTRICTIONS and CARRIER_PINS, and a plain Sharpe ranking beside it
     does none of those. When the two disagree, the cost curve describes a strategy
@@ -630,7 +631,50 @@ def resolve_solvent_carrier(case_study: str, *, require_solvent: bool = True) ->
                 "CARRIER_PINS, rather than selecting past this row silently."
             )
 
+    _assert_carrier_calibration_is_current(case_study, backtest_hash, spec_json)
+
     return {**lineage, "spec_json": spec_json, "max_drawdown": max_drawdown}
+
+
+def _assert_carrier_calibration_is_current(
+    case_study: str, backtest_hash: str, spec_json: str | None
+) -> None:
+    """Refuse a carrier whose conformal calibration the code will not run.
+
+    Selection ranks on Sharpe and knows nothing about calibration versions, so a
+    backtest fitted under a retired contract stays selectable after the contract is
+    corrected. Nothing downstream can execute it - ``run_backtest`` refuses a
+    non-current ``calibration_version`` outright - so the first sign is a whole stage
+    failing on a configuration that ranked first. On ``us_firm_characteristics``,
+    2026-08-30, all 52 conformal backtests were the retired version and 11 of 11 cost
+    levels died; the v3 refit happened to win on merit, so the wrong carrier was never
+    actually carried, but nothing would have caught it if it had not.
+
+    This raises rather than selecting past the row. Excluding retired rows inside the
+    resolver would change which configuration seven case studies report, silently, and
+    that is a decision for whoever owns the sweep - taken by re-running the stage under
+    the current calibration, not by a filter nobody sees.
+    """
+    import json
+
+    from case_studies.utils.conformal import CALIBRATION_VERSION
+
+    if not spec_json:
+        return
+    try:
+        allocation = (json.loads(spec_json).get("strategy") or {}).get("allocation") or {}
+    except (TypeError, ValueError):
+        return
+    recorded = allocation.get("calibration_version")
+    if recorded is None or recorded == CALIBRATION_VERSION:
+        return
+    raise RuntimeError(
+        f"Canonical rank-1 {backtest_hash} for {case_study} was fitted under conformal "
+        f"calibration {recorded!r}, and the current contract is {CALIBRATION_VERSION!r}. "
+        "Nothing downstream can execute it. Re-run the allocation stage so the sweep "
+        "holds current-calibration candidates, rather than measuring costs or a holdout "
+        "on a configuration that cannot be reproduced."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -908,7 +952,7 @@ def plot_sharpe_waterfall(
     -------
     plt.Figure
     """
-    stage_order = ["signal", "allocation", "cost_sensitivity", "risk_overlay"]
+    stage_order = list(STAGE_SEQUENCE)
     stage_labels = {
         "signal": "Signal",
         "allocation": "Allocation",

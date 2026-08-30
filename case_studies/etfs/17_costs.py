@@ -86,6 +86,7 @@ from case_studies.utils.sweep_config import (
     get_cost_grid_half_spread_usd,
     get_top_n_predictions,
 )
+from case_studies.utils.uncertainty import STAGE_SEQUENCE
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, ml4t_palette, show_plotly_with_alt
 
@@ -180,16 +181,19 @@ print(f"Live prediction sets: {len(LIVE_PREDICTIONS):,}")
 # configuration wins when it deserves to.
 #
 # `cost_sensitivity` stays out: pooling it would let a cost-charged run re-enter the selection it
-# is a consequence of.
+# is a consequence of. It is also the terminal stage, which is why taking everything before it
+# is the whole pool rather than a subset of one - `STAGE_SEQUENCE` is the order the backtests
+# run and `STAGE_CARRIER_BLOCK` records that nothing is ever built on top of a cost sweep.
+# Derived from that sequence rather than written out again, so a stage added to the pipeline
+# joins this pool without anyone remembering to come here.
 #
-# `holdout` is the one member of the resolver's list that is absent here, and not by choice. That
+# `holdout` is the one member of the resolver's list absent from both, and not by choice. That
 # resolver reads `backtest_runs` with raw SQL; this path goes through
-# `registry.store._stage_filter_clause`, whose `VALID_STAGES` is
-# {signal, allocation, risk_overlay, cost_sensitivity} and which raises on anything else. Naming
-# it here would not widen the pool, it would raise before the first stage was read. The two
-# selections still agree, because the resolver asks for validation-split rows and a holdout-stage
-# backtest is not one.
-PRE_COST_STAGES = ("signal", "allocation", "risk_overlay")
+# `registry.store._stage_filter_clause`, whose `VALID_STAGES` raises on anything outside
+# {signal, allocation, risk_overlay, cost_sensitivity}. Naming it here would not widen the pool,
+# it would raise before the first stage was read. The two selections still agree, because the
+# resolver asks for validation-split rows and a holdout-stage backtest is not one.
+PRE_COST_STAGES = tuple(stage for stage in STAGE_SEQUENCE if stage != "cost_sensitivity")
 
 
 def resolve_pre_cost_runs(top_n: int) -> pl.DataFrame:

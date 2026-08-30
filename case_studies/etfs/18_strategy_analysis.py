@@ -114,6 +114,7 @@ from case_studies.utils.strategy_analysis import (
     resolve_holdout_self_backtest,
     write_strategy_assessment,
 )
+from case_studies.utils.uncertainty import STAGE_SEQUENCE, descends_from
 from utils.paths import get_case_study_dir, get_output_dir
 
 # %% tags=["parameters"]
@@ -616,16 +617,35 @@ fig = plot_sharpe_waterfall(lineage, ci_lo=ci_lo, ci_hi=ci_hi)
 fig.show()
 
 # %%
-# Read through load_paired_metrics; never recompute a paired metric inline.
-transitions = [
-    ("allocation", "signal_leader"),
-    ("cost_sensitivity", "allocation_leader"),
-    ("risk_overlay", "cost_sensitivity_leader"),
-]
-for stage_name, kind in transitions:
-    stage_info = lineage.get(stage_name)
-    if stage_info is None:
+# Stage-transition deltas via load_paired_metrics — never recompute paired
+# metrics inline. ETFs is one of the few CSs whose rank-1 prediction has
+# all four pipeline stages registered against it, so each transition has
+# a populated paired row.
+# The pairs are the consecutive stages this prediction actually has, taken in
+# STAGE_SEQUENCE order, which is the order the backtests run: size positions,
+# apply risk controls, then measure what realistic costs take off the winner.
+present = [s for s in STAGE_SEQUENCE if lineage.get(s)]
+for stage_name in STAGE_SEQUENCE:
+    if lineage.get(stage_name) is None:
         print(f"Stage {stage_name}: not run for this prediction")
+for prev_stage, stage_name in zip(present, present[1:]):
+    kind = f"{prev_stage}_leader"
+    stage_info = lineage[stage_name]
+    # champion_lineage selects each stage independently, so two entries can be
+    # siblings rather than parent and child. The producer writes a paired row
+    # only where the later stage carries the earlier one's whole strategy
+    # prefix; asking for one it declined to write is normal, and the reason is
+    # worth naming rather than reporting as a missing row.
+    if not descends_from(
+        stage_info.get("_strategy", {}),
+        lineage[prev_stage].get("_strategy", {}),
+        prev_stage,
+    ):
+        print(
+            f"Stage {stage_name}: not paired against {kind} - this run does not "
+            f"descend from the {prev_stage} leader, so the two are siblings and "
+            f"the difference between them is not a stage effect."
+        )
         continue
     pair = load_paired_metrics(
         CASE_STUDY,
@@ -662,36 +682,20 @@ for stage_name, kind in transitions:
     print()
 
 # %% [markdown]
-# **Each transition is a paired test, not a subtraction.** Subtracting one stage's Sharpe from the
-# next gives a number with no interval, which cannot say whether the difference is larger than the
-# noise. The paired bootstrap resamples both return series together and gives the difference its
-# own interval.
+# Read the transitions printed above against the order the backtests run:
+# positions are sized, risk controls are applied to the sized strategy, and
+# costs are charged against the strategy that survives both. Each printed row
+# compares a stage against the leader of the stage before it, so a positive
+# `sharpe_diff` is what that one step added and nothing else.
 #
-# **It is not a decomposition, and the printed axes are how to tell.** Each side is its stage's
-# highest-Sharpe backtest for this prediction, chosen independently, so consecutive entries share
-# the prediction and need share nothing else. Where one axis moved, the difference belongs to that
-# axis. Where two moved, the chain records how the search proceeded and not where the Sharpe came
-# from, and no part of the number is attributable to the stage it is filed under.
-#
-# **The cost stage is the case to read carefully.** `cost_sensitivity` prices one strategy across a
-# grid, so its Sharpe maximum is the zero-cost point and always will be. Read as a stage
-# transition it says the cost model added Sharpe; what it measures is the same returns with
-# friction switched off. Its interval is narrow and its p-value zero because the two series differ
-# only by the fees, which makes the comparison precise rather than important. The line beneath it
-# states the size the other way round, as the price of trading. [`17_costs`](17_costs.ipynb) is
-# where that grid is read as the curve it is.
-#
-# **`prob_challenger_wins` and the interval say different things.** The interval asks whether the
-# difference is resolved at the conventional level; the probability asks in what fraction of
-# bootstrap draws the later stage came out ahead. A step can be directionally consistent across
-# most draws and still have an interval spanning zero, and reporting only the interval would throw
-# that away while reporting only the probability would overstate it.
-#
-# **A transition whose interval spans zero is a choice the validation window did not settle.** It
-# is still in the lineage - the pipeline applied it - but the reason it is there is the point
-# estimate, and §9's deployment reading has to carry that. A step whose interval excludes zero by a
-# wide margin usually turns out to be mechanical rather than a discovery: a cost regime changing
-# between stages moves every strategy the same way.
+# Two readings need care. A confidence interval that straddles zero means the
+# step's contribution is not resolved at this sample - the point estimate still
+# says which way it leaned, and `prob_challenger_wins` says how often it led
+# across bootstrap draws, but neither is a rejection. And a transition reported
+# as siblings rather than a pair is not a gap in the evidence: the two stages
+# were selected independently and the later one does not carry the earlier
+# one's configuration, so their difference mixes the stage with everything else
+# that differs between them, and no paired row is written for it.
 
 # %%
 conc_df = explorer.concentration_curve(TOP_PHASH)

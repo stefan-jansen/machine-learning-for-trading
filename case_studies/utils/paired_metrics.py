@@ -44,8 +44,10 @@ from case_studies.utils.benchmark import load_benchmark_returns
 from case_studies.utils.registry.registration import register_paired_metrics
 from case_studies.utils.uncertainty import (
     SIGNAL_BASELINE_BY_CASE_STUDY,
+    STAGE_SEQUENCE,
     compute_independent_diff_uncertainty,
     compute_paired_uncertainty,
+    descends_from,
     joint_returns,
 )
 from utils.paths import get_case_study_dir
@@ -1204,18 +1206,31 @@ def populate_paired_metrics(
     # `17_risk_management` and `18_strategy_analysis` do use the overlay rule, because there the
     # overlay is paired with its own no-overlay carrier by construction rather than by a
     # highest-Sharpe query. Keeping the default here also keeps this producer agreeing with
-    # `20_strategy_synthesis/01_aggregate_synthesis.py`, which computes the same three
+    # `20_strategy_synthesis/01_aggregate_synthesis.py`, which computes the same
     # transitions into the same table from its own copy of the coercion;
     # `tests/test_uncertainty_cscv.py` runs the two against each other.
     lineage = explorer.champion_lineage(leader_phash)
-    for prev_stage, this_stage, kind in [
-        ("signal", "allocation", "signal_leader"),
-        ("allocation", "cost_sensitivity", "allocation_leader"),
-        ("cost_sensitivity", "risk_overlay", "cost_sensitivity_leader"),
-    ]:
-        prev_entry = lineage.get(prev_stage)
-        this_entry = lineage.get(this_stage)
-        if not prev_entry or not this_entry:
+    # Pairs are consecutive *present* stages of `STAGE_SEQUENCE`, not a fixed list. A case
+    # study that has not run the risk stage still gets its allocation-to-cost comparison
+    # instead of losing both transitions to a missing middle.
+    present = [s for s in STAGE_SEQUENCE if lineage.get(s)]
+    for prev_stage, this_stage in zip(present, present[1:]):
+        kind = f"{prev_stage}_leader"
+        prev_entry = lineage[prev_stage]
+        this_entry = lineage[this_stage]
+        # Only pair a stage with one actually built on it. `champion_lineage` picks the
+        # best backtest at each stage independently, so on a case study whose cost sweep
+        # clones an allocation carrier rather than the selected risk overlay, the risk and
+        # cost entries are siblings - and pairing them would book the whole difference
+        # between two unrelated strategies as the cost of trading.
+        if not descends_from(
+            this_entry.get("_strategy", {}), prev_entry.get("_strategy", {}), prev_stage
+        ):
+            if verbose:
+                print(
+                    f"  skip {prev_stage} -> {this_stage}: the {this_stage} leader is not "
+                    f"built on the {prev_stage} leader"
+                )
             continue
         prev_hash = prev_entry["backtest_hash"]
         this_hash = this_entry["backtest_hash"]
