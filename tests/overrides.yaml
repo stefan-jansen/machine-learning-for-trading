@@ -1607,71 +1607,58 @@ case_studies/etfs/12_causal_dml:
   timeout: 120
 case_studies/etfs/13_model_analysis:
   timeout: 300
-# MAX_SYMBOLS must stay ABOVE the smallest concentration etfs declares, which is 5
-# (`config/setup.yaml` backtest.sweep.top_k_grid: [5, 10, 20]). `get_entry_schemes_for` drops
-# every k at or above the traded universe - holding 5 of 5 funds is the equal-weight benchmark,
-# not a ranked selection - so at MAX_SYMBOLS 5 the whole grid is infeasible and the sweep
-# produced zero backtests. It reported that as "0 computed, 0 served, 0 failed", which reads
-# exactly like a re-run that found everything cached, and 15 through 18 then failed on the
-# absence four notebooks away from the cause. 14 now refuses an empty scheme list outright.
+# The backtest stage takes the fixture's whole 24-fund cross-section. No MAX_SYMBOLS here,
+# for the reason 04 and 05 give above: the fixture IS the reduction, and capping it again made
+# every downstream result degenerate rather than fast. `get_entry_schemes_for` drops every k at
+# or above the traded universe - holding 5 of 5 funds is the equal-weight benchmark, not a
+# ranked selection - so at 5 the whole `top_k_grid` [5, 10, 20] was infeasible and the sweep
+# produced zero backtests, reported as "0 computed, 0 served, 0 failed", which reads exactly
+# like a re-run that found everything cached. 14 now refuses an empty scheme list outright.
 #
 # TOP_K is gone with it. It named the plumbing test's concentration, and 2 is not in the
 # declared grid; worse, setting it at all skipped the notebook's own feasibility check, which
 # runs only when TOP_K is left at 0. Unset, the notebook takes the smallest feasible k.
 #
-# 15 through 17 take the same universe: they re-price and overlay 14's backtests, and a run
-# that loaded a different number of funds would be reading a price panel the registered
+# 15 through 19 take the same universe: they re-price, overlay and replay 14's backtests, and a
+# run that loaded a different number of funds would be reading a price panel the registered
 # specifications were not built against.
 #
-# It stays at 5, matching the rest of the chain, because raising it here fixes nothing and
-# hides the cause. Measured: at 12 the schemes become feasible and all 12 backtests run, and
-# every one records `sharpe=0.0, num_trades=0.0, total_return=0.0`. The predictions 06 and 07
-# fit cover FIVE symbols, so a top-5 selection holds the entire ranked cross-section at every
-# rebalance, the basket never changes and nothing is ever traded. What bounds the ranking is
-# the prediction universe, not the price panel - and only the price panel was raised.
+# The five #989 skips are gone with the cap that caused them. They are not replaced with a
+# narrower skip: the whole point of removing them is that this job now exercises the chain it
+# was reporting green while stepping over.
 #
-# So the fixture cannot exercise this sweep at all while the model notebooks fit five symbols
-# and the smallest concentration etfs declares is five. Fixing it means raising `max_symbols`
-# across 04 through 12 and re-measuring every timeout against it, which is a fixture-scale
-# change with its own runtime budget - filed rather than made here. At 5 the notebook refuses
-# up front and names both numbers, which is the honest failure.
+# Timeouts are raised across the block rather than kept: every stage below now sees 24 funds
+# where it saw 5, and the previous budgets were measured against the narrower panel.
 case_studies/etfs/14_backtest:
-  parameters:
-    MAX_SYMBOLS: 5
-  timeout: 600
-  skip: true
-  skip_reason: "The fixture cannot produce a traded backtest: it fits 5 symbols and the smallest concentration etfs declares is 5, so a top-5 selection holds the whole ranked cross-section, the basket never changes and every backtest records num_trades=0. Measured: 12 backtests, 12 with a Sharpe, 0 with a trade. Skipped rather than left red because the cause is a fixture-scale defect filed as ml4t/agent-workspace#989, not the notebook - which is correct and re-executed on the canonical registry. Remove these five skips when #989 raises max_symbols across 04-12."
+  timeout: 900
 case_studies/etfs/15_portfolio_management:
   parameters:
-    MAX_SYMBOLS: 5
     TOP_N_PREDICTIONS: 2
-  timeout: 120
-  skip: true
-  skip_reason: "The fixture cannot produce a traded backtest: it fits 5 symbols and the smallest concentration etfs declares is 5, so a top-5 selection holds the whole ranked cross-section, the basket never changes and every backtest records num_trades=0. Measured: 12 backtests, 12 with a Sharpe, 0 with a trade. Skipped rather than left red because the cause is a fixture-scale defect filed as ml4t/agent-workspace#989, not the notebook - which is correct and re-executed on the canonical registry. Remove these five skips when #989 raises max_symbols across 04-12."
+  timeout: 600
 case_studies/etfs/16_risk_management:
-  # MAX_RISK_VARIANTS bounds the overlay sweep, which is the cell that dominates this notebook.
-  # Scoping the baselines to live prediction sets added enough work to the sweep to put it over
-  # the 120s per-cell cap: measured on this workstation at loads 34-41, the unbounded sweep
-  # passed 4/4 before the scoping and 1/3 after, timing out at loads where it had passed. Capping
-  # the controls is the reduction this notebook provides for exactly that; raising the cap would
-  # only move the same cell back under a budget nobody had measured.
+  # MAX_RISK_VARIANTS bounds the overlay sweep, which is the cell that dominates this notebook,
+  # and it bounds work rather than the cross-section - which is why it stays while MAX_SYMBOLS
+  # goes. Scoping the baselines to live prediction sets had already put that cell over the
+  # per-cell cap once: measured at loads 34-41, the unbounded sweep passed 4/4 before the
+  # scoping and 1/3 after.
   parameters:
     MAX_RISK_VARIANTS: 2
-    MAX_SYMBOLS: 5
     TOP_N_COMBOS: 2
-  timeout: 120
-  skip: true
-  skip_reason: "The fixture cannot produce a traded backtest: it fits 5 symbols and the smallest concentration etfs declares is 5, so a top-5 selection holds the whole ranked cross-section, the basket never changes and every backtest records num_trades=0. Measured: 12 backtests, 12 with a Sharpe, 0 with a trade. Skipped rather than left red because the cause is a fixture-scale defect filed as ml4t/agent-workspace#989, not the notebook - which is correct and re-executed on the canonical registry. Remove these five skips when #989 raises max_symbols across 04-12."
+  timeout: 600
 case_studies/etfs/17_costs:
   parameters:
-    MAX_SYMBOLS: 5
     TOP_N_COMBOS: 2
-  timeout: 120
-  skip: true
-  skip_reason: "Draws its carrier from the signal, allocation and risk_overlay stages, and 14_backtest, 15_portfolio_management and 16_risk_management are all skipped for the same #989 cause, so the pool is empty and the notebook refuses. That refusal is correct; the cause is one step upstream, which is what makes this skip theirs rather than its own: the fixture cannot produce a traded backtest, because it fits 5 symbols and the smallest concentration etfs declares is 5, so a top-5 selection holds the whole ranked cross-section, the basket never changes and every backtest records num_trades=0. Measured: 12 backtests, 12 with a Sharpe, 0 with a trade. Remove these five skips when #989 raises max_symbols across 04-12."
-case_studies/etfs/18_strategy_analysis:
-  skip: true
-  skip_reason: "The fixture cannot produce a traded backtest: it fits 5 symbols and the smallest concentration etfs declares is 5, so a top-5 selection holds the whole ranked cross-section, the basket never changes and every backtest records num_trades=0. Measured: 12 backtests, 12 with a Sharpe, 0 with a trade. Skipped rather than left red because the cause is a fixture-scale defect filed as ml4t/agent-workspace#989, not the notebook - which is correct and re-executed on the canonical registry. Remove these five skips when #989 raises max_symbols across 04-12."
+  timeout: 600
+case_studies/etfs/18_holdout_predictions:
+  # Refits the selected configuration over the holdout fold - one training run, no sweep. The
+  # budget is a single GBM fit over the full history before the window, on 24 funds.
+  timeout: 900
+case_studies/etfs/19_holdout_backtest:
+  # One backtest over the holdout window, on the engine path this case study's trailing-stop
+  # carrier requires.
+  timeout: 600
+case_studies/etfs/20_strategy_analysis:
+  timeout: 900
 case_studies/fx_pairs/01_feasibility_analysis:
   timeout: 120
 case_studies/fx_pairs/02_labels:

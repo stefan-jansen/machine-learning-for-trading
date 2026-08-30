@@ -173,7 +173,7 @@ print(f"Live prediction sets: {len(LIVE_PREDICTIONS):,}")
 # The stages the sweep may draw its carrier from. This is not a free choice: it is exactly the set
 # `resolve_canonical_rank1_lineage` selects over (`case_studies/utils/strategy_analysis.py:355`),
 # and the two have to agree. Pool anything narrower and they can name different configurations -
-# the curve below would then describe a strategy `18_strategy_analysis` does not report, and that
+# the curve below would then describe a strategy `20_strategy_analysis` does not report, and that
 # notebook would find no cost rows for the carrier it did select.
 #
 # Breadth is also what keeps the risk question empirical. The risk stage files one row per named
@@ -670,5 +670,7 @@ show_plotly_with_alt(
 # And every point is measured on validation folds; the holdout is not consulted.
 
 # %% [markdown]
-# **Next**: [`18_strategy_analysis`](18_strategy_analysis.ipynb) takes the carrier this sweep
-# priced and reports it end to end.
+# **Next**: [`18_holdout_predictions`](18_holdout_predictions.ipynb) refits the carrier this
+# sweep priced on the history before the holdout window, [`19_holdout_backtest`](19_holdout_backtest.ipynb)
+# trades it there, and [`20_strategy_analysis`](20_strategy_analysis.ipynb) reports the whole
+# progression. This is the last stage that selects; nothing after it chooses anything.

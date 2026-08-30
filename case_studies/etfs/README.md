@@ -42,7 +42,7 @@ The configuration is the most cost-favorable in the book — long-only rank-and-
 | Portfolio | [`15_portfolio_management`](15_portfolio_management.ipynb) | Ch17 | Score-weighted, risk-parity, inverse-vol, MVO, HRP, and conformal-weighted allocation | One backtest run per allocation method, same artifact layout |
 | Costs | [`16_costs`](16_costs.ipynb) | Ch18 | Transaction cost impact on the momentum edge | One backtest run per cost level, same artifact layout |
 | Risk | [`17_risk_management`](17_risk_management.ipynb) | Ch19 | Position-level stop-loss, trailing-stop, and time-exit overlays calibrated against the in-sample MAE distribution | One backtest run per overlay variant, same artifact layout |
-| Strategy Analysis | [`18_strategy_analysis`](18_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with IC, Sharpe, and cost analysis | `results/strategy_assessment.json`, `20_strategy_synthesis/output/etfs/etfs_tearsheet.html`; nothing in the registry |
+| Strategy Analysis | [`20_strategy_analysis`](20_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with IC, Sharpe, and cost analysis | `results/strategy_assessment.json`, `20_strategy_synthesis/output/etfs/etfs_tearsheet.html`; nothing in the registry |
 
 ## Key Results
 
@@ -80,7 +80,7 @@ uv run python case_studies/etfs/14_backtest.py
 uv run python case_studies/etfs/15_portfolio_management.py
 uv run python case_studies/etfs/16_risk_management.py
 uv run python case_studies/etfs/17_costs.py
-uv run python case_studies/etfs/18_strategy_analysis.py
+uv run python case_studies/etfs/20_strategy_analysis.py
 ```
 
 ## Run Log

@@ -221,7 +221,7 @@ def test_an_unevaluated_holdout_is_reported_as_a_state_not_as_a_missing_hash(cas
     """The reason distinguishes "the holdout has not been run" from every other absence.
 
     Three strategy-analysis notebooks call this and raise when it answers None, which is
-    what leaves `cs-etfs` red on `18_strategy_analysis` and stops us_firm_characteristics'
+    what leaves `cs-etfs` red on `20_strategy_analysis` and stops us_firm_characteristics'
     `15_strategy_analysis` at the same line. A reader working the notebooks in order
     reaches them before the holdout stage has run, so the ordinary case has to be a
     sentence rather than a traceback - and the sentence has to say which of the four

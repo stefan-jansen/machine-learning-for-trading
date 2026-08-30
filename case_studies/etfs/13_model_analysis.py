@@ -36,7 +36,7 @@
 # [`14_backtest`](14_backtest.ipynb), over the population this notebook describes. Every number
 # here is measured on validation folds that have been read repeatedly by the time a case study
 # reaches this point; the holdout is opened once, in
-# [`18_strategy_analysis`](18_strategy_analysis.ipynb).
+# [`20_strategy_analysis`](20_strategy_analysis.ipynb).
 #
 # **Learning objectives**
 #
@@ -1321,7 +1321,7 @@ print(
 # actually swept.
 #
 # It reads `cohort_metrics`, which is computed once the whole pipeline exists and written by
-# [`18_strategy_analysis`](18_strategy_analysis.ipynb) - the notebook that has every stage in front
+# [`20_strategy_analysis`](20_strategy_analysis.ipynb) - the notebook that has every stage in front
 # of it. So on a first pass this table is empty, and it is empty for a reason worth stating: the
 # cost of a search cannot be priced until the search has happened. The notebook says so rather than
 # failing, and filling in on a second pass is the normal course rather than a repair.
@@ -1354,7 +1354,7 @@ else:
 # ### Validation against holdout, for whatever has been retrained
 #
 # The holdout is opened once, for the candidate the selection workflow names, and
-# [`18_strategy_analysis`](18_strategy_analysis.ipynb) is where that happens. Until it does, the
+# [`20_strategy_analysis`](20_strategy_analysis.ipynb) is where that happens. Until it does, the
 # holdout side of this table is empty by design rather than by omission - a family showing no
 # holdout figure was never retrained on it, which is not the same as a family that was retrained
 # and did badly.
@@ -1417,7 +1417,7 @@ else:
 # **The holdout has been looked at once, or not at all.** Every figure in this notebook comes from
 # validation folds that have been read repeatedly by the time a case study reaches here. The
 # holdout table above is the only out-of-sample evidence, it covers only whatever was retrained,
-# and it is small. [`18_strategy_analysis`](18_strategy_analysis.ipynb) is where it is opened and
+# and it is small. [`20_strategy_analysis`](20_strategy_analysis.ipynb) is where it is opened and
 # where the comparison that matters is made.
 #
 # ### How the predictions are used downstream

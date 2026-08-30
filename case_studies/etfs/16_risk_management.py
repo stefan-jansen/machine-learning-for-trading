@@ -49,7 +49,7 @@
 # **What it writes**: one row in `backtest_runs` per combination and risk control, at
 # `stage='risk_overlay'` - and no row for the un-overlaid strategy, which is why
 # [`17_costs`](17_costs.ipynb) pools this stage with `allocation` and `signal` rather than reading
-# it alone. [`18_strategy_analysis`](18_strategy_analysis.ipynb) reads the whole pipeline, this
+# it alone. [`20_strategy_analysis`](20_strategy_analysis.ipynb) reads the whole pipeline, this
 # stage included.
 
 # %%
@@ -492,5 +492,5 @@ show_plotly_with_alt(
 
 # %% [markdown]
 # **Next**: [`17_costs`](17_costs.ipynb) prices whichever carrier wins across the baseline, the
-# allocation sweep and this overlay stage, and [`18_strategy_analysis`](18_strategy_analysis.ipynb)
+# allocation sweep and this overlay stage, and [`20_strategy_analysis`](20_strategy_analysis.ipynb)
 # then reads the whole progression and opens the holdout.

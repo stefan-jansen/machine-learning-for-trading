@@ -41,7 +41,7 @@
 # **Book reference**: Chapter 20, §20.1 (the §9 handoff feeds Ch20's
 # cross-case-study aggregation).
 #
-# **Prerequisites**: case-study pipeline through `17_costs`;
+# **Prerequisites**: case-study pipeline through `19_holdout_backtest`;
 # the locked registry (`case_studies/etfs/run_log/registry.db`).
 #
 # **Scope**: no training and no re-backtesting. It does write two derived tables,
