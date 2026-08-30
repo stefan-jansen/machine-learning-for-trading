@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterable
 from pathlib import Path
 
 import polars as pl
@@ -396,6 +397,7 @@ def load_best_ic_per_family(
     split: str = "validation",
     case_studies: list[str] | None = None,
     use_primary_label: bool = True,
+    exclude_prediction_hashes: Iterable[str] | None = None,
 ) -> pl.DataFrame:
     """Highest-IC row per family per case study (one row per family-case_study pair).
 
@@ -414,10 +416,25 @@ def load_best_ic_per_family(
     bar is per family, so ``ic_n_days`` lets a caller comparing families confirm
     they were scored over the same *number* of days; ``prediction_hash`` is what
     lets it load the rows and confirm they were the same days.
+
+    ``exclude_prediction_hashes`` drops rows **before** the per-family maximum is
+    taken, which is the only point where it can be applied correctly. A caller
+    that filters the returned frame instead has already lost every runner-up: if
+    a family's highest-IC row is excluded, the family disappears from the result
+    rather than falling back to its best remaining row, and a caller expecting one
+    row per family raises on the lookup. The catalog this reads carries no
+    lineage, so retirement is what a caller usually has to exclude, and it cannot
+    tell from the returned frame whether a family is absent because it was never
+    fitted or because its leader was retired.
     """
     all_ic = load_model_ic(families, split=split, case_studies=case_studies)
     if all_ic.is_empty():
         return pl.DataFrame()
+
+    if exclude_prediction_hashes is not None and "prediction_hash" in all_ic.columns:
+        all_ic = all_ic.filter(~pl.col("prediction_hash").is_in(list(exclude_prediction_hashes)))
+        if all_ic.is_empty():
+            return pl.DataFrame()
 
     if use_primary_label:
         label_rows = [
