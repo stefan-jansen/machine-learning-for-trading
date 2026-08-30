@@ -201,7 +201,15 @@ else:
     # one open per row on a path that runs only where no frozen set exists.
     _complete: list[tuple[str, object]] = []
     _incomplete: list[str] = []
-    for _row in _live.sort("sharpe", descending=True).iter_rows(named=True):
+    # A candidate with no registered Sharpe cannot be ranked, so it is not eligible - and
+    # `completeness()` does not catch it, because a backtest is complete once a metrics ROW
+    # exists whether or not that row carries a Sharpe. Polars sorts nulls first on a descending
+    # sort, so without this a null-Sharpe row would sort above every real one and be selected.
+    _rankable = _live.filter(pl.col("sharpe").is_not_null())
+    _unrankable = _live.height - _rankable.height
+    if _unrankable:
+        print(f"Excluded {_unrankable} backtest(s) with no registered Sharpe from the field")
+    for _row in _rankable.sort("sharpe", descending=True, nulls_last=True).iter_rows(named=True):
         _result = study.results.open(_row["backtest_hash"])
         _reason = _result.completeness()
         if _reason is None:
@@ -210,8 +218,8 @@ else:
             _incomplete.append(f"{_row['backtest_hash']} ({_reason})")
     if not _complete:
         raise RuntimeError(
-            f"all {_live.height} eligible validation backtests are incomplete, so there is no "
-            "selection to carry forward: " + "; ".join(_incomplete[:5])
+            f"none of the {_live.height} eligible validation backtests is both rankable and "
+            "complete, so there is no selection to carry forward: " + "; ".join(_incomplete[:5])
         )
     if _incomplete:
         print(
