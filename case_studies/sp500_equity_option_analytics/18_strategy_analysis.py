@@ -985,12 +985,31 @@ if LOCK_FINALIZED and not _sealed:
         f"holdout_evaluations pins backtest {FINALIZED[LOCK_HASH][2]} for lock {LOCK_HASH}, "
         "and the registry does not hold it: the finalized lineage cannot be read back"
     )
+# An empty `_sealed` has two quite different causes and they call for different readings.
+# Either the lock's own fit was predicted and not yet backtested - a run between two writes -
+# or the holdout artifacts that do exist belong to a different training hash than the lock
+# names, which is a mismatched evaluation and a much stronger statement about the registry.
+# Reporting both as "no backtest computes the result" would bury the second in the first.
+_sealed_predicted = [row for row in holdout_prediction_rows if row[1] == SEALED_TRAINING_HASH]
+_other_fits = sorted({row[1] for row in holdout_prediction_rows} - {SEALED_TRAINING_HASH})
 if HOLDOUT_ASSESSABLE and not _sealed:
-    print(
-        f"The lock names holdout training {SEALED_TRAINING_HASH} and "
-        f"{len(holdout_prediction_rows)} holdout prediction(s) exist, but no holdout backtest "
-        "runs on that fit. The window is spent and its result has not been computed."
-    )
+    if _sealed_predicted:
+        print(
+            f"The lock names holdout training {SEALED_TRAINING_HASH}, its holdout prediction "
+            "exists, and no backtest runs on it. The window is spent and its result has not "
+            "been computed."
+        )
+    elif _other_fits:
+        print(
+            f"The lock names holdout training {SEALED_TRAINING_HASH}, and every holdout "
+            f"artifact in this registry belongs to another fit ({', '.join(_other_fits)}). "
+            "The window was spent on something the lock does not seal."
+        )
+    else:
+        print(
+            f"The lock names holdout training {SEALED_TRAINING_HASH} and the registry holds "
+            "no holdout artifact for it."
+        )
 if len(_sealed) > 1:
     raise RuntimeError(f"{len(_sealed)} holdout backtests run on the sealed fit; expected one")
 
@@ -1349,6 +1368,8 @@ assessment = pl.DataFrame(
                 else (
                     "no research lock in this registry; no holdout has been taken"
                     if not HOLDOUT_SPENT
+                    else f"the window was spent on another fit ({', '.join(_other_fits)})"
+                    if _other_fits and not _sealed_predicted
                     else "the window is spent and no backtest computes its result"
                 )
                 if sealed_holdout is None

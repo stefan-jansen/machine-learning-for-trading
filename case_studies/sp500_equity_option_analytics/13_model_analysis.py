@@ -500,14 +500,20 @@ if _causal_db.exists():
 
     from case_studies.utils.registry.store import current_causal_identities
 
-    with sqlite3.connect(_causal_db) as _coverage_con:
-        # Exactly one, which is the reader's rule: `CausalResult.one` refuses an ambiguous
-        # label rather than choosing between two current identities. Counting "one or more"
-        # here would mark the family covered on a registry whose evidence Section 7 then
-        # declines to show, which is the same disagreement one step earlier.
-        _causal_current = current_causal_identities(_coverage_con, label=PRIMARY_LABEL)
-        _causal_primary_count = 1 if len(_causal_current) == 1 else 0
+    # Resolved once, here, through the reader's own path, and reused by Section 7 below.
+    # Two checks were drifting apart otherwise: this one counted identities while the
+    # evidence block tested a single metric, so a row could be coverage here and withheld
+    # there. `CausalResult.one` refuses an ambiguous label rather than choosing between two
+    # current identities, and `.complete` is the contract for whether the row holds what its
+    # run was asked to produce - including the refutation, when one was asked for.
+    try:
+        CAUSAL_RESULT = CausalResult.one(study, label=PRIMARY_LABEL)
+        CAUSAL_REFUSAL = "" if CAUSAL_RESULT.complete else f"{CAUSAL_RESULT.hash} is incomplete"
+    except ValueError as _causal_err:
+        CAUSAL_RESULT, CAUSAL_REFUSAL = None, str(_causal_err)
+    _causal_primary_count = 0 if CAUSAL_REFUSAL else 1
 else:
+    CAUSAL_RESULT, CAUSAL_REFUSAL = None, "no registry"
     _causal_primary_count = 0
 causal_families = ["causal_dml"] if _causal_primary_count else []
 all_labels = sorted(coverage["label"].unique().to_list())
@@ -1508,24 +1514,13 @@ if _db_path.exists():
 # have put two estimates in the table below with nothing distinguishing them, and gate counts
 # computed out of two; an incomplete one would have counted as causal coverage. Neither is
 # something the membership check can see, so the reader's own resolution is run here too.
-CAUSAL_RESOLUTION = ""
-if causal_rows:
-    try:
-        _resolved = CausalResult.one(study, label=PRIMARY_LABEL)
-    except ValueError as _err:
-        CAUSAL_RESOLUTION = str(_err)
-        causal_rows = []
-    else:
-        if not _resolved.metrics.get("refutation_class"):
-            CAUSAL_RESOLUTION = (
-                f"{_resolved.hash} resolves but carries no refutation verdict, so it is not "
-                "complete causal evidence"
-            )
-            causal_rows = []
-        else:
-            causal_rows = [row for row in causal_rows if row["causal_hash"] == _resolved.hash]
-if CAUSAL_RESOLUTION:
-    print(f"No causal evidence is reported: {CAUSAL_RESOLUTION}")
+# The same resolution the coverage map above was computed from, so the two cannot disagree.
+if CAUSAL_REFUSAL or CAUSAL_RESULT is None:
+    causal_rows = []
+else:
+    causal_rows = [row for row in causal_rows if row["causal_hash"] == CAUSAL_RESULT.hash]
+if CAUSAL_REFUSAL:
+    print(f"No causal evidence is reported: {CAUSAL_REFUSAL}")
 
 if causal_unresolvable:
     # Why each one is excluded, rather than one explanation applied to all of them.
