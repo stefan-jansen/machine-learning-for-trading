@@ -230,3 +230,7 @@ case_studies/*/catalog/*.json
 
 # generated preview fixtures (tests/generate_intermediates.py)
 case_studies/.preview/
+
+# Papermill writes `.<stem>.papermill.<pid>.ipynb` beside the notebook while it executes and
+# leaves it behind if the run is killed. It is never a deliverable.
+.*.papermill.*.ipynb

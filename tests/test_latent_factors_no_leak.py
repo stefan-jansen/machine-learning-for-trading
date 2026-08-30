@@ -377,6 +377,7 @@ def test_latent_training_identity_includes_input_splits_and_runtime() -> None:
             "label": "return",
             "seed": 42,
         },
+        "model_name": "cae",
         "n_factors": 5,
         "n_epochs": 50,
         "model_kwargs": {"checkpoint_interval": 5},
@@ -545,6 +546,7 @@ def test_latent_input_digest_excludes_sealed_holdout() -> None:
             "label": "return",
             "seed": 42,
         },
+        "model_name": "cae",
         "n_factors": 5,
         "n_epochs": 50,
         "model_kwargs": {"checkpoint_interval": 5},
@@ -1170,6 +1172,7 @@ def test_ipca_solver_controls_change_training_identity() -> None:
     }
     old = _apply_latent_factor_runtime_spec(
         spec=base,
+        model_name="ipca",
         n_factors=5,
         n_epochs=50,
         model_kwargs={"max_iter": 100},
@@ -1178,6 +1181,7 @@ def test_ipca_solver_controls_change_training_identity() -> None:
     )
     corrected = _apply_latent_factor_runtime_spec(
         spec=base,
+        model_name="ipca",
         n_factors=5,
         n_epochs=50,
         model_kwargs={"max_iter": 10_000},
@@ -1220,6 +1224,7 @@ def test_n_factors_changes_training_identity_even_when_the_preset_declares_one()
         "model_kwargs": {},
         "fold_extras": [],
         "n_epochs": 50,
+        "model_name": "ipca",
     }
     at_five = _apply_latent_factor_runtime_spec(spec=preset, n_factors=5, **identity)
     at_two = _apply_latent_factor_runtime_spec(spec=preset, n_factors=2, **identity)
@@ -1644,6 +1649,7 @@ def test_fold_temporal_assembly_changes_training_identity() -> None:
     }
     placeholder = _apply_latent_factor_runtime_spec(
         spec=base,
+        model_name="ipca",
         n_factors=5,
         n_epochs=50,
         model_kwargs={},
@@ -1652,6 +1658,7 @@ def test_fold_temporal_assembly_changes_training_identity() -> None:
     )
     fold_scoped = _apply_latent_factor_runtime_spec(
         spec=base,
+        model_name="ipca",
         n_factors=5,
         n_epochs=50,
         model_kwargs={},
@@ -1667,6 +1674,7 @@ def test_fold_temporal_assembly_changes_training_identity() -> None:
 
     changed_fold_data = _apply_latent_factor_runtime_spec(
         spec=base,
+        model_name="ipca",
         n_factors=5,
         n_epochs=50,
         model_kwargs={},

@@ -59,6 +59,7 @@ warnings.filterwarnings("ignore")
 # paired uncertainty consistent with the preceding pipeline stages.
 
 # %%
+from case_studies.research import Study
 from case_studies.utils.backtest_loaders import (
     VECTORIZED_CASE_STUDIES,
     get_backtest_config,
@@ -71,6 +72,7 @@ from case_studies.utils.backtest_presets import (
     strategy_view,
 )
 from case_studies.utils.backtest_runner import precompute_weights, run_backtest
+from case_studies.utils.notebook_contracts import prediction_members_in_force
 from case_studies.utils.registry import (
     backtest_hash_from_parts,
     model_source,
@@ -126,13 +128,50 @@ print(f"Case study: {CASE_STUDY_ID}; label: {RISK_LABEL}; selected lineages: {TO
 # allocators using validation Sharpe and maximum prediction coverage.
 # Historical rows from removed allocators cannot enter the corrected risk stage.
 
+# %% [markdown]
+# **The carrier is whichever strategy row ranks highest, so the pool it is drawn from decides what
+# is being overlaid.** A population is immutable and the registry keeps every generation of it, so
+# a pool built straight from `backtest_runs` counts retired members beside current ones - nothing
+# in the read path filters on supersession (`case_studies/utils/registry/queries.py` contains no
+# occurrence of `supersed`). A retired generation that outranks its own replacement would carry the
+# risk comparison, and the notebook would report an overlay on a strategy the case study no longer
+# publishes. `prediction_hashes` is passed rather than applied afterwards because it also scopes
+# the full-coverage bar the query ranks against: a retired row with a longer in-window count would
+# otherwise set a bar its live replacement cannot meet.
+
+# %%
+# `Study.at` is the read-only form: one root, no activation. These notebooks only read the
+# populations - their backtests reach the registry by their own paths - and every other way in
+# ends in `activate()`, which rewrites `ML4T_OUTPUT_DIR` process-wide. `open_study` with the
+# canonical tier routes to `Study.regenerate`, which refuses unless `features`, `labels` and
+# `run_log` are symlinks: true in a maintainer worktree, false in every clean clone and CI run.
+# `CASE_DIR` is already the directory this notebook resolved, including under a preview, so
+# asking it directly answers for the registry the rest of the notebook reads.
+_study = Study.at(CASE_DIR, case_study=CASE_STUDY_ID, entry_point="17_risk_management")
+_members, _population_notes = prediction_members_in_force(_study)
+for _note in _population_notes:
+    print(_note)
+CURRENT_MEMBERS = _members
+if CURRENT_MEMBERS is not None:
+    print(f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force")
+
 # %%
 active_allocators = {item["method"] for item in get_allocators(CASE_STUDY_ID)}
 baseline_pool = resolve_best_backtest_runs(
-    CASE_STUDY_ID, RISK_LABEL, split="validation", stage="signal", top_n=9999
+    CASE_STUDY_ID,
+    RISK_LABEL,
+    split="validation",
+    stage="signal",
+    top_n=9999,
+    prediction_hashes=CURRENT_MEMBERS,
 )
 allocation_pool = resolve_best_backtest_runs(
-    CASE_STUDY_ID, RISK_LABEL, split="validation", stage="allocation", top_n=9999
+    CASE_STUDY_ID,
+    RISK_LABEL,
+    split="validation",
+    stage="allocation",
+    top_n=9999,
+    prediction_hashes=CURRENT_MEMBERS,
 )
 candidate_pool = pl.concat([baseline_pool, allocation_pool], how="diagonal_relaxed").unique(
     "backtest_hash"

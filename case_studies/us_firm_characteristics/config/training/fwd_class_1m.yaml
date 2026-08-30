@@ -34,4 +34,9 @@ latent_factors:
 - sdf
 - sae
 causal_dml:
-- dml
+# A DML row cap is spent on whole decision months, so the history it buys is the cap
+# divided by the width of the cross-section. This panel is a monthly cross-section
+# thousands of firms wide, and the fleet default preset leaves it under two years of
+# decision months to compute a time-clustered standard error and a block permutation
+# over. dml_250k is that same design with a cap sized for a panel this wide.
+- dml_250k
