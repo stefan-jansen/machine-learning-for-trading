@@ -165,6 +165,25 @@ def option_source_identity(labels_dir: Path, raw_options_dir: Path) -> dict[str,
     }
 
 
+def _quote_is_ordered() -> pl.Expr:
+    """An ask at or above its bid, everywhere the quote is used to mark the straddle.
+
+    The expiration session is exempt. The straddle settles there in cash at the intrinsic
+    value of its legs, computed from the underlying and the strike, and
+    :func:`_load_option_lifecycle` overwrites both mids with that value - so the vendor's
+    end-of-session bid and ask on that date are read by nothing. Requiring them to be
+    ordered rejects a decision over a quote that cannot reach a single accounted number.
+
+    This is the same exemption ``_defective_lifecycle_contracts`` already makes when it
+    counts half-quoted sessions, and it is drawn for the same reason. It was missing here,
+    so COST 295 expiring 2020-01-03 - whose call closed its last session bid 0.02 / ask 0.01,
+    a crossed quote in one of 20.5 million rows - failed the paired-session count and halted
+    the whole backtest at "1 of 1711 selected option decisions have no complete paired
+    lifecycle". Every session whose prices the accounting does read is still checked.
+    """
+    return (pl.col("ask") >= pl.col("bid")) | (pl.col("date") == pl.col("expiration"))
+
+
 def _price_end_of_session_quotes(chain: pl.DataFrame) -> pl.DataFrame:
     """Read a null bid beside a quoted ask as a bid of zero.
 
@@ -298,7 +317,7 @@ def _defective_lifecycle_contracts(
         )
         & (pl.col("mid_price") >= 0)
         & (pl.col("bid") >= 0)
-        & (pl.col("ask") >= pl.col("bid"))
+        & _quote_is_ordered()
         & (pl.col("underlying_price") > 0)
     )
     join_keys = ["date", "symbol", "strike", "expiration"]
@@ -605,7 +624,7 @@ def _load_option_lifecycle(
         )
         | (pl.col("mid_price") < 0)
         | (pl.col("bid") < 0)
-        | (pl.col("ask") < pl.col("bid"))
+        | ~_quote_is_ordered()
         | (pl.col("underlying_price") <= 0)
     )
     if not invalid.is_empty():

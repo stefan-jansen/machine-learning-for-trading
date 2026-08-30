@@ -399,6 +399,48 @@ def test_lifecycle_rejects_a_missing_contract_leg_date(tmp_path: Path) -> None:
         _load_option_lifecycle(cohorts, raw_dir)
 
 
+def _cross_the_call_quote(raw_dir: Path, on: date) -> None:
+    """Make the call's bid exceed its ask on one session, as the vendor chain does."""
+    raw_path = raw_dir / "year=2024.parquet"
+    crossed = (pl.col("date") == on) & (pl.col("call_put") == "C")
+    pl.read_parquet(raw_path).with_columns(
+        bid=pl.when(crossed).then(pl.lit(0.02)).otherwise(pl.col("bid")),
+        ask=pl.when(crossed).then(pl.lit(0.01)).otherwise(pl.col("ask")),
+    ).write_parquet(raw_path)
+
+
+def test_a_crossed_quote_on_the_expiration_session_still_settles_at_intrinsic(
+    tmp_path: Path,
+) -> None:
+    """The expiry mids are discarded for cash settlement, so their order cannot matter.
+
+    COST 295 expiring 2020-01-03 closed its last session bid 0.02 / ask 0.01. Nothing
+    reads that quote - the straddle settles at max(underlying - strike, 0) + max(strike
+    - underlying, 0) - and rejecting it halted the whole backtest over one crossed row.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    _cross_the_call_quote(raw_dir, date(2024, 1, 10))
+    cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
+
+    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
+    settled = lifecycle.filter(pl.col("cash_settled"))
+    assert settled.height == 1
+    assert settled.get_column("date").item() == date(2024, 1, 10)
+    assert settled.get_column("instr_mid").item() == pytest.approx(1.0)
+
+
+def test_a_crossed_quote_before_expiration_is_still_rejected(tmp_path: Path) -> None:
+    """The exemption is the expiration session and nothing wider: 01-09 marks the position."""
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    _cross_the_call_quote(raw_dir, date(2024, 1, 9))
+    cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
+
+    with pytest.raises(ValueError, match="invalid quote rows"):
+        _load_option_lifecycle(cohorts, raw_dir)
+
+
 def test_supplied_lifecycle_cannot_drop_cash_settlement(tmp_path: Path) -> None:
     raw_dir = tmp_path / "raw"
     _write_raw_options(raw_dir)
