@@ -1,6 +1,6 @@
+import json
 import os
 import re
-import subprocess
 import sys
 import types
 from pathlib import Path
@@ -430,14 +430,49 @@ def _paired_notebook(tmp_path: Path, body: str) -> Path:
     """A `.py` and the `.ipynb` beside it, because papermill only reads the notebook.
 
     `_notebook` writes the source alone, which is all the AST analysis needs. The
-    papermill-visibility check asks papermill itself, and papermill takes a notebook, so a
-    test for that check has to produce the pair the way jupytext does.
+    papermill-visibility check asks papermill itself, and papermill takes a notebook, so a test
+    for that check has to produce the pair.
+
+    Written with `nbformat` rather than by shelling out to `jupytext --set-kernel python3`, which
+    needs a registered `python3` kernelspec: that exists on a workstation and not on the CI
+    runner, where the call exits 1 and takes these three tests with it. The kernelspec is declared
+    here instead, because it is what papermill reads to choose a language translator - the only
+    thing about the notebook these tests depend on.
     """
     py = _notebook(tmp_path, body)
-    subprocess.run(
-        [sys.executable, "-m", "jupytext", "--to", "notebook", "--set-kernel", "python3", str(py)],
-        check=True,
-        capture_output=True,
+    cells = []
+    for chunk in body.split("# %%"):
+        chunk = chunk.strip("\n")
+        if not chunk:
+            continue
+        tags = ["parameters"] if chunk.startswith(' tags=["parameters"]') else []
+        source = chunk.split("\n", 1)[1] if chunk.startswith(" ") else chunk
+        cells.append(
+            {
+                "id": f"cell{len(cells)}",
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {"tags": tags},
+                "outputs": [],
+                "source": source.splitlines(keepends=True),
+            }
+        )
+    py.with_suffix(".ipynb").write_text(
+        json.dumps(
+            {
+                "cells": cells,
+                "metadata": {
+                    "kernelspec": {
+                        "display_name": "Python 3",
+                        "language": "python",
+                        "name": "python3",
+                    },
+                    "language_info": {"name": "python"},
+                },
+                "nbformat": 4,
+                "nbformat_minor": 5,
+            }
+        )
     )
     return py
 
