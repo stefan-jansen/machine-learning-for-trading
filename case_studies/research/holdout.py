@@ -87,13 +87,26 @@ class _DecisionReplay:
 
 
 @dataclass(frozen=True)
-class LockedStrategyReplay:
-    lock: ResearchLock
+class StrategyReplay:
+    """The exact holdout re-run of one validation strategy.
+
+    It holds the four facts the replay actually consumes - the study, the resolved strategy
+    specification, the label whose price grid the holdout is read from, and the validation
+    prediction the conformal calibration is keyed on - rather than a research lock, because
+    every one of them is readable from the selected validation backtest. Taking a lock instead
+    made an authorization token a prerequisite for a computation that needs no authorization,
+    which is what forced holdout production to happen inside the lock transaction.
+    """
+
+    study: Any
+    strategy_spec: dict[str, Any]
+    label: str
+    validation_prediction_hash: str
     request: dict[str, Any]
     decision_replay: _DecisionReplay | None
 
     def run(self, prediction: PredictionResult) -> BacktestResult:
-        if prediction.study != self.lock.study:
+        if prediction.study != self.study:
             raise ValueError("holdout prediction belongs to another study")
         from case_studies.utils.artifact_digest import value_digest
         from case_studies.utils.backtest_presets import serializable_backtest_spec
@@ -105,18 +118,18 @@ class LockedStrategyReplay:
         from .lifecycle import _locked_strategy_projection
         from .results import Result
 
-        locked_spec = deepcopy(self.lock.record["strategy_spec"])
+        locked_spec = deepcopy(self.strategy_spec)
         warmup = strategy_module.strategy_warmup_periods(locked_spec)
         prices = strategy_module.load_backtest_prices_for(
-            self.lock.study.case_study,
-            str(self.lock.record["label"]),
+            self.study.case_study,
+            self.label,
             split="holdout",
             warmup_periods=warmup,
         )
         decision = (
             self.decision_replay.publish(prediction, prices) if self.decision_replay else None
         )
-        strategy = self.lock.study.strategy(
+        strategy = self.study.strategy(
             prediction=prediction,
             decision=decision,
             **self.request,
@@ -152,7 +165,7 @@ class LockedStrategyReplay:
             raise ValueError("locked decision artifact was not transformed for holdout")
 
         contract_specs = None
-        if self.lock.study.case_study == "cme_futures":
+        if self.study.case_study == "cme_futures":
             contract_specs = strategy_module.load_contract_specs_from_yaml()
             serialized = {
                 symbol: asdict(contract_spec) for symbol, contract_spec in contract_specs.items()
@@ -170,13 +183,13 @@ class LockedStrategyReplay:
         allocation = spec.get("strategy", {}).get("allocation", {})
         if allocation.get("method") == "conformal_weighted":
             strategy_module.compute_holdout_conformal_widths(
-                self.lock.study.case_study,
-                self.lock.record["prediction_hash"],
+                self.study.case_study,
+                self.validation_prediction_hash,
                 prediction.hash,
                 alpha=float(allocation.get("alpha", 0.2)),
                 min_calibration_n=int(allocation["min_calibration_n"]),
                 embargo_steps=strategy_module.holdout_conformal_embargo_steps(
-                    self.lock.study.case_study,
+                    self.study.case_study,
                     strategy.label,
                 ),
                 write=True,
@@ -211,14 +224,14 @@ class LockedStrategyReplay:
             identity_version=2,
         )
         try:
-            cached = Result.open(self.lock.study, expected_hash)
+            cached = Result.open(self.study, expected_hash)
         except KeyError:
             cached = None
         if isinstance(cached, BacktestResult) and cached.complete:
             return cached
-        self.lock.study.activate(ExecutionTier.CANONICAL)
+        self.study.activate(ExecutionTier.CANONICAL)
         result = strategy_module.run_backtest(
-            self.lock.study.case_study,
+            self.study.case_study,
             prediction.hash,
             spec,
             prices=engine_prices,
@@ -237,19 +250,21 @@ class LockedStrategyReplay:
                 f"locked backtest identity changed during execution: "
                 f"{expected_hash} -> {result.backtest_hash}"
             )
-        reopened = Result.open(self.lock.study, expected_hash)
+        reopened = Result.open(self.study, expected_hash)
         if not isinstance(reopened, BacktestResult) or not reopened.complete:
             raise ValueError("locked strategy did not publish a complete backtest result")
         return reopened
 
 
-def _prepare_decision_replay(lock: ResearchLock) -> _DecisionReplay | None:
-    decision_record = lock.record["strategy_spec"].get("decision_artifact")
+def _prepare_decision_replay(
+    study: Any, strategy_spec: Mapping[str, Any]
+) -> _DecisionReplay | None:
+    decision_record = strategy_spec.get("decision_artifact")
     if decision_record is None:
         return None
     if not decision_record.get("canonical"):
-        raise ValueError("locked holdout decisions require a canonical validation artifact")
-    original = DecisionArtifact.open(lock.study, str(decision_record["hash"]))
+        raise ValueError("holdout decisions require a canonical validation artifact")
+    original = DecisionArtifact.open(study, str(decision_record["hash"]))
     expected = {
         "artifact_digest": original.spec["artifact_digest"],
         "canonical": original.canonical,
@@ -262,7 +277,7 @@ def _prepare_decision_replay(lock: ResearchLock) -> _DecisionReplay | None:
         if name in decision_record:
             expected[name] = original.spec[name]
     if decision_record != expected:
-        raise ValueError("locked decision artifact differs from its immutable registry record")
+        raise ValueError("decision artifact differs from its immutable registry record")
     original.load()
     source_identity = original.spec["source_identity"]
     replay = source_identity.get("holdout_replay")
@@ -328,7 +343,46 @@ def _prepare_decision_replay(lock: ResearchLock) -> _DecisionReplay | None:
     return _DecisionReplay(original, function, locked_inputs)
 
 
-def prepare_locked_strategy_replay(lock: ResearchLock) -> LockedStrategyReplay:
+def prepare_strategy_replay(
+    study: Any,
+    *,
+    strategy_spec: Mapping[str, Any],
+    label: str,
+    validation_prediction_hash: str,
+) -> StrategyReplay:
+    """Validate one resolved strategy and prepare its exact holdout replay.
+
+    Everything here is read from the selected validation backtest and its lineage. The three
+    arguments beyond the study are the three facts a backtest specification does not carry
+    about itself: which study it belongs to, which label's price grid the holdout reads, and
+    which validation prediction a conformal allocator calibrates against.
+    """
+    if not isinstance(strategy_spec, dict) or strategy_spec.get("version") != 2:
+        raise ValueError("holdout replay requires a complete canonical strategy specification")
+    strategy = strategy_spec.get("strategy")
+    if not isinstance(strategy, dict) or not isinstance(strategy.get("signal"), dict):
+        raise ValueError("holdout replay requires a resolved signal specification")
+    rebalance = strategy.get("rebalance") or {}
+    request = {
+        "signal": deepcopy(strategy["signal"]),
+        "allocation": deepcopy(strategy.get("allocation")),
+        "risk": deepcopy(strategy.get("risk")),
+        "chapter": strategy_spec.get("chapter"),
+        "execution_mode": rebalance.get("mode"),
+        "min_weight_change": rebalance.get("min_weight_change"),
+        "min_trade_value": rebalance.get("min_trade_value"),
+    }
+    return StrategyReplay(
+        study,
+        deepcopy(dict(strategy_spec)),
+        label,
+        validation_prediction_hash,
+        request,
+        _prepare_decision_replay(study, strategy_spec),
+    )
+
+
+def prepare_locked_strategy_replay(lock: ResearchLock) -> StrategyReplay:
     """Validate the locked strategy and prepare its exact holdout replay before model writes."""
     spec = lock.record.get("strategy_spec")
     if not isinstance(spec, dict) or spec.get("version") != 2:
@@ -336,17 +390,12 @@ def prepare_locked_strategy_replay(lock: ResearchLock) -> LockedStrategyReplay:
     strategy = spec.get("strategy")
     if not isinstance(strategy, dict) or not isinstance(strategy.get("signal"), dict):
         raise ValueError("research lock has no resolved signal specification")
-    rebalance = strategy.get("rebalance") or {}
-    request = {
-        "signal": deepcopy(strategy["signal"]),
-        "allocation": deepcopy(strategy.get("allocation")),
-        "risk": deepcopy(strategy.get("risk")),
-        "chapter": spec.get("chapter"),
-        "execution_mode": rebalance.get("mode"),
-        "min_weight_change": rebalance.get("min_weight_change"),
-        "min_trade_value": rebalance.get("min_trade_value"),
-    }
-    return LockedStrategyReplay(lock, request, _prepare_decision_replay(lock))
+    return prepare_strategy_replay(
+        lock.study,
+        strategy_spec=spec,
+        label=str(lock.record["label"]),
+        validation_prediction_hash=str(lock.record["prediction_hash"]),
+    )
 
 
 def _validation_folds(validation_spec: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -615,6 +664,191 @@ class HoldoutOutcome:
         return self.lock.study.lifecycle.holdout_lineage(self.lock.hash)
 
 
+def build_holdout_training_spec(
+    study: Any,
+    validation_spec: Mapping[str, Any],
+    *,
+    timeline: Sequence[Any],
+    case_study: str | None = None,
+) -> dict[str, Any]:
+    """The training specification that refits *validation_spec* on the holdout interval.
+
+    The two steps are inseparable and were previously reachable only from inside the lock
+    transaction: derive the one holdout fold from the panel's own observation grid, then re-key
+    every field the holdout changes. Splitting them across callers is how two case studies end
+    up with holdout specifications that differ in a field neither notebook mentions.
+
+    The holdout interval is stepped back along the observation grid rather than the calendar:
+    training ends a whole label buffer, counted in observations, before the holdout opens, so
+    the last training label's outcome cannot resolve inside the holdout.
+    """
+    holdout_spec = deepcopy(dict(validation_spec))
+    holdout_spec["computation"]["cv"] = build_holdout_cv(
+        validation_spec,
+        case_study=str(case_study if case_study is not None else study.case_study),
+        timeline=timeline,
+        train_start_floor=_holdout_training_floor(study, validation_spec),
+    )
+    _rekey_holdout_spec(study, holdout_spec, validation_spec)
+    return holdout_spec
+
+
+@dataclass(frozen=True)
+class HoldoutSelection:
+    """One validation selection and the holdout lineage it determines.
+
+    Holdout production is split across three notebooks - refit, backtest, then read both back -
+    and all three have to agree on which configuration was selected and what its holdout identity
+    is. They agree by deriving it here rather than by each re-deriving it, and by passing hashes
+    forward rather than re-selecting: the derivation is pure, so a notebook run days later
+    resolves the same lineage without anything having been written down between runs.
+
+    ``holdout_training_hash`` is the identity the holdout refit will have, derived whether or
+    not it has been produced yet, so a notebook can name the result it is waiting for rather
+    than report that a query found nothing. ``holdout_prediction`` and ``holdout_backtest``
+    resolve to None until the refit and the backtest have run.
+    """
+
+    study: Any
+    candidate_set: Any
+    validation_backtest: BacktestResult
+    validation_prediction: PredictionResult
+    validation_training: Any
+    label: str
+    checkpoint_kind: str
+    checkpoint_value: int | None
+    holdout_training_spec: dict[str, Any]
+    holdout_training_hash: str
+
+    @property
+    def holdout_prediction(self) -> PredictionResult | None:
+        """The registered holdout prediction, or None before the refit has run."""
+        from .results import PredictionResult as _PredictionResult
+
+        rows = self.study.predictions.table().filter(
+            (pl.col("training_hash") == self.holdout_training_hash)
+            & (pl.col("split") == "holdout")
+            & (pl.col("checkpoint_kind") == self.checkpoint_kind)
+        )
+        if self.checkpoint_value is None:
+            rows = rows.filter(pl.col("checkpoint_value").is_null())
+        else:
+            rows = rows.filter(pl.col("checkpoint_value") == self.checkpoint_value)
+        if rows.is_empty():
+            return None
+        hashes = sorted(set(rows.get_column("prediction_hash")))
+        if len(hashes) > 1:
+            raise ValueError(
+                f"holdout training {self.holdout_training_hash} resolved {len(hashes)} "
+                f"predictions at checkpoint {self.checkpoint_kind}={self.checkpoint_value}: "
+                f"{hashes}"
+            )
+        opened = self.study.results.open(hashes[0])
+        if not isinstance(opened, _PredictionResult):
+            raise TypeError("the holdout lineage resolved a non-prediction result")
+        return opened
+
+    @property
+    def holdout_backtest(self) -> BacktestResult | None:
+        """The registered holdout backtest, or None before the replay has run."""
+        prediction = self.holdout_prediction
+        if prediction is None:
+            return None
+        rows = self.study.backtests.table().filter(
+            (pl.col("prediction_hash") == prediction.hash) & (pl.col("split") == "holdout")
+        )
+        if rows.is_empty():
+            return None
+        hashes = sorted(set(rows.get_column("backtest_hash")))
+        if len(hashes) > 1:
+            raise ValueError(
+                f"holdout prediction {prediction.hash} resolved {len(hashes)} backtests: {hashes}"
+            )
+        opened = self.study.results.open(hashes[0])
+        if not isinstance(opened, BacktestResult):
+            raise TypeError("the holdout lineage resolved a non-backtest result")
+        return opened
+
+    def strategy_replay(self) -> StrategyReplay:
+        """The exact holdout re-run of the selected validation strategy."""
+        return prepare_strategy_replay(
+            self.study,
+            strategy_spec=self.validation_backtest.spec(),
+            label=self.label,
+            validation_prediction_hash=self.validation_prediction.hash,
+        )
+
+
+def resolve_holdout_selection(
+    study: Any,
+    *,
+    candidate_set_name: str,
+    timeline: Sequence[Any] | None = None,
+    case_study: str | None = None,
+) -> HoldoutSelection:
+    """Resolve the rank-1 validation selection and the holdout lineage it determines.
+
+    Selection is not a parameter: the candidate set's highest validation backtest Sharpe is read
+    from the set rather than accepted from a caller, which removes the one place a caller could
+    disagree with the documented rule. The candidate set is immutable, so this resolves the same
+    member every time it is called.
+
+    ``timeline`` defaults to the observation grid of the label the selection was made on, which
+    is the grid the holdout interval must be stepped back along. It is derived rather than passed
+    because a caller cannot know which label to read the grid from until this function has
+    resolved the selection, and a caller that guesses gets it right in every case study whose
+    labels happen to share one grid - and silently wrong in the first one where they do not.
+    """
+    from .comparison import CandidateSet
+    from .results import PredictionResult as _PredictionResult
+    from .results import TrainingResult as _TrainingResult
+
+    candidates = CandidateSet.one(study, name=candidate_set_name)
+    if candidates.member_kind != "backtest":
+        raise ValueError("holdout selection requires a backtest candidate set")
+    selected = candidates.best_validation_sharpe()
+    if not isinstance(selected, BacktestResult) or not selected.complete:
+        raise ValueError("the selected validation backtest is incomplete")
+    if selected.execution_tier != "canonical":
+        raise ValueError("the selected validation backtest is not canonical")
+    selected_record = selected.registry_record()
+    prediction = study.results.open(selected_record["prediction_hash"])
+    if not isinstance(prediction, _PredictionResult):
+        raise TypeError("the selected backtest does not reference a prediction")
+    training = study.results.open(prediction.registry_record()["training_hash"])
+    if not isinstance(training, _TrainingResult):
+        raise TypeError("the selected prediction does not reference a training result")
+
+    validation_spec = training.spec()
+    label = str(validation_spec["label"])
+    if timeline is None:
+        timeline = (
+            pl.read_parquet(study.root / "labels" / f"{label}.parquet")
+            .get_column("timestamp")
+            .unique()
+            .sort()
+            .to_list()
+        )
+    holdout_spec = build_holdout_training_spec(
+        study, validation_spec, timeline=timeline, case_study=case_study
+    )
+    from case_studies.utils.registry import training_hash_from_spec
+
+    prediction_record = prediction.registry_record()
+    return HoldoutSelection(
+        study=study,
+        candidate_set=candidates,
+        validation_backtest=selected,
+        validation_prediction=prediction,
+        validation_training=training,
+        label=label,
+        checkpoint_kind=str(prediction_record["checkpoint_kind"]),
+        checkpoint_value=prediction_record["checkpoint_value"],
+        holdout_training_spec=holdout_spec,
+        holdout_training_hash=training_hash_from_spec(holdout_spec),
+    )
+
+
 def evaluate_holdout(
     study: Any,
     *,
@@ -664,14 +898,9 @@ def evaluate_holdout(
     training = study.results.open(prediction.registry_record()["training_hash"])
 
     validation_spec = training.spec()
-    holdout_spec = deepcopy(validation_spec)
-    holdout_spec["computation"]["cv"] = build_holdout_cv(
-        validation_spec,
-        case_study=str(case_study if case_study is not None else study.case_study),
-        timeline=timeline,
-        train_start_floor=_holdout_training_floor(study, validation_spec),
+    holdout_spec = build_holdout_training_spec(
+        study, validation_spec, timeline=timeline, case_study=case_study
     )
-    _rekey_holdout_spec(study, holdout_spec, validation_spec)
 
     # selection_evidence is hashed into the lock identity, so anything put here that is already
     # recorded elsewhere gives one fact two sources and makes the lock unreproducible by any

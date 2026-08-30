@@ -28,7 +28,7 @@
 #
 # **Book reference**: Chapter 18
 #
-# **Prerequisite**: `14_portfolio_management`.
+# **Prerequisite**: `15_risk_management`.
 
 # %%
 """Run one cost-sensitivity curve per FX prediction label."""

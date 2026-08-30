@@ -28,7 +28,7 @@
 #
 # **Book reference**: Chapter 19
 #
-# **Prerequisite**: `15_costs`.
+# **Prerequisite**: `14_portfolio_management`.
 
 # %%
 """Run the declared FX position-risk controls for each label."""
@@ -449,7 +449,7 @@ pl.DataFrame(risk_rows).sort("label", "risk_name")
 # allocation variants, and the risk overlays. The comparison contract names the fields every member
 # must agree on, so a candidate fitted against different labels, features or folds cannot silently
 # join a set the holdout will pick from. Only identities are printed here; what the selection is
-# worth is `17_strategy_analysis`'s question.
+# worth is `19_strategy_analysis`'s question.
 
 # %%
 if not include_preview:

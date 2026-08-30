@@ -858,9 +858,9 @@ def test_fitted_state_change_during_backtest_fails_before_staging(
 ) -> None:
     study, lock, prices = _locked_study(tmp_path, monkeypatch)
     _install_fixture_adapter(monkeypatch, prices)
-    from case_studies.research.holdout import LockedStrategyReplay
+    from case_studies.research.holdout import StrategyReplay
 
-    original_run = LockedStrategyReplay.run
+    original_run = StrategyReplay.run
 
     def run_then_change_fitted_state(self, prediction):
         result = original_run(self, prediction)
@@ -875,7 +875,7 @@ def test_fitted_state_change_during_backtest_fails_before_staging(
         model.write_bytes(b"changed-during-backtest")
         return result
 
-    monkeypatch.setattr(LockedStrategyReplay, "run", run_then_change_fitted_state)
+    monkeypatch.setattr(StrategyReplay, "run", run_then_change_fitted_state)
 
     with pytest.raises(ValueError, match="changed during holdout execution"):
         run_locked_holdout(lock)

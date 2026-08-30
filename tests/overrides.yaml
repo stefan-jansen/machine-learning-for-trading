@@ -1667,21 +1667,35 @@ case_studies/fx_pairs/14_portfolio_management:
     TOP_K: 2
     TOP_N_CONFIGS: 1
   timeout: 900
-case_studies/fx_pairs/15_costs:
-  research_preview: false
-  parameters:
-    POPULATION_NAME: fx_pairs:preflight
-    MAX_COST_POINTS: 1
-  timeout: 900
-case_studies/fx_pairs/16_risk_management:
+case_studies/fx_pairs/15_risk_management:
   research_preview: false
   parameters:
     POPULATION_NAME: fx_pairs:preflight
     MAX_RISK_VARIANTS: 3
   timeout: 900
-case_studies/fx_pairs/17_strategy_analysis:
+case_studies/fx_pairs/16_costs:
+  research_preview: false
+  parameters:
+    POPULATION_NAME: fx_pairs:preflight
+    MAX_COST_POINTS: 1
+  timeout: 900
+case_studies/fx_pairs/17_holdout_predictions:
   skip: true
-  skip_reason: "Requires RESEARCH_LOCK_HASH from the one-shot holdout transaction - a lock exists only after that workflow runs in production"
+  skip_reason: "Refits the canonical validation selection on the holdout interval. The fixture
+    registry carries no fx_pairs:holdout-candidates set, and a seeded one would make the holdout
+    lineage resolve against a selection no validation run produced. The notebook takes no
+    reduction that would change this: the configuration it refits is whichever one selection
+    chose, and there is only ever one."
+  timeout: 300
+case_studies/fx_pairs/18_holdout_backtest:
+  skip: true
+  skip_reason: "Replays the selected strategy against 17_holdout_predictions' output, so it is
+    skipped for the same reason and would fail on the missing holdout prediction first."
+  timeout: 300
+case_studies/fx_pairs/19_strategy_analysis:
+  skip: true
+  skip_reason: "Reads back the holdout lineage 17 and 18 produce; with those skipped there is
+    nothing for it to resolve."
   timeout: 300
 case_studies/nasdaq100_microstructure/01_feasibility_analysis:
   parameters:

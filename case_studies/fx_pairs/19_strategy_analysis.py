@@ -16,28 +16,32 @@
 # %% [markdown]
 # # Strategy Analysis - FX Pairs
 #
-# This notebook locks the selection made from the immutable validation candidate set, spends the
-# single holdout evaluation that lock authorizes, and then reads both back. Selection uses
-# validation backtest Sharpe with the backtest identity as the deterministic tie-breaker. Cost
-# sensitivity is excluded from selection, and no holdout result can change the locked choice.
+# This notebook reads back the selection made from the immutable validation candidate set and the
+# holdout lineage that selection determines, and assesses both. Selection uses validation backtest
+# Sharpe with the backtest identity as the deterministic tie-breaker. Cost sensitivity is excluded
+# from selection, and nothing measured on the holdout can revise the choice - not because a lock
+# forbids it, but because the choice was made upstream against a set that is already frozen.
+#
+# The holdout results are produced by `17_holdout_predictions` and `18_holdout_backtest`. This
+# notebook writes nothing; it fails if either is missing rather than producing them itself, so
+# reading the holdout and deciding what to run against it stay separate acts.
 #
 # **Learning objectives**
 #
 # - Reproduce validation selection from an immutable, complete candidate set.
-# - Verify the exact model, checkpoint, strategy, and holdout lineage recorded by the lock.
+# - Verify that the holdout lineage on record is the one the selection determines.
 # - Interpret cost and risk variants through controlled sibling comparisons.
 # - Assess validation and holdout performance with interval and paired evidence.
 #
 # **Book reference**: Chapters 16-20
 #
-# **Prerequisites**: canonical validation populations and the final candidate set from
-# `16_risk_management`.
+# **Prerequisites**: `17_holdout_predictions` and `18_holdout_backtest`, and the candidate set
+# `15_risk_management` freezes.
 
 # %%
-"""Lock one FX validation selection, spend its holdout once, and assess both lineages."""
+"""Read back the selected FX validation lineage and its holdout, and assess both."""
 
 import json
-import sqlite3
 from copy import deepcopy
 from typing import Any
 
@@ -49,14 +53,13 @@ import polars as pl
 from case_studies.research import (
     BacktestResult,
     CandidateSet,
-    LifecycleState,
     OfficialPopulation,
     PredictionResult,
     Result,
     TrainingResult,
     open_study,
 )
-from case_studies.research.holdout import evaluate_holdout
+from case_studies.research.holdout import resolve_holdout_selection
 from case_studies.utils.backtest_presets import cost_view
 from case_studies.utils.registry import load_backtest_metrics, load_paired_metrics
 from utils.style import COLORS
@@ -68,66 +71,34 @@ WORKSPACE: str = ""
 CANDIDATE_SET_NAME = "fx_pairs:holdout-candidates"
 
 # %% [markdown]
-# ## Lock the selection and spend the holdout, once
+# ## Resolve the selection and its holdout lineage
 #
-# `evaluate_holdout` is the whole one-shot sequence: read the rank-1 validation backtest out of
-# the frozen candidate set, derive the one holdout interval that retrains it, lock that selection,
-# and execute. It is the sequence rather than five primitives assembled here because nine case
-# studies assembling them separately is how nine versions of it appear.
+# Selection is not a parameter and is not made here. `15_risk_management` froze an immutable
+# candidate set; its highest validation backtest Sharpe is read out of that set, with the backtest
+# identity as the deterministic tie-breaker. Cost sensitivity is excluded from the set, so a cost
+# variant cannot be selected, and nothing on this page can revise the choice.
 #
-# The holdout is spent once and re-running this notebook must not spend it again, so an
-# already-evaluated lifecycle returns its recorded lineage and executes nothing. `evaluated_now`
-# is how the two are told apart, and it is why this page reproduces: a re-run reads back exactly
-# the numbers it published before.
-#
-# Selection is not a parameter. `lifecycle.lock` refuses any selection that is not the candidate
-# set's highest validation backtest Sharpe, so the rank-1 member is the only thing that can be
-# locked, and the lock hash is produced here rather than supplied - a value that arrives only as
-# a run-time override could never be stamped by a production run, which passes none.
-#
-# The holdout interval is derived from the panel's own observation grid, not from calendar
-# arithmetic: the training window ends a whole label buffer counted in observations before the
-# holdout opens, so the last training label's outcome cannot resolve inside the holdout.
+# The holdout lineage is derived from that selection rather than looked up in a ledger. The
+# derivation is pure - the same candidate set yields the same training identity every time - so
+# this notebook can state which holdout results it requires before checking whether they exist,
+# and name the missing one when they do not. An earlier design recorded the lineage in a research
+# lock instead and read it back from a lifecycle table. That made the holdout a one-shot
+# transaction, which in turn made it impossible to fix: any correction upstream needed a retrain
+# the lock forbade, and the lock could not be reissued.
 
 # %% tags=["results"]
 study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
+selection = resolve_holdout_selection(study, candidate_set_name=CANDIDATE_SET_NAME)
 
-# The label the selection was made on decides which observation grid the holdout interval is
-# stepped back along, so it is read from the selected lineage rather than assumed. FX carries
-# three labels on one daily grid, which is exactly the coincidence that would let an assumption
-# here survive untested.
-_candidates = CandidateSet.one(study, name=CANDIDATE_SET_NAME)
-_selected_for_lock = _candidates.best_validation_sharpe()
-_selected_prediction = Result.open(study, _selected_for_lock.registry_record()["prediction_hash"])
-_selected_training = Result.open(study, _selected_prediction.registry_record()["training_hash"])
-locked_label = str(_selected_training.spec()["label"])
-observation_timeline = (
-    pl.read_parquet(study.root / "labels" / f"{locked_label}.parquet")
-    .get_column("timestamp")
-    .unique()
-    .sort()
-    .to_list()
-)
-
-holdout_outcome = evaluate_holdout(
-    study,
-    candidate_set_name=CANDIDATE_SET_NAME,
-    timeline=observation_timeline,
-)
-research_lock = holdout_outcome.lock
-validation_set = research_lock.candidate_set()
-
-if validation_set.member_kind != "backtest":
-    raise ValueError("strategy selection requires a backtest candidate set")
-if research_lock.state != LifecycleState.HOLDOUT_EVALUATED.value:
-    raise ValueError("strategy analysis requires one completed holdout evaluation")
-selected_validation = validation_set.best_validation_sharpe()
-if not isinstance(selected_validation, BacktestResult) or not selected_validation.complete:
-    raise ValueError("the selected validation backtest is incomplete")
-if selected_validation.execution_tier != "canonical":
-    raise ValueError("the selected validation backtest is not canonical")
-if selected_validation.hash != research_lock.record["validation_backtest_hash"]:
-    raise ValueError("the lock does not match deterministic validation selection")
+validation_set = selection.candidate_set
+selected_validation = selection.validation_backtest
+selected_prediction = selection.validation_prediction
+selected_training = selection.validation_training
+selected_record = selected_validation.registry_record()
+selected_prediction_record = selected_prediction.registry_record()
+selected_training_record = selected_training.registry_record()
+selected_training_spec = selected_training.spec()
+selected_computation = selected_training_spec.get("computation", selected_training_spec)
 
 pl.DataFrame(
     {
@@ -135,61 +106,36 @@ pl.DataFrame(
             "candidate set",
             "candidate count",
             "selected validation",
-            "research lock",
-            "evaluated by this run",
+            "derived holdout training",
         ],
         "value": [
             validation_set.hash,
             str(len(validation_set.members)),
             selected_validation.hash,
-            research_lock.hash,
-            str(holdout_outcome.evaluated_now),
+            selection.holdout_training_hash,
         ],
     }
 )
 
 # %% [markdown]
-# ## Verify the locked validation lineage
+# ## The selected validation lineage
 #
-# Model family, configuration, label, checkpoint, data artifacts, CV request, source commit, runtime,
-# and full strategy specification must reproduce the lock record.
+# Model family, configuration, label, checkpoint and the data artifacts the fit read are printed
+# together, because they are what the holdout comparison holds fixed. The provenance fields are
+# checked rather than displayed: a selected training run with no recorded source commit or runtime
+# cannot be reproduced by a reader, and a holdout number from a run nobody can reproduce is not
+# evidence of anything.
 
 # %% tags=["results"]
-selected_record = selected_validation.registry_record()
-selected_prediction = Result.open(study, selected_record["prediction_hash"])
-if not isinstance(selected_prediction, PredictionResult):
-    raise TypeError("the selected backtest does not reference a prediction")
-selected_prediction_record = selected_prediction.registry_record()
-selected_training = Result.open(study, selected_prediction_record["training_hash"])
-if not isinstance(selected_training, TrainingResult):
-    raise TypeError("the selected prediction does not reference a training result")
-selected_training_record = selected_training.registry_record()
-selected_training_spec = selected_training.spec()
-selected_computation = selected_training_spec.get("computation", selected_training_spec)
-
-if selected_prediction.hash != research_lock.record["prediction_hash"]:
-    raise ValueError("the locked prediction differs from the selected backtest lineage")
-if selected_training.hash != research_lock.record["training_hash"]:
-    raise ValueError("the locked training differs from the selected backtest lineage")
-if (
-    selected_prediction_record["checkpoint_kind"] != research_lock.record["checkpoint_kind"]
-    or selected_prediction_record["checkpoint_value"] != research_lock.record["checkpoint_value"]
-):
-    raise ValueError("the locked checkpoint differs from the selected prediction")
-if selected_validation.spec() != research_lock.record["strategy_spec"]:
-    raise ValueError("the locked strategy differs from the selected validation strategy")
 for field in ("label_artifact", "feature_artifacts", "cv"):
-    if selected_computation.get(field) != research_lock.record[field]:
-        raise ValueError(f"locked {field} differs from selected training")
-if selected_training_record.get("git_commit") != research_lock.record["source_identity"]:
-    raise ValueError("the locked source identity differs from selected training")
-if (
-    json.loads(selected_training_record.get("runtime_json") or "{}")
-    != research_lock.record["runtime_provenance"]
-):
-    raise ValueError("the locked runtime identity differs from selected training")
+    if not selected_computation.get(field):
+        raise ValueError(f"the selected training run records no {field}")
+if not selected_training_record.get("git_commit"):
+    raise ValueError("the selected training run records no source commit")
+if not json.loads(selected_training_record.get("runtime_json") or "{}"):
+    raise ValueError("the selected training run records no runtime provenance")
 
-locked_identity = pl.DataFrame(
+selected_identity = pl.DataFrame(
     {
         "field": [
             "label",
@@ -200,6 +146,7 @@ locked_identity = pl.DataFrame(
             "training hash",
             "prediction hash",
             "validation backtest hash",
+            "source commit",
         ],
         "value": [
             str(selected_training_spec["label"]),
@@ -210,10 +157,11 @@ locked_identity = pl.DataFrame(
             selected_training.hash,
             selected_prediction.hash,
             selected_validation.hash,
+            str(selected_training_record["git_commit"]),
         ],
     }
 )
-locked_identity
+selected_identity
 
 # %% [markdown]
 # ## Validation candidate evidence
@@ -352,7 +300,7 @@ for member_hash in cost_population.members:
         }
     )
 if not cost_rows:
-    raise ValueError("no controlled cost siblings match the locked strategy")
+    raise ValueError("no controlled cost siblings match the selected strategy")
 cost_evidence = pl.DataFrame(cost_rows).sort("total_cost_bps")
 cost_evidence
 
@@ -362,7 +310,7 @@ cost_figure = px.line(
     x="total_cost_bps",
     y="sharpe",
     markers=True,
-    title="Validation Sharpe for exact cost siblings of the locked FX strategy",
+    title="Validation Sharpe for exact cost siblings of the selected FX strategy",
     labels={"total_cost_bps": "Total cost per traded leg (basis points)", "sharpe": "Sharpe"},
 )
 cost_figure.add_hline(y=0, line_dash="dot", line_color=COLORS["recede"])
@@ -390,7 +338,7 @@ for member_hash in risk_population.members:
         }
     )
 if not risk_rows:
-    raise ValueError("no controlled risk siblings match the locked strategy")
+    raise ValueError("no controlled risk siblings match the selected strategy")
 risk_evidence = pl.DataFrame(risk_rows).sort("sharpe", descending=True)
 risk_evidence
 
@@ -400,7 +348,7 @@ risk_figure = px.bar(
     x="sharpe",
     y="risk_name",
     orientation="h",
-    title="Validation Sharpe for exact risk siblings of the locked FX strategy",
+    title="Validation Sharpe for exact risk siblings of the selected FX strategy",
     labels={"sharpe": "Sharpe", "risk_name": "Position-risk rule"},
 )
 risk_figure.add_vline(x=0, line_dash="dot", line_color=COLORS["recede"])
@@ -442,25 +390,30 @@ controlled_summary = pl.DataFrame(
 controlled_summary
 
 # %% [markdown]
-# ## Resolve the single holdout evaluation
+# ## Require the holdout lineage the selection determines
 #
-# The lifecycle table is keyed by the supplied lock. It must contain exactly one finalized lineage,
-# and every result must match the training request, checkpoint, and strategy recorded before holdout.
+# The holdout results are not looked up by whatever happens to carry the holdout split; they are
+# required to be the ones this selection determines. `17_holdout_predictions` refits the derived
+# training identity and `18_holdout_backtest` replays the selected strategy against it, so the
+# lineage checked here is fully specified before anything is read: a holdout produced from a
+# different configuration, a different checkpoint or a different strategy does not resolve, and
+# does not silently take the place of the one that should have been produced.
 
 # %% tags=["results"]
-with sqlite3.connect(study.root / "run_log" / "registry.db") as connection:
-    holdout_rows = connection.execute(
-        "SELECT holdout_training_hash, holdout_prediction_hash, holdout_backtest_hash "
-        "FROM holdout_evaluations WHERE lock_hash = ?",
-        (research_lock.hash,),
-    ).fetchall()
-if len(holdout_rows) != 1:
-    raise ValueError("the research lock must have exactly one holdout evaluation")
-
-holdout_training_hash, holdout_prediction_hash, holdout_backtest_hash = holdout_rows[0]
-holdout_training = Result.open(study, holdout_training_hash)
-holdout_prediction = Result.open(study, holdout_prediction_hash)
-holdout_backtest = Result.open(study, holdout_backtest_hash)
+holdout_prediction = selection.holdout_prediction
+if holdout_prediction is None:
+    raise ValueError(
+        f"no holdout prediction is registered for training {selection.holdout_training_hash} "
+        f"at checkpoint {selection.checkpoint_kind}={selection.checkpoint_value}; "
+        "run 17_holdout_predictions"
+    )
+holdout_backtest = selection.holdout_backtest
+if holdout_backtest is None:
+    raise ValueError(
+        f"holdout prediction {holdout_prediction.hash} has no registered backtest; "
+        "run 18_holdout_backtest"
+    )
+holdout_training = Result.open(study, holdout_prediction.registry_record()["training_hash"])
 if not isinstance(holdout_training, TrainingResult) or not holdout_training.complete:
     raise ValueError("the holdout training result is incomplete")
 if not isinstance(holdout_prediction, PredictionResult) or not holdout_prediction.complete:
@@ -472,32 +425,34 @@ if any(
     for result in (holdout_training, holdout_prediction, holdout_backtest)
 ):
     raise ValueError("holdout lineage must use canonical execution")
-if holdout_training.hash != research_lock.record["holdout_training_hash"]:
-    raise ValueError("the holdout training identity differs from the lock")
-if holdout_training.spec() != research_lock.record["holdout_training_spec"]:
-    raise ValueError("the holdout training specification differs from the lock")
-if holdout_prediction.registry_record()["training_hash"] != holdout_training.hash:
-    raise ValueError("the holdout prediction and training lineage disagree")
-if holdout_prediction.registry_record()["split"] != "holdout":
-    raise ValueError("the holdout prediction has the wrong split")
-if (
-    holdout_prediction.registry_record()["checkpoint_kind"]
-    != research_lock.record["checkpoint_kind"]
-    or holdout_prediction.registry_record()["checkpoint_value"]
-    != research_lock.record["checkpoint_value"]
-):
-    raise ValueError("the holdout checkpoint differs from the lock")
-if holdout_backtest.registry_record()["prediction_hash"] != holdout_prediction.hash:
-    raise ValueError("the holdout backtest and prediction lineage disagree")
-if holdout_backtest.spec().get("strategy") != research_lock.record["strategy_spec"].get("strategy"):
-    raise ValueError("the holdout strategy differs from the locked validation strategy")
+if holdout_training.hash != selection.holdout_training_hash:
+    raise ValueError("the holdout training identity differs from the derived one")
+if holdout_training.spec() != selection.holdout_training_spec:
+    raise ValueError("the holdout training specification differs from the derived one")
+if holdout_backtest.spec().get("strategy") != selected_validation.spec().get("strategy"):
+    raise ValueError("the holdout strategy differs from the selected validation strategy")
 if not holdout_backtest.spec().get("input_identity", {}).get("prices"):
     raise ValueError("the holdout backtest lacks canonical price identity")
 
+# The holdout fold is the one thing the two runs are supposed to differ in, so it is printed
+# rather than only checked: a reader can see which interval the holdout numbers below describe.
+_holdout_fold = selection.holdout_training_spec["computation"]["cv"]["folds"][-1]
 holdout_identity = pl.DataFrame(
     {
-        "field": ["holdout training", "holdout prediction", "holdout backtest"],
-        "value": [holdout_training.hash, holdout_prediction.hash, holdout_backtest.hash],
+        "field": [
+            "holdout training",
+            "holdout prediction",
+            "holdout backtest",
+            "holdout train window",
+            "holdout test window",
+        ],
+        "value": [
+            holdout_training.hash,
+            holdout_prediction.hash,
+            holdout_backtest.hash,
+            f"{_holdout_fold['train_start']} to {_holdout_fold['train_end']}",
+            f"{_holdout_fold['test_start']} to {_holdout_fold['test_end']}",
+        ],
     }
 )
 holdout_identity
@@ -505,7 +460,7 @@ holdout_identity
 # %% [markdown]
 # ## Validation and holdout evidence
 #
-# Point estimates and intervals are displayed by exact locked identity. Statistical comparisons use
+# Point estimates and intervals are displayed by exact selected identity. Statistical comparisons use
 # registered paired evidence. The holdout may disconfirm the validation result and cannot trigger
 # fallback or reselection.
 
@@ -536,19 +491,19 @@ for period, result in (("validation", selected_validation), ("holdout", holdout_
             **{name: metrics[name] for name in required_metrics},
         }
     )
-locked_performance = pl.DataFrame(performance_rows)
-locked_performance
+selected_performance = pl.DataFrame(performance_rows)
+selected_performance
 
 # %% tags=["results"]
 performance_figure = px.bar(
-    locked_performance,
+    selected_performance,
     x="period",
     y="sharpe",
-    error_y=locked_performance.get_column("sharpe_ci95_hi")
-    - locked_performance.get_column("sharpe"),
-    error_y_minus=locked_performance.get_column("sharpe")
-    - locked_performance.get_column("sharpe_ci95_lo"),
-    title="Locked FX strategy Sharpe in validation and holdout windows",
+    error_y=selected_performance.get_column("sharpe_ci95_hi")
+    - selected_performance.get_column("sharpe"),
+    error_y_minus=selected_performance.get_column("sharpe")
+    - selected_performance.get_column("sharpe_ci95_lo"),
+    title="Selected FX strategy Sharpe in validation and holdout windows",
     labels={"period": "Window", "sharpe": "Sharpe"},
 )
 performance_figure.add_hline(y=0, line_dash="dot", line_color=COLORS["recede"])
@@ -630,9 +585,9 @@ for period, result in (("validation", selected_validation), ("holdout", holdout_
     axes[0].plot(dates, wealth, label=period)
     axes[1].plot(dates, drawdown, label=period)
 
-axes[0].set_title("Wealth within each locked evaluation window")
+axes[0].set_title("Wealth within each evaluation window")
 axes[0].set_ylabel("Growth of 1.0")
-axes[1].set_title("Drawdown within each locked evaluation window")
+axes[1].set_title("Drawdown within each evaluation window")
 axes[1].set_ylabel("Drawdown")
 for axis in axes:
     axis.set_xlabel("Date")
@@ -643,7 +598,7 @@ fig.show()
 # %% [markdown]
 # ## Result interpretation
 #
-# The sentences below are computed from the locked metrics. An interval wholly above or below zero
+# The sentences below are computed from the registered metrics. An interval wholly above or below zero
 # is reported as such; an interval spanning zero is not converted into a positive or negative claim.
 
 # %% tags=["results"]
@@ -659,8 +614,8 @@ def _interval_read(name: str, point: float, lower: float, upper: float) -> str:
     return f"{name}: {point:.3f} [{lower:.3f}, {upper:.3f}]; {status}."
 
 
-validation_row = locked_performance.filter(pl.col("period") == "validation").row(0, named=True)
-holdout_row = locked_performance.filter(pl.col("period") == "holdout").row(0, named=True)
+validation_row = selected_performance.filter(pl.col("period") == "validation").row(0, named=True)
+holdout_row = selected_performance.filter(pl.col("period") == "holdout").row(0, named=True)
 decay_row = paired_evidence.filter(pl.col("comparison") == "holdout minus validation").row(
     0, named=True
 )
@@ -695,7 +650,9 @@ interpretation
 # %% [markdown]
 # ## Key takeaways
 #
-# - The immutable candidate set and lock determine the exact selected configuration.
+# - The immutable candidate set determines the exact selected configuration, and the holdout
+#   lineage follows from it rather than being recorded alongside it.
 # - Controlled cost and risk evidence changes one strategy field at a time.
-# - The holdout is read once through the finalized lock and cannot cause reselection.
-# - All result-specific interpretation is produced from the current locked artifacts.
+# - The holdout cannot cause reselection, because the selection is upstream of it and frozen.
+# - All result-specific interpretation is produced from the registered artifacts this notebook
+#   resolved, so a re-run reports the same numbers or fails.

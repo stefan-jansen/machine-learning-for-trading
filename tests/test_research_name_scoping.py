@@ -82,7 +82,7 @@ def test_every_population_name_in_the_fx_phase_two_chain_is_scoped() -> None:
     methods = {"one", "create"}
     unscoped: list[str] = []
     checked = 0
-    for stem in ("13_backtest", "14_portfolio_management", "15_costs", "16_risk_management"):
+    for stem in ("13_backtest", "14_portfolio_management", "15_risk_management", "16_costs"):
         tree = ast.parse((NOTEBOOKS / f"{stem}.py").read_text(encoding="utf-8"))
         # A name may be bound to a local first. That is not a way around the rule - the binding
         # still has to come from `research_name` - and it is how a notebook passes one name to
