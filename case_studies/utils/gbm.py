@@ -2026,26 +2026,16 @@ def rekey_holdout_spec(
                 "huber_alpha_scale to re-derive it from, so the holdout delta cannot be "
                 "computed by the rule that produced the validation ones"
             )
-        entity_col = mds.entity_cols[0]
-        folds = prepare_gbm_folds(
-            mds.dataset.to_pandas(),
-            [split],
-            mds.feature_names,
-            mds.label_col,
-            mds.date_col,
-            entity_col,
-            task_type=mds.task_type,
-            class_values=mds.class_values,
-            temporal_by_fold=mds.temporal_by_fold,
-            temporal_keys=mds.temporal_keys,
-            temporal_feature_names=mds.temporal_feature_names,
-            train_sample_frac=1.0,
-            eval_label_col=mds.eval_label_col,
-            seed=RANDOM_SEED,
-        )
-        if len(folds) != 1 or not folds[0]["n_train"]:
-            raise ValueError("GBM holdout fold could not be prepared to re-derive the Huber delta")
-        params["alpha"] = _scaled_huber_alpha(float(scale), folds[0]["y_train"])
+        # The same selection the request planner derives its own thresholds from
+        # (`_gbm_sampled_training_labels`), and for the reason recorded there: reading the
+        # labels through fold preparation casts them to LightGBM's float32, which quantizes
+        # to a different delta than the float64 labels validation resolved its alpha from,
+        # and one declared configuration would then carry two identities. It also reads the
+        # labels without materializing the fold's feature matrix.
+        labels = training_labels_for_split(mds, split, train_sample_frac=1.0, seed=RANDOM_SEED)
+        if not len(labels):
+            raise ValueError("GBM holdout fold has no training labels to re-derive the Huber delta")
+        params["alpha"] = _scaled_huber_alpha(float(scale), labels)
 
     _validate_lightgbm_params(params)
     model["effective_params_by_fold"] = {str(int(split["fold"])): params}

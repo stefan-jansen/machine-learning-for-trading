@@ -177,3 +177,73 @@ def test_parameters_keyed_to_folds_the_validation_cv_never_declared_are_refused(
     spec = _spec({"7": dict(BASE_PARAMS)})
     with pytest.raises(ValueError, match=r"records parameters for folds \['7'\]"):
         gbm.rekey_holdout_spec(study, spec, validation_spec=_validation_spec())
+
+
+def test_the_huber_delta_is_rederived_from_the_holdout_folds_own_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`alpha` is a scaled standard deviation of the training labels, so it moves per fold.
+
+    It is read through `training_labels_for_split`, the same selection the request planner
+    derives its own thresholds from. Reading the labels through fold preparation instead
+    would cast them to LightGBM's float32, and the delta is quantized to twelve significant
+    digits - far past where float32 stops carrying information - so the two paths resolve
+    different alphas from identical labels and give one declared configuration two
+    training identities. The labels below are the case: their float32 standard deviation
+    quantizes to something else entirely.
+    """
+    import numpy as np
+
+    from case_studies.utils.derived_params import quantize_derived
+
+    timestamps = pl.datetime_range(
+        pl.datetime(2005, 1, 31), pl.datetime(2016, 12, 30), interval="1mo", eager=True
+    )
+    rng = np.random.default_rng(0)
+    values = rng.normal(0.0, 0.03, size=2 * len(timestamps))
+    dataset = pl.DataFrame(
+        {
+            "timestamp": [t for t in timestamps for _ in ("A", "B")],
+            "symbol": ["A", "B"] * len(timestamps),
+            "feature": [0.1] * (2 * len(timestamps)),
+            "fwd_ret_1m": values,
+        }
+    )
+    mds = SimpleNamespace(
+        dataset=dataset,
+        date_col="timestamp",
+        entity_cols=["symbol"],
+        label_col="fwd_ret_1m",
+        feature_names=["feature"],
+        task_type="regression",
+        class_values=[],
+        eval_label_col=None,
+        temporal_by_fold=None,
+        temporal_keys=None,
+        temporal_feature_names=None,
+    )
+    monkeypatch.setattr("utils.modeling.load_modeling_dataset", lambda *a, **k: mds)
+    monkeypatch.setattr(
+        "case_studies.utils.cv_window.canonical_window",
+        lambda *a, **k: (date(2016, 1, 29), date(2016, 12, 30)),
+    )
+    study = SimpleNamespace(
+        case_study="fixture_case_study",
+        labels=SimpleNamespace(get=lambda name, **_: SimpleNamespace(name=name)),
+    )
+
+    huber = {**BASE_PARAMS, "objective": "huber"}
+    spec = _spec(
+        {"0": {**huber, "alpha": 0.031}, "1": {**huber, "alpha": 0.029}},
+        huber_alpha_scale=1.0,
+    )
+    gbm.rekey_holdout_spec(study, spec, validation_spec=_validation_spec())
+
+    train = dataset.filter(pl.col("timestamp") <= pl.datetime(2015, 12, 31))
+    expected = quantize_derived(float(np.nanstd(train["fwd_ret_1m"].to_numpy())))
+    resolved = spec["computation"]["model"]["effective_params_by_fold"]["2"]["alpha"]
+    assert resolved == expected
+    float32_delta = quantize_derived(
+        float(np.nanstd(train["fwd_ret_1m"].to_numpy().astype(np.float32)))
+    )
+    assert resolved != float32_delta, "the two paths must be distinguishable here"
