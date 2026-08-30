@@ -587,24 +587,47 @@ def _holdout_lineage_for(
                 if row:
                     return dict(row)
 
-        row = db.execute(
+        # The fallback used to take the highest holdout Sharpe. That chooses the evaluation
+        # by its own result, and the same-lineage branch above says so in as many words: it
+        # orders by ``backtest_hash`` "to keep the choice off holdout performance either
+        # way". The fallback has to answer to the same rule.
+        #
+        # It also has no way to prefer correctly. A holdout produced by the canonical retrain
+        # registers its own training hash and records nothing about the validation carrier it
+        # came from, so when the candidates span several trained models there is no ground
+        # for picking one - and picking the best-performing one is how a holdout descended
+        # from a retired carrier would win. Several lineages here is unresolvable, not a
+        # ranking problem, so it refuses; one lineage is unambiguous and is returned.
+        rows = db.execute(
             f"""
-            SELECT t.family, t.config_name, t.label,
-                   p.prediction_hash, b.backtest_hash
+            SELECT DISTINCT t.family, t.config_name, t.label,
+                   p.prediction_hash, b.backtest_hash, p.training_hash
             FROM prediction_sets p
             JOIN training_runs t ON p.training_hash = t.training_hash
             JOIN backtest_runs b ON p.prediction_hash = b.prediction_hash
                                  AND b.stage IN ('signal','allocation','risk_overlay','holdout')
             JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
             WHERE {where_sql}
-            ORDER BY bm.sharpe DESC NULLS LAST
-            LIMIT 1
+            ORDER BY b.backtest_hash
             """,
             params,
-        ).fetchone()
+        ).fetchall()
     finally:
         db.close()
-    return dict(row) if row else None
+    if not rows:
+        return None
+    lineages = {row["training_hash"] for row in rows}
+    if len(lineages) > 1:
+        raise ValueError(
+            f"{len(rows)} holdout backtests across {len(lineages)} trained models match the "
+            f"carrier spec for {cs}, and nothing records which validation carrier each was "
+            "retrained from. Choosing between them would rank the holdout on its own result. "
+            "Record the carrier on the holdout training run, or leave one lineage registered."
+        )
+    row = rows[0]
+    return {
+        k: row[k] for k in ("family", "config_name", "label", "prediction_hash", "backtest_hash")
+    }
 
 
 def _val_backtest_for_lineage(
