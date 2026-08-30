@@ -1329,15 +1329,15 @@ case_studies/cme_futures/14_portfolio_management:
     PREVIEW_LABELS: [fwd_ret_21d]
     PREVIEW_MAX_BASELINE_ROWS: 2
   timeout: 600
-case_studies/cme_futures/15_costs:
+case_studies/cme_futures/15_risk_management:
   parameters:
     PREVIEW_LABELS: [fwd_ret_21d]
   timeout: 600
-case_studies/cme_futures/16_risk_management:
+case_studies/cme_futures/16_costs:
   parameters:
     PREVIEW_LABELS: [fwd_ret_21d]
   timeout: 600
-case_studies/cme_futures/17_strategy_analysis:
+case_studies/cme_futures/19_strategy_analysis:
   parameters:
     PREVIEW_LABELS: [fwd_ret_21d]
   timeout: 600
