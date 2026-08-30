@@ -43,7 +43,7 @@ from case_studies.crypto_perps_funding.research_workflow import (
     open_study,
     plan_official_models,
 )
-from case_studies.research import CausalResult, OfficialPopulation
+from case_studies.research import CausalResult, OfficialPopulation, superseded_members
 from utils.style import COLORS, ml4t_palette, show_plotly_with_alt
 
 # %% tags=["parameters"]
@@ -61,6 +61,16 @@ catalog = study.predictions.table(include_preview=EXECUTION_TIER == "preview").f
     & (pl.col("split") == "validation")
     & pl.col("complete")
 )
+# `identity_status` names the schema version a row was written under, not the generation its
+# producer still publishes. A model notebook that refits leaves the generation it replaced in
+# the registry - complete, and current under a column that has not moved - so the filter above
+# carries retired prediction sets into the analysis. The population lineage is what answers it,
+# and `superseded_members` reads that, so the analysed catalog and the frozen population
+# describe one set of models rather than two.
+retired = superseded_members(study, member_kind="prediction")
+if retired:
+    catalog = catalog.filter(~pl.col("prediction_hash").is_in(list(retired)))
+
 if catalog.is_empty() or catalog["prediction_hash"].n_unique() != catalog.height:
     raise RuntimeError("the canonical model catalog is empty or has duplicate identities")
 

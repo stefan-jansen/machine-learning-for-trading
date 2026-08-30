@@ -1410,16 +1410,24 @@ case_studies/crypto_perps_funding/13_backtest:
   timeout: 600
 case_studies/crypto_perps_funding/14_portfolio_management:
   parameters:
-    MAX_SYMBOLS: 5
+    # MAX_SYMBOLS was the pre-migration knob and this notebook no longer reads it - the
+    # cross-section comes from the frozen candidate set 13_backtest published, not from a
+    # parameter. Setting it reduced nothing and CI swept all four labels believing it had
+    # reduced. LABELS is what these three read, and one label is the reduction.
+    LABELS:
+    - fwd_ret_8h
   timeout: 300
 case_studies/crypto_perps_funding/15_costs:
   parameters:
-    MAX_SYMBOLS: 5
+    LABELS:
+    - fwd_ret_8h
   timeout: 600
 case_studies/crypto_perps_funding/16_risk_management:
   parameters:
-    MAX_RISK_VARIANTS: 3
-    MAX_SYMBOLS: 5
+    # MAX_RISK_VARIANTS went the same way as MAX_SYMBOLS: the overlay grid is declared in
+    # config/setup.yaml under backtest.risk and read from there, so no parameter trims it.
+    LABELS:
+    - fwd_ret_8h
   timeout: 600
 case_studies/crypto_perps_funding/17_strategy_analysis:
   skip: true

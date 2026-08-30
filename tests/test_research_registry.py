@@ -557,6 +557,61 @@ def test_candidate_sets_are_immutable_and_validate_protocols(tmp_path: Path) -> 
     assert set(extended_comparison.members) == {first.hash, incompatible.hash, third.hash}
 
 
+def test_a_changed_candidate_set_supersedes_the_one_it_replaces(tmp_path: Path) -> None:
+    """A re-run that changes membership must say what it replaces, and the name must resolve.
+
+    The stage that freezes a candidate set is re-run whenever anything upstream of it is
+    corrected, and the admitted membership moves with it. Without a recorded lineage the name
+    carries two live identities and every reader of it raises instead of resolving.
+    """
+    study = _study(tmp_path)
+    training = study.results.register_training(_training_spec())
+    frame = _predictions()
+    expected = frame.select("symbol", "timestamp", "fold_id")
+    first = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=expected,
+    )
+    second = study.results.publish_predictions(
+        training,
+        checkpoint_kind="epoch",
+        checkpoint_value=2,
+        split="validation",
+        predictions=frame.with_columns((pl.col("y_score") * 2).alias("y_score")),
+        expected_keys=expected,
+    )
+
+    original = CandidateSet.create(study, "pool", [first])
+    assert CandidateSet.one(study, name="pool").hash == original.hash
+    assert CandidateSet.create(study, "pool", [first]).hash == original.hash
+
+    with pytest.raises(ValueError, match="must explicitly supersedes"):
+        CandidateSet.create(study, "pool", [first, second])
+
+    with pytest.raises(ValueError, match="cannot supersede"):
+        CandidateSet.create(study, "fresh", [second], supersedes=original.hash)
+
+    replacement = CandidateSet.create(study, "pool", [first, second], supersedes=original.hash)
+    assert replacement.supersedes == original.hash
+    assert CandidateSet.one(study, name="pool").hash == replacement.hash
+    assert CandidateSet.open(study, original.hash).members == (first.hash,)
+
+    third = study.results.publish_predictions(
+        training,
+        checkpoint_kind="epoch",
+        checkpoint_value=3,
+        split="validation",
+        predictions=frame.with_columns((pl.col("y_score") * 3).alias("y_score")),
+        expected_keys=expected,
+    )
+    head = CandidateSet.create(study, "pool", [first, second, third], supersedes=replacement.hash)
+    assert CandidateSet.one(study, name="pool").hash == head.hash
+
+
 def test_partial_and_preview_results_are_rejected_from_canonical_sets(tmp_path: Path) -> None:
     study = _study(tmp_path)
     canonical_training = study.results.register_training(_training_spec())

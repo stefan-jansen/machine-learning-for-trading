@@ -1116,6 +1116,24 @@ def resolve_best_predictions(
         backtest_cte = "backtest_members(backtest_hash) AS (SELECT value FROM json_each(?)),"
         backtest_clause = "AND b.backtest_hash IN (SELECT backtest_hash FROM backtest_members)"
         params.append(json.dumps(sorted(backtest_hashes)))
+        if prediction_hashes is None:
+            # The eligibility bar has to move with the restriction, or the restriction is worse
+            # than useless. `full_coverage_prediction_sql` keeps rows whose `ic_n_days` equals
+            # the maximum for their (split, family, label); computed over every historical
+            # identity, a retired prediction with wider stored coverage sets a bar no member of
+            # the named population can reach, and the call returns nothing. Scoped to the
+            # predictions behind the named backtests, the bar is the best any candidate actually
+            # offers. An explicit `prediction_hashes` is left to scope it, because that is the
+            # caller naming the population itself.
+            coverage_clause = full_coverage_prediction_sql(
+                "p",
+                "t",
+                "pm",
+                population_subquery=(
+                    "SELECT prediction_hash FROM backtest_runs "
+                    "WHERE backtest_hash IN (SELECT backtest_hash FROM backtest_members)"
+                ),
+            )
     params.extend([label, *stage_params, *exclude_params])
     if split:
         split_clause = "AND p.split = ?"

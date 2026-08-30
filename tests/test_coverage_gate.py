@@ -401,3 +401,33 @@ def test_a_decision_axis_disjoint_from_the_label_artifact_is_refused(case_dir):
 
     with pytest.raises(CoverageError, match="share no timestamp"):
         declared_sessions("cs", LABEL, case_dir=case_dir, decision_axis=elsewhere)
+
+
+def test_the_gap_between_folds_is_read_on_the_decision_axis_too(case_dir, monkeypatch):
+    """An outage between two folds is not a fold that failed to account for its sessions.
+
+    The weekend between the two folds carries no sessions, so the between-fold check is silent
+    on this fixture. Declaring a session there and withholding it from the panel is what the
+    check has to see through: the label artifact has a row nothing could have decided at.
+    """
+    weekend = dt.datetime(2020, 1, 11, 16, 0)
+    labels = case_dir / "labels"
+    pl.DataFrame(
+        [
+            {"timestamp": ts, "symbol": sym, LABEL: 0.01 * i}
+            for i, ts in enumerate([*SESSIONS, weekend])
+            for sym in ("AAA", "BBB", "CCC")
+        ]
+    ).write_parquet(labels / f"{LABEL}.parquet")
+
+    with pytest.raises(CoverageError, match="belong to no declared fold"):
+        check_prediction_coverage(_frame(), "cs", LABEL, case_dir=case_dir)
+
+    report = check_prediction_coverage(
+        _frame(),
+        "cs",
+        LABEL,
+        case_dir=case_dir,
+        decision_axis=pl.Series("timestamp", SESSIONS),
+    )
+    assert report.expected_sessions == len(SESSIONS)
