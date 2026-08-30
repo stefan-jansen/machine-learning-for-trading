@@ -993,11 +993,33 @@ plot_regime_bars(regime_df)
 # diagnostics below read each one's persisted fold extras to look inside the fit rather than at
 # its score.
 
+# %% [markdown]
+# The per-fold diagnostics are stored under the **training hash** of the run that produced them -
+# `run_log/training/<training_hash>/fold_extras.json` - so the configuration name from the metrics
+# table has to be resolved to that hash first. Passing the name straight through returns `None` for
+# every estimator, and because the loader answers `None` for "no file" rather than raising, the
+# figures below silently render nothing while the prose beside them describes what they show. The
+# estimators that wrote no extras are named rather than left out, so an empty panel is
+# distinguishable from a panel that was never asked for.
+
 # %%
-# Load latent factor diagnostics
-lf_models = ["pca", "ipca", "cae", "sdf", "sae"]
-lf_extras = {m: load_fold_extras(CASE_STUDY, m) for m in lf_models}
-lf_extras = {m: e for m, e in lf_extras.items() if e is not None}
+lf_runs = (
+    all_labels_metrics.filter(
+        pl.col("family") == "latent_factors", pl.col("label") == PRIMARY_LABEL
+    )
+    .sort("ic_mean_daily", descending=True, nulls_last=True)
+    .group_by("config_name", maintain_order=True)
+    .first()
+    .select("config_name", "training_hash", "ic_mean_daily")
+)
+lf_extras = {}
+for _row in lf_runs.iter_rows(named=True):
+    _extras = load_fold_extras(CASE_STUDY, _row["training_hash"])
+    if _extras:
+        lf_extras[_row["config_name"]] = _extras
+_missing_extras = sorted(set(lf_runs["config_name"]) - set(lf_extras))
+if _missing_extras:
+    print(f"no fold_extras.json written by: {', '.join(_missing_extras)}")
 
 # Print IC summary from registry
 lf_metrics = all_labels_metrics.filter(
