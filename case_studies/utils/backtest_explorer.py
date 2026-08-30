@@ -409,6 +409,7 @@ class BacktestExplorer:
         stage: str = "signal",
         *,
         prediction_hashes: tuple[str, ...] | list[str] | None = None,
+        exclude_insolvent: bool = False,
     ) -> pl.DataFrame:
         """Compare model families by backtest Sharpe at a given stage.
 
@@ -420,12 +421,43 @@ class BacktestExplorer:
             whose full-coverage rows are outside the population must be compared on its own
             terms rather than dropped against a bar nothing in the population can meet.
             An empty sequence is a population with no members and compares nothing.
+        exclude_insolvent : bool, default False
+            Compute the Sharpe statistics over the runs that stayed solvent,
+            and report how many did not in an added ``insolvent`` column. A run
+            whose ``max_drawdown`` reached -100% took its equity to zero or
+            past it; there is no capital left to earn a later return, so every
+            subsequent period is arithmetic on zero or a negative balance and
+            the Sharpe is a number without a meaning. Leaving those in distorts
+            a median and can top a maximum.
+
+            The count is reported rather than the runs silently dropped,
+            because dropping them alone would rank a family by its survivors: a
+            family that went to zero in nine runs out of ten would show the
+            Sharpe of the tenth and nothing to say so. ``n`` counts the solvent
+            runs the statistics are computed over and ``insolvent`` the rest,
+            so a reader can see what the median is conditional on. A family
+            with no solvent run has null statistics and sorts last.
+
+            A run with no recorded drawdown is counted under ``unknown`` and
+            kept out of the statistics. It cannot be shown to have stayed
+            solvent, but neither did it fail: putting it under ``insolvent``
+            would report a bankruptcy that was never measured. ``n``,
+            ``insolvent`` and ``unknown`` together are every run of the family:
+            the query does not drop a run for having no Sharpe when this is on,
+            because a bankrupt run can carry a null one and dropping it would take
+            a wiped-out family off the table entirely. The Sharpe statistics skip
+            any solvent run without a recorded Sharpe, so they can rest on fewer
+            than ``n`` runs: these columns count runs, not measurements.
+
+            Off by default, so a caller that has already reported on the full
+            population keeps reporting on it, with the same columns as before.
 
         Returns
         -------
         pl.DataFrame
             Columns: family, n, sharpe_median, sharpe_max, sharpe_q75,
-            pct_positive
+            pct_positive - and ``insolvent``, ``unknown`` when
+            ``exclude_insolvent``.
         """
         scope_sql = ""
         scope_params: tuple[str, ...] = ()
@@ -440,11 +472,18 @@ class BacktestExplorer:
                 population_subquery="SELECT value FROM json_each(?)",
             )
             scope_params = (json.dumps(list(prediction_hashes)), *prediction_hashes)
+        # A run that went bankrupt can carry a null Sharpe, and dropping those in SQL would
+        # remove it before `insolvent` counts it - so a family that went bankrupt in every
+        # run would leave the comparison entirely, which is the survivorship bias this
+        # option exists to expose. Under the flag the rows are kept, and the Sharpe
+        # aggregates skip the nulls themselves.
+        sharpe_sql = "" if exclude_insolvent else "AND bm.sharpe IS NOT NULL"
         df = self._query(
             f"""
             SELECT
                 t.family,
-                bm.sharpe
+                bm.sharpe,
+                bm.max_drawdown
             FROM backtest_metrics bm
             JOIN backtest_runs b ON bm.backtest_hash = b.backtest_hash
             JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
@@ -454,7 +493,7 @@ class BacktestExplorer:
               AND p.split != 'holdout'
               {excluded_family_sql(self.case_study, "t.family")[0]}
               {coverage_sql}
-              AND bm.sharpe IS NOT NULL
+              {sharpe_sql}
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
               {scope_sql}
             """,
@@ -466,16 +505,43 @@ class BacktestExplorer:
         if df.is_empty():
             return df
 
+        if not exclude_insolvent:
+            return (
+                df.group_by("family")
+                .agg(
+                    n=pl.len(),
+                    sharpe_median=pl.col("sharpe").median(),
+                    sharpe_max=pl.col("sharpe").max(),
+                    sharpe_q75=pl.col("sharpe").quantile(0.75),
+                    pct_positive=((pl.col("sharpe") > 0).sum() / pl.len() * 100),
+                )
+                .sort("sharpe_median", descending=True)
+            )
+
+        # Three outcomes, counted separately, because a run with no recorded drawdown
+        # is not a bankruptcy: reporting it under `insolvent` would put a failure on
+        # the record that was never measured. Each comparison is null for that run, so
+        # the sums skip it and it lands only in `unknown`. n + insolvent + unknown is
+        # every run of the family.
+        solvent = pl.col("max_drawdown") > -1.0
+        # Filtering needs a mask with no nulls; the counts above do not, and take the
+        # null-skipping behaviour instead.
+        solvent_mask = solvent.fill_null(False)
         return (
             df.group_by("family")
             .agg(
-                n=pl.len(),
-                sharpe_median=pl.col("sharpe").median(),
-                sharpe_max=pl.col("sharpe").max(),
-                sharpe_q75=pl.col("sharpe").quantile(0.75),
-                pct_positive=((pl.col("sharpe") > 0).sum() / pl.len() * 100),
+                n=solvent.sum(),
+                insolvent=(pl.col("max_drawdown") <= -1.0).sum(),
+                unknown=pl.col("max_drawdown").is_null().sum(),
+                sharpe_median=pl.col("sharpe").filter(solvent_mask).median(),
+                sharpe_max=pl.col("sharpe").filter(solvent_mask).max(),
+                sharpe_q75=pl.col("sharpe").filter(solvent_mask).quantile(0.75),
+                # `mean` rather than `sum() / len()`: a family whose runs all went
+                # insolvent divides by zero, and mean over an empty selection is null,
+                # which is what "no solvent run to report a rate over" means.
+                pct_positive=(pl.col("sharpe").filter(solvent_mask) > 0).mean() * 100,
             )
-            .sort("sharpe_median", descending=True)
+            .sort("sharpe_median", descending=True, nulls_last=True)
         )
 
     # -----------------------------------------------------------------
