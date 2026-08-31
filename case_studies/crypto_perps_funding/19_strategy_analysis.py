@@ -428,23 +428,32 @@ if carrier_lineage["val_backtest_hash"] != selected.hash:
         f"analyses {selected.hash}. The sections above and the holdout below would describe "
         "different strategies."
     )
+# The prose below this cell states a holdout result, so the cell has to establish that there
+# is one. Reporting nothing and reading as though a number had been checked is the failure
+# mode a silently empty query produces, and it is worse than a refusal because the conclusion
+# still renders.
 holdout_backtest_hash = carrier_lineage["holdout_backtest_hash"]
-if holdout_predictions.height and holdout_backtest_hash is None:
+if holdout_backtest_hash is None:
     raise RuntimeError(
-        "the registry holds a holdout prediction set but no backtest replaying the selected "
-        "configuration, so any holdout row it does hold belongs to something else."
+        f"no registered holdout backtest replays {selected.hash}. Run "
+        "17_holdout_predictions and 18_holdout_backtest before this notebook; the section "
+        "below reports a holdout result and there is none to report."
     )
-holdout_metrics = []
-if holdout_backtest_hash is not None:
-    with closing(
-        sqlite3.connect(f"file:{STORAGE_ROOT / 'run_log' / 'registry.db'}?mode=ro", uri=True)
-    ) as db:
-        holdout_metrics = db.execute(
-            "SELECT m.sharpe, m.cagr, m.max_drawdown, m.n_periods "
-            "FROM backtest_metrics m JOIN backtest_runs r ON r.backtest_hash = m.backtest_hash "
-            "WHERE r.stage = 'holdout' AND m.backtest_hash = ?",
-            (holdout_backtest_hash,),
-        ).fetchall()
+with closing(
+    sqlite3.connect(f"file:{STORAGE_ROOT / 'run_log' / 'registry.db'}?mode=ro", uri=True)
+) as db:
+    holdout_metrics = db.execute(
+        "SELECT m.sharpe, m.cagr, m.max_drawdown, m.n_periods "
+        "FROM backtest_metrics m JOIN backtest_runs r ON r.backtest_hash = m.backtest_hash "
+        "WHERE r.stage = 'holdout' AND m.backtest_hash = ?",
+        (holdout_backtest_hash,),
+    ).fetchall()
+if len(holdout_metrics) != 1:
+    raise RuntimeError(
+        f"{len(holdout_metrics)} metrics rows for holdout backtest {holdout_backtest_hash}, "
+        "expected exactly one. The window carries one backtest at a time by construction, so "
+        "this is a registry that has been written to by something other than 18."
+    )
 print(
     f"{holdout_predictions.height} holdout prediction set(s) in the registry; "
     f"selection pool {pool.hash} is frozen at {len(pool.members)} members"
