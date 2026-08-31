@@ -915,7 +915,27 @@ def run_official_backtest_requests(
     # Read the option chain once for the whole run. `prime_option_lifecycle` stores what it
     # built under the digest of the files it read, and each request below looks up its own
     # declared digest, so the sharing costs nothing in trust: no frame crosses the boundary.
-    prime_option_lifecycle(pl.concat(all_decisions), raw_options_dir)
+    #
+    # Only the columns the loader reads are carried over, and the concat is relaxed. Decisions
+    # published by different model families do not agree on the width of their `fold` column -
+    # Int32 from one producer, Int64 from another - and a strict concat over the full frames
+    # fails on that, having nothing to do with the contracts being unioned here.
+    lifecycle_columns = [
+        "timestamp",
+        "symbol",
+        "strike",
+        "expiration",
+        "entry_date",
+        "entry_call_mid",
+        "entry_put_mid",
+    ]
+    prime_option_lifecycle(
+        pl.concat(
+            [decisions.select(lifecycle_columns) for decisions in all_decisions],
+            how="vertical_relaxed",
+        ),
+        raw_options_dir,
+    )
     results = []
     rows = []
     for row, prediction, prices, decision, expected_hash in prepared:
