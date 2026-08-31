@@ -470,6 +470,26 @@ class PredictionResult(Result):
         path = self.root / "run_log" / "predictions" / self.hash / "predictions.parquet"
         return pl.read_parquet(path)
 
+    def folds(self):
+        """Return the per-fold metrics registered for this prediction set.
+
+        The headline `ic_mean` is an average over these, so a notebook arguing from the
+        spread across folds - how often the sign changes, how far the folds sit from their
+        own mean, whether the cross-section narrows as the window rolls forward - needs the
+        rows the average was taken over. Reading them back is what keeps such an argument
+        checkable from the published artifact rather than remembered from the output of a
+        fit that a later run reuses instead of repeating.
+        """
+        import polars as pl
+
+        with closing(sqlite3.connect(self.root / "run_log" / "registry.db")) as db:
+            rows = db.execute(
+                "SELECT fold_id, ic, ic_std, n_entities FROM fold_metrics "
+                "WHERE prediction_hash = ? ORDER BY fold_id",
+                (self.hash,),
+            ).fetchall()
+        return pl.DataFrame(rows, schema=["fold_id", "ic", "ic_std", "n_entities"], orient="row")
+
 
 @dataclass(frozen=True)
 class BacktestResult(Result):

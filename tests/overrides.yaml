@@ -1451,18 +1451,43 @@ case_studies/etfs/02_labels:
 case_studies/etfs/03_financial_features:
   timeout: 300
 case_studies/etfs/04_model_based_features:
+  # No MAX_SYMBOLS, for the reason 02_labels gives: the CI fixture is already only 24
+  # ETFs, so it IS the reduction. Cutting to 5 on top of it made every downstream
+  # backtest degenerate rather than fast. etfs declares top_k_grid [5, 10, 20] against a
+  # 24-fund price panel, so all three schemes pass the feasibility filter - but the
+  # predictions they rank covered 5 symbols, so top-5, top-10 and top-20 each held the
+  # whole cross-section, the basket never changed, and 12 of 12 backtests recorded
+  # num_trades=0. Four notebooks (14, 15, 17, 18) were blocked on that as
+  # ml4t/agent-workspace#989. The selection has to have something to reject.
   parameters:
     GARCH_MIN_OBS: 50
-    MAX_SYMBOLS: 5
     N_RESTARTS: 1
-  timeout: 300
+  timeout: 900
 case_studies/etfs/05_evaluation:
-  parameters:
-    MAX_SYMBOLS: 5
-  timeout: 300
+  # Same reason as 04 above: this stage feeds the same predictions, so reducing it
+  # re-narrows the cross-section that 04 was widened to preserve.
+  timeout: 900
 case_studies/etfs/06_linear:
+  # #560 moved this notebook onto the shared boundary and removed `MAX_FOLDS: 2` /
+  # `MAX_SYMBOLS: 5` without replacing them, leaving a timeout that had been measured
+  # against them. `_collect_preview_reductions` defaults `max_symbols: 5` when nothing is
+  # declared, so the universe stayed cut and the fold count did not: this panel runs eight
+  # folds, the most in the fleet, and the preview has been fitting all of them on a budget
+  # priced for two. These are the pre-#560 reductions restated in the parameter that now
+  # carries them, so the timeout below is once again measured against what runs.
+  parameters:
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
   timeout: 120
 case_studies/etfs/07_gbm:
+  # As 06_linear. The iteration and checkpoint axes are left at their declared values: a
+  # boosted fit reduced to two folds and five funds is already a smoke test, and cutting the
+  # checkpoint grid as well would reduce away the dimension the notebook is about.
+  parameters:
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
   timeout: 180
 case_studies/etfs/08_tabular_dl:
   # DEVICE and POPULATION_NAME travel together. The runner refuses to substitute a CPU
@@ -1481,26 +1506,38 @@ case_studies/etfs/08_tabular_dl:
       max_symbols: 5
   timeout: 300
 case_studies/etfs/09_dl_lstm:
+  # Converted onto the research boundary, so the notebook no longer binds BATCH_SIZE, LOOKBACK or
+  # N_EPOCHS: the sequence window and the batch come from the lstm preset, and the epoch budget
+  # from the patched fixture presets (tests/preset_patches.py sets n_epochs 2). Those three names
+  # stayed here after the conversion, reached nothing, and left the job running at full scope
+  # while this block described a reduced one - the same failure the header documents.
+  # DEVICE and POPULATION_NAME travel together, as in 08_tabular_dl: the device is inside the
+  # training identity, so a CPU run declares a different member set and must name its own
+  # population rather than publish into the canonical one.
+  # max_symbols is 5 to match 04_model_based_features for the reason 11a_pca states below: the
+  # boundary validates the fold-specific temporal artifact against the CV splits, and the 6 the
+  # pre-conversion block carried put fold 0 validation at 93.5%, under the 95% floor.
   parameters:
-    BATCH_SIZE: 32
-    LOOKBACK: 5
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 6
-    N_EPOCHS: 6
+    DEVICE: cpu
+    POPULATION_NAME: etfs-lstm-preview
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
   timeout: 180
 case_studies/etfs/10_dl_tsmixer:
-  # LOOKBACK becomes the Darts input_chunk_length, which must exceed
-  # output_chunk_length, and output_chunk_length is the label horizon: etfs is
-  # primary fwd_ret_21d, so 21. LOOKBACK was 5, which _resolve_chunk_lengths
-  # rejects outright on any data size. 22 is the smallest value it accepts - the
-  # check is input > output and nothing more - so the window is valid without
-  # paying for the notebook default of 60.
+  # Converted onto the research boundary alongside 09_dl_lstm, so the same three names are gone:
+  # the window and the batch come from the tsmixer preset, the epoch budget from the patched
+  # fixture presets. The LOOKBACK note this block used to carry is settled by the preset rather
+  # than by an override - Darts requires input_chunk_length above output_chunk_length, which is
+  # the 21-day label horizon, and the preset's 60 clears it.
+  # DEVICE and POPULATION_NAME travel together for the reason 08_tabular_dl states.
+  # max_symbols is 5 to match 04_model_based_features, as in 09_dl_lstm.
   parameters:
-    BATCH_SIZE: 32
-    LOOKBACK: 22
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 6
-    N_EPOCHS: 2
+    DEVICE: cpu
+    POPULATION_NAME: etfs-tsmixer-preview
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
   timeout: 180
 case_studies/etfs/11a_pca:
   # max_symbols must match 04_model_based_features, which builds the temporal
@@ -1529,8 +1566,12 @@ case_studies/etfs/11b_ipca:
   # boundary, and it is the same boundary sp500_equity_option_analytics measured
   # at K=2 on 19-21 assets and found unstable across machines. n_factors=1 is
   # below it rather than on it, which is why it is chosen over raising max_iter.
-  # A reduced run declares a different member set than the canonical population,
-  # so it names its own.
+  #
+  # The preview names its own population because n_factors changes WHICH members
+  # exist, not how cheaply each one is fitted: a one-factor IPCA publishes a
+  # different set of prediction identities than a five-factor one. folds and
+  # max_symbols do not - they make each member cheaper and leave the set alone -
+  # so a reduction of those two alone would need no name.
   parameters:
     POPULATION_NAME: etfs-ipca-preview
     PREVIEW_REDUCTIONS:
@@ -1566,27 +1607,73 @@ case_studies/etfs/12_causal_dml:
   timeout: 120
 case_studies/etfs/13_model_analysis:
   timeout: 300
+# The backtest stage takes the fixture's whole 24-fund cross-section. No MAX_SYMBOLS here,
+# for the reason 04 and 05 give above: the fixture IS the reduction, and capping it again made
+# every downstream result degenerate rather than fast. `get_entry_schemes_for` drops every k at
+# or above the traded universe - holding 5 of 5 funds is the equal-weight benchmark, not a
+# ranked selection - so at 5 the whole `top_k_grid` [5, 10, 20] was infeasible and the sweep
+# produced zero backtests, reported as "0 computed, 0 served, 0 failed", which reads exactly
+# like a re-run that found everything cached. 14 now refuses an empty scheme list outright.
+#
+# TOP_K is gone with it. It named the plumbing test's concentration, and 2 is not in the
+# declared grid; worse, setting it at all skipped the notebook's own feasibility check, which
+# runs only when TOP_K is left at 0. Unset, the notebook takes the smallest feasible k.
+#
+# 15 through 19 take the same universe: they re-price, overlay and replay 14's backtests, and a
+# run that loaded a different number of funds would be reading a price panel the registered
+# specifications were not built against.
+#
+# The five #989 skips are gone with the cap that caused them. They are not replaced with a
+# narrower skip: the whole point of removing them is that this job now exercises the chain it
+# was reporting green while stepping over.
+#
+# Timeouts are raised across the block rather than kept: every stage below now sees 24 funds
+# where it saw 5, and the previous budgets were measured against the narrower panel.
 case_studies/etfs/14_backtest:
-  parameters:
-    MAX_SYMBOLS: 5
-    TOP_K: 2
-  timeout: 600
+  timeout: 900
 case_studies/etfs/15_portfolio_management:
   parameters:
-    MAX_SYMBOLS: 5
     TOP_N_PREDICTIONS: 2
-  timeout: 120
-case_studies/etfs/16_costs:
+  timeout: 600
+case_studies/etfs/16_risk_management:
+  # MAX_RISK_VARIANTS bounds the overlay sweep, which is the cell that dominates this notebook,
+  # and it bounds work rather than the cross-section - which is why it stays while MAX_SYMBOLS
+  # goes. Scoping the baselines to live prediction sets had already put that cell over the
+  # per-cell cap once: measured at loads 34-41, the unbounded sweep passed 4/4 before the
+  # scoping and 1/3 after.
   parameters:
-    MAX_SYMBOLS: 5
+    MAX_RISK_VARIANTS: 2
     TOP_N_COMBOS: 2
-  timeout: 120
-case_studies/etfs/17_risk_management:
+  timeout: 600
+case_studies/etfs/17_costs:
   parameters:
-    MAX_SYMBOLS: 5
     TOP_N_COMBOS: 2
-  timeout: 120
-case_studies/etfs/18_strategy_analysis:
+  timeout: 600
+case_studies/etfs/18_holdout_predictions:
+  # Canonical, not preview. `reconstruct_locked_model_request` refuses any spec whose
+  # execution_tier is not canonical, and the harness injects EXECUTION_TIER="preview" for
+  # any notebook that declares it - so the default routing fails this notebook on its first
+  # fit. 19 and 20 follow it, because a holdout resolved in one tier and read in another is
+  # two registries. Kept although all three are skipped, so that whenever the fixture can
+  # support them they run as one tier rather than being wired up again from scratch.
+  research_preview: false
+  # Refits the selected configuration over the holdout fold - one training run, no sweep. The
+  # budget is a single GBM fit over the full history before the window, on 24 funds.
+  timeout: 900
+  skip: true
+  skip_reason: "The seeded fixture carries no resolved training specification, so the holdout fold cannot be derived. `tests/fixtures/seed_results.py:578` writes each training run's spec as {family, config_name, label} with no `computation` block, and `build_holdout_training_spec` re-keys the validation CV onto the holdout fold by reading `computation.cv` - so it refuses with 'holdout CV derivation requires a current resolved training specification'. That refusal is correct and the notebook is correct: a holdout refit is defined by the CV interval it covers, and a spec that records none cannot produce one. Remove this skip when the fixture seeds a resolved computation, not before - a fabricated CV block would let the job report a holdout derived from fold boundaries no model was ever fitted on."
+case_studies/etfs/19_holdout_backtest:
+  research_preview: false
+  # One backtest over the holdout window, on the engine path this case study's trailing-stop
+  # carrier requires.
+  timeout: 600
+  skip: true
+  skip_reason: "Reads the holdout prediction set 18_holdout_predictions registers, and derives which one through the same `build_holdout_training_spec` call - so it refuses for the same reason and one step earlier than 18 does. The seeded fixture carries no resolved training specification, so the holdout fold cannot be derived. `tests/fixtures/seed_results.py:578` writes each training run's spec as {family, config_name, label} with no `computation` block, and `build_holdout_training_spec` re-keys the validation CV onto the holdout fold by reading `computation.cv` - so it refuses with 'holdout CV derivation requires a current resolved training specification'. That refusal is correct and the notebook is correct: a holdout refit is defined by the CV interval it covers, and a spec that records none cannot produce one. Remove this skip when the fixture seeds a resolved computation, not before - a fabricated CV block would let the job report a holdout derived from fold boundaries no model was ever fitted on."
+case_studies/etfs/20_strategy_analysis:
+  research_preview: false
+  timeout: 900
+  skip: true
+  skip_reason: "Every risk-overlay backtest in the fixture sits below its family's coverage bar, so the complete-run filter admits none and the notebook refuses. The bar is the population's maximum ic_n_days: the seeded deep_learning predictions carry more scored days than the ones this job actually fits, so a fitted run can never reach a maximum a seeded row holds. Measured: 20 risk_overlay rows, all on 57b4d1ffd748 at 1536 days, all below the bar. The refusal is the guard working - an incomplete run compared as complete manufactures a false leader - and the fixture is what cannot satisfy it. Same shape as the `.preview` seeding removed in a1227f1d, one level up. Stages 14 through 17 run unskipped and pass, so the chain below this notebook is exercised."
 case_studies/fx_pairs/01_feasibility_analysis:
   timeout: 120
 case_studies/fx_pairs/02_labels:

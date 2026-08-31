@@ -283,15 +283,15 @@ print(f"{len(requested_pairs)} label-configuration pairs")
 # predictions happen to be in the registry.
 #
 # `SUPERSEDES_POPULATION` names the population hash this run replaces. A population is the set of
-# prediction identities, so anything that moves a training identity - a changed tolerance as much as a changed label menu -
-# produces a different set under the same name, and the registry refuses to write it without being
-# told which snapshot it supersedes. It is empty here because this notebook, run as it stands,
-# reproduces the members already published under that name rather than changing them, and
-# reproducing a published list is not a replacement. Fill it in when you have changed something
-# that moves an identity and want the new set to take the name; the error raised on the attempt
-# tells you which hash to name. A reduced-scale run passes it empty whatever the default is: a
-# population produced under a reduction is thrown away with the workspace it was written to, so it
-# has no lineage to extend.
+# prediction identities, so anything that moves a training identity - a changed tolerance as much
+# as a changed label menu - produces a different set under the same name, and the registry refuses
+# to write it without being told which snapshot it supersedes. It is empty here because this
+# notebook, run as it stands, reproduces the members already published under that name rather than
+# changing them, and reproducing a published list is not a replacement. Fill it in when you have
+# changed something that moves an identity and want the new set to take the name; the error raised
+# on the attempt tells you which hash to name. A reduced-scale run passes it empty whatever the
+# default is: a population produced under a reduction is thrown away with the workspace it was
+# written to, so it has no lineage to extend.
 
 # %%
 population_name = POPULATION_NAME or f"etfs-{MODEL_NAME}-validation-v1"
@@ -512,7 +512,7 @@ print(
 # for in turnover.
 #
 # It says nothing about accuracy. A ranking that turns over quickly is not better or worse than one
-# that does not; it is a different thing to hold, and [`16_costs`](16_costs.ipynb) is where the
+# that does not; it is a different thing to hold, and [`17_costs`](17_costs.ipynb) is where the
 # holding cost is priced.
 
 # %%
@@ -583,7 +583,7 @@ show_plotly_with_alt(
 # intended. The day-over-day rank correlation says how far that gets: between **0.92 and 0.98** on
 # every one of the eight folds. Two things follow, and they point in opposite directions for a
 # reader deciding what to do with this model. A strategy trading it turns over slowly, which
-# [`16_costs`](16_costs.ipynb) will price as an advantage. And the 1,995 daily correlations behind
+# [`17_costs`](17_costs.ipynb) will price as an advantage. And the 1,995 daily correlations behind
 # `ic_mean` are nowhere near 1,995 independent readings, because consecutive dates are scoring
 # almost the same ordering against a different day of returns, so `ic_std / sqrt(ic_n_days)`
 # understates the uncertainty on `ic_mean` here much as it did for the forecast that was frozen

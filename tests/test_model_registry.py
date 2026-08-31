@@ -218,13 +218,29 @@ def test_notebook_override_parameters_have_final_precedence() -> None:
 
 
 def test_etf_checkpoint_contract_parameters_come_from_notebook_overrides() -> None:
+    """A notebook's own override beats the quick default, whichever name carries it.
+
+    Both etfs sequence notebooks moved onto the research boundary, so they no longer bind
+    `MAX_SYMBOLS`, `N_EPOCHS`, `BATCH_SIZE` or `LOOKBACK`: the window and the batch come from
+    the preset, the epoch budget from the patched fixture presets, and the universe and fold
+    reductions travel in `PREVIEW_REDUCTIONS`. This asserted the pre-conversion names, so it
+    was checking a transcription of `overrides.yaml` that the file had moved past.
+
+    What it is actually for is precedence - that `_quick_parameters` does not overwrite what
+    the notebook declared - so it is expressed against the names each notebook declares now.
+    """
     for stage, expected in {
-        "09_dl_lstm": {"MAX_SYMBOLS": 6, "N_EPOCHS": 6},
-        "10_dl_tsmixer": {"MAX_SYMBOLS": 6, "N_EPOCHS": 2},
+        "09_dl_lstm": {"DEVICE": "cpu", "POPULATION_NAME": "etfs-lstm-preview"},
+        "10_dl_tsmixer": {"DEVICE": "cpu", "POPULATION_NAME": "etfs-tsmixer-preview"},
     }.items():
         overrides = get_overrides(f"case_studies/etfs/{stage}")["parameters"]
         parameters, _ = _quick_parameters("etfs", stage, overrides)
         assert {key: parameters[key] for key in expected} == expected
+        # The reduction is declared, and as the mapping the boundary reads rather than as the
+        # loose names it replaced. A converted notebook that reduces nothing is a canonical run
+        # wearing the wrong tier, which the request builder refuses.
+        assert parameters["PREVIEW_REDUCTIONS"] == {"folds": [0, 1], "max_symbols": 5}
+        assert not {"MAX_SYMBOLS", "N_EPOCHS", "BATCH_SIZE", "LOOKBACK"} & set(overrides)
 
 
 @pytest.mark.parametrize(

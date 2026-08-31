@@ -219,6 +219,11 @@ CREATE TABLE IF NOT EXISTS cohort_metrics (
     family        TEXT,
     leader_hash   TEXT NOT NULL REFERENCES backtest_runs(backtest_hash),
     k_variants                  INTEGER NOT NULL,
+    -- sha256 over the cohort's sorted member backtest hashes. A count cannot say
+    -- which variants a stored correction was computed over: swap one retired member
+    -- for one live member and k_variants is unchanged, so a reader comparing counts
+    -- accepts a correction from a different cohort than the one it asked for.
+    member_digest               TEXT,
     periods_per_year            REAL NOT NULL,
     computed_at                 TEXT NOT NULL,
     n_trials_effective_mp       REAL,
@@ -713,6 +718,11 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
         for column, sql_type in prediction_columns.items():
             if column not in prediction_cols:
                 db.execute(f"ALTER TABLE prediction_sets ADD COLUMN {column} {sql_type}")
+
+    if "cohort_metrics" in tables:
+        cohort_cols = {row[1] for row in db.execute("PRAGMA table_info(cohort_metrics)").fetchall()}
+        if "member_digest" not in cohort_cols:
+            db.execute("ALTER TABLE cohort_metrics ADD COLUMN member_digest TEXT")
 
     if "prediction_coverage" in tables:
         coverage_cols = {

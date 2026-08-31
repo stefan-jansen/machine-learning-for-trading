@@ -52,7 +52,10 @@ import yaml
 from ml4t.diagnostic.metrics import cross_sectional_ic
 
 from case_studies.research.contracts import ExecutionTier
-from case_studies.research.cv import require_fold_scoped_temporal_compatibility
+from case_studies.research.cv import (
+    require_fold_scoped_temporal_compatibility,
+    require_fold_scoped_temporal_holdout_coverage,
+)
 from case_studies.research.identity import ResolvedSpec
 from case_studies.research.models import ModelRun
 from case_studies.research.recovery import ExecutionAttempt, ExecutionLedger
@@ -2116,7 +2119,43 @@ def reconstruct_locked_request(
 
     split = locked_holdout_split(spec, mds.dataset, mds.date_col, study.case_study)
     if mds.temporal_by_fold is not None and mds.temporal_keys and mds.temporal_feature_names:
-        require_fold_scoped_temporal_compatibility([split], mds.temporal_artifact_splits)
+        # Coverage, not fold-boundary compatibility - the same branch
+        # `latent_factors/adapter.py` takes on this path, and for the same reason.
+        # Compatibility asks whether the stage-04 artifact declares a fold with this geometry.
+        # For a holdout that question has no good answer: the holdout fold is derived after
+        # stage 04 ran, so the artifact never declares it, and it cannot be rebuilt to declare
+        # it without changing the sha256 the selection was made under. Asking it here refused
+        # every holdout refit on a gbm-carried case study with fold-scoped model-based
+        # features - measured on etfs, whose carrier is `gbm/default_mae`, with
+        # "custom CV is incompatible with fold-scoped temporal features".
+        #
+        # The features are joined by (entity, date), so what the run needs is rows spanning
+        # the dates it trains and evaluates on, not a fold labelled for it. That is what
+        # `require_fold_scoped_temporal_holdout_coverage` asks, and its docstring already said
+        # this was the question to ask - it just had no caller on this family.
+        #
+        # What coverage cannot check, and where the guarantee actually comes from. A producer
+        # declares its rolling folds 0..N-1 in `temporal_artifact_splits` and appends the
+        # holdout rows as fold N without declaring that fold's geometry, so the boundary its
+        # holdout rows were fitted under is not in the artifact for anything here to verify.
+        # It is enforced upstream instead: `case_studies/etfs/04_model_based_features.py:345`
+        # asserts `train_end <= HOLDOUT_START` over `all_folds`, the holdout fold included, with
+        # the message "fold N estimates parameters from sessions inside the holdout". That
+        # source is inside the sha256 the artifact is pinned by, so the property is pinned even
+        # though the declaration is missing. Filed as a gap in what the artifact can attest.
+        #
+        # One difference that is not a leak and is easy to read as one: the model's training
+        # window ends a label buffer earlier than the feature estimator's, because the buffer
+        # pulls the label cutoff back. So features on the model's training rows embed sessions
+        # after its label cutoff and before the holdout opens - fresher than the labels beside
+        # them, and drawn entirely from outside the evaluated window, so they cannot move the
+        # holdout number.
+        require_fold_scoped_temporal_holdout_coverage(
+            split,
+            mds.temporal_by_fold,
+            source_timeline=mds.dataset.get_column(mds.date_col),
+            date_col=mds.date_col,
+        )
     expected = _gbm_expected_keys_from_dataset(mds, [split])
     validate_locked_expected_keys(spec, expected)
     folds = prepare_gbm_folds(

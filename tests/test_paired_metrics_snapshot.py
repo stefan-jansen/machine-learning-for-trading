@@ -99,8 +99,16 @@ class TestTheRebuildEntryPoint:
     @staticmethod
     def _explorer(rows: pl.DataFrame):
         class _Explorer:
-            def best(self, *, stage: str, top_n: int) -> pl.DataFrame:
-                return rows
+            def best(
+                self,
+                *,
+                stage: str,
+                top_n: int,
+                prediction_hashes: list[str] | None = None,
+            ) -> pl.DataFrame:
+                if prediction_hashes is None:
+                    return rows
+                return rows.filter(pl.col("prediction_hash").is_in(prediction_hashes))
 
             def champion_lineage(self, _prediction_hash: str) -> dict:
                 return {}
