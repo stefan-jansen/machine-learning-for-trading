@@ -1825,7 +1825,7 @@ credible.select(
 #
 # **Next**: [`14_backtest`](14_backtest.ipynb) for strategy simulation,
 # [`15_portfolio_management`](15_portfolio_management.ipynb) for position sizing, and
-# `18_strategy_analysis.py` for end-to-end results.
+# [`20_strategy_analysis`](20_strategy_analysis.ipynb) for end-to-end results.
 
 # %% [markdown]
 # ## Key Takeaways

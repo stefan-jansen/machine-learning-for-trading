@@ -183,7 +183,7 @@ costs:
   per_leg_cost_bps_range: [3, 10]
   round_trip_cost_bps: 13    # Midpoint of per_leg_cost_bps_range (6.5 bps × 2 legs).
   # per_share is the commission rate for the exploratory per-share
-  # cost-sensitivity regime (read by Ch18 16_costs.py and the run_sweep
+  # cost-sensitivity regime (read by Ch18 17_costs.py and the run_sweep
   # planner). IBKR Pro Tiered top tier. NOT used in the headline bps
   # regime — bps regime is the production cost model.
   per_share: 0.0035

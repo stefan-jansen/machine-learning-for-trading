@@ -418,5 +418,5 @@ fig.show()
 # 5. **These are selection-stage results on a current-constituent universe**, so they carry
 #    survivorship bias and establish no out-of-sample edge. The holdout is untouched here.
 #
-# **Next:** [`16_costs`](16_costs.ipynb) applies friction to the leading validation lineage. See
+# **Next:** [`16_risk_management`](16_risk_management.ipynb) applies friction to the leading validation lineage. See
 # Chapter 18 for the transaction-cost framework.

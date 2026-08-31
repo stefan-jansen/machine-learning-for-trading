@@ -48,7 +48,7 @@
 # predictions and metrics are read from this case study's registry, so a family that
 # has not been fitted is simply absent from every table here rather than an error.
 #
-# This notebook and [`15_strategy_analysis`](15_strategy_analysis.ipynb) are the two
+# This notebook and [`17_strategy_analysis`](17_strategy_analysis.ipynb) are the two
 # places in this case study where results are interpreted. The modelling notebooks
 # state what their run produced and stop.
 
@@ -1300,7 +1300,7 @@ synthesis
 # ### What this notebook does not establish
 #
 # - **Whether the spread survives a real cost model.** The cost columns here apply a
-#   flat per-leg range to a decile spread. [`13_costs`](13_costs.ipynb) applies a cost
+#   flat per-leg range to a decile spread. [`14_costs`](14_costs.ipynb) applies a cost
 #   model that varies with the name and the trade.
 # - **Whether the portfolio is capacity-constrained.** Decile membership takes no
 #   account of how much can be traded in a small name without moving it.
@@ -1312,7 +1312,7 @@ synthesis
 #
 # **Next**: [`11_backtest`](11_backtest.ipynb) simulates trading these predictions,
 # [`12_portfolio_management`](12_portfolio_management.ipynb) sizes the positions, and
-# [`15_strategy_analysis`](15_strategy_analysis.ipynb) reports what the strategy did
+# [`17_strategy_analysis`](17_strategy_analysis.ipynb) reports what the strategy did
 # end to end.
 
 # %% [markdown]
