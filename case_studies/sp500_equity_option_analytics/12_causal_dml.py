@@ -76,7 +76,6 @@ from utils.style import COLORS, FIGSIZE, add_message_title
 CASE_STUDY_ID = "sp500_equity_option_analytics"
 PRIMARY_LABEL = ""
 MAX_SYMBOLS = 0
-RANDOM_SEED = 42
 CV_FOLDS = 0
 MAX_SAMPLES = 0
 N_PLACEBO = 0
@@ -110,7 +109,6 @@ SUPERSEDES_CAUSAL: str = ""
 # reduced one.
 
 # %%
-set_global_seeds(RANDOM_SEED)
 setup = yaml.safe_load((get_case_study_dir(CASE_STUDY_ID) / "config" / "setup.yaml").read_text())
 label = PRIMARY_LABEL or setup["labels"]["primary"]
 
@@ -145,12 +143,19 @@ request = study.causal(
 resolved = request.resolve()
 computation = resolved.spec["computation"]
 estimand = computation["estimand"]
+# Seeded from the identity rather than from a notebook parameter. The seed the estimate depends
+# on is `dml.yaml`'s, and it is in the resolved specification and therefore in the hash; a
+# parameter beside it would be a dial a reader can turn that changes nothing, and worse, turning
+# it would leave the identity untouched and reload the cached result under a seed it was not fit
+# with. The nuisance estimator and the placebo permutation carry this seed explicitly; the global
+# call covers whatever else in the stack reads a process-wide one.
+set_global_seeds(int(resolved.spec["seed"]))
 
 print(f"Case study: {CASE_STUDY_ID}")
 print(f"Treatment: {estimand['treatment']}")
 print(f"Outcome: {estimand['outcome']} (horizon {estimand['outcome_horizon']})")
 print(f"Confounders: {', '.join(estimand['confounders'])}")
-print(f"Execution tier: {tier.value}")
+print(f"Execution tier: {tier.value} | seed {resolved.spec['seed']}")
 print(f"Last admissible outcome endpoint: {estimand['holdout_endpoint_cutoff']}")
 
 # %% [markdown]
@@ -365,8 +370,9 @@ else:
 #    cross-sectional dependence.
 #
 # 3. **Compare naive OLS and DML on the same rows**: `confounding_bias_pct` is the gap
-#    between them as a share of the adjusted estimate. Both are computed on the same
-#    analysis population, so the difference is adjustment rather than sample.
+#    between them as a share of the adjusted estimate. Both are computed on the cross-fitted
+#    observations - the smaller of the two counts reported above, not the analysis population
+#    - so the difference between them is adjustment rather than sample.
 #
 # 4. **The estimand is part of the identity**: treatment, confounders, temporal geometry and
 #    refutation design all enter the hashed specification, so a run at a different block size,
