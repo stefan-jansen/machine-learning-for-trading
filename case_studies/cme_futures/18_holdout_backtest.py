@@ -54,6 +54,7 @@ warnings.filterwarnings("ignore")
 
 from case_studies.research import open_study
 from case_studies.research.holdout import build_holdout_training_spec
+from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
     load_backtest_prices_for,
@@ -271,6 +272,17 @@ futures_market = load_futures_market_contract(
 identity = spec.setdefault("input_identity", {})
 identity["contract_specs"] = compute_hash(canonical_json(serialized_contract_specs))
 identity["futures_market"] = compute_hash(canonical_json(futures_market))
+# `prices` is the third entry and the same kind of mistake as the other two: cloned from the
+# validation run, it is the digest of the validation price frame while this backtest consumes
+# the holdout one. The record would say the run read prices it did not read, and
+# `us_equities_panel/20_strategy_analysis.py` shows the shape of the consumer that checks
+# exactly this.
+#
+# It is digested on the engine-keyed frame, which for cme is the reader frame with `product`
+# renamed to `symbol` - the rename `research/strategy.py::_engine_prices` performs before
+# `_build_spec` digests it, and the reason the digest cannot be taken off the frame as loaded.
+engine_prices = prices.rename({"product": "symbol"}) if "product" in prices.columns else prices
+identity["prices"] = value_digest(engine_prices)
 spec["futures_market"] = futures_market
 spec["entity_contract"] = {
     "reader_key": "product",
