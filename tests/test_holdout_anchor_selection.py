@@ -233,3 +233,42 @@ def test_a_retired_prediction_is_not_a_candidate(monkeypatch, tmp_path) -> None:
 
     assert _lineage(retired_hashes=frozenset({"p1"})) is None
     assert _lineage(retired_hashes=frozenset({"other"}))["backtest_hash"] == "b1"
+
+
+def test_the_pinned_carrier_branch_refuses_ambiguity_too(monkeypatch, tmp_path) -> None:
+    """Naming the carrier is normally one candidate, and it is not guaranteed to be.
+
+    One prediction set can carry several backtests, and they survive the carrier filter
+    together - same configuration, same checkpoint, same strategy. The pinned branch used to
+    return the first eligible row in `backtest_hash` order while the unpinned branch below it
+    refused the identical ambiguity, so which resolver you asked decided whether the registry
+    was ambiguous. The higher Sharpe is on `b0`, which is what hash order returns.
+    """
+    case_dir = _registry(
+        tmp_path,
+        [
+            ("p1", "t1", "cfg_a", "b0", 9.9),
+            ("p1", "t1", "cfg_a", "b9", 0.4),
+        ],
+    )
+    _install(monkeypatch, case_dir)
+
+    with pytest.raises(ValueError, match="rank the holdout on its own result"):
+        _lineage(prefer_prediction_hash="p1")
+
+
+def test_the_pinned_carrier_still_resolves_when_it_is_unambiguous(monkeypatch, tmp_path) -> None:
+    """The refusal above must not fire on the ordinary case, which is the one that matters:
+    a carrier with one holdout replay resolves, and it is not the higher-scoring sibling
+    checkpoint that the unpinned branch would have to refuse over."""
+    case_dir = _registry(
+        tmp_path,
+        [
+            ("p1", "t1", "cfg_a", "b1", 9.9, HOLDOUT_REFIT_SPEC, 50),
+            ("p2", "t1", "cfg_a", "b2", 0.1, HOLDOUT_REFIT_SPEC, 60),
+        ],
+    )
+    _install(monkeypatch, case_dir)
+
+    assert _lineage(prefer_prediction_hash="p1")["backtest_hash"] == "b1"
+    assert _lineage(prefer_prediction_hash="p2")["backtest_hash"] == "b2"

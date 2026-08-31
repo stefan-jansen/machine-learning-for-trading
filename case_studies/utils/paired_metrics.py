@@ -599,11 +599,31 @@ def _holdout_lineage_for(
                     """,
                     params + list(carrier),
                 ).fetchall()
-                for candidate in rows_:
-                    if training_run_fitted_for_the_holdout(candidate["spec_json"]):
-                        resolved = dict(candidate)
-                        resolved.pop("spec_json")
-                        return resolved
+                # Naming the carrier pins the configuration and the checkpoint, and that is
+                # normally one candidate. It is not guaranteed to be: one prediction set can
+                # carry several backtests - a replay under a different strategy spec, an
+                # experimental allocator sharing the holdout prediction - and they survive
+                # this filter together. Returning the first in `backtest_hash` order would
+                # decide on nothing the carrier determines, which is the same defect the
+                # unpinned branch below refuses, so it refuses here too rather than only
+                # where the caller happened not to pin.
+                eligible = [
+                    candidate
+                    for candidate in rows_
+                    if training_run_fitted_for_the_holdout(candidate["spec_json"])
+                ]
+                if len({candidate["backtest_hash"] for candidate in eligible}) > 1:
+                    raise ValueError(
+                        f"{len(eligible)} holdout backtests match the pinned carrier "
+                        f"{prefer_prediction_hash} for {cs} - same configuration, same "
+                        "checkpoint, same strategy. Choosing between them would rank the "
+                        "holdout on its own result. Retire the replays that are not this "
+                        "study's holdout, so one candidate remains."
+                    )
+                if eligible:
+                    resolved = dict(eligible[0])
+                    resolved.pop("spec_json")
+                    return resolved
 
         # The caller named no carrier, so this is the unpinned fallback. Two filters, and
         # neither is optional.

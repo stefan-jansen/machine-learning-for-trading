@@ -1133,8 +1133,19 @@ def _full_strategy_spec_from_backtest(db: sqlite3.Connection, bt_hash: str) -> d
     }
 
 
-def _val_rank1_full_spec(cs: str) -> dict | None:
-    """Return the val rank-1 *full strategy* spec for ``cs`` — the
+def _val_rank1_carrier(cs: str) -> dict | None:
+    """Return ``{'spec', 'prediction_hash'}`` for ``cs``'s validation rank-1 carrier.
+
+    The prediction hash is carried out alongside the spec because the holdout resolver
+    needs it: naming the carrier pins the configuration AND the checkpoint, and without
+    it a case study that registered several checkpoints against one strategy is ambiguous
+    and the resolver refuses. It was determinable all along - this walk had it in hand and
+    threw it away - so refusing there would have dropped a case study out of the
+    reader-facing holdout table for want of a value one line above.
+
+    ``_val_rank1_full_spec`` remains as the spec-only view for callers that want it.
+
+    The val rank-1 *full strategy* spec for ``cs`` — the
     highest-Sharpe validation backtest across (signal, allocation,
     risk_overlay) stages — walking candidates by val Sharpe descending until
     one with a matching holdout backtest at the SAME full spec is found.
@@ -1226,10 +1237,16 @@ def _val_rank1_full_spec(cs: str) -> dict | None:
                 ho_params,
             ).fetchone()
             if row:
-                return spec
+                return {"spec": spec, "prediction_hash": cand["prediction_hash"][i]}
     finally:
         db.close()
     return None
+
+
+def _val_rank1_full_spec(cs: str) -> dict | None:
+    """The validation rank-1 carrier's strategy spec alone."""
+    carrier = _val_rank1_carrier(cs)
+    return carrier["spec"] if carrier else None
 
 
 def _full_strategy_clauses(spec: dict | None) -> tuple[list[str], list[object]]:
@@ -1941,9 +1958,15 @@ def query_holdout_rows():
         # several candidates survive, and the other eight case studies still have rows to
         # report. The reason is printed rather than swallowed, because a case study silently
         # missing from the holdout table looks like unrun work.
-        val_spec = _val_rank1_full_spec(cs)
+        carrier = _val_rank1_carrier(cs)
+        val_spec = carrier["spec"] if carrier else None
         try:
-            lineage = _holdout_lineage_for(cs, "", val_spec)
+            lineage = _holdout_lineage_for(
+                cs,
+                "",
+                val_spec,
+                prefer_prediction_hash=carrier["prediction_hash"] if carrier else None,
+            )
         except ValueError as exc:
             print(f"[warn] {cs}: holdout not resolvable, so no holdout row: {exc}")
             continue
