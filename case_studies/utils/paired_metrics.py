@@ -344,6 +344,7 @@ def _val_rank1_full_spec(
     )
     if cand.is_empty() or "backtest_hash" not in cand.columns:
         return None
+    cand = _drop_retired_generations(cs, cand)
     if "family" in cand.columns:
         cand = cand.filter(pl.col("family") != "benchmark")
     if label_restriction and "label" in cand.columns:
@@ -718,6 +719,37 @@ def _populate_pair(
     }
 
 
+def _drop_retired_generations(cs: str, cand):
+    """Candidates whose own publisher still publishes them.
+
+    Every ranking in this module sorts on `sharpe` over whatever the registry holds, and a
+    superseded generation is still complete, still `current` under its schema version, and
+    still ranks. Passing a resolved `carrier` fixes only the pairs that consult it; Pair #1
+    ranks for itself, so the retired row won there and the validation-side pair was written
+    against a backtest the case study no longer publishes - measured on fx_pairs, where the
+    live carrier then had no challenger row at all and the strategy-analysis notebook refused
+    for want of evidence that had been written under the retired hash.
+
+    Both sides are filtered, because a retired generation reaches a ranking through either.
+    The prediction side is the one that hides: a refit that changes no numbers publishes
+    identical predictions under a new identity, so old and new carry the same Sharpe to the
+    last digit and the sort returns whichever it likes.
+    """
+    from case_studies.research import superseded_members_at
+    from utils.paths import get_case_study_dir
+
+    if cand is None or cand.is_empty():
+        return cand
+    case_dir = get_case_study_dir(cs)
+    retired = superseded_members_at(case_dir, member_kind="backtest")
+    retired_predictions = superseded_members_at(case_dir, member_kind="prediction")
+    if "backtest_hash" in cand.columns and retired:
+        cand = cand.filter(~pl.col("backtest_hash").is_in(list(retired)))
+    if "prediction_hash" in cand.columns and retired_predictions:
+        cand = cand.filter(~pl.col("prediction_hash").is_in(list(retired_predictions)))
+    return cand
+
+
 def populate_paired_metrics(
     cs: str,
     explorer: BacktestExplorer | None = None,
@@ -813,6 +845,7 @@ def populate_paired_metrics(
     if cand.is_empty() or "backtest_hash" not in cand.columns:
         skip_pair1 = True
     if not skip_pair1:
+        cand = _drop_retired_generations(cs, cand)
         if "family" in cand.columns:
             cand = cand.filter(pl.col("family") != "benchmark")
         if label_restriction and "label" in cand.columns:

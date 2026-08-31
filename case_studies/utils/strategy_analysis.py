@@ -365,6 +365,53 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
     db = sqlite3.connect(str(db_path))
     try:
         candidates = db.execute(val_sql, params).fetchall()
+        # A superseded generation is still complete, still `current` under its schema version,
+        # and still ranks. `identity_status` says the registry understands the row; it says
+        # nothing about whether the row is the one its producer still publishes, which is
+        # recorded in the population lineage instead. Without this the carrier can be resolved
+        # from a retired generation - measured on fx_pairs, where a rebuilt allocation stage
+        # left the retired conformal-v2 backtest ranking first and every downstream notebook
+        # refused it as unreproducible rather than selecting the generation in force.
+        #
+        # `superseded_members_at` asks the lineage per NAME, which is the whole point: the same
+        # identity is legitimately listed under several names, so "retired by someone" is not
+        # the same question and would drop members a narrowed run still publishes.
+        from case_studies.research.population import superseded_members_at
+
+        # Both sides of the join, because a retired generation reaches the ranking through
+        # either. The backtest side is the obvious one. The prediction side is the one that
+        # survived unnoticed: a refit that changes no numbers - a relabel, a re-key, a rerun
+        # that reproduces its inputs - publishes value-for-value identical predictions under a
+        # new identity, so the old and new rows carry the SAME Sharpe to the last digit. On an
+        # exact tie the ORDER BY returns whichever row it likes, and "whichever it likes" was
+        # observed returning the retired one. Measured on sp500_equity_option_analytics: three
+        # candidates at sharpe 1.965796084396144, and the resolver took a training run from a
+        # superseded generation, against which a full 17-point cost surface was then registered.
+        #
+        # That is the shape worth remembering: the tie is produced BY CONSTRUCTION whenever a
+        # refit changes nothing, so every lane that has ever superseded a population is exposed,
+        # and the defect is invisible wherever no tie exists and silently wrong wherever one
+        # does. Which is why it survived.
+        #
+        # `superseded_members_at` is asked per NAME rather than globally, for both kinds. The
+        # naive "retired by someone and listed by nobody in force" reads as equivalent and is
+        # not: one identity is legitimately listed under several names, and a narrowed or
+        # preview run keeps its own frozen snapshot in force forever.
+        case_dir = get_case_study_dir(case_study)
+        retired = superseded_members_at(case_dir, member_kind="backtest")
+        retired_predictions = superseded_members_at(case_dir, member_kind="prediction")
+        ranked = len(candidates)
+        candidates = [
+            row for row in candidates if row[0] not in retired and row[1] not in retired_predictions
+        ]
+        if ranked and not candidates:
+            raise RuntimeError(
+                f"Every one of the {ranked} ranked validation backtests for {case_study} belongs "
+                "to a superseded generation, on the backtest side or the prediction side. The stages have been rebuilt and nothing was "
+                "re-registered under a name still in force, so there is no configuration this "
+                "case study currently publishes. Re-run the validation stages rather than "
+                "selecting a retired one."
+            )
         if not candidates:
             # Name the restriction that emptied the set. A pin is the one whose
             # failure is silent and total: it is a backtest-hash prefix, a hash
