@@ -95,7 +95,8 @@ from utils.style import (  # COLORS registers the ml4t Plotly template on import
 
 # %% tags=["parameters"]
 # Production defaults (Papermill overrides for testing)
-MAX_SYMBOLS = 0  # 0 = all symbols
+# Zero means all symbols.
+MAX_SYMBOLS = 0
 
 # %% [markdown]
 # ### The one-month holding period, read from the configuration

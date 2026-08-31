@@ -311,13 +311,14 @@ pl.DataFrame(
 # whole call rather than publishing a population one member short.
 #
 # `SUPERSEDES_POPULATION` names the population hash this run replaces. A population is the set of
-# prediction identities, so anything that moves a training identity - a changed macro panel as much as a changed epoch schedule -
-# produces a different set under the same name, and the registry refuses to write it without being
-# told which snapshot it supersedes. It is empty here because this notebook, run as it stands,
-# reproduces the members already published under that name rather than changing them, and
-# reproducing a published list is not a replacement. Fill it in when you have changed something
-# that moves an identity and want the new set to take the name; the error raised on the attempt
-# tells you which hash to name. A reduced-scale run passes it empty whatever the default is: a
+# prediction identities, so anything that moves a training identity - a changed macro panel as
+# much as a changed epoch schedule - produces a different set under the same name, and the
+# registry refuses to write it without being told which snapshot it supersedes. It is empty here
+# because `etfs-sdf-validation-v1` has one generation and this run is it: there is no earlier
+# snapshot to replace. It stays empty on a re-run too, because reproducing a member list already
+# published under that name is not a replacement. Fill it in when you have changed something that
+# moves an identity and want the new set to take the name; the error raised on the attempt tells
+# you which hash to name. A reduced-scale run passes it empty whatever the default is: a
 # population produced under a reduction is thrown away with the workspace it was written to, so it
 # has no lineage to extend.
 

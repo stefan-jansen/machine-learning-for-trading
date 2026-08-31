@@ -247,3 +247,110 @@ def test_the_huber_delta_is_rederived_from_the_holdout_folds_own_labels(
         float(np.nanstd(train["fwd_ret_1m"].to_numpy().astype(np.float32)))
     )
     assert resolved != float32_delta, "the two paths must be distinguishable here"
+
+
+# --- the holdout asks coverage, not fold-boundary compatibility ------------------------
+#
+# `#676` gave the GBM family a re-key hook, which is what the cases above cover. It did not
+# change what the locked reconstruction asks of a fold-scoped stage-04 artifact, and that
+# question was still compatibility: does the artifact declare a fold with this geometry. For a
+# holdout it never can - the fold is derived after stage 04 ran, and the artifact cannot be
+# rebuilt to declare it without changing the sha256 the selection was made under. So every
+# gbm-carried case study with fold-scoped model-based features refused its own holdout refit
+# with "custom CV is incompatible with fold-scoped temporal features". Measured on etfs, whose
+# carrier is `gbm/default_mae`.
+#
+# `latent_factors/adapter.py` already took the coverage branch here. This asserts the GBM path
+# takes it too, by which function the reconstruction calls rather than by re-testing what the
+# functions themselves do - `test_holdout_cv_derivation.py` covers that.
+
+
+class _Reached(Exception):
+    """Raised by the stubbed check, so the test ends at the call it is about."""
+
+
+def _fold_scoped_mds(dataset: pl.DataFrame) -> Any:
+    return SimpleNamespace(
+        dataset=dataset,
+        date_col="timestamp",
+        entity_cols=["symbol"],
+        label_col="fwd_ret_1m",
+        feature_names=["feature"],
+        task_type="regression",
+        class_values=[],
+        eval_label_col=None,
+        temporal_by_fold=dataset.select("timestamp", "symbol"),
+        temporal_keys=["symbol"],
+        temporal_feature_names=["temporal_feature"],
+        # Present so that reverting the fix fails on the assertion below rather than on a
+        # missing attribute. The artifact declares the validation folds and not the derived
+        # holdout one, which is the whole shape of the defect.
+        temporal_artifact_splits=VALIDATION_CV["folds"],
+    )
+
+
+def test_the_locked_gbm_holdout_asks_coverage_not_compatibility(
+    study: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "case_studies.research.cv.require_fold_scoped_temporal_compatibility",
+        lambda *a, **k: calls.append("compatibility"),
+    )
+    monkeypatch.setattr(
+        "case_studies.utils.gbm.require_fold_scoped_temporal_compatibility",
+        lambda *a, **k: calls.append("compatibility"),
+    )
+
+    def _coverage(*_a: Any, **_k: Any) -> None:
+        calls.append("coverage")
+        raise _Reached
+
+    monkeypatch.setattr(
+        "case_studies.utils.gbm.require_fold_scoped_temporal_holdout_coverage", _coverage
+    )
+    mds = _fold_scoped_mds(_dataset())
+    mds.input_lineage = {"artifacts": {"features": "feat_digest"}}
+    monkeypatch.setattr("utils.modeling.load_modeling_dataset", lambda *a, **k: mds)
+    label_ref = SimpleNamespace(
+        name="fwd_ret_1m",
+        digest="label_digest",
+        definition=SimpleNamespace(continuous_eval_label=None),
+    )
+
+    # The prelude is reproduced rather than stubbed: every field below is one the
+    # reconstruction refuses on, so building them from the same helpers is what gets the call
+    # as far as the branch this test is about.
+    interval = 500
+    schedule = [
+        {"kind": "iteration", "value": value}
+        for value in gbm.gbm_checkpoint_iterations(
+            {"max_iterations": 500, "checkpoint_interval": interval}
+        )
+    ]
+    spec = _spec({"2": dict(BASE_PARAMS)})
+    spec["seed"] = gbm.RANDOM_SEED
+    computation = spec["computation"]
+    computation["sampling"] = {"train_sample_frac": 1.0, "max_symbols": 0}
+    computation["checkpoint_schedule"] = schedule
+    computation["label_artifact"] = {"digest": "label_digest", "name": "fwd_ret_1m"}
+    computation["feature_artifacts"] = mds.input_lineage["artifacts"]
+    computation["feature_names"] = ["feature"]
+    computation["input_data_spec"] = mds.input_lineage
+    computation["source_identity"] = gbm._gbm_source_identity()
+    computation["runtime_identity"] = gbm._gbm_runtime_identity()
+    computation["task"] = {"type": "regression", "class_values": [], "continuous_eval_label": None}
+
+    writable_study = SimpleNamespace(
+        case_study="fixture_case_study",
+        require_writable=lambda: None,
+        activate=lambda _tier: None,
+        labels=SimpleNamespace(get=lambda name, **_: label_ref),
+    )
+
+    with pytest.raises(_Reached):
+        gbm.reconstruct_locked_request(
+            writable_study, spec, checkpoint_kind="iteration", checkpoint_value=500
+        )
+
+    assert calls == ["coverage"]
