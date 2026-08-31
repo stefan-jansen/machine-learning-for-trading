@@ -43,6 +43,7 @@
 # %%
 """CME Futures: Holdout Backtest."""
 
+import dataclasses
 import json
 import sqlite3
 import warnings
@@ -53,7 +54,12 @@ warnings.filterwarnings("ignore")
 
 from case_studies.research import open_study
 from case_studies.research.holdout import build_holdout_training_spec
-from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
+from case_studies.utils.backtest_loaders import (
+    get_backtest_config,
+    load_backtest_prices_for,
+    load_contract_specs_from_yaml,
+    load_futures_market_contract,
+)
 from case_studies.utils.backtest_presets import (
     ensure_backtest_spec,
     serializable_backtest_spec,
@@ -65,7 +71,12 @@ from case_studies.utils.conformal import (
     ensure_conformal_calibration_identity,
     holdout_conformal_embargo_steps,
 )
-from case_studies.utils.registry import backtest_run_status, read_predictions
+from case_studies.utils.registry import (
+    backtest_run_status,
+    canonical_json,
+    compute_hash,
+    read_predictions,
+)
 from case_studies.utils.strategy_analysis import resolve_solvent_carrier
 from utils.paths import get_case_study_dir
 
@@ -74,9 +85,6 @@ CASE_STUDY_ID = "cme_futures"
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 MAX_SYMBOLS = 0
-# Whether a holdout backtest of a DIFFERENT strategy may be superseded by this run. Off by
-# default, and the same switch `17_holdout_predictions` uses for the model side.
-REPLACE_HOLDOUT = False
 
 # %%
 study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -93,22 +101,6 @@ def _registered_holdout_backtests(case_dir, prediction_hash):
             (prediction_hash,),
         ).fetchall()
     return [{"backtest_hash": backtest_hash} for (backtest_hash,) in rows]
-
-
-def _delete_holdout_backtest(case_dir, backtest_hash):
-    """Remove one registered holdout backtest and the rows derived from it.
-
-    Same rule as `17_holdout_predictions`' replacement of a superseded generation: a
-    holdout result that has been observed and then left readable beside its replacement is
-    still a number someone can quote.
-    """
-    with sqlite3.connect(str(case_dir / "run_log" / "registry.db")) as conn:
-        conn.execute(
-            "DELETE FROM backtest_paired_metrics WHERE challenger_hash = ? OR benchmark_hash = ?",
-            (backtest_hash, backtest_hash),
-        )
-        conn.execute("DELETE FROM backtest_metrics WHERE backtest_hash = ?", (backtest_hash,))
-        conn.execute("DELETE FROM backtest_runs WHERE backtest_hash = ?", (backtest_hash,))
 
 
 # %% [markdown]
@@ -248,6 +240,43 @@ spec = ensure_backtest_spec(
     initial_cash=bt_config.initial_cash,
 )
 spec["chapter"] = "ch20"
+# Futures need their contract specifications, and this is the one place in the tail where
+# they have to be restored by hand. `ensure_backtest_spec` is idempotent on an
+# already-canonical spec: it deep-copies and refreshes the prediction hash and nothing
+# else. That is correct for every other case study, which is why `etfs/19_holdout_backtest`
+# does no more than this. cme is the exception - `research/strategy.py` loads contract
+# specs for `cme_futures` alone, and it does so on the path that builds a spec from
+# scratch, which a clone never enters.
+#
+# Two of the four entries are functions of the price frame and so belong to the holdout,
+# not to the run this spec was cloned from. `futures_market` is loaded for the products
+# actually priced, and if the holdout window prices a different set than validation did,
+# the cloned value describes contracts this run does not trade. The specs themselves come
+# from a static YAML and the entity contract is a fixed key mapping, so those two carry
+# over unchanged - they are rewritten here anyway rather than relied on, because a spec
+# assembled half from the clone and half from the holdout is the harder thing to check.
+#
+# Without this the engine receives no multipliers, tick sizes or margin schedules while
+# the spec's hash goes on claiming it did. The result would not be a failure; it would be
+# a holdout P&L in the wrong units, compared against validation numbers that had them.
+contract_specs = load_contract_specs_from_yaml()
+serialized_contract_specs = {
+    symbol: dataclasses.asdict(contract_spec) for symbol, contract_spec in contract_specs.items()
+}
+futures_market = load_futures_market_contract(
+    prices.get_column("symbol").unique().sort().to_list()
+    if "symbol" in prices.columns
+    else prices.get_column("product").unique().sort().to_list()
+)
+identity = spec.setdefault("input_identity", {})
+identity["contract_specs"] = compute_hash(canonical_json(serialized_contract_specs))
+identity["futures_market"] = compute_hash(canonical_json(futures_market))
+spec["futures_market"] = futures_market
+spec["entity_contract"] = {
+    "reader_key": "product",
+    "engine_key": "symbol",
+    "mapping": "one_to_one_at_backtest_boundary",
+}
 # The embargo goes into the specification here, before anything hashes it. The widths are
 # an input to this backtest and the embargo decides them, so two embargoes are two results
 # and must not share an identity - which they did: changing it left the hash where it was
@@ -284,16 +313,15 @@ superseded_backtests = sorted(
     }
     - {prospective_hash}
 )
-if superseded_backtests and not REPLACE_HOLDOUT:
+if superseded_backtests:
     raise RuntimeError(
         "the holdout window already carries a backtest of a different configuration: "
         + ", ".join(superseded_backtests)
-        + f". This run would register {prospective_hash} and has not run. Set "
-        "REPLACE_HOLDOUT=True to discard the earlier one, or leave the selection where it was."
+        + f". This run would register {prospective_hash} and has not run. Same rule as "
+        "17_holdout_predictions: discarding the earlier result would not undo having "
+        "observed it, so there is no switch here. Leave the selection where it was, or "
+        "retire the earlier evaluation through the registry's lifecycle."
     )
-for backtest_hash in superseded_backtests:
-    print(f"REPLACING holdout backtest {backtest_hash}")
-    _delete_holdout_backtest(CASE_DIR, backtest_hash)
 
 # The guard has passed, so this run will register and the widths it is sized by are the
 # ones that belong beside this prediction set.
@@ -324,6 +352,7 @@ result = run_backtest(
     register=True,
     initial_cash=bt_config.initial_cash,
     calendar=bt_config.calendar,
+    contract_specs=contract_specs,
 )
 if result.backtest_hash != prospective_hash:
     raise RuntimeError(

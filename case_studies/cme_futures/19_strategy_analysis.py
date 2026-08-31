@@ -51,11 +51,13 @@ from case_studies.cme_futures.research_workflow import (
     final_validation_results,
     open_study,
     product_universe_table,
-    rank_by_validation_sharpe,
     selection_catalog,
 )
 from case_studies.research import OfficialPopulation, Result
-from case_studies.utils.strategy_analysis import select_holdout_self_backtest
+from case_studies.utils.strategy_analysis import (
+    resolve_solvent_carrier,
+    select_holdout_self_backtest,
+)
 from utils.style import COLORS
 
 # %% tags=["parameters"]
@@ -185,15 +187,41 @@ fig.show()
 # %% [markdown]
 # ## The selected configuration
 #
-# `best_validation_sharpe` ranks the immutable set by Sharpe and breaks a tie on the backtest
-# identity, so the same pool always names the same row. The prediction checkpoint is part of that
-# identity: two rows from the same trained model at different checkpoints are different
-# configurations. A holdout matched on the trained model alone can therefore land on a different
-# checkpoint from the one selected, and report a different result for what looks like the same
-# model, which is why the checkpoint travels with the selection into the lock below.
+# The selection is made by `resolve_solvent_carrier`, the shared resolver, and not by ranking this
+# pool's Sharpe column directly. The two do not agree here. Ranking the column names the
+# `latent_factors` / `sdf` row on `fwd_ret_21d` at 1.274; the resolver names the `gbm` /
+# `leaves_31_mse` row on `fwd_ret_5d`, whose raw 1.236 becomes 1.294 once the candidates are
+# compared over the 1,270 sessions they all price. Different family, different horizon, from the
+# same registry.
+#
+# The re-ranking is the reason to prefer the resolver. A Sharpe computed over a configuration's own
+# available history is not comparable across configurations that priced different spans, and
+# ranking the raw column silently rewards whichever candidate had the most forgiving window. The
+# resolver also refuses a carrier that is insolvent rather than reporting it.
+#
+# It matters here beyond correctness of the ranking. `17_holdout_predictions` and
+# `18_holdout_backtest` resolve the carrier the same way, so a second selection rule in this
+# notebook would ask `select_holdout_self_backtest` for the holdout replay of a configuration
+# those notebooks never ran. The answer would be `None`, and this notebook would report the
+# holdout as not produced while it sat in the registry.
+#
+# The prediction checkpoint is part of the identity either way: two rows from the same trained
+# model at different checkpoints are different configurations, and a holdout matched on the
+# trained model alone can land on a different checkpoint from the one selected.
 
 # %%
-selected = rank_by_validation_sharpe(study, pool_results)[0]
+carrier = resolve_solvent_carrier("cme_futures")
+selected = next(
+    (result for result in pool_results if result.hash == carrier["val_backtest_hash"]), None
+)
+if selected is None:
+    raise RuntimeError(
+        f"the resolved carrier {carrier['val_backtest_hash']} ({carrier['family']}/"
+        f"{carrier['config_name']}, {carrier['label']}, stage {carrier['val_stage']}) is not in "
+        "this notebook's pool. The pool and the shared resolver are reading the same registry, so "
+        "they disagree about which stages are selected from, and the holdout notebooks followed "
+        "the resolver."
+    )
 selected_row = pool.filter(pl.col("backtest_hash") == selected.hash)
 selected_label = selected_row.item(0, "label")
 selected_strategy = selected.spec()["strategy"]
