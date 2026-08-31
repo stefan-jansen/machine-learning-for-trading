@@ -231,10 +231,12 @@ else:
 # %% tags=["results"]
 # The warmup prefix is not optional for this carrier. `hrp` sizes from a covariance
 # estimated over a rolling window, and prices loaded from the holdout boundary give it no
-# history to estimate from - `load_backtest_prices_for` then falls back to a median-imputed
-# warmup, so the first weights of the holdout would be imputed where every validation
-# weight was data-driven. That is a difference between the two runs that the strategy
-# specification does not record and the comparison in section 4 would silently absorb.
+# history to estimate from. `compute_hrp_weights` then falls back to equal weight until
+# enough covariance history has accumulated, so the opening weeks of the holdout would be
+# allocated by a different rule than the one selected - not a degraded version of it, a
+# different allocator - where every validation weight was the carrier's own. That is a
+# difference between the two runs the strategy specification does not record, and the
+# comparison in section 4 would absorb it as decay.
 #
 # `strategy_warmup_periods` reads the resolved allocation and returns 0 for any allocator
 # that does not estimate a moment, so this is unconditional rather than a branch on the
