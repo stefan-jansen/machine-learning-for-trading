@@ -54,6 +54,8 @@ from case_studies.cme_futures.research_workflow import (
     selection_catalog,
 )
 from case_studies.research import OfficialPopulation, Result
+from case_studies.utils.cohort_metrics import compute_and_register
+from case_studies.utils.paired_metrics import populate_paired_metrics
 from case_studies.utils.strategy_analysis import (
     resolve_solvent_carrier,
     select_holdout_self_backtest,
@@ -128,6 +130,29 @@ pool_size = pl.DataFrame(
     ],
     schema={"label": pl.String, "candidates": pl.Int64, "candidate_set_hash": pl.String},
 ).sort("label")
+
+# %% [markdown]
+# ## The selection correction, and the paired comparisons
+#
+# Two registry tables carry the statistics this notebook reports rather than recomputes:
+# `cohort_metrics` holds the deflated Sharpe for each cohort's leader, and
+# `backtest_paired_metrics` holds bootstrap comparisons between registered return series.
+# Both were empty here until 2026-08-31, so an earlier edition of the README quoted deflation
+# numbers with nothing behind them. The cause was not a bad computation - it was that this
+# notebook never called for one, while `etfs`, `fx_pairs` and `us_firm_characteristics` all do.
+#
+# `compute_and_register` refreshes the whole table rather than one row, so it can never report
+# a stale leader. `populate_paired_metrics` writes one row per comparison kind, including
+# `val_rank1_self` - the carrier's validation series against its own holdout replay, which is
+# the paired form of the val-to-holdout question and the only honest way to ask it. Comparing
+# two point estimates is not that question: the holdout is a shorter window, so the difference
+# carries sampling error the point estimates do not show.
+
+# %%
+cohort_counts = compute_and_register("cme_futures", verbose=False)
+paired_rows = populate_paired_metrics("cme_futures", verbose=False)
+print(f"cohort_metrics: {sum(v for k, v in cohort_counts.items() if k != 'errors')} rows")
+print(f"backtest_paired_metrics: {sum(1 for r in paired_rows if 'skip' not in r)} pairs")
 
 # %% tags=["results"]
 pool_size

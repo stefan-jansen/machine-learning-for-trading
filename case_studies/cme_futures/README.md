@@ -89,9 +89,12 @@ risk-overlay stage: equal-weight long-short top-5 at the signal stage, an `hrp` 
 Validation Sharpe **1.236** [+0.397, +2.126] over 1,286 daily periods (CAGR +19.5%, MaxDD −25.9%,
 2,355 trades, Sortino 2.04, PSR p = 0.003). On common support the same run reads 1.294.
 
-No deflation figure is quoted. `cohort_metrics` is empty in this registry, so the DSR and
-effective-trials numbers a previous edition reported have nothing behind them, and the selection is
-not corrected for here.
+Selection adjustment, from the `fwd_ret_5d` label cohort: K = 550 candidates, effective trials
+12.8 after correlation correction, **DSR_ER = 0.045**. The carrier survives deflation at the label
+scale. The `fwd_ret_21d` cohort reads 0.037 on K = 554. Both were absent from earlier editions of
+this file, which quoted deflation numbers `cohort_metrics` did not contain - not because the
+computation was wrong but because `19_strategy_analysis` never called for one, while three sibling
+case studies did. It calls for it now.
 
 Two distinctions matter when reading 1.236 as a selected maximum. The pool is the 1,140 candidates
 across the signal, allocation and risk-overlay stages; the registry's other 12 backtests are the 11
@@ -108,12 +111,17 @@ later window - the holdout training run carries its own identity, `365d0ce706e2`
 declares the holdout fold.
 
 **The honest reading is that this establishes very little, in either direction.** The point estimate
-falls from 1.236 to 0.287, which invites a decay story, but the two intervals overlap across almost
-their whole length: validation spans [+0.397, +2.126] and the holdout [−1.034, +1.638]. A 516-session
-window on a weekly rebalance carries too few independent decisions to separate a strategy that
-decayed from one that had two ordinary years, and the holdout interval contains both the validation
-estimate and zero. What the holdout does rule out is the one thing it exists for: no choice in this
-case study was made on this period.
+falls from 1.236 to 0.287, which invites a decay story, and the paired test refuses it: comparing the
+carrier's validation series against its own holdout replay over the 512 sessions they share gives a
+Sharpe difference of **−0.300 [−1.944, +1.275], p = 0.709**. That is the form the question has to
+take - differencing two point estimates ignores that the holdout is a shorter window, and the
+interval is what shows there is nothing here to call decay.
+
+Against a holdout-window equal-weight benchmark the strategy reads −0.470 [−2.071, +1.136],
+p = 0.554, also indistinguishable. A 516-session window on a weekly rebalance carries too few
+independent decisions to separate a strategy that decayed from one that had two ordinary years. What
+the holdout does establish is the one thing it exists for: no choice in this case study was made on
+this period.
 
 **Friction floor.** One curve, not two. `16_costs.ipynb` sweeps the shipped carrier including its
 risk overlay, where a previous edition swept two pre-overlay allocation-stage combinations that are
