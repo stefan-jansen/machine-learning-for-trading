@@ -2108,11 +2108,40 @@ def query_holdout_rows():
     return holdout_rows
 
 
+# The columns query_holdout_rows emits, declared so the empty case still has a shape.
+# `pl.DataFrame([])` is 0x0 with no columns, and the downstream notebooks select and join
+# on these names: a schema-less frame turns "no case study has a holdout yet" into a
+# missing-column error one notebook later, which is a worse failure than the one it
+# replaces. The populated path is unchanged - polars infers from the rows exactly as before.
+HOLDOUT_SCHEMA = {
+    "case_study": pl.String,
+    "cs_id": pl.String,
+    "family": pl.String,
+    "config": pl.String,
+    "label": pl.String,
+    "holdout_backtest_hash": pl.String,
+    "holdout_prediction_hash": pl.String,
+    "holdout_ic": pl.Float64,
+    "holdout_ic_daily": pl.Float64,
+    "holdout_ic_se_hac": pl.Float64,
+    "holdout_ic_p_hac": pl.Float64,
+    "holdout_ic_ci_lo": pl.Float64,
+    "holdout_ic_ci_hi": pl.Float64,
+    "holdout_sharpe": pl.Float64,
+    "holdout_sharpe_ci_lo": pl.Float64,
+    "holdout_sharpe_ci_hi": pl.Float64,
+    "holdout_max_dd": pl.Float64,
+    "holdout_cagr": pl.Float64,
+    "holdout_num_trades": pl.Float64,
+    "holdout_psr_p": pl.Float64,
+}
+
+
 # %%
 holdout_rows = query_holdout_rows()
 
 # %%
-holdout_df = pl.DataFrame(holdout_rows)
+holdout_df = pl.DataFrame(holdout_rows) if holdout_rows else pl.DataFrame(schema=HOLDOUT_SCHEMA)
 if not holdout_df.is_empty():
     print(f"\n=== Holdout Results ({len(holdout_df)} entries) ===")
     print(
@@ -2498,8 +2527,12 @@ if not prog_df.is_empty():
     prog_df.write_parquet(OUTPUT_DIR / "sharpe_progression.parquet")
 if not lineage_df.is_empty():
     lineage_df.write_parquet(OUTPUT_DIR / "lineage.parquet")
-if not holdout_df.is_empty():
-    holdout_df.write_parquet(OUTPUT_DIR / "holdout_results.parquet")
+# Written unconditionally, unlike its neighbours above. 04_signal_to_strategy and
+# 08_recommendations both read this path with a bare pl.read_parquet, and 08 already
+# distinguishes "no holdout row for this case study" from "failed a gate" - so an empty
+# table is a state it can report, while an absent file is a FileNotFoundError in cell 5.
+# The CI fixture seeds no holdout rows for any case study, which is the all-empty case.
+holdout_df.write_parquet(OUTPUT_DIR / "holdout_results.parquet")
 if not cluster_df.is_empty():
     cluster_df.write_parquet(OUTPUT_DIR / "rank1_cluster_diagnostics.parquet")
 measurement_df.write_parquet(OUTPUT_DIR / "measurement_quality.parquet")
