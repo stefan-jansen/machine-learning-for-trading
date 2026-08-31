@@ -1094,6 +1094,79 @@ def test_a_liquidated_contract_pays_the_exit_spread(tmp_path: Path) -> None:
     assert charged.get_column("liquidated").to_list() == [True]
 
 
+def test_a_fully_unquoted_row_is_a_termination_not_an_invalid_quote(tmp_path: Path) -> None:
+    """The vendor writes the row and nulls its prices; it does not delete the row.
+
+    That is the representation `_price_end_of_session_quotes` documents and deliberately leaves
+    alone - 1,705 such rows in the validation window. The other termination tests delete rows
+    instead, which reaches the same lifecycle logic by a different path and so cannot catch a
+    validation step that rejects nulls before that logic runs. This one uses the shape the
+    chain actually carries.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    chain = pl.read_parquet(raw_dir / "year=2024.parquet")
+    runner_up = chain.with_columns(symbol=pl.lit("B"))
+    stops = pl.col("symbol") == "A"
+    after_entry = pl.col("date") > date(2024, 1, 8)
+    nulled = chain.with_columns(
+        [
+            pl.when(stops & after_entry)
+            .then(pl.lit(None, dtype=chain.schema[column]))
+            .otherwise(pl.col(column))
+            .alias(column)
+            for column in ("mid_price", "bid", "ask", "delta", "underlying_price")
+        ]
+    )
+    pl.concat([nulled, runner_up]).write_parquet(raw_dir / "year=2024.parquet")
+    predictions, contract_returns = _two_names()
+
+    cohorts = _select_cohorts(predictions, contract_returns, top_k=1, raw_options_dir=raw_dir)
+    assert cohorts.get_column("symbol").to_list() == ["A"]
+
+    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
+    ended = lifecycle.filter(pl.col("liquidated"))
+    assert ended.get_column("date").to_list() == [date(2024, 1, 9)]
+    assert lifecycle.filter(pl.col("cash_settled")).is_empty()
+
+
+def test_a_liquidation_marks_the_hedge_at_that_sessions_own_close(tmp_path: Path) -> None:
+    """The option exits at the previous mark; the stock does not.
+
+    Rule 3 exits the straddle against the last mark the chain carried, because on the
+    liquidation session there is no option quote to trade against. The underlying has no such
+    problem - it is still trading, and the retained hedge is unwound into that day's close.
+    Carrying the previous close forward instead would silently zero the hedge's P&L on a
+    session the stock may well have moved, which is a real mis-accounting rather than a
+    convention.
+
+    The selected contract stops being quoted; a second contract on the same underlying, which
+    the strategy does not hold, keeps quoting. That is where the close comes from, and it is
+    how the chain is actually shaped - the underlying price is written on every contract.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    chain = pl.read_parquet(raw_dir / "year=2024.parquet")
+    # A contract on the same name at a strike the strategy never selects.
+    neighbour = chain.filter(pl.col("symbol") == "A").with_columns(strike=pl.lit(105.0))
+    runner_up = chain.with_columns(symbol=pl.lit("B"))
+    held = chain.filter(pl.col("date") < date(2024, 1, 9))
+    pl.concat([held, neighbour, runner_up]).write_parquet(raw_dir / "year=2024.parquet")
+    predictions, contract_returns = _two_names()
+
+    cohorts = _select_cohorts(predictions, contract_returns, top_k=1, raw_options_dir=raw_dir)
+    assert cohorts.get_column("symbol").to_list() == ["A"]
+
+    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
+    ended = lifecycle.filter(pl.col("liquidated"))
+    assert ended.get_column("date").to_list() == [date(2024, 1, 9)]
+    # 2024-01-09's close is 102.0; the previous session's was 100.0. The option legs still come
+    # from the previous session, because that is the mark the buy-to-close executes against.
+    assert ended.get_column("underlying_price").item() == pytest.approx(102.0)
+    assert ended.get_column("call_mid").item() == pytest.approx(6.0)
+    assert ended.get_column("put_mid").item() == pytest.approx(4.0)
+
+
 def test_a_position_survives_an_interior_session_nobody_quoted(tmp_path: Path) -> None:
     """A gap in the middle of a life is an unmarked session, not the end of the position.
 

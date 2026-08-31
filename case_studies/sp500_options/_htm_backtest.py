@@ -583,6 +583,7 @@ def _load_option_lifecycle(
     years = list(range(entry_min.year, exp_max.year + 1))
     parts = []
     calendars = []
+    underlyings = []
     symbols = cohorts.get_column("symbol").unique().to_list()
     for year in years:
         parquet_path = raw_options_dir / f"year={year}.parquet"
@@ -615,6 +616,19 @@ def _load_option_lifecycle(
             .unique()
             .collect()
         )
+        # The underlying close per (date, symbol), read across every contract on the name
+        # rather than only the selected ones. A liquidation session is by definition one where
+        # the selected contract carries no quote, so its own rows cannot supply the stock price
+        # the retained hedge is unwound at - but any other contract on the same underlying
+        # still can, and the chain writes the same underlying_price on all of them.
+        underlyings.append(
+            raw.select(["date", "symbol", "underlying_price"])
+            .filter(pl.col("symbol").is_in(symbols))
+            .filter(pl.col("date").is_between(entry_min, exp_max, closed="both"))
+            .filter(pl.col("underlying_price") > 0)
+            .unique(subset=["date", "symbol"])
+            .collect()
+        )
         parts.append(selected)
         calendars.append(calendar)
     if not parts:
@@ -623,8 +637,19 @@ def _load_option_lifecycle(
     key_columns = ["date", "symbol", "strike", "expiration", "call_put"]
     if raw_lookup.n_unique(key_columns) != raw_lookup.height:
         raise ValueError("raw option lifecycle contains duplicate contract-leg dates")
+    # Validate the rows the vendor actually quoted, and only those.
+    #
+    # `_price_end_of_session_quotes` leaves a fully unquoted leg null on purpose: its bid, ask
+    # and mid are all absent because the chain carried no quote, not because a quote went
+    # missing. Checking those rows for nulls therefore rejects the very representation the rest
+    # of this function is built to handle - an unmarked session, or the trigger for a
+    # liquidation - and it rejects it before any of that logic runs. The chain carries 1,705
+    # such rows in the validation window, so this is what a canonical run meets, not an edge
+    # case. The tests missed it because they delete rows to simulate a vendor stopping, and an
+    # absent row and a null row travel different paths from here.
+    quoted = raw_lookup.filter(pl.col("_source_quoted"))
     required_values = ["mid_price", "bid", "ask", "delta", "underlying_price"]
-    invalid = raw_lookup.filter(
+    invalid = quoted.filter(
         pl.any_horizontal(
             [
                 pl.col(column).is_null() | ~pl.col(column).cast(pl.Float64).is_finite()
@@ -638,7 +663,7 @@ def _load_option_lifecycle(
     )
     if not invalid.is_empty():
         raise ValueError(f"raw option lifecycle contains {invalid.height} invalid quote rows")
-    calls = raw_lookup.filter(pl.col("call_put") == "C").select(
+    calls = quoted.filter(pl.col("call_put") == "C").select(
         [
             "date",
             "symbol",
@@ -651,7 +676,7 @@ def _load_option_lifecycle(
             "underlying_price",
         ]
     )
-    puts = raw_lookup.filter(pl.col("call_put") == "P").select(
+    puts = quoted.filter(pl.col("call_put") == "P").select(
         [
             "date",
             "symbol",
@@ -741,7 +766,7 @@ def _load_option_lifecycle(
         .with_columns(cash_settled=pl.lit(False), liquidated=pl.lit(False))
     )
 
-    at_expiry = raw_lookup.filter(pl.col("date") == pl.col("expiration"))
+    at_expiry = quoted.filter(pl.col("date") == pl.col("expiration"))
     expiry_underlying = at_expiry.group_by(["symbol", "strike", "expiration"]).agg(
         pl.col("underlying_price").min().alias("_underlying_low"),
         pl.col("underlying_price").max().alias("_underlying_high"),
@@ -780,6 +805,17 @@ def _load_option_lifecycle(
     )
 
     contract_keys = ["symbol", "strike", "expiration"]
+    underlying_panel = (
+        pl.concat(underlyings).unique(subset=["date", "symbol"])
+        if underlyings
+        else pl.DataFrame(
+            schema={
+                "date": paired.schema["date"],
+                "symbol": pl.Utf8,
+                "underlying_price": pl.Float64,
+            }
+        )
+    )
     sessions = (
         pl.concat(calendars)
         .unique()
@@ -809,8 +845,28 @@ def _load_option_lifecycle(
             right_on=[*contract_keys, "date"],
             how="inner",
         )
+        .join(
+            underlying_panel.select(
+                pl.col("date").alias("_liquidation_date"),
+                "symbol",
+                pl.col("underlying_price").alias("_liquidation_underlying"),
+            ),
+            on=["_liquidation_date", "symbol"],
+            how="left",
+        )
         .with_columns(
             date=pl.col("_liquidation_date"),
+            # The stock is marked at its own close on this session, not at the previous one's.
+            # The option cannot be: rule 3 exits it against the last mark the chain carried,
+            # because there is no quote here to trade against. The stock has no such problem -
+            # it is still trading, the retained hedge is unwound into it at that day's price,
+            # and copying the previous close would silently zero the hedge's P&L on a session
+            # the underlying may well have moved. Where the whole name has left the chain there
+            # is no close to read, and the previous one is carried forward as a stated
+            # assumption rather than a measurement.
+            underlying_price=pl.coalesce(
+                pl.col("_liquidation_underlying"), pl.col("underlying_price")
+            ),
             # The straddle is bought back here, so it holds no delta into the next session.
             call_delta=pl.lit(0.0),
             put_delta=pl.lit(0.0),
