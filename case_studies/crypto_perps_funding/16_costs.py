@@ -215,6 +215,10 @@ def _non_cost_projection(spec: dict[str, Any]) -> dict[str, Any]:
     metadata = config.get("metadata")
     if isinstance(metadata, dict):
         metadata.pop("chapter", None)
+        # An absolute path to the preset file on the machine that ran it. It is not part of a
+        # backtest's identity, and keeping it here would fail the audit for anyone whose
+        # checkout lives somewhere else while nothing about the strategy had changed.
+        metadata.pop("preset_path", None)
     return projected
 
 

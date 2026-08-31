@@ -65,6 +65,7 @@ from case_studies.research import (
     candidate_set_supersedes,
     open_study,
 )
+from case_studies.utils.strategy_analysis import resolve_solvent_carrier
 from case_studies.utils.uncertainty import (
     compute_backtest_uncertainty,
     compute_cohort_metrics,
@@ -405,6 +406,19 @@ pl.DataFrame(
 
 # %% tags=["results"]
 holdout_predictions = study.predictions.table().filter(pl.col("split") == "holdout")
+# `17` and `18` resolve the configuration to carry through `resolve_solvent_carrier`, which
+# ranks registry candidates on the period they all cover; section 2 above ranks the frozen pool
+# on each member's own periods. They agree here, and the cohort check in section 3 is what
+# keeps the second from drifting off the first. Neither of those makes them the same procedure,
+# so the agreement is asserted rather than assumed: a holdout measured on some other
+# configuration would otherwise be reported beside an analysis of this one.
+if holdout_predictions.height:
+    carried = resolve_solvent_carrier("crypto_perps_funding")["val_backtest_hash"]
+    if carried != selected.hash:
+        raise RuntimeError(
+            f"the holdout was carried by {carried} but this notebook analyses {selected.hash}. "
+            "The sections above and the holdout below would describe different strategies."
+        )
 with closing(
     sqlite3.connect(f"file:{STORAGE_ROOT / 'run_log' / 'registry.db'}?mode=ro", uri=True)
 ) as db:

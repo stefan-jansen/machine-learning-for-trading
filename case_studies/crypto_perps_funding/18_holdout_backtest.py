@@ -41,9 +41,11 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 
+from case_studies.crypto_perps_funding.funding_data import funding_rates_for_prices
 from case_studies.research import open_study
 from case_studies.research.holdout import build_holdout_training_spec
 from case_studies.research.strategy import strategy_warmup_periods
+from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import (
     ensure_backtest_spec,
@@ -214,6 +216,17 @@ else:
 # checkpoint - and it cannot see this one: a changed allocator, overlay or cost level
 # produces the same holdout predictions and a different result from them.
 #
+# Two fields are rebuilt rather than carried. `input_identity` records the digests of the
+# data a run actually read - here the price panel and the official funding settlements - and
+# the carrier's copy describes the validation window. Cloning it produces a record that names
+# inputs the run never touched, which is exactly what a consumer checking a price digest
+# against the canonical one would refuse. They are derived from the holdout frames instead.
+#
+# The funding settlements are also passed to the runner, not merely digested. This case study
+# is about a cashflow that accrues on holding rather than trading, every validation number in
+# it is net of the funding the position actually paid or received, and a holdout run that
+# omitted it would compare a strategy without its central economics against one with it.
+#
 # The test is the backtest hash, not a field-by-field comparison. Every input that changes
 # the result is in that hash by construction, and a guard naming fields instead has to be
 # right about all of them. The hash is resolved before anything runs, so nothing is evaluated
@@ -231,7 +244,12 @@ prices = load_backtest_prices_for(
     max_symbols=MAX_SYMBOLS,
 )
 predictions = read_predictions(CASE_STUDY_ID, HOLDOUT_PREDICTION_HASH)
+funding_rates = funding_rates_for_prices(prices)
 print(f"Prices: {len(prices):,} rows, {prices['symbol'].n_unique():,} assets")
+print(
+    f"Funding: {funding_rates.height:,} settlements over "
+    f"{funding_rates['symbol'].n_unique():,} names"
+)
 print(f"Predictions: {predictions.height:,} rows, {predictions['timestamp'].n_unique():,} stamps")
 
 spec = ensure_backtest_spec(
@@ -243,6 +261,11 @@ spec = ensure_backtest_spec(
     initial_cash=bt_config.initial_cash,
 )
 spec["chapter"] = "ch20"
+spec["input_identity"] = {
+    **spec.get("input_identity", {}),
+    "prices": value_digest(prices),
+    "funding_rates": value_digest(funding_rates),
+}
 if NEEDS_CALIBRATION:
     spec = ensure_conformal_calibration_identity(spec, holdout_embargo_steps=embargo_steps)
 
@@ -291,6 +314,7 @@ result = run_backtest(
     prices=prices,
     predictions=predictions,
     label=LABEL,
+    funding_rates=funding_rates,
     register=True,
     initial_cash=bt_config.initial_cash,
     calendar=bt_config.calendar,

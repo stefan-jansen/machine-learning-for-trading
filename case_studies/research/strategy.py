@@ -505,21 +505,11 @@ class Strategy:
     def _funding_rates(self, prices: pl.DataFrame) -> pl.DataFrame | None:
         if self.study.case_study != "crypto_perps_funding":
             return None
-        from case_studies.crypto_perps_funding.funding_data import load_funding_rates
+        # One implementation, so a holdout run keyed to its own price window cannot drift
+        # from the validation runs it is compared against.
+        from case_studies.crypto_perps_funding.funding_data import funding_rates_for_prices
 
-        timestamp_dtype = prices.schema["timestamp"]
-        price_keys = prices.select("symbol", "timestamp").unique()
-        symbols = price_keys.get_column("symbol").unique().to_list()
-        start = _date_string(price_keys.get_column("timestamp").min())
-        end = _date_string(price_keys.get_column("timestamp").max())
-        funding = load_funding_rates(symbols=symbols, start_date=start, end_date=end)
-        funding = funding.with_columns(
-            pl.col("symbol").cast(price_keys.schema["symbol"]),
-            pl.col("timestamp").cast(timestamp_dtype),
-        ).join(price_keys, on=["symbol", "timestamp"], how="semi")
-        if funding.is_empty():
-            raise ValueError("crypto backtest resolved no official funding settlements")
-        return funding.sort("timestamp", "symbol")
+        return funding_rates_for_prices(prices)
 
     def _decision_weights(self, prices: pl.DataFrame) -> pl.DataFrame | None:
         if self.decision is None:
