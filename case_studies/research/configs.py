@@ -260,6 +260,7 @@ def resolved_model_plan(resolved_requests: Iterable[ResolvedModelRequest]) -> pl
                 "feature_count": len(computation.get("feature_names") or []),
                 "eligible_entities": expected.get_column(entity).n_unique(),
                 "eligible_rows": expected.height,
+                "eligible_dates": timestamps.n_unique(),
                 "folds": expected.get_column(fold).n_unique(),
                 "validation_start": timestamps.min(),
                 "validation_end": timestamps.max(),

@@ -20,7 +20,6 @@ if TYPE_CHECKING:
     from .catalog import BacktestCatalog, PredictionCatalog
     from .causal import CausalRequest
     from .labels import LabelCatalog
-    from .lifecycle import Lifecycle
     from .models import ModelRequest
     from .recovery import ExecutionLedger
     from .results import ResultsCatalog
@@ -407,12 +406,6 @@ class Study:
         if self.release_case_dir is not None:
             return self.release_case_dir
         return self.release_root / "case_studies" / self.case_study
-
-    @property
-    def lifecycle(self) -> Lifecycle:
-        from .lifecycle import Lifecycle
-
-        return Lifecycle(self)
 
     @property
     def executions(self) -> ExecutionLedger:

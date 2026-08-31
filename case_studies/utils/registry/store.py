@@ -219,6 +219,11 @@ CREATE TABLE IF NOT EXISTS cohort_metrics (
     family        TEXT,
     leader_hash   TEXT NOT NULL REFERENCES backtest_runs(backtest_hash),
     k_variants                  INTEGER NOT NULL,
+    -- sha256 over the cohort's sorted member backtest hashes. A count cannot say
+    -- which variants a stored correction was computed over: swap one retired member
+    -- for one live member and k_variants is unchanged, so a reader comparing counts
+    -- accepts a correction from a different cohort than the one it asked for.
+    member_digest               TEXT,
     periods_per_year            REAL NOT NULL,
     computed_at                 TEXT NOT NULL,
     n_trials_effective_mp       REAL,
@@ -268,23 +273,6 @@ CREATE TABLE IF NOT EXISTS candidate_set_members (
     UNIQUE (set_hash, member_hash)
 );
 
-CREATE TABLE IF NOT EXISTS research_locks (
-    lock_hash  TEXT PRIMARY KEY,
-    lock_json  TEXT NOT NULL,
-    state      TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_research_singleton ON research_locks((1));
-
-CREATE TABLE IF NOT EXISTS holdout_evaluations (
-    lock_hash               TEXT PRIMARY KEY REFERENCES research_locks(lock_hash),
-    holdout_training_hash   TEXT NOT NULL,
-    holdout_prediction_hash TEXT NOT NULL,
-    holdout_backtest_hash   TEXT NOT NULL,
-    fitted_state_digest     TEXT,
-    evaluated_at            TEXT NOT NULL
-);
 
 CREATE TABLE IF NOT EXISTS execution_attempts (
     attempt_id          TEXT PRIMARY KEY,
@@ -348,15 +336,6 @@ CREATE TABLE IF NOT EXISTS decision_artifacts (
     created_at          TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS holdout_staging (
-    lock_hash               TEXT PRIMARY KEY REFERENCES research_locks(lock_hash),
-    holdout_training_hash   TEXT NOT NULL,
-    holdout_prediction_hash TEXT NOT NULL,
-    holdout_backtest_hash   TEXT NOT NULL,
-    fitted_state_digest     TEXT,
-    lineage_digest          TEXT NOT NULL,
-    staged_at               TEXT NOT NULL
-);
 """
 
 
@@ -714,6 +693,11 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
             if column not in prediction_cols:
                 db.execute(f"ALTER TABLE prediction_sets ADD COLUMN {column} {sql_type}")
 
+    if "cohort_metrics" in tables:
+        cohort_cols = {row[1] for row in db.execute("PRAGMA table_info(cohort_metrics)").fetchall()}
+        if "member_digest" not in cohort_cols:
+            db.execute("ALTER TABLE cohort_metrics ADD COLUMN member_digest TEXT")
+
     if "prediction_coverage" in tables:
         coverage_cols = {
             row[1] for row in db.execute("PRAGMA table_info(prediction_coverage)").fetchall()
@@ -736,10 +720,6 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
         for column, sql_type in backtest_columns.items():
             if column not in cols:
                 db.execute(f"ALTER TABLE backtest_runs ADD COLUMN {column} {sql_type}")
-
-    for table in ("holdout_staging", "holdout_evaluations"):
-        if table in tables and not _table_has_column(db, table, "fitted_state_digest"):
-            db.execute(f"ALTER TABLE {table} ADD COLUMN fitted_state_digest TEXT")
 
     # The number of successful placebo draws decides whether the refutation could have
     # rejected at all: the plus-one correction floors the p-value at 1 / (n + 1), so at

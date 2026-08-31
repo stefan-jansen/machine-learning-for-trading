@@ -49,13 +49,13 @@ from case_studies.cme_futures.research_workflow import (
     final_selection_candidate_set,
     final_validation_candidate_set,
     final_validation_results,
-    holdout_evidence,
     open_study,
     product_universe_table,
     rank_by_validation_sharpe,
     selection_catalog,
 )
 from case_studies.research import OfficialPopulation, Result
+from case_studies.utils.strategy_analysis import select_holdout_self_backtest
 from utils.style import COLORS
 
 # %% tags=["parameters"]
@@ -288,40 +288,44 @@ fig.show()
 # %% [markdown]
 # ## The holdout
 #
-# The research lock is what allows the holdout to be used at all. It records the candidate set, the
-# selected validation backtest, and the retraining contract - the same specification, differing only
-# in the cross-validation interval that extends through the holdout period - before any holdout
-# artifact exists. The lifecycle then admits one evaluation against that lock and refuses a second,
-# so the holdout cannot become an axis to search over.
+# The holdout evaluates one configuration: the one the validation backtests selected. That is the
+# highest validation backtest Sharpe across the baseline, position-sizing, allocation and
+# risk-management stages, and it is fixed before any holdout artifact exists.
 #
-# The lock and its single evaluation are created by the lifecycle path, not here. This notebook
-# reads what that path recorded and reports the selected configuration's holdout result beside its
-# validation result. Where the lifecycle has not yet been locked, the table below is empty and the
-# validation result above stands on its own.
-
-# %%
-holdout = holdout_evidence(study)
-if holdout.height > 1:
-    raise RuntimeError("the lifecycle holds more than one research lock")
-if not holdout.is_empty():
-    locked = holdout.item(0, "validation_backtest_hash")
-    if locked != selected.hash:
-        raise RuntimeError(
-            f"the research lock was created from backtest {locked}, "
-            f"not the configuration this pool selects, {selected.hash}"
-        )
-    if holdout.item(0, "label") != selected_label:
-        raise RuntimeError("the research lock records a different return horizon")
+# What keeps the holdout from becoming an axis to search over is the direction of that rule, not a
+# gate. The ranking reads validation rows only, and the holdout row below is found by matching the
+# selected strategy specification - never by taking whichever holdout backtest scored best. A
+# holdout number therefore cannot change which configuration is reported here.
+#
+# Nothing about it is one-shot. A holdout result that turns out to be wrong is deleted and produced
+# again; what would make the number uninterpretable is evaluating many configurations on the window
+# and reporting the best, which is the thing the selection rule rules out. The holdout notebooks
+# produce the row; this one reads it. Where they have not run, the table is empty and the validation
+# result above stands on its own.
 
 # %% tags=["results"]
-holdout
+# `select_holdout_self_backtest` is the shared resolver every strategy-analysis notebook uses.
+# It takes the selection this notebook already made and finds the holdout backtest replaying that
+# same strategy specification, at the same configuration and checkpoint, over a training run whose
+# own CV declares the holdout fold. It returns None where no such run exists, and raises rather
+# than choosing where two of them do.
+#
+# Calling it rather than re-deriving the lineage here is deliberate. A second implementation
+# living beside the first agrees with it on the registry it was written against and diverges on
+# the next one, and a divergence in this particular lookup is a holdout number attributed to the
+# wrong configuration.
+holdout_backtest_hash = select_holdout_self_backtest("cme_futures", selected.hash)
+print(
+    f"Selected validation backtest: {selected.hash}  ({selected_label})\n"
+    f"Holdout replay: {holdout_backtest_hash or 'not produced yet'}"
+)
 
 # %% tags=["results"]
-if holdout.is_empty() or holdout.item(0, "holdout_backtest_hash") is None:
+if holdout_backtest_hash is None:
     comparison = pl.DataFrame()
 else:
     evaluated = study.backtests.table(include_preview=True).filter(
-        pl.col("backtest_hash") == holdout.item(0, "holdout_backtest_hash")
+        pl.col("backtest_hash") == holdout_backtest_hash
     )
     comparison = pl.concat(
         [

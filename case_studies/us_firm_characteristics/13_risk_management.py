@@ -91,7 +91,9 @@ from utils.paths import get_case_study_dir
 CASE_STUDY_ID = "us_firm_characteristics"
 LABEL = ""
 MAX_SYMBOLS = 0
-MAX_RISK_VARIANTS = 0  # 0 = all; >0 limits position + portfolio controls each
+# Zero means all controls; a positive value limits position and portfolio
+# controls each.
+MAX_RISK_VARIANTS = 0
 TOP_N_COMBOS = None
 
 # %%

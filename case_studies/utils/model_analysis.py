@@ -1292,3 +1292,121 @@ def indistinguishable_groups(
             running_lo = float(lo)
 
     return ordered.with_columns(pl.Series("group", groups))
+
+
+def _align_date_dtype(keyed: dict[str, pl.DataFrame], date_col: str) -> dict[str, pl.DataFrame]:
+    """*keyed* with ``date_col`` brought to one dtype, so the intersection join can run.
+
+    One registry can hold both conventions for the same trading day: etfs stores
+    ``timestamp`` as ``Date`` in 277 of its prediction files and as midnight ``Datetime``
+    in 123, because the families were registered by notebooks written months apart. A
+    join on mismatched key dtypes raises ``SchemaError`` rather than returning nothing,
+    so comparing across those families failed outright.
+
+    Widening ``Date`` to ``Datetime`` is lossless - a date becomes midnight, which is
+    what the datetime-typed rows already carry - so it is the direction taken whenever
+    both appear. Narrowing would truncate a genuine time of day, so it is never taken:
+    a case study whose timestamps really are intraday keeps them, and if it also holds
+    date-typed rows the intersection comes back empty, which is the true answer about
+    two sets that do not share keys. Anything other than these two dtypes is left alone
+    for the join to reject, because guessing a cast for it would be a fabrication.
+    """
+    dtypes = {frame.schema[date_col] for frame in keyed.values()}
+    if len(dtypes) < 2 or not dtypes <= {pl.Date, *(pl.Datetime(u) for u in ("ms", "us", "ns"))}:
+        return keyed
+    target = next(dt for dt in dtypes if dt != pl.Date)
+    return {
+        name: (
+            frame.with_columns(pl.col(date_col).cast(target))
+            if frame.schema[date_col] == pl.Date
+            else frame
+        )
+        for name, frame in keyed.items()
+    }
+
+
+def common_sample_daily_ic(
+    predictions: dict[str, pl.DataFrame],
+    *,
+    entity_col: str = "symbol",
+    date_col: str = "timestamp",
+    score_col: str = "y_score",
+    target_col: str = "y_true",
+) -> tuple[dict[str, float], int, int]:
+    """Daily rank IC for several prediction sets over the rows all of them share.
+
+    Two families can be scored over the same *number* of validation dates and still not be
+    comparable: sequence models drop the warm-up rows a flat model keeps, so the same date can
+    carry a different cross-section in each. Comparing the stored ICs then measures the samples
+    as much as the models.
+
+    This intersects on exact ``(entity, date)`` keys and recomputes the daily cross-sectional
+    Spearman correlation on what survives.
+
+    **Intersecting the keys is not sufficient, and the second intersection is why.** A date
+    whose scores are constant within one model has no cross-sectional correlation there - the
+    rank correlation is undefined, not zero - while the other models still have one. Dropping
+    those per model leaves each mean taken over a different set of dates, which is the sample
+    difference this function exists to remove, reintroduced one step later. So every model's
+    daily IC is computed first, the dates where **all** of them are defined are intersected, and
+    every mean is taken over that set. Dates with fewer than two entities are undefined for every
+    model at once and fall out of the same intersection.
+
+    The returned counts describe the same set. Reporting the key intersection instead would
+    overstate the comparison by however many dates the second intersection removed, which is
+    exactly the number a reader would need to judge it.
+
+    Column names default to what :func:`load_predictions` returns (``y_score``, ``y_true``),
+    which is the only supported source for these frames.
+
+    Returns ``({name: mean_daily_ic}, n_dates, n_rows_per_set)``.
+    """
+    if not predictions:
+        return {}, 0, 0
+
+    keyed = {
+        name: df.select(entity_col, date_col, score_col, target_col).unique(
+            subset=[entity_col, date_col]
+        )
+        for name, df in predictions.items()
+    }
+    keyed = _align_date_dtype(keyed, date_col)
+    common: pl.DataFrame | None = None
+    for frame in keyed.values():
+        keys = frame.select(entity_col, date_col)
+        common = keys if common is None else common.join(keys, on=[entity_col, date_col])
+    if common is None or common.is_empty():
+        return {}, 0, 0
+
+    per_day: dict[str, pl.DataFrame] = {}
+    scored_dates: pl.DataFrame | None = None
+    for name, frame in keyed.items():
+        sample = frame.join(common, on=[entity_col, date_col])
+        daily = (
+            sample.group_by(date_col)
+            .agg(
+                pl.corr(
+                    pl.col(score_col).rank(), pl.col(target_col).rank(), method="pearson"
+                ).alias("ic"),
+                pl.len().alias("n"),
+            )
+            # Both spellings of undefined. `pl.corr` returns NaN, not null, when one side has
+            # no variance - a date whose scores are all equal - and `is_not_null()` is true of
+            # NaN, so filtering on nullity alone let those dates through and carried the NaN
+            # into the mean.
+            .filter((pl.col("n") >= 2) & pl.col("ic").is_not_null() & pl.col("ic").is_not_nan())
+            .select(date_col, "ic")
+        )
+        per_day[name] = daily
+        dates = daily.select(date_col)
+        scored_dates = dates if scored_dates is None else scored_dates.join(dates, on=date_col)
+
+    if scored_dates is None or scored_dates.is_empty():
+        return {name: float("nan") for name in keyed}, 0, 0
+
+    ics = {
+        name: float(daily.join(scored_dates, on=date_col)["ic"].mean())
+        for name, daily in per_day.items()
+    }
+    shared_rows = common.join(scored_dates, on=date_col)
+    return ics, scored_dates.height, shared_rows.height

@@ -13,14 +13,14 @@ a derivation that read the fixture, which is the shape of test that passes on wr
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
+import polars as pl
 import pytest
 
 from case_studies.research.holdout import build_holdout_cv
-from case_studies.research.lifecycle import _locked_training_spec
 from utils.artifact_specs import load_setup_config
 
 # Newest first, which is the order generate_cv_splits returns and the order the trap depends on:
@@ -223,43 +223,61 @@ def test_folds_missing_a_boundary_are_named_rather_than_read_as_none() -> None:
         build_holdout_cv(spec, case_study="us_firm_characteristics", timeline=MONTH_ENDS)
 
 
-def test_the_derived_interval_satisfies_the_lock_contract_it_will_be_checked_against() -> None:
-    """The derivation is only correct if ``lifecycle.lock`` accepts what it produces.
+def test_the_derived_interval_is_a_new_one_and_not_the_validation_interval() -> None:
+    """The derivation is only a retrain if the interval it produces is a different interval.
 
-    ``_locked_training_spec`` is the real gate: it requires the holdout spec to differ from the
-    selected validation spec in the CV interval and in nothing else, and to carry an explicit,
-    distinct interval. Asserting against it rather than against a restatement of the derivation
-    is what makes this a test of the contract instead of a mirror of the code.
+    The training identity is computed over the CV block, so a derivation that returned the
+    validation interval unchanged would register the holdout under the validation training hash
+    and serve the already-fitted model from the registry. The refit would not happen, and
+    nothing downstream would say so - the prediction set would carry ``split='holdout'`` and a
+    model chosen while looking at the folds it is being judged against. Asserting that the
+    identity moves is what makes that failure loud.
     """
     validation = _validation_spec()
-    holdout = deepcopy(validation)
-    holdout["computation"]["cv"] = build_holdout_cv(
+    holdout_cv = build_holdout_cv(
         validation, case_study="us_firm_characteristics", timeline=MONTH_ENDS
     )
 
-    locked = _locked_training_spec(validation, holdout)
-
-    assert locked["computation"]["cv"]["split"] == "holdout"
-    assert locked["computation"]["cv"]["identity"] != validation["computation"]["cv"]["identity"]
-
-
-def test_the_lock_refuses_a_holdout_interval_identical_to_the_validation_one() -> None:
-    """The failure direction of the test above: an unchanged interval must not pass."""
-    validation = _validation_spec()
-    unchanged = deepcopy(validation)
-
-    with pytest.raises(ValueError, match="explicit, distinct CV interval"):
-        _locked_training_spec(validation, unchanged)
+    assert holdout_cv["split"] == "holdout"
+    assert holdout_cv["identity"] != validation["computation"]["cv"]["identity"]
+    assert holdout_cv["folds"] != validation["computation"]["cv"]["folds"]
 
 
 class _TemporalStub:
-    """The three fields ``_require_holdout_temporal_features`` reads, and nothing else."""
+    """The fields ``_require_holdout_temporal_features`` reads, and nothing else.
 
-    def __init__(self, artifact_splits: list[dict[str, Any]] | None) -> None:
-        self.temporal_by_fold = {} if artifact_splits is not None else None
+    The check asks COVERAGE - does the artifact hold rows spanning the dates this run trains
+    and evaluates on - so the stub carries the rows themselves rather than only the declared
+    fold boundaries. `temporal_rows` maps a fold id to the timestamps the artifact holds for it.
+    """
+
+    def __init__(
+        self,
+        artifact_splits: list[dict[str, Any]] | None,
+        temporal_rows: dict[int, list[Any]] | None = None,
+    ) -> None:
+        rows = temporal_rows or {}
+        self.dataset = pl.DataFrame({"timestamp": _MONTH_ENDS_DT})
+        self.date_col = "timestamp"
+        self.temporal_by_fold = (
+            pl.DataFrame(
+                {
+                    "fold": [fold for fold, dates in rows.items() for _ in dates],
+                    "timestamp": [value for dates in rows.values() for value in dates],
+                },
+                schema={"fold": pl.Int64, "timestamp": pl.Datetime("us")},
+            )
+            if artifact_splits is not None
+            else None
+        )
         self.temporal_keys = ("symbol", "timestamp") if artifact_splits is not None else ()
         self.temporal_feature_names = ("kalman_trend", "arima_forecast") if artifact_splits else ()
         self.temporal_artifact_splits = artifact_splits or []
+
+
+_MONTH_ENDS_DT = pl.datetime_range(
+    pl.datetime(2010, 1, 31), pl.datetime(2021, 12, 31), interval="1mo", eager=True
+)
 
 
 _VALIDATION_FOLD_0 = {
@@ -271,13 +289,16 @@ _VALIDATION_FOLD_0 = {
 }
 
 
-def test_a_holdout_fold_colliding_with_a_validation_fold_id_is_refused() -> None:
+def test_a_holdout_reusing_a_validation_fold_id_is_refused_on_that_folds_rows() -> None:
     """The silent case: `locked_holdout_split` defaults the fold id to 0, and fold 0 exists.
 
     The join against fold-scoped temporal features would then succeed against features fitted
     on validation fold 0's training window, which ends years before the holdout interval
     starts. Nothing raises, and the holdout number is computed from the wrong feature vintage.
-    This is the failure the check exists for, so the test asserts the refusal names the fold.
+
+    Coverage catches it on the rows rather than on the declared boundaries: fold 0's rows stop
+    in 2015 and the holdout is evaluated over 2020-2021, so the artifact does not hold what the
+    run would be scored on.
     """
     from case_studies.utils.linear import _require_holdout_temporal_features
 
@@ -288,9 +309,14 @@ def test_a_holdout_fold_colliding_with_a_validation_fold_id_is_refused() -> None
         val_start="2020-01-31",
         val_end="2021-12-31",
     )
+    fold_0_rows = [
+        value for value in _MONTH_ENDS_DT if value <= datetime.fromisoformat("2015-12-31")
+    ]
 
-    with pytest.raises(ValueError, match=r"holdout fold 0 .*wrong fold or from none at all"):
-        _require_holdout_temporal_features(_TemporalStub([_VALIDATION_FOLD_0]), holdout)
+    with pytest.raises(ValueError, match="not covered by the fold-scoped temporal artifact"):
+        _require_holdout_temporal_features(
+            _TemporalStub([_VALIDATION_FOLD_0], {0: fold_0_rows}), holdout
+        )
 
 
 def test_a_holdout_fold_absent_from_the_artifact_is_refused() -> None:
@@ -298,9 +324,14 @@ def test_a_holdout_fold_absent_from_the_artifact_is_refused() -> None:
     from case_studies.utils.linear import _require_holdout_temporal_features
 
     holdout = dict(_VALIDATION_FOLD_0, fold=8, val_start="2020-01-31", val_end="2021-12-31")
+    fold_0_rows = [
+        value for value in _MONTH_ENDS_DT if value <= datetime.fromisoformat("2015-12-31")
+    ]
 
-    with pytest.raises(ValueError, match=r"holdout fold 8 .*carries folds \[0\]"):
-        _require_holdout_temporal_features(_TemporalStub([_VALIDATION_FOLD_0]), holdout)
+    with pytest.raises(ValueError, match="not covered by the fold-scoped temporal artifact"):
+        _require_holdout_temporal_features(
+            _TemporalStub([_VALIDATION_FOLD_0], {0: fold_0_rows}), holdout
+        )
 
 
 def test_a_case_study_without_fold_scoped_temporal_features_is_not_refused() -> None:

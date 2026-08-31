@@ -38,6 +38,7 @@
 import json
 import sqlite3
 import warnings
+from functools import cache
 
 import polars as pl
 import yaml
@@ -230,6 +231,66 @@ _CLUSTER_RUNG_RESTRICTIONS: dict[str, dict[str, object]] = {
 }
 
 
+# Distinguishes "the lock's carrier was superseded, so no holdout applies" from "no lock".
+_NO_LIVE_HOLDOUT = "\x00no-live-holdout"
+
+
+def _locked_holdout_evaluation(db: sqlite3.Connection, cs: str):
+    """The holdout this study may report, from the shared resolver.
+
+    Both this notebook and `populate_paired_metrics` write `backtest_paired_metrics`, so they
+    have to agree on which holdout is this study's; two copies of the rule would let a Chapter
+    20 run overwrite the case study's pairs with a different lineage. The resolver lives with
+    that producer and is imported here rather than restated - including the part that matters
+    most, that the lock's `holdout_training_hash` is what was expected and
+    `holdout_evaluations` is what was produced.
+
+    Returns `(prediction_hash, backtest_hash)`, `NO_LIVE_HOLDOUT`, or None.
+    """
+    from case_studies.utils.paired_metrics import locked_holdout_evaluation
+
+    return locked_holdout_evaluation(db, cs)
+
+
+def _retired(cs: str) -> frozenset[str]:
+    """Identities a later generation retired, from the same helper `populate_paired_metrics`
+    uses. Both write `backtest_paired_metrics`, so a disagreement here would let a Chapter 20
+    run overwrite the corrected pairs with a retired lineage."""
+    from case_studies.utils.paired_metrics import _retired_prediction_hashes
+
+    return _retired_prediction_hashes(cs)
+
+
+@cache
+def _live_predictions(cs: str) -> list[str] | None:
+    """What this case study currently publishes, or None when it declares no populations.
+
+    Membership, not the complement of retirement. A prediction no population ever listed has
+    not been retired by anyone, so ranking over "everything not retired" admits experimental
+    results the case study never published; ranking over the members in force does not.
+
+    Applied inside the query rather than to its result, because `best()` applies its SQL
+    `LIMIT top_n` first - a row filtered afterwards has already consumed a slot and can hide a
+    live candidate below the cut.
+    """
+    from case_studies.research.population import published_members_at
+
+    published = published_members_at(get_case_study_dir(cs), member_kind="prediction")
+    if published is None:
+        return None
+    if not published:
+        # `best()` tests this argument for truthiness, so an empty list would read as "no
+        # filter" and rank everything. A study that declares populations and publishes
+        # nothing has nothing to report, which is a refusal rather than a wide-open ranking.
+        raise RuntimeError(f"{cs} declares populations but publishes no prediction identities")
+    return sorted(published)
+
+
+def _best_live(explorer: "BacktestExplorer", cs: str, stage: str, top_n: int) -> pl.DataFrame:
+    """`explorer.best` narrowed to what the case study still publishes."""
+    return explorer.best(stage=stage, top_n=top_n, prediction_hashes=_live_predictions(cs))
+
+
 def _best_pinned(explorer: "BacktestExplorer", cs: str, stage: str, top_n: int) -> pl.DataFrame:
     """`explorer.best` for a stage, fetching enough rows that a rung-restricted
     cohort survives the post-hoc predicate filter.
@@ -238,9 +299,10 @@ def _best_pinned(explorer: "BacktestExplorer", cs: str, stage: str, top_n: int) 
     SQL `LIMIT top_n`. For nasdaq the pinned cost-feasible carrier sits below
     the full-universe in-sample maxima, so a small `top_n` truncates it before
     `_apply_rung_restriction` runs. Pull all rows for restricted case studies."""
+    live = _live_predictions(cs)
     if cs in _CLUSTER_RUNG_RESTRICTIONS:
-        return explorer.best(stage=stage, top_n=1_000_000)
-    return explorer.best(stage=stage, top_n=top_n)
+        return explorer.best(stage=stage, top_n=1_000_000, prediction_hashes=live)
+    return explorer.best(stage=stage, top_n=top_n, prediction_hashes=live)
 
 
 def _apply_rung_restriction(df: pl.DataFrame, cs: str) -> pl.DataFrame:
@@ -614,7 +676,7 @@ def build_backtest_rows():
         # the registry numbers come from deprecated runs, so report None to
         # match the synthesis_dict sanitizer below.
         if _stage_applicable(cs, "allocation"):
-            alloc_candidates = explorer.best(stage="allocation", top_n=200)
+            alloc_candidates = _best_live(explorer, cs, "allocation", 200)
             if not alloc_candidates.is_empty() and "family" in alloc_candidates.columns:
                 alloc_candidates = alloc_candidates.filter(pl.col("family") != "benchmark")
             if (
@@ -895,7 +957,7 @@ for cs, explorer in explorers.items():
     # holdout.py::HOLDOUT_SELECTION_STAGES. Dedup by prediction_hash so the
     # leader corresponds to a distinct trained model.
     cand = pl.concat(
-        [explorer.best(stage=s, top_n=2000) for s in ("signal", "allocation", "risk_overlay")],
+        [_best_live(explorer, cs, s, 2000) for s in ("signal", "allocation", "risk_overlay")],
         how="diagonal_relaxed",
     )
     if cand.is_empty() or "backtest_hash" not in cand.columns:
@@ -1114,7 +1176,7 @@ def _val_rank1_full_spec(cs: str) -> dict | None:
     if explorer is None:
         return None
     cand = pl.concat(
-        [explorer.best(stage=s, top_n=2000) for s in ("signal", "allocation", "risk_overlay")],
+        [_best_live(explorer, cs, s, 2000) for s in ("signal", "allocation", "risk_overlay")],
         how="diagonal_relaxed",
     )
     if cand.is_empty() or "backtest_hash" not in cand.columns:
@@ -1148,7 +1210,11 @@ def _val_rank1_full_spec(cs: str) -> dict | None:
                 continue
             spec_clauses, spec_params = _full_strategy_clauses(spec)
             ho_clauses = ["p.split = 'holdout'"] + spec_clauses
+            if _retired(cs):
+                ho_clauses.append("p.prediction_hash NOT IN (SELECT value FROM json_each(?))")
             ho_params: list[object] = list(spec_params)
+            if _retired(cs):
+                ho_params.append(json.dumps(sorted(_retired(cs))))
             if label_restriction:
                 placeholders = ",".join("?" for _ in label_restriction)
                 ho_clauses.append(f"t.label IN ({placeholders})")
@@ -1303,6 +1369,9 @@ def _holdout_lineage_for(
     rung = _CLUSTER_RUNG_RESTRICTIONS.get(cs)
     clauses = ["p.split = 'holdout'"]
     params: list[object] = []
+    if _retired(cs):
+        clauses.append("p.prediction_hash NOT IN (SELECT value FROM json_each(?))")
+        params.append(json.dumps(sorted(_retired(cs))))
     if label_restriction:
         placeholders = ",".join("?" for _ in label_restriction)
         clauses.append(f"t.label IN ({placeholders})")
@@ -1327,6 +1396,18 @@ def _holdout_lineage_for(
     db = sqlite3.connect(str(db_path))
     db.row_factory = sqlite3.Row
     try:
+        # Pin to the holdout the research lock names. Without it these queries rank by the
+        # holdout's own Sharpe, which chooses the evaluation by its result and is how a
+        # holdout descended from a retired carrier takes the slot.
+        locked_holdout = _locked_holdout_evaluation(db, cs)
+        if locked_holdout == _NO_LIVE_HOLDOUT:
+            return None
+        if locked_holdout is not None:
+            clauses.append("p.prediction_hash = ?")
+            params.append(locked_holdout[0])
+            clauses.append("b.backtest_hash = ?")
+            params.append(locked_holdout[1])
+            where_sql = " AND ".join(clauses)
         # Same-lineage preference: when the caller knows the validation rank-1's
         # training_hash, prefer a holdout that shares it. This pins val→holdout
         # decay to the same trained model rather than a same-spec but
@@ -1342,7 +1423,7 @@ def _holdout_lineage_for(
                                      AND b.stage IN ('signal','allocation','risk_overlay','holdout')
                 JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
                 WHERE {where_sql} AND p.training_hash = ?
-                ORDER BY bm.sharpe DESC NULLS LAST
+                ORDER BY b.backtest_hash
                 LIMIT 1
                 """,
                 params + [prefer_training_hash],
@@ -1360,7 +1441,7 @@ def _holdout_lineage_for(
                                  AND b.stage IN ('signal','allocation','risk_overlay','holdout')
             JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
             WHERE {where_sql}
-            ORDER BY bm.sharpe DESC NULLS LAST
+            ORDER BY b.backtest_hash
             LIMIT 1
             """,
             params,
@@ -1396,10 +1477,18 @@ def _val_backtest_for_lineage(cs: str, family: str, config_name: str, label: str
               AND t.family = ?
               AND t.config_name = ?
               AND t.label = ?
+              {scope}
             ORDER BY bm.sharpe DESC NULLS LAST
             LIMIT 1
-            """,
-            (family, config_name, label),
+            """.format(
+                scope=(
+                    " AND p.prediction_hash NOT IN (SELECT value FROM json_each(?))"
+                    if _retired(cs)
+                    else ""
+                )
+            ),
+            (family, config_name, label)
+            + ((json.dumps(sorted(_retired(cs))),) if _retired(cs) else ()),
         ).fetchone()
     finally:
         db.close()
@@ -1538,7 +1627,7 @@ for cs, explorer in explorers.items():
     # val rank-1 is the highest-Sharpe validation backtest across the three
     # stages; see `_val_rank1_full_spec`.
     cand = pl.concat(
-        [explorer.best(stage=s, top_n=2000) for s in _PAIRED_STAGES],
+        [_best_live(explorer, cs, s, 2000) for s in _PAIRED_STAGES],
         how="diagonal_relaxed",
     )
     if cand.is_empty() or "backtest_hash" not in cand.columns:
@@ -1768,7 +1857,7 @@ for cs, explorer in explorers.items():
     # chapter-wide rank-1 signal rather than whichever Sharpe happens to be
     # highest under any execution regime.
     label_restriction = _CLUSTER_LABEL_RESTRICTIONS.get(cs)
-    candidates = explorer.best(stage="signal", top_n=200)
+    candidates = _best_live(explorer, cs, "signal", 200)
     if not candidates.is_empty() and "family" in candidates.columns:
         candidates = candidates.filter(pl.col("family") != "benchmark")
     if label_restriction and "label" in candidates.columns and not candidates.is_empty():
@@ -1849,7 +1938,7 @@ for cs, explorer in explorers.items():
     # pin sp500_options to the Rung-2 full-universe baseline so lineage
     # traces the same signal as the cross-case cluster diagnostics.
     label_restriction = _CLUSTER_LABEL_RESTRICTIONS.get(cs)
-    candidates = explorer.best(stage="signal", top_n=200)
+    candidates = _best_live(explorer, cs, "signal", 200)
     if not candidates.is_empty() and "family" in candidates.columns:
         candidates = candidates.filter(pl.col("family") != "benchmark")
     if label_restriction and "label" in candidates.columns and not candidates.is_empty():
@@ -1990,9 +2079,24 @@ def query_holdout_rows():
         spec_clauses, spec_params = _full_strategy_clauses(val_spec)
         clauses.extend(spec_clauses)
         params.extend(spec_params)
+        db = sqlite3.connect(str(db_path))
+        # The same holdout the paired metrics resolve to, so the reader-facing row and the
+        # comparison behind it describe one evaluation rather than two.
+        _locked = _locked_holdout_evaluation(db, cs)
+        if _locked == _NO_LIVE_HOLDOUT:
+            # No holdout this study can report: the lock's carrier was superseded, the lock
+            # never reached HOLDOUT_EVALUATED, or its evaluation row never landed.
+            clauses.append("1 = 0")
+        elif _locked is not None:
+            # Both sides. The backtest join here is a LEFT JOIN, and requiring the finalized
+            # hash makes it effectively inner - which is right in this branch, because reaching
+            # it means an evaluation exists and named that backtest.
+            clauses.append("p.prediction_hash = ?")
+            params.append(_locked[0])
+            clauses.append("b.backtest_hash = ?")
+            params.append(_locked[1])
         where_sql = " AND ".join(clauses)
 
-        db = sqlite3.connect(str(db_path))
         db.row_factory = sqlite3.Row
         optional = ", ".join(
             [
@@ -2026,7 +2130,7 @@ def query_holdout_rows():
             LEFT JOIN backtest_metrics bm
                 ON b.backtest_hash = bm.backtest_hash
             WHERE {where_sql}
-            ORDER BY bm.sharpe DESC NULLS LAST
+            ORDER BY b.backtest_hash
             LIMIT 1
             """,
             params,

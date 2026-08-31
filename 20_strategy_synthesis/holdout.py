@@ -47,6 +47,7 @@ try:
 except ImportError:  # pragma: no cover - polars-version drift safety
     _PolarsPanicException = type("PanicException", (Exception,), {})
 
+from case_studies.research.population import published_members_at
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.backtest_loaders import load_backtest_prices_for
 from case_studies.utils.backtest_runner import run_backtest
@@ -210,6 +211,17 @@ def select_best_models(
     optional families/labels/min_ic restrictions applied before ranking.
     """
     explorer = BacktestExplorer(cs_id)
+    # Holdout selection ranks over what the case study publishes. "Not retired" is a weaker
+    # set - a prediction no population ever listed was retired by nobody - and the scope goes
+    # into the query because `best()` applies its SQL limit before any filter applied to the
+    # result, so an ineligible row consumes a slot and can hide a live candidate below it.
+    # None when the registry declares no populations, which leaves the ranking as it was.
+    published = published_members_at(get_case_study_dir(cs_id), member_kind="prediction")
+    if published is not None and not published:
+        # `best()` tests this for truthiness, so an empty list reads as "no filter" and would
+        # rank every registered row - the opposite of what an empty population means.
+        raise ValueError(f"{cs_id} declares populations but publishes no prediction identities")
+    published = None if published is None else sorted(published)
     # Pull a generous pool from each stage so dedupe-by-prediction_hash
     # still yields top_n after the cross-stage merge. When ``labels``
     # restricts the eligible label set, the per-stage top_n must be much
@@ -220,7 +232,7 @@ def select_best_models(
     per_stage_n = max(top_n * 20, 5000 if labels else 200)
     stage_frames = []
     for stage in HOLDOUT_SELECTION_STAGES:
-        df = explorer.best(stage=stage, top_n=per_stage_n)
+        df = explorer.best(stage=stage, top_n=per_stage_n, prediction_hashes=published)
         if not df.is_empty():
             stage_frames.append(df)
     if not stage_frames:

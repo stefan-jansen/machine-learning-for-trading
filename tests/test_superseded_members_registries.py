@@ -8,7 +8,7 @@ fleet measured on 2026-08-25, each chosen for a shape the others do not test:
 
 | case study | retired | what it catches |
 |---|---|---|
-| `etfs` | 324 | Transitive closure. `etfs-gbm-validation-v1` runs four generations, `linear` and `ipca` three each, so a form that finds the first edge and stops under-reports. |
+| `etfs` | 364 | Transitive closure. `etfs-gbm-validation-v1` runs four generations, `linear` and `ipca` three each, so a form that finds the first edge and stops under-reports. Was 324 until 2026-08-28, when `09_dl_lstm` refit and `etfs-lstm-validation-v1` retired its 40 members in one edge (`1c04632dec9c` -> `9d09b33a058c`); the difference is that edge exactly. |
 | `us_firm_characteristics` | 135 | Four independent single-hop chains with uneven counts (30/3/30/72), so a form that stops at one chain misses the rest and an over-retiring form cannot coincidentally match. |
 | `sp500_equity_option_analytics` | 123 | A doubled catalog, visible directly: 915 prediction rows = 792 live + 123 retired, zero overlap. |
 | `crypto_perps_funding` | 400 | The edge outlives the rows. Its refit deleted generation A's `prediction_sets` rows and only the `official_population_members` record survives, so a form reading supersession out of `prediction_sets` returns empty here and correct on the other three. |
@@ -48,7 +48,7 @@ ARTIFACTS = Path.home() / "ml4t" / "artifacts" / "case_studies"
 
 # Measured 2026-08-25, each by the pane that owns that case study.
 RETIRED_PREDICTIONS = {
-    "etfs": 324,
+    "etfs": 364,
     "us_firm_characteristics": 135,
     "sp500_equity_option_analytics": 123,
     "crypto_perps_funding": 400,

@@ -74,7 +74,8 @@ from utils.paths import get_case_study_dir
 CASE_STUDY_ID = "nasdaq100_microstructure"
 LABEL = ""
 SPLIT = "validation"
-TOP_K = 0  # 0 = use smallest top_k from setup.yaml backtest.sweep.top_k_grid
+# Zero means the smallest top_k from setup.yaml backtest.sweep.top_k_grid.
+TOP_K = 0
 MAX_SYMBOLS = 0
 FORCE_REBACKTEST = False  # Set True to re-backtest even if a complete backtest_hash exists
 TOP_N_PREDICTIONS = None

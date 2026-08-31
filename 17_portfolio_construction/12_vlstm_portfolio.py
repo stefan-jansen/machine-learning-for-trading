@@ -63,7 +63,8 @@ from utils.reproducibility import set_global_seeds
 from utils.style import COLORS
 
 # %% tags=["parameters"]
-MAX_SYMBOLS = 0  # 0 = full ETF universe.
+# 0 = full ETF universe.
+MAX_SYMBOLS = 0
 N_EPOCHS = 200
 SEQ_LEN = 63  # ~3 months lookback, matches notebook 11.
 D_MODEL = 32  # GRN / VSN hidden dimension.

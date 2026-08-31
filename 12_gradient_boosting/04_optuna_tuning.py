@@ -88,7 +88,8 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 # %%
 # %% tags=["parameters"]
 N_TRIALS = 50
-MAX_FOLDS = 0  # 0 = all folds for walk-forward HPO
+# 0 = all folds for walk-forward HPO
+MAX_FOLDS = 0
 SEED = 42
 
 
