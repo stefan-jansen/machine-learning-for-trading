@@ -326,12 +326,31 @@ _derived_holdout_cv = build_holdout_cv(
     label=PRIMARY_LABEL,
 )
 _derived = _derived_holdout_cv["folds"][0]
+
+
+def _utc(value) -> pd.Timestamp:
+    """A UTC timestamp, whether ``value`` arrives aware, naive, or as a string.
+
+    `build_holdout_cv` reports each boundary in whatever form the timeline it was handed
+    carries, so the awareness of its output is a property of the data rather than of the
+    derivation. This notebook read two boundaries with `tz_convert`, which requires an aware
+    input and raises "Cannot convert tz-naive Timestamp" on a naive one, and the other two with
+    a localizing constructor. Production timestamps are aware, so the difference never showed
+    there; a tz-naive timeline reaches the `tz_convert` pair first and fails the notebook. One
+    rule for all four, and it is the rule the eligibility rows further down already apply.
+    """
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize("UTC")
+    return timestamp.tz_convert("UTC")
+
+
 holdout_fold = {
     "fold": int(_derived["fold"]),
-    "train_start": pd.Timestamp(_derived["train_start"], tz="UTC"),
-    "train_end": pd.Timestamp(_derived["train_end"]).tz_convert("UTC"),
-    "test_start": pd.Timestamp(_derived["val_start"], tz="UTC"),
-    "test_end": pd.Timestamp(_derived["val_end"]).tz_convert("UTC"),
+    "train_start": _utc(_derived["train_start"]),
+    "train_end": _utc(_derived["train_end"]),
+    "test_start": _utc(_derived["val_start"]),
+    "test_end": _utc(_derived["val_end"]),
 }
 HOLDOUT_FOLD_ID = holdout_fold["fold"]
 assert HOLDOUT_FOLD_ID not in VALIDATION_FOLD_IDS, (
