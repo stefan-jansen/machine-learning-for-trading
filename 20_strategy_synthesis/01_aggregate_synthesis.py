@@ -179,7 +179,7 @@ print(f"\nLoaded: {len(explorers)}/{len(ALL_CASE_STUDIES)} case studies")
 # full spec — degenerate predictions, vol-window-vs-history mismatch,
 # universe-filter rejection, or other generation failures — the rule falls
 # back to the next-highest validation Sharpe with a usable holdout, and so
-# on until one succeeds. The `_val_rank1_full_spec` helper implements this
+# on until one succeeds. The `_val_rank1_carrier` helper implements this
 # walk; `query_holdout_rows` and `_holdout_lineage_for` consume its output
 # to pin val/holdout pairs to the same full strategy carrier.
 
@@ -1146,8 +1146,6 @@ def _val_rank1_carrier(cs: str) -> dict | None:
     threw it away - so refusing there would have dropped a case study out of the
     reader-facing holdout table for want of a value one line above.
 
-    ``_val_rank1_full_spec`` remains as the spec-only view for callers that want it.
-
     The val rank-1 *full strategy* spec for ``cs`` — the
     highest-Sharpe validation backtest across (signal, allocation,
     risk_overlay) stages — walking candidates by val Sharpe descending until
@@ -1280,12 +1278,6 @@ def _val_rank1_carrier(cs: str) -> dict | None:
     finally:
         db.close()
     return None
-
-
-def _val_rank1_full_spec(cs: str) -> dict | None:
-    """The validation rank-1 carrier's strategy spec alone."""
-    carrier = _val_rank1_carrier(cs)
-    return carrier["spec"] if carrier else None
 
 
 def _full_strategy_clauses(spec: dict | None) -> tuple[list[str], list[object]]:
@@ -1581,7 +1573,7 @@ for cs, explorer in explorers.items():
     # crypto signal-stage rank-1 = quintile_long_short but cross-stage
     # rank-1 = score_weighted/equal_weight_top_k). Carrier-selection rule:
     # val rank-1 is the highest-Sharpe validation backtest across the three
-    # stages; see `_val_rank1_full_spec`.
+    # stages; see `_val_rank1_carrier`.
     cand = pl.concat(
         [_best_live(explorer, cs, s, 2000) for s in _PAIRED_STAGES],
         how="diagonal_relaxed",
@@ -1624,19 +1616,25 @@ for cs, explorer in explorers.items():
     # risk) spec so val→holdout decay isn't measured across different
     # allocators (e.g. score_weighted vs conformal_weighted), different
     # position-sizing parameters, or different risk overlays.
-    val_spec = _val_rank1_full_spec(cs)
-    # The validation rank-1's own prediction set names the carrier. It is passed rather than
-    # its training hash: the prediction hash pins the checkpoint as well as the configuration,
-    # and a correct holdout refit registers a NEW training identity covering the holdout CV
-    # interval, so preferring the validation training hash could only match a holdout scored
-    # from the validation-fitted model. The lookup that used to sit here - prediction hash to
-    # training hash, with its own connection and error branch - is gone with it; the resolver
-    # reads the carrier itself.
+    # The carrier is whatever the WALK settled on, spec and prediction hash together, and it
+    # is not `leader_phash`. The walk advances past the leader when the leader has no holdout
+    # of its own, so passing the leader's hash alongside a later candidate's spec asks for a
+    # holdout that matches neither - and the strict pin answers None rather than quietly
+    # falling through, which is how the case study would lose a fallback carrier it has.
+    #
+    # The prediction hash is what is passed, not the training hash: it pins the checkpoint as
+    # well as the configuration, and a correct holdout refit registers a NEW training identity
+    # covering the holdout CV interval, so preferring the validation training hash could only
+    # ever match a holdout scored from the validation-fitted model. The lookup that used to
+    # sit here - prediction hash to training hash, with its own connection and error branch -
+    # is gone with it; the resolver reads the carrier itself.
+    val_rank1 = _val_rank1_carrier(cs)
+    val_spec = val_rank1["spec"] if val_rank1 else None
     ho_lineage = _holdout_lineage_for(
         cs,
         leader_label,
         strategy_spec=val_spec,
-        prefer_prediction_hash=leader_phash,
+        prefer_prediction_hash=val_rank1["prediction_hash"] if val_rank1 else leader_phash,
     )
     ho_hash = ho_lineage["backtest_hash"] if ho_lineage else None
     ho_label = ho_lineage["label"] if ho_lineage else leader_label

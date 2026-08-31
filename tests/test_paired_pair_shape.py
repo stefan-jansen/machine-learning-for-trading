@@ -203,7 +203,7 @@ def test_the_producer_gives_every_stage_transition_the_default_shape(
 
     monkeypatch.setattr(paired_metrics, "_populate_pair", spy)
     monkeypatch.setattr(paired_metrics, "_aligned_returns", lambda cs, h: _returns([0.001] * 60))
-    monkeypatch.setattr(paired_metrics, "_val_rank1_full_spec", lambda *a, **k: None)
+    monkeypatch.setattr(paired_metrics, "_val_rank1_carrier", lambda *a, **k: None)
     monkeypatch.setattr(paired_metrics, "_holdout_lineage_for", lambda *a, **k: None)
     monkeypatch.setattr(paired_metrics, "_benchmark_returns_from_artifact", lambda *a, **k: None)
 
@@ -237,7 +237,7 @@ def test_the_producer_skips_a_stage_the_case_study_has_not_run(
 
     monkeypatch.setattr(paired_metrics, "_populate_pair", spy)
     monkeypatch.setattr(paired_metrics, "_aligned_returns", lambda cs, h: _returns([0.001] * 60))
-    monkeypatch.setattr(paired_metrics, "_val_rank1_full_spec", lambda *a, **k: None)
+    monkeypatch.setattr(paired_metrics, "_val_rank1_carrier", lambda *a, **k: None)
     monkeypatch.setattr(paired_metrics, "_holdout_lineage_for", lambda *a, **k: None)
     monkeypatch.setattr(paired_metrics, "_benchmark_returns_from_artifact", lambda *a, **k: None)
 
@@ -301,7 +301,7 @@ def test_the_producer_will_not_pair_two_stages_that_branched_separately(
 
     monkeypatch.setattr(paired_metrics, "_populate_pair", spy)
     monkeypatch.setattr(paired_metrics, "_aligned_returns", lambda cs, h: _returns([0.001] * 60))
-    monkeypatch.setattr(paired_metrics, "_val_rank1_full_spec", lambda *a, **k: None)
+    monkeypatch.setattr(paired_metrics, "_val_rank1_carrier", lambda *a, **k: None)
     monkeypatch.setattr(paired_metrics, "_holdout_lineage_for", lambda *a, **k: None)
     monkeypatch.setattr(paired_metrics, "_benchmark_returns_from_artifact", lambda *a, **k: None)
 

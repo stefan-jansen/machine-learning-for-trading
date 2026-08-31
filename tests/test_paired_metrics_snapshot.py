@@ -146,7 +146,9 @@ class TestTheRebuildEntryPoint:
             ),
         )
         monkeypatch.setattr(pm, "compute_paired_uncertainty", lambda *a, **k: {"sharpe_diff": 0.1})
-        monkeypatch.setattr(pm, "_val_rank1_full_spec", lambda *a, **k: {})
+        monkeypatch.setattr(
+            pm, "_val_rank1_carrier", lambda *a, **k: {"spec": {}, "prediction_hash": None}
+        )
         monkeypatch.setattr(pm, "_holdout_lineage_for", lambda *a, **k: None)
 
     def test_the_previous_selections_rows_are_gone_after_a_rebuild(

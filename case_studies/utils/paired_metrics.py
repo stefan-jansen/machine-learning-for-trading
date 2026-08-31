@@ -502,29 +502,6 @@ def _val_rank1_carrier(
     return None
 
 
-def _val_rank1_full_spec(
-    cs: str,
-    explorer: BacktestExplorer,
-    *,
-    label_restriction: frozenset[str] | None,
-    rung: dict | None,
-    carrier_pin_predicate: pl.Expr | None,
-    prediction_hashes: list[str] | None = None,
-    retired_hashes: frozenset[str] | None = None,
-) -> dict | None:
-    """The validation rank-1 carrier's strategy spec alone."""
-    carrier = _val_rank1_carrier(
-        cs,
-        explorer,
-        label_restriction=label_restriction,
-        rung=rung,
-        carrier_pin_predicate=carrier_pin_predicate,
-        prediction_hashes=prediction_hashes,
-        retired_hashes=retired_hashes,
-    )
-    return carrier["spec"] if carrier else None
-
-
 def _holdout_lineage_for(
     cs: str,
     leader_label: str,
