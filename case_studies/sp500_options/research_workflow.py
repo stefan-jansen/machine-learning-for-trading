@@ -31,11 +31,11 @@ from case_studies.research.execution import ModelExecution
 from case_studies.research.strategy import strategy_warmup_periods
 from case_studies.sp500_options._htm_backtest import (
     _apply_cohort_allocator,
-    _load_option_lifecycle,
     _select_cohorts,
     option_contract_source_identity,
     option_data_paths,
     option_source_identity,
+    prime_option_lifecycle,
 )
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.backtest_loaders import load_backtest_prices_for
@@ -911,9 +911,11 @@ def run_official_backtest_requests(
         if population_name is not None
         else None
     )
-    labels_dir, raw_options_dir = option_data_paths()
-    lifecycle_source = option_source_identity(labels_dir, raw_options_dir)["raw_lifecycle"]
-    lifecycle = _load_option_lifecycle(pl.concat(all_decisions), raw_options_dir)
+    _, raw_options_dir = option_data_paths()
+    # Read the option chain once for the whole run. `prime_option_lifecycle` stores what it
+    # built under the digest of the files it read, and each request below looks up its own
+    # declared digest, so the sharing costs nothing in trust: no frame crosses the boundary.
+    prime_option_lifecycle(pl.concat(all_decisions), raw_options_dir)
     results = []
     rows = []
     for row, prediction, prices, decision, expected_hash in prepared:
@@ -926,11 +928,7 @@ def run_official_backtest_requests(
             chapter=row.get("chapter"),
             decision=decision,
         )
-        result = strategy.run(
-            prices=prices,
-            option_lifecycle=lifecycle,
-            option_lifecycle_source=lifecycle_source,
-        )
+        result = strategy.run(prices=prices)
         if result.hash != expected_hash:
             raise RuntimeError(f"backtest identity changed: {expected_hash} -> {result.hash}")
         results.append(result)

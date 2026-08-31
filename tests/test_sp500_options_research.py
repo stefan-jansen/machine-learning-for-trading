@@ -21,6 +21,7 @@ from case_studies.sp500_options._htm_backtest import (
     _load_option_lifecycle,
     _select_cohorts,
     option_source_identity,
+    prime_option_lifecycle,
     run_htm_daily_mtm,
 )
 from case_studies.sp500_options.research_workflow import (
@@ -468,49 +469,69 @@ def test_supplied_lifecycle_cannot_drop_the_end_of_a_position(tmp_path: Path) ->
         )
 
 
-def test_a_supplied_lifecycle_is_checked_against_the_decision_not_only_its_source_dict(
+def test_a_shared_option_lifecycle_is_reached_by_the_files_it_was_read_from(
     tmp_path: Path,
 ) -> None:
-    """Naming the right files does not establish that the frame beside them came from those files.
+    """A run that shares one loaded chain must not hand the frame to the requests.
 
-    `Strategy.run` compares a hash of the caller's source dictionary against the identity's
-    declared lifecycle digest. That says the caller named the canonical files; nothing in it
-    reads the frame, so an unrelated frame passed alongside a correct dictionary would price
-    the backtest and register under an identity asserting the canonical lifecycle.
+    Handing it over asks each request to trust a frame it did not produce, and nothing inside
+    the request closes that: a source dictionary the same caller supplies checks the label on
+    the box, and comparing against the decision catches an unrelated frame but not a stale one
+    whose entry quotes are unchanged and whose later quotes are not. The frame's own digest
+    cannot go into the identity either, because the identity is fixed when the request is
+    planned, before any frame exists.
 
-    The frame's own digest cannot close this by going into `input_identity`: the identity is
-    fixed when the request is planned, before any frame is loaded, and `run` raises when what it
-    registers differs from the planned hash. So the frame is checked against what the request
-    already knows independently - the decision it is backtesting, whose entry quotes come from
-    the contract-return artifact rather than from this frame.
+    So the frame is reached by the digest of the files it was read from - the same digest the
+    identity records. This pins that a request declaring any other digest, including the one
+    the same directory had before its files changed, gets nothing rather than the wrong frame.
     """
     from case_studies.research.strategy import Strategy
+    from case_studies.sp500_options._htm_backtest import (
+        primed_option_lifecycle,
+        raw_lifecycle_identity,
+    )
+    from case_studies.utils.registry import canonical_json, compute_hash
 
+    labels_dir = tmp_path / "labels"
+    labels_dir.mkdir()
+    _contract_returns().write_parquet(labels_dir / "contract_returns.parquet")
     raw_dir = tmp_path / "raw"
     _write_raw_options(raw_dir)
     cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
-    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
-    checker = Strategy._require_lifecycle_matches_decision
-    holder = SimpleNamespace(decision=SimpleNamespace(load=lambda: cohorts))
 
-    # The canonical frame passes.
-    checker(holder, lifecycle)
+    key = prime_option_lifecycle(cohorts, raw_dir)
 
-    # A frame for a contract the decision does not hold.
-    other_contract = lifecycle.with_columns(strike=pl.col("strike") + 5.0)
-    with pytest.raises(ValueError, match="missing 1 of 1 contracts"):
-        checker(holder, other_contract)
-
-    # A frame whose entry session prices the straddle differently from the decision's own
-    # record. Same contract, same dates, different quotes - exactly what a frame built from
-    # other files looks like, and what the source dictionary cannot detect.
-    altered = lifecycle.with_columns(
-        call_mid=pl.when(pl.col("date") == pl.col("date").min())
-        .then(pl.col("call_mid") + 1.0)
-        .otherwise(pl.col("call_mid"))
+    # The key is exactly what `Strategy._build_spec` writes into the identity, so a request
+    # looks its own declared value up without any separate agreement about how it is formed.
+    assert key == compute_hash(
+        canonical_json(option_source_identity(labels_dir, raw_dir)["raw_lifecycle"])
     )
-    with pytest.raises(ValueError, match="disagrees with this decision's recorded entry quotes"):
-        checker(holder, altered)
+
+    primed = primed_option_lifecycle(key)
+    assert primed is not None
+    assert not primed.is_empty()
+
+    # Nothing is served for a digest these files do not have.
+    assert primed_option_lifecycle("0" * 12) is None
+    assert primed_option_lifecycle(None) is None
+
+    # Change the chain and the identity moves with it, so the frame built from the old files
+    # is unreachable under the new one. That is the stale-frame case, closed by construction
+    # rather than by a check a caller could satisfy with the wrong frame.
+    year_file = next(iter(sorted(raw_dir.glob("year=*.parquet"))))
+    year_file.write_bytes(year_file.read_bytes() + b"\0")
+    changed = raw_lifecycle_identity(raw_dir)
+    assert changed != key
+    assert primed_option_lifecycle(changed) is None
+
+    # Coverage is the one thing the digest does not establish: the frame is loaded for the
+    # union of a run's decisions, and a decision reaching outside that union must refuse
+    # rather than price the contracts it happens to cover.
+    checker = Strategy._require_lifecycle_covers_decision
+    holder = SimpleNamespace(decision=SimpleNamespace(load=lambda: cohorts))
+    checker(holder, primed)
+    with pytest.raises(ValueError, match="missing 1 of 1 contracts"):
+        checker(holder, primed.with_columns(strike=pl.col("strike") + 5.0))
 
 
 def test_typed_contract_rows_match_direct_option_selection(tmp_path: Path) -> None:
@@ -691,18 +712,10 @@ def test_typed_decision_runs_through_registered_option_backtest_path(
         prices=prices,
         signal=signal,
     )
-    lifecycle = _load_option_lifecycle(decision.load(), raw_dir)
-    lifecycle_source = option_source_identity(labels_dir, raw_dir)["raw_lifecycle"]
+    prime_option_lifecycle(decision.load(), raw_dir)
 
     strategy = study.strategy(prediction=prediction, signal=signal, decision=decision)
-    # A frame the identity does not account for cannot be the one the returns are computed from.
-    with pytest.raises(ValueError, match="declare the raw files"):
-        strategy.run(prices=prices, option_lifecycle=lifecycle)
-    result = strategy.run(
-        prices=prices,
-        option_lifecycle=lifecycle,
-        option_lifecycle_source=lifecycle_source,
-    )
+    result = strategy.run(prices=prices)
     spec = result.spec()
 
     assert result.complete
@@ -1186,14 +1199,18 @@ def test_a_liquidation_marks_the_hedge_at_that_sessions_own_close(tmp_path: Path
     convention.
 
     The selected contract stops being quoted; a second contract on the same underlying, which
-    the strategy does not hold, keeps quoting. That is where the close comes from, and it is
-    how the chain is actually shaped - the underlying price is written on every contract.
+    the strategy does not hold, keeps quoting for one more session. That is where the close
+    comes from, and it is how the chain is actually shaped - the underlying price is written
+    on every contract. The name leaves the chain before its expiration session, so no
+    settlement price exists there and the position ends at the liquidation instead.
     """
     raw_dir = tmp_path / "raw"
     _write_raw_options(raw_dir)
     chain = pl.read_parquet(raw_dir / "year=2024.parquet")
     # A contract on the same name at a strike the strategy never selects.
-    neighbour = chain.filter(pl.col("symbol") == "A").with_columns(strike=pl.lit(105.0))
+    neighbour = chain.filter(
+        (pl.col("symbol") == "A") & (pl.col("date") < date(2024, 1, 10))
+    ).with_columns(strike=pl.lit(105.0))
     runner_up = chain.with_columns(symbol=pl.lit("B"))
     held = chain.filter(pl.col("date") < date(2024, 1, 9))
     pl.concat([held, neighbour, runner_up]).write_parquet(raw_dir / "year=2024.parquet")
@@ -1210,6 +1227,47 @@ def test_a_liquidation_marks_the_hedge_at_that_sessions_own_close(tmp_path: Path
     assert ended.get_column("underlying_price").item() == pytest.approx(102.0)
     assert ended.get_column("call_mid").item() == pytest.approx(6.0)
     assert ended.get_column("put_mid").item() == pytest.approx(4.0)
+
+
+def test_an_unquoted_expiration_session_still_settles_against_the_underlying(
+    tmp_path: Path,
+) -> None:
+    """A straddle held to expiry settles at intrinsic whether or not its legs were quoted.
+
+    Intrinsic value is a function of the underlying close and the strike, so a vendor that
+    stopped quoting the contract before its expiration session withholds nothing the
+    settlement needs. Reading the settlement price only off a quoted leg sent the position to
+    the liquidation path instead, which books the exit at the previous session's option mark -
+    a mark taken before the move the position was held through, and one nobody could have
+    traded at.
+
+    The held contract goes unquoted on its expiration session; a contract on the same name at
+    a strike the strategy never selects still carries that session's underlying close.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    chain = pl.read_parquet(raw_dir / "year=2024.parquet")
+    neighbour = chain.filter(pl.col("symbol") == "A").with_columns(strike=pl.lit(105.0))
+    runner_up = chain.with_columns(symbol=pl.lit("B"))
+    held = chain.filter(pl.col("date") < date(2024, 1, 10))
+    pl.concat([held, neighbour, runner_up]).write_parquet(raw_dir / "year=2024.parquet")
+    predictions, contract_returns = _two_names()
+
+    cohorts = _select_cohorts(predictions, contract_returns, top_k=1, raw_options_dir=raw_dir)
+    assert cohorts.get_column("symbol").to_list() == ["A"]
+
+    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
+    assert lifecycle.filter(pl.col("liquidated")).is_empty()
+    settled = lifecycle.filter(pl.col("cash_settled"))
+    assert settled.get_column("date").to_list() == [date(2024, 1, 10)]
+    # The expiration close is 101.0 against a strike of 100.0, so the call settles at 1.0 and
+    # the put at nothing. The previous session's marks - 5.5 and 3.5 - are what the
+    # liquidation path would have booked.
+    assert settled.get_column("underlying_price").item() == pytest.approx(101.0)
+    assert settled.get_column("call_mid").item() == pytest.approx(1.0)
+    assert settled.get_column("put_mid").item() == pytest.approx(0.0)
+    assert settled.get_column("call_delta").item() == pytest.approx(0.0)
+    assert settled.get_column("put_delta").item() == pytest.approx(0.0)
 
 
 def test_a_position_survives_an_interior_session_nobody_quoted(tmp_path: Path) -> None:
@@ -1786,8 +1844,7 @@ def test_an_unaccounted_lifecycle_refuses_before_any_conformal_width_is_written(
         )
         db.commit()
     holdout_decision = publish_short_straddle_decisions(holdout, prices=prices, signal=signal)
-    lifecycle = _load_option_lifecycle(holdout_decision.load(), raw_dir)
-    lifecycle_source = option_source_identity(labels_dir, raw_dir)["raw_lifecycle"]
+    lifecycle_key = prime_option_lifecycle(holdout_decision.load(), raw_dir)
 
     def _widths(*args, **kwargs):
         raise _WidthsWritten
@@ -1804,13 +1861,23 @@ def test_an_unaccounted_lifecycle_refuses_before_any_conformal_width_is_written(
         allocation=allocation,
     )
 
-    with pytest.raises(ValueError, match="declare the raw files"):
-        strategy.run(option_lifecycle=lifecycle)
+    # A primed frame that does not span this decision's contracts must refuse before the
+    # holdout widths are written, not after: the widths land in the registry, so a run that
+    # reaches them and then refuses has already left a partial artifact behind.
+    from case_studies.sp500_options import _htm_backtest as _htm
+
+    covering = _htm._PRIMED_LIFECYCLE[lifecycle_key]
+    _htm._PRIMED_LIFECYCLE[lifecycle_key] = covering.with_columns(strike=pl.col("strike") + 5.0)
+    try:
+        with pytest.raises(ValueError, match="contracts this decision holds"):
+            strategy.run()
+    finally:
+        _htm._PRIMED_LIFECYCLE[lifecycle_key] = covering
 
     # The widths branch is live in this setup, so the refusal above ran ahead of it rather
     # than the branch simply never being reached.
     with pytest.raises(_WidthsWritten):
-        strategy.run(option_lifecycle=lifecycle, option_lifecycle_source=lifecycle_source)
+        strategy.run()
 
 
 def test_the_research_workflow_imports_without_torch() -> None:

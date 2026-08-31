@@ -173,6 +173,53 @@ def option_source_identity(labels_dir: Path, raw_options_dir: Path) -> dict[str,
     }
 
 
+def raw_lifecycle_identity(raw_options_dir: Path) -> str:
+    """Digest the raw lifecycle files exactly as a backtest identity records them."""
+    from case_studies.utils.registry import canonical_json, compute_hash
+
+    raw_files = sorted(raw_options_dir.glob("year=*.parquet"))
+    if not raw_files:
+        raise FileNotFoundError(f"raw option lifecycle directory is empty: {raw_options_dir}")
+    return compute_hash(canonical_json({path.name: _digest_file(path) for path in raw_files}))
+
+
+_PRIMED_LIFECYCLE: dict[str, pl.DataFrame] = {}
+
+
+def prime_option_lifecycle(cohorts: pl.DataFrame, raw_options_dir: Path) -> str:
+    """Load the lifecycle once for a run of many requests, keyed by the files it was read from.
+
+    A run that backtests hundreds of variants over one decision set should read the option
+    chain once. The obvious way to arrange that is to load the frame and hand it to each
+    request, and it is the wrong way: the request then has to trust a frame it did not
+    produce. No check inside the request closes that. Comparing the frame against a source
+    dictionary the same caller supplies checks the label on the box. Comparing it against the
+    decision catches an unrelated frame but not a stale one, whose entry quotes are unchanged
+    and whose later quotes, deltas and settlement rows are not. The frame's own digest cannot
+    go into the identity either, because the identity is fixed when the request is planned,
+    before any frame exists.
+
+    So no frame is handed over. The loader reads the raw files, digests exactly those files,
+    and stores what it built under that digest. A request looks up its own declared digest and
+    gets either the frame those files produce or nothing at all, and nothing a caller passes
+    can make it get anything else.
+    """
+    key = raw_lifecycle_identity(raw_options_dir)
+    frame = _load_option_lifecycle(cohorts, raw_options_dir)
+    if raw_lifecycle_identity(raw_options_dir) != key:
+        raise RuntimeError("the raw option lifecycle files changed while they were being read")
+    _PRIMED_LIFECYCLE.clear()
+    _PRIMED_LIFECYCLE[key] = frame
+    return key
+
+
+def primed_option_lifecycle(identity: str | None) -> pl.DataFrame | None:
+    """Return the primed lifecycle for these exact raw files, or None to load canonically."""
+    if identity is None:
+        return None
+    return _PRIMED_LIFECYCLE.get(identity)
+
+
 def _quote_is_ordered() -> pl.Expr:
     """An ask at or above its bid, everywhere the quote is used to mark the straddle.
 
@@ -766,8 +813,23 @@ def _load_option_lifecycle(
         .with_columns(cash_settled=pl.lit(False), liquidated=pl.lit(False))
     )
 
+    contract_keys = ["symbol", "strike", "expiration"]
+    underlying_panel = (
+        pl.concat(underlyings)
+        .unique(subset=["date", "symbol"])
+        .filter(pl.col("underlying_price").is_not_null())
+        if underlyings
+        else pl.DataFrame(
+            schema={
+                "date": paired.schema["date"],
+                "symbol": pl.Utf8,
+                "underlying_price": pl.Float64,
+            }
+        )
+    )
+
     at_expiry = quoted.filter(pl.col("date") == pl.col("expiration"))
-    expiry_underlying = at_expiry.group_by(["symbol", "strike", "expiration"]).agg(
+    expiry_underlying = at_expiry.group_by(contract_keys).agg(
         pl.col("underlying_price").min().alias("_underlying_low"),
         pl.col("underlying_price").max().alias("_underlying_high"),
     )
@@ -775,13 +837,36 @@ def _load_option_lifecycle(
         (pl.col("_underlying_high") - pl.col("_underlying_low")).abs() > 1e-10
     ).height:
         raise ValueError("option legs disagree on the underlying settlement price at expiration")
+    # A straddle held to expiry settles at the intrinsic value of its legs, and intrinsic value
+    # is a function of the underlying close and the strike. Neither leg has to be quoted for
+    # that number to exist. Reading the settlement price only off a quoted leg made an
+    # expiration session where the vendor quoted neither leg fall through to the liquidation
+    # path below, which books the exit at the previous session's option mark - a mark that
+    # predates the move the position was held through. Where the underlying closed on the
+    # expiration session, the contract settles on it.
+    settlement_underlying = pl.concat(
+        [
+            expiry_underlying.select(
+                *contract_keys, pl.col("_underlying_low").alias("underlying_price")
+            ),
+            contracts.join(expiry_underlying.select(contract_keys), on=contract_keys, how="anti")
+            .join(
+                underlying_panel.select(
+                    pl.col("date").alias("expiration"), "symbol", "underlying_price"
+                ),
+                on=["symbol", "expiration"],
+                how="inner",
+            )
+            .select(*contract_keys, "underlying_price"),
+        ]
+    )
     settled = (
-        expiry_underlying.select(
+        settlement_underlying.select(
             pl.col("expiration").alias("date"),
             "symbol",
             "strike",
             "expiration",
-            pl.col("_underlying_low").alias("underlying_price"),
+            "underlying_price",
         )
         .with_columns(
             call_mid=(pl.col("underlying_price") - pl.col("strike")).clip(lower_bound=0.0),
@@ -804,18 +889,6 @@ def _load_option_lifecycle(
         .select(*quote_columns, "cash_settled", "liquidated")
     )
 
-    contract_keys = ["symbol", "strike", "expiration"]
-    underlying_panel = (
-        pl.concat(underlyings).unique(subset=["date", "symbol"])
-        if underlyings
-        else pl.DataFrame(
-            schema={
-                "date": paired.schema["date"],
-                "symbol": pl.Utf8,
-                "underlying_price": pl.Float64,
-            }
-        )
-    )
     sessions = (
         pl.concat(calendars)
         .unique()

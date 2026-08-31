@@ -625,13 +625,14 @@ class Strategy:
         spec = self.resolve(prices=prices)
         return backtest_hash_from_parts(self.prediction.hash, spec, identity_version=2)
 
-    def _require_lifecycle_matches_decision(self, option_lifecycle: pl.DataFrame) -> None:
-        """Refuse a supplied lifecycle that is not the one this request's decision describes.
+    def _require_lifecycle_covers_decision(self, option_lifecycle: pl.DataFrame) -> None:
+        """Refuse a primed lifecycle that does not span the contracts this decision holds.
 
-        Cheap on purpose: it joins the decision this backtest already loads against the frame,
-        rather than rebuilding the canonical lifecycle to compare with - rebuilding is the cost
-        the ``option_lifecycle`` parameter exists to avoid, so paying it here would make the
-        parameter pointless.
+        The frame is trustworthy by construction - it is looked up by the digest of the files
+        this backtest's identity records, so it is the one those files produce. What is not
+        guaranteed is coverage: it was loaded for the union of a run's decisions, and a request
+        whose decision reaches outside that union would price the contracts it does cover and
+        silently drop the rest.
         """
         if self.decision is None:
             return
@@ -643,44 +644,20 @@ class Strategy:
         missing = wanted.join(option_lifecycle.select(keys).unique(), on=keys, how="anti")
         if not missing.is_empty():
             raise ValueError(
-                f"the supplied option lifecycle is missing {missing.height} of "
+                f"the primed option lifecycle is missing {missing.height} of "
                 f"{wanted.height} contracts this decision holds "
                 f"(first: {missing.head(3).to_dicts()})"
             )
-        quote_columns = {"entry_date", "entry_call_mid", "entry_put_mid"}
-        if not quote_columns <= set(decisions.columns):
-            return
-        entries = decisions.select(*keys, "entry_date", "entry_call_mid", "entry_put_mid").join(
-            option_lifecycle.select(*keys, "date", "call_mid", "put_mid"),
-            left_on=[*keys, "entry_date"],
-            right_on=[*keys, "date"],
-            how="inner",
-        )
-        disagreeing = entries.filter(
-            ((pl.col("call_mid") - pl.col("entry_call_mid")).abs() > 1e-10)
-            | ((pl.col("put_mid") - pl.col("entry_put_mid")).abs() > 1e-10)
-        )
-        if not disagreeing.is_empty():
-            raise ValueError(
-                f"the supplied option lifecycle disagrees with this decision's recorded entry "
-                f"quotes on {disagreeing.height} contracts, so it was not built from the files "
-                f"the identity declares (first: {disagreeing.head(3).to_dicts()})"
-            )
 
-    def run(
-        self,
-        *,
-        prices: pl.DataFrame | None = None,
-        option_lifecycle: pl.DataFrame | None = None,
-        option_lifecycle_source: dict[str, Any] | None = None,
-    ) -> BacktestResult:
+    def run(self, *, prices: pl.DataFrame | None = None) -> BacktestResult:
         """Execute this strategy and register the result.
 
-        ``option_lifecycle`` lets a caller running many requests load the paired option quotes
-        once instead of per request. It changes the returns, while the identity records the
-        digest of the canonical lifecycle files, so ``option_lifecycle_source`` has to name the
-        files the frame was built from: without it, two different lifecycles register different
-        results under one backtest hash.
+        A caller running many option requests over one decision set primes the shared option
+        lifecycle first, with
+        :func:`case_studies.sp500_options._htm_backtest.prime_option_lifecycle`. This method
+        looks that frame up by the digest its own identity records, so the frame it prices with
+        is always the one the declared files produce; there is no frame parameter to pass a
+        different one through.
         """
         self.study.require_writable()
         if self.split == "holdout" and prices is not None:
@@ -706,36 +683,15 @@ class Strategy:
         )
         case_config = get_backtest_config(self.study.case_study)
         spec = self._build_spec(resolved_prices, case_config, contract_specs)
-        if option_lifecycle is not None:
-            declared = spec.get("input_identity", {}).get("option_lifecycle")
-            supplied = (
-                compute_hash(canonical_json(option_lifecycle_source))
-                if option_lifecycle_source is not None
-                else None
+        option_lifecycle = None
+        if self.study.case_study == "sp500_options" and self.label == "ret_to_expiry":
+            from case_studies.sp500_options._htm_backtest import primed_option_lifecycle
+
+            option_lifecycle = primed_option_lifecycle(
+                spec.get("input_identity", {}).get("option_lifecycle")
             )
-            if declared is None or supplied != declared:
-                raise ValueError(
-                    "a supplied option lifecycle must declare the raw files it was built from, "
-                    "and they must be the ones this backtest's identity records"
-                )
-            # The declaration above is about the FILES. It says the caller named the right
-            # sources; it cannot say the frame beside it was built from them, because nothing
-            # here reads the frame. An unrelated frame passed with a correct source dictionary
-            # would price this backtest and register under an identity asserting the canonical
-            # lifecycle - the label on the box, checked, and the box never opened.
-            #
-            # The frame's own digest cannot go into `input_identity` to close that. The
-            # identity is fixed when the request is planned, before any caller has loaded a
-            # frame - `plan_backtests` returns the expected hash, an OfficialPopulation is
-            # created from those hashes, and `run` raises if what it registers differs. A field
-            # only computable here would make every planned hash wrong.
-            #
-            # So the frame is checked against something this request already knows
-            # independently: the decision it is backtesting. Every contract must be present,
-            # and the entry-session mids must equal the entry quotes the decision recorded when
-            # it was written. Those quotes come from the contract-return artifact, not from
-            # this frame, so a frame built from other files disagrees with them.
-            self._require_lifecycle_matches_decision(option_lifecycle)
+            if option_lifecycle is not None:
+                self._require_lifecycle_covers_decision(option_lifecycle)
         allocation = spec.get("strategy", {}).get("allocation", {})
         if self.split == "holdout" and allocation.get("method") == "conformal_weighted":
             lock_record = self._active_lock_record()
