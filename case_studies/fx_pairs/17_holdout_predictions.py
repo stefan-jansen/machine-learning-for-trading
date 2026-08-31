@@ -20,16 +20,19 @@
 # registers its predictions. It writes predictions and nothing else: the backtest is
 # `18_holdout_backtest`, and what any of it is worth is `19_strategy_analysis`.
 #
-# Selection is not a parameter. The candidate set frozen by `15_risk_management` is immutable, and
-# its highest validation backtest Sharpe is read from that set rather than supplied here, so this
-# notebook cannot select a different configuration than the one already on record.
+# Selection is not a parameter and is not made here. `resolve_solvent_carrier` reads the
+# highest-Sharpe registered validation backtest across the baseline, allocation and risk-overlay
+# stages, restricted to runs that stayed solvent, so this notebook cannot select a configuration
+# the validation stages did not already rank first.
 #
-# The holdout is not a one-shot transaction. An earlier design took an authorization lock at this
-# point and spent it, which made the holdout unrepeatable by construction and therefore unfixable
-# whenever anything upstream turned out to be wrong: the fix needed a retrain the lock forbade.
-# What protects the holdout is that selection happens upstream against an immutable set, so
-# re-running this notebook re-derives the same training identity and reuses the registered result
-# instead of producing a second one.
+# The holdout is not a one-shot transaction and nothing here pre-registers it. There is no lock,
+# no seal and no gate: the whole rule is retrain the selected configuration on everything up to
+# the holdout window, predict, and backtest that same configuration on the result. Re-running is
+# therefore ordinary. A reader who runs it five hundred times and quotes the best number has
+# produced something uninterpretable, and that is a property of what they did rather than
+# something the software can prevent - the earlier design tried to, and bought
+# unfixability: a holdout found to be wrong after a bug fix could not be corrected, because the
+# lock was by construction the one artifact that could not be revised.
 #
 # **Learning objectives**
 #
@@ -39,7 +42,8 @@
 #
 # **Book reference**: Chapters 16-20
 #
-# **Prerequisite**: `16_costs`, and the candidate set `15_risk_management` freezes.
+# **Prerequisite**: `16_costs`. The carrier is resolved from the registered validation
+# backtests, so every stage that registers one must have run.
 
 # %%
 """Refit the validation-selected FX configuration on the holdout interval."""
@@ -47,11 +51,9 @@
 import polars as pl
 
 from case_studies.research import open_study
-from case_studies.research.holdout import resolve_holdout_selection
-from case_studies.research.models import (
-    reconstruct_locked_model_request,
-    validate_locked_model_run,
-)
+from case_studies.research.holdout import build_holdout_training_spec
+from case_studies.research.models import reconstruct_locked_model_request
+from case_studies.utils.strategy_analysis import resolve_solvent_carrier
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "fx_pairs"
@@ -75,38 +77,62 @@ CANDIDATE_SET_NAME = "fx_pairs:holdout-candidates"
 
 # %% tags=["results"]
 study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
-selection = resolve_holdout_selection(study, candidate_set_name=CANDIDATE_SET_NAME)
 
-holdout_cv = selection.holdout_training_spec["computation"]["cv"]
-holdout_fold = holdout_cv["folds"][-1]
+# The carrier is the highest-Sharpe registered VALIDATION backtest across the baseline,
+# allocation and risk-overlay stages, restricted to runs that stayed solvent. It is resolved
+# from the registry rather than named here, so this notebook cannot select a configuration that
+# the validation stages did not rank first.
+carrier = resolve_solvent_carrier(CASE_STUDY_ID)
+validation_prediction = study.results.open(carrier["val_prediction_hash"])
+prediction_record = validation_prediction.registry_record()
+CHECKPOINT_KIND = prediction_record["checkpoint_kind"]
+CHECKPOINT_VALUE = prediction_record["checkpoint_value"]
+
+# The label the carrier was fitted on decides which observation grid the holdout interval is
+# stepped back along, so it is read from the carrier rather than assumed. FX carries three
+# labels on one daily grid, which is exactly the coincidence that would let an assumption here
+# survive untested.
+observation_timeline = (
+    pl.read_parquet(study.root / "labels" / f"{carrier['label']}.parquet")
+    .get_column("timestamp")
+    .unique()
+    .sort()
+    .to_list()
+)
+validation_spec = study.results.open(carrier["training_hash"]).spec()
+holdout_spec = build_holdout_training_spec(
+    study,
+    validation_spec,
+    timeline=observation_timeline,
+    case_study=CASE_STUDY_ID,
+)
+holdout_fold = holdout_spec["computation"]["cv"]["folds"][0]
 
 pl.DataFrame(
     {
         "field": [
-            "candidate set",
-            "candidate count",
-            "selected validation backtest",
-            "selected prediction",
-            "selected training",
-            "label",
+            "carrier backtest",
+            "carrier stage",
+            "validation Sharpe",
             "family",
             "configuration",
+            "label",
             "checkpoint",
-            "holdout training identity",
+            "validation training",
+            "validation prediction",
             "holdout train window",
             "holdout evaluation window",
         ],
         "value": [
-            selection.candidate_set.hash,
-            str(len(selection.candidate_set.members)),
-            selection.validation_backtest.hash,
-            selection.validation_prediction.hash,
-            selection.validation_training.hash,
-            selection.label,
-            str(selection.validation_training.spec()["family"]),
-            str(selection.validation_training.spec()["config_name"]),
-            f"{selection.checkpoint_kind}={selection.checkpoint_value}",
-            selection.holdout_training_hash,
+            carrier["val_backtest_hash"],
+            str(carrier["val_stage"]),
+            f"{carrier['val_sharpe']:.4f}",
+            str(carrier["family"]),
+            str(carrier["config_name"]),
+            str(carrier["label"]),
+            f"{CHECKPOINT_KIND}={CHECKPOINT_VALUE}",
+            str(carrier["training_hash"]),
+            validation_prediction.hash,
             f"{holdout_fold['train_start']} to {holdout_fold['train_end']}",
             f"{holdout_fold['val_start']} to {holdout_fold['val_end']}",
         ],
@@ -114,75 +140,52 @@ pl.DataFrame(
 )
 
 # %% [markdown]
-# ## Refit the selected configuration on the holdout fold
+# ## Refit the carrier on the holdout fold
 #
 # The request is reconstructed from the immutable validation specification with only the fold
-# geometry re-keyed, so the holdout model differs from the validation model in what it was fitted
-# on and in nothing else. The runner publishes the selected checkpoint alone: a holdout refit that
-# published its whole checkpoint schedule would hand the next notebook a choice, and choosing
-# among holdout checkpoints is selection on the holdout under another name.
+# geometry re-keyed, so the holdout model differs from the validation model in what it was
+# fitted on and in nothing else. It publishes the selected checkpoint alone: a holdout refit
+# that published its whole checkpoint schedule would hand the next notebook a choice, and
+# choosing among holdout checkpoints is selection on the holdout under another name.
 #
-# The fitted state is validated on every run, not only on the run that produced it. A second run
-# reuses the registered identity rather than refitting, and accepting that on the strength of the
-# registry row alone would skip the one check worth keeping: that the weights on disk are what
-# this specification produces, with fold state that agrees.
+# The one thing checked afterwards that a specification cannot state about itself is that this
+# is a refit at all. A holdout training identity equal to the validation one means the fold
+# re-keying changed nothing, and the model is a validation fit predicting forward over a later
+# window rather than a model trained up to it.
 
 # %% tags=["results"]
-# The request is reconstructed whether or not the refit has to run, because the fitted state is
-# validated on both paths. A reused prediction is persisted state from an earlier process, and
-# accepting it because a row exists would trust exactly the thing worth checking: that the
-# weights on disk are the ones this specification produces, with fold state that agrees. The
-# runner itself reuses a complete identity rather than refitting, so reconstructing costs a
-# resolution, not a training run.
 request = reconstruct_locked_model_request(
     study,
-    selection.holdout_training_spec,
-    checkpoint_kind=selection.checkpoint_kind,
-    checkpoint_value=selection.checkpoint_value,
+    holdout_spec,
+    checkpoint_kind=CHECKPOINT_KIND,
+    checkpoint_value=CHECKPOINT_VALUE,
 )
-existing = selection.holdout_prediction
 model_run = request.run()
-if model_run.training.hash != selection.holdout_training_hash:
+if model_run.training.hash == carrier["training_hash"]:
     raise RuntimeError(
-        f"the holdout refit produced training {model_run.training.hash}, "
-        f"not the derived identity {selection.holdout_training_hash}"
+        f"the holdout refit produced the validation training identity "
+        f"{carrier['training_hash']}, so it did not refit"
     )
 if len(model_run.predictions) != 1:
     raise RuntimeError(
-        f"the holdout refit published {len(model_run.predictions)} predictions; "
+        f"the holdout refit published {len(model_run.predictions)} prediction sets; "
         "only the selected checkpoint may be published"
     )
 prediction = model_run.predictions[0]
-fitted_state_digest = validate_locked_model_run(request, model_run)
-if not fitted_state_digest:
-    raise RuntimeError("the holdout model produced no fitted-state digest")
-if existing is not None and existing.hash != prediction.hash:
-    raise RuntimeError(
-        f"holdout prediction {existing.hash} was already registered for training "
-        f"{selection.holdout_training_hash}, but this run resolved {prediction.hash}"
-    )
-print(
-    f"Holdout prediction {prediction.hash} "
-    f"{'reused' if existing is not None else 'refitted and registered'}; "
-    f"fitted state {fitted_state_digest[:12]}."
-)
 
 record = prediction.registry_record()
 if record["split"] != "holdout":
     raise RuntimeError(f"the holdout refit published a {record['split']!r} prediction")
-if (
-    record["checkpoint_kind"] != selection.checkpoint_kind
-    or record["checkpoint_value"] != selection.checkpoint_value
-):
+if record["checkpoint_kind"] != CHECKPOINT_KIND or record["checkpoint_value"] != CHECKPOINT_VALUE:
     raise RuntimeError(
         f"the holdout prediction is at checkpoint {record['checkpoint_kind']}="
-        f"{record['checkpoint_value']}, not the selected "
-        f"{selection.checkpoint_kind}={selection.checkpoint_value}"
+        f"{record['checkpoint_value']}, not the carrier's {CHECKPOINT_KIND}={CHECKPOINT_VALUE}"
     )
 if not prediction.complete:
     raise RuntimeError("the holdout prediction is incomplete")
-if prediction.lineage()["training_spec"] != selection.holdout_training_spec:
-    raise RuntimeError("the holdout prediction was fitted against a different training spec")
+
+print(f"Holdout training run:   {model_run.training.hash}")
+print(f"Holdout prediction set: {prediction.hash}")
 
 # %% [markdown]
 # ## What the holdout refit covers

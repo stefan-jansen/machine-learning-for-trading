@@ -16,19 +16,18 @@
 # %% [markdown]
 # # Holdout Backtest - FX Pairs
 #
-# This notebook replays the selected validation strategy against the holdout predictions
+# This notebook runs the carrier's own backtest configuration against the holdout predictions
 # `17_holdout_predictions` registered. It changes nothing about the strategy: signal, allocation,
-# risk controls, rebalance rule, costs and account configuration are the resolved specification of
-# the selected validation backtest, and the replay refuses if reconstructing them changes any
-# field the comparison depends on.
+# risk controls, rebalance rule, costs and account configuration are the carrier's registered
+# specification with only the prediction set re-pointed.
 #
-# Keeping this separate from the refit is what makes the holdout diagnosable. When the two ran as
-# one transaction, a failure in the backtest half discarded the model half with it, and the
+# Keeping this separate from the refit is what makes the holdout diagnosable. While the two ran
+# as one transaction, a failure in the backtest half discarded the model half with it, and the
 # retrain needed to investigate was the exact thing the transaction forbade.
 #
 # **Learning objectives**
 #
-# - Replay one resolved strategy specification against a new prediction set.
+# - Replay one registered strategy specification against a new prediction set.
 # - Distinguish reproducing a strategy from re-choosing one.
 # - Read a holdout result without letting it revise anything upstream.
 #
@@ -37,129 +36,156 @@
 # **Prerequisite**: `17_holdout_predictions`.
 
 # %%
-"""Replay the selected FX strategy against its holdout predictions."""
+"""Run the carrier's registered strategy against its holdout predictions."""
+
+import json
+import sqlite3
 
 import polars as pl
 
 from case_studies.research import open_study
-from case_studies.research.holdout import resolve_holdout_selection
-from case_studies.utils.registry import load_backtest_metrics
+from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
+from case_studies.utils.backtest_presets import ensure_backtest_spec
+from case_studies.utils.backtest_runner import run_backtest
+from case_studies.utils.registry import load_backtest_metrics, read_predictions
+from case_studies.utils.strategy_analysis import resolve_solvent_carrier
+from utils.paths import get_case_study_dir
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "fx_pairs"
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
-CANDIDATE_SET_NAME = "fx_pairs:holdout-candidates"
 
 # %% [markdown]
-# ## Resolve the same selection, and require its holdout predictions
+# ## Resolve the same carrier, and require its holdout predictions
 #
-# The selection is re-derived here rather than handed over from the previous notebook. The
-# derivation is pure and the candidate set is immutable, so it resolves the same configuration;
-# passing it through a file or a parameter would add a way for the two notebooks to disagree
-# without either of them being wrong about anything it did itself.
+# The carrier is re-resolved here rather than handed over from the previous notebook. The
+# resolution is a query against registered validation backtests, so it returns the same
+# configuration; passing it through a file or a parameter would add a way for the two notebooks
+# to disagree without either being wrong about anything it did itself.
 #
 # What this notebook cannot derive is whether the refit has run. When it has not, the missing
 # result is named rather than reported as an empty query.
 
 # %% tags=["results"]
 study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
-selection = resolve_holdout_selection(study, candidate_set_name=CANDIDATE_SET_NAME)
+CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
+bt_config = get_backtest_config(CASE_STUDY_ID)
 
-holdout_prediction = selection.holdout_prediction
-if holdout_prediction is None:
+carrier = resolve_solvent_carrier(CASE_STUDY_ID)
+LABEL = str(carrier["label"])
+validation_record = study.results.open(carrier["val_prediction_hash"]).registry_record()
+
+# The holdout prediction is matched on the carrier's CONFIGURATION rather than on its training
+# hash, because a genuine retrain never shares the validation model's training identity - that
+# is what makes it a retrain. Family, configuration, label and checkpoint are what carry across.
+with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as _conn:
+    _rows = _conn.execute(
+        """
+        SELECT p.prediction_hash
+        FROM prediction_sets p
+        JOIN training_runs t ON t.training_hash = p.training_hash
+        WHERE p.split = 'holdout'
+          AND p.checkpoint_kind IS ?
+          AND p.checkpoint_value IS ?
+          AND t.family = ?
+          AND t.config_name = ?
+          AND t.label = ?
+        ORDER BY p.prediction_hash
+        """,
+        (
+            validation_record["checkpoint_kind"],
+            validation_record["checkpoint_value"],
+            carrier["family"],
+            carrier["config_name"],
+            LABEL,
+        ),
+    ).fetchall()
+
+if not _rows:
     raise RuntimeError(
-        f"no holdout prediction is registered for training {selection.holdout_training_hash} "
-        f"at checkpoint {selection.checkpoint_kind}={selection.checkpoint_value}; "
+        f"no holdout prediction set is registered for {carrier['family']}/"
+        f"{carrier['config_name']} on {LABEL} at checkpoint "
+        f"{validation_record['checkpoint_kind']}={validation_record['checkpoint_value']}; "
         "run 17_holdout_predictions first"
     )
-if not holdout_prediction.complete:
-    raise RuntimeError(f"holdout prediction {holdout_prediction.hash} is incomplete")
+if len(_rows) > 1:
+    raise RuntimeError(
+        f"the carrier's configuration resolves {len(_rows)} holdout prediction sets: "
+        f"{sorted(row[0] for row in _rows)}. One configuration has one holdout generation; "
+        "delete the superseded one rather than choosing between them here."
+    )
+HOLDOUT_PREDICTION_HASH = _rows[0][0]
 
 pl.DataFrame(
     {
         "field": [
-            "candidate set",
-            "selected validation backtest",
-            "validation prediction",
-            "holdout training",
-            "holdout prediction",
+            "carrier backtest",
+            "carrier stage",
+            "family",
+            "configuration",
             "label",
+            "validation prediction",
+            "holdout prediction",
         ],
         "value": [
-            selection.candidate_set.hash,
-            selection.validation_backtest.hash,
-            selection.validation_prediction.hash,
-            selection.holdout_training_hash,
-            holdout_prediction.hash,
-            selection.label,
+            str(carrier["val_backtest_hash"]),
+            str(carrier["val_stage"]),
+            str(carrier["family"]),
+            str(carrier["config_name"]),
+            LABEL,
+            str(carrier["val_prediction_hash"]),
+            HOLDOUT_PREDICTION_HASH,
         ],
     }
 )
 
 # %% [markdown]
-# ## Replay the strategy on the holdout
+# ## Run the carrier's configuration on the holdout
 #
-# The replay reconstructs the strategy from the selected validation backtest's own specification
-# and refuses if the reconstruction changes any field the comparison rests on. That check is the
-# point of the notebook: a holdout number is only comparable to its validation number when the
-# only difference between the two runs is the interval they were run over.
-#
-# Re-running is safe. The backtest identity is a function of the prediction and the resolved
-# specification, so a second run resolves the registered result and returns it rather than
-# writing a second one.
+# The specification is the carrier's own registered one with the prediction set re-pointed and
+# the chapter re-tagged. Nothing else is rebuilt from this notebook's defaults, because a
+# holdout number is only comparable to its validation number when the only difference between
+# the two runs is the interval they cover.
 
 # %% tags=["results"]
-# The replay runs unconditionally rather than being skipped when a backtest is already
-# registered. Resolving one by lineage cannot stand in for running it: the identity a replay
-# produces includes the digest of the price panel it actually loaded, and the projection a
-# lineage lookup can compare excludes that digest by construction - it has to, because prices
-# are the one input that legitimately differs between the validation and holdout windows. So a
-# backtest built from a superseded price artifact matches the lineage and would be reported as
-# this holdout's result. `run` resolves the registered result by full identity and returns it
-# when it is complete, so this is idempotent and cheap when nothing has changed, and it writes
-# a new result when the prices did.
-_already = selection.holdout_backtest
-holdout_backtest = selection.strategy_replay().run(holdout_prediction)
-if _already is not None and _already.hash != holdout_backtest.hash:
-    raise RuntimeError(
-        f"holdout backtest {_already.hash} was registered for this lineage, but replaying it "
-        f"now produces {holdout_backtest.hash}; an input the lineage does not cover has "
-        "changed, most likely the price artifact"
-    )
-print(
-    f"Holdout backtest {holdout_backtest.hash} "
-    f"{'resolved by identity' if _already is not None else 'produced'}."
-)
+prices = load_backtest_prices_for(CASE_STUDY_ID, LABEL, split="holdout")
+predictions = read_predictions(CASE_STUDY_ID, HOLDOUT_PREDICTION_HASH)
+print(f"Prices: {len(prices):,} rows, {prices['symbol'].n_unique()} pairs")
+print(f"Predictions: {predictions.height:,} rows, {predictions['timestamp'].n_unique()} sessions")
 
-record = holdout_backtest.registry_record()
-if record["prediction_hash"] != holdout_prediction.hash:
-    raise RuntimeError("the holdout backtest does not reference the holdout prediction")
-if not holdout_backtest.complete:
-    raise RuntimeError("the holdout backtest is incomplete")
-# The split is a property of the prediction the backtest ran on, so it is read from the catalog
-# view rather than from the `backtest_runs` row, which has no split column of its own.
-_catalog = study.backtests.table().filter(pl.col("backtest_hash") == holdout_backtest.hash)
-if _catalog.height != 1:
-    raise RuntimeError(f"backtest {holdout_backtest.hash} has {_catalog.height} catalog rows")
-_split = _catalog.get_column("split").item()
-if _split != "holdout":
-    raise RuntimeError(f"the replay published a {_split!r} backtest")
+spec = ensure_backtest_spec(
+    CASE_STUDY_ID,
+    bt_config,
+    json.loads(carrier["spec_json"]),
+    prices=prices,
+    prediction_hash=HOLDOUT_PREDICTION_HASH,
+    initial_cash=bt_config.initial_cash,
+)
+spec["chapter"] = "ch20"
+
+result = run_backtest(
+    CASE_STUDY_ID,
+    HOLDOUT_PREDICTION_HASH,
+    spec,
+    prices=prices,
+    predictions=predictions,
+    label=LABEL,
+    register=True,
+    initial_cash=bt_config.initial_cash,
+    calendar=bt_config.calendar,
+)
+print(f"Holdout backtest: {result.backtest_hash}")
 
 # %% [markdown]
 # ## Validation and holdout, side by side
 #
-# Both rows are printed here without interpretation. Whether the difference between them is
-# evidence of anything is `19_strategy_analysis`'s question, and it needs the candidate
-# distribution and the interval evidence to answer it - neither of which belongs in a notebook
-# whose job is to produce one result.
+# Both rows are printed without interpretation. Whether the difference between them is evidence
+# of anything is `19_strategy_analysis`'s question, and answering it needs the candidate
+# distribution and the interval evidence - neither of which belongs in a notebook whose job is
+# to produce one result.
 
 # %% tags=["results"]
-
-
-# The registry's own names. "annual_return" and "annual_volatility" are what the quantities are
-# called in prose and neither exists as a column, so asking for them returns nulls that read as a
-# strategy with no return rather than as a query that missed.
 REPORTED = ("sharpe", "cagr", "volatility", "max_drawdown")
 
 
@@ -177,14 +203,16 @@ def _metrics(backtest_hash: str, split: str) -> dict[str, object]:
 
 pl.DataFrame(
     [
-        _metrics(selection.validation_backtest.hash, "validation"),
-        _metrics(holdout_backtest.hash, "holdout"),
+        _metrics(str(carrier["val_backtest_hash"]), "validation"),
+        _metrics(result.backtest_hash, "holdout"),
     ]
 )
 
 # %% [markdown]
-# - The strategy replayed here is the resolved specification of the selected validation backtest,
-#   not a strategy rebuilt from this notebook's own defaults.
-# - The holdout result is produced once and read many times; the identity, not a lock, is what
-#   stops a second one from appearing.
-# - Nothing here revises the selection, which was made on validation and is already frozen.
+# ## Key takeaways
+#
+# - The configuration run here is the carrier's registered specification, not a strategy rebuilt
+#   from this notebook's own defaults.
+# - The holdout prediction set is matched by configuration, because a genuine retrain does not
+#   share the validation model's training identity.
+# - Nothing here revises the selection, which was made on validation and is already registered.

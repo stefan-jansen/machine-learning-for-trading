@@ -42,6 +42,7 @@
 """Read back the selected FX validation lineage and its holdout, and assess both."""
 
 import json
+import sqlite3
 from copy import deepcopy
 from typing import Any
 
@@ -49,6 +50,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import plotly.express as px
 import polars as pl
+import yaml
 
 from case_studies.research import (
     BacktestResult,
@@ -59,60 +61,87 @@ from case_studies.research import (
     TrainingResult,
     open_study,
 )
-from case_studies.research.holdout import resolve_holdout_selection
+from case_studies.research.population import superseded_members_at
 from case_studies.utils.backtest_presets import cost_view
+from case_studies.utils.cohort_metrics import compute_and_register
+from case_studies.utils.paired_metrics import populate_paired_metrics
 from case_studies.utils.registry import load_backtest_metrics, load_paired_metrics
+from case_studies.utils.strategy_analysis import (
+    resolve_canonical_rank1_lineage,
+    resolve_solvent_carrier,
+)
+from utils.paths import get_case_study_dir
 from utils.style import COLORS
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "fx_pairs"
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
-CANDIDATE_SET_NAME = "fx_pairs:holdout-candidates"
 
 # %% [markdown]
-# ## Resolve the selection and its holdout lineage
+# ## Resolve the carrier and its holdout lineage
 #
-# Selection is not a parameter and is not made here. `15_risk_management` froze an immutable
-# candidate set; its highest validation backtest Sharpe is read out of that set, with the backtest
-# identity as the deterministic tie-breaker. Cost sensitivity is excluded from the set, so a cost
-# variant cannot be selected, and nothing on this page can revise the choice.
+# Selection is not a parameter and is not made here. `resolve_solvent_carrier` reads the
+# highest-Sharpe registered validation backtest across the baseline, allocation and risk-overlay
+# stages, among runs that stayed solvent and belong to a generation still in force. Cost
+# siblings are not candidates: a cost variant is a descendant of a selection rather than an
+# entrant in one. Nothing on this page can revise the choice.
 #
-# The holdout lineage is derived from that selection rather than looked up in a ledger. The
-# derivation is pure - the same candidate set yields the same training identity every time - so
-# this notebook can state which holdout results it requires before checking whether they exist,
-# and name the missing one when they do not. An earlier design recorded the lineage in a research
-# lock instead and read it back from a lifecycle table. That made the holdout a one-shot
-# transaction, which in turn made it impossible to fix: any correction upstream needed a retrain
-# the lock forbade, and the lock could not be reissued.
+# The holdout lineage is matched to that carrier by CONFIGURATION - family, configuration name,
+# label and checkpoint - rather than by the validation model's training hash. A genuine retrain
+# does not share that hash; that is what makes it a retrain, and a lineage query keyed on it can
+# only ever find a validation fit scored over a later window.
+#
+# There is no lock and no ledger. The whole rule is: take the configuration validation ranked
+# first, retrain it on everything up to the holdout window, predict, and run that same backtest
+# configuration on the result. An earlier design pre-registered the lineage in a research lock,
+# which made the holdout a one-shot transaction and therefore impossible to correct - any fix
+# upstream needed a retrain the lock forbade, and the lock could not be reissued.
 
 # %% tags=["results"]
 study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
-selection = resolve_holdout_selection(study, candidate_set_name=CANDIDATE_SET_NAME)
 
-validation_set = selection.candidate_set
-selected_validation = selection.validation_backtest
-selected_prediction = selection.validation_prediction
-selected_training = selection.validation_training
+# The carrier is the highest-Sharpe registered validation backtest across the baseline,
+# allocation and risk-overlay stages, among runs that stayed solvent and belong to a generation
+# still in force. Read from the registry, so this page cannot report a configuration the
+# validation stages did not rank first.
+carrier = resolve_solvent_carrier(CASE_STUDY_ID)
+selected_validation = study.results.open(str(carrier["val_backtest_hash"]))
+selected_prediction = study.results.open(str(carrier["val_prediction_hash"]))
+selected_training = study.results.open(str(carrier["training_hash"]))
 selected_record = selected_validation.registry_record()
 selected_prediction_record = selected_prediction.registry_record()
 selected_training_record = selected_training.registry_record()
 selected_training_spec = selected_training.spec()
 selected_computation = selected_training_spec.get("computation", selected_training_spec)
 
+# Everything this case study backtested on validation and still publishes: the equal-weight
+# baselines, the allocation variants and the risk overlays. Cost siblings are excluded, because
+# a cost variant is a descendant of a selection rather than a candidate for one. Superseded
+# generations are excluded for the same reason the carrier resolution excludes them - a retired
+# row still ranks, and a distribution that mixes two generations answers no question.
+_retired = superseded_members_at(study.root, member_kind="backtest")
+candidate_rows_source = (
+    study.backtests.table()
+    .filter(
+        (pl.col("split") == "validation")
+        & (pl.col("execution_tier") == "canonical")
+        & pl.col("complete")
+        & pl.col("stage").is_in(["signal", "allocation", "risk_overlay"])
+        & pl.col("sharpe").is_not_null()
+        & ~pl.col("backtest_hash").is_in(list(_retired))
+    )
+    .sort("sharpe", "backtest_hash", descending=[True, False])
+)
+
 pl.DataFrame(
     {
-        "field": [
-            "candidate set",
-            "candidate count",
-            "selected validation",
-            "derived holdout training",
-        ],
+        "field": ["carrier backtest", "carrier stage", "candidates ranked", "validation Sharpe"],
         "value": [
-            validation_set.hash,
-            str(len(validation_set.members)),
             selected_validation.hash,
-            selection.holdout_training_hash,
+            str(carrier["val_stage"]),
+            str(candidate_rows_source.height),
+            f"{carrier['val_sharpe']:.4f}",
         ],
     }
 )
@@ -184,7 +213,7 @@ def _metric_row(result: BacktestResult) -> dict[str, Any]:
 
 
 candidate_rows = []
-for member_hash in validation_set.members:
+for member_hash in candidate_rows_source.get_column("backtest_hash").to_list():
     result = Result.open(study, member_hash)
     if not isinstance(result, BacktestResult) or not result.complete:
         raise ValueError(f"candidate {member_hash} is not a complete backtest")
@@ -390,30 +419,58 @@ controlled_summary = pl.DataFrame(
 controlled_summary
 
 # %% [markdown]
-# ## Require the holdout lineage the selection determines
+# ## Require the holdout lineage the carrier determines
 #
-# The holdout results are not looked up by whatever happens to carry the holdout split; they are
-# required to be the ones this selection determines. `17_holdout_predictions` refits the derived
-# training identity and `18_holdout_backtest` replays the selected strategy against it, so the
-# lineage checked here is fully specified before anything is read: a holdout produced from a
-# different configuration, a different checkpoint or a different strategy does not resolve, and
-# does not silently take the place of the one that should have been produced.
+# The holdout results are not whatever happens to carry the holdout split; they are required to
+# be the ones this carrier determines. The match is on the carrier's **configuration** - family,
+# configuration name, label and checkpoint - and not on its training hash, because a genuine
+# retrain never shares the validation model's training identity. That is the whole point of a
+# retrain, and matching on the training hash is how a lineage query ends up able to find only a
+# validation fit scored over a later window.
 
 # %% tags=["results"]
-holdout_prediction = selection.holdout_prediction
-if holdout_prediction is None:
+_carrier_ck = selected_prediction_record["checkpoint_kind"]
+_carrier_cv = selected_prediction_record["checkpoint_value"]
+with sqlite3.connect(str(study.root / "run_log" / "registry.db")) as _conn:
+    _holdout_rows = _conn.execute(
+        """
+        SELECT p.prediction_hash
+        FROM prediction_sets p
+        JOIN training_runs t ON t.training_hash = p.training_hash
+        WHERE p.split = 'holdout'
+          AND p.checkpoint_kind IS ? AND p.checkpoint_value IS ?
+          AND t.family = ? AND t.config_name = ? AND t.label = ?
+        ORDER BY p.prediction_hash
+        """,
+        (
+            _carrier_ck,
+            _carrier_cv,
+            carrier["family"],
+            carrier["config_name"],
+            str(carrier["label"]),
+        ),
+    ).fetchall()
+if len(_holdout_rows) != 1:
     raise ValueError(
-        f"no holdout prediction is registered for training {selection.holdout_training_hash} "
-        f"at checkpoint {selection.checkpoint_kind}={selection.checkpoint_value}; "
-        "run 17_holdout_predictions"
+        f"the carrier's configuration resolves {len(_holdout_rows)} holdout prediction sets; "
+        "exactly one is required - run 17_holdout_predictions, or delete the superseded one"
     )
-holdout_backtest = selection.holdout_backtest
-if holdout_backtest is None:
+holdout_prediction = Result.open(study, _holdout_rows[0][0])
+
+_holdout_backtests = (
+    study.backtests.table()
+    .filter((pl.col("prediction_hash") == holdout_prediction.hash) & pl.col("complete"))
+    .get_column("backtest_hash")
+    .to_list()
+)
+if len(_holdout_backtests) != 1:
     raise ValueError(
-        f"holdout prediction {holdout_prediction.hash} has no registered backtest; "
-        "run 18_holdout_backtest"
+        f"holdout prediction {holdout_prediction.hash} has {len(_holdout_backtests)} complete "
+        "backtests; exactly one is required - run 18_holdout_backtest"
     )
+holdout_backtest = Result.open(study, _holdout_backtests[0])
 holdout_training = Result.open(study, holdout_prediction.registry_record()["training_hash"])
+
 if not isinstance(holdout_training, TrainingResult) or not holdout_training.complete:
     raise ValueError("the holdout training result is incomplete")
 if not isinstance(holdout_prediction, PredictionResult) or not holdout_prediction.complete:
@@ -425,21 +482,17 @@ if any(
     for result in (holdout_training, holdout_prediction, holdout_backtest)
 ):
     raise ValueError("holdout lineage must use canonical execution")
-if holdout_training.hash != selection.holdout_training_hash:
-    raise ValueError("the holdout training identity differs from the derived one")
-if holdout_training.spec() != selection.holdout_training_spec:
-    raise ValueError("the holdout training specification differs from the derived one")
-# The strategy is not re-checked here. `HoldoutSelection.holdout_backtest` resolves by the
-# replay's own projection - the specification minus the fields that must differ between the two
-# intervals - so a backtest whose strategy differed would not have been returned in the first
-# place, and asserting it again would be an assertion that cannot fail. What is checked is the
-# price identity, which the projection deliberately excludes and which nothing upstream requires.
+# A holdout training identity equal to the validation one means the re-keying changed nothing:
+# the model is a validation fit predicting forward rather than one trained up to the window.
+if holdout_training.hash == selected_training.hash:
+    raise ValueError(
+        f"the holdout training identity equals the validation one ({selected_training.hash}), "
+        "so the holdout model was not refitted"
+    )
 if not holdout_backtest.spec().get("input_identity", {}).get("prices"):
     raise ValueError("the holdout backtest lacks canonical price identity")
 
-# The holdout fold is the one thing the two runs are supposed to differ in, so it is printed
-# rather than only checked: a reader can see which interval the holdout numbers below describe.
-_holdout_fold = selection.holdout_training_spec["computation"]["cv"]["folds"][-1]
+_holdout_fold = holdout_training.spec()["computation"]["cv"]["folds"][-1]
 holdout_identity = pl.DataFrame(
     {
         "field": [
@@ -511,6 +564,35 @@ performance_figure = px.bar(
 )
 performance_figure.add_hline(y=0, line_dash="dot", line_color=COLORS["recede"])
 performance_figure.show()
+
+# %% [markdown]
+# ### Register the cohort and paired evidence this section reads
+#
+# The bootstrapped comparisons and the effective-rank cohort statistics are computed here rather
+# than assumed. They used to be a side effect of the holdout lock transaction; with that gone,
+# the notebook that reads them is the notebook that has to produce them.
+#
+# The carrier is passed in rather than left to the populator. Left to itself it ranks the
+# registry on raw Sharpe, which would be a second selector sitting beside `resolve_solvent_carrier`
+# and the cost sweep - and a raw ranking has no notion of a retired generation, so it would pair
+# the superseded conformal-v2 backtest and describe a carrier this case study does not report.
+
+# %% tags=["results"]
+_periods_per_year = int(
+    yaml.safe_load((get_case_study_dir(CASE_STUDY_ID) / "config" / "setup.yaml").read_text())[
+        "evaluation"
+    ]["periods_per_year"]
+)
+_cohort_counts = compute_and_register(CASE_STUDY_ID)
+_paired_rows = populate_paired_metrics(
+    CASE_STUDY_ID,
+    periods_per_year=_periods_per_year,
+    carrier=resolve_canonical_rank1_lineage(CASE_STUDY_ID),
+)
+print(
+    f"cohort_metrics: {sum(_cohort_counts[k] for k in ('family', 'stagelabel', 'label'))} rows; "
+    f"backtest_paired_metrics: {sum(1 for row in _paired_rows if 'skip' not in row)} pairs"
+)
 
 # %% tags=["results"]
 holdout_pairs = load_paired_metrics(
