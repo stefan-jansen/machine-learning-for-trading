@@ -568,6 +568,7 @@ def resolve_short_straddle_decisions(
     prices: pl.DataFrame,
     signal: dict[str, Any],
     allocation: dict[str, Any] | None = None,
+    label: str | None = None,
     data_paths: tuple[Path, Path] | None = None,
     option_contract_returns: dict[str, Any] | None = None,
     option_sources: dict[str, Any] | None = None,
@@ -618,8 +619,15 @@ def resolve_short_straddle_decisions(
         raw_options_dir=raw_options_dir,
     )
     if allocation:
+        # The label goes with the allocation. A conformal allocator needs widths, and
+        # generating them where none exist needs an embargo the label supplies. Without it the
+        # first conformal request on a prediction set refuses instead of calibrating.
         decisions = _apply_cohort_allocator(
-            decisions, raw_options_dir, allocation, prediction_hash=prediction.hash
+            decisions,
+            raw_options_dir,
+            allocation,
+            prediction_hash=prediction.hash,
+            label=label,
         )
     fold_columns = [column for column in ("fold", "fold_id") if column in predictions.columns]
     if len(fold_columns) != 1:
@@ -647,6 +655,7 @@ def publish_short_straddle_decisions(
     prices: pl.DataFrame,
     signal: dict[str, Any],
     allocation: dict[str, Any] | None = None,
+    label: str | None = None,
     canonical: bool = False,
     clean_replay_digest: str | None = None,
 ) -> DecisionArtifact:
@@ -658,6 +667,7 @@ def publish_short_straddle_decisions(
         prices=prices,
         signal=signal,
         allocation=allocation,
+        label=label,
     )
     return _publish_resolved_short_straddle_decisions(
         prediction,
@@ -838,6 +848,7 @@ def run_official_backtest_requests(
             prices=prices,
             signal=row["signal"],
             allocation=allocation,
+            label=row["label"],
         )
         resolved.append((row, prediction, prices, decisions))
         replay_requests.append(
@@ -1010,6 +1021,7 @@ def _replay_from_stdin() -> None:
             prices=price_cache[cache_key],
             signal=row["signal"],
             allocation=allocation,
+            label=row["label"],
             data_paths=data_paths,
         )
         replayed.append(

@@ -188,6 +188,7 @@ def main() -> None:
         prediction,
         prices=prices,
         signal=signal,
+        label="ret_to_expiry",
     )
     local_decision_digest = value_digest(prepared_decisions)
     clean_replay = _clean_replay_digests(

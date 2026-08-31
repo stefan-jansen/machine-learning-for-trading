@@ -421,6 +421,7 @@ def test_the_option_allocator_asks_for_widths_with_its_label(
     an embargo" rather than calibrating - which is what stopped 13_portfolio_management on its
     first canonical run. The generic runner has always passed it.
     """
+    from case_studies.sp500_options import research_workflow
     from case_studies.utils import conformal as conformal_module
 
     raw_dir = tmp_path / "raw"
@@ -445,6 +446,36 @@ def test_the_option_allocator_asks_for_widths_with_its_label(
             {"method": "conformal_weighted"},
             prediction_hash="abcdef123456",
             label="ret_to_expiry",
+        )
+    assert seen["label"] == "ret_to_expiry"
+
+    # And through the resolver the workflow actually calls, which is where the canonical run
+    # entered - the engine-level parameter is no use if the layer above never fills it.
+    seen.clear()
+    labels_dir = tmp_path / "labels"
+    labels_dir.mkdir()
+    _contract_returns().write_parquet(labels_dir / "contract_returns.parquet")
+    study = _study(tmp_path)
+    prediction = _prediction(study)
+    prices = pl.DataFrame(
+        {
+            "symbol": ["A"],
+            "timestamp": [datetime(2024, 1, 5)],
+            "open": [100.0],
+            "high": [101.0],
+            "low": [99.0],
+            "close": [100.0],
+            "volume": [1000],
+        }
+    )
+    with pytest.raises(_Asked):
+        research_workflow.resolve_short_straddle_decisions(
+            prediction,
+            prices=prices,
+            signal={"method": "equal_weight_top_k", "top_k": 1},
+            allocation={"method": "conformal_weighted"},
+            label="ret_to_expiry",
+            data_paths=(labels_dir, raw_dir),
         )
     assert seen["label"] == "ret_to_expiry"
 
