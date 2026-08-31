@@ -43,7 +43,10 @@ from case_studies.utils.analytics import DISPLAY_NAMES
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_returns
 from case_studies.utils.registry.registration import register_paired_metrics
-from case_studies.utils.strategy_analysis import training_run_fitted_for_the_holdout
+from case_studies.utils.strategy_analysis import (
+    is_refit_of,
+    training_run_fitted_for_the_holdout,
+)
 from case_studies.utils.uncertainty import (
     SIGNAL_BASELINE_BY_CASE_STUDY,
     STAGE_SEQUENCE,
@@ -379,7 +382,7 @@ def _retired_prediction_hashes(cs: str) -> frozenset[str]:
     )
 
 
-def _val_rank1_full_spec(
+def _val_rank1_carrier(
     cs: str,
     explorer: BacktestExplorer,
     *,
@@ -457,21 +460,47 @@ def _val_rank1_full_spec(
                         "json_extract(b.spec_json, '$.strategy.signal.exit_at_max_days') = ?"
                     )
                     ho_params.append(rung["exit_at_max_days"])
-            row = db.execute(
+            # The probe asks whether THIS candidate has a holdout, so it matches the
+            # candidate's own configuration and checkpoint, not only its strategy spec, and
+            # applies the same eligibility test `_holdout_lineage_for` applies.
+            #
+            # Spec alone stopped the walk wherever a SIBLING checkpoint had a holdout at the
+            # same spec. The caller then pinned this candidate, the resolver found nothing of
+            # its own, and the case study reported no holdout although a later candidate had
+            # one. `training_run_fitted_for_the_holdout` is the other half: a model fitted on
+            # the validation folds publishes over the holdout window, so split plus a non-null
+            # Sharpe does not make a row a holdout result, and it is not expressible in SQL.
+            carrier_row = db.execute(
+                """
+                SELECT t.family, t.config_name, t.label,
+                       p.checkpoint_value, p.checkpoint_kind
+                FROM prediction_sets p
+                JOIN training_runs t ON t.training_hash = p.training_hash
+                WHERE p.prediction_hash = ?
+                """,
+                (cand["prediction_hash"][i],),
+            ).fetchone()
+            if carrier_row is None:
+                continue
+            probe_rows = db.execute(
                 f"""
-                SELECT 1 FROM prediction_sets p
+                SELECT t.spec_json FROM prediction_sets p
                 JOIN training_runs t ON p.training_hash = t.training_hash
                 JOIN backtest_runs b ON p.prediction_hash = b.prediction_hash
                                      AND b.stage IN ('signal','allocation','risk_overlay','holdout')
                 JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
                 WHERE {" AND ".join(ho_clauses)}
+                  AND t.family = ?
+                  AND t.config_name = ?
+                  AND t.label = ?
+                  AND p.checkpoint_value IS ?
+                  AND p.checkpoint_kind IS ?
                   AND bm.sharpe IS NOT NULL
-                LIMIT 1
                 """,
-                ho_params,
-            ).fetchone()
-            if row:
-                return spec
+                ho_params + list(carrier_row),
+            ).fetchall()
+            if any(training_run_fitted_for_the_holdout(probe[0]) for probe in probe_rows):
+                return {"spec": spec, "prediction_hash": cand["prediction_hash"][i]}
     finally:
         db.close()
     return None
@@ -548,27 +577,6 @@ def _holdout_lineage_for(
     db = sqlite3.connect(str(db_path))
     db.row_factory = sqlite3.Row
     try:
-        # The research lock is the authority on which holdout belongs to this case study: it
-        # seals a validation carrier before the holdout is touched, and a unique index makes it
-        # a singleton, because the holdout is used once. Pinning to it is what makes the choice
-        # determinate - without it the fallback below ranks by holdout Sharpe, which chooses
-        # the evaluation by its own result, and is how a holdout descended from a retired
-        # carrier takes the slot.
-        #
-        # `locked_holdout_evaluation` resolves the exact prediction set AND backtest the
-        # evaluation finalized, rather than the training hash the lock expected; see its
-        # docstring for why neither substitution is the same question.
-        pinned = locked_holdout_evaluation(db, cs)
-        if pinned == NO_LIVE_HOLDOUT:
-            return None
-        if pinned is not None:
-            pinned_prediction, pinned_backtest = pinned
-            clauses.append("p.prediction_hash = ?")
-            params.append(pinned_prediction)
-            clauses.append("b.backtest_hash = ?")
-            params.append(pinned_backtest)
-            where_sql = " AND ".join(clauses)
-
         # Same-lineage preference: given the validation rank-1's own prediction
         # set, prefer a holdout sharing its trained model AND its checkpoint.
         # Both are read from that one row here rather than accepted as separate
@@ -586,7 +594,7 @@ def _holdout_lineage_for(
             carrier = db.execute(
                 """
                 SELECT t.family, t.config_name, t.label,
-                       p.checkpoint_value, p.checkpoint_kind
+                       p.checkpoint_value, p.checkpoint_kind, t.spec_json
                 FROM prediction_sets p
                 JOIN training_runs t ON t.training_hash = p.training_hash
                 WHERE p.prediction_hash = ?
@@ -594,6 +602,8 @@ def _holdout_lineage_for(
                 (prefer_prediction_hash,),
             ).fetchone()
             if carrier is not None:
+                carrier_spec_json = carrier["spec_json"]
+                carrier_key = list(carrier)[:5]
                 # Matched on the declared configuration, not on the carrier's training
                 # hash. A holdout prediction produced correctly carries a NEW training
                 # identity - the same configuration refitted on the holdout fold - so
@@ -619,24 +629,67 @@ def _holdout_lineage_for(
                       AND p.checkpoint_kind IS ?
                     ORDER BY b.backtest_hash
                     """,
-                    params + list(carrier),
+                    params + carrier_key,
                 ).fetchall()
-                for candidate in rows_:
-                    if training_run_fitted_for_the_holdout(candidate["spec_json"]):
-                        resolved = dict(candidate)
-                        resolved.pop("spec_json")
-                        return resolved
+                # Naming the carrier pins the configuration and the checkpoint, and that is
+                # normally one candidate. It is not guaranteed to be: one prediction set can
+                # carry several backtests - a replay under a different strategy spec, an
+                # experimental allocator sharing the holdout prediction - and they survive
+                # this filter together. Returning the first in `backtest_hash` order would
+                # decide on nothing the carrier determines, which is the same defect the
+                # unpinned branch below refuses, so it refuses here too rather than only
+                # where the caller happened not to pin.
+                # Fitted for the holdout AND a refit of this specification. The four
+                # columns the query filters on are a configuration's NAME, and a name is
+                # reused across generations - refit a study after its features change and the
+                # new runs carry the same family, config_name, label and checkpoint as the
+                # old ones. On the current registries fx_pairs has 144 configuration groups
+                # spanning more than one feature-artifact generation and etfs has 10, so
+                # without the second condition a holdout fitted on features the study no
+                # longer publishes can be the sole coarse match and get reported as the
+                # carrier's own holdout.
+                eligible = [
+                    candidate
+                    for candidate in rows_
+                    if training_run_fitted_for_the_holdout(candidate["spec_json"])
+                    and is_refit_of(candidate["spec_json"], carrier_spec_json)
+                ]
+                if len({candidate["backtest_hash"] for candidate in eligible}) > 1:
+                    raise ValueError(
+                        f"{len(eligible)} holdout backtests match the pinned carrier "
+                        f"{prefer_prediction_hash} for {cs} - same configuration, same "
+                        "checkpoint, same strategy. Choosing between them would rank the "
+                        "holdout on its own result. Retire the replays that are not this "
+                        "study's holdout, so one candidate remains."
+                    )
+                if eligible:
+                    resolved = dict(eligible[0])
+                    resolved.pop("spec_json")
+                    return resolved
+            # A named carrier with no eligible holdout is an ANSWER, not a reason to look
+            # elsewhere. Falling through to the unpinned query below made the pin a mere
+            # preference: where the selected checkpoint had no holdout and a sibling
+            # checkpoint did, the fallback returned the sibling's, and the reader-facing
+            # table then reported a checkpoint that validation never selected. There is no
+            # weaker sense in which that is the carrier's holdout.
+            #
+            # `carrier is None` lands here too, and for the same reason: the caller named a
+            # prediction set the registry does not have, and "some other holdout" is not a
+            # better answer to that than none.
+            return None
 
-        # No lock, or a lock that names no holdout run. Two filters, and neither is optional.
+        # The caller named no carrier, so this is the unpinned fallback. Two filters, and
+        # neither is optional.
         #
         # Only runs actually refitted for the holdout are eligible: a model fitted on the
         # validation folds can publish predictions over the holdout window, and it is not a
         # holdout result whatever its Sharpe.
         #
-        # And what survives has to be one lineage. Several trained models reaching here cannot
-        # be separated on anything the registry records, so ordering them by Sharpe would pick
-        # the carrier by its holdout result - the selection the lock exists to prevent. The
-        # refusal names the lock as the way out rather than choosing.
+        # And what survives has to be ONE candidate. Anything that reaches here cannot be
+        # separated on what the registry records, so picking among them means picking by
+        # holdout Sharpe - choosing the evaluation by its own result, which is the one thing
+        # this module must never do. The refusal is the answer; the caller resolves it by
+        # naming the validation carrier, not by this function guessing.
         rows = db.execute(
             f"""
             SELECT DISTINCT t.family, t.config_name, t.label,
@@ -656,14 +709,21 @@ def _holdout_lineage_for(
     rows = [row for row in rows if training_run_fitted_for_the_holdout(row["spec_json"])]
     if not rows:
         return None
-    lineages = {row["training_hash"] for row in rows}
-    if len(lineages) > 1:
+    # Ambiguity is ambiguity however it arises, and it arises three ways: several trained
+    # models, several checkpoints of one trained model (one prediction set each, sharing a
+    # strategy spec), and several backtests hanging off one prediction set. Only the first
+    # used to refuse; the other two fell through to `rows[0]` under `ORDER BY b.backtest_hash`,
+    # which is arbitrary with respect to the configuration and therefore picks on the holdout's
+    # own result as surely as ordering by Sharpe would.
+    if len({row["backtest_hash"] for row in rows}) > 1:
+        lineages = {row["training_hash"] for row in rows}
         raise ValueError(
-            f"{len(rows)} holdout backtests across {len(lineages)} trained models were refitted "
-            f"for the holdout and match the carrier spec for {cs}, and no research lock names "
-            "which holdout run belongs to this study. Choosing between them would rank the "
-            "holdout on its own result. Take the lock, which records the sealed carrier and the "
-            "run made from it."
+            f"{len(rows)} holdout backtests across {len(lineages)} trained model(s) were "
+            f"refitted for the holdout and match the carrier spec for {cs}. Choosing between "
+            "them would rank the holdout on its own result. Pass the validation rank-1's "
+            "prediction hash as `prefer_prediction_hash`, which pins the configuration and the "
+            "checkpoint, so the holdout is resolved from the carrier that was selected rather "
+            "than from the holdout scores."
         )
     row = rows[0]
     return {
@@ -856,74 +916,6 @@ def _populate_pair(
         "info_ratio": paired.get("info_ratio"),
         "p_value": paired.get("p_value"),
     }
-
-
-NO_LIVE_HOLDOUT = "\x00no-live-holdout"
-
-
-def locked_holdout_evaluation(db: sqlite3.Connection, cs: str) -> tuple[str, str] | str | None:
-    """The one holdout this study may report, as ``(prediction_hash, backtest_hash)``.
-
-    Returns both finalized hashes; :data:`NO_LIVE_HOLDOUT` when a lock exists but names no
-    holdout this study can publish; ``None`` when no lock has been taken at all, which leaves
-    the caller's query unpinned as before.
-
-    **Both hashes, because the prediction alone does not identify the evaluation.** One
-    prediction set can carry several backtests - a replay registered under a different strategy
-    spec, an experimental allocator sharing the holdout prediction - so pinning the prediction
-    still leaves the caller choosing among their backtests by row order, which is the defect
-    one level down from the one this function was written to close.
-
-    **The lock's ``holdout_training_hash`` is what was expected, not what was produced.** It is
-    written when the carrier is sealed, before the retrain runs, and one training run registers
-    one prediction set per declared checkpoint - so pinning on it alone leaves several
-    candidates and the caller then picks among them by order. ``holdout_evaluations`` records
-    what the run actually finalized, ``holdout_prediction_hash`` and ``holdout_backtest_hash``,
-    keyed by the same ``lock_hash``. That is the row to resolve through, and its absence is
-    itself the answer: a lock whose evaluation never landed has no holdout to report, and
-    publishing the closest matching row would present an unfinished one as the result.
-
-    The state is checked for the same reason. Only ``HOLDOUT_EVALUATED`` means the sealed
-    carrier was actually taken to the holdout and the evaluation completed; anything earlier is
-    a lock in progress.
-
-    A lock is also immutable, and the carrier it sealed can be superseded afterwards - a later
-    refit publishes a new generation and the lock goes on naming the old one. Its holdout then
-    evaluates a configuration the study no longer publishes, so there is no live holdout either.
-    """
-    try:
-        row = db.execute(
-            "SELECT lock_hash, state, lock_json FROM research_locks ORDER BY created_at DESC "
-            "LIMIT 1"
-        ).fetchone()
-    except sqlite3.OperationalError as error:
-        if "no such table" not in str(error):
-            raise
-        return None
-    if not row:
-        return None
-    lock_hash, state, lock_json = row[0], row[1], row[2]
-    lock = json.loads(lock_json)
-    carrier = lock.get("prediction_hash")
-    if carrier is not None and carrier in _retired_prediction_hashes(cs):
-        return NO_LIVE_HOLDOUT
-    if state != "HOLDOUT_EVALUATED":
-        return NO_LIVE_HOLDOUT
-    try:
-        evaluated = db.execute(
-            "SELECT holdout_prediction_hash, holdout_backtest_hash FROM holdout_evaluations "
-            "WHERE lock_hash = ?",
-            (lock_hash,),
-        ).fetchone()
-    except sqlite3.OperationalError as error:
-        if "no such table" not in str(error):
-            raise
-        return NO_LIVE_HOLDOUT
-    if not evaluated or not evaluated[0] or not evaluated[1]:
-        # A half-written evaluation row names one side and not the other, which identifies no
-        # single evaluation. That is the same answer as no row at all.
-        return NO_LIVE_HOLDOUT
-    return str(evaluated[0]), str(evaluated[1])
 
 
 def _drop_retired_generations(cs: str, cand):
@@ -1207,7 +1199,7 @@ def populate_paired_metrics(
         return rows
 
     # Pair #2: cross-stage rank-1 holdout ↔ equal-weight (holdout window)
-    val_spec = _val_rank1_full_spec(
+    val_rank1 = _val_rank1_carrier(
         cs,
         explorer,
         label_restriction=label_restriction,
@@ -1216,9 +1208,16 @@ def populate_paired_metrics(
         prediction_hashes=live,
         retired_hashes=_retired_prediction_hashes(cs),
     )
+    val_spec = val_rank1["spec"] if val_rank1 else None
     # The carrier's training hash and checkpoint are both resolved inside
     # ``_holdout_lineage_for`` from this one prediction hash, so the same-lineage
     # preference cannot be half-applied by a caller.
+    #
+    # It is the WALK's carrier, not `leader_phash`. The walk advances past the leader when
+    # the leader has no holdout of its own, so the two name different candidates whenever it
+    # does - and passing the leader's hash alongside a later candidate's spec asks for a
+    # holdout that matches neither. That used to be masked by the pin falling through to an
+    # unpinned query; now that the pin is strict it would answer None instead.
     if carrier is None:
         ho_lineage = _holdout_lineage_for(
             cs,
@@ -1226,7 +1225,7 @@ def populate_paired_metrics(
             strategy_spec=val_spec,
             label_restriction=label_restriction,
             rung=rung,
-            prefer_prediction_hash=leader_phash,
+            prefer_prediction_hash=val_rank1["prediction_hash"] if val_rank1 else leader_phash,
             retired_hashes=_retired_prediction_hashes(cs),
         )
     elif carrier.get("holdout_backtest_hash") is None:

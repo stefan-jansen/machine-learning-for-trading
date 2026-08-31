@@ -48,7 +48,10 @@ warnings.filterwarnings("ignore")
 
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_returns
-from case_studies.utils.strategy_analysis import compute_cost_bps
+from case_studies.utils.strategy_analysis import (
+    compute_cost_bps,
+    training_run_fitted_for_the_holdout,
+)
 from utils.paths import REPO_ROOT, get_case_study_dir, get_chapter_dir
 
 # %% tags=["parameters"]
@@ -176,7 +179,7 @@ print(f"\nLoaded: {len(explorers)}/{len(ALL_CASE_STUDIES)} case studies")
 # full spec — degenerate predictions, vol-window-vs-history mismatch,
 # universe-filter rejection, or other generation failures — the rule falls
 # back to the next-highest validation Sharpe with a usable holdout, and so
-# on until one succeeds. The `_val_rank1_full_spec` helper implements this
+# on until one succeeds. The `_val_rank1_carrier` helper implements this
 # walk; `query_holdout_rows` and `_holdout_lineage_for` consume its output
 # to pin val/holdout pairs to the same full strategy carrier.
 
@@ -229,27 +232,6 @@ _CLUSTER_RUNG_RESTRICTIONS: dict[str, dict[str, object]] = {
         "exit_at_max_days": None,
     },
 }
-
-
-# Distinguishes "the lock's carrier was superseded, so no holdout applies" from "no lock".
-_NO_LIVE_HOLDOUT = "\x00no-live-holdout"
-
-
-def _locked_holdout_evaluation(db: sqlite3.Connection, cs: str):
-    """The holdout this study may report, from the shared resolver.
-
-    Both this notebook and `populate_paired_metrics` write `backtest_paired_metrics`, so they
-    have to agree on which holdout is this study's; two copies of the rule would let a Chapter
-    20 run overwrite the case study's pairs with a different lineage. The resolver lives with
-    that producer and is imported here rather than restated - including the part that matters
-    most, that the lock's `holdout_training_hash` is what was expected and
-    `holdout_evaluations` is what was produced.
-
-    Returns `(prediction_hash, backtest_hash)`, `NO_LIVE_HOLDOUT`, or None.
-    """
-    from case_studies.utils.paired_metrics import locked_holdout_evaluation
-
-    return locked_holdout_evaluation(db, cs)
 
 
 def _retired(cs: str) -> frozenset[str]:
@@ -1154,8 +1136,17 @@ def _full_strategy_spec_from_backtest(db: sqlite3.Connection, bt_hash: str) -> d
     }
 
 
-def _val_rank1_full_spec(cs: str) -> dict | None:
-    """Return the val rank-1 *full strategy* spec for ``cs`` — the
+def _val_rank1_carrier(cs: str) -> dict | None:
+    """Return ``{'spec', 'prediction_hash'}`` for ``cs``'s validation rank-1 carrier.
+
+    The prediction hash is carried out alongside the spec because the holdout resolver
+    needs it: naming the carrier pins the configuration AND the checkpoint, and without
+    it a case study that registered several checkpoints against one strategy is ambiguous
+    and the resolver refuses. It was determinable all along - this walk had it in hand and
+    threw it away - so refusing there would have dropped a case study out of the
+    reader-facing holdout table for want of a value one line above.
+
+    The val rank-1 *full strategy* spec for ``cs`` — the
     highest-Sharpe validation backtest across (signal, allocation,
     risk_overlay) stages — walking candidates by val Sharpe descending until
     one with a matching holdout backtest at the SAME full spec is found.
@@ -1208,6 +1199,27 @@ def _val_rank1_full_spec(cs: str) -> dict | None:
             spec = _full_strategy_spec_from_backtest(db, bt_hash)
             if spec is None:
                 continue
+            # The probe below asks whether THIS candidate has a holdout, so it matches the
+            # candidate's own configuration and checkpoint and not only its strategy spec.
+            #
+            # Matching the spec alone made the walk stop at a candidate whose own checkpoint
+            # had no holdout whenever a sibling checkpoint had one at the same spec. The
+            # resolver, handed that carrier, then finds nothing for it - and the walk has
+            # already stopped, so the case study reports no holdout while one exists for a
+            # later candidate. Advancing instead is what makes the fall-through the resolver
+            # no longer performs unnecessary rather than merely forbidden.
+            carrier_row = db.execute(
+                """
+                SELECT t.family, t.config_name, t.label,
+                       p.checkpoint_value, p.checkpoint_kind
+                FROM prediction_sets p
+                JOIN training_runs t ON t.training_hash = p.training_hash
+                WHERE p.prediction_hash = ?
+                """,
+                (cand["prediction_hash"][i],),
+            ).fetchone()
+            if carrier_row is None:
+                continue
             spec_clauses, spec_params = _full_strategy_clauses(spec)
             ho_clauses = ["p.split = 'holdout'"] + spec_clauses
             if _retired(cs):
@@ -1233,21 +1245,36 @@ def _val_rank1_full_spec(cs: str) -> dict | None:
                         "json_extract(b.spec_json, '$.strategy.signal.exit_at_max_days') = ?"
                     )
                     ho_params.append(rung["exit_at_max_days"])
-            row = db.execute(
+            # `t.spec_json` rather than `1`, and no LIMIT: the probe has to apply the same
+            # eligibility test the resolver applies, and that test is not expressible in SQL.
+            #
+            # A model fitted on the validation folds can publish predictions over the holdout
+            # window, so `p.split = 'holdout'` with a non-null Sharpe is not enough to make a
+            # row a holdout result. The resolver drops those through
+            # `training_run_fitted_for_the_holdout`; a probe that admitted them would stop the
+            # walk at a candidate whose only holdout is validation-fitted, the resolver would
+            # then find nothing eligible for it, and the case study would report no holdout
+            # while a later candidate had a real one.
+            probe_rows = db.execute(
                 f"""
-                SELECT 1 FROM prediction_sets p
+                SELECT t.spec_json FROM prediction_sets p
                 JOIN training_runs t ON p.training_hash = t.training_hash
                 JOIN backtest_runs b ON p.prediction_hash = b.prediction_hash
                                      AND b.stage IN ('signal','allocation','risk_overlay','holdout')
                 JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
                 WHERE {" AND ".join(ho_clauses)}
+                  AND t.family = ?
+                  AND t.config_name = ?
+                  AND t.label = ?
+                  AND p.checkpoint_value IS ?
+                  AND p.checkpoint_kind IS ?
                   AND bm.sharpe IS NOT NULL
-                LIMIT 1
                 """,
-                ho_params,
-            ).fetchone()
+                ho_params + list(carrier_row),
+            ).fetchall()
+            row = any(training_run_fitted_for_the_holdout(probe[0]) for probe in probe_rows)
             if row:
-                return spec
+                return {"spec": spec, "prediction_hash": cand["prediction_hash"][i]}
     finally:
         db.close()
     return None
@@ -1331,124 +1358,45 @@ def _holdout_lineage_for(
     leader_label: str,
     strategy_spec: dict | None = None,
     *,
-    prefer_training_hash: str | None = None,
+    prefer_prediction_hash: str | None = None,
 ) -> dict | None:
-    """Return ``{backtest_hash, prediction_hash, family, config_name, label}``
-    for the highest-Sharpe holdout backtest registered in this case study,
-    honoring per-CS cluster restrictions but **not** the leader's label.
+    """Return ``{backtest_hash, prediction_hash, family, config_name, label}`` for this
+    case study's holdout, from the shared resolver.
 
-    Note: ``leader_label`` is intentionally unused in the SQL — kept in the
-    signature for call-site symmetry with ``_val_backtest_for_lineage`` and
-    so call sites remain self-documenting about which validation leader the
-    holdout pairs against.
+    This used to be a second implementation of the query, and it drifted from the one in
+    `populate_paired_metrics` in three ways that all pointed the same direction. It did not
+    check that the training run behind a candidate was actually refitted for the holdout, so
+    a model fitted on the validation folds and scored over the holdout window was eligible.
+    It took `ORDER BY b.backtest_hash LIMIT 1` where several candidates survived, which
+    decides on nothing the configuration determines. And it preferred the validation
+    `training_hash`, which a correct holdout refit does not share - the refit registers its
+    own identity covering the holdout CV interval - so the preference could only ever match a
+    holdout scored from the validation-fitted model, which is the thing to exclude.
 
-    Returns the holdout's *own* label so callers can pair it against
-    matching benchmarks. The decoupling matters when ``generate_holdout``'s
-    degeneracy fallback accepts a candidate on a different label than the
-    validation rank-1 (e.g., crypto's cross-stage rank-1 — over signal,
-    allocation, and risk_overlay — runs on fwd_ret_24h but the next fall-
-    through candidate runs on fwd_ret_8h). A label-restricted query would
-    silently miss the holdout and leave val_rank1_self /
-    equal_weight_holdout_side_artifact pairs unpopulated.
+    Both this notebook and `populate_paired_metrics` write `backtest_paired_metrics`. Two
+    copies of the rule let a Chapter 20 run overwrite the case study's pairs with a different
+    lineage, which is the reason the delegation matters beyond the duplication.
 
-    The label_restriction (e.g., sp500_options pinned to ret_to_expiry)
-    is applied to the holdout query so we don't pick up cross-rung
-    holdouts in CSs with HTM-coherent label scoping.
+    The carrier is named by its PREDICTION hash rather than its training hash, because that
+    pins the checkpoint as well as the configuration: one trained model registers one
+    prediction set per declared checkpoint and they share a strategy spec.
 
-    When ``strategy_spec`` is provided, the holdout pick is restricted to
-    backtests with the same full (signal, allocation, risk) tuple as val's
-    rank-1 carrier, so the val→holdout comparison stays apples-to-apples
-    on the full pipeline configuration, not just the signal block.
+    ``leader_label`` is unused, as it was before: the holdout's own label is returned so
+    callers can pair it against matching benchmarks, and restricting on the leader's label
+    would silently miss a holdout that fell through to another one.
     """
-    case_dir = get_case_study_dir(cs)
-    db_path = case_dir / "run_log" / "registry.db"
-    if not db_path.exists():
-        return None
+    from case_studies.utils.paired_metrics import _holdout_lineage_for as _shared_lineage_for
 
-    label_restriction = _CLUSTER_LABEL_RESTRICTIONS.get(cs)
-    rung = _CLUSTER_RUNG_RESTRICTIONS.get(cs)
-    clauses = ["p.split = 'holdout'"]
-    params: list[object] = []
-    if _retired(cs):
-        clauses.append("p.prediction_hash NOT IN (SELECT value FROM json_each(?))")
-        params.append(json.dumps(sorted(_retired(cs))))
-    if label_restriction:
-        placeholders = ",".join("?" for _ in label_restriction)
-        clauses.append(f"t.label IN ({placeholders})")
-        params.extend(label_restriction)
-    if rung is not None:
-        clauses.append(
-            "COALESCE(json_extract(b.spec_json, '$.strategy.signal.universe_filter'), 'full') = ?"
-        )
-        params.append(rung["universe_filter"])
-        if rung["exit_at_max_days"] is None:
-            clauses.append(
-                "json_extract(b.spec_json, '$.strategy.signal.exit_at_max_days') IS NULL"
-            )
-        else:
-            clauses.append("json_extract(b.spec_json, '$.strategy.signal.exit_at_max_days') = ?")
-            params.append(rung["exit_at_max_days"])
-    spec_clauses, spec_params = _full_strategy_clauses(strategy_spec)
-    clauses.extend(spec_clauses)
-    params.extend(spec_params)
-    where_sql = " AND ".join(clauses)
-
-    db = sqlite3.connect(str(db_path))
-    db.row_factory = sqlite3.Row
-    try:
-        # Pin to the holdout the research lock names. Without it these queries rank by the
-        # holdout's own Sharpe, which chooses the evaluation by its result and is how a
-        # holdout descended from a retired carrier takes the slot.
-        locked_holdout = _locked_holdout_evaluation(db, cs)
-        if locked_holdout == _NO_LIVE_HOLDOUT:
-            return None
-        if locked_holdout is not None:
-            clauses.append("p.prediction_hash = ?")
-            params.append(locked_holdout[0])
-            clauses.append("b.backtest_hash = ?")
-            params.append(locked_holdout[1])
-            where_sql = " AND ".join(clauses)
-        # Same-lineage preference: when the caller knows the validation rank-1's
-        # training_hash, prefer a holdout that shares it. This pins val→holdout
-        # decay to the same trained model rather than a same-spec but
-        # different-lineage holdout that happens to have a higher Sharpe.
-        if prefer_training_hash is not None:
-            row = db.execute(
-                f"""
-                SELECT t.family, t.config_name, t.label,
-                       p.prediction_hash, b.backtest_hash
-                FROM prediction_sets p
-                JOIN training_runs t ON p.training_hash = t.training_hash
-                JOIN backtest_runs b ON p.prediction_hash = b.prediction_hash
-                                     AND b.stage IN ('signal','allocation','risk_overlay','holdout')
-                JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
-                WHERE {where_sql} AND p.training_hash = ?
-                ORDER BY b.backtest_hash
-                LIMIT 1
-                """,
-                params + [prefer_training_hash],
-            ).fetchone()
-            if row:
-                return dict(row)
-
-        row = db.execute(
-            f"""
-            SELECT t.family, t.config_name, t.label,
-                   p.prediction_hash, b.backtest_hash
-            FROM prediction_sets p
-            JOIN training_runs t ON p.training_hash = t.training_hash
-            JOIN backtest_runs b ON p.prediction_hash = b.prediction_hash
-                                 AND b.stage IN ('signal','allocation','risk_overlay','holdout')
-            JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
-            WHERE {where_sql}
-            ORDER BY b.backtest_hash
-            LIMIT 1
-            """,
-            params,
-        ).fetchone()
-    finally:
-        db.close()
-    return dict(row) if row else None
+    retired = _retired(cs)
+    return _shared_lineage_for(
+        cs,
+        leader_label,
+        strategy_spec,
+        label_restriction=_CLUSTER_LABEL_RESTRICTIONS.get(cs),
+        rung=_CLUSTER_RUNG_RESTRICTIONS.get(cs),
+        prefer_prediction_hash=prefer_prediction_hash,
+        retired_hashes=retired or None,
+    )
 
 
 def _val_backtest_for_lineage(cs: str, family: str, config_name: str, label: str) -> str | None:
@@ -1625,7 +1573,7 @@ for cs, explorer in explorers.items():
     # crypto signal-stage rank-1 = quintile_long_short but cross-stage
     # rank-1 = score_weighted/equal_weight_top_k). Carrier-selection rule:
     # val rank-1 is the highest-Sharpe validation backtest across the three
-    # stages; see `_val_rank1_full_spec`.
+    # stages; see `_val_rank1_carrier`.
     cand = pl.concat(
         [_best_live(explorer, cs, s, 2000) for s in _PAIRED_STAGES],
         how="diagonal_relaxed",
@@ -1668,37 +1616,35 @@ for cs, explorer in explorers.items():
     # risk) spec so val→holdout decay isn't measured across different
     # allocators (e.g. score_weighted vs conformal_weighted), different
     # position-sizing parameters, or different risk overlays.
-    val_spec = _val_rank1_full_spec(cs)
-    # Resolve the val rank-1's training_hash so the holdout pick prefers the
-    # same-lineage holdout when one exists (avoids cross-pollination across
-    # training_hashes that happen to share signal_spec).
-    _val_training_hash: str | None = None
+    # The carrier is whatever the WALK settled on, spec and prediction hash together, and it
+    # is not `leader_phash`. The walk advances past the leader when the leader has no holdout
+    # of its own, so passing the leader's hash alongside a later candidate's spec asks for a
+    # holdout that matches neither - and the strict pin answers None rather than quietly
+    # falling through, which is how the case study would lose a fallback carrier it has.
+    #
+    # The prediction hash is what is passed, not the training hash: it pins the checkpoint as
+    # well as the configuration, and a correct holdout refit registers a NEW training identity
+    # covering the holdout CV interval, so preferring the validation training hash could only
+    # ever match a holdout scored from the validation-fitted model. The lookup that used to
+    # sit here - prediction hash to training hash, with its own connection and error branch -
+    # is gone with it; the resolver reads the carrier itself.
+    #
+    # The refusal is caught here for the same reason `query_holdout_rows` catches it: it is a
+    # statement about ONE case study, and letting it propagate would end the loop and drop the
+    # other eight. The notebook then reports no holdout pair for this case study, which is the
+    # correct answer when nothing can be shown to have selected one, and carries on.
+    val_rank1 = _val_rank1_carrier(cs)
+    val_spec = val_rank1["spec"] if val_rank1 else None
     try:
-        _case_db = get_case_study_dir(cs) / "run_log" / "registry.db"
-        with sqlite3.connect(str(_case_db)) as _con:
-            _row = _con.execute(
-                "SELECT training_hash FROM prediction_sets WHERE prediction_hash = ?",
-                (leader_phash,),
-            ).fetchone()
-            if _row:
-                _val_training_hash = _row[0]
-    except (sqlite3.Error, OSError) as exc:
-        # Surface real registry corruption / IO problems instead of silently
-        # falling back to cross-lineage selection. Keep the fallback so the
-        # populator still produces a row, but emit a one-line warning so
-        # downstream noticeably distinguishes "no preferred lineage" from
-        # "DB unavailable".
-        print(
-            f"[warn] {cs}: failed to resolve val_training_hash from "
-            f"prediction_hash={leader_phash}: {type(exc).__name__}: {exc}"
+        ho_lineage = _holdout_lineage_for(
+            cs,
+            leader_label,
+            strategy_spec=val_spec,
+            prefer_prediction_hash=val_rank1["prediction_hash"] if val_rank1 else leader_phash,
         )
-        _val_training_hash = None
-    ho_lineage = _holdout_lineage_for(
-        cs,
-        leader_label,
-        strategy_spec=val_spec,
-        prefer_training_hash=_val_training_hash,
-    )
+    except ValueError as exc:
+        print(f"[warn] {cs}: no holdout pair, holdout not resolvable: {exc}")
+        ho_lineage = None
     ho_hash = ho_lineage["backtest_hash"] if ho_lineage else None
     ho_label = ho_lineage["label"] if ho_lineage else leader_label
     chal_ho = _aligned_returns(cs, ho_hash) if ho_hash else None
@@ -2045,56 +1991,53 @@ def query_holdout_rows():
         if not db_path.exists():
             continue
 
-        label_restriction = _CLUSTER_LABEL_RESTRICTIONS.get(cs)
-        rung = _CLUSTER_RUNG_RESTRICTIONS.get(cs)
-        clauses = ["p.split = 'holdout'"]
-        params: list[object] = []
-        if label_restriction:
-            placeholders = ",".join("?" for _ in label_restriction)
-            clauses.append(f"t.label IN ({placeholders})")
-            params.extend(sorted(label_restriction))
-        if rung is not None:
-            clauses.append(
-                "COALESCE(json_extract(b.spec_json, '$.strategy.signal.universe_filter'), 'full') = ?"
+        # WHICH holdout is decided by the one resolver, and only the metrics are read here.
+        #
+        # This used to build its own WHERE clause and take `ORDER BY b.backtest_hash LIMIT 1`,
+        # which selected on nothing the configuration determines and admitted a training run
+        # that was never refitted for the holdout. It was also a second copy of a rule that
+        # `_holdout_lineage_for` already applies - and the two write the same reader-facing
+        # comparison, so a disagreement between them publishes a holdout row against paired
+        # metrics computed from a different evaluation.
+        #
+        # A refusal is per case study, not fatal to the chapter: the resolver raises when
+        # several candidates survive, and the other eight case studies still have rows to
+        # report. The reason is printed rather than swallowed, because a case study silently
+        # missing from the holdout table looks like unrun work.
+        # No carrier is an ANSWER here, and the answer is no row.
+        #
+        # The carrier IS the selection: the rank-1 validation configuration is the only thing
+        # that nominates a holdout, and the invariant the resolver exists to hold is that the
+        # holdout is never chosen by its own holdout result. Falling through to an unpinned
+        # query when the carrier is missing breaks exactly that - it publishes whatever single
+        # eligible holdout the registry happens to hold, which is a holdout that selected
+        # itself. This table is reader-facing, so it takes the pinned answer or none.
+        #
+        # It differs from the paired-metrics caller above, which falls back to `leader_phash`:
+        # there a leader is already in hand and the pin narrows a known lineage. Here the
+        # label is unrestricted (`""`), so an unpinned query is at its most permissive.
+        carrier = _val_rank1_carrier(cs)
+        if carrier is None:
+            print(
+                f"[warn] {cs}: no rank-1 validation carrier, so no holdout row - "
+                "nothing selected a holdout, and an unpinned query would let one select itself"
             )
-            params.append(rung["universe_filter"])
-            if rung["exit_at_max_days"] is None:
-                clauses.append(
-                    "json_extract(b.spec_json, '$.strategy.signal.exit_at_max_days') IS NULL"
-                )
-            else:
-                clauses.append(
-                    "json_extract(b.spec_json, '$.strategy.signal.exit_at_max_days') = ?"
-                )
-                params.append(rung["exit_at_max_days"])
-        # Pin the holdout pick to val rank-1's *full* strategy spec (signal
-        # + allocation + risk) so the val/holdout comparison reads the same
-        # full pipeline on both sides. Without this constraint, MAX(sharpe)
-        # over holdout backtests can surface a different allocator (e.g.
-        # conformal_weighted when the val carrier was score_weighted), a
-        # different top_k, or a different risk overlay than the validation
-        # carrier — pairing those two reads as decay but is actually a
-        # full-spec mismatch.
-        val_spec = _val_rank1_full_spec(cs)
-        spec_clauses, spec_params = _full_strategy_clauses(val_spec)
-        clauses.extend(spec_clauses)
-        params.extend(spec_params)
+            continue
+        try:
+            lineage = _holdout_lineage_for(
+                cs,
+                "",
+                carrier["spec"],
+                prefer_prediction_hash=carrier["prediction_hash"],
+            )
+        except ValueError as exc:
+            print(f"[warn] {cs}: holdout not resolvable, so no holdout row: {exc}")
+            continue
+        if lineage is None:
+            continue
+        clauses = ["b.backtest_hash = ?"]
+        params: list[object] = [lineage["backtest_hash"]]
         db = sqlite3.connect(str(db_path))
-        # The same holdout the paired metrics resolve to, so the reader-facing row and the
-        # comparison behind it describe one evaluation rather than two.
-        _locked = _locked_holdout_evaluation(db, cs)
-        if _locked == _NO_LIVE_HOLDOUT:
-            # No holdout this study can report: the lock's carrier was superseded, the lock
-            # never reached HOLDOUT_EVALUATED, or its evaluation row never landed.
-            clauses.append("1 = 0")
-        elif _locked is not None:
-            # Both sides. The backtest join here is a LEFT JOIN, and requiring the finalized
-            # hash makes it effectively inner - which is right in this branch, because reaching
-            # it means an evaluation exists and named that backtest.
-            clauses.append("p.prediction_hash = ?")
-            params.append(_locked[0])
-            clauses.append("b.backtest_hash = ?")
-            params.append(_locked[1])
         where_sql = " AND ".join(clauses)
 
         db.row_factory = sqlite3.Row
