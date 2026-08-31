@@ -310,3 +310,138 @@ def test_a_carrier_the_registry_does_not_have_resolves_to_nothing(monkeypatch, t
 
     assert _lineage(prefer_prediction_hash="not_registered") is None
     assert _lineage(prefer_prediction_hash="p1")["backtest_hash"] == "b1"
+
+
+# ---------------------------------------------------------------------------
+# The Chapter 20 caller.
+#
+# The resolver is single-sourced - ch20's `_holdout_lineage_for` is a delegate - so the twelve
+# tests above cover the RULE for both producers. What they do not reach is the WIRING, and the
+# wiring is where this went wrong twice: once passing a spec from one candidate alongside a
+# prediction hash from another, and once letting a missing carrier fall through to an unpinned
+# query. Both were in the copy, not the original. These run the real Chapter 20 function.
+# ---------------------------------------------------------------------------
+
+CH20_SOURCE = (
+    Path(__file__).resolve().parents[1] / "20_strategy_synthesis" / "01_aggregate_synthesis.py"
+)
+
+
+def _ch20(name: str, namespace: dict):
+    """Lift one Chapter 20 function into ``namespace`` without importing the notebook.
+
+    The module executes a synthesis over nine registries at import, so it cannot be imported
+    in a unit test. Re-implementing the function here would test the copy in this file rather
+    than the one that ships, which is the exact failure mode being pinned.
+    """
+    import ast
+
+    tree = ast.parse(CH20_SOURCE.read_text())
+    definition = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+    exec(  # noqa: S102 - running the shipped producer is the point
+        compile(ast.Module(body=[definition], type_ignores=[]), str(CH20_SOURCE), "exec"),
+        namespace,
+    )
+    return namespace[name]
+
+
+def _ch20_namespace(tmp_path: Path, carrier, calls: list) -> dict:
+    """A namespace for `query_holdout_rows` over one case study with a populated registry."""
+    case_dir = tmp_path / "probe"
+    (case_dir / "run_log").mkdir(parents=True)
+    db = sqlite3.connect(case_dir / "run_log" / "registry.db")
+    db.executescript(
+        """
+        CREATE TABLE training_runs (training_hash TEXT, family TEXT, config_name TEXT, label TEXT);
+        CREATE TABLE prediction_sets (prediction_hash TEXT, training_hash TEXT);
+        CREATE TABLE backtest_runs (backtest_hash TEXT, prediction_hash TEXT, stage TEXT);
+        CREATE TABLE backtest_metrics (backtest_hash TEXT, sharpe REAL, max_drawdown REAL,
+                                       cagr REAL, num_trades INTEGER);
+        CREATE TABLE prediction_metrics (prediction_hash TEXT, ic_mean REAL);
+        INSERT INTO training_runs VALUES ('train_ho', 'gbm', 'cfg_a', 'fwd_ret_1m');
+        INSERT INTO prediction_sets VALUES ('pred_ho', 'train_ho');
+        INSERT INTO backtest_runs VALUES ('bt_ho', 'pred_ho', 'holdout');
+        INSERT INTO backtest_metrics VALUES ('bt_ho', 1.25, -0.1, 0.2, 40);
+        INSERT INTO prediction_metrics VALUES ('pred_ho', 0.03);
+        """
+    )
+    db.commit()
+    db.close()
+
+    def _lineage(cs, leader_label, strategy_spec=None, *, prefer_prediction_hash=None):
+        calls.append(
+            {
+                "cs": cs,
+                "spec": strategy_spec,
+                "prefer_prediction_hash": prefer_prediction_hash,
+            }
+        )
+        return {"backtest_hash": "bt_ho", "label": "fwd_ret_1m"}
+
+    return {
+        "ALL_CASE_STUDIES": ["probe"],
+        "DISPLAY_NAMES": {"probe": "Probe"},
+        "get_case_study_dir": lambda cs: case_dir,
+        "_val_rank1_carrier": lambda cs: carrier,
+        "_holdout_lineage_for": _lineage,
+        "_optional_metric": lambda db_, table, column, alias: f"NULL AS {alias}",
+        "sqlite3": sqlite3,
+    }
+
+
+def test_chapter_20_publishes_no_holdout_row_where_nothing_selected_one(tmp_path, capsys):
+    """No validation carrier is an answer, and the answer is no row.
+
+    The carrier IS the selection. Falling through to an unpinned query here would publish the
+    one eligible holdout the registry happens to hold - a holdout chosen by its own holdout
+    result, which is the thing the whole mechanism exists to prevent. The registry in this
+    fixture HAS a usable holdout, so a caller that falls through returns a row and fails.
+    """
+    calls: list = []
+    namespace = _ch20_namespace(tmp_path, carrier=None, calls=calls)
+    query_holdout_rows = _ch20("query_holdout_rows", namespace)
+
+    assert query_holdout_rows() == []
+    assert calls == [], "the resolver must not be reached at all without a carrier"
+    assert "no rank-1 validation carrier" in capsys.readouterr().out
+
+
+def test_chapter_20_pins_the_carriers_own_prediction_hash(tmp_path):
+    """The spec and the prediction hash come from the SAME carrier.
+
+    Passing one candidate's spec alongside another's hash asks for a holdout matching neither.
+    That was live until the pin became strict, masked by the unpinned fall-through.
+    """
+    calls: list = []
+    carrier = {"spec": {"signal": {"method": "equal_weight_top_k"}}, "prediction_hash": "pred_val"}
+    namespace = _ch20_namespace(tmp_path, carrier=carrier, calls=calls)
+    query_holdout_rows = _ch20("query_holdout_rows", namespace)
+
+    rows = query_holdout_rows()
+
+    assert len(calls) == 1
+    assert calls[0]["prefer_prediction_hash"] == "pred_val"
+    assert calls[0]["spec"] is carrier["spec"]
+    assert [row["holdout_backtest_hash"] for row in rows] == ["bt_ho"]
+
+
+def test_chapter_20_reports_a_refusal_rather_than_dropping_the_case_study(tmp_path, capsys):
+    """A refusal is per case study and it is printed.
+
+    A case study silently missing from the holdout table looks like unrun work, which is how a
+    resolver refusal would be read as a scheduling problem instead of an ambiguity to settle.
+    """
+    calls: list = []
+    carrier = {"spec": {}, "prediction_hash": "pred_val"}
+    namespace = _ch20_namespace(tmp_path, carrier=carrier, calls=calls)
+
+    def _refuse(cs, leader_label, strategy_spec=None, *, prefer_prediction_hash=None):
+        raise ValueError("two candidates survive")
+
+    namespace["_holdout_lineage_for"] = _refuse
+    query_holdout_rows = _ch20("query_holdout_rows", namespace)
+
+    assert query_holdout_rows() == []
+    assert "two candidates survive" in capsys.readouterr().out

@@ -1995,14 +1995,31 @@ def query_holdout_rows():
         # several candidates survive, and the other eight case studies still have rows to
         # report. The reason is printed rather than swallowed, because a case study silently
         # missing from the holdout table looks like unrun work.
+        # No carrier is an ANSWER here, and the answer is no row.
+        #
+        # The carrier IS the selection: the rank-1 validation configuration is the only thing
+        # that nominates a holdout, and the invariant the resolver exists to hold is that the
+        # holdout is never chosen by its own holdout result. Falling through to an unpinned
+        # query when the carrier is missing breaks exactly that - it publishes whatever single
+        # eligible holdout the registry happens to hold, which is a holdout that selected
+        # itself. This table is reader-facing, so it takes the pinned answer or none.
+        #
+        # It differs from the paired-metrics caller above, which falls back to `leader_phash`:
+        # there a leader is already in hand and the pin narrows a known lineage. Here the
+        # label is unrestricted (`""`), so an unpinned query is at its most permissive.
         carrier = _val_rank1_carrier(cs)
-        val_spec = carrier["spec"] if carrier else None
+        if carrier is None:
+            print(
+                f"[warn] {cs}: no rank-1 validation carrier, so no holdout row - "
+                "nothing selected a holdout, and an unpinned query would let one select itself"
+            )
+            continue
         try:
             lineage = _holdout_lineage_for(
                 cs,
                 "",
-                val_spec,
-                prefer_prediction_hash=carrier["prediction_hash"] if carrier else None,
+                carrier["spec"],
+                prefer_prediction_hash=carrier["prediction_hash"],
             )
         except ValueError as exc:
             print(f"[warn] {cs}: holdout not resolvable, so no holdout row: {exc}")
