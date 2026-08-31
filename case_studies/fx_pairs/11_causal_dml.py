@@ -49,7 +49,6 @@ from utils.reproducibility import set_global_seeds
 CASE_STUDY_ID = "fx_pairs"
 PRIMARY_LABEL = ""
 MAX_SYMBOLS = 0
-RANDOM_SEED = 42
 CV_FOLDS = 0
 MAX_SAMPLES = 0
 N_PLACEBO = 0
@@ -73,7 +72,7 @@ WORKSPACE: str | None = None
 # empty: `run-production-notebook.sh` executes with no parameter overrides, so a value
 # supplied only at run time could never be stamped.
 SUPERSEDES_CAUSAL: str = (
-    '{"fwd_ret_1d": "6e17a9b4644c", "fwd_ret_5d": "e9623aa44d9a", "fwd_ret_21d": "f53540351b6b"}'
+    '{"fwd_ret_1d": "25f8bdd775de", "fwd_ret_5d": "c797f741134a", "fwd_ret_21d": "3547657669ca"}'
 )
 
 # %% [markdown]
@@ -83,7 +82,6 @@ SUPERSEDES_CAUSAL: str = (
 # and excluded from canonical evidence.
 
 # %%
-set_global_seeds(RANDOM_SEED)
 case_dir = get_case_study_dir(CASE_STUDY_ID)
 setup = yaml.safe_load((case_dir / "config" / "setup.yaml").read_text())
 labels = (
@@ -123,6 +121,21 @@ requests = {
     for label in labels
 }
 resolutions = {label: request.resolve() for label, request in requests.items()}
+
+# Seeded from the RESOLVED specification rather than from a notebook constant. The seed the
+# estimate depends on is `dml.yaml`'s, and it is inside the identity hash - so a constant here
+# that only reached `set_global_seeds` was a dial that turned without moving the number: change
+# it and the identity is unchanged, the cached result fit under the configured seed is served
+# back, and nothing says so. Seeding from the resolved value makes the seed this notebook
+# announces the seed its results were actually fit under.
+RANDOM_SEED = int(resolutions[labels[0]].spec["seed"])
+if any(int(resolved.spec["seed"]) != RANDOM_SEED for resolved in resolutions.values()):
+    raise RuntimeError(
+        "the configured labels resolved to different seeds, so one global seed cannot describe "
+        f"them: {sorted({int(r.spec['seed']) for r in resolutions.values()})}"
+    )
+set_global_seeds(RANDOM_SEED)
+
 computations = {label: resolved.spec["computation"] for label, resolved in resolutions.items()}
 computation = computations[labels[0]]
 
@@ -131,6 +144,7 @@ print(f"Labels: {', '.join(labels)}")
 print(f"Treatment: {estimand['treatment']}")
 print(f"Confounders: {', '.join(estimand['confounders'])}")
 print(f"Execution tier: {tier.value}")
+print(f"Seed (from the resolved identity): {RANDOM_SEED}")
 for horizon, values in computations.items():
     print(
         f"  {horizon}: outcome horizon {values['estimand']['outcome_horizon']}, "
