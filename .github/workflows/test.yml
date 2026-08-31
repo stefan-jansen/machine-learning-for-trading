@@ -93,6 +93,19 @@ jobs:
             # something that had already been tested in ninety seconds.
             shared:
               - 'utils/**'
+              # Every case study imports these two. `case_studies/research/` is the study,
+              # population, candidate-set and holdout machinery; `case_studies/utils/` is the
+              # backtest runner, registry and presets. A change to either can alter what every
+              # case-study pipeline does, and neither was listed - so a change to the module
+              # they all import fanned out zero case-study jobs and reported a green PR that had
+              # exercised none of them. The per-case-study filters below cover a study's own
+              # notebooks; nothing covered the code underneath all of them.
+              - 'case_studies/research/**'
+              - 'case_studies/utils/**'
+              # And the presets they load. A case-study pipeline reads its shared model and
+              # backtest configuration from here, so a config-only change alters what every
+              # pipeline does while touching no code path the two filters above cover.
+              - 'case_studies/config/**'
               - 'data/**'
               - 'pyproject.toml'
               - '.github/workflows/test.yml'
@@ -475,6 +488,13 @@ jobs:
         # files are behind it too, and installing it would cost gigabytes on
         # every commit. Those stay quarantined and named in the file below.
         #
+        # papermill is here for one assertion and it is not optional. `unusable_parameters`
+        # asks papermill itself which names it can see in a parameters cell, because two valid
+        # Python declarations are invisible to its line-based parser and the override is then
+        # dropped in silence. Driving the real parser is what keeps that check from going stale
+        # against a restatement of its rules - and without the package the helper has no one to
+        # ask, so the corpus sweep would pass while checking nothing. Pinned to the version in
+        # `uv.lock`, as jupytext above is.
         # pyarrow is what polars converts through in `DataFrame.to_pandas`, which
         # `load_modeling_dataset` calls on the fold-tagged temporal artifact. The
         # variant-geometry guard hangs off exactly that frame, so without pyarrow
@@ -485,7 +505,7 @@ jobs:
           uv venv --python 3.14
           uv pip install pytest pytest-timeout numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
             scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow \
-            "ml4t-diagnostic>=0.1.2" jupytext==1.19.3 ml4t-backtest ml4t-data ml4t-engineer databento
+            "ml4t-diagnostic>=0.1.2" jupytext==1.19.3 papermill==2.7.0 ml4t-backtest ml4t-data ml4t-engineer databento
       - name: Run download-logic unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -949,6 +969,7 @@ jobs:
           unset ML4T_OUTPUT_DIR
           python -m pytest \
             tests/test_crypto_modeling_lineage.py \
+            tests/test_common_sample_daily_ic.py \
             tests/test_cv_cached_results.py \
             tests/test_darts_state.py \
             tests/test_darts_temporal.py \
@@ -962,12 +983,12 @@ jobs:
             tests/test_gbm_identity.py \
             tests/test_gbm_runtime.py \
             tests/test_insight_chapter.py \
+            tests/test_latent_epoch_ic_over_dates.py \
             tests/test_latent_factors_identity.py \
             tests/test_latent_factors_no_leak.py \
             tests/test_latent_input_identity.py \
+            tests/test_lightning_announcement_silence.py \
             tests/test_family_hook_dispatch.py \
-            tests/test_holdout_evaluation_driver.py \
-            tests/test_locked_holdout_execution.py \
             tests/test_model_analysis_selection.py \
             tests/test_model_source_identity_versions.py \
             tests/test_registry_metrics.py \

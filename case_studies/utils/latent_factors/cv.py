@@ -407,6 +407,7 @@ def _load_registered_latent_factor(
                     "epoch": epoch,
                     "fold_id": int(fold_id),
                     "ic_mean": float(fold_metric["ic_mean"]),
+                    "n_scored_dates": int(fold_metric["n_periods"]),
                 }
             )
         frames.append(predictions)
@@ -658,6 +659,10 @@ def run_latent_factor_cv(
                 or cached_metric_surface != expected_cache_surface
             ):
                 log(f"  {model_name}: cache checkpoint surface mismatch, retraining")
+            elif "n_scored_dates" not in metrics_df.columns:
+                # Written before fold ICs recorded the dates they scored, so the epoch IC
+                # cannot be averaged over decision dates from it.
+                log(f"  {model_name}: cache predates dated fold ICs, retraining")
             else:
                 best_epoch, mean_ic = _select_reporting_epoch(
                     metrics_df,
@@ -1564,6 +1569,31 @@ def _select_epoch_from_values(
     return epoch, float(checkpoint_ics[epoch])
 
 
+def _epoch_daily_ic(metrics_df: pl.DataFrame) -> pl.DataFrame:
+    """Average each epoch's fold ICs over decision dates, not over folds.
+
+    Folds cover different numbers of validation dates, so the mean of the fold means is
+    not the IC over the period. Validation windows are disjoint under purged walk-forward
+    splitting, so weighting each fold mean by the dates it scored reproduces the mean of
+    the pooled daily series exactly.
+    """
+    if "n_scored_dates" not in metrics_df.columns:
+        raise ValueError(
+            "fold IC metrics must carry n_scored_dates to average IC over decision dates"
+        )
+    weights = pl.col("n_scored_dates").cast(pl.Float64)
+    return (
+        metrics_df.group_by("epoch")
+        .agg(
+            pl.when(weights.sum() > 0)
+            .then((pl.col("ic_mean") * weights).sum() / weights.sum())
+            .otherwise(pl.col("ic_mean").mean())
+            .alias("mean_ic")
+        )
+        .sort("epoch")
+    )
+
+
 def _select_reporting_epoch(
     metrics_df: pl.DataFrame,
     *,
@@ -1573,9 +1603,7 @@ def _select_reporting_epoch(
     if metrics_df.height == 0:
         return 0, 0.0
 
-    summary = (
-        metrics_df.group_by("epoch").agg(pl.col("ic_mean").mean().alias("mean_ic")).sort("epoch")
-    )
+    summary = _epoch_daily_ic(metrics_df)
     checkpoint_ics = {
         int(epoch): float(mean_ic)
         for epoch, mean_ic in zip(
@@ -1690,7 +1718,9 @@ def _register_model_predictions(
         if epoch_preds.height == 0:
             raise ValueError(f"Missing registered checkpoint {epoch} for {model_name}")
         epoch_metrics = fold_ics_df.filter(pl.col("epoch") == epoch)
-        ic_mean = float(epoch_metrics["ic_mean"].mean()) if epoch_metrics.height > 0 else 0.0
+        ic_mean = (
+            float(_epoch_daily_ic(epoch_metrics)["mean_ic"][0]) if epoch_metrics.height > 0 else 0.0
+        )
         register_prediction_set(
             case_study_id,
             training_hash,

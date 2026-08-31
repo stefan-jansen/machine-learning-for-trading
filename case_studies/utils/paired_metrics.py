@@ -31,7 +31,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -107,7 +108,11 @@ def rung_for(cs: str) -> dict | None:
 
 
 def _best_for_rung(
-    explorer: BacktestExplorer, stage: str, rung: dict | None, top_n: int = 2000
+    explorer: BacktestExplorer,
+    stage: str,
+    rung: dict | None,
+    top_n: int = 2000,
+    prediction_hashes: list[str] | None = None,
 ) -> pl.DataFrame:
     """``explorer.best`` for a stage, fetching enough rows that the pin survives.
 
@@ -121,7 +126,11 @@ def _best_for_rung(
     dropped it, which is why every pinned selection here has to go through this helper rather
     than call ``explorer.best`` directly.
     """
-    return explorer.best(stage=stage, top_n=1_000_000 if rung is not None else top_n)
+    return explorer.best(
+        stage=stage,
+        top_n=1_000_000 if rung is not None else top_n,
+        prediction_hashes=prediction_hashes,
+    )
 
 
 def _apply_rung_restriction(df: pl.DataFrame, rung: dict | None) -> pl.DataFrame:
@@ -322,6 +331,54 @@ def _full_strategy_clauses(spec: dict | None) -> tuple[list[str], list[object]]:
     return clauses, params
 
 
+@cache
+def _retired_prediction_hashes(cs: str) -> frozenset[str]:
+    """Every prediction identity a later generation retired, on either split.
+
+    Retirement is recorded member-wise on the *validation* population, and a prediction
+    identity includes its split, so a retired validation hash never equals its holdout
+    sibling and cannot filter it directly. What identifies the same model state across the
+    two is the training run together with the checkpoint it was scored at, so this expands
+    the recorded set along that key.
+
+    Member-wise, not run-wise: a population that moved one checkpoint of a run and kept
+    another has retired one checkpoint, and the sibling that did not move is still current.
+
+    ``superseded_members_at`` rather than ``superseded_members``, because the latter takes a
+    ``Study`` and every ``Study.open`` branch ends in ``activate()``, which clears
+    ``ML4T_OUTPUT_DIR`` and would re-point a preview or isolated workspace at the released
+    registry - answering for a different registry than these queries read.
+    """
+    from case_studies.research.population import superseded_members_at
+
+    case_dir = get_case_study_dir(cs)
+    db_path = case_dir / "run_log" / "registry.db"
+    if not db_path.exists():
+        return frozenset()
+    recorded = superseded_members_at(case_dir, member_kind="prediction")
+    if not recorded:
+        return frozenset()
+
+    db = sqlite3.connect(str(db_path))
+    try:
+        rows = db.execute(
+            "SELECT prediction_hash, training_hash, checkpoint_kind, checkpoint_value "
+            "FROM prediction_sets"
+        ).fetchall()
+    finally:
+        db.close()
+    retired_states = {
+        (training_hash, checkpoint_kind, checkpoint_value)
+        for prediction_hash, training_hash, checkpoint_kind, checkpoint_value in rows
+        if prediction_hash in recorded
+    }
+    return frozenset(
+        prediction_hash
+        for prediction_hash, training_hash, checkpoint_kind, checkpoint_value in rows
+        if (training_hash, checkpoint_kind, checkpoint_value) in retired_states
+    )
+
+
 def _val_rank1_full_spec(
     cs: str,
     explorer: BacktestExplorer,
@@ -329,6 +386,8 @@ def _val_rank1_full_spec(
     label_restriction: frozenset[str] | None,
     rung: dict | None,
     carrier_pin_predicate: pl.Expr | None,
+    prediction_hashes: list[str] | None = None,
+    retired_hashes: frozenset[str] | None = None,
 ) -> dict | None:
     """Return the val rank-1 *full strategy* spec for ``cs`` — the
     highest-Sharpe validation backtest across (signal, allocation,
@@ -339,7 +398,10 @@ def _val_rank1_full_spec(
     under the case study's label / rung restrictions.
     """
     cand = pl.concat(
-        [_best_for_rung(explorer, s, rung) for s in ("signal", "allocation", "risk_overlay")],
+        [
+            _best_for_rung(explorer, s, rung, prediction_hashes=prediction_hashes)
+            for s in ("signal", "allocation", "risk_overlay")
+        ],
         how="diagonal_relaxed",
     )
     if cand.is_empty() or "backtest_hash" not in cand.columns:
@@ -370,6 +432,13 @@ def _val_rank1_full_spec(
             spec_clauses, spec_params = _full_strategy_clauses(spec)
             ho_clauses = ["p.split = 'holdout'"] + spec_clauses
             ho_params: list[object] = list(spec_params)
+            # The same exclusion `_holdout_lineage_for` applies. Without it a retired holdout
+            # makes this candidate look eligible, the walk stops here, and that call then
+            # filters the row out and returns nothing - instead of advancing to the next live
+            # candidate that does have a holdout.
+            if retired_hashes:
+                ho_clauses.append("p.prediction_hash NOT IN (SELECT value FROM json_each(?))")
+                ho_params.append(json.dumps(sorted(retired_hashes)))
             if label_restriction:
                 placeholders = ",".join("?" for _ in label_restriction)
                 ho_clauses.append(f"t.label IN ({placeholders})")
@@ -416,6 +485,7 @@ def _holdout_lineage_for(
     label_restriction: frozenset[str] | None,
     rung: dict | None,
     prefer_prediction_hash: str | None = None,
+    retired_hashes: frozenset[str] | None = None,
 ) -> dict | None:
     """Return ``{backtest_hash, prediction_hash, family, config_name, label}``
     for the highest-Sharpe holdout backtest registered in this case study,
@@ -454,6 +524,22 @@ def _holdout_lineage_for(
         else:
             clauses.append("json_extract(b.spec_json, '$.strategy.signal.exit_at_max_days') = ?")
             params.append(rung["exit_at_max_days"])
+    if retired_hashes:
+        # ``_retired_prediction_hashes`` carries the recorded validation retirements across
+        # to the holdout rows that share a training run and checkpoint, so this filters on the
+        # identity the row actually has.
+        #
+        # It reaches a holdout scored from the same trained model. One produced by the
+        # canonical *retrain* registers its own training hash and shares no key with the
+        # validation identity that was retired - measured: no holdout training spec in any
+        # registry here references a validation identity, so there is nothing to join on.
+        #
+        # What prevents a retired carrier from reaching a holdout is upstream instead:
+        # `holdout.select_best_models` ranks over published members only, so a retrain created
+        # from here on descends from a live carrier by construction. Holdout rows written
+        # before that are stale artifacts of an earlier selection, and they are regenerated.
+        clauses.append("p.prediction_hash NOT IN (SELECT value FROM json_each(?))")
+        params.append(json.dumps(sorted(retired_hashes)))
     spec_clauses, spec_params = _full_strategy_clauses(strategy_spec)
     clauses.extend(spec_clauses)
     params.extend(spec_params)
@@ -462,6 +548,27 @@ def _holdout_lineage_for(
     db = sqlite3.connect(str(db_path))
     db.row_factory = sqlite3.Row
     try:
+        # The research lock is the authority on which holdout belongs to this case study: it
+        # seals a validation carrier before the holdout is touched, and a unique index makes it
+        # a singleton, because the holdout is used once. Pinning to it is what makes the choice
+        # determinate - without it the fallback below ranks by holdout Sharpe, which chooses
+        # the evaluation by its own result, and is how a holdout descended from a retired
+        # carrier takes the slot.
+        #
+        # `locked_holdout_evaluation` resolves the exact prediction set AND backtest the
+        # evaluation finalized, rather than the training hash the lock expected; see its
+        # docstring for why neither substitution is the same question.
+        pinned = locked_holdout_evaluation(db, cs)
+        if pinned == NO_LIVE_HOLDOUT:
+            return None
+        if pinned is not None:
+            pinned_prediction, pinned_backtest = pinned
+            clauses.append("p.prediction_hash = ?")
+            params.append(pinned_prediction)
+            clauses.append("b.backtest_hash = ?")
+            params.append(pinned_backtest)
+            where_sql = " AND ".join(clauses)
+
         # Same-lineage preference: given the validation rank-1's own prediction
         # set, prefer a holdout sharing its trained model AND its checkpoint.
         # Both are read from that one row here rather than accepted as separate
@@ -520,34 +627,58 @@ def _holdout_lineage_for(
                         resolved.pop("spec_json")
                         return resolved
 
-        # The fallback keeps its Sharpe ordering, but only over runs that were actually
-        # refitted for the holdout. A model fitted on the validation folds is not a
-        # holdout result whatever its Sharpe, so it cannot be reached by ranking.
-        row = None
-        for candidate in db.execute(
+        # No lock, or a lock that names no holdout run. Two filters, and neither is optional.
+        #
+        # Only runs actually refitted for the holdout are eligible: a model fitted on the
+        # validation folds can publish predictions over the holdout window, and it is not a
+        # holdout result whatever its Sharpe.
+        #
+        # And what survives has to be one lineage. Several trained models reaching here cannot
+        # be separated on anything the registry records, so ordering them by Sharpe would pick
+        # the carrier by its holdout result - the selection the lock exists to prevent. The
+        # refusal names the lock as the way out rather than choosing.
+        rows = db.execute(
             f"""
-            SELECT t.family, t.config_name, t.label,
-                   p.prediction_hash, b.backtest_hash, t.spec_json
+            SELECT DISTINCT t.family, t.config_name, t.label,
+                   p.prediction_hash, b.backtest_hash, p.training_hash, t.spec_json
             FROM prediction_sets p
             JOIN training_runs t ON p.training_hash = t.training_hash
             JOIN backtest_runs b ON p.prediction_hash = b.prediction_hash
                                  AND b.stage IN ('signal','allocation','risk_overlay','holdout')
             JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
             WHERE {where_sql}
-            ORDER BY bm.sharpe DESC NULLS LAST
+            ORDER BY b.backtest_hash
             """,
             params,
-        ).fetchall():
-            if training_run_fitted_for_the_holdout(candidate["spec_json"]):
-                row = dict(candidate)
-                row.pop("spec_json")
-                break
+        ).fetchall()
     finally:
         db.close()
-    return row
+    rows = [row for row in rows if training_run_fitted_for_the_holdout(row["spec_json"])]
+    if not rows:
+        return None
+    lineages = {row["training_hash"] for row in rows}
+    if len(lineages) > 1:
+        raise ValueError(
+            f"{len(rows)} holdout backtests across {len(lineages)} trained models were refitted "
+            f"for the holdout and match the carrier spec for {cs}, and no research lock names "
+            "which holdout run belongs to this study. Choosing between them would rank the "
+            "holdout on its own result. Take the lock, which records the sealed carrier and the "
+            "run made from it."
+        )
+    row = rows[0]
+    return {
+        k: row[k] for k in ("family", "config_name", "label", "prediction_hash", "backtest_hash")
+    }
 
 
-def _val_backtest_for_lineage(cs: str, family: str, config_name: str, label: str) -> str | None:
+def _val_backtest_for_lineage(
+    cs: str,
+    family: str,
+    config_name: str,
+    label: str,
+    *,
+    prediction_hashes: list[str] | None = None,
+) -> str | None:
     """Return the highest-Sharpe validation signal-stage backtest_hash for the
     given (family, config_name, label) lineage, or None if absent.
 
@@ -572,10 +703,18 @@ def _val_backtest_for_lineage(cs: str, family: str, config_name: str, label: str
               AND t.family = ?
               AND t.config_name = ?
               AND t.label = ?
+              {scope}
             ORDER BY bm.sharpe DESC NULLS LAST
             LIMIT 1
-            """,
-            (family, config_name, label),
+            """.format(
+                scope=(
+                    " AND p.prediction_hash IN (SELECT value FROM json_each(?))"
+                    if prediction_hashes is not None
+                    else ""
+                )
+            ),
+            (family, config_name, label)
+            + ((json.dumps(list(prediction_hashes)),) if prediction_hashes is not None else ()),
         ).fetchone()
     finally:
         db.close()
@@ -719,6 +858,74 @@ def _populate_pair(
     }
 
 
+NO_LIVE_HOLDOUT = "\x00no-live-holdout"
+
+
+def locked_holdout_evaluation(db: sqlite3.Connection, cs: str) -> tuple[str, str] | str | None:
+    """The one holdout this study may report, as ``(prediction_hash, backtest_hash)``.
+
+    Returns both finalized hashes; :data:`NO_LIVE_HOLDOUT` when a lock exists but names no
+    holdout this study can publish; ``None`` when no lock has been taken at all, which leaves
+    the caller's query unpinned as before.
+
+    **Both hashes, because the prediction alone does not identify the evaluation.** One
+    prediction set can carry several backtests - a replay registered under a different strategy
+    spec, an experimental allocator sharing the holdout prediction - so pinning the prediction
+    still leaves the caller choosing among their backtests by row order, which is the defect
+    one level down from the one this function was written to close.
+
+    **The lock's ``holdout_training_hash`` is what was expected, not what was produced.** It is
+    written when the carrier is sealed, before the retrain runs, and one training run registers
+    one prediction set per declared checkpoint - so pinning on it alone leaves several
+    candidates and the caller then picks among them by order. ``holdout_evaluations`` records
+    what the run actually finalized, ``holdout_prediction_hash`` and ``holdout_backtest_hash``,
+    keyed by the same ``lock_hash``. That is the row to resolve through, and its absence is
+    itself the answer: a lock whose evaluation never landed has no holdout to report, and
+    publishing the closest matching row would present an unfinished one as the result.
+
+    The state is checked for the same reason. Only ``HOLDOUT_EVALUATED`` means the sealed
+    carrier was actually taken to the holdout and the evaluation completed; anything earlier is
+    a lock in progress.
+
+    A lock is also immutable, and the carrier it sealed can be superseded afterwards - a later
+    refit publishes a new generation and the lock goes on naming the old one. Its holdout then
+    evaluates a configuration the study no longer publishes, so there is no live holdout either.
+    """
+    try:
+        row = db.execute(
+            "SELECT lock_hash, state, lock_json FROM research_locks ORDER BY created_at DESC "
+            "LIMIT 1"
+        ).fetchone()
+    except sqlite3.OperationalError as error:
+        if "no such table" not in str(error):
+            raise
+        return None
+    if not row:
+        return None
+    lock_hash, state, lock_json = row[0], row[1], row[2]
+    lock = json.loads(lock_json)
+    carrier = lock.get("prediction_hash")
+    if carrier is not None and carrier in _retired_prediction_hashes(cs):
+        return NO_LIVE_HOLDOUT
+    if state != "HOLDOUT_EVALUATED":
+        return NO_LIVE_HOLDOUT
+    try:
+        evaluated = db.execute(
+            "SELECT holdout_prediction_hash, holdout_backtest_hash FROM holdout_evaluations "
+            "WHERE lock_hash = ?",
+            (lock_hash,),
+        ).fetchone()
+    except sqlite3.OperationalError as error:
+        if "no such table" not in str(error):
+            raise
+        return NO_LIVE_HOLDOUT
+    if not evaluated or not evaluated[0] or not evaluated[1]:
+        # A half-written evaluation row names one side and not the other, which identifies no
+        # single evaluation. That is the same answer as no row at all.
+        return NO_LIVE_HOLDOUT
+    return str(evaluated[0]), str(evaluated[1])
+
+
 def _drop_retired_generations(cs: str, cand):
     """Candidates whose own publisher still publishes them.
 
@@ -733,20 +940,22 @@ def _drop_retired_generations(cs: str, cand):
     Both sides are filtered, because a retired generation reaches a ranking through either.
     The prediction side is the one that hides: a refit that changes no numbers publishes
     identical predictions under a new identity, so old and new carry the same Sharpe to the
-    last digit and the sort returns whichever it likes.
+    last digit and the sort returns whichever it likes. It goes through
+    ``_retired_prediction_hashes`` rather than the recorded set, so a holdout prediction is
+    dropped along with the validation generation it was retrained from.
     """
-    from case_studies.research import superseded_members_at
-    from utils.paths import get_case_study_dir
+    from case_studies.research.population import superseded_members_at
 
     if cand is None or cand.is_empty():
         return cand
-    case_dir = get_case_study_dir(cs)
-    retired = superseded_members_at(case_dir, member_kind="backtest")
-    retired_predictions = superseded_members_at(case_dir, member_kind="prediction")
-    if "backtest_hash" in cand.columns and retired:
-        cand = cand.filter(~pl.col("backtest_hash").is_in(list(retired)))
-    if "prediction_hash" in cand.columns and retired_predictions:
-        cand = cand.filter(~pl.col("prediction_hash").is_in(list(retired_predictions)))
+    if "backtest_hash" in cand.columns:
+        retired = superseded_members_at(get_case_study_dir(cs), member_kind="backtest")
+        if retired:
+            cand = cand.filter(~pl.col("backtest_hash").is_in(list(retired)))
+    if "prediction_hash" in cand.columns:
+        retired_predictions = _retired_prediction_hashes(cs)
+        if retired_predictions:
+            cand = cand.filter(~pl.col("prediction_hash").is_in(list(retired_predictions)))
     return cand
 
 
@@ -762,6 +971,7 @@ def populate_paired_metrics(
     verbose: bool = True,
     replace_all: bool = False,
     write_case_dir: Path | None = None,
+    prediction_hashes: Iterable[str] | None = None,
 ) -> list[dict]:
     """Compute all six paired-bootstrap pair types for ``cs`` and register them.
 
@@ -816,12 +1026,19 @@ def populate_paired_metrics(
     ``extra_paired_rows`` the Ch20 producer builds); each pair is also written to
     ``backtest_paired_metrics`` via ``register_paired_metrics``.
 
+    ``prediction_hashes`` restricts every candidate read to that population. A pair is a
+    comparison between two strategies the caller reports; selecting either side from the
+    whole registry lets a retired generation be the challenger or the benchmark, and the
+    difference is then measured against a strategy its own publisher replaced. Detecting
+    those rows and rebuilding without this would write them back unchanged.
+
     ``write_case_dir`` redirects the registry *write* to an alternate case dir
     (reads still come from the live tree) — used by the verification harness to
     write into a temp registry copy non-destructively.
     """
     if explorer is None:
         explorer = BacktestExplorer(cs)
+    live = list(prediction_hashes) if prediction_hashes is not None else None
     if periods_per_year is None:
         from case_studies.utils.uncertainty import periods_per_year_from_setup
 
@@ -838,7 +1055,7 @@ def populate_paired_metrics(
 
     # -- Pair #1: signal rank-1 (overall) ↔ equal-weight (overall) -----------
     cand = pl.concat(
-        [_best_for_rung(explorer, s, rung) for s in _PAIRED_STAGES],
+        [_best_for_rung(explorer, s, rung, prediction_hashes=live) for s in _PAIRED_STAGES],
         how="diagonal_relaxed",
     )
     skip_pair1 = False
@@ -936,12 +1153,15 @@ def populate_paired_metrics(
 
     # -- Pairs #2-6: holdout + stage transitions -----------------------------
     cand = pl.concat(
-        [_best_for_rung(explorer, s, rung) for s in _PAIRED_STAGES],
+        [_best_for_rung(explorer, s, rung, prediction_hashes=live) for s in _PAIRED_STAGES],
         how="diagonal_relaxed",
     )
     if cand.is_empty() or "backtest_hash" not in cand.columns:
         _report(cs, rows, verbose)
         return rows
+    # Pair #1 filters this out and so must this pool: with no carrier passed the leader is
+    # taken from the ranking below, and a superseded row still ranks.
+    cand = _drop_retired_generations(cs, cand)
     if "family" in cand.columns:
         cand = cand.filter(pl.col("family") != "benchmark")
     if label_restriction and "label" in cand.columns:
@@ -991,6 +1211,8 @@ def populate_paired_metrics(
         label_restriction=label_restriction,
         rung=rung,
         carrier_pin_predicate=carrier_pin_predicate,
+        prediction_hashes=live,
+        retired_hashes=_retired_prediction_hashes(cs),
     )
     # The carrier's training hash and checkpoint are both resolved inside
     # ``_holdout_lineage_for`` from this one prediction hash, so the same-lineage
@@ -1003,6 +1225,7 @@ def populate_paired_metrics(
             label_restriction=label_restriction,
             rung=rung,
             prefer_prediction_hash=leader_phash,
+            retired_hashes=_retired_prediction_hashes(cs),
         )
     elif carrier.get("holdout_backtest_hash") is None:
         ho_lineage = None
@@ -1067,7 +1290,9 @@ def populate_paired_metrics(
             val_self_hash = leader_hash
             val_self_returns = chal_full
         else:
-            val_self_hash = _val_backtest_for_lineage(cs, ho_family, ho_config, ho_label)
+            val_self_hash = _val_backtest_for_lineage(
+                cs, ho_family, ho_config, ho_label, prediction_hashes=live
+            )
             val_self_returns = _aligned_returns(cs, val_self_hash) if val_self_hash else None
         if val_self_hash is not None and val_self_returns is not None:
             rows.append(

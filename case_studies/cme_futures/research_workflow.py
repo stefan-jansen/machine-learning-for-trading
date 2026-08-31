@@ -8,6 +8,7 @@ import json
 import sqlite3
 import subprocess
 from collections.abc import Iterable
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -1236,48 +1237,3 @@ def selection_catalog(study: Study, members: Iterable[str]) -> pl.DataFrame:
         "prediction_hash",
         "backtest_hash",
     ).sort("sharpe", "backtest_hash", descending=[True, False])
-
-
-def holdout_evidence(study: Study) -> pl.DataFrame:
-    """Return the research lock and the one holdout evaluation it authorizes, if any.
-
-    The lock is what makes the holdout usable once: it records the candidate set, the
-    selected validation backtest and the retraining contract before any holdout artifact
-    exists. Reading it here is how the analysis shows which configuration the holdout ran
-    on without being able to choose a different one.
-    """
-    database = study.root / "run_log" / "registry.db"
-    if not database.is_file():
-        return pl.DataFrame()
-    with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as db:
-        names = {
-            row[0]
-            for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
-        }
-        if "research_locks" not in names:
-            return pl.DataFrame()
-        rows = db.execute(
-            "SELECT l.lock_hash, l.state, l.lock_json, e.holdout_training_hash, "
-            "e.holdout_prediction_hash, e.holdout_backtest_hash, e.evaluated_at "
-            "FROM research_locks l "
-            "LEFT JOIN holdout_evaluations e ON e.lock_hash = l.lock_hash"
-        ).fetchall()
-    records = []
-    for lock_hash, state, lock_json, training, prediction, backtest, evaluated_at in rows:
-        lock = json.loads(lock_json)
-        records.append(
-            {
-                "lock_hash": lock_hash,
-                "state": state,
-                "label": lock.get("label"),
-                "checkpoint_kind": lock.get("checkpoint_kind"),
-                "checkpoint_value": lock.get("checkpoint_value"),
-                "candidate_set_hash": lock.get("candidate_set_hash"),
-                "validation_backtest_hash": lock.get("validation_backtest_hash"),
-                "holdout_training_hash": training,
-                "holdout_prediction_hash": prediction,
-                "holdout_backtest_hash": backtest,
-                "evaluated_at": evaluated_at,
-            }
-        )
-    return pl.DataFrame(records)

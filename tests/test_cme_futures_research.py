@@ -800,52 +800,6 @@ def test_selection_catalog_rejects_a_candidate_the_catalog_does_not_describe(
         research_workflow.selection_catalog(study, members)
 
 
-def test_holdout_evidence_is_empty_until_the_lifecycle_is_locked(tmp_path: Path) -> None:
-    study = _study(tmp_path)
-
-    assert research_workflow.holdout_evidence(study).is_empty()
-
-
-def test_holdout_evidence_reports_the_lock_and_its_single_evaluation(tmp_path: Path) -> None:
-    study = _study(tmp_path)
-    lock_record = {
-        "candidate_set_hash": "set-1",
-        "label": "fwd_ret_5d",
-        "checkpoint_kind": "epoch",
-        "checkpoint_value": 20,
-        "validation_backtest_hash": "bt-validation",
-    }
-    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
-        db.execute(
-            "INSERT INTO research_locks (lock_hash, lock_json, state, created_at) VALUES (?,?,?,?)",
-            ("lock-1", json.dumps(lock_record), "LOCKED", "2026-08-15T00:00:00Z"),
-        )
-
-    pending = research_workflow.holdout_evidence(study)
-    assert pending.height == 1
-    assert pending.item(0, "state") == "LOCKED"
-    assert pending.item(0, "label") == "fwd_ret_5d"
-    assert pending.item(0, "checkpoint_value") == 20
-    assert pending.item(0, "holdout_backtest_hash") is None
-
-    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
-        db.execute(
-            "INSERT INTO holdout_evaluations (lock_hash, holdout_training_hash, "
-            "holdout_prediction_hash, holdout_backtest_hash, evaluated_at) VALUES (?,?,?,?,?)",
-            ("lock-1", "tr-holdout", "pr-holdout", "bt-holdout", "2026-08-15T01:00:00Z"),
-        )
-        db.execute(
-            "UPDATE research_locks SET state = ? WHERE lock_hash = ?",
-            ("HOLDOUT_EVALUATED", "lock-1"),
-        )
-
-    evaluated = research_workflow.holdout_evidence(study)
-    assert evaluated.height == 1
-    assert evaluated.item(0, "state") == "HOLDOUT_EVALUATED"
-    assert evaluated.item(0, "holdout_backtest_hash") == "bt-holdout"
-    assert evaluated.item(0, "evaluated_at") == "2026-08-15T01:00:00Z"
-
-
 def test_official_model_catalog_forwards_the_population_it_supersedes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

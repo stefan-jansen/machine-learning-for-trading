@@ -43,8 +43,10 @@ benchmark name in the registry is non-default.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import warnings
+from collections.abc import Iterable
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
@@ -1042,6 +1044,16 @@ def _align_variants_on_timestamp(
     return matrix, names
 
 
+def cohort_member_digest(hashes: Iterable[str]) -> str:
+    """Identify a cohort by its members rather than by how many it has.
+
+    Order-independent, so the digest does not depend on how the caller happened to
+    assemble the cohort, and duplicates collapse - a hash is in the cohort or it is not.
+    """
+    unique = sorted(set(str(h) for h in hashes))
+    return hashlib.sha256("\n".join(unique).encode()).hexdigest()
+
+
 def compute_cohort_metrics(
     returns_by_hash: dict[str, pl.DataFrame],
     *,
@@ -1125,6 +1137,11 @@ def compute_cohort_metrics(
     out: dict[str, Any] = {
         "leader_hash": leader_hash,
         "k_variants": int(k_variants),
+        # `names` is the cohort the correction below is actually computed over, after
+        # alignment has dropped whatever could not be aligned. Persisting its digest is
+        # what lets a reader establish that a stored correction belongs to the cohort it
+        # is about to report it against, rather than inferring it from a matching count.
+        "member_digest": cohort_member_digest(names),
         "periods_per_year": float(periods_per_year),
         "leader_sharpe": float(sharpes[leader_idx]),
     }

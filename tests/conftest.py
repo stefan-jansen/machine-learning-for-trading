@@ -376,6 +376,19 @@ def seeded_output_dir(tmp_path_factory):
 
     seed_results(output_dir, CASE_STUDY_IDS)
 
+    # The preview root is deliberately NOT seeded. `Study.activate()` links only `labels` and
+    # `features` into the preview case directory and opens an empty registry there, and it was
+    # tempting to seed that root too so a read-only downstream notebook would find a candidate
+    # index. Measured on etfs, that does more harm than the gap it fills: the seeded rows land
+    # in the same `(split, family, label)` coverage group as the predictions the preview run
+    # actually fits, and they cannot win it - a seeded artifact carries 60 dates against a
+    # fitted 447-483 - so `full_coverage_prediction_sql` admits neither and `14_backtest`
+    # refuses to rank anything. With the preview root left empty, `13_model_analysis` passes
+    # anyway and that refusal does not arise.
+    #
+    # A notebook that genuinely has nothing to read under preview should say so, which is what
+    # the refusals in 14 through 18 already do.
+
     # The reader-facing crypto workflow opens the seeded case directory as a Study workspace.
     # Mark that existing fixture root explicitly so Study.open does not confuse it with an
     # unrelated directory and so preview outputs remain under this test worker's output root.
