@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterable
 from pathlib import Path
 
 import polars as pl
@@ -175,12 +176,19 @@ def load_model_ic(
     split: str = "validation",
     case_studies: list[str] | None = None,
     require_full_coverage: bool = True,
+    exclude_prediction_hashes: Iterable[str] | None = None,
 ) -> pl.DataFrame:
     """Load IC metrics across case studies for specified model families.
 
     Returns a DataFrame with columns:
         case_study, family, config_name, label, split,
-        checkpoint_value, ic_mean, ic_std
+        checkpoint_value, ic_mean, ic_std, ic_n_days
+
+    ``ic_n_days`` is returned so a caller placing two families side by side can
+    check the periods actually match rather than assume it. The coverage bar
+    below is taken within each ``(split, family, label)``, so families reaching
+    different maxima are each full-coverage by their own measure and compare
+    across different windows without anything saying so.
 
     A model family can hold prediction sets scored over different numbers of
     decision days, because a run that failed partway still registers rows for the
@@ -211,10 +219,21 @@ def load_model_ic(
         Keep only the maximum-coverage rows per (split, family, label). Set False
         for an inventory of everything scored, which cannot be compared across
         rows.
+    exclude_prediction_hashes : iterable of str, optional
+        Prediction sets to drop. Applied **inside** the coverage bar as well as
+        outside it, so an excluded row cannot set the maximum the surviving rows
+        are then measured against. Excluding after the query returns is not the
+        same operation: the bar is the population's maximum, so an excluded row
+        holding the highest coverage removes every remaining member of its family
+        and the family disappears rather than falling back to its best remaining
+        run. Retirement is the usual reason to exclude, and a retired generation
+        is exactly the kind of row that can hold the highest coverage.
     """
     if isinstance(families, str):
         families = [families]
     cs_list = case_studies or CASE_STUDY_IDS
+    excluded = list(exclude_prediction_hashes) if exclude_prediction_hashes is not None else None
+    excluded_json = json.dumps(excluded) if excluded else None
 
     frames = []
     for cs_id in cs_list:
@@ -256,7 +275,31 @@ def load_model_ic(
                     is not None
                 )
         coverage_enforced = require_full_coverage and coverage_usable
-        coverage_clause = full_coverage_prediction_sql("p", "t", "pm") if coverage_enforced else ""
+        # The exclusion is folded into the coverage subquery's population rather than applied to
+        # its result. The bar is a MAX over that population, so leaving an excluded row inside it
+        # lets that row set a threshold none of the rows the caller asked for can reach.
+        coverage_population = (
+            "SELECT prediction_hash FROM prediction_sets "
+            "WHERE prediction_hash NOT IN (SELECT value FROM json_each(?))"
+            if excluded_json
+            else None
+        )
+        coverage_clause = (
+            full_coverage_prediction_sql("p", "t", "pm", population_subquery=coverage_population)
+            if coverage_enforced
+            else ""
+        )
+        # Bound in the order the fragments appear in the SQL below: the coverage subquery's
+        # parameter first, then the outer exclusion's.
+        if coverage_clause and excluded_json:
+            params.append(excluded_json)
+        exclusion_clause = ""
+        if excluded_json:
+            exclusion_clause = "AND p.prediction_hash NOT IN (SELECT value FROM json_each(?))"
+            params.append(excluded_json)
+        # The probe above tolerates a legacy registry without the column; selecting it anyway
+        # would fail those same registries with `no such column`.
+        n_days_expr = "pm.ic_n_days" if "ic_n_days" in pm_cols else "NULL"
 
         sql = f"""
             SELECT
@@ -271,7 +314,8 @@ def load_model_ic(
                 -- kept only as a fallback for rows predating the daily backfill. Ranking on
                 -- the legacy column while quoting the daily interval mixes two statistics.
                 {ic_expr} AS ic_mean,
-                pm.ic_std
+                pm.ic_std,
+                {n_days_expr} AS ic_n_days
             FROM training_runs t
             JOIN prediction_sets p ON t.training_hash = p.training_hash
             JOIN prediction_metrics pm ON p.prediction_hash = pm.prediction_hash
@@ -279,6 +323,7 @@ def load_model_ic(
               AND p.split = ?
               {degenerate_prediction_sql("p.prediction_hash")}
               {coverage_clause}
+              {exclusion_clause}
             ORDER BY ic_mean DESC NULLS LAST, p.prediction_hash ASC
         """
         df = _query(db_path, sql, tuple(params))
@@ -422,6 +467,7 @@ def load_best_ic_per_family(
     split: str = "validation",
     case_studies: list[str] | None = None,
     use_primary_label: bool = True,
+    exclude_prediction_hashes: Iterable[str] | None = None,
 ) -> pl.DataFrame:
     """Highest-IC row per family per case study (one row per family-case_study pair).
 
@@ -435,9 +481,29 @@ def load_best_ic_per_family(
     a family's strongest score are using it correctly; a caller choosing what to
     trade or fit from this result is not.
 
-    Returns: case_study, display_name, family, config_name, label, ic_mean
+    Returns: case_study, display_name, family, config_name, label, ic_mean,
+    ic_n_days, and ``prediction_hash`` where the source carries it. The coverage
+    bar is per family, so ``ic_n_days`` lets a caller comparing families confirm
+    they were scored over the same *number* of days; ``prediction_hash`` is what
+    lets it load the rows and confirm they were the same days.
+
+    ``exclude_prediction_hashes`` is forwarded to :func:`load_model_ic`, which
+    applies it inside the coverage bar and again in the row filter. Both
+    placements matter and neither can be done by the caller afterwards: the
+    coverage bar is a maximum over the population, so an excluded row holding the
+    highest ``ic_n_days`` removes every surviving member of its family; and this
+    function keeps one row per family, so filtering its result deletes a family
+    whose leader was excluded instead of falling back to the runner-up. A caller
+    that looks its families up by name raises either way. The catalog carries no
+    lineage, so retirement is the usual reason to exclude, and a retired
+    generation is exactly the kind of row that holds high coverage.
     """
-    all_ic = load_model_ic(families, split=split, case_studies=case_studies)
+    all_ic = load_model_ic(
+        families,
+        split=split,
+        case_studies=case_studies,
+        exclude_prediction_hashes=exclude_prediction_hashes,
+    )
     if all_ic.is_empty():
         return pl.DataFrame()
 
@@ -459,7 +525,15 @@ def load_best_ic_per_family(
         )
         .group_by(["case_study", "family"])
         .first()
-        .select("case_study", "family", "config_name", "label", "ic_mean")
+        .select(
+            "case_study",
+            "family",
+            "config_name",
+            "label",
+            "ic_mean",
+            "ic_n_days",
+            *(["prediction_hash"] if "prediction_hash" in all_ic.columns else []),
+        )
     )
 
     # Add display names

@@ -14,6 +14,8 @@ from .contracts import ExecutionTier
 from .results import Result
 
 if TYPE_CHECKING:
+    import polars as pl
+
     from .workspace import Study
 
 
@@ -469,6 +471,101 @@ def _lineage(
     return rows, members
 
 
+@dataclass(frozen=True)
+class RetirementSplit:
+    """A candidate index divided into what its publishers still stand behind and what they do not.
+
+    Both sides carry every column of the index they came from, so the retired side is
+    reportable - which family, which configuration, what IC it would have swept on - rather
+    than a count with no way to check it.
+    """
+
+    live: pl.DataFrame
+    retired: pl.DataFrame
+
+
+def split_retired_members(
+    study: Study,
+    index: pl.DataFrame,
+    *,
+    member_kind: str = "prediction",
+    column: str = "prediction_hash",
+) -> RetirementSplit:
+    """Divide a candidate index on whether each identity's publisher has moved past it.
+
+    A sweep builds its candidates from the registry catalog, and the catalog does not carry
+    lineage: a refit leaves the previous generation complete, current under an unmoved schema
+    version, and indistinguishable from the generation that replaced it. Selecting over both
+    does not fail. It ranks twice as many rows, and a retired identity that outranks a live
+    one takes its slot and is carried into every stage downstream.
+
+    The predicate is ``superseded_members``, applied to the index rather than folded into the
+    query that built it. Keeping it here is what lets the notebook print the two halves: a
+    filter inside the loader would drop the rows before anything could say which ones or why,
+    and an index that silently shrinks between runs is the failure this exists to prevent.
+
+    Retirement is member-wise within a population name, so a refit that moved three of ten
+    identities retires three and leaves seven live. With no supersession edge anywhere -
+    a clean clone, or a study that has published exactly one generation - nothing is retired
+    and the index passes through whole.
+    """
+    import polars as pl
+
+    if column not in index.columns:
+        raise ValueError(
+            f"candidate index has no {column!r} column, so retirement cannot be decided on it; "
+            f"it carries {sorted(index.columns)}"
+        )
+    retired = superseded_members(study, member_kind=member_kind)
+    if not retired:
+        return RetirementSplit(live=index, retired=index.clear())
+    is_retired = pl.col(column).is_in(list(retired))
+    return RetirementSplit(live=index.filter(~is_retired), retired=index.filter(is_retired))
+
+
+def split_unpublished_members(
+    study: Study,
+    index: pl.DataFrame,
+    *,
+    member_kind: str = "prediction",
+    column: str = "prediction_hash",
+) -> RetirementSplit:
+    """Divide a candidate index on whether its case study publishes each identity.
+
+    :func:`split_retired_members` asks the exclusion question - has this identity's publisher
+    moved past it - and that is the weaker of the two. "Not retired" and "published" differ by
+    the identities no population ever listed: an experimental fit, a one-off, a row written
+    before its notebook declared a population. Nobody retired them, so an exclusion set admits
+    them, and a sweep ranking over that set can carry one into every stage downstream as though
+    it were what the case study publishes. Measured on the etfs registry 2026-08-30: of 682
+    validation prediction sets, 134 are superseded and 498 are published, leaving 50 that are
+    live by exclusion and listed by no population at all.
+
+    So membership is asked first, through :func:`published_members_at`, and the exclusion
+    question is the fallback rather than the answer. ``published_members_at`` returns ``None``
+    where the registry declares no populations - a fixture, or a study written before the
+    mechanism - and there membership cannot be asked at all; narrowing to nothing would refuse
+    every candidate, so the exclusion split stands in and the index passes through as before.
+
+    The return shape is :class:`RetirementSplit` either way, so a caller goes on printing both
+    halves. On the membership path the ``retired`` side is everything not published, which is
+    the superset that includes the never-listed rows - named for what the caller does with it,
+    which is to exclude and report it.
+    """
+    import polars as pl
+
+    if column not in index.columns:
+        raise ValueError(
+            f"candidate index has no {column!r} column, so membership cannot be decided on it; "
+            f"it carries {sorted(index.columns)}"
+        )
+    published = published_members_at(study.root, member_kind=member_kind)
+    if published is None:
+        return split_retired_members(study, index, member_kind=member_kind, column=column)
+    is_published = pl.col(column).is_in(list(published))
+    return RetirementSplit(live=index.filter(is_published), retired=index.filter(~is_published))
+
+
 def superseded_members(study: Study, *, member_kind: str = "prediction") -> frozenset[str]:
     """Identities whose own publisher has moved past them.
 
@@ -593,6 +690,47 @@ def published_population_names_at(
     """
     rows, _ = _lineage(Path(case_dir), member_kind)
     return frozenset(name for _, name, _ in rows)
+
+
+def published_members_at(
+    case_dir: str | Path, *, member_kind: str = "prediction"
+) -> frozenset[str] | None:
+    """The members every population name in this registry currently stands behind.
+
+    The positive counterpart to :func:`superseded_members_at`. "Not retired" and "published"
+    are different sets, and only the second answers *which results may be reported*: a
+    prediction that no population ever listed has not been retired by anyone, so an exclusion
+    set admits it while a membership set does not. A reader that ranks over the exclusion set
+    can therefore surface an experimental result its case study never published.
+
+    ``None`` when the registry declares no populations at all - a fixture, or one written
+    before the mechanism existed. That is not an empty population: it means membership cannot
+    be asked here, and a caller should fall back to catalog admissibility and say so, rather
+    than narrow every query to nothing.
+
+    A forked chain leaves more than one tip standing; the union is taken across tips, matching
+    :func:`_retired`, so a fork can only over-admit and never silently drop a live member.
+
+    The union is then reduced by what is retired, and it has to be: names are independent, so
+    a downstream population - a backtest set, a candidate set - can go on listing a prediction
+    that the *model* population which produced it has since refit past. Taking the union alone
+    would let that downstream listing restore an identity its own publisher retired, which is
+    precisely the reading :func:`superseded_members` exists to prevent. Listed by some tip and
+    retired by nobody is the conjunction that answers "may this be reported".
+    """
+    rows, members = _lineage(Path(case_dir), member_kind)
+    if not rows:
+        return None
+    by_name: dict[str, list[tuple[str, str | None]]] = {}
+    for population_hash, name, supersedes in rows:
+        by_name.setdefault(name, []).append((population_hash, supersedes))
+    published: set[str] = set()
+    for generations in by_name.values():
+        superseded = {s for _, s in generations if s is not None}
+        for population_hash, _ in generations:
+            if population_hash not in superseded:
+                published |= members.get(population_hash, set())
+    return frozenset(published - _retired(rows, members))
 
 
 def superseded_members_at(

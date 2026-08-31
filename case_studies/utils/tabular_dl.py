@@ -464,7 +464,9 @@ def reconstruct_locked_request(
 ):
     """Reconstruct a TabM holdout fit without consulting a mutable preset."""
     from case_studies.research.contracts import ExecutionTier
-    from case_studies.research.cv import require_fold_scoped_temporal_compatibility
+    from case_studies.research.cv import (
+        require_fold_scoped_temporal_holdout_coverage,
+    )
     from case_studies.research.models import (
         ResolvedModelRequest,
         locked_holdout_split,
@@ -501,7 +503,19 @@ def reconstruct_locked_request(
             raise ValueError(f"locked TabM {name} does not match the available computation")
     split = locked_holdout_split(spec, mds.dataset, mds.date_col, study.case_study)
     if mds.temporal_by_fold is not None and mds.temporal_keys and mds.temporal_feature_names:
-        require_fold_scoped_temporal_compatibility([split], mds.temporal_artifact_splits)
+        # Coverage, not fold-boundary compatibility - the branch `latent_factors/adapter.py:603`
+        # and `gbm.py` already take, for the same reason. Compatibility asks whether the stage-04
+        # artifact declares a fold with this geometry, and for a holdout that question has no good
+        # answer: the fold is derived after stage 04 ran, so the artifact does not declare it, and
+        # rebuilding it to declare it changes the sha256 the selection was made under. The
+        # features are joined by (entity, date), so what the run needs is rows spanning the dates
+        # it trains and evaluates on, not a fold labelled for it.
+        require_fold_scoped_temporal_holdout_coverage(
+            split,
+            mds.temporal_by_fold,
+            source_timeline=mds.dataset.get_column(mds.date_col),
+            date_col=mds.date_col,
+        )
     expected = _tabm_expected_keys(mds, [split])
     validate_locked_expected_keys(spec, expected)
 

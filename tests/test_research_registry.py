@@ -251,7 +251,7 @@ def test_legacy_registry_schema_migrates_additively(tmp_path: Path) -> None:
         migrated.close()
 
     assert {"identity_version", "execution_tier"} <= columns
-    assert {"prediction_coverage", "candidate_sets", "research_locks"} <= tables
+    assert {"prediction_coverage", "candidate_sets"} <= tables
     assert row == ("legacy-training", None, None)
 
 
@@ -670,6 +670,73 @@ def test_fitted_states_come_back_in_fold_order_not_filename_order(tmp_path: Path
 
     assert isinstance(reopened, TrainingResult)
     assert [state["fold"] for state in reopened.fitted_states()] == list(range(12))
+
+
+def test_fold_metrics_come_back_in_fold_order_with_the_values_registered(tmp_path: Path) -> None:
+    """`ic_mean` is the equal-weight mean of these rows, so a notebook arguing from their spread -
+    how often the sign changes, how far the cross-section narrows - is reading them rather than the
+    average. That argument is only checkable if the rows come back complete and in fold order: a
+    lexicographic sort would put fold 10 before fold 2 and silently reorder the sequence the prose
+    walks through."""
+    study = _study(tmp_path)
+    registered = [
+        (0, -0.076172, 0.330584, 92.0),
+        (2, -0.003361, 0.175347, 88.0),
+        (10, 0.115767, 0.302743, 86.0),
+    ]
+    db = _open_registry(study.root)
+    try:
+        db.execute(
+            "INSERT INTO training_runs "
+            "(training_hash, family, label, spec_json, created_at) VALUES (?,?,?,?,?)",
+            ("folded-training", "latent_factors", "fwd_ret_21d", "{}", "2024-01-01"),
+        )
+        db.execute(
+            "INSERT INTO prediction_sets "
+            "(prediction_hash, training_hash, split, created_at) VALUES (?,?,?,?)",
+            ("folded-prediction", "folded-training", "validation", "2024-01-01"),
+        )
+        for fold_id, ic, ic_std, n_entities in reversed(registered):
+            db.execute(
+                "INSERT INTO fold_metrics "
+                "(prediction_hash, fold_id, computed_at, ic, ic_std, n_entities) "
+                "VALUES (?,?,?,?,?,?)",
+                ("folded-prediction", fold_id, "2024-01-01", ic, ic_std, n_entities),
+            )
+        db.commit()
+    finally:
+        db.close()
+
+    folds = Result.open(study, "folded-prediction").folds()
+
+    assert folds.columns == ["fold_id", "ic", "ic_std", "n_entities"]
+    assert [tuple(row) for row in folds.iter_rows()] == registered
+
+
+def test_a_prediction_set_with_no_registered_folds_returns_an_empty_frame(tmp_path: Path) -> None:
+    """Reading the folds of a result that has none must not raise. A legacy row carries no fold
+    metrics at all, and a caller that has to guard the call before making it will not make it."""
+    study = _study(tmp_path)
+    db = _open_registry(study.root)
+    try:
+        db.execute(
+            "INSERT INTO training_runs "
+            "(training_hash, family, label, spec_json, created_at) VALUES (?,?,?,?,?)",
+            ("foldless-training", "linear", "fwd_ret_21d", "{}", "2024-01-01"),
+        )
+        db.execute(
+            "INSERT INTO prediction_sets "
+            "(prediction_hash, training_hash, split, created_at) VALUES (?,?,?,?)",
+            ("foldless-prediction", "foldless-training", "validation", "2024-01-01"),
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    folds = Result.open(study, "foldless-prediction").folds()
+
+    assert folds.height == 0
+    assert folds.columns == ["fold_id", "ic", "ic_std", "n_entities"]
 
 
 def test_the_refusal_names_the_partial_member_and_the_sense_it_is_partial_in(

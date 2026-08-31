@@ -30,10 +30,14 @@ from case_studies.utils.notebook_contracts import (
     filter_active_model_rows,
     full_coverage_prediction_sql,
 )
-from case_studies.utils.uncertainty import STAGE_SEQUENCE
+from case_studies.utils.uncertainty import STAGE_SEQUENCE, cohort_member_digest
 
 # Sentinel distinguishing "no filter" from "match exit_at_max_days IS NULL".
 _UNSET = object()
+
+# `best` bounds its read with a SQL LIMIT, so counting a whole cohort means asking for
+# more rows than any cohort holds rather than for no limit at all.
+_UNBOUNDED_COHORT = 1_000_000
 
 # Canonical schema for BacktestExplorer.best() output. Used to construct
 # schema-stable empty DataFrames so downstream `.select("source", ...)`
@@ -401,12 +405,22 @@ class BacktestExplorer:
     # -----------------------------------------------------------------
 
     def compare_families(
-        self, stage: str = "signal", *, exclude_insolvent: bool = False
+        self,
+        stage: str = "signal",
+        *,
+        prediction_hashes: tuple[str, ...] | list[str] | None = None,
+        exclude_insolvent: bool = False,
     ) -> pl.DataFrame:
         """Compare model families by backtest Sharpe at a given stage.
 
         Parameters
         ----------
+        prediction_hashes : sequence of str, optional
+            Restrict the comparison to these prediction identities. The coverage bar is
+            then taken within them, matching ``best`` and ``compare_allocators``: a family
+            whose full-coverage rows are outside the population must be compared on its own
+            terms rather than dropped against a bar nothing in the population can meet.
+            An empty sequence is a population with no members and compares nothing.
         exclude_insolvent : bool, default False
             Compute the Sharpe statistics over the runs that stayed solvent,
             and report how many did not in an added ``insolvent`` column. A run
@@ -445,6 +459,19 @@ class BacktestExplorer:
             pct_positive - and ``insolvent``, ``unknown`` when
             ``exclude_insolvent``.
         """
+        scope_sql = ""
+        scope_params: tuple[str, ...] = ()
+        coverage_sql = full_coverage_prediction_sql("p", "t", "pm")
+        if prediction_hashes is not None:
+            placeholders = ", ".join("?" for _ in prediction_hashes)
+            scope_sql = f" AND p.prediction_hash IN ({placeholders})"
+            coverage_sql = full_coverage_prediction_sql(
+                "p",
+                "t",
+                "pm",
+                population_subquery="SELECT value FROM json_each(?)",
+            )
+            scope_params = (json.dumps(list(prediction_hashes)), *prediction_hashes)
         # A run that went bankrupt can carry a null Sharpe, and dropping those in SQL would
         # remove it before `insolvent` counts it - so a family that went bankrupt in every
         # run would leave the comparison entirely, which is the survivorship bias this
@@ -465,11 +492,12 @@ class BacktestExplorer:
             WHERE b.stage = ?
               AND p.split != 'holdout'
               {excluded_family_sql(self.case_study, "t.family")[0]}
-              {full_coverage_prediction_sql("p", "t", "pm")}
+              {coverage_sql}
               {sharpe_sql}
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
+              {scope_sql}
             """,
-            (stage, *excluded_family_sql(self.case_study, "t.family")[1]),
+            (stage, *excluded_family_sql(self.case_study, "t.family")[1], *scope_params),
         )
         if df.is_empty():
             return df
@@ -830,6 +858,7 @@ class BacktestExplorer:
         *,
         top_n: int = 20,
         periods_per_year: int = 252,
+        prediction_hashes: tuple[str, ...] | list[str] | None = None,
     ) -> pl.DataFrame:
         """Per-variant Sharpe with selection-bias DSR for family leaders.
 
@@ -839,7 +868,18 @@ class BacktestExplorer:
 
         Selection-bias DSR / RAS / Reality Check / PBO come from the
         persisted ``cohort_metrics`` table (cohort_type='family',
-        leader_hash=backtest_hash). Backward-compatible columns
+        leader_hash=backtest_hash).
+
+        A deflated Sharpe is only meaningful against the trial count of the
+        selection actually performed, so when ``prediction_hashes`` scopes
+        the ranking these columns are reported only where the persisted
+        cohort *is* the scoped cohort. ``k_variants`` is the count the stored
+        correction was computed over and ``k_variants_scoped`` is the count
+        in hand; where they disagree the selection-bias columns are null and
+        both counts are kept, so a reader sees which population the missing
+        correction belonged to rather than a leader that appears to need
+        none. The counts are built by the same eligibility rule, since the
+        scoped cohort is measured with ``best`` itself. Backward-compatible columns
         ``deflated_sharpe``, ``expected_max_sharpe``, ``dsr_pvalue``,
         ``significant`` carry the **effective-rank (ER) DSR** — the
         library maintainer's recommended default. ``dsr_mp`` and
@@ -853,14 +893,33 @@ class BacktestExplorer:
             Columns: source, sharpe, psr_pvalue, deflated_sharpe,
             expected_max_sharpe, dsr_pvalue, significant, is_best,
             dsr_mp, dsr_mp_pvalue, dsr_raw, dsr_raw_pvalue, k_variants,
-            n_trials_effective_er, n_trials_effective_mp, ras_leader,
+            k_variants_scoped, n_trials_effective_er, n_trials_effective_mp, ras_leader,
             ras_pvalue, reality_check_pvalue, pbo, family, label.
         """
         from ml4t.diagnostic.evaluation.stats import deflated_sharpe_ratio
 
-        top = self.best(stage=stage, top_n=top_n)
+        top = self.best(stage=stage, top_n=top_n, prediction_hashes=prediction_hashes)
         if top.is_empty():
             return pl.DataFrame()
+
+        # The scoped cohort's size per (family, label), measured through `best` so that
+        # coverage, excluded families and the tradeless-backtest rule are applied exactly
+        # once. `top_n` bounds the rows displayed, not the cohort selected from, so this
+        # is a second unbounded read rather than a group-by over `top`.
+        scoped_k: dict[tuple[str, str], int] = {}
+        scoped_digest: dict[tuple[str, str], str] = {}
+        if prediction_hashes:
+            cohort = self.best(
+                stage=stage, top_n=_UNBOUNDED_COHORT, prediction_hashes=prediction_hashes
+            )
+            if not cohort.is_empty():
+                grouped = cohort.group_by("family", "label").agg(
+                    n=pl.len(), members=pl.col("backtest_hash")
+                )
+                for row in grouped.iter_rows(named=True):
+                    key = (row["family"], row["label"])
+                    scoped_k[key] = row["n"]
+                    scoped_digest[key] = cohort_member_digest(row["members"])
 
         per_variant_psr: dict[str, float | None] = {}
         for row in top.iter_rows(named=True):
@@ -887,7 +946,7 @@ class BacktestExplorer:
         placeholders = ",".join("?" for _ in hashes)
         cm = self._query(
             f"""
-            SELECT leader_hash, k_variants,
+            SELECT leader_hash, k_variants, member_digest,
                    n_trials_effective_mp, n_trials_effective_er,
                    dsr_raw, dsr_raw_pvalue,
                    dsr_mp,  dsr_mp_pvalue,
@@ -913,7 +972,24 @@ class BacktestExplorer:
             b_hash = r["backtest_hash"]
             cmr = cm_by_hash.get(b_hash)
             is_leader = cmr is not None
-            dsr_er_p = cmr["dsr_er_pvalue"] if is_leader else None
+            key = (r["family"], r["label"])
+            k_scoped = scoped_k.get(key) if prediction_hashes else None
+            # Applies only where the stored cohort IS the one that was ranked, established
+            # on the members and not on how many there are: swapping a retired member for a
+            # live one leaves `k_variants` untouched, and the correction would then be
+            # reported against a cohort it was not computed over. `member_digest` is null on
+            # rows written before it was persisted; those still fall back to the count, which
+            # at least catches the scoping that strictly removes variants, and stop doing so
+            # the first time their producer re-runs.
+            applies = is_leader and (
+                not prediction_hashes
+                or (
+                    cmr["member_digest"] == scoped_digest.get(key)
+                    if cmr["member_digest"]
+                    else cmr["k_variants"] == k_scoped
+                )
+            )
+            dsr_er_p = cmr["dsr_er_pvalue"] if applies else None
             rows.append(
                 {
                     "source": r["source"],
@@ -921,32 +997,31 @@ class BacktestExplorer:
                     "label": r["label"],
                     "sharpe": _round(r["sharpe"]),
                     "psr_pvalue": _round(per_variant_psr.get(b_hash)),
-                    "deflated_sharpe": _round(cmr["dsr_er"]) if is_leader else None,
+                    "deflated_sharpe": _round(cmr["dsr_er"]) if applies else None,
                     "expected_max_sharpe": _round(cmr["expected_max_sharpe_er"])
-                    if is_leader
+                    if applies
                     else None,
                     "dsr_pvalue": _round(dsr_er_p),
-                    "significant": (dsr_er_p is not None and dsr_er_p < 0.05)
-                    if is_leader
-                    else None,
+                    "significant": (dsr_er_p is not None and dsr_er_p < 0.05) if applies else None,
                     "is_best": is_leader,
-                    "dsr_mp": _round(cmr["dsr_mp"]) if is_leader else None,
-                    "dsr_mp_pvalue": _round(cmr["dsr_mp_pvalue"]) if is_leader else None,
-                    "dsr_raw": _round(cmr["dsr_raw"]) if is_leader else None,
-                    "dsr_raw_pvalue": _round(cmr["dsr_raw_pvalue"]) if is_leader else None,
+                    "dsr_mp": _round(cmr["dsr_mp"]) if applies else None,
+                    "dsr_mp_pvalue": _round(cmr["dsr_mp_pvalue"]) if applies else None,
+                    "dsr_raw": _round(cmr["dsr_raw"]) if applies else None,
+                    "dsr_raw_pvalue": _round(cmr["dsr_raw_pvalue"]) if applies else None,
                     "k_variants": cmr["k_variants"] if is_leader else None,
+                    "k_variants_scoped": k_scoped,
                     "n_trials_effective_er": _round(cmr["n_trials_effective_er"], 1)
-                    if is_leader
+                    if applies
                     else None,
                     "n_trials_effective_mp": _round(cmr["n_trials_effective_mp"], 1)
-                    if is_leader
+                    if applies
                     else None,
-                    "ras_leader": _round(cmr["ras_leader"]) if is_leader else None,
-                    "ras_pvalue": _round(cmr["ras_pvalue"]) if is_leader else None,
+                    "ras_leader": _round(cmr["ras_leader"]) if applies else None,
+                    "ras_pvalue": _round(cmr["ras_pvalue"]) if applies else None,
                     "reality_check_pvalue": _round(cmr["reality_check_pvalue"])
-                    if is_leader
+                    if applies
                     else None,
-                    "pbo": _round(cmr["pbo"]) if is_leader else None,
+                    "pbo": _round(cmr["pbo"]) if applies else None,
                 }
             )
         return pl.DataFrame(rows).sort("sharpe", descending=True, nulls_last=True)
@@ -1052,8 +1127,14 @@ class BacktestExplorer:
     # risk_impact: risk overlay comparison from registry
     # -----------------------------------------------------------------
 
-    def risk_impact(self, *, prediction_hash: str | None = None) -> pl.DataFrame:
-        """Load risk overlay results and compute impact vs baseline.
+    def risk_impact(
+        self,
+        *,
+        prediction_hash: str | None = None,
+        prediction_hashes: tuple[str, ...] | list[str] | None = None,
+        parents: Iterable[tuple[str, str, object]] | None = None,
+    ) -> pl.DataFrame:
+        """Load risk overlay results and compute impact vs the baseline each one modified.
 
         Parameters
         ----------
@@ -1062,19 +1143,44 @@ class BacktestExplorer:
             Case studies with a pinned carrier (e.g. nasdaq's cost-feasible
             ensemble) must scope to the carrier so the full-universe overlay
             demonstration rows do not pool into the headline.
+        prediction_hashes : sequence of str, optional
+            Restrict to overlays on these predictions. An overlay is a change to
+            one allocation, so pooling overlays from predictions the caller did
+            not sweep measures rules against strategies it never built.
+        parents : sequence of (prediction_hash, allocator, top_k), optional
+            Restrict to overlays sitting on these allocation specifications. A
+            prediction has one allocation *stage* and several allocation *parents*,
+            distinguished by allocator and ``top_k``; scoping on the prediction
+            alone admits overlays on combinations the caller did not advance, and
+            those can rank among the reported leaders. ``top_k`` is compared as
+            written in the spec, so ``None`` matches a spec that carries no
+            ``top_k`` rather than matching everything.
 
         Returns
         -------
         pl.DataFrame
-            Columns: risk_name, risk_type, sharpe, max_drawdown,
-            num_trades, baseline_sharpe, sharpe_delta
+            Columns: risk_name, risk_type, sharpe, max_drawdown, num_trades,
+            allocator, prediction_hash, baseline_sharpe, sharpe_delta
+
+        Each overlay's ``baseline_sharpe`` is the no-overlay Sharpe of the
+        allocation it was applied to, matched on ``(prediction_hash,
+        allocator)``. One registry-wide maximum would measure most overlays
+        against a strategy they did not modify, so an overlay could appear to
+        destroy Sharpe purely because a different prediction allocated better.
         """
-        pred_clause = "" if prediction_hash is None else " AND b.prediction_hash = ?"
-        pred_params = () if prediction_hash is None else (prediction_hash,)
+        pred_clause = ""
+        pred_params: tuple = ()
+        if prediction_hash is not None:
+            pred_clause = " AND b.prediction_hash = ?"
+            pred_params = (prediction_hash,)
+        elif prediction_hashes:
+            pred_clause = " AND b.prediction_hash IN (SELECT value FROM json_each(?))"
+            pred_params = (json.dumps(list(prediction_hashes)),)
         df = self._query(
             f"""
             SELECT
                 b.spec_json,
+                b.prediction_hash,
                 t.family,
                 t.config_name,
                 bm.sharpe,
@@ -1099,8 +1205,9 @@ class BacktestExplorer:
             return df
 
         rows = []
-        for spec_str, sharpe, max_dd, trades in zip(
+        for spec_str, pred_h, sharpe, max_dd, trades in zip(
             df["spec_json"].to_list(),
+            df["prediction_hash"].to_list(),
             df["sharpe"].to_list(),
             df["max_drawdown"].to_list(),
             df["num_trades"].to_list(),
@@ -1129,10 +1236,25 @@ class BacktestExplorer:
                     "sharpe": sharpe,
                     "max_drawdown": max_dd,
                     "num_trades": trades,
+                    "prediction_hash": pred_h,
+                    "allocator": strategy_view(spec)
+                    .get("allocation", {})
+                    .get("method", "equal_weight"),
+                    "top_k": strategy_view(spec).get("signal", {}).get("top_k"),
                 }
             )
 
         result = pl.DataFrame(rows)
+        if parents is not None:
+            wanted = {(str(h), str(a), k) for h, a, k in parents}
+            result = result.filter(
+                pl.struct("prediction_hash", "allocator", "top_k").map_elements(
+                    lambda r: (r["prediction_hash"], r["allocator"], r["top_k"]) in wanted,
+                    return_dtype=pl.Boolean,
+                )
+            )
+            if result.is_empty():
+                return result
 
         # Compute baseline: the no-overlay Sharpe the overlays are measured
         # against. Registry-wide (unpinned) this is the best allocation-stage
@@ -1151,6 +1273,8 @@ class BacktestExplorer:
             f"""
             SELECT
                 bm.sharpe,
+                b.prediction_hash,
+                b.spec_json,
                 t.family,
                 t.config_name
             FROM backtest_metrics bm
@@ -1164,19 +1288,44 @@ class BacktestExplorer:
             tuple(excluded_family_sql(self.case_study, "t.family")[1]) + pred_params,
         )
         baseline_df = self._filter_active_models(baseline_df)
-        baseline_sharpe = baseline_df["sharpe"].max() if not baseline_df.is_empty() else None
 
-        if baseline_sharpe is not None:
-            result = result.with_columns(
-                pl.lit(baseline_sharpe).alias("baseline_sharpe"),
-                (pl.col("sharpe") - baseline_sharpe).alias("sharpe_delta"),
-            )
-        else:
-            result = result.with_columns(
+        if baseline_df.is_empty():
+            return result.with_columns(
                 pl.lit(None).cast(pl.Float64).alias("baseline_sharpe"),
                 pl.lit(None).cast(pl.Float64).alias("sharpe_delta"),
-            )
+            ).sort("sharpe", descending=True)
 
+        # The parent of an overlay is the no-overlay run of the same prediction under the same
+        # allocator at the same concentration. All three are needed: a single registry-wide
+        # maximum would charge every overlay for the gap between its own allocation and the best
+        # allocation anywhere in the registry, and dropping `top_k` would still leave several
+        # distinct parents sharing a key, whose maximum is not the run the overlay modified.
+        parents = (
+            baseline_df.with_columns(
+                pl.col("spec_json")
+                .map_elements(
+                    lambda js: (
+                        strategy_view(_parse_spec(js) or {})
+                        .get("allocation", {})
+                        .get("method", "equal_weight")
+                    ),
+                    return_dtype=pl.String,
+                )
+                .alias("allocator"),
+                pl.col("spec_json")
+                .map_elements(
+                    lambda js: strategy_view(_parse_spec(js) or {}).get("signal", {}).get("top_k"),
+                    return_dtype=pl.Int64,
+                )
+                .alias("top_k"),
+            )
+            .group_by("prediction_hash", "allocator", "top_k")
+            .agg(pl.col("sharpe").max().alias("baseline_sharpe"))
+        )
+        result = result.join(parents, on=["prediction_hash", "allocator", "top_k"], how="left")
+        result = result.with_columns(
+            (pl.col("sharpe") - pl.col("baseline_sharpe")).alias("sharpe_delta")
+        )
         return result.sort("sharpe", descending=True)
 
     # -----------------------------------------------------------------
@@ -1380,11 +1529,23 @@ class BacktestExplorer:
     # search_context: distribution stats for a stage
     # -----------------------------------------------------------------
 
-    def search_context(self, stage: str = "signal") -> dict[str, Any]:
+    def search_context(
+        self,
+        stage: str = "signal",
+        *,
+        prediction_hashes: tuple[str, ...] | list[str] | None = None,
+    ) -> dict[str, Any]:
         """Distribution statistics for all backtests at a stage.
 
         Quantifies search risk: how exceptional is the champion relative
         to the full sweep?
+
+        Parameters
+        ----------
+        prediction_hashes : sequence of str, optional
+            Restrict the sweep to these prediction identities. The trial count and the
+            distribution the champion is placed in are then the ones the shortlist was
+            actually drawn from.
 
         Returns
         -------
@@ -1393,6 +1554,19 @@ class BacktestExplorer:
             champion_sharpe, champion_source, champion_percentile,
             pct_positive
         """
+        scope_sql = ""
+        scope_params: tuple[str, ...] = ()
+        coverage_sql = full_coverage_prediction_sql("p", "t", "pm")
+        if prediction_hashes is not None:
+            placeholders = ", ".join("?" for _ in prediction_hashes)
+            scope_sql = f" AND p.prediction_hash IN ({placeholders})"
+            coverage_sql = full_coverage_prediction_sql(
+                "p",
+                "t",
+                "pm",
+                population_subquery="SELECT value FROM json_each(?)",
+            )
+            scope_params = (json.dumps(list(prediction_hashes)), *prediction_hashes)
         df = self._query(
             f"""
             SELECT
@@ -1405,11 +1579,12 @@ class BacktestExplorer:
             JOIN prediction_metrics pm ON p.prediction_hash = pm.prediction_hash
             WHERE b.stage = ?
               AND p.split != 'holdout'
-              {full_coverage_prediction_sql("p", "t", "pm")}
+              {coverage_sql}
               AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
+              {scope_sql}
             """,
-            (stage,),
+            (stage, *scope_params),
         )
         if df.is_empty():
             return {}

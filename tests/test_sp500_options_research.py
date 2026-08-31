@@ -1770,27 +1770,23 @@ def test_the_liquid_filter_moves_the_decision_to_an_earlier_session(
     assert option_trade_calendar(decision_dates).get_column("decision_date").to_list() == [thursday]
 
 
-def test_an_unaccounted_lifecycle_refuses_before_any_conformal_width_is_written(
+def test_a_lifecycle_short_of_the_decision_refuses_before_anything_registers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The refusal has to come first, or a run that cannot register still writes calibration.
+    """A run that cannot price every held contract must refuse, not register what it can.
 
-    `compute_holdout_conformal_widths(..., write=True)` publishes widths keyed by the holdout
-    prediction. A supplied lifecycle the identity does not account for makes the run unable to
-    register, so reaching the widths write first leaves an artifact behind that no registered
-    backtest explains.
+    The primed lifecycle is loaded for the union of a run's decisions, so a request whose
+    decision reaches outside that union would price the contracts the frame covers and drop
+    the rest - a registered backtest whose returns are computed over a strict subset of the
+    positions the strategy held, with nothing in the artifact saying so. The refusal has to
+    come before `run_backtest`, which is what registers.
     """
-    import json
-
-    from case_studies.research import strategy as strategy_module
     from case_studies.sp500_options import _htm_backtest, research_workflow
     from case_studies.utils import cv_window
 
-    class _WidthsWritten(Exception):
-        pass
-
     study = _study(tmp_path)
+    prediction = _prediction(study)
     labels_dir = tmp_path / "labels"
     raw_dir = tmp_path / "raw"
     labels_dir.mkdir()
@@ -1811,73 +1807,27 @@ def test_an_unaccounted_lifecycle_refuses_before_any_conformal_width_is_written(
         }
     )
     signal = {"method": "equal_weight_top_k", "top_k": 1}
-    allocation = {"method": "conformal_weighted", "alpha": 0.2, "min_calibration_n": 2}
+    decision = publish_short_straddle_decisions(prediction, prices=prices, signal=signal)
+    lifecycle_key = prime_option_lifecycle(decision.load(), raw_dir)
+    strategy = study.strategy(prediction=prediction, signal=signal, decision=decision)
 
-    validation = _prediction(study)
-    validation_decision = publish_short_straddle_decisions(validation, prices=prices, signal=signal)
-    locked_spec = study.strategy(
-        prediction=validation,
-        signal=signal,
-        decision=validation_decision,
-        allocation=allocation,
-    ).resolve(prices=prices)
-    # The lock stores the strategy, not the runtime object the projection drops from both sides.
-    locked_spec.pop("_runtime_backtest_config", None)
-
-    holdout = _prediction(study, split="holdout")
-    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
-        db.execute(
-            "INSERT INTO research_locks (lock_hash, lock_json, state, created_at) "
-            "VALUES (?, ?, 'LOCKED', '2024-01-06T00:00:00Z')",
-            (
-                "lockhash00000001",
-                json.dumps(
-                    {
-                        "holdout_training_hash": holdout.registry_record()["training_hash"],
-                        "checkpoint_kind": "final",
-                        "checkpoint_value": None,
-                        "prediction_hash": validation.hash,
-                        "strategy_spec": locked_spec,
-                    }
-                ),
-            ),
-        )
-        db.commit()
-    holdout_decision = publish_short_straddle_decisions(holdout, prices=prices, signal=signal)
-    lifecycle_key = prime_option_lifecycle(holdout_decision.load(), raw_dir)
-
-    def _widths(*args, **kwargs):
-        raise _WidthsWritten
-
-    monkeypatch.setattr(strategy_module, "compute_holdout_conformal_widths", _widths)
-    # No reviewed embargo is registered for this case study and label; the ordering under test
-    # is the engine's, not that table's.
-    monkeypatch.setattr(strategy_module, "holdout_conformal_embargo_steps", lambda *a, **k: 0)
-    monkeypatch.setattr(strategy_module, "load_backtest_prices_for", lambda *a, **k: prices)
-    strategy = study.strategy(
-        prediction=holdout,
-        signal=signal,
-        decision=holdout_decision,
-        allocation=allocation,
+    covering = _htm_backtest._PRIMED_LIFECYCLE[lifecycle_key]
+    _htm_backtest._PRIMED_LIFECYCLE[lifecycle_key] = covering.with_columns(
+        strike=pl.col("strike") + 5.0
     )
-
-    # A primed frame that does not span this decision's contracts must refuse before the
-    # holdout widths are written, not after: the widths land in the registry, so a run that
-    # reaches them and then refuses has already left a partial artifact behind.
-    from case_studies.sp500_options import _htm_backtest as _htm
-
-    covering = _htm._PRIMED_LIFECYCLE[lifecycle_key]
-    _htm._PRIMED_LIFECYCLE[lifecycle_key] = covering.with_columns(strike=pl.col("strike") + 5.0)
     try:
         with pytest.raises(ValueError, match="contracts this decision holds"):
-            strategy.run()
+            strategy.run(prices=prices)
     finally:
-        _htm._PRIMED_LIFECYCLE[lifecycle_key] = covering
+        _htm_backtest._PRIMED_LIFECYCLE[lifecycle_key] = covering
 
-    # The widths branch is live in this setup, so the refusal above ran ahead of it rather
-    # than the branch simply never being reached.
-    with pytest.raises(_WidthsWritten):
-        strategy.run()
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        registered = db.execute("SELECT COUNT(*) FROM backtest_runs").fetchone()[0]
+    assert registered == 0
+
+    # The same request with the covering frame does register, so the refusal above was the
+    # coverage check rather than the run being unable to execute at all.
+    assert strategy.run(prices=prices).complete
 
 
 def test_the_research_workflow_imports_without_torch() -> None:

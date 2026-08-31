@@ -4,8 +4,10 @@ import sqlite3
 
 import numpy as np
 import polars as pl
+import pytest
 
 from case_studies.utils import notebook_render
+from case_studies.utils.registry.store import _open_registry
 
 
 def test_conformal_diagnostic_excludes_partial_and_orders_folds_chronologically(
@@ -199,3 +201,78 @@ def test_conformal_width_is_scaled_by_the_calibration_window_alone(tmp_path, mon
 
     assert width == 2.0 * q_hat / calibration_scale
     assert width != 2.0 * q_hat / whole_panel_scale
+
+
+def _empty_registry(tmp_path):
+    """A registry carrying the production schema and no rows in any of it.
+
+    Built by the production opener rather than by a hand-written subset or by
+    `REGISTRY_SCHEMA_SQL` alone: several columns these readers name - `ic_mean_daily` and its
+    HAC interval among them - are added by `_declare_uncertainty_columns` rather than by the
+    CREATE TABLE statements. A reader naming one of those against a partial fixture fails with
+    OperationalError, which is a fixture defect wearing the costume of the contract under test.
+    """
+    _open_registry(tmp_path).close()
+    return tmp_path / "run_log" / "registry.db"
+
+
+# Each registry reader, the columns a notebook selects off it, and the arguments to reach it.
+# The three are covered together because they fail the same way and a reader meets all three
+# in one notebook, before the stage that fills any of them has run.
+EMPTY_FRAME_READERS = [
+    (
+        "selection_adjusted_leader_table",
+        {"stage": "signal"},
+        ("family", "config_name", "sharpe", "dsr", "pbo", "k_variants"),
+    ),
+    (
+        "holdout_decay_table",
+        {"label": "fwd_ret_21d"},
+        ("family", "config_name", "val_ic", "ho_ic", "decay_pp"),
+    ),
+    (
+        "conformal_coverage_diagnostic",
+        {"label": "fwd_ret_21d"},
+        ("family", "config_name", "nominal_level", "empirical_coverage", "n_test"),
+    ),
+]
+
+
+@pytest.mark.parametrize("reader, kwargs, columns", EMPTY_FRAME_READERS, ids=lambda v: str(v)[:40])
+def test_a_registry_reader_keeps_its_columns_when_it_has_no_rows(
+    tmp_path, monkeypatch, reader, kwargs, columns
+):
+    """A caller selects columns off these frames, so an empty result has to carry them.
+
+    Every case study's model-analysis notebook reads all three before its backtesting stage
+    has been run, because that is the order a reader works through the notebooks in.
+    Returning a bare `pl.DataFrame()` made the next line - `.select("family", ...)` - raise
+    ColumnNotFoundError, which reads as a defect in the notebook rather than as a stage that
+    has not run yet, and is what broke `etfs/13_model_analysis` against a fresh registry.
+    """
+    db_path = _empty_registry(tmp_path)
+    monkeypatch.setattr(notebook_render, "registry_path", lambda _case_study: db_path)
+
+    table = getattr(notebook_render, reader)("etfs", **kwargs)
+
+    assert table.is_empty()
+    assert table.select(*columns).is_empty()
+
+
+@pytest.mark.parametrize("reader, kwargs, columns", EMPTY_FRAME_READERS, ids=lambda v: str(v)[:40])
+def test_a_registry_reader_keeps_its_columns_when_there_is_no_registry(
+    tmp_path, monkeypatch, reader, kwargs, columns
+):
+    """The same contract on the other empty path, so the two cannot disagree.
+
+    A function returning columns when the query is empty and no columns when the file is
+    absent hands its caller a frame whose shape depends on which kind of nothing it found.
+    """
+    monkeypatch.setattr(
+        notebook_render, "registry_path", lambda _case_study: tmp_path / "absent" / "registry.db"
+    )
+
+    table = getattr(notebook_render, reader)("etfs", **kwargs)
+
+    assert table.is_empty()
+    assert table.select(*columns).is_empty()

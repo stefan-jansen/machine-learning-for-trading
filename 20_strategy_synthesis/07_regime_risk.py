@@ -60,7 +60,8 @@ from utils.style import show_with_alt
 warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
-MAX_CASE_STUDIES = 0  # 0 = all
+# 0 = all
+MAX_CASE_STUDIES = 0
 
 # %%
 CS_LIST = CASE_STUDY_IDS[:MAX_CASE_STUDIES] if MAX_CASE_STUDIES else CASE_STUDY_IDS
@@ -275,6 +276,7 @@ show_with_alt(
 )
 
 # %% [markdown]
+#
 # %% tags=["results"]
 _helped = best_per_cs.filter(pl.col("sharpe_delta") > 0)
 display(
@@ -609,6 +611,7 @@ else:
     print("Insufficient data for regime-conditional analysis.")
 
 # %% [markdown]
+#
 # %% [markdown]
 # Panel (a) places each case study by what its best overlay did to Sharpe and to
 # maximum drawdown. Four outcomes are possible and the quadrants name all four,

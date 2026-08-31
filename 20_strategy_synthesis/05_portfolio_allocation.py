@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -70,7 +70,8 @@ from utils.style import show_with_alt
 warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
-MAX_CASE_STUDIES = 0  # 0 = all
+# 0 = all
+MAX_CASE_STUDIES = 0
 
 # %%
 CS_LIST = CASE_STUDY_IDS[:MAX_CASE_STUDIES] if MAX_CASE_STUDIES else CASE_STUDY_IDS
@@ -706,6 +707,7 @@ else:
     print("Insufficient data for MVO diagnostic scatter.")
 
 # %% [markdown]
+#
 # %% tags=["results"]
 display(
     Markdown(

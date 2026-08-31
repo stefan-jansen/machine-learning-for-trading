@@ -11,9 +11,11 @@ refuses version 3 without that payload. So a notebook that reaches `register_cau
 registers something no reader sees, whatever it names the result it passes in.
 
 Measured against the fleet registries on 2026-08-25: crypto 2/2 rows visible, cme 6/6, fx
-3/3, all written by the resolver. us_firm_characteristics 0/3 and etfs 0/1, both written by
-the wrapper. nasdaq100_microstructure and sp500_equity_option_analytics have registered
-nothing yet and would register invisible rows on their first run.
+3/3, all written by the resolver. us_firm_characteristics 0/3, written by the wrapper;
+etfs' one row was written by the wrapper and its notebook has since been converted, so its
+next run registers a resolvable one. nasdaq100_microstructure and
+sp500_equity_option_analytics have registered nothing yet and would register invisible rows
+on their first run.
 
 sp500_options came off the list on 2026-08-27. The note above had it moving to the wrapper,
 which was never true of the committed notebook: `10_causal_dml` goes through
@@ -40,7 +42,6 @@ REPO = Path(__file__).resolve().parent.parent
 # Delete an entry when its notebook is converted; the test below fails if one is
 # converted and left here.
 UNCONVERTED = {
-    "case_studies/etfs/12_causal_dml.py",
     "case_studies/nasdaq100_microstructure/12_causal_dml.py",
     "case_studies/sp500_equity_option_analytics/12_causal_dml.py",
 }

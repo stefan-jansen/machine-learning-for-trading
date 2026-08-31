@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -319,13 +320,43 @@ class _DartsEpochProgressCallback(pl_lightning.callbacks.Callback):
         )
 
 
+# Lightning announces itself on every trainer it builds - the accelerator, the TPU count, the
+# visible CUDA devices, a logging-service advertisement, and the reason `fit` stopped. One fit is
+# five lines. A checkpointed Darts run builds one trainer per checkpoint increment, so eight folds
+# at a hundred epochs in five-epoch steps is a hundred and sixty of them, and they land in the
+# executed notebook as thousands of output entries around the results.
+#
+# Measured before this was silenced: `case_studies/etfs/10_dl_tsmixer.ipynb` committed at 11.9 MB
+# and 441,860 lines, with 62,901 output entries in a single cell - a notebook that neither GitHub
+# nor JupyterLab will open, so the chapter had no readable artifact at all.
+#
+# These are `rank_zero_info` records rather than progress-bar or logger output, which is why
+# `enable_progress_bar` and `logger` below do not cover them. Raising the level is the whole fix:
+# nothing here is a warning, and a real Lightning warning still comes through.
+_LIGHTNING_ANNOUNCEMENT_LOGGERS = (
+    "pytorch_lightning",
+    "pytorch_lightning.utilities.rank_zero",
+    "pytorch_lightning.accelerators.cuda",
+    "lightning.pytorch",
+    "lightning.pytorch.utilities.rank_zero",
+)
+
+
+def silence_lightning_announcements() -> None:
+    """Keep Lightning's per-trainer banners out of the executed notebook."""
+    for name in _LIGHTNING_ANNOUNCEMENT_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def _trainer_kwargs(device: str) -> dict[str, Any]:
     accelerator = "gpu" if device == "cuda" and torch.cuda.is_available() else "cpu"
+    silence_lightning_announcements()
     return {
         "accelerator": accelerator,
         "devices": 1,
         "deterministic": True,
         "enable_checkpointing": False,
+        "enable_model_summary": False,
         "enable_progress_bar": False,
         "logger": False,
     }

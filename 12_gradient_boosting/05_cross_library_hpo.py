@@ -90,7 +90,8 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 N_TRIALS = 50
 N_WARMUP_TRIALS = 5
 EARLY_STOPPING_ROUNDS = 50
-N_LIBRARIES = 0  # 0 = all libraries, 1-3 = first N only
+# 0 = all libraries, 1-3 = first N only
+N_LIBRARIES = 0
 SEED = 42
 
 
