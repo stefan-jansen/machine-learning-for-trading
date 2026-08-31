@@ -174,15 +174,20 @@ print(f"Holdout prediction: {HOLDOUT_PREDICTION_HASH}")
 # residuals of the validation prediction set, which is what the allocator would have had
 # standing at the start of the window.
 #
-# No validation observation is dropped at the boundary, and the reason is the label rather
-# than a choice. The embargo exists because a residual observed at `t` measures a return
-# realising over `(t, t+h]`, so with `h > 0` the last residuals of the validation span
+# Validation observations ARE dropped at the boundary here, and how many depends on which
+# horizon the carrier was selected on. The embargo exists because a residual observed at `t`
+# measures a return realising over `(t, t+h]`, so the last residuals of the validation span
 # reach into the holdout window and would size holdout positions with holdout price
-# information. This panel declares `h = 0D` - each row is dated by the month the return
-# was earned - so the outcome is already realised at the observation and nothing reaches
-# forward. The step count comes from the reviewed table in `conformal.py`, which records
-# the label horizon; it carried 1 for these labels, which discarded the last month of
-# calibration against a leak the label cannot have.
+# information. This is a daily panel and both labels declare `h > 0`: `fwd_ret_5d` embargoes
+# 5 sessions and `fwd_ret_21d` embargoes 21, read from the reviewed table in `conformal.py`
+# rather than restated here. So the last week or the last month of validation residuals is
+# discarded, against a leak the label makes real rather than one it rules out.
+#
+# None of this binds the carrier that was actually selected. It allocates by `hrp`, which
+# sizes from a covariance rather than from an interval width, so `NEEDS_CALIBRATION` is
+# false below and no widths are computed or written. The section stays because the carrier
+# is resolved from the registry and a rebuilt sweep can name a conformal one, at which
+# point the embargo above is what the holdout would be sized under.
 #
 # The embargo is derived here because the backtest identity below is built from it. The
 # widths themselves are NOT written here: writing them replaces the artifact the already
@@ -381,9 +386,9 @@ print(f"Holdout backtest: {result.backtest_hash}")
 # The two numbers below are one strategy measured on two disjoint periods, and the gap
 # between them is not an estimate of decay. The validation figure is the maximum of a
 # ranking over more than a thousand backtests, so it carries the selection; the holdout
-# figure is one measurement of twelve monthly returns, so it carries the sampling error of
-# twelve observations. Both facts push the pair apart on their own, before any real change
-# in the strategy's edge. [`19_strategy_analysis`](19_strategy_analysis.ipynb) is where
+# figure is one measurement over the daily sessions of 2024 and 2025, so it carries the
+# sampling error of that window. Both facts push the pair apart on their own, before any
+# real change in the strategy's edge. [`19_strategy_analysis`](19_strategy_analysis.ipynb) is where
 # they are given intervals and a paired comparison.
 
 # %% tags=["results"]
@@ -399,10 +404,10 @@ with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
         (carrier["val_backtest_hash"],),
     ).fetchone()
 
-print(f"Validation Sharpe over its {int(carrier_periods)} months:  {carrier_sharpe:.3f}")
+print(f"Validation Sharpe over its {int(carrier_periods)} sessions:  {carrier_sharpe:.3f}")
 print(f"  the same run re-ranked on common support: {carrier['val_sharpe']:.3f}")
 print(
-    f"Holdout Sharpe over {int(metrics['n_periods'])} months:        "
+    f"Holdout Sharpe over {int(metrics['n_periods'])} sessions:        "
     f"{metrics.get('sharpe', float('nan')):.3f}"
 )
 print(
@@ -420,8 +425,11 @@ print(
 #
 # It establishes a return series for the selected configuration over a period no choice in
 # this case study was made on. That is the only thing a holdout can give, and it is worth
-# less than it looks: one year of monthly rebalances is twelve observations, which is too
-# few to separate a strategy that decayed from one that had an ordinary year.
+# less than it looks. The window is two years of daily sessions, 2024-01-01 onward, which
+# is a few hundred observations rather than a dozen - but they are daily returns on a
+# rebalance that is not daily, so the count overstates how much independent evidence is in
+# them, and it remains too little to separate a strategy that decayed from one that had two
+# ordinary years.
 #
 # It does not establish that this configuration was the right one to carry here. The
 # selection that brought it was made on validation, over a pool large enough that its

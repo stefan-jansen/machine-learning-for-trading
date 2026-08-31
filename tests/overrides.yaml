@@ -1337,6 +1337,22 @@ case_studies/cme_futures/16_costs:
   parameters:
     PREVIEW_LABELS: [fwd_ret_21d]
   timeout: 600
+case_studies/cme_futures/17_holdout_predictions:
+  # Canonical, not preview. `reconstruct_locked_model_request` refuses any spec whose
+  # execution_tier is not canonical, and the harness injects EXECUTION_TIER="preview" for
+  # any notebook that declares it. 18 follows it, because a holdout resolved in one tier
+  # and read in another is two registries.
+  research_preview: false
+  # Refits the selected configuration over the holdout fold - one training run, no sweep.
+  timeout: 900
+  skip: true
+  skip_reason: "Refuses before fitting, at `resolve_solvent_carrier`: 'No validation rank-1 candidate for cme_futures (label_filter=None)', measured at cell 6. The preview fixture registers no validation backtest for this case study, so there is no carrier to refit, and the refusal is one step earlier than the etfs pair's - etfs reaches `build_holdout_training_spec` and refuses on the missing resolved computation block, cme does not get that far. Both are the same shortfall in the fixture rather than two problems. Remove this skip when the fixture seeds a validation backtest population with a resolvable rank-1, not before: a fabricated carrier would let the job report a holdout refit of a configuration nothing selected."
+case_studies/cme_futures/18_holdout_backtest:
+  research_preview: false
+  # One backtest over the holdout window.
+  timeout: 900
+  skip: true
+  skip_reason: "Reads the holdout prediction set 17_holdout_predictions registers and resolves the same carrier to find it, so it refuses at `resolve_solvent_carrier` for the same reason and one step earlier than 17 does. Remove this skip together with 17's."
 case_studies/cme_futures/19_strategy_analysis:
   parameters:
     PREVIEW_LABELS: [fwd_ret_21d]
