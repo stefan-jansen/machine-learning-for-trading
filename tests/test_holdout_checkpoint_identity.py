@@ -292,83 +292,23 @@ def test_a_found_replay_carries_no_reason(case_study):
 
 # --- the canonical holdout hangs off a different training identity ---------------------
 #
-# `research.holdout.evaluate_holdout` seals the carrier and then retrains it over a holdout CV
-# interval that `build_holdout_cv` derives, so the holdout prediction set carries a DIFFERENT
-# `training_hash` than the validation one by construction. Every lookup above matches on the
-# validation `training_hash`, so none of them can find it: the notebook reported the holdout as
-# unevaluated after it had been finalized, which a reader cannot tell apart from "not run yet".
-
-
-def _seal_and_evaluate(case_dir, *, carrier="b_validation_200", state="HOLDOUT_EVALUATED"):
-    """A lock over `carrier`, and the holdout it produced under its own training identity.
-
-    The holdout training run comes from `_build_registry`, which already creates one whose CV
-    declares the holdout fold - the identity a refit produces, and the one the lineage match
-    now requires. This adds only what a sealed evaluation adds: the prediction and backtest it
-    finalized, and the lock and evaluation rows naming them.
-    """
-    db = sqlite3.connect(str(case_dir / "run_log" / "registry.db"))
-    # A checkpoint the fixture does not use, so the lineage fallback stays unambiguous and
-    # these cases test the one thing they are about: whether the lock is consulted, and whose.
-    # With the same checkpoint the registry holds two indistinguishable holdout replays and the
-    # fallback refuses - correctly, but for a reason that has nothing to do with the lock.
-    db.execute(
-        "INSERT INTO prediction_sets (prediction_hash, training_hash, checkpoint_value,"
-        " checkpoint_kind, split, created_at)"
-        " VALUES ('p_locked_holdout', ?, 900, 'iteration', 'holdout',"
-        " '2026-08-30T00:00:00+00:00')",
-        (HOLDOUT_TRAINING_HASH,),
-    )
-    db.execute(
-        "INSERT INTO backtest_runs (backtest_hash, prediction_hash, spec_json, stage, created_at)"
-        " VALUES ('b_locked_holdout', 'p_locked_holdout', ?, 'holdout',"
-        " '2026-08-30T00:00:00+00:00')",
-        (_spec(STRATEGY),),
-    )
-    db.execute(
-        "INSERT INTO research_locks (lock_hash, lock_json, state, created_at)"
-        " VALUES ('lock1', ?, ?, '2026-08-30T00:00:00+00:00')",
-        (json.dumps({"validation_backtest_hash": carrier}), state),
-    )
-    if state == "HOLDOUT_EVALUATED":
-        db.execute(
-            "INSERT INTO holdout_evaluations (lock_hash, holdout_training_hash,"
-            " holdout_prediction_hash, holdout_backtest_hash, evaluated_at)"
-            " VALUES ('lock1', ?, 'p_locked_holdout', 'b_locked_holdout',"
-            " '2026-08-30T00:00:00+00:00')",
-            (HOLDOUT_TRAINING_HASH,),
-        )
-    db.commit()
-    db.close()
-
-
-def test_a_sealed_and_evaluated_holdout_is_found_through_its_lock(case_study):
-    """The lineage match cannot reach it; the lock can, and records what actually landed."""
-    _build_registry(case_study)
-    _seal_and_evaluate(case_study)
-
-    assert select_holdout_self_backtest("etfs", "b_validation_200") == "b_locked_holdout"
-
-
-def test_a_lock_over_another_carrier_is_not_borrowed(case_study):
-    """A lock naming a different validation run answers a question this caller did not ask.
-
-    Falling through to the lineage match is the right answer, not the locked holdout: the
-    registry does hold a finalized holdout, but for a configuration other than the selected
-    carrier, and returning it would report that one's numbers under this one's name.
-    """
-    _build_registry(case_study)
-    _seal_and_evaluate(case_study, carrier="b_validation_400")
-
-    assert select_holdout_self_backtest("etfs", "b_validation_200") == "b_holdout_200"
-
-
-def test_a_lock_still_in_progress_is_not_read_as_an_evaluation(case_study):
-    """Only HOLDOUT_EVALUATED means the sealed carrier reached the holdout and finished."""
-    _build_registry(case_study)
-    _seal_and_evaluate(case_study, state="LOCKED")
-
-    assert select_holdout_self_backtest("etfs", "b_validation_200") == "b_holdout_200"
+# A holdout refit registers its own training identity covering the holdout CV interval, so the
+# holdout prediction set carries a DIFFERENT `training_hash` than the validation one by
+# construction. A lookup that matches on the validation `training_hash` cannot find it, and the
+# notebook then reports the holdout as unevaluated after it has been finalized - which a reader
+# cannot tell apart from "not run yet".
+#
+# `research.holdout.evaluate_holdout` used to close that gap by sealing the carrier and
+# recording what the retrain produced, and three tests here read the lock back. #685 deleted
+# the layer and the follow-up deleted its last readers, so the fixture that inserted into
+# `research_locks` and `holdout_evaluations` is gone with them - those tables are no longer in
+# the schema, and a fixture creating them would test a registry shape nothing can produce.
+#
+# Nothing is left uncovered. Two of the three asserted the lineage answer `b_holdout_200`
+# anyway, which is what the tests above already pin; the third asserted lock-only resolution,
+# and there is no lock. What replaces the lock is the caller naming the carrier - covered by
+# `test_both_resolvers_agree_on_one_hash_for_the_same_carrier` and, for the case where it
+# cannot be named, `test_an_ambiguous_pinned_lineage_raises_rather_than_choosing`.
 
 
 def test_a_validation_fitted_holdout_is_matched_by_neither_resolver(case_study):
