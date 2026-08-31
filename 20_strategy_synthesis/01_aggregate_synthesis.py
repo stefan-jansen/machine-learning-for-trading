@@ -1310,112 +1310,45 @@ def _holdout_lineage_for(
     leader_label: str,
     strategy_spec: dict | None = None,
     *,
-    prefer_training_hash: str | None = None,
+    prefer_prediction_hash: str | None = None,
 ) -> dict | None:
-    """Return ``{backtest_hash, prediction_hash, family, config_name, label}``
-    for the highest-Sharpe holdout backtest registered in this case study,
-    honoring per-CS cluster restrictions but **not** the leader's label.
+    """Return ``{backtest_hash, prediction_hash, family, config_name, label}`` for this
+    case study's holdout, from the shared resolver.
 
-    Note: ``leader_label`` is intentionally unused in the SQL — kept in the
-    signature for call-site symmetry with ``_val_backtest_for_lineage`` and
-    so call sites remain self-documenting about which validation leader the
-    holdout pairs against.
+    This used to be a second implementation of the query, and it drifted from the one in
+    `populate_paired_metrics` in three ways that all pointed the same direction. It did not
+    check that the training run behind a candidate was actually refitted for the holdout, so
+    a model fitted on the validation folds and scored over the holdout window was eligible.
+    It took `ORDER BY b.backtest_hash LIMIT 1` where several candidates survived, which
+    decides on nothing the configuration determines. And it preferred the validation
+    `training_hash`, which a correct holdout refit does not share - the refit registers its
+    own identity covering the holdout CV interval - so the preference could only ever match a
+    holdout scored from the validation-fitted model, which is the thing to exclude.
 
-    Returns the holdout's *own* label so callers can pair it against
-    matching benchmarks. The decoupling matters when ``generate_holdout``'s
-    degeneracy fallback accepts a candidate on a different label than the
-    validation rank-1 (e.g., crypto's cross-stage rank-1 — over signal,
-    allocation, and risk_overlay — runs on fwd_ret_24h but the next fall-
-    through candidate runs on fwd_ret_8h). A label-restricted query would
-    silently miss the holdout and leave val_rank1_self /
-    equal_weight_holdout_side_artifact pairs unpopulated.
+    Both this notebook and `populate_paired_metrics` write `backtest_paired_metrics`. Two
+    copies of the rule let a Chapter 20 run overwrite the case study's pairs with a different
+    lineage, which is the reason the delegation matters beyond the duplication.
 
-    The label_restriction (e.g., sp500_options pinned to ret_to_expiry)
-    is applied to the holdout query so we don't pick up cross-rung
-    holdouts in CSs with HTM-coherent label scoping.
+    The carrier is named by its PREDICTION hash rather than its training hash, because that
+    pins the checkpoint as well as the configuration: one trained model registers one
+    prediction set per declared checkpoint and they share a strategy spec.
 
-    When ``strategy_spec`` is provided, the holdout pick is restricted to
-    backtests with the same full (signal, allocation, risk) tuple as val's
-    rank-1 carrier, so the val→holdout comparison stays apples-to-apples
-    on the full pipeline configuration, not just the signal block.
+    ``leader_label`` is unused, as it was before: the holdout's own label is returned so
+    callers can pair it against matching benchmarks, and restricting on the leader's label
+    would silently miss a holdout that fell through to another one.
     """
-    case_dir = get_case_study_dir(cs)
-    db_path = case_dir / "run_log" / "registry.db"
-    if not db_path.exists():
-        return None
+    from case_studies.utils.paired_metrics import _holdout_lineage_for as _shared_lineage_for
 
-    label_restriction = _CLUSTER_LABEL_RESTRICTIONS.get(cs)
-    rung = _CLUSTER_RUNG_RESTRICTIONS.get(cs)
-    clauses = ["p.split = 'holdout'"]
-    params: list[object] = []
-    if _retired(cs):
-        clauses.append("p.prediction_hash NOT IN (SELECT value FROM json_each(?))")
-        params.append(json.dumps(sorted(_retired(cs))))
-    if label_restriction:
-        placeholders = ",".join("?" for _ in label_restriction)
-        clauses.append(f"t.label IN ({placeholders})")
-        params.extend(label_restriction)
-    if rung is not None:
-        clauses.append(
-            "COALESCE(json_extract(b.spec_json, '$.strategy.signal.universe_filter'), 'full') = ?"
-        )
-        params.append(rung["universe_filter"])
-        if rung["exit_at_max_days"] is None:
-            clauses.append(
-                "json_extract(b.spec_json, '$.strategy.signal.exit_at_max_days') IS NULL"
-            )
-        else:
-            clauses.append("json_extract(b.spec_json, '$.strategy.signal.exit_at_max_days') = ?")
-            params.append(rung["exit_at_max_days"])
-    spec_clauses, spec_params = _full_strategy_clauses(strategy_spec)
-    clauses.extend(spec_clauses)
-    params.extend(spec_params)
-    where_sql = " AND ".join(clauses)
-
-    db = sqlite3.connect(str(db_path))
-    db.row_factory = sqlite3.Row
-    try:
-        # Same-lineage preference: when the caller knows the validation rank-1's
-        # training_hash, prefer a holdout that shares it. This pins val→holdout
-        # decay to the same trained model rather than a same-spec but
-        # different-lineage holdout that happens to have a higher Sharpe.
-        if prefer_training_hash is not None:
-            row = db.execute(
-                f"""
-                SELECT t.family, t.config_name, t.label,
-                       p.prediction_hash, b.backtest_hash
-                FROM prediction_sets p
-                JOIN training_runs t ON p.training_hash = t.training_hash
-                JOIN backtest_runs b ON p.prediction_hash = b.prediction_hash
-                                     AND b.stage IN ('signal','allocation','risk_overlay','holdout')
-                JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
-                WHERE {where_sql} AND p.training_hash = ?
-                ORDER BY b.backtest_hash
-                LIMIT 1
-                """,
-                params + [prefer_training_hash],
-            ).fetchone()
-            if row:
-                return dict(row)
-
-        row = db.execute(
-            f"""
-            SELECT t.family, t.config_name, t.label,
-                   p.prediction_hash, b.backtest_hash
-            FROM prediction_sets p
-            JOIN training_runs t ON p.training_hash = t.training_hash
-            JOIN backtest_runs b ON p.prediction_hash = b.prediction_hash
-                                 AND b.stage IN ('signal','allocation','risk_overlay','holdout')
-            JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
-            WHERE {where_sql}
-            ORDER BY b.backtest_hash
-            LIMIT 1
-            """,
-            params,
-        ).fetchone()
-    finally:
-        db.close()
-    return dict(row) if row else None
+    retired = _retired(cs)
+    return _shared_lineage_for(
+        cs,
+        leader_label,
+        strategy_spec,
+        label_restriction=_CLUSTER_LABEL_RESTRICTIONS.get(cs),
+        rung=_CLUSTER_RUNG_RESTRICTIONS.get(cs),
+        prefer_prediction_hash=prefer_prediction_hash,
+        retired_hashes=retired or None,
+    )
 
 
 def _val_backtest_for_lineage(cs: str, family: str, config_name: str, label: str) -> str | None:
@@ -1636,35 +1569,18 @@ for cs, explorer in explorers.items():
     # allocators (e.g. score_weighted vs conformal_weighted), different
     # position-sizing parameters, or different risk overlays.
     val_spec = _val_rank1_full_spec(cs)
-    # Resolve the val rank-1's training_hash so the holdout pick prefers the
-    # same-lineage holdout when one exists (avoids cross-pollination across
-    # training_hashes that happen to share signal_spec).
-    _val_training_hash: str | None = None
-    try:
-        _case_db = get_case_study_dir(cs) / "run_log" / "registry.db"
-        with sqlite3.connect(str(_case_db)) as _con:
-            _row = _con.execute(
-                "SELECT training_hash FROM prediction_sets WHERE prediction_hash = ?",
-                (leader_phash,),
-            ).fetchone()
-            if _row:
-                _val_training_hash = _row[0]
-    except (sqlite3.Error, OSError) as exc:
-        # Surface real registry corruption / IO problems instead of silently
-        # falling back to cross-lineage selection. Keep the fallback so the
-        # populator still produces a row, but emit a one-line warning so
-        # downstream noticeably distinguishes "no preferred lineage" from
-        # "DB unavailable".
-        print(
-            f"[warn] {cs}: failed to resolve val_training_hash from "
-            f"prediction_hash={leader_phash}: {type(exc).__name__}: {exc}"
-        )
-        _val_training_hash = None
+    # The validation rank-1's own prediction set names the carrier. It is passed rather than
+    # its training hash: the prediction hash pins the checkpoint as well as the configuration,
+    # and a correct holdout refit registers a NEW training identity covering the holdout CV
+    # interval, so preferring the validation training hash could only match a holdout scored
+    # from the validation-fitted model. The lookup that used to sit here - prediction hash to
+    # training hash, with its own connection and error branch - is gone with it; the resolver
+    # reads the carrier itself.
     ho_lineage = _holdout_lineage_for(
         cs,
         leader_label,
         strategy_spec=val_spec,
-        prefer_training_hash=_val_training_hash,
+        prefer_prediction_hash=leader_phash,
     )
     ho_hash = ho_lineage["backtest_hash"] if ho_lineage else None
     ho_label = ho_lineage["label"] if ho_lineage else leader_label
@@ -2012,40 +1928,29 @@ def query_holdout_rows():
         if not db_path.exists():
             continue
 
-        label_restriction = _CLUSTER_LABEL_RESTRICTIONS.get(cs)
-        rung = _CLUSTER_RUNG_RESTRICTIONS.get(cs)
-        clauses = ["p.split = 'holdout'"]
-        params: list[object] = []
-        if label_restriction:
-            placeholders = ",".join("?" for _ in label_restriction)
-            clauses.append(f"t.label IN ({placeholders})")
-            params.extend(sorted(label_restriction))
-        if rung is not None:
-            clauses.append(
-                "COALESCE(json_extract(b.spec_json, '$.strategy.signal.universe_filter'), 'full') = ?"
-            )
-            params.append(rung["universe_filter"])
-            if rung["exit_at_max_days"] is None:
-                clauses.append(
-                    "json_extract(b.spec_json, '$.strategy.signal.exit_at_max_days') IS NULL"
-                )
-            else:
-                clauses.append(
-                    "json_extract(b.spec_json, '$.strategy.signal.exit_at_max_days') = ?"
-                )
-                params.append(rung["exit_at_max_days"])
-        # Pin the holdout pick to val rank-1's *full* strategy spec (signal
-        # + allocation + risk) so the val/holdout comparison reads the same
-        # full pipeline on both sides. Without this constraint, MAX(sharpe)
-        # over holdout backtests can surface a different allocator (e.g.
-        # conformal_weighted when the val carrier was score_weighted), a
-        # different top_k, or a different risk overlay than the validation
-        # carrier — pairing those two reads as decay but is actually a
-        # full-spec mismatch.
+        # WHICH holdout is decided by the one resolver, and only the metrics are read here.
+        #
+        # This used to build its own WHERE clause and take `ORDER BY b.backtest_hash LIMIT 1`,
+        # which selected on nothing the configuration determines and admitted a training run
+        # that was never refitted for the holdout. It was also a second copy of a rule that
+        # `_holdout_lineage_for` already applies - and the two write the same reader-facing
+        # comparison, so a disagreement between them publishes a holdout row against paired
+        # metrics computed from a different evaluation.
+        #
+        # A refusal is per case study, not fatal to the chapter: the resolver raises when
+        # several candidates survive, and the other eight case studies still have rows to
+        # report. The reason is printed rather than swallowed, because a case study silently
+        # missing from the holdout table looks like unrun work.
         val_spec = _val_rank1_full_spec(cs)
-        spec_clauses, spec_params = _full_strategy_clauses(val_spec)
-        clauses.extend(spec_clauses)
-        params.extend(spec_params)
+        try:
+            lineage = _holdout_lineage_for(cs, "", val_spec)
+        except ValueError as exc:
+            print(f"[warn] {cs}: holdout not resolvable, so no holdout row: {exc}")
+            continue
+        if lineage is None:
+            continue
+        clauses = ["b.backtest_hash = ?"]
+        params: list[object] = [lineage["backtest_hash"]]
         db = sqlite3.connect(str(db_path))
         where_sql = " AND ".join(clauses)
 
