@@ -18,19 +18,17 @@ from .configs import (
     resolved_model_plan,
     sweep_labels,
 )
-from .contracts import ExecutionTier, LifecycleState
+from .contracts import ExecutionTier
 from .cv import CVSpec, EligibilityManifest, ResolvedCVSpec
 from .decisions import DecisionArtifact, StateTransitionPolicy
 from .execution import (
     BacktestExecution,
     BacktestPlan,
-    HoldoutExecution,
     ModelExecution,
     PlannedBacktest,
     expected_prediction_hashes,
     plan_backtests,
     run_backtests,
-    run_locked_holdout,
     run_model_population,
     run_models,
     run_official_model_subset,
@@ -39,7 +37,6 @@ from .execution import (
 )
 from .identity import ResolvedSpec
 from .labels import LabelDefinition, LabelRef
-from .lifecycle import ResearchLock
 from .model_planning import (
     ModelPlan,
     PlannedModel,
@@ -88,20 +85,17 @@ __all__ = [
     "EligibilityManifest",
     "LabelDefinition",
     "LabelRef",
-    "LifecycleState",
     "ModelRequest",
     "ModelExecution",
     "ModelPlan",
     "ModelRun",
     "HORIZON_DEPENDENT_PROTOCOL_FIELDS",
-    "HoldoutExecution",
     "PredictionResult",
     "PredictionCatalog",
     "PlannedBacktest",
     "PlannedModel",
     "OfficialPopulation",
     "supersedes_for_run",
-    "ResearchLock",
     "ResolvedModelRequest",
     "ResolvedCausalRequest",
     "ResolvedSpec",
@@ -135,7 +129,6 @@ __all__ = [
     "research_name",
     "resolved_model_plan",
     "run_backtests",
-    "run_locked_holdout",
     "run_model_population",
     "split_retired_members",
     "split_unpublished_members",

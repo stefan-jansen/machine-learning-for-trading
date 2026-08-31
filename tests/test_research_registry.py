@@ -262,7 +262,7 @@ def test_legacy_registry_schema_migrates_additively(tmp_path: Path) -> None:
         migrated.close()
 
     assert {"identity_version", "execution_tier"} <= columns
-    assert {"prediction_coverage", "candidate_sets", "research_locks"} <= tables
+    assert {"prediction_coverage", "candidate_sets"} <= tables
     assert row == ("legacy-training", None, None)
 
 

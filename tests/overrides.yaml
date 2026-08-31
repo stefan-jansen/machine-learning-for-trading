@@ -1774,10 +1774,6 @@ case_studies/fx_pairs/16_risk_management:
     POPULATION_NAME: fx_pairs:preflight
     MAX_RISK_VARIANTS: 3
   timeout: 900
-case_studies/fx_pairs/17_strategy_analysis:
-  skip: true
-  skip_reason: "Requires RESEARCH_LOCK_HASH from the one-shot holdout transaction - a lock exists only after that workflow runs in production"
-  timeout: 300
 case_studies/nasdaq100_microstructure/01_feasibility_analysis:
   parameters:
     MAX_SYMBOLS: 5
@@ -2483,19 +2479,17 @@ case_studies/us_equities_panel/19_risk_management:
 case_studies/us_equities_panel/20_strategy_analysis:
   skip: true
   # One obstacle, and it is structural: it holds until someone changes what CI runs against. This
-  # notebook reads a research lock, and lifecycle.lock() refuses a selected backtest whose
-  # execution_tier is not canonical - "preview ancestry cannot enter a lock",
-  # research/lifecycle.py:231-232, with _locked_training_spec at :106 refusing a non-canonical
-  # holdout independently. CI exercises reduced fixtures and has no canonical registry to draw a
-  # lock from, so there is no parameter that reaches this and no hash that could be passed in. The
-  # notebook is exercised by the production run instead.
+  # notebook resolves the holdout replay of the selected validation strategy, so it needs a
+  # registered holdout refit and its backtest. The reduced CI fixture runs the validation sweep
+  # only and registers no holdout, so `select_holdout_self_backtest` returns None and the notebook
+  # refuses by design. The production run exercises it.
   #
-  # This entry used to carry a second obstacle - that VALIDATION_BACKTEST_SET_NAME had no producer.
-  # 19_risk_management.py:488-491 now freezes exactly that name per label, so it is closed, and the
-  # sentence is gone rather than left standing next to the one that is still true.
+  # This entry used to name a research lock as the obstacle. The lock layer is gone: selection is
+  # the highest validation backtest Sharpe and the holdout is the replay of what it chose, with
+  # nothing to open or unlock. The remaining obstacle is the fixture, which is a different and
+  # smaller thing.
   skip_reason: >-
-    Reads a research lock, which cannot be built from preview ancestry
-    (research/lifecycle.py:231-232), so a reduced CI fixture cannot exercise it by construction -
+    Needs a registered holdout refit and backtest, which the reduced CI fixture does not produce -
     the production run does.
 case_studies/us_firm_characteristics/01_feasibility_analysis:
   timeout: 120

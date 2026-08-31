@@ -21,7 +21,10 @@ from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, LogisticRe
 from threadpoolctl import threadpool_limits
 
 from case_studies.research.contracts import ExecutionTier
-from case_studies.research.cv import require_fold_scoped_temporal_compatibility
+from case_studies.research.cv import (
+    require_fold_scoped_temporal_compatibility,
+    require_fold_scoped_temporal_holdout_coverage,
+)
 from case_studies.research.identity import ResolvedSpec
 from case_studies.research.models import ModelRun
 from case_studies.research.recovery import ExecutionAttempt, ExecutionLedger
@@ -625,12 +628,11 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
 
 
 def _require_holdout_temporal_features(mds, split: dict[str, Any]) -> None:
-    """Refuse to re-key onto a holdout fold the fold-scoped temporal artifact does not describe.
+    """Refuse to re-key onto a holdout fold the fold-scoped temporal artifact does not cover.
 
-    Stage 04 writes model-based features per validation fold, so the artifact carries the
-    validation fold ids and their boundaries and nothing else. A holdout fold is a different
-    interval, and `locked_holdout_split` takes its id from the spec's CV, defaulting to 0. Both
-    ways of getting this wrong are silent:
+    Stage 04 writes model-based features per validation fold, and `locked_holdout_split` takes
+    the holdout fold's id from the spec's CV, defaulting to 0. Both ways of getting this wrong
+    are silent:
 
     - a holdout id absent from the artifact joins no temporal rows, and the model fits on
       all-null features rather than the ones it was selected with;
@@ -639,25 +641,38 @@ def _require_holdout_temporal_features(mds, split: dict[str, Any]) -> None:
       fold's training window, which ends before the holdout interval begins. Nothing raises;
       the holdout number is simply computed from the wrong feature vintage.
 
-    `reconstruct_locked_request` runs the same check, but it runs after the lock is written, and
-    a lock is not recoverable. Checking here means the refusal happens while the holdout is still
-    unspent.
+    The question asked is COVERAGE, not fold-boundary compatibility, and this is the same branch
+    `gbm.py` and `latent_factors/adapter.py:603` take. Compatibility asks whether the artifact
+    declares a fold with this geometry; for a holdout it never does, because the fold is derived
+    after stage 04 ran and the artifact cannot be rebuilt to declare it without changing the
+    sha256 the selection was made under. Asking it here refused every holdout refit on a
+    linear-carried case study with fold-scoped model-based features. The features are joined by
+    (entity, date), so what the run needs is rows spanning the dates it trains and evaluates on.
+
+    `reconstruct_locked_request` runs the same check. Checking here as well means the refusal
+    happens while the holdout specification is still being built, rather than after it is
+    registered.
     """
     if mds.temporal_by_fold is None or not mds.temporal_keys or not mds.temporal_feature_names:
         return
     try:
-        require_fold_scoped_temporal_compatibility([split], mds.temporal_artifact_splits)
+        require_fold_scoped_temporal_holdout_coverage(
+            split,
+            mds.temporal_by_fold,
+            source_timeline=mds.dataset.get_column(mds.date_col),
+            date_col=mds.date_col,
+        )
     except ValueError as exc:
-        available = sorted(int(fold["fold"]) for fold in mds.temporal_artifact_splits)
         raise ValueError(
             f"holdout fold {int(split['fold'])} "
             f"({split['train_start']}..{split['train_end']} train, "
-            f"{split['val_start']}..{split['val_end']} evaluation) is not the geometry the "
-            f"fold-scoped temporal artifact was built for; it carries folds {available}. "
-            f"The {len(mds.temporal_feature_names)} model-based features would be joined from "
-            "the wrong fold or from none at all, so the holdout would not evaluate the "
-            "configuration selection ranked. Generate the model-based features for the holdout "
-            "fold in stage 04 before locking."
+            f"{split['val_start']}..{split['val_end']} evaluation) is not covered by the "
+            f"fold-scoped temporal artifact. The {len(mds.temporal_feature_names)} model-based "
+            "features would be joined from the wrong rows or from none at all, so the holdout "
+            "would not evaluate the configuration selection ranked. Check that stage 04 emitted "
+            "model-based feature rows spanning the holdout window; do NOT regenerate the "
+            "artifact to add a fold declaration, which moves a digest the selection was made "
+            "under and buys nothing this check reads."
         ) from exc
 
 
@@ -800,7 +815,19 @@ def reconstruct_locked_request(
 
     split = locked_holdout_split(spec, mds.dataset, mds.date_col, study.case_study)
     if mds.temporal_by_fold is not None and mds.temporal_keys and mds.temporal_feature_names:
-        require_fold_scoped_temporal_compatibility([split], mds.temporal_artifact_splits)
+        # Coverage, not fold-boundary compatibility - the branch `latent_factors/adapter.py:603`
+        # and `gbm.py` already take, for the same reason. Compatibility asks whether the stage-04
+        # artifact declares a fold with this geometry, and for a holdout that question has no good
+        # answer: the fold is derived after stage 04 ran, so the artifact does not declare it, and
+        # rebuilding it to declare it changes the sha256 the selection was made under. The
+        # features are joined by (entity, date), so what the run needs is rows spanning the dates
+        # it trains and evaluates on, not a fold labelled for it.
+        require_fold_scoped_temporal_holdout_coverage(
+            split,
+            mds.temporal_by_fold,
+            source_timeline=mds.dataset.get_column(mds.date_col),
+            date_col=mds.date_col,
+        )
     expected = _expected_keys_from_dataset(
         mds.dataset,
         [split],
