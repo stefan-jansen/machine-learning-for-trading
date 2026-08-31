@@ -401,23 +401,26 @@ def _defective_lifecycle_contracts(
     quoted_legs = (
         bounds.select("_candidate_id", "entry_date", *contract_join)
         .join(
-            raw_lookup.filter(pl.col("_source_quoted")).select("date", *contract_join),
+            raw_lookup.select("date", *contract_join, "_source_quoted"),
             on=contract_join,
             how="left",
         )
         .filter(pl.col("date").is_between(pl.col("entry_date"), pl.col("expiration")))
         .group_by("_candidate_id", "expiration", "date")
-        .len(name="_quoted_on_date")
+        .agg(
+            pl.len().alias("_legs_on_date"),
+            pl.col("_source_quoted").sum().alias("_quoted_on_date"),
+        )
         .group_by("_candidate_id")
         .agg(
-            # The expiration session is left out of the half-quoted count. The straddle settles
+            # The expiration session is left out of the one-leg count. The straddle settles
             # there in cash at the intrinsic value of its legs, computed from the underlying and
             # the strike, and the quoted mids are discarded rather than used - so a leg the
             # chain stops carrying on that session is the worthless one, and its absence says
             # nothing about whether the contract is intact.
-            ((pl.col("_quoted_on_date") == 1) & (pl.col("date") < pl.col("expiration")))
+            ((pl.col("_legs_on_date") == 1) & (pl.col("date") < pl.col("expiration")))
             .sum()
-            .alias("_half_quoted_dates"),
+            .alias("_one_leg_dates"),
             (pl.col("_quoted_on_date") == 2).sum().alias("_fully_quoted_dates"),
         )
     )
@@ -449,19 +452,23 @@ def _defective_lifecycle_contracts(
         .join(observed_pairs, on="_candidate_id", how="left")
         .filter(pl.col("_expected_dates").is_not_null() & (pl.col("_expected_dates") > 0))
     )
-    # Every session the vendor quoted both legs on must yield a valid pair. A session it quoted
-    # one leg on is a chain that holds the contract and lost a leg; a session where both legs
-    # are quoted but the pair fails validation - a nonfinite price, an ask below its bid, the
-    # two legs disagreeing on the underlying - is the same kind of problem. Both are defects in
-    # the data and both raise.
+    # Every session the vendor quoted both legs on must yield a valid pair. A session where
+    # both legs are quoted but the pair fails validation - a nonfinite price, an ask below its
+    # bid, the two legs disagreeing on the underlying - is a defect in the data and raises. So
+    # is a session where the chain carries a row for one leg and no row at all for the other:
+    # that is a chain that still holds the contract and lost a leg.
     #
-    # A session the vendor quoted neither leg on is not a defect and does not reject anything.
-    # It is what a corporate action leaves behind, either for good once the position continues
-    # under an adjusted strike this chain does not carry, or for the single session around the
-    # event date. The position is still entered; `_load_option_lifecycle` leaves it unmarked
-    # where quotes resume, and liquidates it on that session where they do not.
+    # A leg whose row is PRESENT with no bid and no ask is a different thing, and not a defect.
+    # It is a leg nobody would trade that session, which is what happens to the far side of a
+    # straddle once the underlying has moved away from the strike - KEYS 67.5 expiring
+    # 2019-02-15 held a call at 9.45 and a put with a null bid, a null ask and a delta of zero
+    # for one session, and quoted that put at 0.05 on the sessions either side. Marking the
+    # straddle needs both legs, so such a session is one the position cannot be marked at, the
+    # same as a session the chain quoted neither leg on. Neither rejects anything:
+    # `_load_option_lifecycle` leaves the position unmarked where quotes resume, and liquidates
+    # it on that session where the name has left the chain for good.
     defective = (
-        (pl.col("_half_quoted_dates").fill_null(0) > 0)
+        (pl.col("_one_leg_dates").fill_null(0) > 0)
         | (pl.col("_observed_dates").fill_null(0) != pl.col("_fully_quoted_dates").fill_null(0))
         | ~pl.col("_entry_matches").fill_null(False)
     )
@@ -764,32 +771,41 @@ def _load_option_lifecycle(
     # contributes zero on its own weight for the rest of the holding period, which is what
     # holding cash is. Emitting rows to say so would state it twice, and reweighting the
     # survivors would say something else entirely.
-    # A session the chain quoted one leg on, before expiration, is a defect rather than an end.
-    # The two look alike downstream - neither yields a paired row - but they are different
-    # claims about the data: a chain that quoted nothing has stopped carrying the contract,
-    # while a chain that quoted one leg still carries it and lost the other. Reading the second
-    # as a termination would let a half-written session end a position early and book a
-    # liquidation against it. Expiration is exempt for the reason rule 2 gives: the settlement
-    # is intrinsic, so a leg the chain drops there is the worthless one and its absence says
-    # nothing about the contract.
+    # A session where the chain carries a row for one leg and no row at all for the other,
+    # before expiration, is a defect rather than an end. It looks downstream like a session the
+    # chain quoted nothing on - neither yields a paired row - but it is a different claim about
+    # the data: a chain that carries nothing has stopped carrying the contract, while a chain
+    # that carries one leg's row still holds it and lost the other. Reading the second as a
+    # termination would let a half-written session end a position early and book a liquidation
+    # against it.
+    #
+    # The count is over rows the chain carries, not over rows it quoted. A leg present with a
+    # null bid and a null ask is a leg nobody would trade that session, not a leg the chain
+    # dropped, and the straddle simply goes unmarked there because marking it needs both legs.
+    # Counting quoted legs instead halted a 1,923-decision run on KEYS 67.5 expiring
+    # 2019-02-15, whose deep out-of-the-money put lost its market for a single session and was
+    # quoted at 0.05 on the sessions either side.
+    #
+    # Expiration is exempt for the reason rule 2 gives: the settlement is intrinsic, so a leg
+    # the chain drops there is the worthless one and its absence says nothing about the
+    # contract.
     entry_window = cohorts.group_by(["symbol", "strike", "expiration"]).agg(
         pl.col("entry_date").min().alias("_held_from")
     )
-    half_quoted = (
-        raw_lookup.filter(pl.col("_source_quoted"))
-        .group_by(["date", "symbol", "strike", "expiration"])
-        .len(name="_quoted_legs")
+    one_legged = (
+        raw_lookup.group_by(["date", "symbol", "strike", "expiration"])
+        .len(name="_legs")
         .join(entry_window, on=["symbol", "strike", "expiration"], how="inner")
         .filter(
-            (pl.col("_quoted_legs") == 1)
+            (pl.col("_legs") == 1)
             & (pl.col("date") >= pl.col("_held_from"))
             & (pl.col("date") < pl.col("expiration"))
         )
     )
-    if not half_quoted.is_empty():
+    if not one_legged.is_empty():
         raise ValueError(
-            f"raw option lifecycle is missing {half_quoted.height} contract-leg dates "
-            f"(first: {half_quoted.select('date', 'symbol').head(5).to_dicts()})"
+            f"raw option lifecycle is missing {one_legged.height} contract-leg dates "
+            f"(first: {one_legged.select('date', 'symbol').head(5).to_dicts()})"
         )
 
     quote_columns = [

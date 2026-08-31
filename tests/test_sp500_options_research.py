@@ -18,6 +18,7 @@ from case_studies.research import (
 from case_studies.sp500_options._htm_backtest import (
     _apply_cohort_allocator,
     _compute_cohort_daily_pnl,
+    _defective_lifecycle_contracts,
     _load_option_lifecycle,
     _select_cohorts,
     option_source_identity,
@@ -405,6 +406,51 @@ def test_lifecycle_rejects_a_missing_contract_leg_date(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="missing 1 contract-leg dates"):
         _load_option_lifecycle(cohorts, raw_dir)
+
+
+def test_a_leg_with_no_market_is_an_unmarked_session_not_a_missing_leg(tmp_path: Path) -> None:
+    """A present row with no bid and no ask is a leg nobody would trade, not a leg the chain lost.
+
+    The far side of a straddle loses its market once the underlying has moved away from the
+    strike, and the vendor writes the row with a null bid, a null ask and no mid because it has
+    no two-sided quote to take the midpoint of. KEYS 67.5 expiring 2019-02-15 did exactly that
+    for one session - a call at 9.45 beside a put with nothing on either side and a delta of
+    zero - and quoted that put at 0.05 on the sessions either side.
+
+    Counting quoted legs rather than carried rows read that as a chain that had lost a leg and
+    halted a 1,923-decision run on it. Marking a straddle needs both legs, so the session is
+    one the position cannot be marked at; the position continues and is marked again when the
+    quote returns. A leg whose row is absent entirely is still a defect, which
+    `test_lifecycle_rejects_a_missing_contract_leg_date` pins.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    raw_path = raw_dir / "year=2024.parquet"
+    chain = pl.read_parquet(raw_path)
+    unmarketable = (pl.col("date") == date(2024, 1, 9)) & (pl.col("call_put") == "P")
+    chain.with_columns(
+        [
+            pl.when(unmarketable)
+            .then(pl.lit(None, dtype=chain.schema[column]))
+            .otherwise(pl.col(column))
+            .alias(column)
+            for column in ("mid_price", "bid", "ask")
+        ]
+    ).write_parquet(raw_path)
+    cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
+
+    # The screen does not reject the decision.
+    assert _defective_lifecycle_contracts(
+        cohorts.rename({"timestamp": "feature_date"}), raw_dir
+    ).is_empty()
+
+    # The position skips that session and settles at expiry, rather than ending on it.
+    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
+    assert lifecycle.get_column("date").to_list() == [date(2024, 1, 8), date(2024, 1, 10)]
+    assert lifecycle.filter(pl.col("liquidated")).is_empty()
+    assert lifecycle.filter(pl.col("cash_settled")).get_column("date").to_list() == [
+        date(2024, 1, 10)
+    ]
 
 
 def _cross_the_call_quote(raw_dir: Path, on: date) -> None:
