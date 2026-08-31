@@ -43,6 +43,8 @@
 
 import json
 import sqlite3
+import warnings
+from collections import Counter
 from copy import deepcopy
 from typing import Any
 
@@ -61,11 +63,13 @@ from case_studies.research import (
     TrainingResult,
     open_study,
 )
+from case_studies.research.holdout import build_holdout_training_spec
 from case_studies.research.population import superseded_members_at
 from case_studies.utils.backtest_presets import cost_view
 from case_studies.utils.cohort_metrics import compute_and_register
 from case_studies.utils.paired_metrics import populate_paired_metrics
 from case_studies.utils.registry import load_backtest_metrics, load_paired_metrics
+from case_studies.utils.registry.specs import training_hash_from_spec
 from case_studies.utils.strategy_analysis import (
     resolve_canonical_rank1_lineage,
     resolve_solvent_carrier,
@@ -77,6 +81,7 @@ from utils.style import COLORS
 CASE_STUDY_ID = "fx_pairs"
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
+CANDIDATE_SET_NAME = "fx_pairs:holdout-candidates"
 
 # %% [markdown]
 # ## Resolve the carrier and its holdout lineage
@@ -106,6 +111,18 @@ study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKS
 # still in force. Read from the registry, so this page cannot report a configuration the
 # validation stages did not rank first.
 carrier = resolve_solvent_carrier(CASE_STUDY_ID)
+
+# The same admission contract `17` and `18` enforce. This page reports the carrier as the case
+# study's answer, so a carrier the frozen set never admitted is refused here too rather than
+# published.
+holdout_candidates = CandidateSet.one(study, name=CANDIDATE_SET_NAME)
+if carrier["val_backtest_hash"] not in holdout_candidates.members:
+    raise ValueError(
+        f"the resolved carrier {carrier['val_backtest_hash']} is not a member of "
+        f"{CANDIDATE_SET_NAME} ({holdout_candidates.hash}); it is not a result this case "
+        "study may report as its selection"
+    )
+
 selected_validation = study.results.open(str(carrier["val_backtest_hash"]))
 selected_prediction = study.results.open(str(carrier["val_prediction_hash"]))
 selected_training = study.results.open(str(carrier["training_hash"]))
@@ -422,37 +439,46 @@ controlled_summary
 # ## Require the holdout lineage the carrier determines
 #
 # The holdout results are not whatever happens to carry the holdout split; they are required to
-# be the ones this carrier determines. The match is on the carrier's **configuration** - family,
-# configuration name, label and checkpoint - and not on its training hash, because a genuine
-# retrain never shares the validation model's training identity. That is the whole point of a
-# retrain, and matching on the training hash is how a lineage query ends up able to find only a
-# validation fit scored over a later window.
+# be the ones this carrier determines. The match is not on the carrier's own training hash - a
+# genuine retrain never shares the validation model's training identity, which is the whole
+# point of a retrain - and it is not on family, configuration name and label either, because
+# several training specifications carry the same three names. The holdout training identity is
+# derived here the way `17_holdout_predictions` derives it, and the query asks for that hash.
 
 # %% tags=["results"]
 _carrier_ck = selected_prediction_record["checkpoint_kind"]
 _carrier_cv = selected_prediction_record["checkpoint_value"]
+_observation_timeline = (
+    pl.read_parquet(study.root / "labels" / f"{carrier['label']}.parquet")
+    .get_column("timestamp")
+    .unique()
+    .sort()
+    .to_list()
+)
+EXPECTED_HOLDOUT_TRAINING_HASH = training_hash_from_spec(
+    build_holdout_training_spec(
+        study,
+        study.results.open(carrier["training_hash"]).spec(),
+        timeline=_observation_timeline,
+        case_study=CASE_STUDY_ID,
+    )
+)
 with sqlite3.connect(str(study.root / "run_log" / "registry.db")) as _conn:
     _holdout_rows = _conn.execute(
         """
-        SELECT p.prediction_hash
-        FROM prediction_sets p
-        JOIN training_runs t ON t.training_hash = p.training_hash
-        WHERE p.split = 'holdout'
-          AND p.checkpoint_kind IS ? AND p.checkpoint_value IS ?
-          AND t.family = ? AND t.config_name = ? AND t.label = ?
-        ORDER BY p.prediction_hash
+        SELECT prediction_hash
+        FROM prediction_sets
+        WHERE split = 'holdout'
+          AND training_hash = ?
+          AND checkpoint_kind IS ? AND checkpoint_value IS ?
+        ORDER BY prediction_hash
         """,
-        (
-            _carrier_ck,
-            _carrier_cv,
-            carrier["family"],
-            carrier["config_name"],
-            str(carrier["label"]),
-        ),
+        (EXPECTED_HOLDOUT_TRAINING_HASH, _carrier_ck, _carrier_cv),
     ).fetchall()
 if len(_holdout_rows) != 1:
     raise ValueError(
-        f"the carrier's configuration resolves {len(_holdout_rows)} holdout prediction sets; "
+        f"holdout training run {EXPECTED_HOLDOUT_TRAINING_HASH} resolves "
+        f"{len(_holdout_rows)} prediction sets at checkpoint {_carrier_ck}={_carrier_cv}; "
         "exactly one is required - run 17_holdout_predictions, or delete the superseded one"
     )
 holdout_prediction = Result.open(study, _holdout_rows[0][0])
@@ -469,6 +495,23 @@ if len(_holdout_backtests) != 1:
         "backtests; exactly one is required - run 18_holdout_backtest"
     )
 holdout_backtest = Result.open(study, _holdout_backtests[0])
+
+# One complete backtest on the holdout prediction is not the same as the carrier's strategy
+# having been the one that produced it. A side-channel allocator or a cost variant registered
+# against the same prediction set would satisfy the count and be reported as the carrier's
+# holdout result. The strategy block is what the carrier is, so it is compared field for field.
+_carrier_strategy = json.loads(selected_record["spec_json"]).get("strategy", {})
+_holdout_strategy = holdout_backtest.spec().get("strategy", {})
+if _holdout_strategy != _carrier_strategy:
+    _differing = sorted(
+        key
+        for key in set(_carrier_strategy) | set(_holdout_strategy)
+        if _carrier_strategy.get(key) != _holdout_strategy.get(key)
+    )
+    raise ValueError(
+        f"holdout backtest {holdout_backtest.hash} does not replay the carrier's strategy; "
+        f"the blocks that differ are {_differing}"
+    )
 holdout_training = Result.open(study, holdout_prediction.registry_record()["training_hash"])
 
 if not isinstance(holdout_training, TrainingResult) or not holdout_training.complete:
@@ -583,7 +626,15 @@ _periods_per_year = int(
         "evaluation"
     ]["periods_per_year"]
 )
-_cohort_counts = compute_and_register(CASE_STUDY_ID)
+# The cohort statistics warn per metric for every cohort whose leader holds a constant position
+# - a deflated Sharpe needs return variance and a correlation matrix, and neither is defined
+# there. The warnings are collected rather than printed: each one carries the absolute path of
+# the module that raised it, which is this machine's path and does not belong in a committed
+# notebook. What they mean is a count, so a count is what is reported.
+with warnings.catch_warnings(record=True) as _cohort_warnings:
+    warnings.simplefilter("always")
+    _cohort_counts = compute_and_register(CASE_STUDY_ID)
+_undefined = Counter(str(entry.message).split(" for ")[0] for entry in _cohort_warnings)
 _paired_rows = populate_paired_metrics(
     CASE_STUDY_ID,
     periods_per_year=_periods_per_year,
@@ -594,6 +645,8 @@ print(
     f"cohort_metrics: {sum(_cohort_counts[k] for k in ('family', 'stagelabel', 'label'))} rows; "
     f"backtest_paired_metrics: {sum(1 for row in _paired_rows if 'skip' not in row)} pairs"
 )
+for _metric, _count in sorted(_undefined.items()):
+    print(f"  undefined on a constant-position cohort: {_metric} x{_count}")
 
 # %% tags=["results"]
 holdout_pairs = load_paired_metrics(
@@ -678,7 +731,10 @@ axes[1].set_ylabel("Drawdown")
 for axis in axes:
     axis.set_xlabel("Date")
     axis.legend(frameon=False)
-fig.tight_layout()
+# No `tight_layout` here: matplotlibrc sets `figure.constrained_layout.use`, so the figure
+# already has a layout engine and asking for a second one warns. The warning names the
+# kernel's own temporary module path, which then lands in the committed notebook and fails
+# the output-hygiene guard.
 fig.show()
 
 # %% [markdown]
