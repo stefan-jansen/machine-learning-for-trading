@@ -1429,6 +1429,12 @@ case_studies/crypto_perps_funding/16_costs:
     LABELS:
     - fwd_ret_8h
   timeout: 600
+case_studies/crypto_perps_funding/17_holdout_predictions:
+  skip: true
+  skip_reason: "Refits the funnel winner on the holdout fold, so it needs a registry carrying the validation sweep - resolve_solvent_carrier has no candidate to resolve against the CI fixture. Compounding it, the seeded grid strides weekdays, so an 8-hourly holdout window is unrepresentable in the fixture at all (ml4t/agent-workspace#960). No parameter reduces either: there is nothing to refit until the sweep has run."
+case_studies/crypto_perps_funding/18_holdout_backtest:
+  skip: true
+  skip_reason: "Trades 17_holdout_predictions' prediction set and raises by design when it is absent, so it inherits that notebook's prerequisite - a registry carrying the validation sweep and the holdout refit, neither of which the test data builds."
 case_studies/crypto_perps_funding/19_strategy_analysis:
   skip: true
   skip_reason: "Signed pre-holdout freeze pins an exact production registry snapshot (whole-file md5 + production-scale table counts, e.g. backtest_runs: 698) that a reduced CI fixture cannot reproduce by construction — same class as us_firm_characteristics/08a_ipca, not a fixable reduction."
