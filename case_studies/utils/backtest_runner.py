@@ -1769,6 +1769,7 @@ def _run_htm_daily_mtm(
         option_lifecycle=option_lifecycle,
         option_spread_fraction=float(option_accounting["option_spread_fraction"]),
         prediction_hash=prediction_hash,
+        label=label,
     )
     port = result["daily_returns"]
     metrics = result["metrics"]

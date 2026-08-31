@@ -1432,6 +1432,7 @@ def _apply_cohort_allocator(
     allocation_spec: dict,
     *,
     prediction_hash: str | None = None,
+    label: str | None = None,
 ) -> pl.DataFrame:
     """Replace cohort `weight` column with allocator-derived weights.
 
@@ -1495,6 +1496,12 @@ def _apply_cohort_allocator(
                 "prediction interval, which is calibrated per prediction set; the caller "
                 "must pass prediction_hash."
             )
+        # The label goes with the request. Where no widths artifact exists yet,
+        # `load_conformal_widths` generates one, and the generation needs an embargo - which
+        # it looks up from the label when it is not given a number. Omitting the label here
+        # made every first conformal request on a prediction set fail with "conformal
+        # calibration needs the label horizon as an embargo" instead of calibrating, which is
+        # what stopped 13_portfolio_management. The generic runner has always passed it.
         widths = load_conformal_widths(
             CASE_STUDY_ID,
             prediction_hash,
@@ -1505,6 +1512,7 @@ def _apply_cohort_allocator(
             calibration_version=str(
                 allocation_spec.get("calibration_version", CALIBRATION_VERSION)
             ),
+            label=label or None,
         )
         if widths["timestamp"].dtype != preds["timestamp"].dtype:
             widths = widths.cast({"timestamp": preds["timestamp"].dtype})
@@ -1662,6 +1670,7 @@ def run_htm_daily_mtm(
     option_lifecycle: pl.DataFrame | None = None,
     option_spread_fraction: float = 1.0,
     prediction_hash: str | None = None,
+    label: str | None = None,
 ) -> dict:
     """Run the HTM daily-MTM short-straddle backtest and return a result dict.
 
@@ -1723,7 +1732,11 @@ def run_htm_daily_mtm(
     # implement covariance-shrinkage MVO, hierarchical risk parity, etc.
     if allocation_spec and decisions is None:
         cohorts = _apply_cohort_allocator(
-            cohorts, raw_options_dir, allocation_spec, prediction_hash=prediction_hash
+            cohorts,
+            raw_options_dir,
+            allocation_spec,
+            prediction_hash=prediction_hash,
+            label=label,
         )
 
     contract_mids = (

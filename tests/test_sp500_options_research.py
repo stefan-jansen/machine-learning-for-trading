@@ -408,6 +408,47 @@ def test_lifecycle_rejects_a_missing_contract_leg_date(tmp_path: Path) -> None:
         _load_option_lifecycle(cohorts, raw_dir)
 
 
+def test_the_option_allocator_asks_for_widths_with_its_label(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Where no widths artifact exists, generating one needs an embargo, and the label carries it.
+
+    `load_conformal_widths` generates the artifact when the file is absent, and the generation
+    refuses without an embargo unless it can look the reviewed value up from the label. The
+    option engine kept its own copy of this call and omitted the label, so the first conformal
+    request on any prediction set failed with "conformal calibration needs the label horizon as
+    an embargo" rather than calibrating - which is what stopped 13_portfolio_management on its
+    first canonical run. The generic runner has always passed it.
+    """
+    from case_studies.utils import conformal as conformal_module
+
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
+
+    seen: dict[str, object] = {}
+
+    class _Asked(Exception):
+        pass
+
+    def _record(*args: object, **kwargs: object) -> pl.DataFrame:
+        seen.update(kwargs)
+        raise _Asked
+
+    monkeypatch.setattr(conformal_module, "load_conformal_widths", _record)
+
+    with pytest.raises(_Asked):
+        _apply_cohort_allocator(
+            cohorts,
+            raw_dir,
+            {"method": "conformal_weighted"},
+            prediction_hash="abcdef123456",
+            label="ret_to_expiry",
+        )
+    assert seen["label"] == "ret_to_expiry"
+
+
 def test_a_leg_with_no_market_is_an_unmarked_session_not_a_missing_leg(tmp_path: Path) -> None:
     """A present row with no bid and no ask is a leg nobody would trade, not a leg the chain lost.
 
