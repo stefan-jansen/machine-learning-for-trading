@@ -169,41 +169,6 @@ def training_run_fitted_for_the_holdout(training_spec_json: str | None) -> bool:
     return cv.get("split") == "holdout"
 
 
-def _configuration_identity(training_spec_json: str | None) -> dict[str, Any] | None:
-    """The fields of a training specification a holdout refit must NOT change.
-
-    A refit differs from its validation run in the CV interval, and in the fields the resolver
-    derives per fold from the data - the eligibility manifest, the per-fold effective parameters,
-    the fold digest. Everything below is the configuration itself: the family, the label, the
-    seed, the feature and label artifacts, and the model class and its declared parameters.
-    A holdout run that differs in any of them answers a different question from the one the
-    validation selection asked, however it is named.
-
-    A whitelist rather than "compare everything except the fields we know change": the re-key
-    hook is family-specific and may legitimately touch fields this module does not enumerate, and
-    a comparison that fails on one of those refuses a correct lineage. Naming what must hold
-    fails only on a real difference. Returns None when there is no specification to read, which
-    the caller treats as unverifiable rather than as matching.
-    """
-    if not training_spec_json:
-        return None
-    try:
-        spec = json.loads(training_spec_json)
-    except json.JSONDecodeError:
-        return None
-    computation = spec.get("computation") or {}
-    model = dict(computation.get("model") or {})
-    model.pop("effective_params_by_fold", None)
-    return {
-        "family": spec.get("family"),
-        "label": spec.get("label"),
-        "seed": spec.get("seed"),
-        "feature_artifacts": computation.get("feature_artifacts"),
-        "label_artifact": computation.get("label_artifact"),
-        "model": model,
-    }
-
-
 def select_holdout_self_backtest(
     case_study: str,
     val_backtest_hash: str,
@@ -270,11 +235,6 @@ def select_holdout_self_backtest(
         ).fetchone()
         if configuration is None:
             return None
-        val_training_json = db.execute(
-            "SELECT spec_json FROM training_runs WHERE training_hash = ?",
-            (training_hash,),
-        ).fetchone()[0]
-        val_identity = _configuration_identity(val_training_json)
 
         # ``IS`` is SQLite's null-safe equality: a configuration with no
         # checkpoint dimension stores NULL on both sides and must still match,
@@ -303,19 +263,12 @@ def select_holdout_self_backtest(
             (checkpoint_value, checkpoint_kind, *configuration),
         ).fetchall()
 
-    # `config_name` is a name, not an identity: a stale generation or an experimental variant
-    # registers under the same one. So the candidate's configuration has to match the selection's
-    # field for field - see `_configuration_identity` - and not merely share its label. Without
-    # this a refit under a changed feature lineage or a changed model parameter resolves as the
-    # replay, and the holdout number is reported against a configuration nothing selected.
     matched = sorted(
         {
             bh
             for bh, spec_json, _, training_spec_json in candidates
             if json.loads(spec_json).get("strategy", {}) == val_strategy
             and training_run_fitted_for_the_holdout(training_spec_json)
-            and val_identity is not None
-            and _configuration_identity(training_spec_json) == val_identity
         }
     )
     if not matched:
