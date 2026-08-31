@@ -49,13 +49,13 @@ from case_studies.cme_futures.research_workflow import (
     final_selection_candidate_set,
     final_validation_candidate_set,
     final_validation_results,
-    holdout_evidence,
     open_study,
     product_universe_table,
     rank_by_validation_sharpe,
     selection_catalog,
 )
 from case_studies.research import OfficialPopulation, Result
+from case_studies.utils.strategy_analysis import select_holdout_self_backtest
 from utils.style import COLORS
 
 # %% tags=["parameters"]
@@ -303,20 +303,29 @@ fig.show()
 # produce the row; this one reads it. Where they have not run, the table is empty and the validation
 # result above stands on its own.
 
-# %%
-holdout = holdout_evidence(study, selected.hash)
-if not holdout.is_empty() and holdout.item(0, "label") != selected_label:
-    raise RuntimeError("the holdout replay records a different return horizon")
+# %% tags=["results"]
+# `select_holdout_self_backtest` is the shared resolver every strategy-analysis notebook uses.
+# It takes the selection this notebook already made and finds the holdout backtest replaying that
+# same strategy specification, at the same configuration and checkpoint, over a training run whose
+# own CV declares the holdout fold. It returns None where no such run exists, and raises rather
+# than choosing where two of them do.
+#
+# Calling it rather than re-deriving the lineage here is deliberate. A second implementation
+# living beside the first agrees with it on the registry it was written against and diverges on
+# the next one, and a divergence in this particular lookup is a holdout number attributed to the
+# wrong configuration.
+holdout_backtest_hash = select_holdout_self_backtest("cme_futures", selected.hash)
+print(
+    f"Selected validation backtest: {selected.hash}  ({selected_label})\n"
+    f"Holdout replay: {holdout_backtest_hash or 'not produced yet'}"
+)
 
 # %% tags=["results"]
-holdout
-
-# %% tags=["results"]
-if holdout.is_empty() or holdout.item(0, "holdout_backtest_hash") is None:
+if holdout_backtest_hash is None:
     comparison = pl.DataFrame()
 else:
     evaluated = study.backtests.table(include_preview=True).filter(
-        pl.col("backtest_hash") == holdout.item(0, "holdout_backtest_hash")
+        pl.col("backtest_hash") == holdout_backtest_hash
     )
     comparison = pl.concat(
         [
