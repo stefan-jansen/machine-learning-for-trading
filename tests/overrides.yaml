@@ -1553,13 +1553,27 @@ case_studies/etfs/10_dl_tsmixer:
   # than by an override - Darts requires input_chunk_length above output_chunk_length, which is
   # the 21-day label horizon, and the preset's 60 clears it.
   # DEVICE and POPULATION_NAME travel together for the reason 08_tabular_dl states.
-  # max_symbols is 5 to match 04_model_based_features, as in 09_dl_lstm.
+  #
+  # No max_symbols, and that is the fix for ml4t/agent-workspace#988. This block carried
+  # `max_symbols: 5` "to match 04_model_based_features" - a justification that stopped holding
+  # when 04's own cap was removed, so the reduction went on cutting the cross-section to five
+  # while the temporal artifact it fits against covered the fixture's twenty-four. Darts TSMixer
+  # diverged on the mismatch: the registration guard refused predictions at a per-fold dispersion
+  # ratio of 286 (score std 10.588 against a target std of 0.037), and #988 measured that
+  # restoring the pre-conversion LOOKBACK of 22 made it four times worse at 1285. Neither the
+  # window nor the shared levers the issue named - the tsmixer epoch count in
+  # tests/preset_patches.py, the darts training path - were the cause. Removing this line alone
+  # takes the chain green: measured 2026-08-31 in the container, stages 01-10, 10 passed in
+  # 288.70s, with this notebook inside its 180s cap.
+  #
+  # 09_dl_lstm, 11a_pca and 11b_ipca keep max_symbols: 5 and pass with it. Their blocks state the
+  # same "must match 04" rule, which is no longer true of any of them; it is left in place there
+  # because what those three need is a coverage floor they currently clear, not agreement with 04.
   parameters:
     DEVICE: cpu
     POPULATION_NAME: etfs-tsmixer-preview
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 5
   timeout: 180
 case_studies/etfs/11a_pca:
   # max_symbols must match 04_model_based_features, which builds the temporal
