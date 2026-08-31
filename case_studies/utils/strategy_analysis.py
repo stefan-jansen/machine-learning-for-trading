@@ -196,6 +196,67 @@ def training_run_fitted_for_the_holdout(training_spec_json: str | None) -> bool:
     return cv.get("split") == "holdout"
 
 
+# What a holdout refit is allowed to change, and nothing else. Everything outside this set
+# has to agree with the validation run, because the holdout is defined as *that configuration*
+# refitted on a later window - not as another run that happens to share its name.
+#
+#   cv                        the definition of the refit: split, folds, identity, request
+#   expected_prediction_keys  derived from the fold geometry, so it moves with cv
+#   input_data_spec           carries the fold splits and a fingerprint over them. Its
+#                             `artifacts` are still checked, through the top-level
+#                             `feature_artifacts` that duplicates them.
+#   runtime_identity          the environment the run happened in
+#   source_identity           the notebook and commit that ran it
+#   model.effective_params_by_fold   keyed by fold number, which the refit renumbers
+#
+# This is a denylist rather than an allowlist on purpose: a field added to the specification
+# later is compared by default, so the check tightens as the spec grows instead of silently
+# ignoring the new field.
+_REFIT_MAY_CHANGE = frozenset(
+    {"cv", "expected_prediction_keys", "input_data_spec", "runtime_identity", "source_identity"}
+)
+
+
+def _refit_comparable(training_spec_json: str | None) -> dict | None:
+    """A training specification reduced to what a refit must preserve."""
+    if not training_spec_json:
+        return None
+    computation = dict(json.loads(training_spec_json).get("computation") or {})
+    for key in _REFIT_MAY_CHANGE:
+        computation.pop(key, None)
+    model = dict(computation.get("model") or {})
+    if model:
+        model.pop("effective_params_by_fold", None)
+        computation["model"] = model
+    return computation
+
+
+def is_refit_of(holdout_spec_json: str | None, validation_spec_json: str | None) -> bool:
+    """True when a holdout training run is the validation run's own configuration refitted.
+
+    Family, configuration name, label and checkpoint are what the queries can filter on in
+    SQL, and they are not enough to identify a configuration. They are a *name*, and a name is
+    reused across generations: refit a study after its features change and the new runs carry
+    the same four values as the old ones. Measured on the current registries, fx_pairs has 144
+    configuration groups spanning more than one feature-artifact generation and etfs has 10 -
+    so on those two case studies the coarse filter alone can return a holdout fitted on
+    features the study no longer publishes, and report it as the selected carrier's.
+
+    Comparing the specifications closes that. The feature artifact digests are the field that
+    catches the stale generation, but the comparison is deliberately not limited to them: model
+    hyperparameters, feature names, the task and the sampling all have to agree too, because a
+    holdout that differs in any of them is not a refit of what was selected.
+
+    A run with no recorded specification answers False. It cannot be shown to be a refit, and
+    the holdout lineage is not a place to assume.
+    """
+    holdout = _refit_comparable(holdout_spec_json)
+    validation = _refit_comparable(validation_spec_json)
+    if holdout is None or validation is None:
+        return False
+    return holdout == validation
+
+
 def resolve_holdout_self_backtest(
     case_study: str,
     val_backtest_hash: str,
@@ -259,10 +320,13 @@ def resolve_holdout_self_backtest(
             )
         training_hash, checkpoint_value, checkpoint_kind = train_row
 
-        configuration = db.execute(
-            "SELECT family, config_name, label FROM training_runs WHERE training_hash = ?",
+        val_train_row = db.execute(
+            "SELECT family, config_name, label, spec_json FROM training_runs "
+            "WHERE training_hash = ?",
             (training_hash,),
         ).fetchone()
+        configuration = val_train_row[:3] if val_train_row is not None else None
+        val_training_spec_json = val_train_row[3] if val_train_row is not None else None
         if configuration is None:
             return HoldoutSelfBacktest(
                 None,
@@ -308,18 +372,21 @@ def resolve_holdout_self_backtest(
             "this case study",
         )
 
-    # Two conditions, and the second is the one a lineage match alone cannot express. The
-    # strategy spec has to be the validation run's, so the anchor is a replay of what was
-    # selected rather than a neighbouring allocator that shares the holdout prediction. And
-    # the training run behind it has to have been refitted for the holdout: a model fitted on
-    # the validation folds can publish predictions over the holdout window, and accepting one
-    # would report the exact thing the holdout exists to rule out.
+    # Three conditions, and the SQL above can express none of them. The strategy spec has to
+    # be the validation run's, so the anchor is a replay of what was selected rather than a
+    # neighbouring allocator that shares the holdout prediction. The training run behind it has
+    # to have been refitted for the holdout: a model fitted on the validation folds can publish
+    # predictions over the holdout window, and accepting one would report the exact thing the
+    # holdout exists to rule out. And it has to be a refit of THIS specification rather than of
+    # a configuration with the same name - see `is_refit_of`, which is what stops a holdout
+    # fitted on a superseded feature generation from being reported as the carrier's.
     matched = sorted(
         {
             bh
             for bh, spec_json, _, training_spec_json in candidates
             if json.loads(spec_json).get("strategy", {}) == val_strategy
             and training_run_fitted_for_the_holdout(training_spec_json)
+            and is_refit_of(training_spec_json, val_training_spec_json)
         }
     )
     if not matched:
@@ -327,8 +394,9 @@ def resolve_holdout_self_backtest(
             None,
             f"{len(candidates)} holdout backtests are registered for "
             f"{configuration[0]}/{configuration[1]} on {configuration[2]} ({checkpoint}), and "
-            "none of them both replays that run's strategy and comes from a run refitted for "
-            "the holdout, so the anchor is not a replay of what was selected",
+            "none of them replays that run's strategy from a run refitted for the holdout "
+            "under the same specification, so the anchor is not a replay of what was "
+            "selected",
         )
     if len(matched) > 1:
         raise ValueError(

@@ -43,7 +43,10 @@ from case_studies.utils.analytics import DISPLAY_NAMES
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_returns
 from case_studies.utils.registry.registration import register_paired_metrics
-from case_studies.utils.strategy_analysis import training_run_fitted_for_the_holdout
+from case_studies.utils.strategy_analysis import (
+    is_refit_of,
+    training_run_fitted_for_the_holdout,
+)
 from case_studies.utils.uncertainty import (
     SIGNAL_BASELINE_BY_CASE_STUDY,
     STAGE_SEQUENCE,
@@ -591,7 +594,7 @@ def _holdout_lineage_for(
             carrier = db.execute(
                 """
                 SELECT t.family, t.config_name, t.label,
-                       p.checkpoint_value, p.checkpoint_kind
+                       p.checkpoint_value, p.checkpoint_kind, t.spec_json
                 FROM prediction_sets p
                 JOIN training_runs t ON t.training_hash = p.training_hash
                 WHERE p.prediction_hash = ?
@@ -599,6 +602,8 @@ def _holdout_lineage_for(
                 (prefer_prediction_hash,),
             ).fetchone()
             if carrier is not None:
+                carrier_spec_json = carrier["spec_json"]
+                carrier_key = list(carrier)[:5]
                 # Matched on the declared configuration, not on the carrier's training
                 # hash. A holdout prediction produced correctly carries a NEW training
                 # identity - the same configuration refitted on the holdout fold - so
@@ -624,7 +629,7 @@ def _holdout_lineage_for(
                       AND p.checkpoint_kind IS ?
                     ORDER BY b.backtest_hash
                     """,
-                    params + list(carrier),
+                    params + carrier_key,
                 ).fetchall()
                 # Naming the carrier pins the configuration and the checkpoint, and that is
                 # normally one candidate. It is not guaranteed to be: one prediction set can
@@ -634,10 +639,20 @@ def _holdout_lineage_for(
                 # decide on nothing the carrier determines, which is the same defect the
                 # unpinned branch below refuses, so it refuses here too rather than only
                 # where the caller happened not to pin.
+                # Fitted for the holdout AND a refit of this specification. The four
+                # columns the query filters on are a configuration's NAME, and a name is
+                # reused across generations - refit a study after its features change and the
+                # new runs carry the same family, config_name, label and checkpoint as the
+                # old ones. On the current registries fx_pairs has 144 configuration groups
+                # spanning more than one feature-artifact generation and etfs has 10, so
+                # without the second condition a holdout fitted on features the study no
+                # longer publishes can be the sole coarse match and get reported as the
+                # carrier's own holdout.
                 eligible = [
                     candidate
                     for candidate in rows_
                     if training_run_fitted_for_the_holdout(candidate["spec_json"])
+                    and is_refit_of(candidate["spec_json"], carrier_spec_json)
                 ]
                 if len({candidate["backtest_hash"] for candidate in eligible}) > 1:
                     raise ValueError(

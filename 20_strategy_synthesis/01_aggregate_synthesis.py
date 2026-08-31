@@ -1628,14 +1628,23 @@ for cs, explorer in explorers.items():
     # ever match a holdout scored from the validation-fitted model. The lookup that used to
     # sit here - prediction hash to training hash, with its own connection and error branch -
     # is gone with it; the resolver reads the carrier itself.
+    #
+    # The refusal is caught here for the same reason `query_holdout_rows` catches it: it is a
+    # statement about ONE case study, and letting it propagate would end the loop and drop the
+    # other eight. The notebook then reports no holdout pair for this case study, which is the
+    # correct answer when nothing can be shown to have selected one, and carries on.
     val_rank1 = _val_rank1_carrier(cs)
     val_spec = val_rank1["spec"] if val_rank1 else None
-    ho_lineage = _holdout_lineage_for(
-        cs,
-        leader_label,
-        strategy_spec=val_spec,
-        prefer_prediction_hash=val_rank1["prediction_hash"] if val_rank1 else leader_phash,
-    )
+    try:
+        ho_lineage = _holdout_lineage_for(
+            cs,
+            leader_label,
+            strategy_spec=val_spec,
+            prefer_prediction_hash=val_rank1["prediction_hash"] if val_rank1 else leader_phash,
+        )
+    except ValueError as exc:
+        print(f"[warn] {cs}: no holdout pair, holdout not resolvable: {exc}")
+        ho_lineage = None
     ho_hash = ho_lineage["backtest_hash"] if ho_lineage else None
     ho_label = ho_lineage["label"] if ho_lineage else leader_label
     chal_ho = _aligned_returns(cs, ho_hash) if ho_hash else None

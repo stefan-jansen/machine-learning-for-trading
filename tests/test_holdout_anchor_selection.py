@@ -445,3 +445,106 @@ def test_chapter_20_reports_a_refusal_rather_than_dropping_the_case_study(tmp_pa
 
     assert query_holdout_rows() == []
     assert "two candidates survive" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------------------
+# A configuration's NAME is not its identity.
+#
+# Family, config_name, label and checkpoint are what the resolver can filter on in SQL, and
+# they are reused across generations: refit a case study after its features change and the new
+# runs carry the same four values as the old ones. Measured on the registries as they stand,
+# fx_pairs has 144 configuration groups spanning more than one feature-artifact generation and
+# etfs has 10. So on those case studies the coarse filter alone can leave a holdout fitted on
+# features the study no longer publishes as the sole match, and report it as the carrier's.
+#
+# `is_refit_of` closes it by requiring the specifications to agree on everything a refit is not
+# allowed to change.
+# ---------------------------------------------------------------------------------------
+
+
+def _spec(model_based: str, *, split: str = "holdout", max_depth: int = 6) -> str:
+    """A training spec with the fields that decide whether two runs are the same fit."""
+    return json.dumps(
+        {
+            "computation": {
+                "cv": {"split": split, "folds": [{"fold": 1}]},
+                "feature_artifacts": {"model_based": {"sha256": model_based}},
+                "feature_names": ["ret_5d", "vol_21d"],
+                "model": {
+                    "class": "lightgbm.Booster",
+                    "max_depth": max_depth,
+                    # Keyed by fold number, which a refit renumbers - so it must be ignored.
+                    "effective_params_by_fold": {"1": {"seed": 42}},
+                },
+            }
+        }
+    )
+
+
+CURRENT = "aaaa" * 16
+SUPERSEDED = "bbbb" * 16
+
+
+def test_a_refit_differs_from_its_validation_run_only_in_the_fold_geometry() -> None:
+    """The positive case, or the check would be satisfied by rejecting everything."""
+    from case_studies.utils.strategy_analysis import is_refit_of
+
+    assert is_refit_of(_spec(CURRENT), _spec(CURRENT, split="validation"))
+
+
+def test_a_holdout_on_a_superseded_feature_generation_is_not_a_refit() -> None:
+    """The defect this exists for: same four columns, different features underneath."""
+    from case_studies.utils.strategy_analysis import is_refit_of
+
+    assert not is_refit_of(_spec(SUPERSEDED), _spec(CURRENT, split="validation"))
+
+
+def test_differing_hyperparameters_are_not_a_refit_either() -> None:
+    """Not only the artifacts. A holdout that changes the model is not a refit of what ran."""
+    from case_studies.utils.strategy_analysis import is_refit_of
+
+    assert not is_refit_of(_spec(CURRENT, max_depth=9), _spec(CURRENT, split="validation"))
+
+
+def test_a_run_with_no_specification_is_not_a_refit() -> None:
+    """It cannot be shown to be one, and the holdout lineage is not a place to assume."""
+    from case_studies.utils.strategy_analysis import is_refit_of
+
+    assert not is_refit_of(None, _spec(CURRENT, split="validation"))
+    assert not is_refit_of(_spec(CURRENT), None)
+
+
+def test_the_pinned_carrier_rejects_a_stale_generation_sharing_its_name(
+    monkeypatch, tmp_path
+) -> None:
+    """End to end through the resolver, which is where it would reach a reader.
+
+    Two holdout backtests, same family, config_name, label and checkpoint - so both survive the
+    SQL filter. One was fitted on the feature artifact the study publishes, the other on the
+    generation it retired. Pinning the carrier must return the first and never the second, and
+    the second must not even count towards ambiguity.
+    """
+    case_dir = _registry(
+        tmp_path,
+        [
+            ("p1", "t1", "cfg", "b1", 0.4, _spec(CURRENT)),
+            ("p2", "t2", "cfg", "b2", 9.9, _spec(SUPERSEDED)),
+        ],
+    )
+    _install(monkeypatch, case_dir)
+    # The carrier is p1's own configuration, recorded as the validation fit it was selected as.
+    monkeypatch.setattr(
+        paired_metrics,
+        "is_refit_of",
+        lambda holdout, _carrier: __import__(
+            "case_studies.utils.strategy_analysis", fromlist=["is_refit_of"]
+        ).is_refit_of(holdout, _spec(CURRENT, split="validation")),
+    )
+
+    resolved = _lineage(prefer_prediction_hash="p1")
+
+    assert resolved is not None, "the carrier's own holdout must still resolve"
+    assert resolved["backtest_hash"] == "b1"
+    # 9.9 is the higher Sharpe. Nothing may reach it, and it must not raise as ambiguity
+    # either - it is not a candidate at all.
+    assert resolved["backtest_hash"] != "b2"
