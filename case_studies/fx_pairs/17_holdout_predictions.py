@@ -51,8 +51,12 @@
 import polars as pl
 
 from case_studies.research import open_study
+from case_studies.research.comparison import CandidateSet
 from case_studies.research.holdout import build_holdout_training_spec
-from case_studies.research.models import reconstruct_locked_model_request
+from case_studies.research.models import (
+    reconstruct_locked_model_request,
+    validate_locked_model_run,
+)
 from case_studies.utils.strategy_analysis import resolve_solvent_carrier
 
 # %% tags=["parameters"]
@@ -83,6 +87,27 @@ study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKS
 # from the registry rather than named here, so this notebook cannot select a configuration that
 # the validation stages did not rank first.
 carrier = resolve_solvent_carrier(CASE_STUDY_ID)
+
+# The resolver ranks the registry; `15_risk_management` froze the set the holdout is allowed to
+# choose from. They are two mechanisms and they can disagree, so the admission contract is
+# enforced here rather than assumed: a carrier the frozen set never admitted is refused, not
+# quietly refitted. The set's own raw-Sharpe pick is printed beside the resolved one because the
+# two rank differently - the resolver re-ranks on common support and the set does not - and a
+# divergence between them is worth seeing rather than discovering downstream.
+holdout_candidates = CandidateSet.one(study, name=CANDIDATE_SET_NAME)
+if carrier["val_backtest_hash"] not in holdout_candidates.members:
+    raise RuntimeError(
+        f"the resolved carrier {carrier['val_backtest_hash']} is not a member of "
+        f"{CANDIDATE_SET_NAME} ({holdout_candidates.hash}, {len(holdout_candidates.members)} "
+        "members). The holdout may only refit a configuration the frozen set admitted; "
+        "re-run 15_risk_management if the set is stale."
+    )
+print(
+    f"Frozen candidate set {holdout_candidates.hash}: "
+    f"{len(holdout_candidates.members)} members, "
+    f"raw-Sharpe pick {holdout_candidates.best_validation_sharpe().hash}"
+)
+
 validation_prediction = study.results.open(carrier["val_prediction_hash"])
 prediction_record = validation_prediction.registry_record()
 CHECKPOINT_KIND = prediction_record["checkpoint_kind"]
@@ -184,7 +209,15 @@ if record["checkpoint_kind"] != CHECKPOINT_KIND or record["checkpoint_value"] !=
 if not prediction.complete:
     raise RuntimeError("the holdout prediction is incomplete")
 
+# Completeness verifies the published prediction artifact, not that the persisted fitted state
+# reproduces it. A cached run whose model state is missing or inconsistent passes the check
+# above and fails only where someone tries to use the model again. The family's own validator
+# reads that state and returns its digest, which is the one thing about this run that the
+# specification cannot state about itself.
+fitted_state_digest = validate_locked_model_run(request, model_run)
+
 print(f"Holdout training run:   {model_run.training.hash}")
+print(f"Fitted-state digest:    {fitted_state_digest}")
 print(f"Holdout prediction set: {prediction.hash}")
 
 # %% [markdown]
