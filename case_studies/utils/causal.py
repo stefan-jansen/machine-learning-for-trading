@@ -1310,8 +1310,8 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     seed = int(config.get("seed", RANDOM_SEED))
     n_folds = int(reductions.get("n_folds", config.get("n_folds", 5)))
     n_placebo = int(reductions.get("n_placebo", config.get("n_placebo", 100)))
-    # The shared preset still declares max_samples for the six case-study DML stages that have
-    # not migrated to this path and read it as their own default. This path ignores it: a
+    # The shared preset still declares max_samples for the case-study DML stages that have not
+    # migrated to this path and read it as their own default. This path ignores it: a
     # canonical run uses the full declared population, and a reduction reaches it only through
     # preview_reductions, which research/causal.py refuses for a canonical request. So the
     # preset cannot cap a canonical sample, and the resolved spec records max_samples: 0.

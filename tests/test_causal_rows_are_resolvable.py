@@ -15,8 +15,11 @@ Measured against the fleet registries on 2026-08-25: crypto 2/2 rows visible, cm
 wrapper; etfs' one row was written by the wrapper and its notebook has since been converted,
 so its next run registers a resolvable one. sp500_options holds one visible row, but it was written by the resolver before
 that notebook moved to the wrapper, so its next run registers an invisible one;
-nasdaq100_microstructure and sp500_equity_option_analytics have registered nothing yet and
-would register invisible rows on their first run.
+nasdaq100_microstructure has registered nothing yet and would register an invisible row on
+its first run. sp500_equity_option_analytics registered one through the wrapper on 2026-08-26
+and replaced it through the resolver on 2026-08-31; the wrapper row is still in its table,
+stranded rather than superseded, because a row no reader resolves cannot be named as a
+predecessor.
 
 The guard keys on `register_causal_run` rather than on any particular call spelling. An
 earlier version matched the literal `results = run_dml_analysis(`, which a notebook slips
@@ -39,7 +42,6 @@ REPO = Path(__file__).resolve().parent.parent
 UNCONVERTED = {
     "case_studies/nasdaq100_microstructure/12_causal_dml.py",
     "case_studies/sp500_options/10_causal_dml.py",
-    "case_studies/sp500_equity_option_analytics/12_causal_dml.py",
 }
 
 WRAPPER = "register_causal_run"

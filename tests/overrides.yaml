@@ -2151,8 +2151,12 @@ case_studies/sp500_equity_option_analytics/11e_supervised_autoencoder:
   timeout: 900
 
 case_studies/sp500_equity_option_analytics/12_causal_dml:
-  # CV_FOLDS was renamed N_FOLDS: the notebook now separates the request from the resolved
-  # value, so the parameter and the number the analysis runs on no longer share a name.
+  # N_FOLDS is back to CV_FOLDS. The notebook resolves its population through the shared causal
+  # request now, and the request's four preview fields are named for the reductions they become,
+  # so the parameter carries the resolver's name rather than the notebook's own. The harness sets
+  # EXECUTION_TIER and WORKSPACE itself, which makes every run here a preview, and a preview
+  # causal request must declare all four - papermill only warns on a parameter the notebook does
+  # not read, so a stale name here fails inside the resolver rather than at injection.
   # N_PLACEBO was 5, below the ten successful draws run_dml_analysis assembles a refutation
   # from at all, so it published none and this notebook's guard against a missing refutation
   # fired on every CI run. The bar is not that a refutation is computed but that a verdict below
@@ -2162,9 +2166,9 @@ case_studies/sp500_equity_option_analytics/12_causal_dml:
   # draws above it are a chosen margin, because a draw can fail and drop the survivors below the
   # bar. Measured at 14s against a 300s cap.
   parameters:
+    CV_FOLDS: 2
     MAX_SAMPLES: 3000
     MAX_SYMBOLS: 5
-    N_FOLDS: 2
     N_PLACEBO: 25
   timeout: 300
 case_studies/sp500_equity_option_analytics/13_model_analysis:
