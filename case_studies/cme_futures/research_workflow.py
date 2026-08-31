@@ -36,6 +36,7 @@ from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_runner import precompute_weights
 from case_studies.utils.registry import prediction_hash_from_parts
+from case_studies.utils.strategy_analysis import training_run_fitted_for_the_holdout
 from data import load_cme_futures
 from utils.modeling import load_configs
 from utils.paths import REPO_ROOT
@@ -1254,6 +1255,11 @@ def holdout_evidence(study: Study, selected_backtest_hash: str) -> pl.DataFrame:
     `reference/CASE_STUDY_PIPELINE.md` section 6 forbids, and a match on the specification cannot
     do it even accidentally.
 
+    A candidate must also have been REFITTED for the holdout. ``split = 'holdout'`` says where
+    the predictions land and nothing about what the model saw while fitting: a model fitted on
+    the validation folds can publish predictions over the holdout window, which is the precise
+    lineage the holdout exists to rule out. The training run's own CV is what settles it.
+
     Queried against ``study.root``, so this answers about the registry the caller opened rather
     than about whichever one a case-study name resolves to.
     """
@@ -1287,7 +1293,7 @@ def holdout_evidence(study: Study, selected_backtest_hash: str) -> pl.DataFrame:
         # stores NULL on both sides and must still match, where `=` would drop it.
         candidates = db.execute(
             """
-            SELECT b.backtest_hash, b.spec_json, b.prediction_hash, bm.sharpe
+            SELECT b.backtest_hash, b.spec_json, b.prediction_hash, bm.sharpe, t.spec_json
             FROM backtest_runs b
             JOIN prediction_sets p ON p.prediction_hash = b.prediction_hash
             JOIN training_runs t ON t.training_hash = p.training_hash
@@ -1303,7 +1309,18 @@ def holdout_evidence(study: Study, selected_backtest_hash: str) -> pl.DataFrame:
             (ck_kind, ck_value, family, config_name, label),
         ).fetchall()
 
-    replay = [row for row in candidates if json.loads(row[1]).get("strategy", {}) == val_strategy]
+    # `split = 'holdout'` says where the predictions LAND and nothing about what the model saw
+    # while fitting. A model fitted on the validation folds can publish predictions over the
+    # holdout window, and that lineage is exactly what the holdout exists to rule out - so the
+    # training run is checked too, from its own CV, by the same predicate the canonical lineage
+    # resolver applies. A run with no recorded specification answers False rather than being
+    # assumed refitted.
+    replay = [
+        row
+        for row in candidates
+        if json.loads(row[1]).get("strategy", {}) == val_strategy
+        and training_run_fitted_for_the_holdout(row[4])
+    ]
     if not replay:
         return pl.DataFrame()
     if len(replay) > 1:
@@ -1312,7 +1329,7 @@ def holdout_evidence(study: Study, selected_backtest_hash: str) -> pl.DataFrame:
             f"{sorted(row[0] for row in replay)} share {family}/{config_name} on {label}, "
             f"checkpoint {ck_kind}={ck_value} and one strategy specification"
         )
-    backtest_hash, _, prediction_hash, sharpe = replay[0]
+    backtest_hash, _, prediction_hash, sharpe, _ = replay[0]
     return pl.DataFrame(
         [
             {

@@ -825,7 +825,14 @@ def test_holdout_evidence_replays_the_selection_it_is_handed(tmp_path: Path) -> 
         db.execute(
             "INSERT INTO training_runs (training_hash, spec_json, family, config_name, label, "
             "created_at) VALUES (?,?,?,?,?,?)",
-            ("tr-ho", "{}", "linear", "lasso", "fwd_ret_5d", "2026-08-15T00:00:00Z"),
+            (
+                "tr-ho",
+                json.dumps({"computation": {"cv": {"split": "holdout"}}}),
+                "linear",
+                "lasso",
+                "fwd_ret_5d",
+                "2026-08-15T00:00:00Z",
+            ),
         )
         for ph, th, split in (("pr-val", "tr-val", "validation"), ("pr-ho", "tr-ho", "holdout")):
             db.execute(
@@ -858,6 +865,56 @@ def test_holdout_evidence_replays_the_selection_it_is_handed(tmp_path: Path) -> 
     assert evidence.item(0, "label") == "fwd_ret_5d"
     assert evidence.item(0, "holdout_backtest_hash") == "bt-ho"
     assert evidence.item(0, "holdout_sharpe") == 0.4
+
+
+def test_a_validation_fitted_holdout_prediction_is_not_reported_as_a_replay(
+    tmp_path: Path,
+) -> None:
+    """`split = 'holdout'` says where predictions land, not what the model saw while fitting.
+
+    A model fitted on the validation folds can publish predictions over the holdout window.
+    Reporting that as the holdout replay is the precise lineage the holdout exists to rule out,
+    and nothing about the prediction set's own split distinguishes it.
+    """
+    study = _study(tmp_path)
+    strategy = {"signal": {"method": "equal_weight_top_k", "top_k": 1}}
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        for th in ("tr-val", "tr-leaky"):
+            db.execute(
+                "INSERT INTO training_runs (training_hash, spec_json, family, config_name, "
+                "label, created_at) VALUES (?,?,?,?,?,?)",
+                # Both declare the VALIDATION cv: tr-leaky was never refitted.
+                (
+                    th,
+                    json.dumps({"computation": {"cv": {"split": "validation"}}}),
+                    "linear",
+                    "lasso",
+                    "fwd_ret_5d",
+                    "2026-08-15T00:00:00Z",
+                ),
+            )
+        for ph, th, split in (("pr-val", "tr-val", "validation"), ("pr-ho", "tr-leaky", "holdout")):
+            db.execute(
+                "INSERT INTO prediction_sets (prediction_hash, training_hash, split, "
+                "checkpoint_kind, checkpoint_value, created_at) VALUES (?,?,?,?,?,?)",
+                (ph, th, split, "final", None, "2026-08-15T00:00:00Z"),
+            )
+        for bh, ph, stage in (("bt-val", "pr-val", "signal"), ("bt-ho", "pr-ho", "holdout")):
+            db.execute(
+                "INSERT INTO backtest_runs (backtest_hash, prediction_hash, stage, spec_json, "
+                "started_at, created_at) VALUES (?,?,?,?,?,?)",
+                (
+                    bh,
+                    ph,
+                    stage,
+                    json.dumps({"strategy": strategy}),
+                    "2026-08-15T01:00:00Z",
+                    "2026-08-15T01:00:00Z",
+                ),
+            )
+
+    # The strategy specification matches exactly; only the refit is missing.
+    assert research_workflow.holdout_evidence(study, "bt-val").is_empty()
 
 
 def test_official_model_catalog_forwards_the_population_it_supersedes(
