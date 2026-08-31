@@ -406,6 +406,7 @@ def _val_rank1_carrier(
     )
     if cand.is_empty() or "backtest_hash" not in cand.columns:
         return None
+    cand = _drop_retired_generations(cs, cand)
     if "family" in cand.columns:
         cand = cand.filter(pl.col("family") != "benchmark")
     if label_restriction and "label" in cand.columns:
@@ -902,6 +903,39 @@ def _populate_pair(
     }
 
 
+def _drop_retired_generations(cs: str, cand):
+    """Candidates whose own publisher still publishes them.
+
+    Every ranking in this module sorts on `sharpe` over whatever the registry holds, and a
+    superseded generation is still complete, still `current` under its schema version, and
+    still ranks. Passing a resolved `carrier` fixes only the pairs that consult it; Pair #1
+    ranks for itself, so the retired row won there and the validation-side pair was written
+    against a backtest the case study no longer publishes - measured on fx_pairs, where the
+    live carrier then had no challenger row at all and the strategy-analysis notebook refused
+    for want of evidence that had been written under the retired hash.
+
+    Both sides are filtered, because a retired generation reaches a ranking through either.
+    The prediction side is the one that hides: a refit that changes no numbers publishes
+    identical predictions under a new identity, so old and new carry the same Sharpe to the
+    last digit and the sort returns whichever it likes. It goes through
+    ``_retired_prediction_hashes`` rather than the recorded set, so a holdout prediction is
+    dropped along with the validation generation it was retrained from.
+    """
+    from case_studies.research.population import superseded_members_at
+
+    if cand is None or cand.is_empty():
+        return cand
+    if "backtest_hash" in cand.columns:
+        retired = superseded_members_at(get_case_study_dir(cs), member_kind="backtest")
+        if retired:
+            cand = cand.filter(~pl.col("backtest_hash").is_in(list(retired)))
+    if "prediction_hash" in cand.columns:
+        retired_predictions = _retired_prediction_hashes(cs)
+        if retired_predictions:
+            cand = cand.filter(~pl.col("prediction_hash").is_in(list(retired_predictions)))
+    return cand
+
+
 def populate_paired_metrics(
     cs: str,
     explorer: BacktestExplorer | None = None,
@@ -1005,6 +1039,7 @@ def populate_paired_metrics(
     if cand.is_empty() or "backtest_hash" not in cand.columns:
         skip_pair1 = True
     if not skip_pair1:
+        cand = _drop_retired_generations(cs, cand)
         if "family" in cand.columns:
             cand = cand.filter(pl.col("family") != "benchmark")
         if label_restriction and "label" in cand.columns:
@@ -1016,9 +1051,31 @@ def populate_paired_metrics(
         if cand.is_empty():
             skip_pair1 = True
     if not skip_pair1:
-        cand1 = cand.sort("sharpe", descending=True).unique(
+        # This ranking is on raw Sharpe, and the canonical resolver is not: when a conformal
+        # candidate is in the field it re-ranks everything on exact common timestamp support,
+        # so it can return a lower raw-Sharpe row. It also happens that the two tie exactly -
+        # a risk overlay that never binds produces the same returns as the allocation stage
+        # under it, to the last digit - and the dedupe then keeps whichever the sort emitted.
+        #
+        # Either way the pair ends up registered under a backtest the case study does not
+        # report, and a notebook asking for its carrier's validation-to-benchmark evidence
+        # finds none. So a supplied carrier is used rather than ranked against: the caller
+        # resolved it through the canonical selection, which is the answer this ranking is a
+        # cheaper approximation of. With no carrier the sort stands, with `backtest_hash` as
+        # a final key so the choice is at least deterministic.
+        carrier_backtest = str(carrier["val_backtest_hash"]) if carrier else None
+        cand1 = cand.sort(["sharpe", "backtest_hash"], descending=[True, False]).unique(
             subset=["prediction_hash"], keep="first", maintain_order=True
         )
+        if carrier_backtest is not None:
+            pinned = cand.filter(pl.col("backtest_hash") == carrier_backtest)
+            if pinned.is_empty():
+                raise RuntimeError(
+                    f"the carrier {carrier_backtest} passed for {cs} is not among the "
+                    f"{cand.height} candidates this ranking sees. Pair #1 would be registered "
+                    "under a different backtest than the one the case study reports."
+                )
+            cand1 = pinned
         leader_hash = cand1["backtest_hash"][0]
         leader_label = cand1["label"][0] if "label" in cand1.columns else None
         if leader_label:
@@ -1081,6 +1138,9 @@ def populate_paired_metrics(
     if cand.is_empty() or "backtest_hash" not in cand.columns:
         _report(cs, rows, verbose)
         return rows
+    # Pair #1 filters this out and so must this pool: with no carrier passed the leader is
+    # taken from the ranking below, and a superseded row still ranks.
+    cand = _drop_retired_generations(cs, cand)
     if "family" in cand.columns:
         cand = cand.filter(pl.col("family") != "benchmark")
     if label_restriction and "label" in cand.columns:
