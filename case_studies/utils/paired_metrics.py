@@ -547,27 +547,6 @@ def _holdout_lineage_for(
     db = sqlite3.connect(str(db_path))
     db.row_factory = sqlite3.Row
     try:
-        # The research lock is the authority on which holdout belongs to this case study: it
-        # seals a validation carrier before the holdout is touched, and a unique index makes it
-        # a singleton, because the holdout is used once. Pinning to it is what makes the choice
-        # determinate - without it the fallback below ranks by holdout Sharpe, which chooses
-        # the evaluation by its own result, and is how a holdout descended from a retired
-        # carrier takes the slot.
-        #
-        # `locked_holdout_evaluation` resolves the exact prediction set AND backtest the
-        # evaluation finalized, rather than the training hash the lock expected; see its
-        # docstring for why neither substitution is the same question.
-        pinned = locked_holdout_evaluation(db, cs)
-        if pinned == NO_LIVE_HOLDOUT:
-            return None
-        if pinned is not None:
-            pinned_prediction, pinned_backtest = pinned
-            clauses.append("p.prediction_hash = ?")
-            params.append(pinned_prediction)
-            clauses.append("b.backtest_hash = ?")
-            params.append(pinned_backtest)
-            where_sql = " AND ".join(clauses)
-
         # Same-lineage preference: given the validation rank-1's own prediction
         # set, prefer a holdout sharing its trained model AND its checkpoint.
         # Both are read from that one row here rather than accepted as separate
@@ -626,16 +605,18 @@ def _holdout_lineage_for(
                         resolved.pop("spec_json")
                         return resolved
 
-        # No lock, or a lock that names no holdout run. Two filters, and neither is optional.
+        # The caller named no carrier, so this is the unpinned fallback. Two filters, and
+        # neither is optional.
         #
         # Only runs actually refitted for the holdout are eligible: a model fitted on the
         # validation folds can publish predictions over the holdout window, and it is not a
         # holdout result whatever its Sharpe.
         #
-        # And what survives has to be one lineage. Several trained models reaching here cannot
-        # be separated on anything the registry records, so ordering them by Sharpe would pick
-        # the carrier by its holdout result - the selection the lock exists to prevent. The
-        # refusal names the lock as the way out rather than choosing.
+        # And what survives has to be ONE candidate. Anything that reaches here cannot be
+        # separated on what the registry records, so picking among them means picking by
+        # holdout Sharpe - choosing the evaluation by its own result, which is the one thing
+        # this module must never do. The refusal is the answer; the caller resolves it by
+        # naming the validation carrier, not by this function guessing.
         rows = db.execute(
             f"""
             SELECT DISTINCT t.family, t.config_name, t.label,
@@ -655,14 +636,21 @@ def _holdout_lineage_for(
     rows = [row for row in rows if training_run_fitted_for_the_holdout(row["spec_json"])]
     if not rows:
         return None
-    lineages = {row["training_hash"] for row in rows}
-    if len(lineages) > 1:
+    # Ambiguity is ambiguity however it arises, and it arises three ways: several trained
+    # models, several checkpoints of one trained model (one prediction set each, sharing a
+    # strategy spec), and several backtests hanging off one prediction set. Only the first
+    # used to refuse; the other two fell through to `rows[0]` under `ORDER BY b.backtest_hash`,
+    # which is arbitrary with respect to the configuration and therefore picks on the holdout's
+    # own result as surely as ordering by Sharpe would.
+    if len({row["backtest_hash"] for row in rows}) > 1:
+        lineages = {row["training_hash"] for row in rows}
         raise ValueError(
-            f"{len(rows)} holdout backtests across {len(lineages)} trained models were refitted "
-            f"for the holdout and match the carrier spec for {cs}, and no research lock names "
-            "which holdout run belongs to this study. Choosing between them would rank the "
-            "holdout on its own result. Take the lock, which records the sealed carrier and the "
-            "run made from it."
+            f"{len(rows)} holdout backtests across {len(lineages)} trained model(s) were "
+            f"refitted for the holdout and match the carrier spec for {cs}. Choosing between "
+            "them would rank the holdout on its own result. Pass the validation rank-1's "
+            "prediction hash as `prefer_prediction_hash`, which pins the configuration and the "
+            "checkpoint, so the holdout is resolved from the carrier that was selected rather "
+            "than from the holdout scores."
         )
     row = rows[0]
     return {
@@ -855,74 +843,6 @@ def _populate_pair(
         "info_ratio": paired.get("info_ratio"),
         "p_value": paired.get("p_value"),
     }
-
-
-NO_LIVE_HOLDOUT = "\x00no-live-holdout"
-
-
-def locked_holdout_evaluation(db: sqlite3.Connection, cs: str) -> tuple[str, str] | str | None:
-    """The one holdout this study may report, as ``(prediction_hash, backtest_hash)``.
-
-    Returns both finalized hashes; :data:`NO_LIVE_HOLDOUT` when a lock exists but names no
-    holdout this study can publish; ``None`` when no lock has been taken at all, which leaves
-    the caller's query unpinned as before.
-
-    **Both hashes, because the prediction alone does not identify the evaluation.** One
-    prediction set can carry several backtests - a replay registered under a different strategy
-    spec, an experimental allocator sharing the holdout prediction - so pinning the prediction
-    still leaves the caller choosing among their backtests by row order, which is the defect
-    one level down from the one this function was written to close.
-
-    **The lock's ``holdout_training_hash`` is what was expected, not what was produced.** It is
-    written when the carrier is sealed, before the retrain runs, and one training run registers
-    one prediction set per declared checkpoint - so pinning on it alone leaves several
-    candidates and the caller then picks among them by order. ``holdout_evaluations`` records
-    what the run actually finalized, ``holdout_prediction_hash`` and ``holdout_backtest_hash``,
-    keyed by the same ``lock_hash``. That is the row to resolve through, and its absence is
-    itself the answer: a lock whose evaluation never landed has no holdout to report, and
-    publishing the closest matching row would present an unfinished one as the result.
-
-    The state is checked for the same reason. Only ``HOLDOUT_EVALUATED`` means the sealed
-    carrier was actually taken to the holdout and the evaluation completed; anything earlier is
-    a lock in progress.
-
-    A lock is also immutable, and the carrier it sealed can be superseded afterwards - a later
-    refit publishes a new generation and the lock goes on naming the old one. Its holdout then
-    evaluates a configuration the study no longer publishes, so there is no live holdout either.
-    """
-    try:
-        row = db.execute(
-            "SELECT lock_hash, state, lock_json FROM research_locks ORDER BY created_at DESC "
-            "LIMIT 1"
-        ).fetchone()
-    except sqlite3.OperationalError as error:
-        if "no such table" not in str(error):
-            raise
-        return None
-    if not row:
-        return None
-    lock_hash, state, lock_json = row[0], row[1], row[2]
-    lock = json.loads(lock_json)
-    carrier = lock.get("prediction_hash")
-    if carrier is not None and carrier in _retired_prediction_hashes(cs):
-        return NO_LIVE_HOLDOUT
-    if state != "HOLDOUT_EVALUATED":
-        return NO_LIVE_HOLDOUT
-    try:
-        evaluated = db.execute(
-            "SELECT holdout_prediction_hash, holdout_backtest_hash FROM holdout_evaluations "
-            "WHERE lock_hash = ?",
-            (lock_hash,),
-        ).fetchone()
-    except sqlite3.OperationalError as error:
-        if "no such table" not in str(error):
-            raise
-        return NO_LIVE_HOLDOUT
-    if not evaluated or not evaluated[0] or not evaluated[1]:
-        # A half-written evaluation row names one side and not the other, which identifies no
-        # single evaluation. That is the same answer as no row at all.
-        return NO_LIVE_HOLDOUT
-    return str(evaluated[0]), str(evaluated[1])
 
 
 def populate_paired_metrics(

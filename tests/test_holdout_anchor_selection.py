@@ -1,4 +1,18 @@
-"""The holdout anchor is never chosen by its own holdout result."""
+"""The holdout anchor is never chosen by its own holdout result.
+
+The invariant is the file's original one and it is unchanged. What changed is the mechanism
+that enforces it. A research lock used to name the sealed carrier and the run made from it, so
+ambiguity among holdout candidates was resolved by reading the lock. PR #685 deleted that layer
+- the selection rule is the whole mechanism now - and these tests pin the two things that hold
+the invariant up in its absence:
+
+* the caller names the validation carrier, and the checkpoint comes with it; and
+* where no carrier is named and more than one candidate survives, the resolver REFUSES.
+
+Refusing is the point. Every way of choosing between surviving candidates - Sharpe, row order,
+`backtest_hash` ascending - decides on something the holdout produced, which is the selection
+the holdout exists to rule out.
+"""
 
 from __future__ import annotations
 
@@ -14,9 +28,22 @@ from case_studies.utils import paired_metrics
 #: like, and what `training_run_fitted_for_the_holdout` reads.
 HOLDOUT_REFIT_SPEC = json.dumps({"computation": {"cv": {"split": "holdout"}}})
 
+#: A model fitted on the validation folds. It can publish predictions over the holdout window,
+#: and it is not a holdout result whatever it scores.
+VALIDATION_FITTED_SPEC = json.dumps({"computation": {"cv": {"split": "validation"}}})
+
 
 def _registry(tmp_path: Path, rows) -> Path:
-    """``rows`` are (prediction_hash, training_hash, config_name, backtest_hash, sharpe)."""
+    """``rows`` are (prediction_hash, training_hash, config_name, backtest_hash, sharpe).
+
+    Optionally a 6th element, the training spec, and a 7th, the checkpoint value. They default
+    to a holdout refit at checkpoint 50, which is what every row was before this file had a
+    case that needed to vary them.
+
+    There are no `research_locks` or `holdout_evaluations` tables. #685 dropped both from the
+    schema, so a fixture that created them would be testing against a registry shape the code
+    can no longer produce.
+    """
     case_dir = tmp_path / "probe"
     (case_dir / "run_log").mkdir(parents=True)
     db = sqlite3.connect(case_dir / "run_log" / "registry.db")
@@ -24,12 +51,6 @@ def _registry(tmp_path: Path, rows) -> Path:
         "CREATE TABLE prediction_sets (prediction_hash TEXT, training_hash TEXT, split TEXT, "
         "checkpoint_kind TEXT, checkpoint_value INTEGER)"
     )
-    # `spec_json` is not decoration: `_holdout_lineage_for` reads each candidate's own CV out
-    # of it and drops any run that does not declare the holdout fold, because a model fitted on
-    # the validation folds can publish predictions over the holdout window and is not a holdout
-    # result whatever its Sharpe. Every row here is a genuine refit, so the filter admits them
-    # all and these cases go on testing what they are about - which of several refits is chosen,
-    # and on what.
     db.execute(
         "CREATE TABLE training_runs (training_hash TEXT, family TEXT, config_name TEXT, "
         "label TEXT, spec_json TEXT)"
@@ -39,23 +60,24 @@ def _registry(tmp_path: Path, rows) -> Path:
         "spec_json TEXT)"
     )
     db.execute("CREATE TABLE backtest_metrics (backtest_hash TEXT, sharpe REAL)")
-    db.execute(
-        "CREATE TABLE research_locks (lock_hash TEXT, lock_json TEXT, state TEXT, created_at TEXT)"
-    )
-    db.execute(
-        "CREATE TABLE holdout_evaluations (lock_hash TEXT, holdout_training_hash TEXT, "
-        "holdout_prediction_hash TEXT, holdout_backtest_hash TEXT, fitted_state_digest TEXT, "
-        "evaluated_at TEXT)"
-    )
-    for prediction_hash, training_hash, config_name, backtest_hash, sharpe in rows:
-        db.execute(
-            "INSERT INTO prediction_sets VALUES (?,?,?,?,?)",
-            (prediction_hash, training_hash, "holdout", "epoch", 50),
-        )
-        db.execute(
-            "INSERT INTO training_runs VALUES (?,?,?,?,?)",
-            (training_hash, "gbm", config_name, "fwd_ret_21d", HOLDOUT_REFIT_SPEC),
-        )
+    seen_predictions: set[str] = set()
+    seen_training: set[str] = set()
+    for row in rows:
+        prediction_hash, training_hash, config_name, backtest_hash, sharpe = row[:5]
+        spec = row[5] if len(row) > 5 else HOLDOUT_REFIT_SPEC
+        checkpoint = row[6] if len(row) > 6 else 50
+        if prediction_hash not in seen_predictions:
+            db.execute(
+                "INSERT INTO prediction_sets VALUES (?,?,?,?,?)",
+                (prediction_hash, training_hash, "holdout", "epoch", checkpoint),
+            )
+            seen_predictions.add(prediction_hash)
+        if training_hash not in seen_training:
+            db.execute(
+                "INSERT INTO training_runs VALUES (?,?,?,?,?)",
+                (training_hash, "gbm", config_name, "fwd_ret_21d", spec),
+            )
+            seen_training.add(training_hash)
         db.execute(
             "INSERT INTO backtest_runs VALUES (?,?,?,?)",
             (backtest_hash, prediction_hash, "holdout", "{}"),
@@ -81,9 +103,9 @@ def _install(monkeypatch, case_dir: Path) -> None:
     )
 
 
-def _lineage(cs="probe"):
+def _lineage(cs="probe", **kwargs):
     return paired_metrics._holdout_lineage_for(
-        cs, "fwd_ret_21d", None, label_restriction=None, rung=None
+        cs, "fwd_ret_21d", None, label_restriction=None, rung=None, **kwargs
     )
 
 
@@ -92,6 +114,13 @@ def test_one_lineage_resolves(monkeypatch, tmp_path) -> None:
     _install(monkeypatch, case_dir)
 
     assert _lineage()["backtest_hash"] == "b1"
+
+
+def test_no_candidates_is_not_an_error(monkeypatch, tmp_path) -> None:
+    case_dir = _registry(tmp_path, [])
+    _install(monkeypatch, case_dir)
+
+    assert _lineage() is None
 
 
 def test_several_trained_models_refuse_rather_than_rank(monkeypatch, tmp_path) -> None:
@@ -110,98 +139,34 @@ def test_several_trained_models_refuse_rather_than_rank(monkeypatch, tmp_path) -
         _lineage()
 
 
-def _take_lock(
-    case_dir: Path,
-    holdout_training_hash: str,
-    carrier: str = "carrier",
-    *,
-    state: str = "HOLDOUT_EVALUATED",
-    evaluated_prediction: str | None = "p1",
-    evaluated_backtest: str = "b1",
-) -> None:
-    """Seal a carrier, and optionally record the evaluation the retrain finalized.
-
-    ``holdout_training_hash`` is what the lock *expected*; ``evaluated_prediction`` and
-    ``evaluated_backtest`` are what the run actually produced. They are separate arguments
-    because they can disagree, and the resolver has to follow the recorded pair - a real
-    ``holdout_backtest_hash``, not a placeholder, because a test that records an unrelated hash
-    cannot tell whether the resolver used it.
-    """
-    db = sqlite3.connect(case_dir / "run_log" / "registry.db")
-    db.execute(
-        "INSERT INTO research_locks VALUES (?,?,?,?)",
-        (
-            "lk",
-            json.dumps(
-                {"holdout_training_hash": holdout_training_hash, "prediction_hash": carrier}
-            ),
-            state,
-            "2026-01-01",
-        ),
-    )
-    if evaluated_prediction is not None:
-        db.execute(
-            "INSERT INTO holdout_evaluations VALUES (?,?,?,?,?,?)",
-            (
-                "lk",
-                holdout_training_hash,
-                evaluated_prediction,
-                evaluated_backtest,
-                "digest",
-                "2026-01-02",
-            ),
-        )
-    db.commit()
-    db.close()
-
-
-def test_the_lock_names_the_holdout_even_when_another_scores_higher(monkeypatch, tmp_path) -> None:
-    """The lock records the sealed carrier and the run made from it, so the choice is
-    determinate and never falls to the holdout's own Sharpe."""
-    case_dir = _registry(
-        tmp_path,
-        [
-            ("p1", "t1", "cfg_a", "b1", 0.4),
-            ("p2", "t2", "cfg_b", "b2", 9.9),
-        ],
-    )
-    _take_lock(case_dir, "t1")
-    _install(monkeypatch, case_dir)
-
-    assert _lineage()["backtest_hash"] == "b1"
-
-
-def test_the_evaluated_prediction_wins_over_the_expected_training_hash(
-    monkeypatch, tmp_path
-) -> None:
-    """The lock names what was expected; `holdout_evaluations` names what was produced.
-
-    One training run registers one prediction set per declared checkpoint, so the lock's
-    `holdout_training_hash` leaves several candidates and pinning on it alone lets the caller
-    pick among them by row order. Here `t1` carries two checkpoints and the evaluation names the
-    second, which is the one that must be reported however the other scores.
+def test_several_checkpoints_of_one_model_refuse(monkeypatch, tmp_path) -> None:
+    """One trained model registers one prediction set per declared checkpoint, and they share
+    a strategy spec. Before the lock was deleted this case fell through the multi-model
+    refusal - which counted DISTINCT training hashes, and here there is one - and landed on
+    `rows[0]` under `ORDER BY b.backtest_hash`. `b1` carries 9.9 and `b2` carries 0.1, so what
+    came back was the higher-scoring checkpoint, chosen on nothing but its holdout result.
     """
     case_dir = _registry(
         tmp_path,
         [
-            ("p1", "t1", "cfg_a", "b1", 9.9),
-            ("p2", "t1", "cfg_a", "b2", 0.1),
+            ("p1", "t1", "cfg_a", "b1", 9.9, HOLDOUT_REFIT_SPEC, 50),
+            ("p2", "t1", "cfg_a", "b2", 0.1, HOLDOUT_REFIT_SPEC, 60),
         ],
     )
-    _take_lock(case_dir, "t1", evaluated_prediction="p2", evaluated_backtest="b2")
     _install(monkeypatch, case_dir)
 
-    assert _lineage()["backtest_hash"] == "b2"
+    with pytest.raises(ValueError, match="rank the holdout on its own result"):
+        _lineage()
 
 
-def test_the_recorded_backtest_wins_among_siblings_on_one_prediction(monkeypatch, tmp_path) -> None:
-    """One prediction set can carry several backtests, and only one of them was evaluated.
+def test_sibling_backtests_on_one_prediction_refuse(monkeypatch, tmp_path) -> None:
+    """One prediction set can carry several backtests - a replay under a different strategy
+    spec, an experimental allocator sharing the holdout prediction. Pinning the prediction
+    alone leaves the choice to `backtest_hash` ascending.
 
-    Pinning the prediction alone leaves the caller choosing among its backtests by the fallback
-    order, which is `backtest_hash` ascending. So the sibling is named `b0` and the evaluated
-    one `b9`: ordering picks `b0`, and only reading `holdout_evaluations` picks `b9`. Naming
-    them the other way round would let the test pass with the pin removed, which is the flaw
-    this case was added to close.
+    The sibling is named `b0` and carries the higher Sharpe deliberately: with the refusal
+    absent, ordering returns `b0` and the test would pass while the resolver was picking on
+    the holdout's own result. Naming them the other way round would hide that.
     """
     case_dir = _registry(
         tmp_path,
@@ -210,58 +175,61 @@ def test_the_recorded_backtest_wins_among_siblings_on_one_prediction(monkeypatch
             ("p1", "t1", "cfg_a", "b9", 0.4),
         ],
     )
-    _take_lock(case_dir, "t1", evaluated_prediction="p1", evaluated_backtest="b9")
     _install(monkeypatch, case_dir)
 
-    assert _lineage()["backtest_hash"] == "b9"
+    with pytest.raises(ValueError, match="rank the holdout on its own result"):
+        _lineage()
 
 
-def test_a_half_written_evaluation_row_yields_no_holdout(monkeypatch, tmp_path) -> None:
-    """A row naming one side and not the other identifies no single evaluation."""
-    case_dir = _registry(tmp_path, [("p1", "t1", "cfg_a", "b1", 0.4)])
-    _take_lock(case_dir, "t1", evaluated_prediction="p1", evaluated_backtest="")
+def test_the_named_carrier_pins_the_checkpoint_over_a_higher_score(monkeypatch, tmp_path) -> None:
+    """The replacement for what the lock used to do, and the reason refusing is not a dead end.
+
+    The caller knows which validation run was selected. Naming its prediction set pins the
+    configuration AND the checkpoint, so the holdout is resolved from the carrier rather than
+    from the scores - here `p2`/`b2` at 0.1, while `b1` sits at 9.9 and is not chosen.
+    """
+    case_dir = _registry(
+        tmp_path,
+        [
+            ("p1", "t1", "cfg_a", "b1", 9.9, HOLDOUT_REFIT_SPEC, 50),
+            ("p2", "t1", "cfg_a", "b2", 0.1, HOLDOUT_REFIT_SPEC, 60),
+        ],
+    )
     _install(monkeypatch, case_dir)
 
-    assert _lineage() is None
+    assert _lineage(prefer_prediction_hash="p2")["backtest_hash"] == "b2"
 
 
-def test_a_lock_that_has_not_reached_the_holdout_yields_no_holdout(monkeypatch, tmp_path) -> None:
-    """Only HOLDOUT_EVALUATED means the sealed carrier was taken to the holdout and finished.
+def test_a_validation_fitted_run_is_not_a_holdout_however_it_scores(monkeypatch, tmp_path) -> None:
+    """The eligibility filter, which the refusal sits behind rather than replaces.
 
-    Anything earlier is a lock in progress, and reporting the closest matching row would
-    publish an unfinished evaluation as the result.
+    `t2` is fitted on the validation folds and publishes over the holdout window at 9.9. It is
+    dropped before the count, so the one genuine refit resolves instead of the pair refusing -
+    which also shows the refusal is not firing on rows that were never candidates.
+    """
+    case_dir = _registry(
+        tmp_path,
+        [
+            ("p1", "t1", "cfg_a", "b1", 0.4),
+            ("p2", "t2", "cfg_b", "b2", 9.9, VALIDATION_FITTED_SPEC),
+        ],
+    )
+    _install(monkeypatch, case_dir)
+
+    assert _lineage()["backtest_hash"] == "b1"
+
+
+def test_a_retired_prediction_is_not_a_candidate(monkeypatch, tmp_path) -> None:
+    """Retirement is passed in, not looked up, and it filters on the prediction hash the row
+    actually carries.
+
+    `retired_hashes` is a parameter rather than a call to `_retired_prediction_hashes` inside
+    the function, so a test that monkeypatches the helper patches something this code path
+    never reaches - it would pass whatever the filter did. Retiring the only candidate leaves
+    none, which is `None` and not a refusal: there is nothing ambiguous about an empty set.
     """
     case_dir = _registry(tmp_path, [("p1", "t1", "cfg_a", "b1", 0.4)])
-    _take_lock(case_dir, "t1", state="HOLDOUT_LOCKED", evaluated_prediction=None)
     _install(monkeypatch, case_dir)
 
-    assert _lineage() is None
-
-
-def test_a_lock_with_no_evaluation_row_yields_no_holdout(monkeypatch, tmp_path) -> None:
-    """The absence of the row is the answer, not a reason to fall back to matching by spec."""
-    case_dir = _registry(tmp_path, [("p1", "t1", "cfg_a", "b1", 0.4)])
-    _take_lock(case_dir, "t1", evaluated_prediction=None)
-    _install(monkeypatch, case_dir)
-
-    assert _lineage() is None
-
-
-def test_no_candidates_is_not_an_error(monkeypatch, tmp_path) -> None:
-    case_dir = _registry(tmp_path, [])
-    _install(monkeypatch, case_dir)
-
-    assert _lineage() is None
-
-
-def test_a_lock_whose_carrier_was_superseded_yields_no_holdout(monkeypatch, tmp_path) -> None:
-    """A lock is immutable; the carrier it sealed can be refit past afterwards. Its holdout
-    then evaluates a generation the study no longer publishes, so there is no holdout pair."""
-    case_dir = _registry(tmp_path, [("p1", "t1", "cfg_a", "b1", 0.4)])
-    _take_lock(case_dir, "t1", carrier="stale_carrier")
-    monkeypatch.setattr(paired_metrics, "get_case_study_dir", lambda cs: case_dir)
-    monkeypatch.setattr(
-        paired_metrics, "_retired_prediction_hashes", lambda cs: frozenset({"stale_carrier"})
-    )
-
-    assert _lineage() is None
+    assert _lineage(retired_hashes=frozenset({"p1"})) is None
+    assert _lineage(retired_hashes=frozenset({"other"}))["backtest_hash"] == "b1"

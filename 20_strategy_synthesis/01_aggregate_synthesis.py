@@ -231,27 +231,6 @@ _CLUSTER_RUNG_RESTRICTIONS: dict[str, dict[str, object]] = {
 }
 
 
-# Distinguishes "the lock's carrier was superseded, so no holdout applies" from "no lock".
-_NO_LIVE_HOLDOUT = "\x00no-live-holdout"
-
-
-def _locked_holdout_evaluation(db: sqlite3.Connection, cs: str):
-    """The holdout this study may report, from the shared resolver.
-
-    Both this notebook and `populate_paired_metrics` write `backtest_paired_metrics`, so they
-    have to agree on which holdout is this study's; two copies of the rule would let a Chapter
-    20 run overwrite the case study's pairs with a different lineage. The resolver lives with
-    that producer and is imported here rather than restated - including the part that matters
-    most, that the lock's `holdout_training_hash` is what was expected and
-    `holdout_evaluations` is what was produced.
-
-    Returns `(prediction_hash, backtest_hash)`, `NO_LIVE_HOLDOUT`, or None.
-    """
-    from case_studies.utils.paired_metrics import locked_holdout_evaluation
-
-    return locked_holdout_evaluation(db, cs)
-
-
 def _retired(cs: str) -> frozenset[str]:
     """Identities a later generation retired, from the same helper `populate_paired_metrics`
     uses. Both write `backtest_paired_metrics`, so a disagreement here would let a Chapter 20
@@ -1396,18 +1375,6 @@ def _holdout_lineage_for(
     db = sqlite3.connect(str(db_path))
     db.row_factory = sqlite3.Row
     try:
-        # Pin to the holdout the research lock names. Without it these queries rank by the
-        # holdout's own Sharpe, which chooses the evaluation by its result and is how a
-        # holdout descended from a retired carrier takes the slot.
-        locked_holdout = _locked_holdout_evaluation(db, cs)
-        if locked_holdout == _NO_LIVE_HOLDOUT:
-            return None
-        if locked_holdout is not None:
-            clauses.append("p.prediction_hash = ?")
-            params.append(locked_holdout[0])
-            clauses.append("b.backtest_hash = ?")
-            params.append(locked_holdout[1])
-            where_sql = " AND ".join(clauses)
         # Same-lineage preference: when the caller knows the validation rank-1's
         # training_hash, prefer a holdout that shares it. This pins val→holdout
         # decay to the same trained model rather than a same-spec but
@@ -2080,21 +2047,6 @@ def query_holdout_rows():
         clauses.extend(spec_clauses)
         params.extend(spec_params)
         db = sqlite3.connect(str(db_path))
-        # The same holdout the paired metrics resolve to, so the reader-facing row and the
-        # comparison behind it describe one evaluation rather than two.
-        _locked = _locked_holdout_evaluation(db, cs)
-        if _locked == _NO_LIVE_HOLDOUT:
-            # No holdout this study can report: the lock's carrier was superseded, the lock
-            # never reached HOLDOUT_EVALUATED, or its evaluation row never landed.
-            clauses.append("1 = 0")
-        elif _locked is not None:
-            # Both sides. The backtest join here is a LEFT JOIN, and requiring the finalized
-            # hash makes it effectively inner - which is right in this branch, because reaching
-            # it means an evaluation exists and named that backtest.
-            clauses.append("p.prediction_hash = ?")
-            params.append(_locked[0])
-            clauses.append("b.backtest_hash = ?")
-            params.append(_locked[1])
         where_sql = " AND ".join(clauses)
 
         db.row_factory = sqlite3.Row
