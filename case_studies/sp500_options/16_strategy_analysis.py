@@ -82,10 +82,11 @@ from ml4t.diagnostic.integration import (
 # Load the registry readers and reporting helpers the notebook draws on.
 
 # %%
-from case_studies.research import OfficialPopulation, Study
+from case_studies.research import CandidateSet, OfficialPopulation, Study
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_metrics, load_benchmark_returns
 from case_studies.utils.cohort_reporting import cohort_metric_attribution, reportable_pbo
+from case_studies.utils.uncertainty import cohort_member_digest
 from case_studies.utils.factor_attribution import (
     compute_bootstrap_ci,
     format_attribution_summary,
@@ -116,8 +117,10 @@ MAX_SYMBOLS = 0
 
 # %%
 CASE_STUDY = "sp500_options"
-# The immutable grid `12_backtest` publishes; the DSR below deflates for its size.
+# The immutable grid `12_backtest` publishes; the DSR below deflates for its members.
 BASELINE_POPULATION = "sp500-options-baseline-validation-v1"
+# The nominees `13_portfolio_management` publishes; the carrier has to be one of them.
+STRATEGY_CANDIDATES = "sp500-options-strategy-candidates-v1"
 PRIMARY_LABEL = "ret_to_expiry"  # registered HTM strategy label (Appendix A)
 PERIODS_PER_YEAR = 252
 CASE_DIR = get_case_study_dir(CASE_STUDY)
@@ -128,6 +131,7 @@ with open(CASE_DIR / "config" / "setup.yaml") as f:
     setup = yaml.safe_load(f)
 
 explorer = BacktestExplorer(CASE_STUDY)
+_selection_study = Study.open(CASE_STUDY)
 print(explorer)
 
 # %% [markdown]
@@ -206,6 +210,18 @@ assert HO_HASH is not None, (
     "Run 20_strategy_synthesis/holdout.py::generate_holdout('sp500_options') once, "
     "then populate the paired metrics for this case."
 )
+# `resolve_canonical_rank1_lineage` ranks every validation backtest the restrictions leave
+# standing, which is the whole registry rather than the set this case study nominated. A
+# stale, experimental or retired row that outranks the nominees would be published as the
+# carrier. 13_portfolio_management writes the nominees into an immutable candidate set, so
+# the winner has to be one of them.
+_candidate_hashes = set(CandidateSet.one(_selection_study, name=STRATEGY_CANDIDATES).members)
+if TOP_HASH not in _candidate_hashes:
+    raise RuntimeError(
+        f"Canonical rank-1 {TOP_HASH} is not a member of {STRATEGY_CANDIDATES} "
+        f"({len(_candidate_hashes)} nominees), so the carrier was ranked from outside the "
+        "set this case study nominated"
+    )
 
 # %% [markdown]
 # Resolve the carrier's prediction metrics and registered strategy
@@ -251,7 +267,7 @@ _cohort_select = (
     "dsr_er, dsr_er_pvalue, expected_max_sharpe_raw, "
     "expected_max_sharpe_mp, expected_max_sharpe_er, min_trl_periods_raw, "
     "min_trl_periods_mp, min_trl_periods_er, cm.pbo, cm.leader_hash, "
-    "cm.pbo_n_combinations, cm.pbo_n_folds, t.config_name "
+    "cm.pbo_n_combinations, cm.pbo_n_folds, t.config_name, cm.member_digest "
     "FROM cohort_metrics cm "
     "JOIN backtest_runs b ON b.backtest_hash = cm.leader_hash "
     "JOIN prediction_sets p ON p.prediction_hash = b.prediction_hash "
@@ -296,6 +312,7 @@ def _cohort_payload(row: tuple | None) -> dict | None:
             "pbo_n_combinations": row[15],
             "pbo_n_folds": row[16],
             "leader_config_name": row[17],
+            "member_digest": row[18],
         }
         if row is not None
         else None
@@ -329,20 +346,26 @@ if SEARCH_COHORT["leader_hash"] != _baseline_leader["backtest_hash"]:
 # `sp500-options-baseline-validation-v1` before the first backtest executes, and that
 # population is immutable afterwards. `require_complete` refuses a member that is missing or
 # partial, so the count below cannot shrink to meet a K that already has.
-_baseline_study = Study.open(CASE_STUDY)
 _baseline_members = OfficialPopulation.one(
-    _baseline_study, name=BASELINE_POPULATION
+    _selection_study, name=BASELINE_POPULATION
 ).require_complete()
-if int(SEARCH_COHORT["k_variants"]) != len(_baseline_members):
+# The count alone is not enough. `cohort_metrics` records `member_digest`, an
+# order-independent digest of the hashes the correction was actually computed over, precisely
+# so a reader can establish that a stored DSR belongs to the cohort it is about to be reported
+# against. A cohort that swapped a declared member for a retired or unrelated backtest has the
+# same K and a different digest, and only the digest catches it.
+_declared_digest = cohort_member_digest(_baseline_members)
+if SEARCH_COHORT["member_digest"] is None:
     raise RuntimeError(
-        f"Cross-family DSR uses K={SEARCH_COHORT['k_variants']} against the "
-        f"{len(_baseline_members)} members of {BASELINE_POPULATION}; the DSR must deflate for "
-        "the complete grid the selection ranged over"
+        "Cross-family DSR row predates member_digest, so the cohort it was computed over "
+        f"cannot be established; recompute the cohort metrics for {BASELINE_POPULATION}"
     )
-if SEARCH_COHORT["leader_hash"] not in set(_baseline_members):
+if SEARCH_COHORT["member_digest"] != _declared_digest:
     raise RuntimeError(
-        f"Cross-family DSR leader {SEARCH_COHORT['leader_hash']} is not a member of "
-        f"{BASELINE_POPULATION}, so it was selected from outside the grid it deflates for"
+        f"Cross-family DSR was computed over a cohort of {SEARCH_COHORT['k_variants']} "
+        f"whose members are not the {len(_baseline_members)} of {BASELINE_POPULATION} "
+        f"(digest {SEARCH_COHORT['member_digest']} != {_declared_digest}); the DSR must "
+        "deflate for the complete grid the selection ranged over"
     )
 PBO_REPORT = (
     reportable_pbo(FAMILY_COHORT["pbo"], FAMILY_COHORT["pbo_n_combinations"])

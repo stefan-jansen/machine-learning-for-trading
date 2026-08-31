@@ -837,19 +837,41 @@ def _load_option_lifecycle(
         (pl.col("_underlying_high") - pl.col("_underlying_low")).abs() > 1e-10
     ).height:
         raise ValueError("option legs disagree on the underlying settlement price at expiration")
-    # A straddle held to expiry settles at the intrinsic value of its legs, and intrinsic value
-    # is a function of the underlying close and the strike. Neither leg has to be quoted for
-    # that number to exist. Reading the settlement price only off a quoted leg made an
-    # expiration session where the vendor quoted neither leg fall through to the liquidation
-    # path below, which books the exit at the previous session's option mark - a mark that
-    # predates the move the position was held through. Where the underlying closed on the
-    # expiration session, the contract settles on it.
+    # How a position ends, and why the two endings divide where they do.
+    #
+    # A straddle held to expiry settles at the intrinsic value of its legs, which is a
+    # function of the underlying close and the strike. Neither leg has to be quoted for that
+    # number to exist, so the settlement price is taken from whichever contract on the name
+    # carries the expiration close - the held one if it is still quoted, any other contract on
+    # the same underlying otherwise. The alternative for an unquoted expiration session is the
+    # liquidation below, which books the exit at the previous session's option mark: a mark
+    # taken before the move the position was held through, at a price nobody could have
+    # traded, and it is the worse of the two wherever a close exists.
+    #
+    # The two endings divide on whether the NAME is still in the chain, not on whether the
+    # CONTRACT is still quoted:
+    #
+    #   - The name closed on the expiration session. The position is held to expiry and
+    #     settles at intrinsic. This is the interior-gap reading - a session nobody quoted is
+    #     a session the position cannot be marked at, not the end of it - extended to a gap
+    #     that runs to expiry. A short straddle whose legs stop being quoted cannot be bought
+    #     back, because there is no market to buy it back in. It is held.
+    #   - The name is gone by the expiration session. Nothing observable prices the position
+    #     there, so rule 3 of the straddle-lifecycle rule liquidates it on the first unquoted
+    #     session against the last mark the chain carried. That mark is not executable either,
+    #     which is why this branch is narrow: it is the delisting case, where the alternative
+    #     is not a worse price but no price at all.
+    #
+    # Only contracts the chain actually priced are settled. A contract with no marked session
+    # has no position to end, and a settlement row for it would put a holding in the lifecycle
+    # that the entry check below would then have to reject.
+    held = marked.select(contract_keys).unique()
     settlement_underlying = pl.concat(
         [
             expiry_underlying.select(
                 *contract_keys, pl.col("_underlying_low").alias("underlying_price")
             ),
-            contracts.join(expiry_underlying.select(contract_keys), on=contract_keys, how="anti")
+            held.join(expiry_underlying.select(contract_keys), on=contract_keys, how="anti")
             .join(
                 underlying_panel.select(
                     pl.col("date").alias("expiration"), "symbol", "underlying_price"
