@@ -803,17 +803,15 @@ def test_selection_catalog_rejects_a_candidate_the_catalog_does_not_describe(
 def test_holdout_evidence_is_empty_before_a_holdout_is_registered(tmp_path: Path) -> None:
     study = _study(tmp_path)
 
-    assert research_workflow.holdout_evidence(study).is_empty()
+    assert research_workflow.holdout_evidence(study, "bt-absent").is_empty()
 
 
-def test_holdout_evidence_reports_the_selected_configuration_and_its_replay(
-    tmp_path: Path,
-) -> None:
-    """One row: the validation rank-1, and the holdout backtest replaying its strategy.
+def test_holdout_evidence_replays_the_selection_it_is_handed(tmp_path: Path) -> None:
+    """One row: the holdout backtest replaying the strategy of the backtest passed in.
 
-    The ranking is over VALIDATION rows only. A holdout backtest with a higher Sharpe must not
-    be able to displace the selection, because choosing among configurations by holdout
-    performance is the one thing the funnel forbids.
+    The selection is the caller's; this ranks nothing. A holdout backtest of a DIFFERENT
+    strategy scoring far higher must not be reported, because choosing among configurations by
+    holdout performance is the one thing the funnel forbids.
     """
     study = _study(tmp_path)
     strategy = {"signal": {"method": "equal_weight_top_k", "top_k": 1}}
@@ -854,7 +852,7 @@ def test_holdout_evidence_reports_the_selected_configuration_and_its_replay(
                 (bh, sharpe, "2026-08-15T01:00:00Z"),
             )
 
-    evidence = research_workflow.holdout_evidence(study)
+    evidence = research_workflow.holdout_evidence(study, "bt-val")
     assert evidence.height == 1
     assert evidence.item(0, "validation_backtest_hash") == "bt-val"
     assert evidence.item(0, "label") == "fwd_ret_5d"

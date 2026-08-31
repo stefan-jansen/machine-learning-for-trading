@@ -1238,21 +1238,24 @@ def selection_catalog(study: Study, members: Iterable[str]) -> pl.DataFrame:
     ).sort("sharpe", "backtest_hash", descending=[True, False])
 
 
-def holdout_evidence(study: Study) -> pl.DataFrame:
-    """Return the holdout lineage of the configuration this case study selected, or nothing.
+def holdout_evidence(study: Study, selected_backtest_hash: str) -> pl.DataFrame:
+    """Return the holdout replay of one selected validation backtest, or an empty frame.
 
-    One row, or an empty frame where no holdout has been produced yet.
+    The selection is the CALLER's and is passed in. This function does not rank anything, and
+    that is deliberate: an earlier version re-derived the validation rank-1 with its own query,
+    disagreed with the pool the notebook had already ranked, and the notebook refused itself -
+    "the research lock was created from backtest 85b0cdd33803, not the configuration this pool
+    selects, 44f8992f5e6e". Two selection rules in one notebook is the defect; one rule, applied
+    once, upstream, is the fix.
 
-    The configuration is the validation rank-1: the highest validation backtest Sharpe across
-    the baseline, position-sizing, allocation and risk-management stages. The holdout row is
-    the replay of that same strategy specification on a holdout prediction set. Nothing about
-    the holdout enters the choice - the ranking is over validation rows only, and the holdout
-    is matched on the strategy specification rather than on its own Sharpe. Reading the holdout
-    to choose among configurations is what `reference/CASE_STUDY_PIPELINE.md` section 6 forbids.
+    The replay is matched on the selected backtest's own strategy specification, at the same
+    configuration and checkpoint, over prediction sets with ``split = 'holdout'``. It is never
+    matched on holdout Sharpe: choosing among configurations by holdout performance is what
+    `reference/CASE_STUDY_PIPELINE.md` section 6 forbids, and a match on the specification cannot
+    do it even accidentally.
 
-    Queried against ``study.root`` rather than through a case-study name, so this answers about
-    the registry the caller actually opened. A resolver that takes a name resolves the path
-    itself and would read the canonical registry even when handed a workspace study.
+    Queried against ``study.root``, so this answers about the registry the caller opened rather
+    than about whichever one a case-study name resolves to.
     """
     database = study.root / "run_log" / "registry.db"
     if not database.is_file():
@@ -1262,29 +1265,22 @@ def holdout_evidence(study: Study) -> pl.DataFrame:
             row[0]
             for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
         }
-        if not {"backtest_runs", "backtest_metrics", "prediction_sets", "training_runs"} <= names:
+        if not {"backtest_runs", "prediction_sets", "training_runs"} <= names:
             return pl.DataFrame()
         selected = db.execute(
             """
-            SELECT b.backtest_hash, b.spec_json, bm.sharpe, t.family, t.config_name, t.label,
+            SELECT b.spec_json, t.family, t.config_name, t.label,
                    p.checkpoint_kind, p.checkpoint_value
             FROM backtest_runs b
-            JOIN backtest_metrics bm ON bm.backtest_hash = b.backtest_hash
             JOIN prediction_sets p ON p.prediction_hash = b.prediction_hash
             JOIN training_runs t ON t.training_hash = p.training_hash
-            WHERE p.split = 'validation'
-              AND bm.sharpe IS NOT NULL
-              AND t.family != 'benchmark'
-              AND b.stage IN ('signal', 'allocation', 'risk_overlay')
-            ORDER BY bm.sharpe DESC, b.backtest_hash ASC
-            LIMIT 1
-            """
+            WHERE b.backtest_hash = ?
+            """,
+            (selected_backtest_hash,),
         ).fetchone()
         if selected is None:
             return pl.DataFrame()
-        (val_hash, val_spec_json, val_sharpe, family, config_name, label, ck_kind, ck_value) = (
-            selected
-        )
+        val_spec_json, family, config_name, label, ck_kind, ck_value = selected
         val_strategy = json.loads(val_spec_json).get("strategy", {})
 
         # `IS` is SQLite's null-safe equality: a configuration with no checkpoint dimension
@@ -1308,24 +1304,25 @@ def holdout_evidence(study: Study) -> pl.DataFrame:
         ).fetchall()
 
     replay = [row for row in candidates if json.loads(row[1]).get("strategy", {}) == val_strategy]
+    if not replay:
+        return pl.DataFrame()
     if len(replay) > 1:
         raise ValueError(
-            f"holdout replay for {val_hash} is ambiguous: "
+            f"holdout replay for {selected_backtest_hash} is ambiguous: "
             f"{sorted(row[0] for row in replay)} share {family}/{config_name} on {label}, "
             f"checkpoint {ck_kind}={ck_value} and one strategy specification"
         )
-    holdout = replay[0] if replay else None
+    backtest_hash, _, prediction_hash, sharpe = replay[0]
     return pl.DataFrame(
         [
             {
-                "validation_backtest_hash": val_hash,
+                "validation_backtest_hash": selected_backtest_hash,
                 "label": label,
                 "family": family,
                 "config_name": config_name,
-                "validation_sharpe": val_sharpe,
-                "holdout_prediction_hash": holdout[2] if holdout else None,
-                "holdout_backtest_hash": holdout[0] if holdout else None,
-                "holdout_sharpe": holdout[3] if holdout else None,
+                "holdout_prediction_hash": prediction_hash,
+                "holdout_backtest_hash": backtest_hash,
+                "holdout_sharpe": sharpe,
             }
         ]
     )

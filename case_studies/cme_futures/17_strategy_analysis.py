@@ -304,18 +304,9 @@ fig.show()
 # result above stands on its own.
 
 # %%
-holdout = holdout_evidence(study)
-if holdout.height > 1:
-    raise RuntimeError("the lifecycle holds more than one research lock")
-if not holdout.is_empty():
-    locked = holdout.item(0, "validation_backtest_hash")
-    if locked != selected.hash:
-        raise RuntimeError(
-            f"the research lock was created from backtest {locked}, "
-            f"not the configuration this pool selects, {selected.hash}"
-        )
-    if holdout.item(0, "label") != selected_label:
-        raise RuntimeError("the research lock records a different return horizon")
+holdout = holdout_evidence(study, selected.hash)
+if not holdout.is_empty() and holdout.item(0, "label") != selected_label:
+    raise RuntimeError("the holdout replay records a different return horizon")
 
 # %% tags=["results"]
 holdout
