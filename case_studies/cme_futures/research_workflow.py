@@ -8,6 +8,7 @@ import json
 import sqlite3
 import subprocess
 from collections.abc import Iterable
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -1239,6 +1240,51 @@ def selection_catalog(study: Study, members: Iterable[str]) -> pl.DataFrame:
     ).sort("sharpe", "backtest_hash", descending=[True, False])
 
 
+def _is_holdout_refit_of(holdout_training_json: str | None, validation_training_json: str) -> bool:
+    """True when a holdout training specification is THIS validation one, refitted.
+
+    Same configuration, same family, same label and a declared holdout fold are together not
+    enough: a stale generation, or an experimental variant registered under the same config
+    name, satisfies all four and answers a different question from the one the selection asked.
+    The specification itself is what distinguishes them, and it must be identical except where
+    a holdout is REQUIRED to differ.
+
+    Two kinds of field are excluded, and nothing else is. The CV block, because a holdout fold
+    is a different interval and changing it is the entire point of the refit. And the
+    fold-derived fields, which the resolver computes per fold from the data during a run -
+    `research/holdout.py::_FOLD_DERIVED_FIELDS`, the same three
+    `build_holdout_training_spec` re-keys. Carrying those forward unchanged would mean the
+    refit did not happen, so they cannot be compared for equality.
+
+    Everything else - the feature lineage, the label artifact, the model class and its
+    parameters, the seed, the task - has to match. A specification with no recorded content
+    answers False rather than being assumed compatible.
+    """
+    if not holdout_training_json or not validation_training_json:
+        return False
+    try:
+        holdout = json.loads(holdout_training_json)
+        validation = json.loads(validation_training_json)
+    except json.JSONDecodeError:
+        return False
+
+    def _stripped(spec: dict) -> dict:
+        spec = deepcopy(spec)
+        computation = spec.get("computation")
+        if isinstance(computation, dict):
+            computation.pop("cv", None)
+            computation.pop("expected_prediction_keys", None)
+            model = computation.get("model")
+            if isinstance(model, dict):
+                model.pop("effective_params_by_fold", None)
+            macro = computation.get("macro_context")
+            if isinstance(macro, dict):
+                macro.pop("resolved_fold_digest", None)
+        return spec
+
+    return _stripped(holdout) == _stripped(validation)
+
+
 def holdout_evidence(study: Study, selected_backtest_hash: str) -> pl.DataFrame:
     """Return the holdout replay of one selected validation backtest, or an empty frame.
 
@@ -1255,7 +1301,8 @@ def holdout_evidence(study: Study, selected_backtest_hash: str) -> pl.DataFrame:
     `reference/CASE_STUDY_PIPELINE.md` section 6 forbids, and a match on the specification cannot
     do it even accidentally.
 
-    A candidate must also have been REFITTED for the holdout. ``split = 'holdout'`` says where
+    A candidate must also be THIS selection refitted - see :func:`_is_holdout_refit_of` - and
+    must have been refitted at all. ``split = 'holdout'`` says where
     the predictions land and nothing about what the model saw while fitting: a model fitted on
     the validation folds can publish predictions over the holdout window, which is the precise
     lineage the holdout exists to rule out. The training run's own CV is what settles it.
@@ -1276,7 +1323,7 @@ def holdout_evidence(study: Study, selected_backtest_hash: str) -> pl.DataFrame:
         selected = db.execute(
             """
             SELECT b.spec_json, t.family, t.config_name, t.label,
-                   p.checkpoint_kind, p.checkpoint_value
+                   p.checkpoint_kind, p.checkpoint_value, t.spec_json
             FROM backtest_runs b
             JOIN prediction_sets p ON p.prediction_hash = b.prediction_hash
             JOIN training_runs t ON t.training_hash = p.training_hash
@@ -1286,7 +1333,7 @@ def holdout_evidence(study: Study, selected_backtest_hash: str) -> pl.DataFrame:
         ).fetchone()
         if selected is None:
             return pl.DataFrame()
-        val_spec_json, family, config_name, label, ck_kind, ck_value = selected
+        val_spec_json, family, config_name, label, ck_kind, ck_value, val_training_json = selected
         val_strategy = json.loads(val_spec_json).get("strategy", {})
 
         # `IS` is SQLite's null-safe equality: a configuration with no checkpoint dimension
@@ -1320,6 +1367,7 @@ def holdout_evidence(study: Study, selected_backtest_hash: str) -> pl.DataFrame:
         for row in candidates
         if json.loads(row[1]).get("strategy", {}) == val_strategy
         and training_run_fitted_for_the_holdout(row[4])
+        and _is_holdout_refit_of(row[4], val_training_json)
     ]
     if not replay:
         return pl.DataFrame()

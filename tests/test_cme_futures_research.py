@@ -817,24 +817,56 @@ def test_holdout_evidence_replays_the_selection_it_is_handed(tmp_path: Path) -> 
     strategy = {"signal": {"method": "equal_weight_top_k", "top_k": 1}}
     other = {"signal": {"method": "equal_weight_top_k", "top_k": 5}}
     with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
-        db.execute(
-            "INSERT INTO training_runs (training_hash, spec_json, family, config_name, label, "
-            "created_at) VALUES (?,?,?,?,?,?)",
-            ("tr-val", "{}", "linear", "lasso", "fwd_ret_5d", "2026-08-15T00:00:00Z"),
-        )
+        # One configuration, two fits. The specifications are identical except in the CV block
+        # and the fold-derived fields a refit necessarily recomputes - which is what makes the
+        # holdout run a refit OF this validation run rather than a different question.
+        def _spec(split: str, folds: int) -> str:
+            return json.dumps(
+                {
+                    "family": "linear",
+                    "label": "fwd_ret_5d",
+                    "seed": 42,
+                    "computation": {
+                        "cv": {"split": split, "identity": f"cv-{split}"},
+                        "expected_prediction_keys": {"n_folds": folds},
+                        "model": {
+                            "class": "Lasso",
+                            "params": {"alpha": 0.1},
+                            "effective_params_by_fold": {str(i): {} for i in range(folds)},
+                        },
+                        "feature_artifacts": {"features": "feat-digest"},
+                        "label_artifact": {"digest": "label-digest"},
+                    },
+                }
+            )
+
+        for th, split, folds in (("tr-val", "validation", 5), ("tr-ho", "holdout", 1)):
+            db.execute(
+                "INSERT INTO training_runs (training_hash, spec_json, family, config_name, "
+                "label, created_at) VALUES (?,?,?,?,?,?)",
+                (th, _spec(split, folds), "linear", "lasso", "fwd_ret_5d", "2026-08-15T00:00:00Z"),
+            )
+        # A third fit: same config name and a real holdout CV, but a DIFFERENT model parameter.
+        # It is a different question evaluated on the same window, and must not be reported.
+        variant = json.loads(_spec("holdout", 1))
+        variant["computation"]["model"]["params"]["alpha"] = 0.9
         db.execute(
             "INSERT INTO training_runs (training_hash, spec_json, family, config_name, label, "
             "created_at) VALUES (?,?,?,?,?,?)",
             (
-                "tr-ho",
-                json.dumps({"computation": {"cv": {"split": "holdout"}}}),
+                "tr-variant",
+                json.dumps(variant),
                 "linear",
                 "lasso",
                 "fwd_ret_5d",
                 "2026-08-15T00:00:00Z",
             ),
         )
-        for ph, th, split in (("pr-val", "tr-val", "validation"), ("pr-ho", "tr-ho", "holdout")):
+        for ph, th, split in (
+            ("pr-val", "tr-val", "validation"),
+            ("pr-ho", "tr-ho", "holdout"),
+            ("pr-variant", "tr-variant", "holdout"),
+        ):
             db.execute(
                 "INSERT INTO prediction_sets (prediction_hash, training_hash, split, "
                 "checkpoint_kind, checkpoint_value, created_at) VALUES (?,?,?,?,?,?)",
@@ -847,6 +879,9 @@ def test_holdout_evidence_replays_the_selection_it_is_handed(tmp_path: Path) -> 
             # A holdout of a DIFFERENT strategy, scoring higher than the replay. It must not
             # be reported, and it must not change which validation row was selected.
             ("bt-ho-other", "pr-ho", "holdout", json.dumps({"strategy": other}), 5.0),
+            # Same strategy, refitted, same config name - but a different model parameter, and
+            # scoring highest of all. Only the specification separates it from the replay.
+            ("bt-variant", "pr-variant", "holdout", json.dumps({"strategy": strategy}), 9.0),
         ]
         for bh, ph, stage, spec_json, sharpe in rows:
             db.execute(
