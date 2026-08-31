@@ -272,3 +272,41 @@ def test_the_pinned_carrier_still_resolves_when_it_is_unambiguous(monkeypatch, t
 
     assert _lineage(prefer_prediction_hash="p1")["backtest_hash"] == "b1"
     assert _lineage(prefer_prediction_hash="p2")["backtest_hash"] == "b2"
+
+
+def test_a_named_carrier_with_no_holdout_does_not_borrow_a_siblings(monkeypatch, tmp_path) -> None:
+    """The pin is a pin, not a preference.
+
+    Only `p2`/checkpoint 60 has a holdout here. Asking for `p1`'s must answer None: the
+    pinned branch used to fall through to the unpinned query when its carrier had no
+    eligible row, and with one candidate left in the registry that query returns `b2`
+    happily. The reader-facing table would then report checkpoint 60's holdout under the
+    name of the checkpoint validation actually selected.
+
+    Asking for `p2` in the same registry still resolves, so the None above is the pin
+    refusing to borrow rather than the fixture being empty.
+    """
+    case_dir = _registry(
+        tmp_path,
+        [("p2", "t1", "cfg_a", "b2", 9.9, HOLDOUT_REFIT_SPEC, 60)],
+    )
+    db = sqlite3.connect(case_dir / "run_log" / "registry.db")
+    db.execute(
+        "INSERT INTO prediction_sets VALUES ('p1','t1','holdout','epoch',50)",
+    )
+    db.commit()
+    db.close()
+    _install(monkeypatch, case_dir)
+
+    assert _lineage(prefer_prediction_hash="p1") is None
+    assert _lineage(prefer_prediction_hash="p2")["backtest_hash"] == "b2"
+
+
+def test_a_carrier_the_registry_does_not_have_resolves_to_nothing(monkeypatch, tmp_path) -> None:
+    """Naming an unregistered prediction set is a question about a carrier that is not
+    there. Falling through would answer it with some other case's holdout."""
+    case_dir = _registry(tmp_path, [("p1", "t1", "cfg_a", "b1", 0.4)])
+    _install(monkeypatch, case_dir)
+
+    assert _lineage(prefer_prediction_hash="not_registered") is None
+    assert _lineage(prefer_prediction_hash="p1")["backtest_hash"] == "b1"

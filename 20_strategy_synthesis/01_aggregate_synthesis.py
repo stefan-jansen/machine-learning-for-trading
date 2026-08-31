@@ -1198,6 +1198,27 @@ def _val_rank1_carrier(cs: str) -> dict | None:
             spec = _full_strategy_spec_from_backtest(db, bt_hash)
             if spec is None:
                 continue
+            # The probe below asks whether THIS candidate has a holdout, so it matches the
+            # candidate's own configuration and checkpoint and not only its strategy spec.
+            #
+            # Matching the spec alone made the walk stop at a candidate whose own checkpoint
+            # had no holdout whenever a sibling checkpoint had one at the same spec. The
+            # resolver, handed that carrier, then finds nothing for it - and the walk has
+            # already stopped, so the case study reports no holdout while one exists for a
+            # later candidate. Advancing instead is what makes the fall-through the resolver
+            # no longer performs unnecessary rather than merely forbidden.
+            carrier_row = db.execute(
+                """
+                SELECT t.family, t.config_name, t.label,
+                       p.checkpoint_value, p.checkpoint_kind
+                FROM prediction_sets p
+                JOIN training_runs t ON t.training_hash = p.training_hash
+                WHERE p.prediction_hash = ?
+                """,
+                (cand["prediction_hash"][i],),
+            ).fetchone()
+            if carrier_row is None:
+                continue
             spec_clauses, spec_params = _full_strategy_clauses(spec)
             ho_clauses = ["p.split = 'holdout'"] + spec_clauses
             if _retired(cs):
@@ -1231,10 +1252,15 @@ def _val_rank1_carrier(cs: str) -> dict | None:
                                      AND b.stage IN ('signal','allocation','risk_overlay','holdout')
                 JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
                 WHERE {" AND ".join(ho_clauses)}
+                  AND t.family = ?
+                  AND t.config_name = ?
+                  AND t.label = ?
+                  AND p.checkpoint_value IS ?
+                  AND p.checkpoint_kind IS ?
                   AND bm.sharpe IS NOT NULL
                 LIMIT 1
                 """,
-                ho_params,
+                ho_params + list(carrier_row),
             ).fetchone()
             if row:
                 return {"spec": spec, "prediction_hash": cand["prediction_hash"][i]}

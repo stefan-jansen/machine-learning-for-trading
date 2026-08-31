@@ -624,6 +624,17 @@ def _holdout_lineage_for(
                     resolved = dict(eligible[0])
                     resolved.pop("spec_json")
                     return resolved
+            # A named carrier with no eligible holdout is an ANSWER, not a reason to look
+            # elsewhere. Falling through to the unpinned query below made the pin a mere
+            # preference: where the selected checkpoint had no holdout and a sibling
+            # checkpoint did, the fallback returned the sibling's, and the reader-facing
+            # table then reported a checkpoint that validation never selected. There is no
+            # weaker sense in which that is the carrier's holdout.
+            #
+            # `carrier is None` lands here too, and for the same reason: the caller named a
+            # prediction set the registry does not have, and "some other holdout" is not a
+            # better answer to that than none.
+            return None
 
         # The caller named no carrier, so this is the unpinned fallback. Two filters, and
         # neither is optional.
