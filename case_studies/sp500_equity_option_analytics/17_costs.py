@@ -49,7 +49,7 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 
-from case_studies.research import Study
+from case_studies.research import CandidateSet, Study
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
     load_backtest_prices_for,
@@ -71,7 +71,6 @@ from case_studies.utils.registry import (
     resolve_best_backtest_runs,
 )
 from case_studies.utils.sweep_config import (
-    get_allocators,
     get_cost_grid_bps,
     get_cost_grid_half_spread_usd,
     get_per_share_commission,
@@ -84,7 +83,7 @@ from utils.style import COLORS, FIGSIZE, add_message_title
 CASE_STUDY_ID = "sp500_equity_option_analytics"
 LABEL = ""
 MAX_SYMBOLS = 0
-TOP_N_COMBOS = None
+TOP_N_COMBOS = 1
 
 # %% [markdown]
 # ### What is asked for, and what it resolves to
@@ -121,92 +120,175 @@ print(
 # `run_log` are symlinks: true in a maintainer worktree, false in every clean clone and CI run.
 # `CASE_DIR` is already the directory this notebook resolved, including under a preview, so
 # asking it directly answers for the registry the rest of the notebook reads.
-_study = Study.at(CASE_DIR, case_study=CASE_STUDY_ID, entry_point="16_costs")
+_study = Study.at(CASE_DIR, case_study=CASE_STUDY_ID, entry_point="17_costs")
 _members, _population_notes = prediction_members_in_force(_study)
 for _note in _population_notes:
     print(_note)
 CURRENT_MEMBERS = _members
 
 # %% [markdown]
-# ## 1. Advance the leading eligible strategy
+# ## 1. Advance the single configuration the pipeline selected
 #
-# The ranking compares the equal-weight baseline with the active alternative
-# allocators using validation Sharpe and maximum prediction coverage.
-# Historical rows from removed allocators cannot re-enter the cost stage.
+# Cost sensitivity is the last stage before the holdout and it stresses exactly
+# one configuration. Which one is not decided here:
+# [`16_risk_management`](16_risk_management.ipynb) freezes the field it ranked
+# over as an immutable candidate set, and this reads the highest validation
+# Sharpe out of that set - the same way
+# [`18_holdout_predictions`](18_holdout_predictions.ipynb),
+# [`19_holdout_backtest`](19_holdout_backtest.ipynb) and
+# [`20_strategy_analysis`](20_strategy_analysis.ipynb) do.
+#
+# Re-ranking the live registry here would also give the right answer today, and
+# would keep giving an answer after something upstream moved - stressing the
+# costs of one configuration while the holdout was run on another. Reading the
+# frozen set is what makes those two the same strategy by construction rather
+# than by four notebooks applying one rule consistently.
+#
+# The frozen field carries all three ranked stages, so "no allocation helped"
+# and "no overlay helped" are both reachable outcomes and are reported as such.
 
 # %%
-active_allocators = {item["method"] for item in get_allocators(CASE_STUDY_ID)}
-baseline_pool = resolve_best_backtest_runs(
-    CASE_STUDY_ID,
-    COST_LABEL,
-    split="validation",
-    stage="signal",
-    top_n=9999,
-    prediction_hashes=CURRENT_MEMBERS,
-)
-allocation_pool = resolve_best_backtest_runs(
-    CASE_STUDY_ID,
-    COST_LABEL,
-    split="validation",
-    stage="allocation",
-    top_n=9999,
-    prediction_hashes=CURRENT_MEMBERS,
-)
-candidate_pool = pl.concat([baseline_pool, allocation_pool], how="diagonal_relaxed").unique(
-    "backtest_hash"
-)
-candidate_hashes = candidate_pool["prediction_hash"].unique().to_list()
-if not candidate_hashes:
-    raise RuntimeError("No full-coverage baseline or allocation candidates found")
+CANDIDATE_SET_NAME = f"{CASE_STUDY_ID}:holdout-candidates"
+# The frozen set where it exists, and the rule it was frozen under where it does not.
+# 16_risk_management writes it by opening the study, which canonical regeneration refuses
+# wherever the generated directories are not symlinks - a reader's clean clone and the test
+# fixtures both - so the set is in the published run log and absent everywhere else. Reading it
+# is the stronger path: it is immutable, so it cannot follow an upstream change. Re-deriving is
+# the same rule applied live, and cannot notice that something moved. Which one ran is printed.
+# Whether the name is recorded at all is asked of the registry directly, rather than inferred
+# from an exception. `CandidateSet.one` raises ValueError for two unrelated conditions - the
+# name resolves to no unsuperseded set, and it resolves to several - and only the first means
+# "this registry has no frozen selection". Catching both would send an AMBIGUOUS set, which is
+# a refit that left two generations live and needs a person to say which supersedes which,
+# silently down the live-ranking path. So the fallback is chosen on absence, and every way a
+# recorded set can be wrong propagates from the unguarded call below.
+# The same database the resolution reads: this notebook opens with `Study.at(CASE_DIR)`, which
+# never activates and roots the study at that directory, so `_study.root` IS `CASE_DIR`.
+try:
+    with sqlite3.connect(REGISTRY_DB) as _db:
+        _recorded_sets = _db.execute(
+            "SELECT COUNT(*) FROM candidate_sets WHERE name = ?", (CANDIDATE_SET_NAME,)
+        ).fetchone()[0]
+except sqlite3.OperationalError:
+    # No `candidate_sets` table: a registry that predates them, or a reader's clean clone.
+    _recorded_sets = 0
 
-# %% [markdown]
-# Model labels come from prediction provenance rather than from free-form
-# strategy metadata.
-
-# %%
-with sqlite3.connect(REGISTRY_DB) as db:
-    source_rows = db.execute(
-        f"""
-        SELECT p.prediction_hash, t.family, t.config_name
-        FROM prediction_sets p
-        JOIN training_runs t ON p.training_hash = t.training_hash
-        WHERE p.prediction_hash IN ({",".join("?" for _ in candidate_hashes)})
-        """,
-        candidate_hashes,
-    ).fetchall()
-source_by_hash = {
-    prediction_hash: model_source(family, config_name)
-    for prediction_hash, family, config_name in source_rows
-}
-
-# %% [markdown]
-# The baseline is the equal-weight member of the candidate union. Alternative
-# allocation rows are eligible only when their method remains active in the
-# current case-study configuration.
-
-# %%
-eligible_rows = []
-for row in candidate_pool.iter_rows(named=True):
-    strategy = strategy_view(json.loads(row["spec_json"]))
-    allocator = strategy.get("allocation", {}).get("method", "equal_weight")
-    if allocator == "equal_weight" or allocator in active_allocators:
-        eligible_rows.append(
-            {
-                **row,
-                "source": source_by_hash[row["prediction_hash"]],
-                "allocator": allocator,
-                "top_k": strategy.get("signal", {}).get("top_k"),
-            }
+if _recorded_sets:
+    CANDIDATES = CandidateSet.one(_study, name=CANDIDATE_SET_NAME)
+    if CANDIDATES.member_kind != "backtest":
+        raise RuntimeError(
+            f"candidate set {CANDIDATES.hash} holds {CANDIDATES.member_kind} members; "
+            "the holdout selection requires backtests"
         )
+    SELECTED = CANDIDATES.best_validation_sharpe()
+    FIELD_HASHES = list(CANDIDATES.members)
+    FIELD_NAME = f"frozen candidate set {CANDIDATES.hash}"
+    SELECTION_SOURCE = f"{FIELD_NAME} ({len(FIELD_HASHES)} members)"
+else:
+    _live = pl.concat(
+        [
+            resolve_best_backtest_runs(
+                CASE_STUDY_ID,
+                COST_LABEL,
+                split="validation",
+                stage=stage,
+                top_n=9999,
+                prediction_hashes=prediction_members_in_force(_study)[0],
+            )
+            for stage in ("signal", "allocation", "risk_overlay")
+        ],
+        how="diagonal_relaxed",
+    ).unique("backtest_hash")
+    if _live.is_empty():
+        raise RuntimeError(
+            f"no candidate set {CANDIDATE_SET_NAME!r} in this registry and no eligible "
+            "validation backtests to rank, so there is no selection to carry forward"
+        )
+    # The same eligibility the freeze applies, to the whole field and not only to its top row.
+    # `CandidateSet.create` refuses partial members, so a frozen field is complete by
+    # construction and everything downstream may assume it; `resolve_best_backtest_runs` ranks
+    # on registered metrics and applies no such filter. Checking only the selection would leave
+    # the two fields different in exactly the way that matters to a reader of `FIELD_HASHES` -
+    # 20_strategy_analysis opens every member of it. So every candidate is checked, which costs
+    # one open per row on a path that runs only where no frozen set exists.
+    _complete: list[tuple[str, object]] = []
+    _incomplete: list[str] = []
+    # A candidate with no registered Sharpe cannot be ranked, so it is not eligible - and
+    # `completeness()` does not catch it, because a backtest is complete once a metrics ROW
+    # exists whether or not that row carries a Sharpe. Polars sorts nulls first on a descending
+    # sort, so without this a null-Sharpe row would sort above every real one and be selected.
+    _rankable = _live.filter(pl.col("sharpe").is_not_null())
+    _unrankable = _live.height - _rankable.height
+    if _unrankable:
+        print(f"Excluded {_unrankable} backtest(s) with no registered Sharpe from the field")
+    for _row in _rankable.sort("sharpe", descending=True, nulls_last=True).iter_rows(named=True):
+        _result = _study.results.open(_row["backtest_hash"])
+        _reason = _result.completeness()
+        if _reason is None:
+            _complete.append((_row["backtest_hash"], _result))
+        else:
+            _incomplete.append(f"{_row['backtest_hash']} ({_reason})")
+    if not _complete:
+        raise RuntimeError(
+            f"none of the {_live.height} eligible validation backtests is both rankable and "
+            "complete, so there is no selection to carry forward: " + "; ".join(_incomplete[:5])
+        )
+    if _incomplete:
+        print(
+            f"Excluded {len(_incomplete)} incomplete backtest(s) from the field: "
+            + "; ".join(_incomplete[:3])
+            + ("" if len(_incomplete) <= 3 else f"; and {len(_incomplete) - 3} more")
+        )
+    SELECTED = _complete[0][1]
+    FIELD_HASHES = [hash_ for hash_, _ in _complete]
+    FIELD_NAME = "live ranking (no frozen set in this registry)"
+    SELECTION_SOURCE = f"{FIELD_NAME} over {len(FIELD_HASHES)} eligible backtests"
+print(f"Selection read from the {SELECTION_SOURCE}")
 
-if len(eligible_rows) < TOP_N:
-    raise RuntimeError(f"Expected {TOP_N} eligible strategy lineages, found {len(eligible_rows)}")
+_why = SELECTED.completeness()
+if _why is not None:
+    raise RuntimeError(
+        f"the selected validation backtest {SELECTED.hash} is incomplete: {_why}. "
+        f"It was chosen from the {SELECTION_SOURCE}."
+    )
+SELECTED_SPEC = SELECTED.spec()
+_view = strategy_view(SELECTED_SPEC)
+SELECTED_PREDICTION_HASH = SELECTED.registry_record()["prediction_hash"]
 
-top_combos = pl.DataFrame(eligible_rows).sort("sharpe", descending=True).head(TOP_N)
+with sqlite3.connect(REGISTRY_DB) as db:
+    _source = db.execute(
+        "SELECT t.family, t.config_name FROM prediction_sets p "
+        "JOIN training_runs t USING(training_hash) WHERE p.prediction_hash = ?",
+        (SELECTED_PREDICTION_HASH,),
+    ).fetchone()
+    _selected_sharpe = db.execute(
+        "SELECT sharpe FROM backtest_metrics WHERE backtest_hash = ?", (SELECTED.hash,)
+    ).fetchone()
+if _source is None or _selected_sharpe is None:
+    raise RuntimeError(f"the selected backtest {SELECTED.hash} has no lineage or no metrics")
+
+RISK_NAME = (_view.get("risk") or {}).get("name")
+RISK_HELPED = RISK_NAME is not None
+top_combos = pl.DataFrame(
+    [
+        {
+            "backtest_hash": SELECTED.hash,
+            "prediction_hash": SELECTED_PREDICTION_HASH,
+            "spec_json": json.dumps(SELECTED_SPEC),
+            "sharpe": _selected_sharpe[0],
+            "source": model_source(*_source),
+            "allocator": (_view.get("allocation") or {}).get("method", "equal_weight"),
+            "top_k": (_view.get("signal") or {}).get("top_k"),
+            "risk": RISK_NAME,
+        }
+    ]
+)
 winner = top_combos.row(0, named=True)
 print(
-    f"Selected {winner['source']} with {winner['allocator']} allocation, "
-    f"top-{winner['top_k']}, validation Sharpe {winner['sharpe']:.3f}"
+    f"{FIELD_NAME} with {len(FIELD_HASHES)} members selects "
+    f"{winner['source']} with {winner['allocator']} allocation, top-{winner['top_k']}, "
+    + (f"risk overlay {RISK_NAME}" if RISK_HELPED else "no risk overlay")
+    + f", validation Sharpe {winner['sharpe']:.3f}"
 )
 
 # %% [markdown]
@@ -506,5 +588,5 @@ fig.show()
 #    It establishes that this validation result is not an artifact of one cost assumption, which
 #    is a narrower and more defensible claim.
 #
-# **Next:** [`17_risk_management`](17_risk_management.ipynb) tests risk overlays on the same
+# **Next:** [`18_holdout_predictions`](18_holdout_predictions.ipynb) tests risk overlays on the same
 # eligible validation lineage. See Chapter 19 for the risk-control framework.

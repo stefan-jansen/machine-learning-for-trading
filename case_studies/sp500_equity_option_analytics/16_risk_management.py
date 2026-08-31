@@ -20,8 +20,8 @@
 # lineage that ranks first on validation Sharpe among the full-coverage
 # candidates. It asks whether stop losses, trailing stops, or time exits improve
 # validation Sharpe and drawdown relative to the same no-overlay baseline. Every
-# measurement here comes from validation; the 2021 holdout is read in
-# `18_strategy_analysis`.
+# measurement here comes from validation; the 2021 holdout is not read until
+# [`18_holdout_predictions`](18_holdout_predictions.ipynb).
 #
 # **Learning objectives**
 #
@@ -35,7 +35,7 @@
 # **Book reference:** Chapter 19, Sections 19.3-19.6.
 #
 # **Prerequisites:** `15_portfolio_management` and the cost diagnostics in
-# `16_costs`. Signals form after Friday's close and execute at the next
+# `17_costs`. Signals form after Friday's close and execute at the next
 # available open, normally Monday. The current-constituent universe retains
 # survivorship bias. Results describe this retrospective roster during the
 # development window, not the historical index-membership process or a
@@ -59,7 +59,7 @@ warnings.filterwarnings("ignore")
 # paired uncertainty consistent with the preceding pipeline stages.
 
 # %%
-from case_studies.research import Study
+from case_studies.research import CandidateSet, Study, open_study
 from case_studies.utils.backtest_loaders import (
     VECTORIZED_CASE_STUDIES,
     get_backtest_config,
@@ -147,7 +147,7 @@ print(f"Case study: {CASE_STUDY_ID}; label: {RISK_LABEL}; selected lineages: {TO
 # `run_log` are symlinks: true in a maintainer worktree, false in every clean clone and CI run.
 # `CASE_DIR` is already the directory this notebook resolved, including under a preview, so
 # asking it directly answers for the registry the rest of the notebook reads.
-_study = Study.at(CASE_DIR, case_study=CASE_STUDY_ID, entry_point="17_risk_management")
+_study = Study.at(CASE_DIR, case_study=CASE_STUDY_ID, entry_point="16_risk_management")
 _members, _population_notes = prediction_members_in_force(_study)
 for _note in _population_notes:
     print(_note)
@@ -547,6 +547,107 @@ add_message_title(
 fig_tradeoff.show()
 
 # %% [markdown]
+# ## 4. Freeze the field the holdout will choose from
+#
+# This is the last stage that ranks. Everything after it - the cost surface, the
+# holdout refit, the holdout backtest - acts on one configuration, and which one
+# that is has to be decided here rather than re-derived four times from a
+# registry that keeps moving underneath. So the field is written down as an
+# immutable candidate set, and `18_holdout_predictions`, `19_holdout_backtest`
+# and `20_strategy_analysis` read the selection out of it instead of each
+# applying the ranking rule again and hoping the four agree.
+#
+# The members are the three stages that competed: the equal-weight baselines,
+# the allocation variants, and the risk overlays laid over them, restricted to
+# the prediction sets currently in force. All three matter. A pool of overlays
+# alone would force an overlay onto the carrier even where every control hurt
+# it, because this stage registers a row per named control and none for the
+# strategy it was overlaid on. A pool without the baselines would make a bare
+# equal-weight top-k unreachable, which is a legitimate answer whenever neither
+# allocation nor risk earned its complexity.
+#
+# The comparison contract names what every member must agree on, so a backtest
+# fitted against different labels, features or folds cannot quietly join a set
+# the holdout will pick from.
+#
+# Freezing writes to the registry, which needs the study opened rather than read.
+# That is a maintainer path: a reader's clean clone has no `run_log/` to freeze
+# from, so the cell reports why it did nothing instead of failing.
+
+# %%
+CANDIDATE_SET_NAME = f"{CASE_STUDY_ID}:holdout-candidates"
+candidate_stages = ("signal", "allocation", "risk_overlay")
+frozen_pool = pl.concat(
+    [
+        resolve_best_backtest_runs(
+            CASE_STUDY_ID,
+            RISK_LABEL,
+            split="validation",
+            stage=stage,
+            top_n=9999,
+            prediction_hashes=CURRENT_MEMBERS,
+        )
+        for stage in candidate_stages
+    ],
+    how="diagonal_relaxed",
+).unique("backtest_hash")
+print(
+    f"Field to freeze: {frozen_pool.height} eligible validation backtests across {candidate_stages}"
+)
+
+try:
+    writable = open_study(CASE_STUDY_ID, entry_point="16_risk_management")
+except PermissionError as exc:
+    holdout_candidates = None
+    print(
+        f"Not freezing a candidate set here: {exc}. The set is a maintainer artifact written "
+        "alongside the registry this notebook reads; a clean clone has neither, and the "
+        "holdout notebooks name it when they cannot find it."
+    )
+else:
+    # `open_study` activates, and activation decides which case directory this process reads and
+    # writes. If that is not the directory the pool above was resolved from, the set would be
+    # written where 17 through 20 will not look for it, and its members would be opened from a
+    # root other than the one they will be read back from - which is how a member that is
+    # complete at freeze time is incomplete at read time. Refusing is better than writing a set
+    # nobody reads.
+    if writable.root != CASE_DIR:
+        raise RuntimeError(
+            f"16 resolved its candidate field from {CASE_DIR} but opened a study rooted at "
+            f"{writable.root}. Freezing here would write the set where the holdout notebooks "
+            "will not find it, and check its members against different artifacts than they "
+            "will read."
+        )
+    members = [
+        writable.results.open(backtest_hash)
+        for backtest_hash in frozen_pool["backtest_hash"].to_list()
+    ]
+    # Named here rather than left to `create`, which reports the first partial member and stops.
+    # A field that cannot be frozen is a field the holdout stage cannot select from, so what a
+    # reader needs is how many members are unusable and why, not the first one alphabetically.
+    incomplete = [
+        (member.hash, reason) for member in members if (reason := member.completeness()) is not None
+    ]
+    if incomplete:
+        raise RuntimeError(
+            f"{len(incomplete)} of {len(members)} eligible backtests are incomplete, so the "
+            "field cannot be frozen: "
+            + "; ".join(f"{hash_} ({reason})" for hash_, reason in incomplete[:5])
+            + ("" if len(incomplete) <= 5 else f"; and {len(incomplete) - 5} more")
+        )
+    holdout_candidates = CandidateSet.create(
+        writable,
+        name=CANDIDATE_SET_NAME,
+        members=members,
+        comparison_contract={"comparable_fields": ["label_artifact", "feature_artifacts", "cv"]},
+    )
+    frozen_selection = holdout_candidates.best_validation_sharpe()
+    print(
+        f"Frozen candidate set {holdout_candidates.hash}: {len(holdout_candidates.members)} members"
+    )
+    print(f"Validation-selected backtest: {frozen_selection.hash}")
+
+# %% [markdown]
 # ## Key takeaways
 #
 # 1. Risk selection is validation-only. It carries the eligible lineage that
@@ -558,9 +659,14 @@ fig_tradeoff.show()
 # 4. Full-validation MAE-calibrated thresholds are excluded from corrected
 #    v3.1 because their thresholds were learned from the same validation paths
 #    used to score them.
-# 5. The predeclared overlays still constitute a selection cohort. The holdout
-#    can be used once on the final carrier, not to choose among them.
+# 5. The predeclared overlays are a selection cohort, and the winner of one is a
+#    validation result. The holdout is what says whether it survives, and it is
+#    read on the final carrier rather than used to choose among these.
+# 6. The field is frozen here as an immutable candidate set. That is what stops
+#    the four stages after this one from each re-deriving a selection, and what
+#    makes the configuration the holdout was run on a matter of record rather
+#    than a rule four notebooks apply consistently until one of them does not.
 #
-# **Next:** `18_strategy_analysis` locks the corrected validation carrier and
-# compares it with the preserved historical holdout without reading that window
-# a second time on the new lineage. See Chapter 20 for the strategy synthesis framework.
+# **Next:** [`17_costs`](17_costs.ipynb) stresses whichever configuration this stage
+# advances - the best overlay, or the un-overlaid carrier where no overlay helped -
+# across the cost surface. See Chapter 20 for the strategy synthesis framework.

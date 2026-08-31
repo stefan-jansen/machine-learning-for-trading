@@ -85,6 +85,7 @@ from case_studies.research import (
     open_study,
     plan_models,
     planned_model_plan,
+    population_supersedes,
     primary_label,
     run_model_population,
 )
@@ -96,7 +97,7 @@ EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 POPULATION_NAME = ""
-SUPERSEDES_POPULATION: str = ""
+SUPERSEDES_POPULATION: str = "9d91aafd2b10"
 DEVICE: str = ""
 
 MODEL_NAME = "sae"
@@ -284,6 +285,26 @@ print(f"{len(plan.expected_prediction_hashes)} validation prediction sets")
 # **What the call publishes is a population**: a named, immutable list of the prediction sets it
 # will produce, written down before the first fit. Afterwards every member must exist and be
 # complete, which is what makes the downstream comparison well defined.
+#
+# ### Why this run supersedes a population rather than resolving to one
+#
+# A training identity records the *declared behaviour version* of the runner that produced it,
+# not a digest of the runner's source. `case_studies/utils/latent_factors/versions.py` holds
+# those literals, and `sae` sits at 2 there because `run_sae_fold_with_library` once omitted
+# `batch_size` and the library read the absent value as a single batch over the whole training
+# window - a different computation, whose results must not be reused.
+#
+# The generation this declaration replaces is on the correct side of that fix and the wrong side
+# of the file: it was fitted on 2026-08-29 with `batch_size` already passed, hours before
+# `versions.py` existed to say so, and it therefore recorded `sae/v1`. So this refit is not
+# correcting a result. It is re-registering the same computation under the version the codebase
+# now declares for it, which is what lets a holdout reconstruction - which compares the recorded
+# version against the current one and refuses on a mismatch - reach this configuration at all.
+#
+# `population_supersedes` decides whether the declared hash is offered. It is offered on a re-run,
+# where the name already carries the generation this declaration produced, and on the refit, where
+# it names the generation in force. It is withheld on a reader's clean clone, where `run_log/` is
+# gitignored and there is no generation to supersede, and under a caller's own `POPULATION_NAME`.
 
 
 # %%
@@ -294,7 +315,10 @@ def catalog_labels(execution) -> int:
 
 population_name = POPULATION_NAME or f"sp500_equity_option_analytics-{MODEL_NAME}-validation-v1"
 execution, population = run_model_population(
-    study, plan, population_name=population_name, supersedes=SUPERSEDES_POPULATION or None
+    study,
+    plan,
+    population_name=population_name,
+    supersedes=population_supersedes(study, name=population_name, declared=SUPERSEDES_POPULATION),
 )
 
 # No per-fold counts: this family's runner reports none, and two zeros would read as a failed fit.
