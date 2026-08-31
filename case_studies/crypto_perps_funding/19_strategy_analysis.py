@@ -18,8 +18,8 @@
 #
 # Four notebooks narrowed a field. [`13_backtest`](13_backtest.ipynb) ran every prediction set
 # equally weighted, [`14_portfolio_management`](14_portfolio_management.ipynb) sized the survivors
-# six ways, [`15_costs`](15_costs.ipynb) asked how much friction the result absorbs, and
-# [`16_risk_management`](16_risk_management.ipynb) tried fourteen ways of leaving a position early.
+# six ways, [`15_risk_management`](15_risk_management.ipynb) tried fourteen ways of leaving a
+# position early, and [`16_costs`](16_costs.ipynb) asked how much friction the survivor absorbs.
 # This notebook makes the one choice the case study exists to make, and then says how much
 # confidence that choice supports.
 #
@@ -40,7 +40,7 @@
 #
 # **Book reference**: Chapter 20 (Strategy Synthesis).
 #
-# **Prerequisites**: [`16_risk_management`](16_risk_management.ipynb) has frozen a candidate set
+# **Prerequisites**: [`15_risk_management`](15_risk_management.ipynb) has frozen a candidate set
 # per label spanning all three selection stages.
 #
 # **What it writes**: one candidate set holding the whole selection pool. No backtests, no
@@ -57,14 +57,15 @@ import polars as pl
 
 from case_studies.crypto_perps_funding.research_workflow import (
     ALL_LABELS,
-    candidate_set_supersedes,
 )
 from case_studies.research import (
     HORIZON_DEPENDENT_PROTOCOL_FIELDS,
     CandidateSet,
     Result,
+    candidate_set_supersedes,
     open_study,
 )
+from case_studies.utils.strategy_analysis import resolve_solvent_carrier
 from case_studies.utils.uncertainty import (
     compute_backtest_uncertainty,
     compute_cohort_metrics,
@@ -78,12 +79,17 @@ LABELS: list[str] = []
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 # The generation of `crypto-final-selection` this run replaces. Its membership is the union of
-# the four final validation sets, and those moved in `16_risk_management` when the grid their
+# the four final validation sets, and those moved in `15_risk_management` when the grid their
 # admission rule is applied to stopped being every row the registry holds for the label - so
 # this pool moves with them. Recorded here rather than passed at run time: `supersedes` is part
 # of what identifies the generation, so a re-run declaring nothing computes a different hash
 # from the row on record and is refused (ml4t/agent-workspace#879).
-SUPERSEDES: str = "8270e5b544f9"
+# Left empty, and it stays empty. The registry was reset for the stage-04 holdout rebuild, so
+# every name below is published at generation one and there is nothing to supersede. A
+# declaration is only needed when a re-run changes an existing name's membership: the refusal
+# prints the name and the hash, and it is resolved through the shared resolver rather than
+# offered straight, because a reader's clean clone has no generation for it to replace.
+SUPERSEDES: str = ""
 
 # %%
 study = open_study(
@@ -382,25 +388,98 @@ pl.DataFrame(
 )
 
 # %% [markdown]
-# ## 5. The holdout is untouched
+# ## 5. The holdout, and what it does to section 3
 #
-# `config/setup.yaml` reserves 2024 and 2025 as a holdout, and nothing in this case study has
-# been fitted, selected or measured on it. The registry holds no holdout prediction set, so there
-# is no holdout number to report and none is implied by anything above.
+# `config/setup.yaml` reserves 2024 and 2025 as a holdout. Nothing above was fitted, selected or
+# measured on it: the pool is frozen and immutable, so the configuration could not be re-chosen
+# after the holdout result was seen. Every stage of the funnel exists to make that sentence true.
 #
-# It takes three steps, in this order and only once: refit the selected configuration on
-# training plus validation, predict the holdout window, and run that one configuration through
-# the same backtest specification. What makes it a holdout is that the selection is
-# already fixed - the pool above is frozen and immutable, so the configuration cannot be
-# re-chosen after the holdout result is seen. Every step of the funnel exists to make that
-# sentence true.
+# Measuring it takes three steps, in this order: refit the selected configuration on training
+# plus validation, predict the holdout window, and replay that one configuration through the
+# same backtest specification. That is [`17_holdout_predictions`](17_holdout_predictions.ipynb)
+# and [`18_holdout_backtest`](18_holdout_backtest.ipynb), and both have now run.
+#
+# It is not that the window may only ever be measured once. The rule forbids selecting on the
+# holdout, not recomputing it: a result found to be wrong is deleted and produced again, and
+# what the two notebooks guard is that only one generation is readable at a time, so nobody
+# downstream can quote whichever number they prefer.
 
-# %%
+# %% tags=["results"]
 holdout_predictions = study.predictions.table().filter(pl.col("split") == "holdout")
+# Two different things have to be true before a holdout number belongs beside this analysis,
+# and the stage alone establishes neither.
+#
+# The first is that the configuration carried into the holdout is the one analysed here. `17`
+# and `18` resolve it through `resolve_solvent_carrier`, which ranks registry candidates on the
+# period they all cover; section 2 ranks the frozen pool on each member's own periods. They
+# agree, and section 3's cohort check keeps the second from drifting off the first, but neither
+# makes them one procedure.
+#
+# The second is that the registered result is the replay of that configuration. `stage` says a
+# row was produced from a holdout prediction set and nothing more, so a query keyed on it would
+# also return a run of some other allocator over the same window, or one left by a superseded
+# selection. The resolver matches the holdout backtest to the carrier by strategy
+# specification, which is the link that actually establishes lineage, so the metrics below are
+# restricted to the hash it returns.
+carrier_lineage = resolve_solvent_carrier("crypto_perps_funding")
+if carrier_lineage["val_backtest_hash"] != selected.hash:
+    raise RuntimeError(
+        f"the holdout was carried by {carrier_lineage['val_backtest_hash']} but this notebook "
+        f"analyses {selected.hash}. The sections above and the holdout below would describe "
+        "different strategies."
+    )
+# The prose below this cell states a holdout result, so the cell has to establish that there
+# is one. Reporting nothing and reading as though a number had been checked is the failure
+# mode a silently empty query produces, and it is worse than a refusal because the conclusion
+# still renders.
+holdout_backtest_hash = carrier_lineage["holdout_backtest_hash"]
+if holdout_backtest_hash is None:
+    raise RuntimeError(
+        f"no registered holdout backtest replays {selected.hash}. Run "
+        "17_holdout_predictions and 18_holdout_backtest before this notebook; the section "
+        "below reports a holdout result and there is none to report."
+    )
+with closing(
+    sqlite3.connect(f"file:{STORAGE_ROOT / 'run_log' / 'registry.db'}?mode=ro", uri=True)
+) as db:
+    holdout_metrics = db.execute(
+        "SELECT m.sharpe, m.cagr, m.max_drawdown, m.n_periods "
+        "FROM backtest_metrics m JOIN backtest_runs r ON r.backtest_hash = m.backtest_hash "
+        "WHERE r.stage = 'holdout' AND m.backtest_hash = ?",
+        (holdout_backtest_hash,),
+    ).fetchall()
+if len(holdout_metrics) != 1:
+    raise RuntimeError(
+        f"{len(holdout_metrics)} metrics rows for holdout backtest {holdout_backtest_hash}, "
+        "expected exactly one. The window carries one backtest at a time by construction, so "
+        "this is a registry that has been written to by something other than 18."
+    )
 print(
-    f"{holdout_predictions.height} holdout prediction sets in the registry; "
+    f"{holdout_predictions.height} holdout prediction set(s) in the registry; "
     f"selection pool {pool.hash} is frozen at {len(pool.members)} members"
 )
+for sharpe, cagr, max_drawdown, n_periods in holdout_metrics:
+    print(
+        f"  holdout {holdout_backtest_hash}: Sharpe {sharpe:.3f} over {int(n_periods):,} "
+        f"periods, CAGR {cagr:.1%}, max drawdown {max_drawdown:.2%}"
+    )
+
+# %% [markdown]
+# The holdout Sharpe is negative, on the configuration section 3 measured at a validation
+# Sharpe of 1.57, with a bootstrap interval excluding zero and a probabilistic Sharpe p-value
+# of 0.011. Every uncorrected statistic there said the strategy worked. The deflated Sharpe, at
+# -0.15, said it did not, and the holdout agrees with the deflation.
+#
+# This is one draw and it is not proof that the deflation is right in general. What it does
+# establish is that the disagreement in section 3 was not academic: a reader who stopped at the
+# interval and the p-value, both correctly computed, would have carried a strategy into 2024
+# that lost money over two years. The correction was the only number that anticipated it.
+#
+# The sign is what carries the lesson here, not the magnitude. A drawdown this deep on nineteen
+# perpetual contracts over two years also reflects the leverage the allocator took and the
+# absence of any position-level stop beyond the selected time exit, so the holdout should be
+# read as the direction of the edge, not as a calibrated forecast of what this configuration
+# would have returned in production.
 
 # %% [markdown]
 # ## 6. What to notice
@@ -412,18 +491,18 @@ print(
 # as though it were one measurement.
 #
 # **Every uncorrected statistic here says the selection is real, and the correction says it is
-# not.** The selected configuration posts a validation Sharpe of 1.59. Its bootstrap interval is
-# [0.30, 2.81] and excludes zero; its probabilistic Sharpe p-value is 0.0100; it needs 366 periods
+# not.** The selected configuration posts a validation Sharpe of 1.57. Its bootstrap interval is
+# [0.27, 2.80] and excludes zero; its probabilistic Sharpe p-value is 0.0107; it needs 374 periods
 # to reach significance and it has 729. Read on their own, all four say the strategy works. The
 # deflated Sharpe is -0.15, and under either shrunk trial count it is still below zero. The
 # disagreement is not a contradiction: the interval and the p-value are computed for one series
 # and answer whether *this* return stream differs from zero, while the deflation asks whether the
 # best of 2,807 differs from what the best of 2,807 worthless strategies would have produced. The
-# largest of 2,807 draws lands near 1.6 whether or not any of them has an edge, so 1.59 is what
+# largest of 2,807 draws lands near 1.6 whether or not any of them has an edge, so 1.57 is what
 # this search returns when nothing works.
 #
 # That is the whole reason the pool is frozen before it is read. A case study free to stop at the
-# interval would have reported a Sharpe of 1.59 significant at the 1% level, with each supporting
+# interval would have reported a Sharpe of 1.57 significant at the 1% level, with each supporting
 # number correctly computed.
 #
 # **The interval and the correction answer different questions.** The bootstrap interval widens
@@ -431,7 +510,7 @@ print(
 # has a tight interval and no deflation. A short backtest of five hundred has both problems, and
 # two validation folds of 8-hourly crypto data is closer to the second.
 #
-# The Rademacher-adjusted Sharpe of 1.11 stays positive where the deflated Sharpe does not, and
+# The Rademacher-adjusted Sharpe of 1.09 stays positive where the deflated Sharpe does not, and
 # the two are not interchangeable. It penalizes the complexity of the strategy class by what the
 # same procedure achieves on permuted returns; the deflation penalizes the number of draws taken.
 # On a pool this size the count dominates, so where they disagree the deflation is the one being
@@ -444,5 +523,6 @@ print(
 # **Known limitations.** Everything above is measured on two validation folds spanning 2022 and
 # 2023, on nineteen perpetual contracts, at one declared cost schedule. The pool contains only
 # configurations that traded both folds, so nothing here says how a strategy that trades
-# selectively would compare - by construction it could not have been ranked against these. And
-# the holdout has not been used, so no statement here has been checked out of sample.
+# selectively would compare - by construction it could not have been ranked against these. The
+# holdout in section 5 checks the selected configuration out of sample and nothing else: every
+# other statement above is a validation statement.

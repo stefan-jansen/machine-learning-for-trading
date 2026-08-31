@@ -108,7 +108,12 @@ POPULATION_NAME = ""
 # population it published. Checked against `official_populations`: `178c8b6cef03` is the current
 # generation and it supersedes `32770bf22544`. A re-run recomputes `178c8b6cef03`, matches, and
 # returns the existing population rather than refitting.
-SUPERSEDES_POPULATION: str = "32770bf22544"
+# Left empty, and it stays empty. The registry was reset for the stage-04 holdout rebuild, so
+# every name below is published at generation one and there is nothing to supersede. A
+# declaration is only needed when a re-run changes an existing name's membership: the refusal
+# prints the name and the hash, and it is resolved through the shared resolver rather than
+# offered straight, because a reader's clean clone has no generation for it to replace.
+SUPERSEDES_POPULATION: str = ""
 
 # %%
 study = open_study(

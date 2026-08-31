@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import httpx
@@ -149,6 +149,40 @@ def load_funding_rates(
         funding = funding.filter(pl.col("timestamp").dt.date() >= pl.lit(start_date).str.to_date())
     if end_date:
         funding = funding.filter(pl.col("timestamp").dt.date() <= pl.lit(end_date).str.to_date())
+    return funding.sort("timestamp", "symbol")
+
+
+def funding_rates_for_prices(prices: pl.DataFrame) -> pl.DataFrame:
+    """Official funding settlements restricted to the exact keys ``prices`` covers.
+
+    The backtest charges funding against the position held at each settlement, so the
+    settlements a run is identified by have to be the ones its own price panel spans. A
+    holdout run slices a different window from the validation run it inherits its
+    configuration from, which is why this is derived from the frame rather than carried
+    across with the rest of the specification.
+    """
+
+    def _day(value: object) -> str:
+        if isinstance(value, datetime):
+            return value.date().isoformat()
+        if isinstance(value, date):
+            return value.isoformat()
+        raise TypeError(f"expected a date-like timestamp, got {type(value).__name__}")
+
+    timestamp_dtype = prices.schema["timestamp"]
+    price_keys = prices.select("symbol", "timestamp").unique()
+    symbols = price_keys.get_column("symbol").unique().to_list()
+    funding = load_funding_rates(
+        symbols=symbols,
+        start_date=_day(price_keys.get_column("timestamp").min()),
+        end_date=_day(price_keys.get_column("timestamp").max()),
+    )
+    funding = funding.with_columns(
+        pl.col("symbol").cast(price_keys.schema["symbol"]),
+        pl.col("timestamp").cast(timestamp_dtype),
+    ).join(price_keys, on=["symbol", "timestamp"], how="semi")
+    if funding.is_empty():
+        raise ValueError("crypto backtest resolved no official funding settlements")
     return funding.sort("timestamp", "symbol")
 
 
