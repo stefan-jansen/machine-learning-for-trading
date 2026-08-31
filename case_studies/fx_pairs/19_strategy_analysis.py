@@ -65,10 +65,18 @@ from case_studies.research import (
 )
 from case_studies.research.holdout import build_holdout_training_spec
 from case_studies.research.population import superseded_members_at
-from case_studies.utils.backtest_presets import cost_view
+from case_studies.research.strategy import strategy_warmup_periods
+from case_studies.utils.artifact_digest import value_digest
+from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
+from case_studies.utils.backtest_presets import cost_view, ensure_backtest_spec
+from case_studies.utils.backtest_runner import resolved_allow_short_selling
 from case_studies.utils.cohort_metrics import compute_and_register
 from case_studies.utils.paired_metrics import populate_paired_metrics
-from case_studies.utils.registry import load_backtest_metrics, load_paired_metrics
+from case_studies.utils.registry import (
+    backtest_run_status,
+    load_backtest_metrics,
+    load_paired_metrics,
+)
 from case_studies.utils.registry.specs import training_hash_from_spec
 from case_studies.utils.strategy_analysis import (
     resolve_canonical_rank1_lineage,
@@ -110,18 +118,13 @@ study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKS
 # allocation and risk-overlay stages, among runs that stayed solvent and belong to a generation
 # still in force. Read from the registry, so this page cannot report a configuration the
 # validation stages did not rank first.
-carrier = resolve_solvent_carrier(CASE_STUDY_ID)
-
-# The same admission contract `17` and `18` enforce. This page reports the carrier as the case
-# study's answer, so a carrier the frozen set never admitted is refused here too rather than
-# published.
+# The frozen set is the field, exactly as in `17` and `18`. This page reports the carrier as the
+# case study's answer, so it resolves over the same restricted field rather than over the whole
+# registry - otherwise a row the set never admitted could still move the common-support
+# intersection and change which admitted row is reported.
 holdout_candidates = CandidateSet.one(study, name=CANDIDATE_SET_NAME)
-if carrier["val_backtest_hash"] not in holdout_candidates.members:
-    raise ValueError(
-        f"the resolved carrier {carrier['val_backtest_hash']} is not a member of "
-        f"{CANDIDATE_SET_NAME} ({holdout_candidates.hash}); it is not a result this case "
-        "study may report as its selection"
-    )
+ADMITTED = frozenset(holdout_candidates.members)
+carrier = resolve_solvent_carrier(CASE_STUDY_ID, admitted=ADMITTED)
 
 selected_validation = study.results.open(str(carrier["val_backtest_hash"]))
 selected_prediction = study.results.open(str(carrier["val_prediction_hash"]))
@@ -147,6 +150,10 @@ candidate_rows_source = (
         & pl.col("stage").is_in(["signal", "allocation", "risk_overlay"])
         & pl.col("sharpe").is_not_null()
         & ~pl.col("backtest_hash").is_in(list(_retired))
+        # Restricted to the frozen set, because this is the distribution the selection was
+        # made from and the selection sees exactly this field. A table drawn from a wider one
+        # invites the reader to compare the carrier against rows it was never ranked against.
+        & pl.col("backtest_hash").is_in(list(ADMITTED))
     )
     .sort("sharpe", "backtest_hash", descending=[True, False])
 )
@@ -262,11 +269,22 @@ for member_hash in candidate_rows_source.get_column("backtest_hash").to_list():
         }
     )
 
+# Sorted on raw Sharpe, which is not how the carrier was chosen: with a conformal candidate in
+# the field the resolver re-ranks everything on the timestamps they all share, and it can return
+# a row that is not first here. The two agree on this case study and the check says so rather
+# than assuming it. A disagreement is a refusal and not a re-ordering, because the honest table
+# is the one whose top row is the result the page goes on to report - and if raw Sharpe stops
+# producing that row, what to display instead is a decision, not a repair.
 candidate_evidence = pl.DataFrame(candidate_rows).sort(
     ["sharpe", "backtest_hash"], descending=[True, False]
 )
 if candidate_evidence["backtest_hash"][0] != selected_validation.hash:
-    raise ValueError("displayed evidence disagrees with the candidate-set selection rule")
+    raise ValueError(
+        f"the displayed candidate distribution ranks {candidate_evidence['backtest_hash'][0]} "
+        f"first on raw Sharpe, but the carrier is {selected_validation.hash}. The canonical "
+        "resolver re-ranked the field on common support; the table and the selection would "
+        "describe different results."
+    )
 candidate_evidence
 
 # %% tags=["results"]
@@ -496,22 +514,47 @@ if len(_holdout_backtests) != 1:
     )
 holdout_backtest = Result.open(study, _holdout_backtests[0])
 
-# One complete backtest on the holdout prediction is not the same as the carrier's strategy
-# having been the one that produced it. A side-channel allocator or a cost variant registered
-# against the same prediction set would satisfy the count and be reported as the carrier's
-# holdout result. The strategy block is what the carrier is, so it is compared field for field.
-_carrier_strategy = json.loads(selected_record["spec_json"]).get("strategy", {})
-_holdout_strategy = holdout_backtest.spec().get("strategy", {})
-if _holdout_strategy != _carrier_strategy:
-    _differing = sorted(
-        key
-        for key in set(_carrier_strategy) | set(_holdout_strategy)
-        if _carrier_strategy.get(key) != _holdout_strategy.get(key)
-    )
+# One complete backtest on the holdout prediction is not the same as the carrier's replay
+# having been the one that produced it, and comparing the `strategy` block alone does not
+# close the gap: commissions, slippage, account settings and the price identity all sit
+# outside that block, so a cost variant or a stale-price run registered against the same
+# prediction set would pass a strategy comparison and be reported as the carrier's holdout.
+#
+# The backtest hash covers every input that changes the result, by construction. So the
+# expected specification is rebuilt here exactly as `18_holdout_backtest` builds it - the
+# carrier's registered spec, the holdout prediction, the holdout price frame with the
+# strategy's declared warmup, and the digest of that frame - and the registered backtest is
+# required to BE that identity rather than to resemble it.
+_holdout_prices = load_backtest_prices_for(
+    CASE_STUDY_ID,
+    str(carrier["label"]),
+    split="holdout",
+    warmup_periods=strategy_warmup_periods(json.loads(selected_record["spec_json"])),
+)
+_expected_spec = ensure_backtest_spec(
+    CASE_STUDY_ID,
+    get_backtest_config(CASE_STUDY_ID),
+    json.loads(selected_record["spec_json"]),
+    prices=_holdout_prices,
+    prediction_hash=holdout_prediction.hash,
+    initial_cash=get_backtest_config(CASE_STUDY_ID).initial_cash,
+)
+_expected_spec["chapter"] = "ch20"
+_expected_spec.setdefault("input_identity", {})["prices"] = value_digest(_holdout_prices)
+_expected_spec["backtest_config"]["account"]["allow_short_selling"] = resolved_allow_short_selling(
+    _expected_spec, None
+)
+EXPECTED_HOLDOUT_BACKTEST_HASH = backtest_run_status(
+    CASE_STUDY_ID, holdout_prediction.hash, _expected_spec
+).backtest_hash
+if holdout_backtest.hash != EXPECTED_HOLDOUT_BACKTEST_HASH:
     raise ValueError(
-        f"holdout backtest {holdout_backtest.hash} does not replay the carrier's strategy; "
-        f"the blocks that differ are {_differing}"
+        f"the registered holdout backtest is {holdout_backtest.hash}, but replaying the "
+        f"carrier on the holdout produces {EXPECTED_HOLDOUT_BACKTEST_HASH}. The registered "
+        "run is a different configuration, not this carrier's holdout - re-run "
+        "18_holdout_backtest rather than reporting it."
     )
+
 holdout_training = Result.open(study, holdout_prediction.registry_record()["training_hash"])
 
 if not isinstance(holdout_training, TrainingResult) or not holdout_training.complete:
@@ -638,7 +681,7 @@ _undefined = Counter(str(entry.message).split(" for ")[0] for entry in _cohort_w
 _paired_rows = populate_paired_metrics(
     CASE_STUDY_ID,
     periods_per_year=_periods_per_year,
-    carrier=resolve_canonical_rank1_lineage(CASE_STUDY_ID),
+    carrier=resolve_canonical_rank1_lineage(CASE_STUDY_ID, admitted=ADMITTED),
     replace_all=True,
 )
 print(

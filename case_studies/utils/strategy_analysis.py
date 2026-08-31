@@ -409,7 +409,9 @@ def select_holdout_self_backtest(
     return resolve_holdout_self_backtest(case_study, val_backtest_hash).backtest_hash
 
 
-def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
+def resolve_canonical_rank1_lineage(
+    case_study: str, *, admitted: frozenset[str] | None = None
+) -> dict[str, Any]:
     """Resolve the canonical val rank-1 + matching holdout for a case study.
 
     Cross-stage validation rank-1 is selected over stage IN (signal,
@@ -423,6 +425,17 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
     sweep is rebuilt, and queries that forget LABEL_RESTRICTIONS surface the
     diagnostic-variant rows (sp500_options' fwd_ret_10d Sharpe ≈ 9.7) as
     bogus rank-1 candidates.
+
+    ``admitted``, when given, is the set of backtest hashes a case study has frozen as
+    the field this selection may choose from - a ``CandidateSet``'s members. It is applied
+    to the candidates BEFORE the ranking, not checked against the winner afterwards,
+    because the two are not the same test whenever the conformal branch is taken: the
+    common-support ranking restricts every series to the timestamps they all share, so a
+    candidate that is never going to win still decides how far the intersection reaches
+    and therefore which admitted candidate does. Checking membership after the fact passes
+    while the answer has already been changed by a row that was never eligible. Default
+    None keeps the whole registry in the field, which is what every case study that
+    freezes no set wants.
 
     Returns a dict with keys ``val_backtest_hash``, ``val_prediction_hash``,
     ``val_stage``, ``val_sharpe``, ``training_hash``, ``family``,
@@ -531,6 +544,16 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
         candidates = [
             row for row in candidates if row[0] not in retired and row[1] not in retired_predictions
         ]
+        if admitted is not None:
+            admitted_before = len(candidates)
+            candidates = [row for row in candidates if row[0] in admitted]
+            if admitted_before and not candidates:
+                raise RuntimeError(
+                    f"None of the {admitted_before} live validation backtests for {case_study} "
+                    f"is among the {len(admitted)} the frozen candidate set admits. The set and "
+                    "the registry describe different sweeps; re-freeze the set rather than "
+                    "selecting outside it."
+                )
         if ranked and not candidates:
             raise RuntimeError(
                 f"Every one of the {ranked} ranked validation backtests for {case_study} belongs "
@@ -657,7 +680,9 @@ exists - including a Sharpe high enough to top a ranking.
 """
 
 
-def resolve_solvent_carrier(case_study: str, *, require_solvent: bool = True) -> dict[str, Any]:
+def resolve_solvent_carrier(
+    case_study: str, *, require_solvent: bool = True, admitted: frozenset[str] | None = None
+) -> dict[str, Any]:
     """The configuration downstream notebooks run, with its spec and drawdown.
 
     Cost sensitivity, holdout prediction and holdout backtest all have to run the
@@ -687,7 +712,7 @@ def resolve_solvent_carrier(case_study: str, *, require_solvent: bool = True) ->
 
     from utils.paths import get_case_study_dir
 
-    lineage = resolve_canonical_rank1_lineage(case_study)
+    lineage = resolve_canonical_rank1_lineage(case_study, admitted=admitted)
     backtest_hash = lineage["val_backtest_hash"]
 
     db_path = get_case_study_dir(case_study) / "run_log" / "registry.db"

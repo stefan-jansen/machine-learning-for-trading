@@ -1074,29 +1074,31 @@ def populate_paired_metrics(
         if cand.is_empty():
             skip_pair1 = True
     if not skip_pair1:
-        # A risk overlay that never binds produces returns identical to the allocation
-        # stage it sits on, so both rows carry the same Sharpe to the last digit and the
-        # dedupe below keeps whichever the sort happened to emit first. The paired numbers
-        # are the same either way - only the identity written to `challenger_hash` differs,
-        # and a notebook that asks for the pair by its selected carrier finds nothing when
-        # the tie went to the sibling. Break the tie toward the carrier when one is passed,
-        # then on the hash so the choice is stable with no carrier at all.
+        # This ranking is on raw Sharpe, and the canonical resolver is not: when a conformal
+        # candidate is in the field it re-ranks everything on exact common timestamp support,
+        # so it can return a lower raw-Sharpe row. It also happens that the two tie exactly -
+        # a risk overlay that never binds produces the same returns as the allocation stage
+        # under it, to the last digit - and the dedupe then keeps whichever the sort emitted.
+        #
+        # Either way the pair ends up registered under a backtest the case study does not
+        # report, and a notebook asking for its carrier's validation-to-benchmark evidence
+        # finds none. So a supplied carrier is used rather than ranked against: the caller
+        # resolved it through the canonical selection, which is the answer this ranking is a
+        # cheaper approximation of. With no carrier the sort stands, with `backtest_hash` as
+        # a final key so the choice is at least deterministic.
         carrier_backtest = str(carrier["val_backtest_hash"]) if carrier else None
-        cand1 = (
-            cand.with_columns(
-                _is_carrier=(
-                    pl.lit(False)
-                    if carrier_backtest is None
-                    else pl.col("backtest_hash") == carrier_backtest
-                )
-            )
-            .sort(
-                ["sharpe", "_is_carrier", "backtest_hash"],
-                descending=[True, True, False],
-            )
-            .unique(subset=["prediction_hash"], keep="first", maintain_order=True)
-            .drop("_is_carrier")
+        cand1 = cand.sort(["sharpe", "backtest_hash"], descending=[True, False]).unique(
+            subset=["prediction_hash"], keep="first", maintain_order=True
         )
+        if carrier_backtest is not None:
+            pinned = cand.filter(pl.col("backtest_hash") == carrier_backtest)
+            if pinned.is_empty():
+                raise RuntimeError(
+                    f"the carrier {carrier_backtest} passed for {cs} is not among the "
+                    f"{cand.height} candidates this ranking sees. Pair #1 would be registered "
+                    "under a different backtest than the one the case study reports."
+                )
+            cand1 = pinned
         leader_hash = cand1["backtest_hash"][0]
         leader_label = cand1["label"][0] if "label" in cand1.columns else None
         if leader_label:

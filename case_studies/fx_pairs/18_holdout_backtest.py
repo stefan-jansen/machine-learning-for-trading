@@ -88,19 +88,12 @@ study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKS
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 bt_config = get_backtest_config(CASE_STUDY_ID)
 
-carrier = resolve_solvent_carrier(CASE_STUDY_ID)
-LABEL = str(carrier["label"])
-
-# Same admission contract `17_holdout_predictions` enforces, checked again rather than inherited.
-# This notebook re-resolves the carrier, so it can reach a different one, and the frozen set is
-# what says which carriers the holdout may run at all.
+# Same frozen set `17_holdout_predictions` resolves against, and passed in the same way - into
+# the resolution rather than checked against its answer. This notebook re-resolves rather than
+# inheriting, so restricting the field is what makes the two agree by construction.
 holdout_candidates = CandidateSet.one(study, name=CANDIDATE_SET_NAME)
-if carrier["val_backtest_hash"] not in holdout_candidates.members:
-    raise RuntimeError(
-        f"the resolved carrier {carrier['val_backtest_hash']} is not a member of "
-        f"{CANDIDATE_SET_NAME} ({holdout_candidates.hash}); the holdout may only replay a "
-        "configuration the frozen set admitted"
-    )
+carrier = resolve_solvent_carrier(CASE_STUDY_ID, admitted=frozenset(holdout_candidates.members))
+LABEL = str(carrier["label"])
 
 validation_prediction = study.results.open(carrier["val_prediction_hash"])
 validation_record = validation_prediction.registry_record()

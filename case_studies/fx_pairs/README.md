@@ -38,7 +38,7 @@ The pipeline is a study in hypothesis revision, from short-horizon momentum to m
 | Costs | [`16_costs`](16_costs.ipynb) | Ch18 | Spread impact on the selected carrier, controls included | One backtest run per cost level, same artifact layout |
 | Holdout Predictions | [`17_holdout_predictions`](17_holdout_predictions.ipynb) | Ch16-20 | Refits the validation-selected configuration on the holdout interval | One holdout prediction set at the selected checkpoint |
 | Holdout Backtest | [`18_holdout_backtest`](18_holdout_backtest.ipynb) | Ch16-20 | Replays the selected strategy against those predictions | One holdout backtest run |
-| Strategy Analysis | [`19_strategy_analysis`](19_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with IC, Sharpe, and cost analysis | `20_strategy_synthesis/output/fx_pairs/fx_pairs_tearsheet.html` and `strategy_assessment.json` (a `tearsheet_predictions.parquet` is staged alongside them and deleted again) |
+| Strategy Analysis | [`19_strategy_analysis`](19_strategy_analysis.ipynb) | Ch20 | Reads the validation and holdout results back and reports them with interval evidence | Registry rows rather than files: `cohort_metrics` for the candidate cohorts and `backtest_paired_metrics` for the bootstrapped comparisons |
 
 ## Key Results
 

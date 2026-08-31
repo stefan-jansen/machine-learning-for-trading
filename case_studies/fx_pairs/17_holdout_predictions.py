@@ -86,22 +86,15 @@ study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKS
 # allocation and risk-overlay stages, restricted to runs that stayed solvent. It is resolved
 # from the registry rather than named here, so this notebook cannot select a configuration that
 # the validation stages did not rank first.
-carrier = resolve_solvent_carrier(CASE_STUDY_ID)
-
-# The resolver ranks the registry; `15_risk_management` froze the set the holdout is allowed to
-# choose from. They are two mechanisms and they can disagree, so the admission contract is
-# enforced here rather than assumed: a carrier the frozen set never admitted is refused, not
-# quietly refitted. The set's own raw-Sharpe pick is printed beside the resolved one because the
-# two rank differently - the resolver re-ranks on common support and the set does not - and a
-# divergence between them is worth seeing rather than discovering downstream.
+# `15_risk_management` froze the set the holdout is allowed to choose from, and that set is
+# passed into the resolution rather than checked against its answer. The two are different
+# tests: when a conformal candidate is in the field the resolver re-ranks every candidate on
+# the timestamps they all share, so a row that was never admitted still decides how far that
+# intersection reaches and therefore which admitted row wins. fx has 194 conformal backtests,
+# so this is a live path here rather than a hypothetical one. Checking membership afterwards
+# would pass while the answer had already been changed by an ineligible row.
 holdout_candidates = CandidateSet.one(study, name=CANDIDATE_SET_NAME)
-if carrier["val_backtest_hash"] not in holdout_candidates.members:
-    raise RuntimeError(
-        f"the resolved carrier {carrier['val_backtest_hash']} is not a member of "
-        f"{CANDIDATE_SET_NAME} ({holdout_candidates.hash}, {len(holdout_candidates.members)} "
-        "members). The holdout may only refit a configuration the frozen set admitted; "
-        "re-run 15_risk_management if the set is stale."
-    )
+carrier = resolve_solvent_carrier(CASE_STUDY_ID, admitted=frozenset(holdout_candidates.members))
 print(
     f"Frozen candidate set {holdout_candidates.hash}: "
     f"{len(holdout_candidates.members)} members, "
