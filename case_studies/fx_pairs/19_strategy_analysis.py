@@ -588,6 +588,7 @@ _paired_rows = populate_paired_metrics(
     CASE_STUDY_ID,
     periods_per_year=_periods_per_year,
     carrier=resolve_canonical_rank1_lineage(CASE_STUDY_ID),
+    replace_all=True,
 )
 print(
     f"cohort_metrics: {sum(_cohort_counts[k] for k in ('family', 'stagelabel', 'label'))} rows; "

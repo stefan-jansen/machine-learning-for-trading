@@ -857,8 +857,28 @@ def populate_paired_metrics(
         if cand.is_empty():
             skip_pair1 = True
     if not skip_pair1:
-        cand1 = cand.sort("sharpe", descending=True).unique(
-            subset=["prediction_hash"], keep="first", maintain_order=True
+        # A risk overlay that never binds produces returns identical to the allocation
+        # stage it sits on, so both rows carry the same Sharpe to the last digit and the
+        # dedupe below keeps whichever the sort happened to emit first. The paired numbers
+        # are the same either way - only the identity written to `challenger_hash` differs,
+        # and a notebook that asks for the pair by its selected carrier finds nothing when
+        # the tie went to the sibling. Break the tie toward the carrier when one is passed,
+        # then on the hash so the choice is stable with no carrier at all.
+        carrier_backtest = str(carrier["val_backtest_hash"]) if carrier else None
+        cand1 = (
+            cand.with_columns(
+                _is_carrier=(
+                    pl.lit(False)
+                    if carrier_backtest is None
+                    else pl.col("backtest_hash") == carrier_backtest
+                )
+            )
+            .sort(
+                ["sharpe", "_is_carrier", "backtest_hash"],
+                descending=[True, True, False],
+            )
+            .unique(subset=["prediction_hash"], keep="first", maintain_order=True)
+            .drop("_is_carrier")
         )
         leader_hash = cand1["backtest_hash"][0]
         leader_label = cand1["label"][0] if "label" in cand1.columns else None
