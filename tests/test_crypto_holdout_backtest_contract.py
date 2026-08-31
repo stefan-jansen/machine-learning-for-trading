@@ -1,16 +1,13 @@
-"""The crypto holdout backtest must read, and be identified by, its own inputs."""
+"""The crypto holdout must read its own inputs, and be reported only for its own lineage."""
 
 from __future__ import annotations
 
 import ast
 from pathlib import Path
 
-NOTEBOOK = (
-    Path(__file__).resolve().parents[1]
-    / "case_studies"
-    / "crypto_perps_funding"
-    / "18_holdout_backtest.py"
-)
+CASE_STUDY = Path(__file__).resolve().parents[1] / "case_studies" / "crypto_perps_funding"
+NOTEBOOK = CASE_STUDY / "18_holdout_backtest.py"
+ANALYSIS = CASE_STUDY / "19_strategy_analysis.py"
 
 
 def _tree() -> ast.Module:
@@ -64,3 +61,42 @@ def test_holdout_backtest_rebuilds_input_identity() -> None:
     assert "input_identity" in assigned, (
         f"{NOTEBOOK.name} never assigns spec['input_identity'], so it inherits the carrier's"
     )
+
+
+def test_strategy_analysis_reports_only_its_own_holdout() -> None:
+    """``stage='holdout'`` names a window, not a lineage.
+
+    Every row produced from a holdout prediction set carries that stage, including a run of a
+    different allocator over the same window and one left behind by a superseded selection. A
+    metrics query keyed on the stage alone therefore reports whatever holdout rows the registry
+    happens to hold, beside an analysis of the configuration this notebook selected - which is
+    the same failure as reporting two strategies as one, arrived at from the other end.
+
+    The lineage link is ``resolve_solvent_carrier``'s ``holdout_backtest_hash``, which matches
+    the holdout backtest to the carrier by strategy specification. The query has to be
+    restricted to it, which means being parameterised rather than filtered on the stage alone.
+    """
+    source = ANALYSIS.read_text(encoding="utf-8")
+    assert "holdout_backtest_hash" in source, (
+        f"{ANALYSIS.name} never resolves the holdout backtest for the carrier it analyses"
+    )
+    holdout_queries = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "execute"
+        and any(
+            isinstance(arg, ast.Constant)
+            and isinstance(arg.value, str)
+            and "stage = 'holdout'" in arg.value
+            for arg in node.args
+        )
+    ]
+    assert holdout_queries, f"{ANALYSIS.name} runs no holdout metrics query to check"
+    unrestricted = [
+        f"{ANALYSIS.name}:{node.lineno} filters on stage alone"
+        for node in holdout_queries
+        if len(node.args) < 2
+    ]
+    assert not unrestricted, "\n".join(unrestricted)

@@ -406,35 +406,53 @@ pl.DataFrame(
 
 # %% tags=["results"]
 holdout_predictions = study.predictions.table().filter(pl.col("split") == "holdout")
-# `17` and `18` resolve the configuration to carry through `resolve_solvent_carrier`, which
-# ranks registry candidates on the period they all cover; section 2 above ranks the frozen pool
-# on each member's own periods. They agree here, and the cohort check in section 3 is what
-# keeps the second from drifting off the first. Neither of those makes them the same procedure,
-# so the agreement is asserted rather than assumed: a holdout measured on some other
-# configuration would otherwise be reported beside an analysis of this one.
-if holdout_predictions.height:
-    carried = resolve_solvent_carrier("crypto_perps_funding")["val_backtest_hash"]
-    if carried != selected.hash:
-        raise RuntimeError(
-            f"the holdout was carried by {carried} but this notebook analyses {selected.hash}. "
-            "The sections above and the holdout below would describe different strategies."
-        )
-with closing(
-    sqlite3.connect(f"file:{STORAGE_ROOT / 'run_log' / 'registry.db'}?mode=ro", uri=True)
-) as db:
-    holdout_metrics = db.execute(
-        "SELECT m.sharpe, m.cagr, m.max_drawdown, m.n_periods "
-        "FROM backtest_metrics m JOIN backtest_runs r ON r.backtest_hash = m.backtest_hash "
-        "WHERE r.stage = 'holdout'",
-    ).fetchall()
+# Two different things have to be true before a holdout number belongs beside this analysis,
+# and the stage alone establishes neither.
+#
+# The first is that the configuration carried into the holdout is the one analysed here. `17`
+# and `18` resolve it through `resolve_solvent_carrier`, which ranks registry candidates on the
+# period they all cover; section 2 ranks the frozen pool on each member's own periods. They
+# agree, and section 3's cohort check keeps the second from drifting off the first, but neither
+# makes them one procedure.
+#
+# The second is that the registered result is the replay of that configuration. `stage` says a
+# row was produced from a holdout prediction set and nothing more, so a query keyed on it would
+# also return a run of some other allocator over the same window, or one left by a superseded
+# selection. The resolver matches the holdout backtest to the carrier by strategy
+# specification, which is the link that actually establishes lineage, so the metrics below are
+# restricted to the hash it returns.
+carrier_lineage = resolve_solvent_carrier("crypto_perps_funding")
+if carrier_lineage["val_backtest_hash"] != selected.hash:
+    raise RuntimeError(
+        f"the holdout was carried by {carrier_lineage['val_backtest_hash']} but this notebook "
+        f"analyses {selected.hash}. The sections above and the holdout below would describe "
+        "different strategies."
+    )
+holdout_backtest_hash = carrier_lineage["holdout_backtest_hash"]
+if holdout_predictions.height and holdout_backtest_hash is None:
+    raise RuntimeError(
+        "the registry holds a holdout prediction set but no backtest replaying the selected "
+        "configuration, so any holdout row it does hold belongs to something else."
+    )
+holdout_metrics = []
+if holdout_backtest_hash is not None:
+    with closing(
+        sqlite3.connect(f"file:{STORAGE_ROOT / 'run_log' / 'registry.db'}?mode=ro", uri=True)
+    ) as db:
+        holdout_metrics = db.execute(
+            "SELECT m.sharpe, m.cagr, m.max_drawdown, m.n_periods "
+            "FROM backtest_metrics m JOIN backtest_runs r ON r.backtest_hash = m.backtest_hash "
+            "WHERE r.stage = 'holdout' AND m.backtest_hash = ?",
+            (holdout_backtest_hash,),
+        ).fetchall()
 print(
     f"{holdout_predictions.height} holdout prediction set(s) in the registry; "
     f"selection pool {pool.hash} is frozen at {len(pool.members)} members"
 )
 for sharpe, cagr, max_drawdown, n_periods in holdout_metrics:
     print(
-        f"  holdout Sharpe {sharpe:.3f} over {int(n_periods):,} periods, "
-        f"CAGR {cagr:.1%}, max drawdown {max_drawdown:.2%}"
+        f"  holdout {holdout_backtest_hash}: Sharpe {sharpe:.3f} over {int(n_periods):,} "
+        f"periods, CAGR {cagr:.1%}, max drawdown {max_drawdown:.2%}"
     )
 
 # %% [markdown]
