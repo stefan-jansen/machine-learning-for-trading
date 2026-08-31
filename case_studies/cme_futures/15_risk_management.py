@@ -125,5 +125,5 @@ candidate_sets = (
 execution.catalog_rows.sort("label", "request_name")
 
 # %% [markdown]
-# Final selection in `17_strategy_analysis` uses the union of signal, allocation, and risk-overlay
+# Final selection in `19_strategy_analysis` uses the union of signal, allocation, and risk-overlay
 # results. Cost-sensitivity rows are excluded.

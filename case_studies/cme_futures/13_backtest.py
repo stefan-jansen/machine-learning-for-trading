@@ -182,4 +182,4 @@ execution.catalog_rows.sort("label", "request_name")
 
 # %% [markdown]
 # `14_portfolio_management` ranks each immutable per-label set by validation backtest Sharpe.
-# `17_strategy_analysis` interprets the validated strategy results.
+# `19_strategy_analysis` interprets the validated strategy results.
