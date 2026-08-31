@@ -625,6 +625,48 @@ class Strategy:
         spec = self.resolve(prices=prices)
         return backtest_hash_from_parts(self.prediction.hash, spec, identity_version=2)
 
+    def _require_lifecycle_matches_decision(self, option_lifecycle: pl.DataFrame) -> None:
+        """Refuse a supplied lifecycle that is not the one this request's decision describes.
+
+        Cheap on purpose: it joins the decision this backtest already loads against the frame,
+        rather than rebuilding the canonical lifecycle to compare with - rebuilding is the cost
+        the ``option_lifecycle`` parameter exists to avoid, so paying it here would make the
+        parameter pointless.
+        """
+        if self.decision is None:
+            return
+        decisions = self.decision.load()
+        keys = ["symbol", "strike", "expiration"]
+        if not set(keys) <= set(decisions.columns):
+            return
+        wanted = decisions.select(keys).unique()
+        missing = wanted.join(option_lifecycle.select(keys).unique(), on=keys, how="anti")
+        if not missing.is_empty():
+            raise ValueError(
+                f"the supplied option lifecycle is missing {missing.height} of "
+                f"{wanted.height} contracts this decision holds "
+                f"(first: {missing.head(3).to_dicts()})"
+            )
+        quote_columns = {"entry_date", "entry_call_mid", "entry_put_mid"}
+        if not quote_columns <= set(decisions.columns):
+            return
+        entries = decisions.select(*keys, "entry_date", "entry_call_mid", "entry_put_mid").join(
+            option_lifecycle.select(*keys, "date", "call_mid", "put_mid"),
+            left_on=[*keys, "entry_date"],
+            right_on=[*keys, "date"],
+            how="inner",
+        )
+        disagreeing = entries.filter(
+            ((pl.col("call_mid") - pl.col("entry_call_mid")).abs() > 1e-10)
+            | ((pl.col("put_mid") - pl.col("entry_put_mid")).abs() > 1e-10)
+        )
+        if not disagreeing.is_empty():
+            raise ValueError(
+                f"the supplied option lifecycle disagrees with this decision's recorded entry "
+                f"quotes on {disagreeing.height} contracts, so it was not built from the files "
+                f"the identity declares (first: {disagreeing.head(3).to_dicts()})"
+            )
+
     def run(
         self,
         *,
@@ -676,6 +718,24 @@ class Strategy:
                     "a supplied option lifecycle must declare the raw files it was built from, "
                     "and they must be the ones this backtest's identity records"
                 )
+            # The declaration above is about the FILES. It says the caller named the right
+            # sources; it cannot say the frame beside it was built from them, because nothing
+            # here reads the frame. An unrelated frame passed with a correct source dictionary
+            # would price this backtest and register under an identity asserting the canonical
+            # lifecycle - the label on the box, checked, and the box never opened.
+            #
+            # The frame's own digest cannot go into `input_identity` to close that. The
+            # identity is fixed when the request is planned, before any caller has loaded a
+            # frame - `plan_backtests` returns the expected hash, an OfficialPopulation is
+            # created from those hashes, and `run` raises if what it registers differs. A field
+            # only computable here would make every planned hash wrong.
+            #
+            # So the frame is checked against something this request already knows
+            # independently: the decision it is backtesting. Every contract must be present,
+            # and the entry-session mids must equal the entry quotes the decision recorded when
+            # it was written. Those quotes come from the contract-return artifact, not from
+            # this frame, so a frame built from other files disagrees with them.
+            self._require_lifecycle_matches_decision(option_lifecycle)
         allocation = spec.get("strategy", {}).get("allocation", {})
         if self.split == "holdout" and allocation.get("method") == "conformal_weighted":
             lock_record = self._active_lock_record()

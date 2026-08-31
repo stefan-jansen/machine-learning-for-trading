@@ -468,6 +468,51 @@ def test_supplied_lifecycle_cannot_drop_the_end_of_a_position(tmp_path: Path) ->
         )
 
 
+def test_a_supplied_lifecycle_is_checked_against_the_decision_not_only_its_source_dict(
+    tmp_path: Path,
+) -> None:
+    """Naming the right files does not establish that the frame beside them came from those files.
+
+    `Strategy.run` compares a hash of the caller's source dictionary against the identity's
+    declared lifecycle digest. That says the caller named the canonical files; nothing in it
+    reads the frame, so an unrelated frame passed alongside a correct dictionary would price
+    the backtest and register under an identity asserting the canonical lifecycle.
+
+    The frame's own digest cannot close this by going into `input_identity`: the identity is
+    fixed when the request is planned, before any frame is loaded, and `run` raises when what it
+    registers differs from the planned hash. So the frame is checked against what the request
+    already knows independently - the decision it is backtesting, whose entry quotes come from
+    the contract-return artifact rather than from this frame.
+    """
+    from case_studies.research.strategy import Strategy
+
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
+    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
+    checker = Strategy._require_lifecycle_matches_decision
+    holder = SimpleNamespace(decision=SimpleNamespace(load=lambda: cohorts))
+
+    # The canonical frame passes.
+    checker(holder, lifecycle)
+
+    # A frame for a contract the decision does not hold.
+    other_contract = lifecycle.with_columns(strike=pl.col("strike") + 5.0)
+    with pytest.raises(ValueError, match="missing 1 of 1 contracts"):
+        checker(holder, other_contract)
+
+    # A frame whose entry session prices the straddle differently from the decision's own
+    # record. Same contract, same dates, different quotes - exactly what a frame built from
+    # other files looks like, and what the source dictionary cannot detect.
+    altered = lifecycle.with_columns(
+        call_mid=pl.when(pl.col("date") == pl.col("date").min())
+        .then(pl.col("call_mid") + 1.0)
+        .otherwise(pl.col("call_mid"))
+    )
+    with pytest.raises(ValueError, match="disagrees with this decision's recorded entry quotes"):
+        checker(holder, altered)
+
+
 def test_typed_contract_rows_match_direct_option_selection(tmp_path: Path) -> None:
     labels_dir = tmp_path / "labels"
     raw_dir = tmp_path / "raw"
