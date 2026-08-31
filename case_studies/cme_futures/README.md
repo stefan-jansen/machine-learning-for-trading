@@ -2,7 +2,7 @@
 
 This case study uses daily Databento data on 30 CME futures products spanning seven sectors (equity indices, treasuries, energy, metals, currencies, agriculture, and livestock) to test whether carry and term-structure signals produce tradeable alpha at a weekly cadence. Futures have a return decomposition that splits into spot and roll components, natural sector groupings that constrain diversification, and inherent leverage that magnifies both signal and friction.
 
-The pipeline runs a long-short carry-ranked strategy with weekly Friday-close decisions and Monday-open execution, trades 30 front-month continuous contracts built with ratio back-adjustment, and prices in commission, bid-ask spread, and roll slippage. The teaching point is that a modest per-product IC — the latent-factor SDF carries the credible cross-sectional signal at +0.034 (HAC 95% CI [+0.006, +0.062], t_HAC = 2.36) — translates into outsized portfolio P&L through magnitude on the top of the cross-section: the cross-stage carrier (GBM + `hrp` allocator + 2% trailing stop) posts a validation Sharpe of **1.236** [+0.397, +2.126]. Its holdout Sharpe is **0.287** [−1.034, +1.638], an interval wide enough to contain both the validation estimate and zero, which is the second teaching point: a two-year window on weekly decisions does not adjudicate a strategy.
+The pipeline runs a long-short carry-ranked strategy with weekly Friday-close decisions and Monday-open execution, trades 30 front-month continuous contracts built with ratio back-adjustment, and prices in commission, bid-ask spread, and roll slippage. Two results sit side by side and belong to different model families. The credible cross-sectional signal is the latent-factor SDF's: IC +0.034 (HAC 95% CI [+0.006, +0.062], t_HAC = 2.36), the only family clearing zero. The strategy the case study ships is a different lineage — GBM with an `hrp` allocator and a 2% trailing stop — and it posts a validation Sharpe of **1.236** [+0.397, +2.126]. The teaching point is that portfolio Sharpe comes from magnitude at the top of the cross-section rather than from average IC, which is also why the family with the best IC is not the family that carries. Its holdout Sharpe is **0.287** [−1.034, +1.638], an interval wide enough to contain both the validation estimate and zero, which is the second teaching point: a two-year window on weekly decisions does not adjudicate a strategy.
 
 ## At a Glance
 
@@ -90,9 +90,16 @@ Validation Sharpe **1.236** [+0.397, +2.126] over 1,286 daily periods (CAGR +19.
 2,355 trades, Sortino 2.04, PSR p = 0.003). On common support the same run reads 1.294.
 
 No deflation figure is quoted. `cohort_metrics` is empty in this registry, so the DSR and
-effective-trials numbers a previous edition reported have nothing behind them, and the selection
-this leader survived - a pool of 1,151 backtests - is not corrected for here. Read the validation
-Sharpe as the maximum of that pool, which is optimistic by construction.
+effective-trials numbers a previous edition reported have nothing behind them, and the selection is
+not corrected for here.
+
+Two distinctions matter when reading 1.236 as a selected maximum. The pool is the 1,140 candidates
+across the signal, allocation and risk-overlay stages; the registry's other 12 backtests are the 11
+cost-sensitivity cells and the holdout itself, neither of which is selected from. And 1.236 is not
+the statistic selection maximised - that is common-support Sharpe, on which this carrier reads 1.294.
+Ranked on their own full windows the pool's maximum is 1.274, a different configuration. So 1.236 is
+the carrier's full-window Sharpe reported after a selection made on a different number, and it is
+optimistic by construction in the ordinary way a pool maximum is.
 
 **Holdout.** The same configuration, refitted through the holdout fold and replayed on 2024-2025:
 Sharpe **0.287** [−1.034, +1.638] over 516 daily periods (CAGR +2.8%, MaxDD −13.3%, 970 trades,
