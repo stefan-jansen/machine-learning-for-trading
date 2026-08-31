@@ -262,7 +262,9 @@ def test_a_holdout_that_replays_a_different_strategy_is_a_different_reason(case_
     resolution = resolve_holdout_self_backtest("etfs", "b_validation_200")
 
     assert not resolution.found
-    assert "none of them both replays" in resolution.reason
+    # The reason distinguishes "registered but not a replay of the selection" from "the
+    # holdout stage was never run", which is the distinction this test exists for.
+    assert "none of them replays that run's strategy" in resolution.reason
     assert "has not been evaluated" not in resolution.reason
 
 

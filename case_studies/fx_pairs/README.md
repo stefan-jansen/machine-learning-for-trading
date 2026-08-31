@@ -34,9 +34,11 @@ The pipeline is a study in hypothesis revision, from short-horizon momentum to m
 | Model Analysis | [`12_model_analysis`](12_model_analysis.ipynb) | -- | Cross-model IC comparison and fold stability diagnostics | Nothing - it reads the registry |
 | Backtest | [`13_backtest`](13_backtest.ipynb) | Ch16 | Long-short daily FX strategy simulation | One backtest run per prediction set and entry scheme; `daily_returns.parquet`, `weights.parquet`, `trades.parquet`, `fills.parquet`, `equity.parquet`, `portfolio_state.parquet`, and `spec.json` under `run_log/backtest/{hash}/` |
 | Portfolio | [`14_portfolio_management`](14_portfolio_management.ipynb) | Ch17 | Allocation methods for the small FX cross-section | One backtest run per allocation method, same artifact layout |
-| Costs | [`15_costs`](15_costs.ipynb) | Ch18 | Spread impact on the selected 21-day carrier | One backtest run per cost level, same artifact layout |
-| Risk | [`16_risk_management`](16_risk_management.ipynb) | Ch19 | Position-level controls compared with the unoverlaid carrier | One backtest run per overlay variant, same artifact layout |
-| Strategy Analysis | [`17_strategy_analysis`](17_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with IC, Sharpe, and cost analysis | `20_strategy_synthesis/output/fx_pairs/fx_pairs_tearsheet.html` and `strategy_assessment.json` (a `tearsheet_predictions.parquet` is staged alongside them and deleted again) |
+| Risk | [`15_risk_management`](15_risk_management.ipynb) | Ch19 | Position-level controls compared with the unoverlaid carrier | One backtest run per overlay variant, same artifact layout |
+| Costs | [`16_costs`](16_costs.ipynb) | Ch18 | Spread impact on the selected carrier, controls included | One backtest run per cost level, same artifact layout |
+| Holdout Predictions | [`17_holdout_predictions`](17_holdout_predictions.ipynb) | Ch16-20 | Refits the validation-selected configuration on the holdout interval | One holdout prediction set at the selected checkpoint |
+| Holdout Backtest | [`18_holdout_backtest`](18_holdout_backtest.ipynb) | Ch16-20 | Replays the selected strategy against those predictions | One holdout backtest run |
+| Strategy Analysis | [`19_strategy_analysis`](19_strategy_analysis.ipynb) | Ch20 | Reads the validation and holdout results back and reports them with interval evidence | Registry rows rather than files: `cohort_metrics` for the candidate cohorts and `backtest_paired_metrics` for the bootstrapped comparisons |
 
 ## Key Results
 
@@ -97,9 +99,11 @@ uv run python case_studies/fx_pairs/11_causal_dml.py
 uv run python case_studies/fx_pairs/12_model_analysis.py
 uv run python case_studies/fx_pairs/13_backtest.py
 uv run python case_studies/fx_pairs/14_portfolio_management.py
-uv run python case_studies/fx_pairs/15_costs.py
-uv run python case_studies/fx_pairs/16_risk_management.py
-uv run python case_studies/fx_pairs/17_strategy_analysis.py
+uv run python case_studies/fx_pairs/15_risk_management.py
+uv run python case_studies/fx_pairs/16_costs.py
+uv run python case_studies/fx_pairs/17_holdout_predictions.py
+uv run python case_studies/fx_pairs/18_holdout_backtest.py
+uv run python case_studies/fx_pairs/19_strategy_analysis.py
 ```
 
 ## Registry Status

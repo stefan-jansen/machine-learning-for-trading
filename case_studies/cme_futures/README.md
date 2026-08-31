@@ -2,7 +2,7 @@
 
 This case study uses daily Databento data on 30 CME futures products spanning seven sectors (equity indices, treasuries, energy, metals, currencies, agriculture, and livestock) to test whether carry and term-structure signals produce tradeable alpha at a weekly cadence. Futures have a return decomposition that splits into spot and roll components, natural sector groupings that constrain diversification, and inherent leverage that magnifies both signal and friction.
 
-The pipeline runs a long-short carry-ranked strategy with weekly Friday-close decisions and Monday-open execution, trades 30 front-month continuous contracts built with ratio back-adjustment, and prices in commission, bid-ask spread, and roll slippage. The teaching point is that a modest per-product IC — the latent-factor SDF carries the credible cross-sectional signal at +0.042 (HAC 95% CI [+0.017, +0.068], t_HAC = 3.25) — translates into outsized portfolio P&L through magnitude on the top of the cross-section: the cross-stage rank-1 lineage (GBM + `score_weighted` top-k=5 allocator + 3.3% trailing-stop) posts a validation Sharpe of **1.264** [+0.345, +2.087] and a holdout Sharpe of **1.142** [−0.186, +2.342].
+The pipeline runs a long-short carry-ranked strategy with weekly Friday-close decisions and Monday-open execution, trades 30 front-month continuous contracts built with ratio back-adjustment, and prices in commission, bid-ask spread, and roll slippage. Two results sit side by side and belong to different model families. The credible cross-sectional signal is the latent-factor SDF's: IC +0.034 (HAC 95% CI [+0.006, +0.062], t_HAC = 2.36), the only family clearing zero. The strategy the case study ships is a different lineage — GBM with an `hrp` allocator and a 2% trailing stop — and it posts a validation Sharpe of **1.236** [+0.397, +2.126]. The teaching point is that portfolio Sharpe comes from magnitude at the top of the cross-section rather than from average IC, which is also why the family with the best IC is not the family that carries. Its holdout Sharpe is **0.287** [−1.034, +1.638], an interval wide enough to contain both the validation estimate and zero, which is the second teaching point: a two-year window on weekly decisions does not adjudicate a strategy.
 
 ## At a Glance
 
@@ -36,9 +36,11 @@ The pipeline runs a long-short carry-ranked strategy with weekly Friday-close de
 | Model Analysis | [`12_model_analysis`](12_model_analysis.ipynb) | Ch11-15 | Cross-model IC comparison and fold stability diagnostics | Nothing - it reads the registry |
 | Backtest | [`13_backtest`](13_backtest.ipynb) | Ch16 | Long-short carry-ranked strategy simulation | One backtest run per prediction set and entry scheme; `daily_returns.parquet`, `weights.parquet`, `trades.parquet`, `fills.parquet`, `equity.parquet`, `portfolio_state.parquet`, and `spec.json` under `run_log/backtest/{hash}/` |
 | Portfolio | [`14_portfolio_management`](14_portfolio_management.ipynb) | Ch17 | Equal-risk, score-weighted, and sector-constrained allocation | One backtest run per allocation method, same artifact layout |
-| Costs | [`15_costs`](15_costs.ipynb) | Ch18 | Commission, spread, and roll slippage impact analysis | One backtest run per cost level, same artifact layout |
-| Risk | [`16_risk_management`](16_risk_management.ipynb) | Ch19 | Position-level risk overlays (stop-loss, trailing stops, time exits) | One backtest run per overlay variant, same artifact layout |
-| Strategy Analysis | [`17_strategy_analysis`](17_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with uncertainty-aware metrics | `results/strategy_assessment.json`, `20_strategy_synthesis/output/cme_futures/cme_futures_tearsheet.html`; fills the registry's `cohort_metrics` and `backtest_paired_metrics` tables, but only when either is missing or empty |
+| Risk | [`15_risk_management`](15_risk_management.ipynb) | Ch19 | Position-level risk overlays (stop-loss, trailing stops, time exits) | One backtest run per overlay variant, same artifact layout |
+| Costs | [`16_costs`](16_costs.ipynb) | Ch18 | Commission, spread, and roll slippage impact analysis | One backtest run per cost level, same artifact layout |
+| Holdout predictions | [`17_holdout_predictions`](17_holdout_predictions.ipynb) | Ch20 | Refits the resolved carrier through the holdout fold and predicts 2024-2025 | One training run under a new identity whose CV declares the holdout fold, and one prediction set at `split='holdout'` |
+| Holdout backtest | [`18_holdout_backtest`](18_holdout_backtest.ipynb) | Ch20 | Replays the carrier's own strategy specification on the holdout prediction set | One backtest run at `stage='holdout'`, same artifact layout |
+| Strategy Analysis | [`19_strategy_analysis`](19_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with uncertainty-aware metrics | `results/strategy_assessment.json`, `20_strategy_synthesis/output/cme_futures/cme_futures_tearsheet.html`; fills the registry's `cohort_metrics` and `backtest_paired_metrics` tables, but only when either is missing or empty |
 
 ## Margin Model
 
@@ -62,15 +64,70 @@ Account sizing: `initial_cash` is **$10M** in `config/setup.yaml`. The 30-produc
 
 ## Key Results
 
-The IC-credible signal and the highest-Sharpe lineage both sit on the 5-day primary label.
+All figures below are read from `run_log/registry.db` as rebuilt on 2026-08-30: 100 training
+runs, 496 validation prediction sets, 1,151 backtests, and one holdout evaluation. An earlier
+edition of this section reported a different lineage, a holdout Sharpe of 1.142 over 511 periods,
+and IC counts of 1,290 - none of which the current registry contains. They described a registry
+that was replaced, and they are not reproduced here.
 
-**Signal quality.** On the 5-day primary label, the latent-factor SDF is the one family whose HAC 95% CI excludes zero on 1,290 daily IC observations: IC +0.042 [+0.017, +0.068] (t_HAC = 3.25, p = 0.001). GBM (leaves_31_mse) is positive at +0.025 [−0.002, +0.053] (t_HAC = 1.80, p = 0.072), but its interval touches zero. On the 21-day variant the SDF again clears — IC +0.070 [+0.029, +0.112] (t_HAC = 3.31, p = 0.001) — while linear (lasso) +0.040 [−0.032, +0.112], GBM −0.004, tabular DL (tabm) −0.009, and deep_learning (lstm_h64) −0.033 straddle or sit below zero. The predictive signal concentrates in the carry-driven cross-section captured by the latent-factor SDF.
+**Signal quality.** The latent-factor SDF is the one family whose HAC 95% CI excludes zero, and it
+does so on both horizons. On the 5-day primary label: IC +0.034 [+0.006, +0.062] (t_HAC = 2.36) over
+1,285 daily observations. On the 21-day variant: IC +0.064 [+0.020, +0.109] (t_HAC = 2.82) over
+1,269. Nothing else clears on either. The best GBM on the primary label is `leaves_15_mae` at +0.021
+[−0.009, +0.050] (t_HAC = 1.39); linear (`lasso_f0.85`) +0.018, deep_learning (`lstm_h64`) +0.010 and
+tabular DL (`tabm_l`) +0.009 all straddle zero, and on the 21-day label GBM (−0.007) and tabular DL
+(−0.003) sit below it. The predictive signal concentrates in the carry-driven cross-section the
+latent-factor SDF captures.
 
-**Strategy-stage performance with CIs.** The cross-stage rank-1 lineage by validation Sharpe is gbm/`leaves_7_huber` on `fwd_ret_5d`: equal-weight long-short top-5 selection at the signal stage, `score_weighted` top-5 allocator at the portfolio stage, and a 3.3% trailing-stop overlay at the risk stage. Validation Sharpe **1.264** [+0.345, +2.087] over 1,290 daily periods (CAGR +35.1%, MaxDD −35.6%, 1,939 trades, Sortino 1.44, PSR p = 0.002). Selection adjustment is read from the fwd_ret_5d label cohort (k = 320 variants across all stages and families): **DSR_ER = 0.038, p = 0.005** — the leader survives deflation at the label scale. Effective-rank corrected trials = 15.6 of nominal 320; expected-max Sharpe under noise = 0.041. The fwd_ret_21d label cohort (k = 330) also survives: DSR_ER = 0.027, p = 0.044.
+**The shipped strategy.** The carrier is resolved by `resolve_solvent_carrier`, which ranks
+candidates on the 1,270 sessions they all price rather than on each one's own window - a raw ranking
+of the Sharpe column names a different family and a different horizon, and rewards whichever
+candidate had the most forgiving span. The carrier is gbm/`leaves_31_mse` on `fwd_ret_5d`, from the
+risk-overlay stage: equal-weight long-short top-5 at the signal stage, an `hrp` allocator with a
+63-bar volatility window at the portfolio stage, and a 2% trailing stop at the risk stage.
 
-**Holdout closure.** The same `gbm/leaves_7_huber/fwd_ret_5d` lineage on the 2024-2025 holdout window: Sharpe **1.142** [−0.19, +2.34] over 511 daily periods (CAGR +35.9%, MaxDD −23.1%, 702 trades, Sortino 1.34, PSR p = 0.049). Paired val→holdout Sharpe diff is −0.103 [−1.68, +1.41] (p = 0.90, straddles zero — no significant val→holdout decay). Strategy vs holdout-window equal-weight benchmark: Sharpe diff +0.364 [−1.43, +2.05] (p = 0.69, straddles zero). The two-year commodity holdout is too short to resolve dispersion either way.
+Validation Sharpe **1.236** [+0.397, +2.126] over 1,286 daily periods (CAGR +19.5%, MaxDD −25.9%,
+2,355 trades, Sortino 2.04, PSR p = 0.003). On common support the same run reads 1.294.
 
-**Friction floor.** The cost-grid sweep runs at 0/1/2/3/5/7/10/15/20/30/50 bps total cost per leg (commission and slippage split evenly, applied symmetrically at entry and exit). Both curves below are allocation-stage combos, measured before the risk overlay. `15_costs.ipynb` sweeps the top allocation-stage combo on the primary label — latent_factors `sdf` × `mvo_ledoit_wolf` — the most cost-sensitive candidate, because MVO rebalances to full mean-variance weights each period: Sharpe 1.112 (0 bps) → 0.785 (5) → 0.444 (10) → 0.166 (15) → −0.131 (20) → −1.948 (50), breaking even near 17 bps. The allocation combo that carries the shipped lineage — gbm/`leaves_7_huber` × `score_weighted` (top-5) — turns over far less and stays positive across the whole grid: Sharpe 0.884 (0 bps) → 0.814 (5) → 0.749 (10) → 0.623 (20) → 0.483 (30) → 0.235 (50). The 3.3% trailing-stop overlay applied at the risk stage lifts this lineage's validation Sharpe to 1.264 but is not part of the cost sweep. At CME-typical friction (1–5 bps per leg for liquid contracts) both hold well above zero; the sdf/MVO allocation-stage leader is the one that erodes at institutional 10–20 bps costs, while the concentrated `score_weighted` lineage does not. The binding constraint on the shipped strategy is signal stability across regimes, not cost.
+No deflation figure is quoted. `cohort_metrics` is empty in this registry, so the DSR and
+effective-trials numbers a previous edition reported have nothing behind them, and the selection is
+not corrected for here.
+
+Two distinctions matter when reading 1.236 as a selected maximum. The pool is the 1,140 candidates
+across the signal, allocation and risk-overlay stages; the registry's other 12 backtests are the 11
+cost-sensitivity cells and the holdout itself, neither of which is selected from. And 1.236 is not
+the statistic selection maximised - that is common-support Sharpe, on which this carrier reads 1.294.
+Ranked on their own full windows the pool's maximum is 1.274, a different configuration. So 1.236 is
+the carrier's full-window Sharpe reported after a selection made on a different number, and it is
+optimistic by construction in the ordinary way a pool maximum is.
+
+**Holdout.** The same configuration, refitted through the holdout fold and replayed on 2024-2025:
+Sharpe **0.287** [−1.034, +1.638] over 516 daily periods (CAGR +2.8%, MaxDD −13.3%, 970 trades,
+Sortino 0.42, PSR p = 0.333). The refit is genuine rather than a validation-fitted model scored on a
+later window - the holdout training run carries its own identity, `365d0ce706e2`, and its own CV
+declares the holdout fold.
+
+**The honest reading is that this establishes very little, in either direction.** The point estimate
+falls from 1.236 to 0.287, which invites a decay story, but the two intervals overlap across almost
+their whole length: validation spans [+0.397, +2.126] and the holdout [−1.034, +1.638]. A 516-session
+window on a weekly rebalance carries too few independent decisions to separate a strategy that
+decayed from one that had two ordinary years, and the holdout interval contains both the validation
+estimate and zero. What the holdout does rule out is the one thing it exists for: no choice in this
+case study was made on this period.
+
+**Friction floor.** One curve, not two. `16_costs.ipynb` sweeps the shipped carrier including its
+risk overlay, where a previous edition swept two pre-overlay allocation-stage combinations that are
+not what the case study reports. Total cost per leg, commission and slippage split evenly and applied
+symmetrically at entry and exit:
+
+| bps | 0 | 1 | 2 | 3 | 5 | 7 | 10 | 15 | 20 | 30 | 50 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| Sharpe | 1.499 | 1.415 | 1.341 | 1.285 | 1.182 | 1.043 | 0.857 | 0.549 | 0.227 | −0.390 | −1.582 |
+
+Break-even sits between 20 and 30 bps per leg. At CME-typical friction for liquid contracts, 1-5 bps,
+the strategy retains most of its frictionless Sharpe. The zero-cost figure exceeds the carrier's own
+registered 1.236 because the carrier's run carries `setup.yaml`'s declared friction and the 0 bps
+cell removes it. Cost is not the binding constraint on this strategy; the holdout interval is.
 
 ## Running
 
@@ -92,9 +149,11 @@ uv run python case_studies/cme_futures/11_causal_dml.py
 uv run python case_studies/cme_futures/12_model_analysis.py
 uv run python case_studies/cme_futures/13_backtest.py
 uv run python case_studies/cme_futures/14_portfolio_management.py
-uv run python case_studies/cme_futures/15_costs.py
-uv run python case_studies/cme_futures/16_risk_management.py
-uv run python case_studies/cme_futures/17_strategy_analysis.py
+uv run python case_studies/cme_futures/15_risk_management.py
+uv run python case_studies/cme_futures/16_costs.py
+uv run python case_studies/cme_futures/17_holdout_predictions.py
+uv run python case_studies/cme_futures/18_holdout_backtest.py
+uv run python case_studies/cme_futures/19_strategy_analysis.py
 ```
 
 ## Run Log

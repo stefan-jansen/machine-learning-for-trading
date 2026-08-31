@@ -411,7 +411,7 @@ show_with_alt(
 # charged here, which is the conservative end of the assumption.
 #
 # This data carries no bid and no ask, only what traded, so the spread cannot be measured from it.
-# The declared assumption is what gets charged, and `15_costs` re-runs the strategy under harsher
+# The declared assumption is what gets charged, and `16_costs` re-runs the strategy under harsher
 # ones to see how much the answer depends on it. Because the assumption has only the two levels the
 # configuration declares - one for the dollar pairs, one for the crosses - the cost across this
 # universe is two numbers rather than a curve, and they are printed rather than drawn.

@@ -323,7 +323,9 @@ def preview_prediction_candidates(
     return candidates
 
 
-def _preview_traded_backtests(study: Study, label: str) -> pl.DataFrame:
+def _preview_traded_backtests(
+    study: Study, label: str, stages: tuple[str, ...] = ("signal", "allocation")
+) -> pl.DataFrame:
     """This workspace's own baseline and allocation results for one label, minus the flat ones.
 
     A book that never opened a position books a return of exactly zero on every session, so it
@@ -334,7 +336,7 @@ def _preview_traded_backtests(study: Study, label: str) -> pl.DataFrame:
 
     Measured: a reduced `conformal_weighted` run has too little history to calibrate a width, so
     it holds nothing for the whole span and registers 0 trades. Ranked on Sharpe it won its
-    label, every overlay of it was identical to it in every digit, and `16_risk_management`
+    label, every overlay of it was identical to it in every digit, and `15_risk_management`
     raised the guard that exists to catch a control the engine never installed - which is a true
     statement about a book with no positions and a false one about the engine.
     """
@@ -342,47 +344,11 @@ def _preview_traded_backtests(study: Study, label: str) -> pl.DataFrame:
         (pl.col("label") == label)
         & (pl.col("split") == "validation")
         & (pl.col("execution_tier") == "preview")
-        & pl.col("stage").is_in(["signal", "allocation"])
+        & pl.col("stage").is_in(list(stages))
         & pl.col("complete")
         & pl.col("sharpe").is_not_null()
         & (pl.col("num_trades") > 0)
     )
-
-
-def candidate_set_supersedes(study: Study, *, name: str, declared: str | None) -> str | None:
-    """Whether a declared candidate-set generation may be offered to ``CandidateSet.create``.
-
-    The same decision :func:`case_studies.research.population_supersedes` makes for an official
-    population, applied to a candidate set, and it exists because the declaration is committed
-    source that has to be right in three situations the notebook cannot tell apart:
-
-    - **A clean clone.** ``run_log/`` is gitignored, so a reader starts with an empty registry -
-      often with no ``candidate_sets`` table at all. ``create`` refuses a first generation that
-      claims to supersede something, so the declared hash is withheld and the reader's run
-      publishes generation one. This is the ordinary case for anyone who is not the author.
-    - **The re-run.** The generation in force is the one this declaration produced, so
-      ``current.supersedes == declared`` and offering the hash resolves to the set already
-      published rather than writing a new one.
-    - **The refit.** The declaration names the tip itself, and offering it publishes the next
-      generation over that tip.
-
-    Anything else is withheld, and ``create`` then refuses and names the hash it requires, which
-    is a better answer than this function guessing.
-    """
-    from case_studies.research import CandidateSet
-
-    if not declared:
-        return None
-    try:
-        current = CandidateSet.one(study, name=name)
-    except (ValueError, KeyError, sqlite3.OperationalError):
-        # No generation under this name, or no table at all: `one` raises `ValueError` when the
-        # name resolves to other than exactly one head, `open` raises `KeyError` for a hash the
-        # table does not hold, and a clean clone has no `candidate_sets` table for either to read.
-        return None
-    if declared in (current.supersedes, current.hash):
-        return declared
-    return None
 
 
 def allocation_pool(study: Study, *, label: str, canonical: bool) -> list[str]:
@@ -392,7 +358,7 @@ def allocation_pool(study: Study, *, label: str, canonical: bool) -> list[str]:
     frozen set - a candidate set is canonical, and `CandidateSet.create` refuses a preview
     member - so it is the baselines and allocation results this workspace produced.
 
-    `16_risk_management` needs the pool as well as the winner: it pairs each overlay against
+    `15_risk_management` needs the pool as well as the winner: it pairs each overlay against
     the unprotected result it was run over, and a paired difference taken against a result from
     another generation is a difference between two studies.
     """
@@ -410,8 +376,45 @@ def allocation_pool(study: Study, *, label: str, canonical: bool) -> list[str]:
     return rows.get_column("backtest_hash").to_list()
 
 
+def selected_final_result(study: Study, *, label: str, canonical: bool):
+    """The configuration `16_costs` prices, for one label: the winner out of risk management.
+
+    The funnel is sequential, so cost sensitivity belongs on the configuration the stage before
+    it selected - which is the risk stage, not the allocation stage. Reading the allocation
+    winner instead prices a configuration the case study does not ship whenever an overlay
+    improves on the unprotected book, and it does so silently: cost rows are excluded from the
+    selection pool, so nothing downstream contradicts the ladder. Measured on `cme_futures`,
+    where the two differ - pre-overlay winner at Sharpe 1.209 against post-risk rank-1 at 1.274.
+
+    `crypto-final-validation-{label}` is the set `15_risk_management` freezes, and it holds the
+    baseline, the allocation results and the overlays together, so its best member is the
+    configuration that survives the whole funnel. **An unprotected book is a legitimate winner**:
+    the set admits the no-overlay results too, and a label whose best member carries no risk
+    block is a label where no control helped, not a label that failed.
+
+    A preview run has no frozen set. Its equivalent is the results its own 13, 14 and 15 wrote
+    into this workspace, ranked the same way and tie-broken on the same identity.
+    """
+    from case_studies.research import CandidateSet, Result
+
+    if canonical:
+        return CandidateSet.one(
+            study, name=f"crypto-final-validation-{label}"
+        ).best_validation_sharpe()
+    rows = _preview_traded_backtests(
+        study, label, stages=("signal", "allocation", "risk_overlay")
+    ).sort("sharpe", "backtest_hash", descending=[True, False])
+    if rows.is_empty():
+        raise RuntimeError(
+            f"no preview baseline, allocation or overlay backtest for {label} traded in this "
+            "workspace; 13, 14 and 15 have to run in it first, and at least one of their "
+            "results has to open a position"
+        )
+    return Result.open(study, rows.item(0, "backtest_hash"), include_preview=True)
+
+
 def selected_allocation_result(study: Study, *, label: str, canonical: bool):
-    """The configuration `15_costs` and `16_risk_management` develop, for one label.
+    """The configuration `15_risk_management` puts its overlays on, for one label.
 
     On a canonical run it is the highest validation Sharpe in `crypto-signal-allocation-{label}`,
     read back through the frozen set rather than re-queried. The set is immutable and a query is

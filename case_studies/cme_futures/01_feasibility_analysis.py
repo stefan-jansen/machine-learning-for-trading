@@ -659,7 +659,7 @@ print(
 # capture, and no model would fix that. Section B.5 is the measurement that would show it.
 #
 # The other ways this design can fail are strategy outcomes, not properties of the data, and
-# they are measured where the backtests are. `17_strategy_analysis` asks whether the validation
+# they are measured where the backtests are. `19_strategy_analysis` asks whether the validation
 # Sharpe ratio's confidence interval clears zero, and whether the holdout difference against an
 # equally weighted portfolio of the same products falls entirely below it.
 #

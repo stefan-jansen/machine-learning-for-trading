@@ -49,7 +49,7 @@
 #
 # **What it writes**: one `stage='risk_overlay'` backtest per label and declared control, and one
 # candidate set per label spanning all three stages, which
-# [`17_strategy_analysis`](17_strategy_analysis.ipynb) selects the final configuration from.
+# [`19_strategy_analysis`](19_strategy_analysis.ipynb) selects the final configuration from.
 
 # %%
 """Run the declared risk-overlay grid on the surviving crypto perpetuals configuration."""
@@ -62,10 +62,15 @@ import polars as pl
 from case_studies.crypto_perps_funding.research_workflow import (
     ALL_LABELS,
     allocation_pool,
-    candidate_set_supersedes,
     selected_allocation_result,
 )
-from case_studies.research import Result, open_study, population_supersedes, run_backtests
+from case_studies.research import (
+    Result,
+    candidate_set_supersedes,
+    open_study,
+    population_supersedes,
+    run_backtests,
+)
 from case_studies.research.strategy import strategy_warmup_periods
 from case_studies.utils.backtest_loaders import load_backtest_prices_for
 from case_studies.utils.strategy_analysis import rank_returns_on_common_support
@@ -81,23 +86,12 @@ LABELS: list[str] = []
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 POPULATION_SUFFIX = "v2"
-SUPERSEDES: dict[str, str] = {
-    # The four final validation sets this run replaces. Their membership moved because the
-    # grid the admission rule is applied to is now the predecessor set's members plus this
-    # run's own overlays, where it used to be every signal, allocation and risk_overlay row
-    # the registry holds for the label. A superseded generation's rows are immutable and
-    # still complete, so they passed the admission and entered a set meant to be this
-    # generation's.
-    #
-    # Recorded here rather than passed at run time: `supersedes` sits inside the hashed
-    # snapshot, so a re-run that declares nothing computes a different hash from the row on
-    # record and is refused (ml4t/agent-workspace#879). A set whose members did not move
-    # resolves by hash and ignores the declaration.
-    "crypto-final-validation-fwd_dir_8h": "e6fdadbb6f0b",
-    "crypto-final-validation-fwd_dir_8h_3c": "7cd1b20aa8c8",
-    "crypto-final-validation-fwd_ret_24h": "9b396032bd0c",
-    "crypto-final-validation-fwd_ret_8h": "2f952b3e3c11",
-}
+# Left empty, and it stays empty. The registry was reset for the stage-04 holdout rebuild, so
+# every name below is published at generation one and there is nothing to supersede. A
+# declaration is only needed when a re-run changes an existing name's membership: the refusal
+# prints the name and the hash, and it is resolved through the shared resolver rather than
+# offered straight, because a reader's clean clone has no generation for it to replace.
+SUPERSEDES: dict[str, str] = {}
 
 # %%
 study = open_study(
@@ -121,9 +115,9 @@ CANONICAL_RUN = EXECUTION_TIER == "canonical" and not WORKSPACE
 # year of data. The question is whether a control improves the configuration the case study
 # already arrived at, not which control looks best somewhere in the grid.
 #
-# The set read here is the same one [`15_costs`](15_costs.ipynb) read, and this notebook is not
-# downstream of that one - cost sensitivity selects nothing, so both stages hang off the
-# allocation result independently.
+# This is the stage that reads the allocation set. [`16_costs`](16_costs.ipynb) is downstream of
+# it rather than beside it: cost sensitivity prices the configuration that survives the whole
+# funnel, so it reads the set frozen at the end of this notebook, not the one read here.
 
 # %%
 chosen_by_label = {
@@ -585,8 +579,8 @@ fig.update_layout(
 show_plotly_with_alt(
     fig,
     "Scatter plot of the change in annualized validation Sharpe against the change in maximum "
-    "drawdown, one point per label and declared risk control coloured by control type, with dashed lines through the "
-    "origin marking the no-overlay result. Points spread on both sides of the horizontal line, "
+    "drawdown, one point per label and declared risk control coloured by control type, with "
+    "dashed lines through the origin marking the no-overlay result. Points spread on both sides of the horizontal line, "
     "so the controls do not separate from no overlay on Sharpe.",
 )
 
@@ -594,7 +588,7 @@ show_plotly_with_alt(
 # ## 5. The set the final choice is made from
 #
 # One candidate set per label spanning all three stages: the equal-weight baseline, the allocation
-# results and the overlay results. [`17_strategy_analysis`](17_strategy_analysis.ipynb) selects one
+# results and the overlay results. [`19_strategy_analysis`](19_strategy_analysis.ipynb) selects one
 # configuration from it, so no overlay is eligible only by being an overlay - a label where no
 # control improved anything selects the configuration it already had.
 #
@@ -605,7 +599,7 @@ show_plotly_with_alt(
 # what it did trade would otherwise compete for the final selection.
 #
 # `SUPERSEDES` names the generation of each set this run replaces, which the freeze refuses to do
-# implicitly. `17_strategy_analysis` resolves these four sets by name, so two live generations of
+# implicitly. `19_strategy_analysis` resolves these four sets by name, so two live generations of
 # one name would leave it unable to say which comparison a result came from. It defaults to empty,
 # because a first run has nothing to replace and a set whose members are unchanged returns the
 # existing one without consulting it. Pass it only for a re-run that admits different members;
@@ -673,5 +667,6 @@ for label in labels:
 # nowhere for this case study, so the whole regime-control family is untested here. And every
 # number is measured on the validation folds at the declared cost schedule.
 #
-# **Next**: [`17_strategy_analysis`](17_strategy_analysis.ipynb) selects one configuration from
+# **Next**: [`16_costs`](16_costs.ipynb) prices the winner this stage names, and then
+# [`19_strategy_analysis`](19_strategy_analysis.ipynb) selects one configuration from
 # the set this notebook froze and reports what it did.

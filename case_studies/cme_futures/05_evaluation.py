@@ -339,8 +339,10 @@ display(
 # Every value it emits is out of sample wherever it is read.
 #
 # So it belongs with the invariants, and putting it there is not a formality - it is what
-# subjects the replication to the assertion below. The five copies of a feature computed
-# once have to agree, and if they ever stop agreeing this cell is what says so.
+# subjects the replication to the assertion below. The copies of a feature computed once
+# have to agree, and if they ever stop agreeing this cell is what says so. The artifact now
+# also carries a holdout period, which is the same walk continued past the boundary rather
+# than a sixth copy; it is checked against the others on the sessions they share.
 
 # %%
 FITTED_PREFIXES = ("hmm_",)
@@ -353,12 +355,43 @@ invariant_cols = [c for c in temporal_feature_cols if not c.startswith(FITTED_PR
 fitted_cols = [c for c in temporal_feature_cols if c.startswith(FITTED_PREFIXES)]
 
 folds = sorted(temporal["fold"].unique().to_list())
-_reference = temporal.filter(pl.col("fold") == folds[0]).select([*JOIN_COLS, *invariant_cols])
-for fold_id in folds[1:]:
+# The holdout period is the one the artifact carries that the walk-forward spec does not.
+# It holds the same history as the validation periods plus a forecast tail across the
+# holdout, so it agrees with them everywhere they overlap and has strictly more rows. A
+# plain frame comparison against it therefore fails on the row count alone, which says
+# nothing about whether the copies agree.
+_validation_folds = [f for f in folds if f in {int(s["fold"]) for s in splits}]
+_holdout_folds = [f for f in folds if f not in _validation_folds]
+assert len(_holdout_folds) <= 1, (
+    f"more than one period is outside the walk-forward spec: {_holdout_folds}"
+)
+
+_reference = temporal.filter(pl.col("fold") == _validation_folds[0]).select(
+    [*JOIN_COLS, *invariant_cols]
+)
+for fold_id in _validation_folds[1:]:
     other = temporal.filter(pl.col("fold") == fold_id).select([*JOIN_COLS, *invariant_cols])
     assert _reference.sort(JOIN_COLS).equals(other.sort(JOIN_COLS)), (
-        f"fold {fold_id} disagrees with fold {folds[0]} on {invariant_cols}, "
+        f"fold {fold_id} disagrees with fold {_validation_folds[0]} on {invariant_cols}, "
         "which this notebook reads once because they carry no fitted parameter"
+    )
+
+# The holdout period, checked on the sessions it shares with them rather than exempted.
+for fold_id in _holdout_folds:
+    shared = (
+        temporal.filter((pl.col("fold") == fold_id) & (pl.col(DATE_COL) < HOLDOUT_START))
+        .select([*JOIN_COLS, *invariant_cols])
+        .sort(JOIN_COLS)
+    )
+    assert _reference.filter(pl.col(DATE_COL) < HOLDOUT_START).sort(JOIN_COLS).equals(shared), (
+        f"period {fold_id} carries the holdout vintage and disagrees with period "
+        f"{_validation_folds[0]} on {invariant_cols} before {HOLDOUT_START}, where the two "
+        "are the same walk and must be identical"
+    )
+    _tail = temporal.filter((pl.col("fold") == fold_id) & (pl.col(DATE_COL) >= HOLDOUT_START))
+    print(
+        f"Period {fold_id} is the holdout vintage: it agrees with the walk-forward periods "
+        f"on every session before {HOLDOUT_START} and adds {len(_tail):,} rows after it."
     )
 
 val_windows = {int(s["fold"]): (_as_date(s["val_start"]), _as_date(s["val_end"])) for s in splits}

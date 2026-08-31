@@ -1329,15 +1329,31 @@ case_studies/cme_futures/14_portfolio_management:
     PREVIEW_LABELS: [fwd_ret_21d]
     PREVIEW_MAX_BASELINE_ROWS: 2
   timeout: 600
-case_studies/cme_futures/15_costs:
+case_studies/cme_futures/15_risk_management:
   parameters:
     PREVIEW_LABELS: [fwd_ret_21d]
   timeout: 600
-case_studies/cme_futures/16_risk_management:
+case_studies/cme_futures/16_costs:
   parameters:
     PREVIEW_LABELS: [fwd_ret_21d]
   timeout: 600
-case_studies/cme_futures/17_strategy_analysis:
+case_studies/cme_futures/17_holdout_predictions:
+  # Canonical, not preview. `reconstruct_locked_model_request` refuses any spec whose
+  # execution_tier is not canonical, and the harness injects EXECUTION_TIER="preview" for
+  # any notebook that declares it. 18 follows it, because a holdout resolved in one tier
+  # and read in another is two registries.
+  research_preview: false
+  # Refits the selected configuration over the holdout fold - one training run, no sweep.
+  timeout: 900
+  skip: true
+  skip_reason: "Refuses before fitting, at `resolve_solvent_carrier`: 'No validation rank-1 candidate for cme_futures (label_filter=None)', measured at cell 6. The preview fixture registers no validation backtest for this case study, so there is no carrier to refit, and the refusal is one step earlier than the etfs pair's - etfs reaches `build_holdout_training_spec` and refuses on the missing resolved computation block, cme does not get that far. Both are the same shortfall in the fixture rather than two problems. Remove this skip when the fixture seeds a validation backtest population with a resolvable rank-1, not before: a fabricated carrier would let the job report a holdout refit of a configuration nothing selected."
+case_studies/cme_futures/18_holdout_backtest:
+  research_preview: false
+  # One backtest over the holdout window.
+  timeout: 900
+  skip: true
+  skip_reason: "Reads the holdout prediction set 17_holdout_predictions registers and resolves the same carrier to find it, so it refuses at `resolve_solvent_carrier` for the same reason and one step earlier than 17 does. Remove this skip together with 17's."
+case_studies/cme_futures/19_strategy_analysis:
   parameters:
     PREVIEW_LABELS: [fwd_ret_21d]
   timeout: 600
@@ -1417,19 +1433,25 @@ case_studies/crypto_perps_funding/14_portfolio_management:
     LABELS:
     - fwd_ret_8h
   timeout: 300
-case_studies/crypto_perps_funding/15_costs:
-  parameters:
-    LABELS:
-    - fwd_ret_8h
-  timeout: 600
-case_studies/crypto_perps_funding/16_risk_management:
+case_studies/crypto_perps_funding/15_risk_management:
   parameters:
     # MAX_RISK_VARIANTS went the same way as MAX_SYMBOLS: the overlay grid is declared in
     # config/setup.yaml under backtest.risk and read from there, so no parameter trims it.
     LABELS:
     - fwd_ret_8h
   timeout: 600
-case_studies/crypto_perps_funding/17_strategy_analysis:
+case_studies/crypto_perps_funding/16_costs:
+  parameters:
+    LABELS:
+    - fwd_ret_8h
+  timeout: 600
+case_studies/crypto_perps_funding/17_holdout_predictions:
+  skip: true
+  skip_reason: "Refits the funnel winner on the holdout fold, so it needs a registry carrying the validation sweep - resolve_solvent_carrier has no candidate to resolve against the CI fixture. Compounding it, the seeded grid strides weekdays, so an 8-hourly holdout window is unrepresentable in the fixture at all (ml4t/agent-workspace#960). No parameter reduces either: there is nothing to refit until the sweep has run."
+case_studies/crypto_perps_funding/18_holdout_backtest:
+  skip: true
+  skip_reason: "Trades 17_holdout_predictions' prediction set and raises by design when it is absent, so it inherits that notebook's prerequisite - a registry carrying the validation sweep and the holdout refit, neither of which the test data builds."
+case_studies/crypto_perps_funding/19_strategy_analysis:
   skip: true
   skip_reason: "Signed pre-holdout freeze pins an exact production registry snapshot (whole-file md5 + production-scale table counts, e.g. backtest_runs: 698) that a reduced CI fixture cannot reproduce by construction - same class as us_firm_characteristics/08a_ipca, not a fixable reduction."
 case_studies/etfs/01_feasibility_analysis:
@@ -1762,18 +1784,36 @@ case_studies/fx_pairs/14_portfolio_management:
     TOP_K: 2
     TOP_N_CONFIGS: 1
   timeout: 900
-case_studies/fx_pairs/15_costs:
-  research_preview: false
-  parameters:
-    POPULATION_NAME: fx_pairs:preflight
-    MAX_COST_POINTS: 1
-  timeout: 900
-case_studies/fx_pairs/16_risk_management:
+case_studies/fx_pairs/15_risk_management:
   research_preview: false
   parameters:
     POPULATION_NAME: fx_pairs:preflight
     MAX_RISK_VARIANTS: 3
   timeout: 900
+case_studies/fx_pairs/16_costs:
+  research_preview: false
+  parameters:
+    POPULATION_NAME: fx_pairs:preflight
+    MAX_COST_POINTS: 1
+  timeout: 900
+case_studies/fx_pairs/17_holdout_predictions:
+  skip: true
+  skip_reason: "Refits the canonical validation selection on the holdout interval. The fixture
+    registry carries no fx_pairs:holdout-candidates set, and a seeded one would make the holdout
+    lineage resolve against a selection no validation run produced. The notebook takes no
+    reduction that would change this: the configuration it refits is whichever one selection
+    chose, and there is only ever one."
+  timeout: 300
+case_studies/fx_pairs/18_holdout_backtest:
+  skip: true
+  skip_reason: "Replays the selected strategy against 17_holdout_predictions' output, so it is
+    skipped for the same reason and would fail on the missing holdout prediction first."
+  timeout: 300
+case_studies/fx_pairs/19_strategy_analysis:
+  skip: true
+  skip_reason: "Reads back the holdout lineage 17 and 18 produce; with those skipped there is
+    nothing for it to resolve."
+  timeout: 300
 case_studies/nasdaq100_microstructure/01_feasibility_analysis:
   parameters:
     MAX_SYMBOLS: 5
@@ -2117,8 +2157,12 @@ case_studies/sp500_equity_option_analytics/11e_supervised_autoencoder:
   timeout: 900
 
 case_studies/sp500_equity_option_analytics/12_causal_dml:
-  # CV_FOLDS was renamed N_FOLDS: the notebook now separates the request from the resolved
-  # value, so the parameter and the number the analysis runs on no longer share a name.
+  # N_FOLDS is back to CV_FOLDS. The notebook resolves its population through the shared causal
+  # request now, and the request's four preview fields are named for the reductions they become,
+  # so the parameter carries the resolver's name rather than the notebook's own. The harness sets
+  # EXECUTION_TIER and WORKSPACE itself, which makes every run here a preview, and a preview
+  # causal request must declare all four - papermill only warns on a parameter the notebook does
+  # not read, so a stale name here fails inside the resolver rather than at injection.
   # N_PLACEBO was 5, below the ten successful draws run_dml_analysis assembles a refutation
   # from at all, so it published none and this notebook's guard against a missing refutation
   # fired on every CI run. The bar is not that a refutation is computed but that a verdict below
@@ -2128,9 +2172,9 @@ case_studies/sp500_equity_option_analytics/12_causal_dml:
   # draws above it are a chosen margin, because a draw can fail and drop the survivors below the
   # bar. Measured at 14s against a 300s cap.
   parameters:
+    CV_FOLDS: 2
     MAX_SAMPLES: 3000
     MAX_SYMBOLS: 5
-    N_FOLDS: 2
     N_PLACEBO: 25
   timeout: 300
 case_studies/sp500_equity_option_analytics/13_model_analysis:

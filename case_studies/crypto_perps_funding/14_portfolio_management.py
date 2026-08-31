@@ -52,7 +52,7 @@
 #
 # **What it writes**: one `stage='allocation'` backtest per surviving prediction set, entry rule
 # and allocator, and one candidate set per label holding the baseline and the allocation results
-# together. [`15_costs`](15_costs.ipynb) and [`16_risk_management`](16_risk_management.ipynb)
+# together. [`15_risk_management`](15_risk_management.ipynb) and [`16_costs`](16_costs.ipynb)
 # read those.
 
 # %%
@@ -63,11 +63,11 @@ import polars as pl
 
 from case_studies.crypto_perps_funding.research_workflow import (
     ALL_LABELS,
-    candidate_set_supersedes,
 )
 from case_studies.research import (
     CandidateSet,
     Result,
+    candidate_set_supersedes,
     open_study,
     population_supersedes,
     run_backtests,
@@ -89,54 +89,23 @@ LABELS: list[str] = []
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 POPULATION_SUFFIX = "v1"
-SUPERSEDES: dict[str, str] = {
-    # The four per-label candidate sets this run replaces. Their membership moved for a
-    # different reason from the allocation populations below: the grid the admission rule is
-    # applied to is now the signal set's members plus this run's own executions, where it used
-    # to be every signal and allocation row the registry holds. A superseded generation's rows
-    # are immutable and still complete, so they passed the `traded_folds` admission and entered
-    # a set that is meant to be this generation's.
-    "crypto-signal-allocation-fwd_dir_8h": "51d909e265df",
-    "crypto-signal-allocation-fwd_dir_8h_3c": "b6b86d2e8f47",
-    "crypto-signal-allocation-fwd_ret_24h": "3b1787742734",
-    "crypto-signal-allocation-fwd_ret_8h": "ce6d5c0db04f",
-}
+# Left empty, and it stays empty. The registry was reset for the stage-04 holdout rebuild, so
+# every name below is published at generation one and there is nothing to supersede. A
+# declaration is only needed when a re-run changes an existing name's membership: the refusal
+# prints the name and the hash, and it is resolved through the shared resolver rather than
+# offered straight, because a reader's clean clone has no generation for it to replace.
+SUPERSEDES: dict[str, str] = {}
 # Per-allocation-population lineage, keyed by the population's own name. `SUPERSEDES` above is
 # keyed by label and covers the one per-label set frozen at the end; this stage declares one
 # population per (label, scheme, allocator), so a single label key cannot name them. An entry
 # for a name whose members did not change is ignored, so the whole current generation can be
 # passed at once rather than discovered one refusal at a time.
-SUPERSEDES_ALLOCATION: dict[str, str] = {
-    # The eighteen `fwd_dir_8h_3c` populations this run replaces, and only those.
-    # Ranking the survivors inside `crypto-signal-fwd_dir_8h_3c` rather than over the whole
-    # registry swapped one member of that label's shortlist - 19d842b00885 out, 9186e7d609a0
-    # in - so every population built on it has a different member list. The other three
-    # labels' shortlists are identical either way and their populations are untouched.
-    #
-    # These are recorded here rather than passed at run time because `supersedes` sits inside
-    # the hashed snapshot: a second generation's hash depends on which generation it replaced,
-    # so a re-run that passes nothing computes a different hash from the row on record and is
-    # refused. That is ml4t/agent-workspace#879, and a lineage held only in a shell command is
-    # how a notebook stops being able to reproduce what it published.
-    "crypto-allocation-fwd_dir_8h_3c-ew_top3-conformal_weighted-v1": "25d807177ac3",
-    "crypto-allocation-fwd_dir_8h_3c-ew_top3-hrp-v1": "e449e80fcae7",
-    "crypto-allocation-fwd_dir_8h_3c-ew_top3-inverse_vol-v1": "93b5fc280b3e",
-    "crypto-allocation-fwd_dir_8h_3c-ew_top3-mvo_ledoit_wolf-v1": "1282799a1328",
-    "crypto-allocation-fwd_dir_8h_3c-ew_top3-risk_parity-v1": "a538d029f34a",
-    "crypto-allocation-fwd_dir_8h_3c-ew_top3-score_weighted-v1": "3083305f8e79",
-    "crypto-allocation-fwd_dir_8h_3c-ew_top5-conformal_weighted-v1": "22532018bf40",
-    "crypto-allocation-fwd_dir_8h_3c-ew_top5-hrp-v1": "96a828520f7f",
-    "crypto-allocation-fwd_dir_8h_3c-ew_top5-inverse_vol-v1": "802a1abee1d1",
-    "crypto-allocation-fwd_dir_8h_3c-ew_top5-mvo_ledoit_wolf-v1": "dadf8ab26a68",
-    "crypto-allocation-fwd_dir_8h_3c-ew_top5-risk_parity-v1": "48cef804e42e",
-    "crypto-allocation-fwd_dir_8h_3c-ew_top5-score_weighted-v1": "014e86d945b7",
-    "crypto-allocation-fwd_dir_8h_3c-quintile_ls-conformal_weighted-v1": "2f4a454f4940",
-    "crypto-allocation-fwd_dir_8h_3c-quintile_ls-hrp-v1": "2bd913a5c4f3",
-    "crypto-allocation-fwd_dir_8h_3c-quintile_ls-inverse_vol-v1": "11c6a88e5e59",
-    "crypto-allocation-fwd_dir_8h_3c-quintile_ls-mvo_ledoit_wolf-v1": "a6804cae114c",
-    "crypto-allocation-fwd_dir_8h_3c-quintile_ls-risk_parity-v1": "4d9e3a96fb99",
-    "crypto-allocation-fwd_dir_8h_3c-quintile_ls-score_weighted-v1": "a6f94f642fd3",
-}
+# Left empty, and it stays empty. The registry was reset for the stage-04 holdout rebuild, so
+# every name below is published at generation one and there is nothing to supersede. A
+# declaration is only needed when a re-run changes an existing name's membership: the refusal
+# prints the name and the hash, and it is resolved through the shared resolver rather than
+# offered straight, because a reader's clean clone has no generation for it to replace.
+SUPERSEDES_ALLOCATION: dict[str, str] = {}
 
 # %%
 study = open_study(
@@ -625,8 +594,8 @@ show_plotly_with_alt(
 # A set is identified by its members, so a re-run that admits the same results returns the set
 # that already exists. A re-run that admits different ones - because something upstream was
 # corrected, or because the admission rule changed - is a second generation, and it has to name
-# the generation it replaces in `SUPERSEDES`. That is not ceremony: `15_costs`,
-# `16_risk_management` and `17_strategy_analysis` all resolve this set by name, so two live
+# the generation it replaces in `SUPERSEDES`. That is not ceremony: `15_risk_management` and
+# `19_strategy_analysis` both resolve this set by name, so two live
 # generations of one name would leave them unable to say which comparison a result came from.
 # The error raised on a changed set names the predecessor hash to pass.
 
@@ -707,8 +676,9 @@ for label in labels:
 # would be another search axis, and adding it would widen the very search the funnel narrows.
 # Costs are the flat declared schedule, which sizing interacts with directly, since an allocator
 # that spreads capital more evenly turns over more of the book at each rebalance;
-# [`15_costs`](15_costs.ipynb) varies that assumption. And every number is measured on the
-# validation folds.
+# [`16_costs`](16_costs.ipynb) varies that assumption at the end of the funnel. And every number
+# is measured on the validation folds.
 #
-# **Next**: [`15_costs`](15_costs.ipynb) holds the surviving configuration fixed and varies what
-# it costs to trade, which is the one stage in the funnel that selects nothing.
+# **Next**: [`15_risk_management`](15_risk_management.ipynb) holds the surviving configuration
+# fixed and asks whether a position-level control improves it. [`16_costs`](16_costs.ipynb) then
+# prices the winner, which is the one stage in the funnel that selects nothing.

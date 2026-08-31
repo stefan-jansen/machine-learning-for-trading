@@ -28,7 +28,7 @@
 #
 # **Book reference**: Chapter 19
 #
-# **Prerequisite**: `15_costs`.
+# **Prerequisite**: `14_portfolio_management`.
 
 # %%
 """Run the declared FX position-risk controls for each label."""
@@ -45,6 +45,7 @@ from case_studies.research import (
     OfficialPopulation,
     PredictionResult,
     Result,
+    candidate_set_supersedes,
     open_study,
     plan_backtests,
     population_supersedes,
@@ -74,7 +75,19 @@ SEED = 42
 RUN_SWEEP = True
 FORCE_REBACKTEST = False
 POPULATION_NAME = ""
-SUPERSEDES_RISK_BACKTESTS: str = ""
+SUPERSEDES_RISK_BACKTESTS: str = "cd421f7757e0"
+# A candidate set is immutable under its name, exactly as a population is, so a rebuilt upstream
+# generation has to name the set it replaces. Keyed by the full set name because that is what the
+# refusal prints: pasting back the name it names is the obvious thing to try, and it has to work.
+# Resolved through `candidate_set_supersedes` rather than passed straight to `create`, because a
+# reader's clean clone has no generation to supersede and `create` refuses a first version that
+# claims to replace one.
+SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
+    "fx_pairs:fwd_ret_1d:pre-risk-strategies": "208fc4bbc14c",
+    "fx_pairs:fwd_ret_5d:pre-risk-strategies": "ceea3ffc2dd3",
+    "fx_pairs:fwd_ret_21d:pre-risk-strategies": "23087a1081bf",
+    "fx_pairs:holdout-candidates": "4aea5c6c1218",
+}
 
 # %% [markdown]
 # ## Select the parent strategy
@@ -251,12 +264,16 @@ else:
         )
     for label in upstream_labels:
         members = [result for result in upstream if _label(result) == label]
+        _set_name = research_name(
+            CASE_STUDY_ID, f"{label}:pre-risk-strategies", scope=POPULATION_NAME
+        )
         candidates = CandidateSet.create(
             study,
-            name=research_name(
-                CASE_STUDY_ID, f"{label}:pre-risk-strategies", scope=POPULATION_NAME
-            ),
+            name=_set_name,
             members=members,
+            supersedes=candidate_set_supersedes(
+                study, name=_set_name, declared=SUPERSEDES_CANDIDATE_SETS.get(_set_name)
+            ),
         )
         candidate_sets[label] = candidates
         leader = candidates.best_validation_sharpe()
@@ -449,15 +466,21 @@ pl.DataFrame(risk_rows).sort("label", "risk_name")
 # allocation variants, and the risk overlays. The comparison contract names the fields every member
 # must agree on, so a candidate fitted against different labels, features or folds cannot silently
 # join a set the holdout will pick from. Only identities are printed here; what the selection is
-# worth is `17_strategy_analysis`'s question.
+# worth is `19_strategy_analysis`'s question.
 
 # %%
 if not include_preview:
+    _holdout_set_name = research_name(CASE_STUDY_ID, "holdout-candidates", scope=POPULATION_NAME)
     holdout_candidates = CandidateSet.create(
         study,
-        name=research_name(CASE_STUDY_ID, "holdout-candidates", scope=POPULATION_NAME),
+        name=_holdout_set_name,
         members=[*baselines, *allocations, *risk_results],
         comparison_contract={"comparable_fields": ["label_artifact", "feature_artifacts", "cv"]},
+        supersedes=candidate_set_supersedes(
+            study,
+            name=_holdout_set_name,
+            declared=SUPERSEDES_CANDIDATE_SETS.get(_holdout_set_name),
+        ),
     )
     selected = holdout_candidates.best_validation_sharpe()
     print(f"Frozen holdout candidate set: {holdout_candidates.hash}")

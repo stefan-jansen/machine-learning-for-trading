@@ -39,7 +39,7 @@
 #
 # **Nothing is selected here.** Every declared configuration gets a baseline, the results are
 # registered, and the ranking of one against another is read in
-# [`17_strategy_analysis`](17_strategy_analysis.ipynb).
+# [`19_strategy_analysis`](19_strategy_analysis.ipynb).
 #
 # **Learning objectives.** By the end of this notebook you will be able to:
 #
@@ -787,7 +787,7 @@ signal_grid
 # over the same timestamps, so the spread within a panel is what changing the model does at fixed
 # sizing, and it is the quantity the later stages have to beat to be worth their extra machinery.
 # A panel's highest point is the largest of many draws, and how much of it is the draw rather than
-# the model is what [`17_strategy_analysis`](17_strategy_analysis.ipynb) accounts for.
+# the model is what [`19_strategy_analysis`](19_strategy_analysis.ipynb) accounts for.
 
 # %%
 panel_labels = [label for label in labels if results.filter(pl.col("label") == label).height]
@@ -841,8 +841,8 @@ show_plotly_with_alt(
 #
 # **An equal-weight baseline is a measuring instrument, not a candidate.** It exists so that the
 # stages after it can change exactly one thing and attribute the difference. Sizing changes in
-# `14_portfolio_management`, the cost assumption in [`15_costs`](15_costs.ipynb), an exit overlay
-# in [`16_risk_management`](16_risk_management.ipynb) - each against the same rankings, the same
+# `14_portfolio_management`, the cost assumption in [`16_costs`](16_costs.ipynb), an exit overlay
+# in [`15_risk_management`](15_risk_management.ipynb) - each against the same rankings, the same
 # timestamps and the same funding. A comparison that changes the model *and* the sizing measures
 # neither.
 #
@@ -866,8 +866,8 @@ show_plotly_with_alt(
 #
 # **Known limitations.** The baseline charges a flat commission and slippage to every contract,
 # while the fee schedule this exchange publishes separates the largest contracts from the rest;
-# `15_costs` is where that assumption is varied rather than assumed away. Positions are held for
-# exactly the label horizon with no exit condition, which `16_risk_management` relaxes. And every
+# `16_costs` is where that assumption is varied rather than assumed away. Positions are held for
+# exactly the label horizon with no exit condition, which `15_risk_management` relaxes. And every
 # number here is measured on the validation folds, which the case study has read many times by the
 # time it reaches this notebook.
 #
