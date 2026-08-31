@@ -48,7 +48,10 @@ warnings.filterwarnings("ignore")
 
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_returns
-from case_studies.utils.strategy_analysis import compute_cost_bps
+from case_studies.utils.strategy_analysis import (
+    compute_cost_bps,
+    training_run_fitted_for_the_holdout,
+)
 from utils.paths import REPO_ROOT, get_case_study_dir, get_chapter_dir
 
 # %% tags=["parameters"]
@@ -1244,9 +1247,19 @@ def _val_rank1_carrier(cs: str) -> dict | None:
                         "json_extract(b.spec_json, '$.strategy.signal.exit_at_max_days') = ?"
                     )
                     ho_params.append(rung["exit_at_max_days"])
-            row = db.execute(
+            # `t.spec_json` rather than `1`, and no LIMIT: the probe has to apply the same
+            # eligibility test the resolver applies, and that test is not expressible in SQL.
+            #
+            # A model fitted on the validation folds can publish predictions over the holdout
+            # window, so `p.split = 'holdout'` with a non-null Sharpe is not enough to make a
+            # row a holdout result. The resolver drops those through
+            # `training_run_fitted_for_the_holdout`; a probe that admitted them would stop the
+            # walk at a candidate whose only holdout is validation-fitted, the resolver would
+            # then find nothing eligible for it, and the case study would report no holdout
+            # while a later candidate had a real one.
+            probe_rows = db.execute(
                 f"""
-                SELECT 1 FROM prediction_sets p
+                SELECT t.spec_json FROM prediction_sets p
                 JOIN training_runs t ON p.training_hash = t.training_hash
                 JOIN backtest_runs b ON p.prediction_hash = b.prediction_hash
                                      AND b.stage IN ('signal','allocation','risk_overlay','holdout')
@@ -1258,10 +1271,10 @@ def _val_rank1_carrier(cs: str) -> dict | None:
                   AND p.checkpoint_value IS ?
                   AND p.checkpoint_kind IS ?
                   AND bm.sharpe IS NOT NULL
-                LIMIT 1
                 """,
                 ho_params + list(carrier_row),
-            ).fetchone()
+            ).fetchall()
+            row = any(training_run_fitted_for_the_holdout(probe[0]) for probe in probe_rows)
             if row:
                 return {"spec": spec, "prediction_hash": cand["prediction_hash"][i]}
     finally:

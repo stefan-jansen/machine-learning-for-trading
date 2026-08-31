@@ -379,7 +379,7 @@ def _retired_prediction_hashes(cs: str) -> frozenset[str]:
     )
 
 
-def _val_rank1_full_spec(
+def _val_rank1_carrier(
     cs: str,
     explorer: BacktestExplorer,
     *,
@@ -456,24 +456,73 @@ def _val_rank1_full_spec(
                         "json_extract(b.spec_json, '$.strategy.signal.exit_at_max_days') = ?"
                     )
                     ho_params.append(rung["exit_at_max_days"])
-            row = db.execute(
+            # The probe asks whether THIS candidate has a holdout, so it matches the
+            # candidate's own configuration and checkpoint, not only its strategy spec, and
+            # applies the same eligibility test `_holdout_lineage_for` applies.
+            #
+            # Spec alone stopped the walk wherever a SIBLING checkpoint had a holdout at the
+            # same spec. The caller then pinned this candidate, the resolver found nothing of
+            # its own, and the case study reported no holdout although a later candidate had
+            # one. `training_run_fitted_for_the_holdout` is the other half: a model fitted on
+            # the validation folds publishes over the holdout window, so split plus a non-null
+            # Sharpe does not make a row a holdout result, and it is not expressible in SQL.
+            carrier_row = db.execute(
+                """
+                SELECT t.family, t.config_name, t.label,
+                       p.checkpoint_value, p.checkpoint_kind
+                FROM prediction_sets p
+                JOIN training_runs t ON t.training_hash = p.training_hash
+                WHERE p.prediction_hash = ?
+                """,
+                (cand["prediction_hash"][i],),
+            ).fetchone()
+            if carrier_row is None:
+                continue
+            probe_rows = db.execute(
                 f"""
-                SELECT 1 FROM prediction_sets p
+                SELECT t.spec_json FROM prediction_sets p
                 JOIN training_runs t ON p.training_hash = t.training_hash
                 JOIN backtest_runs b ON p.prediction_hash = b.prediction_hash
                                      AND b.stage IN ('signal','allocation','risk_overlay','holdout')
                 JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
                 WHERE {" AND ".join(ho_clauses)}
+                  AND t.family = ?
+                  AND t.config_name = ?
+                  AND t.label = ?
+                  AND p.checkpoint_value IS ?
+                  AND p.checkpoint_kind IS ?
                   AND bm.sharpe IS NOT NULL
-                LIMIT 1
                 """,
-                ho_params,
-            ).fetchone()
-            if row:
-                return spec
+                ho_params + list(carrier_row),
+            ).fetchall()
+            if any(training_run_fitted_for_the_holdout(probe[0]) for probe in probe_rows):
+                return {"spec": spec, "prediction_hash": cand["prediction_hash"][i]}
     finally:
         db.close()
     return None
+
+
+def _val_rank1_full_spec(
+    cs: str,
+    explorer: BacktestExplorer,
+    *,
+    label_restriction: frozenset[str] | None,
+    rung: dict | None,
+    carrier_pin_predicate: pl.Expr | None,
+    prediction_hashes: list[str] | None = None,
+    retired_hashes: frozenset[str] | None = None,
+) -> dict | None:
+    """The validation rank-1 carrier's strategy spec alone."""
+    carrier = _val_rank1_carrier(
+        cs,
+        explorer,
+        label_restriction=label_restriction,
+        rung=rung,
+        carrier_pin_predicate=carrier_pin_predicate,
+        prediction_hashes=prediction_hashes,
+        retired_hashes=retired_hashes,
+    )
+    return carrier["spec"] if carrier else None
 
 
 def _holdout_lineage_for(
@@ -1098,7 +1147,7 @@ def populate_paired_metrics(
         return rows
 
     # Pair #2: cross-stage rank-1 holdout ↔ equal-weight (holdout window)
-    val_spec = _val_rank1_full_spec(
+    val_rank1 = _val_rank1_carrier(
         cs,
         explorer,
         label_restriction=label_restriction,
@@ -1107,9 +1156,16 @@ def populate_paired_metrics(
         prediction_hashes=live,
         retired_hashes=_retired_prediction_hashes(cs),
     )
+    val_spec = val_rank1["spec"] if val_rank1 else None
     # The carrier's training hash and checkpoint are both resolved inside
     # ``_holdout_lineage_for`` from this one prediction hash, so the same-lineage
     # preference cannot be half-applied by a caller.
+    #
+    # It is the WALK's carrier, not `leader_phash`. The walk advances past the leader when
+    # the leader has no holdout of its own, so the two name different candidates whenever it
+    # does - and passing the leader's hash alongside a later candidate's spec asks for a
+    # holdout that matches neither. That used to be masked by the pin falling through to an
+    # unpinned query; now that the pin is strict it would answer None instead.
     if carrier is None:
         ho_lineage = _holdout_lineage_for(
             cs,
@@ -1117,7 +1173,7 @@ def populate_paired_metrics(
             strategy_spec=val_spec,
             label_restriction=label_restriction,
             rung=rung,
-            prefer_prediction_hash=leader_phash,
+            prefer_prediction_hash=val_rank1["prediction_hash"] if val_rank1 else leader_phash,
             retired_hashes=_retired_prediction_hashes(cs),
         )
     elif carrier.get("holdout_backtest_hash") is None:
