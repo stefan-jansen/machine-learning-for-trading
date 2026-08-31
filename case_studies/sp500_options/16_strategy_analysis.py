@@ -82,6 +82,7 @@ from ml4t.diagnostic.integration import (
 # Load the registry readers and reporting helpers the notebook draws on.
 
 # %%
+from case_studies.research import OfficialPopulation, Study
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_metrics, load_benchmark_returns
 from case_studies.utils.cohort_reporting import cohort_metric_attribution, reportable_pbo
@@ -115,6 +116,8 @@ MAX_SYMBOLS = 0
 
 # %%
 CASE_STUDY = "sp500_options"
+# The immutable grid `12_backtest` publishes; the DSR below deflates for its size.
+BASELINE_POPULATION = "sp500-options-baseline-validation-v1"
 PRIMARY_LABEL = "ret_to_expiry"  # registered HTM strategy label (Appendix A)
 PERIODS_PER_YEAR = 252
 CASE_DIR = get_case_study_dir(CASE_STUDY)
@@ -314,19 +317,32 @@ if SEARCH_COHORT["leader_hash"] != _baseline_leader["backtest_hash"]:
         "Cross-family DSR leader does not match the displayed baseline leader: "
         f"{SEARCH_COHORT['leader_hash']} != {_baseline_leader['backtest_hash']}"
     )
-# K is the size of the search the DSR deflates for, so it has to be the number of baseline
-# variants this registry actually holds, measured here rather than remembered. It was pinned at
-# the literal 342 - the count from the pre-rebuild registry, when `12_backtest` swept the full
-# and liquid universes together. That notebook now registers the liquid grid only, so the
-# literal describes a search that no longer happens and the check would refuse every run
-# instead of catching a partial one. The invariant it was written for survives unchanged: the
-# DSR must range over the complete grid, not a subset of it.
-_baseline_variants = explorer.best(stage="signal", top_n=1_000_000).height
-if int(SEARCH_COHORT["k_variants"]) != _baseline_variants:
+# K is the size of the search the DSR deflates for, so it has to be the size of the grid the
+# selection ranged over. Two earlier versions of this check named it wrongly. It was first
+# pinned at the literal 342 - the count from the pre-rebuild registry, when `12_backtest` swept
+# the full and liquid universes together - which describes a search that no longer happens. It
+# was then measured off the registry with `explorer.best`, which is worse than a stale literal:
+# if part of the grid is missing, the recorded K and the measured count shrink together and the
+# check passes on an under-deflated DSR, which is the one thing it exists to catch.
+#
+# The grid is declared, not measured. `12_backtest` writes its membership into
+# `sp500-options-baseline-validation-v1` before the first backtest executes, and that
+# population is immutable afterwards. `require_complete` refuses a member that is missing or
+# partial, so the count below cannot shrink to meet a K that already has.
+_baseline_study = Study.open(CASE_STUDY)
+_baseline_members = OfficialPopulation.one(
+    _baseline_study, name=BASELINE_POPULATION
+).require_complete()
+if int(SEARCH_COHORT["k_variants"]) != len(_baseline_members):
     raise RuntimeError(
-        f"Cross-family DSR uses K={SEARCH_COHORT['k_variants']} against "
-        f"{_baseline_variants} registered baseline variants; the DSR must deflate for the "
-        "complete grid the selection ranged over"
+        f"Cross-family DSR uses K={SEARCH_COHORT['k_variants']} against the "
+        f"{len(_baseline_members)} members of {BASELINE_POPULATION}; the DSR must deflate for "
+        "the complete grid the selection ranged over"
+    )
+if SEARCH_COHORT["leader_hash"] not in set(_baseline_members):
+    raise RuntimeError(
+        f"Cross-family DSR leader {SEARCH_COHORT['leader_hash']} is not a member of "
+        f"{BASELINE_POPULATION}, so it was selected from outside the grid it deflates for"
     )
 PBO_REPORT = (
     reportable_pbo(FAMILY_COHORT["pbo"], FAMILY_COHORT["pbo_n_combinations"])
