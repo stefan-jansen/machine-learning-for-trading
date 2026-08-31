@@ -806,46 +806,60 @@ def test_holdout_evidence_is_empty_before_a_holdout_is_registered(tmp_path: Path
     assert research_workflow.holdout_evidence(study).is_empty()
 
 
-def test_holdout_evidence_reports_every_registered_holdout_lineage(tmp_path: Path) -> None:
-    """Two generations on the window are two rows, not one the query picks.
+def test_holdout_evidence_reports_the_selected_configuration_and_its_replay(
+    tmp_path: Path,
+) -> None:
+    """One row: the validation rank-1, and the holdout backtest replaying its strategy.
 
-    The registry is append-only and a case study that re-ran its holdout under a different
-    configuration holds both. Resolving that silently would let a reader quote whichever
-    number they preferred without knowing there was a choice, so every lineage is listed.
+    The ranking is over VALIDATION rows only. A holdout backtest with a higher Sharpe must not
+    be able to displace the selection, because choosing among configurations by holdout
+    performance is the one thing the funnel forbids.
     """
     study = _study(tmp_path)
+    strategy = {"signal": {"method": "equal_weight_top_k", "top_k": 1}}
+    other = {"signal": {"method": "equal_weight_top_k", "top_k": 5}}
     with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
-        for training_hash, config_name in (("tr-a", "lasso_f0.85"), ("tr-b", "ridge_f0.90")):
-            db.execute(
-                "INSERT INTO training_runs (training_hash, spec_json, family, config_name, "
-                "label, created_at) VALUES (?,?,?,?,?,?)",
-                (training_hash, "{}", "linear", config_name, "fwd_ret_5d", "2026-08-15T00:00:00Z"),
-            )
-        for prediction_hash, training_hash in (("pr-a", "tr-a"), ("pr-b", "tr-b")):
+        db.execute(
+            "INSERT INTO training_runs (training_hash, spec_json, family, config_name, label, "
+            "created_at) VALUES (?,?,?,?,?,?)",
+            ("tr-val", "{}", "linear", "lasso", "fwd_ret_5d", "2026-08-15T00:00:00Z"),
+        )
+        db.execute(
+            "INSERT INTO training_runs (training_hash, spec_json, family, config_name, label, "
+            "created_at) VALUES (?,?,?,?,?,?)",
+            ("tr-ho", "{}", "linear", "lasso", "fwd_ret_5d", "2026-08-15T00:00:00Z"),
+        )
+        for ph, th, split in (("pr-val", "tr-val", "validation"), ("pr-ho", "tr-ho", "holdout")):
             db.execute(
                 "INSERT INTO prediction_sets (prediction_hash, training_hash, split, "
                 "checkpoint_kind, checkpoint_value, created_at) VALUES (?,?,?,?,?,?)",
-                (prediction_hash, training_hash, "holdout", "epoch", 20, "2026-08-15T00:00:00Z"),
+                (ph, th, split, "final", None, "2026-08-15T00:00:00Z"),
             )
-        db.execute(
-            "INSERT INTO backtest_runs (backtest_hash, prediction_hash, started_at, created_at) "
-            "VALUES (?,?,?,?)",
-            ("bt-a", "pr-a", "2026-08-15T01:00:00Z", "2026-08-15T01:00:00Z"),
-        )
-        db.execute(
-            "INSERT INTO backtest_metrics (backtest_hash, sharpe, computed_at) VALUES (?,?,?)",
-            ("bt-a", 0.75, "2026-08-15T01:00:00Z"),
-        )
+        rows = [
+            ("bt-val", "pr-val", "signal", json.dumps({"strategy": strategy}), 0.9),
+            ("bt-val-lo", "pr-val", "signal", json.dumps({"strategy": other}), 0.2),
+            ("bt-ho", "pr-ho", "holdout", json.dumps({"strategy": strategy}), 0.4),
+            # A holdout of a DIFFERENT strategy, scoring higher than the replay. It must not
+            # be reported, and it must not change which validation row was selected.
+            ("bt-ho-other", "pr-ho", "holdout", json.dumps({"strategy": other}), 5.0),
+        ]
+        for bh, ph, stage, spec_json, sharpe in rows:
+            db.execute(
+                "INSERT INTO backtest_runs (backtest_hash, prediction_hash, stage, spec_json, "
+                "started_at, created_at) VALUES (?,?,?,?,?,?)",
+                (bh, ph, stage, spec_json, "2026-08-15T01:00:00Z", "2026-08-15T01:00:00Z"),
+            )
+            db.execute(
+                "INSERT INTO backtest_metrics (backtest_hash, sharpe, computed_at) VALUES (?,?,?)",
+                (bh, sharpe, "2026-08-15T01:00:00Z"),
+            )
 
     evidence = research_workflow.holdout_evidence(study)
-    assert evidence.height == 2
-    by_prediction = {row["prediction_hash"]: row for row in evidence.iter_rows(named=True)}
-    assert by_prediction["pr-a"]["backtest_hash"] == "bt-a"
-    assert by_prediction["pr-a"]["sharpe"] == 0.75
-    assert by_prediction["pr-a"]["config_name"] == "lasso_f0.85"
-    assert by_prediction["pr-a"]["checkpoint_value"] == 20
-    # Registered, not yet backtested: the row is still reported, with the backtest absent.
-    assert by_prediction["pr-b"]["backtest_hash"] is None
+    assert evidence.height == 1
+    assert evidence.item(0, "validation_backtest_hash") == "bt-val"
+    assert evidence.item(0, "label") == "fwd_ret_5d"
+    assert evidence.item(0, "holdout_backtest_hash") == "bt-ho"
+    assert evidence.item(0, "holdout_sharpe") == 0.4
 
 
 def test_official_model_catalog_forwards_the_population_it_supersedes(

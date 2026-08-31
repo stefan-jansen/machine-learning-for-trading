@@ -288,16 +288,20 @@ fig.show()
 # %% [markdown]
 # ## The holdout
 #
-# The research lock is what allows the holdout to be used at all. It records the candidate set, the
-# selected validation backtest, and the retraining contract - the same specification, differing only
-# in the cross-validation interval that extends through the holdout period - before any holdout
-# artifact exists. The lifecycle then admits one evaluation against that lock and refuses a second,
-# so the holdout cannot become an axis to search over.
+# The holdout evaluates one configuration: the one the validation backtests selected. That is the
+# highest validation backtest Sharpe across the baseline, position-sizing, allocation and
+# risk-management stages, and it is fixed before any holdout artifact exists.
 #
-# The lock and its single evaluation are created by the lifecycle path, not here. This notebook
-# reads what that path recorded and reports the selected configuration's holdout result beside its
-# validation result. Where the lifecycle has not yet been locked, the table below is empty and the
-# validation result above stands on its own.
+# What keeps the holdout from becoming an axis to search over is the direction of that rule, not a
+# gate. The ranking reads validation rows only, and the holdout row below is found by matching the
+# selected strategy specification - never by taking whichever holdout backtest scored best. A
+# holdout number therefore cannot change which configuration is reported here.
+#
+# Nothing about it is one-shot. A holdout result that turns out to be wrong is deleted and produced
+# again; what would make the number uninterpretable is evaluating many configurations on the window
+# and reporting the best, which is the thing the selection rule rules out. The holdout notebooks
+# produce the row; this one reads it. Where they have not run, the table is empty and the validation
+# result above stands on its own.
 
 # %%
 holdout = holdout_evidence(study)

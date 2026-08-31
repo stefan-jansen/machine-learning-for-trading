@@ -1239,12 +1239,20 @@ def selection_catalog(study: Study, members: Iterable[str]) -> pl.DataFrame:
 
 
 def holdout_evidence(study: Study) -> pl.DataFrame:
-    """Return every holdout lineage the registry holds: prediction set, model, backtest.
+    """Return the holdout lineage of the configuration this case study selected, or nothing.
 
-    The holdout runs the configuration selected on the validation backtests, and this reads
-    back what was actually registered for it. Every row is listed rather than one preferred,
-    because a registry that holds two holdout generations is a fact a reader has to be able to
-    see rather than something a query should quietly resolve.
+    One row, or an empty frame where no holdout has been produced yet.
+
+    The configuration is the validation rank-1: the highest validation backtest Sharpe across
+    the baseline, position-sizing, allocation and risk-management stages. The holdout row is
+    the replay of that same strategy specification on a holdout prediction set. Nothing about
+    the holdout enters the choice - the ranking is over validation rows only, and the holdout
+    is matched on the strategy specification rather than on its own Sharpe. Reading the holdout
+    to choose among configurations is what `reference/CASE_STUDY_PIPELINE.md` section 6 forbids.
+
+    Queried against ``study.root`` rather than through a case-study name, so this answers about
+    the registry the caller actually opened. A resolver that takes a name resolves the path
+    itself and would read the canonical registry even when handed a workspace study.
     """
     database = study.root / "run_log" / "registry.db"
     if not database.is_file():
@@ -1254,43 +1262,70 @@ def holdout_evidence(study: Study) -> pl.DataFrame:
             row[0]
             for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
         }
-        if "prediction_sets" not in names:
+        if not {"backtest_runs", "backtest_metrics", "prediction_sets", "training_runs"} <= names:
             return pl.DataFrame()
-        rows = db.execute(
-            "SELECT p.prediction_hash, p.training_hash, p.checkpoint_kind, p.checkpoint_value, "
-            "t.family, t.config_name, t.label, b.backtest_hash, bm.sharpe, b.started_at "
-            "FROM prediction_sets p "
-            "JOIN training_runs t ON t.training_hash = p.training_hash "
-            "LEFT JOIN backtest_runs b ON b.prediction_hash = p.prediction_hash "
-            "LEFT JOIN backtest_metrics bm ON bm.backtest_hash = b.backtest_hash "
-            "WHERE p.split = 'holdout' "
-            "ORDER BY p.prediction_hash, b.backtest_hash"
+        selected = db.execute(
+            """
+            SELECT b.backtest_hash, b.spec_json, bm.sharpe, t.family, t.config_name, t.label,
+                   p.checkpoint_kind, p.checkpoint_value
+            FROM backtest_runs b
+            JOIN backtest_metrics bm ON bm.backtest_hash = b.backtest_hash
+            JOIN prediction_sets p ON p.prediction_hash = b.prediction_hash
+            JOIN training_runs t ON t.training_hash = p.training_hash
+            WHERE p.split = 'validation'
+              AND bm.sharpe IS NOT NULL
+              AND t.family != 'benchmark'
+              AND b.stage IN ('signal', 'allocation', 'risk_overlay')
+            ORDER BY bm.sharpe DESC, b.backtest_hash ASC
+            LIMIT 1
+            """
+        ).fetchone()
+        if selected is None:
+            return pl.DataFrame()
+        (val_hash, val_spec_json, val_sharpe, family, config_name, label, ck_kind, ck_value) = (
+            selected
+        )
+        val_strategy = json.loads(val_spec_json).get("strategy", {})
+
+        # `IS` is SQLite's null-safe equality: a configuration with no checkpoint dimension
+        # stores NULL on both sides and must still match, where `=` would drop it.
+        candidates = db.execute(
+            """
+            SELECT b.backtest_hash, b.spec_json, b.prediction_hash, bm.sharpe
+            FROM backtest_runs b
+            JOIN prediction_sets p ON p.prediction_hash = b.prediction_hash
+            JOIN training_runs t ON t.training_hash = p.training_hash
+            LEFT JOIN backtest_metrics bm ON bm.backtest_hash = b.backtest_hash
+            WHERE p.split = 'holdout'
+              AND p.checkpoint_kind IS ?
+              AND p.checkpoint_value IS ?
+              AND t.family = ?
+              AND t.config_name = ?
+              AND t.label = ?
+            ORDER BY b.backtest_hash
+            """,
+            (ck_kind, ck_value, family, config_name, label),
         ).fetchall()
+
+    replay = [row for row in candidates if json.loads(row[1]).get("strategy", {}) == val_strategy]
+    if len(replay) > 1:
+        raise ValueError(
+            f"holdout replay for {val_hash} is ambiguous: "
+            f"{sorted(row[0] for row in replay)} share {family}/{config_name} on {label}, "
+            f"checkpoint {ck_kind}={ck_value} and one strategy specification"
+        )
+    holdout = replay[0] if replay else None
     return pl.DataFrame(
         [
             {
-                "prediction_hash": prediction_hash,
-                "training_hash": training_hash,
-                "checkpoint_kind": checkpoint_kind,
-                "checkpoint_value": checkpoint_value,
+                "validation_backtest_hash": val_hash,
+                "label": label,
                 "family": family,
                 "config_name": config_name,
-                "label": label,
-                "backtest_hash": backtest_hash,
-                "sharpe": sharpe,
-                "registered_at": started_at,
+                "validation_sharpe": val_sharpe,
+                "holdout_prediction_hash": holdout[2] if holdout else None,
+                "holdout_backtest_hash": holdout[0] if holdout else None,
+                "holdout_sharpe": holdout[3] if holdout else None,
             }
-            for (
-                prediction_hash,
-                training_hash,
-                checkpoint_kind,
-                checkpoint_value,
-                family,
-                config_name,
-                label,
-                backtest_hash,
-                sharpe,
-                started_at,
-            ) in rows
         ]
     )
