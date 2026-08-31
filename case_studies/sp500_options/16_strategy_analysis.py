@@ -22,7 +22,7 @@
 # baseline on the liquid subset, produced by `linear/ridge_a10000000.0` for
 # `ret_to_expiry`, with no allocation overlay. The fixed carrier follows
 # the exact validation-only selection contract: the liquid-universe pin
-# is applied first, then the complete 342-row baseline grid is ranked.
+# is applied first, then the complete baseline grid is ranked.
 # All `ret_to_expiry` backtests dispatch
 # through the HTM daily-MTM cohort engine (`_run_htm_daily_mtm`): entry on
 # the final available session of each Friday week, the underlying delta
@@ -168,7 +168,7 @@ def _fmt(val: float | None, fmt: str = ".4f") -> str:
 # from rank-1 selection, so the deployed carrier stays on the liquid
 # subset and remains poolable with its holdout replay. The complete current
 # validation surface selects the ridge carrier at Sharpe `+0.001681`; two of
-# the 342 baseline rows are nonnegative. The carrier is fixed before the one
+# the baseline rows are nonnegative. The carrier is fixed before the one
 # holdout evaluation. The upstream
 # prediction-side IC and the downstream strategy Sharpe are both
 # statistically consistent with zero - there is no IC-vs-Sharpe disconnect
@@ -314,9 +314,19 @@ if SEARCH_COHORT["leader_hash"] != _baseline_leader["backtest_hash"]:
         "Cross-family DSR leader does not match the displayed baseline leader: "
         f"{SEARCH_COHORT['leader_hash']} != {_baseline_leader['backtest_hash']}"
     )
-if int(SEARCH_COHORT["k_variants"]) != 342:
+# K is the size of the search the DSR deflates for, so it has to be the number of baseline
+# variants this registry actually holds, measured here rather than remembered. It was pinned at
+# the literal 342 - the count from the pre-rebuild registry, when `12_backtest` swept the full
+# and liquid universes together. That notebook now registers the liquid grid only, so the
+# literal describes a search that no longer happens and the check would refuse every run
+# instead of catching a partial one. The invariant it was written for survives unchanged: the
+# DSR must range over the complete grid, not a subset of it.
+_baseline_variants = explorer.best(stage="signal", top_n=1_000_000).height
+if int(SEARCH_COHORT["k_variants"]) != _baseline_variants:
     raise RuntimeError(
-        f"Cross-family DSR uses K={SEARCH_COHORT['k_variants']}, expected exact K=342"
+        f"Cross-family DSR uses K={SEARCH_COHORT['k_variants']} against "
+        f"{_baseline_variants} registered baseline variants; the DSR must deflate for the "
+        "complete grid the selection ranged over"
     )
 PBO_REPORT = (
     reportable_pbo(FAMILY_COHORT["pbo"], FAMILY_COHORT["pbo_n_combinations"])
@@ -486,7 +496,7 @@ fig.show()
 
 # %% [markdown]
 # Three families produce zero positive-Sharpe baseline rows on `ret_to_expiry`.
-# Linear has two near-zero nonnegative rows among the exact 342-row surface.
+# Linear has two near-zero nonnegative rows among the complete baseline surface.
 # The full-universe leader is comparison evidence only; the registered carrier
 # is the liquid-universe rank-1. Neither resolves a statistically reliable edge.
 
@@ -525,7 +535,7 @@ print(
 # Selection-bias adjustment (DSR raw / MP / ER, k_variants,
 # expected_max_sharpe, min_trl_periods) lives in `cohort_metrics` per
 # `memory/UNCERTAINTY_ARCHITECTURE.md` - `backtest_metrics` no longer
-# carries those columns. The DSR uses the exact 342-row cross-family baseline
+# carries those columns. The DSR uses the complete cross-family baseline
 # cohort and names its full-universe leader. That leader differs from the pinned
 # liquid carrier, so these statistics are not presented as carrier metrics.
 # Linear-family PBO is displayed separately and suppressed because only two
@@ -643,7 +653,8 @@ print("Current-carrier performance and exactly attributed search diagnostics:")
 print(headline)
 
 # %% [markdown]
-# The cross-family DSR row has exact K=342 and names the complete-grid baseline
+# The cross-family DSR row has K equal to the registered baseline count and names
+# the complete-grid baseline
 # leader, not the pinned liquid carrier. PBO is a separate linear-family
 # diagnostic. With only two CSCV combinations, the notebook reports
 # "insufficient combinations" instead of interpreting 0.50.
@@ -739,7 +750,7 @@ fig.show()
 # evidence is null-consistent. § 6's paired holdout vs EW test resolves
 # whether the validation/EW gap holds out of sample. Selection accounting
 # is supplied by the exact cross-family baseline cohort above (DSR raw /
-# MP / ER and K=342 from `cohort_metrics`), whose named leader differs from
+# MP / ER and K from `cohort_metrics`), whose named leader differs from
 # the carrier. Linear-family PBO is separately suppressed as underidentified.
 # The two near-zero nonnegative baseline rows do not alter the unresolved
 # selection-adjusted DSR_ER reading.
