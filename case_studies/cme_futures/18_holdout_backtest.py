@@ -54,6 +54,7 @@ warnings.filterwarnings("ignore")
 
 from case_studies.research import open_study
 from case_studies.research.holdout import build_holdout_training_spec
+from case_studies.research.strategy import strategy_warmup_periods
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
@@ -228,7 +229,30 @@ else:
 # generation.
 
 # %% tags=["results"]
-prices = load_backtest_prices_for(CASE_STUDY_ID, LABEL, split="holdout", max_symbols=MAX_SYMBOLS)
+# The warmup prefix is not optional for this carrier. `hrp` sizes from a covariance
+# estimated over a rolling window, and prices loaded from the holdout boundary give it no
+# history to estimate from - `load_backtest_prices_for` then falls back to a median-imputed
+# warmup, so the first weights of the holdout would be imputed where every validation
+# weight was data-driven. That is a difference between the two runs that the strategy
+# specification does not record and the comparison in section 4 would silently absorb.
+#
+# `strategy_warmup_periods` reads the resolved allocation and returns 0 for any allocator
+# that does not estimate a moment, so this is unconditional rather than a branch on the
+# carrier: a rebuilt sweep naming an equal-weight carrier gets 0 and the same call.
+#
+# The prefix does not enter the returns. The loader leaves the window start unconstrained
+# and still caps the end at the canonical window, and the engine aggregates only over the
+# rebalance timestamps the predictions carry - so the extra history is consumed by the
+# allocator's rolling window and nothing before the holdout start is scored.
+warmup_periods = strategy_warmup_periods({"allocation": allocation})
+prices = load_backtest_prices_for(
+    CASE_STUDY_ID,
+    LABEL,
+    split="holdout",
+    warmup_periods=warmup_periods,
+    max_symbols=MAX_SYMBOLS,
+)
+print(f"Allocator warmup: {warmup_periods} period(s) of pre-window history")
 predictions = read_predictions(CASE_STUDY_ID, HOLDOUT_PREDICTION_HASH)
 # `13_backtest` records that reader-facing rows use `product` while the shared boundary
 # converts to the engine's `symbol` key, so a price frame can arrive carrying either.
