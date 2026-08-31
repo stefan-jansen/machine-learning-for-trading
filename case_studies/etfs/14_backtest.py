@@ -186,6 +186,7 @@ strategy_spec = build_backtest_spec(
         "top_k": TOP_K,
         "long_short": bt_config.long_short,
     },
+    label=LABEL,
 )
 
 try:
@@ -361,6 +362,7 @@ for i, pred_row in enumerate(pred_index.iter_rows(named=True)):
             initial_cash=bt_config.initial_cash,
             chapter="ch16",
             signal=signal,
+            label=LABEL,
         )
         already = backtest_hash_from_parts(pred_hash, serializable_backtest_spec(spec))
         if already in existing_hashes and not FORCE_REBACKTEST:

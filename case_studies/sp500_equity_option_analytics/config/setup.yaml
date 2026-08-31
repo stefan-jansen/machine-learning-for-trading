@@ -10,6 +10,14 @@ decision:
   snapshot: friday_16:00_et
   execution_delay: monday_open
   iv_feature_lag: 1_day
+  # Per-label decision cadence; `cadence` above applies to every label not named here. The five
+  # 5-day labels trade the weekly grid, which is what they forecast. The two 10-day labels
+  # resolve after two weeks, so on the weekly grid a new position is opened while the previous
+  # one is still inside its own horizon - overlapping the very quantity being measured. They
+  # rebalance every other week instead.
+  cadence_by_label:
+    fwd_ret_10d: biweekly
+    fwd_dir_10d: biweekly
 
 # The feature-specification register for 03_financial_features, and every window
 # it computes over. It lives here rather than in the notebook for the same reason

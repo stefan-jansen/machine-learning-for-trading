@@ -145,6 +145,22 @@ class BacktestConfig:
     min_trade_value: float = 100.0  # Engine rebalance threshold (skip < this $)
     initial_cash: float = 100_000.0  # SSOT — set from setup.yaml::execution.initial_cash
     share_type: str = "integer"  # SSOT — set from setup.yaml::execution.share_type
+    # Per-label decision cadence, from setup.yaml::decision.cadence_by_label. `cadence` above is
+    # the case study's default and remains what an unlabelled caller gets. A case study whose
+    # labels span horizons cannot trade them all on one grid: holding a 5-day forecast for 21
+    # sessions is not the strategy the label describes, and the label then measures something the
+    # backtest never traded.
+    cadence_by_label: dict[str, str] = field(default_factory=dict)
+
+    def cadence_for(self, label: str | None = None) -> str:
+        """Return the decision cadence for ``label``, falling back to the case-study default.
+
+        A label with no entry in ``cadence_by_label`` trades on ``cadence``, so declaring nothing
+        reproduces the previous single-cadence behaviour exactly.
+        """
+        if not label:
+            return self.cadence
+        return self.cadence_by_label.get(label, self.cadence)
 
 
 def load_contract_specs_from_yaml(yaml_path: Path | None = None):
@@ -1092,25 +1108,37 @@ _CADENCE_CALENDAR_DAYS_PER_PERIOD: dict[str, float] = {
     # Intraday equity microstructure: ~26 fifteen-minute bars per RTH
     # trading day; multiply by 1.4 to account for weekends.
     "15_minute": (1.0 / 26.0) * 1.4,
+    # Biweekly: every other ISO week, for labels whose horizon is ~10 sessions
+    "biweekly": 14.0,
+    "biweekly_friday_close": 14.0,
     # Monthly month-end
     "monthly_month_end": 31.0,
 }
 
 
-def _calendar_days_per_period(case_study_id: str) -> float:
-    """Calendar-day spacing per allocator-window bar for this case study.
+def _calendar_days_per_period(case_study_id: str, label: str | None = None) -> float:
+    """Calendar-day spacing per allocator-window bar for this case study and label.
 
     Reads ``decision.entry_cadence`` (or ``decision.cadence`` or
-    ``decision.bar_frequency``) and returns the calendar-day multiplier
-    used to walk the start_date back during a warmup-prefix load. Falls
-    back to the daily 1.5× heuristic when the cadence token isn't
-    recognized — old behavior for unknown CSes.
+    ``decision.bar_frequency``), overridden per label by
+    ``decision.entry_cadence_by_label`` / ``decision.cadence_by_label``, and returns
+    the calendar-day multiplier used to walk the start_date back during a
+    warmup-prefix load. Falls back to the daily 1.5× heuristic when the cadence
+    token isn't recognized — old behavior for unknown CSes.
+
+    The label matters because the warmup prefix has to cover the allocator's lookback
+    in *its* bars: a label trading biweekly needs twice the calendar span of the same
+    lookback traded weekly, and under-reading the prefix silently shortens the window
+    the allocator fits on.
     """
     setup = _load_case_setup_yaml(case_study_id)
     decision = setup.get("decision") or {}
     cadence = (
         decision.get("entry_cadence") or decision.get("cadence") or decision.get("bar_frequency")
     )
+    if label:
+        by_label = decision.get("entry_cadence_by_label") or decision.get("cadence_by_label") or {}
+        cadence = by_label.get(label, cadence)
     if cadence and cadence in _CADENCE_CALENDAR_DAYS_PER_PERIOD:
         return _CADENCE_CALENDAR_DAYS_PER_PERIOD[cadence]
     return 1.5
@@ -1178,7 +1206,7 @@ def load_backtest_prices_for(
             # parquet read covers at least a full calendar week even
             # when ``warmup_periods`` is tiny (e.g. monthly us_firm
             # with 12 periods).
-            cal_per_period = _calendar_days_per_period(case_study_id)
+            cal_per_period = _calendar_days_per_period(case_study_id, label)
             prefix_days = max(math.ceil(warmup_periods * cal_per_period), 7)
             kwargs.setdefault("start_date", (win[0] - timedelta(days=prefix_days)).isoformat())
     return load_backtest_prices(case_study_id, **kwargs)
@@ -1245,6 +1273,24 @@ def resolve_rebalance_timestamps(
         week_ends = (
             df.group_by("iso_year", "iso_week")
             .agg(pl.col("ts").max().alias("rebal_ts"))
+            .sort("rebal_ts")
+        )
+        return week_ends["rebal_ts"]
+
+    if cadence in {"biweekly", "biweekly_friday_close"}:
+        # Last available session of every other ISO week. The parity is taken on an absolute
+        # week counter (iso_year * 53 + iso_week) rather than on position in the resolved list,
+        # so the same calendar dates are chosen whatever window the caller loaded - two splits
+        # of one case study land on the same grid instead of interleaving.
+        df = pl.DataFrame({"ts": ts}).with_columns(
+            iso_year=pl.col("ts").dt.iso_year(),
+            iso_week=pl.col("ts").dt.week(),
+        )
+        week_ends = (
+            df.group_by("iso_year", "iso_week")
+            .agg(pl.col("ts").max().alias("rebal_ts"))
+            .with_columns(abs_week=pl.col("iso_year") * 53 + pl.col("iso_week"))
+            .filter(pl.col("abs_week") % 2 == 0)
             .sort("rebal_ts")
         )
         return week_ends["rebal_ts"]
@@ -1884,6 +1930,22 @@ def get_backtest_config(case_study_id: str) -> BacktestConfig:
     initial_cash = float(execution.get("initial_cash", 100_000.0))
     share_type = str(execution.get("share_type", "integer"))
 
+    # Per-label overrides. `entry_cadence_by_label` mirrors the `entry_cadence > cadence`
+    # precedence above; a label absent from both trades on the case-study default.
+    cadence_by_label = {
+        str(k): str(v)
+        for k, v in (
+            decision.get("entry_cadence_by_label") or decision.get("cadence_by_label") or {}
+        ).items()
+    }
+    _declared = set(labels.get("variants") or []) | {labels["primary"]}
+    _unknown = sorted(set(cadence_by_label) - _declared)
+    if _unknown:
+        raise ValueError(
+            f"decision.cadence_by_label names {_unknown} which are not declared in labels "
+            f"for {case_study_id}; known labels: {sorted(_declared)}"
+        )
+
     return BacktestConfig(
         case_study_id=case_study_id,
         primary_label=labels["primary"],
@@ -1903,6 +1965,7 @@ def get_backtest_config(case_study_id: str) -> BacktestConfig:
         min_trade_value=float(default_rebal.get("min_trade_value", 100.0)),
         initial_cash=initial_cash,
         share_type=share_type,
+        cadence_by_label=cadence_by_label,
     )
 
 

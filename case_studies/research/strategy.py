@@ -360,6 +360,7 @@ class Strategy:
             execution_mode=self.execution_mode,
             min_weight_change=self.min_weight_change,
             min_trade_value=self.min_trade_value,
+            label=self.label,
         )
         spec["identity_version"] = 2
         spec["execution_tier"] = self.prediction.execution_tier
