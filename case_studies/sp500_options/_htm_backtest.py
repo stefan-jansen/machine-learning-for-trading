@@ -108,7 +108,16 @@ def option_accounting_parameters(signal: dict[str, Any]) -> dict[str, Any]:
     if delta_threshold < 0:
         raise ValueError("delta_threshold cannot be negative")
     return {
-        "schema_version": 1,
+        # 2, not 1. A settlement whose borrowed expiration close belongs to a different quoting
+        # regime now falls to the liquidation path instead of settling the listed strike against
+        # a restated underlying, and that changes booked returns. Under version 1 the change was
+        # invisible to the identity: a run completed before the guard hashed the same and was
+        # served from the registry, so the corrected engine returned the pre-fix numbers. The
+        # band is part of the identity for the same reason - moving it moves the results.
+        "schema_version": 2,
+        "settlement_regime_guard": "borrowed_expiration_close_within_split_guard_band",
+        "settlement_regime_guard_low": SPLIT_GUARD_LOW,
+        "settlement_regime_guard_high": SPLIT_GUARD_HIGH,
         "n_roll": n_roll,
         "portfolio_sizing": "equal_premium_within_cohort_and_fixed_cohort_fraction",
         "delta_hedge": True,
