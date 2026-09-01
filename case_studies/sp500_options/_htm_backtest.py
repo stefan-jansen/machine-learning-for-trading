@@ -74,6 +74,16 @@ OPTION_COMMISSION_PER_CONTRACT_DEFAULT = 1.00  # USD / contract incl. exchange/c
 OPTION_CONTRACT_MULTIPLIER_DEFAULT = 100
 
 
+#: How far a borrowed expiration close may sit from the underlying at a contract's own last
+#: marked session before the two are taken to be different quoting regimes. A split moves the
+#: underlying by the split ratio while the listed strike does not follow, so two-for-one lands at
+#: 0.50 and four-for-one at 0.25 - well outside this - while an ordinary move over the fortnight
+#: these gaps typically run stays well inside it. The band is deliberately wide: its job is to
+#: separate a corporate action from a market move, not to bound a market move.
+SPLIT_GUARD_LOW: float = 0.7
+SPLIT_GUARD_HIGH: float = 1.4
+
+
 def option_accounting_parameters(signal: dict[str, Any]) -> dict[str, Any]:
     """Resolve every identity-bearing input used by the specialized option engine."""
     import yaml
@@ -882,20 +892,48 @@ def _load_option_lifecycle(
     # has no position to end, and a settlement row for it would put a holding in the lifecycle
     # that the entry check below would then have to reject.
     held = marked.select(contract_keys).unique()
+    # Borrowing a sibling's expiration close assumes the strike and that close are quoted in the
+    # same regime, and a stock split is exactly when they are not. ISRG split three-for-one on
+    # 2021-10-05: the chain reprices the underlying from 970.75 to 330.23 that session, lists the
+    # pre-split strikes one last time with no bid, ask or mid, and drops them the next day. A
+    # position held at K=1080 then settles against 328.44 for an intrinsic of 751.56, against a
+    # last real straddle mark of 110.68 four sessions earlier. It is not a settlement rule
+    # choosing badly between two defensible prices - it is |S - K| computed across a corporate
+    # action, and 180 of the 322 holdable contracts on this path show it.
+    #
+    # The contract's own last marked session is what says which regime its strike belongs to.
+    # Where the settlement close is not a market move away from the underlying that session, the
+    # borrowed close prices a different security and the position falls to the liquidation path
+    # below, which marks it at the last price the chain actually carried for THIS contract.
+    last_marked_underlying = (
+        marked.sort("date")
+        .group_by(contract_keys)
+        .agg(pl.col("underlying_price").last().alias("_underlying_at_last_mark"))
+    )
+    borrowed = (
+        held.join(expiry_underlying.select(contract_keys), on=contract_keys, how="anti")
+        .join(
+            underlying_panel.select(
+                pl.col("date").alias("expiration"), "symbol", "underlying_price"
+            ),
+            on=["symbol", "expiration"],
+            how="inner",
+        )
+        .join(last_marked_underlying, on=contract_keys, how="inner")
+        .filter(
+            (pl.col("_underlying_at_last_mark") > 0)
+            & (pl.col("underlying_price") / pl.col("_underlying_at_last_mark")).is_between(
+                SPLIT_GUARD_LOW, SPLIT_GUARD_HIGH
+            )
+        )
+        .select(*contract_keys, "underlying_price")
+    )
     settlement_underlying = pl.concat(
         [
             expiry_underlying.select(
                 *contract_keys, pl.col("_underlying_low").alias("underlying_price")
             ),
-            held.join(expiry_underlying.select(contract_keys), on=contract_keys, how="anti")
-            .join(
-                underlying_panel.select(
-                    pl.col("date").alias("expiration"), "symbol", "underlying_price"
-                ),
-                on=["symbol", "expiration"],
-                how="inner",
-            )
-            .select(*contract_keys, "underlying_price"),
+            borrowed,
         ]
     )
     settled = (

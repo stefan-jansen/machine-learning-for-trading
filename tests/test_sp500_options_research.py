@@ -2055,3 +2055,107 @@ def test_a_round_trip_that_exits_before_expiration_still_pays_the_spread(
 
     assert costs[-1] > 0.0
     assert costs[:-1] == pytest.approx([0.0] * (len(costs) - 1))
+
+
+def _split_the_underlying(raw_dir: Path, *, on: date, ratio: float) -> None:
+    """Reprice the underlying by ``ratio`` from ``on``, and stop quoting the old strikes.
+
+    What the vendor chain does through a stock split: the underlying is restated on the split
+    session, the pre-split strikes are listed once more with no bid, ask or mid and then
+    disappear, and a fresh post-split strike ladder takes over under the same symbol.
+    """
+    raw_path = raw_dir / "year=2024.parquet"
+    chain = pl.read_parquet(raw_path)
+    after = pl.col("date") >= on
+    chain = chain.with_columns(
+        underlying_price=pl.when(after)
+        .then(pl.col("underlying_price") * ratio)
+        .otherwise(pl.col("underlying_price"))
+    ).with_columns(
+        [
+            pl.when(after)
+            .then(pl.lit(None, dtype=chain.schema[column]))
+            .otherwise(pl.col(column))
+            .alias(column)
+            for column in ("mid_price", "bid", "ask")
+        ]
+    )
+    post_split = chain.filter(pl.col("date") >= on).with_columns(
+        strike=pl.col("strike") * ratio,
+        mid_price=pl.lit(1.0),
+        bid=pl.lit(0.5),
+        ask=pl.lit(1.5),
+    )
+    pl.concat([chain, post_split]).write_parquet(raw_path)
+
+
+def test_a_split_does_not_settle_the_old_strike_against_the_new_underlying(
+    tmp_path: Path,
+) -> None:
+    """|S - K| across a corporate action prices a security nobody held.
+
+    ISRG split three-for-one on 2021-10-05. The chain restated the underlying from 970.75 to
+    330.23, listed the pre-split strikes that session with no quote, and dropped them. A
+    position at K=1080 then cash-settled against 328.44 for an intrinsic of 751.56, against a
+    last real straddle mark of 110.68 four sessions earlier - 180 of the 322 holdable contracts
+    reaching this path carried that shape.
+
+    The borrowed close has to come from the same quoting regime as the strike. Where it does
+    not, the position takes the liquidation path against the last mark the chain carried for
+    this contract, which is the only price observed for the security actually held.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    _split_the_underlying(raw_dir, on=date(2024, 1, 9), ratio=1 / 3)
+    cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
+
+    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
+    settled = lifecycle.filter(pl.col("cash_settled"))
+    assert settled.is_empty(), (
+        "the pre-split strike settled against the post-split underlying: "
+        f"{settled.select('date', 'strike', 'instr_mid').to_dicts()}"
+    )
+    liquidated = lifecycle.filter(pl.col("liquidated"))
+    assert liquidated.height == 1
+    # The last session the contract was really quoted, at 100.0 underlying: call 6.0 + put 4.0.
+    assert liquidated.get_column("instr_mid").item() == pytest.approx(10.0)
+
+
+def test_an_ordinary_move_still_settles_on_a_borrowed_close(tmp_path: Path) -> None:
+    """The guard separates a corporate action from a market move, and only that.
+
+    A position whose own quotes stop before expiry, on a name that keeps trading, still settles
+    at intrinsic - that is the interior-gap reading and it is unchanged. Widening the guard until
+    it caught ordinary moves would book exits at stale marks nobody could have traded.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    raw_path = raw_dir / "year=2024.parquet"
+    chain = pl.read_parquet(raw_path)
+    # Stop quoting the held contract after 01-09, and let a sibling strike carry the expiration
+    # close at an underlying 10% below the last mark - a market move, not a split.
+    held = (pl.col("date") == date(2024, 1, 10)) & (pl.col("strike") == 100.0)
+    chain = chain.with_columns(
+        [
+            pl.when(held)
+            .then(pl.lit(None, dtype=chain.schema[column]))
+            .otherwise(pl.col(column))
+            .alias(column)
+            for column in ("mid_price", "bid", "ask")
+        ]
+    ).with_columns(
+        underlying_price=pl.when(pl.col("date") == date(2024, 1, 10))
+        .then(pl.lit(91.8))
+        .otherwise(pl.col("underlying_price"))
+    )
+    sibling = chain.filter(pl.col("date") == date(2024, 1, 10)).with_columns(
+        strike=pl.lit(90.0), mid_price=pl.lit(2.0), bid=pl.lit(1.5), ask=pl.lit(2.5)
+    )
+    pl.concat([chain, sibling]).write_parquet(raw_path)
+    cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
+
+    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
+    settled = lifecycle.filter(pl.col("cash_settled"))
+    assert settled.height == 1
+    # |91.8 - 100| = 8.2, the intrinsic of the straddle actually held.
+    assert settled.get_column("instr_mid").item() == pytest.approx(8.2)
