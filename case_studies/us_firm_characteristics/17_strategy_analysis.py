@@ -84,6 +84,8 @@ from ml4t.diagnostic.visualization.portfolio.returns_plots import (
 from ml4t.diagnostic.visualization.portfolio.risk_plots import plot_rolling_sharpe
 
 # %%
+from case_studies.research.population import split_unpublished_members
+from case_studies.research.workspace import open_study
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_metrics, load_benchmark_returns
 from case_studies.utils.conformal import CALIBRATION_VERSION
@@ -114,6 +116,7 @@ from case_studies.utils.registry import (
     load_backtest_fold_metrics,
     load_backtest_metrics,
     load_paired_metrics,
+    load_prediction_index,
 )
 from case_studies.utils.strategy_analysis import (
     ci_status,
@@ -211,6 +214,21 @@ from case_studies.utils.cohort_metrics import compute_and_register
 from case_studies.utils.paired_metrics import populate_paired_metrics
 
 _db = CASE_DIR / "run_log" / "registry.db"
+# The prediction sets their publishers still stand behind. `compute_and_register` scopes cohorts
+# by prediction, and unscoped it computes them over the whole registry: 22 configurations here
+# carry more than one training generation, and the pool grew by roughly 2,300 backtests when
+# fwd_ret_1m_win and fwd_class_1m were backtested. K is what the deflated Sharpe divides by, so
+# an unscoped call reports a correction computed over a population this page does not describe.
+# Every declared label stays in - they compete at the baseline, and the selection ranges over
+# all of them - so what is excluded is superseded generations, not variant labels.
+_live_index = split_unpublished_members(
+    open_study(CASE_STUDY),
+    load_prediction_index(CASE_STUDY, split="validation"),
+)
+LIVE_PREDICTIONS = _live_index.live["prediction_hash"].to_list()
+if not LIVE_PREDICTIONS:
+    raise RuntimeError(f"no live validation prediction sets for {CASE_STUDY}")
+print(f"Live prediction sets: {len(LIVE_PREDICTIONS):,}")
 # Resolved before the guard because the guard asks about this holdout, not about holdouts
 # in general. §6 re-resolves it and checks the two agree.
 _lineage = resolve_canonical_rank1_lineage(CASE_STUDY)
@@ -241,7 +259,7 @@ with sqlite3.connect(str(_db)) as _con:
     )
 REQUIRED_PAIR_KINDS = {"val_rank1_self", "equal_weight_holdout_side_artifact"}
 if _n_cohorts == 0 or not REQUIRED_PAIR_KINDS.issubset(_kinds_present):
-    _cohort_counts = compute_and_register(CASE_STUDY)
+    _cohort_counts = compute_and_register(CASE_STUDY, prediction_hashes=LIVE_PREDICTIONS)
     # The lineage is passed rather than re-derived inside. Left to itself the populator
     # ranks the registry on raw Sharpe, which is a fourth selector beside the resolver,
     # this notebook and the costs sweep - and here it picked the retired conformal
