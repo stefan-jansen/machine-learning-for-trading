@@ -291,12 +291,11 @@ else:
 # prose. IC on the prediction set is computed on continuous model scores against
 # continuous realized returns.
 #
-# Only the setup-primary label `fwd_ret_1m` has been backtested. The modelling
-# stages also fitted the winsorized variant `fwd_ret_1m_win` and the
-# classification variant `fwd_class_1m`, and their predictions are registered,
-# but no backtest runs against either - so the strategy phase compares one label
-# to itself and the variants are outside what this notebook can say anything
-# about.
+# All three declared labels are backtested: the setup-primary `fwd_ret_1m`, the
+# winsorized `fwd_ret_1m_win` and the classification variant `fwd_class_1m`. They
+# compete at the baseline and the selection ranges over all of them, so the label
+# the strategy phase carries is read off the resolver below rather than assumed
+# to be the primary one.
 
 # %% [markdown]
 # The shared resolver applies the common-support contract whenever corrected
@@ -640,9 +639,10 @@ if missing_stages:
 # of it is the window. The comparison below recomputes both on the exact
 # timestamp intersection and raises if the two supports still differ.
 #
-# The two rows are the strongest candidate under each sizing rule, found by
-# ranking rather than named, so the comparison reads the same way whichever rule
-# the selection landed on.
+# One row per sizing rule the eligible population registers, each the strongest
+# candidate under that rule, found by ranking rather than named - so the comparison
+# reads the same way whichever rule the selection landed on, and adding an allocator
+# to the sweep adds a row here rather than silently falling outside the check.
 #
 # They are drawn from the population the selection rule itself draws from, and they have
 # to be: both arms are compared against the selected run, and the check below requires
@@ -674,49 +674,59 @@ with sqlite3.connect(str(_db)) as _con:
         _ELIGIBLE_STAGES,
     ).fetchall()
 
-# A superseded conformal calibration is not a candidate; the equal-weight side has no such
+# A superseded conformal calibration is not a candidate; no other sizing rule has such a
 # distinction to make. The current contract is read from `CALIBRATION_VERSION` rather than
 # written out here: this line named `walk_forward_v2` as the strict rule, and when the
 # fleet moved to `walk_forward_v3` the literal stopped matching anything and the notebook
 # refused with "no conformal candidate is registered" - which reads as an absent sweep and
 # was a stale string.
-equal_weight_hashes = [row[0] for row in _sizing_candidates if row[1] == "equal_weight"]
-current_conformal_hashes = [
-    row[0]
+#
+# Which sizing rules exist is read from the registry rather than named here. This cell named
+# `equal_weight` and `conformal_weighted` and built a comparison row for each, while the
+# selection rule ranges over the whole allocator sweep. When the winsorized label's
+# `score_weighted` allocation took rank 1, the selected run belonged to a rule the comparison
+# had no row for, and the check below refused it for disagreeing with a ranking it was never
+# entered in. Reading the rules off the same population the selection draws from is what makes
+# "strongest under its own sizing rule" a statement about the selection rather than about
+# which two rules this cell happened to list.
+_method_of = {
+    row[0]: row[1]
     for row in _sizing_candidates
-    if row[1] == "conformal_weighted" and row[2] == CALIBRATION_VERSION
-]
-if not current_conformal_hashes:
+    if row[1] != "conformal_weighted" or row[2] == CALIBRATION_VERSION
+}
+_methods = set(_method_of.values())
+if "conformal_weighted" not in _methods:
     raise RuntimeError(
         f"No conformal candidate at the current calibration {CALIBRATION_VERSION!r} is "
         "registered. Re-run 12_portfolio_management: the registry's conformal generation "
         "predates the current contract and cannot be executed."
     )
-if not equal_weight_hashes:
+if "equal_weight" not in _methods:
     raise RuntimeError("No equal-weight baseline candidate is registered.")
+if TOP_HASH not in _method_of:
+    raise RuntimeError(
+        f"The selected run {TOP_HASH} is not in the eligible sizing population, so this "
+        "comparison would rank it against candidates the selection never saw."
+    )
 
 sizing_ranking = rank_backtests_on_common_support(
     CASE_STUDY,
-    sorted({TOP_HASH, *equal_weight_hashes, *current_conformal_hashes}),
+    sorted(_method_of),
     periods_per_year=PERIODS_PER_YEAR,
 )
-_allocator_of = {row[0]: row[1] for row in _sizing_candidates}
 sizing_ranking = sizing_ranking.with_columns(
-    pl.col("backtest_hash").replace_strict(_allocator_of, default="equal_weight").alias("method")
+    pl.col("backtest_hash").replace_strict(_method_of).alias("method")
 )
-BEST_EQUAL_WEIGHT_HASH = sizing_ranking.filter(pl.col("method") == "equal_weight")["backtest_hash"][
-    0
-]
-BEST_CONFORMAL_HASH = sizing_ranking.filter(pl.col("method") == "conformal_weighted")[
-    "backtest_hash"
-][0]
-selection_comparison = sizing_ranking.filter(
-    pl.col("backtest_hash").is_in([BEST_EQUAL_WEIGHT_HASH, BEST_CONFORMAL_HASH])
-).with_columns(
-    pl.when(pl.col("backtest_hash") == TOP_HASH)
-    .then(pl.col("method") + pl.lit(" (selected)"))
-    .otherwise(pl.col("method"))
-    .alias("method")
+selection_comparison = (
+    sizing_ranking.sort("sharpe", descending=True)
+    .group_by("method", maintain_order=True)
+    .first()
+    .with_columns(
+        pl.when(pl.col("backtest_hash") == TOP_HASH)
+        .then(pl.col("method") + pl.lit(" (selected)"))
+        .otherwise(pl.col("method"))
+        .alias("method")
+    )
 )
 if selection_comparison["n_periods"].n_unique() != 1:
     raise RuntimeError("Selection comparison does not have identical period support.")
