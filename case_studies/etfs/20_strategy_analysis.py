@@ -111,6 +111,7 @@ from case_studies.utils.strategy_analysis import (
     plot_concentration_curve,
     plot_equity_drawdown,
     plot_sharpe_waterfall,
+    resolve_canonical_rank1_lineage,
     resolve_holdout_self_backtest,
     write_strategy_assessment,
 )
@@ -158,15 +159,15 @@ print(explorer)
 LIVE_PREDICTIONS = (
     split_unpublished_members(
         study,
-        load_prediction_index(CASE_STUDY, label=PRIMARY_LABEL, split="validation"),
+        load_prediction_index(CASE_STUDY, split="validation"),
     )
     .live["prediction_hash"]
     .to_list()
 )
 if not LIVE_PREDICTIONS:
     raise RuntimeError(
-        f"no live prediction sets for {CASE_STUDY}/{PRIMARY_LABEL}/validation; run the model "
-        "stage and 14_backtest first"
+        f"no live prediction sets for {CASE_STUDY}/validation; run the model stage and "
+        "14_backtest first"
     )
 print(f"Live prediction sets: {len(LIVE_PREDICTIONS):,}")
 
@@ -266,6 +267,54 @@ def _stale_derived_rows(live: list[str]) -> tuple[int, int]:
     return stale_cohort, stale_paired
 
 
+# §1 reports the configuration the validation stages ranked first, and the paired-metrics
+# producer below has to be told what it is. Left to itself the producer ranks the registry on
+# raw Sharpe, which is a second selector beside this one - it applies neither the common-support
+# re-ranking a conformal candidate forces nor the restrictions the resolver holds. The two agree
+# on this registry today, which is why the published rows are right; etfs now has a second fully
+# backtested label, so agreement is a fact about this registry rather than a property of either
+# ranking. So the selection is resolved here, before anything is written, and the two rankings
+# are required to agree rather than assumed to.
+
+# %%
+_HOLDOUT_STAGES = ("signal", "allocation", "risk_overlay")
+_FIELD = (
+    pl.concat(
+        [
+            explorer.best(stage=s, top_n=2000, prediction_hashes=LIVE_PREDICTIONS)
+            for s in _HOLDOUT_STAGES
+        ],
+        how="diagonal_relaxed",
+    )
+    .filter(pl.col("family") != "benchmark")
+    .sort("sharpe", descending=True)
+    .unique(subset=["prediction_hash"], keep="first", maintain_order=True)
+)
+ADMITTED = frozenset(_FIELD["backtest_hash"].to_list())
+top_signal = _FIELD.head(1)
+TOP_HASH = top_signal.row(0, named=True)["backtest_hash"]
+TOP_PHASH = top_signal.row(0, named=True)["prediction_hash"]
+RANK1_FAMILY = top_signal.row(0, named=True)["family"]
+RANK1_CONFIG = top_signal.row(0, named=True)["config_name"]
+# Every label the case study declares is backtested equal-weight and competes here; what wins
+# decides the label everything below is keyed to. Reading `labels.primary` instead was only ever
+# right by coincidence, and etfs has a second fully backtested label, so the coincidence is not
+# one to rely on. The primary is kept as the declared value, to say when the two differ.
+SELECTED_LABEL = top_signal.row(0, named=True)["label"]
+
+# The resolver is given the same field, not the whole registry: it re-ranks on common timestamp
+# support wherever a conformal candidate is present, so a row this notebook never admitted would
+# otherwise decide how far the intersection reaches and therefore which admitted row wins.
+CARRIER = resolve_canonical_rank1_lineage(CASE_STUDY, admitted=ADMITTED)
+if CARRIER["val_backtest_hash"] != TOP_HASH:
+    raise RuntimeError(
+        "this notebook's ranking and the canonical resolver disagree on the carrier: "
+        f"{TOP_HASH} against {CARRIER['val_backtest_hash']}. Everything below reports the "
+        "first and the paired rows would be written against the second, so the decay would "
+        "compare the right holdout against a different strategy."
+    )
+
+# %%
 have_kinds, have_cohorts = _derived_table_state()
 stale_cohort, stale_paired = _stale_derived_rows(LIVE_PREDICTIONS)
 missing_kinds = sorted(set(PAIRED_KINDS) - have_kinds)
@@ -291,7 +340,7 @@ if missing_kinds or stale_paired:
         if missing_kinds
         else f"{stale_paired} pair(s) challenged by a retired prediction"
     )
-    rows = populate_paired_metrics(CASE_STUDY, prediction_hashes=LIVE_PREDICTIONS)
+    rows = populate_paired_metrics(CASE_STUDY, prediction_hashes=LIVE_PREDICTIONS, carrier=CARRIER)
     written = sum(1 for r in rows if "skip" not in r)
     print(f"backtest_paired_metrics: wrote {written} pairs ({reason})")
 else:
@@ -424,25 +473,6 @@ def _changed(challenger_hash: str, benchmark_hash: str) -> list[str]:
 # than about the signal - and the interval on the IC is what says which case this is.
 
 # %%
-_HOLDOUT_STAGES = ("signal", "allocation", "risk_overlay")
-top_signal = (
-    pl.concat(
-        [
-            explorer.best(stage=s, top_n=2000, prediction_hashes=LIVE_PREDICTIONS)
-            for s in _HOLDOUT_STAGES
-        ],
-        how="diagonal_relaxed",
-    )
-    .filter(pl.col("family") != "benchmark")
-    .sort("sharpe", descending=True)
-    .unique(subset=["prediction_hash"], keep="first", maintain_order=True)
-    .head(1)
-)
-TOP_HASH = top_signal.row(0, named=True)["backtest_hash"]
-TOP_PHASH = top_signal.row(0, named=True)["prediction_hash"]
-RANK1_FAMILY = top_signal.row(0, named=True)["family"]
-RANK1_CONFIG = top_signal.row(0, named=True)["config_name"]
-
 _db = CASE_DIR / "run_log" / "registry.db"
 with sqlite3.connect(str(_db)) as _con:
     _row = _con.execute(
@@ -453,7 +483,7 @@ with sqlite3.connect(str(_db)) as _con:
     ).fetchone()
 ic_mean, ic_lo, ic_hi, ic_t, ic_p, ic_ndays, ic_lag, ic_pct = _row
 
-print(f"Rank-1: family={RANK1_FAMILY}, config={RANK1_CONFIG}, label={PRIMARY_LABEL}")
+print(f"Rank-1: family={RANK1_FAMILY}, config={RANK1_CONFIG}, label={SELECTED_LABEL}")
 print(f"        prediction_hash={TOP_PHASH}, backtest_hash={TOP_HASH}")
 print()
 print("Daily-pooled IC (validation):")
@@ -738,7 +768,7 @@ spec_block = {
     "case_study": CASE_STUDY,
     "family": RANK1_FAMILY,
     "config_name": RANK1_CONFIG,
-    "label": PRIMARY_LABEL,
+    "label": SELECTED_LABEL,
     "signal_method": lineage["signal"].get("signal_method"),
     "top_k": lineage["signal"].get("top_k"),
     "allocation": lineage.get("allocation", {}).get("allocator"),
@@ -849,7 +879,7 @@ print(headline)
 
 # %%
 # Forest plot: rank-1 metrics with CI bars + reference lines
-ew_val = load_benchmark_metrics(CASE_STUDY, PRIMARY_LABEL, period="validation")
+ew_val = load_benchmark_metrics(CASE_STUDY, SELECTED_LABEL, period="validation")
 forest_metrics = [
     ("Sharpe", full["sharpe"], full["sharpe_ci95_lo"], full["sharpe_ci95_hi"]),
     ("Sortino", full["sortino"], full["sortino_ci95_lo"], full["sortino_ci95_hi"]),
@@ -910,7 +940,7 @@ strat_df = (
 )
 
 bench_val = (
-    load_benchmark_returns(CASE_STUDY, PRIMARY_LABEL, period="validation")
+    load_benchmark_returns(CASE_STUDY, SELECTED_LABEL, period="validation")
     .with_columns(pl.col("timestamp").cast(pl.Date).alias("ts"))
     .select(pl.col("ts"), pl.col("ew_return").alias("benchmark"))
 )
@@ -1344,7 +1374,7 @@ HO_VS_EW_AVAILABLE = he is not None
 if not HO_VS_EW_AVAILABLE:
     print("No holdout strategy-versus-benchmark comparison to report.")
 else:
-    ew_ho = load_benchmark_metrics(CASE_STUDY, PRIMARY_LABEL, period="holdout")
+    ew_ho = load_benchmark_metrics(CASE_STUDY, SELECTED_LABEL, period="holdout")
     print("Holdout strategy against the holdout-window equal-weight universe:")
     print(f"  strategy Sharpe:  {ho_full['sharpe']:.3f}")
     print(f"  EW Sharpe:        {ew_ho['sharpe']:.3f}")
@@ -1597,7 +1627,7 @@ bench_series = aligned["benchmark"].to_numpy()
 
 meta = BacktestReportMetadata(
     title="ETFs - The selected configuration Lineage",
-    strategy_name=f"{RANK1_FAMILY}/{RANK1_CONFIG} - {PRIMARY_LABEL}",
+    strategy_name=f"{RANK1_FAMILY}/{RANK1_CONFIG} - {SELECTED_LABEL}",
     universe=f"{setup['universe'].get('size', 100)} ETFs across categories",
     benchmark_name="ETF equal-weight universe (validation window)",
     evaluation_window=f"{aligned['ts'].min()} to {aligned['ts'].max()}",
@@ -1724,7 +1754,7 @@ assessment = {
     "rank1": {
         "family": RANK1_FAMILY,
         "config_name": RANK1_CONFIG,
-        "label": PRIMARY_LABEL,
+        "label": SELECTED_LABEL,
         "prediction_hash": TOP_PHASH,
         "validation_backtest_hash": TOP_HASH,
         "holdout_backtest_hash": HO_HASH,  # None until the holdout has been evaluated
