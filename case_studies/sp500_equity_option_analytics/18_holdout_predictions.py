@@ -99,7 +99,7 @@ LABEL = ""
 # The parameters above are the request; the values this notebook runs on are resolved here under
 # different names, so a resolved value cannot overwrite the request that produced it. An injected
 # parameter wins; otherwise the case study's own declaration does.
-
+#
 # This notebook writes to the registry, so it opens the study rather than reading one.
 # `open_study` activates the tier, which is what lets a fit publish a training run and a
 # prediction set under it; the read-only `Study.at` the preceding four notebooks use cannot.
