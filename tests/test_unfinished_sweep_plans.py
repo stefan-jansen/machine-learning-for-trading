@@ -18,10 +18,17 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import polars as pl
 import pytest
 
-from case_studies.research import OfficialPopulation, unfinished_sweep_plans
+from case_studies.research import (
+    OfficialPopulation,
+    advancing_labels,
+    unfinished_sweep_plans,
+)
 from case_studies.research.workspace import Study
+from case_studies.utils.registry import register_backtest_run
+from tests.test_research_contract_execution import _publish_prediction
 from tests.test_research_workspace import _seed_release
 
 
@@ -98,3 +105,106 @@ def test_a_registry_without_the_table_reports_absence_not_a_crash(tmp_path: Path
 
 def test_no_plans_named_is_nothing_unfinished(study: Study) -> None:
     assert unfinished_sweep_plans(study, plan_names={}) == []
+
+
+def _complete_backtest(study: Study, *, top_k: int) -> str:
+    """One registered, complete backtest, so a plan naming it is genuinely complete."""
+    prediction_hash = _publish_prediction(study, alpha=1.0, checkpoint=top_k)
+    returns = pl.DataFrame({"timestamp": ["2024-01-05"], "return": [0.01]}).with_columns(
+        pl.col("timestamp").str.to_date()
+    )
+    return register_backtest_run(
+        "etfs",
+        prediction_hash,
+        {
+            "identity_version": 3,
+            "execution_tier": "canonical",
+            "strategy": {"signal": {"method": "equal_weight_top_k", "top_k": top_k}},
+        },
+        stage="signal",
+        returns=returns,
+        metrics={"sharpe": 1.0},
+        case_dir=study.root,
+    )
+
+
+def test_a_changed_plan_is_read_instead_of_the_complete_generation_it_replaced(
+    study: Study,
+) -> None:
+    """The reason the plan is published before the sweep rather than after it.
+
+    Published after, a sweep that has grown leaves the previous generation in force while it
+    runs. That generation is complete, so an interrupted re-run under a widened grid reports as
+    finished on the strength of a plan it has already replaced, and the freeze seals a field
+    the current sweep never produced. Published before, the live generation always describes
+    the sweep in flight, and an interruption is visible as members that are not registered.
+    """
+    first = _complete_backtest(study, top_k=1)
+    name = "etfs-allocation-fwd_ret_5d-v1"
+    generation_one = OfficialPopulation.create(
+        study, name=name, member_kind="backtest", members=[first]
+    )
+    assert unfinished_sweep_plans(study, plan_names={"fwd_ret_5d allocation": name}) == []
+
+    # The widened grid, published before it runs: the extra member is not registered yet.
+    OfficialPopulation.create(
+        study,
+        name=name,
+        member_kind="backtest",
+        members=[first, "cccc55556666"],
+        supersedes=generation_one.hash,
+    )
+    unfinished = unfinished_sweep_plans(study, plan_names={"fwd_ret_5d allocation": name})
+    assert len(unfinished) == 1
+    assert "cccc55556666" in unfinished[0]
+
+
+def test_a_label_that_stops_after_its_baseline_does_not_block_the_freeze(study: Study) -> None:
+    """One label swept to completion, one deliberately left at its baseline.
+
+    Requiring a plan for every declared label makes the field unfreezable until sweeps nobody
+    intended are run. The dropped label is declared instead, and the freeze waits only for what
+    is actually being produced.
+    """
+    swept = _complete_backtest(study, top_k=1)
+    plans = {
+        "fwd_ret_21d": "etfs-allocation-fwd_ret_21d-v1",
+        "fwd_ret_5d": "etfs-allocation-fwd_ret_5d-v1",
+    }
+    OfficialPopulation.create(
+        study, name=plans["fwd_ret_21d"], member_kind="backtest", members=[swept]
+    )
+
+    advancing = advancing_labels(
+        study, allocation_plans=plans, not_advancing={"fwd_ret_5d": "dominated at baseline"}
+    )
+    assert advancing == ["fwd_ret_21d"]
+    assert unfinished_sweep_plans(study, plan_names={"fwd_ret_21d": plans["fwd_ret_21d"]}) == []
+
+
+def test_a_declared_drop_that_the_registry_contradicts_is_refused(study: Study) -> None:
+    """The label was declared dropped and its sweep ran anyway.
+
+    Honouring the declaration would silently discard configurations that exist, so the
+    contradiction is raised rather than resolved in either direction.
+    """
+    swept = _complete_backtest(study, top_k=1)
+    plans = {"fwd_ret_5d": "etfs-allocation-fwd_ret_5d-v1"}
+    OfficialPopulation.create(
+        study, name=plans["fwd_ret_5d"], member_kind="backtest", members=[swept]
+    )
+
+    with pytest.raises(ValueError, match="complete allocation plan"):
+        advancing_labels(
+            study, allocation_plans=plans, not_advancing={"fwd_ret_5d": "dominated at baseline"}
+        )
+
+
+def test_a_drop_naming_an_undeclared_label_is_refused(study: Study) -> None:
+    """A typo or a leftover from a renamed label would silently exclude a real label."""
+    with pytest.raises(ValueError, match="not declared by this case study"):
+        advancing_labels(
+            study,
+            allocation_plans={"fwd_ret_5d": "etfs-allocation-fwd_ret_5d-v1"},
+            not_advancing={"fwd_ret_1d": "typo"},
+        )

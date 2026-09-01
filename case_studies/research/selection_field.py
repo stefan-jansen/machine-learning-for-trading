@@ -116,6 +116,56 @@ def unfinished_sweep_plans(study: Study, *, plan_names: Mapping[str, str]) -> li
     return unfinished
 
 
+def advancing_labels(
+    study: Study,
+    *,
+    allocation_plans: Mapping[str, str],
+    not_advancing: Mapping[str, str],
+) -> list[str]:
+    """The declared labels whose sweeps the freeze should wait for.
+
+    The funnel permits a label to stop after its baseline: dominated there, it earns no
+    allocation or overlay sweep. That decision leaves a registry identical to the one a sweep
+    that has not been started yet leaves, so requiring plans for every declared label makes the
+    field unfreezable until sweeps nobody intended are run, and requiring them for no label
+    makes the plans pointless. The decision has to be recorded, and ``not_advancing`` is where.
+
+    It is the one thing in this design that is written down rather than derived, and it is
+    written down because there is nothing to derive it from. It also costs nothing later:
+    advancing a label afterwards means running its sweeps, which publishes real plans, and
+    taking it out of the mapping. Declaring a label here never caps a grid either - a run that
+    adds configurations supersedes its own plan, so better configurations are always admissible.
+
+    Two ways the declaration can be wrong are refused rather than tolerated. A label it names
+    that this case study does not declare is a typo or a leftover from a renamed label, and
+    silently dropping it would exclude a real label from the wait. A label it names whose
+    allocation plan is recorded and complete is a contradiction: the sweep did run, so its
+    configurations belong in the field, and honouring the declaration would silently discard
+    them.
+    """
+    stale = set(not_advancing) - set(allocation_plans)
+    if stale:
+        raise ValueError(
+            "labels declared as not advancing are not declared by this case study: "
+            + ", ".join(sorted(stale))
+        )
+    contradicted = sorted(
+        label
+        for label in not_advancing
+        if not unfinished_sweep_plans(study, plan_names={label: allocation_plans[label]})
+    )
+    if contradicted:
+        raise ValueError(
+            "labels declared as not advancing have a complete allocation plan: "
+            + ", ".join(contradicted)
+            + ". Remove them from the declaration so their configurations enter the field."
+        )
+    advancing = [label for label in allocation_plans if label not in not_advancing]
+    if not advancing:
+        raise ValueError("every declared label is marked as not advancing, so there is no field")
+    return advancing
+
+
 def resolve_field_members(
     study: Study,
     *,

@@ -63,6 +63,7 @@ from case_studies.research import (
     CandidateSet,
     OfficialPopulation,
     Study,
+    advancing_labels,
     candidate_set_supersedes,
     open_study,
     population_supersedes,
@@ -362,33 +363,20 @@ def execute_risk_plans(combo: dict, combo_plans: list[dict]) -> list[str]:
     return combo_failures
 
 
-# %%
-failures = []
-started = time.monotonic()
-for combo in top_combos.iter_rows(named=True):
-    combo_plans = [
-        plan
-        for plan in plans
-        if plan["prediction_hash"] == combo["prediction_hash"]
-        and plan["backtest_hash"] not in existing_hashes
-    ]
-    if combo_plans:
-        failures.extend(execute_risk_plans(combo, combo_plans))
-
-# %%
-if failures:
-    raise RuntimeError("Risk-sweep failures:\n" + "\n".join(failures))
-print(f"Risk surface complete in {(time.monotonic() - started):.1f}s")
-
 # %% [markdown]
-# ### Record the grid that was run
+# ### Record the grid before running it
 #
 # `plans` is every overlay backtest this sweep intends to register, identified before any of
-# them executed, and the loop above raises rather than dropping one. Publishing it as an
+# them executes, and the loop below raises rather than dropping one. Publishing it as an
 # official population is what lets the freeze below tell an interrupted sweep from a finished
 # one. No reading of the registered rows can: an interruption leaves rows that look exactly
 # like a smaller finished grid, whether they are counted as rows, as model configurations, or
-# as stages present. An interrupted run reaches neither this cell nor the population.
+# as stages present.
+#
+# Published before the sweep and checked with `require_complete` after, for the reason
+# `15_portfolio_management` gives: written at the end, a changed sweep stays represented by the
+# previous generation, which is complete, so an interrupted re-run under a widened grid reports
+# as finished on a plan it has already replaced.
 
 # %%
 RISK_POPULATION = f"{CASE_STUDY_ID}-risk-{RISK_LABEL}-v1"
@@ -397,6 +385,7 @@ RISK_POPULATION = f"{CASE_STUDY_ID}-risk-{RISK_LABEL}-v1"
 # to say which one it replaces; the refusal prints the current hash.
 SUPERSEDES_RISK_POPULATIONS: dict[str, str] = {}
 
+_risk_plan = None
 try:
     _risk_writable = open_study(CASE_STUDY_ID, entry_point="16_risk_management")
 except PermissionError as exc:
@@ -419,7 +408,28 @@ else:
             declared=SUPERSEDES_RISK_POPULATIONS.get(RISK_POPULATION),
         ),
     )
-    print(f"Risk plan {RISK_POPULATION}: {_risk_plan.hash}, {len(plans)} backtests")
+    print(f"Risk plan {RISK_POPULATION}: {_risk_plan.hash}, {len(plans)} planned")
+
+# %%
+failures = []
+started = time.monotonic()
+for combo in top_combos.iter_rows(named=True):
+    combo_plans = [
+        plan
+        for plan in plans
+        if plan["prediction_hash"] == combo["prediction_hash"]
+        and plan["backtest_hash"] not in existing_hashes
+    ]
+    if combo_plans:
+        failures.extend(execute_risk_plans(combo, combo_plans))
+
+# %%
+if failures:
+    raise RuntimeError("Risk-sweep failures:\n" + "\n".join(failures))
+print(f"Risk surface complete in {(time.monotonic() - started):.1f}s")
+if _risk_plan is not None:
+    _risk_plan.require_complete()
+    print(f"Risk plan {RISK_POPULATION} complete: {len(plans)} backtests")
 
 # %% [markdown]
 # ## 3. Measure paired overlay effects
@@ -641,6 +651,13 @@ fig_tradeoff.show()
 # per-stage count of advancing configurations, which admitted a label whose sweep had produced
 # one row per configuration and stopped. Only the tip is declarable - `create` refuses anything
 # else and names the tip - so this value moves on every generation.
+# Labels deliberately stopped after their baseline, and why. The funnel permits it - a label
+# dominated at the baseline stage earns no allocation or overlay sweep - but a label that was
+# dropped and a label whose sweep has not been run yet leave the same registry, so the decision
+# has to be recorded or the freeze can never tell them apart and would wait forever. Empty here:
+# all five labels advanced.
+LABELS_NOT_ADVANCING: dict[str, str] = {}
+
 SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
     "sp500_equity_option_analytics:holdout-candidates": "aa6b3986124b",
 }
@@ -694,31 +711,35 @@ else:
             "will not find it, and check its members against different artifacts than they "
             "will read."
         )
-    # Every declared label's sweeps have to be finished, and finished is `require_complete` on
-    # the plan each sweep recorded, not a reading of the rows it left. The set is immutable
+    # Every *advancing* label's sweeps have to be finished, and finished is `require_complete`
+    # on the plan each sweep recorded, not a reading of the rows it left. The set is immutable
     # under its name, so a label whose allocation or overlay sweep has not run yet would be
     # frozen out permanently, and a sweep interrupted part-way is indistinguishable from a
     # smaller finished one by rows, by configurations, or by which stages are present.
     #
-    # This is also what sequences a per-label run without any coordination: 15 and 16 run for
-    # each label in turn, every run but the last finds a plan missing and declines to freeze,
-    # and the last one freezes the whole field. Declining is not a failure - the notebook has
-    # done its own label's work either way, and the set is written exactly once.
-    # Every declared label's sweeps have to be finished, and finished is `require_complete` on
-    # the plan each sweep recorded, not a reading of the rows it left. The set is immutable
-    # under its name, so a label whose allocation or overlay sweep has not run yet would be
-    # frozen out permanently, and a sweep interrupted part-way is indistinguishable from a
-    # smaller finished one by rows, by configurations, or by which stages are present.
+    # A label that stops after its baseline is a decision, not a registry state: it leaves
+    # exactly what a sweep that was never started leaves, so it has to be declared. That is the
+    # one thing here that is written down rather than derived, and declaring it costs nothing
+    # later - advancing the label afterwards means running 15 and 16 for it, which publishes
+    # real plans, and removing it from the mapping. What a plan population never does is cap
+    # the grid: a run that adds configurations supersedes its own plan.
     #
     # This is also what sequences a per-label run without any coordination: 15 and 16 run for
-    # each label in turn, every run but the last finds a plan missing and declines to freeze,
-    # and the last one freezes the whole field. Declining is not a failure - the notebook has
-    # done its own label's work either way, and the set is written exactly once.
+    # each advancing label in turn, every run but the last finds a plan missing and declines to
+    # freeze, and the last one freezes the whole field. Declining is not a failure - the
+    # notebook has done its own label's work either way, and the set is written exactly once.
+    advancing = advancing_labels(
+        writable,
+        allocation_plans={
+            label: f"{CASE_STUDY_ID}-allocation-{label}-v1" for label in CANDIDATE_LABELS
+        },
+        not_advancing=LABELS_NOT_ADVANCING,
+    )
     unfinished = unfinished_sweep_plans(
         writable,
         plan_names={
             f"{label} {stage}": f"{CASE_STUDY_ID}-{key}-{label}-v1"
-            for label in CANDIDATE_LABELS
+            for label in advancing
             for stage, key in (("allocation", "allocation"), ("risk_overlay", "risk"))
         },
     )
@@ -727,8 +748,8 @@ else:
         holdout_candidates = None
         print(
             f"Not freezing a candidate set here: {len(unfinished)} of "
-            f"{2 * len(CANDIDATE_LABELS)} recorded sweep plans are absent or incomplete, so "
-            "the field is still being produced. Run 15 and 16 for each declared label; the "
+            f"{2 * len(advancing)} recorded sweep plans are absent or incomplete, so "
+            "the field is still being produced. Run 15 and 16 for each advancing label; the "
             "last of those runs freezes the set.\n  " + "\n  ".join(unfinished)
         )
     else:

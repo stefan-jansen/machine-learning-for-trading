@@ -68,6 +68,7 @@ from .results import (
 from .selection_field import (
     FIELD_STAGES,
     SelectionField,
+    advancing_labels,
     label_of,
     open_selection_field,
     resolve_field_members,
@@ -138,6 +139,7 @@ __all__ = [
     "label_of",
     "open_selection_field",
     "resolve_field_members",
+    "advancing_labels",
     "unfinished_sweep_plans",
     "population_supersedes",
     "research_name",
