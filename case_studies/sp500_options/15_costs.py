@@ -36,7 +36,7 @@
 # Cost variants are diagnostics. They never join the candidate set a strategy is selected from,
 # because varying the cost assumption after the fact and keeping the most favourable answer is a
 # way of choosing a result rather than measuring one. Their interpretation is in
-# `16_strategy_analysis`.
+# `18_strategy_analysis`.
 #
 # **Learning objectives**
 #

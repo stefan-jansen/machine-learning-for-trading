@@ -2413,7 +2413,7 @@ case_studies/sp500_options/15_costs:
   awaiting_rebuild:
     needs: {of: sp500_options, backtest_stage: signal}
     issue: 501
-case_studies/sp500_options/16_strategy_analysis:
+case_studies/sp500_options/18_strategy_analysis:
   awaiting_rebuild:
     needs: {of: sp500_options, backtest_stage: allocation}
     issue: 503

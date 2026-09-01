@@ -28,7 +28,7 @@
 # capital. Both kinds are common in practice and they fail in different ways, which is the point
 # of running them side by side.
 #
-# The results extend the immutable candidate set that `16_strategy_analysis` selects from.
+# The results extend the immutable candidate set that `18_strategy_analysis` selects from.
 #
 # **Learning objectives**
 #
@@ -300,7 +300,7 @@ strategy_candidates = (
 # A point above the diagonal is a baseline the allocator improved on this data; the vertical
 # spread within one colour is how much the answer depends on which model the allocator was handed.
 # Neither is a selection - that needs the interval around each estimate, which
-# `16_strategy_analysis` reports.
+# `18_strategy_analysis` reports.
 #
 # Both Sharpe ratios in a pair are recomputed over the dates the two results share, rather than
 # read from the registry where each covers its own series. `conformal_weighted` trades a shorter

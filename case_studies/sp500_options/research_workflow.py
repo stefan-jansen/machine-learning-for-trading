@@ -738,8 +738,16 @@ def _publish_resolved_short_straddle_decisions(
 def _clean_replay_digests(
     study: Study,
     requests: list[dict[str, Any]],
+    *,
+    split: str,
 ) -> dict[str, str]:
-    """Replay a complete decision request set in a fresh interpreter."""
+    """Replay a complete decision request set in a fresh interpreter.
+
+    ``split`` names the price window the decisions are resolved over and has to reach the
+    replay, because the digest it returns is compared against the one this process computed.
+    A replay that always loaded the validation window would disagree with every holdout run
+    and report it as a dirty replay.
+    """
     tiers = {str(request["execution_tier"]) for request in requests}
     if len(tiers) != 1:
         raise ValueError("clean option decision replay cannot mix execution tiers")
@@ -754,6 +762,7 @@ def _clean_replay_digests(
             "manifest": study.manifest,
         },
         "execution_tier": tiers.pop(),
+        "split": split,
         "requests": requests,
     }
     completed = subprocess.run(
@@ -795,8 +804,16 @@ def run_official_backtest_requests(
     *,
     population_name: str | None,
     supersedes: str | None = None,
+    split: str = "validation",
 ) -> OptionBacktestExecution:
     """Resolve and execute typed option requests, snapshotting canonical populations.
+
+    ``split`` is the price window the decisions and the backtest run over. Every sweep in
+    this case study runs on the validation window, so that is the default; the holdout
+    notebook passes ``"holdout"`` and is the only caller that does. It is a parameter rather
+    than a second code path because the entry schedule, the hedge rule and the settlement are
+    the same in both windows - only the prices differ - and a copy of this function for the
+    holdout would be a copy that can drift from the one every validation number came from.
 
     ``supersedes`` names the generation of ``population_name`` this run replaces, and is
     threaded here for the same reason ``run_backtests`` takes it: a name that already exists
@@ -849,7 +866,7 @@ def run_official_backtest_requests(
             price_cache[cache_key] = load_backtest_prices_for(
                 CASE_STUDY,
                 str(row["label"]),
-                split="validation",
+                split=split,
                 warmup_periods=warmup,
             )
         prices = price_cache[cache_key]
@@ -878,7 +895,7 @@ def run_official_backtest_requests(
         raise ValueError("canonical option execution requires an official population name")
     if execution_tier == "preview" and population_name is not None:
         raise ValueError("preview option execution cannot create an official population")
-    replay_digests = _clean_replay_digests(study, replay_requests)
+    replay_digests = _clean_replay_digests(study, replay_requests, split=split)
     local_digests = {
         row["request_name"]: value_digest(decisions)
         for row, _prediction, _prices, decisions in resolved
@@ -907,7 +924,12 @@ def run_official_backtest_requests(
             study,
             predictions=prediction_row,
             signal=row["signal"],
-            prices=prices,
+            # `Strategy` refuses reader-supplied prices on the holdout split and loads the
+            # canonical window itself, which is the guard that stops a holdout result being
+            # produced from a frame the notebook assembled. The decisions above are resolved
+            # against the same window - same split, same warmup - so what is withheld here is
+            # the frame, not the window.
+            prices=None if split == "holdout" else prices,
             allocation=allocation,
             risk=row.get("risk"),
             costs=row.get("costs"),
@@ -970,7 +992,7 @@ def run_official_backtest_requests(
             chapter=row.get("chapter"),
             decision=decision,
         )
-        result = strategy.run(prices=prices)
+        result = strategy.run(prices=None if split == "holdout" else prices)
         if result.hash != expected_hash:
             raise RuntimeError(f"backtest identity changed: {expected_hash} -> {result.hash}")
         results.append(result)
@@ -1010,6 +1032,7 @@ def _replay_from_stdin() -> None:
         Path(payload["data_paths"]["raw_options"]),
     )
     catalog = study.predictions.table(include_preview=True)
+    split = str(payload["split"])
     price_cache: dict[tuple[str, int], pl.DataFrame] = {}
     replayed = []
     for row in payload["requests"]:
@@ -1024,7 +1047,7 @@ def _replay_from_stdin() -> None:
             price_cache[cache_key] = load_backtest_prices_for(
                 CASE_STUDY,
                 str(row["label"]),
-                split="validation",
+                split=split,
                 warmup_periods=warmup,
             )
         decisions = resolve_short_straddle_decisions(

@@ -45,7 +45,7 @@ The cost-mitigation cascade (O'Donovan & Yu 2024) is encoded in the `strategy.si
 | Portfolio | [`13_portfolio_management`](13_portfolio_management.ipynb) | Ch17 | Long-short straddle allocation with margin constraints | One backtest run per allocation method, same artifact layout |
 | Risk | [`14_risk_management`](14_risk_management.ipynb) | Ch19 | Proves the risk-overlay boundary: the option path refuses a target-weight overlay | Nothing - the comparison stays in the notebook |
 | Costs | [`15_costs`](15_costs.ipynb) | Ch18 | HTM cost-sensitivity grid in % of premium across families and universes | `evaluation/htm_cost_sensitivity.parquet`, plus one registered backtest run per cost cell with `daily_returns.parquet` and `spec.json` under `run_log/backtest/{hash}/` (the grid is aggregated inline rather than through `run_backtest()`, so there are no weights) |
-| Strategy Analysis | [`16_strategy_analysis`](16_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with paired-bootstrap holdout closure | `results/strategy_assessment.json`. The tear sheet is gated on a `trades.parquet` the vectorized HTM backtester does not emit, so it is skipped |
+| Strategy Analysis | [`18_strategy_analysis`](18_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with paired-bootstrap holdout closure | `results/strategy_assessment.json`. The tear sheet is gated on a `trades.parquet` the vectorized HTM backtester does not emit, so it is skipped |
 | Appendix | [`90_ic_diagnostic`](90_ic_diagnostic.ipynb) | — | Signal-attribution deep dive outside the main pipeline | Nothing - it reads the registry |
 
 ## Key Results
@@ -87,7 +87,7 @@ uv run python case_studies/sp500_options/12_backtest.py
 uv run python case_studies/sp500_options/13_portfolio_management.py
 uv run python case_studies/sp500_options/14_risk_management.py
 uv run python case_studies/sp500_options/15_costs.py
-uv run python case_studies/sp500_options/16_strategy_analysis.py
+uv run python case_studies/sp500_options/18_strategy_analysis.py
 uv run python case_studies/sp500_options/90_ic_diagnostic.py
 ```
 

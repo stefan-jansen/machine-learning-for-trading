@@ -30,7 +30,7 @@
 # held varies across requests.
 #
 # The run publishes a named, immutable population of backtest results. `13_portfolio_management`
-# and `15_costs` resolve that population by name and build on it, and `16_strategy_analysis` is
+# and `15_costs` resolve that population by name and build on it, and `18_strategy_analysis` is
 # where the results are ranked and interpreted.
 #
 # **Learning objectives**
@@ -326,7 +326,7 @@ if catalog.height != requests.height or catalog.filter(~pl.col("complete")).heig
 #
 # The Sharpe ratios below are the raw outcome of the sweep. They are not ranked here and no
 # configuration is preferred: choosing one needs the uncertainty around each estimate and the
-# count of configurations searched, which `16_strategy_analysis` computes.
+# count of configurations searched, which `18_strategy_analysis` computes.
 
 # %%
 published = (

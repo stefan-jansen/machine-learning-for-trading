@@ -39,7 +39,7 @@
 # a risk request would be refused if one were configured, and confirms it wrote nothing.
 #
 # This is the third of the four backtest stages, and the last one that could add a run to the
-# candidate pool. It registers none, so the pool `15_costs` prices and `16_strategy_analysis`
+# candidate pool. It registers none, so the pool `15_costs` prices and `18_strategy_analysis`
 # reports is the one `13_portfolio_management` left. Costs runs after this notebook rather than
 # beside it so that the last stage to select is the last stage to run.
 #
