@@ -46,13 +46,16 @@
 # **Book reference**: Chapter 20, §20.1 - sp500_options anchors the
 # "cost model validity" theme in the cross-case-study synthesis.
 #
-# **Prerequisites**: case-study pipeline through `12_backtest` and
-# `15_costs`; the locked registry at
-# `case_studies/sp500_options/run_log/registry.db`.
+# **Prerequisites**: the case-study pipeline through
+# [`17_holdout_backtest`](17_holdout_backtest.ipynb), which registers the holdout result this
+# notebook closes on.
 #
-# **Scope**: registry-read only - no training, no re-backtesting, no
-# registry writes. The `backtest_paired_metrics` table was populated by
-# `20_strategy_synthesis/01_aggregate_synthesis.py` (commit `57677ce`).
+# **Scope**: no training and no re-backtesting. It does write two derived tables it also
+# reads - `backtest_paired_metrics` and `cohort_metrics` - because a case study has to be able
+# to produce everything its own notebooks report, and only Chapter 20's synthesis ever wrote
+# them. Both are computed from the registered backtests over the population this notebook
+# nominates, and both are replaced rather than added to, so a carrier that moved does not
+# leave its predecessor's rows behind looking current.
 
 # %%
 """S&P 500 Options - Strategy Analysis."""
@@ -231,6 +234,34 @@ if TOP_HASH not in _candidate_hashes:
         "set this case study nominated"
     )
 
+# The prediction sets behind the nominated backtests, resolved once and used wherever a
+# cohort or a leader is taken below. Both of those questions are about the search this case
+# study declared, and the registry holds more than that search: retired generations, the
+# full-universe rows the Chapter 18 cost cascade keeps, and any label this notebook does not
+# report. Restricting on the universe alone leaves all three in, and a cohort that admits
+# them has a different leader and a different deflation than the search being reported.
+_db = CASE_DIR / "run_log" / "registry.db"
+with sqlite3.connect(str(_db)) as _con:
+    _CANDIDATE_PREDICTIONS = tuple(
+        sorted(
+            row[0]
+            for row in _con.execute(
+                "SELECT DISTINCT prediction_hash FROM backtest_runs WHERE backtest_hash IN "
+                f"({','.join('?' * len(_candidate_hashes))})",
+                sorted(_candidate_hashes),
+            )
+        )
+    )
+if not _CANDIDATE_PREDICTIONS:
+    raise RuntimeError(
+        f"{STRATEGY_CANDIDATES} names {len(_candidate_hashes)} backtests and none of them is "
+        "in backtest_runs, so the nominated search cannot be resolved to a prediction "
+        "population"
+    )
+print(
+    f"Nominated search: {len(_candidate_hashes)} backtests over {len(_CANDIDATE_PREDICTIONS)} prediction sets"
+)
+
 # %% [markdown]
 # ### The paired rows this notebook reads, built here rather than assumed
 #
@@ -264,6 +295,7 @@ if TOP_HASH not in _candidate_hashes:
 _cohort_counts = compute_and_register(
     CASE_STUDY,
     universe_filter=rung_for(CASE_STUDY)["universe_filter"],
+    prediction_hashes=_CANDIDATE_PREDICTIONS,
     verbose=False,
 )
 print(
@@ -294,7 +326,6 @@ for _row in _paired_rows:
 # specification directly from the registry.
 
 # %%
-_db = CASE_DIR / "run_log" / "registry.db"
 with sqlite3.connect(str(_db)) as _con:
     _row = _con.execute(
         "SELECT ic_mean_daily, ic_ci_lo, ic_ci_hi, ic_t_hac, ic_p_hac, ic_n_days, "
@@ -322,6 +353,16 @@ with sqlite3.connect(str(_db)) as _con:
     UNIVERSE_FILTER = _spec.get("strategy", {}).get("signal", {}).get("universe_filter") or "full"
     CASCADE_RUNG = {"full": 2, "liquid": 3}[UNIVERSE_FILTER]
     ALLOCATOR_METHOD = _spec.get("strategy", {}).get("allocation", {}).get("method")
+    # Read rather than restated, for the same reason as the allocator beside it: the
+    # entry scheme is part of what the carrier IS, and three call sites below wrote it
+    # as a literal that was only ever checked against the carrier of the day.
+    SIGNAL_METHOD = _spec.get("strategy", {}).get("signal", {}).get("method")
+    TOP_K = _spec.get("strategy", {}).get("signal", {}).get("top_k")
+    if not SIGNAL_METHOD or TOP_K is None:
+        raise RuntimeError(
+            "rank-1 spec declares no strategy.signal method or top_k; "
+            "the carrier's entry scheme cannot be reported"
+        )
 
 # %% [markdown]
 # Query the cross-family selection cohort and the narrower family cohort
@@ -399,7 +440,16 @@ SEARCH_ATTRIBUTION = cohort_metric_attribution(SEARCH_COHORT, TOP_HASH)
 # `_lineage["val_stage"]`, which agreed only while the carrier happened to be a baseline row.
 # The current carrier is an allocation row, and the two sides of the comparison were then two
 # different stages: the check reported a mismatch that was its own.
-_stage_leader = explorer.best(stage=_lineage["val_stage"], top_n=1).row(0, named=True)
+# Same population as the cohort above, and for the same reason: `best` with a stage alone
+# ranges over every label and every universe in the registry, so the leader it returns can be
+# a row the cohort never saw, and the check would then fail on the difference between two
+# populations rather than on a real disagreement.
+_stage_leader = explorer.best(
+    stage=_lineage["val_stage"],
+    top_n=1,
+    label=PRIMARY_LABEL,
+    prediction_hashes=_CANDIDATE_PREDICTIONS,
+).row(0, named=True)
 if SEARCH_COHORT["leader_hash"] != _stage_leader["backtest_hash"]:
     raise RuntimeError(
         f"Cross-family DSR leader does not match the {_lineage['val_stage']} leader: "
@@ -683,9 +733,9 @@ spec_block = {
     "config_name": RANK1_CONFIG,
     "label": PRIMARY_LABEL,
     "stage": _lineage["val_stage"],
-    "signal_method": "equal_weight_top_k",
+    "signal_method": SIGNAL_METHOD,
     "allocator": ALLOCATOR_METHOD,
-    "top_k": 5,
+    "top_k": TOP_K,
     "universe_filter": UNIVERSE_FILTER,
     "cascade_rung": CASCADE_RUNG,
     "rebalance_cadence": setup["decision"]["entry_cadence"],
@@ -703,7 +753,14 @@ spec_block = {
     "bootstrap_block_length": int(full["bootstrap_block_length"]),
     "bootstrap_n": int(full["bootstrap_n"]),
 }
-print("Pinned-carrier specification (equal-weight baseline, validation window):")
+# The stage comes from the carrier's own lineage. Naming it "equal-weight baseline" was
+# correct only while the cross-stage rank-1 happened to be a signal-stage row; the carrier in
+# force is an allocation row, and a reader told otherwise has the wrong provenance for every
+# number in the block.
+print(
+    f"Pinned-carrier specification ({_lineage['val_stage']} stage, "
+    f"{ALLOCATOR_METHOD or 'equal-weight'} allocation, validation window):"
+)
 for k, v in spec_block.items():
     print(f"  {k}: {v}")
 
@@ -751,7 +808,7 @@ for suffix, label in [("raw", "DSR_raw"), ("er", "DSR_ER"), ("mp", "DSR_MP")]:
     status = f"{suffix}_p={pvalue:.3f}" if pvalue is not None else "cohort_unavailable"
     dsr_rows.append(
         _row(
-            f"{label} (baseline leader {SEARCH_COHORT['leader_hash']})",
+            f"{label} ({_lineage['val_stage']} leader {SEARCH_COHORT['leader_hash']})",
             _fmt(SEARCH_COHORT[f"dsr_{suffix}"]),
             "-",
             "-",
@@ -1350,8 +1407,8 @@ lineage = {
         "volatility": full["volatility"],
         "total_return": full["total_return"],
         "backtest_hash": TOP_HASH,
-        "signal_method": "equal_weight_top_k",
-        "top_k": 5,
+        "signal_method": SIGNAL_METHOD,
+        "top_k": TOP_K,
     }
 }
 op_profile = compute_operating_profile(lineage, setup)
@@ -1438,9 +1495,9 @@ rank1_assessment = {
     "prediction_hash": TOP_PHASH,
     "validation_backtest_hash": TOP_HASH,
     "holdout_backtest_hash": HO_HASH,
-    "signal_method": "equal_weight_top_k",
+    "signal_method": SIGNAL_METHOD,
     "allocator": ALLOCATOR_METHOD,
-    "top_k": 5,
+    "top_k": TOP_K,
     "universe_filter": UNIVERSE_FILTER,
     "cascade_rung": CASCADE_RUNG,
     "rebalance_cadence": setup["decision"]["entry_cadence"],
@@ -1494,10 +1551,13 @@ headline_assessment = {
 # %%
 selection_assessment = {
     "architecture": "cohort_metrics",
-    "cohort_layer": "stagelabel/(signal, ret_to_expiry)",
+    # Both derived from the row actually fetched above, not restated. The literals here named
+    # the signal stage and the primary label, and the cohort is fetched at the carrier's stage,
+    # so a serialized assessment attributed an allocation-stage cohort to the baseline.
+    "cohort_layer": f"stagelabel/({_lineage['val_stage']}, {PRIMARY_LABEL})",
     "metric_subject": (
-        f"cross-family baseline leader {SEARCH_COHORT['leader_config_name']} "
-        f"({SEARCH_COHORT['leader_hash']})"
+        f"cross-family {_lineage['val_stage']} leader "
+        f"{SEARCH_COHORT['leader_config_name']} ({SEARCH_COHORT['leader_hash']})"
     ),
     "carrier_hash": TOP_HASH,
     "applies_to_current_carrier": SEARCH_ATTRIBUTION["applies_to_carrier"],
