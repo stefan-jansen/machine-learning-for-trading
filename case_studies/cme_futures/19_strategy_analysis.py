@@ -54,6 +54,8 @@ from case_studies.cme_futures.research_workflow import (
     selection_catalog,
 )
 from case_studies.research import OfficialPopulation, Result
+from case_studies.utils.cohort_metrics import compute_and_register
+from case_studies.utils.paired_metrics import populate_paired_metrics
 from case_studies.utils.strategy_analysis import (
     resolve_solvent_carrier,
     select_holdout_self_backtest,
@@ -128,6 +130,54 @@ pool_size = pl.DataFrame(
     ],
     schema={"label": pl.String, "candidates": pl.Int64, "candidate_set_hash": pl.String},
 ).sort("label")
+
+# %% [markdown]
+# ## The selection correction, and the paired comparisons
+#
+# Two registry tables carry the statistics this notebook reports rather than recomputes:
+# `cohort_metrics` holds the deflated Sharpe for each cohort's leader, and
+# `backtest_paired_metrics` holds bootstrap comparisons between registered return series.
+# Both were empty here until 2026-08-31, so an earlier edition of the README quoted deflation
+# numbers with nothing behind them. The cause was not a bad computation - it was that this
+# notebook never called for one, while `etfs`, `fx_pairs` and `us_firm_characteristics` all do.
+#
+# `compute_and_register` refreshes the whole table rather than one row, so it can never report
+# a stale leader. `populate_paired_metrics` writes one row per comparison kind, including
+# `val_rank1_self` - the carrier's validation series against its own holdout replay, which is
+# the paired form of the val-to-holdout question and the only honest way to ask it. Comparing
+# two point estimates is not that question: the holdout is a shorter window, so the difference
+# carries sampling error the point estimates do not show.
+#
+# The carrier is resolved here rather than further down because `populate_paired_metrics` needs
+# it. Omitting it does not fail - it falls back to ranking the registry on raw Sharpe, which on
+# this registry names `latent_factors`/`sdf` on `fwd_ret_21d`, while the canonical resolver names
+# `gbm`/`leaves_31_mse` on `fwd_ret_5d`. The paired rows would then compare a strategy the
+# chapter does not report, under headings that say they describe the one it does. That is the
+# same disagreement documented below for the holdout lookup, reaching a different table.
+#
+# `replace_all=True` makes the call a snapshot rather than an insert. Registration is an upsert
+# keyed on the pair, so it cannot remove rows a previous selection wrote; without the prune, the
+# raw-Sharpe pairs would survive alongside the carrier's.
+#
+# `prediction_hashes` scopes the cohorts to this notebook's own pool. On this registry it changes
+# nothing - the cohorts are already a strict subset of the pool, because it was rebuilt from empty
+# and holds no retired generation. That is a property of the registry, not of the call: without the
+# argument, a superseded generation left in the registry would inflate K and could lead a cohort
+# outright, and the deflation this notebook publishes would be computed over a variant the pool
+# excludes. Being right by accident is not the same as being right.
+
+# %%
+carrier = resolve_solvent_carrier("cme_futures")
+cohort_counts = compute_and_register(
+    "cme_futures",
+    prediction_hashes=pool.get_column("prediction_hash").unique().to_list(),
+    verbose=False,
+)
+paired_rows = populate_paired_metrics(
+    "cme_futures", carrier=carrier, replace_all=True, verbose=False
+)
+print(f"cohort_metrics: {sum(cohort_counts[k] for k in ('family', 'stagelabel', 'label'))} rows")
+print(f"backtest_paired_metrics: {sum(1 for r in paired_rows if 'skip' not in r)} pairs")
 
 # %% tags=["results"]
 pool_size
@@ -210,7 +260,6 @@ fig.show()
 # trained model alone can land on a different checkpoint from the one selected.
 
 # %%
-carrier = resolve_solvent_carrier("cme_futures")
 selected = next(
     (result for result in pool_results if result.hash == carrier["val_backtest_hash"]), None
 )
@@ -246,10 +295,11 @@ pl.DataFrame(
 # %% [markdown]
 # ## What friction costs this configuration
 #
-# The cost grid was run on the per-horizon leader of the signal and allocation stages, holding the
-# model, sizing, and contract specification fixed and varying only the all-in cost assumption.
-# Commission and slippage each take half of the quoted figure. The curve for the selected horizon
-# shows how the validation result changes as the assumed fill gets worse.
+# The cost grid was run on the single carrier this case study ships - the same one selected above,
+# resolved across labels and priced with its risk overlay in place - holding the model, sizing,
+# risk rules and contract specification fixed and varying only the all-in cost assumption.
+# Commission and slippage each take half of the quoted figure. One curve, not one per horizon:
+# there is one strategy, so the label the carrier does not sit on has no cost rows at all.
 
 # %%
 if EXECUTION_TIER == "canonical":
