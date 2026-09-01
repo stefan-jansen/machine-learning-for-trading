@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import re
+import sqlite3
+from contextlib import closing
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
@@ -502,6 +505,115 @@ class Strategy:
                 "allocator's loader would regenerate them from the holdout's own residuals "
                 "rather than refuse. Recompute with compute_holdout_conformal_widths."
             )
+        # `fold_id = -1` and a current version are true of ANY validation-calibrated widths
+        # file, so together they answer "were these taken from validation" and nothing else.
+        # They do not say WHICH validation prediction produced them, which is the question
+        # that decides whether the interval sizing this holdout belongs to the model being
+        # evaluated. `compute_holdout_conformal_widths` takes `val_prediction_hash` and
+        # `embargo_steps` and now writes both, so the artifact can be asked directly.
+        for column in ("calibration_source", "calibration_embargo_steps"):
+            if column not in widths.columns:
+                raise ValueError(
+                    f"conformal holdout {self.prediction.hash} carries widths with no "
+                    f"{column!r} column, so which validation prediction calibrated them "
+                    "cannot be established from the artifact. Recompute with "
+                    "compute_holdout_conformal_widths, which stamps it."
+                )
+        sources = set(widths.get_column("calibration_source").unique().to_list())
+        if len(sources) != 1 or None in sources:
+            raise ValueError(
+                f"conformal holdout {self.prediction.hash} carries widths calibrated from "
+                f"{sorted(source for source in sources if source)} - one artifact, several "
+                "sources, so no single validation prediction sized these positions"
+            )
+        source = sources.pop()
+        expected = self._calibration_source_configuration()
+        observed = self._prediction_configuration(source)
+        if observed is None:
+            raise ValueError(
+                f"conformal holdout {self.prediction.hash} names validation prediction "
+                f"{source} as its calibration source, and this registry holds no such "
+                "prediction set. The widths came from somewhere this study cannot account for."
+            )
+        if expected is not None and observed != expected:
+            raise ValueError(
+                f"conformal holdout {self.prediction.hash} was sized by widths calibrated on "
+                f"validation prediction {source}, which is a different configuration:\n"
+                f"  widths calibrated on: {observed}\n"
+                f"  this holdout is:      {expected}\n"
+                "A width is a quantile of one model's residuals, so another model's spreads the "
+                "wrong interval over these positions. Recompute with "
+                "compute_holdout_conformal_widths against this configuration's own validation "
+                "prediction."
+            )
+        embargoes = set(widths.get_column("calibration_embargo_steps").unique().to_list())
+        if len(embargoes) != 1 or None in embargoes:
+            raise ValueError(
+                f"conformal holdout {self.prediction.hash} carries widths under embargoes "
+                f"{sorted(steps for steps in embargoes if steps is not None)}; the embargo "
+                "decides how much of the calibration set can see the holdout window, so one "
+                "artifact cannot hold two"
+            )
+
+    def _prediction_configuration(self, prediction_hash: str) -> str | None:
+        """What a prediction set was fitted as, or None if this registry does not hold it.
+
+        Not the training hash: a holdout prediction is a refit to the holdout window, so it never
+        shares one with the validation prediction that calibrates it. What has to match is the
+        configuration - the same label, the same family, the same named config, the same model
+        definition - fitted on a different window.
+
+        `label`, `family` and `config_name` alone are not enough, because two different models can
+        share all three: the fixture in ``tests/test_research_flow.py`` registers a Ridge and a
+        Lasso under family ``linear`` with no config name, and a check on the three columns
+        admitted the Lasso's widths for the Ridge's holdout. So the model block goes in too.
+
+        The checkpoint goes in for the same reason it is part of what selection chooses. A
+        boosted model publishes a prediction set per iteration - ``us_firm_characteristics``
+        carries ten for ``gbm/leaves_63_mse/fwd_ret_1m`` - and they are ten different models with
+        one config name. Its holdout refit records the checkpoint it was taken at, so the
+        calibrating prediction has to be at the same one.
+
+        The window-dependent parts of the spec stay out. ``cv`` differs by construction, and a
+        case study that refits ``model_based`` features for the holdout fold carries different
+        ``feature_artifacts`` on either side - the artifact identity moves with the window while
+        the configuration does not.
+        """
+        registry = self.study.root / "run_log" / "registry.db"
+        if not registry.is_file():
+            return None
+        with closing(sqlite3.connect(f"file:{registry}?mode=ro", uri=True)) as db:
+            row = db.execute(
+                """
+                SELECT t.label, t.family, t.config_name, t.spec_json,
+                       p.checkpoint_kind, p.checkpoint_value
+                FROM prediction_sets p
+                JOIN training_runs t ON t.training_hash = p.training_hash
+                WHERE p.prediction_hash = ?
+                """,
+                (prediction_hash,),
+            ).fetchone()
+        if row is None:
+            return None
+        label, family, config_name, spec_json, checkpoint_kind, checkpoint_value = row
+        try:
+            model = (json.loads(spec_json) if spec_json else {}).get("model")
+        except (TypeError, ValueError):
+            model = None
+        return canonical_json(
+            {
+                "label": label,
+                "family": family,
+                "config_name": config_name,
+                "model": model,
+                "checkpoint_kind": checkpoint_kind,
+                "checkpoint_value": checkpoint_value,
+            }
+        )
+
+    def _calibration_source_configuration(self) -> str | None:
+        """The configuration the calibrating validation prediction has to share."""
+        return self._prediction_configuration(self.prediction.hash)
 
     def _funding_rates(self, prices: pl.DataFrame) -> pl.DataFrame | None:
         if self.study.case_study != "crypto_perps_funding":

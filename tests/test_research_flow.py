@@ -443,3 +443,46 @@ def test_conformal_holdout_requires_widths_calibrated_on_validation_residuals(
     widths.with_columns(calibration_version=pl.lit("walk_forward_v1")).write_parquet(widths_path)
     with pytest.raises(ValueError, match="calibration version"):
         study.strategy(prediction=holdout_prediction, **request).run()
+
+    # Neither marker says WHICH validation prediction calibrated these, and that is the question
+    # that decides whether the interval sizing this holdout belongs to the model being evaluated.
+    # The writer stamps its `val_prediction_hash` and `embargo_steps` arguments, so the artifact
+    # can answer it.
+    assert widths.get_column("calibration_source").unique().to_list() == [
+        validation_prediction.hash
+    ]
+    assert widths.get_column("calibration_embargo_steps").unique().to_list() == [0]
+
+    # An artifact written before the stamp existed cannot be checked, and passing it would be
+    # the finding this guard closes.
+    widths.drop("calibration_source").write_parquet(widths_path)
+    with pytest.raises(ValueError, match="no 'calibration_source' column"):
+        study.strategy(prediction=holdout_prediction, **request).run()
+
+    # A source this registry does not hold is not a benign gap: the widths came from a
+    # prediction set the study cannot account for.
+    widths.with_columns(calibration_source=pl.lit("f" * 12)).write_parquet(widths_path)
+    with pytest.raises(ValueError, match="no such prediction"):
+        study.strategy(prediction=holdout_prediction, **request).run()
+
+    # The finding itself: widths calibrated on a DIFFERENT model pass every marker the guard
+    # could previously check - `fold_id = -1` and a current calibration version are both true of
+    # them. Only the stamped source separates them from the right ones.
+    other_training = study.results.register_training(
+        _training_spec(model={"class": "Lasso", "params": {"alpha": 0.5}})
+    )
+    other_validation = study.results.publish_predictions(
+        other_training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=validation,
+        expected_keys=validation.select("symbol", "timestamp", "fold_id"),
+    )
+    widths.with_columns(calibration_source=pl.lit(other_validation.hash)).write_parquet(widths_path)
+    with pytest.raises(ValueError, match="different configuration"):
+        study.strategy(prediction=holdout_prediction, **request).run()
+
+    # And the artifact the writer produced still runs, so the guard admits what it should.
+    widths.write_parquet(widths_path)
+    assert study.strategy(prediction=holdout_prediction, **request).run().complete

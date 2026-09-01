@@ -572,7 +572,18 @@ def compute_holdout_conformal_widths(
 
     Output schema matches ``compute_conformal_widths``'s val output:
     ``[timestamp, symbol, fold_id, width, alpha, calibration_n]`` with
-    ``fold_id = -1`` as a sentinel meaning "holdout, no fold partition".
+    ``fold_id = -1`` as a sentinel meaning "holdout, no fold partition", plus
+    two provenance columns this function alone can supply.
+
+    ``calibration_source`` records ``val_prediction_hash`` and
+    ``calibration_embargo_steps`` records ``embargo_steps``. Both are arguments
+    here and neither was written, so the artifact could not say which validation
+    prediction calibrated it or under what embargo - and ``fold_id = -1`` plus a
+    current ``calibration_version`` are true of *any* validation-calibrated
+    widths file. Widths taken from a different model, or from the right model
+    under a different embargo, satisfied every marker the holdout guard in
+    ``case_studies/research/strategy.py`` could check. Stamping the two makes the
+    question answerable from the file rather than from the call that wrote it.
     """
     val_dir = _predictions_dir(case_study, val_prediction_hash)
     val_path = val_dir / "predictions.parquet"
@@ -683,7 +694,11 @@ def compute_holdout_conformal_widths(
 
     widths = (
         ho_keys.join(per_symbol_widths, on="symbol", how="inner")
-        .with_columns(fold_id=pl.lit(-1, dtype=pl.Int64))
+        .with_columns(
+            fold_id=pl.lit(-1, dtype=pl.Int64),
+            calibration_source=pl.lit(val_prediction_hash, dtype=pl.Utf8),
+            calibration_embargo_steps=pl.lit(int(embargo_steps), dtype=pl.Int64),
+        )
         .select(
             "timestamp",
             "symbol",
@@ -693,6 +708,8 @@ def compute_holdout_conformal_widths(
             "calibration_n",
             "calibration_scope",
             "calibration_version",
+            "calibration_source",
+            "calibration_embargo_steps",
         )
         .sort("timestamp", "symbol")
     )
