@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import re
+import sqlite3
+from contextlib import closing
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
@@ -23,6 +26,8 @@ from case_studies.utils.backtest_presets import (
 from case_studies.utils.backtest_runner import precompute_weights, run_backtest
 from case_studies.utils.conformal import (
     CALIBRATION_VERSION,
+    DEFAULT_ALPHA,
+    HOLDOUT_CONFORMAL_EMBARGO_STEPS,
     ensure_conformal_calibration_identity,
 )
 from case_studies.utils.registry import backtest_hash_from_parts, canonical_json, compute_hash
@@ -476,6 +481,21 @@ class Strategy:
                 "load them would calibrate on the holdout's own residuals."
             )
         widths = pl.read_parquet(widths_path)
+        # An artifact may hold several alphas: `_write_widths` merges rather than replaces, so
+        # a recomputation at one alpha leaves the others in place. The allocator consumes only
+        # the alpha its spec asks for, so that is the only one whose provenance decides this
+        # run. Validating across all of them rejects a correct recomputation because some other
+        # alpha's rows are older, and - the direction that matters - it would also let a
+        # single-alpha check pass on rows nothing reads.
+        alpha = float(allocation.get("alpha", DEFAULT_ALPHA))
+        if "alpha" in widths.columns:
+            widths = widths.filter(pl.col("alpha") == alpha)
+            if widths.is_empty():
+                raise ValueError(
+                    f"conformal holdout {self.prediction.hash} carries no widths at the alpha "
+                    f"this allocation asks for ({alpha}). Recompute with "
+                    "compute_holdout_conformal_widths at this alpha."
+                )
         folds = set(widths.get_column("fold_id").unique().to_list())
         if folds != {-1}:
             raise ValueError(
@@ -502,6 +522,193 @@ class Strategy:
                 "allocator's loader would regenerate them from the holdout's own residuals "
                 "rather than refuse. Recompute with compute_holdout_conformal_widths."
             )
+        # `fold_id = -1` and a current version are true of ANY validation-calibrated widths
+        # file, so together they answer "were these taken from validation" and nothing else.
+        # They do not say WHICH validation prediction produced them, which is the question
+        # that decides whether the interval sizing this holdout belongs to the model being
+        # evaluated. `compute_holdout_conformal_widths` takes `val_prediction_hash` and
+        # `embargo_steps` and now writes both, so the artifact can be asked directly.
+        for column in ("calibration_source", "calibration_embargo_steps"):
+            if column not in widths.columns:
+                raise ValueError(
+                    f"conformal holdout {self.prediction.hash} carries widths with no "
+                    f"{column!r} column, so which validation prediction calibrated them "
+                    "cannot be established from the artifact. Recompute with "
+                    "compute_holdout_conformal_widths, which stamps it."
+                )
+        sources = set(widths.get_column("calibration_source").unique().to_list())
+        if len(sources) != 1 or None in sources:
+            raise ValueError(
+                f"conformal holdout {self.prediction.hash} carries widths calibrated from "
+                f"{sorted(source for source in sources if source)} - one artifact, several "
+                "sources, so no single validation prediction sized these positions"
+            )
+        source = sources.pop()
+        # The configuration check below asks "same model", and a holdout prediction of THIS
+        # configuration answers yes. So configuration alone admits the artifact self-calibrating
+        # on the outcome being evaluated - the one thing the guard exists to refuse - and does it
+        # by the shortest path: pass the holdout's own hash as `val_prediction_hash`. The split
+        # is what separates them, so it is read before the configuration is compared.
+        source_split = self._prediction_split(source)
+        if source_split is None:
+            raise ValueError(
+                f"conformal holdout {self.prediction.hash} names {source} as its calibration "
+                "source, and this registry holds no such prediction set. The widths came from "
+                "somewhere this study cannot account for."
+            )
+        if source_split != "validation":
+            raise ValueError(
+                f"conformal holdout {self.prediction.hash} was sized by widths calibrated on "
+                f"prediction set {source}, which is a {source_split!r} split, not validation. "
+                "A width is a quantile of residuals, so calibrating on anything but validation "
+                "sizes these positions using an outcome the holdout is meant to be free of. "
+                "Recompute with compute_holdout_conformal_widths against this configuration's "
+                "validation prediction."
+            )
+        expected = self._calibration_source_configuration()
+        observed = self._prediction_configuration(source)
+        if observed is None:
+            raise ValueError(
+                f"conformal holdout {self.prediction.hash} names validation prediction "
+                f"{source} as its calibration source, and this registry holds no such "
+                "prediction set. The widths came from somewhere this study cannot account for."
+            )
+        if expected is not None and observed != expected:
+            raise ValueError(
+                f"conformal holdout {self.prediction.hash} was sized by widths calibrated on "
+                f"validation prediction {source}, which is a different configuration:\n"
+                f"  widths calibrated on: {observed}\n"
+                f"  this holdout is:      {expected}\n"
+                "A width is a quantile of one model's residuals, so another model's spreads the "
+                "wrong interval over these positions. Recompute with "
+                "compute_holdout_conformal_widths against this configuration's own validation "
+                "prediction."
+            )
+        embargoes = set(widths.get_column("calibration_embargo_steps").unique().to_list())
+        if len(embargoes) != 1 or None in embargoes:
+            raise ValueError(
+                f"conformal holdout {self.prediction.hash} carries widths under embargoes "
+                f"{sorted(steps for steps in embargoes if steps is not None)}; the embargo "
+                "decides how much of the calibration set can see the holdout window, so one "
+                "artifact cannot hold two"
+            )
+        # One embargo is not the same as the right embargo. `compute_holdout_conformal_widths`
+        # takes the value from its caller and accepts zero, so widths whose last calibration
+        # residuals overlap the holdout window are single-valued and leak. The reviewed value
+        # per case study and label is what the label's own horizon requires, so that is what is
+        # compared against.
+        observed_embargo = int(embargoes.pop())
+        label = self._prediction_label(self.prediction.hash)
+        declared_embargo = (
+            HOLDOUT_CONFORMAL_EMBARGO_STEPS.get(f"{self.study.case_study}/{label}")
+            if label is not None
+            else None
+        )
+        if declared_embargo is None:
+            raise ValueError(
+                f"conformal holdout {self.prediction.hash} carries an embargo of "
+                f"{observed_embargo} step(s), and no reviewed embargo is declared for "
+                f"{self.study.case_study}/{label} to check it against. Add a reviewed value to "
+                "HOLDOUT_CONFORMAL_EMBARGO_STEPS; an unchecked embargo cannot be shown to keep "
+                "the calibration residuals clear of the holdout window."
+            )
+        if observed_embargo != int(declared_embargo):
+            raise ValueError(
+                f"conformal holdout {self.prediction.hash} was sized by widths calibrated under "
+                f"an embargo of {observed_embargo} step(s), but {self.study.case_study}/{label} "
+                f"declares {int(declared_embargo)}. The embargo drops the trailing validation "
+                "observations whose label horizon reaches into the holdout window, so a shorter "
+                "one calibrates on residuals that already saw it. Recompute with "
+                "compute_holdout_conformal_widths at the declared embargo."
+            )
+
+    def _prediction_configuration(self, prediction_hash: str) -> str | None:
+        """What a prediction set was fitted as, or None if this registry does not hold it.
+
+        Not the training hash: a holdout prediction is a refit to the holdout window, so it never
+        shares one with the validation prediction that calibrates it. What has to match is the
+        configuration - the same label, the same family, the same named config, the same model
+        definition - fitted on a different window.
+
+        `label`, `family` and `config_name` alone are not enough, because two different models can
+        share all three: the fixture in ``tests/test_research_flow.py`` registers a Ridge and a
+        Lasso under family ``linear`` with no config name, and a check on the three columns
+        admitted the Lasso's widths for the Ridge's holdout. So the model block goes in too.
+
+        The checkpoint goes in for the same reason it is part of what selection chooses. A
+        boosted model publishes a prediction set per iteration - ``us_firm_characteristics``
+        carries ten for ``gbm/leaves_63_mse/fwd_ret_1m`` - and they are ten different models with
+        one config name. Its holdout refit records the checkpoint it was taken at, so the
+        calibrating prediction has to be at the same one.
+
+        The window-dependent parts of the spec stay out. ``cv`` differs by construction, and a
+        case study that refits ``model_based`` features for the holdout fold carries different
+        ``feature_artifacts`` on either side - the artifact identity moves with the window while
+        the configuration does not.
+        """
+        registry = self.study.root / "run_log" / "registry.db"
+        if not registry.is_file():
+            return None
+        with closing(sqlite3.connect(f"file:{registry}?mode=ro", uri=True)) as db:
+            row = db.execute(
+                """
+                SELECT t.label, t.family, t.config_name, t.spec_json,
+                       p.checkpoint_kind, p.checkpoint_value
+                FROM prediction_sets p
+                JOIN training_runs t ON t.training_hash = p.training_hash
+                WHERE p.prediction_hash = ?
+                """,
+                (prediction_hash,),
+            ).fetchone()
+        if row is None:
+            return None
+        label, family, config_name, spec_json, checkpoint_kind, checkpoint_value = row
+        try:
+            model = (json.loads(spec_json) if spec_json else {}).get("model")
+        except (TypeError, ValueError):
+            model = None
+        return canonical_json(
+            {
+                "label": label,
+                "family": family,
+                "config_name": config_name,
+                "model": model,
+                "checkpoint_kind": checkpoint_kind,
+                "checkpoint_value": checkpoint_value,
+            }
+        )
+
+    def _calibration_source_configuration(self) -> str | None:
+        """The configuration the calibrating validation prediction has to share."""
+        return self._prediction_configuration(self.prediction.hash)
+
+    def _prediction_column(self, prediction_hash: str, sql: str) -> str | None:
+        """One scalar about a prediction set, or None if this registry does not hold it."""
+        registry = self.study.root / "run_log" / "registry.db"
+        if not registry.is_file():
+            return None
+        with closing(sqlite3.connect(f"file:{registry}?mode=ro", uri=True)) as db:
+            row = db.execute(sql, (prediction_hash,)).fetchone()
+        return None if row is None or row[0] is None else str(row[0])
+
+    def _prediction_split(self, prediction_hash: str) -> str | None:
+        """Which split a prediction set was produced on."""
+        return self._prediction_column(
+            prediction_hash,
+            "SELECT split FROM prediction_sets WHERE prediction_hash = ?",
+        )
+
+    def _prediction_label(self, prediction_hash: str) -> str | None:
+        """The label a prediction set was fitted against."""
+        return self._prediction_column(
+            prediction_hash,
+            """
+            SELECT t.label
+            FROM prediction_sets p
+            JOIN training_runs t ON t.training_hash = p.training_hash
+            WHERE p.prediction_hash = ?
+            """,
+        )
 
     def _funding_rates(self, prices: pl.DataFrame) -> pl.DataFrame | None:
         if self.study.case_study != "crypto_perps_funding":
