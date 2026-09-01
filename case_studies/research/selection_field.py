@@ -30,7 +30,7 @@ import polars as pl
 
 from .comparison import CandidateSet
 from .configs import sweep_labels
-from .population import OfficialPopulation, recorded_generations
+from .population import OfficialPopulation
 
 if TYPE_CHECKING:
     from .results import Result
@@ -117,61 +117,37 @@ def unfinished_sweep_plans(study: Study, *, plan_names: Mapping[str, str]) -> li
 
 
 def advancing_labels(
-    study: Study,
+    reached: Mapping[str, set[str]],
     *,
-    allocation_plans: Mapping[str, str],
-    not_advancing: Mapping[str, str],
+    coverage_stage: str = COVERAGE_STAGE,
 ) -> list[str]:
-    """The declared labels whose sweeps the freeze should wait for.
+    """The labels whose sweeps the freeze has to wait for, read off the field itself.
 
     The funnel permits a label to stop after its baseline: dominated there, it earns no
-    allocation or overlay sweep. That decision leaves a registry identical to the one a sweep
-    that has not been started yet leaves, so requiring plans for every declared label makes the
-    field unfreezable until sweeps nobody intended are run, and requiring them for no label
-    makes the plans pointless. The decision has to be recorded, and ``not_advancing`` is where.
+    allocation or overlay sweep. So the freeze cannot require a plan from every declared label,
+    or a field containing a deliberately dropped label could never be sealed. Nor can it require
+    one from no label, which is what let a half-run sweep be frozen in the first place.
 
-    It is the one thing in this design that is written down rather than derived, and it is
-    written down because there is nothing to derive it from. It also costs nothing later:
-    advancing a label afterwards means running its sweeps, which publishes real plans, and
-    taking it out of the mapping. Declaring a label here never caps a grid either - a run that
-    adds configurations supersedes its own plan, so better configurations are always admissible.
+    A label is waited for when it has rows past the coverage stage in the field being frozen -
+    the field the caller has already resolved, restricted to the prediction populations in
+    force. That is a property of the current field rather than a declaration about intent, and
+    it separates the three cases without anyone writing anything down:
 
-    Two ways the declaration can be wrong are refused rather than tolerated. A label it names
-    that this case study does not declare is a typo or a leftover from a renamed label, and
-    silently dropping it would exclude a real label from the wait. A label it names that has
-    *any* recorded allocation plan is a contradiction: the sweep ran, so its rows are in the
-    registry and eligible for the field, and the declaration would exclude the label from the
-    completion check while its rows stayed in.
+    - **Never advanced.** No rows past the baseline, so nothing is waited for, and nothing but
+      its baseline rows is in the field either. A deliberate drop and a sweep nobody has run yet
+      are the same state and want the same answer.
+    - **Interrupted.** Its sweep published a plan before executing, so the label has rows past
+      the baseline *and* a plan whose members are not all registered. It is waited for, and
+      ``unfinished_sweep_plans`` reports it.
+    - **Finished.** Rows and a complete plan, so the wait is satisfied.
 
-    The test is whether a plan exists, not whether it is complete. Plans are published before
-    their sweep executes, so an interrupted sweep leaves an incomplete plan - exactly the state
-    a completeness test would read as "no finished sweep here" and wave through, which is the
-    one combination that seals a partial field into an immutable set. A label whose sweep was
-    started and then abandoned therefore cannot be declared dropped while its plan and rows are
-    on record; deciding it should not advance after all means removing what it registered.
+    An earlier version of this asked whether a plan had ever been recorded under the label's
+    name. That reads the wrong generation: after a refit, a label that advanced under superseded
+    predictions still has its old plan on record while none of its old rows are eligible, so it
+    could never stop advancing. The field already answers the question the plan was standing in
+    for.
     """
-    stale = set(not_advancing) - set(allocation_plans)
-    if stale:
-        raise ValueError(
-            "labels declared as not advancing are not declared by this case study: "
-            + ", ".join(sorted(stale))
-        )
-    contradicted = [
-        label
-        for label in not_advancing
-        if recorded_generations(study, name=allocation_plans[label])
-    ]
-    if contradicted:
-        raise ValueError(
-            "labels declared as not advancing have a recorded allocation plan: "
-            + ", ".join(sorted(contradicted))
-            + ". Their sweep ran, so their rows are in the field. Remove them from the "
-            "declaration, or remove what the sweep registered."
-        )
-    advancing = [label for label in allocation_plans if label not in not_advancing]
-    if not advancing:
-        raise ValueError("every declared label is marked as not advancing, so there is no field")
-    return advancing
+    return sorted(label for label, stages in reached.items() if stages - {coverage_stage})
 
 
 def resolve_field_members(
@@ -182,7 +158,7 @@ def resolve_field_members(
     resolve_best_backtest_runs: Any,
     stages: tuple[str, ...] = FIELD_STAGES,
     coverage_stage: str = COVERAGE_STAGE,
-) -> pl.DataFrame:
+) -> tuple[pl.DataFrame, dict[str, set[str]]]:
     """Every eligible validation backtest across the declared labels and the field's stages.
 
     Advancing past the baseline is a decision, so completeness cannot be asked uniformly.
@@ -209,6 +185,11 @@ def resolve_field_members(
     construction, since the selection ranks on validation backtest Sharpe, and leaving them
     in makes them count towards coverage and then fails the whole frozen set later, when
     ``best_validation_sharpe`` rejects it for holding a member it cannot rank.
+
+    Returns the field and the stages each label reached in it. The second is what
+    :func:`advancing_labels` reads to decide which labels the freeze waits for, and it is
+    returned rather than recomputed because it is a by-product of building the field and a
+    second pass would resolve a different one wherever the registry moved in between.
     """
     labels = sweep_labels(study)
     frames: list[pl.DataFrame] = []
@@ -244,7 +225,7 @@ def resolve_field_members(
             "the holdout field cannot be frozen: no declared label has a rankable validation "
             "backtest at any stage."
         )
-    return pl.concat(frames, how="diagonal_relaxed").unique("backtest_hash")
+    return pl.concat(frames, how="diagonal_relaxed").unique("backtest_hash"), reached
 
 
 def label_of(study: Study, result: Result) -> str:

@@ -111,7 +111,7 @@ def test_field_spans_every_declared_label_and_stage(tmp_path: Path) -> None:
         assert split == "validation"
         return _rows(label, stage)
 
-    field = resolve_field_members(
+    field, _reached = resolve_field_members(
         study,
         case_study="fixture",
         prediction_hashes=None,
@@ -146,7 +146,7 @@ def test_a_dominated_label_may_stop_after_the_baselines(tmp_path: Path) -> None:
             return _rows(label, stage).clear()
         return _rows(label, stage)
 
-    field = resolve_field_members(
+    field, _reached = resolve_field_members(
         study,
         case_study="fixture",
         prediction_hashes=None,

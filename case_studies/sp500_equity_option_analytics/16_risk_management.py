@@ -651,13 +651,6 @@ fig_tradeoff.show()
 # per-stage count of advancing configurations, which admitted a label whose sweep had produced
 # one row per configuration and stopped. Only the tip is declarable - `create` refuses anything
 # else and names the tip - so this value moves on every generation.
-# Labels deliberately stopped after their baseline, and why. The funnel permits it - a label
-# dominated at the baseline stage earns no allocation or overlay sweep - but a label that was
-# dropped and a label whose sweep has not been run yet leave the same registry, so the decision
-# has to be recorded or the freeze can never tell them apart and would wait forever. Empty here:
-# all five labels advanced.
-LABELS_NOT_ADVANCING: dict[str, str] = {}
-
 SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
     "sp500_equity_option_analytics:holdout-candidates": "aa6b3986124b",
 }
@@ -676,7 +669,7 @@ CANDIDATE_LABELS = sweep_labels(_study)
 # and an absent one means the baseline sweep is unfinished. Whether the stages past the baseline
 # finished is decided below, against the recorded plans, because no reading of the rows can
 # answer it.
-frozen_pool = resolve_field_members(
+frozen_pool, stages_reached = resolve_field_members(
     _study,
     case_study=CASE_STUDY_ID,
     prediction_hashes=CURRENT_MEMBERS,
@@ -717,24 +710,18 @@ else:
     # frozen out permanently, and a sweep interrupted part-way is indistinguishable from a
     # smaller finished one by rows, by configurations, or by which stages are present.
     #
-    # A label that stops after its baseline is a decision, not a registry state: it leaves
-    # exactly what a sweep that was never started leaves, so it has to be declared. That is the
-    # one thing here that is written down rather than derived, and declaring it costs nothing
-    # later - advancing the label afterwards means running 15 and 16 for it, which publishes
-    # real plans, and removing it from the mapping. What a plan population never does is cap
-    # the grid: a run that adds configurations supersedes its own plan.
+    # Which labels to wait for is read off the field, not declared: a label is waited for when
+    # it has rows past the baseline in the field being frozen. A label the funnel dropped at its
+    # baseline has none, so nothing waits on sweeps nobody intended to run, and a sweep that was
+    # interrupted has both rows and a plan it published before executing, so it is waited for
+    # and reported. What a plan never does is cap the grid - a run that adds configurations
+    # supersedes its own plan.
     #
     # This is also what sequences a per-label run without any coordination: 15 and 16 run for
     # each advancing label in turn, every run but the last finds a plan missing and declines to
     # freeze, and the last one freezes the whole field. Declining is not a failure - the
     # notebook has done its own label's work either way, and the set is written exactly once.
-    advancing = advancing_labels(
-        writable,
-        allocation_plans={
-            label: f"{CASE_STUDY_ID}-allocation-{label}-v1" for label in CANDIDATE_LABELS
-        },
-        not_advancing=LABELS_NOT_ADVANCING,
-    )
+    advancing = advancing_labels(stages_reached)
     unfinished = unfinished_sweep_plans(
         writable,
         plan_names={

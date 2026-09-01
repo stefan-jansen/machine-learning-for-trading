@@ -346,27 +346,6 @@ class OfficialPopulation:
         return self.members
 
 
-def recorded_generations(study: Study, *, name: str) -> int:
-    """How many snapshots this registry holds under ``name``, current or superseded.
-
-    Distinct from :meth:`OfficialPopulation.one`, which answers "which generation is in force"
-    and raises for both of the two ways that has no answer - a name never written, and a name
-    whose chain forked. A caller asking whether a stage ever ran needs those two separated from
-    each other: the fork means it ran, and only the absence means it did not.
-
-    A registry predating official populations has no table, which is a name never written.
-    """
-    try:
-        with _connect(study.root) as db:
-            return int(
-                db.execute(
-                    "SELECT COUNT(*) FROM official_populations WHERE name = ?", (name,)
-                ).fetchone()[0]
-            )
-    except sqlite3.OperationalError:
-        return 0
-
-
 def population_supersedes(study: Study, *, name: str, declared: str | None) -> str | None:
     """Decide whether a declared population hash may be offered to :meth:`OfficialPopulation.create`.
 
