@@ -122,7 +122,7 @@ print(f"""Protocol term sheet
   Case study:    {CASE_STUDY_ID}
   Label:         {BACKTEST_LABEL}
   Calendar:      {bt_config.calendar}
-  Cadence:       {bt_config.cadence}
+  Cadence:       {bt_config.cadence_for(BACKTEST_LABEL)}
   Commission:    {bt_config.commission_bps:.1f} bps
   Slippage:      {bt_config.slippage_bps:.1f} bps
   Total cost:    {bt_config.commission_bps + bt_config.slippage_bps:.1f} bps/leg
@@ -162,6 +162,7 @@ strategy_spec = build_backtest_spec(
         "top_k": PLUMBING_TOP_K,
         "long_short": bt_config.long_short,
     },
+    label=BACKTEST_LABEL,
 )
 
 try:
@@ -310,6 +311,7 @@ def _pending_specs(pred_row, predictions):
             initial_cash=bt_config.initial_cash,
             chapter="ch16",
             signal=signal,
+            label=BACKTEST_LABEL,
         )
         backtest_hash = backtest_hash_from_parts(pred_hash, serializable_backtest_spec(spec))
         artifact_is_current = _artifact_matches_prediction_window(backtest_hash, predictions)

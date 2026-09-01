@@ -201,6 +201,7 @@ for pred_row in top_preds.iter_rows(named=True):
                     "long_short": bt_config.long_short,
                 },
                 allocation={**alloc, "top_k": top_k, "long_short": bt_config.long_short},
+                label=ALLOCATION_LABEL,
             )
             # run_backtest resolves the conformal calibration identity into the spec
             # before registering, so hash the resolved spec or the cache never hits.
