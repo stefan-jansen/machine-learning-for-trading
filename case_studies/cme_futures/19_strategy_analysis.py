@@ -176,7 +176,7 @@ cohort_counts = compute_and_register(
 paired_rows = populate_paired_metrics(
     "cme_futures", carrier=carrier, replace_all=True, verbose=False
 )
-print(f"cohort_metrics: {sum(v for k, v in cohort_counts.items() if k != 'errors')} rows")
+print(f"cohort_metrics: {sum(cohort_counts[k] for k in ('family', 'stagelabel', 'label'))} rows")
 print(f"backtest_paired_metrics: {sum(1 for r in paired_rows if 'skip' not in r)} pairs")
 
 # %% tags=["results"]
@@ -295,10 +295,11 @@ pl.DataFrame(
 # %% [markdown]
 # ## What friction costs this configuration
 #
-# The cost grid was run on the per-horizon leader of the signal and allocation stages, holding the
-# model, sizing, and contract specification fixed and varying only the all-in cost assumption.
-# Commission and slippage each take half of the quoted figure. The curve for the selected horizon
-# shows how the validation result changes as the assumed fill gets worse.
+# The cost grid was run on the single carrier this case study ships - the same one selected above,
+# resolved across labels and priced with its risk overlay in place - holding the model, sizing,
+# risk rules and contract specification fixed and varying only the all-in cost assumption.
+# Commission and slippage each take half of the quoted figure. One curve, not one per horizon:
+# there is one strategy, so the label the carrier does not sit on has no cost rows at all.
 
 # %%
 if EXECUTION_TIER == "canonical":
