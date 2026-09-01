@@ -147,10 +147,24 @@ pool_size = pl.DataFrame(
 # the paired form of the val-to-holdout question and the only honest way to ask it. Comparing
 # two point estimates is not that question: the holdout is a shorter window, so the difference
 # carries sampling error the point estimates do not show.
+#
+# The carrier is resolved here rather than further down because `populate_paired_metrics` needs
+# it. Omitting it does not fail - it falls back to ranking the registry on raw Sharpe, which on
+# this registry names `latent_factors`/`sdf` on `fwd_ret_21d`, while the canonical resolver names
+# `gbm`/`leaves_31_mse` on `fwd_ret_5d`. The paired rows would then compare a strategy the
+# chapter does not report, under headings that say they describe the one it does. That is the
+# same disagreement documented below for the holdout lookup, reaching a different table.
+#
+# `replace_all=True` makes the call a snapshot rather than an insert. Registration is an upsert
+# keyed on the pair, so it cannot remove rows a previous selection wrote; without the prune, the
+# raw-Sharpe pairs would survive alongside the carrier's.
 
 # %%
+carrier = resolve_solvent_carrier("cme_futures")
 cohort_counts = compute_and_register("cme_futures", verbose=False)
-paired_rows = populate_paired_metrics("cme_futures", verbose=False)
+paired_rows = populate_paired_metrics(
+    "cme_futures", carrier=carrier, replace_all=True, verbose=False
+)
 print(f"cohort_metrics: {sum(v for k, v in cohort_counts.items() if k != 'errors')} rows")
 print(f"backtest_paired_metrics: {sum(1 for r in paired_rows if 'skip' not in r)} pairs")
 
@@ -235,7 +249,6 @@ fig.show()
 # trained model alone can land on a different checkpoint from the one selected.
 
 # %%
-carrier = resolve_solvent_carrier("cme_futures")
 selected = next(
     (result for result in pool_results if result.hash == carrier["val_backtest_hash"]), None
 )

@@ -40,7 +40,7 @@ The pipeline runs a long-short carry-ranked strategy with weekly Friday-close de
 | Costs | [`16_costs`](16_costs.ipynb) | Ch18 | Commission, spread, and roll slippage impact analysis | One backtest run per cost level, same artifact layout |
 | Holdout predictions | [`17_holdout_predictions`](17_holdout_predictions.ipynb) | Ch20 | Refits the resolved carrier through the holdout fold and predicts 2024-2025 | One training run under a new identity whose CV declares the holdout fold, and one prediction set at `split='holdout'` |
 | Holdout backtest | [`18_holdout_backtest`](18_holdout_backtest.ipynb) | Ch20 | Replays the carrier's own strategy specification on the holdout prediction set | One backtest run at `stage='holdout'`, same artifact layout |
-| Strategy Analysis | [`19_strategy_analysis`](19_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with uncertainty-aware metrics | `results/strategy_assessment.json`, `20_strategy_synthesis/output/cme_futures/cme_futures_tearsheet.html`; fills the registry's `cohort_metrics` and `backtest_paired_metrics` tables, but only when either is missing or empty |
+| Strategy Analysis | [`19_strategy_analysis`](19_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with uncertainty-aware metrics | `results/strategy_assessment.json`, `20_strategy_synthesis/output/cme_futures/cme_futures_tearsheet.html`; rebuilds the registry's `cohort_metrics` and `backtest_paired_metrics` tables on every canonical run, pruning rows a previous selection wrote |
 
 ## Margin Model
 
@@ -111,11 +111,13 @@ later window - the holdout training run carries its own identity, `365d0ce706e2`
 declares the holdout fold.
 
 **The honest reading is that this establishes very little, in either direction.** The point estimate
-falls from 1.236 to 0.287, which invites a decay story, and the paired test refuses it: comparing the
-carrier's validation series against its own holdout replay over the 512 sessions they share gives a
-Sharpe difference of **−0.300 [−1.944, +1.275], p = 0.709**. That is the form the question has to
-take - differencing two point estimates ignores that the holdout is a shorter window, and the
-interval is what shows there is nothing here to call decay.
+falls from 1.236 to 0.287, which invites a decay story, and the interval will not support one:
+comparing the carrier's validation series against its own holdout replay gives a Sharpe difference of
+**−0.949 [−2.583, +0.624], p = 0.246**. The two windows are disjoint - that is what a holdout is - so
+each side is bootstrapped independently over its own sessions, 1,286 in validation against 516 in the
+holdout, rather than paired on shared dates. The difference in the point estimates is therefore all
+the comparison has to work with; what it adds is the interval around it, and that interval contains
+zero comfortably.
 
 Against a holdout-window equal-weight benchmark the strategy reads −0.470 [−2.071, +1.136],
 p = 0.554, also indistinguishable. A 516-session window on a weekly rebalance carries too few
