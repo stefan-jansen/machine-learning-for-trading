@@ -416,14 +416,23 @@ base_spec = risk_base
 execution = base_spec["backtest_config"]["execution"]
 metadata = base_spec["backtest_config"]["metadata"]
 stops = base_spec["backtest_config"]["stops"]
+# The cadence is taken from the selected label rather than pinned. What this check is about is
+# same-bar information use, and that is decided by the execution mode, the fill timing and the
+# stop lag - how often the strategy decides is a separate declaration. Pinning the weekly value
+# was correct while every label traded the same grid; now that a label declares its own cadence,
+# a correctly selected 10-day winner carries a biweekly one and would abort here.
+EXPECTED_CADENCE = bt_config.cadence_for(LABEL)
 if (
     execution["execution_mode"] != "next_bar"
     or execution["execution_price"] != "open"
-    or metadata["cadence"] != "weekly_friday_close"
+    or metadata["cadence"] != EXPECTED_CADENCE
     or metadata["fill_timing"] != "MONDAY_OPEN"
     or stops["trail_stop_timing"] != "lagged"
 ):
-    raise RuntimeError("Carrier execution or stop timing permits same-bar information use")
+    raise RuntimeError(
+        "Carrier execution or stop timing permits same-bar information use, or its cadence "
+        f"{metadata['cadence']!r} is not the {EXPECTED_CADENCE!r} that {LABEL} declares"
+    )
 for control in fixed_controls:
     spec = clone_backtest_spec(base_spec)
     spec["chapter"] = "ch19"

@@ -116,24 +116,6 @@ def test_a_label_with_no_baseline_refuses_to_freeze(tmp_path: Path) -> None:
         )
 
 
-def test_a_stage_no_label_reached_refuses_to_freeze(tmp_path: Path) -> None:
-    """One label dropping out of a stage is a decision; every label missing is an unrun stage."""
-    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=["fwd_ret_21d"])
-
-    def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
-        if stage == "risk_overlay":
-            return _rows(label, stage).clear()
-        return _rows(label, stage)
-
-    with pytest.raises(RuntimeError, match="risk_overlay"):
-        resolve_field_members(
-            study,
-            case_study="fixture",
-            prediction_hashes=None,
-            resolve_best_backtest_runs=resolver,
-        )
-
-
 def test_label_comes_from_the_winner_not_the_primary(tmp_path: Path) -> None:
     """What the stages after the selection run under is a property of what won."""
     registry_dir = tmp_path / "run_log"
@@ -162,3 +144,49 @@ def test_label_comes_from_the_winner_not_the_primary(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="no label in this registry"):
         label_of(study, _Result("absent"))
+
+
+def test_a_label_part_way_through_advancing_refuses_to_freeze(tmp_path: Path) -> None:
+    """Neither a decision nor coverage: a sweep still running.
+
+    A label that stops at the baseline was dropped there. A label that reached allocation and
+    not risk overlay is mid-sweep, and freezing now would permanently exclude the risk
+    candidates it is about to produce - the set is immutable under its name.
+    """
+    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=["fwd_ret_21d"])
+
+    def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
+        if label == "fwd_ret_21d" and stage == "risk_overlay":
+            return _rows(label, stage).clear()
+        return _rows(label, stage)
+
+    with pytest.raises(RuntimeError, match="part-way through advancing"):
+        resolve_field_members(
+            study,
+            case_study="fixture",
+            prediction_hashes=None,
+            resolve_best_backtest_runs=resolver,
+        )
+
+
+def test_an_unrankable_row_does_not_satisfy_coverage(tmp_path: Path) -> None:
+    """A null Sharpe cannot be ranked, so it is not a backtest the field can select from.
+
+    Counting it towards coverage freezes a set that ``best_validation_sharpe`` then rejects
+    whole, for holding a member it cannot rank - the failure lands after the set is immutable.
+    """
+    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=["fwd_ret_21d"])
+
+    def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
+        rows = _rows(label, stage)
+        if label == "fwd_ret_21d":
+            return rows.with_columns(sharpe=pl.lit(None, dtype=pl.Float64))
+        return rows
+
+    with pytest.raises(RuntimeError, match="fwd_ret_21d"):
+        resolve_field_members(
+            study,
+            case_study="fixture",
+            prediction_hashes=None,
+            resolve_best_backtest_runs=resolver,
+        )

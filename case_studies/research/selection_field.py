@@ -95,25 +95,33 @@ def resolve_field_members(
 ) -> pl.DataFrame:
     """Every eligible validation backtest across the declared labels and the field's stages.
 
-    Two different questions, so two different rules.
+    Advancing past the baseline is a decision, so completeness cannot be asked uniformly.
 
-    **Coverage** is asked of the baseline stage only. Every declared label is backtested
-    equal-weight, and that is what makes the labels comparable, so a declared label with no
-    baseline rows means the run has not finished rather than that the label was dropped.
-    Freezing there would publish an immutable field that excludes it, and the set is
-    immutable under its name, so no later run could add it.
+    **Every declared label is backtested equal-weight**, and that is what makes the labels
+    comparable, so a declared label with no baseline rows means the run is unfinished. The
+    set is immutable under its name, so freezing there publishes a field nothing can add to.
 
-    **Advancement** is not a coverage question at all. Allocation and risk overlay exist to
-    develop the labels the baselines favour, so a label the baselines show to be dominated
-    is deliberately not carried further. Requiring every label in every stage would demand
-    backtests whose only purpose is to fill a matrix, and would refuse to freeze a field
-    that is complete. What is required of those stages is that they ran: no eligible rows
-    anywhere in a stage means the stage itself is missing, not that every label lost it.
+    **What advances past the baseline is whichever labels the baselines favour.** A label
+    the comparison shows to be dominated stops there deliberately, and requiring it in
+    allocation and risk overlay would order backtests whose only purpose is filling a
+    matrix. So a label absent from every post-baseline stage is a completed decision.
+
+    **A label part-way through advancing is neither.** It is the sequential-run failure: a
+    run mid-way through the second advancing label's sweep has that label's allocation rows
+    and not its risk rows, and freezing then excludes candidates that could have won. A
+    label that reached ANY post-baseline stage is taken to be advancing, and an advancing
+    label has to be present in all of them. That is the only reading available here -
+    nothing in the registry declares an advancement set - and it is the conservative one:
+    it refuses to freeze exactly while a label is mid-sweep.
+
+    Rows with no Sharpe are dropped before any of this. They are ineligible by
+    construction, since the selection ranks on validation backtest Sharpe, and leaving them
+    in makes them count towards coverage and then fails the whole frozen set later, when
+    ``best_validation_sharpe`` rejects it for holding a member it cannot rank.
     """
     labels = sweep_labels(study)
     frames: list[pl.DataFrame] = []
-    covered: list[str] = []
-    populated: set[str] = set()
+    reached: dict[str, set[str]] = {label: set() for label in labels}
     for label in labels:
         for stage in stages:
             rows = resolve_best_backtest_runs(
@@ -124,26 +132,40 @@ def resolve_field_members(
                 top_n=9999,
                 prediction_hashes=prediction_hashes,
             )
+            if "sharpe" in rows.columns:
+                rows = rows.filter(pl.col("sharpe").is_not_null())
             if rows.is_empty():
                 continue
-            populated.add(stage)
-            if stage == coverage_stage:
-                covered.append(label)
+            reached[label].add(stage)
             frames.append(rows)
-    uncovered = [label for label in labels if label not in covered]
+
+    uncovered = [label for label in labels if coverage_stage not in reached[label]]
     if uncovered:
         raise RuntimeError(
-            f"the holdout field cannot be frozen while these declared labels have no eligible "
+            f"the holdout field cannot be frozen while these declared labels have no rankable "
             f"validation backtests at the {coverage_stage!r} stage: {uncovered}. Every declared "
-            "label is backtested equal-weight, so an absent one means the run is unfinished; "
-            "the set is immutable under its name, so no later run could add them."
+            "label is backtested equal-weight, so an absent one means the run is unfinished, and "
+            "the set is immutable under its name, so no later run could add it."
         )
-    empty_stages = [stage for stage in stages if stage not in populated]
-    if empty_stages:
+
+    advancing = {stage for stage in stages if stage != coverage_stage}
+    partial = {
+        label: sorted(advancing - reached[label])
+        for label in labels
+        if reached[label] & advancing and not advancing.issubset(reached[label])
+    }
+    if partial:
         raise RuntimeError(
-            f"the holdout field cannot be frozen while these stages have no eligible validation "
-            f"backtests for any label: {empty_stages}. A stage no label reached has not run - a "
-            "label dropped after the baselines is expected, a whole stage missing is not."
+            f"the holdout field cannot be frozen while these labels are part-way through "
+            f"advancing: {partial} (stage: missing). A label that stops at the baseline is a "
+            "decision the baselines made; a label that reached one advancing stage and not the "
+            "next is a sweep still running, and freezing now would permanently exclude "
+            "candidates that could have won."
+        )
+    if not frames:
+        raise RuntimeError(
+            "the holdout field cannot be frozen: no declared label has a rankable validation "
+            "backtest at any stage."
         )
     return pl.concat(frames, how="diagonal_relaxed").unique("backtest_hash")
 
