@@ -49,7 +49,13 @@
 import plotly.express as px
 import polars as pl
 
-from case_studies.research import CandidateSet, OfficialPopulation, Result
+from case_studies.research import (
+    CandidateSet,
+    OfficialPopulation,
+    Result,
+    candidate_set_supersedes,
+    supersedes_for_run,
+)
 from case_studies.sp500_options.research_workflow import (
     open_study,
     paired_sharpe_on_common_support,
@@ -106,7 +112,11 @@ if EXECUTION_TIER == "canonical":
     baseline_candidates = study.backtests.freeze(
         baseline_table,
         name=BASELINE_CANDIDATES,
-        supersedes=SUPERSEDES_BASELINE_CANDIDATES or None,
+        supersedes=candidate_set_supersedes(
+            study,
+            name=BASELINE_CANDIDATES,
+            declared=SUPERSEDES_BASELINE_CANDIDATES or None,
+        ),
     )
 else:
     if not WORKSPACE or not PREVIEW_BASELINE_HASHES:
@@ -259,7 +269,12 @@ execution = run_official_backtest_requests(
     study,
     requests,
     population_name=ALLOCATION_POPULATION if EXECUTION_TIER == "canonical" else None,
-    supersedes=SUPERSEDES_ALLOCATION_POPULATION or None,
+    supersedes=supersedes_for_run(
+        study,
+        population_name=ALLOCATION_POPULATION,
+        declared=SUPERSEDES_ALLOCATION_POPULATION or None,
+        execution_tier=EXECUTION_TIER,
+    ),
 )
 catalog = execution.catalog_rows.sort("request_name")
 if catalog.height != requests.height or catalog.filter(~pl.col("complete")).height:
@@ -268,7 +283,11 @@ strategy_candidates = (
     baseline_candidates.extend(
         STRATEGY_CANDIDATES,
         execution.results,
-        supersedes=SUPERSEDES_STRATEGY_CANDIDATES or None,
+        supersedes=candidate_set_supersedes(
+            study,
+            name=STRATEGY_CANDIDATES,
+            declared=SUPERSEDES_STRATEGY_CANDIDATES or None,
+        ),
     )
     if baseline_candidates is not None
     else None

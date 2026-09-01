@@ -31,7 +31,7 @@
 
 import polars as pl
 
-from case_studies.research import supersedes_for
+from case_studies.research import causal_supersedes
 from case_studies.sp500_options.research_workflow import open_study
 
 # %% tags=["parameters"]
@@ -80,7 +80,13 @@ request_table
 request = study.causal(
     **request_table.row(0, named=True),
     preview_reductions=PREVIEW_REDUCTIONS,
-    supersedes=supersedes_for(SUPERSEDES_CAUSAL, "ret_to_expiry", labels=["ret_to_expiry"]),
+    supersedes=causal_supersedes(
+        study,
+        SUPERSEDES_CAUSAL,
+        "ret_to_expiry",
+        labels=["ret_to_expiry"],
+        execution_tier=EXECUTION_TIER,
+    ),
 )
 resolved = request.resolve()
 computation = resolved.spec["computation"]

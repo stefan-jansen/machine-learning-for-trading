@@ -28,6 +28,7 @@
 
 import polars as pl
 
+from case_studies.research import supersedes_for_run
 from case_studies.sp500_options.research_workflow import (
     ALL_LABELS,
     declared_dl_device,
@@ -131,7 +132,12 @@ if EXECUTION_TIER == "canonical":
         all_requests,
         population_name=population_name,
         resolved_requests=all_resolved,
-        supersedes=SUPERSEDES_POPULATION or None,
+        supersedes=supersedes_for_run(
+            study,
+            population_name=population_name,
+            declared=SUPERSEDES_POPULATION or None,
+            execution_tier=EXECUTION_TIER,
+        ),
     )
     execution, population = run_official_model_subset(
         study,

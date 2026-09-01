@@ -70,6 +70,7 @@ from case_studies.research import (
     open_study,
     resolved_model_plan,
     run_model_population,
+    supersedes_for_run,
 )
 from case_studies.sp500_options.research_workflow import (
     declared_dl_device,
@@ -219,7 +220,12 @@ execution, population = run_model_population(
     study,
     resolved,
     population_name=population_name,
-    supersedes=SUPERSEDES_POPULATION or None,
+    supersedes=supersedes_for_run(
+        study,
+        population_name=population_name,
+        declared=SUPERSEDES_POPULATION or None,
+        execution_tier=EXECUTION_TIER,
+    ),
 )
 
 print(f"{len(execution.runs)} configurations fitted")

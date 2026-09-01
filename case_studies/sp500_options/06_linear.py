@@ -93,6 +93,7 @@ from case_studies.research import (
     primary_label,
     resolved_model_plan,
     run_model_population,
+    supersedes_for_run,
 )
 from utils.cv_splits import load_evaluation_config
 from utils.style import COLORS, show_plotly_with_alt
@@ -282,7 +283,12 @@ execution, population = run_model_population(
     study,
     resolved,
     population_name=population_name,
-    supersedes=SUPERSEDES_POPULATION or None,
+    supersedes=supersedes_for_run(
+        study,
+        population_name=population_name,
+        declared=SUPERSEDES_POPULATION or None,
+        execution_tier=EXECUTION_TIER,
+    ),
 )
 
 fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)

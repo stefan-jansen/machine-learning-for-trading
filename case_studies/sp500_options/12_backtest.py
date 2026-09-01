@@ -52,6 +52,7 @@
 import plotly.express as px
 import polars as pl
 
+from case_studies.research import supersedes_for_run
 from case_studies.sp500_options.research_workflow import (
     official_prediction_catalog,
     open_study,
@@ -309,7 +310,12 @@ execution = run_official_backtest_requests(
     study,
     requests,
     population_name=BASELINE_POPULATION if EXECUTION_TIER == "canonical" else None,
-    supersedes=SUPERSEDES_BASELINE_POPULATION or None,
+    supersedes=supersedes_for_run(
+        study,
+        population_name=BASELINE_POPULATION,
+        declared=SUPERSEDES_BASELINE_POPULATION or None,
+        execution_tier=EXECUTION_TIER,
+    ),
 )
 catalog = execution.catalog_rows.sort("request_name")
 if catalog.height != requests.height or catalog.filter(~pl.col("complete")).height:

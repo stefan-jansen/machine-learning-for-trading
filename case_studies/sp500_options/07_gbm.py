@@ -89,6 +89,7 @@ from case_studies.research import (
     open_study,
     resolved_model_plan,
     run_model_population,
+    supersedes_for_run,
 )
 from utils.style import COLORS, show_plotly_with_alt
 
@@ -239,23 +240,24 @@ plan.select(
 # registry would refuse it against the one on record.
 #
 # The default hash records what the published snapshot replaced, so it is only correct under that
-# population's name. Two runs therefore start a lineage of their own: a preview, whose population
-# lives and dies with its workspace and has nothing to extend, and a run under a name of its own,
-# whose first version has no predecessor and would be refused for claiming one. Passing a hash
-# explicitly under a custom name still supersedes, which is what a second version of that
-# population needs.
+# population's name and in a registry that holds that generation. `supersedes_for_run` is that
+# decision: it withholds the hash for a preview, whose population lives and dies with its
+# workspace and has nothing to extend, for a run under a name of its own, whose first version
+# would be refused for claiming a predecessor, and for a reader's clean clone, which holds no
+# generation at all. The comparison this replaced tested the declaration against a second
+# hardcoded hash instead of against the registry, so a custom name kept a predecessor that name
+# never had.
 
 # %%
 DEFAULT_POPULATION_NAME = "sp500-options-gbm-validation-v1"
-PUBLISHED_SUPERSEDES = "6f061b802c3f"
 
 population_name = POPULATION_NAME or DEFAULT_POPULATION_NAME
-supersedes = SUPERSEDES_POPULATION or None
-starts_own_lineage = EXECUTION_TIER != "canonical" or (
-    population_name != DEFAULT_POPULATION_NAME and supersedes == PUBLISHED_SUPERSEDES
+supersedes = supersedes_for_run(
+    study,
+    population_name=population_name,
+    declared=SUPERSEDES_POPULATION or None,
+    execution_tier=EXECUTION_TIER,
 )
-if starts_own_lineage:
-    supersedes = None
 execution, population = run_model_population(
     study,
     resolved,
