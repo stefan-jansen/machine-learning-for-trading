@@ -405,12 +405,18 @@ def test_conformal_holdout_requires_widths_calibrated_on_validation_residuals(
     with pytest.raises(ValueError, match="no widths artifact"):
         study.strategy(prediction=holdout_prediction, **request).run()
 
+    # The declared embargo for etfs/fwd_ret_21d, not the writer's permissive default. A
+    # 21-session label needs 21 sessions of embargo before the trailing calibration residuals
+    # stop overlapping the holdout window, and the writer takes whatever it is handed.
+    declared_embargo = conformal.HOLDOUT_CONFORMAL_EMBARGO_STEPS["etfs/fwd_ret_21d"]
+    assert declared_embargo == 21
     conformal.compute_holdout_conformal_widths(
         "etfs",
         validation_prediction.hash,
         holdout_prediction.hash,
         alpha=0.2,
         min_calibration_n=1,
+        embargo_steps=declared_embargo,
         write=True,
     )
     holdout_backtest = study.strategy(prediction=holdout_prediction, **request).run()
@@ -423,9 +429,10 @@ def test_conformal_holdout_requires_widths_calibrated_on_validation_residuals(
         / "conformal_widths.parquet"
     )
     assert widths.get_column("fold_id").unique().to_list() == [-1]
-    # Per symbol, every validation observation of that symbol: 23 dates, two symbols, and the
-    # count is per-symbol rather than pooled.
-    assert widths.get_column("calibration_n").unique().to_list() == [23]
+    # Per symbol, the validation observations of that symbol that survive the embargo: 23 dates
+    # less the 21 embargoed leaves 2, and the count is per-symbol rather than pooled (which
+    # would be 4 across the two symbols).
+    assert widths.get_column("calibration_n").unique().to_list() == [2]
     assert holdout_backtest.complete
 
     # `fold_id = -1` alone is not enough. `load_conformal_widths` REGENERATES an artifact that
@@ -451,7 +458,25 @@ def test_conformal_holdout_requires_widths_calibrated_on_validation_residuals(
     assert widths.get_column("calibration_source").unique().to_list() == [
         validation_prediction.hash
     ]
-    assert widths.get_column("calibration_embargo_steps").unique().to_list() == [0]
+    assert widths.get_column("calibration_embargo_steps").unique().to_list() == [declared_embargo]
+
+    # A single-valued embargo is not the same as the right one. The writer accepts zero, and
+    # zero keeps the trailing validation residuals whose 21-session horizon already reaches into
+    # the holdout window - a leak that passes every other marker the guard checks.
+    widths.with_columns(calibration_embargo_steps=pl.lit(0, dtype=pl.Int64)).write_parquet(
+        widths_path
+    )
+    with pytest.raises(ValueError, match="declares 21"):
+        study.strategy(prediction=holdout_prediction, **request).run()
+
+    # The shortest path to self-calibration: hand the holdout its own hash as the calibration
+    # source. It is the same configuration by construction, so the configuration check below
+    # cannot separate them; only the split can.
+    widths.with_columns(calibration_source=pl.lit(holdout_prediction.hash)).write_parquet(
+        widths_path
+    )
+    with pytest.raises(ValueError, match="not validation"):
+        study.strategy(prediction=holdout_prediction, **request).run()
 
     # An artifact written before the stamp existed cannot be checked, and passing it would be
     # the finding this guard closes.
