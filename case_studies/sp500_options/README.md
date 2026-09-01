@@ -45,20 +45,22 @@ The cost-mitigation cascade (O'Donovan & Yu 2024) is encoded in the `strategy.si
 | Portfolio | [`13_portfolio_management`](13_portfolio_management.ipynb) | Ch17 | Long-short straddle allocation with margin constraints | One backtest run per allocation method, same artifact layout |
 | Risk | [`14_risk_management`](14_risk_management.ipynb) | Ch19 | Proves the risk-overlay boundary: the option path refuses a target-weight overlay | Nothing - the comparison stays in the notebook |
 | Costs | [`15_costs`](15_costs.ipynb) | Ch18 | HTM cost-sensitivity grid in % of premium across families and universes | `evaluation/htm_cost_sensitivity.parquet`, plus one registered backtest run per cost cell with `daily_returns.parquet` and `spec.json` under `run_log/backtest/{hash}/` (the grid is aggregated inline rather than through `run_backtest()`, so there are no weights) |
+| Holdout Predictions | [`16_holdout_predictions`](16_holdout_predictions.ipynb) | Ch20 | Refits the selected configuration over the holdout interval under a training identity of its own | One training run and one `split='holdout'` prediction set |
+| Holdout Backtest | [`17_holdout_backtest`](17_holdout_backtest.ipynb) | Ch20 | Writes straddles from those predictions with the carrier's own signal and allocator | One backtest run at `stage='holdout'`, its decision artifact, and the population `sp500_options-holdout-ret_to_expiry` |
 | Strategy Analysis | [`18_strategy_analysis`](18_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with paired-bootstrap holdout closure | `results/strategy_assessment.json`. The tear sheet is gated on a `trades.parquet` the vectorized HTM backtester does not emit, so it is skipped |
 | Appendix | [`90_ic_diagnostic`](90_ic_diagnostic.ipynb) | — | Signal-attribution deep dive outside the main pipeline | Nothing - it reads the registry |
 
 ## Key Results
 
-A null-edge case on the HTM primary label `ret_to_expiry`. The validation carrier is an equal-weight top-5 selection on the cost-feasible liquid universe, anchored on `linear / ridge_a10000000.0`. Two alternative allocations tie it exactly, so the simpler equal-weight baseline remains the carrier.
+A negative-result case on the HTM primary label `ret_to_expiry`. The cross-stage validation rank-1 is `linear / lasso_f0.7` with an HRP overlay on the top-5 cross-section of the cost-feasible liquid universe. Every number below is read from `run_log/registry.db` by [`18_strategy_analysis`](18_strategy_analysis.ipynb); the carrier is resolved there rather than pinned here, because a name written into prose agrees with the registry only until the next rebuild.
 
-**Signal direction.** The carrier's daily IC is -0.0040 [-0.0343, +0.0262] over 484 validation dates (HAC p=0.794). LSTM has the highest model IC at +0.0138 [-0.0089, +0.0366], also unresolved. The prediction and strategy evidence agree that validation does not establish an edge.
+**Signal direction.** The carrier's daily IC is -0.0117 [-0.0432, +0.0198] over 467 validation dates (HAC lag 34, t=-0.732, p=0.465), positive on 46.5% of them. The prediction and strategy evidence agree that validation does not establish an edge.
 
-**Baseline performance.** Validation Sharpe is +0.0017 [-1.0793, +1.5630] over 497 daily periods, with CAGR -0.7888 and maximum drawdown -0.9961. The distinct full-universe baseline leader has Sharpe +0.0027. Its all-family baseline cohort has 342 variants and DSR_ER -0.0094 (p=0.611). Linear PBO has only two combinations, below the ten-combination reporting threshold.
+**Validation performance.** Validation Sharpe is -0.2083 [-1.7870, +1.5297] over 462 daily periods, with maximum drawdown -0.8549 driven by a single 232-day episode into June 2020. Across the eight validation folds the Sharpe ranges [-1.272, +1.282] with a standard deviation of 1.806, so the point estimate is not distinguishable from fold-to-fold noise. Every one of the 1,632 backtests on this label is negative: mean Sharpe -1.105, median -1.108, P90 -0.883, and the best of them is -0.311 (`gbm / default_mae`, equal-weight baseline). The carrier's own 60-variant allocation cohort deflates to DSR_ER -0.0250 (p=0.759). Linear PBO has only two combinations, below the ten-combination reporting threshold.
 
-**Holdout closure.** The fixed carrier has holdout Sharpe +1.0947 [-0.5816, +3.1555]. Its holdout-minus-validation difference is +1.0931 [-1.2007, +3.2558] (p=0.327). Against the equal-weight holdout universe, the difference is -1.4527 [-3.5364, +0.6402] (p=0.166). Both comparisons remain uncertain, and the holdout never enters selection.
+**Holdout closure.** The carrier was refitted over the holdout interval by [`16_holdout_predictions`](16_holdout_predictions.ipynb) - a training identity of its own, covering a CV interval that ends a full option cycle before the window opens - and traded by [`17_holdout_backtest`](17_holdout_backtest.ipynb). Holdout Sharpe is +1.2683 over 247 sessions. The holdout-minus-validation difference is +1.4766 [-0.9861, +3.8542] (p=0.254), and against the equal-weight holdout universe (Sharpe +2.7137) the difference is -1.2791 [-3.2038, +0.6525]. Both intervals straddle zero: one year of weekly straddle cohorts is too few independent observations to separate a strategy that turned around from one that had an ordinary year, and the holdout never enters selection.
 
-**Friction floor.** The HTM cost grid contains 32 rows across four model families, two universes, and cost fractions 0.203, 0.5, 0.75, and 1.0. Every row is negative. At the full quoted half-spread, net Sharpes range from -0.698 to -1.266. Premium-denominated option spreads remain the binding constraint.
+**Friction floor.** The HTM cost grid contains 32 rows across four model families, two universes, and four fractions of the quoted half-spread. Every row is negative, from -0.452 at the lowest fraction to -1.610 at the full spread. Premium-denominated option spreads remain the binding constraint.
 
 The printed book records the frozen production environment used for its results. This README reports the corrected living-code registry, including the holiday-aware weekly schedule and current model cohort. Hardware and library differences can cause small numerical variation, while the no-edge conclusion should remain stable.
 
@@ -87,6 +89,8 @@ uv run python case_studies/sp500_options/12_backtest.py
 uv run python case_studies/sp500_options/13_portfolio_management.py
 uv run python case_studies/sp500_options/14_risk_management.py
 uv run python case_studies/sp500_options/15_costs.py
+uv run python case_studies/sp500_options/16_holdout_predictions.py
+uv run python case_studies/sp500_options/17_holdout_backtest.py
 uv run python case_studies/sp500_options/18_strategy_analysis.py
 uv run python case_studies/sp500_options/90_ic_diagnostic.py
 ```

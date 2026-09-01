@@ -2413,6 +2413,25 @@ case_studies/sp500_options/15_costs:
   awaiting_rebuild:
     needs: {of: sp500_options, backtest_stage: signal}
     issue: 501
+case_studies/sp500_options/16_holdout_predictions:
+  # Canonical, not preview. `reconstruct_locked_model_request` refuses any spec whose
+  # execution_tier is not canonical, and the harness injects EXECUTION_TIER="preview" for any
+  # notebook that declares it - so the default routing fails this notebook on its first fit.
+  # 17 follows it, because a holdout resolved in one tier and read in another is two
+  # registries. Kept although both are skipped, so that whenever the fixture can support them
+  # they run as one tier rather than being wired up again from scratch.
+  research_preview: false
+  # Refits the selected configuration over the holdout fold - one training run, no sweep. The
+  # budget is a single linear fit over the history before the window.
+  timeout: 900
+  skip: true
+  skip_reason: "The seeded fixture carries no resolved training specification, so the holdout fold cannot be derived. `tests/fixtures/seed_results.py` writes each training run's spec as {family, config_name, label} with no `computation` block, and `build_holdout_training_spec` re-keys the validation CV onto the holdout fold by reading `computation.cv` - so it refuses with 'holdout CV derivation requires a current resolved training specification'. Same shape as `case_studies/etfs/18_holdout_predictions`. That refusal is correct and the notebook is correct: a holdout refit is defined by the CV interval it covers, and a spec that records none cannot produce one. Remove this skip when the fixture seeds a resolved computation, not before - a fabricated CV block would let the job report a holdout derived from fold boundaries no model was ever fitted on."
+case_studies/sp500_options/17_holdout_backtest:
+  research_preview: false
+  # One short-straddle backtest over the holdout window, through the HTM cohort engine.
+  timeout: 900
+  skip: true
+  skip_reason: "Derives which holdout prediction set to trade through the same `build_holdout_training_spec` call 16 makes, so it refuses for the same reason and one step earlier. The seeded fixture carries no resolved training specification, so the holdout fold cannot be derived. It would refuse a second time even if that were fixed: the option path resolves short straddles against the raw AlgoSeek chain and replays that resolution in a fresh interpreter, and the fixture carries neither. Remove this skip when the fixture seeds a resolved computation and an option chain, not before."
 case_studies/sp500_options/18_strategy_analysis:
   awaiting_rebuild:
     needs: {of: sp500_options, backtest_stage: allocation}
