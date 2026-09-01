@@ -144,8 +144,13 @@ def sweep_plan_name(case_study: str, label: str, stage: str, predictions: str) -
     return f"{case_study}-{PLAN_STAGE_KEYS[stage]}-{label}-{predictions}"
 
 
-def sweep_attestation_name(plan_name: str, members: Collection[str]) -> str:
-    """The population a sweep publishes to say it executed its plan without a failure.
+def sweep_attempt_name(plan_name: str, attempt: int) -> str:
+    """The population a sweep publishes when it starts executing its plan, once per attempt."""
+    return f"{plan_name}-attempt-{attempt}"
+
+
+def sweep_attestation_name(plan_name: str, attempt: int) -> str:
+    """The population a sweep publishes when that attempt finished with no failure.
 
     The plan alone cannot say this. It is published *before* the sweep runs, so that an
     interruption leaves a plan that is visibly short rather than a previous generation still
@@ -157,39 +162,75 @@ def sweep_attestation_name(plan_name: str, members: Collection[str]) -> str:
     later reader nothing - and the freeze is a later reader, in another notebook and usually
     another process.
 
-    So the run records its own success where the freeze can see it. The name carries
-    :func:`members_digest` of the plan's own members, which is what makes a stale attestation
-    unusable rather than merely wrong: a grid that changed under unchanged predictions keeps
-    the plan's name and takes a new attestation name, so the previous run's attestation does
-    not answer for it. Re-running the identical grid resolves to the identical name and
-    ``OfficialPopulation.create`` matches on the member list, so attesting twice is a no-op
-    and needs no supersedes declaration.
+    **The attestation is per attempt, and the reader requires the latest attempt to carry
+    one.** A single attestation keyed on the plan would be indelible: a sweep that succeeded
+    once, then failed on a re-run of the identical grid - which is exactly the stale-artifact
+    case - would leave the first run's attestation standing, and the freeze would accept the
+    failed attempt on the strength of it. Numbering the attempts makes "did the last run of
+    this sweep finish" answerable, which is the actual question. Each name is used once, so no
+    attempt or attestation ever needs a supersedes declaration.
     """
-    return f"{plan_name}-swept-{members_digest(members)}"
+    return f"{plan_name}-swept-{attempt}"
 
 
-def attest_sweep(study: Study, plan: OfficialPopulation) -> OfficialPopulation:
-    """Record that ``plan`` was executed in full, with every member produced by this run.
+def _attempts(names: Collection[str], plan_name: str) -> list[int]:
+    """The attempt numbers this registry records for ``plan_name``, ascending."""
+    prefix = f"{plan_name}-attempt-"
+    found = []
+    for name in names:
+        if name.startswith(prefix):
+            suffix = name[len(prefix) :]
+            if suffix.isdigit():
+                found.append(int(suffix))
+    return sorted(found)
+
+
+def open_sweep_attempt(study: Study, plan: OfficialPopulation) -> int:
+    """Record that this run is about to execute ``plan``, and return the attempt number.
+
+    Called immediately after the plan is published and before any member executes, so that a
+    run which dies part-way leaves an attempt with no attestation behind it. The members are
+    the plan's own, sorted, so the record is addressable and carries what was attempted.
+    """
+    names = _population_names(study) or set()
+    attempt = (max(_attempts(names, plan.name), default=0)) + 1
+    OfficialPopulation.create(
+        study,
+        name=sweep_attempt_name(plan.name, attempt),
+        member_kind="backtest",
+        members=sorted(set(plan.members)),
+    )
+    return attempt
+
+
+def attest_sweep(study: Study, plan: OfficialPopulation, attempt: int) -> OfficialPopulation:
+    """Record that attempt ``attempt`` of ``plan`` executed in full, with no failure.
 
     Called by a sweep notebook after it has raised on any failure, so reaching it is the
     statement being recorded. One call rather than a name built at each site, for the reason
     :func:`sweep_plan_name` is owned here: three notebooks publish plans and the freeze reads
     all three, and a convention spelled out in four places can differ in one of them.
     """
-    members = tuple(plan.members)
     return OfficialPopulation.create(
         study,
-        name=sweep_attestation_name(plan.name, members),
+        name=sweep_attestation_name(plan.name, attempt),
         member_kind="backtest",
-        members=list(members),
+        members=sorted(set(plan.members)),
     )
 
 
-def _attested(names: set[str] | None, plan_name: str, members: Collection[str]) -> bool:
-    """Whether this registry records the attestation for exactly these planned members."""
+def _attested(names: set[str] | None, plan_name: str) -> bool:
+    """Whether the latest recorded attempt of this sweep finished without a failure.
+
+    An absent attempt is not a success. Plans recorded before attempts existed have none, and
+    their sweeps are exactly the runs whose outcome was never written down.
+    """
     if names is None:
         return False
-    return sweep_attestation_name(plan_name, members) in names
+    attempts = _attempts(names, plan_name)
+    if not attempts:
+        return False
+    return sweep_attestation_name(plan_name, attempts[-1]) in names
 
 
 def _population_names(study: Study) -> set[str] | None:
@@ -263,7 +304,7 @@ def _plan_members(
         return None
     plan = OfficialPopulation.one(study, name=name)
     plan.require_complete()
-    if not _attested(names, name, plan.members):
+    if not _attested(names, name):
         raise ValueError(
             f"sweep plan {name} is complete but records no attestation, so the run that "
             "filled it either reported failures or did not finish; re-run that sweep"
@@ -327,7 +368,7 @@ def unfinished_sweep_plans(
             try:
                 plan = OfficialPopulation.one(study, name=name)
                 plan.require_complete()
-                if not _attested(names, name, plan.members):
+                if not _attested(names, name):
                     raise ValueError(
                         "complete, but the run that filled it recorded no attestation - it "
                         "reported failures or did not finish"

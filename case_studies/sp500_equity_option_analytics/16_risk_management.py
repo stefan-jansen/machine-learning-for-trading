@@ -67,6 +67,7 @@ from case_studies.research import (
     attest_sweep,
     candidate_set_supersedes,
     open_study,
+    open_sweep_attempt,
     population_supersedes,
     predictions_identity,
     resolve_field_members,
@@ -415,7 +416,11 @@ else:
             declared=SUPERSEDES_RISK_POPULATIONS.get(RISK_POPULATION),
         ),
     )
-    print(f"Risk plan {RISK_POPULATION}: {_risk_plan.hash}, {len(plans)} planned")
+    # Before any member executes; see `sweep_attestation_name`.
+    _attempt = open_sweep_attempt(_risk_writable, _risk_plan)
+    print(
+        f"Risk plan {RISK_POPULATION}: {_risk_plan.hash}, {len(plans)} planned, attempt {_attempt}"
+    )
 
 # %%
 failures = []
@@ -437,7 +442,7 @@ print(f"Risk surface complete in {(time.monotonic() - started):.1f}s")
 if _risk_plan is not None:
     _risk_plan.require_complete()
     # Only a run that raised on nothing reaches this. See `sweep_attestation_name`.
-    _attestation = attest_sweep(_risk_writable, _risk_plan)
+    _attestation = attest_sweep(_risk_writable, _risk_plan, _attempt)
     print(f"Risk plan {RISK_POPULATION} complete: {len(plans)} backtests")
     print(f"Sweep attested as {_attestation.name}")
 

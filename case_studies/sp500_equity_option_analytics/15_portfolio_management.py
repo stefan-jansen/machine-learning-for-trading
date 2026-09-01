@@ -55,6 +55,7 @@ from case_studies.research import (
     Study,
     attest_sweep,
     open_study,
+    open_sweep_attempt,
     population_supersedes,
     predictions_identity,
     sweep_plan_name,
@@ -285,7 +286,12 @@ else:
             declared=SUPERSEDES_ALLOCATION_POPULATIONS.get(ALLOCATION_POPULATION),
         ),
     )
-    print(f"Allocation plan {ALLOCATION_POPULATION}: {_plan.hash}, {len(planned)} planned")
+    # Before any member executes; see `sweep_attestation_name`.
+    _attempt = open_sweep_attempt(_writable, _plan)
+    print(
+        f"Allocation plan {ALLOCATION_POPULATION}: {_plan.hash}, {len(planned)} planned, "
+        f"attempt {_attempt}"
+    )
 
 # %% [markdown]
 # A production run fails if any planned backtest fails. The notebook does not
@@ -330,7 +336,7 @@ print(f"Allocation surface complete in {(time.monotonic() - started):.1f}s")
 if _plan is not None:
     _plan.require_complete()
     # Only a run that raised on nothing reaches this. See `sweep_attestation_name`.
-    _attestation = attest_sweep(_writable, _plan)
+    _attestation = attest_sweep(_writable, _plan, _attempt)
     print(f"Allocation plan {ALLOCATION_POPULATION} complete: {len(planned)} backtests")
     print(f"Sweep attested as {_attestation.name}")
 

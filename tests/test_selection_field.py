@@ -17,6 +17,7 @@ from case_studies.research.selection_field import (
     open_selection_field,
     predictions_identity,
     resolve_field_members,
+    sweep_attempt_name,
     sweep_attestation_name,
 )
 
@@ -236,6 +237,7 @@ def _record_plan(
     members: list[str],
     supersedes: str | None = None,
     attested: bool = True,
+    attempt: int = 1,
 ) -> str:
     """A recorded sweep plan, written straight to the table `OfficialPopulation.one` reads.
 
@@ -243,9 +245,10 @@ def _record_plan(
     test is the effect of a plan on membership, and that is the same whichever way the row got
     there.
 
-    ``attested`` writes the attestation the sweep publishes when it executed its plan without a
-    failure. It defaults to true because that is what a finished sweep leaves; pass false for
-    the run that raised.
+    ``attested`` writes what a finished sweep leaves: an attempt record and the attestation
+    for it. It defaults to true; ``attested=False`` writes the attempt alone, which is what a
+    run that raised or died part-way leaves, and ``attempt`` selects which attempt number this
+    call is writing so a test can put a failure after a success on the same grid.
     """
     population_hash = f"pop-{name}-{len(members)}-{supersedes or 'first'}"
     db = sqlite3.connect(study.root / "run_log" / "registry.db")
@@ -268,13 +271,15 @@ def _record_plan(
             "2026-09-01T00:00:00+00:00",
         ),
     )
+    records = [sweep_attempt_name(name, attempt)]
     if attested:
-        attestation = sweep_attestation_name(name, members)
+        records.append(sweep_attestation_name(name, attempt))
+    for record in records:
         db.execute(
             "INSERT OR REPLACE INTO official_populations VALUES (?, ?, ?, ?, ?, ?)",
             (
-                f"pop-{attestation}",
-                attestation,
+                f"pop-{record}",
+                record,
                 "backtest",
                 json.dumps({"members": members}),
                 None,
@@ -660,36 +665,32 @@ def test_a_complete_plan_whose_sweep_failed_does_not_admit_its_members(tmp_path:
         )
 
 
-def test_an_attestation_for_a_different_grid_does_not_answer_for_this_one(tmp_path: Path) -> None:
-    """Why the attestation name carries the members and not just the plan's name.
+def test_a_failed_re_run_is_not_covered_by_the_previous_run_s_attestation(tmp_path: Path) -> None:
+    """The indelibility a single attestation per plan would have.
 
-    A grid can change without the predictions changing - an entry scheme withdrawn, an
-    allocator added - and the plan's name carries only the predictions, so the new plan is
-    published under the old name. A fixed attestation name would then still be present from the
-    previous run, and would attest a grid nobody executed.
+    The stale-artifact failure does not change the grid: the planned identities are the same,
+    the registered rows are the same, and what differs is that a member's artifact no longer
+    matches the prediction window, so the forced re-backtest fails. A sweep that succeeded once
+    and then fails that way would, under a name keyed on the plan alone, still be covered by
+    the first run's attestation - and the freeze would accept the failed attempt. The record is
+    per attempt for that reason, and the reader asks the latest one.
+
+    Attempt 1 succeeded on this exact grid; attempt 2 did not.
     """
-    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1", "c2"))
+    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1",))
     study.results = _Results()
     name = f"fixture-baseline-fwd_ret_5d-{predictions_identity(None)}"
-    # The previous run's grid, executed and attested.
-    previous = _record_plan(study, name=name, members=["fwd_ret_5d-signal-c1"])
-    # The grid as it is now, published under the same name because the predictions did not move.
-    _record_plan(
-        study,
-        name=name,
-        members=["fwd_ret_5d-signal-c1", "fwd_ret_5d-signal-c2"],
-        supersedes=previous,
-        attested=False,
-    )
+    _record_plan(study, name=name, members=["fwd_ret_5d-signal-c1"], attempt=1)
+    _record_plan(study, name=name, members=["fwd_ret_5d-signal-c1"], attempt=2, attested=False)
     for key, stage in (("allocation", "allocation"), ("risk", "risk_overlay")):
         _record_plan(
             study,
             name=f"fixture-{key}-fwd_ret_5d-{predictions_identity(None)}",
-            members=[f"fwd_ret_5d-{stage}-c1", f"fwd_ret_5d-{stage}-c2"],
+            members=[f"fwd_ret_5d-{stage}-c1"],
         )
 
     def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
-        return _rows(label, stage, configs=("c1", "c2"))
+        return _rows(label, stage, configs=("c1",))
 
     with pytest.raises(ValueError, match="records no attestation"):
         resolve_field_members(
@@ -698,3 +699,42 @@ def test_an_attestation_for_a_different_grid_does_not_answer_for_this_one(tmp_pa
             prediction_hashes=None,
             resolve_best_backtest_runs=resolver,
         )
+
+
+def test_a_re_run_that_succeeds_after_a_failure_is_accepted(tmp_path: Path) -> None:
+    """The other direction, so the check above is not simply "any failed attempt, ever"."""
+    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1",))
+    study.results = _Results()
+    for key, stage in (
+        ("baseline", "signal"),
+        ("allocation", "allocation"),
+        ("risk", "risk_overlay"),
+    ):
+        _record_plan(
+            study,
+            name=f"fixture-{key}-fwd_ret_5d-{predictions_identity(None)}",
+            members=[f"fwd_ret_5d-{stage}-c1"],
+            attempt=1,
+            attested=False,
+        )
+        _record_plan(
+            study,
+            name=f"fixture-{key}-fwd_ret_5d-{predictions_identity(None)}",
+            members=[f"fwd_ret_5d-{stage}-c1"],
+            attempt=2,
+        )
+
+    def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
+        return _rows(label, stage, configs=("c1",))
+
+    field = resolve_field_members(
+        study,
+        case_study="fixture",
+        prediction_hashes=None,
+        resolve_best_backtest_runs=resolver,
+    )
+    assert set(field["backtest_hash"]) == {
+        "fwd_ret_5d-signal-c1",
+        "fwd_ret_5d-allocation-c1",
+        "fwd_ret_5d-risk_overlay-c1",
+    }

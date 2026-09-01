@@ -56,6 +56,7 @@ from case_studies.research import (
     Study,
     attest_sweep,
     open_study,
+    open_sweep_attempt,
     population_supersedes,
     predictions_identity,
     sweep_plan_name,
@@ -423,7 +424,14 @@ else:
             declared=SUPERSEDES_BASELINE_POPULATIONS.get(BASELINE_POPULATION),
         ),
     )
-    print(f"Baseline plan {BASELINE_POPULATION}: {_plan.hash}, {len(planned)} planned")
+    # Opened here, before a single member executes, so a run that dies part-way leaves an
+    # attempt with no attestation behind it and the freeze declines. See
+    # `sweep_attestation_name` for why the record is per attempt rather than per plan.
+    _attempt = open_sweep_attempt(_writable, _plan)
+    print(
+        f"Baseline plan {BASELINE_POPULATION}: {_plan.hash}, {len(planned)} planned, "
+        f"attempt {_attempt}"
+    )
 
 # %%
 t0 = time.time()
@@ -487,7 +495,7 @@ if _plan is not None:
     # plan alone cannot say it - a member that failed against a stale registered artifact
     # leaves the plan complete - and the freeze runs later, in another notebook, where the
     # exception above is not visible. See `sweep_attestation_name`.
-    _attestation = attest_sweep(_writable, _plan)
+    _attestation = attest_sweep(_writable, _plan, _attempt)
     print(f"\nBaseline plan {BASELINE_POPULATION} complete: {len(planned)} backtests")
     print(f"Sweep attested as {_attestation.name}")
 
