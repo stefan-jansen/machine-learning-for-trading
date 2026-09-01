@@ -91,7 +91,10 @@ Validation Sharpe **1.236** [+0.397, +2.126] over 1,286 daily periods (CAGR +19.
 
 Selection adjustment, from the `fwd_ret_5d` label cohort: K = 550 candidates, effective trials
 12.8 after correlation correction, **DSR_ER = 0.045**. The carrier survives deflation at the label
-scale. The `fwd_ret_21d` cohort reads 0.037 on K = 554. Both were absent from earlier editions of
+scale. The `fwd_ret_21d` cohort reads 0.037 on K = 554. Those two do not add to the 1,140-candidate
+pool below and are not meant to: a cohort drops any backtest whose prediction set has a fold with no
+computable IC, which is 36 of the 1,140 here. A prediction that could not be scored on every fold is
+not a variant the selection could have chosen. Both were absent from earlier editions of
 this file, which quoted deflation numbers `cohort_metrics` did not contain - not because the
 computation was wrong but because `19_strategy_analysis` never called for one, while three sibling
 case studies did. It calls for it now.

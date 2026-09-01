@@ -158,10 +158,21 @@ pool_size = pl.DataFrame(
 # `replace_all=True` makes the call a snapshot rather than an insert. Registration is an upsert
 # keyed on the pair, so it cannot remove rows a previous selection wrote; without the prune, the
 # raw-Sharpe pairs would survive alongside the carrier's.
+#
+# `prediction_hashes` scopes the cohorts to this notebook's own pool. On this registry it changes
+# nothing - the cohorts are already a strict subset of the pool, because it was rebuilt from empty
+# and holds no retired generation. That is a property of the registry, not of the call: without the
+# argument, a superseded generation left in the registry would inflate K and could lead a cohort
+# outright, and the deflation this notebook publishes would be computed over a variant the pool
+# excludes. Being right by accident is not the same as being right.
 
 # %%
 carrier = resolve_solvent_carrier("cme_futures")
-cohort_counts = compute_and_register("cme_futures", verbose=False)
+cohort_counts = compute_and_register(
+    "cme_futures",
+    prediction_hashes=pool.get_column("prediction_hash").unique().to_list(),
+    verbose=False,
+)
 paired_rows = populate_paired_metrics(
     "cme_futures", carrier=carrier, replace_all=True, verbose=False
 )
