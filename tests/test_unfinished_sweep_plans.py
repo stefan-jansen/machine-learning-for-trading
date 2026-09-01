@@ -205,7 +205,7 @@ def test_a_complete_plan_from_a_superseded_generation_is_reported(study: Study) 
     )
 
     assert len(unfinished) == 1
-    assert "records a generation the refit superseded" in unfinished[0]
+    assert "records a generation a refit has superseded" in unfinished[0]
 
 
 def test_a_complete_plan_riding_a_current_prediction_is_not_reported(study: Study) -> None:
@@ -222,6 +222,40 @@ def test_a_complete_plan_riding_a_current_prediction_is_not_reported(study: Stud
         )
         == []
     )
+
+
+def test_a_plan_half_superseded_by_a_partial_refit_is_reported(study: Study) -> None:
+    """A refit does not have to replace a whole label at once, and a mix is still stale.
+
+    Accepting a plan because *some* member still rides a current prediction reads the survivors
+    of a partial refit as evidence the sweep re-ran. It did not: those are the configurations
+    the refit happened not to touch, and freezing here seals a field missing everything it did.
+    """
+    kept = _complete_plan(study, name="etfs-allocation-fwd_ret_5d-v1", alpha=1.0)
+    superseded = _complete_plan(study, name="etfs-risk-fwd_ret_5d-v1", alpha=2.0)
+    plan = OfficialPopulation.one(study, name="etfs-allocation-fwd_ret_5d-v1")
+    OfficialPopulation.create(
+        study,
+        name="etfs-allocation-fwd_ret_5d-v1",
+        member_kind="backtest",
+        members=[
+            *plan.members,
+            *OfficialPopulation.one(study, name="etfs-risk-fwd_ret_5d-v1").members,
+        ],
+        supersedes=plan.hash,
+    )
+
+    unfinished = unfinished_sweep_plans(
+        study,
+        case_study="etfs",
+        labels=["fwd_ret_5d"],
+        stages=["allocation"],
+        prediction_hashes={kept},
+    )
+
+    assert superseded != kept
+    assert len(unfinished) == 1
+    assert "records a generation a refit has superseded" in unfinished[0]
 
 
 def test_without_populations_in_force_completeness_is_the_whole_check(study: Study) -> None:

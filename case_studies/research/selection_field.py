@@ -120,7 +120,12 @@ def _plan_members(study: Study, case_study: str, label: str, stage: str) -> set[
 def _rides_current_predictions(
     study: Study, members: Sequence[str], prediction_hashes: Collection[str]
 ) -> bool:
-    """Whether any of ``members`` is a backtest of a prediction still in force.
+    """Whether *every* one of ``members`` is a backtest of a prediction still in force.
+
+    Every, not any. A refit does not have to replace a whole label at once, and a plan holding
+    a mix of current and superseded predictions is a plan whose sweep has not re-run - the
+    surviving members are the ones the refit happened not to touch. Accepting it on the
+    strength of those would freeze a field missing everything the refit did move.
 
     A registry that cannot be read answers ``True``: the caller is deciding whether a plan is
     stale, and an unreadable registry is not evidence that it is.
@@ -133,13 +138,15 @@ def _rides_current_predictions(
             f"file:{study.root / 'run_log' / 'registry.db'}?mode=ro", uri=True
         ) as db:
             rows = db.execute(
-                f"SELECT prediction_hash FROM backtest_runs WHERE backtest_hash IN ({placeholders})",
+                f"SELECT backtest_hash, prediction_hash FROM backtest_runs "
+                f"WHERE backtest_hash IN ({placeholders})",
                 tuple(members),
             ).fetchall()
     except sqlite3.OperationalError:
         return True
     current = set(prediction_hashes)
-    return any(row[0] in current for row in rows)
+    riding = {member for member, prediction in rows if prediction in current}
+    return riding.issuperset(members)
 
 
 def unfinished_sweep_plans(
@@ -176,8 +183,10 @@ def unfinished_sweep_plans(
     its own sweep re-runs, so after a refit the previous generation is still the plan in force
     under that name - and it is still complete, because its members are still registered. The
     freeze would then seal a field holding current baselines and a superseded label's nothing.
-    A plan is therefore also asked whether any of its backtests rides a prediction still in
-    force. None of them does exactly when the plan belongs to a generation the refit replaced.
+    A plan is therefore also asked whether every one of its backtests rides a prediction still
+    in force. Every, because a refit does not have to replace a whole label at once: a plan
+    holding a mix is one whose sweep has not re-run, and the members that survive are the ones
+    the refit happened not to touch.
 
     Absent and incomplete are reported the same way on purpose. A plan that was never written
     is a sweep that either has not run or ran before plans were recorded, and neither is a
@@ -200,10 +209,10 @@ def unfinished_sweep_plans(
                 study, plan.members, prediction_hashes
             ):
                 unfinished.append(
-                    f"{label} {stage} ({name}): plan {plan.hash} is complete, but none of its "
-                    f"{len(plan.members)} backtests rides a prediction still in force, so it "
-                    "records a generation the refit superseded and this sweep has not been "
-                    "re-run under the current predictions"
+                    f"{label} {stage} ({name}): plan {plan.hash} is complete, but not all of "
+                    f"its {len(plan.members)} backtests ride a prediction still in force, so it "
+                    "records a generation a refit has superseded, in whole or in part, and this "
+                    "sweep has not been re-run under the current predictions"
                 )
     return unfinished
 
