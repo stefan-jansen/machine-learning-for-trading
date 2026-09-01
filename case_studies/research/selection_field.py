@@ -38,6 +38,12 @@ if TYPE_CHECKING:
 #: neither allocation nor risk earned its complexity, so all three are in the field.
 FIELD_STAGES: tuple[str, ...] = ("signal", "allocation", "risk_overlay")
 
+#: The one stage every declared label has to reach. The baseline is the equal-weight backtest
+#: every label is measured at, so it is where a label being absent means a run is unfinished.
+#: The stages after it are where the comparison pays off: a label the baselines show to be
+#: dominated is dropped rather than carried through allocation and risk for symmetry.
+COVERAGE_STAGE: str = "signal"
+
 
 @dataclass(frozen=True)
 class SelectionField:
@@ -85,18 +91,29 @@ def resolve_field_members(
     prediction_hashes: Any,
     resolve_best_backtest_runs: Any,
     stages: tuple[str, ...] = FIELD_STAGES,
+    coverage_stage: str = COVERAGE_STAGE,
 ) -> pl.DataFrame:
-    """Every eligible validation backtest across every declared label and stage.
+    """Every eligible validation backtest across the declared labels and the field's stages.
 
-    Raises where a declared label has no eligible rows **in a stage**, rather than none at
-    all. Pooling the stages was not enough: a label whose baselines have registered and
-    whose overlays have not satisfies a per-label check, and a run that froze then would
-    publish an immutable field missing that label's overlays, which no later run could
-    correct. The freeze has to wait until every label has been carried through every stage.
+    Two different questions, so two different rules.
+
+    **Coverage** is asked of the baseline stage only. Every declared label is backtested
+    equal-weight, and that is what makes the labels comparable, so a declared label with no
+    baseline rows means the run has not finished rather than that the label was dropped.
+    Freezing there would publish an immutable field that excludes it, and the set is
+    immutable under its name, so no later run could add it.
+
+    **Advancement** is not a coverage question at all. Allocation and risk overlay exist to
+    develop the labels the baselines favour, so a label the baselines show to be dominated
+    is deliberately not carried further. Requiring every label in every stage would demand
+    backtests whose only purpose is to fill a matrix, and would refuse to freeze a field
+    that is complete. What is required of those stages is that they ran: no eligible rows
+    anywhere in a stage means the stage itself is missing, not that every label lost it.
     """
     labels = sweep_labels(study)
     frames: list[pl.DataFrame] = []
-    missing: list[str] = []
+    covered: list[str] = []
+    populated: set[str] = set()
     for label in labels:
         for stage in stages:
             rows = resolve_best_backtest_runs(
@@ -108,15 +125,25 @@ def resolve_field_members(
                 prediction_hashes=prediction_hashes,
             )
             if rows.is_empty():
-                missing.append(f"{label}/{stage}")
-            else:
-                frames.append(rows)
-    if missing:
+                continue
+            populated.add(stage)
+            if stage == coverage_stage:
+                covered.append(label)
+            frames.append(rows)
+    uncovered = [label for label in labels if label not in covered]
+    if uncovered:
         raise RuntimeError(
-            "the holdout field cannot be frozen while these declared label/stage pairs have "
-            f"no eligible validation backtests: {missing}. Freezing now would publish an "
-            "immutable field that excludes them, and the set is immutable under its name, so "
-            "no later run could add them."
+            f"the holdout field cannot be frozen while these declared labels have no eligible "
+            f"validation backtests at the {coverage_stage!r} stage: {uncovered}. Every declared "
+            "label is backtested equal-weight, so an absent one means the run is unfinished; "
+            "the set is immutable under its name, so no later run could add them."
+        )
+    empty_stages = [stage for stage in stages if stage not in populated]
+    if empty_stages:
+        raise RuntimeError(
+            f"the holdout field cannot be frozen while these stages have no eligible validation "
+            f"backtests for any label: {empty_stages}. A stage no label reached has not run - a "
+            "label dropped after the baselines is expected, a whole stage missing is not."
         )
     return pl.concat(frames, how="diagonal_relaxed").unique("backtest_hash")
 

@@ -10,6 +10,7 @@ import polars as pl
 import pytest
 
 from case_studies.research.selection_field import (
+    COVERAGE_STAGE,
     FIELD_STAGES,
     label_of,
     resolve_field_members,
@@ -64,22 +65,67 @@ def test_field_spans_every_declared_label_and_stage(tmp_path: Path) -> None:
     }
 
 
-def test_a_label_carried_through_only_some_stages_refuses_to_freeze(tmp_path: Path) -> None:
-    """The sequential-run failure: baselines land before overlays, and the set is immutable.
+def test_a_dominated_label_may_stop_after_the_baselines(tmp_path: Path) -> None:
+    """Dropping a label after the baselines is the point of running them, not an incomplete run.
 
-    A per-label check that pools the three stages passes as soon as a label has ANY row, so a
-    run mid-way through the second label's sweep would freeze a field holding that label's
-    baselines and none of its overlays. Nothing can correct it afterwards - the set is immutable
-    under its name, and every later run produces the same membership and resolves to it.
+    Every declared label is backtested equal-weight, which is what makes them comparable. The
+    stages after that develop whichever labels the comparison favours, so a label the baselines
+    show to be dominated is deliberately not carried into allocation or risk overlay. A rule
+    demanding every label in every stage would order backtests whose only purpose is filling a
+    matrix, and would refuse to freeze a field that is finished.
+    """
+    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=["fwd_ret_21d"])
+
+    def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
+        if label == "fwd_ret_5d" and stage != COVERAGE_STAGE:
+            return _rows(label, stage).clear()
+        return _rows(label, stage)
+
+    field = resolve_field_members(
+        study,
+        case_study="fixture",
+        prediction_hashes=None,
+        resolve_best_backtest_runs=resolver,
+    )
+    assert set(field["backtest_hash"]) == {
+        f"fwd_ret_5d-{COVERAGE_STAGE}",
+        *(f"fwd_ret_21d-{stage}" for stage in FIELD_STAGES),
+    }
+
+
+def test_a_label_with_no_baseline_refuses_to_freeze(tmp_path: Path) -> None:
+    """The sequential-run failure, at the one stage where absence means unfinished.
+
+    A run mid-way through the second label's baseline sweep would otherwise freeze a field that
+    excludes it, and nothing can correct that afterwards: the set is immutable under its name,
+    and every later run produces the same membership and resolves to it.
     """
     study = _study_at(tmp_path, primary="fwd_ret_5d", variants=["fwd_ret_10d"])
 
     def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
-        if label == "fwd_ret_10d" and stage == "risk_overlay":
+        if label == "fwd_ret_10d":
             return _rows(label, stage).clear()
         return _rows(label, stage)
 
-    with pytest.raises(RuntimeError, match=r"fwd_ret_10d/risk_overlay"):
+    with pytest.raises(RuntimeError, match=r"fwd_ret_10d"):
+        resolve_field_members(
+            study,
+            case_study="fixture",
+            prediction_hashes=None,
+            resolve_best_backtest_runs=resolver,
+        )
+
+
+def test_a_stage_no_label_reached_refuses_to_freeze(tmp_path: Path) -> None:
+    """One label dropping out of a stage is a decision; every label missing is an unrun stage."""
+    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=["fwd_ret_21d"])
+
+    def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
+        if stage == "risk_overlay":
+            return _rows(label, stage).clear()
+        return _rows(label, stage)
+
+    with pytest.raises(RuntimeError, match="risk_overlay"):
         resolve_field_members(
             study,
             case_study="fixture",
