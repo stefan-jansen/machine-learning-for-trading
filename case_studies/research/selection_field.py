@@ -84,6 +84,47 @@ def _recorded_set_count(registry: Any, name: str) -> int:
         return 0
 
 
+def derive_advancing_labels(
+    baseline_rows: pl.DataFrame,
+    *,
+    top_n: int | None,
+) -> frozenset[str]:
+    """The labels the baselines favour, taken from the pooled baseline ranking.
+
+    The funnel that feeds *stage* keeps the best ``top_n_predictions[stage]`` model
+    configurations, so that is the unit ranked here: one ``(label, family, config_name)``
+    triple contributes its best baseline Sharpe, and the labels appearing in the top N are
+    the ones the comparison carried forward. The pool spans labels because comparing them is
+    the whole point - within one label the same query answers which configurations advance.
+
+    *top_n* is the caller's cut, read from ``backtest.sweep.top_n_predictions`` where the
+    caller has a case study to read it from. It is a parameter rather than a lookup inside
+    here because this module is also used by readers rebuilding the field in a clean clone,
+    where resolving a case-study name to a config path is exactly what is unavailable.
+
+    Returns every label when the rows cannot support the ranking - no cut given, no rows at
+    all, or a frame without the family and configuration columns. An empty answer would
+    silently excuse every label from the completeness check below, which is the opposite of
+    what an unanswerable question should do.
+    """
+    if baseline_rows.is_empty():
+        return frozenset()
+    every = frozenset(baseline_rows["label"].unique().to_list())
+    required = {"label", "family", "config_name", "sharpe"}
+    if top_n is None or top_n <= 0 or not required.issubset(baseline_rows.columns):
+        return every
+    ranked = (
+        baseline_rows.filter(pl.col("sharpe").is_not_null())
+        .group_by("label", "family", "config_name")
+        .agg(pl.col("sharpe").max().alias("best_sharpe"))
+        .sort("best_sharpe", descending=True)
+        .head(top_n)
+    )
+    if ranked.is_empty():
+        return every
+    return frozenset(ranked["label"].unique().to_list())
+
+
 def resolve_field_members(
     study: Study,
     *,
@@ -92,6 +133,7 @@ def resolve_field_members(
     resolve_best_backtest_runs: Any,
     stages: tuple[str, ...] = FIELD_STAGES,
     coverage_stage: str = COVERAGE_STAGE,
+    advancing_top_n: int | None = None,
 ) -> pl.DataFrame:
     """Every eligible validation backtest across the declared labels and the field's stages.
 
@@ -106,13 +148,23 @@ def resolve_field_members(
     allocation and risk overlay would order backtests whose only purpose is filling a
     matrix. So a label absent from every post-baseline stage is a completed decision.
 
-    **A label part-way through advancing is neither.** It is the sequential-run failure: a
-    run mid-way through the second advancing label's sweep has that label's allocation rows
-    and not its risk rows, and freezing then excludes candidates that could have won. A
-    label that reached ANY post-baseline stage is taken to be advancing, and an advancing
-    label has to be present in all of them. That is the only reading available here -
-    nothing in the registry declares an advancement set - and it is the conservative one:
-    it refuses to freeze exactly while a label is mid-sweep.
+    **Which labels those are is derived from the baselines, not guessed from what ran.**
+    Ranking the pooled baseline results answers "which labels did the comparison favour"
+    directly, so a label that is favoured and has no allocation rows is an unfinished sweep
+    rather than a decision - the distinction reading post-baseline rows alone cannot make.
+    The unit ranked is the model configuration, matching the funnel: ``top_n_predictions``
+    counts one ``(family, config_name)`` pair per candidate, and the pool spans labels
+    because the same configuration on two labels is two candidates.
+
+    Deriving rather than declaring is what survives more work arriving. A written-down
+    advancement set is correct until a new configuration promotes a label that was dominated,
+    and then it refuses the very sweep that should now run; a derived set re-ranks itself.
+
+    **A label part-way through advancing is refused either way.** It is the sequential-run
+    failure: a run mid-way through the second advancing label's sweep has that label's
+    allocation rows and not its risk rows, and freezing then excludes candidates that could
+    have won. So both readings are applied - a favoured label missing any advancing stage,
+    and any label that reached one advancing stage and not the next.
 
     Rows with no Sharpe are dropped before any of this. They are ineligible by
     construction, since the selection ranks on validation backtest Sharpe, and leaving them
@@ -121,6 +173,7 @@ def resolve_field_members(
     """
     labels = sweep_labels(study)
     frames: list[pl.DataFrame] = []
+    baseline_frames: list[pl.DataFrame] = []
     reached: dict[str, set[str]] = {label: set() for label in labels}
     for label in labels:
         for stage in stages:
@@ -138,7 +191,12 @@ def resolve_field_members(
                 continue
             reached[label].add(stage)
             frames.append(rows)
+            if stage == coverage_stage:
+                baseline_frames.append(rows.with_columns(pl.lit(label).alias("label")))
 
+    baseline_rows = (
+        pl.concat(baseline_frames, how="diagonal_relaxed") if baseline_frames else pl.DataFrame()
+    )
     uncovered = [label for label in labels if coverage_stage not in reached[label]]
     if uncovered:
         raise RuntimeError(
@@ -149,18 +207,25 @@ def resolve_field_members(
         )
 
     advancing = {stage for stage in stages if stage != coverage_stage}
+    favoured = derive_advancing_labels(baseline_rows, top_n=advancing_top_n)
+    unstarted = {
+        label: sorted(advancing - reached[label])
+        for label in labels
+        if label in favoured and not advancing.issubset(reached[label])
+    }
     partial = {
         label: sorted(advancing - reached[label])
         for label in labels
         if reached[label] & advancing and not advancing.issubset(reached[label])
     }
-    if partial:
+    missing = {**partial, **unstarted}
+    if missing:
         raise RuntimeError(
             f"the holdout field cannot be frozen while these labels are part-way through "
-            f"advancing: {partial} (stage: missing). A label that stops at the baseline is a "
-            "decision the baselines made; a label that reached one advancing stage and not the "
-            "next is a sweep still running, and freezing now would permanently exclude "
-            "candidates that could have won."
+            f"advancing: {missing} (stage: missing). The baselines favour {sorted(favoured)}, "
+            "so those have to be present in every advancing stage; and a label that reached one "
+            "advancing stage and not the next is a sweep still running whatever the baselines "
+            "said. Freezing now would permanently exclude candidates that could have won."
         )
     if not frames:
         raise RuntimeError(
@@ -205,6 +270,7 @@ def open_selection_field(
     prediction_hashes: Any,
     resolve_best_backtest_runs: Any,
     stages: tuple[str, ...] = FIELD_STAGES,
+    advancing_top_n: int | None = None,
 ) -> SelectionField:
     """The frozen field where one is recorded, the same field rebuilt live where none is.
 
@@ -238,6 +304,7 @@ def open_selection_field(
         prediction_hashes=prediction_hashes,
         resolve_best_backtest_runs=resolve_best_backtest_runs,
         stages=stages,
+        advancing_top_n=advancing_top_n,
     )
     # `CandidateSet.create` refuses partial members, so a frozen field is complete by
     # construction and everything downstream may assume it; `resolve_best_backtest_runs` ranks

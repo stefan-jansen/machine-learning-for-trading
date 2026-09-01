@@ -34,12 +34,14 @@ def _study_at(tmp_path: Path, *, primary: str, variants: list[str]) -> _Study:
     return _Study(root=tmp_path)
 
 
-def _rows(label: str, stage: str) -> pl.DataFrame:
+def _rows(label: str, stage: str, *, sharpe: float = 1.0, config: str = "c1") -> pl.DataFrame:
     return pl.DataFrame(
         {
             "backtest_hash": [f"{label}-{stage}"],
             "prediction_hash": [f"p-{label}"],
-            "sharpe": [1.0],
+            "sharpe": [sharpe],
+            "family": ["gbm"],
+            "config_name": [config],
         }
     )
 
@@ -73,24 +75,80 @@ def test_a_dominated_label_may_stop_after_the_baselines(tmp_path: Path) -> None:
     show to be dominated is deliberately not carried into allocation or risk overlay. A rule
     demanding every label in every stage would order backtests whose only purpose is filling a
     matrix, and would refuse to freeze a field that is finished.
+
+    Which labels the comparison favoured is read off the pooled baseline ranking rather than
+    off which labels happen to have allocation rows. Here the cut keeps one configuration, and
+    ``fwd_ret_21d`` outranks ``fwd_ret_5d`` at the baseline, so ``fwd_ret_5d`` stopping there is
+    the decision the baselines made.
     """
     study = _study_at(tmp_path, primary="fwd_ret_5d", variants=["fwd_ret_21d"])
 
     def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
         if label == "fwd_ret_5d" and stage != COVERAGE_STAGE:
             return _rows(label, stage).clear()
-        return _rows(label, stage)
+        return _rows(label, stage, sharpe=2.0 if label == "fwd_ret_21d" else 0.5)
 
     field = resolve_field_members(
         study,
         case_study="fixture",
         prediction_hashes=None,
         resolve_best_backtest_runs=resolver,
+        advancing_top_n=1,
     )
     assert set(field["backtest_hash"]) == {
         f"fwd_ret_5d-{COVERAGE_STAGE}",
         *(f"fwd_ret_21d-{stage}" for stage in FIELD_STAGES),
     }
+
+
+def test_a_favoured_label_whose_allocation_never_started_refuses_to_freeze(
+    tmp_path: Path,
+) -> None:
+    """The case reading post-baseline rows alone cannot see.
+
+    ``fwd_ret_21d`` tops the pooled baseline ranking and has no rows in any advancing stage.
+    Read off observed rows that is indistinguishable from a label dropped after the baselines;
+    read off the ranking it is a sweep that has not started, and freezing now would publish a
+    field missing the candidates the comparison actually selected.
+    """
+    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=["fwd_ret_21d"])
+
+    def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
+        if label == "fwd_ret_21d" and stage != COVERAGE_STAGE:
+            return _rows(label, stage).clear()
+        return _rows(label, stage, sharpe=2.0 if label == "fwd_ret_21d" else 0.5)
+
+    with pytest.raises(RuntimeError, match="fwd_ret_21d"):
+        resolve_field_members(
+            study,
+            case_study="fixture",
+            prediction_hashes=None,
+            resolve_best_backtest_runs=resolver,
+            advancing_top_n=1,
+        )
+
+
+def test_without_a_cut_every_label_is_required_to_advance(tmp_path: Path) -> None:
+    """No cut means the question is unanswerable, and an unanswerable question refuses.
+
+    A caller that cannot supply ``top_n`` cannot say which labels the baselines favoured, so
+    every label is treated as favoured. Returning an empty favoured set instead would excuse
+    every label from the check and freeze whatever happened to be there.
+    """
+    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=["fwd_ret_21d"])
+
+    def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
+        if label == "fwd_ret_5d" and stage != COVERAGE_STAGE:
+            return _rows(label, stage).clear()
+        return _rows(label, stage, sharpe=2.0 if label == "fwd_ret_21d" else 0.5)
+
+    with pytest.raises(RuntimeError, match="fwd_ret_5d"):
+        resolve_field_members(
+            study,
+            case_study="fixture",
+            prediction_hashes=None,
+            resolve_best_backtest_runs=resolver,
+        )
 
 
 def test_a_label_with_no_baseline_refuses_to_freeze(tmp_path: Path) -> None:

@@ -84,6 +84,7 @@ from case_studies.utils.sweep_config import (
     get_cost_grid_half_spread_usd,
     get_per_share_commission,
     get_position_risk_controls,
+    get_top_n_predictions,
 )
 from case_studies.utils.uncertainty import (
     compute_cohort_metrics,
@@ -174,6 +175,7 @@ FIELD = open_selection_field(
     name=CANDIDATE_SET_NAME,
     prediction_hashes=CURRENT_MEMBERS,
     resolve_best_backtest_runs=resolve_best_backtest_runs,
+    advancing_top_n=get_top_n_predictions(CASE_STUDY, "allocation"),
 )
 CANDIDATES = FIELD.candidate_set
 SELECTED = FIELD.selected
