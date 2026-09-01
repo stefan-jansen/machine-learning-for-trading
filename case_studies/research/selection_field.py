@@ -43,8 +43,8 @@ FIELD_STAGES: tuple[str, ...] = ("signal", "allocation", "risk_overlay")
 
 #: The one stage every declared label has to reach. The baseline is the equal-weight backtest
 #: every label is measured at, so it is where a label being absent means a run is unfinished.
-#: The stages after it are where the comparison pays off: a label the baselines show to be
-#: dominated is dropped rather than carried through allocation and risk for symmetry.
+#: Reaching it is a floor, not a completion check - what says the baseline sweep finished is
+#: its plan, the same as every stage after it.
 COVERAGE_STAGE: str = "signal"
 
 
@@ -87,10 +87,22 @@ def _recorded_set_count(registry: Any, name: str) -> int:
         return 0
 
 
-#: The population a sweep publishes its planned backtests under, per stage past the baseline.
-#: The baseline has no plan: every declared label is backtested equal-weight, so its coverage
-#: is checked directly and there is no grid for a plan to be compared against.
-PLAN_STAGE_KEYS: Mapping[str, str] = {"allocation": "allocation", "risk_overlay": "risk"}
+#: The population a sweep publishes its planned backtests under, per stage.
+#:
+#: The baseline is here too. It was left out on the reading that coverage - one rankable row
+#: per declared label - is enough to say it finished, and that is wrong twice. The baseline is
+#: a grid, predictions by entry scheme, so an interruption leaves the same shape every other
+#: interrupted sweep leaves: the stage present, each surviving prediction fully represented,
+#: and nothing to compare the count against. And a grid that has since changed - an entry
+#: scheme withdrawn, the prediction population refitted - leaves rows that are still rankable,
+#: so they stay eligible and can win a selection no current plan contains. One rankable row is
+#: evidence the sweep started, and coverage is still asked for exactly that; it is not evidence
+#: the sweep finished, and only the plan answers that.
+PLAN_STAGE_KEYS: Mapping[str, str] = {
+    "signal": "baseline",
+    "allocation": "allocation",
+    "risk_overlay": "risk",
+}
 
 
 def predictions_identity(prediction_hashes: Collection[str] | None) -> str:
@@ -174,12 +186,21 @@ def _plan_members(
     always admits something. It is also distinct from unreadable and from ambiguous - a name
     resolving to two current identities is a forked lineage that needs a person, and reading
     either of those as absence would drop the membership filter and admit historical rows.
+
+    A recorded plan is required to be complete before its members are handed back. Plans are
+    published *before* their sweep executes, so a current-but-incomplete plan is exactly what
+    an interruption leaves, and filtering to it would rank the part of the grid that finished.
+    The freeze asks the same question through :func:`unfinished_sweep_plans` and declines; a
+    live rebuild has to reach the same answer, or a reader rebuilding the field mid-sweep gets
+    a selection the freeze would have refused to make.
     """
     name = sweep_plan_name(case_study, label, stage, predictions)
     names = _population_names(study)
     if names is None or name not in names:
         return None
-    return set(OfficialPopulation.one(study, name=name).members)
+    plan = OfficialPopulation.one(study, name=name)
+    plan.require_complete()
+    return set(plan.members)
 
 
 def unfinished_sweep_plans(
@@ -252,18 +273,17 @@ def resolve_field_members(
 ) -> pl.DataFrame:
     """Every eligible validation backtest across the declared labels and the field's stages.
 
-    Advancing past the baseline is a decision, so completeness cannot be asked uniformly.
-
     **Every declared label is backtested equal-weight**, and that is what makes the labels
     comparable, so a declared label with no baseline rows means the run is unfinished. The
     set is immutable under its name, so freezing there publishes a field nothing can add to.
 
-    **Whether the stages past the baseline are finished is not asked here, because no reading
-    of the rows can answer it.** Each sweep plans a grid - configurations by top-k by
-    allocator, or one carrier by risk control - and an interrupted run leaves rows that look
-    like a smaller finished grid from every angle: the stage is present, and each surviving
-    configuration is fully represented. Presence, row counts and configuration counts were all
-    tried and each of them accepts an interruption as complete.
+    **Whether a stage is finished is not readable from its rows, the baseline included.** Each
+    sweep plans a grid - predictions by entry scheme, configurations by top-k by allocator, one
+    carrier by risk control - and an interrupted run leaves rows that look like a smaller
+    finished grid from every angle: the stage is present, and each surviving configuration is
+    fully represented. Presence, row counts and configuration counts were all tried and each of
+    them accepts an interruption as complete. Coverage catches a label with no baseline at all
+    and says nothing about a baseline that stopped part-way.
 
     What answers it is the plan itself. The sweep notebooks compute every expected backtest
     identity before executing, and publish that list as an official population, so completion
@@ -272,13 +292,15 @@ def resolve_field_members(
     is irreversible; this function builds the field and the caller decides whether it may be
     sealed.
 
-    **Where a plan is recorded, it also decides membership.** Checking a plan only for
-    completeness left it decorative: a superseded grid - an allocator withdrawn, a top-k level
-    dropped - leaves rows whose predictions are still current, so they stayed eligible and
-    could win the selection even though no current plan contains them. Restricting each
-    downstream stage to its plan's members makes the published field the grid the sweep
-    actually declared. A stage with no recorded plan is admitted whole, which is how the case
-    studies that predate plans keep the field they were published with - and that is decided by
+    **Where a plan is recorded, it also decides membership, and it has to be complete.**
+    Checking a plan only for completeness left it decorative: a superseded grid - an entry
+    scheme withdrawn, an allocator withdrawn, a top-k level dropped - leaves rows whose
+    predictions are still current, so they stayed eligible and could win the selection even
+    though no current plan contains them. Restricting each stage to its plan's members makes
+    the published field the grid the sweep actually declared, and requiring the plan complete
+    keeps a rebuild run mid-sweep from ranking the half of the grid that finished. A stage with
+    no recorded plan is admitted whole, which is how the case studies that predate plans keep
+    the field they were published with - and that is decided by
     whether this registry has ever recorded a plan for this case study, not by whether this one
     happens to be missing. Where it has, an absent plan is a sweep that has not run against the
     predictions in force, and building the field anyway would hand every reader who rebuilds it

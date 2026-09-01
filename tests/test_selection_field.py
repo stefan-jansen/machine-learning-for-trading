@@ -271,6 +271,12 @@ def test_a_recorded_plan_decides_which_downstream_rows_are_eligible(tmp_path: Pa
     plan is what says which rows the published field is made of.
     """
     study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1", "c2"))
+    study.results = _Results()
+    _record_plan(
+        study,
+        name=f"fixture-baseline-fwd_ret_5d-{predictions_identity(None)}",
+        members=["fwd_ret_5d-signal-c1", "fwd_ret_5d-signal-c2"],
+    )
     _record_plan(
         study,
         name=f"fixture-allocation-fwd_ret_5d-{predictions_identity(None)}",
@@ -293,8 +299,6 @@ def test_a_recorded_plan_decides_which_downstream_rows_are_eligible(tmp_path: Pa
     )
     allocation = {name for name in field["backtest_hash"] if "-allocation-" in name}
     assert allocation == {"fwd_ret_5d-allocation-c1"}
-    # The stages with no recorded plan are admitted whole, which is what keeps the case studies
-    # published before plans existed reading the field they were published with.
     assert {name for name in field["backtest_hash"] if f"-{COVERAGE_STAGE}-" in name} == {
         "fwd_ret_5d-signal-c1",
         "fwd_ret_5d-signal-c2",
@@ -304,6 +308,12 @@ def test_a_recorded_plan_decides_which_downstream_rows_are_eligible(tmp_path: Pa
 def test_a_superseded_plan_does_not_admit_its_own_members(tmp_path: Path) -> None:
     """Only the generation in force decides membership; the grid it replaced does not."""
     study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1", "c2"))
+    study.results = _Results()
+    _record_plan(
+        study,
+        name=f"fixture-baseline-fwd_ret_5d-{predictions_identity(None)}",
+        members=["fwd_ret_5d-signal-c1", "fwd_ret_5d-signal-c2"],
+    )
     _record_plan(
         study,
         name=f"fixture-allocation-fwd_ret_5d-{predictions_identity(None)}",
@@ -336,13 +346,18 @@ def test_a_superseded_plan_does_not_admit_its_own_members(tmp_path: Path) -> Non
 
 @dataclass
 class _Member:
-    """What `open_selection_field` needs of a result: an identity and whether it is usable."""
+    """What the field construction needs of a result: an identity, a kind, and whether it is usable."""
 
     hash: str
     reason: str | None = None
+    kind: str = "backtest"
 
     def completeness(self) -> str | None:
         return self.reason
+
+    @property
+    def complete(self) -> bool:
+        return self.reason is None
 
 
 class _Results:
@@ -468,5 +483,114 @@ def test_a_live_rebuild_refuses_when_the_predictions_moved_past_the_plans(tmp_pa
             case_study="fixture",
             name="fixture:holdout-candidates",
             prediction_hashes={"p-after-the-refit"},
+            resolve_best_backtest_runs=resolver,
+        )
+
+
+def test_a_live_rebuild_refuses_a_plan_whose_sweep_is_still_running(tmp_path: Path) -> None:
+    """The state publishing a plan before its sweep executes deliberately creates.
+
+    Recording the plan afterwards was the alternative, and it is worse: an interrupted sweep
+    then records nothing and leaves the previous, smaller, complete plan in force, so a freeze
+    reads the interruption as a finished run. Published first, an interruption leaves a current
+    plan whose members are not all registered.
+
+    The freeze declines that state through `unfinished_sweep_plans`. A live rebuild has to
+    reach the same answer, or a reader who rebuilds the field while the sweep is running ranks
+    over the part of the grid that finished and gets a selection the freeze would have refused
+    to make.
+    """
+    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1", "c2"))
+    study.results = _Results({"fwd_ret_5d-allocation-c2": "no metrics row"})
+    _record_plan(
+        study,
+        name=f"fixture-baseline-fwd_ret_5d-{predictions_identity(None)}",
+        members=["fwd_ret_5d-signal-c1", "fwd_ret_5d-signal-c2"],
+    )
+    # The whole grid is named; only `c1` has finished running.
+    _record_plan(
+        study,
+        name=f"fixture-allocation-fwd_ret_5d-{predictions_identity(None)}",
+        members=["fwd_ret_5d-allocation-c1", "fwd_ret_5d-allocation-c2"],
+    )
+    _record_plan(
+        study,
+        name=f"fixture-risk-fwd_ret_5d-{predictions_identity(None)}",
+        members=["fwd_ret_5d-risk_overlay-c1", "fwd_ret_5d-risk_overlay-c2"],
+    )
+
+    def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
+        return _rows(label, stage, configs=("c1", "c2"))
+
+    with pytest.raises(ValueError, match="fwd_ret_5d-allocation-c2"):
+        resolve_field_members(
+            study,
+            case_study="fixture",
+            prediction_hashes=None,
+            resolve_best_backtest_runs=resolver,
+        )
+
+
+def test_the_baseline_grid_is_planned_like_every_other_stage(tmp_path: Path) -> None:
+    """Coverage is a floor, and it was standing in for a completion check it cannot make.
+
+    The baseline was left unplanned on the reading that one rankable row per declared label is
+    enough to say it finished. It is a grid - predictions by entry scheme - so an interruption
+    leaves the same shape every other interrupted sweep leaves, and a grid that has since
+    changed leaves rows that are still rankable and no current plan contains. Both states pass
+    coverage, and both are here: `c2`'s baseline is registered, rankable, and not in the plan.
+    """
+    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1", "c2"))
+    study.results = _Results()
+    _record_plan(
+        study,
+        name=f"fixture-baseline-fwd_ret_5d-{predictions_identity(None)}",
+        members=["fwd_ret_5d-signal-c1"],
+    )
+    for key, stage in (("allocation", "allocation"), ("risk", "risk_overlay")):
+        _record_plan(
+            study,
+            name=f"fixture-{key}-fwd_ret_5d-{predictions_identity(None)}",
+            members=[f"fwd_ret_5d-{stage}-c1", f"fwd_ret_5d-{stage}-c2"],
+        )
+
+    def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
+        return _rows(label, stage, configs=("c1", "c2"))
+
+    field = resolve_field_members(
+        study,
+        case_study="fixture",
+        prediction_hashes=None,
+        resolve_best_backtest_runs=resolver,
+    )
+    assert {name for name in field["backtest_hash"] if f"-{COVERAGE_STAGE}-" in name} == {
+        "fwd_ret_5d-signal-c1"
+    }
+
+
+def test_a_case_study_that_publishes_plans_needs_one_for_its_baseline(tmp_path: Path) -> None:
+    """An absent baseline plan is a baseline sweep that has not run against these predictions.
+
+    It reads exactly like the downstream stages, and for the same reason: the rows the stage
+    does have belong to another generation, so building the field anyway hands a reader a
+    membership the freeze never published.
+    """
+    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1",))
+    study.results = _Results()
+    for key, stage in (("allocation", "allocation"), ("risk", "risk_overlay")):
+        _record_plan(
+            study,
+            name=f"fixture-{key}-fwd_ret_5d-{predictions_identity(None)}",
+            members=[f"fwd_ret_5d-{stage}-c1"],
+        )
+
+    def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
+        return _rows(label, stage)
+
+    with pytest.raises(RuntimeError, match="at the 'signal' stage"):
+        resolve_field_members(
+            study,
+            case_study="fixture",
+            prediction_hashes=None,
             resolve_best_backtest_runs=resolver,
         )

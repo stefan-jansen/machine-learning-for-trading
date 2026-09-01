@@ -82,7 +82,7 @@ def test_every_named_plan_is_reported_not_only_the_first(study: Study) -> None:
     unfinished = unfinished_sweep_plans(
         study, case_study="etfs", labels=["fwd_ret_5d", "fwd_ret_21d"]
     )
-    assert len(unfinished) == 4
+    assert len(unfinished) == 6
 
 
 def test_a_registry_without_the_table_reports_absence_not_a_crash(tmp_path: Path) -> None:
@@ -119,8 +119,10 @@ def test_a_label_with_no_rows_at_all_is_still_waited_for(study: Study) -> None:
         study, case_study="etfs", labels=["fwd_ret_5d", "fwd_ret_21d"]
     )
     assert {line.split(" (")[0] for line in unfinished} == {
+        "fwd_ret_5d signal",
         "fwd_ret_5d allocation",
         "fwd_ret_5d risk_overlay",
+        "fwd_ret_21d signal",
         "fwd_ret_21d allocation",
         "fwd_ret_21d risk_overlay",
     }
@@ -134,6 +136,10 @@ def test_the_plan_name_is_the_one_the_sweeps_publish_under() -> None:
     `risk` is the key its population name carries, and reading either for the other was the
     shape of the mistake this closes.
     """
+    assert (
+        sweep_plan_name("etfs", "fwd_ret_5d", "signal", "abc123")
+        == "etfs-baseline-fwd_ret_5d-abc123"
+    )
     assert (
         sweep_plan_name("etfs", "fwd_ret_5d", "allocation", "abc123")
         == "etfs-allocation-fwd_ret_5d-abc123"
