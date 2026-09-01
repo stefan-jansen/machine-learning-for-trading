@@ -194,7 +194,14 @@ def _fmt(val: float | None, fmt: str = ".4f") -> str:
 # strategy - are excluded from the cross-stage rank-1 lookup. The val/
 # holdout pair shares a training_hash; the notebook reads from those rows
 # rather than recomputing.
-_lineage = resolve_canonical_rank1_lineage(CASE_STUDY)
+# The nominated field is resolved BEFORE the ranking and handed to it, not checked against
+# the winner afterwards. Those are different tests wherever the conformal branch is taken:
+# the common-support re-ranking restricts every series to the timestamps they all share, so a
+# row that is never going to win still decides how far that intersection reaches, and
+# therefore which admitted candidate does. A membership check on the winner passes while the
+# answer has already been moved by a row that was never eligible.
+_candidate_hashes = frozenset(CandidateSet.one(_selection_study, name=STRATEGY_CANDIDATES).members)
+_lineage = resolve_canonical_rank1_lineage(CASE_STUDY, admitted=_candidate_hashes)
 TOP_HASH = _lineage["val_backtest_hash"]
 TOP_PHASH = _lineage["val_prediction_hash"]
 HO_HASH = _lineage["holdout_backtest_hash"]
@@ -210,12 +217,10 @@ assert HO_HASH is not None, (
     "Run 20_strategy_synthesis/holdout.py::generate_holdout('sp500_options') once, "
     "then populate the paired metrics for this case."
 )
-# `resolve_canonical_rank1_lineage` ranks every validation backtest the restrictions leave
-# standing, which is the whole registry rather than the set this case study nominated. A
-# stale, experimental or retired row that outranks the nominees would be published as the
-# carrier. 13_portfolio_management writes the nominees into an immutable candidate set, so
-# the winner has to be one of them.
-_candidate_hashes = set(CandidateSet.one(_selection_study, name=STRATEGY_CANDIDATES).members)
+# The field was applied before the ranking, so this cannot fail on a row from outside it.
+# It stays because it is cheap and because it is the assertion a reader needs: the carrier
+# published below is one of the nominees `13_portfolio_management` froze, not whatever
+# happened to rank first in the registry.
 if TOP_HASH not in _candidate_hashes:
     raise RuntimeError(
         f"Canonical rank-1 {TOP_HASH} is not a member of {STRATEGY_CANDIDATES} "
