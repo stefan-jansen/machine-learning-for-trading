@@ -68,10 +68,10 @@ from .results import (
 from .selection_field import (
     FIELD_STAGES,
     SelectionField,
-    advancing_labels,
     label_of,
     open_selection_field,
     resolve_field_members,
+    sweep_plan_name,
     unfinished_sweep_plans,
 )
 from .strategy import Strategy, strategy_warmup_periods
@@ -139,7 +139,7 @@ __all__ = [
     "label_of",
     "open_selection_field",
     "resolve_field_members",
-    "advancing_labels",
+    "sweep_plan_name",
     "unfinished_sweep_plans",
     "population_supersedes",
     "research_name",

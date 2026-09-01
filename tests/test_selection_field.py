@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,7 @@ from case_studies.research.selection_field import (
     COVERAGE_STAGE,
     FIELD_STAGES,
     label_of,
+    open_selection_field,
     resolve_field_members,
 )
 
@@ -111,7 +113,7 @@ def test_field_spans_every_declared_label_and_stage(tmp_path: Path) -> None:
         assert split == "validation"
         return _rows(label, stage)
 
-    field, _reached = resolve_field_members(
+    field = resolve_field_members(
         study,
         case_study="fixture",
         prediction_hashes=None,
@@ -146,7 +148,7 @@ def test_a_dominated_label_may_stop_after_the_baselines(tmp_path: Path) -> None:
             return _rows(label, stage).clear()
         return _rows(label, stage)
 
-    field, _reached = resolve_field_members(
+    field = resolve_field_members(
         study,
         case_study="fixture",
         prediction_hashes=None,
@@ -223,3 +225,195 @@ def test_an_unrankable_row_does_not_satisfy_coverage(tmp_path: Path) -> None:
             prediction_hashes=None,
             resolve_best_backtest_runs=resolver,
         )
+
+
+def _record_plan(
+    study: _Study, *, name: str, members: list[str], supersedes: str | None = None
+) -> str:
+    """A recorded sweep plan, written straight to the table `OfficialPopulation.one` reads.
+
+    Not through `create`, which requires a writable study and registered members. What is under
+    test is the effect of a plan on membership, and that is the same whichever way the row got
+    there.
+    """
+    population_hash = f"pop-{name}-{len(members)}-{supersedes or 'first'}"
+    db = sqlite3.connect(study.root / "run_log" / "registry.db")
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS official_populations (
+            population_hash TEXT PRIMARY KEY, name TEXT NOT NULL, member_kind TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL, supersedes_hash TEXT, created_at TEXT NOT NULL
+        )
+        """
+    )
+    db.execute(
+        "INSERT OR REPLACE INTO official_populations VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            population_hash,
+            name,
+            "backtest",
+            json.dumps({"members": members}),
+            supersedes,
+            "2026-09-01T00:00:00+00:00",
+        ),
+    )
+    db.commit()
+    db.close()
+    return population_hash
+
+
+def test_a_recorded_plan_decides_which_downstream_rows_are_eligible(tmp_path: Path) -> None:
+    """A withdrawn allocator's rows keep current predictions, so nothing else excludes them.
+
+    Checking a plan only for completeness left it decorative: the sweep declares a grid, and a
+    row from a grid the sweep no longer declares was still eligible to win the selection. The
+    plan is what says which rows the published field is made of.
+    """
+    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1", "c2"))
+    _record_plan(
+        study,
+        name="fixture-allocation-fwd_ret_5d-v1",
+        members=["fwd_ret_5d-allocation-c1"],
+    )
+
+    def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
+        return _rows(label, stage, configs=("c1", "c2"))
+
+    field = resolve_field_members(
+        study,
+        case_study="fixture",
+        prediction_hashes=None,
+        resolve_best_backtest_runs=resolver,
+    )
+    allocation = {name for name in field["backtest_hash"] if "-allocation-" in name}
+    assert allocation == {"fwd_ret_5d-allocation-c1"}
+    # The stages with no recorded plan are admitted whole, which is what keeps the case studies
+    # published before plans existed reading the field they were published with.
+    assert {name for name in field["backtest_hash"] if f"-{COVERAGE_STAGE}-" in name} == {
+        "fwd_ret_5d-signal-c1",
+        "fwd_ret_5d-signal-c2",
+    }
+
+
+def test_a_superseded_plan_does_not_admit_its_own_members(tmp_path: Path) -> None:
+    """Only the generation in force decides membership; the grid it replaced does not."""
+    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1", "c2"))
+    first = _record_plan(
+        study,
+        name="fixture-risk-fwd_ret_5d-v1",
+        members=["fwd_ret_5d-risk_overlay-c1"],
+    )
+    _record_plan(
+        study,
+        name="fixture-risk-fwd_ret_5d-v1",
+        members=["fwd_ret_5d-risk_overlay-c2"],
+        supersedes=first,
+    )
+
+    def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
+        return _rows(label, stage, configs=("c1", "c2"))
+
+    field = resolve_field_members(
+        study,
+        case_study="fixture",
+        prediction_hashes=None,
+        resolve_best_backtest_runs=resolver,
+    )
+    overlay = {name for name in field["backtest_hash"] if "-risk_overlay-" in name}
+    assert overlay == {"fwd_ret_5d-risk_overlay-c2"}
+
+
+@dataclass
+class _Member:
+    """What `open_selection_field` needs of a result: an identity and whether it is usable."""
+
+    hash: str
+    reason: str | None = None
+
+    def completeness(self) -> str | None:
+        return self.reason
+
+
+class _Results:
+    def __init__(self, incomplete: dict[str, str] | None = None) -> None:
+        self._incomplete = incomplete or {}
+
+    def open(self, backtest_hash: str) -> _Member:
+        return _Member(backtest_hash, self._incomplete.get(backtest_hash))
+
+
+def _register_backtests(study: _Study, rows: list[tuple[str, str]]) -> None:
+    db = sqlite3.connect(study.root / "run_log" / "registry.db")
+    db.executemany("INSERT OR REPLACE INTO backtest_runs VALUES (?, ?)", rows)
+    db.commit()
+    db.close()
+
+
+def test_open_selection_field_ranks_live_where_no_set_is_recorded(tmp_path: Path) -> None:
+    """The path a reader's clean clone takes, and the one that had no test at all.
+
+    `open_selection_field` returns the frozen set where one exists and rebuilds the same field
+    live where none does. Only the frozen branch was ever exercised, so a change to what
+    `resolve_field_members` returns broke every notebook that reads the field on a clone while
+    every test and every maintainer run stayed green - they all had a recorded set and returned
+    before reaching this.
+    """
+    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=["fwd_ret_10d"])
+    study.results = _Results()
+    _register_backtests(
+        study,
+        [
+            (f"{label}-{stage}-c1", _prediction_hash(label, "c1"))
+            for label in ("fwd_ret_5d", "fwd_ret_10d")
+            for stage in FIELD_STAGES
+        ],
+    )
+
+    def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
+        # The winner is a variant label at the overlay stage, so the label carried forward has
+        # to be read off the selection rather than taken from `labels.primary`.
+        sharpe = 2.0 if (label, stage) == ("fwd_ret_10d", "risk_overlay") else 1.0
+        return _rows(label, stage, sharpe=sharpe)
+
+    field = open_selection_field(
+        study,
+        case_study="fixture",
+        name="fixture:holdout-candidates",
+        prediction_hashes=None,
+        resolve_best_backtest_runs=resolver,
+    )
+
+    assert field.frozen is False
+    assert field.selected.hash == "fwd_ret_10d-risk_overlay-c1"
+    assert field.label == "fwd_ret_10d"
+    assert len(field.members) == 2 * len(FIELD_STAGES)
+
+
+def test_open_selection_field_drops_members_it_cannot_open_complete(tmp_path: Path) -> None:
+    """`CandidateSet.create` refuses partial members, so the live field has to match.
+
+    Otherwise a reader rebuilding the field would rank over members the frozen set excluded,
+    and could select something the published selection never saw.
+    """
+    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[])
+    study.results = _Results({"fwd_ret_5d-risk_overlay-c1": "no metrics row"})
+    _register_backtests(
+        study,
+        [
+            (f"fwd_ret_5d-{stage}-c1", _prediction_hash("fwd_ret_5d", "c1"))
+            for stage in FIELD_STAGES
+        ],
+    )
+
+    def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
+        return _rows(label, stage, sharpe=2.0 if stage == "risk_overlay" else 1.0)
+
+    field = open_selection_field(
+        study,
+        case_study="fixture",
+        name="fixture:holdout-candidates",
+        prediction_hashes=None,
+        resolve_best_backtest_runs=resolver,
+    )
+    assert "fwd_ret_5d-risk_overlay-c1" not in field.members
+    assert field.selected.hash != "fwd_ret_5d-risk_overlay-c1"

@@ -63,7 +63,6 @@ from case_studies.research import (
     CandidateSet,
     OfficialPopulation,
     Study,
-    advancing_labels,
     candidate_set_supersedes,
     open_study,
     population_supersedes,
@@ -649,10 +648,14 @@ fig_tradeoff.show()
 # `328d2009685c` is the single-label field frozen on 2026-08-30, before the four variant labels
 # had baseline, allocation or overlay rows; `aa6b3986124b` replaced it on 2026-09-01 under a
 # per-stage count of advancing configurations, which admitted a label whose sweep had produced
-# one row per configuration and stopped. Only the tip is declarable - `create` refuses anything
-# else and names the tip - so this value moves on every generation.
+# one row per configuration and stopped; `04cb35eec43f` replaced that one later the same day and
+# held 3,710 members, 66 of them allocation backtests from a grid no current sweep plan declares.
+# This generation admits the declared grids only, so it holds 3,644. The validation selection is
+# `ec0cfd449843` in both, so what moved is the membership and not the choice made over it. Only
+# the tip is declarable - `create` refuses anything else and names the tip - so this value moves
+# on every generation.
 SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
-    "sp500_equity_option_analytics:holdout-candidates": "aa6b3986124b",
+    "sp500_equity_option_analytics:holdout-candidates": "04cb35eec43f",
 }
 
 # %% [markdown]
@@ -669,7 +672,7 @@ CANDIDATE_LABELS = sweep_labels(_study)
 # and an absent one means the baseline sweep is unfinished. Whether the stages past the baseline
 # finished is decided below, against the recorded plans, because no reading of the rows can
 # answer it.
-frozen_pool, stages_reached = resolve_field_members(
+frozen_pool = resolve_field_members(
     _study,
     case_study=CASE_STUDY_ID,
     prediction_hashes=CURRENT_MEMBERS,
@@ -704,39 +707,30 @@ else:
             "will not find it, and check its members against different artifacts than they "
             "will read."
         )
-    # Every *advancing* label's sweeps have to be finished, and finished is `require_complete`
-    # on the plan each sweep recorded, not a reading of the rows it left. The set is immutable
+    # Every declared label's sweeps have to be finished, and finished is `require_complete` on
+    # the plan each sweep recorded, not a reading of the rows it left. The set is immutable
     # under its name, so a label whose allocation or overlay sweep has not run yet would be
     # frozen out permanently, and a sweep interrupted part-way is indistinguishable from a
     # smaller finished one by rows, by configurations, or by which stages are present.
     #
-    # Which labels to wait for is read off the field, not declared: a label is waited for when
-    # it has rows past the baseline in the field being frozen. A label the funnel dropped at its
-    # baseline has none, so nothing waits on sweeps nobody intended to run, and a sweep that was
-    # interrupted has both rows and a plan it published before executing, so it is waited for
-    # and reported. What a plan never does is cap the grid - a run that adds configurations
-    # supersedes its own plan.
+    # Every declared label, not the ones the rows suggest advanced. A label that has not
+    # started and a label deliberately stopped at its baseline leave the registry in the same
+    # state, so inferring the wait-set from the rows lets whichever label ran first seal the
+    # field and lock the rest out. There is no funnel to accommodate here: 15 raises rather than
+    # advancing fewer configurations than declared, so no label stops at its baseline.
     #
     # This is also what sequences a per-label run without any coordination: 15 and 16 run for
-    # each advancing label in turn, every run but the last finds a plan missing and declines to
-    # freeze, and the last one freezes the whole field. Declining is not a failure - the
-    # notebook has done its own label's work either way, and the set is written exactly once.
-    advancing = advancing_labels(stages_reached)
-    unfinished = unfinished_sweep_plans(
-        writable,
-        plan_names={
-            f"{label} {stage}": f"{CASE_STUDY_ID}-{key}-{label}-v1"
-            for label in advancing
-            for stage, key in (("allocation", "allocation"), ("risk_overlay", "risk"))
-        },
-    )
+    # each label in turn, every run but the last finds a plan missing and declines to freeze,
+    # and the last one freezes the whole field. Declining is not a failure - the notebook has
+    # done its own label's work either way, and the set is written exactly once.
+    unfinished = unfinished_sweep_plans(writable, case_study=CASE_STUDY_ID, labels=CANDIDATE_LABELS)
 
     if unfinished:
         holdout_candidates = None
         print(
             f"Not freezing a candidate set here: {len(unfinished)} of "
-            f"{2 * len(advancing)} recorded sweep plans are absent or incomplete, so "
-            "the field is still being produced. Run 15 and 16 for each advancing label; the "
+            f"{2 * len(CANDIDATE_LABELS)} recorded sweep plans are absent or incomplete, so "
+            "the field is still being produced. Run 15 and 16 for each declared label; the "
             "last of those runs freezes the set.\n  " + "\n  ".join(unfinished)
         )
     else:

@@ -22,7 +22,7 @@ Both are closed by having one construction and reading the label off the selecti
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -86,19 +86,65 @@ def _recorded_set_count(registry: Any, name: str) -> int:
         return 0
 
 
-def unfinished_sweep_plans(study: Study, *, plan_names: Mapping[str, str]) -> list[str]:
-    """Which of the recorded sweep plans are absent or not fully executed, one line each.
+#: The population a sweep publishes its planned backtests under, per stage past the baseline.
+#: The baseline has no plan: every declared label is backtested equal-weight, so its coverage
+#: is checked directly and there is no grid for a plan to be compared against.
+PLAN_STAGE_KEYS: Mapping[str, str] = {"allocation": "allocation", "risk_overlay": "risk"}
+
+
+def sweep_plan_name(case_study: str, label: str, stage: str) -> str:
+    """The official population a sweep publishes its planned backtests under.
+
+    Owned here rather than built at each call site. The freeze and the four notebooks that
+    rebuild the field live have to name the same populations, and a convention spelled out in
+    five places is a convention that can differ in one of them.
+    """
+    return f"{case_study}-{PLAN_STAGE_KEYS[stage]}-{label}-v1"
+
+
+def _plan_members(study: Study, case_study: str, label: str, stage: str) -> set[str] | None:
+    """The backtests a sweep planned, or ``None`` where this registry records no such plan.
+
+    Absent is distinct from empty: ``create`` refuses an empty member list, so a recorded plan
+    always admits something, and ``None`` means only that a case study does not publish plans
+    for this stage. The freeze refuses to seal a field whose plans are absent, so ``None`` here
+    is never what decides a published membership.
+    """
+    try:
+        plan = OfficialPopulation.one(study, name=sweep_plan_name(case_study, label, stage))
+    except (KeyError, ValueError, sqlite3.OperationalError):
+        return None
+    return set(plan.members)
+
+
+def unfinished_sweep_plans(
+    study: Study,
+    *,
+    case_study: str,
+    labels: Sequence[str],
+    stages: Sequence[str] = tuple(PLAN_STAGE_KEYS),
+) -> list[str]:
+    """Which of the declared labels' sweep plans are absent or not fully executed, one line each.
 
     A sweep notebook computes every backtest identity it intends to register before it
     registers any of them, and publishes that list as an official population. This asks each
-    named plan whether every member is present and complete, and that is the only question
-    about a sweep's completion the registry can actually answer.
+    plan whether every member is present and complete, and that is the only question about a
+    sweep's completion the registry can actually answer.
 
     It is asked because none of the alternatives work. An interrupted sweep leaves rows that
     look exactly like a smaller finished one: the stage is present, the surviving model
     configurations are each fully represented, and the row count is simply lower with nothing
     to compare it against. Stage presence, row counts and configuration counts were each tried
     and each accepts an interruption as complete. The plan is the comparison they lacked.
+
+    **Every declared label is asked, not a subset inferred from the rows.** An earlier version
+    waited only on labels that already had rows past their baseline, so that whichever label
+    ran first could seal the field while the rest had not started - the two states are
+    identical in the registry, and a set frozen in the first one locks the others out
+    permanently. A label whose sweep is genuinely not intended does not exist here: the
+    allocation notebook raises rather than advancing fewer configurations than it declared, so
+    there is no path that stops a label at its baseline. Should one ever be added, it has to
+    publish that decision, because nothing in the rows distinguishes it from an unstarted run.
 
     Absent and incomplete are reported the same way on purpose. A plan that was never written
     is a sweep that either has not run or ran before plans were recorded, and neither is a
@@ -108,46 +154,14 @@ def unfinished_sweep_plans(study: Study, *, plan_names: Mapping[str, str]) -> li
     populations has no table to query, which is an absent plan and not a broken one.
     """
     unfinished: list[str] = []
-    for description, name in plan_names.items():
-        try:
-            OfficialPopulation.one(study, name=name).require_complete()
-        except (KeyError, ValueError, sqlite3.OperationalError) as exc:
-            unfinished.append(f"{description}: {exc}")
+    for label in labels:
+        for stage in stages:
+            name = sweep_plan_name(case_study, label, stage)
+            try:
+                OfficialPopulation.one(study, name=name).require_complete()
+            except (KeyError, ValueError, sqlite3.OperationalError) as exc:
+                unfinished.append(f"{label} {stage} ({name}): {exc}")
     return unfinished
-
-
-def advancing_labels(
-    reached: Mapping[str, set[str]],
-    *,
-    coverage_stage: str = COVERAGE_STAGE,
-) -> list[str]:
-    """The labels whose sweeps the freeze has to wait for, read off the field itself.
-
-    The funnel permits a label to stop after its baseline: dominated there, it earns no
-    allocation or overlay sweep. So the freeze cannot require a plan from every declared label,
-    or a field containing a deliberately dropped label could never be sealed. Nor can it require
-    one from no label, which is what let a half-run sweep be frozen in the first place.
-
-    A label is waited for when it has rows past the coverage stage in the field being frozen -
-    the field the caller has already resolved, restricted to the prediction populations in
-    force. That is a property of the current field rather than a declaration about intent, and
-    it separates the three cases without anyone writing anything down:
-
-    - **Never advanced.** No rows past the baseline, so nothing is waited for, and nothing but
-      its baseline rows is in the field either. A deliberate drop and a sweep nobody has run yet
-      are the same state and want the same answer.
-    - **Interrupted.** Its sweep published a plan before executing, so the label has rows past
-      the baseline *and* a plan whose members are not all registered. It is waited for, and
-      ``unfinished_sweep_plans`` reports it.
-    - **Finished.** Rows and a complete plan, so the wait is satisfied.
-
-    An earlier version of this asked whether a plan had ever been recorded under the label's
-    name. That reads the wrong generation: after a refit, a label that advanced under superseded
-    predictions still has its old plan on record while none of its old rows are eligible, so it
-    could never stop advancing. The field already answers the question the plan was standing in
-    for.
-    """
-    return sorted(label for label, stages in reached.items() if stages - {coverage_stage})
 
 
 def resolve_field_members(
@@ -158,7 +172,7 @@ def resolve_field_members(
     resolve_best_backtest_runs: Any,
     stages: tuple[str, ...] = FIELD_STAGES,
     coverage_stage: str = COVERAGE_STAGE,
-) -> tuple[pl.DataFrame, dict[str, set[str]]]:
+) -> pl.DataFrame:
     """Every eligible validation backtest across the declared labels and the field's stages.
 
     Advancing past the baseline is a decision, so completeness cannot be asked uniformly.
@@ -181,15 +195,19 @@ def resolve_field_members(
     is irreversible; this function builds the field and the caller decides whether it may be
     sealed.
 
+    **Where a plan is recorded, it also decides membership.** Checking a plan only for
+    completeness left it decorative: a superseded grid - an allocator withdrawn, a top-k level
+    dropped - leaves rows whose predictions are still current, so they stayed eligible and
+    could win the selection even though no current plan contains them. Restricting each
+    downstream stage to its plan's members makes the published field the grid the sweep
+    actually declared. A stage with no recorded plan is admitted whole, which is how the case
+    studies that predate plans keep the field they were published with; the freeze refuses to
+    seal a field whose plans are absent, so that fallback never decides a sealed membership.
+
     Rows with no Sharpe are dropped before any of this. They are ineligible by
     construction, since the selection ranks on validation backtest Sharpe, and leaving them
     in makes them count towards coverage and then fails the whole frozen set later, when
     ``best_validation_sharpe`` rejects it for holding a member it cannot rank.
-
-    Returns the field and the stages each label reached in it. The second is what
-    :func:`advancing_labels` reads to decide which labels the freeze waits for, and it is
-    returned rather than recomputed because it is a by-product of building the field and a
-    second pass would resolve a different one wherever the registry moved in between.
     """
     labels = sweep_labels(study)
     frames: list[pl.DataFrame] = []
@@ -206,6 +224,10 @@ def resolve_field_members(
             )
             if "sharpe" in rows.columns:
                 rows = rows.filter(pl.col("sharpe").is_not_null())
+            if stage in PLAN_STAGE_KEYS:
+                admitted = _plan_members(study, case_study, label, stage)
+                if admitted is not None:
+                    rows = rows.filter(pl.col("backtest_hash").is_in(list(admitted)))
             if rows.is_empty():
                 continue
             reached[label].add(stage)
@@ -225,7 +247,7 @@ def resolve_field_members(
             "the holdout field cannot be frozen: no declared label has a rankable validation "
             "backtest at any stage."
         )
-    return pl.concat(frames, how="diagonal_relaxed").unique("backtest_hash"), reached
+    return pl.concat(frames, how="diagonal_relaxed").unique("backtest_hash")
 
 
 def label_of(study: Study, result: Result) -> str:

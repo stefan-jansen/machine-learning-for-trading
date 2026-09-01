@@ -23,12 +23,10 @@ import pytest
 
 from case_studies.research import (
     OfficialPopulation,
-    advancing_labels,
+    sweep_plan_name,
     unfinished_sweep_plans,
 )
 from case_studies.research.workspace import Study
-from case_studies.utils.registry import register_backtest_run
-from tests.test_research_contract_execution import _publish_prediction
 from tests.test_research_workspace import _seed_release
 
 
@@ -46,10 +44,10 @@ def test_a_plan_that_was_never_written_is_reported(study: Study) -> None:
     immutable set. Reporting them the same way is deliberate.
     """
     unfinished = unfinished_sweep_plans(
-        study, plan_names={"fwd_ret_5d allocation": "etfs-allocation-fwd_ret_5d-v1"}
+        study, case_study="etfs", labels=["fwd_ret_5d"], stages=["allocation"]
     )
     assert len(unfinished) == 1
-    assert unfinished[0].startswith("fwd_ret_5d allocation:")
+    assert unfinished[0].startswith("fwd_ret_5d allocation (etfs-allocation-fwd_ret_5d-v1):")
 
 
 def test_a_plan_whose_members_are_not_registered_is_reported(study: Study) -> None:
@@ -61,7 +59,7 @@ def test_a_plan_whose_members_are_not_registered_is_reported(study: Study) -> No
         members=["aaaa11112222", "bbbb33334444"],
     )
     unfinished = unfinished_sweep_plans(
-        study, plan_names={"fwd_ret_5d allocation": "etfs-allocation-fwd_ret_5d-v1"}
+        study, case_study="etfs", labels=["fwd_ret_5d"], stages=["allocation"]
     )
     assert len(unfinished) == 1
     assert "aaaa11112222" in unfinished[0] and "bbbb33334444" in unfinished[0]
@@ -74,12 +72,7 @@ def test_every_named_plan_is_reported_not_only_the_first(study: Study) -> None:
     unfinished plans, each learning about exactly one more.
     """
     unfinished = unfinished_sweep_plans(
-        study,
-        plan_names={
-            f"{label} {stage}": f"etfs-{key}-{label}-v1"
-            for label in ("fwd_ret_5d", "fwd_ret_21d")
-            for stage, key in (("allocation", "allocation"), ("risk_overlay", "risk"))
-        },
+        study, case_study="etfs", labels=["fwd_ret_5d", "fwd_ret_21d"]
     )
     assert len(unfinished) == 4
 
@@ -98,32 +91,40 @@ def test_a_registry_without_the_table_reports_absence_not_a_crash(tmp_path: Path
     sqlite3.connect(tmp_path / "run_log" / "registry.db").close()
 
     unfinished = unfinished_sweep_plans(
-        _Study(), plan_names={"fwd_ret_5d allocation": "etfs-allocation-fwd_ret_5d-v1"}
+        _Study(), case_study="etfs", labels=["fwd_ret_5d"], stages=["allocation"]
     )
     assert len(unfinished) == 1
 
 
-def test_a_label_that_stopped_at_its_baseline_is_not_waited_for() -> None:
-    """The funnel drops a dominated label after its baseline, and nothing waits on it.
+def test_a_label_with_no_rows_at_all_is_still_waited_for(study: Study) -> None:
+    """The premature freeze: whichever label runs first sealing the field on the rest.
 
-    Requiring a plan from every declared label makes the field unfreezable until sweeps nobody
-    intended are run. A deliberate drop and a sweep that has not been started are the same
-    registry state and want the same answer, which is why this is read off the field rather
-    than declared.
+    An earlier version waited only on labels that already had rows past their baseline, so a
+    label whose sweep had not started was read as a label deliberately dropped after its
+    baseline - the two leave the registry in the same state. The set is immutable under its
+    name, so the first label to finish would have locked every other one out permanently.
+
+    Every declared label is asked instead. Nothing here has run, so both plans of both labels
+    are reported and the caller declines to freeze.
     """
-    reached = {"fwd_ret_21d": {"signal", "allocation", "risk_overlay"}, "fwd_ret_5d": {"signal"}}
-    assert advancing_labels(reached) == ["fwd_ret_21d"]
+    unfinished = unfinished_sweep_plans(
+        study, case_study="etfs", labels=["fwd_ret_5d", "fwd_ret_21d"]
+    )
+    assert {line.split(" (")[0] for line in unfinished} == {
+        "fwd_ret_5d allocation",
+        "fwd_ret_5d risk_overlay",
+        "fwd_ret_21d allocation",
+        "fwd_ret_21d risk_overlay",
+    }
 
 
-def test_a_label_whose_sweep_was_interrupted_is_still_waited_for() -> None:
-    """The case a declaration-based test would wave through.
+def test_the_plan_name_is_the_one_the_sweeps_publish_under() -> None:
+    """The freeze and the four notebooks that rebuild the field live have to agree on it.
 
-    An interrupted sweep has rows past the baseline, so it is waited for, and its plan - which
-    it published before executing - is incomplete, so `unfinished_sweep_plans` reports it. This
-    is the combination that would otherwise seal a partial field into an immutable set.
+    Spelled out once here rather than at each call site, because a convention written in five
+    places is a convention that can differ in one of them. `risk_overlay` is the stage and
+    `risk` is the key its population name carries, and reading either for the other was the
+    shape of the mistake this closes.
     """
-    assert advancing_labels({"fwd_ret_5d": {"signal", "allocation"}}) == ["fwd_ret_5d"]
-
-
-def test_no_label_past_the_baseline_waits_on_nothing() -> None:
-    assert advancing_labels({"fwd_ret_5d": {"signal"}, "fwd_ret_21d": {"signal"}}) == []
+    assert sweep_plan_name("etfs", "fwd_ret_5d", "allocation") == "etfs-allocation-fwd_ret_5d-v1"
+    assert sweep_plan_name("etfs", "fwd_ret_5d", "risk_overlay") == "etfs-risk-fwd_ret_5d-v1"
