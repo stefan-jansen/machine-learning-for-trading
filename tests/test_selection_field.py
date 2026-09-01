@@ -17,6 +17,7 @@ from case_studies.research.selection_field import (
     open_selection_field,
     predictions_identity,
     resolve_field_members,
+    sweep_attestation_name,
 )
 
 #: What `resolve_best_backtest_runs` actually returns. The fixture resolver is held to this
@@ -229,13 +230,22 @@ def test_an_unrankable_row_does_not_satisfy_coverage(tmp_path: Path) -> None:
 
 
 def _record_plan(
-    study: _Study, *, name: str, members: list[str], supersedes: str | None = None
+    study: _Study,
+    *,
+    name: str,
+    members: list[str],
+    supersedes: str | None = None,
+    attested: bool = True,
 ) -> str:
     """A recorded sweep plan, written straight to the table `OfficialPopulation.one` reads.
 
     Not through `create`, which requires a writable study and registered members. What is under
     test is the effect of a plan on membership, and that is the same whichever way the row got
     there.
+
+    ``attested`` writes the attestation the sweep publishes when it executed its plan without a
+    failure. It defaults to true because that is what a finished sweep leaves; pass false for
+    the run that raised.
     """
     population_hash = f"pop-{name}-{len(members)}-{supersedes or 'first'}"
     db = sqlite3.connect(study.root / "run_log" / "registry.db")
@@ -258,6 +268,19 @@ def _record_plan(
             "2026-09-01T00:00:00+00:00",
         ),
     )
+    if attested:
+        attestation = sweep_attestation_name(name, members)
+        db.execute(
+            "INSERT OR REPLACE INTO official_populations VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                f"pop-{attestation}",
+                attestation,
+                "backtest",
+                json.dumps({"members": members}),
+                None,
+                "2026-09-01T00:00:01+00:00",
+            ),
+        )
     db.commit()
     db.close()
     return population_hash
@@ -588,6 +611,87 @@ def test_a_case_study_that_publishes_plans_needs_one_for_its_baseline(tmp_path: 
         return _rows(label, stage)
 
     with pytest.raises(RuntimeError, match="at the 'signal' stage"):
+        resolve_field_members(
+            study,
+            case_study="fixture",
+            prediction_hashes=None,
+            resolve_best_backtest_runs=resolver,
+        )
+
+
+def test_a_complete_plan_whose_sweep_failed_does_not_admit_its_members(tmp_path: Path) -> None:
+    """The state the raise inside the sweep cannot protect on its own.
+
+    The sweep raises on a failed member, which stops that process. It does not stop the freeze,
+    which runs later and usually in another notebook, and it cannot make the plan look
+    unfinished: a member that failed because its registered artifact was produced over a
+    different prediction window is a registered, internally complete backtest, so
+    `require_complete` passes on it. Without a record of the run's own outcome, the next reader
+    builds a field from a grid it was told not to trust.
+
+    The attestation is that record. Here the baseline plan is complete and its sweep reported a
+    failure, so no attestation was written, and the rebuild refuses rather than admitting the
+    grid.
+    """
+    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1",))
+    study.results = _Results()
+    _record_plan(
+        study,
+        name=f"fixture-baseline-fwd_ret_5d-{predictions_identity(None)}",
+        members=["fwd_ret_5d-signal-c1"],
+        attested=False,
+    )
+    for key, stage in (("allocation", "allocation"), ("risk", "risk_overlay")):
+        _record_plan(
+            study,
+            name=f"fixture-{key}-fwd_ret_5d-{predictions_identity(None)}",
+            members=[f"fwd_ret_5d-{stage}-c1"],
+        )
+
+    def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
+        return _rows(label, stage, configs=("c1",))
+
+    with pytest.raises(ValueError, match="records no attestation"):
+        resolve_field_members(
+            study,
+            case_study="fixture",
+            prediction_hashes=None,
+            resolve_best_backtest_runs=resolver,
+        )
+
+
+def test_an_attestation_for_a_different_grid_does_not_answer_for_this_one(tmp_path: Path) -> None:
+    """Why the attestation name carries the members and not just the plan's name.
+
+    A grid can change without the predictions changing - an entry scheme withdrawn, an
+    allocator added - and the plan's name carries only the predictions, so the new plan is
+    published under the old name. A fixed attestation name would then still be present from the
+    previous run, and would attest a grid nobody executed.
+    """
+    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1", "c2"))
+    study.results = _Results()
+    name = f"fixture-baseline-fwd_ret_5d-{predictions_identity(None)}"
+    # The previous run's grid, executed and attested.
+    previous = _record_plan(study, name=name, members=["fwd_ret_5d-signal-c1"])
+    # The grid as it is now, published under the same name because the predictions did not move.
+    _record_plan(
+        study,
+        name=name,
+        members=["fwd_ret_5d-signal-c1", "fwd_ret_5d-signal-c2"],
+        supersedes=previous,
+        attested=False,
+    )
+    for key, stage in (("allocation", "allocation"), ("risk", "risk_overlay")):
+        _record_plan(
+            study,
+            name=f"fixture-{key}-fwd_ret_5d-{predictions_identity(None)}",
+            members=[f"fwd_ret_5d-{stage}-c1", f"fwd_ret_5d-{stage}-c2"],
+        )
+
+    def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
+        return _rows(label, stage, configs=("c1", "c2"))
+
+    with pytest.raises(ValueError, match="records no attestation"):
         resolve_field_members(
             study,
             case_study="fixture",

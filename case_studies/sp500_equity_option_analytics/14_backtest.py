@@ -54,6 +54,7 @@ warnings.filterwarnings("ignore")
 from case_studies.research import (
     OfficialPopulation,
     Study,
+    attest_sweep,
     open_study,
     population_supersedes,
     predictions_identity,
@@ -481,7 +482,14 @@ if failures:
 
 if _plan is not None:
     _plan.require_complete()
+    # Reaching this line is the statement being recorded: the sweep raised above on any
+    # failure, so an attestation exists only for a run that executed its whole plan. The
+    # plan alone cannot say it - a member that failed against a stale registered artifact
+    # leaves the plan complete - and the freeze runs later, in another notebook, where the
+    # exception above is not visible. See `sweep_attestation_name`.
+    _attestation = attest_sweep(_writable, _plan)
     print(f"\nBaseline plan {BASELINE_POPULATION} complete: {len(planned)} backtests")
+    print(f"Sweep attested as {_attestation.name}")
 
 # %% [markdown]
 # ## 3. Signal Evaluation

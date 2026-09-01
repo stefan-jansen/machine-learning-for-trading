@@ -53,6 +53,7 @@ warnings.filterwarnings("ignore")
 from case_studies.research import (
     OfficialPopulation,
     Study,
+    attest_sweep,
     open_study,
     population_supersedes,
     predictions_identity,
@@ -328,7 +329,10 @@ if failures:
 print(f"Allocation surface complete in {(time.monotonic() - started):.1f}s")
 if _plan is not None:
     _plan.require_complete()
+    # Only a run that raised on nothing reaches this. See `sweep_attestation_name`.
+    _attestation = attest_sweep(_writable, _plan)
     print(f"Allocation plan {ALLOCATION_POPULATION} complete: {len(planned)} backtests")
+    print(f"Sweep attested as {_attestation.name}")
 
 # %% [markdown]
 # ## 3. Compare the active allocation surface

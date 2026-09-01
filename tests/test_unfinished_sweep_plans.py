@@ -24,6 +24,7 @@ import pytest
 
 from case_studies.research import (
     OfficialPopulation,
+    attest_sweep,
     predictions_identity,
     sweep_plan_name,
     unfinished_sweep_plans,
@@ -197,13 +198,27 @@ def _complete_plan(study: Study, *, name: str, alpha: float) -> str:
         metrics={"sharpe": alpha, "sharpe_se_lo": 0.0},
         case_dir=study.root,
     )
-    OfficialPopulation.create(study, name=name, member_kind="backtest", members=[backtest_hash])
+    plan = OfficialPopulation.create(
+        study, name=name, member_kind="backtest", members=[backtest_hash]
+    )
+    attest_sweep(study, plan)
     return prediction.hash
 
 
 def _rename_population(study: Study, old: str, new: str) -> None:
+    """Rename a recorded plan, and the attestation that names it, as one act.
+
+    A real run writes both under its final name; the fixture cannot, because the name carries
+    the identity of a prediction that does not exist until the member is registered. Renaming
+    only the plan would leave every renamed fixture reporting an absent attestation, which is a
+    property of the shim rather than of the behaviour under test.
+    """
     with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
         db.execute("UPDATE official_populations SET name = ? WHERE name = ?", (new, old))
+        db.execute(
+            "UPDATE official_populations SET name = ? || substr(name, ?) WHERE name LIKE ?",
+            (new, len(old) + 1, f"{old}-swept-%"),
+        )
         db.commit()
 
 
@@ -363,12 +378,13 @@ def test_a_complete_plan_says_nothing_about_the_window_its_members_ran_on(study:
         case_dir=study.root,
     )
     _rename_population(study, name, f"{name}-retired")
-    OfficialPopulation.create(
+    _second = OfficialPopulation.create(
         study,
         name=name,
         member_kind="backtest",
         members=[other_window],
     )
+    attest_sweep(study, _second)
 
     # Complete either way. Nothing in the plan distinguishes the two.
     assert OfficialPopulation.one(study, name=name).require_complete() == (other_window,)

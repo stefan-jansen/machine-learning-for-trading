@@ -120,8 +120,12 @@ def predictions_identity(prediction_hashes: Collection[str] | None) -> str:
     """
     if prediction_hashes is None:
         return "unrestricted"
-    joined = "\n".join(sorted(prediction_hashes))
-    return hashlib.sha256(joined.encode()).hexdigest()[:12]
+    return members_digest(prediction_hashes)
+
+
+def members_digest(hashes: Collection[str]) -> str:
+    """A short, stable name for a set of registered identities, order-independent."""
+    return hashlib.sha256("\n".join(sorted(hashes)).encode()).hexdigest()[:12]
 
 
 def sweep_plan_name(case_study: str, label: str, stage: str, predictions: str) -> str:
@@ -138,6 +142,54 @@ def sweep_plan_name(case_study: str, label: str, stage: str, predictions: str) -
     for the same reason it declines a sweep that never ran at all.
     """
     return f"{case_study}-{PLAN_STAGE_KEYS[stage]}-{label}-{predictions}"
+
+
+def sweep_attestation_name(plan_name: str, members: Collection[str]) -> str:
+    """The population a sweep publishes to say it executed its plan without a failure.
+
+    The plan alone cannot say this. It is published *before* the sweep runs, so that an
+    interruption leaves a plan that is visibly short rather than a previous generation still
+    in force, and completeness is then asked of its members. But a member can fail to execute
+    and still leave the plan complete: where the failure is a registered artifact that
+    disagrees with the prediction window in force, the row is a registered, internally whole
+    backtest, and ``require_complete`` is answering a question about the member rather than
+    about the run. The sweep raises on such a failure, which stops *that* process and tells a
+    later reader nothing - and the freeze is a later reader, in another notebook and usually
+    another process.
+
+    So the run records its own success where the freeze can see it. The name carries
+    :func:`members_digest` of the plan's own members, which is what makes a stale attestation
+    unusable rather than merely wrong: a grid that changed under unchanged predictions keeps
+    the plan's name and takes a new attestation name, so the previous run's attestation does
+    not answer for it. Re-running the identical grid resolves to the identical name and
+    ``OfficialPopulation.create`` matches on the member list, so attesting twice is a no-op
+    and needs no supersedes declaration.
+    """
+    return f"{plan_name}-swept-{members_digest(members)}"
+
+
+def attest_sweep(study: Study, plan: OfficialPopulation) -> OfficialPopulation:
+    """Record that ``plan`` was executed in full, with every member produced by this run.
+
+    Called by a sweep notebook after it has raised on any failure, so reaching it is the
+    statement being recorded. One call rather than a name built at each site, for the reason
+    :func:`sweep_plan_name` is owned here: three notebooks publish plans and the freeze reads
+    all three, and a convention spelled out in four places can differ in one of them.
+    """
+    members = tuple(plan.members)
+    return OfficialPopulation.create(
+        study,
+        name=sweep_attestation_name(plan.name, members),
+        member_kind="backtest",
+        members=list(members),
+    )
+
+
+def _attested(names: set[str] | None, plan_name: str, members: Collection[str]) -> bool:
+    """Whether this registry records the attestation for exactly these planned members."""
+    if names is None:
+        return False
+    return sweep_attestation_name(plan_name, members) in names
 
 
 def _population_names(study: Study) -> set[str] | None:
@@ -200,6 +252,10 @@ def _plan_members(
     The freeze asks the same question through :func:`unfinished_sweep_plans` and declines; a
     live rebuild has to reach the same answer, or a reader rebuilding the field mid-sweep gets
     a selection the freeze would have refused to make.
+
+    Completeness is necessary and not sufficient, so the attestation is required too. See
+    :func:`sweep_attestation_name`: a member that failed against a registered artifact from a
+    different prediction window leaves the plan complete, and only the run knows it failed.
     """
     name = sweep_plan_name(case_study, label, stage, predictions)
     names = _population_names(study)
@@ -207,6 +263,11 @@ def _plan_members(
         return None
     plan = OfficialPopulation.one(study, name=name)
     plan.require_complete()
+    if not _attested(names, name, plan.members):
+        raise ValueError(
+            f"sweep plan {name} is complete but records no attestation, so the run that "
+            "filled it either reported failures or did not finish; re-run that sweep"
+        )
     return set(plan.members)
 
 
@@ -258,12 +319,19 @@ def unfinished_sweep_plans(
     populations has no table to query, which is an absent plan and not a broken one.
     """
     predictions = predictions_identity(prediction_hashes)
+    names = _population_names(study)
     unfinished: list[str] = []
     for label in labels:
         for stage in stages:
             name = sweep_plan_name(case_study, label, stage, predictions)
             try:
-                OfficialPopulation.one(study, name=name).require_complete()
+                plan = OfficialPopulation.one(study, name=name)
+                plan.require_complete()
+                if not _attested(names, name, plan.members):
+                    raise ValueError(
+                        "complete, but the run that filled it recorded no attestation - it "
+                        "reported failures or did not finish"
+                    )
             except (KeyError, ValueError, sqlite3.OperationalError) as exc:
                 unfinished.append(f"{label} {stage} ({name}): {exc}")
     return unfinished
