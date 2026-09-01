@@ -135,7 +135,7 @@ print(f"""=== Protocol term sheet ===
   Case study:    {CASE_STUDY_ID}
   Label:         {LABEL}
   Calendar:      {bt_config.calendar}
-  Cadence:       {bt_config.cadence}
+  Cadence:       {bt_config.cadence_for(LABEL)}
   Initial cash:  {bt_config.initial_cash:,.0f}
   Share type:    {bt_config.share_type}
   Commission:    {bt_config.commission_bps:.1f} bps
@@ -186,6 +186,7 @@ strategy_spec = build_backtest_spec(
         "top_k": TOP_K,
         "long_short": bt_config.long_short,
     },
+    label=LABEL,
 )
 
 try:
@@ -361,6 +362,7 @@ for i, pred_row in enumerate(pred_index.iter_rows(named=True)):
             initial_cash=bt_config.initial_cash,
             chapter="ch16",
             signal=signal,
+            label=LABEL,
         )
         already = backtest_hash_from_parts(pred_hash, serializable_backtest_spec(spec))
         if already in existing_hashes and not FORCE_REBACKTEST:

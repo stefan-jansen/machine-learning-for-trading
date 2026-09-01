@@ -239,6 +239,7 @@ for top_k in TOP_K_VALUES:
                     "long_short": bt_config.long_short,
                 },
                 allocation={**alloc, "top_k": top_k, "long_short": bt_config.long_short},
+                label=LABEL,
             )
 
             started = time.monotonic()

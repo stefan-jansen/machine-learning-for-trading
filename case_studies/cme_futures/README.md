@@ -40,7 +40,7 @@ The pipeline runs a long-short carry-ranked strategy with weekly Friday-close de
 | Costs | [`16_costs`](16_costs.ipynb) | Ch18 | Commission, spread, and roll slippage impact analysis | One backtest run per cost level, same artifact layout |
 | Holdout predictions | [`17_holdout_predictions`](17_holdout_predictions.ipynb) | Ch20 | Refits the resolved carrier through the holdout fold and predicts 2024-2025 | One training run under a new identity whose CV declares the holdout fold, and one prediction set at `split='holdout'` |
 | Holdout backtest | [`18_holdout_backtest`](18_holdout_backtest.ipynb) | Ch20 | Replays the carrier's own strategy specification on the holdout prediction set | One backtest run at `stage='holdout'`, same artifact layout |
-| Strategy Analysis | [`19_strategy_analysis`](19_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with uncertainty-aware metrics | `results/strategy_assessment.json`, `20_strategy_synthesis/output/cme_futures/cme_futures_tearsheet.html`; fills the registry's `cohort_metrics` and `backtest_paired_metrics` tables, but only when either is missing or empty |
+| Strategy Analysis | [`19_strategy_analysis`](19_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with uncertainty-aware metrics | `results/strategy_assessment.json`, `20_strategy_synthesis/output/cme_futures/cme_futures_tearsheet.html`; rebuilds the registry's `cohort_metrics` and `backtest_paired_metrics` tables on every canonical run, pruning rows a previous selection wrote |
 
 ## Margin Model
 
@@ -89,9 +89,15 @@ risk-overlay stage: equal-weight long-short top-5 at the signal stage, an `hrp` 
 Validation Sharpe **1.236** [+0.397, +2.126] over 1,286 daily periods (CAGR +19.5%, MaxDD −25.9%,
 2,355 trades, Sortino 2.04, PSR p = 0.003). On common support the same run reads 1.294.
 
-No deflation figure is quoted. `cohort_metrics` is empty in this registry, so the DSR and
-effective-trials numbers a previous edition reported have nothing behind them, and the selection is
-not corrected for here.
+Selection adjustment, from the `fwd_ret_5d` label cohort: K = 550 candidates, effective trials
+12.8 after correlation correction, **DSR_ER = 0.045**. The carrier survives deflation at the label
+scale. The `fwd_ret_21d` cohort reads 0.037 on K = 554. Those two do not add to the 1,140-candidate
+pool below and are not meant to: a cohort drops any backtest whose prediction set has a fold with no
+computable IC, which is 36 of the 1,140 here. A prediction that could not be scored on every fold is
+not a variant the selection could have chosen. Both were absent from earlier editions of
+this file, which quoted deflation numbers `cohort_metrics` did not contain - not because the
+computation was wrong but because `19_strategy_analysis` never called for one, while three sibling
+case studies did. It calls for it now.
 
 Two distinctions matter when reading 1.236 as a selected maximum. The pool is the 1,140 candidates
 across the signal, allocation and risk-overlay stages; the registry's other 12 backtests are the 11
@@ -108,12 +114,19 @@ later window - the holdout training run carries its own identity, `365d0ce706e2`
 declares the holdout fold.
 
 **The honest reading is that this establishes very little, in either direction.** The point estimate
-falls from 1.236 to 0.287, which invites a decay story, but the two intervals overlap across almost
-their whole length: validation spans [+0.397, +2.126] and the holdout [−1.034, +1.638]. A 516-session
-window on a weekly rebalance carries too few independent decisions to separate a strategy that
-decayed from one that had two ordinary years, and the holdout interval contains both the validation
-estimate and zero. What the holdout does rule out is the one thing it exists for: no choice in this
-case study was made on this period.
+falls from 1.236 to 0.287, which invites a decay story, and the interval will not support one:
+comparing the carrier's validation series against its own holdout replay gives a Sharpe difference of
+**−0.949 [−2.583, +0.624], p = 0.246**. The two windows are disjoint - that is what a holdout is - so
+each side is bootstrapped independently over its own sessions, 1,286 in validation against 516 in the
+holdout, rather than paired on shared dates. The difference in the point estimates is therefore all
+the comparison has to work with; what it adds is the interval around it, and that interval contains
+zero comfortably.
+
+Against a holdout-window equal-weight benchmark the strategy reads −0.470 [−2.071, +1.136],
+p = 0.554, also indistinguishable. A 516-session window on a weekly rebalance carries too few
+independent decisions to separate a strategy that decayed from one that had two ordinary years. What
+the holdout does establish is the one thing it exists for: no choice in this case study was made on
+this period.
 
 **Friction floor.** One curve, not two. `16_costs.ipynb` sweeps the shipped carrier including its
 risk overlay, where a previous edition swept two pre-overlay allocation-stage combinations that are

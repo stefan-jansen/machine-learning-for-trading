@@ -16,9 +16,13 @@
 # %% [markdown]
 # # CME Futures: Transaction-Cost Sensitivity
 #
-# For each return horizon, this notebook selects the highest validation Sharpe from the immutable
-# union of equal-weight signal and allocation results. It then applies the declared all-in cost grid
+# This notebook prices one configuration: the single carrier the case study ships, resolved
+# across labels from the immutable union of signal, allocation and risk-overlay results, with
+# its risk overlay carried rather than cleared. It then applies the declared all-in cost grid
 # to that fixed configuration. Commission and slippage each receive half of the grid value.
+#
+# One curve, not one per horizon. The carrier sits on a single label, so the other label
+# produces no cost rows, and that is the intended state rather than a missing run.
 #
 # Cost sensitivity is not a selection stage. Its rows are excluded from the final selection pool.
 # Contract multipliers, tick sizes, margin rates, front-contract position, roll adjustment, and

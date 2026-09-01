@@ -236,10 +236,17 @@ def test_etf_checkpoint_contract_parameters_come_from_notebook_overrides() -> No
         overrides = get_overrides(f"case_studies/etfs/{stage}")["parameters"]
         parameters, _ = _quick_parameters("etfs", stage, overrides)
         assert {key: parameters[key] for key in expected} == expected
-        # The reduction is declared, and as the mapping the boundary reads rather than as the
-        # loose names it replaced. A converted notebook that reduces nothing is a canonical run
-        # wearing the wrong tier, which the request builder refuses.
-        assert parameters["PREVIEW_REDUCTIONS"] == {"folds": [0, 1], "max_symbols": 5}
+        # The reduction survives _quick_parameters unchanged, and it is compared against what
+        # the notebook itself declares rather than against a copy of it written down here.
+        # Transcribing the value is what this test used to do and what the docstring above
+        # describes going wrong: the two notebooks no longer reduce identically - 10_dl_tsmixer
+        # dropped its max_symbols under ml4t/agent-workspace#988 - and a hardcoded mapping
+        # fails on the fixture rather than on the behaviour.
+        declared = overrides["PREVIEW_REDUCTIONS"]
+        assert parameters["PREVIEW_REDUCTIONS"] == declared
+        # A converted notebook that reduces nothing is a canonical run wearing the wrong tier,
+        # which the request builder refuses. That invariant is the part worth asserting.
+        assert declared, f"{stage} declares an empty PREVIEW_REDUCTIONS"
         assert not {"MAX_SYMBOLS", "N_EPOCHS", "BATCH_SIZE", "LOOKBACK"} & set(overrides)
 
 
