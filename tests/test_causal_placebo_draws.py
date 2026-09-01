@@ -51,7 +51,10 @@ def _register(case_dir, *, placebo_json, started_at="first") -> None:
 
 
 def _study(case_dir):
-    return SimpleNamespace(root=case_dir, output_root=None)
+    # `release_case_root` equals `root` for a study opened over a case directory alone, which is
+    # what this fixture is. `CausalResult.open` reads it to overlay a release's `run_log`, and a
+    # stub missing it fails there rather than at the behaviour under test.
+    return SimpleNamespace(root=case_dir, release_case_root=case_dir, output_root=None)
 
 
 def _stored(case_dir):
