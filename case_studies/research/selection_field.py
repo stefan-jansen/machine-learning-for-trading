@@ -22,6 +22,7 @@ Both are closed by having one construction and reading the label off the selecti
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -84,45 +85,83 @@ def _recorded_set_count(registry: Any, name: str) -> int:
         return 0
 
 
-def derive_advancing_labels(
-    baseline_rows: pl.DataFrame,
-    *,
-    top_n: int | None,
-) -> frozenset[str]:
-    """The labels the baselines favour, taken from the pooled baseline ranking.
+def config_counts(registry: Any, prediction_hashes: Any) -> int:
+    """How many distinct ``(family, config_name)`` pairs those predictions were fitted under.
 
-    The funnel that feeds *stage* keeps the best ``top_n_predictions[stage]`` model
-    configurations, so that is the unit ranked here: one ``(label, family, config_name)``
-    triple contributes its best baseline Sharpe, and the labels appearing in the top N are
-    the ones the comparison carried forward. The pool spans labels because comparing them is
-    the whole point - within one label the same query answers which configurations advance.
+    The funnel counts model configurations, not backtest rows: ``top_n_predictions[stage]``
+    admits that many ``(family, config_name)`` pairs, and each of them contributes as many
+    rows as there are allocators, top-k values and overlays. Counting rows would compare a
+    number against a cut it is not measured in.
 
-    *top_n* is the caller's cut, read from ``backtest.sweep.top_n_predictions`` where the
-    caller has a case study to read it from. It is a parameter rather than a lookup inside
-    here because this module is also used by readers rebuilding the field in a clean clone,
-    where resolving a case-study name to a config path is exactly what is unavailable.
-
-    Returns every label when the rows cannot support the ranking - no cut given, no rows at
-    all, or a frame without the family and configuration columns. An empty answer would
-    silently excuse every label from the completeness check below, which is the opposite of
-    what an unanswerable question should do.
+    The pairs live on ``training_runs`` and reach a backtest through its prediction, so this
+    is the same join ``label_of`` makes for one row.
     """
-    if baseline_rows.is_empty():
-        return frozenset()
-    every = frozenset(baseline_rows["label"].unique().to_list())
-    required = {"label", "family", "config_name", "sharpe"}
-    if top_n is None or top_n <= 0 or not required.issubset(baseline_rows.columns):
-        return every
-    ranked = (
-        baseline_rows.filter(pl.col("sharpe").is_not_null())
-        .group_by("label", "family", "config_name")
-        .agg(pl.col("sharpe").max().alias("best_sharpe"))
-        .sort("best_sharpe", descending=True)
-        .head(top_n)
-    )
-    if ranked.is_empty():
-        return every
-    return frozenset(ranked["label"].unique().to_list())
+    hashes = sorted(set(prediction_hashes))
+    if not hashes:
+        return 0
+    placeholders = ",".join("?" * len(hashes))
+    with sqlite3.connect(f"file:{registry}?mode=ro", uri=True) as db:
+        return int(
+            db.execute(
+                f"""
+                SELECT COUNT(*) FROM (
+                    SELECT DISTINCT t.family, t.config_name
+                    FROM prediction_sets p
+                    JOIN training_runs t ON t.training_hash = p.training_hash
+                    WHERE p.prediction_hash IN ({placeholders})
+                )
+                """,
+                hashes,
+            ).fetchone()[0]
+        )
+
+
+def advancing_shortfalls(
+    reached: Mapping[str, Mapping[str, int]],
+    *,
+    advancing: tuple[str, ...],
+    stage_cuts: Mapping[str, int] | None,
+) -> dict[str, str]:
+    """The labels whose advance past the baseline is part-way done, and why for each.
+
+    *reached* maps each declared label to how many distinct model configurations it carries
+    at each advancing stage; *stage_cuts* is ``top_n_predictions`` for those stages, which is
+    how many configurations the funnel admits there. Both are the caller's, because the cut
+    lives in ``config/setup.yaml`` under the case study and this module is handed a study,
+    not a case-study name to look one up by.
+
+    Two readings, and both are counted rather than inferred from a stage being present:
+
+    - **Short of the cut.** A stage that admits ten configurations and carries three is a
+      sweep interrupted between them. Presence at the stage says nothing about this, which is
+      how a run stopped one configuration in could freeze a field missing nine.
+    - **Started and not continued.** Configurations at one advancing stage and none at the
+      next is the same interruption one stage later.
+
+    A label with nothing at any advancing stage is left alone. It is either a comparison that
+    ended at the baseline or a sweep that has not begun, and **the registry cannot tell those
+    apart** - neither leaves a record. Refusing on it would block the first, which is a
+    completed decision; the caller sees the count and can say which it is.
+
+    Each stage is measured against its own cut because the cuts differ by an order of
+    magnitude: allocation advances ten configurations and the overlay stages advance one.
+    """
+    shortfalls: dict[str, str] = {}
+    for label, counts in reached.items():
+        present = [stage for stage in advancing if counts.get(stage, 0)]
+        if not present:
+            continue
+        reasons: list[str] = []
+        for stage in advancing:
+            found = counts.get(stage, 0)
+            cut = (stage_cuts or {}).get(stage)
+            if not found:
+                reasons.append(f"{stage}: none")
+            elif cut and cut > 0 and found < cut:
+                reasons.append(f"{stage}: {found} of {cut} configurations")
+        if reasons:
+            shortfalls[label] = "; ".join(reasons)
+    return shortfalls
 
 
 def resolve_field_members(
@@ -133,7 +172,7 @@ def resolve_field_members(
     resolve_best_backtest_runs: Any,
     stages: tuple[str, ...] = FIELD_STAGES,
     coverage_stage: str = COVERAGE_STAGE,
-    advancing_top_n: int | None = None,
+    stage_cuts: Mapping[str, int] | None = None,
 ) -> pl.DataFrame:
     """Every eligible validation backtest across the declared labels and the field's stages.
 
@@ -143,28 +182,24 @@ def resolve_field_members(
     comparable, so a declared label with no baseline rows means the run is unfinished. The
     set is immutable under its name, so freezing there publishes a field nothing can add to.
 
-    **What advances past the baseline is whichever labels the baselines favour.** A label
-    the comparison shows to be dominated stops there deliberately, and requiring it in
-    allocation and risk overlay would order backtests whose only purpose is filling a
-    matrix. So a label absent from every post-baseline stage is a completed decision.
+    **What advances past the baseline is a decision the registry does not record.** A label
+    the comparison shows to be dominated stops at the baseline deliberately, and requiring it
+    in allocation and risk overlay would order backtests whose only purpose is filling a
+    matrix. Nothing distinguishes that from a sweep that has not started, so a label with no
+    post-baseline rows at all is left to the caller rather than refused.
 
-    **Which labels those are is derived from the baselines, not guessed from what ran.**
-    Ranking the pooled baseline results answers "which labels did the comparison favour"
-    directly, so a label that is favoured and has no allocation rows is an unfinished sweep
-    rather than a decision - the distinction reading post-baseline rows alone cannot make.
-    The unit ranked is the model configuration, matching the funnel: ``top_n_predictions``
-    counts one ``(family, config_name)`` pair per candidate, and the pool spans labels
-    because the same configuration on two labels is two candidates.
+    **What the registry does answer is whether an advance that started has finished**, and
+    that is asked in the funnel's own unit. ``top_n_predictions[stage]`` admits a number of
+    model configurations, so a stage carrying fewer configurations than its cut is a sweep
+    interrupted part-way, and one carrying configurations while the next carries none is the
+    same interruption one stage later. Both are counted per label, against that label's own
+    rows and that stage's own cut, because the allocation notebook applies the cut inside one
+    label and the overlay stages admit an order of magnitude fewer configurations than
+    allocation does.
 
-    Deriving rather than declaring is what survives more work arriving. A written-down
-    advancement set is correct until a new configuration promotes a label that was dominated,
-    and then it refuses the very sweep that should now run; a derived set re-ranks itself.
-
-    **A label part-way through advancing is refused either way.** It is the sequential-run
-    failure: a run mid-way through the second advancing label's sweep has that label's
-    allocation rows and not its risk rows, and freezing then excludes candidates that could
-    have won. So both readings are applied - a favoured label missing any advancing stage,
-    and any label that reached one advancing stage and not the next.
+    Counting rather than declaring is what survives more work arriving. A written-down
+    advancement set is correct until a new configuration outranks the ones on it, and then it
+    refuses the very sweep that should now run; a count re-reads the registry.
 
     Rows with no Sharpe are dropped before any of this. They are ineligible by
     construction, since the selection ranks on validation backtest Sharpe, and leaving them
@@ -172,9 +207,9 @@ def resolve_field_members(
     ``best_validation_sharpe`` rejects it for holding a member it cannot rank.
     """
     labels = sweep_labels(study)
+    registry = study.root / "run_log" / "registry.db"
     frames: list[pl.DataFrame] = []
-    baseline_frames: list[pl.DataFrame] = []
-    reached: dict[str, set[str]] = {label: set() for label in labels}
+    reached: dict[str, dict[str, int]] = {label: {} for label in labels}
     for label in labels:
         for stage in stages:
             rows = resolve_best_backtest_runs(
@@ -189,15 +224,10 @@ def resolve_field_members(
                 rows = rows.filter(pl.col("sharpe").is_not_null())
             if rows.is_empty():
                 continue
-            reached[label].add(stage)
+            reached[label][stage] = config_counts(registry, rows["prediction_hash"].to_list())
             frames.append(rows)
-            if stage == coverage_stage:
-                baseline_frames.append(rows.with_columns(pl.lit(label).alias("label")))
 
-    baseline_rows = (
-        pl.concat(baseline_frames, how="diagonal_relaxed") if baseline_frames else pl.DataFrame()
-    )
-    uncovered = [label for label in labels if coverage_stage not in reached[label]]
+    uncovered = [label for label in labels if not reached[label].get(coverage_stage)]
     if uncovered:
         raise RuntimeError(
             f"the holdout field cannot be frozen while these declared labels have no rankable "
@@ -206,26 +236,16 @@ def resolve_field_members(
             "the set is immutable under its name, so no later run could add it."
         )
 
-    advancing = {stage for stage in stages if stage != coverage_stage}
-    favoured = derive_advancing_labels(baseline_rows, top_n=advancing_top_n)
-    unstarted = {
-        label: sorted(advancing - reached[label])
-        for label in labels
-        if label in favoured and not advancing.issubset(reached[label])
-    }
-    partial = {
-        label: sorted(advancing - reached[label])
-        for label in labels
-        if reached[label] & advancing and not advancing.issubset(reached[label])
-    }
-    missing = {**partial, **unstarted}
-    if missing:
+    advancing = tuple(stage for stage in stages if stage != coverage_stage)
+    shortfalls = advancing_shortfalls(reached, advancing=advancing, stage_cuts=stage_cuts)
+    if shortfalls:
         raise RuntimeError(
             f"the holdout field cannot be frozen while these labels are part-way through "
-            f"advancing: {missing} (stage: missing). The baselines favour {sorted(favoured)}, "
-            "so those have to be present in every advancing stage; and a label that reached one "
-            "advancing stage and not the next is a sweep still running whatever the baselines "
-            "said. Freezing now would permanently exclude candidates that could have won."
+            f"advancing: {shortfalls}. Each count is the distinct model configurations that "
+            f"label carries at that stage, against the {dict(stage_cuts or {})} the funnel "
+            "admits there. A label short of its cut, or carrying configurations at one "
+            "advancing stage and none at the next, is a sweep still running, and freezing now "
+            "would permanently exclude candidates that could have won."
         )
     if not frames:
         raise RuntimeError(
@@ -270,7 +290,7 @@ def open_selection_field(
     prediction_hashes: Any,
     resolve_best_backtest_runs: Any,
     stages: tuple[str, ...] = FIELD_STAGES,
-    advancing_top_n: int | None = None,
+    stage_cuts: Mapping[str, int] | None = None,
 ) -> SelectionField:
     """The frozen field where one is recorded, the same field rebuilt live where none is.
 
@@ -304,7 +324,7 @@ def open_selection_field(
         prediction_hashes=prediction_hashes,
         resolve_best_backtest_runs=resolve_best_backtest_runs,
         stages=stages,
-        advancing_top_n=advancing_top_n,
+        stage_cuts=stage_cuts,
     )
     # `CandidateSet.create` refuses partial members, so a frozen field is complete by
     # construction and everything downstream may assume it; `resolve_best_backtest_runs` ranks

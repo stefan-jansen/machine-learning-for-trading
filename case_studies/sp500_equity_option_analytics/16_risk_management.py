@@ -617,7 +617,10 @@ frozen_pool = resolve_field_members(
     prediction_hashes=CURRENT_MEMBERS,
     resolve_best_backtest_runs=resolve_best_backtest_runs,
     stages=candidate_stages,
-    advancing_top_n=get_top_n_predictions(CASE_STUDY_ID, "allocation"),
+    stage_cuts={
+        stage: get_top_n_predictions(CASE_STUDY_ID, stage)
+        for stage in ("allocation", "risk_overlay")
+    },
 )
 print(
     f"Field to freeze: {frozen_pool.height} eligible validation backtests "

@@ -12,9 +12,16 @@ import pytest
 from case_studies.research.selection_field import (
     COVERAGE_STAGE,
     FIELD_STAGES,
+    config_counts,
     label_of,
     resolve_field_members,
 )
+
+#: What `resolve_best_backtest_runs` actually returns. The fixture resolver is held to this
+#: exactly, because a fixture that hands back `family` and `config_name` would test a frame the
+#: production query cannot produce, and every count taken from it would pass here and be zero
+#: against a registry.
+RESOLVER_COLUMNS = ("backtest_hash", "prediction_hash", "spec_json", "sharpe")
 
 
 @dataclass
@@ -23,27 +30,79 @@ class _Study:
     case_study: str = "fixture"
 
 
-def _study_at(tmp_path: Path, *, primary: str, variants: list[str]) -> _Study:
-    config = tmp_path / "config"
-    config.mkdir(parents=True, exist_ok=True)
-    (config / "setup.yaml").write_text(
+def _prediction_hash(label: str, config: str) -> str:
+    return f"p-{label}-{config}"
+
+
+def _study_at(
+    tmp_path: Path,
+    *,
+    primary: str,
+    variants: list[str],
+    configs: tuple[str, ...] = ("c1",),
+) -> _Study:
+    """A study whose registry knows which configuration every prediction was fitted under.
+
+    The configuration lives on ``training_runs`` in production, so the fixture puts it there
+    rather than on the resolver's frame. That is what makes the config count under test the
+    same join the notebooks run.
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "setup.yaml").write_text(
         "labels:\n"
         f"  primary: {primary}\n"
         "  variants:\n" + "".join(f"    - {name}\n" for name in variants)
     )
+    registry_dir = tmp_path / "run_log"
+    registry_dir.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(registry_dir / "registry.db")
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS training_runs (
+            training_hash TEXT PRIMARY KEY, label TEXT, family TEXT, config_name TEXT
+        );
+        CREATE TABLE IF NOT EXISTS prediction_sets (
+            prediction_hash TEXT PRIMARY KEY, training_hash TEXT
+        );
+        CREATE TABLE IF NOT EXISTS backtest_runs (
+            backtest_hash TEXT PRIMARY KEY, prediction_hash TEXT
+        );
+        """
+    )
+    for label in [primary, *variants]:
+        for config in configs:
+            training = f"t-{label}-{config}"
+            db.execute(
+                "INSERT OR REPLACE INTO training_runs VALUES (?, ?, ?, ?)",
+                (training, label, "gbm", config),
+            )
+            db.execute(
+                "INSERT OR REPLACE INTO prediction_sets VALUES (?, ?)",
+                (_prediction_hash(label, config), training),
+            )
+    db.commit()
+    db.close()
     return _Study(root=tmp_path)
 
 
-def _rows(label: str, stage: str, *, sharpe: float = 1.0, config: str = "c1") -> pl.DataFrame:
-    return pl.DataFrame(
+def _rows(
+    label: str,
+    stage: str,
+    *,
+    sharpe: float = 1.0,
+    configs: tuple[str, ...] = ("c1",),
+) -> pl.DataFrame:
+    frame = pl.DataFrame(
         {
-            "backtest_hash": [f"{label}-{stage}"],
-            "prediction_hash": [f"p-{label}"],
-            "sharpe": [sharpe],
-            "family": ["gbm"],
-            "config_name": [config],
+            "backtest_hash": [f"{label}-{stage}-{config}" for config in configs],
+            "prediction_hash": [_prediction_hash(label, config) for config in configs],
+            "spec_json": ["{}"] * len(configs),
+            "sharpe": [sharpe] * len(configs),
         }
     )
+    assert frame.columns == list(RESOLVER_COLUMNS)
+    return frame
 
 
 def test_field_spans_every_declared_label_and_stage(tmp_path: Path) -> None:
@@ -61,7 +120,7 @@ def test_field_spans_every_declared_label_and_stage(tmp_path: Path) -> None:
     )
     assert field.height == 3 * len(FIELD_STAGES)
     assert set(field["backtest_hash"]) == {
-        f"{label}-{stage}"
+        f"{label}-{stage}-c1"
         for label in ("fwd_ret_5d", "fwd_ret_10d", "fwd_dir_5d")
         for stage in FIELD_STAGES
     }
@@ -76,79 +135,108 @@ def test_a_dominated_label_may_stop_after_the_baselines(tmp_path: Path) -> None:
     demanding every label in every stage would order backtests whose only purpose is filling a
     matrix, and would refuse to freeze a field that is finished.
 
-    Which labels the comparison favoured is read off the pooled baseline ranking rather than
-    off which labels happen to have allocation rows. Here the cut keeps one configuration, and
-    ``fwd_ret_21d`` outranks ``fwd_ret_5d`` at the baseline, so ``fwd_ret_5d`` stopping there is
-    the decision the baselines made.
+    Nothing records that the drop was a decision, so this is also the shape of a sweep that has
+    not started. The two are indistinguishable in the registry and the caller is left to say
+    which it is - the counted checks below are the ones that can be answered.
     """
     study = _study_at(tmp_path, primary="fwd_ret_5d", variants=["fwd_ret_21d"])
 
     def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
         if label == "fwd_ret_5d" and stage != COVERAGE_STAGE:
             return _rows(label, stage).clear()
-        return _rows(label, stage, sharpe=2.0 if label == "fwd_ret_21d" else 0.5)
+        return _rows(label, stage)
 
     field = resolve_field_members(
         study,
         case_study="fixture",
         prediction_hashes=None,
         resolve_best_backtest_runs=resolver,
-        advancing_top_n=1,
+        stage_cuts={"allocation": 1, "risk_overlay": 1},
     )
     assert set(field["backtest_hash"]) == {
-        f"fwd_ret_5d-{COVERAGE_STAGE}",
-        *(f"fwd_ret_21d-{stage}" for stage in FIELD_STAGES),
+        f"fwd_ret_5d-{COVERAGE_STAGE}-c1",
+        *(f"fwd_ret_21d-{stage}-c1" for stage in FIELD_STAGES),
     }
 
 
-def test_a_favoured_label_whose_allocation_never_started_refuses_to_freeze(
-    tmp_path: Path,
-) -> None:
-    """The case reading post-baseline rows alone cannot see.
+def test_a_stage_short_of_its_cut_refuses_to_freeze(tmp_path: Path) -> None:
+    """Presence at a stage is not evidence the sweep through it finished.
 
-    ``fwd_ret_21d`` tops the pooled baseline ranking and has no rows in any advancing stage.
-    Read off observed rows that is indistinguishable from a label dropped after the baselines;
-    read off the ranking it is a sweep that has not started, and freezing now would publish a
-    field missing the candidates the comparison actually selected.
+    ``fwd_ret_21d`` carries two of the ten configurations allocation admits, which is a sweep
+    interrupted after its second. Every stage is present for every label, so the reading that
+    asks only whether a stage was reached sees a complete field and freezes eight candidates
+    out of it permanently.
     """
-    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=["fwd_ret_21d"])
+    study = _study_at(
+        tmp_path,
+        primary="fwd_ret_5d",
+        variants=["fwd_ret_21d"],
+        configs=tuple(f"c{i}" for i in range(1, 11)),
+    )
+    every = tuple(f"c{i}" for i in range(1, 11))
 
     def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
-        if label == "fwd_ret_21d" and stage != COVERAGE_STAGE:
-            return _rows(label, stage).clear()
-        return _rows(label, stage, sharpe=2.0 if label == "fwd_ret_21d" else 0.5)
+        if label == "fwd_ret_21d" and stage == "allocation":
+            return _rows(label, stage, configs=("c1", "c2"))
+        if stage == "risk_overlay":
+            return _rows(label, stage, configs=("c1",))
+        return _rows(label, stage, configs=every)
 
-    with pytest.raises(RuntimeError, match="fwd_ret_21d"):
+    with pytest.raises(RuntimeError, match="2 of 10 configurations"):
         resolve_field_members(
             study,
             case_study="fixture",
             prediction_hashes=None,
             resolve_best_backtest_runs=resolver,
-            advancing_top_n=1,
+            stage_cuts={"allocation": 10, "risk_overlay": 1},
         )
 
 
-def test_without_a_cut_every_label_is_required_to_advance(tmp_path: Path) -> None:
-    """No cut means the question is unanswerable, and an unanswerable question refuses.
+def test_the_cut_is_read_per_stage_not_once(tmp_path: Path) -> None:
+    """Allocation advances ten configurations and the overlay advances one.
 
-    A caller that cannot supply ``top_n`` cannot say which labels the baselines favoured, so
-    every label is treated as favoured. Returning an empty favoured set instead would excuse
-    every label from the check and freeze whatever happened to be there.
+    Holding the overlay to allocation's cut would refuse every finished case study, which is
+    the failure a single pooled cut produces.
     """
-    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=["fwd_ret_21d"])
+    study = _study_at(
+        tmp_path,
+        primary="fwd_ret_5d",
+        variants=["fwd_ret_21d"],
+        configs=tuple(f"c{i}" for i in range(1, 11)),
+    )
+    every = tuple(f"c{i}" for i in range(1, 11))
 
     def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
-        if label == "fwd_ret_5d" and stage != COVERAGE_STAGE:
-            return _rows(label, stage).clear()
-        return _rows(label, stage, sharpe=2.0 if label == "fwd_ret_21d" else 0.5)
+        if stage == "risk_overlay":
+            return _rows(label, stage, configs=("c1",))
+        return _rows(label, stage, configs=every)
 
-    with pytest.raises(RuntimeError, match="fwd_ret_5d"):
-        resolve_field_members(
-            study,
-            case_study="fixture",
-            prediction_hashes=None,
-            resolve_best_backtest_runs=resolver,
-        )
+    field = resolve_field_members(
+        study,
+        case_study="fixture",
+        prediction_hashes=None,
+        resolve_best_backtest_runs=resolver,
+        stage_cuts={"allocation": 10, "risk_overlay": 1},
+    )
+    assert field.height == 2 * (2 * len(every) + 1)
+
+
+def test_config_counts_reads_the_registry_not_the_resolver_frame(tmp_path: Path) -> None:
+    """The count under test comes from the join the notebooks run.
+
+    ``resolve_best_backtest_runs`` returns ``backtest_hash``, ``prediction_hash``,
+    ``spec_json`` and ``sharpe`` and nothing else, so a count taken off its frame is a count of
+    rows. Three rows here are two configurations.
+    """
+    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1", "c2"))
+    registry = study.root / "run_log" / "registry.db"
+    hashes = [
+        _prediction_hash("fwd_ret_5d", "c1"),
+        _prediction_hash("fwd_ret_5d", "c1"),
+        _prediction_hash("fwd_ret_5d", "c2"),
+    ]
+    assert config_counts(registry, hashes) == 2
+    assert config_counts(registry, []) == 0
 
 
 def test_a_label_with_no_baseline_refuses_to_freeze(tmp_path: Path) -> None:
@@ -176,23 +264,14 @@ def test_a_label_with_no_baseline_refuses_to_freeze(tmp_path: Path) -> None:
 
 def test_label_comes_from_the_winner_not_the_primary(tmp_path: Path) -> None:
     """What the stages after the selection run under is a property of what won."""
-    registry_dir = tmp_path / "run_log"
-    registry_dir.mkdir(parents=True)
-    db = sqlite3.connect(registry_dir / "registry.db")
-    db.executescript(
-        """
-        CREATE TABLE training_runs (training_hash TEXT PRIMARY KEY, label TEXT);
-        CREATE TABLE prediction_sets (prediction_hash TEXT PRIMARY KEY, training_hash TEXT);
-        CREATE TABLE backtest_runs (backtest_hash TEXT PRIMARY KEY, prediction_hash TEXT);
-        INSERT INTO training_runs VALUES ('t1', 'fwd_ret_risk_adj_5d');
-        INSERT INTO prediction_sets VALUES ('p1', 't1');
-        INSERT INTO backtest_runs VALUES ('b1', 'p1');
-        """
+    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=["fwd_ret_risk_adj_5d"])
+    db = sqlite3.connect(study.root / "run_log" / "registry.db")
+    db.execute(
+        "INSERT INTO backtest_runs VALUES (?, ?)",
+        ("b1", _prediction_hash("fwd_ret_risk_adj_5d", "c1")),
     )
     db.commit()
     db.close()
-
-    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=["fwd_ret_risk_adj_5d"])
 
     @dataclass
     class _Result:
