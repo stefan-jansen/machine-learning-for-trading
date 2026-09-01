@@ -67,6 +67,7 @@ from .results import (
 )
 from .selection_field import (
     FIELD_STAGES,
+    PLAN_STAGE_KEYS,
     SelectionField,
     label_of,
     open_selection_field,
@@ -142,6 +143,7 @@ __all__ = [
     "open_selection_field",
     "resolve_field_members",
     "predictions_identity",
+    "PLAN_STAGE_KEYS",
     "publishes_sweep_plans",
     "sweep_plan_name",
     "unfinished_sweep_plans",

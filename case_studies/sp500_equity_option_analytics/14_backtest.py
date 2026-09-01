@@ -427,6 +427,7 @@ else:
 # %%
 t0 = time.time()
 completed = failed = skipped = 0
+failures: list[str] = []
 existing_hashes = load_existing_backtest_hashes(CASE_STUDY_ID, stage="signal")
 print(f"Existing equal-weight baseline hashes in registry: {len(existing_hashes):,}")
 
@@ -441,6 +442,7 @@ for pred_hash, group in planned_by_prediction:
         _, error = _execute_one(pred_hash, row["spec"], predictions, is_registered)
         if error:
             failed += 1
+            failures.append(f"{backtest_hash} ({row['source']} / {row['scheme']['name']}): {error}")
             print(f"  FAILED {row['source']} / {row['scheme']['name']}: {error}")
         else:
             completed += 1
@@ -457,6 +459,25 @@ print(
     f"\nSweep complete: {completed} run in {elapsed:.0f}s "
     f"({failed} failed, {skipped} already complete)"
 )
+
+# A failure here stops the notebook rather than being counted and printed. `require_complete`
+# below cannot be relied on to catch one: a member that failed because its registered artifact
+# disagrees with the current prediction window is still a *registered, internally complete*
+# backtest, so the plan passes while the row it admits was produced over a different window.
+# That is the state that reaches the freeze and gets sealed into an immutable set. Every
+# failure is printed above with its cause; this says the run does not continue past them.
+if failures:
+    raise RuntimeError(
+        f"{len(failures)} of the {total_backtests} planned baseline backtests failed and the "
+        "plan is not accepted. The causes are printed above. A failure whose backtest is "
+        "already registered does not show up as an incomplete plan - the registered row is "
+        "complete on its own terms - so it has to stop the run here or it reaches the freeze "
+        "as a current result. `immutable backtest artifact conflict` means an artifact "
+        "directory exists for an identity the registry does not hold: check for a "
+        "`backtest_runs` row, and where there is none the directory is debris from an "
+        "interrupted sweep and belongs in a quarantine directory, not in the way of the "
+        f"re-run. First five: {failures[:5]}"
+    )
 
 if _plan is not None:
     _plan.require_complete()

@@ -297,3 +297,78 @@ def test_without_populations_in_force_completeness_is_the_whole_check(study: Stu
         )
         == []
     )
+
+
+def test_a_complete_plan_says_nothing_about_the_window_its_members_ran_on(study: Study) -> None:
+    """Why a sweep that reported failures may not hand its plan to the freeze.
+
+    `require_complete` asks whether each member is registered, of the declared kind, and whole
+    on its own terms. It does not and cannot ask whether the member was produced over the
+    prediction window in force - that is a comparison between two artifacts, and a registered
+    backtest is complete against its own.
+
+    The state this rules out is the one the baseline sweep hits. A member whose registered
+    artifact covers a different window is re-run with `force_rebacktest`, the immutability guard
+    refuses to overwrite the artifact, and the run fails. The plan is then *still* complete,
+    because the stale row is still a registered, whole backtest. Counting that failure and
+    carrying on would freeze a field holding it. So the notebook raises on any failure rather
+    than relying on the plan to notice, and this is the test that says why it has to.
+
+    Both members below are complete, and their return series cover disjoint windows.
+    """
+    name = f"etfs-baseline-fwd_ret_5d-{UNRESTRICTED}"
+    _complete_plan(study, name=name, alpha=1.0)
+    OfficialPopulation.one(study, name=name).require_complete()
+
+    training = study.results.register_training(
+        {
+            "identity_version": 2,
+            "family": "linear",
+            "label": "fwd_ret_5d",
+            "label_artifact": "label-b",
+            "feature_artifacts": {"financial": "features-b"},
+            "feature_names": ["momentum"],
+            "cv": {"folds": [{"fold": 0, "val_start": "2020-06-01"}]},
+            "model": {"class": "Ridge", "params": {"alpha": 2.0}},
+            "numerics": {"seed": 42, "precision": "float64"},
+            "execution_tier": "canonical",
+            "seed": 42,
+        }
+    )
+    frame = pl.DataFrame(
+        {
+            "symbol": ["A"],
+            "timestamp": ["2020-06-01"],
+            "fold_id": [0],
+            "y_true": [0.01],
+            "y_score": [0.02],
+        }
+    ).with_columns(pl.col("timestamp").str.to_date())
+    prediction = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=frame.select("symbol", "timestamp", "fold_id"),
+    )
+    # A year away from the first member's single session, which is what a stale artifact looks
+    # like: the same identity, a return series over a window nothing in force covers.
+    other_window = register_backtest_run(
+        "etfs",
+        prediction.hash,
+        {"strategy": {"top_k": 1}, "stage": "signal", "alpha": 2.0},
+        returns=pl.DataFrame({"timestamp": [date(2020, 6, 1)], "daily_return": [0.002]}),
+        metrics={"sharpe": 2.0, "sharpe_se_lo": 0.0},
+        case_dir=study.root,
+    )
+    _rename_population(study, name, f"{name}-retired")
+    OfficialPopulation.create(
+        study,
+        name=name,
+        member_kind="backtest",
+        members=[other_window],
+    )
+
+    # Complete either way. Nothing in the plan distinguishes the two.
+    assert OfficialPopulation.one(study, name=name).require_complete() == (other_window,)

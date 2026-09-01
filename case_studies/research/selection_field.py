@@ -147,10 +147,17 @@ def _population_names(study: Study) -> set[str] | None:
     which an absent plan is not evidence of anything. Any other failure to read propagates:
     a lock timeout is not a case study that publishes no plans.
     """
+    # The same timeouts every other reader of this registry uses. The field construction now
+    # makes this read once per (label, stage) rather than once per label, so a sweep writing in
+    # another process is that much more likely to be holding the lock when it happens, and
+    # SQLite's five-second default would surface as a reconstruction that aborts rather than
+    # waits. A timeout that does expire still propagates: a locked registry is not a case study
+    # that publishes no plans.
     try:
         with sqlite3.connect(
-            f"file:{study.root / 'run_log' / 'registry.db'}?mode=ro", uri=True
+            f"file:{study.root / 'run_log' / 'registry.db'}?mode=ro", uri=True, timeout=120.0
         ) as db:
+            db.execute("PRAGMA busy_timeout = 60000")
             return {row[0] for row in db.execute("SELECT name FROM official_populations")}
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc):

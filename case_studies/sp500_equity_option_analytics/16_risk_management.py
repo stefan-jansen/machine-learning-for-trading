@@ -60,6 +60,7 @@ warnings.filterwarnings("ignore")
 
 # %%
 from case_studies.research import (
+    PLAN_STAGE_KEYS,
     CandidateSet,
     OfficialPopulation,
     Study,
@@ -693,13 +694,17 @@ unfinished = unfinished_sweep_plans(
     prediction_hashes=CURRENT_MEMBERS,
 )
 if unfinished:
+    # The denominator is derived, not written down. There is one plan per (label, planned
+    # stage), and the baseline became a planned stage after this message was first written -
+    # so a hardcoded two per label reports a fraction whose numerator can exceed it, and
+    # names the wrong notebooks to run.
     print(
         f"Not freezing a candidate set here: {len(unfinished)} of "
-        f"{2 * len(CANDIDATE_LABELS)} recorded sweep plans are absent or incomplete, so the "
-        "field is still being produced. Run 15 and 16 for each declared label; the last of "
-        "those runs freezes the set. Declining is not a failure - this notebook has done its "
-        "own label's work either way, and the set is written exactly once.\n  "
-        + "\n  ".join(unfinished)
+        f"{len(PLAN_STAGE_KEYS) * len(CANDIDATE_LABELS)} recorded sweep plans are absent or "
+        "incomplete, so the field is still being produced. Run 14, 15 and 16 for each declared "
+        "label; the last of those runs freezes the set. Declining is not a failure - this "
+        "notebook has done its own label's work either way, and the set is written exactly "
+        "once.\n  " + "\n  ".join(unfinished)
     )
 
 # One construction, shared with the four stages that read this field. It requires every
