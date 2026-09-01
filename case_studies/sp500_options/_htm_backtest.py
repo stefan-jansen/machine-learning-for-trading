@@ -1726,6 +1726,29 @@ def _apply_cohort_allocator(
     return held
 
 
+#: What a typed short-straddle decision frame has to carry beyond a weight. A caller that
+#: derived its weights from predictions alone - the holdout retrain does - has none of these,
+#: and passing that frame here as if it were typed is what the check below catches. The set is
+#: named so the caller can ask the same question before deciding what to pass.
+OPTION_DECISION_COLUMNS: frozenset[str] = frozenset(
+    {
+        "timestamp",
+        "symbol",
+        "strike",
+        "expiration",
+        "entry_date",
+        "entry_straddle_mid",
+        "entry_call_mid",
+        "entry_call_bid",
+        "entry_call_ask",
+        "entry_put_mid",
+        "entry_put_bid",
+        "entry_put_ask",
+        "weight",
+    }
+)
+
+
 def run_htm_daily_mtm(
     case_study: str,
     predictions: pl.DataFrame,
@@ -1779,22 +1802,7 @@ def run_htm_daily_mtm(
             raw_options_dir=raw_options_dir,
         )
     else:
-        required = {
-            "timestamp",
-            "symbol",
-            "strike",
-            "expiration",
-            "entry_date",
-            "entry_straddle_mid",
-            "entry_call_mid",
-            "entry_call_bid",
-            "entry_call_ask",
-            "entry_put_mid",
-            "entry_put_bid",
-            "entry_put_ask",
-            "weight",
-        }
-        missing = required - set(decisions.columns)
+        missing = OPTION_DECISION_COLUMNS - set(decisions.columns)
         if missing:
             raise ValueError(f"typed option decisions are missing columns: {sorted(missing)}")
         cohorts = decisions
