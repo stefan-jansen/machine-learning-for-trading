@@ -38,7 +38,7 @@ from case_studies.sp500_options.research_workflow import open_study
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
-SUPERSEDES_CAUSAL: str = "4e310dbab236"
+SUPERSEDES_CAUSAL: str = "64dee4ecd95f"
 
 # %% [markdown]
 # ## Declared and resolved request
@@ -50,20 +50,19 @@ SUPERSEDES_CAUSAL: str = "4e310dbab236"
 #
 # `CausalResult.one` resolves a label to exactly one canonical identity, so a refit has to name the
 # identity it replaces or the registry is left with two and refuses. The retired identity is
-# `4e310dbab236`.
+# `64dee4ecd95f`.
 #
-# It is worth saying what did and did not change, because the two are usually the same and here
-# they are not. The block-permutation refutation now records *how* its block size was derived, not
-# only what it was: the resolver takes the larger of the label buffer and the treatment's own
-# construction window, and it writes down both along with which one governed. For this case study
-# the label buffer is 35 steps and the `vrp_21d` treatment window is 21, so the block size is
-# unchanged at 35 and the basis is the label buffer. Method, seed, cadence, gap policy and the 100
-# placebo draws are all unchanged too.
+# What changed is the label itself, not the estimator. `02_labels` now refuses to settle a straddle
+# whose underlying crossed a split or another share-count change between entry and expiry: the
+# strike is stated in pre-event shares and the expiration close in post-event shares, so the
+# difference between them was a unit mismatch rather than a return. Those contracts are dropped
+# rather than settled, which changes the analysis population this notebook fits on and therefore
+# every quantity below. Method, seed, cadence, gap policy, block size and the 100 placebo draws are
+# unchanged.
 #
-# So the estimate and the refutation this run publishes are the same numbers the retired identity
-# held. What was wrong with the old identity was not its arithmetic but its silence: it recorded a
-# block size of 35 with nothing saying where 35 came from, which is indistinguishable from a block
-# size that happened to be 35 for the wrong reason. That is the defect the retirement closes.
+# The retired identity fitted 166,527 observations and reported an effect of 0.3808 with a HAC
+# standard error of 0.3192, so p = 0.233 and a refutation p of 0.0099. The table below is what the
+# corrected labels give.
 
 # %%
 study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)

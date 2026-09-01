@@ -1702,7 +1702,28 @@ def _apply_cohort_allocator(
     out = out.with_columns(
         (pl.col("weight") / pl.col("weight").sum().over("timestamp")).alias("weight")
     )
-    return out
+    # A zero weight is a name the allocator declined to hold, so it leaves the cohort.
+    #
+    # `_select_cohorts` picks top-k by score and every allocator here is free to put none of
+    # the book on one of them: `conformal_weighted` zeroes a name whose interval is too wide to
+    # size, and a corner solution from `mvo_ledoit_wolf` does the same. Carrying that name at
+    # weight zero publishes a decision to trade a contract at no size, and the decision
+    # validator refuses it - correctly, because a decision artifact records what was traded.
+    # Dropping the row leaves the remaining weights summing to one already, since removing
+    # zeros cannot change a sum.
+    #
+    # An entry date the allocator zeroed out entirely is a different matter: nothing was
+    # traded that day and the renormalization above has already produced nulls or NaN from the
+    # zero divisor, so it is raised rather than silently dropped.
+    held = out.filter(pl.col("weight") > 0)
+    emptied = set(out["timestamp"].unique().to_list()) - set(held["timestamp"].unique().to_list())
+    if emptied:
+        raise ValueError(
+            f"HTM allocator '{method}' left {len(emptied)} of "
+            f"{out['timestamp'].n_unique()} entry dates with no positive weight, so those "
+            "cohorts have nothing to hold"
+        )
+    return held
 
 
 def run_htm_daily_mtm(

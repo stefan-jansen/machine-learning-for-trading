@@ -79,6 +79,12 @@ EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 PREVIEW_PREDICTION_HASHES: list[str] = []
 
+# The baseline population is immutable under its name, so a run whose members have moved has to
+# say which generation it retires. Anything upstream that changes a backtest identity moves them:
+# here it was the corrected settlement in `02_labels`, which moved every training identity and so
+# every prediction the requests below resolve. Empty for a first snapshot.
+SUPERSEDES_BASELINE_POPULATION: str = "25421ed29ba5"
+
 # %% [markdown]
 # ## Which predictions are traded
 #
@@ -303,6 +309,7 @@ execution = run_official_backtest_requests(
     study,
     requests,
     population_name=BASELINE_POPULATION if EXECUTION_TIER == "canonical" else None,
+    supersedes=SUPERSEDES_BASELINE_POPULATION or None,
 )
 catalog = execution.catalog_rows.sort("request_name")
 if catalog.height != requests.height or catalog.filter(~pl.col("complete")).height:

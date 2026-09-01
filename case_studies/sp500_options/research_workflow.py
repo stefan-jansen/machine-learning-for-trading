@@ -794,8 +794,18 @@ def run_official_backtest_requests(
     requests: pl.DataFrame,
     *,
     population_name: str | None,
+    supersedes: str | None = None,
 ) -> OptionBacktestExecution:
-    """Resolve and execute typed option requests, snapshotting canonical populations."""
+    """Resolve and execute typed option requests, snapshotting canonical populations.
+
+    ``supersedes`` names the generation of ``population_name`` this run replaces, and is
+    threaded here for the same reason ``run_backtests`` takes it: a name that already exists
+    with a different member list is refused unless the caller says which generation it is
+    replacing. This path did not take it, so anything that moved a backtest identity - a
+    corrected label, a changed accounting field - raised a refusal the notebook had no way to
+    answer, and re-running the baseline sweep was impossible. Passing it for an unchanged
+    member list is a no-op; passing it for a name that does not exist yet is refused.
+    """
     required = {"request_name", "prediction_hash", "label", "signal"}
     missing = required - set(requests.columns)
     if missing:
@@ -918,6 +928,7 @@ def run_official_backtest_requests(
             name=population_name,
             member_kind="backtest",
             members=expected,
+            supersedes=supersedes,
         )
         if population_name is not None
         else None

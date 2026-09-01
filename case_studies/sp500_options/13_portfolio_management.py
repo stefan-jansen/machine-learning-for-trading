@@ -74,6 +74,14 @@ EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 PREVIEW_BASELINE_HASHES: tuple[str, ...] = ()
 PREVIEW_ALLOCATORS: tuple[str, ...] = ("score_weighted",)
+# The generation each named set retires. A set and a population are immutable under their
+# name, so a re-run whose membership moved has to say which one it replaces; the refusal
+# names the current hash, and empty is correct only for a name this registry has never held.
+# Each of these is stale the moment the run it authorizes succeeds, because that run becomes
+# the generation the next one has to name.
+SUPERSEDES_BASELINE_CANDIDATES: str = "af7f57ed895e"
+SUPERSEDES_ALLOCATION_POPULATION: str = ""
+SUPERSEDES_STRATEGY_CANDIDATES: str = ""
 
 # %% [markdown]
 # ## Freeze what is being selected from
@@ -95,7 +103,11 @@ if EXECUTION_TIER == "canonical":
     baseline_table = study.backtests.table().filter(pl.col("backtest_hash").is_in(baseline_hashes))
     if baseline_table.height != len(baseline_hashes):
         raise RuntimeError("the baseline backtest catalog is incomplete")
-    baseline_candidates = study.backtests.freeze(baseline_table, name=BASELINE_CANDIDATES)
+    baseline_candidates = study.backtests.freeze(
+        baseline_table,
+        name=BASELINE_CANDIDATES,
+        supersedes=SUPERSEDES_BASELINE_CANDIDATES or None,
+    )
 else:
     if not WORKSPACE or not PREVIEW_BASELINE_HASHES:
         raise ValueError("preview execution requires WORKSPACE and PREVIEW_BASELINE_HASHES")
@@ -247,12 +259,17 @@ execution = run_official_backtest_requests(
     study,
     requests,
     population_name=ALLOCATION_POPULATION if EXECUTION_TIER == "canonical" else None,
+    supersedes=SUPERSEDES_ALLOCATION_POPULATION or None,
 )
 catalog = execution.catalog_rows.sort("request_name")
 if catalog.height != requests.height or catalog.filter(~pl.col("complete")).height:
     raise RuntimeError("allocation execution did not publish every declared request")
 strategy_candidates = (
-    baseline_candidates.extend(STRATEGY_CANDIDATES, execution.results)
+    baseline_candidates.extend(
+        STRATEGY_CANDIDATES,
+        execution.results,
+        supersedes=SUPERSEDES_STRATEGY_CANDIDATES or None,
+    )
     if baseline_candidates is not None
     else None
 )
