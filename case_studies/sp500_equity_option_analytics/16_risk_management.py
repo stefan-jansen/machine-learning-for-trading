@@ -650,12 +650,12 @@ fig_tradeoff.show()
 # per-stage count of advancing configurations, which admitted a label whose sweep had produced
 # one row per configuration and stopped; `04cb35eec43f` replaced that one later the same day and
 # held 3,710 members, 66 of them allocation backtests from a grid no current sweep plan declares.
-# This generation admits the declared grids only, so it holds 3,644. The validation selection is
-# `ec0cfd449843` in both, so what moved is the membership and not the choice made over it. Only
-# the tip is declarable - `create` refuses anything else and names the tip - so this value moves
-# on every generation.
+# `37169a5be187` replaced it with the declared grids only and holds 3,644. The validation
+# selection is `ec0cfd449843` in both, so what moved is the membership and not the choice made
+# over it. Only the tip is declarable - `create` refuses anything else and names the tip - so
+# this value moves on every generation.
 SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
-    "sp500_equity_option_analytics:holdout-candidates": "04cb35eec43f",
+    "sp500_equity_option_analytics:holdout-candidates": "37169a5be187",
 }
 
 # %% [markdown]
@@ -719,11 +719,21 @@ else:
     # field and lock the rest out. There is no funnel to accommodate here: 15 raises rather than
     # advancing fewer configurations than declared, so no label stops at its baseline.
     #
+    # The populations in force are passed because a plan supersedes only when its own sweep
+    # re-runs. After a refit the previous generation is still the plan under that name and is
+    # still complete, so completeness alone would wave through a label whose sweep has not been
+    # re-run at all.
+    #
     # This is also what sequences a per-label run without any coordination: 15 and 16 run for
     # each label in turn, every run but the last finds a plan missing and declines to freeze,
     # and the last one freezes the whole field. Declining is not a failure - the notebook has
     # done its own label's work either way, and the set is written exactly once.
-    unfinished = unfinished_sweep_plans(writable, case_study=CASE_STUDY_ID, labels=CANDIDATE_LABELS)
+    unfinished = unfinished_sweep_plans(
+        writable,
+        case_study=CASE_STUDY_ID,
+        labels=CANDIDATE_LABELS,
+        prediction_hashes=CURRENT_MEMBERS,
+    )
 
     if unfinished:
         holdout_candidates = None

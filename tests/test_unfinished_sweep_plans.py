@@ -16,6 +16,7 @@ sweep leaves behind.
 from __future__ import annotations
 
 import sqlite3
+from datetime import date
 from pathlib import Path
 
 import polars as pl
@@ -27,6 +28,7 @@ from case_studies.research import (
     unfinished_sweep_plans,
 )
 from case_studies.research.workspace import Study
+from case_studies.utils.registry import register_backtest_run
 from tests.test_research_workspace import _seed_release
 
 
@@ -128,3 +130,107 @@ def test_the_plan_name_is_the_one_the_sweeps_publish_under() -> None:
     """
     assert sweep_plan_name("etfs", "fwd_ret_5d", "allocation") == "etfs-allocation-fwd_ret_5d-v1"
     assert sweep_plan_name("etfs", "fwd_ret_5d", "risk_overlay") == "etfs-risk-fwd_ret_5d-v1"
+
+
+def _complete_plan(study: Study, *, name: str, alpha: float) -> str:
+    """A recorded plan whose one backtest is registered and complete, and its prediction hash.
+
+    Registering it for real is the point: the staleness check runs only after
+    `require_complete` passes, so a plan that cannot pass it never reaches the behaviour under
+    test.
+    """
+    training = study.results.register_training(
+        {
+            "identity_version": 2,
+            "family": "linear",
+            "label": "fwd_ret_5d",
+            "label_artifact": "label-a",
+            "feature_artifacts": {"financial": "features-a"},
+            "feature_names": ["momentum"],
+            "cv": {"folds": [{"fold": 0, "val_start": "2024-01-05"}]},
+            "model": {"class": "Ridge", "params": {"alpha": alpha}},
+            "numerics": {"seed": 42, "precision": "float64"},
+            "execution_tier": "canonical",
+            "seed": 42,
+        }
+    )
+    frame = pl.DataFrame(
+        {
+            "symbol": ["A", "B"],
+            "timestamp": ["2024-01-05", "2024-01-05"],
+            "fold_id": [0, 0],
+            "y_true": [0.01, -0.02],
+            "y_score": [0.02 * alpha, -0.01 * alpha],
+        }
+    ).with_columns(pl.col("timestamp").str.to_date())
+    prediction = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=frame.select("symbol", "timestamp", "fold_id"),
+    )
+    backtest_hash = register_backtest_run(
+        "etfs",
+        prediction.hash,
+        {"strategy": {"top_k": 1}, "stage": "allocation", "alpha": alpha},
+        returns=pl.DataFrame({"timestamp": [date(2024, 1, 5)], "daily_return": [0.001 * alpha]}),
+        metrics={"sharpe": alpha, "sharpe_se_lo": 0.0},
+        case_dir=study.root,
+    )
+    OfficialPopulation.create(study, name=name, member_kind="backtest", members=[backtest_hash])
+    return prediction.hash
+
+
+def test_a_complete_plan_from_a_superseded_generation_is_reported(study: Study) -> None:
+    """The premature freeze a refit makes possible, and the one completeness cannot see.
+
+    A plan supersedes only when its own sweep re-runs, so after predictions are refitted the
+    previous generation is still the plan in force under that name - and still complete,
+    because its members are still registered. Waving it through would seal a field holding
+    current baselines and none of this label's current allocation rows.
+
+    The plan below is complete, and the population in force is some other prediction, which is
+    exactly the state a refit leaves behind.
+    """
+    _complete_plan(study, name="etfs-allocation-fwd_ret_5d-v1", alpha=1.0)
+
+    unfinished = unfinished_sweep_plans(
+        study,
+        case_study="etfs",
+        labels=["fwd_ret_5d"],
+        stages=["allocation"],
+        prediction_hashes={"a-prediction-from-the-refit"},
+    )
+
+    assert len(unfinished) == 1
+    assert "records a generation the refit superseded" in unfinished[0]
+
+
+def test_a_complete_plan_riding_a_current_prediction_is_not_reported(study: Study) -> None:
+    """The other side of it: the sweep did re-run, so its plan is the current generation."""
+    prediction_hash = _complete_plan(study, name="etfs-allocation-fwd_ret_5d-v1", alpha=1.0)
+
+    assert (
+        unfinished_sweep_plans(
+            study,
+            case_study="etfs",
+            labels=["fwd_ret_5d"],
+            stages=["allocation"],
+            prediction_hashes={prediction_hash},
+        )
+        == []
+    )
+
+
+def test_without_populations_in_force_completeness_is_the_whole_check(study: Study) -> None:
+    """A case study that declares no prediction populations has no generation to be behind."""
+    _complete_plan(study, name="etfs-allocation-fwd_ret_5d-v1", alpha=1.0)
+
+    assert (
+        unfinished_sweep_plans(
+            study, case_study="etfs", labels=["fwd_ret_5d"], stages=["allocation"]
+        )
+        == []
+    )

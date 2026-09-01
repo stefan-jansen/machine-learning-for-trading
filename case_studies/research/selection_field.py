@@ -22,7 +22,7 @@ Both are closed by having one construction and reading the label off the selecti
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -117,11 +117,37 @@ def _plan_members(study: Study, case_study: str, label: str, stage: str) -> set[
     return set(plan.members)
 
 
+def _rides_current_predictions(
+    study: Study, members: Sequence[str], prediction_hashes: Collection[str]
+) -> bool:
+    """Whether any of ``members`` is a backtest of a prediction still in force.
+
+    A registry that cannot be read answers ``True``: the caller is deciding whether a plan is
+    stale, and an unreadable registry is not evidence that it is.
+    """
+    if not members:
+        return False
+    placeholders = ",".join("?" * len(members))
+    try:
+        with sqlite3.connect(
+            f"file:{study.root / 'run_log' / 'registry.db'}?mode=ro", uri=True
+        ) as db:
+            rows = db.execute(
+                f"SELECT prediction_hash FROM backtest_runs WHERE backtest_hash IN ({placeholders})",
+                tuple(members),
+            ).fetchall()
+    except sqlite3.OperationalError:
+        return True
+    current = set(prediction_hashes)
+    return any(row[0] in current for row in rows)
+
+
 def unfinished_sweep_plans(
     study: Study,
     *,
     case_study: str,
     labels: Sequence[str],
+    prediction_hashes: Collection[str] | None = None,
     stages: Sequence[str] = tuple(PLAN_STAGE_KEYS),
 ) -> list[str]:
     """Which of the declared labels' sweep plans are absent or not fully executed, one line each.
@@ -146,6 +172,13 @@ def unfinished_sweep_plans(
     there is no path that stops a label at its baseline. Should one ever be added, it has to
     publish that decision, because nothing in the rows distinguishes it from an unstarted run.
 
+    **Complete is not enough where predictions have been refitted.** A plan supersedes only when
+    its own sweep re-runs, so after a refit the previous generation is still the plan in force
+    under that name - and it is still complete, because its members are still registered. The
+    freeze would then seal a field holding current baselines and a superseded label's nothing.
+    A plan is therefore also asked whether any of its backtests rides a prediction still in
+    force. None of them does exactly when the plan belongs to a generation the refit replaced.
+
     Absent and incomplete are reported the same way on purpose. A plan that was never written
     is a sweep that either has not run or ran before plans were recorded, and neither is a
     sweep whose results may be sealed into an immutable set.
@@ -158,9 +191,20 @@ def unfinished_sweep_plans(
         for stage in stages:
             name = sweep_plan_name(case_study, label, stage)
             try:
-                OfficialPopulation.one(study, name=name).require_complete()
+                plan = OfficialPopulation.one(study, name=name)
+                plan.require_complete()
             except (KeyError, ValueError, sqlite3.OperationalError) as exc:
                 unfinished.append(f"{label} {stage} ({name}): {exc}")
+                continue
+            if prediction_hashes is not None and not _rides_current_predictions(
+                study, plan.members, prediction_hashes
+            ):
+                unfinished.append(
+                    f"{label} {stage} ({name}): plan {plan.hash} is complete, but none of its "
+                    f"{len(plan.members)} backtests rides a prediction still in force, so it "
+                    "records a generation the refit superseded and this sweep has not been "
+                    "re-run under the current predictions"
+                )
     return unfinished
 
 
