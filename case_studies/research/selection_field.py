@@ -30,7 +30,7 @@ import polars as pl
 
 from .comparison import CandidateSet
 from .configs import sweep_labels
-from .population import OfficialPopulation
+from .population import OfficialPopulation, recorded_generations
 
 if TYPE_CHECKING:
     from .results import Result
@@ -138,10 +138,17 @@ def advancing_labels(
 
     Two ways the declaration can be wrong are refused rather than tolerated. A label it names
     that this case study does not declare is a typo or a leftover from a renamed label, and
-    silently dropping it would exclude a real label from the wait. A label it names whose
-    allocation plan is recorded and complete is a contradiction: the sweep did run, so its
-    configurations belong in the field, and honouring the declaration would silently discard
-    them.
+    silently dropping it would exclude a real label from the wait. A label it names that has
+    *any* recorded allocation plan is a contradiction: the sweep ran, so its rows are in the
+    registry and eligible for the field, and the declaration would exclude the label from the
+    completion check while its rows stayed in.
+
+    The test is whether a plan exists, not whether it is complete. Plans are published before
+    their sweep executes, so an interrupted sweep leaves an incomplete plan - exactly the state
+    a completeness test would read as "no finished sweep here" and wave through, which is the
+    one combination that seals a partial field into an immutable set. A label whose sweep was
+    started and then abandoned therefore cannot be declared dropped while its plan and rows are
+    on record; deciding it should not advance after all means removing what it registered.
     """
     stale = set(not_advancing) - set(allocation_plans)
     if stale:
@@ -149,16 +156,17 @@ def advancing_labels(
             "labels declared as not advancing are not declared by this case study: "
             + ", ".join(sorted(stale))
         )
-    contradicted = sorted(
+    contradicted = [
         label
         for label in not_advancing
-        if not unfinished_sweep_plans(study, plan_names={label: allocation_plans[label]})
-    )
+        if recorded_generations(study, name=allocation_plans[label])
+    ]
     if contradicted:
         raise ValueError(
-            "labels declared as not advancing have a complete allocation plan: "
-            + ", ".join(contradicted)
-            + ". Remove them from the declaration so their configurations enter the field."
+            "labels declared as not advancing have a recorded allocation plan: "
+            + ", ".join(sorted(contradicted))
+            + ". Their sweep ran, so their rows are in the field. Remove them from the "
+            "declaration, or remove what the sweep registered."
         )
     advancing = [label for label in allocation_plans if label not in not_advancing]
     if not advancing:

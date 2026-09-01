@@ -194,7 +194,30 @@ def test_a_declared_drop_that_the_registry_contradicts_is_refused(study: Study) 
         study, name=plans["fwd_ret_5d"], member_kind="backtest", members=[swept]
     )
 
-    with pytest.raises(ValueError, match="complete allocation plan"):
+    with pytest.raises(ValueError, match="recorded allocation plan"):
+        advancing_labels(
+            study, allocation_plans=plans, not_advancing={"fwd_ret_5d": "dominated at baseline"}
+        )
+
+
+def test_a_declared_drop_whose_sweep_was_interrupted_is_refused(study: Study) -> None:
+    """The one combination that would seal a partial field into an immutable set.
+
+    Plans are published before their sweep runs, so an interruption leaves an *incomplete*
+    plan. Testing the declaration against completeness would read that as "no finished sweep
+    here" and honour the drop, excluding the label from the wait while its partial rows stayed
+    eligible for the field. Existence is the test, not completeness.
+    """
+    plans = {"fwd_ret_5d": "etfs-allocation-fwd_ret_5d-v1"}
+    OfficialPopulation.create(
+        study,
+        name=plans["fwd_ret_5d"],
+        member_kind="backtest",
+        members=[_complete_backtest(study, top_k=1), "dddd77778888"],
+    )
+    assert unfinished_sweep_plans(study, plan_names=plans) != []
+
+    with pytest.raises(ValueError, match="recorded allocation plan"):
         advancing_labels(
             study, allocation_plans=plans, not_advancing={"fwd_ret_5d": "dominated at baseline"}
         )
