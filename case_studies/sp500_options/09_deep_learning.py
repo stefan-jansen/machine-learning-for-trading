@@ -49,7 +49,7 @@ DEVICE: str = ""
 
 SEQUENCE_CONFIGS = ("nlinear", "lstm_h64", "patchtst")
 POPULATION_NAME: str = ""
-SUPERSEDES_POPULATION: str = ""
+SUPERSEDES_POPULATION: str = "fd45f829a576"
 
 # %% [markdown]
 # ### The device the population was fitted on
@@ -88,7 +88,8 @@ print(f"training device: {device} (declared: {published_device})")
 # this run computes are no longer the members an earlier snapshot under the same name declared,
 # and those two notebooks then refuse their own work as undeclared. `SUPERSEDES_POPULATION`
 # names the snapshot such a run retires, and the value is part of what the population is hashed
-# over. It is empty here because this population has no predecessor.
+# over. The value here names the snapshot this run retires; it is empty only for the first
+# snapshot under a name.
 #
 # `create` refuses a changed member list under an existing name unless this names the current
 # snapshot, so the parameter is what makes refreshing this population possible at all. Without
