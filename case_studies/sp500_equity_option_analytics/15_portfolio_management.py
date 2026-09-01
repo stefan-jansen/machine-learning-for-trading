@@ -50,7 +50,14 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 
-from case_studies.research import OfficialPopulation, Study, open_study, population_supersedes
+from case_studies.research import (
+    OfficialPopulation,
+    Study,
+    open_study,
+    population_supersedes,
+    predictions_identity,
+    sweep_plan_name,
+)
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
     load_backtest_prices_for,
@@ -241,7 +248,14 @@ for pred_row in top_preds.iter_rows(named=True):
 # field to freeze either.
 
 # %%
-ALLOCATION_POPULATION = f"{CASE_STUDY_ID}-allocation-{ALLOCATION_LABEL}-v1"
+# The name carries which prediction sets the sweep planned against, so "has this sweep run
+# against the predictions in force" is a lookup rather than an inference over its members. An
+# inference answers one direction only: comparing members against the current predictions
+# catches one the refit removed and cannot see one it added, because the backtests riding a new
+# prediction do not exist until this notebook runs again.
+ALLOCATION_POPULATION = sweep_plan_name(
+    CASE_STUDY_ID, ALLOCATION_LABEL, "allocation", predictions_identity(CURRENT_MEMBERS)
+)
 # The generation this run retires, per population name. A plan that has grown - a new
 # configuration advancing, a widened top-k grid - is a changed population under a live name and
 # has to say which one it replaces; the refusal prints the current hash. Absent for a name this

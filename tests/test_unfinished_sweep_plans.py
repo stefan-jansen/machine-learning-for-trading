@@ -24,6 +24,7 @@ import pytest
 
 from case_studies.research import (
     OfficialPopulation,
+    predictions_identity,
     sweep_plan_name,
     unfinished_sweep_plans,
 )
@@ -39,6 +40,9 @@ def study(tmp_path: Path) -> Study:
     )
 
 
+UNRESTRICTED = predictions_identity(None)
+
+
 def test_a_plan_that_was_never_written_is_reported(study: Study) -> None:
     """A sweep that has not run, and a sweep that ran before plans were recorded.
 
@@ -49,14 +53,16 @@ def test_a_plan_that_was_never_written_is_reported(study: Study) -> None:
         study, case_study="etfs", labels=["fwd_ret_5d"], stages=["allocation"]
     )
     assert len(unfinished) == 1
-    assert unfinished[0].startswith("fwd_ret_5d allocation (etfs-allocation-fwd_ret_5d-v1):")
+    assert unfinished[0].startswith(
+        f"fwd_ret_5d allocation (etfs-allocation-fwd_ret_5d-{UNRESTRICTED}):"
+    )
 
 
 def test_a_plan_whose_members_are_not_registered_is_reported(study: Study) -> None:
     """The interrupted sweep: the plan names the whole grid, the registry holds part of it."""
     OfficialPopulation.create(
         study,
-        name="etfs-allocation-fwd_ret_5d-v1",
+        name=f"etfs-allocation-fwd_ret_5d-{UNRESTRICTED}",
         member_kind="backtest",
         members=["aaaa11112222", "bbbb33334444"],
     )
@@ -128,8 +134,14 @@ def test_the_plan_name_is_the_one_the_sweeps_publish_under() -> None:
     `risk` is the key its population name carries, and reading either for the other was the
     shape of the mistake this closes.
     """
-    assert sweep_plan_name("etfs", "fwd_ret_5d", "allocation") == "etfs-allocation-fwd_ret_5d-v1"
-    assert sweep_plan_name("etfs", "fwd_ret_5d", "risk_overlay") == "etfs-risk-fwd_ret_5d-v1"
+    assert (
+        sweep_plan_name("etfs", "fwd_ret_5d", "allocation", "abc123")
+        == "etfs-allocation-fwd_ret_5d-abc123"
+    )
+    assert (
+        sweep_plan_name("etfs", "fwd_ret_5d", "risk_overlay", "abc123")
+        == "etfs-risk-fwd_ret_5d-abc123"
+    )
 
 
 def _complete_plan(study: Study, *, name: str, alpha: float) -> str:
@@ -183,34 +195,41 @@ def _complete_plan(study: Study, *, name: str, alpha: float) -> str:
     return prediction.hash
 
 
-def test_a_complete_plan_from_a_superseded_generation_is_reported(study: Study) -> None:
+def test_a_sweep_planned_against_other_predictions_is_reported(study: Study) -> None:
     """The premature freeze a refit makes possible, and the one completeness cannot see.
 
-    A plan supersedes only when its own sweep re-runs, so after predictions are refitted the
-    previous generation is still the plan in force under that name - and still complete,
-    because its members are still registered. Waving it through would seal a field holding
-    current baselines and none of this label's current allocation rows.
+    A plan supersedes only when its own sweep re-runs, so under a fixed name the previous
+    generation would still be the plan in force after a refit - and still complete, because its
+    members are still registered. Waving it through seals a field holding current baselines and
+    none of this label's current allocation rows.
 
-    The plan below is complete, and the population in force is some other prediction, which is
-    exactly the state a refit leaves behind.
+    The plan below is complete. It is simply not the plan for the predictions in force, and the
+    name says so, so it is reported the same way a plan that was never written is.
     """
-    _complete_plan(study, name="etfs-allocation-fwd_ret_5d-v1", alpha=1.0)
+    prediction_hash = _complete_plan(
+        study, name=f"etfs-allocation-fwd_ret_5d-{predictions_identity({'p-old'})}", alpha=1.0
+    )
 
     unfinished = unfinished_sweep_plans(
         study,
         case_study="etfs",
         labels=["fwd_ret_5d"],
         stages=["allocation"],
-        prediction_hashes={"a-prediction-from-the-refit"},
+        prediction_hashes={prediction_hash},
     )
 
     assert len(unfinished) == 1
-    assert "records a generation a refit has superseded" in unfinished[0]
+    assert predictions_identity({prediction_hash}) in unfinished[0]
 
 
-def test_a_complete_plan_riding_a_current_prediction_is_not_reported(study: Study) -> None:
-    """The other side of it: the sweep did re-run, so its plan is the current generation."""
-    prediction_hash = _complete_plan(study, name="etfs-allocation-fwd_ret_5d-v1", alpha=1.0)
+def test_a_sweep_planned_against_the_predictions_in_force_is_not_reported(study: Study) -> None:
+    """The other side of it: the sweep did run against these predictions, so its plan is found."""
+    prediction_hash = "p-current"
+    _complete_plan(
+        study,
+        name=f"etfs-allocation-fwd_ret_5d-{predictions_identity({prediction_hash})}",
+        alpha=1.0,
+    )
 
     assert (
         unfinished_sweep_plans(
@@ -224,25 +243,18 @@ def test_a_complete_plan_riding_a_current_prediction_is_not_reported(study: Stud
     )
 
 
-def test_a_plan_half_superseded_by_a_partial_refit_is_reported(study: Study) -> None:
-    """A refit does not have to replace a whole label at once, and a mix is still stale.
+def test_a_refit_that_only_adds_a_prediction_is_still_reported(study: Study) -> None:
+    """The direction every inference over a plan's members missed.
 
-    Accepting a plan because *some* member still rides a current prediction reads the survivors
-    of a partial refit as evidence the sweep re-ran. It did not: those are the configurations
-    the refit happened not to touch, and freezing here seals a field missing everything it did.
+    Asking whether the members ride predictions still in force answers for removals only: a
+    prediction the refit *added* leaves every existing member riding a current prediction, and
+    the backtests that would ride the new one do not exist until the sweep runs again. Both
+    versions of that check passed this state. A digest of the whole set moves on an addition
+    exactly as it does on a removal.
     """
-    kept = _complete_plan(study, name="etfs-allocation-fwd_ret_5d-v1", alpha=1.0)
-    superseded = _complete_plan(study, name="etfs-risk-fwd_ret_5d-v1", alpha=2.0)
-    plan = OfficialPopulation.one(study, name="etfs-allocation-fwd_ret_5d-v1")
-    OfficialPopulation.create(
-        study,
-        name="etfs-allocation-fwd_ret_5d-v1",
-        member_kind="backtest",
-        members=[
-            *plan.members,
-            *OfficialPopulation.one(study, name="etfs-risk-fwd_ret_5d-v1").members,
-        ],
-        supersedes=plan.hash,
+    kept = "p-kept"
+    _complete_plan(
+        study, name=f"etfs-allocation-fwd_ret_5d-{predictions_identity({kept})}", alpha=1.0
     )
 
     unfinished = unfinished_sweep_plans(
@@ -250,17 +262,18 @@ def test_a_plan_half_superseded_by_a_partial_refit_is_reported(study: Study) -> 
         case_study="etfs",
         labels=["fwd_ret_5d"],
         stages=["allocation"],
-        prediction_hashes={kept},
+        prediction_hashes={kept, "p-added-by-the-refit"},
     )
 
-    assert superseded != kept
     assert len(unfinished) == 1
-    assert "records a generation a refit has superseded" in unfinished[0]
 
 
 def test_without_populations_in_force_completeness_is_the_whole_check(study: Study) -> None:
-    """A case study that declares no prediction populations has no generation to be behind."""
-    _complete_plan(study, name="etfs-allocation-fwd_ret_5d-v1", alpha=1.0)
+    """A case study that declares no prediction populations has no generation to be behind.
+
+    Its plans are named for that state rather than for a digest, so they keep being found.
+    """
+    _complete_plan(study, name=f"etfs-allocation-fwd_ret_5d-{UNRESTRICTED}", alpha=1.0)
 
     assert (
         unfinished_sweep_plans(

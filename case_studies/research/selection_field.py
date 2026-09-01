@@ -21,6 +21,7 @@ Both are closed by having one construction and reading the label off the selecti
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
@@ -92,17 +93,44 @@ def _recorded_set_count(registry: Any, name: str) -> int:
 PLAN_STAGE_KEYS: Mapping[str, str] = {"allocation": "allocation", "risk_overlay": "risk"}
 
 
-def sweep_plan_name(case_study: str, label: str, stage: str) -> str:
+def predictions_identity(prediction_hashes: Collection[str] | None) -> str:
+    """A short, stable name for the set of prediction sets in force.
+
+    The plan names below carry it, which is what makes "has this sweep run against the
+    predictions in force" an equality rather than an inference. Every inference that was tried
+    instead answered one direction and missed the other: comparing a plan's members against the
+    current predictions catches a prediction the refit removed, and cannot see one it added,
+    because the backtests that would ride the new prediction do not exist until the sweep runs.
+    A digest of the whole set moves on either.
+
+    ``None`` means the case study declares no prediction populations, so there is no generation
+    for a plan to be behind, and every plan under that name is asked completeness only.
+    """
+    if prediction_hashes is None:
+        return "unrestricted"
+    joined = "\n".join(sorted(prediction_hashes))
+    return hashlib.sha256(joined.encode()).hexdigest()[:12]
+
+
+def sweep_plan_name(case_study: str, label: str, stage: str, predictions: str) -> str:
     """The official population a sweep publishes its planned backtests under.
 
     Owned here rather than built at each call site. The freeze and the four notebooks that
     rebuild the field live have to name the same populations, and a convention spelled out in
     five places is a convention that can differ in one of them.
+
+    ``predictions`` is :func:`predictions_identity` of the populations the sweep planned
+    against, so the name identifies one (label, stage, predictions) triple. A plan that is
+    absent under the current name is a sweep that has not run against the current predictions -
+    whether they were added to, removed from, or replaced wholesale - and the freeze declines
+    for the same reason it declines a sweep that never ran at all.
     """
-    return f"{case_study}-{PLAN_STAGE_KEYS[stage]}-{label}-v1"
+    return f"{case_study}-{PLAN_STAGE_KEYS[stage]}-{label}-{predictions}"
 
 
-def _plan_members(study: Study, case_study: str, label: str, stage: str) -> set[str] | None:
+def _plan_members(
+    study: Study, case_study: str, label: str, stage: str, predictions: str
+) -> set[str] | None:
     """The backtests a sweep planned, or ``None`` where this registry records no such plan.
 
     Absent is distinct from empty: ``create`` refuses an empty member list, so a recorded plan
@@ -111,42 +139,12 @@ def _plan_members(study: Study, case_study: str, label: str, stage: str) -> set[
     is never what decides a published membership.
     """
     try:
-        plan = OfficialPopulation.one(study, name=sweep_plan_name(case_study, label, stage))
+        plan = OfficialPopulation.one(
+            study, name=sweep_plan_name(case_study, label, stage, predictions)
+        )
     except (KeyError, ValueError, sqlite3.OperationalError):
         return None
     return set(plan.members)
-
-
-def _rides_current_predictions(
-    study: Study, members: Sequence[str], prediction_hashes: Collection[str]
-) -> bool:
-    """Whether *every* one of ``members`` is a backtest of a prediction still in force.
-
-    Every, not any. A refit does not have to replace a whole label at once, and a plan holding
-    a mix of current and superseded predictions is a plan whose sweep has not re-run - the
-    surviving members are the ones the refit happened not to touch. Accepting it on the
-    strength of those would freeze a field missing everything the refit did move.
-
-    A registry that cannot be read answers ``True``: the caller is deciding whether a plan is
-    stale, and an unreadable registry is not evidence that it is.
-    """
-    if not members:
-        return False
-    placeholders = ",".join("?" * len(members))
-    try:
-        with sqlite3.connect(
-            f"file:{study.root / 'run_log' / 'registry.db'}?mode=ro", uri=True
-        ) as db:
-            rows = db.execute(
-                f"SELECT backtest_hash, prediction_hash FROM backtest_runs "
-                f"WHERE backtest_hash IN ({placeholders})",
-                tuple(members),
-            ).fetchall()
-    except sqlite3.OperationalError:
-        return True
-    current = set(prediction_hashes)
-    riding = {member for member, prediction in rows if prediction in current}
-    return riding.issuperset(members)
 
 
 def unfinished_sweep_plans(
@@ -179,14 +177,15 @@ def unfinished_sweep_plans(
     there is no path that stops a label at its baseline. Should one ever be added, it has to
     publish that decision, because nothing in the rows distinguishes it from an unstarted run.
 
-    **Complete is not enough where predictions have been refitted.** A plan supersedes only when
-    its own sweep re-runs, so after a refit the previous generation is still the plan in force
-    under that name - and it is still complete, because its members are still registered. The
-    freeze would then seal a field holding current baselines and a superseded label's nothing.
-    A plan is therefore also asked whether every one of its backtests rides a prediction still
-    in force. Every, because a refit does not have to replace a whole label at once: a plan
-    holding a mix is one whose sweep has not re-run, and the members that survive are the ones
-    the refit happened not to touch.
+    **Which predictions a plan ran against is in its name, not inferred from its members.** A
+    plan supersedes only when its own sweep re-runs, so after a refit the previous generation
+    would otherwise still be the plan in force under a fixed name - and still complete, because
+    its members are still registered. Two inferences were tried and each answered one direction:
+    asking whether the members ride predictions still in force catches a prediction the refit
+    removed, and cannot see one it added, because the backtests that would ride a new prediction
+    do not exist until the sweep runs. The name carries :func:`predictions_identity` instead, so
+    a sweep that has not run against the predictions in force is simply absent under the name
+    being looked up, and absent is a case this already handles.
 
     Absent and incomplete are reported the same way on purpose. A plan that was never written
     is a sweep that either has not run or ran before plans were recorded, and neither is a
@@ -195,25 +194,15 @@ def unfinished_sweep_plans(
     ``OperationalError`` is caught alongside the rest because a registry that predates official
     populations has no table to query, which is an absent plan and not a broken one.
     """
+    predictions = predictions_identity(prediction_hashes)
     unfinished: list[str] = []
     for label in labels:
         for stage in stages:
-            name = sweep_plan_name(case_study, label, stage)
+            name = sweep_plan_name(case_study, label, stage, predictions)
             try:
-                plan = OfficialPopulation.one(study, name=name)
-                plan.require_complete()
+                OfficialPopulation.one(study, name=name).require_complete()
             except (KeyError, ValueError, sqlite3.OperationalError) as exc:
                 unfinished.append(f"{label} {stage} ({name}): {exc}")
-                continue
-            if prediction_hashes is not None and not _rides_current_predictions(
-                study, plan.members, prediction_hashes
-            ):
-                unfinished.append(
-                    f"{label} {stage} ({name}): plan {plan.hash} is complete, but not all of "
-                    f"its {len(plan.members)} backtests ride a prediction still in force, so it "
-                    "records a generation a refit has superseded, in whole or in part, and this "
-                    "sweep has not been re-run under the current predictions"
-                )
     return unfinished
 
 
@@ -263,6 +252,7 @@ def resolve_field_members(
     ``best_validation_sharpe`` rejects it for holding a member it cannot rank.
     """
     labels = sweep_labels(study)
+    predictions = predictions_identity(prediction_hashes)
     frames: list[pl.DataFrame] = []
     reached: dict[str, set[str]] = {label: set() for label in labels}
     for label in labels:
@@ -278,7 +268,7 @@ def resolve_field_members(
             if "sharpe" in rows.columns:
                 rows = rows.filter(pl.col("sharpe").is_not_null())
             if stage in PLAN_STAGE_KEYS:
-                admitted = _plan_members(study, case_study, label, stage)
+                admitted = _plan_members(study, case_study, label, stage, predictions)
                 if admitted is not None:
                     rows = rows.filter(pl.col("backtest_hash").is_in(list(admitted)))
             if rows.is_empty():

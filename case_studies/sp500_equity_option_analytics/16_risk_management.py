@@ -66,8 +66,10 @@ from case_studies.research import (
     candidate_set_supersedes,
     open_study,
     population_supersedes,
+    predictions_identity,
     resolve_field_members,
     sweep_labels,
+    sweep_plan_name,
     unfinished_sweep_plans,
 )
 from case_studies.utils.backtest_loaders import (
@@ -378,7 +380,11 @@ def execute_risk_plans(combo: dict, combo_plans: list[dict]) -> list[str]:
 # as finished on a plan it has already replaced.
 
 # %%
-RISK_POPULATION = f"{CASE_STUDY_ID}-risk-{RISK_LABEL}-v1"
+# The name carries which prediction sets the sweep planned against, for the reason
+# `15_portfolio_management` gives at its own plan.
+RISK_POPULATION = sweep_plan_name(
+    CASE_STUDY_ID, RISK_LABEL, "risk_overlay", predictions_identity(CURRENT_MEMBERS)
+)
 # The generation this run retires, per population name. A plan that has grown - a new carrier
 # advancing, another risk control declared - is a changed population under a live name and has
 # to say which one it replaces; the refusal prints the current hash.

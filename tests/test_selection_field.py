@@ -15,6 +15,7 @@ from case_studies.research.selection_field import (
     FIELD_STAGES,
     label_of,
     open_selection_field,
+    predictions_identity,
     resolve_field_members,
 )
 
@@ -272,7 +273,7 @@ def test_a_recorded_plan_decides_which_downstream_rows_are_eligible(tmp_path: Pa
     study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1", "c2"))
     _record_plan(
         study,
-        name="fixture-allocation-fwd_ret_5d-v1",
+        name=f"fixture-allocation-fwd_ret_5d-{predictions_identity(None)}",
         members=["fwd_ret_5d-allocation-c1"],
     )
 
@@ -300,12 +301,12 @@ def test_a_superseded_plan_does_not_admit_its_own_members(tmp_path: Path) -> Non
     study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1", "c2"))
     first = _record_plan(
         study,
-        name="fixture-risk-fwd_ret_5d-v1",
+        name=f"fixture-risk-fwd_ret_5d-{predictions_identity(None)}",
         members=["fwd_ret_5d-risk_overlay-c1"],
     )
     _record_plan(
         study,
-        name="fixture-risk-fwd_ret_5d-v1",
+        name=f"fixture-risk-fwd_ret_5d-{predictions_identity(None)}",
         members=["fwd_ret_5d-risk_overlay-c2"],
         supersedes=first,
     )
