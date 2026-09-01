@@ -67,7 +67,7 @@ SUPERSEDES_POPULATION: str | None = None
 # the same with the override as without, so this states what the published run already did.
 
 # %%
-study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE)
+study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE, entry_point="08_tabular_dl")
 requests = model_request_catalog("tabular_dl", labels=ALL_LABELS)
 resolved = resolve_model_requests(
     study,

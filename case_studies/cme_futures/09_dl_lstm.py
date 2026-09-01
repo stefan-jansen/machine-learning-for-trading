@@ -68,7 +68,7 @@ SUPERSEDES_POPULATION: str | None = None
 # so this names what the published run already did.
 
 # %%
-study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE)
+study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE, entry_point="09_dl_lstm")
 requests = model_request_catalog("deep_learning", labels=ALL_LABELS)
 resolved = resolve_model_requests(
     study,

@@ -65,7 +65,7 @@ SUPERSEDES_POPULATION: str | None = None
 # choosing, not a comment about it.
 
 # %%
-study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE)
+study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE, entry_point="10a_pca")
 requests = model_request_catalog(
     "latent_factors",
     labels=ALL_LABELS,

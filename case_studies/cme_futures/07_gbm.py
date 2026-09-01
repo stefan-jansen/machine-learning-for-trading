@@ -106,7 +106,9 @@ POPULATION_NAME = ""
 SUPERSEDES_POPULATION: str = "9f26b89f9310"
 
 # %%
-study = open_study("cme_futures", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
+study = open_study(
+    "cme_futures", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None, entry_point="07_gbm"
+)
 
 # %% [markdown]
 # ## 1. Which labels, and which models

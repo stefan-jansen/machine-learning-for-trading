@@ -91,7 +91,12 @@ WORKSPACE: str = ""
 # can quote whichever number they prefer.
 
 # %%
-study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
+study = open_study(
+    CASE_STUDY_ID,
+    execution_tier=EXECUTION_TIER,
+    workspace=WORKSPACE or None,
+    entry_point="17_holdout_predictions",
+)
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 
 

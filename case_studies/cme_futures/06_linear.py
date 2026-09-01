@@ -101,7 +101,12 @@ CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
 
 # %%
-study = open_study("cme_futures", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
+study = open_study(
+    "cme_futures",
+    execution_tier=EXECUTION_TIER,
+    workspace=WORKSPACE or None,
+    entry_point="06_linear",
+)
 
 # %% [markdown]
 # ## 1. Which label, and which models

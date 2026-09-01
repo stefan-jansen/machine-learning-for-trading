@@ -172,11 +172,10 @@ _REGISTERING_SUFFIXES = frozenset(
 # `sp500_equity_option_analytics` is not in this map: its ten registering notebooks all record
 # their stem, which is the value that answers the question the column exists for - which
 # notebook produced this row. `dl_lstm` names a model, and two notebooks in different case
-# studies can fit the same one. The remaining four entries are other case studies' to settle,
+# studies can fit the same one. The remaining three entries are other case studies' to settle,
 # and until they do, the fleet has both conventions in circulation - measured 2026-08-25, when
 # the only two non-NULL rows in all nine registries were `09_dl_lstm` and `dl_tsmixer`.
 _DL_FAMILY_ENTRY_POINTS = {
-    ("cme_futures", "09_dl_lstm"): "dl_lstm",
     ("etfs", "10_dl_tsmixer"): "dl_tsmixer",
     ("sp500_options", "09a_lstm"): "dl_lstm",
     ("sp500_options", "09b_patchtst"): "dl_patchtst",
