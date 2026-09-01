@@ -64,6 +64,7 @@ from case_studies.research import (
     Study,
     candidate_set_supersedes,
     open_study,
+    resolve_field_members,
     sweep_labels,
 )
 from case_studies.utils.backtest_loaders import (
@@ -605,39 +606,21 @@ SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
 CANDIDATE_SET_NAME = f"{CASE_STUDY_ID}:holdout-candidates"
 candidate_stages = ("signal", "allocation", "risk_overlay")
 CANDIDATE_LABELS = sweep_labels(_study)
-_per_label_pools = {
-    label: pl.concat(
-        [
-            resolve_best_backtest_runs(
-                CASE_STUDY_ID,
-                label,
-                split="validation",
-                stage=stage,
-                top_n=9999,
-                prediction_hashes=CURRENT_MEMBERS,
-            )
-            for stage in candidate_stages
-        ],
-        how="diagonal_relaxed",
-    ).unique("backtest_hash")
-    for label in CANDIDATE_LABELS
-}
-frozen_pool = pl.concat(_per_label_pools.values(), how="diagonal_relaxed").unique("backtest_hash")
-# A label with no rows is a stage that has not run for it, not an empty answer. Freezing anyway
-# would publish a field that silently excludes it and hand the holdout a selection made over
-# part of the case study.
-_empty = [label for label, pool in _per_label_pools.items() if pool.height == 0]
-if _empty:
-    raise RuntimeError(
-        f"declared labels {_empty} have no validation backtests in {candidate_stages}, so the "
-        "holdout field cannot be frozen over every label this case study publishes"
-    )
+# One construction, shared with the four stages that read this field. `resolve_field_members`
+# requires every declared label to have eligible rows in EVERY stage, not merely somewhere
+# across the three: during a sequential per-label run a label's baselines register before its
+# overlays do, and freezing at that moment publishes an immutable field missing them that no
+# later run can correct.
+frozen_pool = resolve_field_members(
+    _study,
+    case_study=CASE_STUDY_ID,
+    prediction_hashes=CURRENT_MEMBERS,
+    resolve_best_backtest_runs=resolve_best_backtest_runs,
+    stages=candidate_stages,
+)
 print(
     f"Field to freeze: {frozen_pool.height} eligible validation backtests "
     f"across {candidate_stages} and {len(CANDIDATE_LABELS)} labels"
-)
-pl.DataFrame(
-    [{"label": label, "backtests": pool.height} for label, pool in _per_label_pools.items()]
 )
 
 try:

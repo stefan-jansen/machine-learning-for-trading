@@ -61,7 +61,7 @@ warnings.filterwarnings("ignore")
 # registry artifacts without launching another training or evaluation run.
 
 # %%
-from case_studies.research import CandidateSet, Study
+from case_studies.research import CandidateSet, Study, open_selection_field
 from case_studies.research.holdout import build_holdout_training_spec
 from case_studies.utils.backtest_loaders import get_backtest_config
 from case_studies.utils.backtest_presets import (
@@ -103,12 +103,16 @@ SEED = 42
 CASE_DIR = get_case_study_dir(CASE_STUDY)
 REGISTRY_DB = CASE_DIR / "run_log" / "registry.db"
 bt_config = get_backtest_config(CASE_STUDY)
-LABEL = bt_config.primary_label
+# The label this stage runs under is a property of what the selection chose, so it is resolved
+# below rather than here. `labels.primary` was the winner's label only by coincidence: the field
+# spans every declared label, and the stages after the selection - price windows, schedule
+# thinning, the return contract - have to be keyed to the label that won.
+REQUESTED_LABEL = ""
 PERIODS_PER_YEAR = periods_per_year_from_setup(CASE_STUDY)
 CONFIGURED_COST_BPS = bt_config.commission_bps + bt_config.slippage_bps
 set_global_seeds(SEED)
 
-print(f"Case study: {CASE_STUDY}; corrected label: {LABEL}; mode: registry read-only")
+print(f"Case study: {CASE_STUDY}; mode: registry read-only")
 
 # %% [markdown]
 # ## 1. Reconstruct the corrected carrier
@@ -153,100 +157,41 @@ if CURRENT_MEMBERS is not None:
 
 # %%
 CANDIDATE_SET_NAME = f"{CASE_STUDY}:holdout-candidates"
-# The frozen set where it exists, and the rule it was frozen under where it does not.
+# The frozen set where it exists, and the same construction applied live where it does not.
 # 16_risk_management writes it by opening the study, which canonical regeneration refuses
 # wherever the generated directories are not symlinks - a reader's clean clone and the test
 # fixtures both - so the set is in the published run log and absent everywhere else. Reading it
 # is the stronger path: it is immutable, so it cannot follow an upstream change. Re-deriving is
 # the same rule applied live, and cannot notice that something moved. Which one ran is printed.
-# Whether the name is recorded at all is asked of the registry directly, rather than inferred
-# from an exception. `CandidateSet.one` raises ValueError for two unrelated conditions - the
-# name resolves to no unsuperseded set, and it resolves to several - and only the first means
-# "this registry has no frozen selection". Catching both would send an AMBIGUOUS set, which is
-# a refit that left two generations live and needs a person to say which supersedes which,
-# silently down the live-ranking path. So the fallback is chosen on absence, and every way a
-# recorded set can be wrong propagates from the unguarded call below.
-# The same database the resolution reads: this notebook opens with `Study.at(CASE_DIR)`, which
-# never activates and roots the study at that directory, so `_study.root` IS `CASE_DIR`.
-try:
-    with sqlite3.connect(REGISTRY_DB) as _db:
-        _recorded_sets = _db.execute(
-            "SELECT COUNT(*) FROM candidate_sets WHERE name = ?", (CANDIDATE_SET_NAME,)
-        ).fetchone()[0]
-except sqlite3.OperationalError:
-    # No `candidate_sets` table: a registry that predates them, or a reader's clean clone.
-    _recorded_sets = 0
+#
+# Both paths go through `open_selection_field`, which is also what 16 freezes with. They used to
+# be separate copies and they disagreed: the freeze spanned every declared label and this
+# fallback spanned one, so which configuration a reader selected depended on whether their
+# registry held a `candidate_sets` table.
+FIELD = open_selection_field(
+    _study,
+    case_study=CASE_STUDY,
+    name=CANDIDATE_SET_NAME,
+    prediction_hashes=CURRENT_MEMBERS,
+    resolve_best_backtest_runs=resolve_best_backtest_runs,
+)
+CANDIDATES = FIELD.candidate_set
+SELECTED = FIELD.selected
+FIELD_HASHES = list(FIELD.members)
+FIELD_NAME = f"frozen candidate set {CANDIDATES.hash}" if CANDIDATES is not None else "live ranking"
+SELECTION_SOURCE = FIELD.source
 
-if _recorded_sets:
-    CANDIDATES = CandidateSet.one(_study, name=CANDIDATE_SET_NAME)
-    if CANDIDATES.member_kind != "backtest":
-        raise RuntimeError(
-            f"candidate set {CANDIDATES.hash} holds {CANDIDATES.member_kind} members; "
-            "the holdout selection requires backtests"
-        )
-    SELECTED = CANDIDATES.best_validation_sharpe()
-    FIELD_HASHES = list(CANDIDATES.members)
-    FIELD_NAME = f"frozen candidate set {CANDIDATES.hash}"
-    SELECTION_SOURCE = f"{FIELD_NAME} ({len(FIELD_HASHES)} members)"
-else:
-    _live = pl.concat(
-        [
-            resolve_best_backtest_runs(
-                CASE_STUDY,
-                LABEL,
-                split="validation",
-                stage=stage,
-                top_n=9999,
-                prediction_hashes=prediction_members_in_force(_study)[0],
-            )
-            for stage in ("signal", "allocation", "risk_overlay")
-        ],
-        how="diagonal_relaxed",
-    ).unique("backtest_hash")
-    if _live.is_empty():
-        raise RuntimeError(
-            f"no candidate set {CANDIDATE_SET_NAME!r} in this registry and no eligible "
-            "validation backtests to rank, so there is no selection to carry forward"
-        )
-    # The same eligibility the freeze applies, to the whole field and not only to its top row.
-    # `CandidateSet.create` refuses partial members, so a frozen field is complete by
-    # construction and everything downstream may assume it; `resolve_best_backtest_runs` ranks
-    # on registered metrics and applies no such filter. Checking only the selection would leave
-    # the two fields different in exactly the way that matters to a reader of `FIELD_HASHES` -
-    # 20_strategy_analysis opens every member of it. So every candidate is checked, which costs
-    # one open per row on a path that runs only where no frozen set exists.
-    _complete: list[tuple[str, object]] = []
-    _incomplete: list[str] = []
-    # A candidate with no registered Sharpe cannot be ranked, so it is not eligible - and
-    # `completeness()` does not catch it, because a backtest is complete once a metrics ROW
-    # exists whether or not that row carries a Sharpe. Polars sorts nulls first on a descending
-    # sort, so without this a null-Sharpe row would sort above every real one and be selected.
-    _rankable = _live.filter(pl.col("sharpe").is_not_null())
-    _unrankable = _live.height - _rankable.height
-    if _unrankable:
-        print(f"Excluded {_unrankable} backtest(s) with no registered Sharpe from the field")
-    for _row in _rankable.sort("sharpe", descending=True, nulls_last=True).iter_rows(named=True):
-        _result = _study.results.open(_row["backtest_hash"])
-        _reason = _result.completeness()
-        if _reason is None:
-            _complete.append((_row["backtest_hash"], _result))
-        else:
-            _incomplete.append(f"{_row['backtest_hash']} ({_reason})")
-    if not _complete:
-        raise RuntimeError(
-            f"none of the {_live.height} eligible validation backtests is both rankable and "
-            "complete, so there is no selection to carry forward: " + "; ".join(_incomplete[:5])
-        )
-    if _incomplete:
-        print(
-            f"Excluded {len(_incomplete)} incomplete backtest(s) from the field: "
-            + "; ".join(_incomplete[:3])
-            + ("" if len(_incomplete) <= 3 else f"; and {len(_incomplete) - 3} more")
-        )
-    SELECTED = _complete[0][1]
-    FIELD_HASHES = [hash_ for hash_, _ in _complete]
-    FIELD_NAME = "live ranking (no frozen set in this registry)"
-    SELECTION_SOURCE = f"{FIELD_NAME} over {len(FIELD_HASHES)} eligible backtests"
+# The label the stages after the selection run under is the winner's, not the case study's
+# primary. An injected LABEL is a request to run a different one, and it has to agree with what
+# was selected or the analysis would be keyed to a contract the selection does not name.
+LABEL = FIELD.label
+if REQUESTED_LABEL and REQUESTED_LABEL != LABEL:
+    raise RuntimeError(
+        f"LABEL={REQUESTED_LABEL!r} was requested but the selection carried forward is "
+        f"{SELECTED.hash} on {LABEL!r}. Running the analysis under another "
+        "label's contract would report a different strategy from the one selected."
+    )
+print(f"Label carried by the selection: {LABEL}")
 print(f"Selection read from the {SELECTION_SOURCE}")
 
 _why = SELECTED.completeness()

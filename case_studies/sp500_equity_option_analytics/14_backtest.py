@@ -18,9 +18,11 @@
 #
 # **Chapter 16 - Strategy Simulation**
 #
-# This notebook translates validation predictions into weekly, long-only equity
-# portfolios and evaluates the equal-weight top-$K$ baseline. Option-derived
-# features are predictive inputs only; the strategy trades equities.
+# This notebook translates validation predictions into long-only equity portfolios on the
+# label's own decision grid - `decision.cadence_by_label` puts the two 10-day labels on a
+# biweekly schedule and leaves the 5-day ones weekly - and evaluates the equal-weight top-$K$
+# baseline. The resolved cadence is printed in the term sheet below. Option-derived features are
+# predictive inputs only; the strategy trades equities.
 #
 # **Learning objectives**
 #

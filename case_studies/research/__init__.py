@@ -65,6 +65,13 @@ from .results import (
     Result,
     TrainingResult,
 )
+from .selection_field import (
+    FIELD_STAGES,
+    SelectionField,
+    label_of,
+    open_selection_field,
+    resolve_field_members,
+)
 from .strategy import Strategy, strategy_warmup_periods
 from .workspace import Study, open_study
 
@@ -125,6 +132,11 @@ __all__ = [
     "prediction_rows_at",
     "primary_label",
     "candidate_set_supersedes",
+    "FIELD_STAGES",
+    "SelectionField",
+    "label_of",
+    "open_selection_field",
+    "resolve_field_members",
     "population_supersedes",
     "research_name",
     "resolved_model_plan",
