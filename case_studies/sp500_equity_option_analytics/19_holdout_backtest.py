@@ -74,7 +74,6 @@ from case_studies.utils.registry import (
     resolve_best_backtest_runs,
 )
 from case_studies.utils.registry.specs import training_hash_from_spec
-from case_studies.utils.sweep_config import get_top_n_predictions
 from case_studies.utils.uncertainty import load_daily_returns_with_timestamp
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE, add_message_title
@@ -140,10 +139,6 @@ FIELD = open_selection_field(
     name=CANDIDATE_SET_NAME,
     prediction_hashes=CURRENT_MEMBERS,
     resolve_best_backtest_runs=resolve_best_backtest_runs,
-    stage_cuts={
-        stage: get_top_n_predictions(CASE_STUDY_ID, stage)
-        for stage in ("allocation", "risk_overlay")
-    },
 )
 CANDIDATES = FIELD.candidate_set
 SELECTED = FIELD.selected

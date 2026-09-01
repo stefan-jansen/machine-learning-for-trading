@@ -71,6 +71,7 @@ from .selection_field import (
     label_of,
     open_selection_field,
     resolve_field_members,
+    unfinished_sweep_plans,
 )
 from .strategy import Strategy, strategy_warmup_periods
 from .workspace import Study, open_study
@@ -137,6 +138,7 @@ __all__ = [
     "label_of",
     "open_selection_field",
     "resolve_field_members",
+    "unfinished_sweep_plans",
     "population_supersedes",
     "research_name",
     "resolved_model_plan",

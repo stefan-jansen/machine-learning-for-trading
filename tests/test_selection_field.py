@@ -12,7 +12,6 @@ import pytest
 from case_studies.research.selection_field import (
     COVERAGE_STAGE,
     FIELD_STAGES,
-    config_counts,
     label_of,
     resolve_field_members,
 )
@@ -135,9 +134,10 @@ def test_a_dominated_label_may_stop_after_the_baselines(tmp_path: Path) -> None:
     demanding every label in every stage would order backtests whose only purpose is filling a
     matrix, and would refuse to freeze a field that is finished.
 
-    Nothing records that the drop was a decision, so this is also the shape of a sweep that has
-    not started. The two are indistinguishable in the registry and the caller is left to say
-    which it is - the counted checks below are the ones that can be answered.
+    Nothing in the rows records that the drop was a decision, so this is also the shape of a
+    sweep that has not started. Neither this function nor any other reading of the registry can
+    separate them; what does is the plan each sweep records before it runs, checked by the
+    notebook that freezes the field.
     """
     study = _study_at(tmp_path, primary="fwd_ret_5d", variants=["fwd_ret_21d"])
 
@@ -151,92 +151,11 @@ def test_a_dominated_label_may_stop_after_the_baselines(tmp_path: Path) -> None:
         case_study="fixture",
         prediction_hashes=None,
         resolve_best_backtest_runs=resolver,
-        stage_cuts={"allocation": 1, "risk_overlay": 1},
     )
     assert set(field["backtest_hash"]) == {
         f"fwd_ret_5d-{COVERAGE_STAGE}-c1",
         *(f"fwd_ret_21d-{stage}-c1" for stage in FIELD_STAGES),
     }
-
-
-def test_a_stage_short_of_its_cut_refuses_to_freeze(tmp_path: Path) -> None:
-    """Presence at a stage is not evidence the sweep through it finished.
-
-    ``fwd_ret_21d`` carries two of the ten configurations allocation admits, which is a sweep
-    interrupted after its second. Every stage is present for every label, so the reading that
-    asks only whether a stage was reached sees a complete field and freezes eight candidates
-    out of it permanently.
-    """
-    study = _study_at(
-        tmp_path,
-        primary="fwd_ret_5d",
-        variants=["fwd_ret_21d"],
-        configs=tuple(f"c{i}" for i in range(1, 11)),
-    )
-    every = tuple(f"c{i}" for i in range(1, 11))
-
-    def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
-        if label == "fwd_ret_21d" and stage == "allocation":
-            return _rows(label, stage, configs=("c1", "c2"))
-        if stage == "risk_overlay":
-            return _rows(label, stage, configs=("c1",))
-        return _rows(label, stage, configs=every)
-
-    with pytest.raises(RuntimeError, match="2 of 10 configurations"):
-        resolve_field_members(
-            study,
-            case_study="fixture",
-            prediction_hashes=None,
-            resolve_best_backtest_runs=resolver,
-            stage_cuts={"allocation": 10, "risk_overlay": 1},
-        )
-
-
-def test_the_cut_is_read_per_stage_not_once(tmp_path: Path) -> None:
-    """Allocation advances ten configurations and the overlay advances one.
-
-    Holding the overlay to allocation's cut would refuse every finished case study, which is
-    the failure a single pooled cut produces.
-    """
-    study = _study_at(
-        tmp_path,
-        primary="fwd_ret_5d",
-        variants=["fwd_ret_21d"],
-        configs=tuple(f"c{i}" for i in range(1, 11)),
-    )
-    every = tuple(f"c{i}" for i in range(1, 11))
-
-    def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
-        if stage == "risk_overlay":
-            return _rows(label, stage, configs=("c1",))
-        return _rows(label, stage, configs=every)
-
-    field = resolve_field_members(
-        study,
-        case_study="fixture",
-        prediction_hashes=None,
-        resolve_best_backtest_runs=resolver,
-        stage_cuts={"allocation": 10, "risk_overlay": 1},
-    )
-    assert field.height == 2 * (2 * len(every) + 1)
-
-
-def test_config_counts_reads_the_registry_not_the_resolver_frame(tmp_path: Path) -> None:
-    """The count under test comes from the join the notebooks run.
-
-    ``resolve_best_backtest_runs`` returns ``backtest_hash``, ``prediction_hash``,
-    ``spec_json`` and ``sharpe`` and nothing else, so a count taken off its frame is a count of
-    rows. Three rows here are two configurations.
-    """
-    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1", "c2"))
-    registry = study.root / "run_log" / "registry.db"
-    hashes = [
-        _prediction_hash("fwd_ret_5d", "c1"),
-        _prediction_hash("fwd_ret_5d", "c1"),
-        _prediction_hash("fwd_ret_5d", "c2"),
-    ]
-    assert config_counts(registry, hashes) == 2
-    assert config_counts(registry, []) == 0
 
 
 def test_a_label_with_no_baseline_refuses_to_freeze(tmp_path: Path) -> None:
@@ -281,29 +200,6 @@ def test_label_comes_from_the_winner_not_the_primary(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="no label in this registry"):
         label_of(study, _Result("absent"))
-
-
-def test_a_label_part_way_through_advancing_refuses_to_freeze(tmp_path: Path) -> None:
-    """Neither a decision nor coverage: a sweep still running.
-
-    A label that stops at the baseline was dropped there. A label that reached allocation and
-    not risk overlay is mid-sweep, and freezing now would permanently exclude the risk
-    candidates it is about to produce - the set is immutable under its name.
-    """
-    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=["fwd_ret_21d"])
-
-    def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
-        if label == "fwd_ret_21d" and stage == "risk_overlay":
-            return _rows(label, stage).clear()
-        return _rows(label, stage)
-
-    with pytest.raises(RuntimeError, match="part-way through advancing"):
-        resolve_field_members(
-            study,
-            case_study="fixture",
-            prediction_hashes=None,
-            resolve_best_backtest_runs=resolver,
-        )
 
 
 def test_an_unrankable_row_does_not_satisfy_coverage(tmp_path: Path) -> None:

@@ -86,7 +86,6 @@ from case_studies.utils.backtest_presets import strategy_view
 from case_studies.utils.notebook_contracts import prediction_members_in_force
 from case_studies.utils.registry import resolve_best_backtest_runs
 from case_studies.utils.registry.specs import training_hash_from_spec
-from case_studies.utils.sweep_config import get_top_n_predictions
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "sp500_equity_option_analytics"
@@ -161,10 +160,6 @@ FIELD = open_selection_field(
     name=CANDIDATE_SET_NAME,
     prediction_hashes=prediction_members_in_force(study)[0],
     resolve_best_backtest_runs=resolve_best_backtest_runs,
-    stage_cuts={
-        stage: get_top_n_predictions(CASE_STUDY_ID, stage)
-        for stage in ("allocation", "risk_overlay")
-    },
 )
 CANDIDATES = FIELD.candidate_set
 SELECTED = FIELD.selected

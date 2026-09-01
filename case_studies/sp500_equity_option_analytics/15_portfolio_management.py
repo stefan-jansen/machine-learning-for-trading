@@ -50,7 +50,7 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 
-from case_studies.research import Study
+from case_studies.research import OfficialPopulation, Study, open_study, population_supersedes
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
     load_backtest_prices_for,
@@ -257,6 +257,53 @@ for index, row in enumerate(planned, start=1):
 if failures:
     raise RuntimeError("Allocation sweep failures:\n" + "\n".join(failures))
 print(f"Allocation surface complete in {(time.monotonic() - started):.1f}s")
+
+# %% [markdown]
+# ### Record the grid that was run
+#
+# `planned` is every backtest this sweep intends to register, identified before any of them
+# executed, and the loop above raises rather than dropping one. Publishing that list as an
+# official population is what lets the freeze in `16_risk_management` tell an interrupted sweep
+# from a finished one - which no reading of the registered rows can do, because an interruption
+# leaves rows that look exactly like a smaller finished grid whether they are counted as rows,
+# as model configurations, or as stages present. An interrupted run reaches neither this cell
+# nor the population, which is the answer the freeze needs.
+#
+# Writing it activates the study, so it happens here rather than earlier: activation rewrites
+# `ML4T_OUTPUT_DIR` process-wide, and the sweep above must resolve its artifacts through the
+# same directory it read its prices and predictions from. A reader's clean clone has no
+# writable registry and reports that instead of failing; it has no field to freeze either.
+
+# %%
+ALLOCATION_POPULATION = f"{CASE_STUDY_ID}-allocation-{ALLOCATION_LABEL}-v1"
+# The generation this run retires, per population name. A plan that has grown - a new
+# configuration advancing, a widened top-k grid - is a changed population under a live name and
+# has to say which one it replaces; the refusal prints the current hash. Absent for a name this
+# registry has never held, which is every clean clone and every first run of a label.
+SUPERSEDES_ALLOCATION_POPULATIONS: dict[str, str] = {}
+
+try:
+    _writable = open_study(CASE_STUDY_ID, entry_point="15_portfolio_management")
+except PermissionError as exc:
+    print(f"Not recording the allocation plan here: {exc}")
+else:
+    if _writable.root != CASE_DIR:
+        raise RuntimeError(
+            f"15 ran its sweep against {CASE_DIR} but opened a study rooted at {_writable.root}. "
+            "Recording the plan there would describe a registry this run did not write."
+        )
+    _plan = OfficialPopulation.create(
+        _writable,
+        name=ALLOCATION_POPULATION,
+        member_kind="backtest",
+        members=[row["backtest_hash"] for row in planned],
+        supersedes=population_supersedes(
+            _writable,
+            name=ALLOCATION_POPULATION,
+            declared=SUPERSEDES_ALLOCATION_POPULATIONS.get(ALLOCATION_POPULATION),
+        ),
+    )
+    print(f"Allocation plan {ALLOCATION_POPULATION}: {_plan.hash}, {len(planned)} backtests")
 
 # %% [markdown]
 # ## 3. Compare the active allocation surface

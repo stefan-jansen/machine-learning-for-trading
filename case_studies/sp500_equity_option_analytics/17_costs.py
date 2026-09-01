@@ -170,10 +170,6 @@ FIELD = open_selection_field(
     name=CANDIDATE_SET_NAME,
     prediction_hashes=_members,
     resolve_best_backtest_runs=resolve_best_backtest_runs,
-    stage_cuts={
-        stage: get_top_n_predictions(CASE_STUDY_ID, stage)
-        for stage in ("allocation", "risk_overlay")
-    },
 )
 CANDIDATES = FIELD.candidate_set
 SELECTED = FIELD.selected

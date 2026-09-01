@@ -61,11 +61,14 @@ warnings.filterwarnings("ignore")
 # %%
 from case_studies.research import (
     CandidateSet,
+    OfficialPopulation,
     Study,
     candidate_set_supersedes,
     open_study,
+    population_supersedes,
     resolve_field_members,
     sweep_labels,
+    unfinished_sweep_plans,
 )
 from case_studies.utils.backtest_loaders import (
     VECTORIZED_CASE_STUDIES,
@@ -378,6 +381,47 @@ if failures:
 print(f"Risk surface complete in {(time.monotonic() - started):.1f}s")
 
 # %% [markdown]
+# ### Record the grid that was run
+#
+# `plans` is every overlay backtest this sweep intends to register, identified before any of
+# them executed, and the loop above raises rather than dropping one. Publishing it as an
+# official population is what lets the freeze below tell an interrupted sweep from a finished
+# one. No reading of the registered rows can: an interruption leaves rows that look exactly
+# like a smaller finished grid, whether they are counted as rows, as model configurations, or
+# as stages present. An interrupted run reaches neither this cell nor the population.
+
+# %%
+RISK_POPULATION = f"{CASE_STUDY_ID}-risk-{RISK_LABEL}-v1"
+# The generation this run retires, per population name. A plan that has grown - a new carrier
+# advancing, another risk control declared - is a changed population under a live name and has
+# to say which one it replaces; the refusal prints the current hash.
+SUPERSEDES_RISK_POPULATIONS: dict[str, str] = {}
+
+try:
+    _risk_writable = open_study(CASE_STUDY_ID, entry_point="16_risk_management")
+except PermissionError as exc:
+    print(f"Not recording the risk plan here: {exc}")
+else:
+    if _risk_writable.root != CASE_DIR:
+        raise RuntimeError(
+            f"16 ran its sweep against {CASE_DIR} but opened a study rooted at "
+            f"{_risk_writable.root}. Recording the plan there would describe a registry this "
+            "run did not write."
+        )
+    _risk_plan = OfficialPopulation.create(
+        _risk_writable,
+        name=RISK_POPULATION,
+        member_kind="backtest",
+        members=[plan["backtest_hash"] for plan in plans],
+        supersedes=population_supersedes(
+            _risk_writable,
+            name=RISK_POPULATION,
+            declared=SUPERSEDES_RISK_POPULATIONS.get(RISK_POPULATION),
+        ),
+    )
+    print(f"Risk plan {RISK_POPULATION}: {_risk_plan.hash}, {len(plans)} backtests")
+
+# %% [markdown]
 # ## 3. Measure paired overlay effects
 #
 # The registry query is keyed by the hashes planned above. Each overlay's
@@ -590,11 +634,15 @@ fig_tradeoff.show()
 # generation it replaces. Keyed by the full set name because that is what the refusal prints.
 # Resolved through `candidate_set_supersedes` rather than passed straight to `create`: a
 # reader's clean clone has no generation to supersede, and `create` refuses a first version that
-# claims to replace one. `328d2009685c` is the single-label field frozen on 2026-08-30, before
-# the four variant labels had baseline, allocation or overlay rows. It stays readable by hash,
-# which is what keeps the holdout registered against it traceable to the field it actually saw.
+# claims to replace one. Two generations precede this one and both stay readable by hash, which
+# is what keeps a holdout registered against either traceable to the field it actually saw:
+# `328d2009685c` is the single-label field frozen on 2026-08-30, before the four variant labels
+# had baseline, allocation or overlay rows; `aa6b3986124b` replaced it on 2026-09-01 under a
+# per-stage count of advancing configurations, which admitted a label whose sweep had produced
+# one row per configuration and stopped. Only the tip is declarable - `create` refuses anything
+# else and names the tip - so this value moves on every generation.
 SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
-    "sp500_equity_option_analytics:holdout-candidates": "328d2009685c",
+    "sp500_equity_option_analytics:holdout-candidates": "aa6b3986124b",
 }
 
 # %% [markdown]
@@ -606,21 +654,17 @@ SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
 CANDIDATE_SET_NAME = f"{CASE_STUDY_ID}:holdout-candidates"
 candidate_stages = ("signal", "allocation", "risk_overlay")
 CANDIDATE_LABELS = sweep_labels(_study)
-# One construction, shared with the four stages that read this field. `resolve_field_members`
-# requires every declared label to have eligible rows in EVERY stage, not merely somewhere
-# across the three: during a sequential per-label run a label's baselines register before its
-# overlays do, and freezing at that moment publishes an immutable field missing them that no
-# later run can correct.
+# One construction, shared with the four stages that read this field. It requires every
+# declared label to have rankable baseline rows, because every label is backtested equal-weight
+# and an absent one means the baseline sweep is unfinished. Whether the stages past the baseline
+# finished is decided below, against the recorded plans, because no reading of the rows can
+# answer it.
 frozen_pool = resolve_field_members(
     _study,
     case_study=CASE_STUDY_ID,
     prediction_hashes=CURRENT_MEMBERS,
     resolve_best_backtest_runs=resolve_best_backtest_runs,
     stages=candidate_stages,
-    stage_cuts={
-        stage: get_top_n_predictions(CASE_STUDY_ID, stage)
-        for stage in ("allocation", "risk_overlay")
-    },
 )
 print(
     f"Field to freeze: {frozen_pool.height} eligible validation backtests "
@@ -650,39 +694,81 @@ else:
             "will not find it, and check its members against different artifacts than they "
             "will read."
         )
-    members = [
-        writable.results.open(backtest_hash)
-        for backtest_hash in frozen_pool["backtest_hash"].to_list()
-    ]
-    # Named here rather than left to `create`, which reports the first partial member and stops.
-    # A field that cannot be frozen is a field the holdout stage cannot select from, so what a
-    # reader needs is how many members are unusable and why, not the first one alphabetically.
-    incomplete = [
-        (member.hash, reason) for member in members if (reason := member.completeness()) is not None
-    ]
-    if incomplete:
-        raise RuntimeError(
-            f"{len(incomplete)} of {len(members)} eligible backtests are incomplete, so the "
-            "field cannot be frozen: "
-            + "; ".join(f"{hash_} ({reason})" for hash_, reason in incomplete[:5])
-            + ("" if len(incomplete) <= 5 else f"; and {len(incomplete) - 5} more")
-        )
-    holdout_candidates = CandidateSet.create(
+    # Every declared label's sweeps have to be finished, and finished is `require_complete` on
+    # the plan each sweep recorded, not a reading of the rows it left. The set is immutable
+    # under its name, so a label whose allocation or overlay sweep has not run yet would be
+    # frozen out permanently, and a sweep interrupted part-way is indistinguishable from a
+    # smaller finished one by rows, by configurations, or by which stages are present.
+    #
+    # This is also what sequences a per-label run without any coordination: 15 and 16 run for
+    # each label in turn, every run but the last finds a plan missing and declines to freeze,
+    # and the last one freezes the whole field. Declining is not a failure - the notebook has
+    # done its own label's work either way, and the set is written exactly once.
+    # Every declared label's sweeps have to be finished, and finished is `require_complete` on
+    # the plan each sweep recorded, not a reading of the rows it left. The set is immutable
+    # under its name, so a label whose allocation or overlay sweep has not run yet would be
+    # frozen out permanently, and a sweep interrupted part-way is indistinguishable from a
+    # smaller finished one by rows, by configurations, or by which stages are present.
+    #
+    # This is also what sequences a per-label run without any coordination: 15 and 16 run for
+    # each label in turn, every run but the last finds a plan missing and declines to freeze,
+    # and the last one freezes the whole field. Declining is not a failure - the notebook has
+    # done its own label's work either way, and the set is written exactly once.
+    unfinished = unfinished_sweep_plans(
         writable,
-        name=CANDIDATE_SET_NAME,
-        members=members,
-        comparison_contract={"comparable_fields": ["label_artifact", "feature_artifacts", "cv"]},
-        supersedes=candidate_set_supersedes(
+        plan_names={
+            f"{label} {stage}": f"{CASE_STUDY_ID}-{key}-{label}-v1"
+            for label in CANDIDATE_LABELS
+            for stage, key in (("allocation", "allocation"), ("risk_overlay", "risk"))
+        },
+    )
+
+    if unfinished:
+        holdout_candidates = None
+        print(
+            f"Not freezing a candidate set here: {len(unfinished)} of "
+            f"{2 * len(CANDIDATE_LABELS)} recorded sweep plans are absent or incomplete, so "
+            "the field is still being produced. Run 15 and 16 for each declared label; the "
+            "last of those runs freezes the set.\n  " + "\n  ".join(unfinished)
+        )
+    else:
+        members = [
+            writable.results.open(backtest_hash)
+            for backtest_hash in frozen_pool["backtest_hash"].to_list()
+        ]
+        # Named here rather than left to `create`, which reports the first partial member and stops.
+        # A field that cannot be frozen is a field the holdout stage cannot select from, so what a
+        # reader needs is how many members are unusable and why, not the first one alphabetically.
+        incomplete = [
+            (member.hash, reason)
+            for member in members
+            if (reason := member.completeness()) is not None
+        ]
+        if incomplete:
+            raise RuntimeError(
+                f"{len(incomplete)} of {len(members)} eligible backtests are incomplete, so the "
+                "field cannot be frozen: "
+                + "; ".join(f"{hash_} ({reason})" for hash_, reason in incomplete[:5])
+                + ("" if len(incomplete) <= 5 else f"; and {len(incomplete) - 5} more")
+            )
+        holdout_candidates = CandidateSet.create(
             writable,
             name=CANDIDATE_SET_NAME,
-            declared=SUPERSEDES_CANDIDATE_SETS.get(CANDIDATE_SET_NAME),
-        ),
-    )
-    frozen_selection = holdout_candidates.best_validation_sharpe()
-    print(
-        f"Frozen candidate set {holdout_candidates.hash}: {len(holdout_candidates.members)} members"
-    )
-    print(f"Validation-selected backtest: {frozen_selection.hash}")
+            members=members,
+            comparison_contract={
+                "comparable_fields": ["label_artifact", "feature_artifacts", "cv"]
+            },
+            supersedes=candidate_set_supersedes(
+                writable,
+                name=CANDIDATE_SET_NAME,
+                declared=SUPERSEDES_CANDIDATE_SETS.get(CANDIDATE_SET_NAME),
+            ),
+        )
+        frozen_selection = holdout_candidates.best_validation_sharpe()
+        print(
+            f"Frozen candidate set {holdout_candidates.hash}: {len(holdout_candidates.members)} members"
+        )
+        print(f"Validation-selected backtest: {frozen_selection.hash}")
 
 # %% [markdown]
 # ## Key takeaways
