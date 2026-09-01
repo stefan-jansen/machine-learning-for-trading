@@ -1118,6 +1118,38 @@ def test_score_weighted_allocation_reweights_an_equal_weight_entry(tmp_path: Pat
     assert weights["B"] == pytest.approx(0.25)
 
 
+def test_allocator_weights_do_not_depend_on_the_order_the_cohorts_arrive_in(
+    tmp_path: Path,
+) -> None:
+    """The same cohort, listed in two orders, has to size to the same numbers.
+
+    `score_weighted` divides each score by the sum of the scores on that date, and
+    floating-point addition is not associative, so a summation order that follows the
+    row order puts the difference in the weights. The rows reach the allocator through
+    a `unique`, which returns them in whatever order its hash pass produced. That made
+    one request resolve to two different decision sets on two runs, and the
+    clean-process replay in `run_official_backtest_requests` refuses exactly that.
+
+    The scores are spread far enough apart that one ULP of the sum is visible in the
+    weights, which is why this compares exactly rather than approximately.
+    """
+    cohorts = pl.DataFrame(
+        {
+            "timestamp": [date(2024, 1, 5)] * 4,
+            "symbol": ["D", "C", "B", "A"],
+            "y_score": [1e16, 1.0, 1.0, 1.0],
+            "weight": [0.25] * 4,
+        }
+    )
+    spec = {"method": "score_weighted", "top_k": 4}
+
+    forward = _apply_cohort_allocator(cohorts, tmp_path, spec)
+    reversed_rows = _apply_cohort_allocator(cohorts.reverse(), tmp_path, spec)
+
+    as_map = lambda frame: dict(zip(frame["symbol"], frame["weight"], strict=True))  # noqa: E731
+    assert as_map(forward) == as_map(reversed_rows)
+
+
 def test_equal_weight_allocation_leaves_the_signal_weights_alone(tmp_path: Path) -> None:
     cohorts = _equal_weight_cohorts()
     unchanged = _apply_cohort_allocator(cohorts, tmp_path, {"method": "equal_weight"})

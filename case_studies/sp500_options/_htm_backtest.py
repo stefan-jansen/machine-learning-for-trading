@@ -1466,11 +1466,21 @@ def _apply_cohort_allocator(
     max_weight = float(allocation_spec.get("max_weight", 0.0))
 
     # Build predictions df from cohorts (already filtered to top-K per Friday).
-    preds = cohorts.select(
-        pl.col("timestamp"),
-        pl.col("symbol"),
-        pl.col("y_score"),
-    ).unique(subset=["timestamp", "symbol"])
+    # Sorted, because `unique` returns rows in whatever order the hash pass produced and
+    # every allocator below turns that order into numbers: `score_weighted` sums floats
+    # within a date, and the covariance allocators take their column order from
+    # `preds["symbol"].unique()`. Both are stable to the last bits only if the row order
+    # is. Without the sort the same request resolved twice digests differently, which is
+    # exactly what the clean-process decision replay refuses.
+    preds = (
+        cohorts.select(
+            pl.col("timestamp"),
+            pl.col("symbol"),
+            pl.col("y_score"),
+        )
+        .unique(subset=["timestamp", "symbol"])
+        .sort("timestamp", "symbol")
+    )
 
     max_cohort_size = cast(int, preds.group_by("timestamp").len()["len"].max())
     top_k_for_alloc = max(int(allocation_spec.get("top_k", 0)), max_cohort_size)
@@ -1550,7 +1560,7 @@ def _apply_cohort_allocator(
         vol_window = int(allocation_spec.get("vol_window", 63))
         lookback = int(allocation_spec.get("lookback", 126))
 
-        symbols = preds["symbol"].unique().to_list()
+        symbols = sorted(preds["symbol"].unique().to_list())
         date_min = preds["timestamp"].min()
         date_max = preds["timestamp"].max()
         # Backfill window for covariance estimation: 2x the longest lookback used.
