@@ -195,6 +195,12 @@ def _complete_plan(study: Study, *, name: str, alpha: float) -> str:
     return prediction.hash
 
 
+def _rename_population(study: Study, old: str, new: str) -> None:
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        db.execute("UPDATE official_populations SET name = ? WHERE name = ?", (new, old))
+        db.commit()
+
+
 def test_a_sweep_planned_against_other_predictions_is_reported(study: Study) -> None:
     """The premature freeze a refit makes possible, and the one completeness cannot see.
 
@@ -224,11 +230,15 @@ def test_a_sweep_planned_against_other_predictions_is_reported(study: Study) -> 
 
 def test_a_sweep_planned_against_the_predictions_in_force_is_not_reported(study: Study) -> None:
     """The other side of it: the sweep did run against these predictions, so its plan is found."""
-    prediction_hash = "p-current"
-    _complete_plan(
+    # The plan is recorded under a placeholder, then renamed to the identity of the prediction
+    # its own member actually rides - which is only knowable after the member is registered.
+    # Naming it from a made-up hash would let this pass while the plan described some other
+    # generation, which is the thing it is here to establish.
+    prediction_hash = _complete_plan(study, name="etfs-allocation-fwd_ret_5d-pending", alpha=1.0)
+    _rename_population(
         study,
-        name=f"etfs-allocation-fwd_ret_5d-{predictions_identity({prediction_hash})}",
-        alpha=1.0,
+        "etfs-allocation-fwd_ret_5d-pending",
+        f"etfs-allocation-fwd_ret_5d-{predictions_identity({prediction_hash})}",
     )
 
     assert (

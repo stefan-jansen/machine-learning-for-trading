@@ -276,6 +276,11 @@ def test_a_recorded_plan_decides_which_downstream_rows_are_eligible(tmp_path: Pa
         name=f"fixture-allocation-fwd_ret_5d-{predictions_identity(None)}",
         members=["fwd_ret_5d-allocation-c1"],
     )
+    _record_plan(
+        study,
+        name=f"fixture-risk-fwd_ret_5d-{predictions_identity(None)}",
+        members=["fwd_ret_5d-risk_overlay-c1", "fwd_ret_5d-risk_overlay-c2"],
+    )
 
     def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
         return _rows(label, stage, configs=("c1", "c2"))
@@ -299,6 +304,11 @@ def test_a_recorded_plan_decides_which_downstream_rows_are_eligible(tmp_path: Pa
 def test_a_superseded_plan_does_not_admit_its_own_members(tmp_path: Path) -> None:
     """Only the generation in force decides membership; the grid it replaced does not."""
     study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1", "c2"))
+    _record_plan(
+        study,
+        name=f"fixture-allocation-fwd_ret_5d-{predictions_identity(None)}",
+        members=["fwd_ret_5d-allocation-c1", "fwd_ret_5d-allocation-c2"],
+    )
     first = _record_plan(
         study,
         name=f"fixture-risk-fwd_ret_5d-{predictions_identity(None)}",
@@ -418,3 +428,45 @@ def test_open_selection_field_drops_members_it_cannot_open_complete(tmp_path: Pa
     )
     assert "fwd_ret_5d-risk_overlay-c1" not in field.members
     assert field.selected.hash != "fwd_ret_5d-risk_overlay-c1"
+
+
+def test_a_live_rebuild_refuses_when_the_predictions_moved_past_the_plans(tmp_path: Path) -> None:
+    """The reader's clean clone, rebuilding a field whose sweeps have not caught up.
+
+    `open_selection_field` reads the frozen set where one exists and rebuilds the field live
+    where none does, and only the frozen path was gated on the plans. So after a prediction was
+    added or replaced, the live path admitted every downstream row it could find - rows from the
+    grid the previous predictions implied - and ranked over a membership the freeze would have
+    refused. A reader would then see a different selection from the published one, which is the
+    divergence this module exists to close.
+    """
+    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1", "c2"))
+    study.results = _Results()
+    _register_backtests(
+        study,
+        [
+            (f"fwd_ret_5d-{stage}-{config}", _prediction_hash("fwd_ret_5d", config))
+            for stage in FIELD_STAGES
+            for config in ("c1", "c2")
+        ],
+    )
+    # The plans the previous prediction generation implied. Nothing supersedes them - a plan
+    # supersedes only when its own sweep re-runs - so they are still the plans on record.
+    for key, stage in (("allocation", "allocation"), ("risk", "risk_overlay")):
+        _record_plan(
+            study,
+            name=f"fixture-{key}-fwd_ret_5d-{predictions_identity({'p-before-the-refit'})}",
+            members=[f"fwd_ret_5d-{stage}-c1"],
+        )
+
+    def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
+        return _rows(label, stage, configs=("c1", "c2"))
+
+    with pytest.raises(RuntimeError, match="has not been run against them"):
+        open_selection_field(
+            study,
+            case_study="fixture",
+            name="fixture:holdout-candidates",
+            prediction_hashes={"p-after-the-refit"},
+            resolve_best_backtest_runs=resolver,
+        )

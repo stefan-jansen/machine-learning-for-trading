@@ -673,24 +673,60 @@ SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
 CANDIDATE_SET_NAME = f"{CASE_STUDY_ID}:holdout-candidates"
 candidate_stages = ("signal", "allocation", "risk_overlay")
 CANDIDATE_LABELS = sweep_labels(_study)
-# One construction, shared with the four stages that read this field. It requires every
-# declared label to have rankable baseline rows, because every label is backtested equal-weight
-# and an absent one means the baseline sweep is unfinished. Whether the stages past the baseline
-# finished is decided below, against the recorded plans, because no reading of the rows can
-# answer it.
-frozen_pool = resolve_field_members(
+# The plans are asked for first, before the field is built rather than after it.
+# `resolve_field_members` builds each downstream stage from the plan recorded for the
+# predictions in force and raises where one is absent, because a stage whose sweep has not run
+# against them holds rows from another generation and there is no correct field to return. That
+# is what a reader rebuilding this field live needs. Here it would turn the ordinary sequential
+# case into a failure: 15 and 16 run for each label in turn, and every run but the last finds
+# some other label's plan missing. Asking first keeps that a decline.
+#
+# Every declared label is asked, not the ones the rows suggest advanced. A label that has not
+# started and a label deliberately stopped at its baseline leave the registry in the same state,
+# so inferring the wait-set from the rows lets whichever label ran first seal the field and lock
+# the rest out. There is no funnel to accommodate here: 15 raises rather than advancing fewer
+# configurations than declared, so no label stops at its baseline.
+unfinished = unfinished_sweep_plans(
     _study,
     case_study=CASE_STUDY_ID,
+    labels=CANDIDATE_LABELS,
     prediction_hashes=CURRENT_MEMBERS,
-    resolve_best_backtest_runs=resolve_best_backtest_runs,
-    stages=candidate_stages,
 )
-print(
-    f"Field to freeze: {frozen_pool.height} eligible validation backtests "
-    f"across {candidate_stages} and {len(CANDIDATE_LABELS)} labels"
+if unfinished:
+    print(
+        f"Not freezing a candidate set here: {len(unfinished)} of "
+        f"{2 * len(CANDIDATE_LABELS)} recorded sweep plans are absent or incomplete, so the "
+        "field is still being produced. Run 15 and 16 for each declared label; the last of "
+        "those runs freezes the set. Declining is not a failure - this notebook has done its "
+        "own label's work either way, and the set is written exactly once.\n  "
+        + "\n  ".join(unfinished)
+    )
+
+# One construction, shared with the four stages that read this field. It requires every
+# declared label to have rankable baseline rows, because every label is backtested equal-weight
+# and an absent one means the baseline sweep is unfinished.
+frozen_pool = (
+    None
+    if unfinished
+    else resolve_field_members(
+        _study,
+        case_study=CASE_STUDY_ID,
+        prediction_hashes=CURRENT_MEMBERS,
+        resolve_best_backtest_runs=resolve_best_backtest_runs,
+        stages=candidate_stages,
+    )
 )
+if frozen_pool is not None:
+    print(
+        f"Field to freeze: {frozen_pool.height} eligible validation backtests "
+        f"across {candidate_stages} and {len(CANDIDATE_LABELS)} labels"
+    )
 
 try:
+    if unfinished:
+        raise PermissionError(
+            "the sweep plans reported above are not all complete for the predictions in force"
+        )
     writable = open_study(CASE_STUDY_ID, entry_point="16_risk_management")
 except PermissionError as exc:
     holdout_candidates = None
@@ -713,80 +749,39 @@ else:
             "will not find it, and check its members against different artifacts than they "
             "will read."
         )
-    # Every declared label's sweeps have to be finished, and finished is `require_complete` on
-    # the plan each sweep recorded, not a reading of the rows it left. The set is immutable
-    # under its name, so a label whose allocation or overlay sweep has not run yet would be
-    # frozen out permanently, and a sweep interrupted part-way is indistinguishable from a
-    # smaller finished one by rows, by configurations, or by which stages are present.
-    #
-    # Every declared label, not the ones the rows suggest advanced. A label that has not
-    # started and a label deliberately stopped at its baseline leave the registry in the same
-    # state, so inferring the wait-set from the rows lets whichever label ran first seal the
-    # field and lock the rest out. There is no funnel to accommodate here: 15 raises rather than
-    # advancing fewer configurations than declared, so no label stops at its baseline.
-    #
-    # The populations in force are passed because a plan supersedes only when its own sweep
-    # re-runs. After a refit the previous generation is still the plan under that name and is
-    # still complete, so completeness alone would wave through a label whose sweep has not been
-    # re-run at all.
-    #
-    # This is also what sequences a per-label run without any coordination: 15 and 16 run for
-    # each label in turn, every run but the last finds a plan missing and declines to freeze,
-    # and the last one freezes the whole field. Declining is not a failure - the notebook has
-    # done its own label's work either way, and the set is written exactly once.
-    unfinished = unfinished_sweep_plans(
-        writable,
-        case_study=CASE_STUDY_ID,
-        labels=CANDIDATE_LABELS,
-        prediction_hashes=CURRENT_MEMBERS,
-    )
-
-    if unfinished:
-        holdout_candidates = None
-        print(
-            f"Not freezing a candidate set here: {len(unfinished)} of "
-            f"{2 * len(CANDIDATE_LABELS)} recorded sweep plans are absent or incomplete, so "
-            "the field is still being produced. Run 15 and 16 for each declared label; the "
-            "last of those runs freezes the set.\n  " + "\n  ".join(unfinished)
+    members = [
+        writable.results.open(backtest_hash)
+        for backtest_hash in frozen_pool["backtest_hash"].to_list()
+    ]
+    # Named here rather than left to `create`, which reports the first partial member and stops.
+    # A field that cannot be frozen is a field the holdout stage cannot select from, so what a
+    # reader needs is how many members are unusable and why, not the first one alphabetically.
+    incomplete = [
+        (member.hash, reason) for member in members if (reason := member.completeness()) is not None
+    ]
+    if incomplete:
+        raise RuntimeError(
+            f"{len(incomplete)} of {len(members)} eligible backtests are incomplete, so the "
+            "field cannot be frozen: "
+            + "; ".join(f"{hash_} ({reason})" for hash_, reason in incomplete[:5])
+            + ("" if len(incomplete) <= 5 else f"; and {len(incomplete) - 5} more")
         )
-    else:
-        members = [
-            writable.results.open(backtest_hash)
-            for backtest_hash in frozen_pool["backtest_hash"].to_list()
-        ]
-        # Named here rather than left to `create`, which reports the first partial member and stops.
-        # A field that cannot be frozen is a field the holdout stage cannot select from, so what a
-        # reader needs is how many members are unusable and why, not the first one alphabetically.
-        incomplete = [
-            (member.hash, reason)
-            for member in members
-            if (reason := member.completeness()) is not None
-        ]
-        if incomplete:
-            raise RuntimeError(
-                f"{len(incomplete)} of {len(members)} eligible backtests are incomplete, so the "
-                "field cannot be frozen: "
-                + "; ".join(f"{hash_} ({reason})" for hash_, reason in incomplete[:5])
-                + ("" if len(incomplete) <= 5 else f"; and {len(incomplete) - 5} more")
-            )
-        holdout_candidates = CandidateSet.create(
+    holdout_candidates = CandidateSet.create(
+        writable,
+        name=CANDIDATE_SET_NAME,
+        members=members,
+        comparison_contract={"comparable_fields": ["label_artifact", "feature_artifacts", "cv"]},
+        supersedes=candidate_set_supersedes(
             writable,
             name=CANDIDATE_SET_NAME,
-            members=members,
-            comparison_contract={
-                "comparable_fields": ["label_artifact", "feature_artifacts", "cv"]
-            },
-            supersedes=candidate_set_supersedes(
-                writable,
-                name=CANDIDATE_SET_NAME,
-                declared=SUPERSEDES_CANDIDATE_SETS.get(CANDIDATE_SET_NAME),
-            ),
-        )
-        frozen_selection = holdout_candidates.best_validation_sharpe()
-        print(
-            f"Frozen candidate set {holdout_candidates.hash}: {len(holdout_candidates.members)} members"
-        )
-        print(f"Validation-selected backtest: {frozen_selection.hash}")
+            declared=SUPERSEDES_CANDIDATE_SETS.get(CANDIDATE_SET_NAME),
+        ),
+    )
+    frozen_selection = holdout_candidates.best_validation_sharpe()
+    print(
+        f"Frozen candidate set {holdout_candidates.hash}: {len(holdout_candidates.members)} members"
+    )
+    print(f"Validation-selected backtest: {frozen_selection.hash}")
 
 # %% [markdown]
 # ## Key takeaways

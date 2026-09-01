@@ -128,23 +128,58 @@ def sweep_plan_name(case_study: str, label: str, stage: str, predictions: str) -
     return f"{case_study}-{PLAN_STAGE_KEYS[stage]}-{label}-{predictions}"
 
 
+def _population_names(study: Study) -> set[str] | None:
+    """Every official population name this registry records, or ``None`` where it has no table.
+
+    ``None`` is the registry that predates official populations, which is the one state in
+    which an absent plan is not evidence of anything. Any other failure to read propagates:
+    a lock timeout is not a case study that publishes no plans.
+    """
+    try:
+        with sqlite3.connect(
+            f"file:{study.root / 'run_log' / 'registry.db'}?mode=ro", uri=True
+        ) as db:
+            return {row[0] for row in db.execute("SELECT name FROM official_populations")}
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return None
+        raise
+
+
+def publishes_sweep_plans(study: Study, case_study: str) -> bool:
+    """Whether this registry records any sweep plan for this case study, under any generation.
+
+    What separates a case study whose sweeps publish plans from one whose sweeps predate them.
+    For the first, a plan absent under the name the current predictions imply means the sweep
+    has not run against them, and the field cannot be built. For the second there is nothing to
+    look up and the stages are admitted whole, which is the field those case studies were
+    published with.
+
+    Asked of the whole name space rather than declared, because a case study that has published
+    a plan cannot un-publish one: the old generations stay readable by name forever.
+    """
+    names = _population_names(study)
+    if names is None:
+        return False
+    prefixes = tuple(f"{case_study}-{key}-" for key in PLAN_STAGE_KEYS.values())
+    return any(name.startswith(prefixes) for name in names)
+
+
 def _plan_members(
     study: Study, case_study: str, label: str, stage: str, predictions: str
 ) -> set[str] | None:
     """The backtests a sweep planned, or ``None`` where this registry records no such plan.
 
     Absent is distinct from empty: ``create`` refuses an empty member list, so a recorded plan
-    always admits something, and ``None`` means only that a case study does not publish plans
-    for this stage. The freeze refuses to seal a field whose plans are absent, so ``None`` here
-    is never what decides a published membership.
+    always admits something. It is also distinct from unreadable and from ambiguous - a name
+    resolving to two current identities is a forked lineage that needs a person, and reading
+    either of those as absence would drop the membership filter and admit historical rows.
     """
-    try:
-        plan = OfficialPopulation.one(
-            study, name=sweep_plan_name(case_study, label, stage, predictions)
-        )
-    except (KeyError, ValueError, sqlite3.OperationalError):
+    name = sweep_plan_name(case_study, label, stage, predictions)
+    names = _population_names(study)
+    if names is None or name not in names:
         return None
-    return set(plan.members)
+    return set(OfficialPopulation.one(study, name=name).members)
 
 
 def unfinished_sweep_plans(
@@ -243,8 +278,11 @@ def resolve_field_members(
     could win the selection even though no current plan contains them. Restricting each
     downstream stage to its plan's members makes the published field the grid the sweep
     actually declared. A stage with no recorded plan is admitted whole, which is how the case
-    studies that predate plans keep the field they were published with; the freeze refuses to
-    seal a field whose plans are absent, so that fallback never decides a sealed membership.
+    studies that predate plans keep the field they were published with - and that is decided by
+    whether this registry has ever recorded a plan for this case study, not by whether this one
+    happens to be missing. Where it has, an absent plan is a sweep that has not run against the
+    predictions in force, and building the field anyway would hand every reader who rebuilds it
+    live a different membership from the one that was frozen. It raises instead.
 
     Rows with no Sharpe are dropped before any of this. They are ineligible by
     construction, since the selection ranks on validation backtest Sharpe, and leaving them
@@ -253,6 +291,7 @@ def resolve_field_members(
     """
     labels = sweep_labels(study)
     predictions = predictions_identity(prediction_hashes)
+    planned = publishes_sweep_plans(study, case_study)
     frames: list[pl.DataFrame] = []
     reached: dict[str, set[str]] = {label: set() for label in labels}
     for label in labels:
@@ -269,6 +308,14 @@ def resolve_field_members(
                 rows = rows.filter(pl.col("sharpe").is_not_null())
             if stage in PLAN_STAGE_KEYS:
                 admitted = _plan_members(study, case_study, label, stage, predictions)
+                if admitted is None and planned:
+                    raise RuntimeError(
+                        f"{case_study} publishes sweep plans, and none is recorded for {label} "
+                        f"at the {stage!r} stage against the prediction sets in force "
+                        f"({predictions}). That sweep has not been run against them, so the "
+                        "rows this stage does have belong to another generation and the field "
+                        "cannot be built. Run the sweep for this label."
+                    )
                 if admitted is not None:
                     rows = rows.filter(pl.col("backtest_hash").is_in(list(admitted)))
             if rows.is_empty():
