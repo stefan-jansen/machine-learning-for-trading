@@ -257,8 +257,60 @@ with sqlite3.connect(str(_db)) as _con:
         if "backtest_paired_metrics" in _tables
         else set()
     )
+    # Presence says the tables were built; it does not say they were built over the population
+    # this notebook reports. Scoping the cohorts to the live predictions changes K, and the
+    # previous unscoped rows survive under the same enum values - so a presence-only guard
+    # accepts them, prints "already present, nothing written", and the correction stays the one
+    # computed over a population the page does not describe. A cohort is stale when its
+    # membership is unrecorded, when its leader is a retired prediction, or when its stage still
+    # holds one; a pair is stale when either side is. Same test as `_stale_derived_rows` in
+    # `case_studies/etfs/20_strategy_analysis.py`, which reached it first.
+    _live_payload = json.dumps(LIVE_PREDICTIONS)
+    _stale_cohorts = (
+        _con.execute(
+            """
+            SELECT COUNT(*) FROM cohort_metrics cm
+            WHERE cm.member_digest IS NULL
+               OR cm.leader_hash IN (
+                      SELECT backtest_hash FROM backtest_runs
+                      WHERE prediction_hash NOT IN (SELECT value FROM json_each(?1))
+                  )
+               OR EXISTS (
+                      SELECT 1 FROM backtest_runs r
+                      WHERE r.stage IS cm.stage
+                        AND r.prediction_hash NOT IN (SELECT value FROM json_each(?1))
+                  )
+            """,
+            (_live_payload,),
+        ).fetchone()[0]
+        if "cohort_metrics" in _tables
+        else 0
+    )
+    _stale_pairs = (
+        _con.execute(
+            """
+            SELECT COUNT(*) FROM backtest_paired_metrics pm
+            WHERE pm.challenger_hash IN (
+                      SELECT backtest_hash FROM backtest_runs
+                      WHERE prediction_hash NOT IN (SELECT value FROM json_each(?1))
+                  )
+               OR pm.benchmark_hash IN (
+                      SELECT backtest_hash FROM backtest_runs
+                      WHERE prediction_hash NOT IN (SELECT value FROM json_each(?1))
+                  )
+            """,
+            (_live_payload,),
+        ).fetchone()[0]
+        if "backtest_paired_metrics" in _tables
+        else 0
+    )
 REQUIRED_PAIR_KINDS = {"val_rank1_self", "equal_weight_holdout_side_artifact"}
-if _n_cohorts == 0 or not REQUIRED_PAIR_KINDS.issubset(_kinds_present):
+if (
+    _n_cohorts == 0
+    or not REQUIRED_PAIR_KINDS.issubset(_kinds_present)
+    or _stale_cohorts
+    or _stale_pairs
+):
     _cohort_counts = compute_and_register(CASE_STUDY, prediction_hashes=LIVE_PREDICTIONS)
     # The lineage is passed rather than re-derived inside. Left to itself the populator
     # ranks the registry on raw Sharpe, which is a fourth selector beside the resolver,
@@ -670,8 +722,15 @@ with sqlite3.connect(str(_db)) as _con:
         "JOIN training_runs t ON t.training_hash=p.training_hash "
         f"WHERE b.stage IN ({', '.join('?' * len(_ELIGIBLE_STAGES))}) "
         "AND p.split='validation' AND bm.sharpe IS NOT NULL "
-        "AND t.family != 'benchmark'" + degenerate_prediction_sql("p.prediction_hash"),
-        _ELIGIBLE_STAGES,
+        "AND t.family != 'benchmark' "
+        # The same live population the cohort corrections are scoped to. Unscoped, this pool
+        # holds superseded generations the selection never ranked, and they decide how far the
+        # common-support intersection reaches - so the comparison would be computed over a
+        # window the selected run was never ranked on, and the chart would label it with the
+        # resolver's period count while showing another.
+        f"AND p.prediction_hash IN ({', '.join('?' * len(LIVE_PREDICTIONS))})"
+        + degenerate_prediction_sql("p.prediction_hash"),
+        (*_ELIGIBLE_STAGES, *LIVE_PREDICTIONS),
     ).fetchall()
 
 # A superseded conformal calibration is not a candidate; no other sizing rule has such a
@@ -753,7 +812,8 @@ bars = ax.bar(
 ax.bar_label(bars, labels=[f"{value:.3f}" for value in stage_values], padding=4)
 ax.axhline(0, color=COLORS["neutral"], linewidth=0.8)
 ax.set_xticks(x, stage_labels)
-ax.set_ylabel(f"Validation Sharpe on common {COMMON_SUPPORT_N}-month support")
+_COMPARISON_N = int(selection_comparison["n_periods"][0])
+ax.set_ylabel(f"Validation Sharpe on common {_COMPARISON_N}-month support")
 add_message_title(
     ax,
     "Selection reads the peak of each sizing rule, not its average",
