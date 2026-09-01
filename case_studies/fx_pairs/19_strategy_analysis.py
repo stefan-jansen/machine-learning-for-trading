@@ -124,6 +124,20 @@ study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKS
 # intersection and change which admitted row is reported.
 holdout_candidates = CandidateSet.one(study, name=CANDIDATE_SET_NAME)
 ADMITTED = frozenset(holdout_candidates.members)
+# The prediction sets behind the admitted backtests. `compute_and_register` scopes cohorts by
+# prediction rather than by backtest, and left unscoped it computes the effective trial count and
+# the deflated Sharpe over the whole registry - every retired generation and every configuration
+# no population publishes included. K is what the deflation divides by, so an unscoped call
+# reports a correction computed over a population this page does not describe.
+with sqlite3.connect(str(get_case_study_dir(CASE_STUDY_ID) / "run_log" / "registry.db")) as _con:
+    ADMITTED_PREDICTIONS = [
+        row[0]
+        for row in _con.execute(
+            "SELECT DISTINCT prediction_hash FROM backtest_runs "
+            f"WHERE backtest_hash IN ({','.join('?' * len(ADMITTED))})",
+            tuple(sorted(ADMITTED)),
+        )
+    ]
 carrier = resolve_solvent_carrier(CASE_STUDY_ID, admitted=ADMITTED)
 
 selected_validation = study.results.open(str(carrier["val_backtest_hash"]))
@@ -676,7 +690,7 @@ _periods_per_year = int(
 # notebook. What they mean is a count, so a count is what is reported.
 with warnings.catch_warnings(record=True) as _cohort_warnings:
     warnings.simplefilter("always")
-    _cohort_counts = compute_and_register(CASE_STUDY_ID)
+    _cohort_counts = compute_and_register(CASE_STUDY_ID, prediction_hashes=ADMITTED_PREDICTIONS)
 _undefined = Counter(str(entry.message).split(" for ")[0] for entry in _cohort_warnings)
 _paired_rows = populate_paired_metrics(
     CASE_STUDY_ID,
