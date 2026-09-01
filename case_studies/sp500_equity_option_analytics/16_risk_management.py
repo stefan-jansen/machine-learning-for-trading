@@ -59,7 +59,13 @@ warnings.filterwarnings("ignore")
 # paired uncertainty consistent with the preceding pipeline stages.
 
 # %%
-from case_studies.research import CandidateSet, Study, open_study
+from case_studies.research import (
+    CandidateSet,
+    Study,
+    candidate_set_supersedes,
+    open_study,
+    sweep_labels,
+)
 from case_studies.utils.backtest_loaders import (
     VECTORIZED_CASE_STUDIES,
     get_backtest_config,
@@ -570,6 +576,27 @@ fig_tradeoff.show()
 # fitted against different labels, features or folds cannot quietly join a set
 # the holdout will pick from.
 #
+# **The field spans every declared label, not the one this run overlaid.** The risk sweep above
+# is per label - it perturbs one carrier, drawn from one label's strategies - but the selection
+# this set exists to make is not: the holdout picks the single highest validation backtest Sharpe
+# the case study produced, and a label that never entered the set cannot be picked no matter how
+# it scored. Resolving the field against `RISK_LABEL` made the membership depend on which label
+# happened to run last, which is both the wrong field and a set that changes under a fixed name
+# on every label - so the second label's run could not publish at all.
+
+# %%
+# A candidate set is immutable under its name, so a field that has grown has to name the
+# generation it replaces. Keyed by the full set name because that is what the refusal prints.
+# Resolved through `candidate_set_supersedes` rather than passed straight to `create`: a
+# reader's clean clone has no generation to supersede, and `create` refuses a first version that
+# claims to replace one. `328d2009685c` is the single-label field frozen on 2026-08-30, before
+# the four variant labels had baseline, allocation or overlay rows. It stays readable by hash,
+# which is what keeps the holdout registered against it traceable to the field it actually saw.
+SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
+    "sp500_equity_option_analytics:holdout-candidates": "328d2009685c",
+}
+
+# %% [markdown]
 # Freezing writes to the registry, which needs the study opened rather than read.
 # That is a maintainer path: a reader's clean clone has no `run_log/` to freeze
 # from, so the cell reports why it did nothing instead of failing.
@@ -577,22 +604,40 @@ fig_tradeoff.show()
 # %%
 CANDIDATE_SET_NAME = f"{CASE_STUDY_ID}:holdout-candidates"
 candidate_stages = ("signal", "allocation", "risk_overlay")
-frozen_pool = pl.concat(
-    [
-        resolve_best_backtest_runs(
-            CASE_STUDY_ID,
-            RISK_LABEL,
-            split="validation",
-            stage=stage,
-            top_n=9999,
-            prediction_hashes=CURRENT_MEMBERS,
-        )
-        for stage in candidate_stages
-    ],
-    how="diagonal_relaxed",
-).unique("backtest_hash")
+CANDIDATE_LABELS = sweep_labels(_study)
+_per_label_pools = {
+    label: pl.concat(
+        [
+            resolve_best_backtest_runs(
+                CASE_STUDY_ID,
+                label,
+                split="validation",
+                stage=stage,
+                top_n=9999,
+                prediction_hashes=CURRENT_MEMBERS,
+            )
+            for stage in candidate_stages
+        ],
+        how="diagonal_relaxed",
+    ).unique("backtest_hash")
+    for label in CANDIDATE_LABELS
+}
+frozen_pool = pl.concat(_per_label_pools.values(), how="diagonal_relaxed").unique("backtest_hash")
+# A label with no rows is a stage that has not run for it, not an empty answer. Freezing anyway
+# would publish a field that silently excludes it and hand the holdout a selection made over
+# part of the case study.
+_empty = [label for label, pool in _per_label_pools.items() if pool.height == 0]
+if _empty:
+    raise RuntimeError(
+        f"declared labels {_empty} have no validation backtests in {candidate_stages}, so the "
+        "holdout field cannot be frozen over every label this case study publishes"
+    )
 print(
-    f"Field to freeze: {frozen_pool.height} eligible validation backtests across {candidate_stages}"
+    f"Field to freeze: {frozen_pool.height} eligible validation backtests "
+    f"across {candidate_stages} and {len(CANDIDATE_LABELS)} labels"
+)
+pl.DataFrame(
+    [{"label": label, "backtests": pool.height} for label, pool in _per_label_pools.items()]
 )
 
 try:
@@ -640,6 +685,11 @@ else:
         name=CANDIDATE_SET_NAME,
         members=members,
         comparison_contract={"comparable_fields": ["label_artifact", "feature_artifacts", "cv"]},
+        supersedes=candidate_set_supersedes(
+            writable,
+            name=CANDIDATE_SET_NAME,
+            declared=SUPERSEDES_CANDIDATE_SETS.get(CANDIDATE_SET_NAME),
+        ),
     )
     frozen_selection = holdout_candidates.best_validation_sharpe()
     print(
@@ -666,6 +716,10 @@ else:
 #    the four stages after this one from each re-deriving a selection, and what
 #    makes the configuration the holdout was run on a matter of record rather
 #    than a rule four notebooks apply consistently until one of them does not.
+# 7. The overlay sweep is per label; the field it feeds is not. Each label gets
+#    its own carrier and its own controls, and every label's strategies then
+#    compete in one set, because the holdout picks one configuration for the
+#    case study rather than one per label.
 #
 # **Next:** [`17_costs`](17_costs.ipynb) stresses whichever configuration this stage
 # advances - the best overlay, or the un-overlaid carrier where no overlay helped -
