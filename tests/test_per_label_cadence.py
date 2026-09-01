@@ -90,11 +90,41 @@ class TestBiweeklySchedule:
         overlap = [t for t in full.to_list() if t >= date(2020, 4, 6)]
         assert late.to_list() == overlap
 
+    def test_gaps_stay_fourteen_days_across_a_52_week_year_boundary(self):
+        """2020 is a 53-week ISO year and 2021 a 52-week one.
+
+        A counter of the form ``iso_year * 53 + iso_week`` jumps by two at every 52-week
+        boundary, which flips the parity and lands a 7-day or 21-day gap there. Elapsed weeks
+        since a fixed Monday cannot do that.
+        """
+        ts = _weekdays("2020-10-01", "2021-04-01")
+        dates = resolve_rebalance_timestamps(ts, "biweekly").to_list()
+        gaps = [(b - a).days for a, b in zip(dates, dates[1:], strict=False)]
+        assert gaps, "no rebalance dates resolved"
+        assert max(gaps) <= 21, gaps
+        assert min(gaps) >= 10, gaps
+
+    def test_every_gap_is_two_calendar_weeks_apart_in_monday_terms(self):
+        """The invariant: consecutive rebalances sit exactly 2 ISO weeks apart."""
+        from datetime import timedelta
+
+        ts = _weekdays("2019-01-01", "2022-12-31")
+        dates = resolve_rebalance_timestamps(ts, "biweekly").to_list()
+        mondays = [d - timedelta(days=d.weekday()) for d in dates]
+        deltas = {(b - a).days for a, b in zip(mondays, mondays[1:], strict=False)}
+        assert deltas == {14}, sorted(deltas)
+
     def test_gaps_are_about_fourteen_days(self):
+        """Two weeks apart in Mondays, but the sessions inside them move.
+
+        The rebalance is the last available session of its week, so a holiday-shortened week
+        ends on Thursday and the gap to the next Friday is 13 days rather than 14. The exact
+        invariant is the Monday one above; this bounds how far a real calendar can stretch it.
+        """
         ts = _weekdays("2020-01-01", "2020-12-31")
         dates = resolve_rebalance_timestamps(ts, "biweekly").to_list()
         gaps = {(b - a).days for a, b in zip(dates, dates[1:], strict=False)}
-        assert gaps <= {14, 15, 16, 17, 18, 19, 20, 21}, gaps
+        assert min(gaps) >= 10 and max(gaps) <= 18, sorted(gaps)
 
 
 class TestBuildSpecRefusesAnUnlabelledCall:
@@ -159,3 +189,48 @@ class TestTwoLabelsTradeDifferentGrids:
         assert long_spec["strategy"]["rebalance"]["cadence"] == "monthly_month_end"
         assert short_spec["strategy"]["rebalance"]["cadence"] == "weekly_friday_close"
         assert long_spec["strategy"]["rebalance"] != short_spec["strategy"]["rebalance"]
+
+
+class TestEffectiveScheduleAfterThinning:
+    """cadence and rebalance_step compose; the pair is what decides the holding period.
+
+    rebalance_step exists because the cadence used to be one grid for every label: a 10-session
+    label on a weekly grid had to skip every other decision or its holding periods overlapped.
+    Now that the label has its own grid the step is ceil(horizon / cadence) against THAT grid,
+    and leaving the old value in place thins an already-thinned schedule. This is the check that
+    catches it, on the real setup.yaml rather than a fixture.
+    """
+
+    def test_seoa_ten_day_labels_end_up_ten_sessions_apart(self):
+        from case_studies.utils.backtest_loaders import (
+            get_backtest_config,
+            get_rebalance_step,
+            resolve_rebalance_timestamps,
+        )
+
+        cfg = get_backtest_config("sp500_equity_option_analytics")
+        ts = _weekdays("2020-01-01", "2020-12-31")
+        for label, horizon_sessions in [("fwd_ret_10d", 10), ("fwd_dir_10d", 10)]:
+            schedule = resolve_rebalance_timestamps(ts, cfg.cadence_for(label))
+            step = get_rebalance_step("sp500_equity_option_analytics", label)
+            traded = schedule.to_list()[::step]
+            gaps = [(b - a).days for a, b in zip(traded, traded[1:], strict=False)]
+            # 10 sessions is about 14 calendar days; a doubled step would put this near 28.
+            assert max(gaps) <= 18, (label, step, sorted(set(gaps)))
+            assert horizon_sessions <= max(gaps) <= 18
+
+    def test_seoa_five_day_labels_are_unchanged_at_weekly(self):
+        from case_studies.utils.backtest_loaders import get_backtest_config, get_rebalance_step
+
+        cfg = get_backtest_config("sp500_equity_option_analytics")
+        for label in ["fwd_ret_5d", "fwd_ret_risk_adj_5d", "fwd_dir_5d"]:
+            assert cfg.cadence_for(label) == "weekly_friday_close"
+            assert get_rebalance_step("sp500_equity_option_analytics", label) == 1
+
+    def test_etfs_five_day_label_trades_weekly_with_step_one(self):
+        from case_studies.utils.backtest_loaders import get_backtest_config, get_rebalance_step
+
+        cfg = get_backtest_config("etfs")
+        assert cfg.cadence_for("fwd_ret_5d") == "weekly_friday_close"
+        assert cfg.cadence_for("fwd_ret_21d") == "monthly_month_end"
+        assert get_rebalance_step("etfs", "fwd_ret_5d") == 1

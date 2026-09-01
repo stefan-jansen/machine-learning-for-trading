@@ -135,7 +135,7 @@ print(f"""=== Protocol term sheet ===
   Case study:    {CASE_STUDY_ID}
   Label:         {LABEL}
   Calendar:      {bt_config.calendar}
-  Cadence:       {bt_config.cadence}
+  Cadence:       {bt_config.cadence_for(LABEL)}
   Initial cash:  {bt_config.initial_cash:,.0f}
   Share type:    {bt_config.share_type}
   Commission:    {bt_config.commission_bps:.1f} bps

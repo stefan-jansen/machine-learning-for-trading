@@ -1116,6 +1116,12 @@ _CADENCE_CALENDAR_DAYS_PER_PERIOD: dict[str, float] = {
 }
 
 
+# Monday 1970-01-05, the first Monday at or after the Unix epoch, as a day number. The biweekly
+# schedule's parity is measured from here so it depends only on the calendar, never on which
+# window a caller happened to load.
+_BIWEEKLY_EPOCH_DAY = 4
+
+
 def _calendar_days_per_period(case_study_id: str, label: str | None = None) -> float:
     """Calendar-day spacing per allocator-window bar for this case study and label.
 
@@ -1278,10 +1284,16 @@ def resolve_rebalance_timestamps(
         return week_ends["rebal_ts"]
 
     if cadence in {"biweekly", "biweekly_friday_close"}:
-        # Last available session of every other ISO week. The parity is taken on an absolute
-        # week counter (iso_year * 53 + iso_week) rather than on position in the resolved list,
-        # so the same calendar dates are chosen whatever window the caller loaded - two splits
-        # of one case study land on the same grid instead of interleaving.
+        # Last available session of every other ISO week.
+        #
+        # The parity is taken on elapsed calendar weeks, not on position in the resolved list and
+        # not on `iso_year * 53 + iso_week`. Position would interleave: a caller loading a window
+        # that starts one week later would rebalance on exactly the weeks the other skipped, so
+        # the same strategy would register two schedules depending on how much history was read.
+        # The `* 53` counter is worse than it looks - most ISO years have 52 weeks, so it jumps by
+        # two at those boundaries and silently produces a 7-day or 21-day gap there.
+        #
+        # Weeks since a fixed Monday is continuous by construction and independent of the window.
         df = pl.DataFrame({"ts": ts}).with_columns(
             iso_year=pl.col("ts").dt.iso_year(),
             iso_week=pl.col("ts").dt.week(),
@@ -1289,8 +1301,16 @@ def resolve_rebalance_timestamps(
         week_ends = (
             df.group_by("iso_year", "iso_week")
             .agg(pl.col("ts").max().alias("rebal_ts"))
-            .with_columns(abs_week=pl.col("iso_year") * 53 + pl.col("iso_week"))
-            .filter(pl.col("abs_week") % 2 == 0)
+            .with_columns(
+                # Monday of that timestamp's ISO week, as whole weeks since the epoch Monday.
+                elapsed_weeks=(
+                    pl.col("rebal_ts").cast(pl.Date).cast(pl.Int32)
+                    - (pl.col("rebal_ts").dt.weekday() - 1)
+                    - _BIWEEKLY_EPOCH_DAY
+                )
+                // 7
+            )
+            .filter(pl.col("elapsed_weeks") % 2 == 0)
             .sort("rebal_ts")
         )
         return week_ends["rebal_ts"]

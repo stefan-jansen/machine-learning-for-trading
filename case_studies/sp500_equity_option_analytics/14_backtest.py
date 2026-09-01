@@ -122,7 +122,7 @@ print(f"""Protocol term sheet
   Case study:    {CASE_STUDY_ID}
   Label:         {BACKTEST_LABEL}
   Calendar:      {bt_config.calendar}
-  Cadence:       {bt_config.cadence}
+  Cadence:       {bt_config.cadence_for(BACKTEST_LABEL)}
   Commission:    {bt_config.commission_bps:.1f} bps
   Slippage:      {bt_config.slippage_bps:.1f} bps
   Total cost:    {bt_config.commission_bps + bt_config.slippage_bps:.1f} bps/leg

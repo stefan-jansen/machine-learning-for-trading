@@ -310,12 +310,17 @@ labels:
     fwd_dir_10d: 10D
   # Vectorized-backtest thinning step per label: number of schedule slots
   # to advance per trade so holding periods don't overlap.
+  # The step is ceil(horizon / cadence), and `cadence` is now per label, so it must be read
+  # against decision.cadence_by_label rather than against the weekly default. The two 10-day
+  # labels moved to the biweekly grid, which already spaces their decisions 10 sessions apart;
+  # leaving their step at 2 would thin an already-thinned schedule and trade them every four
+  # weeks under a spec that says biweekly.
   rebalance_step:
-    fwd_ret_5d: 1            # ceil(5 / 5) on the weekly_friday schedule
-    fwd_ret_10d: 2           # ceil(10 / 5)
+    fwd_ret_5d: 1            # ceil(5 / 5) on the weekly_friday_close schedule
+    fwd_ret_10d: 1           # ceil(10 / 10) on the biweekly schedule
     fwd_ret_risk_adj_5d: 1   # ceil(5 / 5)
     fwd_dir_5d: 1            # ceil(5 / 5)
-    fwd_dir_10d: 2           # ceil(10 / 5)
+    fwd_dir_10d: 1           # ceil(10 / 10) on the biweekly schedule
   # Continuous return that each classification label is derived from.
   classification_eval_label:
     fwd_dir_5d: fwd_ret_5d
