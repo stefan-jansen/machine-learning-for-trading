@@ -19,6 +19,11 @@ one through the wrapper on 2026-08-26 and replaced it through the resolver on 20
 the wrapper row is still in its table, stranded rather than superseded, because a row no
 reader resolves cannot be named as a predecessor.
 
+nasdaq100_microstructure came off the list on 2026-09-02, before it had ever registered a
+causal row - so it is the one case study that never had an invisible row to strand rather
+than one living with one. Converting it also takes its estimate from the 50,000-row cap
+the notebook applied by hand to the 12,099,438 rows the resolver admits.
+
 sp500_options came off the list on 2026-08-27. The note above had it moving to the wrapper,
 which was never true of the committed notebook: `10_causal_dml` goes through
 `study.causal(...).resolve().run()` and reaches `register_causal_run` nowhere, so it was
@@ -43,9 +48,10 @@ REPO = Path(__file__).resolve().parent.parent
 # Still building their own spec instead of going through `resolve_causal_request`.
 # Delete an entry when its notebook is converted; the test below fails if one is
 # converted and left here.
-UNCONVERTED = {
-    "case_studies/nasdaq100_microstructure/12_causal_dml.py",
-}
+# Empty since nasdaq100_microstructure/12 converted, which means no notebook in the
+# corpus can write an unresolvable causal row any more - so the checks below now guard
+# against the wrapper returning rather than tracking a migration still under way.
+UNCONVERTED: set[str] = set()
 
 WRAPPER = "register_causal_run"
 
