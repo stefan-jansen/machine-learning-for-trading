@@ -613,6 +613,29 @@ modeling:
     # CUDA-free environment fail on a requirement nobody wrote down. A run on other
     # hardware sets the notebook's DEVICE parameter, which is then what gets registered.
     device: gpu
+    # How many training windows one sequence configuration draws per fold. This is the only
+    # case study that needs the key: every row of a panel starts a window, and this panel is
+    # minute bars, so an uncapped fold builds about 4.0 million near-identical overlapping
+    # sequences where the daily case studies build tens of thousands. Measured on the
+    # canonical plan, 2026-09-02: fold 0 has 4,066,041 training rows and fold 1 has 3,997,571,
+    # across 115 symbols, so uncapped is 5.4x this value and the family's cost goes with it.
+    #
+    # **This number is a compute budget, not a modelling claim, and it is stated that way
+    # deliberately.** It has been 750,000 since the original release and was carried unchanged
+    # through the stage-06 rebuild that moved the folds underneath it, so nothing derives it.
+    # For scale: consecutive windows share 59 of their 60 observations, one window per 60-bar
+    # lookback would give about 67,800 per fold, and one per 15-minute label horizon about
+    # 271,000. At 750,000 a window is drawn every 5.4 minutes, which is finer than the horizon,
+    # so neighbouring training windows still carry overlapping labels.
+    #
+    # Overlapping training windows are not wrong - they are correlated examples rather than
+    # invalid ones, and a noisy intraday target is a reasonable place to want many of them.
+    # What is missing is an argument for this value rather than another, and the value is now
+    # part of the training identity, so the argument has to exist before the number can be
+    # defended. That is ml4t/agent-workspace#1015. It is left at 750,000 here because changing
+    # it changes what every deep-learning result in this chapter describes, and that is a
+    # decision to take on the evidence rather than hours before a production run.
+    max_train_sequences: 750000
   gbm:
     libraries: [lightgbm]
     preset: default
