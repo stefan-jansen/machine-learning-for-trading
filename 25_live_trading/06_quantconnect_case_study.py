@@ -69,7 +69,6 @@ from utils.paths import display_path, get_case_study_dir, get_output_dir
 from utils.style import COLORS, FIGSIZE, add_message_title
 
 # %% tags=["parameters"]
-HORIZON = 21
 PREDICTION_THRESHOLD = 0.0
 # What this export depends on: the configuration the registry selects, and the
 # bytes of that configuration's sealed holdout predictions. The registry file
@@ -127,6 +126,10 @@ with sqlite3.connect(registry_uri, uri=True) as conn:
     ).fetchone()
     if winner is None:
         raise RuntimeError("ETF registry has no eligible cross-stage backtest winner")
+    carrier_family, carrier_config, carrier_label = conn.execute(
+        "SELECT family, config_name, label FROM training_runs WHERE training_hash = ?",
+        (winner[0],),
+    ).fetchone()
     holdout_rows = conn.execute(
         """SELECT h.prediction_hash FROM prediction_sets h
            JOIN training_runs ht ON ht.training_hash = h.training_hash
@@ -155,10 +158,30 @@ predictions = normalize_demo_predictions(pl.read_parquet(prediction_path), "symb
 registry_hash_after_load = hashlib.sha256(registry_path.read_bytes()).hexdigest()
 assert registry_hash_after_load == registry_hash_before
 
+# The horizon is a property of the promoted configuration, not a constant. It was declared as
+# 21 here and never read, so when the ETF carrier moved to `fwd_ret_5d` the notebook went on
+# exporting a signal it described as monthly. Reading it off the label makes the mismatch
+# impossible: everything downstream that names a holding period names this number.
+horizon_days = int(carrier_label.removeprefix("fwd_ret_").removesuffix("d"))
+# The rebalance follows the horizon so a position is closed before the next signal is formed.
+# Trading sessions, not calendar days: 5 sessions is a week, 21 is a month.
+REBALANCE_RULES = {5: ("weekly", "week_start"), 21: ("monthly", "month_start")}
+if horizon_days not in REBALANCE_RULES:
+    raise ValueError(
+        f"no rebalance cadence declared for a {horizon_days}-session horizon "
+        f"(label {carrier_label}); add one to REBALANCE_RULES"
+    )
+rebalance_cadence, rebalance_date_rule = REBALANCE_RULES[horizon_days]
+
 print(f"Registry SHA256: {registry_hash_before}")
 print(f"Prediction parquet SHA256: {prediction_file_hash}")
 print(f"Training hash: {winner[0]} | holdout prediction hash: {prediction_hash}")
 print(f"Selection stage: {winner[2]} | backtest hash: {winner[1]}")
+print(f"Carrier: {carrier_family}/{carrier_config} on {carrier_label}")
+print(
+    f"Horizon: {horizon_days} sessions -> {rebalance_cadence} rebalance "
+    f"(LEAN date_rules.{rebalance_date_rule})"
+)
 
 n_dates = predictions["timestamp"].n_unique()
 n_symbols = predictions["symbol"].n_unique()
@@ -307,9 +330,13 @@ print(f"  Entries: {len(qc_predictions)} dates")
 # ### Algorithm: Select and Rebalance
 #
 # The algorithm subscribes to assets with positive predictions and forms an
-# equal-weighted portfolio. The exported signal is a 21-day forward return, so
-# the rebalance fires monthly, matching the holding period the signal was
-# trained for and the ETF strategy's own monthly cadence (Chapters 16-17).
+# equal-weighted portfolio. The rebalance fires on the cadence printed above,
+# which is read off the promoted configuration's label rather than fixed here:
+# the signal a configuration produces is a forecast over a stated number of
+# sessions, and holding a position longer than that means trading on a forecast
+# that has already expired. The listing below shows the weekly rule for the
+# 5-session ETF carrier; swap `week_start` for `month_start` on a 21-session
+# one.
 #
 # ```python
 # class PredictionUniverseAlgorithm(QCAlgorithm):
@@ -324,10 +351,10 @@ print(f"  Entries: {len(qc_predictions)} dates")
 #             PredictionUniverse, self._select_assets
 #         )
 #
-#         # Rebalance monthly to match the 21-day prediction horizon. The
+#         # Rebalance weekly to match the 5-session prediction horizon. The
 #         # universe still streams daily; only the rebalance is throttled.
 #         self.schedule.on(
-#             self.date_rules.month_start('SPY'),
+#             self.date_rules.week_start('SPY'),
 #             self.time_rules.at(8, 0),
 #             self._rebalance,
 #         )
@@ -351,9 +378,9 @@ print(f"  Entries: {len(qc_predictions)} dates")
 #
 # The entire algorithm is ~30 lines. Portfolio rules (threshold, weighting,
 # rebalance frequency) can be changed without touching the ML pipeline. Matching
-# the rebalance to the signal's 21-day horizon is itself an instance of that
-# freedom: aligning cadence with the prediction is a one-line change here, not a
-# retraining run.
+# the rebalance to the signal's horizon is itself an instance of that freedom:
+# when the ETF case study promoted a 5-session carrier over its 21-session one,
+# aligning the cadence was this one line, not a retraining run.
 
 # %% [markdown]
 # ## 4. Running on QuantConnect
@@ -423,7 +450,7 @@ ax.hist(
     linewidth=0.4,
 )
 ax.axvline(PREDICTION_THRESHOLD, color=COLORS["amber"], linewidth=1.5, label="Long threshold")
-ax.set(xlabel="Predicted 21-day return", ylabel="Prediction count")
+ax.set(xlabel=f"Predicted {horizon_days}-day return", ylabel="Prediction count")
 ax.legend(frameon=False)
 add_message_title(
     ax,
