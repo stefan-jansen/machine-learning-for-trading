@@ -1186,6 +1186,34 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
             (r[0], None, None)
             for r in db.execute("SELECT prediction_hash FROM prediction_sets").fetchall()
         ]
+    # How many folds each prediction's own training run declares. A fabricated panel that
+    # carries a different number is not a weaker fixture, it is a rejected one:
+    # `insight_chapter.load_selected_predictions` reads the declared count off the training
+    # spec and refuses an artifact whose fold column does not enumerate exactly
+    # `range(n_folds)`. Two was hard-coded here, so every notebook reaching that check saw
+    # `expected fold IDs [0..7], observed [0, 1]` for any hash the sampler happened to make
+    # selectable - which is how widening the sample took ch13 down on etfs/77ca2284b27b.
+    declared_folds: dict[str, int] = {}
+    try:
+        from case_studies.utils.insight_chapter import declared_fold_count
+
+        for _p_hash, _spec_json in db.execute(
+            """
+            SELECT ps.prediction_hash, t.spec_json
+            FROM prediction_sets ps
+            JOIN training_runs t ON ps.training_hash = t.training_hash
+            """
+        ).fetchall():
+            if not _spec_json:
+                continue
+            try:
+                count = declared_fold_count(json.loads(_spec_json))
+            except (ValueError, TypeError):
+                continue
+            if count > 0:
+                declared_folds[_p_hash] = count
+    except (sqlite3.OperationalError, ImportError):
+        pass
     # Cohort-leader predictions - the frozen carrier a strategy-analysis/portfolio/
     # cost/risk notebook resolves via cohort_metrics(cohort_type='stagelabel',
     # stage='signal') and pins by hash. Those notebooks check the carrier's real
@@ -1304,11 +1332,11 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
 
     n_symbols = len(symbols)
     target_rng = np.random.default_rng(42)
-    templates: dict[tuple[date, date], tuple[object, int]] = {}
+    templates: dict[tuple[tuple[date, date], int], tuple[object, int]] = {}
 
-    def _template_for(window: tuple[date, date]):
-        """One reusable frame per distinct window; scores are added per hash."""
-        cached = templates.get(window)
+    def _template_for(window: tuple[date, date], n_folds: int = 2):
+        """One reusable frame per (window, fold count); scores are added per hash."""
+        cached = templates.get((window, n_folds))
         if cached is not None:
             return cached
         dates = _weekday_grid(*window)
@@ -1325,11 +1353,14 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         # i % 2) silently partitions symbols across folds and breaks per-symbol
         # conformal calibration (each symbol ends up in one fold only). Partition by
         # date instead so all symbols share the same fold on each date.
-        n_folds = 2
+        # Contiguous date blocks, one per fold, so the grid mirrors walk-forward CV and
+        # every declared fold id appears. The block is floored and the last one absorbs the
+        # remainder: a ceiling would leave the highest folds empty whenever the grid holds
+        # only slightly more dates than folds, and an absent fold id fails the same check
+        # a wrong fold count does.
+        block = max(1, n_dates // max(1, n_folds))
         rows_fold = [
-            (_di // max(1, n_dates // n_folds + 1)) % n_folds
-            for _di in range(n_dates)
-            for _ in range(n_symbols)
+            min(_di // block, n_folds - 1) for _di in range(n_dates) for _ in range(n_symbols)
         ]
         frame = _pl.DataFrame(
             {
@@ -1345,8 +1376,8 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         # one column and keeps the panel a single object, so which labels need it is
         # decided at write time.
         frame = frame.with_columns(_pl.col("actual").alias("eval_actual"))
-        templates[window] = (frame, n)
-        return templates[window]
+        templates[(window, n_folds)] = (frame, n)
+        return templates[(window, n_folds)]
 
     rewrite_existing = cs_id == "crypto_perps_funding"
     missing_leaders = sorted(
@@ -1424,7 +1455,7 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         if reference is not None:
             template, n = reference, reference.height
         else:
-            template, n = _template_for(_window_for(split, label))
+            template, n = _template_for(_window_for(split, label), declared_folds.get(p_hash, 2))
         pred_dir.mkdir(parents=True, exist_ok=True)
         score_seed = int(hashlib.sha256(p_hash.encode()).hexdigest()[:16], 16)
         scores = np.random.default_rng(score_seed).normal(0, 0.01, n).tolist()

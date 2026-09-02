@@ -189,3 +189,40 @@ def test_recorded_artifact_digests_match_the_artifacts(seeded: Path) -> None:
         )
         checked += 1
     assert checked > 0, "no seeded prediction had an artifact to check"
+
+
+def test_seeded_fold_ids_match_the_declared_fold_count(seeded: Path) -> None:
+    """A fabricated panel has to enumerate the folds its own training run declares.
+
+    `insight_chapter.load_selected_predictions` reads the fold count off the training spec
+    and refuses an artifact whose `fold` column is not exactly `range(n_folds)`. The seeder
+    wrote a two-fold grid for every hash regardless, which is wrong for 732 of the 733 etfs
+    predictions (they declare eight) and took `13_dl_time_series/12_case_study_insights`
+    down the moment the sampler drew one of them into a selectable position.
+    """
+    import json as _json
+
+    import polars as pl
+
+    from case_studies.utils.insight_chapter import declared_fold_count
+
+    with sqlite3.connect(seeded / "run_log" / "registry.db") as db:
+        rows = db.execute(
+            "SELECT ps.prediction_hash, t.spec_json FROM prediction_sets ps "
+            "JOIN training_runs t ON ps.training_hash = t.training_hash"
+        ).fetchall()
+
+    checked = 0
+    for p_hash, spec_json in rows:
+        artifact = seeded / "run_log" / "predictions" / p_hash / "predictions.parquet"
+        if not artifact.is_file() or not spec_json:
+            continue
+        declared = declared_fold_count(_json.loads(spec_json))
+        if declared <= 0:
+            continue
+        observed = sorted(pl.read_parquet(artifact)["fold"].unique().to_list())
+        assert observed == list(range(declared)), (
+            f"{p_hash}: declares {declared} folds, artifact carries {observed}"
+        )
+        checked += 1
+    assert checked > 0, "no seeded prediction declared a fold count to check"

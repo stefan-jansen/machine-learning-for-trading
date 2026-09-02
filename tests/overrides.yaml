@@ -1115,10 +1115,16 @@
   timeout: 180
 25_live_trading/06_quantconnect_case_study:
   parameters:
-    # The fixture registry selects the same configuration, but conftest rewrites
-    # the copied prediction parquet to canonical column names, so its bytes
-    # differ from the sealed artifact. EXPECTED_TRAINING_HASH still asserts.
+    # Both pins name what the PRODUCTION etfs registry selects, and this job reads a
+    # sample of it. conftest rewrites the copied prediction parquet to canonical column
+    # names, so its bytes differ from the sealed artifact; and the winner of a
+    # `ORDER BY sharpe DESC LIMIT 1` over a sample is whichever configuration the
+    # sampler drew, not the one production promoted. EXPECTED_TRAINING_HASH held here
+    # only while the sample happened to contain that row, and stopped the moment the
+    # sample widened. Both are set to null, which the notebook reads as "report the
+    # observed value"; the assertions still bind on a production run.
     EXPECTED_PREDICTIONS_SHA256: null
+    EXPECTED_TRAINING_HASH: null
   timeout: 180
 25_live_trading/07_order_state_machine:
   timeout: 180
