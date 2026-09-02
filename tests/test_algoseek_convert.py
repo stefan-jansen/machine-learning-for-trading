@@ -544,16 +544,25 @@ def _staging_root(out: Path) -> Path:
 def test_nasdaq_month_is_ordered_by_symbol_then_timestamp(convert, tmp_path):
     """The month is assembled a batch of symbols at a time, so the ordering the
     whole-month sort used to produce has to survive that."""
-    archive = _nasdaq_archive(
-        convert, tmp_path / "n.zip", ["20200311", "20200312", "20200313"], ["MSFT", "AAPL"]
-    )
+    days = ["20200311", "20200312", "20200313"]
+    # More symbols than one batch holds, so assembly has to span batches and the
+    # ordering claim is about the file as a whole rather than about one write_table
+    # call. Named backwards from the sorted order they must come out in, so a run that
+    # simply preserved arrival order would fail.
+    n_symbols = convert._SYMBOL_BATCH * 2 + 3
+    symbols = [f"SYM{i:02d}" for i in range(n_symbols)][::-1]
+    archive = _nasdaq_archive(convert, tmp_path / "n.zip", days, symbols)
     out = tmp_path / "data"
     assert convert.convert_nasdaq100(archive, out, workers=1, force=False) == 0
 
     df = pl.read_parquet(_month_path(out))
     assert df.equals(df.sort("symbol", "timestamp")), "not ordered by (symbol, timestamp)"
-    # Interleaved across days rather than day-by-day: every AAPL row precedes every MSFT row.
-    assert df["symbol"].to_list() == ["AAPL"] * 6 + ["MSFT"] * 6
+    # Every symbol survives, contiguously and in sorted order: a batch dropped or
+    # written twice shows up here, and so does a symbol split across two batches.
+    assert df["symbol"].unique(maintain_order=True).to_list() == sorted(symbols)
+    per_symbol = df.height // n_symbols
+    assert df.height == per_symbol * n_symbols
+    assert df.group_by("symbol").len()["len"].to_list() == [per_symbol] * n_symbols
     assert not _staging_root(out).exists(), "staging must not outlive a finished month"
 
 
@@ -610,3 +619,19 @@ def test_staged_days_are_not_visible_to_the_loader(convert, tmp_path, monkeypatc
     minute_bars = out / "equities" / "market" / "nasdaq100" / "minute_bars"
     assert _staging_root(out).is_dir(), "the run must have staged somewhere"
     assert list(minute_bars.rglob("*.parquet")) == []
+
+
+def test_a_skipped_month_clears_staging_a_kill_left_behind(convert, tmp_path):
+    """A kill between publishing the month and deleting its staging leaves days that
+    nothing would ever collect: the month exists, so every later run skips it."""
+    archive = _nasdaq_archive(convert, tmp_path / "n.zip", ["20200311", "20200312"], ["AAPL"])
+    out = tmp_path / "data"
+    assert convert.convert_nasdaq100(archive, out, workers=1, force=False) == 0
+
+    # Re-create what the interrupted cleanup would have left.
+    orphan = _staging_root(out) / "202003"
+    orphan.mkdir(parents=True)
+    (orphan / "20200311.parquet").write_bytes(b"stale")
+
+    assert convert.convert_nasdaq100(archive, out, workers=1, force=False) == 0
+    assert not _staging_root(out).exists(), "a skipped month must clear its staged days"

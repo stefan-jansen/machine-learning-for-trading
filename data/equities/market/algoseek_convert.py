@@ -549,7 +549,13 @@ def convert_nasdaq100(source: Path, out_root: Path, workers: int, force: bool) -
     total_rows = 0
     for (year, month), entries in sorted(by_month.items()):
         out_path = out_dir / f"year={year}" / f"month={month}.parquet"
+        staging = staging_root / f"{year}{month}"
         if out_path.exists() and not force:
+            # The month is published, so its staged days are spent. Clearing them here
+            # and not only after assembly covers a kill in the window between the two,
+            # which the skip would otherwise make permanent: the month is never entered
+            # again, so nothing else would ever delete them.
+            shutil.rmtree(staging, ignore_errors=True)
             _log(f"{year}-{month}: already converted, skipping")
             continue
 
@@ -560,7 +566,6 @@ def convert_nasdaq100(source: Path, out_root: Path, workers: int, force: bool) -
         # memory-capped container to kill the run partway through. Because the skip
         # above is per month, that kill discarded every day already parsed, so a retry
         # restarted the same month and died in the same place. Staged days survive it.
-        staging = staging_root / f"{year}{month}"
         staging.mkdir(parents=True, exist_ok=True)
         staged = 0
         for n, (day, reader) in enumerate(entries, start=1):
