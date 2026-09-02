@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import json
 import os
+import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -259,19 +260,212 @@ def declared_contracts(plan: ModelPlan) -> pl.DataFrame:
     )
 
 
-def freeze_official_model_population(study: Study) -> OfficialPopulation:
-    """Record every canonical model checkpoint before the first fit starts."""
-    return plan_official_models(study).create_population(name=OFFICIAL_POPULATION)
+def freeze_official_model_population(
+    study: Study, *, supersedes: str | None = None
+) -> OfficialPopulation:
+    """Record every canonical model checkpoint before the first fit starts.
+
+    *supersedes* names the population hash this snapshot replaces. It is required whenever
+    the membership has moved since the last snapshot - a new checkpoint, a changed model
+    identity - because a reader resolves the population name to exactly one snapshot, and
+    the registry refuses to leave two current. Every other case study threads this through
+    from a notebook parameter; this one did not, so the guard could be raised here and had
+    no way to be answered, and re-running any of the three model notebooks was impossible.
+    """
+    return plan_official_models(study).create_population(
+        name=OFFICIAL_POPULATION, supersedes=supersedes
+    )
 
 
-def run_model_plan(plan: ModelPlan, *, population_name: str | None = None) -> ModelExecution:
-    """Freeze the planned checkpoint population, then execute exactly that population."""
+def preview_prediction_candidates(
+    study: Study, *, labels: Iterable[str], limit: int
+) -> pl.DataFrame:
+    """The preview validation predictions to backtest, capped per label.
+
+    A preview run has no business reading the released population. The predictions it should
+    backtest are the ones its own model notebooks wrote into its workspace on this pass, and
+    they are preview-tier by construction - so the tier is what selects them, not a name.
+
+    Reading the canonical catalog instead is not merely wider, it is a different kind of run:
+    `run_backtests` takes the plan's tier from the PREDICTIONS it resolves, so a preview study
+    handed canonical predictions builds a canonical plan and tries to write an official
+    population into the shared registry. `OfficialPopulation.create` refuses it, which is the
+    guard working; the defect is asking.
+
+    The cap is per label and not over the whole frame. A single head across a label-sorted
+    frame spends the budget on whichever label sorts first, leaving a later label short or
+    empty. A label reduced to zero is caught below; one reduced merely below its budget is
+    not, and that one is invisible.
+    """
+    labels = list(labels)
+    if not labels:
+        raise ValueError("preview prediction selection requires at least one label")
+    if limit < 1:
+        raise ValueError("preview prediction selection requires a positive limit")
+    candidates = (
+        study.predictions.table(include_preview=True)
+        .filter(
+            (pl.col("execution_tier") == "preview")
+            & (pl.col("split") == "validation")
+            & pl.col("complete")
+            & pl.col("label").is_in(labels)
+        )
+        .sort("label", "family", "config_name", "checkpoint_kind", "checkpoint_value")
+        .group_by("label", maintain_order=True)
+        .head(limit)
+    )
+    starved = [label for label in labels if candidates.filter(pl.col("label") == label).is_empty()]
+    if starved:
+        raise RuntimeError(
+            f"no complete preview validation predictions for {', '.join(starved)}; the model "
+            "notebooks have to run in the same workspace before this one"
+        )
+    return candidates
+
+
+def _preview_traded_backtests(
+    study: Study, label: str, stages: tuple[str, ...] = ("signal", "allocation")
+) -> pl.DataFrame:
+    """This workspace's own baseline and allocation results for one label, minus the flat ones.
+
+    A book that never opened a position books a return of exactly zero on every session, so it
+    reports Sharpe 0.0 - which beats every losing strategy in a field where the reduced fixture
+    makes them all lose. `14_portfolio_management` keeps that out of the canonical funnel by
+    admitting only results that traded every declared fold; the preview has no fold calendar to
+    apply, so it applies the part of the rule it can and drops what never traded at all.
+
+    Measured: a reduced `conformal_weighted` run has too little history to calibrate a width, so
+    it holds nothing for the whole span and registers 0 trades. Ranked on Sharpe it won its
+    label, every overlay of it was identical to it in every digit, and `15_risk_management`
+    raised the guard that exists to catch a control the engine never installed - which is a true
+    statement about a book with no positions and a false one about the engine.
+    """
+    return study.backtests.table(include_preview=True).filter(
+        (pl.col("label") == label)
+        & (pl.col("split") == "validation")
+        & (pl.col("execution_tier") == "preview")
+        & pl.col("stage").is_in(list(stages))
+        & pl.col("complete")
+        & pl.col("sharpe").is_not_null()
+        & (pl.col("num_trades") > 0)
+    )
+
+
+def allocation_pool(study: Study, *, label: str, canonical: bool) -> list[str]:
+    """The backtest identities `crypto-signal-allocation-{label}` admits, for one label.
+
+    On a canonical run that is the frozen set's own membership. On a preview run there is no
+    frozen set - a candidate set is canonical, and `CandidateSet.create` refuses a preview
+    member - so it is the baselines and allocation results this workspace produced.
+
+    `15_risk_management` needs the pool as well as the winner: it pairs each overlay against
+    the unprotected result it was run over, and a paired difference taken against a result from
+    another generation is a difference between two studies.
+    """
+    from case_studies.research import CandidateSet
+
+    if canonical:
+        return list(CandidateSet.one(study, name=f"crypto-signal-allocation-{label}").members)
+    rows = _preview_traded_backtests(study, label)
+    if rows.is_empty():
+        raise RuntimeError(
+            f"no preview baseline or allocation backtest for {label} traded in this "
+            "workspace; 13_backtest and 14_portfolio_management have to run in it first, "
+            "and at least one of their results has to open a position"
+        )
+    return rows.get_column("backtest_hash").to_list()
+
+
+def selected_final_result(study: Study, *, label: str, canonical: bool):
+    """The configuration `16_costs` prices, for one label: the winner out of risk management.
+
+    The funnel is sequential, so cost sensitivity belongs on the configuration the stage before
+    it selected - which is the risk stage, not the allocation stage. Reading the allocation
+    winner instead prices a configuration the case study does not ship whenever an overlay
+    improves on the unprotected book, and it does so silently: cost rows are excluded from the
+    selection pool, so nothing downstream contradicts the ladder. Measured on `cme_futures`,
+    where the two differ - pre-overlay winner at Sharpe 1.209 against post-risk rank-1 at 1.274.
+
+    `crypto-final-validation-{label}` is the set `15_risk_management` freezes, and it holds the
+    baseline, the allocation results and the overlays together, so its best member is the
+    configuration that survives the whole funnel. **An unprotected book is a legitimate winner**:
+    the set admits the no-overlay results too, and a label whose best member carries no risk
+    block is a label where no control helped, not a label that failed.
+
+    A preview run has no frozen set. Its equivalent is the results its own 13, 14 and 15 wrote
+    into this workspace, ranked the same way and tie-broken on the same identity.
+    """
+    from case_studies.research import CandidateSet, Result
+
+    if canonical:
+        return CandidateSet.one(
+            study, name=f"crypto-final-validation-{label}"
+        ).best_validation_sharpe()
+    rows = _preview_traded_backtests(
+        study, label, stages=("signal", "allocation", "risk_overlay")
+    ).sort("sharpe", "backtest_hash", descending=[True, False])
+    if rows.is_empty():
+        raise RuntimeError(
+            f"no preview baseline, allocation or overlay backtest for {label} traded in this "
+            "workspace; 13, 14 and 15 have to run in it first, and at least one of their "
+            "results has to open a position"
+        )
+    return Result.open(study, rows.item(0, "backtest_hash"), include_preview=True)
+
+
+def selected_allocation_result(study: Study, *, label: str, canonical: bool):
+    """The configuration `15_risk_management` puts its overlays on, for one label.
+
+    On a canonical run it is the highest validation Sharpe in `crypto-signal-allocation-{label}`,
+    read back through the frozen set rather than re-queried. The set is immutable and a query is
+    not: a registry grows, so a later run that adds one result changes what a fresh "best
+    allocation result" query returns, and the two stages would then develop different
+    configurations from the one `14_portfolio_management` chose.
+
+    A preview run has no frozen set, because a candidate set is canonical - `CandidateSet.create`
+    refuses a preview member outright. Its equivalent is the results its own 13 and 14 wrote into
+    this workspace, ranked the same way and tie-broken on the same identity. That is not the same
+    guarantee and does not pretend to be one: nothing is published, so nothing downstream can
+    resolve it by name, and the preview chain proves only that the stages run.
+    """
+    from case_studies.research import CandidateSet, Result
+
+    if canonical:
+        return CandidateSet.one(
+            study, name=f"crypto-signal-allocation-{label}"
+        ).best_validation_sharpe()
+    rows = _preview_traded_backtests(study, label).sort(
+        "sharpe", "backtest_hash", descending=[True, False]
+    )
+    if rows.is_empty():
+        raise RuntimeError(
+            f"no preview baseline or allocation backtest for {label} traded in this "
+            "workspace; 13_backtest and 14_portfolio_management have to run in it first, "
+            "and at least one of their results has to open a position"
+        )
+    return Result.open(study, rows.item(0, "backtest_hash"), include_preview=True)
+
+
+def run_model_plan(
+    plan: ModelPlan,
+    *,
+    population_name: str | None = None,
+    supersedes: str | None = None,
+) -> ModelExecution:
+    """Freeze the planned checkpoint population, then execute exactly that population.
+
+    ``supersedes`` names the generation of ``population_name`` this run replaces. A name that
+    already exists with different members is refused unless the run says so, and the refusal
+    prints the hash to pass here. It is the caller's statement, not something to infer: a
+    population is a declaration made before the work, so the run has to assert that it is
+    replacing one rather than discovering it after the fact.
+    """
     canonical = plan.execution_tier is ExecutionTier.CANONICAL
     population = None
     if canonical:
         if not population_name:
             raise ValueError("canonical model execution requires an official population name")
-        population = plan.create_population(name=population_name)
+        population = plan.create_population(name=population_name, supersedes=supersedes)
     elif population_name is not None:
         raise ValueError("preview model execution cannot create an official population")
     execution = plan.run()
@@ -290,6 +484,7 @@ def run_model_catalog(
     *,
     execution_tier: str,
     population_name: str | None = None,
+    supersedes: str | None = None,
     overrides: dict[str, Any] | None = None,
     preview_reductions: dict[str, Any] | None = None,
 ) -> ModelExecution:
@@ -303,6 +498,7 @@ def run_model_catalog(
             preview_reductions=preview_reductions,
         ),
         population_name=population_name,
+        supersedes=supersedes,
     )
 
 

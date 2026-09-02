@@ -27,8 +27,14 @@ used by the Ch20 paired-bootstrap synthesis:
 
 - ``signal``  → equal-weight benchmark (per case study, registered separately)
 - ``allocation``    → ``signal`` leader of the same (label, family)
-- ``cost_sensitivity`` → ``signal`` leader (no costs)
-- ``risk_overlay``  → ``cost_sensitivity`` leader (with costs, no risk overlay)
+- ``risk_overlay``  → ``allocation`` leader (sized, no overlay)
+- ``cost_sensitivity`` → ``risk_overlay`` leader (sized and overlaid, frictionless)
+
+Each stage is benchmarked against the leader of the stage before it, so the
+chain follows the order the backtest sequence runs: size positions, apply risk
+controls, then measure what realistic costs take off the winner. A stage that a
+case study has not run is skipped, and the benchmark falls back to the nearest
+earlier stage that has rows.
 
 Per-case-study baselines for the signal stage live in
 :data:`SIGNAL_BASELINE_BY_CASE_STUDY`; populate this when the equal-weight
@@ -37,8 +43,10 @@ benchmark name in the registry is non-default.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import warnings
+from collections.abc import Iterable
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
@@ -139,11 +147,57 @@ def resolve_block_length(
 # ---------------------------------------------------------------------------
 
 
+#: Stage order of the backtest sequence. Each stage's benchmark is the leader of
+#: the nearest preceding stage that has rows.
+STAGE_SEQUENCE: tuple[str, ...] = (
+    "signal",
+    "allocation",
+    "risk_overlay",
+    "cost_sensitivity",
+)
+
+
+#: The block of a strategy spec each stage introduces. ``cost_sensitivity`` has no entry
+#: because it is terminal - nothing is ever built on top of a cost sweep.
+STAGE_CARRIER_BLOCK: dict[str, str] = {
+    "signal": "signal",
+    "allocation": "allocation",
+    "risk_overlay": "risk",
+}
+
+
+def carried_blocks(stage: str) -> tuple[str, ...]:
+    """Every strategy block a backtest at ``stage`` has inherited or introduced."""
+    if stage not in STAGE_SEQUENCE:
+        return ()
+    upto = STAGE_SEQUENCE[: STAGE_SEQUENCE.index(stage) + 1]
+    return tuple(STAGE_CARRIER_BLOCK[s] for s in upto if s in STAGE_CARRIER_BLOCK)
+
+
+def descends_from(challenger: dict, baseline: dict, baseline_stage: str) -> bool:
+    """Is ``challenger`` a strategy built on top of ``baseline``?
+
+    `champion_lineage` takes the best backtest at each stage independently, so its
+    entries can be siblings rather than parent and child - two strategies that branch
+    off the same allocation carrier, say, one adding a risk overlay and one sweeping
+    costs. Comparing those two attributes the whole difference between two unrelated
+    strategies to whichever stage happens to come second in the chain.
+
+    Descent requires the challenger to match the baseline on the *whole prefix* the
+    baseline carries, not only on the block its own stage introduced. A shared
+    prediction hash fixes the predictions and nothing else: signal-stage runs vary
+    the signal method and ``top_k``, so an allocation leader can differ from the
+    signal leader in the one place the comparison is meant to hold fixed. Checking a
+    single block would pass it.
+    """
+    return all(challenger.get(b) == baseline.get(b) for b in carried_blocks(baseline_stage))
+
+
 STAGE_BASELINE: dict[str, str] = {
     "signal": "equal_weight",
     "allocation": "signal_leader",
-    "cost_sensitivity": "signal_leader",
-    "risk_overlay": "cost_sensitivity_leader",
+    "risk_overlay": "allocation_leader",
+    "cost_sensitivity": "risk_overlay_leader",
 }
 
 
@@ -182,12 +236,17 @@ def _sample_stats(returns: np.ndarray, periods_per_year: int) -> _Stats:
     mu = float(np.mean(returns))
     sd = float(np.std(returns, ddof=1))
     sharpe = (mu / sd * np.sqrt(periods_per_year)) if sd > 0 else 0.0
-    downside = returns[returns < 0]
-    if len(downside) > 1:
-        dsd = float(np.sqrt(np.mean(downside**2)))
-        sortino = (mu / dsd * np.sqrt(periods_per_year)) if dsd > 0 else 0.0
-    else:
-        sortino = 0.0
+    # Downside deviation averages the squared shortfall over EVERY period, not over the
+    # periods that fell. Dividing by the count of negative returns instead inflates the
+    # ratio by sqrt(n / n_negative), and since `backtest_metrics.sortino` is written by
+    # the engine's standard definition, that made the point estimate and the interval
+    # around it two different estimators: on us_firm_characteristics' validation rank-1,
+    # 99 periods with 20 negative, a stored 13.876 against a bootstrap CI of
+    # [4.22, 9.65] - the point outside its own interval, and a forest plot that could
+    # not be drawn.
+    shortfall = np.minimum(returns, 0.0)
+    dsd = float(np.sqrt(np.mean(shortfall**2)))
+    sortino = (mu / dsd * np.sqrt(periods_per_year)) if dsd > 0 else 0.0
     cum = np.cumprod(1.0 + returns)
     total_return = float(cum[-1] - 1.0)
     n_years = len(returns) / periods_per_year
@@ -407,6 +466,80 @@ def compute_backtest_uncertainty(
 # ---------------------------------------------------------------------------
 
 
+def joint_returns(
+    challenger: np.ndarray | pl.Series,
+    baseline: np.ndarray | pl.Series,
+    *,
+    challenger_overlays_baseline: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Coerce a paired return series to the precondition of a paired bootstrap.
+
+    :func:`compute_paired_uncertainty` requires two arrays of the same length whose position
+    ``i`` is the same session on both sides, and it refuses the pair rather than bootstrap a
+    misaligned one. Coercing each side on its own does not deliver that: ``_coerce_returns``
+    drops non-finite values and the leading run of zeros per series, so two series with
+    different amounts of leading inactivity part company. Joining on the timestamp beforehand
+    does not save it either, because the per-side trim happens after.
+
+    So both decisions are taken once, over both series: keep a session only where both sides
+    are finite, then start where the comparison becomes defined.
+
+    Where it becomes defined depends on what the pair is, which is why the caller has to say.
+    A leading flat run on the challenger has two possible meanings and they are
+    indistinguishable in the numbers:
+
+    ``challenger_overlays_baseline=False`` (the default, and the strategy-versus-benchmark
+        case): the two series are independent, each live from its own first traded session.
+        A strategy has a warmup prefix before its first signal while an equal-weight
+        benchmark is invested from the first joined session, and those rows are pre-sample
+        for the strategy rather than a result. The sample starts where **both** are trading,
+        which the code below reads as the first session on which both returns are non-zero;
+        see the comment there for the difference and why it is preserved.
+
+    ``challenger_overlays_baseline=True`` (the risk-overlay case): the challenger runs on top
+        of the baseline, so both are live from the same session and a flat challenger there
+        is a position it chose to hold - the largest instance of the effect the comparison
+        exists to measure. Starting where both traded would delete exactly those rows and pull
+        the measured difference toward zero in the direction the overlay is under test. The
+        sample starts where **either** has traded.
+
+    Returns two empty arrays when no session qualifies.
+    """
+    c = _as_return_array(challenger)
+    b = _as_return_array(baseline)
+    if c.size != b.size:
+        raise ValueError(
+            f"a paired series must arrive aligned; got {c.size} and {b.size} observations"
+        )
+    finite = np.isfinite(c) & np.isfinite(b)
+    c, b = c[finite], b[finite]
+    if c.size == 0:
+        return c, b
+    if challenger_overlays_baseline:
+        # Either side having traded starts the sample, so the first index where anything is
+        # non-zero: the earlier of the two firsts, or nothing if neither ever traded.
+        first_c = np.flatnonzero(c != 0.0)
+        first_b = np.flatnonzero(b != 0.0)
+        starts = [int(x[0]) for x in (first_c, first_b) if x.size]
+        if not starts:
+            return c[:0], b[:0]
+        start = min(starts)
+    else:
+        # The first session on which both are simultaneously non-zero, which is the rule the
+        # per-case-study producer and `20_strategy_synthesis/01_aggregate_synthesis.py` have
+        # both applied since they were split apart. It is not quite the rule the paragraph
+        # above states: the later starter's own first session is skipped when the other side
+        # happens to post an exactly zero return on it, and those observations are live on
+        # both series. Correcting that moves every default pair in the registry and obliges a
+        # re-execution of the Chapter 20 synthesis, so it is left as it stands here rather
+        # than changed underneath a comparison this function was only asked to make paired.
+        both = np.flatnonzero((c != 0.0) & (b != 0.0))
+        if not both.size:
+            return c[:0], b[:0]
+        start = int(both[0])
+    return c[start:], b[start:]
+
+
 def compute_paired_uncertainty(
     challenger: np.ndarray | pl.Series,
     baseline: np.ndarray | pl.Series,
@@ -417,24 +550,35 @@ def compute_paired_uncertainty(
     label: str | None = None,
     n_boot: int = 2000,
     seed: int = 0,
+    challenger_overlays_baseline: bool = False,
 ) -> dict[str, float]:
     """Paired stationary bootstrap on daily-return differences.
 
-    Inputs must be the same length and aligned by date. Returns a flat dict for
-    upsert into ``backtest_paired_metrics``.
+    The two series must arrive the same length and aligned by date, so that position ``i``
+    is the same session on both sides; a pair that does not is refused with an empty mapping
+    rather than truncated. Which rows to drop is then decided over both series at once by
+    :func:`joint_returns`, so a caller does not have to coerce them beforehand.
+    ``challenger_overlays_baseline`` is passed straight through and says which pair this is;
+    read that function before choosing it, because the default is right for a strategy
+    against a benchmark and wrong for a risk overlay against its carrier.
+
+    Returns a flat dict for upsert into ``backtest_paired_metrics``, and an empty mapping
+    when fewer than four sessions survive.
     """
     from ml4t.diagnostic.evaluation.stats import _stationary_bootstrap_indices
 
-    c = _coerce_returns(challenger)
-    b = _coerce_returns(baseline)
-    # Caller's contract: pre-aligned by timestamp via inner-join. If the
-    # per-side leading-zero strip leaves the two arrays at different
-    # lengths, head/tail-truncation would misalign them (challenger
-    # position i and baseline position i would correspond to different
-    # original timestamps). Refuse rather than bootstrap a misaligned
-    # pair silently — callers must pre-align if they bypass _joint_coerce.
-    if c.size != b.size:
+    c_raw = _as_return_array(challenger)
+    b_raw = _as_return_array(baseline)
+    # Caller's contract: the two series arrive pre-aligned by timestamp, so position i is
+    # the same session on both sides. Nothing here can recover that if they do not, because
+    # truncating to the shorter one would compare different sessions. Refuse instead.
+    if c_raw.size != b_raw.size:
         return {}
+    # The coercion is taken once over both series rather than per side. `_coerce_returns`
+    # trims each series' own leading run of zeros, which is exactly what a risk overlay
+    # produces - it sits out sessions its carrier trades - and the two arrays then part
+    # company, so the size check above refused every overlay in `17_risk_management`.
+    c, b = joint_returns(c_raw, b_raw, challenger_overlays_baseline=challenger_overlays_baseline)
     if c.size < 4:
         return {}
 
@@ -741,7 +885,12 @@ def compute_reality_check(
 # ---------------------------------------------------------------------------
 
 
-def _coerce_returns(x: np.ndarray | pl.Series | pl.DataFrame) -> np.ndarray:
+def _as_return_array(x: np.ndarray | pl.Series | pl.DataFrame) -> np.ndarray:
+    """The return series as a float array, with no row dropped.
+
+    Separate from :func:`_coerce_returns` because a paired comparison has to decide which
+    rows to drop over both series at once; see :func:`joint_returns`.
+    """
     if isinstance(x, pl.DataFrame):
         for col in ("daily_return", "ret", "return", "value"):
             if col in x.columns:
@@ -753,7 +902,11 @@ def _coerce_returns(x: np.ndarray | pl.Series | pl.DataFrame) -> np.ndarray:
         arr = x.to_numpy()
     else:
         arr = np.asarray(x).flatten()
-    arr = arr.astype(np.float64, copy=False)
+    return arr.astype(np.float64, copy=False)
+
+
+def _coerce_returns(x: np.ndarray | pl.Series | pl.DataFrame) -> np.ndarray:
+    arr = _as_return_array(x)
     arr = arr[np.isfinite(arr)]
     # Engine-mode parquets often carry leading zero rows from bars before the
     # first signal. Including them dilates uncertainty by underestimating
@@ -891,6 +1044,16 @@ def _align_variants_on_timestamp(
     return matrix, names
 
 
+def cohort_member_digest(hashes: Iterable[str]) -> str:
+    """Identify a cohort by its members rather than by how many it has.
+
+    Order-independent, so the digest does not depend on how the caller happened to
+    assemble the cohort, and duplicates collapse - a hash is in the cohort or it is not.
+    """
+    unique = sorted(set(str(h) for h in hashes))
+    return hashlib.sha256("\n".join(unique).encode()).hexdigest()
+
+
 def compute_cohort_metrics(
     returns_by_hash: dict[str, pl.DataFrame],
     *,
@@ -974,6 +1137,11 @@ def compute_cohort_metrics(
     out: dict[str, Any] = {
         "leader_hash": leader_hash,
         "k_variants": int(k_variants),
+        # `names` is the cohort the correction below is actually computed over, after
+        # alignment has dropped whatever could not be aligned. Persisting its digest is
+        # what lets a reader establish that a stored correction belongs to the cohort it
+        # is about to report it against, rather than inferring it from a matching count.
+        "member_digest": cohort_member_digest(names),
         "periods_per_year": float(periods_per_year),
         "leader_sharpe": float(sharpes[leader_idx]),
     }
@@ -1175,18 +1343,29 @@ def _sharpe_per_column(matrix: np.ndarray, periods_per_year: float) -> np.ndarra
 
 
 def _sortino(arr: np.ndarray, periods_per_year: float) -> float:
+    """The same Sortino ratio `_sample_stats` reports, for a cohort leader.
+
+    This file held three downside deviations: the shortfall over all periods, the root
+    mean square of the negative returns alone, and their standard deviation about their
+    own mean. Only the first is the Sortino ratio the engine writes to
+    `backtest_metrics.sortino`, so a `leader_sortino` computed either other way was not
+    comparable to the numbers it was being read beside.
+    """
+    if arr.size < 2:
+        return float("nan")
     mu = float(np.mean(arr))
-    downside = arr[arr < 0]
-    if downside.size < 2:
+    dsd = float(np.sqrt(np.mean(np.minimum(arr, 0.0) ** 2)))
+    if dsd <= 1e-12:
         return float("nan")
-    d_std = float(np.std(downside, ddof=1))
-    if d_std <= 1e-12:
-        return float("nan")
-    return mu / d_std * float(np.sqrt(periods_per_year))
+    return mu / dsd * float(np.sqrt(periods_per_year))
 
 
 __all__ = [
     "STAGE_BASELINE",
+    "STAGE_CARRIER_BLOCK",
+    "carried_blocks",
+    "STAGE_SEQUENCE",
+    "descends_from",
     "SIGNAL_BASELINE_BY_CASE_STUDY",
     "resolve_block_length",
     "compute_backtest_uncertainty",

@@ -376,6 +376,19 @@ def seeded_output_dir(tmp_path_factory):
 
     seed_results(output_dir, CASE_STUDY_IDS)
 
+    # The preview root is deliberately NOT seeded. `Study.activate()` links only `labels` and
+    # `features` into the preview case directory and opens an empty registry there, and it was
+    # tempting to seed that root too so a read-only downstream notebook would find a candidate
+    # index. Measured on etfs, that does more harm than the gap it fills: the seeded rows land
+    # in the same `(split, family, label)` coverage group as the predictions the preview run
+    # actually fits, and they cannot win it - a seeded artifact carries 60 dates against a
+    # fitted 447-483 - so `full_coverage_prediction_sql` admits neither and `14_backtest`
+    # refuses to rank anything. With the preview root left empty, `13_model_analysis` passes
+    # anyway and that refusal does not arise.
+    #
+    # A notebook that genuinely has nothing to read under preview should say so, which is what
+    # the refusals in 14 through 18 already do.
+
     # The reader-facing crypto workflow opens the seeded case directory as a Study workspace.
     # Mark that existing fixture root explicitly so Study.open does not confuse it with an
     # unrelated directory and so preview outputs remain under this test worker's output root.
@@ -555,6 +568,41 @@ def pytest_runtest_logreport(report):
     with open(_RESULTS_PATH, "a") as f:
         f.write(json.dumps(record) + "\n")
         f.flush()
+
+
+@pytest.fixture(autouse=True)
+def _restore_output_root():
+    """Put back the process-global output root a test may have redirected.
+
+    ``Study.open``/``Study.activate`` set ``ML4T_OUTPUT_DIR`` and
+    ``workspace._ACTIVE_OUTPUT_ROOT``, and a test that leaves either pointing into its own
+    tmp_path makes ``get_case_study_dir`` resolve there for every later test in the worker.
+
+    Restored rather than deleted: ``seeded_output_dir`` is session-scoped and writes the
+    per-worker path exactly once, so a teardown that removes the variable removes it for the
+    rest of the worker, and every later module resolving through ``get_case_study_dir`` then
+    reads the committed ``case_studies/`` tree instead of the seeded output dir. This lives here
+    rather than in each module because thirteen copies of it drifted apart once already.
+    """
+    previous = os.environ.get("ML4T_OUTPUT_DIR")
+    yield
+    if previous is None:
+        os.environ.pop("ML4T_OUTPUT_DIR", None)
+    else:
+        os.environ["ML4T_OUTPUT_DIR"] = previous
+    # Read out of sys.modules rather than importing. The module holds the only state this
+    # resets, so a test that never imported it left nothing to reset - and importing it here
+    # would make every test in the run pay for the import. `case_studies.research` pulls in
+    # `utils.config`, which raises FileNotFoundError at import when ML4T_DATA_PATH names a
+    # directory that is not there. The `test-unit` job is exactly that environment: it checks
+    # out no test-data, and its Chapter 21 step does not override the workflow-level path. An
+    # autouse fixture that imports turns that into a teardown error on every test in the step -
+    # 70 passed, 70 errors - against tests that read nothing from disk.
+    workspace = sys.modules.get("case_studies.research.workspace")
+    if workspace is None:
+        return
+    workspace._ACTIVE_OUTPUT_ROOT = None
+    workspace._clear_root_sensitive_caches()
 
 
 @pytest.fixture

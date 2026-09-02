@@ -17,7 +17,7 @@
 
 # ---------------------------------------------------------------------------
 # Needs the modelling environment - run by test-unit-image, in ml4t/ml4t:latest.
-# 32 files. The 26 that existed on 2026-08-24 measured 392 tests, 3m21s.
+# 36 files. The 26 that existed on 2026-08-24 measured 392 tests, 3m21s.
 #
 # `case_studies/utils/gbm.py` imports torch at module scope, so the LightGBM
 # files are behind this boundary too even though LightGBM itself is a small
@@ -30,8 +30,33 @@
 # These stay excluded from THIS job's sweep, which has the fast dependency set.
 # The exclusion no longer means unrun: until 2026-08-24 the image job named here
 # did not exist, so it did.
+#
+# `test_latent_factors_identity` and `test_tabular_dl_identity` were added on
+# 2026-08-25 with the us_firm_characteristics modelling pass and are behind the
+# same boundary for the same reason. The second imports torch directly; the
+# first reaches it through `case_studies/utils/tabular_dl.py:41` and the
+# latent-factor runners. Both were red on `test-unit` at collection - a new
+# test file is gated the moment it is added, which is what this file inverting
+# the default is for.
+#
+# `test_gbm_holdout_rekey` was added on 2026-08-30 with the GBM holdout re-keying
+# hook. It imports `case_studies/utils/gbm.py`, which is the boundary itself.
+#
+# `test_holdout_expected_keys` loads `20_strategy_synthesis/holdout.py`, whose
+# module scope reaches lightgbm and torch through the family training paths it
+# dispatches to. It tests two pure functions and needs none of that, but the
+# module cannot be imported without it.
+# ---------------------------------------------------------------------------
+# The three files the etfs deep-learning and latent-factor pass added are behind
+# the same boundary. `test_common_sample_daily_ic` tests one pure polars
+# function, but `case_studies/utils/model_analysis.py` imports lightgbm at
+# module scope; `test_latent_epoch_ic_over_dates` imports torch directly; and
+# `test_lightning_announcement_silence` reaches pytorch_lightning through
+# `case_studies/utils/darts_forecasting.py`. All three were red on `test-unit`
+# at collection, and all three run in `test-unit-image`.
 # ---------------------------------------------------------------------------
 tests/test_crypto_modeling_lineage.py
+tests/test_common_sample_daily_ic.py
 tests/test_cv_cached_results.py
 tests/test_darts_state.py
 tests/test_darts_temporal.py
@@ -41,16 +66,17 @@ tests/test_deep_model_state.py
 tests/test_dl_device_contract.py
 tests/test_dl_force_retrain_identity.py
 tests/test_gbm_classification_target.py
+tests/test_gbm_holdout_rekey.py
 tests/test_gbm_identity.py
 tests/test_gbm_runtime.py
+tests/test_holdout_expected_keys.py
 tests/test_insight_chapter.py
+tests/test_latent_epoch_ic_over_dates.py
+tests/test_latent_factors_identity.py
 tests/test_latent_factors_no_leak.py
 tests/test_latent_input_identity.py
-# Imports `_install_fixture_adapter` and `_locked_study` from
-# test_locked_holdout_execution, so it inherits that module's torch dependency
-# transitively rather than importing torch itself. Same boundary, same reason.
-tests/test_holdout_evaluation_driver.py
-tests/test_locked_holdout_execution.py
+tests/test_lightning_announcement_silence.py
+tests/test_family_hook_dispatch.py
 tests/test_model_analysis_selection.py
 tests/test_model_source_identity_versions.py
 tests/test_registry_metrics.py
@@ -66,6 +92,7 @@ tests/test_sequence_dataset.py
 tests/test_sequence_identity_roundtrip.py
 tests/test_tabular_dl.py
 tests/test_tabular_dl_adapter.py
+tests/test_tabular_dl_identity.py
 tests/test_tabular_dl_runtime.py
 tests/test_training_identity_migration.py
 
@@ -134,21 +161,3 @@ tests/test_backtest_presets.py
 tests/test_etf_baseline_parity.py
 tests/test_sp500_options_research.py::test_official_population_is_snapshotted_before_option_execution
 tests/test_us_firm_research_workflow.py::test_open_study_writes_canonical_results_to_output_dir
-
-# ---------------------------------------------------------------------------
-# Red on main today, against code this job does not own. Each one is a defect
-# to fix, not a test to delete - the entry comes out when the notebook does.
-# ---------------------------------------------------------------------------
-# Six tests, each lifting one private helper out of
-# case_studies/sp500_options/07_gbm.py by name and exec'ing it:
-# _normal_hac_inference, _training_cache_path, _assert_preset_matches,
-# _validate_curve_frame, _metric_payload, _validate_raw_checkpoint_grid. None
-# of the six exists in that file, or anywhere else in the repo - the notebook
-# moved that logic into case_studies/utils/ and the contract test was left
-# behind. Every test raises KeyError before it asserts anything, and has since
-# the release commit that added the file. Rewriting it against where the
-# helpers actually live is sp500_options' notebook work, not this job's.
-tests/test_sp500_options_gbm_contract.py
-# The `results` cell at case_studies/sp500_options/06_linear.py:401 runs 47
-# lines against the standard's hard maximum of 40.
-tests/test_sp500_options_linear_fold_alignment.py::test_no_code_cell_exceeds_the_standards_hard_maximum

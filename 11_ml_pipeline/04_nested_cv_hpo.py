@@ -35,7 +35,7 @@
 #   same data
 # - Apply the 3σ overfitting diagnostic to a hyperparameter search
 #
-# **Book reference**: Section 11.2 — Regularized Regression (nested CV +
+# **Book reference**: Section 11.2 - Regularized Regression (nested CV +
 # selection bias).
 #
 # **Prerequisites**
@@ -51,7 +51,7 @@
 # ## 1. Setup and Imports
 
 # %% tags=[]
-"""Hyperparameter Selection and Validation Bias — nested CV for unbiased performance evaluation."""
+"""Hyperparameter Selection and Validation Bias - nested CV for unbiased performance evaluation."""
 
 import warnings
 
@@ -62,14 +62,14 @@ import optuna
 import pandas as pd
 import polars as pl
 from matplotlib.colors import LinearSegmentedColormap
-from ml4t.diagnostic.metrics import cross_sectional_ic_series
 from ml4t.diagnostic.splitters import WalkForwardCV
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 
-from utils.paths import get_case_study_dir, get_chapter_dir
+from utils.modeling import cross_sectional_ic_mean
+from utils.paths import display_path, get_case_study_dir, get_chapter_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, ml4t_diverging
+from utils.style import COLORS, ml4t_diverging, show_with_alt
 
 warnings.filterwarnings("ignore")
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -99,7 +99,6 @@ N_TRIALS_EFFECTIVE = N_TRIALS if CV_MAX_TRIALS <= 0 else min(N_TRIALS, CV_MAX_TR
 # We use the pre-computed ETF features from Chapter 8 and labels from Chapter 7.
 
 # %% tags=[]
-# Load ETF features and labels from centralized case study store
 CASE_DIR = get_case_study_dir("etfs")
 FEATURES_PATH = CASE_DIR / "features" / "financial.parquet"
 LABELS_PATH = CASE_DIR / "labels" / "fwd_ret_21d.parquet"
@@ -130,31 +129,34 @@ print(f"Date range: {dataset['timestamp'].min()} to {dataset['timestamp'].max()}
 
 # %% [markdown] tags=[]
 # ## 3. Prepare Features and Target
+#
+# A feature that could not be computed arrives as a null, and every row carrying
+# one is dropped. Zero is not a neutral filler for any of these columns: it is a
+# flat 252-day return, a zero volatility, and a mid-range oscillator reading, so
+# filling with it would put invented observations into the training set. The rows
+# this removes are the early history of a handful of symbols, where a long-window
+# feature has not had its warm-up period yet.
 
 # %% tags=[]
-# Identify feature and target columns
 meta_cols = {"timestamp", ASSET_COL}
 label_cols = {c for c in dataset.columns if c.startswith("fwd_ret")}
 feature_cols = [c for c in dataset.columns if c not in meta_cols and c not in label_cols]
 
-# Prepare arrays
-# Replace inf/NaN with null, then fill remaining nulls with 0
-df = (
-    dataset.select(feature_cols + [TARGET_COL, "timestamp", ASSET_COL])
-    .with_columns(
-        [
-            pl.when(pl.col(c).is_nan() | pl.col(c).is_infinite())
-            .then(None)
-            .otherwise(pl.col(c))
-            .alias(c)
-            for c in feature_cols
-        ]
-    )
-    .fill_null(0)
+df = dataset.select(feature_cols + [TARGET_COL, "timestamp", ASSET_COL]).with_columns(
+    [
+        pl.when(pl.col(c).is_nan() | pl.col(c).is_infinite())
+        .then(None)
+        .otherwise(pl.col(c))
+        .alias(c)
+        for c in feature_cols
+    ]
 )
+rows_before = df.height
+df = df.drop_nulls(subset=feature_cols)
+print(f"Dropped {rows_before - df.height:,} rows with an incomplete feature vector")
+
 X = df.select(feature_cols).to_numpy()
 y = df[TARGET_COL].to_numpy()
-X = np.nan_to_num(X, nan=0.0)
 
 # Create DataFrame with datetime index for WalkForwardCV
 dates = df["timestamp"].to_list()
@@ -162,27 +164,6 @@ dates_arr = df["timestamp"].to_numpy()
 symbols_arr = df[ASSET_COL].to_numpy()
 df_for_cv = pd.DataFrame(X, columns=feature_cols)
 df_for_cv.index = pd.DatetimeIndex(dates).tz_localize("UTC")
-
-
-def cross_sectional_ic_mean(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    dates: np.ndarray,
-    symbols: np.ndarray,
-) -> float:
-    """Mean cross-sectional Spearman IC across dates in a fold."""
-    pred_df = pl.DataFrame({"timestamp": dates, "symbol": symbols, "prediction": y_pred})
-    ret_df = pl.DataFrame({"timestamp": dates, "symbol": symbols, "forward_return": y_true})
-    ic_per_date = cross_sectional_ic_series(
-        pred_df,
-        ret_df,
-        pred_col="prediction",
-        ret_col="forward_return",
-        date_col="timestamp",
-        entity_col="symbol",
-    )
-    ic_clean = ic_per_date.drop_nulls("ic")
-    return float(ic_clean["ic"].mean()) if ic_clean.height else float("nan")
 
 
 print(f"Final dataset: {X.shape[0]} samples, {X.shape[1]} features")
@@ -205,9 +186,8 @@ print(f"Target: {TARGET_COL}")
 # ## 4. Define Alpha Grid and Evaluation Function
 
 # %% tags=[]
-# Alpha grid spanning weak to strong regularization
-ALPHAS = np.logspace(-2, 9, ALPHA_GRID_POINTS)  # 0.01 to 1e9
-LABEL_HORIZON = 21  # 1-month forward returns
+ALPHAS = np.logspace(-2, 9, ALPHA_GRID_POINTS)
+LABEL_HORIZON = 21  # sessions the label looks forward, and the purge each split needs
 
 # %% [markdown] tags=[]
 # ### Evaluate Alpha Grid
@@ -261,8 +241,6 @@ def evaluate_alpha_grid(
             model.fit(X_train, y_train)
             pred = model.predict(X_test)
             ic = cross_sectional_ic_mean(y_test, pred, dates_test, symbols_test)
-            ic = ic if not np.isnan(ic) else 0.0
-
             results.append({"fold": fold_idx + 1, "alpha": alpha, "ic": ic})
 
     return pd.DataFrame(results)
@@ -308,17 +286,21 @@ print(f"\nGrid shape: {ic_matrix.shape[0]} folds × {ic_matrix.shape[1]} alphas"
 # %% [markdown] tags=[]
 # ## 6. Visualize Alpha Landscape
 
+# %% [markdown] tags=[]
+# The colour scale diverges around zero because zero is the meaningful point for
+# an IC: it separates a ranking that helped from one that hurt. The scale is made
+# symmetric so that equal distances either side of zero read as equal.
+
 # %% tags=[]
-# Heatmap of IC across folds and alphas
-# ML4T diverging scale (negative -> neutral -> positive) for the meaningful IC=0 point.
 ml4t_div = LinearSegmentedColormap.from_list("ml4t_div", ml4t_diverging())
 fig, ax = plt.subplots(figsize=(12, 4))
+ic_limit = float(np.nanmax(np.abs(ic_matrix.values)))
 im = ax.imshow(
     ic_matrix.values,
     aspect="auto",
     cmap=ml4t_div,
-    vmin=-ic_matrix.values.max(),
-    vmax=ic_matrix.values.max(),
+    vmin=-ic_limit,
+    vmax=ic_limit,
 )
 # Compact scientific labels (every other tick) keep the alpha grid legible.
 tick_idx = list(range(0, len(ic_matrix.columns), 2))
@@ -329,12 +311,15 @@ ax.set_xticklabels(
 ax.set_yticks(range(len(ic_matrix.index)))
 ax.set_yticklabels([f"Fold {i}" for i in ic_matrix.index])
 ax.set_xlabel(r"Alpha (log spacing, $10^{-2}$ to $10^{9}$)")
-ax.set_title("Information Coefficient Across Alpha Grid")
+ax.set_title("The same alpha does not score alike on every fold")
 fig.colorbar(im, ax=ax, label="IC", shrink=0.8)
-fig.show()
+show_with_alt(
+    fig,
+    "Heatmap of information coefficient with one row per fold and one column per "
+    "alpha, on a scale diverging around zero.",
+)
 
 # %% tags=[]
-# Summary statistics across alphas
 alpha_stats = (
     grid_results.groupby("alpha")
     .agg(
@@ -365,14 +350,17 @@ ax.semilogx(
 )
 ax.set_xlabel("Alpha (log scale)")
 ax.set_ylabel("Information Coefficient")
-ax.set_title("Performance Stability Across Regularization Levels")
-fig.show()
+ax.set_title("Mean IC moves smoothly with alpha, inside a wide error band")
+show_with_alt(
+    fig,
+    "Mean information coefficient against alpha on a log axis, with a shaded band "
+    "one standard deviation wide either side.",
+)
 
 # %% [markdown] tags=[]
 # ## 7. Stability Analysis
 
 # %% tags=[]
-# Compute coefficient of variation (CV) for each alpha
 alpha_stats["cv"] = alpha_stats["std_ic"] / alpha_stats["mean_ic"].abs()
 
 # Find the most stable region
@@ -420,24 +408,23 @@ stability_df = pl.DataFrame(
 stability_df
 
 # %% [markdown] tags=[]
-# **Interpretation**: the empirical landscape on this dataset is dominated by
-# noise rather than signal. Mean IC is **negative** across most of the range
-# (worst around $\alpha \approx 10^3$ at $-0.039$), recovers monotonically as
-# regularization tightens, and only crosses zero at $\alpha \gtrsim 10^7$ to
-# reach a noisy peak of $\approx +0.007$ at $\alpha = 10^9$. The IC landscape
-# is unstable: median coefficient of variation across alphas is 3.48 — fold-level
-# IC swings by ±0.05–0.10 standard deviations, an order of magnitude larger
-# than any mean IC at any alpha.
+# **How to read the table.** Three of its rows describe the landscape and one
+# describes how much you should trust it.
 #
-# Two consequences for Part B:
+# The plateau size and range say whether the alpha that scores highest is
+# meaningfully better than its neighbours or merely first past the post. A
+# plateau spanning orders of magnitude means the choice within it hardly
+# matters, and picking the exact maximum is picking noise.
 #
-# - The "best" alpha at $10^9$ is essentially indistinguishable from the
-#   plateau at $10^8$. The stable region is real but extremely tight at the
-#   top of the search range.
-# - With per-fold std of 0.05+ and mean IC of 0.007, the selection problem in
-#   single-loop CV has a lot of noise to chase. We should expect single-loop
-#   CV to find spuriously high alphas in some folds and quote the cherry-picked
-#   number as the model's "performance."
+# The median coefficient of variation is the ratio of fold-to-fold dispersion to
+# the size of the mean, taken across alphas. Above one, the IC at a given alpha
+# varies between folds by more than the mean IC itself is worth, and no ranking
+# of alphas computed from these folds is reliable.
+#
+# That ratio is what makes Part B necessary. Where fold-level noise dwarfs the
+# mean, a search that takes the highest-scoring alpha per fold is taking whichever alpha
+# suited that fold's noise, and reporting its score as performance measures the
+# search rather than the model.
 
 # %% [markdown] tags=[]
 # ---
@@ -450,6 +437,23 @@ stability_df
 # **Key insight**: Single-loop CV (select best alpha, report that performance)
 # overestimates because we're measuring "how well did we fit the test set during HPO"
 # rather than "how well will we generalize."
+
+# %% [markdown] tags=[]
+# A fold can end with nothing to select from. Every trial in it is pruned when no
+# validation date in that fold carries a defined IC - too few entities priced on
+# any one date, for instance - and Optuna then has no completed trial to report a
+# best parameter from. That is a fold the protocol could not evaluate, not a fold
+# that scored badly, so both runners record it as missing rather than dropping it:
+# the two protocols are compared fold by fold, and deleting a fold from one of
+# them would misalign the pair.
+
+
+# %% tags=[]
+def _selected_alpha(study) -> float:
+    """The alpha of the best completed trial, or NaN when the fold produced none."""
+    completed = study.get_trials(deepcopy=False, states=(optuna.trial.TrialState.COMPLETE,))
+    return float(study.best_params["alpha"]) if completed else float("nan")
+
 
 # %% [markdown] tags=[]
 # ## 8. Single-Loop CV (BIASED)
@@ -476,7 +480,9 @@ def _make_single_loop_objective(
         model.fit(X_train, y_train)
         pred = model.predict(X_test)
         ic = cross_sectional_ic_mean(y_test, pred, dates_test, symbols_test)
-        return ic if not np.isnan(ic) else -1.0
+        if np.isnan(ic):
+            raise optuna.TrialPruned("no validation date carried a defined IC")
+        return ic
 
     return objective
 
@@ -484,7 +490,7 @@ def _make_single_loop_objective(
 # %% [markdown] tags=[]
 # ### Single-Loop CV Runner
 #
-# Runs HPO and evaluation on the same data splits — the biased baseline.
+# Runs HPO and evaluation on the same data splits - the biased baseline.
 
 
 # %% tags=[]
@@ -538,13 +544,17 @@ def single_loop_cv(
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
 
         # Evaluate with best params on SAME test set
-        best_alpha = study.best_params["alpha"]
+        best_alpha = _selected_alpha(study)
+        if np.isnan(best_alpha):
+            results["ic"].append(float("nan"))
+            results["best_alpha"].append(best_alpha)
+            continue
         model = Ridge(alpha=best_alpha, random_state=RANDOM_SEED)
         model.fit(X_train, y_train)
         pred = model.predict(X_test)
         ic = cross_sectional_ic_mean(y_test, pred, dates_test, symbols_test)
 
-        results["ic"].append(ic if not np.isnan(ic) else 0.0)
+        results["ic"].append(ic)
         results["best_alpha"].append(best_alpha)
 
     return results
@@ -576,10 +586,12 @@ def _make_nested_objective(
     Uses WalkForwardCV for inner loop to maintain proper temporal
     structure with purging and embargo.
     """
-    # Inner CV on outer training data only
+    # WalkForwardCV sizes its windows in sessions; this is a panel with many rows
+    # per session, so the inner test size is counted in sessions too.
+    inner_sessions = int(pd.DatetimeIndex(df_inner.index).nunique())
     inner_cv = WalkForwardCV(
         n_splits=n_inner,
-        test_size=max(50, len(df_inner) // (n_inner + 2)),  # Adaptive test size
+        test_size=max(label_horizon, inner_sessions // (n_inner + 2)),
         label_horizon=label_horizon,
         embargo_size=label_horizon,  # Inner embargo must also respect label horizon
         expanding=True,
@@ -612,7 +624,9 @@ def _make_nested_objective(
             if not np.isnan(ic):
                 inner_scores.append(ic)
 
-        return np.mean(inner_scores) if inner_scores else -1.0
+        if not inner_scores:
+            raise optuna.TrialPruned("no inner fold carried a defined IC")
+        return float(np.mean(inner_scores))
 
     return objective
 
@@ -688,7 +702,11 @@ def nested_cv(
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
 
         # Outer evaluation with best params (UNBIASED)
-        best_alpha = study.best_params["alpha"]
+        best_alpha = _selected_alpha(study)
+        if np.isnan(best_alpha):
+            results["ic"].append(float("nan"))
+            results["best_alpha"].append(best_alpha)
+            continue
 
         # Scale outer fold for final evaluation
         outer_scaler = StandardScaler()
@@ -700,7 +718,7 @@ def nested_cv(
         pred = model.predict(X_outer_test)
         ic = cross_sectional_ic_mean(y_outer_test, pred, dates_outer_test, symbols_outer_test)
 
-        results["ic"].append(ic if not np.isnan(ic) else 0.0)
+        results["ic"].append(ic)
         results["best_alpha"].append(best_alpha)
 
     return results
@@ -710,7 +728,6 @@ def nested_cv(
 # ## 10. Run Comparison
 
 # %% tags=[]
-# Inner loop folds for nested CV
 N_INNER = 3
 
 NEED_CV = RETRAIN or not CV_PATH.exists()
@@ -745,7 +762,7 @@ if NEED_CV:
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     joblib.dump({"single_results": single_results, "nested_results": nested_results}, CV_PATH)
-    print(f"Saved results to {CV_PATH}")
+    print(f"Saved results to {display_path(CV_PATH)}")
 
 # %% [markdown] tags=[]
 # ### Load Cached Results
@@ -788,11 +805,20 @@ if not NEED_CV:
 # %% [markdown] tags=[]
 # ## 11. Results Analysis
 
+
 # %% tags=[]
-single_mean_ic = np.mean(single_results["ic"])
-single_std_ic = np.std(single_results["ic"])
-nested_mean_ic = np.mean(nested_results["ic"])
-nested_std_ic = np.std(nested_results["ic"])
+def _alpha_range(results: dict) -> str:
+    """The span of the alphas actually selected, or a note when none were."""
+    chosen = np.asarray(results["best_alpha"], dtype=float)
+    if not np.isfinite(chosen).any():
+        return "no fold selected one"
+    return f"[{np.nanmin(chosen):.2f}, {np.nanmax(chosen):.2f}]"
+
+
+single_mean_ic = np.nanmean(single_results["ic"])
+single_std_ic = np.nanstd(single_results["ic"])
+nested_mean_ic = np.nanmean(nested_results["ic"])
+nested_std_ic = np.nanstd(nested_results["ic"])
 
 # Calculate inflation
 if nested_mean_ic != 0:
@@ -805,37 +831,30 @@ comparison_df = pl.DataFrame(
         "Method": ["Single-Loop (Biased)", "Nested (Unbiased)", "Inflation"],
         "Mean IC": [f"{single_mean_ic:.4f}", f"{nested_mean_ic:.4f}", f"{inflation_pct:+.1f}%"],
         "Std IC": [f"{single_std_ic:.4f}", f"{nested_std_ic:.4f}", ""],
-        "Alpha Range": [
-            f"[{min(single_results['best_alpha']):.2f}, {max(single_results['best_alpha']):.2f}]",
-            f"[{min(nested_results['best_alpha']):.2f}, {max(nested_results['best_alpha']):.2f}]",
-            "",
-        ],
+        "Alpha Range": [_alpha_range(single_results), _alpha_range(nested_results), ""],
     }
 )
 comparison_df
 
 # %% [markdown] tags=[]
-# **Interpretation**: the headline number is not "189.6% inflation" but the
-# sign flip. Single-loop CV reports a positive mean IC of $+0.028$; nested CV
-# returns a **negative** mean IC of $-0.031$ on identical splits. Once HPO is
-# isolated from evaluation, the Ridge model on these features shows **no
-# genuine out-of-sample directional skill at the 21-day horizon** — the
-# single-loop result was selection bias chasing noise.
+# **How to read the table.** The two protocols ran on identical outer splits and
+# differ in one respect: where the alpha came from. Single-loop CV chose it by
+# maximizing IC on the very rows it then reports, so its number answers "how
+# well can this model be made to fit this test fold". Nested CV chose it inside
+# the training window and never showed the outer test fold to the search, so its
+# number answers "how well does the procedure generalize". The gap between them
+# is the selection bias, and it is a property of the search, not of Ridge.
 #
-# The alpha selections corroborate this. Single-loop CV picks alphas that span
-# nine orders of magnitude across folds ($[0.04,\\ 9.4 \\times 10^8]$) — TPE
-# happily lands wherever the test fold's noise happens to peak. Nested CV
-# converges to **the same alpha ($\\approx 132$) on every outer fold**, because
-# the inner-CV objective averaged over inner walk-forward folds is essentially
-# flat over many decades of $\\alpha$, and the TPE sampler with a fixed seed
-# settles in the same place. Stable selection on noise is exactly what we
-# expect from a well-behaved nested protocol when the underlying signal is
-# weak.
+# The alpha column is the more direct evidence. Selections that jump across
+# orders of magnitude from fold to fold mean the search is tracking each fold's
+# noise rather than a stable property of the data. Selections that cluster mean
+# the inner-loop average is finding something the folds agree on. Compare the
+# spread of the two columns before reading either mean IC.
 
 # %% [markdown] tags=[]
 # ### Validation Overfitting Diagnostic (3σ Heuristic)
 #
-# The text proposes a concrete diagnostic: if the best configuration's IC exceeds the
+# The text proposes a concrete diagnostic: if the top configuration's IC exceeds the
 # median by more than 3× the inter-configuration standard deviation, the search is
 # likely overfitting to validation noise. We apply this to the alpha grid from Part A,
 # where each alpha's mean IC across folds serves as a "trial" value.
@@ -864,17 +883,17 @@ diagnostic_df = pl.DataFrame(
 diagnostic_df
 
 # %% [markdown] tags=[]
-# The gap of $\approx 2.3\sigma$ falls below the 3σ threshold, which the
-# heuristic flags as **OK** — the best mean IC is not an outlier among the
-# 23 alpha trials. Note that this diagnostic is testing a different question
-# from the stability classification above. Stability looks at fold-level dispersion
-# *within* an alpha (unstable here, because the IC noise floor is ±0.05);
-# the 3σ heuristic looks at dispersion *across* alphas (OK, because the
-# alpha-by-alpha mean is itself a smooth function). Both are simultaneously
-# true on this dataset: the cross-alpha trajectory is well-behaved, but the
-# fold-to-fold IC at any given alpha is dominated by noise. That combination
-# is precisely why nested CV returns negative IC — there is no signal to
-# overfit, only noise to absorb.
+# This diagnostic and the stability classification above measure dispersion in
+# two different directions, and they can disagree without either being wrong.
+# Stability looks *within* an alpha, across folds: it asks whether the same
+# setting scores consistently on different periods. The three-sigma gap looks
+# *across* alphas, at the fold-averaged scores: it asks whether the top setting
+# stands out from the field.
+#
+# A landscape can be smooth across alphas and noisy across folds at the same
+# time, and that combination is the one to watch for. It means the alpha-by-alpha
+# curve looks orderly enough to invite a confident choice, while the evidence
+# behind each point on it is thin.
 
 # %% [markdown] tags=[]
 # ## 12. Visualization
@@ -909,44 +928,40 @@ axes[1].set_ylabel("Best Alpha (log)")
 axes[1].set_title("(b) Alpha Selection by Fold")
 axes[1].legend(frameon=False)
 
-fig.suptitle(
-    f"Isolating HPO Flips Ridge IC from {single_mean_ic:+.3f} to {nested_mean_ic:+.3f}",
-    fontsize=13,
+fig.suptitle("Isolating the search from the evaluation changes both", fontsize=13)
+show_with_alt(
+    fig,
+    "Two panels: paired bars of information coefficient per fold for the single-loop "
+    "and nested protocols, and the alpha each protocol selected per fold on a log axis.",
 )
-fig.show()
 
 # %% [markdown] tags=[]
 # ## 13. Key Takeaways
 #
-# 1. **Sign-flip, not just inflation.** Single-loop CV: $+0.028$. Nested CV:
-#    $-0.031$. The honest unbiased estimate of the Ridge model's IC on 21-day
-#    ETF returns is *negative* — there is no genuine directional skill once
-#    HPO is isolated from evaluation. The "+189.6% inflation" headline is
-#    arithmetically correct but obscures the substantive result: the
-#    single-loop number was selection bias chasing fold-level noise.
+# 1. **Report the number the protocol earns.** A hyperparameter chosen on a set
+#    of rows makes any score computed on those same rows a statement about the
+#    search. Nested CV separates the two by keeping the outer test fold out of
+#    the selection entirely, and the difference between the two mean ICs above
+#    is what the separation costs on paper and buys in honesty.
 #
-# 2. **Selection-bias mechanics.** Single-loop CV chose alphas spanning nine
-#    orders of magnitude across folds ($[0.04, 9.4 \times 10^8]$); nested CV
-#    converged to a single alpha ($\approx 132$) on every outer fold. The
-#    dramatic narrowing is the protocol working as intended: inner-CV averaging
-#    refuses to reward fold-specific noise.
+# 2. **The spread of the selected values is the tell.** Where a search chases
+#    noise, its choice moves from fold to fold with nothing in the data driving
+#    it. Plotting the selected alpha per fold, as panel (b) does, diagnoses that
+#    faster than comparing scores.
 #
-# 3. **Two stability diagnostics, both useful.** The fold-level coefficient of
-#    variation ($3.48$) flagged the IC landscape as unstable — fold-to-fold
-#    dispersion dwarfs the mean. The cross-alpha 3σ gap ($2.3\sigma$) reported
-#    OK — the best mean IC is not an outlier among the 23 alphas. The
-#    combination diagnoses a noise-dominated landscape, exactly the conditions
-#    under which selection bias is largest.
+# 3. **Two dispersion diagnostics, in different directions.** Fold-to-fold
+#    variation at a fixed alpha and alpha-to-alpha variation of the fold average
+#    answer different questions, and a landscape that is smooth in one can be
+#    dominated by noise in the other.
 #
-# 4. **Pre-HPO grid analysis is cheap and informative.** Sweeping a wide alpha
-#    grid before launching expensive nested HPO reveals whether a signal even
-#    exists. Here the grid's negative-mean trajectory across most of the range
-#    is itself a warning sign that the Ridge model is unlikely to deliver
-#    out-of-sample skill.
+# 4. **A wide grid before an expensive search is cheap insurance.** Sweeping
+#    alpha across many orders of magnitude costs one pass and tells you whether
+#    the landscape has a plateau worth searching in at all.
 #
-# 5. **Nested walk-forward is non-negotiable for honest performance reports.**
-#    Inner and outer loops both need purging and embargo to respect the
-#    label horizon.
+# 5. **Both loops need the purge.** The inner split has the same overlapping
+#    label as the outer one, so it needs the same gap; an inner loop that
+#    silently produces no folds leaves the search with nothing to optimize and
+#    hands back whatever its sampler tried first.
 #
 # **Reference**: Cawley and Talbot (2010) document the same bias mechanism
 # across multiple datasets and model classes.
@@ -958,5 +973,5 @@ print(
     f"{alpha_stats['mean_ic'].min():.4f} to {alpha_stats['mean_ic'].max():.4f}"
 )
 print(f"  Single-loop mean IC: {single_mean_ic:+.4f}  |  Nested mean IC: {nested_mean_ic:+.4f}")
-print(f"  HPO inflation:       {inflation_pct:+.1f}%   |  Sign-flip across protocols")
+print(f"  HPO inflation:       {inflation_pct:+.1f}%")
 print(f"  Stability label:     {stability_label}   |  Cross-alpha gap: {gap_sigma:.1f}σ")

@@ -51,7 +51,7 @@ shortest path from a clean clone to a real result:
 ```bash
 uv run python scripts/download_artifacts.py --cs etfs
 uv run python case_studies/etfs/13_model_analysis.py
-uv run python case_studies/etfs/18_strategy_analysis.py
+uv run python case_studies/etfs/20_strategy_analysis.py
 ```
 
 ## 2. Modify with reasonable effort

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
@@ -20,16 +19,6 @@ from tests.test_research_contract_catalog import _publish, _resolved_spec
 from tests.test_research_flow import _patch_holdout_prices, _prices
 from tests.test_research_registry import _predictions
 from tests.test_research_workspace import _seed_release
-
-
-@pytest.fixture(autouse=True)
-def _restore_output_root():
-    yield
-    os.environ.pop("ML4T_OUTPUT_DIR", None)
-    from case_studies.research import workspace
-
-    workspace._ACTIVE_OUTPUT_ROOT = None
-    workspace._clear_root_sensitive_caches()
 
 
 def _study(tmp_path: Path) -> Study:
@@ -551,110 +540,3 @@ def test_canonical_decision_promotion_requires_replay_evidence(tmp_path: Path) -
     assert not exploratory.canonical
     assert canonical.canonical
     assert canonical.hash != exploratory.hash
-
-
-def test_holdout_stages_then_transitions_in_one_atomic_transaction(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    study = _study(tmp_path)
-    frame = _predictions()
-    expected = frame.select("symbol", "timestamp", "fold_id")
-    validation_spec = _resolved_spec()
-    validation_training = study.results.register_training(validation_spec)
-    validation_prediction = study.results.publish_predictions(
-        validation_training,
-        checkpoint_kind="final",
-        checkpoint_value=None,
-        split="validation",
-        predictions=frame,
-        expected_keys=expected,
-    )
-    request = {
-        "signal": {"method": "equal_weight_top_k", "top_k": 1},
-        "execution_mode": "vectorized",
-    }
-    validation_backtest = study.strategy(prediction=validation_prediction, **request).run(
-        prices=_prices()
-    )
-    candidates = CandidateSet.create(study, "selection", [validation_backtest])
-    holdout_spec = _resolved_spec()
-    holdout_spec["computation"]["cv"] = {
-        "identity": "holdout-cv",
-        "request": {"phase": "holdout", "train_end": "2024-01-04"},
-    }
-    holdout_prices = _prices().with_columns(pl.lit(date(2024, 1, 11)).alias("timestamp"))
-    _patch_holdout_prices(monkeypatch, holdout_prices)
-    lock = study.lifecycle.lock(
-        candidate_set_hash=candidates.hash,
-        selected_backtest_hash=validation_backtest.hash,
-        selection_evidence={"metric": "validation_backtest_sharpe"},
-        holdout_training_spec=holdout_spec,
-    )
-    assert (
-        study.lifecycle.lock(
-            candidate_set_hash=candidates.hash,
-            selected_backtest_hash=validation_backtest.hash,
-            selection_evidence={"metric": "validation_backtest_sharpe"},
-            holdout_training_spec=holdout_spec,
-        ).hash
-        == lock.hash
-    )
-    holdout_training = study.results.register_training(holdout_spec)
-    holdout_frame = frame.with_columns(pl.lit(date(2024, 1, 11)).alias("timestamp"))
-    holdout_prediction = study.results.publish_predictions(
-        holdout_training,
-        checkpoint_kind="final",
-        checkpoint_value=None,
-        split="holdout",
-        predictions=holdout_frame,
-        expected_keys=holdout_frame.select("symbol", "timestamp", "fold_id"),
-    )
-    holdout_backtest = study.strategy(prediction=holdout_prediction, **request).run()
-
-    staged = study.lifecycle.stage_holdout(
-        lock.hash,
-        holdout_training_hash=holdout_training.hash,
-        holdout_prediction_hash=holdout_prediction.hash,
-        holdout_backtest_hash=holdout_backtest.hash,
-    )
-    assert staged.state == "LOCKED"
-    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
-        assert db.execute("SELECT COUNT(*) FROM holdout_staging").fetchone() == (1,)
-        assert db.execute("SELECT COUNT(*) FROM holdout_evaluations").fetchone() == (0,)
-
-    from case_studies.research import lifecycle
-
-    monkeypatch.setattr(
-        lifecycle,
-        "load_backtest_prices_for",
-        lambda *args, **kwargs: holdout_prices.with_columns((pl.col("close") + 1).alias("close")),
-    )
-    with pytest.raises(ValueError, match="exact complete canonical lineage"):
-        study.lifecycle.finalize_holdout(lock.hash)
-    assert study.lifecycle.open(lock.hash).state == "LOCKED"
-    monkeypatch.setattr(
-        lifecycle,
-        "load_backtest_prices_for",
-        lambda *args, **kwargs: holdout_prices,
-    )
-
-    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
-        db.execute(
-            "CREATE TRIGGER force_holdout_failure BEFORE UPDATE OF state ON research_locks "
-            "WHEN NEW.state = 'HOLDOUT_EVALUATED' BEGIN "
-            "SELECT RAISE(ABORT, 'forced holdout failure'); END"
-        )
-        db.commit()
-
-    with pytest.raises(sqlite3.IntegrityError, match="forced holdout failure"):
-        study.lifecycle.finalize_holdout(lock.hash)
-    assert study.lifecycle.open(lock.hash).state == "LOCKED"
-    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
-        assert db.execute("SELECT COUNT(*) FROM holdout_evaluations").fetchone() == (0,)
-        db.execute("DROP TRIGGER force_holdout_failure")
-        db.commit()
-
-    evaluated = study.lifecycle.finalize_holdout(lock.hash)
-    assert evaluated.state == "HOLDOUT_EVALUATED"
-    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
-        assert db.execute("SELECT COUNT(*) FROM holdout_evaluations").fetchone() == (1,)

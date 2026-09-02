@@ -72,7 +72,7 @@ def holdout_decay_table(
     label = label or PRIMARY_LABELS[case_study]
     db = registry_path(case_study)
     if not db.exists():
-        return pl.DataFrame()
+        return _empty_frame(_HOLDOUT_DECAY_SCHEMA)
 
     family_clause = ""
     params: list = [label]
@@ -104,7 +104,7 @@ def holdout_decay_table(
     """
     rows = _query(db, sql, tuple(params))
     if rows.is_empty():
-        return pl.DataFrame()
+        return _empty_frame(_HOLDOUT_DECAY_SCHEMA)
 
     # Holdout retrains are at most one per family (the signal-stage rank-1
     # leader). For those families the row's config_name and val_ic must come
@@ -182,11 +182,76 @@ def holdout_decay_table(
     return out.sort("val_ic", descending=True, nulls_last=True)
 
 
+# The columns each of the three registry readers below promises, with the dtypes a
+# populated result carries. An empty result is returned under its own schema rather than
+# as a bare `pl.DataFrame()`, because a caller cannot write `.select("family", ...)`
+# against a frame with no columns: it raises ColumnNotFoundError, which is a different
+# failure from "the stage that fills this has not run" and reads as a defect in the
+# notebook rather than as an empty stage. Every case study's model-analysis notebook
+# reaches all three before its backtesting stage has run, so the empty case is the one a
+# reader meets first. Each function returns the same schema on every one of its empty
+# paths, so a caller cannot see columns on one and not the other.
+_SELECTION_ADJUSTED_SCHEMA: dict[str, pl.DataType] = {
+    "family": pl.String,
+    "config_name": pl.String,
+    "label": pl.String,
+    "sharpe": pl.Float64,
+    "sharpe_ci95_lo": pl.Float64,
+    "sharpe_ci95_hi": pl.Float64,
+    "psr_pvalue": pl.Float64,
+    "dsr": pl.Float64,
+    "dsr_pvalue": pl.Float64,
+    "expected_max_sharpe": pl.Float64,
+    "dsr_mp": pl.Float64,
+    "dsr_mp_pvalue": pl.Float64,
+    "dsr_raw": pl.Float64,
+    "dsr_raw_pvalue": pl.Float64,
+    "n_trials_effective_er": pl.Float64,
+    "n_trials_effective_mp": pl.Float64,
+    "ras_leader": pl.Float64,
+    "ras_pvalue": pl.Float64,
+    "reality_check_pvalue": pl.Float64,
+    "pbo": pl.Float64,
+    "k_variants": pl.Int64,
+}
+
+
+_HOLDOUT_DECAY_SCHEMA: dict[str, pl.DataType] = {
+    "family": pl.String,
+    "config_name": pl.String,
+    "label": pl.String,
+    "val_ic": pl.Float64,
+    "val_ci_lo": pl.Float64,
+    "val_ci_hi": pl.Float64,
+    "val_ic_source": pl.String,
+    "ho_ic": pl.Float64,
+    "ho_ci_lo": pl.Float64,
+    "ho_ci_hi": pl.Float64,
+    "ho_ic_source": pl.String,
+    "decay_pp": pl.Float64,
+    "decay_pct": pl.Float64,
+}
+
+_CONFORMAL_COVERAGE_SCHEMA: dict[str, pl.DataType] = {
+    "family": pl.String,
+    "config_name": pl.String,
+    "nominal_level": pl.Float64,
+    "empirical_coverage": pl.Float64,
+    "mean_interval_width_frac_std": pl.Float64,
+    "n_test": pl.Int64,
+}
+
+
+def _empty_frame(schema: dict[str, pl.DataType]) -> pl.DataFrame:
+    return pl.DataFrame(schema=schema)
+
+
 def selection_adjusted_leader_table(
     case_study: str,
     *,
     stage: str = "signal",
     label: str | None = None,
+    prediction_hashes: set[str] | None = None,
 ) -> pl.DataFrame:
     """Per-family rank-1 backtest with selection-adjusted statistics.
 
@@ -196,7 +261,8 @@ def selection_adjusted_leader_table(
     ``expected_max_sharpe``) carry the **effective-rank (ER) DSR** — the
     library maintainer's recommended default. ``dsr_mp`` and ``dsr_raw``
     are surfaced alongside for sensitivity. Non-leader family rows have
-    NULL selection-bias columns.
+    NULL selection-bias columns. When ``prediction_hashes`` is supplied,
+    leaders are selected only from that population.
 
     Returns columns:
         family, config_name, label,
@@ -209,7 +275,7 @@ def selection_adjusted_leader_table(
     """
     db = registry_path(case_study)
     if not db.exists():
-        return pl.DataFrame()
+        return _empty_frame(_SELECTION_ADJUSTED_SCHEMA)
 
     label_clause = ""
     params: list = [stage]
@@ -219,6 +285,7 @@ def selection_adjusted_leader_table(
 
     sql = f"""
         SELECT
+            b.prediction_hash,
             t.family,
             t.config_name,
             t.label,
@@ -259,7 +326,11 @@ def selection_adjusted_leader_table(
     """
     rows = _query(db, sql, tuple(params))
     if rows.is_empty():
-        return pl.DataFrame()
+        return _empty_frame(_SELECTION_ADJUSTED_SCHEMA)
+    if prediction_hashes is not None:
+        rows = rows.filter(pl.col("prediction_hash").is_in(prediction_hashes))
+        if rows.is_empty():
+            return _empty_frame(_SELECTION_ADJUSTED_SCHEMA)
 
     # Force Float64 dtype on numeric columns that can come back as all-NULL
     # under the LEFT JOIN (polars infers Null dtype otherwise, which breaks
@@ -284,7 +355,7 @@ def selection_adjusted_leader_table(
         rows = rows.with_columns(casts)
 
     leaders = rows.sort("sharpe", descending=True, nulls_last=True).group_by("family").first()
-    return leaders.sort("sharpe", descending=True, nulls_last=True)
+    return leaders.drop("prediction_hash").sort("sharpe", descending=True, nulls_last=True)
 
 
 # ---------------------------------------------------------------------------
@@ -673,7 +744,7 @@ def conformal_coverage_diagnostic(
     label = label or PRIMARY_LABELS[case_study]
     db = registry_path(case_study)
     if not db.exists():
-        return pl.DataFrame()
+        return _empty_frame(_CONFORMAL_COVERAGE_SCHEMA)
 
     family_clause = ""
     params: list = [label]
@@ -699,7 +770,7 @@ def conformal_coverage_diagnostic(
     """
     rows = _query(db, sql, tuple(params))
     if rows.is_empty():
-        return pl.DataFrame()
+        return _empty_frame(_CONFORMAL_COVERAGE_SCHEMA)
 
     leaders = (
         rows.with_columns(pl.col("ic_n_days").max().over("family").alias("_family_days"))
@@ -729,7 +800,7 @@ def conformal_coverage_diagnostic(
         out_rows.extend({"family": fam, "config_name": cfg, **row} for row in coverage_rows)
 
     if not out_rows:
-        return pl.DataFrame()
+        return _empty_frame(_CONFORMAL_COVERAGE_SCHEMA)
     return pl.DataFrame(out_rows).sort(["family", "nominal_level"])
 
 

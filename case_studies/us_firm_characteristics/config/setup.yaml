@@ -25,17 +25,53 @@ decision:
 # or share_type constant. Changing values here invalidates every existing
 # backtest_hash for this case study (cash + share_type are spec-hash inputs).
 #
-# Moment-based allocators (inverse_vol, risk_parity, hrp, mvo_ledoit_wolf)
-# are EXCLUDED for this case study. The recovered anonymous identities provide
-# per-firm monthly return histories within each tensor block, but the declared
-# 12-month lookback is too short to support a stable covariance estimate over
-# a top-50 long-short cross-section with changing membership. Under that data,
-# the multivariate allocators either hit observation-count guards and fall back
-# or rely on an estimate the design cannot justify.
-# Equal weight establishes the baseline; only the lookback-free alternatives
-# (score_weighted and conformal_weighted) enter the allocation sweep.
-# ``allocator_lookback`` below is retained only because get_backtest_config()
-# requires the key; it is unused while no moment allocator is configured.
+# THE ALLOCATOR EXCLUSIONS, AND THE REASON IS THE CADENCE RATHER THAN THE PANEL.
+#
+# An earlier version of this comment said the moment-based allocators were
+# excluded because firm identities are not stable across periods. That is false
+# of this dataset and its own columns refute it: ``r36_13`` is a return measured
+# from month 36 to month 13 before the decision date, and it is non-null on all
+# 804,530 rows. A feature computed from a 36-month window cannot be complete
+# without 36 months of continuous history per firm. Whatever the anonymous
+# split-scoped identifiers do across tensor blocks, they are stable enough within
+# one to support a three-year lookback on every row.
+#
+# The real constraint is the observation count. ``allocator_lookback`` is 12 and
+# the bars are monthly, so a covariance is estimated from twelve points and has
+# rank at most eleven. What that rules out depends on how many names are held,
+# and ``top_k_grid`` below is [5, 10, 20, 50] against a long-short mapping, so
+# the name count is twice the top_k:
+#
+#   top_k=5  -> 10 names -> rank 11 covers it        -> IDENTIFIED
+#   top_k=10 -> 20 names -> unidentified
+#   top_k=20 -> 40 names -> unidentified
+#   top_k=50 -> 100 names -> unidentified
+#
+# So ``hrp`` (allocation.py:516, rolling correlation matrix) and
+# ``mvo_ledoit_wolf`` (allocation.py:362, Ledoit-Wolf covariance) are structurally
+# unidentified on three of the four mappings and estimable on the smallest. Not on
+# any of them for a shrinkage reason: `sweep_config.get_allocators` injects the
+# case-study lookback as ``lookback`` for mvo, OVERRIDING `compute_mvo_weights`'
+# own 126 default, and shrinkage does not manufacture the missing observations.
+#
+# That argument does NOT reach ``inverse_vol`` (allocation.py:295) or
+# ``risk_parity`` (allocation.py:321). Neither builds a matrix: both take a
+# per-asset rolling standard deviation and weight by 1/vol or 1/vol^1.5, one
+# scalar per name, full rank by construction, and estimable from twelve points.
+# They are excluded by decision rather than by identification: the allocation
+# stage is kept to the equal-weight baseline and the two lookback-free
+# alternatives, and building the rolling volatility they need is work this case
+# study is not spending.
+#
+# Worth recording so it is not re-derived: the panel already carries supplied
+# volatility measures - ``Variance``, ``IdioVol``, ``Resid_Var``, ``Beta`` and
+# ``MktBeta`` are all columns of ``labels/prices.parquet``. An allocator weighting
+# by one of those would need no rolling window and no lookback at all. Nobody has
+# asked for one and it is not scheduled; the option exists and was not taken.
+#
+# ``allocator_lookback`` stays because ``get_backtest_config`` requires the key,
+# and it is inert while the menu declares no moment-based allocator:
+# sweep_config.get_allocators injects it as ``vol_window`` only into those.
 #
 # Cash defaults to 1_000_000 rather than 100_000: monthly-cadence
 # long-short portfolios at top_k=50 carry ~$10K per leg per name at the
@@ -308,7 +344,8 @@ backtest:
     top_n_predictions:
       signal: 0                 # all predictions at the equal-weight baseline
       allocation: 10            # top-10 model configs by equal-weight baseline Sharpe
-      cost_sensitivity: 1       # top-1 of {signal+allocation} per label
+      # cost_sensitivity takes no entry: the sweep runs the canonical rank-1 carrier,
+      # resolved by resolve_solvent_carrier, so there is no top-N to declare.
       risk_overlay: 1           # top-1 of {signal+allocation} per label
     # Skip MVO/HRP when allocator runtime is the bottleneck (intraday CSes).
     expensive_allocators_skip: false
@@ -329,10 +366,10 @@ backtest:
     # quantile_grid:
     #   fwd_ret_1m: [5, 10]
     # Ch17 portfolio: reuses top_k_grid above and sweeps over allocators.
-    # Only lookback-free alternatives are listed - moment-based allocators
-    # (inverse_vol, risk_parity, hrp, mvo_ledoit_wolf) are excluded because a
-    # 12-month history is too thin for the declared top-50 cross-section (see
-    # the execution block above). No max-weight cap.
+    # Equal weight is the baseline; these two are the alternatives, and both are
+    # lookback-free. Why the other four are absent is in the execution block above
+    # - identification for hrp and mvo_ledoit_wolf, decision for inverse_vol and
+    # risk_parity. No max-weight cap.
     allocators:
       - {name: score_weighted,  method: score_weighted}
       - {name: conformal_weighted, method: conformal_weighted}
@@ -371,7 +408,11 @@ modeling:
     max_bin: 255
     num_threads: 8
   tabular_dl:
-    models: [tabm]
+    # The members are declared per label in config/training/<label>.yaml, which is what
+    # load_model_configs reads; a second list here would be a menu nothing consults.
+    # Device and thread count are part of a TabM training identity, not provenance beside
+    # it: a network's arithmetic depends on both, so a CUDA result and a CPU result of the
+    # same configuration are different computations and hash differently.
     device: cuda
     num_threads: 8
   latent_factors:

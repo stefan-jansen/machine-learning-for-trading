@@ -89,6 +89,7 @@ from case_studies.research import (
     primary_label,
     resolved_model_plan,
     run_model_population,
+    supersedes_for_run,
 )
 from utils.style import COLORS, show_plotly_with_alt
 
@@ -99,6 +100,20 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
+# The generation of `crypto_perps_funding-gbm-validation-v1` the published one replaces.
+# `OfficialPopulation.create` hashes `supersedes` into the snapshot, so a run that passes None
+# computes a different hash from the row on record and is refused - which made this notebook
+# unrunnable against its own registry (ml4t/agent-workspace#879). The value was supplied at run
+# time on 2026-08-22 and never written down, so the committed source could not reproduce the
+# population it published. Checked against `official_populations`: `178c8b6cef03` is the current
+# generation and it supersedes `32770bf22544`. A re-run recomputes `178c8b6cef03`, matches, and
+# returns the existing population rather than refitting.
+# Left empty, and it stays empty. The registry was reset for the stage-04 holdout rebuild, so
+# every name below is published at generation one and there is nothing to supersede. A
+# declaration is only needed when a re-run changes an existing name's membership: the refusal
+# prints the name and the hash, and it is resolved through the shared resolver rather than
+# offered straight, because a reader's clean clone has no generation for it to replace.
+SUPERSEDES_POPULATION: str = ""
 
 # %%
 study = open_study(
@@ -242,7 +257,24 @@ plan.select(
 
 # %%
 population_name = POPULATION_NAME or "crypto_perps_funding-gbm-validation-v1"
-execution, population = run_model_population(study, resolved, population_name=population_name)
+# The declaration is resolved rather than offered. It is committed source and has to be right in
+# three situations the notebook cannot tell apart: a reader's clean clone, where `run_log/` is
+# gitignored and `create` refuses a first generation that claims to supersede something; this
+# author's re-run, where the generation in force is the one this declaration produced and offering
+# the hash recomputes it; and a refit, where the declaration names the tip. `supersedes_for_run`
+# decides all three, and answers the tier as well - a preview is discarded with its workspace and
+# has no lineage to extend.
+execution, population = run_model_population(
+    study,
+    resolved,
+    population_name=population_name,
+    supersedes=supersedes_for_run(
+        study,
+        population_name=population_name,
+        declared=SUPERSEDES_POPULATION,
+        execution_tier=EXECUTION_TIER,
+    ),
+)
 
 print(f"{len(execution.runs)} configurations fitted")
 print(f"population {population.name}: {len(population.members)} prediction sets")

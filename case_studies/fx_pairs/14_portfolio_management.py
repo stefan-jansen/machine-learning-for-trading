@@ -47,6 +47,7 @@ from case_studies.research import (
     OfficialPopulation,
     PredictionResult,
     Result,
+    candidate_set_supersedes,
     open_study,
     plan_backtests,
     population_supersedes,
@@ -76,7 +77,21 @@ RUN_SWEEP = True
 FORCE_REBACKTEST = False
 POPULATION_NAME = ""
 BASELINE_POPULATION_NAME = None
-SUPERSEDES_ALLOCATION_BACKTESTS: str = ""
+SUPERSEDES_ALLOCATION_BACKTESTS: str = "e487eb0d75db"
+
+# A candidate set is sealed once written, so a run whose members differ from the recorded
+# generation has to name the set it replaces - the same shape 15_risk_management and 16_costs
+# already carry, and keyed by the full set name because that is what the refusal prints. These
+# three moved when 10a_dl_lstm registered the lstm_h64 checkpoints the training menu declares:
+# the equal-weight baselines went from 1,452 to 1,572, so every label's candidate set gained
+# the 40 backtests riding the new predictions. Resolved through `candidate_set_supersedes`
+# rather than passed straight to `create`, because a reader's clean clone has no generation to
+# supersede and `create` refuses a first version that claims to replace one.
+SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
+    "fx_pairs:fwd_ret_1d:equal-weight-candidates": "77b9631c7f13",
+    "fx_pairs:fwd_ret_5d:equal-weight-candidates": "1c6a3826af9f",
+    "fx_pairs:fwd_ret_21d:equal-weight-candidates": "db7b24f2a58b",
+}
 
 # %% [markdown]
 # ## Resolve the equal-weight inputs
@@ -265,12 +280,16 @@ for label in baseline_labels:
             key=lambda result: (*_result_config(result)[1:], result.hash),
         )
     else:
+        _set_name = research_name(
+            CASE_STUDY_ID, f"{label}:equal-weight-candidates", scope=POPULATION_NAME
+        )
         candidates = CandidateSet.create(
             study,
-            name=research_name(
-                CASE_STUDY_ID, f"{label}:equal-weight-candidates", scope=POPULATION_NAME
-            ),
+            name=_set_name,
             members=label_results,
+            supersedes=candidate_set_supersedes(
+                study, name=_set_name, declared=SUPERSEDES_CANDIDATE_SETS.get(_set_name)
+            ),
         )
         candidate_sets[label] = candidates
         ranked_results = list(candidates.ranked_validation_sharpe())

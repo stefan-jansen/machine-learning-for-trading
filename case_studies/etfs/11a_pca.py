@@ -106,9 +106,10 @@ study = open_study("etfs", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or
 # Every label whose training menu declares `latent_factors:` is fitted, and both do: `fwd_ret_21d`,
 # the total return over the 21 trading days after the decision date, and `fwd_ret_5d`, the same
 # thing over five. The estimator reads none of the 71 feature columns, but it is not blind to the
-# label: the matrix it decomposes is filled from the request's own label column
-# ([`panel.py`](../utils/latent_factors/panel.py) line 140), so the two rows below are two separate
-# fits, each with its own loadings and premia, rather than one fit scored against two returns. What
+# label: the `returns` matrix that `prepare_panel_data`
+# ([`panel.py`](../utils/latent_factors/panel.py)) fills from the request's own label column is the
+# one `run_pca_fold` receives as `returns_train`, so the two rows below are two separate fits, each
+# with its own loadings and premia, rather than one fit scored against two returns. What
 # changes between them is the panel as well as the scoring, and the number of validation dates.
 # `LABELS` restricts the run to a subset when you want one.
 
@@ -465,14 +466,36 @@ show_plotly_with_alt(
 )
 
 # %% [markdown]
+# ### The eight folds behind each average
+#
+# `ic_mean` above is the equal-weight mean of eight per-fold correlations, and section 5 argues
+# from how those eight are spread rather than from where they average. A run that reuses a
+# published fit prints nothing while fitting, so the fold rows are read back from the registry
+# here - the same rows the mean was taken over - and every per-fold number section 5 quotes comes
+# from this table.
+#
+# `n_entities` is how many funds the fold **scored**, which is not the number it fitted on: the
+# training window reaches further back than the validation block and carries funds that have since
+# left the panel.
+
+# %% tags=["results"]
+folds_charted = charted.folds()
+print(
+    f"{charted_label}: {folds_charted.height} folds, "
+    f"{folds_charted.filter(pl.col('ic') < 0).height} negative, "
+    f"mean {folds_charted.get_column('ic').mean():+.4f}"
+)
+folds_charted
+
+# %% [markdown]
 # ## 5. What to notice
 #
-# **The forward-return panel's own covariance structure does not rank these funds.** On the primary label the mean
-# validation IC is **-0.033**, and on the five-day variant **+0.010**. Neither is evidence of
-# skill, and the negative one is not an inverted signal either: the eight fold ICs behind it run
-# -0.076, -0.025, -0.003, +0.116, -0.104, +0.065, -0.182, -0.051, so the sign changes four times
-# and the spread across folds is several times the size of the average. That is the shape of a
-# quantity centred on nothing.
+# **The forward-return panel's own covariance structure does not rank these funds.** On the primary
+# label the mean validation IC is **-0.033**, and on the five-day variant **+0.010**. Neither is
+# evidence of skill, and the negative one is not an inverted signal either: the eight fold ICs
+# behind it run -0.076, -0.025, -0.003, +0.116, -0.104, +0.065, -0.182, -0.051, so the sign changes
+# four times and the spread across folds is several times the size of the average. That is the
+# shape of a quantity centred on nothing.
 #
 # **The ordering itself reverses when the model is refitted.** The rank correlation between
 # consecutive folds' predicted cross-sections is negative on two of the seven pairs (-0.45 and
@@ -503,13 +526,13 @@ show_plotly_with_alt(
 # this is not the object a daily-return covariance matrix would be. It is the same target every
 # conditioned member of the family decomposes, which is what keeps the comparison in
 # [`11c_conditional_autoencoder`](11c_conditional_autoencoder.ipynb) a comparison about
-# conditioning rather than about the target. `n_factors` is declared rather than chosen, and nothing here tests whether
-# a different count would order the cross-section better - that would be a search, and a search
-# over validation IC is what this notebook is arranged to avoid. The number of funds in the panel
-# each fold decomposes falls from 94 in the first to 77 in the last, so the later folds are fitted
-# on a narrower cross-section than the earlier ones and the eight fold ICs are not eight readings
-# of the same experiment. And every number here is measured on validation folds that have been
-# read many times over by the time a case study reaches this notebook.
+# conditioning rather than about the target. `n_factors` is declared rather than chosen, and
+# nothing here tests whether a different count would order the cross-section better - that would be
+# a search, and a search over validation IC is what this notebook is arranged to avoid. The
+# cross-section narrows as the window rolls forward - the `n_entities` column above falls from 92
+# funds on the first fold to 77 on the last - so the eight fold ICs are not eight readings of the
+# same experiment. And every number here is measured on validation folds that have been read many
+# times over by the time a case study reaches this notebook.
 
 # %% [markdown]
 # **Next**: [`11b_ipca`](11b_ipca.ipynb) keeps the factor structure and drops the assumption that a

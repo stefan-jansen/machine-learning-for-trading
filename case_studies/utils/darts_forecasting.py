@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -319,13 +320,43 @@ class _DartsEpochProgressCallback(pl_lightning.callbacks.Callback):
         )
 
 
+# Lightning announces itself on every trainer it builds - the accelerator, the TPU count, the
+# visible CUDA devices, a logging-service advertisement, and the reason `fit` stopped. One fit is
+# five lines. A checkpointed Darts run builds one trainer per checkpoint increment, so eight folds
+# at a hundred epochs in five-epoch steps is a hundred and sixty of them, and they land in the
+# executed notebook as thousands of output entries around the results.
+#
+# Measured before this was silenced: `case_studies/etfs/10_dl_tsmixer.ipynb` committed at 11.9 MB
+# and 441,860 lines, with 62,901 output entries in a single cell - a notebook that neither GitHub
+# nor JupyterLab will open, so the chapter had no readable artifact at all.
+#
+# These are `rank_zero_info` records rather than progress-bar or logger output, which is why
+# `enable_progress_bar` and `logger` below do not cover them. Raising the level is the whole fix:
+# nothing here is a warning, and a real Lightning warning still comes through.
+_LIGHTNING_ANNOUNCEMENT_LOGGERS = (
+    "pytorch_lightning",
+    "pytorch_lightning.utilities.rank_zero",
+    "pytorch_lightning.accelerators.cuda",
+    "lightning.pytorch",
+    "lightning.pytorch.utilities.rank_zero",
+)
+
+
+def silence_lightning_announcements() -> None:
+    """Keep Lightning's per-trainer banners out of the executed notebook."""
+    for name in _LIGHTNING_ANNOUNCEMENT_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def _trainer_kwargs(device: str) -> dict[str, Any]:
     accelerator = "gpu" if device == "cuda" and torch.cuda.is_available() else "cpu"
+    silence_lightning_announcements()
     return {
         "accelerator": accelerator,
         "devices": 1,
         "deterministic": True,
         "enable_checkpointing": False,
+        "enable_model_summary": False,
         "enable_progress_bar": False,
         "logger": False,
     }
@@ -896,6 +927,18 @@ def _overlay_fold_temporal_features(
     )
 
 
+def darts_forecast_reduction(params: dict[str, Any]) -> str:
+    """The reduction a config's forecasts are scored with.
+
+    A ``lagged_label`` target is already the whole horizon's return, so its forecast is read at
+    its terminal step; every other target is a per-period return whose path compounds. The fit
+    and the fitted-state reconstruction both resolve it here, because when they resolved it
+    separately the reconstruction silently scored ``expm1(path.sum())`` against a fit that had
+    published ``expm1(path[-1])``.
+    """
+    return "terminal" if params.get("darts_target") == "lagged_label" else "compound_path"
+
+
 def _predict_fold(
     model,
     fold_series: list[_FoldSeries],
@@ -903,7 +946,10 @@ def _predict_fold(
     date_col: str,
     entity_col: str,
     output_chunk_length: int,
-    forecast_reduction: str = "compound_path",
+    *,
+    # No default: the fit and the fitted-state reconstruction have to agree on this, and they
+    # drifted precisely because one of them could leave it out and take whatever the default was.
+    forecast_reduction: str,
 ) -> pl.DataFrame:
     frames: list[pl.DataFrame] = []
     for state in fold_series:
@@ -1195,11 +1241,7 @@ def run_darts_cv(
                     date_col,
                     entity_col,
                     output_chunk_length,
-                    forecast_reduction=(
-                        "terminal"
-                        if params.get("darts_target") == "lagged_label"
-                        else "compound_path"
-                    ),
+                    forecast_reduction=darts_forecast_reduction(params),
                 )
                 elapsed = time.perf_counter() - t0
                 if checkpoint_preds.height == 0:

@@ -78,12 +78,20 @@ def test_tabm_identity_is_declared() -> None:
     }
 
 
+# `sae` is at 2, not 1: `run_sae_fold_with_library` omitted `batch_size` and the library read the
+# absent value as one full-panel batch, so results fitted before that fix are a different
+# computation. The declared versions live in `case_studies/utils/latent_factors/versions.py`, which
+# both the resolved and the legacy registration paths read, and this pins what they claim.
+PINNED_LATENT_MODELS = {"pca": 1, "ipca": 1, "cae": 1, "sae": 2, "sdf": 1}
+
+
 @pytest.mark.parametrize("model", ["pca", "ipca", "cae", "sae", "sdf"])
 def test_latent_identity_is_declared_and_model_scoped(model: str) -> None:
     assert latent_adapter.LATENT_ADAPTER_VERSION == PINNED_LATENT_ADAPTER
+    version = PINNED_LATENT_MODELS[model]
     assert latent_adapter._source_identity(model) == {
         "latent_adapter": 1,
-        "latent_model": f"{model}/v1",
+        "latent_model": f"{model}/v{version}",
     }
 
 

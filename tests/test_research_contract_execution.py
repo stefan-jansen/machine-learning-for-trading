@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sqlite3
 import time
 from pathlib import Path
@@ -35,16 +34,6 @@ from tests.test_research_flow import _prices
 from tests.test_research_models import _linear_study
 from tests.test_research_registry import _predictions, _training_spec
 from tests.test_research_workspace import _seed_release
-
-
-@pytest.fixture(autouse=True)
-def _restore_output_root():
-    yield
-    os.environ.pop("ML4T_OUTPUT_DIR", None)
-    from case_studies.research import workspace
-
-    workspace._ACTIVE_OUTPUT_ROOT = None
-    workspace._clear_root_sensitive_caches()
 
 
 def _study(tmp_path: Path) -> Study:
@@ -592,6 +581,15 @@ def test_preview_prediction_is_excluded_from_official_population(
             member_kind="prediction",
             members=[preview.hash],
         )
+    with monkeypatch.context() as canonical_env:
+        canonical_env.delenv("ML4T_OUTPUT_DIR", raising=False)
+        with pytest.raises(ValueError, match="preview.*cannot enter"):
+            OfficialPopulation.create(
+                study,
+                name="preview-must-not-enter-official",
+                member_kind="prediction",
+                members=[preview.hash],
+            )
     preview_returns = pl.DataFrame({"timestamp": ["2024-01-05"], "return": [0.01]}).with_columns(
         pl.col("timestamp").str.to_date()
     )
@@ -1215,6 +1213,177 @@ def test_prediction_retry_finishes_metrics_without_new_identity(
     assert finalized.complete
 
 
+def test_backtest_catalog_carries_the_registered_sharpe_interval(tmp_path: Path) -> None:
+    """A catalog reader can say whether a Sharpe clears zero without raw SQL.
+
+    The uncertainty layer registers ``sharpe_ci95_lo``/``_hi`` on every backtest, but the
+    catalog used to project only point estimates, so a notebook reading it could report a
+    Sharpe surface and had no interval to compare against zero.
+    """
+    study = _study(tmp_path)
+    prediction_hash = _publish_prediction(study, alpha=1.0, checkpoint=1)
+    returns = pl.DataFrame({"timestamp": ["2024-01-05"], "return": [0.01]}).with_columns(
+        pl.col("timestamp").str.to_date()
+    )
+    backtest_hash = register_backtest_run(
+        "etfs",
+        prediction_hash,
+        {
+            "execution_tier": "canonical",
+            "strategy": {"signal": {"method": "equal_weight_top_k", "top_k": 1}},
+        },
+        stage="signal",
+        returns=returns,
+        trades=pl.DataFrame({"symbol": ["SPY"], "pnl": [1.0]}),
+        metrics={"sharpe": 1.25, "sharpe_ci95_lo": 0.4, "sharpe_ci95_hi": 2.1},
+        case_dir=study.root,
+    )
+
+    row = study.backtests.one(backtest_hash=backtest_hash)
+
+    assert row["sharpe"] == pytest.approx(1.25)
+    assert row["sharpe_ci95_lo"] == pytest.approx(0.4)
+    assert row["sharpe_ci95_hi"] == pytest.approx(2.1)
+
+
+def test_a_workspace_resolves_the_released_canonical_causal_result(tmp_path: Path) -> None:
+    """A workspace opened over a release starts with an empty run_log; the release still counts.
+
+    `11_model_analysis` reads canonical prediction populations at every tier, so it asks for the
+    canonical causal artifact at every tier too. The prediction and backtest catalogs overlay the
+    release; the causal lookup read only `study.root`, so in a workspace it found nothing.
+    """
+    import json
+
+    from case_studies.research import CausalResult
+    from case_studies.utils.registry.registration import register_causal_run
+    from case_studies.utils.registry.specs import IDENTITY_VERSION
+
+    release = _seed_release(tmp_path)
+    register_causal_run(
+        "etfs",
+        "causalreleased01",
+        label="fwd_ret_21d",
+        treatment="ivrv_spread",
+        confounders_json='["rv_20"]',
+        embargo=10,
+        n_folds=5,
+        n_obs=100,
+        dml_effect=-0.03,
+        dml_se_hac=0.02,
+        p_value_hac=0.25,
+        naive_effect=-0.02,
+        confounding_bias_pct=-0.5,
+        refutation_p=0.01,
+        spec_json=json.dumps(
+            {
+                "family": "causal_dml",
+                "identity_version": IDENTITY_VERSION,
+                "execution_tier": "canonical",
+            }
+        ),
+        notebook="10_causal_dml",
+        started_at="2024-01-05T00:00:00Z",
+        elapsed_s=1.0,
+        case_dir=release / "case_studies" / "etfs",
+    )
+    study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
+
+    result = CausalResult.one(study, label="fwd_ret_21d", execution_tier="canonical")
+
+    assert result.hash == "causalreleased01"
+    assert result.metrics["dml_effect"] == pytest.approx(-0.03)
+
+
+def test_a_workspace_causal_result_wins_over_the_release_it_supersedes(tmp_path: Path) -> None:
+    """The nearer registry answers; the release is a fallback, not a second opinion.
+
+    Merging the two makes a workspace that re-derived the result under a corrected input read
+    as two current identities against the release's prior one, and refuse rather than return
+    the result the workspace just wrote.
+    """
+    import json
+
+    from case_studies.research import CausalResult
+    from case_studies.utils.registry.registration import register_causal_run
+    from case_studies.utils.registry.specs import IDENTITY_VERSION
+
+    def _spec() -> str:
+        return json.dumps(
+            {
+                "family": "causal_dml",
+                "identity_version": IDENTITY_VERSION,
+                "execution_tier": "canonical",
+            }
+        )
+
+    release = _seed_release(tmp_path)
+    common = dict(
+        label="fwd_ret_21d",
+        treatment="ivrv_spread",
+        confounders_json='["rv_20"]',
+        embargo=10,
+        n_folds=5,
+        n_obs=100,
+        dml_se_hac=0.02,
+        p_value_hac=0.25,
+        naive_effect=-0.02,
+        confounding_bias_pct=-0.5,
+        refutation_p=0.01,
+        spec_json=_spec(),
+        notebook="10_causal_dml",
+        started_at="2024-01-05T00:00:00Z",
+        elapsed_s=1.0,
+    )
+    register_causal_run(
+        "etfs",
+        "causalreleasedaa",
+        dml_effect=-0.03,
+        case_dir=release / "case_studies" / "etfs",
+        **common,
+    )
+    study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
+    register_causal_run("etfs", "causalworkspace1", dml_effect=-0.07, case_dir=study.root, **common)
+
+    result = CausalResult.one(study, label="fwd_ret_21d", execution_tier="canonical")
+
+    assert result.hash == "causalworkspace1"
+    assert result.metrics["dml_effect"] == pytest.approx(-0.07)
+
+    # A workspace row at an older identity is not a result at this one, so the release answers.
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        db.execute(
+            "UPDATE causal_runs SET spec_json = ? WHERE causal_hash = ?",
+            (json.dumps({"family": "causal_dml", "identity_version": 1}), "causalworkspace1"),
+        )
+        db.commit()
+
+    fallback = CausalResult.one(study, label="fwd_ret_21d", execution_tier="canonical")
+
+    assert fallback.hash == "causalreleasedaa"
+
+
+def test_a_release_registry_without_causal_runs_reports_nothing_rather_than_erroring(
+    tmp_path: Path,
+) -> None:
+    """A release seeded before any causal run holds a registry with no `causal_runs` table.
+
+    Naming an absent table in a SELECT is an error rather than an empty result, so the fallback
+    that exists to reach the release turns "no causal artifact anywhere" into an OperationalError
+    from sqlite unless the lookup checks the table is there.
+    """
+    from case_studies.research import CausalResult
+
+    release = _seed_release(tmp_path)
+    study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
+
+    with pytest.raises(ValueError, match="resolved to 0 identities"):
+        CausalResult.one(study, label="fwd_ret_21d", execution_tier="canonical")
+
+    with pytest.raises(KeyError, match="unknown causal result"):
+        CausalResult.open(study, "causalmissing001")
+
+
 def test_reproducing_a_published_population_is_a_no_op_whatever_it_says_it_supersedes(
     tmp_path: Path,
 ) -> None:
@@ -1262,3 +1431,42 @@ def test_a_member_list_that_actually_differs_still_needs_its_predecessor(tmp_pat
 
     with pytest.raises(ValueError, match="supersedes"):
         snapshot_official_models(study, [request(2.0)], population_name="ipca-v1")
+
+
+def test_a_sweep_that_computes_nothing_reports_that_it_computed_nothing(tmp_path: Path) -> None:
+    """A re-run served entirely from the registry must not report the full count as work.
+
+    `len(execution.results)` counts what the sweep resolved, not what it did. Every member of
+    a second identical sweep is served from cache, so a summary built on that length reports
+    the same number as the cold run and reads exactly like it - a wrong number indistinguishable
+    from a right one. A reader cannot tell a real sweep from a no-op, and neither can anyone
+    checking whether a re-run did anything.
+
+    `run_backtests` has always recorded per member whether it was computed or reused; nothing
+    surfaced it.
+
+    The fix is not to replace the length with the computed count, which would answer the
+    maintainer's question in the reader's slot: a published page saying "0 computed" is a true
+    record of that execution and a misleading record of what the stage contains. The notebooks
+    print both facts on separate lines, so this pins both - the length stays the stage-facing
+    number across a warm re-run, and the two counts move.
+    """
+    study = _study(tmp_path)
+    first = _publish_prediction(study, alpha=1.0, checkpoint=1)
+    second = _publish_prediction(study, alpha=2.0, checkpoint=2)
+    selected = study.predictions.table().filter(pl.col("prediction_hash").is_in([first, second]))
+    sweep = dict(
+        predictions=selected,
+        signal={"method": "equal_weight_top_k", "top_k": 1},
+        prices=_prices(),
+    )
+
+    cold = run_backtests(study, **sweep)
+
+    assert (cold.n_computed, cold.n_reused) == (2, 0)
+
+    warm = run_backtests(study, **sweep)
+
+    assert len(warm.results) == 2, "the re-run still resolves both members"
+    assert (warm.n_computed, warm.n_reused) == (0, 2)
+    assert {r.hash for r in warm.results} == {r.hash for r in cold.results}

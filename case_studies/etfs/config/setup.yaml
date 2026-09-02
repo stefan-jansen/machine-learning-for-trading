@@ -112,6 +112,13 @@ decision:
   cadence: monthly_month_end
   snapshot: close
   execution_delay: next_bar_open
+  # Per-label decision cadence. `cadence` above is the default and applies to every label not
+  # named here. fwd_ret_5d predicts a five-session return; held to the monthly grid it was
+  # carried for about 21 sessions, so the backtest traded a horizon the label does not describe
+  # and the two could not be compared on equal terms. Adding a label here changes its backtest
+  # spec identity, so it produces new registered rows and leaves existing ones untouched.
+  cadence_by_label:
+    fwd_ret_5d: weekly_friday_close
 
 # Engine-level execution defaults. Single source of truth — Ch16-19 notebooks
 # read these via get_backtest_config(); never declare a local INITIAL_CASH

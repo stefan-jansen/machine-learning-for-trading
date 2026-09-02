@@ -385,6 +385,31 @@ def test_known_unrenderable_list_has_no_stale_entries() -> None:
     )
 
 
+def test_a_gitignored_staging_notebook_is_out_of_scope(tmp_path, monkeypatch) -> None:
+    """Papermill's own scratch is not something a reader can ever receive.
+
+    Every execution stages `.<name>.papermill.<pid>.ipynb` beside the notebook and
+    leaves it behind when the run is killed. It is gitignored, and it holds exactly
+    what these guards look for, so scanning it made the gate fail on any working copy
+    that had run a notebook recently while CI, cloning fresh, passed. An untracked
+    notebook that is *not* ignored is on its way to being committed and stays in scope.
+    """
+    import subprocess
+
+    import sanitize_notebook_paths as sut
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / ".gitignore").write_text("*.papermill.*.ipynb\n", encoding="utf-8")
+    leak = json.dumps({"cells": [], "metadata": {"papermill": {"output_path": "/tmp/x.ipynb"}}})
+    (tmp_path / ".08a_ipca.papermill.579074.ipynb").write_text(leak, encoding="utf-8")
+    (tmp_path / "16_new_notebook.ipynb").write_text(leak, encoding="utf-8")
+
+    monkeypatch.setattr(sut, "REPO_ROOT", tmp_path)
+    found = {p.name for p in sut._iter_notebooks()}
+
+    assert found == {"16_new_notebook.ipynb"}
+
+
 def test_an_untracked_notebook_is_not_committed_content() -> None:
     """The four gates above say "committed", so an untracked file must not reach them.
 

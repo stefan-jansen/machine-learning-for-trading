@@ -39,6 +39,7 @@
 import plotly.express as px
 import polars as pl
 import yaml
+from IPython.display import display
 from ml4t.diagnostic.metrics import cross_sectional_ic
 
 import utils.style  # noqa: F401
@@ -50,7 +51,6 @@ from utils.paths import get_case_study_dir
 
 # %% tags=["parameters"]
 CASE_STUDY = "fx_pairs"
-PRIMARY_LABEL = "fwd_ret_1d"
 N_BUCKETS = 5
 # This notebook reads; it fits nothing and registers nothing, so it has no preview form - a
 # preview population is not the thing whose assembly it checks. It still takes the pair,
@@ -70,7 +70,8 @@ WORKSPACE: str | None = None
 # %%
 case_dir = get_case_study_dir(CASE_STUDY)
 setup = yaml.safe_load((case_dir / "config" / "setup.yaml").read_text())
-configured_labels = [setup["labels"]["primary"], *setup["labels"].get("variants", [])]
+primary_label = setup["labels"]["primary"]
+configured_labels = [primary_label, *setup["labels"].get("variants", [])]
 study = open_study(CASE_STUDY, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 catalog = study.predictions.table().filter(
     (pl.col("identity_status") == "current")
@@ -117,14 +118,17 @@ if catalog.select(identity_columns).n_unique() != catalog.height:
 # configured model reads exactly like a complete one. This compares the assembled population to the
 # menu itself.
 #
-# `deep_learning` is the one family split across two notebooks, `09_dl_tcn` and `10_dl_nlinear`, so
-# any configured architecture outside that pair has no notebook to produce it. Those members are
-# excluded by name and reason rather than passing unnoticed. The exclusions are derived from the
-# menu per label, not listed, so a label that never declares a member does not gain a phantom
-# exclusion for it.
+# `deep_learning` is the one family split across several notebooks - `09_dl_tcn`,
+# `10_dl_nlinear` and `10a_dl_lstm` - so a configured architecture outside that set would have
+# no notebook to produce it. Such members are excluded by name and reason rather than passing
+# unnoticed, and the exclusions are derived from the menu per label rather than listed, so a
+# label that never declares a member does not gain a phantom exclusion for it. The set is empty
+# today: `lstm_h64` was the one configured architecture nothing fitted, and `10a_dl_lstm` closed
+# it. The derivation stays because a menu that grows again should say so here rather than
+# silently publish a population short of what it declares.
 
 # %% tags=["results"]
-SEQUENCE_NOTEBOOK_ARCHITECTURES = {"tcn", "nlinear"}
+SEQUENCE_NOTEBOOK_ARCHITECTURES = {"tcn", "nlinear", "lstm_h64"}
 EXCLUSION_REASON = "configured but no scoped fx_pairs notebook runs it; coverage decision open"
 
 configured_members = {
@@ -309,12 +313,14 @@ fold_figure.show()
 # %% [markdown]
 # ## Prediction agreement and ranking shape
 #
-# Correlation between model scores shows whether families rank pairs similarly. Return buckets show
-# how realized returns vary from the lowest to highest prediction ranks without turning that pattern
-# into a deployment decision.
+# Correlation between model scores shows whether families rank pairs similarly. One correlation
+# matrix covers one label: scores fitted against different targets are not comparable ranks of the
+# same quantity, so the pivot takes the primary label the menu declares rather than all three.
+# Return buckets and conformal coverage carry no such restriction and run over every label.
 
 # %% tags=["results"]
-primary = representative_predictions.filter(pl.col("label") == PRIMARY_LABEL)
+primary = representative_predictions.filter(pl.col("label") == primary_label)
+print(f"Score agreement is computed on {primary_label}, the primary label in the menu")
 # The pivot index is the canonical eligibility key alone. `actual` is the same realized return for
 # every model at a given key, but the families do not agree on its float representation, so including
 # it split the rows into disjoint groups - each score column populated on a different half - and every
@@ -336,8 +342,8 @@ agreement
 
 # %% tags=["results"]
 bucket_rows = []
-for keys, frame in primary.group_by(
-    "family", "config_name", "checkpoint_value", "prediction_hash", "timestamp"
+for keys, frame in representative_predictions.group_by(
+    "label", "family", "config_name", "checkpoint_value", "prediction_hash", "timestamp"
 ):
     if frame.height < N_BUCKETS:
         continue
@@ -349,22 +355,26 @@ for keys, frame in primary.group_by(
     for bucket, values in ranked.group_by("bucket"):
         bucket_rows.append(
             {
-                "family": keys[0],
-                "config_name": keys[1],
-                "checkpoint_value": keys[2],
-                "prediction_hash": keys[3],
-                "timestamp": keys[4],
+                "label": keys[0],
+                "family": keys[1],
+                "config_name": keys[2],
+                "checkpoint_value": keys[3],
+                "prediction_hash": keys[4],
+                "timestamp": keys[5],
                 "bucket": bucket[0],
                 "actual": values.get_column("actual").mean(),
             }
         )
 bucket_summary = (
     pl.DataFrame(bucket_rows)
-    .group_by("family", "config_name", "checkpoint_value", "prediction_hash", "bucket")
+    .group_by("label", "family", "config_name", "checkpoint_value", "prediction_hash", "bucket")
     .agg(pl.col("actual").mean().alias("mean_realized_return"))
-    .sort("family", "bucket")
+    .sort("label", "family", "bucket")
 )
-bucket_summary
+# Three labels sort as 1d, 21d, 5d, so the default row window hides the middle one entirely and
+# a reader would see the same two-thirds coverage this section exists to remove.
+with pl.Config(tbl_rows=bucket_summary.height):
+    display(bucket_summary)
 
 # %% [markdown]
 # ## Chronological conformal coverage
@@ -375,38 +385,51 @@ bucket_summary
 
 # %% tags=["results"]
 conformal_rows = []
-for keys, frame in primary.group_by("family", "config_name", "checkpoint_value", "prediction_hash"):
+for keys, frame in representative_predictions.group_by(
+    "label", "family", "config_name", "checkpoint_value", "prediction_hash"
+):
     for row in split_conformal_coverage(frame):
         conformal_rows.append(
             {
-                "family": keys[0],
-                "config_name": keys[1],
-                "checkpoint_value": keys[2],
-                "prediction_hash": keys[3],
+                "label": keys[0],
+                "family": keys[1],
+                "config_name": keys[2],
+                "checkpoint_value": keys[3],
+                "prediction_hash": keys[4],
                 **row,
             }
         )
-conformal = pl.DataFrame(conformal_rows).sort("nominal_level", "family")
-conformal
+conformal = pl.DataFrame(conformal_rows).sort("label", "nominal_level", "family")
+with pl.Config(tbl_rows=conformal.height, tbl_cols=conformal.width, tbl_width_chars=200):
+    display(conformal)
 
 # %% [markdown]
 # ## Causal evidence remains separate
 #
-# The causal result answers whether the configured momentum treatment has an estimated effect after
+# A causal result answers whether the configured momentum treatment has an estimated effect after
 # adjustment for its declared confounders. It does not count as predictive-family coverage and does
-# not enter the model or backtest population.
+# not enter the model or backtest population. `11_causal_dml` registers one estimate per label the
+# menu declares, so naming a single label here would leave the rest of them unreported.
 
 # %% tags=["results"]
-causal = CausalResult.one(study, label=PRIMARY_LABEL)
-causal_summary = pl.DataFrame([{"causal_hash": causal.hash, **causal.metrics}]).select(
-    "causal_hash",
-    "n_obs",
-    "dml_effect",
-    "dml_se_hac",
-    "p_value_hac",
-    "naive_effect",
-    "confounding_bias_pct",
-    "refutation_p",
+causal_rows = []
+for label in configured_labels:
+    causal = CausalResult.one(study, label=label)
+    causal_rows.append({"label": label, "causal_hash": causal.hash, **causal.metrics})
+causal_summary = (
+    pl.DataFrame(causal_rows)
+    .select(
+        "label",
+        "causal_hash",
+        "n_obs",
+        "dml_effect",
+        "dml_se_hac",
+        "p_value_hac",
+        "naive_effect",
+        "confounding_bias_pct",
+        "refutation_p",
+    )
+    .sort("label")
 )
 causal_summary
 

@@ -63,7 +63,7 @@ BATCH_SIZE = 0
 DEVICE = ""
 SEED = 42
 POPULATION_NAME = ""
-SUPERSEDES_POPULATION: str = "7cf7405afc08"
+SUPERSEDES_POPULATION: str = "20f46e6a5645"
 # The tier is a parameter, not something inferred from whether a reduction happens to be set.
 # Inferring it meant a run could be reduced and still open the case study's own artifacts in
 # place, which is the production path; a reader under test then wrote where the published run

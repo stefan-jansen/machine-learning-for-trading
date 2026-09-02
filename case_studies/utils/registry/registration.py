@@ -44,7 +44,7 @@ VALID_PREDICTION_SPLITS = frozenset({"validation", "holdout"})
 # Columns a schema migration added, which an immutable row may therefore be missing
 # through no change of its own. Nothing else is filled on NULL: see the comment at the
 # backfill itself for why a nullable column is not the same as a migrated one.
-MIGRATION_BACKFILLED_COLUMNS = frozenset({"refutation_n_successful"})
+MIGRATION_BACKFILLED_COLUMNS = frozenset({"refutation_n_successful", "refutation_placebo_json"})
 MAX_PREDICTION_STD_RATIO = 100.0
 
 
@@ -1766,6 +1766,51 @@ def declare_causal_supersedes(
         db.close()
 
 
+def check_causal_supersedes(
+    case_study: str,
+    causal_hash: str,
+    *,
+    label: str,
+    tier: str,
+    supersedes_hash: str | None,
+    case_dir: Path | None = None,
+) -> None:
+    """Raise now what :func:`register_causal_run` would raise after the fit.
+
+    The refusal it wraps is correct and stays where it is; only its timing is the
+    problem. A causal identity moves whenever ``case_studies/utils/causal.py`` changes,
+    because the resolved spec carries a hash of that whole file, so an ordinary edit to
+    the shared resolver leaves every case study on it registering a second identity for
+    its label. The run then misses the cache, pays the full DML fit and every placebo
+    refit, and is refused at the write for naming no predecessor - which is an hour on
+    this panel to be told a hash the registry could have named before the first fold.
+
+    This calls the write-time rule itself rather than restating it. Two copies of this
+    condition would decide what may be written and what is worth starting, and a
+    disagreement between them either refuses a run that would have registered or starts
+    one that cannot. The one place they differ is unavoidable and harmless: another
+    writer can change the registry while the fit runs, so passing here is not a promise
+    that the write will succeed. ``register_causal_run`` remains the authority.
+    """
+    if case_dir is None:
+        case_dir = _case_dir(case_study)
+    db = _open_registry(case_dir)
+    try:
+        _enforce_causal_supersedes(
+            db,
+            causal_hash=causal_hash,
+            label=label,
+            tier=tier,
+            supersedes_hash=supersedes_hash,
+            is_repair=db.execute(
+                "SELECT 1 FROM causal_runs WHERE causal_hash = ?", (causal_hash,)
+            ).fetchone()
+            is not None,
+        )
+    finally:
+        db.close()
+
+
 def _enforce_causal_supersedes(
     db,
     *,
@@ -1881,6 +1926,7 @@ def register_causal_run(
     confounding_bias_pct: float | None,
     refutation_p: float | None,
     refutation_n_successful: int | None = None,
+    refutation_placebo_json: str | None = None,
     spec_json: str,
     notebook: str | None,
     started_at: str | None,
@@ -2027,10 +2073,10 @@ def register_causal_run(
                 causal_hash, label, treatment, confounders_json, embargo,
                 n_folds, n_obs, dml_effect, dml_se_hac, p_value_hac,
                 naive_effect, confounding_bias_pct, refutation_p,
-                refutation_n_successful,
+                refutation_n_successful, refutation_placebo_json,
                 spec_json, notebook, started_at, elapsed_s, git_commit,
                 supersedes_hash, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(causal_hash) DO UPDATE SET
                 label=excluded.label,
                 treatment=excluded.treatment,
@@ -2045,6 +2091,12 @@ def register_causal_run(
                 confounding_bias_pct=excluded.confounding_bias_pct,
                 refutation_p=excluded.refutation_p,
                 refutation_n_successful=excluded.refutation_n_successful,
+                -- Fill-once, like supersedes_hash. A row registered before this column
+                -- existed carries NULL, and a re-registration that recomputes the draws
+                -- should fill it; one that does not must not erase them.
+                refutation_placebo_json=COALESCE(
+                    excluded.refutation_placebo_json, causal_runs.refutation_placebo_json
+                ),
                 spec_json=excluded.spec_json,
                 notebook=excluded.notebook,
                 started_at=excluded.started_at,
@@ -2089,6 +2141,7 @@ def register_causal_run(
                 confounding_bias_pct,
                 refutation_p,
                 refutation_n_successful,
+                refutation_placebo_json,
                 spec_json,
                 notebook,
                 started_at,

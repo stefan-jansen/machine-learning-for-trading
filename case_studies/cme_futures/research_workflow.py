@@ -8,6 +8,7 @@ import json
 import sqlite3
 import subprocess
 from collections.abc import Iterable
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -29,6 +30,7 @@ from case_studies.research import (
     run_backtests,
     run_models,
 )
+from case_studies.research.contracts import ExecutionTier
 from case_studies.research.execution import ModelExecution
 from case_studies.research.strategy import strategy_warmup_periods
 from case_studies.utils.artifact_digest import value_digest
@@ -113,7 +115,12 @@ class FuturesBacktestExecution:
     population: OfficialPopulation | None
 
 
-def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> Study:
+def open_study(
+    *,
+    execution_tier: str,
+    workspace: str | Path | None = None,
+    entry_point: str | None = None,
+) -> Study:
     """Open canonical regeneration, canonical execution into a workspace, or a reader preview.
 
     Canonical with no workspace regenerates the case study's artifacts in place, which is the
@@ -122,12 +129,22 @@ def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> S
     which is the only form a checkout without those symlinks can run: CI seeds its fixture into
     ``ML4T_OUTPUT_DIR`` and has no `features`, `labels` or `run_log` symlink to regenerate over,
     so `Study.regenerate` refused there and took notebooks 13 through 17 red on every run.
+
+    ``execution_tier`` and ``entry_point`` are stamped on the returned study rather than left to
+    their defaults. Both were dropped here while the library set them, which is the hazard a
+    private wrapper carries: this one restates the library's construction and had drifted from it
+    on both fields. A study built with no tier reports ``canonical`` whatever it was opened for,
+    and `OfficialPopulation.create` refuses a preview member by reading exactly that field, so a
+    preview through this wrapper could publish a population the library would have refused.
     """
     if execution_tier == "canonical":
         if workspace is None:
-            return Study.regenerate(CASE_STUDY, release_root=REPO_ROOT)
+            return Study.regenerate(CASE_STUDY, release_root=REPO_ROOT, entry_point=entry_point)
         return Study.open(
-            CASE_STUDY, workspace=Path(workspace).expanduser().resolve(), release_root=REPO_ROOT
+            CASE_STUDY,
+            workspace=Path(workspace).expanduser().resolve(),
+            release_root=REPO_ROOT,
+            entry_point=entry_point,
         )
     if execution_tier != "preview":
         raise ValueError("execution_tier must be canonical or preview")
@@ -135,7 +152,13 @@ def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> S
         raise ValueError("preview execution requires an explicit workspace")
     workspace = Path(workspace).expanduser().resolve()
     try:
-        return Study.open(CASE_STUDY, workspace=workspace, release_root=REPO_ROOT)
+        return Study.open(
+            CASE_STUDY,
+            workspace=workspace,
+            release_root=REPO_ROOT,
+            entry_point=entry_point,
+            execution_tier=ExecutionTier.PREVIEW,
+        )
     except ValueError as error:
         generated = tuple(
             REPO_ROOT / "case_studies" / CASE_STUDY / name
@@ -155,6 +178,8 @@ def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> S
             release_root=REPO_ROOT,
             output_root=workspace,
             read_only=False,
+            entry_point=entry_point,
+            execution_tier=ExecutionTier.PREVIEW,
             manifest={
                 "schema_version": 1,
                 "case_study": CASE_STUDY,
@@ -1212,48 +1237,3 @@ def selection_catalog(study: Study, members: Iterable[str]) -> pl.DataFrame:
         "prediction_hash",
         "backtest_hash",
     ).sort("sharpe", "backtest_hash", descending=[True, False])
-
-
-def holdout_evidence(study: Study) -> pl.DataFrame:
-    """Return the research lock and the one holdout evaluation it authorizes, if any.
-
-    The lock is what makes the holdout usable once: it records the candidate set, the
-    selected validation backtest and the retraining contract before any holdout artifact
-    exists. Reading it here is how the analysis shows which configuration the holdout ran
-    on without being able to choose a different one.
-    """
-    database = study.root / "run_log" / "registry.db"
-    if not database.is_file():
-        return pl.DataFrame()
-    with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as db:
-        names = {
-            row[0]
-            for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
-        }
-        if "research_locks" not in names:
-            return pl.DataFrame()
-        rows = db.execute(
-            "SELECT l.lock_hash, l.state, l.lock_json, e.holdout_training_hash, "
-            "e.holdout_prediction_hash, e.holdout_backtest_hash, e.evaluated_at "
-            "FROM research_locks l "
-            "LEFT JOIN holdout_evaluations e ON e.lock_hash = l.lock_hash"
-        ).fetchall()
-    records = []
-    for lock_hash, state, lock_json, training, prediction, backtest, evaluated_at in rows:
-        lock = json.loads(lock_json)
-        records.append(
-            {
-                "lock_hash": lock_hash,
-                "state": state,
-                "label": lock.get("label"),
-                "checkpoint_kind": lock.get("checkpoint_kind"),
-                "checkpoint_value": lock.get("checkpoint_value"),
-                "candidate_set_hash": lock.get("candidate_set_hash"),
-                "validation_backtest_hash": lock.get("validation_backtest_hash"),
-                "holdout_training_hash": training,
-                "holdout_prediction_hash": prediction,
-                "holdout_backtest_hash": backtest,
-                "evaluated_at": evaluated_at,
-            }
-        )
-    return pl.DataFrame(records)

@@ -82,4 +82,4 @@ Schema (canonical):
 - **Ch16 validation**: `validation/weights.py`.
 - **Ch18**: `01_cost_taxonomy.py`, `02_spread_estimation.py`, `03_market_impact_calibration.py`.
 - **`case_studies/fx_pairs/`**: full pipeline from `01_feasibility_analysis.py` through
-  `17_strategy_analysis.py`.
+  `19_strategy_analysis.py`.

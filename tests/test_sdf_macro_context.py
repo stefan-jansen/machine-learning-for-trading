@@ -131,6 +131,7 @@ def test_macro_context_enters_hash_and_cache_matching() -> None:
     identity = {**_config(), "input_digest": "sha256:abc"}
     resolved = _apply_latent_factor_runtime_spec(
         spec=base,
+        model_name="sdf",
         n_factors=5,
         n_epochs=50,
         model_kwargs={},

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from case_studies.utils.causal import REFUTATION_ALPHA, classify_refutation
 from case_studies.utils.registry.registration import register_causal_run
 
@@ -88,31 +90,14 @@ def _causal_hash(case_dir, **identity) -> str:
     )
 
 
-def test_every_knob_that_changes_the_estimate_changes_the_causal_hash(tmp_path) -> None:
+def test_registration_writes_a_registry_file(tmp_path) -> None:
+    """The only assertion the superseded knob test carried that its replacement does not.
+
+    A knob test compares hashes, and two hashes can differ with nothing written to disk.
+    This is what says a registration actually landed.
+    """
     case_dir = tmp_path / "test_case"
-    base = {
-        "block_size": 20,
-        "n_placebo": 200,
-        "seed": 42,
-        "horizon": 10,
-        "max_samples": 50_000,
-        "max_symbols": 100,
-        "development_end": "2020-01-01",
-    }
-    baseline = _causal_hash(case_dir, **base)
-    assert _causal_hash(case_dir, **base) == baseline
-
-    for knob, other in (
-        ("block_size", 5),
-        ("n_placebo", 100),
-        ("seed", 7),
-        ("horizon", 5),
-        ("max_samples", 10_000),
-        ("max_symbols", 25),
-        ("development_end", "2019-01-01"),
-    ):
-        assert _causal_hash(case_dir, **{**base, knob: other}) != baseline, knob
-
+    _causal_hash(case_dir, block_size=20, n_placebo=200, seed=42, horizon=10)
     assert (case_dir / "run_log" / "registry.db").is_file()
 
 
@@ -243,6 +228,82 @@ def test_a_migrated_column_that_changes_from_a_stored_value_names_itself(tmp_pat
         assert "refutation_n_successful" in str(error), f"the conflict named nothing: {error}"
     else:
         raise AssertionError("a changed draw count on an immutable row must not be accepted")
+
+
+_RESULTS = {
+    "dml_result": {"n_obs": 100, "theta": -0.0008, "se_hac": 0.01},
+    "refutation": {"empirical_p": 0.4},
+    "p_value_hac": 0.3,
+    "naive_effect": -0.0042,
+    "confounding_bias_pct": -450.0,
+}
+
+_BASE = {
+    "label": "fwd_ret_1m",
+    "treatment_col": "r12_2",
+    "confounder_cols": ["Beta", "IdioVol"],
+    "n_folds": 5,
+    "embargo": 1,
+    "time_col": "timestamp",
+    "block_size": 1,
+    "n_placebo": 100,
+    "seed": 42,
+    "horizon": 0,
+    "max_samples": 250_000,
+    "max_symbols": 0,
+    "development_end": "2015-12-01",
+    "config_name": "dml_250k",
+}
+
+# One entry per knob that changes the estimate, with a value that differs from the
+# baseline. A knob outside the identity lets two different estimates share one
+# causal_hash, and registration then takes its ON CONFLICT DO UPDATE branch, so the
+# second run replaces the first in place instead of landing beside it.
+_VARIANTS = {
+    "label": "fwd_class_1m",
+    "treatment_col": "ST_REV",
+    "confounder_cols": ["Beta", "IdioVol", "LME"],
+    "n_folds": 3,
+    "embargo": 2,
+    "block_size": 3,
+    "n_placebo": 50,
+    "seed": 7,
+    "horizon": 1,
+    "max_samples": 50_000,
+    "max_symbols": 5,
+    "development_end": "2014-12-01",
+    "config_name": "dml",
+}
+
+
+def _causal_hash(case_dir, **overrides) -> str:
+    from case_studies.utils.causal import register_causal_run as register
+
+    return register("test_case", results=_RESULTS, case_dir=case_dir, **{**_BASE, **overrides})
+
+
+def test_identical_arguments_reproduce_the_causal_hash(tmp_path) -> None:
+    case_dir = tmp_path / "test_case"
+    assert _causal_hash(case_dir) == _causal_hash(case_dir)
+
+
+@pytest.mark.parametrize("knob", sorted(_VARIANTS))
+def test_every_knob_that_changes_the_estimate_changes_the_causal_hash(tmp_path, knob) -> None:
+    case_dir = tmp_path / "test_case"
+    baseline = _causal_hash(case_dir)
+    assert _causal_hash(case_dir, **{knob: _VARIANTS[knob]}) != baseline, (
+        f"{knob} is outside the causal identity"
+    )
+
+
+def test_registering_under_two_identities_keeps_both_rows(tmp_path) -> None:
+    case_dir = tmp_path / "test_case"
+    wide = _causal_hash(case_dir)
+    narrow = _causal_hash(case_dir, max_samples=50_000)
+
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        stored = {row[0] for row in db.execute("SELECT causal_hash FROM causal_runs")}
+    assert stored == {wide, narrow}
 
 
 def _wrapper_hash(case_dir, **knobs) -> str:

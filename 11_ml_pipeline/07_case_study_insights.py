@@ -59,6 +59,7 @@ from matplotlib.colors import LinearSegmentedColormap
 from scipy import stats
 from sklearn.metrics import roc_auc_score
 
+from case_studies.research.population import retired_prediction_hashes
 from case_studies.utils.analytics import (
     CASE_STUDY_IDS,
     PRIMARY_LABELS,
@@ -72,7 +73,7 @@ from case_studies.utils.model_analysis import (
     load_predictions,
 )
 from utils.paths import get_case_study_dir
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
 # %% tags=["parameters"]
 FAMILY = "linear"
@@ -115,6 +116,16 @@ FINITE_METRIC_FIELDS = [
 # %% [markdown] tags=[]
 # The loader preserves exact training and prediction identities so every later
 # statistic and coefficient view can be traced to one registry-selected artifact.
+#
+# It also drops the generations a refit has retired. A case study that refits under
+# a corrected input artifact publishes new prediction identities and a snapshot that
+# supersedes the previous one; the retired rows stay in the registry, because the
+# record of what was superseded is evidence rather than litter. That record lives in
+# `official_populations`, one layer above the tables joined below, so a query that
+# stops at `prediction_metrics` sees two rows where the study has one. It cannot
+# separate them on the numbers either: a refit that changes only a declared input
+# leaves the computation, and therefore every metric, bit-identical, so a `max` or an
+# `ORDER BY created_at` would pick one arbitrarily and look like it had worked.
 
 
 # %% tags=[]
@@ -133,12 +144,14 @@ def load_complete_metrics(
     with sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True) as connection:
         connection.row_factory = sqlite3.Row
         rows = [dict(row) for row in connection.execute(query, params).fetchall()]
+        retired = retired_prediction_hashes(connection)
     if not rows:
         return pl.DataFrame()
     df = pl.DataFrame(rows, infer_schema_length=None)
     return (
         df.filter(
-            (pl.col("n_null_folds") == 0)
+            ~pl.col("prediction_hash").is_in(list(retired))
+            & (pl.col("n_null_folds") == 0)
             & pl.all_horizontal(
                 pl.col(column).is_not_null() & pl.col(column).is_finite()
                 for column in FINITE_METRIC_FIELDS
@@ -148,6 +161,41 @@ def load_complete_metrics(
         .filter(pl.col("ic_n_days") == pl.col("_max_n_days"))
         .drop("_max_n_days", "n_null_folds")
     )
+
+
+# %% tags=[]
+# The identity a tie has to agree on before it can be resolved. `config_name` alone is not a
+# configuration: a name can be reused across generations while the parameters behind it move, and
+# collapsing two such rows would pick one arbitrarily by hash order - the failure the strict form
+# existed to prevent. A refit that only re-declared an input leaves the whole row bit-identical
+# apart from its two hashes, so requiring agreement on every other column - the config name, the
+# checkpoint, and each recorded statistic - separates the duplicate from the genuine ambiguity
+# without needing the training spec here. Two configurations that merely tie on ic_mean_daily
+# will differ somewhere in that vector and still raise.
+# Everything except the two identities that a refit is expected to move. Naming the
+# fields instead would be a second list to keep in step with METRICS_QUERY, and the
+# first draft of it already omitted ic_mean and ic_std while claiming to check every
+# recorded statistic.
+TIE_IDENTITY_EXCLUDED = frozenset({"training_hash", "prediction_hash"})
+
+
+def resolve_generation_tie(tied: pl.DataFrame, what: str) -> pl.DataFrame:
+    """Collapse generations of one configuration; raise on anything else."""
+    if tied.height == 1:
+        return tied
+    fields = [column for column in tied.columns if column not in TIE_IDENTITY_EXCLUDED]
+    distinct = tied.select(fields).unique()
+    if distinct.height != 1:
+        differing = [column for column in fields if tied[column].n_unique() > 1]
+        names = (
+            sorted(tied["config_name"].unique().to_list()) if "config_name" in tied.columns else []
+        )
+        raise RuntimeError(
+            f"{what}: daily-IC rank one is ambiguous"
+            + (f" between {', '.join(names)}" if names else "")
+            + f"; the tied rows differ on {', '.join(differing)}"
+        )
+    return tied.sort("prediction_hash").head(1)
 
 
 # %% [markdown] tags=[]
@@ -166,8 +214,13 @@ def collect_complete_rank1(case_studies: list[str]) -> pl.DataFrame:
             raise RuntimeError(f"{cs}: no complete linear result for {label}")
         best_ic = df["ic_mean_daily"].max()
         winner = df.filter(pl.col("ic_mean_daily") == best_ic)
-        if winner.height != 1:
-            raise RuntimeError(f"{cs}: primary linear rank one is ambiguous")
+        # A tie across two configurations is a real ambiguity and still raises. A tie between
+        # two generations of the SAME configuration is not: refitting one writes a second
+        # prediction set under a new training hash, and where the refit reproduced the scores
+        # the two ICs are bit-identical. Every fx_pairs linear configuration carries exactly
+        # two such generations - in production, not only in the fixture - so this check
+        # rejected the case study on a duplicate rather than on an ambiguity.
+        winner = resolve_generation_tie(winner, f"{cs}: primary linear")
         frames.append(
             winner.with_columns(
                 case_study=pl.lit(cs),
@@ -282,14 +335,21 @@ def replace_with_chronological_hac(
 
 # %% tags=[]
 def select_unique_best(frame: pl.DataFrame, groups: list[str]) -> pl.DataFrame:
-    """Select one unambiguous highest daily-IC row in every requested group."""
+    """Select one unambiguous highest daily-IC row in every requested group.
+
+    Fails closed on a tie between two configurations, because arbitrary row order must never
+    decide the reported winner. A tie between two generations of ONE configuration is a
+    different thing and resolves rather than raising: refitting writes a second prediction set
+    under a new training hash, and where the refit reproduced the scores the two ICs are
+    bit-identical. Every fx_pairs linear configuration carries exactly two such generations in
+    the production registry, so the strict form rejected the case study on a duplicate.
+    """
     winners = []
     for group in frame.partition_by(groups, maintain_order=True):
         best_ic = group["ic_mean_daily"].max()
         best = group.filter(pl.col("ic_mean_daily") == best_ic)
-        if best.height != 1:
-            identity = {column: group[0, column] for column in groups}
-            raise RuntimeError(f"ambiguous daily-IC rank one for {identity}")
+        identity = {column: group[0, column] for column in groups}
+        best = resolve_generation_tie(best, str(identity))
         winners.append(best)
     return pl.concat(winners, how="diagonal_relaxed") if winners else pl.DataFrame()
 
@@ -428,7 +488,11 @@ fig, ax = plot_cross_cs_forest(
     title="Most primary-label linear intervals overlap zero",
 )
 ax.set_xlabel("Mean daily IC (HAC 95 % CI)")
-fig.show()
+show_with_alt(
+    fig,
+    "Forest plot of mean daily information coefficient with HAC 95% intervals, one row "
+    "per case study on its primary label, against a vertical line at zero.",
+)
 
 # %% tags=[]
 significant = rank1.filter((pl.col("ic_ci_lo") > 0) | (pl.col("ic_ci_hi") < 0))
@@ -568,7 +632,10 @@ ax.set_title("Regularization shifts estimates less than their uncertainty")
 ax.legend(frameon=False, fontsize=8, loc="best")
 if fig.get_layout_engine() is None:
     fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Grouped bars of mean daily information coefficient by regularizer, one group per case study, with HAC 95% error bars and a horizontal line at zero.",
+)
 
 # %% tags=[]
 ridge_ols = reg_best.filter(pl.col("reg_family").is_in(["ridge", "ols"]))
@@ -651,7 +718,10 @@ ax.set_ylabel("Mean daily IC (HAC 95 % CI band)")
 ax.axhline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
 ax.set_title("Ridge paths are mostly flat relative to uncertainty")
 ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=8)
-fig.show()
+show_with_alt(
+    fig,
+    "Mean daily information coefficient against Ridge alpha on a log axis, one line per case study with a shaded HAC 95% band, against a horizontal line at zero.",
+)
 
 # %% [markdown] tags=[]
 # The confidence bands put the path curvature in context. An apparent optimum
@@ -683,7 +753,11 @@ fig, _ = plot_rolling_daily_ic(
     },
     title="ETF and FX rolling IC vary through their shared window",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "Rolling 63-day information coefficient for the ETF and FX selected fits over their "
+    "shared window, against a horizontal line at zero.",
+)
 
 # %% [markdown] tags=[]
 # The rolling view tests whether a full-period average is broadly persistent or
@@ -728,7 +802,10 @@ ax.set_ylabel("Per-fold Spearman IC")
 ax.set_title("Selected linear fits vary widely across validation folds")
 if fig.get_layout_engine() is None:
     fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Box plots of per-fold Spearman information coefficient, one box per case study with the individual folds overlaid as points, against a horizontal line at zero.",
+)
 
 # %% tags=[]
 most_positive = fold_summary.sort("pct_positive", descending=True).row(0, named=True)
@@ -766,7 +843,10 @@ ax.set_xlabel("ICIR (|mean fold IC| / fold standard deviation)")
 ax.set_title("Fold stability differs sharply across the selected linear fits")
 if fig.get_layout_engine() is None:
     fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Horizontal bars of ICIR, the absolute mean fold information coefficient divided by its fold standard deviation, one bar per case study.",
+)
 
 # %% tags=[]
 icir_leader = icir.row(0, named=True)
@@ -896,7 +976,10 @@ if plot_horizon.height > 0:
     ax.axhline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
     ax.set_title("Linear ranking strength changes unevenly with horizon")
     ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=8)
-    fig.show()
+    show_with_alt(
+        fig,
+        "Mean daily information coefficient against label horizon in trading days on a log axis, one line per case study with a shaded HAC 95% band, against a horizontal line at zero.",
+    )
 
 # %% tags=[]
 display(
@@ -1138,7 +1221,13 @@ ax.set_xlim(0.47, 0.53)
 
 if fig.get_layout_engine() is None:
     fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Two panels sharing one row of case-study labels. Left: the classification score's "
+    "mean daily information coefficient against the continuous return, with HAC 95% error "
+    "bars and a line at zero. Right: the regression score's mean daily AUC against the "
+    "binary direction, with a line at one half.",
+)
 
 # %% tags=[]
 direction_a_clear = sym_df.filter((pl.col("cls_score_ic_lo") > 0) | (pl.col("cls_score_ic_hi") < 0))
@@ -1213,7 +1302,16 @@ for row in rank1.iter_rows(named=True):
         }
     )
 
-sign_df = pl.DataFrame(sign_rows).sort("mean_consistency", descending=True)
+sign_df = pl.DataFrame(
+    sign_rows,
+    schema={
+        "short_name": pl.Utf8,
+        "config_name": pl.Utf8,
+        "n_features": pl.Int64,
+        "mean_consistency": pl.Float64,
+        "pct_features_above_80": pl.Float64,
+    },
+).sort("mean_consistency", descending=True)
 print("Coefficient sign consistency for the highest-IC linear configuration (primary label):")
 sign_df
 
@@ -1238,20 +1336,35 @@ if sign_df.height > 0:
     ax.set_title("Most selected linear fits preserve coefficient signs across folds")
     if fig.get_layout_engine() is None:
         fig.tight_layout()
-    fig.show()
+    show_with_alt(
+        fig,
+        "Horizontal bars of mean fold-level coefficient sign consistency, one per case study, against a dashed line at 0.8.",
+    )
 
 # %% tags=[]
+# Counted on both paths: the closing takeaways quote it, and an empty frame is a
+# count of zero rather than an absent name.
 stable_sign_count = sign_df.filter(pl.col("mean_consistency") >= 0.8).height
-sign_leader = sign_df.row(0, named=True)
-display(
-    Markdown(
-        f"Mean fold-level sign consistency reaches 0.8 in **{stable_sign_count} of "
-        f"{sign_df.height}** selected fits. **{sign_leader['short_name']}** is highest at "
-        f"{sign_leader['mean_consistency']:.2f}. Sign stability and predictive ranking are "
-        "different diagnostics: a stable coefficient direction does not by itself establish "
-        "a nonzero out-of-sample IC."
+if sign_df.is_empty():
+    display(
+        Markdown(
+            "No selected linear fit has a stored coefficient artifact in this run log, so "
+            "sign consistency cannot be measured here. The diagnostic needs the per-fold "
+            "coefficients themselves, which the registry records separately from the "
+            "prediction sets."
+        )
     )
-)
+else:
+    sign_leader = sign_df.row(0, named=True)
+    display(
+        Markdown(
+            f"Mean fold-level sign consistency reaches 0.8 in **{stable_sign_count} of "
+            f"{sign_df.height}** selected fits. **{sign_leader['short_name']}** is highest at "
+            f"{sign_leader['mean_consistency']:.2f}. Sign stability and predictive ranking are "
+            "different diagnostics: a stable coefficient direction does not by itself establish "
+            "a nonzero out-of-sample IC."
+        )
+    )
 
 # %% [markdown] tags=[]
 # ### 6b. Lasso sparsity
@@ -1314,16 +1427,26 @@ print("Lasso sparsity per case study (at the highest-IC Lasso $\\alpha$):")
 sparsity_df
 
 # %% tags=[]
-sparsest = sparsity_df.row(0, named=True)
-display(
-    Markdown(
-        f"Complete highest-IC Lasso coefficient artifacts are available for "
-        f"**{sparsity_df.height}** case studies. **{sparsest['short_name']}** is sparsest: "
-        f"{sparsest['zero_fraction']:.1%} of coefficient-by-fold cells are zero, while "
-        f"{sparsest['pct_always_zero']:.1f}% of features are zero in every fold. This comparison "
-        "now uses one selected Lasso configuration per case study rather than pooling all alphas."
+if sparsity_df.is_empty():
+    display(
+        Markdown(
+            "No case study in this run log pairs a complete Lasso result on its primary label "
+            "with a stored coefficient artifact, so there is nothing to compare here. Sparsity "
+            "is read off the coefficients themselves, not off any metric the registry holds."
+        )
     )
-)
+else:
+    sparsest = sparsity_df.row(0, named=True)
+    display(
+        Markdown(
+            f"Complete highest-IC Lasso coefficient artifacts are available for "
+            f"**{sparsity_df.height}** case studies. **{sparsest['short_name']}** is sparsest: "
+            f"{sparsest['zero_fraction']:.1%} of coefficient-by-fold cells are zero, while "
+            f"{sparsest['pct_always_zero']:.1f}% of features are zero in every fold. This "
+            "comparison uses one selected Lasso configuration per case study rather than "
+            "pooling all alphas."
+        )
+    )
 
 # %% [markdown] tags=[]
 # ### 6c. Top-N feature overlap across case studies
@@ -1402,24 +1525,63 @@ if cs_names:
     ax.set_title(f"Top-{TOP_N} coefficient features overlap little across panels")
     colorbar = fig.colorbar(im, ax=ax, fraction=0.045, pad=0.04)
     colorbar.set_label("Jaccard overlap")
-    fig.show()
+    show_with_alt(
+        fig,
+        f"Symmetric heatmap of the pairwise Jaccard overlap between each pair of case "
+        f"studies' top-{TOP_N} coefficient features, each cell labelled with its value.",
+    )
 
 # %% tags=[]
 off_diagonal = J[~np.eye(len(cs_names), dtype=bool)]
-max_overlap = float(np.nanmax(off_diagonal)) if off_diagonal.size else float("nan")
-display(
-    Markdown(
-        f"The largest off-diagonal top-{TOP_N} Jaccard overlap is **{max_overlap:.2f}**. "
-        "Each selected fit draws primarily on its panel-specific feature library; recurring "
-        "momentum or volatility primitives do not form a universal short list."
-    )
+# An overlap is a statement about two panels, so it needs two of them. With one
+# feature set, or none, the off-diagonal is empty and there is no largest value -
+# reported as unavailable rather than as a number the matrix does not contain.
+has_overlap = bool(off_diagonal.size) and bool(np.isfinite(off_diagonal).any())
+max_overlap = float(np.nanmax(off_diagonal)) if has_overlap else float("nan")
+overlap_phrase = (
+    f"only {max_overlap:.2f}"
+    if has_overlap
+    else "unavailable, because fewer than two panels contributed a feature set"
 )
+if has_overlap:
+    display(
+        Markdown(
+            f"The largest off-diagonal top-{TOP_N} Jaccard overlap is **{max_overlap:.2f}**. "
+            "Each selected fit draws primarily on its panel-specific feature library; recurring "
+            "momentum or volatility primitives do not form a universal short list."
+        )
+    )
+else:
+    display(
+        Markdown(
+            f"Fewer than two case studies contributed a top-{TOP_N} feature set here, so there "
+            "is no cross-panel overlap to report. The comparison needs two selected fits with "
+            "stored coefficients."
+        )
+    )
 
 # %% [markdown] tags=[]
 # ## 7. Cross-CS Takeaways
 #
 # **Next**: Ch12 extends the comparison with gradient boosting and
 # tabular deep learning; Ch13 with temporal deep learning.
+
+
+# %% tags=[]
+# Panel-specificity is a claim about two panels disagreeing, so it cannot be made
+# from one. Where the overlap could not be computed, the bullet reports the sign
+# consistency it does have and says the comparison is missing, rather than
+# asserting the conclusion the missing half was there to support.
+coefficient_takeaway = (
+    f"**Coefficient behavior is panel-specific:** {stable_sign_count} selected fits clear "
+    f"0.8 mean sign consistency, and the largest top-{TOP_N} cross-panel feature overlap is "
+    f"{overlap_phrase}."
+    if has_overlap
+    else f"**Coefficient behavior across panels is not established here:** "
+    f"{stable_sign_count} selected fits clear 0.8 mean sign consistency, but the top-{TOP_N} "
+    f"cross-panel feature overlap is {overlap_phrase}, so whether the panels draw on "
+    "different features is not something this run can say."
+)
 
 # %% tags=[]
 display(
@@ -1433,8 +1595,6 @@ display(
         f"estimate uses only {icir_leader['n_folds']} folds.\n"
         f"- **Ranking and direction are not symmetric:** regression-score mean daily AUC stays "
         f"within {max_auc_gap:.3f} of chance in the tested pairs.\n"
-        f"- **Coefficient behavior is panel-specific:** {stable_sign_count} selected fits clear "
-        f"0.8 mean sign consistency, yet the largest top-{TOP_N} cross-panel feature overlap is "
-        f"only {max_overlap:.2f}."
+        f"- {coefficient_takeaway}"
     )
 )

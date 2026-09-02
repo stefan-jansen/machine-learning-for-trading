@@ -1,11 +1,26 @@
-"""Per-prediction split-conformal widths for position sizing.
+"""Per-prediction conformal widths for position sizing.
 
-Validation widths follow the strict ``walk_forward_v2`` contract. The first
-chronological validation fold has no conformal allocation. Every later fold
-uses residuals from earlier validation folds only. An entity with insufficient
-prior residuals receives a pooled width from that same prior out-of-sample
-calibration pool, so allocation never changes the selected basket by silently
-dropping an uncalibrated entity.
+Validation widths follow the ``walk_forward_v3`` contract, which is one rule for
+every fold: the width used at timestamp ``t`` for an entity is calibrated on every
+residual for that entity at or before ``t - h``, where ``h`` is the label horizon in
+prediction data steps. Residuals from earlier folds and from the current fold's own
+elapsed history are both eligible. An entity with fewer than ``min_calibration_n``
+eligible residuals receives a pooled width from every entity's eligible residuals, so
+allocation never changes the selected basket by silently dropping an uncalibrated entity.
+
+``h`` is an embargo and it is load-bearing in both directions. Without it, a residual at
+``t'`` whose forward return realizes over ``(t', t'+h]`` carries information from after
+the decision it sizes - which the prior-fold-only rule this replaces did at every fold
+boundary, not just at the holdout. With it, the earliest fold no longer has to abstain: it
+calibrates on its own elapsed history after a warm-up rather than sitting out entirely,
+which on a two-fold split is the difference between forfeiting half the evaluation period
+and forfeiting a warm-up.
+
+**No coverage guarantee is claimed or consumed.** Split conformal's finite-sample coverage
+requires the calibration and test scores to be exchangeable, and return residuals are
+heteroskedastic and regime-dependent, so they are not. What the allocator does with these
+widths is inverse-uncertainty sizing with a conformal quantile standing in for a
+volatility estimate; nothing downstream reads an interval or a coverage level.
 
 Storage: alongside ``predictions.parquet`` in the same prediction-hash directory.
 Writes are alpha-aware: a new alpha is appended to any existing
@@ -28,6 +43,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from utils.modeling import conformal_quantile
 from utils.paths import get_case_study_dir
 
 ID_COLS: tuple[str, ...] = ("symbol", "product")
@@ -42,7 +58,7 @@ _LEGACY_RENAME: dict[str, str] = {
 
 DEFAULT_ALPHA: float = 0.20
 DEFAULT_MIN_CALIBRATION_N: int = 30
-CALIBRATION_VERSION: str = "walk_forward_v2"
+CALIBRATION_VERSION: str = "walk_forward_v3"
 POOLED_FALLBACK: str = "pooled_prior_oos"
 
 HOLDOUT_CONFORMAL_EMBARGO_STEPS: dict[str, int] = {
@@ -70,12 +86,28 @@ HOLDOUT_CONFORMAL_EMBARGO_STEPS: dict[str, int] = {
     "sp500_equity_option_analytics/fwd_ret_10d": 10,
     "sp500_equity_option_analytics/fwd_dir_5d": 5,
     "sp500_equity_option_analytics/fwd_dir_10d": 10,
+    # ret_to_expiry has no fixed horizon: each row is a 30-day ATM straddle held to its
+    # own expiry, so the residual at session t resolves at that contract's expiry rather
+    # than a constant number of steps later. The bound is labels.buffer = 35D, the widest
+    # DTE the selection admits (measured max dte_calendar = 35), and five calendar weeks
+    # hold exactly 25 weekdays, which NYSE holidays can only reduce. The prediction panel
+    # is one row per session per symbol, so 25 sessions is the tight bound and the
+    # measured maximum over the label panel is 25 steps (median 21). Embargoing the
+    # median would leave the longest-dated quarter of the calibration residuals still
+    # resolving inside the holdout.
+    "sp500_options/ret_to_expiry": 25,
     "us_equities_panel/fwd_ret_5d": 5,
     "us_equities_panel/fwd_ret_1d": 1,
     "us_equities_panel/fwd_ret_21d": 21,
-    "us_firm_characteristics/fwd_ret_1m_win": 1,
-    "us_firm_characteristics/fwd_ret_1m": 1,
-    "us_firm_characteristics/fwd_class_1m": 1,
+    # Zero because the horizon is zero. us_firm_characteristics dates each row by the month
+    # the return was earned, and `labels.horizons` in its setup.yaml declares `0D` for all
+    # three, so the outcome is already realised at the observation and no residual reaches
+    # into the holdout window. The entries were 1, which is not a conservative reading of
+    # this table - the table records the label horizon, and a value above it discards the
+    # last month of calibration for a leak the label cannot have.
+    "us_firm_characteristics/fwd_ret_1m_win": 0,
+    "us_firm_characteristics/fwd_ret_1m": 0,
+    "us_firm_characteristics/fwd_class_1m": 0,
 }
 
 
@@ -136,8 +168,7 @@ def split_conformal_coverage(
     for level in levels:
         if not 0 < level < 1:
             raise ValueError(f"invalid conformal level: {level}")
-        rank = math.ceil((n_calibration + 1) * level)
-        quantile = float("inf") if rank > n_calibration else float(calibration_residuals[rank - 1])
+        quantile = conformal_quantile(calibration_residuals, level)
         rows.append(
             {
                 "nominal_level": float(level),
@@ -160,8 +191,34 @@ def holdout_conformal_embargo_steps(case_study: str, label: str) -> int:
         ) from error
 
 
-def ensure_conformal_calibration_identity(strategy_spec: dict[str, Any]) -> dict[str, Any]:
-    """Return a spec whose conformal allocation carries its full identity."""
+def ensure_conformal_calibration_identity(
+    strategy_spec: dict[str, Any],
+    *,
+    holdout_embargo_steps: int | None = None,
+) -> dict[str, Any]:
+    """Return a spec whose conformal allocation carries its full identity.
+
+    ``holdout_embargo_steps`` belongs here rather than only in the widths artifact, and
+    only for a holdout run. The widths are an input to the backtest and the embargo decides
+    them, so a spec that omits it gives two different calibrations one identity: change the
+    embargo, re-run, and the hash does not move. The registry then refuses to overwrite the
+    registered run - which is how the state announces itself, and the announcement is a
+    conflict rather than a number, so nothing is silently wrong. But the correct behaviour
+    is a different hash for a different calibration, which is what recording it gives.
+
+    It is recorded under ``input_identity``, which is where the specification already
+    records the digests of things a backtest consumed rather than declared - the price
+    frame, the funding rates. The widths are one of those, and the embargo is what decides
+    them. It is deliberately not in the allocation block: that block is what a holdout
+    replay is matched to its validation carrier by, and the two run the same strategy, so
+    putting it there made every holdout spec differ from its own carrier and
+    ``select_holdout_self_backtest`` stopped matching. It is not a ``backtest_config``
+    section either - that schema is closed, and adding one is rejected by name.
+
+    Pass it only on the holdout path. The embargo applies at the validation-to-holdout
+    boundary and has no meaning within validation, so adding it to a validation spec would
+    change every registered conformal hash to record something that did not affect it.
+    """
     spec = copy.deepcopy(strategy_spec)
     strategy = spec.get("strategy")
     if not isinstance(strategy, dict):
@@ -179,6 +236,9 @@ def ensure_conformal_calibration_identity(strategy_spec: dict[str, Any]) -> dict
     allocation["calibration_version"] = CALIBRATION_VERSION
     allocation.setdefault("min_calibration_n", DEFAULT_MIN_CALIBRATION_N)
     allocation.setdefault("sparse_fallback", POOLED_FALLBACK)
+    if holdout_embargo_steps is not None:
+        identity = spec.setdefault("input_identity", {})
+        identity["conformal_holdout_embargo_steps"] = int(holdout_embargo_steps)
     return spec
 
 
@@ -232,16 +292,29 @@ def _write_widths(
             # ComputeError — treat any unreadable file as "no prior widths".
             existing = None
         if existing is not None:
-            if "calibration_version" not in existing.columns:
+            # A superseded artifact is REPLACED, not refused. Both refusals below used
+            # to be unconditional, and their message told the caller to snapshot the file
+            # and delete it by hand. That made a corrected calibration unusable until a
+            # person intervened in every lane holding a stale artifact: on 2026-08-30 it
+            # took us_firm_characteristics' whole conformal stage down - all 52 backtests,
+            # 11 of 11 cost levels, including the canonical rank-1 - and the recovery was
+            # eleven manual file moves. Superseding IS the intended outcome of a
+            # calibration fix, so the writer performs it.
+            #
+            # `immutable` keeps the old behaviour and must: a locked artifact is pinned by
+            # digest, and silently rewriting one would break the pin it exists to hold.
+            legacy = "calibration_version" not in existing.columns
+            versions = set() if legacy else set(existing["calibration_version"].unique().to_list())
+            superseded = legacy or (versions and versions != {CALIBRATION_VERSION})
+            if superseded and immutable:
                 raise ValueError(
-                    f"Legacy conformal artifact at {path}; preserve it in the pre-fix "
-                    "snapshot and remove it from the live candidate before regeneration"
+                    f"locked conformal artifact at {path} holds a superseded calibration "
+                    f"{sorted(versions) or 'with no version column'}; it cannot be rewritten "
+                    "in place because the lock pins it by digest"
                 )
-            versions = set(existing["calibration_version"].unique().to_list())
-            if versions != {CALIBRATION_VERSION}:
-                raise ValueError(
-                    f"Refusing to mix conformal calibration versions in {path}: {versions}"
-                )
+            if superseded:
+                existing = None
+        if existing is not None:
             # Float equality on alpha is fine here: we write Float64 and read
             # back Float64; both sides round-trip bit-identically through parquet.
             same_alpha = existing.filter(pl.col("alpha") == alpha)
@@ -262,6 +335,31 @@ def _write_widths(
         temporary.unlink(missing_ok=True)
 
 
+def _expanding_calibration(frame: pl.DataFrame, *, alpha: float) -> pl.DataFrame:
+    """Per grid step: the quantile and count of every residual up to and including it.
+
+    One row per distinct ``step`` in ``frame``, carrying what a caller standing at that
+    step already knows. The embargo is applied by the as-of join that reads this table,
+    not here, so the same construction serves the per-entity and the pooled pool.
+    """
+    ordered = frame.sort("step")
+    window = max(ordered.height, 1)
+    return (
+        ordered.with_columns(
+            cal_q=pl.col("abs_resid").rolling_quantile(
+                quantile=1.0 - alpha,
+                window_size=window,
+                min_samples=1,
+                interpolation="higher",
+            ),
+            cal_n=pl.int_range(1, pl.len() + 1, dtype=pl.UInt32),
+        )
+        .group_by("step", maintain_order=True)
+        .agg(cal_q=pl.col("cal_q").last(), cal_n=pl.col("cal_n").last())
+        .with_columns(pl.col("step").cast(pl.Int64))
+    )
+
+
 def compute_conformal_widths(
     case_study: str,
     prediction_hash: str,
@@ -270,30 +368,61 @@ def compute_conformal_widths(
     min_calibration_n: int = DEFAULT_MIN_CALIBRATION_N,
     write: bool = True,
     case_dir: Path | None = None,
+    label: str | None = None,
+    embargo_steps: int | None = None,
 ) -> pl.DataFrame:
-    """Compute and optionally persist strict walk-forward conformal widths.
+    """Compute and optionally persist expanding walk-forward conformal widths.
 
     Returns one row per (timestamp, entity) for which a width could be
     calibrated: columns ``[timestamp, <id_col>, fold_id, width, alpha,
-    calibration_n]``. Width = 2·q_{1-α}(|y_true − y_score|) on prior-fold
-    residuals for that entity. The first chronological fold emits no widths.
-    Later folds use earlier validation folds only. Entities below
-    ``min_calibration_n`` use a pooled quantile from the same prior-only pool.
+    calibration_n, calibration_scope, calibration_version]``.
+
+    Calibration rule, one rule for every fold: the width used at timestamp
+    ``t`` for entity ``s`` is ``2·q_{1-α}`` of ``|y_true − y_score|`` over
+    every residual for ``s`` at timestamps at or before ``t − h``, where ``h``
+    is the label horizon in prediction data steps. Residuals from earlier
+    folds and from the current fold's own elapsed history are both eligible,
+    which is what lets the earliest fold trade after a warm-up instead of
+    sitting out entirely.
+
+    ``h`` is the embargo, and it is the same quantity
+    :func:`compute_holdout_conformal_widths` applies at the validation/holdout
+    boundary: a residual at ``t'`` depends on the return realized over
+    ``(t', t'+h]``, so a residual with ``t' + h > t`` carries information from
+    after the decision. Pass ``embargo_steps`` directly or pass ``label`` to
+    take the reviewed value from :data:`HOLDOUT_CONFORMAL_EMBARGO_STEPS`.
+
+    Entities with fewer than ``min_calibration_n`` eligible residuals of their
+    own use a pooled quantile over every entity's eligible residuals, so
+    allocation never changes the selected basket by silently dropping an
+    uncalibrated entity.
 
     Writes are alpha-aware (see module docstring): an existing
     ``conformal_widths.parquet`` for the same prediction hash retains rows
     at other alphas; rows at this ``alpha`` are replaced.
 
-    Raises ``ValueError`` when:
-      * predictions.parquet is missing or has < 2 fold ids (degenerate
-        ``fold_id``); the function requires at least two folds;
-      * no fold yields any entity meeting ``min_calibration_n`` after the
-        prior-fold (or fallback) filter.
+    Raises ``ValueError`` when neither ``embargo_steps`` nor a ``label`` with a
+    reviewed embargo is given, when ``embargo_steps`` is below one, or when no
+    (timestamp, entity) pair clears the warm-up.
     """
     pred_dir = _predictions_dir(case_study, prediction_hash, case_dir=case_dir)
     pred_path = pred_dir / "predictions.parquet"
     if not pred_path.exists():
         raise FileNotFoundError(f"predictions.parquet not found: {pred_path}")
+
+    if embargo_steps is None:
+        if label is None:
+            raise ValueError(
+                f"{case_study}/{prediction_hash}: conformal calibration needs the label "
+                "horizon as an embargo - pass embargo_steps, or label to look up the "
+                "reviewed value"
+            )
+        embargo_steps = holdout_conformal_embargo_steps(case_study, label)
+    if embargo_steps < 1:
+        raise ValueError(
+            f"{case_study}/{prediction_hash}: embargo_steps={embargo_steps} would calibrate "
+            "on a residual that is not yet realized at the decision it sizes"
+        )
 
     preds = pl.read_parquet(pred_path)
     legacy_present = {k: v for k, v in _LEGACY_RENAME.items() if k in preds.columns}
@@ -316,81 +445,80 @@ def compute_conformal_widths(
     preds = preds.filter(
         pl.col("y_true").is_not_null() & pl.col("y_score").is_not_null()
     ).with_columns(abs_resid=(pl.col("y_true") - pl.col("y_score")).abs())
+    if preds.is_empty():
+        raise ValueError(f"{case_study}/{prediction_hash}: no residuals to calibrate on")
 
-    folds = sorted(preds["fold_id"].unique().to_list())
-    if not folds or len(folds) < 2:
-        raise ValueError(
-            f"{case_study}/{prediction_hash}: degenerate fold_id "
-            f"(n_folds={len(folds)}); expanding-window calibration needs ≥2 folds"
-        )
+    # The embargo is expressed in data steps, so it is applied on the position of a
+    # timestamp in the prediction set's own grid rather than on the calendar. A gap in
+    # the grid is a gap in the data, and stepping over it is what "h steps back" means.
+    grid = preds.select("timestamp").unique().sort("timestamp").with_row_index("step")
+    preds = preds.join(grid, on="timestamp", how="inner")
 
-    # Fold IDs are NOT reliably chronological across case studies. Some CV
-    # schemes label the latest fold as fold_id=0 (nasdaq100, crypto, …) while
-    # others label it as the highest fold_id (us_equities_panel fwd_ret_5d/21d).
-    # Derive walk-forward order from each fold's earliest timestamp instead.
-    fold_ts = preds.group_by("fold_id").agg(ts_min=pl.col("timestamp").min()).sort("ts_min")
-    fold_chronological = fold_ts["fold_id"].to_list()
-    fold_widths_rows: list[pl.DataFrame] = []
-    for i, k in enumerate(fold_chronological):
-        prior = fold_chronological[:i]
-        if not prior:
-            continue
-        cal = preds.filter(pl.col("fold_id").is_in(prior))
-        if cal.is_empty():
-            continue
-        target_symbols = preds.filter(pl.col("fold_id") == k).select(id_col).unique()
-        per_symbol = (
-            cal.group_by(id_col)
-            .agg(
-                q=pl.col("abs_resid").quantile(1.0 - alpha, interpolation="higher"),
-                calibration_n=pl.len(),
+    # The entity literal carries the source column's dtype rather than whatever polars infers
+    # from the Python value. `join_asof` compares its `by` columns by dtype and raises on a
+    # mismatch, and a panel keyed on integer identifiers - permnos on us_firm_characteristics -
+    # infers Int32 from an unannotated literal against a UInt32 column.
+    entity_dtype = preds.schema[id_col]
+    per_entity = pl.concat(
+        [
+            _expanding_calibration(group, alpha=alpha).with_columns(
+                pl.lit(entity, dtype=entity_dtype).alias(id_col)
             )
-            .filter(pl.col("calibration_n") >= min_calibration_n)
-            .with_columns(
-                fold_id=pl.lit(k, dtype=pl.Int64),
-                width=2.0 * pl.col("q"),
-                alpha=pl.lit(alpha, dtype=pl.Float64),
-                calibration_scope=pl.lit("symbol"),
-                calibration_version=pl.lit(CALIBRATION_VERSION),
-            )
-            .select(
-                id_col,
-                "fold_id",
-                "width",
-                "alpha",
-                "calibration_n",
-                "calibration_scope",
-                "calibration_version",
-            )
+            for (entity,), group in preds.group_by([id_col], maintain_order=True)
+        ]
+    )
+    pooled = _expanding_calibration(preds, alpha=alpha)
+
+    targets = (
+        preds.select("timestamp", id_col, "fold_id", "step")
+        .unique()
+        .with_columns(known_by=pl.col("step").cast(pl.Int64) - embargo_steps)
+        # Sorted within entity as well as globally: join_asof cannot verify sortedness once
+        # `by` groups are given, and an unsorted group silently resolves to the wrong row.
+        .sort(id_col, "known_by")
+    )
+    resolved = (
+        targets.join_asof(
+            per_entity.sort("step").rename(
+                {"cal_q": "entity_q", "cal_n": "entity_n", "step": "entity_step"}
+            ),
+            left_on="known_by",
+            right_on="entity_step",
+            by=id_col,
+            strategy="backward",
         )
-        missing_symbols = target_symbols.join(per_symbol.select(id_col), on=id_col, how="anti")
-        if not missing_symbols.is_empty() and cal.height >= min_calibration_n:
-            pooled_q = cal["abs_resid"].quantile(1.0 - alpha, interpolation="higher")
-            if pooled_q is None:
-                raise ValueError(f"{case_study}/{prediction_hash}: pooled quantile is undefined")
-            pooled = missing_symbols.with_columns(
-                fold_id=pl.lit(k),
-                width=pl.lit(2.0 * float(pooled_q), dtype=pl.Float64),
-                alpha=pl.lit(alpha, dtype=pl.Float64),
-                calibration_n=pl.lit(cal.height, dtype=pl.UInt32),
-                calibration_scope=pl.lit("pooled"),
-                calibration_version=pl.lit(CALIBRATION_VERSION),
-            ).select(per_symbol.columns)
-            per_symbol = pl.concat([per_symbol, pooled], how="vertical_relaxed")
-        if not per_symbol.is_empty():
-            fold_widths_rows.append(per_symbol)
-
-    if not fold_widths_rows:
-        raise ValueError(
-            f"{case_study}/{prediction_hash}: no fold had prior-fold "
-            f"calibration data after applying min_calibration_n={min_calibration_n}"
+        .sort("known_by")
+        .join_asof(
+            pooled.sort("step").rename(
+                {"cal_q": "pooled_q", "cal_n": "pooled_n", "step": "pooled_step"}
+            ),
+            left_on="known_by",
+            right_on="pooled_step",
+            strategy="backward",
         )
+    )
 
-    fold_widths = pl.concat(fold_widths_rows)
-
-    timestamps = preds.select("timestamp", id_col, "fold_id").unique()
+    enough_own = pl.col("entity_n") >= min_calibration_n
+    enough_pooled = pl.col("pooled_n") >= min_calibration_n
     widths = (
-        timestamps.join(fold_widths, on=[id_col, "fold_id"], how="inner")
+        resolved.with_columns(
+            width=pl.when(enough_own)
+            .then(2.0 * pl.col("entity_q"))
+            .when(enough_pooled)
+            .then(2.0 * pl.col("pooled_q"))
+            .otherwise(None),
+            calibration_n=pl.when(enough_own)
+            .then(pl.col("entity_n"))
+            .otherwise(pl.col("pooled_n")),
+            calibration_scope=pl.when(enough_own)
+            .then(pl.lit("symbol"))
+            .otherwise(pl.lit("pooled")),
+        )
+        .drop_nulls("width")
+        .with_columns(
+            alpha=pl.lit(alpha, dtype=pl.Float64),
+            calibration_version=pl.lit(CALIBRATION_VERSION),
+        )
         .select(
             "timestamp",
             id_col,
@@ -403,6 +531,13 @@ def compute_conformal_widths(
         )
         .sort("timestamp", id_col)
     )
+
+    if widths.is_empty():
+        raise ValueError(
+            f"{case_study}/{prediction_hash}: no decision clears a warm-up of "
+            f"min_calibration_n={min_calibration_n} residuals plus an embargo of "
+            f"{embargo_steps} steps"
+        )
 
     if write:
         # `pred_dir` honours the `case_dir` override the predictions were read
@@ -447,7 +582,18 @@ def compute_holdout_conformal_widths(
 
     Output schema matches ``compute_conformal_widths``'s val output:
     ``[timestamp, symbol, fold_id, width, alpha, calibration_n]`` with
-    ``fold_id = -1`` as a sentinel meaning "holdout, no fold partition".
+    ``fold_id = -1`` as a sentinel meaning "holdout, no fold partition", plus
+    two provenance columns this function alone can supply.
+
+    ``calibration_source`` records ``val_prediction_hash`` and
+    ``calibration_embargo_steps`` records ``embargo_steps``. Both are arguments
+    here and neither was written, so the artifact could not say which validation
+    prediction calibrated it or under what embargo - and ``fold_id = -1`` plus a
+    current ``calibration_version`` are true of *any* validation-calibrated
+    widths file. Widths taken from a different model, or from the right model
+    under a different embargo, satisfied every marker the holdout guard in
+    ``case_studies/research/strategy.py`` could check. Stamping the two makes the
+    question answerable from the file rather than from the call that wrote it.
     """
     val_dir = _predictions_dir(case_study, val_prediction_hash)
     val_path = val_dir / "predictions.parquet"
@@ -558,7 +704,11 @@ def compute_holdout_conformal_widths(
 
     widths = (
         ho_keys.join(per_symbol_widths, on="symbol", how="inner")
-        .with_columns(fold_id=pl.lit(-1, dtype=pl.Int64))
+        .with_columns(
+            fold_id=pl.lit(-1, dtype=pl.Int64),
+            calibration_source=pl.lit(val_prediction_hash, dtype=pl.Utf8),
+            calibration_embargo_steps=pl.lit(int(embargo_steps), dtype=pl.Int64),
+        )
         .select(
             "timestamp",
             "symbol",
@@ -568,6 +718,8 @@ def compute_holdout_conformal_widths(
             "calibration_n",
             "calibration_scope",
             "calibration_version",
+            "calibration_source",
+            "calibration_embargo_steps",
         )
         .sort("timestamp", "symbol")
     )
@@ -593,6 +745,8 @@ def load_conformal_widths(
     alpha: float | None = None,
     min_calibration_n: int = DEFAULT_MIN_CALIBRATION_N,
     calibration_version: str = CALIBRATION_VERSION,
+    label: str | None = None,
+    embargo_steps: int | None = None,
 ) -> pl.DataFrame:
     """Load persisted widths. Filters to a specific alpha if supplied.
 
@@ -603,9 +757,39 @@ def load_conformal_widths(
     on a fresh prediction set should compute widths up-front.
     """
     path = _predictions_dir(case_study, prediction_hash) / "conformal_widths.parquet"
+
+    def _generate() -> None:
+        compute_conformal_widths(
+            case_study,
+            prediction_hash,
+            min_calibration_n=min_calibration_n,
+            label=label,
+            embargo_steps=embargo_steps,
+        )
+
     if not path.exists():
-        compute_conformal_widths(case_study, prediction_hash, min_calibration_n=min_calibration_n)
+        _generate()
     df = pl.read_parquet(path)
+
+    # An artifact holding only a superseded calibration is REGENERATED, not refused.
+    # Auto-generation used to be conditional on the file being absent, so a lane that had
+    # computed widths before a calibration fix could never move past it: the read raised
+    # "No widths for calibration_version=..." and the write refused to mix versions, and
+    # the only way through was to move the file aside by hand. That is the loop this has
+    # been round several times. Regenerating is what the caller wanted in every one of
+    # them, and it is safe because the widths are derived from the prediction set, which
+    # has not changed - only the rule for calibrating against it has.
+    #
+    # Only when the CURRENT version was asked for. A caller naming an older version is
+    # asking a question about history and gets the honest empty answer.
+    stale = (
+        "calibration_version" not in df.columns
+        or df.filter(pl.col("calibration_version") == calibration_version).is_empty()
+    )
+    if stale and calibration_version == CALIBRATION_VERSION:
+        _generate()
+        df = pl.read_parquet(path)
+
     if "calibration_version" not in df.columns:
         raise ValueError(
             f"Legacy conformal artifact at {path}; preserve and regenerate it before use"

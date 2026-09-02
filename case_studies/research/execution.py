@@ -4,7 +4,6 @@ import sqlite3
 from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
@@ -22,17 +21,10 @@ from case_studies.utils.registry.store import _open_registry, _utc_now
 from .adapters import get_adapter
 from .catalog import _resolve_authoritative_selection
 from .contracts import ExecutionTier
-from .lifecycle import ResearchLock
 from .model_planning import ModelPlan, plan_models
-from .models import (
-    ModelRequest,
-    ModelRun,
-    ResolvedModelRequest,
-    reconstruct_locked_model_request,
-    validate_locked_model_run,
-)
+from .models import ModelRequest, ModelRun, ResolvedModelRequest
 from .population import OfficialPopulation
-from .results import BacktestResult, PredictionResult, Result, TrainingResult
+from .results import BacktestResult, PredictionResult, Result
 from .strategy import Strategy
 from .workspace import Study
 
@@ -73,14 +65,23 @@ class BacktestExecution:
     def population_hash(self) -> str | None:
         return self.population.hash if self.population is not None else None
 
+    @property
+    def n_computed(self) -> int:
+        """Backtests this call actually ran.
 
-@dataclass(frozen=True)
-class HoldoutExecution:
-    lock: ResearchLock
-    training: TrainingResult
-    prediction: PredictionResult
-    backtest: BacktestResult
-    fitted_state_digest: str
+        `len(results)` counts what the sweep resolved, not what it did: a re-run against a
+        populated registry serves every member from cache and still reports the full count.
+        A summary built on that cannot distinguish a cold sweep from a no-op, which is the
+        wrong number that reads exactly like the right one. `run_backtests` already records
+        per member whether it was computed or reused; this is that count, and `n_reused`
+        below is the rest of it.
+        """
+        return sum(1 for entry in self.diagnostics if entry["status"] == "completed")
+
+    @property
+    def n_reused(self) -> int:
+        """Backtests served from the registry without being run."""
+        return sum(1 for entry in self.diagnostics if entry["status"] == "reused")
 
 
 @dataclass(frozen=True)
@@ -106,102 +107,6 @@ class _ResolvedBacktest:
     member: PlannedBacktest
     prediction: PredictionResult
     strategy: Strategy
-
-
-def _locked_checkpoint_is_declared(lock: ResearchLock) -> None:
-    checkpoint_kind = lock.record.get("checkpoint_kind")
-    if not isinstance(checkpoint_kind, str) or not checkpoint_kind:
-        raise ValueError("research lock has no explicit checkpoint kind")
-    schedule = (
-        lock.record["holdout_training_spec"].get("computation", {}).get("checkpoint_schedule", [])
-    )
-    expected = (checkpoint_kind, lock.record["checkpoint_value"])
-    declared = {(item.get("kind"), item.get("value")) for item in schedule}
-    if expected not in declared:
-        raise ValueError(f"locked checkpoint {expected!r} is absent from the training schedule")
-
-
-def _validate_locked_prediction_population(
-    training: TrainingResult,
-    prediction: PredictionResult,
-    expected: tuple[str, str, int | None],
-) -> None:
-    with closing(sqlite3.connect(training.root / "run_log" / "registry.db")) as db:
-        rows = db.execute(
-            "SELECT prediction_hash, split, checkpoint_kind, checkpoint_value "
-            "FROM prediction_sets WHERE training_hash = ?",
-            (training.hash,),
-        ).fetchall()
-    if rows != [(prediction.hash, *expected)]:
-        raise ValueError("locked training lineage contains an unexpected prediction population")
-
-
-def run_locked_holdout(lock: ResearchLock) -> HoldoutExecution:
-    """Produce and atomically finalize the one holdout lineage authorized by ``lock``."""
-    reopened = lock.reopen()
-    if reopened.state != "LOCKED":
-        raise ValueError("holdout execution requires a LOCKED research lock")
-    spec = reopened.record["holdout_training_spec"]
-    if training_hash_from_spec(spec) != reopened.record["holdout_training_hash"]:
-        raise ValueError("research lock contains an invalid holdout training identity")
-    _locked_checkpoint_is_declared(reopened)
-
-    from .holdout import prepare_locked_strategy_replay
-
-    strategy_replay = prepare_locked_strategy_replay(reopened)
-    request = reconstruct_locked_model_request(
-        reopened.study,
-        spec,
-        checkpoint_kind=reopened.record["checkpoint_kind"],
-        checkpoint_value=reopened.record["checkpoint_value"],
-    )
-    model_run = request.run()
-    if model_run.training.hash != reopened.record["holdout_training_hash"]:
-        raise ValueError("locked model runner produced the wrong training identity")
-    fitted_state_digest = validate_locked_model_run(request, model_run)
-    if len(model_run.predictions) != 1:
-        raise ValueError("locked model runner must publish only the selected checkpoint")
-    prediction = model_run.predictions[0]
-    prediction_record = prediction.registry_record()
-    expected_prediction = (
-        "holdout",
-        reopened.record["checkpoint_kind"],
-        reopened.record["checkpoint_value"],
-    )
-    actual_prediction = (
-        prediction_record["split"],
-        prediction_record["checkpoint_kind"],
-        prediction_record["checkpoint_value"],
-    )
-    if not prediction.complete or actual_prediction != expected_prediction:
-        raise ValueError("locked model runner produced the wrong holdout prediction")
-    _validate_locked_prediction_population(
-        model_run.training,
-        prediction,
-        expected_prediction,
-    )
-    if prediction.lineage()["training_spec"] != spec or not fitted_state_digest:
-        raise ValueError("locked model fitted state does not validate against the training spec")
-
-    backtest = strategy_replay.run(prediction)
-    staged_fitted_state_digest = validate_locked_model_run(request, model_run)
-    if staged_fitted_state_digest != fitted_state_digest:
-        raise ValueError("locked model fitted state changed during holdout execution")
-    reopened.study.lifecycle.stage_holdout(
-        reopened.hash,
-        holdout_training_hash=model_run.training.hash,
-        holdout_prediction_hash=prediction.hash,
-        holdout_backtest_hash=backtest.hash,
-        fitted_state_digest=staged_fitted_state_digest,
-    )
-    evaluated = reopened.study.lifecycle.finalize_holdout(reopened.hash)
-    return HoldoutExecution(
-        evaluated,
-        model_run.training,
-        prediction,
-        backtest,
-        staged_fitted_state_digest,
-    )
 
 
 def run_models(
@@ -437,7 +342,16 @@ def run_backtests(
     execution_mode: str | None = None,
     decision: DecisionArtifact | None = None,
     population_name: str | None = None,
+    supersedes: str | None = None,
 ) -> BacktestExecution:
+    """``supersedes`` names the generation of ``population_name`` this run replaces.
+
+    A name that already exists with a different member list is refused unless the caller
+    says which generation it is replacing, and the refusal prints the hash. Passing it for a
+    name whose members have not changed is a no-op: the existing population is returned
+    before the check. Passing it for a name that does not exist yet is refused, because a
+    first generation supersedes nothing.
+    """
     study.require_writable()
     if not isinstance(predictions, pl.DataFrame):
         raise TypeError("run_backtests requires a Polars prediction catalog selection")
@@ -465,6 +379,7 @@ def run_backtests(
             name=population_name,
             member_kind="backtest",
             members=ordered_hashes,
+            supersedes=supersedes,
         )
     elif population_name is not None:
         ancestry = "preview" if plan.execution_tier is ExecutionTier.PREVIEW else "exploratory"
@@ -600,6 +515,16 @@ def run_official_model_subset(
     elif population.study != study:
         raise ValueError("official model population belongs to another study")
     if expected is None:
+        unresolved = [
+            request for request in resolved if not isinstance(request, ResolvedModelRequest)
+        ]
+        if unresolved:
+            # `expected_prediction_hashes` reads `request.spec`, which only a resolved request
+            # has. Saying so beats an AttributeError from three frames down.
+            raise ValueError(
+                "unresolved model requests cannot state their expected predictions; "
+                "pass `expected` or resolve the requests first"
+            )
         expected = expected_prediction_hashes(resolved)
     expected = tuple(expected)
     undeclared = sorted(set(expected) - set(population.members))

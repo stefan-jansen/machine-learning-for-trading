@@ -99,7 +99,8 @@ from utils.style import COLORS, plot_fidelity_comparison
 HIDDEN_DIM = 128  # Generator/discriminator hidden dimension
 LATENT_DIM = 32  # Noise vector dimension
 EPOCHS = 20  # Training epochs
-MAX_SYMBOLS = 0  # 0 = use default list; >0 limits symbol count
+# 0 = use default list; >0 limits symbol count
+MAX_SYMBOLS = 0
 SEED = 42
 
 # %%

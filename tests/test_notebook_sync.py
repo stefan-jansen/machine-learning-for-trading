@@ -721,3 +721,30 @@ def test_clearing_a_notebook_makes_it_committable(tmp_path) -> None:
         "injected-parameters" in (c.get("metadata", {}).get("tags") or []) for c in written["cells"]
     )
     assert is_cleared(nb)
+
+
+def test_stamp_refuses_a_notebook_that_never_ran(tmp_path, monkeypatch) -> None:
+    """Fail at the stamp, not two steps later at the commit.
+
+    The way an unexecuted notebook gets stamped is a `jupytext --sync` between the run
+    and the stamp: the .py is newer, so the .ipynb is rebuilt from it and the outputs
+    go. Refusing here names the step that went wrong.
+    """
+    monkeypatch.setattr(notebook_provenance, "REPO_ROOT", tmp_path)
+    (tmp_path / "nb.py").write_text("# %%\nprint(1)\n", encoding="utf-8")
+    nb = tmp_path / "nb.ipynb"
+    nb.write_text(json.dumps(_notebook([_code("print(1)")])), encoding="utf-8")
+    with pytest.raises(SystemExit, match="nothing in it was executed"):
+        stamp_notebook(nb, "local-uv", parameters={})
+
+
+def test_stamp_accepts_a_notebook_whose_cells_only_have_execution_counts(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(notebook_provenance, "REPO_ROOT", tmp_path)
+    (tmp_path / "nb.py").write_text("# %%\nx = 1\n", encoding="utf-8")
+    cell = _code("x = 1")
+    cell["execution_count"] = 1
+    nb = tmp_path / "nb.ipynb"
+    nb.write_text(json.dumps(_notebook([cell])), encoding="utf-8")
+    assert stamp_notebook(nb, "local-uv", parameters={})["production"] is True
