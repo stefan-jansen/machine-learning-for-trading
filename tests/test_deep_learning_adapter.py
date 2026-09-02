@@ -12,6 +12,7 @@ import pytest
 
 from case_studies.research import CVSpec, LabelDefinition, Study
 from case_studies.utils import deep_learning, tabular_dl
+from case_studies.utils.deep_learning import resolve_dl_max_train_sequences
 from tests.test_research_workspace import _seed_release
 
 
@@ -590,3 +591,46 @@ def test_sequence_resolver_keeps_a_preview_request_inside_the_preview_root(
     assert Path(os.environ["ML4T_OUTPUT_DIR"]) == preview_root
     assert study.storage_root("preview") == preview_root / study.case_study
     assert resolved.spec["execution_tier"] == "preview"
+
+
+class TestDeclaredMaxTrainSequences:
+    """`modeling.dl.max_train_sequences` is a model property, not a preview knob.
+
+    Before it existed the only source was `preview_reductions`, so a canonical run was
+    necessarily uncapped. On a minute panel that is the difference between drawing
+    hundreds of thousands of training windows and drawing millions of near-identical
+    overlapping ones, which is a different model rather than a slower run.
+    """
+
+    def test_absent_declaration_is_uncapped_so_no_registered_identity_moves(self):
+        assert resolve_dl_max_train_sequences({}) == (0, 0)
+        assert resolve_dl_max_train_sequences(None) == (0, 0)
+
+    def test_a_declaration_caps_a_canonical_run_that_asks_for_no_reduction(self):
+        assert resolve_dl_max_train_sequences({"max_train_sequences": 373_000}) == (373_000, 0)
+
+    def test_the_reduction_is_reported_separately_so_sampling_records_only_a_preview(self):
+        """`sampling` is what the locked holdout runner reads as 'was this reduced'.
+
+        A declared cap must leave it at zero or a holdout could never be run against a
+        capped configuration at all.
+        """
+        effective, reduction = resolve_dl_max_train_sequences({"max_train_sequences": 373_000}, 8)
+        assert (effective, reduction) == (8, 8)
+
+        effective, reduction = resolve_dl_max_train_sequences({"max_train_sequences": 373_000})
+        assert effective == 373_000
+        assert reduction == 0
+
+    def test_a_preview_may_lower_the_cap_but_never_raise_it(self):
+        with pytest.raises(ValueError, match="cannot fit on more windows"):
+            resolve_dl_max_train_sequences({"max_train_sequences": 1_000}, 5_000)
+
+    def test_a_preview_of_an_uncapped_configuration_still_reduces(self):
+        assert resolve_dl_max_train_sequences({}, 8) == (8, 8)
+
+    def test_a_negative_declaration_is_refused_rather_than_read_as_uncapped(self):
+        with pytest.raises(ValueError, match="zero .uncapped. or positive"):
+            resolve_dl_max_train_sequences({"max_train_sequences": -1})
+        with pytest.raises(ValueError, match="zero or positive"):
+            resolve_dl_max_train_sequences({}, -1)
