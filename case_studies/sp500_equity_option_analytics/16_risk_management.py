@@ -59,7 +59,24 @@ warnings.filterwarnings("ignore")
 # paired uncertainty consistent with the preceding pipeline stages.
 
 # %%
-from case_studies.research import CandidateSet, Study, open_study
+from case_studies.research import (
+    PLAN_STAGE_KEYS,
+    CandidateSet,
+    OfficialPopulation,
+    Study,
+    attest_sweep,
+    candidate_set_supersedes,
+    open_study,
+    open_sweep_attempt,
+    planned_backtests,
+    population_supersedes,
+    predictions_identity,
+    resolve_field_members,
+    sweep_labels,
+    sweep_plan_name,
+    unfinished_sweep_plans,
+    upstream_plan_hashes,
+)
 from case_studies.utils.backtest_loaders import (
     VECTORIZED_CASE_STUDIES,
     get_backtest_config,
@@ -157,21 +174,58 @@ if CURRENT_MEMBERS is not None:
 
 # %%
 active_allocators = {item["method"] for item in get_allocators(CASE_STUDY_ID)}
-baseline_pool = resolve_best_backtest_runs(
-    CASE_STUDY_ID,
-    RISK_LABEL,
-    split="validation",
-    stage="signal",
-    top_n=9999,
+# The carrier is chosen out of the baseline and allocation grids, so both are required before
+# either is ranked: their plans say which backtests the current grids contain, and their
+# attestations say the runs that filled them finished. Ranking the registry unrestricted picks
+# the carrier out of whatever historical rows survive, which is not the same question.
+UPSTREAM_PLANS = upstream_plan_hashes(
+    _study,
+    case_study=CASE_STUDY_ID,
+    label=RISK_LABEL,
+    stage="risk_overlay",
     prediction_hashes=CURRENT_MEMBERS,
 )
-allocation_pool = resolve_best_backtest_runs(
-    CASE_STUDY_ID,
-    RISK_LABEL,
-    split="validation",
-    stage="allocation",
-    top_n=9999,
-    prediction_hashes=CURRENT_MEMBERS,
+_stage_grids = {
+    stage: planned_backtests(
+        _study,
+        case_study=CASE_STUDY_ID,
+        label=RISK_LABEL,
+        stage=stage,
+        prediction_hashes=CURRENT_MEMBERS,
+    )
+    for stage in ("signal", "allocation")
+}
+
+
+def _within_plan(rows: pl.DataFrame, stage: str) -> pl.DataFrame:
+    """The rows the current plan for this stage admits, or all of them where none is recorded."""
+    grid = _stage_grids[stage]
+    if grid is None:
+        return rows
+    return rows.filter(pl.col("backtest_hash").is_in(list(grid)))
+
+
+baseline_pool = _within_plan(
+    resolve_best_backtest_runs(
+        CASE_STUDY_ID,
+        RISK_LABEL,
+        split="validation",
+        stage="signal",
+        top_n=9999,
+        prediction_hashes=CURRENT_MEMBERS,
+    ),
+    "signal",
+)
+allocation_pool = _within_plan(
+    resolve_best_backtest_runs(
+        CASE_STUDY_ID,
+        RISK_LABEL,
+        split="validation",
+        stage="allocation",
+        top_n=9999,
+        prediction_hashes=CURRENT_MEMBERS,
+    ),
+    "allocation",
 )
 candidate_pool = pl.concat([baseline_pool, allocation_pool], how="diagonal_relaxed").unique(
     "backtest_hash"
@@ -352,6 +406,67 @@ def execute_risk_plans(combo: dict, combo_plans: list[dict]) -> list[str]:
     return combo_failures
 
 
+# %% [markdown]
+# ### Record the grid before running it
+#
+# `plans` is every overlay backtest this sweep intends to register, identified before any of
+# them executes, and the loop below raises rather than dropping one. Publishing it as an
+# official population is what lets the freeze below tell an interrupted sweep from a finished
+# one. No reading of the registered rows can: an interruption leaves rows that look exactly
+# like a smaller finished grid, whether they are counted as rows, as model configurations, or
+# as stages present.
+#
+# Published before the sweep and checked with `require_complete` after, for the reason
+# `15_portfolio_management` gives: written at the end, a changed sweep stays represented by the
+# previous generation, which is complete, so an interrupted re-run under a widened grid reports
+# as finished on a plan it has already replaced.
+
+# %%
+# The name carries which prediction sets the sweep planned against, for the reason
+# `15_portfolio_management` gives at its own plan.
+RISK_POPULATION = sweep_plan_name(
+    CASE_STUDY_ID, RISK_LABEL, "risk_overlay", predictions_identity(CURRENT_MEMBERS)
+)
+# The generation this run retires, per population name. A plan that has grown - a new carrier
+# advancing, another risk control declared - is a changed population under a live name and has
+# to say which one it replaces; the refusal prints the current hash.
+# All five moved with the allocation plans above them: the risk grid is built over the strategy
+# 15_portfolio_management selects, and that selection changed for the labels whose top-ten was
+# ranked before the baseline sweep finished.
+# Empty, for the reason `SUPERSEDES_ALLOCATION_POPULATIONS` is: a declaration naming the
+# generation in force pre-authorizes a membership change under that name instead of recording
+# one that happened. Add an entry when a run is refused, with the hash the refusal prints.
+SUPERSEDES_RISK_POPULATIONS: dict[str, str] = {}
+
+_risk_plan = None
+try:
+    _risk_writable = open_study(CASE_STUDY_ID, entry_point="16_risk_management")
+except PermissionError as exc:
+    print(f"Not recording the risk plan here: {exc}")
+else:
+    if _risk_writable.root != CASE_DIR:
+        raise RuntimeError(
+            f"16 ran its sweep against {CASE_DIR} but opened a study rooted at "
+            f"{_risk_writable.root}. Recording the plan there would describe a registry this "
+            "run did not write."
+        )
+    _risk_plan = OfficialPopulation.create(
+        _risk_writable,
+        name=RISK_POPULATION,
+        member_kind="backtest",
+        members=[plan["backtest_hash"] for plan in plans],
+        supersedes=population_supersedes(
+            _risk_writable,
+            name=RISK_POPULATION,
+            declared=SUPERSEDES_RISK_POPULATIONS.get(RISK_POPULATION),
+        ),
+    )
+    # Before any member executes; see `sweep_attestation_name`.
+    _attempt = open_sweep_attempt(_risk_writable, _risk_plan, UPSTREAM_PLANS)
+    print(
+        f"Risk plan {RISK_POPULATION}: {_risk_plan.hash}, {len(plans)} planned, attempt {_attempt}"
+    )
+
 # %%
 failures = []
 started = time.monotonic()
@@ -369,6 +484,12 @@ for combo in top_combos.iter_rows(named=True):
 if failures:
     raise RuntimeError("Risk-sweep failures:\n" + "\n".join(failures))
 print(f"Risk surface complete in {(time.monotonic() - started):.1f}s")
+if _risk_plan is not None:
+    _risk_plan.require_complete()
+    # Only a run that raised on nothing reaches this. See `sweep_attestation_name`.
+    _attestation = attest_sweep(_risk_writable, _risk_plan, _attempt, UPSTREAM_PLANS)
+    print(f"Risk plan {RISK_POPULATION} complete: {len(plans)} backtests")
+    print(f"Sweep attested as {_attestation.name}")
 
 # %% [markdown]
 # ## 3. Measure paired overlay effects
@@ -570,6 +691,38 @@ fig_tradeoff.show()
 # fitted against different labels, features or folds cannot quietly join a set
 # the holdout will pick from.
 #
+# **The field spans every declared label, not the one this run overlaid.** The risk sweep above
+# is per label - it perturbs one carrier, drawn from one label's strategies - but the selection
+# this set exists to make is not: the holdout picks the single highest validation backtest Sharpe
+# the case study produced, and a label that never entered the set cannot be picked no matter how
+# it scored. Resolving the field against `RISK_LABEL` made the membership depend on which label
+# happened to run last, which is both the wrong field and a set that changes under a fixed name
+# on every label - so the second label's run could not publish at all.
+
+# %%
+# A candidate set is immutable under its name, so a field that has grown has to name the
+# generation it replaces. Keyed by the full set name because that is what the refusal prints.
+# Resolved through `candidate_set_supersedes` rather than passed straight to `create`: a
+# reader's clean clone has no generation to supersede, and `create` refuses a first version that
+# claims to replace one. Two generations precede this one and both stay readable by hash, which
+# is what keeps a holdout registered against either traceable to the field it actually saw:
+# `328d2009685c` is the single-label field frozen on 2026-08-30, before the four variant labels
+# had baseline, allocation or overlay rows; `aa6b3986124b` replaced it on 2026-09-01 under a
+# per-stage count of advancing configurations, which admitted a label whose sweep had produced
+# one row per configuration and stopped; `04cb35eec43f` replaced that one later the same day and
+# held 3,710 members, 66 of them allocation backtests from a grid no current sweep plan declares.
+# `37169a5be187` replaced it with the declared grids only and holds 3,644, and `774c32c6e79b`
+# replaced that. Every one of those five was frozen over a field that was still being produced:
+# the allocation and risk plans behind them were all written at 21:40 UTC on 2026-09-01, while
+# the baseline sweeps that feed them published at 22:34-22:46 and three of the baselines they
+# rank were registered at 22:42. This generation is the first frozen over sweeps that ran in
+# stage order and recorded that they finished. Only the tip is declarable - `create` refuses
+# anything else and names the tip - so this value moves on every generation.
+SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
+    "sp500_equity_option_analytics:holdout-candidates": "774c32c6e79b",
+}
+
+# %% [markdown]
 # Freezing writes to the registry, which needs the study opened rather than read.
 # That is a maintainer path: a reader's clean clone has no `run_log/` to freeze
 # from, so the cell reports why it did nothing instead of failing.
@@ -577,25 +730,65 @@ fig_tradeoff.show()
 # %%
 CANDIDATE_SET_NAME = f"{CASE_STUDY_ID}:holdout-candidates"
 candidate_stages = ("signal", "allocation", "risk_overlay")
-frozen_pool = pl.concat(
-    [
-        resolve_best_backtest_runs(
-            CASE_STUDY_ID,
-            RISK_LABEL,
-            split="validation",
-            stage=stage,
-            top_n=9999,
-            prediction_hashes=CURRENT_MEMBERS,
-        )
-        for stage in candidate_stages
-    ],
-    how="diagonal_relaxed",
-).unique("backtest_hash")
-print(
-    f"Field to freeze: {frozen_pool.height} eligible validation backtests across {candidate_stages}"
+CANDIDATE_LABELS = sweep_labels(_study)
+# The plans are asked for first, before the field is built rather than after it.
+# `resolve_field_members` builds each downstream stage from the plan recorded for the
+# predictions in force and raises where one is absent, because a stage whose sweep has not run
+# against them holds rows from another generation and there is no correct field to return. That
+# is what a reader rebuilding this field live needs. Here it would turn the ordinary sequential
+# case into a failure: 15 and 16 run for each label in turn, and every run but the last finds
+# some other label's plan missing. Asking first keeps that a decline.
+#
+# Every declared label is asked, not the ones the rows suggest advanced. A label that has not
+# started and a label deliberately stopped at its baseline leave the registry in the same state,
+# so inferring the wait-set from the rows lets whichever label ran first seal the field and lock
+# the rest out. There is no funnel to accommodate here: 15 raises rather than advancing fewer
+# configurations than declared, so no label stops at its baseline.
+unfinished = unfinished_sweep_plans(
+    _study,
+    case_study=CASE_STUDY_ID,
+    labels=CANDIDATE_LABELS,
+    prediction_hashes=CURRENT_MEMBERS,
 )
+if unfinished:
+    # The denominator is derived, not written down. There is one plan per (label, planned
+    # stage), and the baseline became a planned stage after this message was first written -
+    # so a hardcoded two per label reports a fraction whose numerator can exceed it, and
+    # names the wrong notebooks to run.
+    print(
+        f"Not freezing a candidate set here: {len(unfinished)} of "
+        f"{len(PLAN_STAGE_KEYS) * len(CANDIDATE_LABELS)} recorded sweep plans are absent or "
+        "incomplete, so the field is still being produced. Run 14, 15 and 16 for each declared "
+        "label; the last of those runs freezes the set. Declining is not a failure - this "
+        "notebook has done its own label's work either way, and the set is written exactly "
+        "once.\n  " + "\n  ".join(unfinished)
+    )
+
+# One construction, shared with the four stages that read this field. It requires every
+# declared label to have rankable baseline rows, because every label is backtested equal-weight
+# and an absent one means the baseline sweep is unfinished.
+frozen_pool = (
+    None
+    if unfinished
+    else resolve_field_members(
+        _study,
+        case_study=CASE_STUDY_ID,
+        prediction_hashes=CURRENT_MEMBERS,
+        resolve_best_backtest_runs=resolve_best_backtest_runs,
+        stages=candidate_stages,
+    )
+)
+if frozen_pool is not None:
+    print(
+        f"Field to freeze: {frozen_pool.height} eligible validation backtests "
+        f"across {candidate_stages} and {len(CANDIDATE_LABELS)} labels"
+    )
 
 try:
+    if unfinished:
+        raise PermissionError(
+            "the sweep plans reported above are not all complete for the predictions in force"
+        )
     writable = open_study(CASE_STUDY_ID, entry_point="16_risk_management")
 except PermissionError as exc:
     holdout_candidates = None
@@ -640,6 +833,11 @@ else:
         name=CANDIDATE_SET_NAME,
         members=members,
         comparison_contract={"comparable_fields": ["label_artifact", "feature_artifacts", "cv"]},
+        supersedes=candidate_set_supersedes(
+            writable,
+            name=CANDIDATE_SET_NAME,
+            declared=SUPERSEDES_CANDIDATE_SETS.get(CANDIDATE_SET_NAME),
+        ),
     )
     frozen_selection = holdout_candidates.best_validation_sharpe()
     print(
@@ -666,6 +864,10 @@ else:
 #    the four stages after this one from each re-deriving a selection, and what
 #    makes the configuration the holdout was run on a matter of record rather
 #    than a rule four notebooks apply consistently until one of them does not.
+# 7. The overlay sweep is per label; the field it feeds is not. Each label gets
+#    its own carrier and its own controls, and every label's strategies then
+#    compete in one set, because the holdout picks one configuration for the
+#    case study rather than one per label.
 #
 # **Next:** [`17_costs`](17_costs.ipynb) stresses whichever configuration this stage
 # advances - the best overlay, or the un-overlaid carrier where no overlay helped -

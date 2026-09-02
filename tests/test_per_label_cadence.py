@@ -91,18 +91,24 @@ class TestBiweeklySchedule:
         assert late.to_list() == overlap
 
     def test_gaps_stay_fourteen_days_across_a_52_week_year_boundary(self):
-        """2020 is a 53-week ISO year and 2021 a 52-week one.
+        """2020 is a 53-week ISO year; 2021 and 2022 are 52-week ones.
 
         A counter of the form ``iso_year * 53 + iso_week`` jumps by two at every 52-week
         boundary, which flips the parity and lands a 7-day or 21-day gap there. Elapsed weeks
         since a fixed Monday cannot do that.
+
+        The window spans two boundaries - the 53-week 2020 into 2021 and the 52-week 2021 into
+        2022 - because the defect appears at the END of a 52-week year, which an earlier version
+        of this test stopped short of. It also asserts exactly 14 rather than a range: a bound of
+        21 admits the 21-day gap the defect produces, so the test could not fail on it.
         """
-        ts = _weekdays("2020-10-01", "2021-04-01")
+        ts = _weekdays("2020-10-01", "2022-04-01")
         dates = resolve_rebalance_timestamps(ts, "biweekly").to_list()
         gaps = [(b - a).days for a, b in zip(dates, dates[1:], strict=False)]
         assert gaps, "no rebalance dates resolved"
-        assert max(gaps) <= 21, gaps
-        assert min(gaps) >= 10, gaps
+        assert set(gaps) == {14}, sorted(set(gaps))
+        assert any(d.year == 2021 and d.month == 12 for d in dates), dates[:5]
+        assert any(d.year == 2022 and d.month == 1 for d in dates), dates[:5]
 
     def test_every_gap_is_two_calendar_weeks_apart_in_monday_terms(self):
         """The invariant: consecutive rebalances sit exactly 2 ISO weeks apart."""

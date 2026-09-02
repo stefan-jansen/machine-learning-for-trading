@@ -153,7 +153,7 @@ print(f"""=== Protocol term sheet ===
 # profit from something other than the signal - a price series read one bar early, a return joined
 # to the wrong date, a cost model that never fires - and every result below it would inherit that.
 #
-# The bar is deliberately loose. With a monthly cadence over a validation window this long there
+# The bar is deliberately loose. At this label's decision cadence over a validation window this long there
 # are few enough rebalances that the sampling noise on a random strategy's Sharpe is itself large,
 # so a tight threshold would fail on chance alone. What it is built to catch is a pipeline bug,
 # which produces a Sharpe far outside that noise rather than just outside zero.
@@ -583,7 +583,7 @@ print(
 #
 # $SR^*$ is the Sharpe the leader of $K$ independent zero-skill variants would be expected to
 # reach,
-# so it rises with the size of the sweep. A monthly cadence gives fewer return observations than a
+# so it rises with the size of the sweep. A low-frequency cadence gives fewer return observations than a
 # daily strategy does, which makes $T$ small and the correction correspondingly large: this
 # universe pays more for its search than a higher-frequency one would.
 

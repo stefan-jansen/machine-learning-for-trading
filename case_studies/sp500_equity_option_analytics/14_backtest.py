@@ -18,9 +18,11 @@
 #
 # **Chapter 16 - Strategy Simulation**
 #
-# This notebook translates validation predictions into weekly, long-only equity
-# portfolios and evaluates the equal-weight top-$K$ baseline. Option-derived
-# features are predictive inputs only; the strategy trades equities.
+# This notebook translates validation predictions into long-only equity portfolios on the
+# label's own decision grid - `decision.cadence_by_label` puts the two 10-day labels on a
+# biweekly schedule and leaves the 5-day ones weekly - and evaluates the equal-weight top-$K$
+# baseline. The resolved cadence is printed in the term sheet below. Option-derived features are
+# predictive inputs only; the strategy trades equities.
 #
 # **Learning objectives**
 #
@@ -49,7 +51,16 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 
-from case_studies.research import Study
+from case_studies.research import (
+    OfficialPopulation,
+    Study,
+    attest_sweep,
+    open_study,
+    open_sweep_attempt,
+    population_supersedes,
+    predictions_identity,
+    sweep_plan_name,
+)
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import build_backtest_spec, serializable_backtest_spec
@@ -292,9 +303,14 @@ def _artifact_matches_prediction_window(backtest_hash, predictions):
     return observed.equals(expected)
 
 
-def _pending_specs(pred_row, predictions):
-    pending = []
-    n_existing = 0
+def _planned_backtests(pred_row):
+    """Every backtest this sweep intends for one prediction set, identified before it runs.
+
+    The identity is a function of the prediction hash and the specification, so the whole grid
+    is nameable without reading a single prediction parquet. That is what lets the plan be
+    published before execution rather than after it.
+    """
+    planned = []
     pred_hash = pred_row["prediction_hash"]
     for scheme in entry_schemes:
         signal = {
@@ -314,12 +330,16 @@ def _pending_specs(pred_row, predictions):
             label=BACKTEST_LABEL,
         )
         backtest_hash = backtest_hash_from_parts(pred_hash, serializable_backtest_spec(spec))
-        artifact_is_current = _artifact_matches_prediction_window(backtest_hash, predictions)
-        if backtest_hash in existing_hashes and artifact_is_current:
-            n_existing += 1
-            continue
-        pending.append((scheme, spec, backtest_hash in existing_hashes))
-    return pending, n_existing
+        planned.append(
+            {
+                "prediction_hash": pred_hash,
+                "source": pred_row["source"],
+                "scheme": scheme,
+                "spec": spec,
+                "backtest_hash": backtest_hash,
+            }
+        )
+    return planned
 
 
 # %% [markdown]
@@ -351,25 +371,88 @@ def _execute_one(pred_hash, spec, predictions, force_rebacktest):
 # Progress counts include cached and newly executed combinations. A complete
 # registry therefore finishes quickly without reading every prediction parquet.
 
+# %% [markdown]
+# The grid is published as an official population *before* it executes, and checked with
+# `require_complete` after. Recording it afterwards would say nothing: a sweep that stops
+# part-way registers no plan and leaves the previous, smaller, complete one in force, so the
+# freeze downstream would read an interruption as a finished run. Published first, an
+# interrupted sweep leaves a current plan whose members are not all registered, which is what
+# `require_complete` reports.
+#
+# The name carries which prediction sets the grid was planned against, so "has this baseline
+# been run against the predictions in force" is a lookup rather than an inference over its
+# members. Coverage - one rankable baseline per declared label - is a floor and answers a
+# different question: it catches a label that never started, not a grid that stopped half way.
+
+# %%
+planned_by_prediction = [
+    (pred_row["prediction_hash"], _planned_backtests(pred_row))
+    for pred_row in pred_index.iter_rows(named=True)
+]
+planned = [row for _, rows in planned_by_prediction for row in rows]
+if len(planned) != total_backtests:
+    raise RuntimeError(f"planned {len(planned)} backtests, expected {total_backtests}")
+
+BASELINE_POPULATION = sweep_plan_name(
+    CASE_STUDY_ID, BACKTEST_LABEL, "signal", predictions_identity(CURRENT_MEMBERS)
+)
+# The generation this run retires, per population name. A grid that has grown - a new entry
+# scheme, a wider `TOP_N` - is a changed population under a live name and has to say which one
+# it replaces; the refusal prints the current hash. Absent for a name this registry has never
+# held, which is every clean clone and every first run of a label.
+SUPERSEDES_BASELINE_POPULATIONS: dict[str, str] = {}
+
+_plan = None
+try:
+    _writable = open_study(CASE_STUDY_ID, entry_point="14_backtest")
+except PermissionError as exc:
+    print(f"Not recording the baseline plan here: {exc}")
+else:
+    if _writable.root != CASE_DIR:
+        raise RuntimeError(
+            f"14 ran its sweep against {CASE_DIR} but opened a study rooted at {_writable.root}. "
+            "Recording the plan there would describe a registry this run did not write."
+        )
+    _plan = OfficialPopulation.create(
+        _writable,
+        name=BASELINE_POPULATION,
+        member_kind="backtest",
+        members=[row["backtest_hash"] for row in planned],
+        supersedes=population_supersedes(
+            _writable,
+            name=BASELINE_POPULATION,
+            declared=SUPERSEDES_BASELINE_POPULATIONS.get(BASELINE_POPULATION),
+        ),
+    )
+    # Opened here, before a single member executes, so a run that dies part-way leaves an
+    # attempt with no attestation behind it and the freeze declines. See
+    # `sweep_attestation_name` for why the record is per attempt rather than per plan.
+    _attempt = open_sweep_attempt(_writable, _plan)
+    print(
+        f"Baseline plan {BASELINE_POPULATION}: {_plan.hash}, {len(planned)} planned, "
+        f"attempt {_attempt}"
+    )
+
 # %%
 t0 = time.time()
 completed = failed = skipped = 0
+failures: list[str] = []
 existing_hashes = load_existing_backtest_hashes(CASE_STUDY_ID, stage="signal")
 print(f"Existing equal-weight baseline hashes in registry: {len(existing_hashes):,}")
 
-for pred_row in pred_index.iter_rows(named=True):
-    pred_hash = pred_row["prediction_hash"]
+for pred_hash, group in planned_by_prediction:
     predictions = normalize_prediction_columns(read_predictions(CASE_STUDY_ID, pred_hash))
-    pending_schemes, n_existing = _pending_specs(pred_row, predictions)
-    skipped += n_existing
-    if not pending_schemes:
-        continue
-
-    for scheme, spec, force_rebacktest in pending_schemes:
-        backtest_hash, error = _execute_one(pred_hash, spec, predictions, force_rebacktest)
+    for row in group:
+        backtest_hash = row["backtest_hash"]
+        is_registered = backtest_hash in existing_hashes
+        if is_registered and _artifact_matches_prediction_window(backtest_hash, predictions):
+            skipped += 1
+            continue
+        _, error = _execute_one(pred_hash, row["spec"], predictions, is_registered)
         if error:
             failed += 1
-            print(f"  FAILED {pred_row['source']} / {scheme['name']}: {error}")
+            failures.append(f"{backtest_hash} ({row['source']} / {row['scheme']['name']}): {error}")
+            print(f"  FAILED {row['source']} / {row['scheme']['name']}: {error}")
         else:
             completed += 1
             existing_hashes.add(backtest_hash)
@@ -385,6 +468,36 @@ print(
     f"\nSweep complete: {completed} run in {elapsed:.0f}s "
     f"({failed} failed, {skipped} already complete)"
 )
+
+# A failure here stops the notebook rather than being counted and printed. `require_complete`
+# below cannot be relied on to catch one: a member that failed because its registered artifact
+# disagrees with the current prediction window is still a *registered, internally complete*
+# backtest, so the plan passes while the row it admits was produced over a different window.
+# That is the state that reaches the freeze and gets sealed into an immutable set. Every
+# failure is printed above with its cause; this says the run does not continue past them.
+if failures:
+    raise RuntimeError(
+        f"{len(failures)} of the {total_backtests} planned baseline backtests failed and the "
+        "plan is not accepted. The causes are printed above. A failure whose backtest is "
+        "already registered does not show up as an incomplete plan - the registered row is "
+        "complete on its own terms - so it has to stop the run here or it reaches the freeze "
+        "as a current result. `immutable backtest artifact conflict` means an artifact "
+        "directory exists for an identity the registry does not hold: check for a "
+        "`backtest_runs` row, and where there is none the directory is debris from an "
+        "interrupted sweep and belongs in a quarantine directory, not in the way of the "
+        f"re-run. First five: {failures[:5]}"
+    )
+
+if _plan is not None:
+    _plan.require_complete()
+    # Reaching this line is the statement being recorded: the sweep raised above on any
+    # failure, so an attestation exists only for a run that executed its whole plan. The
+    # plan alone cannot say it - a member that failed against a stale registered artifact
+    # leaves the plan complete - and the freeze runs later, in another notebook, where the
+    # exception above is not visible. See `sweep_attestation_name`.
+    _attestation = attest_sweep(_writable, _plan, _attempt)
+    print(f"\nBaseline plan {BASELINE_POPULATION} complete: {len(planned)} backtests")
+    print(f"Sweep attested as {_attestation.name}")
 
 # %% [markdown]
 # ## 3. Signal Evaluation
