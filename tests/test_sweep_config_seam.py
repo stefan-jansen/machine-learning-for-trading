@@ -394,9 +394,10 @@ def test_the_ceiling_follows_the_selection_mode_not_the_account_permission():
     assert get_declared_long_short("crypto_perps_funding") is True
     assert get_declared_long_short("sp500_options") is False
     assert get_declared_long_short("etfs") is False
-    # 20 assets, long-only selection: k=10 is half the universe and survives, where the
-    # long-short ceiling would have excluded it.
-    assert 10 in get_top_k_values_for("sp500_options", "ret_to_expiry", 20)
+    # 30 assets, long-only selection: the whole declared grid survives. Off the account
+    # permission the ceiling would be 15 and k=20 would be dropped, so this is the
+    # assertion that separates the two sources rather than merely agreeing with both.
+    assert get_top_k_values_for("sp500_options", "ret_to_expiry", 30) == [5, 10, 20]
     # etfs is long-only, so its ceiling is the whole universe: on 30 assets the whole
     # declared grid survives, where a long-short ceiling of 15 would drop 20.
     assert get_top_k_values_for("etfs", "fwd_ret_21d", 30) == [5, 10, 20]
