@@ -941,7 +941,7 @@ print(
 #
 # ### Known limitations
 #
-# - Cost here is the quoted option spread alone. The commission, the share trades the daily hedge
+# - Cost here is the quoted option spread alone. The commission, the share trades the delta hedge
 #   requires and the margin the position ties up all need a notional to be expressed against, and
 #   they enter at the cost stage.
 # - The moves in Section B.3 are unhedged marks. Re-hedging the direction at each close removes part

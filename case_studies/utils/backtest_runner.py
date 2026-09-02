@@ -1180,7 +1180,23 @@ def run_backtest(
         # weights × y_true vectorized path cannot express this strategy because
         # y_true is a single 30-day return, not a daily P&L series.
         if case_study == "sp500_options" and label == "ret_to_expiry":
+            from case_studies.sp500_options._htm_backtest import OPTION_DECISION_COLUMNS
+
+            # A short-straddle spec says the strategy's decisions are typed option contracts;
+            # it does not say this frame is one. Where `run_backtest` was handed a decision
+            # artifact as `precomputed_weights`, it is - the artifact carries the strike,
+            # expiration and both legs' quotes. Where `run_backtest` derived the weights from
+            # predictions itself, which is what the Ch20 holdout retrain does, the frame is
+            # `[timestamp, symbol, weight]` and carries none of them, and passing it on the
+            # strength of the declared kind alone made `run_htm_daily_mtm` reject the holdout
+            # for ten missing columns. Asking the frame is the same question that function asks,
+            # so the two cannot disagree, and `None` is the path it already has for this case:
+            # it selects the cohorts from `contract_returns.parquet` under the spec's own method
+            # and top_k, which is the same selection the artifact records.
             decision_kind = (strategy_spec.get("decision_artifact") or {}).get("kind")
+            typed_decisions = decision_kind == "short_straddles" and not (
+                OPTION_DECISION_COLUMNS - set(weights.columns)
+            )
             result = _run_htm_daily_mtm(
                 case_study=case_study,
                 predictions=predictions,
@@ -1190,7 +1206,7 @@ def run_backtest(
                 allocation_spec=strategy.get("allocation", {}),
                 label=label,
                 prediction_hash=prediction_hash,
-                option_decisions=weights if decision_kind == "short_straddles" else None,
+                option_decisions=weights if typed_decisions else None,
                 option_lifecycle=option_lifecycle,
                 option_accounting=strategy_spec.get("options_accounting"),
             )
@@ -1768,6 +1784,8 @@ def _run_htm_daily_mtm(
         decisions=option_decisions,
         option_lifecycle=option_lifecycle,
         option_spread_fraction=float(option_accounting["option_spread_fraction"]),
+        prediction_hash=prediction_hash,
+        label=label,
     )
     port = result["daily_returns"]
     metrics = result["metrics"]

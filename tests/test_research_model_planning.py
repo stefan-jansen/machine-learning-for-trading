@@ -275,3 +275,65 @@ def test_run_official_models_given_a_plan_does_not_plan_a_second_time(monkeypatc
     # fold set per configuration - the failure the planning path exists to prevent.
     assert forwarded["requests"] == plan.requests
     assert all(isinstance(request, ModelRequest) for request in forwarded["requests"])
+
+
+def test_a_plan_whose_requests_resolve_to_one_identity_is_refused(monkeypatch) -> None:
+    """Two requests that resolve to the same training identity must not collapse into one.
+
+    `plan_models` counts distinct training hashes against the number of requests submitted, so
+    an adapter that returns the same spec twice is a planning defect rather than a plan of one
+    member: the second request would silently inherit the first one's results.
+    """
+    study = cast(Study, SimpleNamespace())
+    requests = [_request(study, "first"), _request(study, "second")]
+
+    monkeypatch.setattr(
+        "case_studies.research.model_planning.get_adapter",
+        lambda kind, family: SimpleNamespace(
+            plan_model_requests=lambda received_study, request_dicts: (
+                tuple(_spec("same") for _ in request_dicts),
+                request_dicts,
+            )
+        ),
+    )
+
+    with pytest.raises(ValueError, match="duplicate training identities"):
+        plan_models(study, requests=requests)
+
+
+def test_a_checkpoint_schedule_that_repeats_an_entry_is_refused(monkeypatch) -> None:
+    """A repeated checkpoint yields two members with one prediction identity.
+
+    The pair would be indistinguishable in the registry, so the second write would land on the
+    first one's row. The guard is separate from the training-identity one above because a single
+    request passes that check before its own schedule is examined.
+    """
+    study = cast(Study, SimpleNamespace())
+    spec = ResolvedSpec.create(
+        family="planned_family",
+        label="target",
+        seed=7,
+        computation={
+            "checkpoint_schedule": [
+                {"kind": "epoch", "value": 5},
+                {"kind": "epoch", "value": 5},
+            ],
+            "cv": {"folds": [0, 1]},
+            "feature_artifacts": {"features": "digest"},
+            "label_artifact": {"name": "target", "digest": "label-digest"},
+            "model": {"class": "FixtureModel", "params": {"variant": "first"}},
+        },
+        provenance={"device": "cpu"},
+        config_name="first",
+        execution_tier="canonical",
+    ).as_dict()
+
+    monkeypatch.setattr(
+        "case_studies.research.model_planning.get_adapter",
+        lambda kind, family: SimpleNamespace(
+            plan_model_requests=lambda received_study, request_dicts: ((spec,), request_dicts)
+        ),
+    )
+
+    with pytest.raises(ValueError, match="duplicate checkpoint identities"):
+        plan_models(study, requests=[_request(study, "first")])

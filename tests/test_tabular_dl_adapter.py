@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -9,16 +8,6 @@ import pytest
 
 from case_studies.research import LabelDefinition, Study
 from tests.test_research_workspace import _seed_release
-
-
-@pytest.fixture(autouse=True)
-def _restore_output_root():
-    yield
-    os.environ.pop("ML4T_OUTPUT_DIR", None)
-    from case_studies.research import workspace
-
-    workspace._ACTIVE_OUTPUT_ROOT = None
-    workspace._clear_root_sensitive_caches()
 
 
 def test_tabm_resolver_builds_complete_resolved_request(tmp_path, monkeypatch) -> None:

@@ -60,9 +60,14 @@ def _register(case_dir, causal_hash, *, effect=-0.02, supersedes=None) -> None:
 
 
 def _study(case_dir):
+    # `release_case_root` is read by the canonical lookup in `CausalResult`: a workspace opened
+    # over a release starts with an empty run_log, so a result registered by the release lives
+    # only there. Pointing it at the same directory is the "no separate release" case, which is
+    # what a tmp_path registry is.
     return SimpleNamespace(
         root=case_dir,
         output_root=None,
+        release_case_root=case_dir,
         storage_root=lambda _tier: case_dir,
     )
 
