@@ -275,6 +275,10 @@ print(f"Prices: {len(prices):,} rows, {prices['symbol'].n_unique()} assets")
 n_total = len(top_combos) * len(COST_GRID_BPS) if not top_combos.is_empty() else 0
 n_done = 0
 t0 = time.time()
+# The rows this run registers, so section 3 can plot its own curve rather than everything the
+# `cost_sensitivity` stage has ever held. Collected here because the hash is only known after
+# the run returns.
+swept_hashes: list[str] = []
 
 for combo_row in top_combos.iter_rows(named=True):
     pred_hash = combo_row["prediction_hash"]
@@ -309,6 +313,8 @@ for combo_row in top_combos.iter_rows(named=True):
                 initial_cash=bt_config.initial_cash,
                 calendar=bt_config.calendar,
             )
+            if result.backtest_hash:
+                swept_hashes.append(result.backtest_hash)
             if cost_bps % 10 == 0:
                 print(
                     f"  [{n_done}/{n_total}] {alloc_method} @ {cost_bps}bps: "
@@ -338,8 +344,16 @@ from case_studies.utils.backtest_explorer import BacktestExplorer
 
 explorer = BacktestExplorer(CASE_STUDY_ID)
 
+# %% [markdown]
+# **The curve is scoped to the rows this run just registered.** `cost_sensitivity()` unscoped
+# returns every row the stage has ever held - previous carriers, superseded generations, and
+# the full-universe rows section 4 registers on purpose. Plotting those together produces one
+# line per allocator drawn through several strategies at once, which is not a Sharpe-versus-cost
+# curve for anything. `backtest_explorer.cost_sensitivity`'s own docstring names this case study
+# as one that must scope, and it was not scoping.
+
 # %%
-cost_df = explorer.cost_sensitivity()
+cost_df = explorer.cost_sensitivity(backtest_hashes=swept_hashes or None)
 
 if not cost_df.is_empty():
     import matplotlib.pyplot as plt
@@ -472,7 +486,12 @@ from case_studies.utils.registry import read_predictions
 db_path = CASE_DIR / "run_log" / "registry.db"
 conn = sqlite3.connect(str(db_path))
 cur = conn.cursor()
-cur.execute("""
+# The universe predicate is the same statement section 1 makes about the carrier pool, and it
+# has to be made again here: this query picks its own row. Without it the cadence exhibit - the
+# publication finding of this notebook - is built on whichever signal row ranks highest, which
+# is the full-universe variant `setup.yaml` excludes from canonical candidacy whenever it wins.
+cur.execute(
+    """
 SELECT br.prediction_hash, tr.family, tr.config_name, bm.sharpe
 FROM backtest_runs br
 JOIN backtest_metrics bm ON br.backtest_hash = bm.backtest_hash
@@ -481,14 +500,20 @@ JOIN training_runs tr ON ps.training_hash = tr.training_hash
 WHERE br.stage = 'signal'
 AND json_extract(br.spec_json, '$.strategy.rebalance.mode') = 'engine'
 AND tr.family != 'deep_learning'
+AND (? IS NULL OR json_extract(br.spec_json, '$.strategy.signal.universe_filter') = ?)
 ORDER BY bm.sharpe DESC
 LIMIT 1
-""")
+""",
+    (CANONICAL_UNIVERSE, CANONICAL_UNIVERSE),
+)
 _row = cur.fetchone()
 conn.close()
 
 if _row is None:
-    print("No signal-stage engine backtest found in registry. Skipping cadence sweep.")
+    print(
+        f"No signal-stage engine backtest on the {CANONICAL_UNIVERSE or 'full'} universe. "
+        "Skipping cadence sweep."
+    )
     best_pred_hash = None
 else:
     best_pred_hash = _row[0]
@@ -593,7 +618,16 @@ def run_cadence_cost_backtest(
         prediction_hash=best_pred_hash,
         initial_cash=bt_config.initial_cash,
         chapter="ch18",
-        signal={"method": "equal_weight_top_k", "top_k": 20, "long_short": bt_config.long_short},
+        # The universe travels with the spec, not just with the query above. A row registered
+        # without it reads as full-universe to every later reader - including section 4's
+        # full-versus-screened query and `derived_tables_off_canonical_universe` - so the
+        # cadence rows would be filed against the comparison they are not part of.
+        signal={
+            "method": "equal_weight_top_k",
+            "top_k": 20,
+            "long_short": bt_config.long_short,
+            **({} if CANONICAL_UNIVERSE is None else {"universe_filter": CANONICAL_UNIVERSE}),
+        },
     )
     spec["strategy"]["rebalance"]["cadence"] = cadence
     spec["backtest_config"]["metadata"]["cadence"] = cadence
