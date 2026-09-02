@@ -324,8 +324,25 @@ class Study:
         global _ACTIVE_OUTPUT_ROOT
         tier = self.execution_tier if execution_tier is None else ExecutionTier(execution_tier)
         if self.read_only:
-            os.environ.pop("ML4T_OUTPUT_DIR", None)
-            _ACTIVE_OUTPUT_ROOT = None
+            # Point the path helpers at the root this study answers for, rather than
+            # clearing the variable. `get_case_study_dir` reads `ML4T_OUTPUT_DIR` and
+            # falls back to the repo's own `case_studies/` when it is absent, so popping
+            # it moved every later lookup - `LabelCatalog.get`'s label artifact included -
+            # off the directory the caller resolved and onto the repo, for the rest of the
+            # process. Under a redirected output root that directory holds nothing, and
+            # the failure surfaces as a missing artifact rather than as a moved root:
+            # sp500_equity_option_analytics' 20_strategy_analysis failed that way, through
+            # the latent-factor holdout hook.
+            #
+            # `get_case_study_dir` composes `ML4T_OUTPUT_DIR / case_study`, so the value is
+            # this root's parent, and only where the root is actually named for its case
+            # study. Where it is not, the variable is left as it stands: whatever the caller
+            # set is closer to right than the repo fallback.
+            if self.root.name == self.case_study:
+                output_root = self.root.parent
+                if output_root != _ACTIVE_OUTPUT_ROOT:
+                    os.environ["ML4T_OUTPUT_DIR"] = str(output_root)
+                    _ACTIVE_OUTPUT_ROOT = output_root
             _clear_root_sensitive_caches()
             return self.root
 
