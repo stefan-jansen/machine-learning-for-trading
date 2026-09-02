@@ -791,7 +791,7 @@ ENTITY_COLUMN_CANDIDATES = ("symbol", "product", "entity", "ticker")
 SEEDED_DATE_BUDGET = 60
 
 
-def _reference_panels(cs_dir: Path, hash_rows: list, survives, entity_col: str, _pl) -> dict:
+def _reference_panels(cs_dir: Path, hash_rows: list, survives, _pl) -> dict:
     """One key/target panel per (split, label), taken from an artifact left in place.
 
     Which artifact: the panel that the most untouched artifacts in the group already
@@ -862,7 +862,7 @@ def _reference_panels(cs_dir: Path, hash_rows: list, survives, entity_col: str, 
             key=lambda item: (-len(item[1]), -item[0][0], item[1][0][0]),
         )
         _, frame, entity = entries[0]
-        panels[key] = _subsampled_panel(frame, entity, entity_col, _pl)
+        panels[key] = _subsampled_panel(frame, entity, _pl)
     return panels
 
 
@@ -891,16 +891,18 @@ def _intraday_split_skeleton(panels: dict, split, _pl):
     return candidates[0] if candidates else None
 
 
-def _subsampled_panel(frame, entity: str, entity_col: str, _pl):
+def _subsampled_panel(frame, entity: str, _pl):
     """A reference artifact reduced to the canonical seeded columns and date budget.
 
     Keeps the reference's own timestamp and identifier dtypes: a seeded artifact has
     to meet the reference on an exact join, and a cast on either side of that key
-    would silently drop every row. The identifier is still renamed to the case
-    study's declared ``entity_col`` - cme_futures registers ``product`` while its
-    copied artifacts carry ``symbol``, and the notebooks resolve that column per
-    frame, so following the reference's name here would change what every seeded
-    cme artifact is called to fix a join that already works on values.
+    would silently drop every row. The identifier keeps the reference's name too.
+    This used to rename it to a per-case-study ``entity_col`` on the belief that
+    "cme_futures registers ``product``". It does not: every prediction artifact in
+    all nine canonical registries is keyed ``symbol``, cme_futures included, where
+    that column holds the product roots its labels store under ``product``. The
+    rename made the fixture and `07_conformal_position_sizing` agree with each
+    other and with no registry.
     """
     dates = frame["timestamp"].unique().sort()
     # A stride is fine on a daily reference, whose own gaps are already uneven
@@ -957,7 +959,7 @@ def _subsampled_panel(frame, entity: str, entity_col: str, _pl):
             .alias("fold")
         )
     columns = [
-        _pl.col(entity).alias(entity_col),
+        _pl.col(entity).alias("symbol"),
         _pl.col("timestamp"),
         fold.alias("fold"),
         _pl.col("actual"),
@@ -1251,7 +1253,10 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
     setup_path = CS_ROOT / cs_id / "config" / "setup.yaml"
     symbols = ["SYM0", "SYM1", "SYM2", "SYM3", "SYM4"]
     holdout_start = "2024-01-01"
-    entity_col = "symbol"
+    # The name the case study's LABELS use for the entity. Prediction artifacts do not
+    # follow it - they are keyed `symbol` in every registry - so this is only how the
+    # fabricated grid finds the dtype and the values to borrow.
+    label_entity_col = "symbol"
     # Labels whose predictions carry a continuous evaluation target beside the class
     # one. `labels.classification_eval_label` in setup.yaml is where production
     # decides this: utils.modeling.load_modeling_dataset reads it for a
@@ -1269,7 +1274,7 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         if assets:
             symbols = assets[:10]  # Cap at 10 for test speed
         if cs_id == "cme_futures":
-            entity_col = "product"
+            label_entity_col = "product"
         eval_cfg = setup.get("evaluation", {})
         if eval_cfg.get("holdout_start"):
             holdout_start = eval_cfg["holdout_start"]
@@ -1348,13 +1353,13 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
             schema = _pl.read_parquet_schema(label_file)
         except Exception:  # noqa: BLE001 - an unreadable label is not ours to fix here
             continue
-        if entity_col not in schema or "timestamp" not in schema:
+        if label_entity_col not in schema or "timestamp" not in schema:
             continue
-        entity_dtype = schema[entity_col]
+        entity_dtype = schema[label_entity_col]
         timestamp_dtype = schema["timestamp"]
         try:
             entities = (
-                _pl.read_parquet(label_file, columns=[entity_col])[entity_col]
+                _pl.read_parquet(label_file, columns=[label_entity_col])[label_entity_col]
                 .unique()
                 .sort()
                 .head(10)
@@ -1400,7 +1405,7 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         ]
         frame = _pl.DataFrame(
             {
-                entity_col: _pl.Series(rows_symbol, dtype=entity_dtype)
+                "symbol": _pl.Series(rows_symbol, dtype=entity_dtype)
                 if entity_dtype is not None
                 else _pl.Series(rows_symbol),
                 "timestamp": _pl.Series(rows_date).cast(timestamp_dtype or _pl.Date),
@@ -1467,7 +1472,7 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
     # keys, folds and realized targets and synthesize only the score - preferring
     # one that survives, and otherwise using one that will be rewritten onto its
     # own keys. Only a group with no artifact at all keeps the fabricated grid.
-    reference_panels = _reference_panels(cs_dir, hash_rows, _survives, entity_col, _pl)
+    reference_panels = _reference_panels(cs_dir, hash_rows, _survives, _pl)
 
     for p_hash, split, label in hash_rows:
         pred_dir = cs_dir / "run_log" / "predictions" / p_hash
