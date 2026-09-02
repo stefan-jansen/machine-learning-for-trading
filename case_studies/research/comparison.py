@@ -245,13 +245,24 @@ class CandidateSet:
             )
         return cls(study, set_hash, row[0], row[1], members, json.loads(row[2]), row[3])
 
-    def extend(self, name: str, members: Iterable[Result]) -> CandidateSet:
+    def extend(
+        self, name: str, members: Iterable[Result], *, supersedes: str | None = None
+    ) -> CandidateSet:
+        """A new set holding this one's members and *members*, under *name*.
+
+        *supersedes* names the generation of *name* this one retires, and is required
+        whenever one is already recorded - ``create`` refuses a changed set under a live
+        name without it. An extension is exactly where that happens: re-running the stage
+        after upstream results moved produces different members under the same name, and
+        without a way to pass the retired hash the notebook has no answer to give.
+        """
         existing = [Result.open(self.study, member_hash) for member_hash in self.members]
         return self.create(
             self.study,
             name,
             [*existing, *members],
             comparison_contract=self.comparison_contract,
+            supersedes=supersedes,
         )
 
     def best_validation_sharpe(self) -> Result:

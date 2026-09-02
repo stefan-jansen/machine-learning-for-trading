@@ -18,17 +18,19 @@
 #
 # This notebook converts the case-study backtest registry for the S&P
 # 500 options HTM straddle strategy into a per-case-study strategy
-# assessment. The current canonical rank-1 is the equal-weight top-5
-# baseline on the liquid subset, produced by `linear/ridge_a10000000.0` for
-# `ret_to_expiry`, with no allocation overlay. The fixed carrier follows
-# the exact validation-only selection contract: the liquid-universe pin
-# is applied first, then the complete 342-row baseline grid is ranked.
+# assessment. Which configuration carries it is resolved from the registry in
+# §1 and printed there, not named here: it is a property of the run and it moves
+# whenever the sweep is rebuilt, and a name written into prose agrees with the
+# registry only until the next rebuild. What is fixed is the selection contract
+# - the liquid-universe pin is applied first, then the surface is ranked on
+# validation, and the holdout is not consulted.
 # All `ret_to_expiry` backtests dispatch
 # through the HTM daily-MTM cohort engine (`_run_htm_daily_mtm`): entry on
-# the final available session of each Friday week, daily delta hedge through
-# the underlying, settle at intrinsic value at expiration, full per-leg
-# costs (entry-side option spread, daily underlying hedge spread, no
-# exit-leg option trade). Every metric is reported with its
+# the final available session of each Friday week, the underlying delta
+# hedged whenever it breaches its threshold, settle at intrinsic value at
+# expiration, full per-leg costs (entry-side option spread, underlying hedge
+# spread on each session the hedge trades, and an exit-leg option trade only
+# where a contract's chain ends before its expiration date). Every metric is reported with its
 # block-bootstrap 95% CI; paired holdout comparisons via
 # `backtest_paired_metrics` are required before the notebook reports them.
 # Cross-case-study comparison is reserved for Chapter 20.
@@ -38,23 +40,22 @@
 # - Read uncertainty-aware backtest metrics for an options strategy whose
 #   signal is statistically null (Sharpe and IC both straddle zero) under
 #   HTM cost accounting on full per-leg friction.
-# - Use the HTM-specific cost-sensitivity artefact (`14_costs`'s
-#   `htm_cost_sensitivity.parquet`) where the standard bps cost-grid
-#   convention does not apply (options costs are denominated in % of
-#   premium, not bps of notional).
 # - Surface a holdout decay reading without invoking champion/winner/
 #   verdict language, and a holdout-vs-EW comparison for the same window.
 #
 # **Book reference**: Chapter 20, §20.1 - sp500_options anchors the
 # "cost model validity" theme in the cross-case-study synthesis.
 #
-# **Prerequisites**: case-study pipeline through `12_backtest`, `14_costs`
-# (for `htm_cost_sensitivity.parquet`); the locked registry at
-# `case_studies/sp500_options/run_log/registry.db`.
+# **Prerequisites**: the case-study pipeline through
+# [`17_holdout_backtest`](17_holdout_backtest.ipynb), which registers the holdout result this
+# notebook closes on.
 #
-# **Scope**: registry-read only - no training, no re-backtesting, no
-# registry writes. The `backtest_paired_metrics` table was populated by
-# `20_strategy_synthesis/01_aggregate_synthesis.py` (commit `57677ce`).
+# **Scope**: no training and no re-backtesting. It does write two derived tables it also
+# reads - `backtest_paired_metrics` and `cohort_metrics` - because a case study has to be able
+# to produce everything its own notebooks report, and only Chapter 20's synthesis ever wrote
+# them. Both are computed from the registered backtests over the population this notebook
+# nominates, and both are replaced rather than added to, so a carrier that moved does not
+# leave its predecessor's rows behind looking current.
 
 # %%
 """S&P 500 Options - Strategy Analysis."""
@@ -82,18 +83,16 @@ from ml4t.diagnostic.integration import (
 )
 
 # %% [markdown]
-# Load the case-study contracts and registry readers that bind every
-# reported result to the accepted producer surface.
+# Load the registry readers and reporting helpers the notebook draws on.
 
 # %%
-from case_studies.sp500_options.backtest_contract import (
-    assert_accepted_deep_baselines,
-    assert_complete_allocation_surface,
-    assert_complete_baseline_surface,
-)
+from case_studies.research import CandidateSet, OfficialPopulation, Study
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_metrics, load_benchmark_returns
+from case_studies.utils.cohort_metrics import compute_and_register
 from case_studies.utils.cohort_reporting import cohort_metric_attribution, reportable_pbo
+from case_studies.utils.paired_metrics import populate_paired_metrics, rung_for
+from case_studies.utils.uncertainty import cohort_member_digest
 from case_studies.utils.factor_attribution import (
     compute_bootstrap_ci,
     format_attribution_summary,
@@ -105,7 +104,6 @@ from case_studies.utils.registry import (
     load_backtest_fold_metrics,
     load_backtest_metrics,
     load_paired_metrics,
-    resolve_best_predictions,
 )
 from case_studies.utils.strategy_analysis import (
     ci_status,
@@ -125,39 +123,21 @@ MAX_SYMBOLS = 0
 
 # %%
 CASE_STUDY = "sp500_options"
+# The immutable grid `12_backtest` publishes; the DSR below deflates for its members.
+BASELINE_POPULATION = "sp500-options-baseline-validation-v1"
+# The nominees `13_portfolio_management` publishes; the carrier has to be one of them.
+STRATEGY_CANDIDATES = "sp500-options-strategy-candidates-v1"
 PRIMARY_LABEL = "ret_to_expiry"  # registered HTM strategy label (Appendix A)
 PERIODS_PER_YEAR = 252
 CASE_DIR = get_case_study_dir(CASE_STUDY)
 OUTPUT_DIR = get_output_dir(20, CASE_STUDY)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-assert_accepted_deep_baselines(CASE_DIR / "run_log" / "registry.db")
-
 with open(CASE_DIR / "config" / "setup.yaml") as f:
     setup = yaml.safe_load(f)
 
-_registry_path = CASE_DIR / "run_log" / "registry.db"
-assert_complete_baseline_surface(_registry_path)
-_sweep = setup["backtest"]["sweep"]
-_allocation_shortlist = resolve_best_predictions(
-    CASE_STUDY,
-    PRIMARY_LABEL,
-    split="validation",
-    stage="signal",
-    top_n=int(_sweep["top_n_predictions"]["allocation"]),
-    checkpoints_per_config=1,
-    universe_filter="liquid",
-)
-assert_complete_allocation_surface(
-    _registry_path,
-    prediction_hashes=set(_allocation_shortlist["prediction_hash"].to_list()),
-    top_ks=tuple(_sweep["top_k_grid"][PRIMARY_LABEL]),
-    allocators={
-        item["method"] for item in _sweep["allocators"] if item["method"] != "equal_weight"
-    },
-)
-
 explorer = BacktestExplorer(CASE_STUDY)
+_selection_study = Study.open(CASE_STUDY)
 print(explorer)
 
 # %% [markdown]
@@ -188,20 +168,17 @@ def _fmt(val: float | None, fmt: str = ".4f") -> str:
 # ## §1 Handoff from model analysis
 #
 # The strategy phase inherits an HTM short-straddle pipeline: weekly
-# entry on the equal-weight top-5 cross-section under `linear/ridge_a10000000.0`
-# on `ret_to_expiry`, daily delta hedge
+# entry on a top-k cross-section of `ret_to_expiry`, daily delta hedge
 # through the underlying, hold to expiry, full per-leg costs on entry-side
-# option spread plus daily underlying hedge spread (no exit-leg option
-# trade). The current canonical rank-1 is this equal-weight baseline itself
-# (allocator is None); the family/config/allocator triplet is resolved
-# from the registry below and printed alongside its identifiers. The
+# option spread plus daily underlying hedge spread, and an exit-leg option
+# trade only where a contract's chain ends before its expiration date. The
+# family, configuration and allocator that carry it are resolved from the
+# registry below and printed alongside their identifiers rather than named
+# here. The
 # liquid universe pin (`UNIVERSE_RESTRICTIONS`) excludes the higher-Sharpe
-# full-universe allocation rows - including the full-surface HRP overlay -
-# from rank-1 selection, so the deployed carrier stays on the liquid
-# subset and remains poolable with its holdout replay. The complete current
-# validation surface selects the ridge carrier at Sharpe `+0.001681`; two of
-# the 342 baseline rows are nonnegative. The carrier is fixed before the one
-# holdout evaluation. The upstream
+# full-universe rows from rank-1 selection, so the deployed carrier stays on
+# the liquid subset and remains poolable with its holdout replay. The carrier
+# is fixed before the one holdout evaluation. The upstream
 # prediction-side IC and the downstream strategy Sharpe are both
 # statistically consistent with zero - there is no IC-vs-Sharpe disconnect
 # on this strategy; both metrics agree that no edge has been resolved on
@@ -219,7 +196,14 @@ def _fmt(val: float | None, fmt: str = ".4f") -> str:
 # strategy - are excluded from the cross-stage rank-1 lookup. The val/
 # holdout pair shares a training_hash; the notebook reads from those rows
 # rather than recomputing.
-_lineage = resolve_canonical_rank1_lineage(CASE_STUDY)
+# The nominated field is resolved BEFORE the ranking and handed to it, not checked against
+# the winner afterwards. Those are different tests wherever the conformal branch is taken:
+# the common-support re-ranking restricts every series to the timestamps they all share, so a
+# row that is never going to win still decides how far that intersection reaches, and
+# therefore which admitted candidate does. A membership check on the winner passes while the
+# answer has already been moved by a row that was never eligible.
+_candidate_hashes = frozenset(CandidateSet.one(_selection_study, name=STRATEGY_CANDIDATES).members)
+_lineage = resolve_canonical_rank1_lineage(CASE_STUDY, admitted=_candidate_hashes)
 TOP_HASH = _lineage["val_backtest_hash"]
 TOP_PHASH = _lineage["val_prediction_hash"]
 HO_HASH = _lineage["holdout_backtest_hash"]
@@ -231,17 +215,117 @@ assert _lineage["label"] == PRIMARY_LABEL, (
     f"{PRIMARY_LABEL!r} - LABEL_RESTRICTIONS misconfigured?"
 )
 assert HO_HASH is not None, (
-    "No holdout backtest matches the canonical val rank-1's training_hash. "
-    "Run 20_strategy_synthesis/holdout.py::generate_holdout('sp500_options') once, "
-    "then populate the paired metrics for this case."
+    "No holdout backtest for the canonical val rank-1. Run "
+    "16_holdout_predictions and 17_holdout_backtest, which refit the carrier over the "
+    "holdout interval and register the result under a training identity of its own. Do not "
+    "reach for 20_strategy_synthesis/holdout.py::generate_holdout: it registers its "
+    "predictions under the VALIDATION training identity, so what it produces is a "
+    "validation-fitted model scored on the holdout window, which is the one thing the "
+    "holdout exists to rule out."
 )
+# The field was applied before the ranking, so this cannot fail on a row from outside it.
+# It stays because it is cheap and because it is the assertion a reader needs: the carrier
+# published below is one of the nominees `13_portfolio_management` froze, not whatever
+# happened to rank first in the registry.
+if TOP_HASH not in _candidate_hashes:
+    raise RuntimeError(
+        f"Canonical rank-1 {TOP_HASH} is not a member of {STRATEGY_CANDIDATES} "
+        f"({len(_candidate_hashes)} nominees), so the carrier was ranked from outside the "
+        "set this case study nominated"
+    )
+
+# The prediction sets behind the nominated backtests, resolved once and used wherever a
+# cohort or a leader is taken below. Both of those questions are about the search this case
+# study declared, and the registry holds more than that search: retired generations, the
+# full-universe rows the Chapter 18 cost cascade keeps, and any label this notebook does not
+# report. Restricting on the universe alone leaves all three in, and a cohort that admits
+# them has a different leader and a different deflation than the search being reported.
+_db = CASE_DIR / "run_log" / "registry.db"
+with sqlite3.connect(str(_db)) as _con:
+    _CANDIDATE_PREDICTIONS = tuple(
+        sorted(
+            row[0]
+            for row in _con.execute(
+                "SELECT DISTINCT prediction_hash FROM backtest_runs WHERE backtest_hash IN "
+                f"({','.join('?' * len(_candidate_hashes))})",
+                sorted(_candidate_hashes),
+            )
+        )
+    )
+if not _CANDIDATE_PREDICTIONS:
+    raise RuntimeError(
+        f"{STRATEGY_CANDIDATES} names {len(_candidate_hashes)} backtests and none of them is "
+        "in backtest_runs, so the nominated search cannot be resolved to a prediction "
+        "population"
+    )
+print(
+    f"Nominated search: {len(_candidate_hashes)} backtests over {len(_CANDIDATE_PREDICTIONS)} prediction sets"
+)
+
+# %% [markdown]
+# ### The paired rows this notebook reads, built here rather than assumed
+#
+# §6 reads two `backtest_paired_metrics` kinds keyed on the holdout backtest, and it used to
+# load rows that only `20_strategy_synthesis/01_aggregate_synthesis.py` ever wrote. On a
+# registry that has been reset, or one whose carrier moved, those rows are absent or belong to
+# a holdout hash that no longer exists, and the notebook stopped on a message telling the
+# reader to populate the case elsewhere. A case study's own pipeline has to be able to produce
+# everything its own notebooks report.
+#
+# `populate_paired_metrics` is the same producer Chapter 20 calls, and it is given the same
+# selection this notebook made: the carrier from the lineage resolver, and the rung this case
+# study is pinned to. The pin matters here - rung-1 (mid-to-mid bps) and rung-2 (full-universe
+# HTM) both carry `universe_filter="full"`, so ranking on the universe alone would let either
+# stand in for the liquid carrier the case study actually deploys.
+#
+# `replace_all` makes the call a snapshot. Registration is an upsert keyed on
+# `(challenger_hash, benchmark_hash)`, so it can add this carrier's rows and cannot remove the
+# rows of a carrier it replaced; those rows name a holdout hash that is no longer the holdout
+# and would sit in the table looking current. This case study restricts to one label and one
+# rung, so what the call writes is the whole of what belongs here, which is the condition
+# under which pruning to it is right.
+
+# %%
+# `cohort_metrics` is the same story one table over: this notebook reads the cross-family
+# baseline cohort and the deflated Sharpe computed over it, and only Chapter 20 ever wrote
+# them. `compute_and_register` is that producer, and it refreshes the whole table rather than
+# one row, so it also removes a cohort led by a backtest the registry no longer holds. The
+# universe pin goes with it - the full-universe rows are kept for the Chapter 18 cost cascade
+# and must not enter a cohort the carrier is deflated against.
+_cohort_counts = compute_and_register(
+    CASE_STUDY,
+    universe_filter=rung_for(CASE_STUDY)["universe_filter"],
+    prediction_hashes=_CANDIDATE_PREDICTIONS,
+    verbose=False,
+)
+print(
+    f"cohort_metrics: {sum(v for k, v in _cohort_counts.items() if k not in ('errors', 'dangling_pruned'))} "
+    f"rows across {sorted(k for k in _cohort_counts if k not in ('errors', 'dangling_pruned'))}"
+    f", {_cohort_counts['dangling_pruned']} dangling pruned, {_cohort_counts['errors']} errors"
+)
+
+# %%
+_paired_rows = populate_paired_metrics(
+    CASE_STUDY,
+    explorer,
+    label_restriction=frozenset({PRIMARY_LABEL}),
+    rung=rung_for(CASE_STUDY),
+    carrier=_lineage,
+    periods_per_year=PERIODS_PER_YEAR,
+    replace_all=True,
+    verbose=False,
+)
+_written = [row for row in _paired_rows if "skip" not in row]
+print(f"backtest_paired_metrics: {len(_written)} pairs written, {len(_paired_rows)} attempted")
+for _row in _paired_rows:
+    if "skip" in _row:
+        print(f"  skipped {_row.get('benchmark_kind', '?')}: {_row['skip']}")
 
 # %% [markdown]
 # Resolve the carrier's prediction metrics and registered strategy
 # specification directly from the registry.
 
 # %%
-_db = CASE_DIR / "run_log" / "registry.db"
 with sqlite3.connect(str(_db)) as _con:
     _row = _con.execute(
         "SELECT ic_mean_daily, ic_ci_lo, ic_ci_hi, ic_t_hac, ic_p_hac, ic_n_days, "
@@ -269,6 +353,16 @@ with sqlite3.connect(str(_db)) as _con:
     UNIVERSE_FILTER = _spec.get("strategy", {}).get("signal", {}).get("universe_filter") or "full"
     CASCADE_RUNG = {"full": 2, "liquid": 3}[UNIVERSE_FILTER]
     ALLOCATOR_METHOD = _spec.get("strategy", {}).get("allocation", {}).get("method")
+    # Read rather than restated, for the same reason as the allocator beside it: the
+    # entry scheme is part of what the carrier IS, and three call sites below wrote it
+    # as a literal that was only ever checked against the carrier of the day.
+    SIGNAL_METHOD = _spec.get("strategy", {}).get("signal", {}).get("method")
+    TOP_K = _spec.get("strategy", {}).get("signal", {}).get("top_k")
+    if not SIGNAL_METHOD or TOP_K is None:
+        raise RuntimeError(
+            "rank-1 spec declares no strategy.signal method or top_k; "
+            "the carrier's entry scheme cannot be reported"
+        )
 
 # %% [markdown]
 # Query the cross-family selection cohort and the narrower family cohort
@@ -280,7 +374,7 @@ _cohort_select = (
     "dsr_er, dsr_er_pvalue, expected_max_sharpe_raw, "
     "expected_max_sharpe_mp, expected_max_sharpe_er, min_trl_periods_raw, "
     "min_trl_periods_mp, min_trl_periods_er, cm.pbo, cm.leader_hash, "
-    "cm.pbo_n_combinations, cm.pbo_n_folds, t.config_name "
+    "cm.pbo_n_combinations, cm.pbo_n_folds, t.config_name, cm.member_digest "
     "FROM cohort_metrics cm "
     "JOIN backtest_runs b ON b.backtest_hash = cm.leader_hash "
     "JOIN prediction_sets p ON p.prediction_hash = b.prediction_hash "
@@ -325,6 +419,7 @@ def _cohort_payload(row: tuple | None) -> dict | None:
             "pbo_n_combinations": row[15],
             "pbo_n_folds": row[16],
             "leader_config_name": row[17],
+            "member_digest": row[18],
         }
         if row is not None
         else None
@@ -340,15 +435,80 @@ FAMILY_COHORT = _cohort_payload(_family_row)
 if SEARCH_COHORT is None:
     raise RuntimeError("Missing cross-family baseline cohort metrics")
 SEARCH_ATTRIBUTION = cohort_metric_attribution(SEARCH_COHORT, TOP_HASH)
-_baseline_leader = explorer.best(stage="signal", top_n=1).row(0, named=True)
-if SEARCH_COHORT["leader_hash"] != _baseline_leader["backtest_hash"]:
+# The cohort is fetched at the carrier's own stage, so the leader it has to name is that
+# stage's leader. This read `stage="signal"` while fetching the cohort at
+# `_lineage["val_stage"]`, which agreed only while the carrier happened to be a baseline row.
+# The current carrier is an allocation row, and the two sides of the comparison were then two
+# different stages: the check reported a mismatch that was its own.
+# Same population as the cohort above, and for the same reason: `best` with a stage alone
+# ranges over every label and every universe in the registry, so the leader it returns can be
+# a row the cohort never saw, and the check would then fail on the difference between two
+# populations rather than on a real disagreement.
+_stage_leader = explorer.best(
+    stage=_lineage["val_stage"],
+    top_n=1,
+    label=PRIMARY_LABEL,
+    prediction_hashes=_CANDIDATE_PREDICTIONS,
+).row(0, named=True)
+if SEARCH_COHORT["leader_hash"] != _stage_leader["backtest_hash"]:
     raise RuntimeError(
-        "Cross-family DSR leader does not match the displayed baseline leader: "
-        f"{SEARCH_COHORT['leader_hash']} != {_baseline_leader['backtest_hash']}"
+        f"Cross-family DSR leader does not match the {_lineage['val_stage']} leader: "
+        f"{SEARCH_COHORT['leader_hash']} != {_stage_leader['backtest_hash']}"
     )
-if int(SEARCH_COHORT["k_variants"]) != 342:
+# K is the size of the search the DSR deflates for, so it has to be the size of the grid the
+# selection ranged over. Two earlier versions of this check named it wrongly. It was first
+# pinned at the literal 342 - the count from the pre-rebuild registry, when `12_backtest` swept
+# the full and liquid universes together - which describes a search that no longer happens. It
+# was then measured off the registry with `explorer.best`, which is worse than a stale literal:
+# if part of the grid is missing, the recorded K and the measured count shrink together and the
+# check passes on an under-deflated DSR, which is the one thing it exists to catch.
+#
+# The grid is declared, not measured, and it is the grid of the carrier's own stage. The
+# nominees `13_portfolio_management` publishes span both stages the selection ranges over -
+# the baseline grid `12_backtest` declared and the allocation grid built on top of it - and
+# the DSR that deflates the carrier is the one computed over the stage the carrier came from.
+# Restricting the declared set to that stage is what keeps the three checks describing one
+# search: the cohort, its leader, and the members it was computed over.
+#
+# This read `sp500-options-baseline-validation-v1` unconditionally, which is the same set
+# whenever the carrier is a baseline row and a different search whenever it is not. Both
+# populations are immutable and `require_complete` refuses a missing or partial member, so
+# the count cannot shrink to meet a K that already has.
+with sqlite3.connect(str(_db)) as _con:
+    _stage_of = dict(
+        _con.execute(
+            "SELECT backtest_hash, stage FROM backtest_runs WHERE backtest_hash IN "
+            f"({','.join('?' * len(_candidate_hashes))})",
+            sorted(_candidate_hashes),
+        ).fetchall()
+    )
+_baseline_members = tuple(
+    sorted(h for h in _candidate_hashes if _stage_of.get(h) == _lineage["val_stage"])
+)
+if not _baseline_members:
     raise RuntimeError(
-        f"Cross-family DSR uses K={SEARCH_COHORT['k_variants']}, expected exact K=342"
+        f"{STRATEGY_CANDIDATES} declares no member at the carrier's stage "
+        f"{_lineage['val_stage']!r}, so there is no declared grid to deflate against"
+    )
+OfficialPopulation.one(_selection_study, name=BASELINE_POPULATION).require_complete()
+# The count alone is not enough. `cohort_metrics` records `member_digest`, an
+# order-independent digest of the hashes the correction was actually computed over, precisely
+# so a reader can establish that a stored DSR belongs to the cohort it is about to be reported
+# against. A cohort that swapped a declared member for a retired or unrelated backtest has the
+# same K and a different digest, and only the digest catches it.
+_declared_digest = cohort_member_digest(_baseline_members)
+if SEARCH_COHORT["member_digest"] is None:
+    raise RuntimeError(
+        "Cross-family DSR row predates member_digest, so the cohort it was computed over "
+        f"cannot be established; recompute the cohort metrics for {STRATEGY_CANDIDATES}"
+    )
+if SEARCH_COHORT["member_digest"] != _declared_digest:
+    raise RuntimeError(
+        f"Cross-family DSR was computed over a cohort of {SEARCH_COHORT['k_variants']} "
+        f"whose members are not the {len(_baseline_members)} that {STRATEGY_CANDIDATES} "
+        f"declares at the {_lineage['val_stage']!r} stage "
+        f"(digest {SEARCH_COHORT['member_digest']} != {_declared_digest}); the DSR must "
+        "deflate for the complete grid the selection ranged over"
     )
 PBO_REPORT = (
     reportable_pbo(FAMILY_COHORT["pbo"], FAMILY_COHORT["pbo_n_combinations"])
@@ -364,7 +524,7 @@ print(f"Rank-1: family={RANK1_FAMILY}, config={RANK1_CONFIG}, label={PRIMARY_LAB
 print(f"        prediction_hash={TOP_PHASH}, val_backtest_hash={TOP_HASH}")
 print(f"        holdout_backtest_hash={HO_HASH} (pred {HO_PHASH})")
 print(
-    f"        baseline DSR leader={SEARCH_COHORT['leader_hash']} "
+    f"        {_lineage['val_stage']} DSR leader={SEARCH_COHORT['leader_hash']} "
     f"(applies_to_carrier={SEARCH_ATTRIBUTION['applies_to_carrier']})"
 )
 print()
@@ -395,8 +555,8 @@ print(f"  CI status: {ci_status(ic_lo, ic_hi)}")
 #    spread (settle at intrinsic), so this gate is materially weakened
 #    relative to the bps-cost variants - but the entry-leg spread alone
 #    remains the dominant friction. The specification block reports the
-#    current entry and hedge cost totals; Section 5's HTM cost-sensitivity
-#    grid quantifies the slope.
+#    current entry and hedge cost totals; the `15_costs` sweep quantifies
+#    the slope against the share of the quoted spread paid on entry.
 #
 # In addition, the strategy-analysis notebook evaluates two universal gates in §9:
 # (i) the validation Sharpe CI lower bound ≥ 0, and
@@ -410,9 +570,9 @@ print(f"  CI status: {ci_status(ic_lo, ic_hi)}")
 # The equal-weight baseline sweep on `ret_to_expiry` covers four model families
 # under HTM accounting. The rank-1 lineage anchors a multi-stage path
 # (signal → allocation → optional risk overlay) at the training-hash
-# level; § 5 reads the HTM-specific cost sensitivity from the `14_costs`
-# artefact rather than the standard bps cost-grid (which is the wrong
-# unit for option premium returns).
+# level. § 5 says why the standard bps cost-grid is the wrong unit for
+# option premium returns and points at the `15_costs` population, which
+# runs the sweep in fractions of the quoted half-spread instead.
 
 # %%
 ctx = explorer.search_context("signal")
@@ -518,7 +678,7 @@ fig.show()
 
 # %% [markdown]
 # Three families produce zero positive-Sharpe baseline rows on `ret_to_expiry`.
-# Linear has two near-zero nonnegative rows among the exact 342-row surface.
+# Linear has two near-zero nonnegative rows among the complete baseline surface.
 # The full-universe leader is comparison evidence only; the registered carrier
 # is the liquid-universe rank-1. Neither resolves a statistically reliable edge.
 
@@ -545,8 +705,9 @@ print(
     "cross-section (eq_w_topk); the allocation stage overlays a within-"
     "cross-section weighting on the HTM cohort accounting; the risk_overlay "
     "stage layers position-level controls on top of the allocator weights. "
-    "§ 5 reads the HTM-specific cost grid from `14_costs` (the standard "
-    "bps cost-grid is the wrong unit for option premium returns)."
+    "The cost sweep lives in `15_costs`, in fractions of the quoted "
+    "half-spread (the standard bps cost-grid is the wrong unit for option "
+    "premium returns)."
 )
 
 # %% [markdown]
@@ -556,7 +717,7 @@ print(
 # Selection-bias adjustment (DSR raw / MP / ER, k_variants,
 # expected_max_sharpe, min_trl_periods) lives in `cohort_metrics` per
 # `memory/UNCERTAINTY_ARCHITECTURE.md` - `backtest_metrics` no longer
-# carries those columns. The DSR uses the exact 342-row cross-family baseline
+# carries those columns. The DSR uses the complete cross-family baseline
 # cohort and names its full-universe leader. That leader differs from the pinned
 # liquid carrier, so these statistics are not presented as carrier metrics.
 # Linear-family PBO is displayed separately and suppressed because only two
@@ -572,9 +733,9 @@ spec_block = {
     "config_name": RANK1_CONFIG,
     "label": PRIMARY_LABEL,
     "stage": _lineage["val_stage"],
-    "signal_method": "equal_weight_top_k",
+    "signal_method": SIGNAL_METHOD,
     "allocator": ALLOCATOR_METHOD,
-    "top_k": 5,
+    "top_k": TOP_K,
     "universe_filter": UNIVERSE_FILTER,
     "cascade_rung": CASCADE_RUNG,
     "rebalance_cadence": setup["decision"]["entry_cadence"],
@@ -592,7 +753,14 @@ spec_block = {
     "bootstrap_block_length": int(full["bootstrap_block_length"]),
     "bootstrap_n": int(full["bootstrap_n"]),
 }
-print("Pinned-carrier specification (equal-weight baseline, validation window):")
+# The stage comes from the carrier's own lineage. Naming it "equal-weight baseline" was
+# correct only while the cross-stage rank-1 happened to be a signal-stage row; the carrier in
+# force is an allocation row, and a reader told otherwise has the wrong provenance for every
+# number in the block.
+print(
+    f"Pinned-carrier specification ({_lineage['val_stage']} stage, "
+    f"{ALLOCATOR_METHOD or 'equal-weight'} allocation, validation window):"
+)
 for k, v in spec_block.items():
     print(f"  {k}: {v}")
 
@@ -640,7 +808,7 @@ for suffix, label in [("raw", "DSR_raw"), ("er", "DSR_ER"), ("mp", "DSR_MP")]:
     status = f"{suffix}_p={pvalue:.3f}" if pvalue is not None else "cohort_unavailable"
     dsr_rows.append(
         _row(
-            f"{label} (baseline leader {SEARCH_COHORT['leader_hash']})",
+            f"{label} ({_lineage['val_stage']} leader {SEARCH_COHORT['leader_hash']})",
             _fmt(SEARCH_COHORT[f"dsr_{suffix}"]),
             "-",
             "-",
@@ -674,7 +842,8 @@ print("Current-carrier performance and exactly attributed search diagnostics:")
 print(headline)
 
 # %% [markdown]
-# The cross-family DSR row has exact K=342 and names the complete-grid baseline
+# The cross-family DSR row has K equal to the registered baseline count and names
+# the complete-grid baseline
 # leader, not the pinned liquid carrier. PBO is a separate linear-family
 # diagnostic. With only two CSCV combinations, the notebook reports
 # "insufficient combinations" instead of interpreting 0.50.
@@ -770,7 +939,7 @@ fig.show()
 # evidence is null-consistent. § 6's paired holdout vs EW test resolves
 # whether the validation/EW gap holds out of sample. Selection accounting
 # is supplied by the exact cross-family baseline cohort above (DSR raw /
-# MP / ER and K=342 from `cohort_metrics`), whose named leader differs from
+# MP / ER and K from `cohort_metrics`), whose named leader differs from
 # the carrier. Linear-family PBO is separately suppressed as underidentified.
 # The two near-zero nonnegative baseline rows do not alter the unresolved
 # selection-adjusted DSR_ER reading.
@@ -780,7 +949,8 @@ fig.show()
 #
 # The equal-weight baseline sweep on this case study now runs on a single label
 # - `ret_to_expiry` - under HTM cost accounting (entry-side option
-# spread + daily underlying hedge spread, no exit-leg option trade).
+# spread + daily underlying hedge spread, plus an exit-leg option trade only
+# where a contract's chain ends before its expiration date).
 # Four legacy diagnostic labels (`fwd_ret_5d`, `fwd_ret_10d`,
 # `fwd_ret_dh_5d`, `fwd_ret_dh_10d`) were dropped from the sweep on
 # 2026-05-17: they routed through the vectorized backtest path that
@@ -863,78 +1033,16 @@ if fold_df.height > 1:
 # bad-vol regime can wipe out cumulative premium.
 
 # %% [markdown]
-# ## §5 Friction budget - the HTM cost-sensitivity grid
+# ## §5 Friction budget
 #
-# The standard `BacktestExplorer.cost_sensitivity()` curve is denominated
-# in bps per leg, which is the right convention for equities and futures
-# but the wrong unit for options: a 10% spread on a 4% premium is 40 bps
-# of notional, well within the "positive Sharpe" zone of any equity
-# sweep, but catastrophic for the actual P&L. § 14 (`14_costs`) ran an
-# HTM-specific cost grid in % of half-spread per trade, monotonicity-
-# checked, and saved the result to
-# `evaluation/htm_cost_sensitivity.parquet`. We read that artefact here
-# rather than recomputing.
-
-# %%
-_cost_path = CASE_DIR / "evaluation" / "htm_cost_sensitivity.parquet"
-if _cost_path.exists():
-    cost_sens = pl.read_parquet(_cost_path)
-    print("HTM cost-sensitivity table (from `14_costs`):")
-    print(cost_sens)
-
-    cost_table = cost_sens.pivot(
-        on="cost_fraction", index=["family", "universe"], values="sharpe"
-    ).sort("family", "universe")
-    print()
-    print("HTM net Sharpe by cost fraction (equal-weight top-K, weekly entry):")
-    print(cost_table)
-else:
-    cost_sens = None
-    print(
-        f"htm_cost_sensitivity.parquet not present at {_cost_path}; § 5 quantitative read is unavailable."
-    )
-
-# %%
-if cost_sens is not None:
-    family_style = {
-        "deep_learning": ("Deep learning (LSTM)", "#1565C0", "o"),
-        "gbm": ("Gradient boosting", "#43A047", "s"),
-        "linear": ("Linear", "#F57C00", "^"),
-        "tabular_dl": ("Tabular DL (TabM)", "#7B1FA2", "D"),
-    }
-    universes = sorted(cost_sens["universe"].unique().to_list())
-    fig, axes = plt.subplots(1, len(universes), figsize=(12, 4), sharey=True)
-    for axis, universe in zip(axes, universes, strict=True):
-        subset = cost_sens.filter(pl.col("universe") == universe)
-        for family in sorted(subset["family"].unique().to_list()):
-            line = subset.filter(pl.col("family") == family).sort("cost_fraction")
-            label, color, marker = family_style[family]
-            axis.plot(
-                line["cost_fraction"],
-                line["sharpe"],
-                color=color,
-                marker=marker,
-                label=label,
-                linewidth=1.5,
-                markersize=5,
-            )
-        axis.axhline(0, color="#9E9E9E", linewidth=0.8, linestyle="--")
-        axis.set_xlabel("Fraction of quoted half-spread")
-        axis.set_title(f"{universe.title()} universe")
-        axis.legend(loc="lower left", fontsize=7, frameon=False)
-    axes[0].set_ylabel("Net Sharpe (HTM, EW top-K)")
-    fig.suptitle("Costs leave every family-universe curve below zero")
-    fig.tight_layout()
-    fig.show()
-
-# %% [markdown]
-# The HTM cost grid begins at the favorable 20.3% execution fraction and
-# ends at the full quoted half-spread. Every registered cost row is
-# negative, and Sharpe decreases monotonically within all eight
-# family-universe curves. Liquidity changes both spreads and selected
-# trades, so it improves only two of the 16 matched comparisons. The
-# cost surface therefore reinforces, rather than rescues, the current
-# validation conclusion.
+# The standard `BacktestExplorer.cost_sensitivity()` curve is denominated in bps per leg, which is
+# the right convention for equities and futures but the wrong unit for options: a 10% spread on a
+# 4% premium is 40 bps of notional, well inside the "positive Sharpe" zone of any equity sweep and
+# ruinous for the actual P&L. `15_costs` runs the cost sweep in fractions of the quoted half-spread
+# instead, executes it through the same engine as every other backtest, and publishes it as the
+# named population `sp500-options-cost-sensitivity-validation-v1`. It reports the resulting Sharpe
+# surface across families, universes and spread fractions there, each point with its
+# block-bootstrap Sharpe interval, so this notebook does not repeat it.
 
 # %% [markdown]
 # ## §6 Holdout closure with paired bootstrap
@@ -1299,8 +1407,8 @@ lineage = {
         "volatility": full["volatility"],
         "total_return": full["total_return"],
         "backtest_hash": TOP_HASH,
-        "signal_method": "equal_weight_top_k",
-        "top_k": 5,
+        "signal_method": SIGNAL_METHOD,
+        "top_k": TOP_K,
     }
 }
 op_profile = compute_operating_profile(lineage, setup)
@@ -1387,9 +1495,9 @@ rank1_assessment = {
     "prediction_hash": TOP_PHASH,
     "validation_backtest_hash": TOP_HASH,
     "holdout_backtest_hash": HO_HASH,
-    "signal_method": "equal_weight_top_k",
+    "signal_method": SIGNAL_METHOD,
     "allocator": ALLOCATOR_METHOD,
-    "top_k": 5,
+    "top_k": TOP_K,
     "universe_filter": UNIVERSE_FILTER,
     "cascade_rung": CASCADE_RUNG,
     "rebalance_cadence": setup["decision"]["entry_cadence"],
@@ -1443,10 +1551,13 @@ headline_assessment = {
 # %%
 selection_assessment = {
     "architecture": "cohort_metrics",
-    "cohort_layer": "stagelabel/(signal, ret_to_expiry)",
+    # Both derived from the row actually fetched above, not restated. The literals here named
+    # the signal stage and the primary label, and the cohort is fetched at the carrier's stage,
+    # so a serialized assessment attributed an allocation-stage cohort to the baseline.
+    "cohort_layer": f"stagelabel/({_lineage['val_stage']}, {PRIMARY_LABEL})",
     "metric_subject": (
-        f"cross-family baseline leader {SEARCH_COHORT['leader_config_name']} "
-        f"({SEARCH_COHORT['leader_hash']})"
+        f"cross-family {_lineage['val_stage']} leader "
+        f"{SEARCH_COHORT['leader_config_name']} ({SEARCH_COHORT['leader_hash']})"
     ),
     "carrier_hash": TOP_HASH,
     "applies_to_current_carrier": SEARCH_ATTRIBUTION["applies_to_carrier"],

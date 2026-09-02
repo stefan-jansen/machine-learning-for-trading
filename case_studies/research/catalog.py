@@ -100,6 +100,12 @@ _BACKTEST_METRIC_COLUMNS = (
     "total_commission",
     "total_slippage",
     "avg_turnover",
+    # The block-bootstrap Sharpe interval is registered on every backtest by
+    # ``compute_backtest_uncertainty``. Without it here, a catalog reader can
+    # only report point estimates and has to drop to raw SQL to say whether a
+    # Sharpe clears zero.
+    "sharpe_ci95_lo",
+    "sharpe_ci95_hi",
 )
 BACKTEST_RESERVED_COLUMNS: dict[str, Any] = {
     "catalog_version": pl.Int64,

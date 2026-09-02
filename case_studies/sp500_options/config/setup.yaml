@@ -138,13 +138,20 @@ backtest:
     # ``execution.allocator_lookback`` on the underlying SPX series; option
     # contracts cycling in/out of the per-expiry universe are part of the
     # observed concentration profile, not hidden behind a method filter.
+    # The six alternatives the shared menu declares. equal_weight is deliberately
+    # not here: it is the signal stage's own weighting, so listing it would enter
+    # the baseline into the comparison as a competitor against itself.
+    # conformal_weighted sizes by the width of each prediction's conformal
+    # interval, so it is the only entry that reads the model's own uncertainty;
+    # widths are generated on demand from the prediction set, with no separate
+    # bootstrap step.
     allocators:
-      - {name: equal_weight,    method: equal_weight}
-      - {name: score_weighted,  method: score_weighted}
-      - {name: inverse_vol,     method: inverse_vol}
-      - {name: risk_parity,     method: risk_parity}
-      - {name: mvo_ledoit_wolf, method: mvo_ledoit_wolf}
-      - {name: hrp,             method: hrp}
+      - {name: score_weighted,     method: score_weighted}
+      - {name: inverse_vol,        method: inverse_vol}
+      - {name: risk_parity,        method: risk_parity}
+      - {name: mvo_ledoit_wolf,    method: mvo_ledoit_wolf}
+      - {name: hrp,                method: hrp}
+      - {name: conformal_weighted, method: conformal_weighted}
     # Ch18 cost analysis is the three-rung hold-to-maturity cascade
     # (O'Donovan & Yu 2024, anchored to Muravyev & Pearson 2020). The
     # standard cost_grid_bps regime does not apply: HTM avoids the
@@ -363,6 +370,16 @@ modeling:
     # faster and lose split points; the reader running this on a CPU gets what the
     # documentation describes.
     max_bin: 255
+  dl:
+    # The device every deep-learning fit in this case study is registered under, read by
+    # `research_workflow.declared_dl_device`. It is not a runtime convenience: the device
+    # enters the training identity through `sequence_identity_params`, so one configuration
+    # fitted on a GPU and the same configuration fitted on a CPU are two different runs
+    # rather than one run on two machines. `cuda` is what the published `tabular_dl` and
+    # sequence populations were fitted on. A reader with no NVIDIA card passes DEVICE="cpu"
+    # together with a POPULATION_NAME, which records the change with the run instead of
+    # substituting a different fit under the published population's name.
+    device: cuda
 
 causal:
   treatment: vrp_21d

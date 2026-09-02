@@ -100,18 +100,29 @@ def _validate_frame(kind: str, decisions: pl.DataFrame) -> tuple[str, ...]:
         )
         if not invalid_dates.is_empty():
             raise ValueError("short-straddle entry and expiration dates are invalid")
-        if decisions.filter(
-            (pl.col("strike") <= 0)
-            | (pl.col("entry_straddle_mid") <= 0)
-            | (pl.col("entry_call_mid") <= 0)
-            | (pl.col("entry_put_mid") <= 0)
-            | (pl.col("entry_call_bid") < 0)
-            | (pl.col("entry_put_bid") < 0)
-            | (pl.col("entry_call_ask") < pl.col("entry_call_bid"))
-            | (pl.col("entry_put_ask") < pl.col("entry_put_bid"))
-            | (pl.col("weight") <= 0)
-        ).height:
-            raise ValueError("short-straddle decisions contain invalid quotes, strike, or weight")
+        # Named per condition rather than as one disjunction. The combined message reports
+        # nine unrelated defects as one sentence, and the caller then has to re-derive which
+        # of a quote, a strike and an allocator weight it met.
+        conditions = {
+            "strike <= 0": pl.col("strike") <= 0,
+            "entry_straddle_mid <= 0": pl.col("entry_straddle_mid") <= 0,
+            "entry_call_mid <= 0": pl.col("entry_call_mid") <= 0,
+            "entry_put_mid <= 0": pl.col("entry_put_mid") <= 0,
+            "entry_call_bid < 0": pl.col("entry_call_bid") < 0,
+            "entry_put_bid < 0": pl.col("entry_put_bid") < 0,
+            "entry_call_ask < entry_call_bid": pl.col("entry_call_ask") < pl.col("entry_call_bid"),
+            "entry_put_ask < entry_put_bid": pl.col("entry_put_ask") < pl.col("entry_put_bid"),
+            "weight <= 0": pl.col("weight") <= 0,
+        }
+        counts = decisions.select(
+            [predicate.sum().alias(name) for name, predicate in conditions.items()]
+        ).row(0, named=True)
+        offending = {name: int(count) for name, count in counts.items() if count}
+        if offending:
+            raise ValueError(
+                "short-straddle decisions contain invalid quotes, strike, or weight: "
+                + ", ".join(f"{name} on {count} rows" for name, count in offending.items())
+            )
         weight_sums = decisions.group_by("timestamp").agg(pl.col("weight").sum().alias("weight"))
         if weight_sums.filter((pl.col("weight") - 1.0).abs() > 1e-10).height:
             raise ValueError("short-straddle weights must sum to one per decision timestamp")

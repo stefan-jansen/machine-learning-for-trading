@@ -670,16 +670,28 @@ def _cached_research_run(study: Study, spec: dict[str, Any], context: TabMResear
     required = {
         "all_predictions.parquet",
         "learning_curves.parquet",
-        "predictions.parquet",
         "result.json",
         "training_log.parquet",
     }
-    if not diagnostics.is_dir() or required - {path.name for path in diagnostics.iterdir()}:
+    present = {path.name for path in diagnostics.iterdir()} if diagnostics.is_dir() else set()
+    # `best_epoch_predictions.parquet` was written as `predictions.parquet` until 2026-09-01, and
+    # every cached run from before then carries the old name. Accepting either keeps those runs
+    # reusable; requiring the new one alone would refit every tabm cohort in every case study to
+    # rename a diagnostic file.
+    best_epoch = next(
+        (
+            name
+            for name in ("best_epoch_predictions.parquet", "predictions.parquet")
+            if name in present
+        ),
+        None,
+    )
+    if not diagnostics.is_dir() or required - present or best_epoch is None:
         return None
     try:
-        for name in required - {"result.json"}:
+        for name in (required - {"result.json"}) | {best_epoch}:
             pl.read_parquet(diagnostics / name)
-        selected = pl.read_parquet(diagnostics / "predictions.parquet")
+        selected = pl.read_parquet(diagnostics / best_epoch)
         if "model_id" not in selected.columns or {"config", "epoch"} & set(selected.columns):
             return None
         json.loads((diagnostics / "result.json").read_text())
@@ -801,7 +813,13 @@ def _persist_tabm_diagnostics(train_dir: Path, result: dict[str, Any], candidate
         .drop("config", "epoch")
     )
     predictions.write_parquet(diagnostics_dir / "all_predictions.parquet")
-    best.write_parquet(diagnostics_dir / "predictions.parquet")
+    # Named for what it holds. Filtered to `best_epoch`, which is an IC-selected single epoch,
+    # so a reader wiring up "the predictions" from this directory under the old name
+    # `predictions.parquet` would have collapsed the checkpoint dimension on IC - the reduction
+    # the pipeline does at the allocation gate on baseline Sharpe and nowhere else. Every
+    # checkpoint reaches the registry through `_publish_tabm_predictions`; this file is a
+    # diagnostic beside them.
+    best.write_parquet(diagnostics_dir / "best_epoch_predictions.parquet")
     curves.write_parquet(diagnostics_dir / "learning_curves.parquet")
     training_log.write_parquet(diagnostics_dir / "training_log.parquet")
     (diagnostics_dir / "result.json").write_text(
@@ -2229,7 +2247,9 @@ def _assemble_tabm_results(
     if save_dir is not None:
         save_dir.mkdir(parents=True, exist_ok=True)
         if best_predictions.height:
-            best_predictions.write_parquet(save_dir / "predictions.parquet")
+            # Same file, same reason as `_persist_tabm_diagnostics`: it is one IC-selected
+            # epoch, and the name says so.
+            best_predictions.write_parquet(save_dir / "best_epoch_predictions.parquet")
         if all_predictions.height:
             all_predictions.write_parquet(save_dir / "all_predictions.parquet")
         if curves.height:

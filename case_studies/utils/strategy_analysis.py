@@ -1875,30 +1875,30 @@ def build_all_synthesis(
         cost_bps = compute_cost_bps(setup)
         labels_cfg = setup.get("labels", {})
 
-        # Get date range from labels data if available
+        # The date range is the primary label's, and reported as empty where that file is
+        # absent. It was previously read from `glob("*.parquet")[0]`, an arbitrary pick from an
+        # unsorted directory: any file dropped in there decided the answer, and a variant label
+        # with a different horizon reported a range the case study's own results do not span.
         date_start, date_end = "", ""
-        for labels_subdir in ["labels", "data/labels"]:
-            labels_dir = case_dir / labels_subdir
-            if labels_dir.exists():
-                label_files = list(labels_dir.glob("*.parquet"))
-                if label_files:
-                    try:
-                        lf = pl.scan_parquet(label_files[0])
-                        cols = lf.collect_schema().names()
-                        ts_col = (
-                            "timestamp"
-                            if "timestamp" in cols
-                            else "date"
-                            if "date" in cols
-                            else None
-                        )
-                        if ts_col:
-                            ts_df = lf.select(ts_col).collect()
-                            if not ts_df.is_empty():
-                                date_start = str(ts_df[ts_col].min())[:10]
-                                date_end = str(ts_df[ts_col].max())[:10]
-                    except Exception:
-                        pass
+        primary_label = labels_cfg.get("primary", "")
+        if primary_label:
+            for labels_subdir in ["labels", "data/labels"]:
+                label_file = case_dir / labels_subdir / f"{primary_label}.parquet"
+                if not label_file.exists():
+                    continue
+                try:
+                    lf = pl.scan_parquet(label_file)
+                    cols = lf.collect_schema().names()
+                    ts_col = (
+                        "timestamp" if "timestamp" in cols else "date" if "date" in cols else None
+                    )
+                    if ts_col:
+                        ts_df = lf.select(ts_col).collect()
+                        if not ts_df.is_empty():
+                            date_start = str(ts_df[ts_col].min())[:10]
+                            date_end = str(ts_df[ts_col].max())[:10]
+                except Exception:
+                    pass
                 if date_start:
                     break
 
