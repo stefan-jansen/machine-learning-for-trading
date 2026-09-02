@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
@@ -20,16 +19,6 @@ from tests.test_research_contract_catalog import _publish, _resolved_spec
 from tests.test_research_flow import _patch_holdout_prices, _prices
 from tests.test_research_registry import _predictions
 from tests.test_research_workspace import _seed_release
-
-
-@pytest.fixture(autouse=True)
-def _restore_output_root():
-    yield
-    os.environ.pop("ML4T_OUTPUT_DIR", None)
-    from case_studies.research import workspace
-
-    workspace._ACTIVE_OUTPUT_ROOT = None
-    workspace._clear_root_sensitive_caches()
 
 
 def _study(tmp_path: Path) -> Study:

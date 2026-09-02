@@ -855,12 +855,40 @@ class Strategy:
         spec = self.resolve(prices=prices)
         return backtest_hash_from_parts(self.prediction.hash, spec, identity_version=2)
 
-    def run(
-        self,
-        *,
-        prices: pl.DataFrame | None = None,
-        option_lifecycle: pl.DataFrame | None = None,
-    ) -> BacktestResult:
+    def _require_lifecycle_covers_decision(self, option_lifecycle: pl.DataFrame) -> None:
+        """Refuse a primed lifecycle that does not span the contracts this decision holds.
+
+        The frame is trustworthy by construction - it is looked up by the digest of the files
+        this backtest's identity records, so it is the one those files produce. What is not
+        guaranteed is coverage: it was loaded for the union of a run's decisions, and a request
+        whose decision reaches outside that union would price the contracts it does cover and
+        silently drop the rest.
+        """
+        if self.decision is None:
+            return
+        decisions = self.decision.load()
+        keys = ["symbol", "strike", "expiration"]
+        if not set(keys) <= set(decisions.columns):
+            return
+        wanted = decisions.select(keys).unique()
+        missing = wanted.join(option_lifecycle.select(keys).unique(), on=keys, how="anti")
+        if not missing.is_empty():
+            raise ValueError(
+                f"the primed option lifecycle is missing {missing.height} of "
+                f"{wanted.height} contracts this decision holds "
+                f"(first: {missing.head(3).to_dicts()})"
+            )
+
+    def run(self, *, prices: pl.DataFrame | None = None) -> BacktestResult:
+        """Execute this strategy and register the result.
+
+        A caller running many option requests over one decision set primes the shared option
+        lifecycle first, with
+        :func:`case_studies.sp500_options._htm_backtest.prime_option_lifecycle`. This method
+        looks that frame up by the digest its own identity records, so the frame it prices with
+        is always the one the declared files produce; there is no frame parameter to pass a
+        different one through.
+        """
         self.study.require_writable()
         if self.split == "holdout" and prices is not None:
             raise ValueError("locked holdout strategy must load canonical holdout prices")
@@ -885,6 +913,15 @@ class Strategy:
         )
         case_config = get_backtest_config(self.study.case_study)
         spec = self._build_spec(resolved_prices, case_config, contract_specs)
+        option_lifecycle = None
+        if self.study.case_study == "sp500_options" and self.label == "ret_to_expiry":
+            from case_studies.sp500_options._htm_backtest import primed_option_lifecycle
+
+            option_lifecycle = primed_option_lifecycle(
+                spec.get("input_identity", {}).get("option_lifecycle")
+            )
+            if option_lifecycle is not None:
+                self._require_lifecycle_covers_decision(option_lifecycle)
         self._require_validation_calibrated_widths(spec)
         tier = ExecutionTier(self.prediction.execution_tier)
         self.study.activate(tier)

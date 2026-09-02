@@ -48,7 +48,10 @@ def _register(case_dir, *, refutation_p, n_successful) -> None:
 
 
 def _study(case_dir):
-    return SimpleNamespace(root=case_dir, output_root=None)
+    # `release_case_root` is read by `CausalResult.open` to fall back to the release
+    # registry when a workspace is opened over one. Pointing it at the same directory is
+    # the "no separate release" case, which is what a tmp_path registry is.
+    return SimpleNamespace(root=case_dir, output_root=None, release_case_root=case_dir)
 
 
 def _drop_the_column(case_dir) -> None:

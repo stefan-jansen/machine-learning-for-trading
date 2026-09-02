@@ -84,6 +84,8 @@ from ml4t.diagnostic.visualization.portfolio.returns_plots import (
 from ml4t.diagnostic.visualization.portfolio.risk_plots import plot_rolling_sharpe
 
 # %%
+from case_studies.research.population import split_unpublished_members
+from case_studies.research.workspace import open_study
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_metrics, load_benchmark_returns
 from case_studies.utils.conformal import CALIBRATION_VERSION
@@ -114,6 +116,7 @@ from case_studies.utils.registry import (
     load_backtest_fold_metrics,
     load_backtest_metrics,
     load_paired_metrics,
+    load_prediction_index,
 )
 from case_studies.utils.strategy_analysis import (
     ci_status,
@@ -211,6 +214,21 @@ from case_studies.utils.cohort_metrics import compute_and_register
 from case_studies.utils.paired_metrics import populate_paired_metrics
 
 _db = CASE_DIR / "run_log" / "registry.db"
+# The prediction sets their publishers still stand behind. `compute_and_register` scopes cohorts
+# by prediction, and unscoped it computes them over the whole registry: 22 configurations here
+# carry more than one training generation, and the pool grew by roughly 2,300 backtests when
+# fwd_ret_1m_win and fwd_class_1m were backtested. K is what the deflated Sharpe divides by, so
+# an unscoped call reports a correction computed over a population this page does not describe.
+# Every declared label stays in - they compete at the baseline, and the selection ranges over
+# all of them - so what is excluded is superseded generations, not variant labels.
+_live_index = split_unpublished_members(
+    open_study(CASE_STUDY),
+    load_prediction_index(CASE_STUDY, split="validation"),
+)
+LIVE_PREDICTIONS = _live_index.live["prediction_hash"].to_list()
+if not LIVE_PREDICTIONS:
+    raise RuntimeError(f"no live validation prediction sets for {CASE_STUDY}")
+print(f"Live prediction sets: {len(LIVE_PREDICTIONS):,}")
 # Resolved before the guard because the guard asks about this holdout, not about holdouts
 # in general. §6 re-resolves it and checks the two agree.
 _lineage = resolve_canonical_rank1_lineage(CASE_STUDY)
@@ -239,9 +257,61 @@ with sqlite3.connect(str(_db)) as _con:
         if "backtest_paired_metrics" in _tables
         else set()
     )
+    # Presence says the tables were built; it does not say they were built over the population
+    # this notebook reports. Scoping the cohorts to the live predictions changes K, and the
+    # previous unscoped rows survive under the same enum values - so a presence-only guard
+    # accepts them, prints "already present, nothing written", and the correction stays the one
+    # computed over a population the page does not describe. A cohort is stale when its
+    # membership is unrecorded, when its leader is a retired prediction, or when its stage still
+    # holds one; a pair is stale when either side is. Same test as `_stale_derived_rows` in
+    # `case_studies/etfs/20_strategy_analysis.py`, which reached it first.
+    _live_payload = json.dumps(LIVE_PREDICTIONS)
+    _stale_cohorts = (
+        _con.execute(
+            """
+            SELECT COUNT(*) FROM cohort_metrics cm
+            WHERE cm.member_digest IS NULL
+               OR cm.leader_hash IN (
+                      SELECT backtest_hash FROM backtest_runs
+                      WHERE prediction_hash NOT IN (SELECT value FROM json_each(?1))
+                  )
+               OR EXISTS (
+                      SELECT 1 FROM backtest_runs r
+                      WHERE r.stage IS cm.stage
+                        AND r.prediction_hash NOT IN (SELECT value FROM json_each(?1))
+                  )
+            """,
+            (_live_payload,),
+        ).fetchone()[0]
+        if "cohort_metrics" in _tables
+        else 0
+    )
+    _stale_pairs = (
+        _con.execute(
+            """
+            SELECT COUNT(*) FROM backtest_paired_metrics pm
+            WHERE pm.challenger_hash IN (
+                      SELECT backtest_hash FROM backtest_runs
+                      WHERE prediction_hash NOT IN (SELECT value FROM json_each(?1))
+                  )
+               OR pm.benchmark_hash IN (
+                      SELECT backtest_hash FROM backtest_runs
+                      WHERE prediction_hash NOT IN (SELECT value FROM json_each(?1))
+                  )
+            """,
+            (_live_payload,),
+        ).fetchone()[0]
+        if "backtest_paired_metrics" in _tables
+        else 0
+    )
 REQUIRED_PAIR_KINDS = {"val_rank1_self", "equal_weight_holdout_side_artifact"}
-if _n_cohorts == 0 or not REQUIRED_PAIR_KINDS.issubset(_kinds_present):
-    _cohort_counts = compute_and_register(CASE_STUDY)
+if (
+    _n_cohorts == 0
+    or not REQUIRED_PAIR_KINDS.issubset(_kinds_present)
+    or _stale_cohorts
+    or _stale_pairs
+):
+    _cohort_counts = compute_and_register(CASE_STUDY, prediction_hashes=LIVE_PREDICTIONS)
     # The lineage is passed rather than re-derived inside. Left to itself the populator
     # ranks the registry on raw Sharpe, which is a fourth selector beside the resolver,
     # this notebook and the costs sweep - and here it picked the retired conformal
@@ -273,12 +343,11 @@ else:
 # prose. IC on the prediction set is computed on continuous model scores against
 # continuous realized returns.
 #
-# Only the setup-primary label `fwd_ret_1m` has been backtested. The modelling
-# stages also fitted the winsorized variant `fwd_ret_1m_win` and the
-# classification variant `fwd_class_1m`, and their predictions are registered,
-# but no backtest runs against either - so the strategy phase compares one label
-# to itself and the variants are outside what this notebook can say anything
-# about.
+# All three declared labels are backtested: the setup-primary `fwd_ret_1m`, the
+# winsorized `fwd_ret_1m_win` and the classification variant `fwd_class_1m`. They
+# compete at the baseline and the selection ranges over all of them, so the label
+# the strategy phase carries is read off the resolver below rather than assumed
+# to be the primary one.
 
 # %% [markdown]
 # The shared resolver applies the common-support contract whenever corrected
@@ -622,9 +691,10 @@ if missing_stages:
 # of it is the window. The comparison below recomputes both on the exact
 # timestamp intersection and raises if the two supports still differ.
 #
-# The two rows are the strongest candidate under each sizing rule, found by
-# ranking rather than named, so the comparison reads the same way whichever rule
-# the selection landed on.
+# One row per sizing rule the eligible population registers, each the strongest
+# candidate under that rule, found by ranking rather than named - so the comparison
+# reads the same way whichever rule the selection landed on, and adding an allocator
+# to the sweep adds a row here rather than silently falling outside the check.
 #
 # They are drawn from the population the selection rule itself draws from, and they have
 # to be: both arms are compared against the selected run, and the check below requires
@@ -652,53 +722,70 @@ with sqlite3.connect(str(_db)) as _con:
         "JOIN training_runs t ON t.training_hash=p.training_hash "
         f"WHERE b.stage IN ({', '.join('?' * len(_ELIGIBLE_STAGES))}) "
         "AND p.split='validation' AND bm.sharpe IS NOT NULL "
-        "AND t.family != 'benchmark'" + degenerate_prediction_sql("p.prediction_hash"),
-        _ELIGIBLE_STAGES,
+        "AND t.family != 'benchmark' "
+        # The same live population the cohort corrections are scoped to. Unscoped, this pool
+        # holds superseded generations the selection never ranked, and they decide how far the
+        # common-support intersection reaches - so the comparison would be computed over a
+        # window the selected run was never ranked on, and the chart would label it with the
+        # resolver's period count while showing another.
+        f"AND p.prediction_hash IN ({', '.join('?' * len(LIVE_PREDICTIONS))})"
+        + degenerate_prediction_sql("p.prediction_hash"),
+        (*_ELIGIBLE_STAGES, *LIVE_PREDICTIONS),
     ).fetchall()
 
-# A superseded conformal calibration is not a candidate; the equal-weight side has no such
+# A superseded conformal calibration is not a candidate; no other sizing rule has such a
 # distinction to make. The current contract is read from `CALIBRATION_VERSION` rather than
 # written out here: this line named `walk_forward_v2` as the strict rule, and when the
 # fleet moved to `walk_forward_v3` the literal stopped matching anything and the notebook
 # refused with "no conformal candidate is registered" - which reads as an absent sweep and
 # was a stale string.
-equal_weight_hashes = [row[0] for row in _sizing_candidates if row[1] == "equal_weight"]
-current_conformal_hashes = [
-    row[0]
+#
+# Which sizing rules exist is read from the registry rather than named here. This cell named
+# `equal_weight` and `conformal_weighted` and built a comparison row for each, while the
+# selection rule ranges over the whole allocator sweep. When the winsorized label's
+# `score_weighted` allocation took rank 1, the selected run belonged to a rule the comparison
+# had no row for, and the check below refused it for disagreeing with a ranking it was never
+# entered in. Reading the rules off the same population the selection draws from is what makes
+# "strongest under its own sizing rule" a statement about the selection rather than about
+# which two rules this cell happened to list.
+_method_of = {
+    row[0]: row[1]
     for row in _sizing_candidates
-    if row[1] == "conformal_weighted" and row[2] == CALIBRATION_VERSION
-]
-if not current_conformal_hashes:
+    if row[1] != "conformal_weighted" or row[2] == CALIBRATION_VERSION
+}
+_methods = set(_method_of.values())
+if "conformal_weighted" not in _methods:
     raise RuntimeError(
         f"No conformal candidate at the current calibration {CALIBRATION_VERSION!r} is "
         "registered. Re-run 12_portfolio_management: the registry's conformal generation "
         "predates the current contract and cannot be executed."
     )
-if not equal_weight_hashes:
+if "equal_weight" not in _methods:
     raise RuntimeError("No equal-weight baseline candidate is registered.")
+if TOP_HASH not in _method_of:
+    raise RuntimeError(
+        f"The selected run {TOP_HASH} is not in the eligible sizing population, so this "
+        "comparison would rank it against candidates the selection never saw."
+    )
 
 sizing_ranking = rank_backtests_on_common_support(
     CASE_STUDY,
-    sorted({TOP_HASH, *equal_weight_hashes, *current_conformal_hashes}),
+    sorted(_method_of),
     periods_per_year=PERIODS_PER_YEAR,
 )
-_allocator_of = {row[0]: row[1] for row in _sizing_candidates}
 sizing_ranking = sizing_ranking.with_columns(
-    pl.col("backtest_hash").replace_strict(_allocator_of, default="equal_weight").alias("method")
+    pl.col("backtest_hash").replace_strict(_method_of).alias("method")
 )
-BEST_EQUAL_WEIGHT_HASH = sizing_ranking.filter(pl.col("method") == "equal_weight")["backtest_hash"][
-    0
-]
-BEST_CONFORMAL_HASH = sizing_ranking.filter(pl.col("method") == "conformal_weighted")[
-    "backtest_hash"
-][0]
-selection_comparison = sizing_ranking.filter(
-    pl.col("backtest_hash").is_in([BEST_EQUAL_WEIGHT_HASH, BEST_CONFORMAL_HASH])
-).with_columns(
-    pl.when(pl.col("backtest_hash") == TOP_HASH)
-    .then(pl.col("method") + pl.lit(" (selected)"))
-    .otherwise(pl.col("method"))
-    .alias("method")
+selection_comparison = (
+    sizing_ranking.sort("sharpe", descending=True)
+    .group_by("method", maintain_order=True)
+    .first()
+    .with_columns(
+        pl.when(pl.col("backtest_hash") == TOP_HASH)
+        .then(pl.col("method") + pl.lit(" (selected)"))
+        .otherwise(pl.col("method"))
+        .alias("method")
+    )
 )
 if selection_comparison["n_periods"].n_unique() != 1:
     raise RuntimeError("Selection comparison does not have identical period support.")
@@ -725,7 +812,8 @@ bars = ax.bar(
 ax.bar_label(bars, labels=[f"{value:.3f}" for value in stage_values], padding=4)
 ax.axhline(0, color=COLORS["neutral"], linewidth=0.8)
 ax.set_xticks(x, stage_labels)
-ax.set_ylabel(f"Validation Sharpe on common {COMMON_SUPPORT_N}-month support")
+_COMPARISON_N = int(selection_comparison["n_periods"][0])
+ax.set_ylabel(f"Validation Sharpe on common {_COMPARISON_N}-month support")
 add_message_title(
     ax,
     "Selection reads the peak of each sizing rule, not its average",

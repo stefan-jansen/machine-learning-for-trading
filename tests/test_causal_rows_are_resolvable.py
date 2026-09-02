@@ -11,15 +11,19 @@ refuses version 3 without that payload. So a notebook that reaches `register_cau
 registers something no reader sees, whatever it names the result it passes in.
 
 Measured against the fleet registries on 2026-08-25: crypto 2/2 rows visible, cme 6/6, fx
-3/3, all written by the resolver. us_firm_characteristics 0/3 written by the
-wrapper; etfs' one row was written by the wrapper and its notebook has since been converted,
-so its next run registers a resolvable one. sp500_options holds one visible row, but it was written by the resolver before
-that notebook moved to the wrapper, so its next run registers an invisible one;
-nasdaq100_microstructure has registered nothing yet and would register an invisible row on
-its first run. sp500_equity_option_analytics registered one through the wrapper on 2026-08-26
-and replaced it through the resolver on 2026-08-31; the wrapper row is still in its table,
-stranded rather than superseded, because a row no reader resolves cannot be named as a
-predecessor.
+3/3, all written by the resolver. us_firm_characteristics 0/3, written by the wrapper;
+etfs' one row was written by the wrapper and its notebook has since been converted, so its
+next run registers a resolvable one. nasdaq100_microstructure has registered nothing yet and
+would register an invisible row on its first run. sp500_equity_option_analytics registered
+one through the wrapper on 2026-08-26 and replaced it through the resolver on 2026-08-31;
+the wrapper row is still in its table, stranded rather than superseded, because a row no
+reader resolves cannot be named as a predecessor.
+
+sp500_options came off the list on 2026-08-27. The note above had it moving to the wrapper,
+which was never true of the committed notebook: `10_causal_dml` goes through
+`study.causal(...).resolve().run()` and reaches `register_causal_run` nowhere, so it was
+already converted when it was listed. Its two registered rows are both resolver-written and
+both visible.
 
 The guard keys on `register_causal_run` rather than on any particular call spelling. An
 earlier version matched the literal `results = run_dml_analysis(`, which a notebook slips
@@ -41,7 +45,6 @@ REPO = Path(__file__).resolve().parent.parent
 # converted and left here.
 UNCONVERTED = {
     "case_studies/nasdaq100_microstructure/12_causal_dml.py",
-    "case_studies/sp500_options/10_causal_dml.py",
 }
 
 WRAPPER = "register_causal_run"

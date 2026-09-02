@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import Any, cast
+
 import numpy as np
 import pandas as pd
 import pandas_market_calendars as mcal
@@ -18,6 +21,7 @@ from case_studies.utils.darts_forecasting import (
     _predict_fold,
     _prepare_fold_series,
     darts_checkpoint_path,
+    darts_forecast_reduction,
     darts_validation_keys,
     load_darts_checkpoint,
     run_darts_cv,
@@ -520,7 +524,13 @@ def test_darts_segments_and_predicts_each_cme_contract_position() -> None:
             ]
 
     predictions = _predict_fold(
-        _OneStepModel(), states, 0, "timestamp", "product", output_chunk_length=1
+        _OneStepModel(),
+        states,
+        0,
+        "timestamp",
+        "product",
+        output_chunk_length=1,
+        forecast_reduction="compound_path",
     )
     assert {"product", "position"} <= set(predictions.columns)
     assert predictions.select("product", "position").n_unique() == 6
@@ -555,3 +565,89 @@ def test_cme_base_target_uses_only_finalized_panel_sessions(monkeypatch) -> None
 
     assert attached[BASE_TARGET_COL].isna().sum() == 1
     assert attached.loc[1, BASE_TARGET_COL] == pytest.approx(np.log(121.0 / 100.0))
+
+
+def test_the_reconstruction_scores_a_lagged_label_the_way_its_fit_did() -> None:
+    """Replaying a fitted checkpoint must not change the reduction the fit published under.
+
+    `run_darts_cv` scores a `lagged_label` forecast at its terminal step, because that target
+    already spans the whole horizon. The fitted-state reconstruction took `_predict_fold`'s
+    default and compounded the path instead, so a run that reused its fitted state republished a
+    different `y_score` for every row - and a locked holdout comparing the two could never agree.
+    Both now resolve the reduction through one function.
+    """
+    assert darts_forecast_reduction({"darts_target": "lagged_label"}) == "terminal"
+    assert darts_forecast_reduction({"darts_target": "one_period_return"}) == "compound_path"
+    assert darts_forecast_reduction({}) == "compound_path"
+
+    # `_predict_fold` no longer carries a default, so neither path can reach it without saying
+    # which reduction it means.
+    with pytest.raises(TypeError):
+        _predict_fold(object(), [], 0, "timestamp", "symbol", output_chunk_length=2)
+
+
+def test_the_reconstruction_asks_for_the_terminal_step_on_a_lagged_label(
+    tmp_path, monkeypatch
+) -> None:
+    """The replay path itself is driven, not just the function it resolves the reduction with.
+
+    Wiring `_reconstruct_darts_predictions` back to a literal `compound_path` would reintroduce
+    the divergence with the mapping's own test still green, because nothing else calls it.
+    """
+    from case_studies.utils import darts_forecasting, deep_learning
+
+    seen: list[str] = []
+
+    def _record(*_args, forecast_reduction: str, **_kwargs) -> pl.DataFrame:
+        seen.append(forecast_reduction)
+        return pl.DataFrame(
+            {"timestamp": [pd.Timestamp("2024-01-05")], "symbol": ["A"], "fold_id": [0]}
+        )
+
+    monkeypatch.setattr(darts_forecasting, "_predict_fold", _record)
+    monkeypatch.setattr(darts_forecasting, "_resolve_chunk_lengths", lambda *_a: (4, 2))
+    monkeypatch.setattr(darts_forecasting, "_parse_label_horizon", lambda _label: 2)
+    monkeypatch.setattr(darts_forecasting, "_attach_expected_periods", lambda frame, **_k: frame)
+    monkeypatch.setattr(darts_forecasting, "_attach_darts_target", lambda frame, **_k: frame)
+    monkeypatch.setattr(darts_forecasting, "_prepare_fold_series", lambda *_a, **_k: [])
+    monkeypatch.setattr(darts_forecasting, "darts_checkpoint_path", lambda *_a, **_k: tmp_path)
+    monkeypatch.setattr(
+        darts_forecasting,
+        "load_darts_checkpoint",
+        lambda _path, device: (
+            object(),
+            {
+                "config_name": "nbeats_weekly",
+                "fold": 0,
+                "checkpoint_kind": "epoch",
+                "checkpoint_value": 5,
+            },
+        ),
+    )
+
+    context = SimpleNamespace(
+        config={
+            "config_name": "nbeats_weekly",
+            "params": {"darts_target": "lagged_label", "architecture": "nbeats"},
+        },
+        dataset_pd=pd.DataFrame({"timestamp": [pd.Timestamp("2024-01-05")], "symbol": ["A"]}),
+        splits=({"fold": 0},),
+        feature_names=("f0",),
+        label_col="fwd_ret_5d",
+        date_col="timestamp",
+        entity_col="symbol",
+        temporal_by_fold=None,
+        temporal_keys=(),
+        temporal_feature_names=(),
+    )
+    computation = {
+        "preprocessing": {"calendar_id": "NYSE"},
+        "numerics": {"device": "cpu"},
+        "checkpoint_schedule": [{"kind": "epoch", "value": 5}],
+    }
+
+    deep_learning._reconstruct_darts_predictions(
+        tmp_path, cast("Any", context), computation, "us_equities_panel"
+    )
+
+    assert seen == ["terminal"]

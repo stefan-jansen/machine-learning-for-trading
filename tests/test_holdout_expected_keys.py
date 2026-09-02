@@ -118,7 +118,7 @@ class TestWhatIsDeclared:
 
 
 class TestHowItIsCompared:
-    """Coverage compares keys as strings, so the two frames must agree on representation."""
+    """Coverage renders keys as strings, having first normalized how a temporal one is written."""
 
     @staticmethod
     def _predictions(days: list[date], dtype: pl.DataType) -> pl.DataFrame:
@@ -132,12 +132,21 @@ class TestHowItIsCompared:
         )
 
     def test_a_date_and_a_millisecond_timestamp_hold_the_same_day(self) -> None:
+        """The same instant written two ways is one key, whichever loader produced the frame.
+
+        This asserted the opposite until `_canonical_key_frame` began normalizing temporal
+        columns: it rendered each one as its dtype, so `2016-01-29` and `2016-01-29
+        00:00:00.000` never joined and a holdout comparing a registry frame against a dataset
+        frame reported every expected row missing and every actual row extra at once. What
+        `_align_expected_timestamps` still does is give the join downstream the dtype it needs,
+        which is a narrower job than deciding whether coverage can be computed at all.
+        """
         mds = _panel([("AAA", date(2016, 1, 29), 0.02)])
         expected = _holdout_expected_keys(mds, SPLIT)
         assert expected.schema["timestamp"] == pl.Date
         predictions = self._predictions([date(2016, 1, 29)], pl.Datetime("ms"))
 
-        assert not evaluate_prediction_coverage(expected, predictions).complete
+        assert evaluate_prediction_coverage(expected, predictions).complete
 
         aligned = _align_expected_timestamps(expected, predictions)
         assert aligned.schema["timestamp"] == pl.Datetime("ms")
