@@ -1195,7 +1195,7 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
     # selectable - which is how widening the sample took ch13 down on etfs/77ca2284b27b.
     declared_folds: dict[str, int] = {}
     try:
-        from case_studies.utils.insight_chapter import declared_fold_count
+        from case_studies.utils.registry.specs import declared_fold_count
 
         for _p_hash, _spec_json in db.execute(
             """
@@ -1330,6 +1330,42 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         # global one used to be reached here and crossed it.
         return window if _weekday_grid(*window) else fallback
 
+    # The keys a fabricated panel has to meet. Production writes a prediction on the same
+    # (entity, timestamp) types its labels carry, and a notebook joins the two; a panel keyed
+    # on strings and dates when the labels carry UInt32 and Datetime does not fail here, it
+    # fails several stages downstream on a polars join:
+    #
+    #   symbol: str on left does not match symbol: u32 on right      (us_firm_characteristics)
+    #   timestamp: date on left does not match timestamp: datetime[us]  (nasdaq100_microstructure)
+    #
+    # So both the entity values and the two key dtypes come from the case study's own labels
+    # where it has them, and fall back to setup.yaml's symbol list otherwise. Only the fabricated
+    # grid needs this: a panel borrowed from a copied artifact already carries production's types.
+    entity_dtype = None
+    timestamp_dtype = None
+    for label_file in sorted((cs_dir / "labels").glob("*.parquet")):
+        try:
+            schema = _pl.read_parquet_schema(label_file)
+        except Exception:  # noqa: BLE001 - an unreadable label is not ours to fix here
+            continue
+        if entity_col not in schema or "timestamp" not in schema:
+            continue
+        entity_dtype = schema[entity_col]
+        timestamp_dtype = schema["timestamp"]
+        try:
+            entities = (
+                _pl.read_parquet(label_file, columns=[entity_col])[entity_col]
+                .unique()
+                .sort()
+                .head(10)
+                .to_list()
+            )
+        except Exception:  # noqa: BLE001
+            entities = []
+        if entities:
+            symbols = entities
+        break
+
     n_symbols = len(symbols)
     target_rng = np.random.default_rng(42)
     templates: dict[tuple[tuple[date, date], int], tuple[object, int]] = {}
@@ -1364,8 +1400,10 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         ]
         frame = _pl.DataFrame(
             {
-                entity_col: rows_symbol,
-                "timestamp": _pl.Series(rows_date).cast(_pl.Date),
+                entity_col: _pl.Series(rows_symbol, dtype=entity_dtype)
+                if entity_dtype is not None
+                else _pl.Series(rows_symbol),
+                "timestamp": _pl.Series(rows_date).cast(timestamp_dtype or _pl.Date),
                 "fold": rows_fold,
                 "actual": target_rng.normal(0, 0.01, n).tolist(),
             }

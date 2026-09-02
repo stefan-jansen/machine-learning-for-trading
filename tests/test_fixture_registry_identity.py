@@ -204,7 +204,7 @@ def test_seeded_fold_ids_match_the_declared_fold_count(seeded: Path) -> None:
 
     import polars as pl
 
-    from case_studies.utils.insight_chapter import declared_fold_count
+    from case_studies.utils.registry.specs import declared_fold_count
 
     with sqlite3.connect(seeded / "run_log" / "registry.db") as db:
         rows = db.execute(

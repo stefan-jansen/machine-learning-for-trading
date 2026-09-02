@@ -179,8 +179,18 @@ def collect_complete_rank1(case_studies: list[str]) -> pl.DataFrame:
             raise RuntimeError(f"{cs}: no complete linear result for {label}")
         best_ic = df["ic_mean_daily"].max()
         winner = df.filter(pl.col("ic_mean_daily") == best_ic)
-        if winner.height != 1:
-            raise RuntimeError(f"{cs}: primary linear rank one is ambiguous")
+        # A tie across two configurations is a real ambiguity and still raises. A tie between
+        # two generations of the SAME configuration is not: refitting one writes a second
+        # prediction set under a new training hash, and where the refit reproduced the scores
+        # the two ICs are bit-identical. Every fx_pairs linear configuration carries exactly
+        # two such generations - in production, not only in the fixture - so this check
+        # rejected the case study on a duplicate rather than on an ambiguity.
+        tied_configs = sorted(winner["config_name"].unique().to_list())
+        if len(tied_configs) != 1:
+            raise RuntimeError(
+                f"{cs}: primary linear rank one is ambiguous between {', '.join(tied_configs)}"
+            )
+        winner = winner.sort("prediction_hash").head(1)
         frames.append(
             winner.with_columns(
                 case_study=pl.lit(cs),
@@ -295,14 +305,32 @@ def replace_with_chronological_hac(
 
 # %% tags=[]
 def select_unique_best(frame: pl.DataFrame, groups: list[str]) -> pl.DataFrame:
-    """Select one unambiguous highest daily-IC row in every requested group."""
+    """Select one unambiguous highest daily-IC row in every requested group.
+
+    Fails closed on a tie between two configurations, because arbitrary row order must never
+    decide the reported winner. A tie between two generations of ONE configuration is a
+    different thing and resolves rather than raising: refitting writes a second prediction set
+    under a new training hash, and where the refit reproduced the scores the two ICs are
+    bit-identical. Every fx_pairs linear configuration carries exactly two such generations in
+    the production registry, so the strict form rejected the case study on a duplicate.
+    """
     winners = []
     for group in frame.partition_by(groups, maintain_order=True):
         best_ic = group["ic_mean_daily"].max()
         best = group.filter(pl.col("ic_mean_daily") == best_ic)
         if best.height != 1:
-            identity = {column: group[0, column] for column in groups}
-            raise RuntimeError(f"ambiguous daily-IC rank one for {identity}")
+            tied = (
+                sorted(best["config_name"].unique().to_list())
+                if "config_name" in best.columns
+                else []
+            )
+            if len(tied) != 1:
+                identity = {column: group[0, column] for column in groups}
+                raise RuntimeError(
+                    f"ambiguous daily-IC rank one for {identity}"
+                    + (f" between {', '.join(tied)}" if tied else "")
+                )
+            best = best.sort("prediction_hash").head(1)
         winners.append(best)
     return pl.concat(winners, how="diagonal_relaxed") if winners else pl.DataFrame()
 

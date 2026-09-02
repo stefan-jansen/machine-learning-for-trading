@@ -77,8 +77,11 @@ PREDICTION_THRESHOLD = 0.0
 # so its hash moves whether or not the selection moves, which would make a
 # whole-file pin fail on runs that export exactly the right predictions. Set a
 # pin to None to report the observed value instead of asserting it.
-EXPECTED_TRAINING_HASH = "0488120b490e"
-EXPECTED_PREDICTIONS_SHA256 = "b3b12dcdfac8a0c59b80609b6c81aff203828a3e19a2d992b1da993185a34b48"
+# The validation training run of the promoted configuration, gbm/leaves_63_mse on fwd_ret_5d.
+# It moved when the etfs holdout was re-evaluated on the corrected carrier; the previous value,
+# 0488120b490e, named the configuration promoted before that.
+EXPECTED_TRAINING_HASH = "b937b23afab5"
+EXPECTED_PREDICTIONS_SHA256 = "b76202842ba56742c3c2748722b60dc1210fdf37687c687a7800da388750bfc8"
 EXPORT_PATH = get_output_dir(25, "quantconnect_export") / "ml4t_qc_predictions.json"
 
 
@@ -92,20 +95,47 @@ registry_hash_before = hashlib.sha256(registry_path.read_bytes()).hexdigest()
 # journal, or transaction side effect in the canonical case-study registry.
 registry_uri = f"{registry_path.resolve().as_uri()}?mode=ro&immutable=1"
 with sqlite3.connect(registry_uri, uri=True) as conn:
+    # The winner has to be a configuration whose holdout predictions were sealed, because
+    # that is what this export ships. Ranking without that condition asks a different
+    # question - the best development backtest, promoted or not - and picks a row that has
+    # no holdout set behind it, which surfaced as "Expected one sealed holdout set, found 0"
+    # several lines below the point where the wrong row was chosen.
+    #
+    # The link is the CONFIGURATION, not the training hash. A holdout fit is a retrain: on
+    # etfs the validation carrier is training run b937b23afab5 and its holdout counterpart is
+    # d5062f7f0eaa, same family, config_name and label, and the holdout run has no development
+    # backtest of its own. Matching on training_hash therefore finds nothing for any promoted
+    # configuration in any registry - it is satisfiable only where a single training run wrote
+    # both splits, which the pipeline stopped doing.
     winner = conn.execute(
         """SELECT ps.training_hash, br.backtest_hash, br.stage, bm.sharpe
            FROM backtest_runs br
            JOIN backtest_metrics bm ON br.backtest_hash = bm.backtest_hash
            JOIN prediction_sets ps ON br.prediction_hash = ps.prediction_hash
+           JOIN training_runs t ON t.training_hash = ps.training_hash
            WHERE br.stage IN ('signal', 'allocation', 'risk_overlay')
+             AND ps.split = 'validation'
+             AND EXISTS (
+                 SELECT 1 FROM prediction_sets h
+                 JOIN training_runs ht ON ht.training_hash = h.training_hash
+                 WHERE h.split = 'holdout'
+                   AND ht.family = t.family
+                   AND ht.config_name = t.config_name
+                   AND ht.label = t.label
+             )
            ORDER BY bm.sharpe DESC LIMIT 1"""
     ).fetchone()
     if winner is None:
         raise RuntimeError("ETF registry has no eligible cross-stage backtest winner")
     holdout_rows = conn.execute(
-        """SELECT prediction_hash FROM prediction_sets
-           WHERE training_hash = ? AND split = 'holdout'
-           ORDER BY prediction_hash""",
+        """SELECT h.prediction_hash FROM prediction_sets h
+           JOIN training_runs ht ON ht.training_hash = h.training_hash
+           WHERE h.split = 'holdout'
+             AND (ht.family, ht.config_name, ht.label) = (
+                 SELECT t.family, t.config_name, t.label
+                 FROM training_runs t WHERE t.training_hash = ?
+             )
+           ORDER BY h.prediction_hash""",
         (winner[0],),
     ).fetchall()
 

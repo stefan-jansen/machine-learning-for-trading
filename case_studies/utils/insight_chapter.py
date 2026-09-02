@@ -45,6 +45,7 @@ import torch  # noqa: F401
 
 from case_studies.utils.analytics import PRIMARY_LABELS, SHORT_NAMES
 from case_studies.utils.conformal import split_conformal_coverage
+from case_studies.utils.registry.specs import declared_fold_count
 from utils.paths import get_case_study_dir
 
 LabelResolver = Callable[[str], str | None]
@@ -167,29 +168,6 @@ def select_rank1(
     full_days = max(float(row["ic_n_days"]) for row in eligible)
     comparable = [row for row in eligible if float(row["ic_n_days"]) == full_days]
     return max(comparable, key=lambda row: float(row["ic_mean_daily"]))
-
-
-def declared_fold_count(spec: dict) -> int:
-    """The number of folds a training spec declares, 0 where it declares none.
-
-    Two spec shapes are live. Identity v3 nests the count under
-    ``computation.expected_prediction_keys``; the v2 shape that ``build_training_spec`` still
-    emits - ``run_dl_cv`` uses it, and ``LEGACY_IDENTITY_VERSION`` is still supported - carries
-    ``n_folds`` at the top level and has no ``computation`` key at all.
-
-    Reading only the top level answers 0 for every v3 row, which is all but four training runs
-    across the seven live registries. Every caller that did so was reachable only while its
-    case study had no rows to select from: widening the CI fixture to sample per label gave
-    `13_dl_time_series/12_case_study_insights` and `14_latent_factors/09_case_study_insights`
-    a `sp500_equity_option_analytics` row for the first time, and both raised "n_folds is not
-    declared" against specs that declare two.
-    """
-    computation = spec.get("computation") or {}
-    return int(
-        (computation.get("expected_prediction_keys") or {}).get("n_folds")
-        or spec.get("n_folds")
-        or 0
-    )
 
 
 def _raw_primary_candidates(
