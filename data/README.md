@@ -171,7 +171,17 @@ uv run python data/equities/market/sp500/materialize_options.py
 `--source` also takes a directory you have already extracted, which is
 considerably faster for the options archive: it holds 1,275,314 gzipped files,
 and reading them out of the zip pays the archive's index on every open. Both
-conversions resume, so an interrupted run continues where it stopped.
+conversions resume, so an interrupted run continues where it stopped: the options
+conversion at the last day it wrote, the NASDAQ-100 conversion at the last day it
+staged, part-way through a month.
+
+**Give the conversion at least 2 GB of memory.** The NASDAQ-100 archive peaks around
+1.3 GB, one day of bars while parsing and about two thirds of a month while a month is
+assembled. In Docker the limit that applies is Docker Desktop's own allocation
+(Settings -> Resources -> Memory), not the host's RAM, and it defaults low enough on
+some installs to stop the run. A conversion killed for memory prints nothing and exits
+137, because the kill leaves no traceback; if a run stops with no error, check the exit
+status before anything else.
 
 The TAQ ticks are already parquet in the layout the loader scans, so unpacking
 them is the whole of the work. Name the members — Dropbox writes a stray root
