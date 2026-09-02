@@ -41,6 +41,7 @@ import pandas as pd
 import polars as pl
 import torch
 import torch.nn as nn
+import yaml
 from ml4t.diagnostic.metrics import cross_sectional_ic
 from torch.utils.data import DataLoader
 
@@ -316,6 +317,53 @@ def resolve_dl_device(config: Mapping[str, Any] | None, requested: str | None = 
     return device
 
 
+def resolve_dl_max_train_sequences(
+    config: Mapping[str, Any] | None, reduction: int = 0
+) -> tuple[int, int]:
+    """Resolve how many training windows a sequence configuration draws per fold.
+
+    Returns ``(effective, reduction)``. ``config`` is a case study's ``modeling.dl``
+    block; ``reduction`` is what a preview asked for, 0 meaning it asked for nothing.
+
+    **The cap is a property of the model, not of the execution tier.** Every row of a
+    panel starts a window, so on a minute panel an uncapped fold builds tens of millions
+    of near-identical overlapping sequences - consecutive windows share all but one
+    observation. How many windows are drawn therefore changes what is fitted, and the
+    same named configuration must not mean one model when someone previews it and a
+    different one when it runs for real. This is `modeling.gbm.max_bin` one axis over:
+    that value used to be read off whichever device was visible until it was made an
+    explicit declaration, for exactly this reason.
+
+    Until this existed the only source was ``preview_reductions``, so a canonical run was
+    necessarily uncapped and the declaration had nowhere to live.
+
+    Absent means uncapped, which is what the daily panels want and what every converted
+    case study already registers, so adding the key moves no existing identity. A preview
+    may only lower the effective cap: raising it would let a reduced run fit on more
+    windows than the canonical one it is rehearsing.
+    """
+    declared_raw = (config or {}).get("max_train_sequences")
+    declared = 0 if declared_raw is None else int(declared_raw)
+    if declared < 0:
+        raise ValueError(
+            f"modeling.dl.max_train_sequences must be zero (uncapped) or positive, not {declared}"
+        )
+    reduction = int(reduction or 0)
+    if reduction < 0:
+        raise ValueError(
+            f"the max_train_sequences preview reduction must be zero or positive, not {reduction}"
+        )
+    if declared and reduction:
+        if reduction > declared:
+            raise ValueError(
+                f"a preview asked for {reduction} training sequences where "
+                f"modeling.dl.max_train_sequences declares {declared}. A preview "
+                "rehearses the canonical run and cannot fit on more windows than it."
+            )
+        return reduction, reduction
+    return (reduction or declared), reduction
+
+
 def _sequence_runtime_spec(
     device: str,
     *,
@@ -410,7 +458,11 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         seed=seed,
         num_threads=int(request["overrides"].get("num_threads", 8)),
     )
-    max_train_sequences = int(reductions.get("max_train_sequences", 0))
+    setup = yaml.safe_load((study.root / "config" / "setup.yaml").read_text()) or {}
+    max_train_sequences, sequence_reduction = resolve_dl_max_train_sequences(
+        (setup.get("modeling") or {}).get("dl") or {},
+        int(reductions.get("max_train_sequences", 0)),
+    )
     calendar_id = make_walk_forward_config(study.case_study, date_col=mds.date_col).calendar_id
     lookback = int(config["params"].get("lookback", 60))
     dataset_pd = dataset.to_pandas()
@@ -512,9 +564,13 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
             "n_folds": expected["fold"].n_unique(),
         },
         "input_data_spec": sequence_identity,
+        # `sampling` records what a PREVIEW reduced, not what the configuration
+        # declares. The locked holdout runner reads it as "was this run reduced" and
+        # refuses anything non-zero, so a declared cap - which is part of the model and
+        # applies to the holdout refit too - rides in `input_data_spec` instead.
         "sampling": {
             "max_symbols": int(reductions.get("max_symbols", 0)),
-            "max_train_sequences": max_train_sequences,
+            "max_train_sequences": sequence_reduction,
         },
         "numerics": runtime,
         "source_identity": _sequence_source_identity(config),
@@ -581,6 +637,15 @@ def reconstruct_locked_request(
     computation = spec["computation"]
     if computation.get("sampling") != {"max_symbols": 0, "max_train_sequences": 0}:
         raise ValueError("locked sequence holdout requires unreduced canonical inputs")
+    # `sampling` above proves no PREVIEW reduced this run. A cap the configuration
+    # DECLARES is a different thing and has to reach the refit: it is part of the model,
+    # so a holdout drawing a different number of windows than the validation fit is not a
+    # cheaper run, it is a different model answering the holdout - and nothing in the
+    # output would show it. Taken from the stored spec rather than re-read from
+    # setup.yaml, so an edit since selection cannot silently change what is refitted.
+    locked_max_train_sequences = int(
+        (computation.get("input_data_spec") or {}).get("max_train_sequences", 0)
+    )
     label_ref = study.labels.get(spec["label"], execution_tier=ExecutionTier.CANONICAL)
     mds = load_modeling_dataset(study.case_study, label_ref.name, max_symbols=0)
     if mds.date_col != "timestamp" or mds.entity_cols[:1] not in (["symbol"], ["product"]):
@@ -718,7 +783,7 @@ def reconstruct_locked_request(
             mds.label_col,
             case_study=study.case_study,
             input_data_spec=mds.input_lineage,
-            max_train_sequences=0,
+            max_train_sequences=locked_max_train_sequences,
         )
         expected_preprocessing = {
             "class": "fold_train_standardization",
@@ -741,7 +806,7 @@ def reconstruct_locked_request(
         input_data_spec = {
             "input_data_spec": mds.input_lineage,
             "lookback": lookback,
-            "max_train_sequences": 0,
+            "max_train_sequences": locked_max_train_sequences,
         }
         expected_preprocessing = {
             "class": "fold_train_standardization",
@@ -781,7 +846,7 @@ def reconstruct_locked_request(
         temporal_keys=tuple(mds.temporal_keys),
         temporal_feature_names=tuple(mds.temporal_feature_names),
         expected_keys=expected,
-        max_train_sequences=0,
+        max_train_sequences=locked_max_train_sequences,
         runtime_provenance=_sequence_runtime_provenance(study, config),
         prediction_split="holdout",
         published_checkpoints=(int(checkpoint_value),),
@@ -908,7 +973,13 @@ def _reconstruct_pytorch_predictions(
             date_col=context.date_col,
             entity_col=context.entity_col,
             lookback=lookback,
-            max_train_sequences=0,
+            # The reconstruction only asserts a training store exists - the
+            # standardization it checks comes from the stored checkpoint, not from these
+            # rows. Drawing the cap the run declared rather than every window keeps that
+            # assertion from materializing millions of sequences on a minute panel.
+            max_train_sequences=int(
+                (computation.get("input_data_spec") or {}).get("max_train_sequences", 0)
+            ),
             temporal_by_fold=context.temporal_by_fold,
             temporal_keys=list(context.temporal_keys),
             temporal_feature_names=list(context.temporal_feature_names),
