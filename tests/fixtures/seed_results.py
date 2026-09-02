@@ -1094,6 +1094,14 @@ def _record_prediction_artifact_digests(cs_dir: Path) -> None:
 
     Runs after `_backfill_all_prediction_parquets`, because the digest cannot be computed
     before the file it describes exists.
+
+    Every row with an artifact is (re)recorded, not only the ones left empty. The seeder
+    rewrites artifacts after they are sampled - `_backfill_all_prediction_parquets` writes
+    synthetic scores over most of them, `_normalize_prediction_timestamp_zone` rewrites the
+    timestamp column of the rest - so a digest carried over from production describes a file
+    that no longer exists. While the sampler copied no `prediction_coverage`, every row
+    reached here empty and the distinction did not arise; once it copies the table, a stale
+    production digest survives and every reader of that prediction reads it as incomplete.
     """
     db_path = cs_dir / "run_log" / "registry.db"
     if not db_path.exists():
@@ -1104,16 +1112,17 @@ def _record_prediction_artifact_digests(cs_dir: Path) -> None:
 
     with sqlite3.connect(str(db_path)) as db:
         rows = db.execute(
-            "SELECT prediction_hash FROM prediction_coverage "
-            "WHERE artifact_digest IS NULL OR artifact_digest = ''"
+            "SELECT prediction_hash, artifact_digest FROM prediction_coverage"
         ).fetchall()
-        for (p_hash,) in rows:
+        for p_hash, recorded in rows:
             artifact = cs_dir / "run_log" / "predictions" / p_hash / "predictions.parquet"
             if not artifact.is_file():
                 continue
             try:
                 digest = value_digest(pl.read_parquet(artifact))
             except Exception:
+                continue
+            if digest == recorded:
                 continue
             db.execute(
                 "UPDATE prediction_coverage SET artifact_digest = ? WHERE prediction_hash = ?",
