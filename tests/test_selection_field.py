@@ -15,6 +15,7 @@ from case_studies.research.selection_field import (
     FIELD_STAGES,
     PLAN_STAGE_KEYS,
     UPSTREAM_STAGES,
+    _recorded_set_count,
     label_of,
     open_selection_field,
     predictions_identity,
@@ -859,3 +860,46 @@ def test_a_label_whose_only_baseline_is_incomplete_does_not_satisfy_coverage(
             prediction_hashes=None,
             resolve_best_backtest_runs=resolver,
         )
+
+
+class TestWhetherARegistryRecordsAFrozenSet:
+    """Only two answers mean "none recorded", and a lock is not one of them.
+
+    A reader asks this to decide between reading the frozen selection and reconstructing the
+    field live. Both branches produce a field, so a wrong answer here is not an error the
+    caller sees - it is a different field, ranked over rows the frozen set excluded, with
+    nothing in the output saying a selection was skipped.
+    """
+
+    def test_a_registry_that_predates_candidate_sets_records_none(self, tmp_path: Path) -> None:
+        registry = tmp_path / "registry.db"
+        with sqlite3.connect(registry) as db:
+            db.execute("CREATE TABLE backtest_runs (backtest_hash TEXT)")
+        assert _recorded_set_count(registry, "fixture:holdout-candidates") == 0
+
+    def test_a_clean_clone_with_no_registry_records_none(self, tmp_path: Path) -> None:
+        assert _recorded_set_count(tmp_path / "absent.db", "fixture:holdout-candidates") == 0
+
+    def test_it_counts_the_generations_it_finds(self, tmp_path: Path) -> None:
+        registry = tmp_path / "registry.db"
+        with sqlite3.connect(registry) as db:
+            db.execute("CREATE TABLE candidate_sets (name TEXT)")
+            db.executemany(
+                "INSERT INTO candidate_sets (name) VALUES (?)",
+                [("fixture:holdout-candidates",), ("fixture:holdout-candidates",), ("other",)],
+            )
+        assert _recorded_set_count(registry, "fixture:holdout-candidates") == 2
+
+    def test_a_locked_registry_raises_rather_than_answering_none(self, tmp_path: Path) -> None:
+        registry = tmp_path / "registry.db"
+        with sqlite3.connect(registry) as db:
+            db.execute("CREATE TABLE candidate_sets (name TEXT)")
+            db.execute("INSERT INTO candidate_sets (name) VALUES ('fixture:holdout-candidates')")
+        writer = sqlite3.connect(registry, timeout=0)
+        writer.execute("BEGIN EXCLUSIVE")
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                _recorded_set_count(registry, "fixture:holdout-candidates")
+        finally:
+            writer.rollback()
+            writer.close()

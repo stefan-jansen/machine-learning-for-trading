@@ -82,9 +82,20 @@ def _recorded_set_count(registry: Any, name: str) -> int:
                     "SELECT COUNT(*) FROM candidate_sets WHERE name = ?", (name,)
                 ).fetchone()[0]
             )
-    except sqlite3.OperationalError:
-        # No `candidate_sets` table: a registry that predates them, or a reader's clean clone.
-        return 0
+    except sqlite3.OperationalError as error:
+        # Two conditions mean "this registry records no generations", and they are the only two
+        # this may answer 0 for: there is no `candidate_sets` table, which is a registry
+        # predating them; and there is no file to open, which is a reader's clean clone.
+        # Everything else `sqlite3` reports through the same exception type is transient and
+        # says nothing about the contents - a lock held by a concurrent writer above all, which
+        # a reader hits precisely while a notebook is freezing a set. Answering 0 there sends
+        # the reader down live reconstruction and lets it rank a field the frozen set excludes,
+        # with nothing in the output saying a selection was skipped. Raise instead: a caller can
+        # retry a lock and cannot recover from a silently wrong field.
+        message = str(error)
+        if "no such table" in message or "unable to open database file" in message:
+            return 0
+        raise
 
 
 #: The population a sweep publishes its planned backtests under, per stage.
