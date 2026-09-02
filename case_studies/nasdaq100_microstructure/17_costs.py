@@ -57,7 +57,10 @@
 #
 # **Book Reference:** Chapter 18, Sections 18.2–18.5
 #
-# **Prerequisites:** Completed Ch17 allocation sweep with results in `registry.db`.
+# **Prerequisites:** [`16_risk_management`](16_risk_management.ipynb), and through it
+# [`15_portfolio_management`](15_portfolio_management.ipynb) and [`14_backtest`](14_backtest.ipynb).
+# This is the last stage that selects, so it runs after all three and draws from all of
+# them.
 
 # %%
 """NASDAQ-100 Microstructure: Costs."""
@@ -91,7 +94,9 @@ from case_studies.utils.sweep_config import (
     get_cost_grid_bps,
     get_cost_grid_half_spread_usd,
     get_top_n_predictions,
+    get_universe_filters_for,
 )
+from case_studies.utils.uncertainty import STAGE_SEQUENCE
 from utils.paths import get_case_study_dir
 
 # %% tags=["parameters"]
@@ -119,20 +124,104 @@ if excluded_families(CASE_STUDY_ID):
     )
 
 # %% [markdown]
-# ## 1. Load Top Combos from Allocation Stage
+# ## 1. Load the leading pre-cost runs
 #
-# We load the least-negative full-universe allocation-stage backtests. These are
-# every-bar combos and are already loss-making (Ch17); the cost grid below
-# traces how the Sharpe-vs-cost curve behaves around them before the two
-# recovery levers — the screen and the cadence — are applied.
+# We load the least-negative full-universe validation backtests. These are every-bar combos
+# and are already loss-making (Ch17); the cost grid below traces how the Sharpe-vs-cost curve
+# behaves around them before the two recovery levers — the screen and the cadence — are
+# applied.
+#
+# **The pool is every stage a carrier can come from, not just `allocation`.** A risk overlay
+# is a strategy in its own right: `16_risk_management` registers it at `stage='risk_overlay'`
+# with its own Sharpe, and it is a candidate to carry the case study. Pricing only the
+# allocation rows would put a cost curve in the chapter for a strategy the case study does
+# not select whenever an overlay outranks its own parent, which is the ordinary case - four
+# of the seven completed case studies have a `risk_overlay` as their rank-1 validation
+# carrier. The stages come from `STAGE_SEQUENCE` rather than a tuple typed here, so the pool
+# cannot drift from the library when a stage is added.
+#
+# `cost_sensitivity` is the one member excluded, because that is the stage this notebook
+# writes: including it would re-price rows that already carry a cost model.
+#
+# **The pool is also pinned to the canonical universe.** `setup.yaml` declares
+# `universe_filter: cost_feasible` and says in the same breath that the full-universe variant
+# "is NOT a canonical rank-1 / cohort / DSR candidate". Widening the stages without pinning the
+# universe would admit exactly that variant, because the signal stage holds both screened and
+# full-universe runs and the full-universe ones are not screened out anywhere else - the cost
+# curve would then price a strategy the case study excludes by declaration. The filter is read
+# out of each run's own `spec_json`, the same place `derived_tables_off_canonical_universe`
+# reads it, so the pool cannot disagree with the sweep that produced the runs.
+#
+# Section 4 is unaffected and has to be: the full-versus-screened contrast is the one place
+# the excluded variant belongs, and it reads `universe_filter` in its own query rather than
+# through this pool.
+#
+# This is also why the notebook is numbered after `16_risk_management` rather than before it.
+# Run the other way round, the overlay rows do not exist yet and the pool is `allocation`
+# whatever it declares.
 
 # %%
-top_combos = resolve_best_backtest_runs(
-    CASE_STUDY_ID, LABEL, split="validation", stage="allocation", top_n=TOP_N_COMBOS
-)
+PRE_COST_STAGES = tuple(stage for stage in STAGE_SEQUENCE if stage != "cost_sensitivity")
+CANONICAL_UNIVERSE = get_universe_filters_for(CASE_STUDY_ID)[0]
+
+
+def _on_canonical_universe(frame: pl.DataFrame) -> pl.DataFrame:
+    """Drop runs selected under a universe this case study does not treat as canonical.
+
+    `None` means the case study pins no universe, and then every run qualifies - the filter
+    has to be a no-op there rather than dropping everything, because a spec that predates the
+    universe axis carries no filter at all.
+    """
+    if CANONICAL_UNIVERSE is None:
+        return frame
+    keep = [
+        strategy_view(json.loads(spec)).get("signal", {}).get("universe_filter")
+        == CANONICAL_UNIVERSE
+        for spec in frame["spec_json"]
+    ]
+    return frame.filter(pl.Series(keep, dtype=pl.Boolean))
+
+
+def resolve_pre_cost_runs(top_n: int) -> pl.DataFrame:
+    """The highest-Sharpe validation runs across every stage a carrier may come from.
+
+    Each stage is asked for its whole ranked list and the pool is sorted afterwards, rather
+    than taking `top_n` from each and merging them: truncating first lets one stage's leader
+    hold a slot that a better run in another stage should have had, and at `top_n=1` that
+    drops a whole stage from consideration instead of falling through to the next candidate.
+    """
+    ranked = [
+        frame.with_columns(pl.lit(stage).alias("pool_stage"))
+        for stage, frame in (
+            (
+                stage,
+                _on_canonical_universe(
+                    resolve_best_backtest_runs(
+                        CASE_STUDY_ID, LABEL, split="validation", stage=stage, top_n=1_000_000
+                    )
+                ),
+            )
+            for stage in PRE_COST_STAGES
+        )
+        if not frame.is_empty()
+    ]
+    if not ranked:
+        return pl.DataFrame()
+    return (
+        pl.concat(ranked)
+        .sort("sharpe", descending=True)
+        .unique("backtest_hash", maintain_order=True)
+        .head(top_n)
+    )
+
+
+top_combos = resolve_pre_cost_runs(TOP_N_COMBOS)
 
 if top_combos.is_empty():
-    print("No allocation-stage results found. Run the portfolio management notebook first.")
+    print(
+        f"No results on the {CANONICAL_UNIVERSE or 'full'} universe at any of "
+        f"{', '.join(PRE_COST_STAGES)}. Run 14_backtest through 16_risk_management first."
+    )
 else:
     for row in top_combos.iter_rows(named=True):
         spec = ensure_backtest_spec(
@@ -150,7 +239,13 @@ else:
             initial_cash=bt_config.initial_cash,
         )
         alloc = strategy_view(spec).get("allocation", {}).get("method", "equal_weight")
-        print(f"  Sharpe={row['sharpe']:.3f}  alloc={alloc}  bt_hash={row['backtest_hash'][:8]}")
+        # The stage is printed because it is the thing that changed: a `risk_overlay` carrier
+        # and its `allocation` parent share a prediction hash, so nothing else in this line
+        # distinguishes the overlaid run from the un-overlaid one it was built on.
+        print(
+            f"  Sharpe={row['sharpe']:.3f}  stage={row['pool_stage']}  alloc={alloc}  "
+            f"bt_hash={row['backtest_hash'][:8]}"
+        )
 
 # %%
 prices = load_backtest_prices_for(
@@ -180,6 +275,15 @@ print(f"Prices: {len(prices):,} rows, {prices['symbol'].n_unique()} assets")
 n_total = len(top_combos) * len(COST_GRID_BPS) if not top_combos.is_empty() else 0
 n_done = 0
 t0 = time.time()
+# The rows this run registers, so section 3 can plot its own curve rather than everything the
+# `cost_sensitivity` stage has ever held. Collected here because the hash is only known after
+# the run returns.
+swept_hashes: list[str] = []
+# Grid points that did not produce a backtest. A cost curve with holes is not a slower
+# version of the curve - it is a different one, and the breakeven read off it states a cost
+# level the strategy was never tested at. Collected rather than only printed, so the
+# rendering below can refuse instead of interpolating across the gap.
+failed_points: list[str] = []
 
 for combo_row in top_combos.iter_rows(named=True):
     pred_hash = combo_row["prediction_hash"]
@@ -214,17 +318,27 @@ for combo_row in top_combos.iter_rows(named=True):
                 initial_cash=bt_config.initial_cash,
                 calendar=bt_config.calendar,
             )
+            if result.backtest_hash:
+                swept_hashes.append(result.backtest_hash)
             if cost_bps % 10 == 0:
                 print(
                     f"  [{n_done}/{n_total}] {alloc_method} @ {cost_bps}bps: "
                     f"Sharpe={result.metrics.get('sharpe', 0):.3f}"
                 )
         except Exception as e:
+            failed_points.append(f"{alloc_method} @ {cost_bps}bps: {e}")
             print(f"  [{n_done}/{n_total}] {alloc_method} @ {cost_bps}bps: FAILED — {e}")
 
 # %%
 elapsed = time.time() - t0
 print(f"Cost sweep complete: {n_done} backtests in {elapsed:.0f}s")
+if failed_points:
+    raise RuntimeError(
+        f"{len(failed_points)} of {n_total} cost-grid points did not produce a backtest, so "
+        "the decay curve below would be drawn through the gaps and the breakeven read off it "
+        "would name a cost level nothing was tested at. Fix the failures and re-run; the "
+        "points that succeeded are registered and will be reused.\n  " + "\n  ".join(failed_points)
+    )
 
 # %% [markdown]
 # ## 3. Cost Sensitivity Analysis
@@ -243,8 +357,24 @@ from case_studies.utils.backtest_explorer import BacktestExplorer
 
 explorer = BacktestExplorer(CASE_STUDY_ID)
 
+# %% [markdown]
+# **The curve is scoped to the rows this run just registered.** `cost_sensitivity()` unscoped
+# returns every row the stage has ever held - previous carriers, superseded generations, and
+# the full-universe rows section 4 registers on purpose. Plotting those together produces one
+# line per allocator drawn through several strategies at once, which is not a Sharpe-versus-cost
+# curve for anything. `backtest_explorer.cost_sensitivity`'s own docstring names this case study
+# as one that must scope, and it was not scoping.
+
 # %%
-cost_df = explorer.cost_sensitivity()
+if not swept_hashes:
+    # Falling back to an unscoped read here would be the worst of both: the curve reappears,
+    # mixed across every generation the stage has ever held, precisely on the runs where the
+    # sweep above registered nothing and there is no curve to draw. An empty frame says the
+    # sweep produced nothing, which is what happened.
+    print("The sweep above registered no cost rows, so there is no curve for this run to plot.")
+    cost_df = pl.DataFrame()
+else:
+    cost_df = explorer.cost_sensitivity(backtest_hashes=swept_hashes)
 
 if not cost_df.is_empty():
     import matplotlib.pyplot as plt
@@ -377,7 +507,12 @@ from case_studies.utils.registry import read_predictions
 db_path = CASE_DIR / "run_log" / "registry.db"
 conn = sqlite3.connect(str(db_path))
 cur = conn.cursor()
-cur.execute("""
+# The universe predicate is the same statement section 1 makes about the carrier pool, and it
+# has to be made again here: this query picks its own row. Without it the cadence exhibit - the
+# publication finding of this notebook - is built on whichever signal row ranks highest, which
+# is the full-universe variant `setup.yaml` excludes from canonical candidacy whenever it wins.
+cur.execute(
+    """
 SELECT br.prediction_hash, tr.family, tr.config_name, bm.sharpe
 FROM backtest_runs br
 JOIN backtest_metrics bm ON br.backtest_hash = bm.backtest_hash
@@ -386,14 +521,20 @@ JOIN training_runs tr ON ps.training_hash = tr.training_hash
 WHERE br.stage = 'signal'
 AND json_extract(br.spec_json, '$.strategy.rebalance.mode') = 'engine'
 AND tr.family != 'deep_learning'
+AND (? IS NULL OR json_extract(br.spec_json, '$.strategy.signal.universe_filter') = ?)
 ORDER BY bm.sharpe DESC
 LIMIT 1
-""")
+""",
+    (CANONICAL_UNIVERSE, CANONICAL_UNIVERSE),
+)
 _row = cur.fetchone()
 conn.close()
 
 if _row is None:
-    print("No signal-stage engine backtest found in registry. Skipping cadence sweep.")
+    print(
+        f"No signal-stage engine backtest on the {CANONICAL_UNIVERSE or 'full'} universe. "
+        "Skipping cadence sweep."
+    )
     best_pred_hash = None
 else:
     best_pred_hash = _row[0]
@@ -498,7 +639,16 @@ def run_cadence_cost_backtest(
         prediction_hash=best_pred_hash,
         initial_cash=bt_config.initial_cash,
         chapter="ch18",
-        signal={"method": "equal_weight_top_k", "top_k": 20, "long_short": bt_config.long_short},
+        # The universe travels with the spec, not just with the query above. A row registered
+        # without it reads as full-universe to every later reader - including section 4's
+        # full-versus-screened query and `derived_tables_off_canonical_universe` - so the
+        # cadence rows would be filed against the comparison they are not part of.
+        signal={
+            "method": "equal_weight_top_k",
+            "top_k": 20,
+            "long_short": bt_config.long_short,
+            **({} if CANONICAL_UNIVERSE is None else {"universe_filter": CANONICAL_UNIVERSE}),
+        },
     )
     spec["strategy"]["rebalance"]["cadence"] = cadence
     spec["backtest_config"]["metadata"]["cadence"] = cadence

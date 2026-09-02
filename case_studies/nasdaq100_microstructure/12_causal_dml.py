@@ -494,4 +494,4 @@ else:
 # most recent complete panels before the holdout, so it then describes that
 # window rather than the whole sample. The effect is measured per unit of
 # `signed_vol_share`; converting it into anything tradable needs that unit's
-# dispersion, which `16_costs` supplies.
+# dispersion, which `17_costs` supplies.
