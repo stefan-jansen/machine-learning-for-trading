@@ -1992,41 +1992,38 @@ case_studies/nasdaq100_microstructure/13_model_analysis:
   timeout: 300
 case_studies/nasdaq100_microstructure/14_backtest:
   parameters:
-    # Test data has 6 nasdaq symbols; the slot grid's smallest max_slots (5)
-    # needs n_assets > 5, so cap at 6 (not 5) or every scheme is filtered out.
-    MAX_SYMBOLS: 6
+    # The whole fixture universe, which is 12 nasdaq symbols since
+    # ml4t/third-edition-test-data fb2da57 widened it from 6. Only the symbol axis moved -
+    # the fixture is the same 43 days of 2020 and 99 of 2021 - so fold geometry and every
+    # date-derived artifact are unchanged and the rows exactly double. At 6 the slot grid's
+    # smallest max_slots (5) only just cleared n_assets > 5; at 12 it clears comfortably.
+    MAX_SYMBOLS: 12
     TOP_K: 2
     TOP_N_PREDICTIONS: 2
-  timeout: 180
+  # Doubled with the universe. The slot grid does not widen with the ceiling, so this run
+  # prices twice the names over the same number of schemes.
+  timeout: 360
 case_studies/nasdaq100_microstructure/15_portfolio_management:
   parameters:
-    # Same constraint as 14_backtest above: the test data has 6 nasdaq symbols and
-    # the smallest top_k in the grid is 5, so a cap of 5 filters the whole grid out
-    # and the allocation sweep registers nothing. 6 is the whole fixture universe.
-    #
-    # It is not enough to realize top_k=5 long-short: `signals.py` caps each side at
-    # `n_assets // 2`, so a declared k of 5 would trade 3 names per side. That used to
-    # happen silently and register under k=5; `get_top_k_values_for` now drops an
-    # infeasible k and raises when the whole grid goes, which is what this notebook
-    # hits at 6 symbols. So the grid is declared here rather than derived - the
-    # smallest k the fixture can actually realize long-short is 3.
-    #
-    # This is a limit of a 6-symbol fixture, not of the sweep. Measured against the
-    # production universes the ceiling never binds: nasdaq100 115 symbols at top_k=20,
-    # cme_futures 30 at 10, fx_pairs 20 at 10, crypto_perps_funding 19 at 5.
-    MAX_SYMBOLS: 6
-    TOP_K_VALUES: [2, 3]
+    # Same constraint as 14_backtest above, and the widened fixture relaxes it.
+    # `signals.py:219` takes `eff_k = min(top_k, n_assets // 2)` on a long-short label, so at
+    # 6 symbols the ceiling was 3: a `top_k=5` row traded 3 names a side and registered under
+    # a k it had not run. At 12 the ceiling is 6 and `top_k=5` binds first, so the sweep
+    # trades the 5 a side it declares. The ceiling never bound in production (nasdaq100 115
+    # symbols at top_k=20, cme_futures 30 at 10, fx_pairs 20 at 10, crypto 19 at 5); it was
+    # a property of a 6-symbol fixture.
+    MAX_SYMBOLS: 12
     TOP_N_PREDICTIONS: 2
   timeout: 300
-case_studies/nasdaq100_microstructure/16_costs:
-  timeout: 600
-case_studies/nasdaq100_microstructure/17_risk_management:
+case_studies/nasdaq100_microstructure/16_risk_management:
   parameters:
     MAX_RISK_VARIANTS: 3
     # Matches 15_portfolio_management: the overlays are applied to that notebook's
     # allocation rows, so both must price the same cross-section.
-    MAX_SYMBOLS: 6
+    MAX_SYMBOLS: 12
     TOP_N_COMBOS: 1
+  timeout: 600
+case_studies/nasdaq100_microstructure/17_costs:
   timeout: 600
 case_studies/nasdaq100_microstructure/18_strategy_analysis:
   skip: true

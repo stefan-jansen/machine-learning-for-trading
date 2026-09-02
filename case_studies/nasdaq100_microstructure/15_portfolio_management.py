@@ -84,12 +84,6 @@ MAX_SYMBOLS = 0
 # after CASE_STUDY_ID is set; papermill can still override at injection time.
 SKIP_EXPENSIVE_ALLOC = None
 TOP_N_PREDICTIONS = None
-# Same convention: None derives the concentration grid from setup.yaml against the
-# resolved universe. A caller overrides it only where the panel cannot express the
-# declared grid at all - the CI fixture carries too few nasdaq symbols to realize a
-# long-short top_k of 5, and `get_top_k_values_for` now says so rather than clamping
-# each side to `n_assets // 2` and registering the result under the declared k.
-TOP_K_VALUES = None
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
@@ -160,8 +154,7 @@ print(f"Prices: {len(prices):,} rows, {n_assets} assets")
 # positions without changing how often those positions turn over.
 
 # %%
-if TOP_K_VALUES is None:
-    TOP_K_VALUES = get_top_k_values_for(CASE_STUDY_ID, LABEL, n_assets)
+TOP_K_VALUES = get_top_k_values_for(CASE_STUDY_ID, LABEL, n_assets)
 print(f"TOP_K grid: {TOP_K_VALUES} (universe: {n_assets} assets)")
 
 _ALL_ALLOC_CONFIGS = get_allocators(CASE_STUDY_ID)
