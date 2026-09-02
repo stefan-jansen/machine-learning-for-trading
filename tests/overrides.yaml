@@ -2002,13 +2002,20 @@ case_studies/nasdaq100_microstructure/15_portfolio_management:
   parameters:
     # Same constraint as 14_backtest above: the test data has 6 nasdaq symbols and
     # the smallest top_k in the grid is 5, so a cap of 5 filters the whole grid out
-    # and the allocation sweep registers nothing. 6 is the whole fixture universe and
-    # is still not enough to realize top_k=5 long-short - signals.py caps each side at
-    # n_assets // 2, so these rows trade 3 names per side under a top_k=5 label. That
-    # is a limit of a 6-symbol fixture, not of the sweep: measured against the
-    # production universes the cap never binds (nasdaq100 115 symbols at top_k=20,
-    # cme_futures 30 at 10, fx_pairs 20 at 10, crypto_perps_funding 19 at 5).
+    # and the allocation sweep registers nothing. 6 is the whole fixture universe.
+    #
+    # It is not enough to realize top_k=5 long-short: `signals.py` caps each side at
+    # `n_assets // 2`, so a declared k of 5 would trade 3 names per side. That used to
+    # happen silently and register under k=5; `get_top_k_values_for` now drops an
+    # infeasible k and raises when the whole grid goes, which is what this notebook
+    # hits at 6 symbols. So the grid is declared here rather than derived - the
+    # smallest k the fixture can actually realize long-short is 3.
+    #
+    # This is a limit of a 6-symbol fixture, not of the sweep. Measured against the
+    # production universes the ceiling never binds: nasdaq100 115 symbols at top_k=20,
+    # cme_futures 30 at 10, fx_pairs 20 at 10, crypto_perps_funding 19 at 5.
     MAX_SYMBOLS: 6
+    TOP_K_VALUES: [2, 3]
     TOP_N_PREDICTIONS: 2
   timeout: 300
 case_studies/nasdaq100_microstructure/16_costs:
