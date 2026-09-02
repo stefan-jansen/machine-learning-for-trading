@@ -144,9 +144,12 @@ declared_labels(study, "gbm")
 # not a value outside the ladder - a `learning_rate` of 0.1 against the 0.05 the twelve `leaves_*`
 # presets declare, and none of the `bagging_fraction` 0.8, `bagging_freq` 1, `feature_fraction` 0.7,
 # `lambda_l1` 0.5, `lambda_l2` 5.0 or `min_child_samples` 50 that all four ladder profiles carry.
-# With `bagging_freq` unset LightGBM disables subsampling outright, so `default` and `leaves_31` are
-# the same capacity at double the learning rate with both regularization and subsampling off, and
-# they differ on seven parameters rather than none.
+# Measured on LightGBM 4.6.0, those omissions resolve to `lambda_l1` and `lambda_l2` at 0,
+# subsampling disabled outright because `bagging_freq` defaults to 0, and `min_child_samples` at 20
+# rather than the ladder's 50. So `default` and `leaves_31` share a leaf limit, not a capacity: the
+# same `num_leaves` reached under a leaf-size constraint less than half as strict, with no penalty
+# term, no subsampling and double the learning rate - seven declared parameters apart rather than
+# none.
 #
 # Read the gap between them as capacity and you will be reading the wrong axis: at 500 iterations
 # `default_mse` reaches an IC of 0.0243 and `leaves_31_mse` 0.0222, at identical leaf counts.
