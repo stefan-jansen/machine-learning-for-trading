@@ -24,6 +24,7 @@ CAUSAL_NOTEBOOKS = [
     "case_studies/cme_futures/11_causal_dml.py",
     "case_studies/crypto_perps_funding/11_causal_dml.py",
     "case_studies/etfs/12_causal_dml.py",
+    "case_studies/nasdaq100_microstructure/12_causal_dml.py",
     "case_studies/fx_pairs/11_causal_dml.py",
     "case_studies/sp500_options/10_causal_dml.py",
     "case_studies/us_equities_panel/14_causal_dml.py",
@@ -32,10 +33,10 @@ CAUSAL_NOTEBOOKS = [
     "case_studies/us_firm_characteristics/09_causal_dml.py",
 ]
 
-# Two more notebooks open a causal request and do not yet declare the parameter, so they
-# cannot answer the write-time refusal: nasdaq100_microstructure/12 and
-# sp500_equity_option_analytics/12. Each is owned by an active branch and takes the same patch
-# from its own side; add the path here in the same commit that adds the parameter.
+# One notebook still opens a causal request without declaring the parameter and so cannot
+# answer the write-time refusal: sp500_equity_option_analytics/12. It is owned by an active
+# branch and takes the same patch from its own side; add the path above in the same commit
+# that adds the parameter. nasdaq100_microstructure/12 came off this note on 2026-09-02.
 
 
 class TestTheDeclarationParser:
