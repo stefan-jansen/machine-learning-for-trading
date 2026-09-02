@@ -1992,23 +1992,26 @@ case_studies/nasdaq100_microstructure/13_model_analysis:
   timeout: 300
 case_studies/nasdaq100_microstructure/14_backtest:
   parameters:
-    # Test data has 6 nasdaq symbols; the slot grid's smallest max_slots (5)
-    # needs n_assets > 5, so cap at 6 (not 5) or every scheme is filtered out.
-    MAX_SYMBOLS: 6
+    # The whole fixture universe, which is 12 nasdaq symbols since
+    # ml4t/third-edition-test-data fb2da57 widened it from 6. Only the symbol axis moved -
+    # the fixture is the same 43 days of 2020 and 99 of 2021 - so fold geometry and every
+    # date-derived artifact are unchanged and the rows exactly double. At 6 the slot grid's
+    # smallest max_slots (5) only just cleared n_assets > 5; at 12 it clears comfortably.
+    MAX_SYMBOLS: 12
     TOP_K: 2
     TOP_N_PREDICTIONS: 2
-  timeout: 180
+  # Doubled with the universe. The slot grid does not widen with the ceiling, so this run
+  # prices twice the names over the same number of schemes.
+  timeout: 360
 case_studies/nasdaq100_microstructure/15_portfolio_management:
   parameters:
-    # Same constraint as 14_backtest above: the test data has 6 nasdaq symbols and
-    # the smallest top_k in the grid is 5, so a cap of 5 filters the whole grid out
-    # and the allocation sweep registers nothing. 6 is the whole fixture universe and
-    # is still not enough to realize top_k=5 long-short - signals.py caps each side at
-    # n_assets // 2, so these rows trade 3 names per side under a top_k=5 label. That
-    # is a limit of a 6-symbol fixture, not of the sweep: measured against the
-    # production universes the cap never binds (nasdaq100 115 symbols at top_k=20,
-    # cme_futures 30 at 10, fx_pairs 20 at 10, crypto_perps_funding 19 at 5).
-    MAX_SYMBOLS: 6
+    # Same constraint as 14_backtest above, and the widened fixture relaxes it. At 6 symbols
+    # a top_k=5 long-short label could not be realized - signals.py caps each side at
+    # n_assets // 2, so those rows traded 3 names per side and the grid's smallest top_k was
+    # a fixture limit rather than a property of the sweep. At 12 the cap is 6 per side and
+    # top_k=5 is realizable. It never bound in production anyway (nasdaq100 115 symbols at
+    # top_k=20, cme_futures 30 at 10, fx_pairs 20 at 10, crypto_perps_funding 19 at 5).
+    MAX_SYMBOLS: 12
     TOP_N_PREDICTIONS: 2
   timeout: 300
 case_studies/nasdaq100_microstructure/16_risk_management:
@@ -2016,7 +2019,7 @@ case_studies/nasdaq100_microstructure/16_risk_management:
     MAX_RISK_VARIANTS: 3
     # Matches 15_portfolio_management: the overlays are applied to that notebook's
     # allocation rows, so both must price the same cross-section.
-    MAX_SYMBOLS: 6
+    MAX_SYMBOLS: 12
     TOP_N_COMBOS: 1
   timeout: 600
 case_studies/nasdaq100_microstructure/17_costs:
