@@ -25,6 +25,7 @@ import yaml
 
 from case_studies.utils.sweep_config import (
     get_allocators,
+    get_allow_short_selling,
     get_cost_grid_bps,
     get_entry_schemes_for,
     get_portfolio_risk_controls,
@@ -320,3 +321,78 @@ def test_sweep_read_does_not_create_case_study_dir(tmp_path, monkeypatch):
     with pytest.raises((FileNotFoundError, KeyError)):
         load_sweep("etfs")  # no config seeded under tmp_path
     assert not (tmp_path / "etfs").exists()
+
+
+# ---------------------------------------------------------------------------
+# The two halves of the concentration grid have to agree on the ceiling
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("case_study", MIGRATED_CASES)
+def test_the_two_grid_helpers_agree_on_every_declared_case_study(case_study):
+    """`get_top_k_values_for` and `get_entry_schemes_for` synthesize one grid.
+
+    They read the same `backtest.sweep.top_k_grid` and are used by the same
+    notebooks - one to size the sweep, the other to build the schemes it runs. When
+    they disagree the sweep registers a `top_k` the engine does not run, because
+    `top_k` is identity-bearing through `plan_backtests(signal=...)` while
+    `signals.py` clamps `eff_k` to `n_assets // 2` on a long-short strategy.
+
+    Measured at each case study's own declared universe, which is where the
+    disagreement was live: crypto_perps_funding declares 19 assets and a k of 10, so
+    the long-short ceiling of 9 excluded it from the schemes while the k values kept
+    it.
+    """
+    setup = yaml.safe_load((CASE_STUDIES_DIR / case_study / "config" / "setup.yaml").read_text())
+    n_assets = (setup.get("universe") or {}).get("n_assets")
+    if not isinstance(n_assets, int):
+        pytest.skip(f"{case_study} declares no universe.n_assets")
+    long_short = get_allow_short_selling(case_study)
+
+    for label, grid in (load_sweep(case_study).get("top_k_grid") or {}).items():
+        schemes = get_entry_schemes_for(case_study, label, n_assets, long_short)
+        # `dict.fromkeys` rather than `set`: nasdaq100 appends a second block of
+        # top-k schemes from `signal_nasdaq100`, so the same k appears more than once,
+        # and the comparison is about which k values are offered, not how many
+        # schemes carry each.
+        from_schemes = list(
+            dict.fromkeys(s["top_k"] for s in schemes if s["method"] == "equal_weight_top_k")
+        )
+        if not from_schemes:
+            continue
+        assert get_top_k_values_for(case_study, label, n_assets) == from_schemes, (
+            f"{case_study}/{label}: grid {list(grid)} at n_assets={n_assets}, "
+            f"long_short={long_short}"
+        )
+
+
+def test_a_long_short_k_above_half_the_universe_is_not_offered():
+    """The interval that registers one identity and runs another.
+
+    On 19 assets long-short, k=10 takes 10 long and 10 short out of 19 names, which
+    `signals.py` cannot realize; it clamps to 9. Offering 10 here is what let a
+    backtest register under `top_k=10` having run `top_k=9`.
+    """
+    assert get_top_k_values_for("crypto_perps_funding", "fwd_ret_8h", 19) == [3, 5]
+    # Long-only, the same universe holds all three: the ceiling is the whole universe.
+    assert get_top_k_values_for("crypto_perps_funding", "fwd_ret_8h", 19, long_short=False) == [
+        3,
+        5,
+        10,
+    ]
+
+
+def test_the_ceiling_defaults_to_what_the_case_study_declares():
+    """No caller passes the flag, so the default has to be the declared account.
+
+    `get_top_k_values_for` is called before any strategy spec exists, so
+    `backtest_runner.resolved_allow_short_selling` has nothing to resolve from. The
+    declared `account.allow_short_selling` is the same field that resolution reads
+    first, and reading it here is what makes the default correct rather than
+    long-only-by-omission.
+    """
+    assert get_allow_short_selling("crypto_perps_funding") is True
+    assert get_allow_short_selling("etfs") is False
+    # etfs is long-only, so its ceiling is the whole universe: on 30 assets the whole
+    # declared grid survives, where a long-short ceiling of 15 would drop 20.
+    assert get_top_k_values_for("etfs", "fwd_ret_21d", 30) == [5, 10, 20]

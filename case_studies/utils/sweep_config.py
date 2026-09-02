@@ -170,6 +170,24 @@ def _load_setup(case_study: str) -> dict:
     return yaml.safe_load(_setup_path(case_study).read_text())
 
 
+def get_allow_short_selling(case_study: str) -> bool:
+    """Return ``account.allow_short_selling`` from a case study's backtest base config.
+
+    The concentration grid is synthesized before any strategy spec exists, so the
+    per-spec resolution in ``backtest_runner.resolved_allow_short_selling`` is not
+    available yet. This reads the same declared field that resolution reads first, from
+    the same file that populates ``backtest_config.account``. A case study with no
+    ``config/backtest/base.yaml`` is long-only by declaration.
+    """
+    from utils.paths import get_case_study_dir
+
+    path = get_case_study_dir(case_study, create=False) / "config" / "backtest" / "base.yaml"
+    if not path.is_file():
+        return False
+    base = yaml.safe_load(path.read_text()) or {}
+    return bool((base.get("account") or {}).get("allow_short_selling", False))
+
+
 def get_execution_defaults(case_study: str) -> dict:
     """Return the ``execution:`` block from setup.yaml.
 
@@ -649,6 +667,8 @@ def get_top_k_values_for(
     case_study: str,
     label: str,
     n_assets: int,
+    *,
+    long_short: bool | None = None,
 ) -> list[int]:
     """Return the top-K grid for ``(case_study, label)`` used by Ch17.
 
@@ -656,6 +676,20 @@ def get_top_k_values_for(
     benchmark, not a prediction-based portfolio). Raises ``KeyError`` if
     ``backtest.sweep.top_k_grid[label]`` is not declared, and ``ValueError``
     when the filter empties the grid.
+
+    A long-short strategy takes ``k`` names on each side, so its ceiling is half
+    the universe, not all of it. ``signals.py`` clamps ``eff_k`` to
+    ``n_assets // 2`` when ``long_short`` is set, and ``top_k`` is identity-bearing
+    through ``plan_backtests(signal=...)`` - so a ``k`` in the half-open interval
+    ``(n_assets // 2, n_assets)`` passes this filter, registers under the declared
+    ``k``, and runs at the clamped one. Two such values register distinct identities
+    over a byte-identical weight series. ``get_entry_schemes_for`` has excluded that
+    interval since it took a ``long_short`` argument; this function is the other half
+    of the same grid and has to agree with it.
+
+    ``long_short`` defaults to the case study's declared
+    ``account.allow_short_selling``, because every caller passes the case study and
+    none of them has a resolved spec at this point. Pass it explicitly to override.
 
     An empty grid is never a legitimate result: the caller multiplies it into
     a sweep size, so zero concentrations means zero backtests, and the sweep
@@ -672,12 +706,18 @@ def get_top_k_values_for(
             f"backtest.sweep.top_k_grid[{label!r}] not declared in "
             f"case_studies/{case_study}/config/setup.yaml"
         )
-    values = [int(k) for k in grid if int(k) < n_assets]
+    if long_short is None:
+        long_short = get_allow_short_selling(case_study)
+    ceiling = n_assets // 2 if long_short else n_assets
+    values = [
+        int(k) for k in grid if int(k) < n_assets and not (long_short and 2 * int(k) > n_assets)
+    ]
     if not values:
+        side = "long-short ceiling" if long_short else "universe"
         raise ValueError(
             f"top_k_grid[{label!r}] = {list(grid)} is empty after filtering against "
             f"n_assets={n_assets} for case_studies/{case_study}: every declared k holds "
-            f"the whole universe. Raise the universe cap (MAX_SYMBOLS) above "
+            f"the whole {side} ({ceiling}). Raise the universe cap (MAX_SYMBOLS) above "
             f"{min(int(k) for k in grid)} or declare a smaller k."
         )
     return values
