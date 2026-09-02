@@ -616,7 +616,7 @@ def test_tabm_corrupt_diagnostics_are_rebuilt_from_completed_folds(tmp_path, mon
     assert prepared_folds == [0, 1]
     assert set(pl.read_parquet(training_log)["fold"]) == {0, 1}
 
-    selected_path = training_log.parent / "predictions.parquet"
+    selected_path = training_log.parent / "best_epoch_predictions.parquet"
     obsolete = (
         pl.read_parquet(selected_path)
         .drop("model_id")
@@ -725,12 +725,12 @@ def test_tabm_variants_from_one_named_preset_keep_separate_identities(
         diagnostics = run.training.root / "run_log" / "training" / run.training.hash / "diagnostics"
         assert {path.name for path in diagnostics.iterdir()} == {
             "all_predictions.parquet",
+            "best_epoch_predictions.parquet",
             "learning_curves.parquet",
-            "predictions.parquet",
             "result.json",
             "training_log.parquet",
         }
-        selected = pl.read_parquet(diagnostics / "predictions.parquet")
+        selected = pl.read_parquet(diagnostics / "best_epoch_predictions.parquet")
         assert "model_id" in selected.columns
         assert {"config", "epoch"}.isdisjoint(selected.columns)
 
