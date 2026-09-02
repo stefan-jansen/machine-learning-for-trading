@@ -30,9 +30,14 @@ def test_open_study_writes_canonical_results_to_output_dir(
     assert study.root == output_root / "us_firm_characteristics"
     assert study.output_root == output_root
     assert study.root != study.release_case_root
-    assert (study.root / "labels").is_dir()
-    assert (study.root / "features").is_dir()
     assert (study.root / "run_log" / "registry.db").is_file()
+    assert (study.root / "config").is_dir()
+    # Not `labels/` and `features/`. `create_experiment` copies a generated directory only
+    # where the release tree has one, and those are gitignored: present in a worktree wired
+    # for this case study, absent in every other worktree and every clean clone. Asserting
+    # them made this test pass or fail on how the checkout happened to be built rather than
+    # on anything `open_study` promises, which is that the writable root is the output dir
+    # and carries its own registry and config.
 
 
 def test_ipca_requests_share_the_case_runtime_contract() -> None:

@@ -328,10 +328,17 @@ class OfficialPopulation:
         )
 
     def require_complete(self) -> tuple[str, ...]:
+        """Every member registered, of the declared kind, and whole. Raises naming the failures.
+
+        Members are opened through ``study.results`` rather than ``Result.open`` directly. The
+        two are the same call - ``ResultStore.open`` forwards to it - and having one way in
+        means a caller that substitutes the store, as the field construction's tests do, gets
+        the same answer here that it gets everywhere else.
+        """
         failures = []
         for member_hash in self.members:
             try:
-                result = Result.open(self.study, member_hash)
+                result = self.study.results.open(member_hash)
             except KeyError:
                 failures.append(f"{member_hash}:missing")
                 continue

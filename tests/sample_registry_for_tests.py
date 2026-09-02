@@ -48,7 +48,14 @@ CASE_STUDY_IDS = [
     "us_equities_panel",
 ]
 
-# Keep top N backtests per (family, stage) by absolute Sharpe
+# Keep top N backtests per (label, family, stage) by absolute Sharpe.
+#
+# The label is in the partition because the notebooks range over every declared label, not over
+# the primary. A case study declares five, and the top three of a family's |Sharpe| bucket at a
+# stage can all belong to one of them - so `fwd_dir_5d` reached the fixture with fifteen
+# training runs, fifteen prediction sets and not one backtest, and every notebook that requires
+# each declared label to have a baseline failed against a fixture where one never could. A
+# sample that drops a label entirely is not a smaller registry, it is a differently shaped one.
 TOP_N_PER_GROUP = 3
 
 # Prediction hashes a shipped notebook names as a literal, per case study. These
@@ -233,16 +240,17 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
     # First, get sampled backtest hashes
     sampled_bt_hashes = set()
 
-    # 3a. Top N per family × stage (validation backtests)
+    # 3a. Top N per label × family × stage (validation backtests)
     top_n_sql = """
         WITH ranked AS (
             SELECT
                 b.backtest_hash,
                 b.stage,
                 t.family,
+                t.label,
                 bm.sharpe,
                 ROW_NUMBER() OVER (
-                    PARTITION BY b.stage, t.family
+                    PARTITION BY b.stage, t.family, t.label
                     ORDER BY ABS(bm.sharpe) DESC
                 ) AS rn
             FROM backtest_runs b
@@ -777,8 +785,21 @@ def main() -> int:
             "intermediates/ directory). Default: ~/ml4t/test-data/intermediates"
         ),
     )
+    parser.add_argument(
+        "--case-study",
+        action="append",
+        choices=CASE_STUDY_IDS,
+        dest="case_studies",
+        help=(
+            "Sample only this case study; repeatable. Default: all of them. A worktree "
+            "symlinks the run_log of the case study it is working and no other, so the "
+            "whole-repo default is not reachable from one, and a case study whose sweeps "
+            "just re-ran is the unit that needs refreshing anyway."
+        ),
+    )
     args = parser.parse_args()
     intermediates_dir = args.output.expanduser().resolve()
+    case_study_ids = args.case_studies or CASE_STUDY_IDS
 
     if reason := rejected_output_root(intermediates_dir):
         parser.error(
@@ -794,7 +815,7 @@ def main() -> int:
     # production identities, and the artifacts.
     missing = [
         cs_id
-        for cs_id in CASE_STUDY_IDS
+        for cs_id in case_study_ids
         if not (CODE_CS_DIR / cs_id / "run_log" / "registry.db").exists()
     ]
     if missing:
@@ -803,7 +824,7 @@ def main() -> int:
             f"Sampling the rest would refresh those fixtures and leave these at the previous "
             f"vintage, which is the mixed state the run is meant to avoid."
         )
-    for cs_id in CASE_STUDY_IDS:
+    for cs_id in case_study_ids:
         try:
             preflight_pinned_predictions(cs_id, intermediates_dir)
         except (ValueError, FileNotFoundError, RuntimeError) as exc:
@@ -811,11 +832,11 @@ def main() -> int:
 
     print(f"Sampling registries from {CODE_CS_DIR}")
     print(f"Writing to {intermediates_dir}")
-    print(f"Top {TOP_N_PER_GROUP} backtests per (family × stage) + all holdout\n")
+    print(f"Top {TOP_N_PER_GROUP} backtests per (label × family × stage) + all holdout\n")
 
     total_size = 0
     not_refreshed: list[str] = []
-    for cs_id in CASE_STUDY_IDS:
+    for cs_id in case_study_ids:
         print(f"--- {cs_id} ---")
         stats = sample_registry(cs_id, intermediates_dir)
         if stats["status"] != "OK":
@@ -864,7 +885,7 @@ def main() -> int:
         # held, so exiting 0 here reports a refresh that did not happen and the
         # replay-only notebooks then read the previous vintage.
         print(
-            f"\nERROR: {len(not_refreshed)} of {len(CASE_STUDY_IDS)} registries were not "
+            f"\nERROR: {len(not_refreshed)} of {len(case_study_ids)} registries were not "
             f"refreshed: {', '.join(not_refreshed)}. Their production registry.db is missing "
             f"under {CODE_CS_DIR}; the fixture keeps whatever it held before this run."
         )
