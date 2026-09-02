@@ -139,7 +139,7 @@ universe:
   # spec-hash input — like the 'liquid' filter, the hash carries only the
   # filter name). The full 115 universe collapses out of sample (featured
   # config holdout -0.42) while the cost-feasible universe is positive; the
-  # screen is load-bearing. See 16_costs.py for the full-vs-screened contrast.
+  # screen is load-bearing. See 17_costs.py for the full-vs-screened contrast.
   cost_feasible:
     validation:
       - AAPL
@@ -461,7 +461,7 @@ backtest:
     # (holdout -0.42) but is positive on the cost-feasible subset (the
     # cheapest-to-trade names, frozen per split — see universe.cost_feasible).
     # The full-universe variant is NOT a canonical rank-1 / cohort / DSR
-    # candidate; it lives only in the 16_costs.py full-vs-screened comparison,
+    # candidate; it lives only in the 17_costs.py full-vs-screened comparison,
     # mirroring sp500_options' liquid screen. Read by
     # case_studies.utils.sweep_config.get_universe_filters_for.
     universe_filter: cost_feasible
@@ -508,7 +508,7 @@ backtest:
     # per_share_plus_spread. Values: 0¢, 0.5¢, 1¢, 2.5¢, 5¢, 10¢.
     cost_grid_half_spread_usd: [0.0, 0.005, 0.01, 0.025, 0.05, 0.10]
     # Alternative rebalance cadences explored by Ch18's cadence × cost
-    # heatmap (16_costs.py Section 4). The first entry must be the CS's
+    # heatmap (17_costs.py Section 4). The first entry must be the CS's
     # default cadence (``decision.bar_frequency``). Each cadence reuses the
     # ``cost_grid_half_spread_usd`` grid above. Tokens are the same cadence
     # vocabulary recognized by the engine; the notebook pulls the list from

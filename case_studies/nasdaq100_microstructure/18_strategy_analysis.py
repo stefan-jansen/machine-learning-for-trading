@@ -49,7 +49,7 @@
 # locked registry (`case_studies/nasdaq100_microstructure/run_log/registry.db`).
 #
 # **Scope**: no training and no re-backtesting. The notebook reads what
-# `14_backtest` through `17_risk_management` registered, and derives
+# `14_backtest` through `17_costs` registered, and derives
 # `cohort_metrics` and `backtest_paired_metrics` from those runs itself when
 # they are absent, so the case study no longer depends on a chapter-20
 # notebook having been run first. On an already-populated registry it writes
@@ -163,14 +163,14 @@ if _n_backtests == 0:
     # one that reads like a finished analysis. `14_backtest` is what fills this.
     raise RuntimeError(
         f"{CASE_STUDY} has no registered backtest runs, so there is nothing to analyse. "
-        "Run 14_backtest through 17_risk_management first; this notebook reads what they "
+        "Run 14_backtest through 17_costs first; this notebook reads what they "
         "register and computes no backtests of its own."
     )
 
 # Both producers need this case study's canonical selection, and passing neither is not a
 # smaller version of passing both - it is a different selection. `setup.yaml` says the
 # full-universe variant "is NOT a canonical rank-1 / cohort / DSR candidate" and lives only in
-# the 16_costs comparison, so a cohort computed without the filter mixes rows the case study
+# the 17_costs comparison, so a cohort computed without the filter mixes rows the case study
 # excludes by declaration into the leaders, trial counts, DSR and PBO. The filter is read from
 # `setup.yaml` rather than written here, so it cannot disagree with the sweep that produced the
 # runs. The rung pin is the matching statement for paired metrics: nasdaq's carrier is the

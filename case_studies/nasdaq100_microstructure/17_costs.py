@@ -57,7 +57,10 @@
 #
 # **Book Reference:** Chapter 18, Sections 18.2–18.5
 #
-# **Prerequisites:** Completed Ch17 allocation sweep with results in `registry.db`.
+# **Prerequisites:** [`16_risk_management`](16_risk_management.ipynb), and through it
+# [`15_portfolio_management`](15_portfolio_management.ipynb) and [`14_backtest`](14_backtest.ipynb).
+# This is the last stage that selects, so it runs after all three and draws from all of
+# them.
 
 # %%
 """NASDAQ-100 Microstructure: Costs."""
@@ -92,6 +95,7 @@ from case_studies.utils.sweep_config import (
     get_cost_grid_half_spread_usd,
     get_top_n_predictions,
 )
+from case_studies.utils.uncertainty import STAGE_SEQUENCE
 from utils.paths import get_case_study_dir
 
 # %% tags=["parameters"]
@@ -119,20 +123,71 @@ if excluded_families(CASE_STUDY_ID):
     )
 
 # %% [markdown]
-# ## 1. Load Top Combos from Allocation Stage
+# ## 1. Load the leading pre-cost runs
 #
-# We load the least-negative full-universe allocation-stage backtests. These are
-# every-bar combos and are already loss-making (Ch17); the cost grid below
-# traces how the Sharpe-vs-cost curve behaves around them before the two
-# recovery levers — the screen and the cadence — are applied.
+# We load the least-negative full-universe validation backtests. These are every-bar combos
+# and are already loss-making (Ch17); the cost grid below traces how the Sharpe-vs-cost curve
+# behaves around them before the two recovery levers — the screen and the cadence — are
+# applied.
+#
+# **The pool is every stage a carrier can come from, not just `allocation`.** A risk overlay
+# is a strategy in its own right: `16_risk_management` registers it at `stage='risk_overlay'`
+# with its own Sharpe, and it is a candidate to carry the case study. Pricing only the
+# allocation rows would put a cost curve in the chapter for a strategy the case study does
+# not select whenever an overlay outranks its own parent, which is the ordinary case - four
+# of the seven completed case studies have a `risk_overlay` as their rank-1 validation
+# carrier. The stages come from `STAGE_SEQUENCE` rather than a tuple typed here, so the pool
+# cannot drift from the library when a stage is added.
+#
+# `cost_sensitivity` is the one member excluded, because that is the stage this notebook
+# writes: including it would re-price rows that already carry a cost model.
+#
+# This is also why the notebook is numbered after `16_risk_management` rather than before it.
+# Run the other way round, the overlay rows do not exist yet and the pool is `allocation`
+# whatever it declares.
 
 # %%
-top_combos = resolve_best_backtest_runs(
-    CASE_STUDY_ID, LABEL, split="validation", stage="allocation", top_n=TOP_N_COMBOS
-)
+PRE_COST_STAGES = tuple(stage for stage in STAGE_SEQUENCE if stage != "cost_sensitivity")
+
+
+def resolve_pre_cost_runs(top_n: int) -> pl.DataFrame:
+    """The highest-Sharpe validation runs across every stage a carrier may come from.
+
+    Each stage is asked for its whole ranked list and the pool is sorted afterwards, rather
+    than taking `top_n` from each and merging them: truncating first lets one stage's leader
+    hold a slot that a better run in another stage should have had, and at `top_n=1` that
+    drops a whole stage from consideration instead of falling through to the next candidate.
+    """
+    ranked = [
+        frame.with_columns(pl.lit(stage).alias("pool_stage"))
+        for stage, frame in (
+            (
+                stage,
+                resolve_best_backtest_runs(
+                    CASE_STUDY_ID, LABEL, split="validation", stage=stage, top_n=1_000_000
+                ),
+            )
+            for stage in PRE_COST_STAGES
+        )
+        if not frame.is_empty()
+    ]
+    if not ranked:
+        return pl.DataFrame()
+    return (
+        pl.concat(ranked)
+        .sort("sharpe", descending=True)
+        .unique("backtest_hash", maintain_order=True)
+        .head(top_n)
+    )
+
+
+top_combos = resolve_pre_cost_runs(TOP_N_COMBOS)
 
 if top_combos.is_empty():
-    print("No allocation-stage results found. Run the portfolio management notebook first.")
+    print(
+        "No results found at any of "
+        f"{', '.join(PRE_COST_STAGES)}. Run 14_backtest through 16_risk_management first."
+    )
 else:
     for row in top_combos.iter_rows(named=True):
         spec = ensure_backtest_spec(
@@ -150,7 +205,13 @@ else:
             initial_cash=bt_config.initial_cash,
         )
         alloc = strategy_view(spec).get("allocation", {}).get("method", "equal_weight")
-        print(f"  Sharpe={row['sharpe']:.3f}  alloc={alloc}  bt_hash={row['backtest_hash'][:8]}")
+        # The stage is printed because it is the thing that changed: a `risk_overlay` carrier
+        # and its `allocation` parent share a prediction hash, so nothing else in this line
+        # distinguishes the overlaid run from the un-overlaid one it was built on.
+        print(
+            f"  Sharpe={row['sharpe']:.3f}  stage={row['pool_stage']}  alloc={alloc}  "
+            f"bt_hash={row['backtest_hash'][:8]}"
+        )
 
 # %%
 prices = load_backtest_prices_for(

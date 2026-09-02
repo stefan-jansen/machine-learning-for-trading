@@ -2011,15 +2011,15 @@ case_studies/nasdaq100_microstructure/15_portfolio_management:
     MAX_SYMBOLS: 6
     TOP_N_PREDICTIONS: 2
   timeout: 300
-case_studies/nasdaq100_microstructure/16_costs:
-  timeout: 600
-case_studies/nasdaq100_microstructure/17_risk_management:
+case_studies/nasdaq100_microstructure/16_risk_management:
   parameters:
     MAX_RISK_VARIANTS: 3
     # Matches 15_portfolio_management: the overlays are applied to that notebook's
     # allocation rows, so both must price the same cross-section.
     MAX_SYMBOLS: 6
     TOP_N_COMBOS: 1
+  timeout: 600
+case_studies/nasdaq100_microstructure/17_costs:
   timeout: 600
 case_studies/nasdaq100_microstructure/18_strategy_analysis:
   skip: true
