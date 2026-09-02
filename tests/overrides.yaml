@@ -1575,6 +1575,22 @@ case_studies/etfs/10_dl_tsmixer:
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
   timeout: 180
+case_studies/etfs/10a_dl_nlinear:
+  # Without a block here the notebook runs as a preview that declares no reduction, which
+  # `run_model_population` refuses outright, so an absent entry is a failed job rather than a
+  # slow one.
+  # The reductions match 10_dl_tsmixer rather than 09_dl_lstm: no max_symbols, for the reason
+  # that block states - a cap on the cross-section that the temporal artifact does not share is
+  # what #988 measured diverging.
+  # DEVICE and POPULATION_NAME travel together, as in 09_dl_lstm: the device is inside the
+  # training identity, so a CPU run declares a different member set and must name its own
+  # population rather than publish into the canonical one.
+  parameters:
+    DEVICE: cpu
+    POPULATION_NAME: etfs-nlinear-preview
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+  timeout: 180
 case_studies/etfs/11a_pca:
   # max_symbols must match 04_model_based_features, which builds the temporal
   # artifact these notebooks validate against. With no reduction they ran on the
