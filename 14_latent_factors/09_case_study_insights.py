@@ -339,8 +339,25 @@ def paired_daily_ic(latent: pl.DataFrame, supervised: pl.DataFrame) -> pl.DataFr
     target_gap = joined.select(
         (pl.col("latent_target") - pl.col("supervised_target")).abs().max()
     ).item()
-    if target_gap is None or target_gap > 1e-10:
-        raise ValueError(f"Aligned targets disagree: maximum gap {target_gap}")
+    # Two recordings of the same label agree only to float32 resolution at the target's own
+    # scale: a prediction artifact can be written through a float32 stage and its partner not.
+    # The bound is therefore relative, not the absolute 1e-10 that used to stand here - that
+    # one passed wherever targets were small and failed on us_firm_characteristics, whose
+    # monthly returns reach 7.0, at a gap of 2.1e-07. Measured across the four pairs this
+    # notebook forms: relative gaps of 0, 1.8e-08, 3.0e-08 and 4.2e-08 against a float32 eps
+    # of 1.19e-07. It still separates float noise from the thing this guard exists to catch,
+    # two different labels joined on the same keys, which disagree by 1.4 to 6.0.
+    magnitude = joined.select(
+        pl.max_horizontal(
+            pl.col("latent_target").abs().max(), pl.col("supervised_target").abs().max()
+        )
+    ).item()
+    tolerance = float(np.finfo(np.float32).eps) * max(1.0, abs(magnitude or 0.0))
+    if target_gap is None or target_gap > tolerance:
+        raise ValueError(
+            f"Aligned targets disagree: maximum gap {target_gap} exceeds {tolerance:.3g} "
+            f"at a target magnitude of {magnitude}"
+        )
     ranked = joined.with_columns(
         pl.col("latent_score").rank(method="average").over("timestamp").alias("latent_rank"),
         pl.col("supervised_score")
