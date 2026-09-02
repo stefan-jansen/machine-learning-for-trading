@@ -358,15 +358,25 @@ bias_pct = results["confounding_bias_pct"]
 # p-value computed in run_dml_analysis (no duplication)
 p_value = results["p_value_hac"]
 
+# An absent refutation is a missing measurement, not a p-value of 1. `run_dml_analysis`
+# leaves `refutation` empty when fewer than `MIN_PLACEBO_DRAWS` placebo draws returned a
+# finite effect, and defaulting to 1.0 here publishes that non-result as if the permutation
+# test had run and failed to reject - in the summary below and to a reader who cannot tell
+# the difference. `register_causal_run` already writes NULL for it; None keeps the notebook
+# saying the same thing (ml4t/agent-workspace#914).
 ref = results.get("refutation", {})
-p_value_perm = ref.get("empirical_p", 1.0)
-ref_class = ref.get("refutation_class", classify_refutation(p_value_perm))
+p_value_perm = ref.get("empirical_p")
+ref_class = None
+if p_value_perm is not None:
+    ref_class = ref.get("refutation_class") or classify_refutation(p_value_perm)
 
 print("Statistical significance:")
 print(f"  p-value (HAC): {p_value:.4f}")
 print(f"  Significant at 5%: {'Yes' if p_value < 0.05 else 'No'}")
 if ref:
     print(f"  Refutation: {ref_class} (p={p_value_perm:.4f})")
+else:
+    print("  Refutation: did not run - too few placebo draws returned a finite effect")
 
 # %% [markdown]
 # > **When should you be suspicious of large DML corrections?** A naive-to-DML
@@ -448,7 +458,10 @@ print(f"Naive slope: {naive_effect:+.3e}")
 print(f"Adjusted (DML) slope: {dml_effect:+.3e}  (Newey-West SE {se_hac:.3e})")
 print(f"Confounding bias: {bias_pct:+.1f}%")
 print(f"Newey-West p-value: {p_value:.4f}  (lags {results.get('hac_maxlags', 0)})")
-print(f"Permutation p-value: {p_value_perm:.4f}  ({ref_class})")
+if p_value_perm is None:
+    print("Permutation p-value: not run")
+else:
+    print(f"Permutation p-value: {p_value_perm:.4f}  ({ref_class})")
 
 # %% [markdown]
 # ## Key Takeaways
