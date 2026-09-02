@@ -93,7 +93,9 @@ from case_studies.research import (
     primary_label,
     resolved_model_plan,
     run_model_population,
+    supersedes_for_run,
 )
+from utils.cv_splits import load_evaluation_config
 from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
@@ -103,6 +105,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
+SUPERSEDES_POPULATION: str = "6c60d6f2089a"
 
 # %%
 study = open_study("sp500_options", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -260,13 +263,33 @@ plan.select(
 # predictions happen to be in the registry - and it is why a configuration that raises fails the
 # whole call rather than publishing a population one member short. Everything that finished stays
 # registered, and re-running fits only what is missing.
+#
+# **A name holds one generation at a time.** Anything that moves a training identity moves
+# every prediction hash with it, so the members this run computes are no longer the members
+# an earlier snapshot under the same name declared. `SUPERSEDES_POPULATION` names the
+# snapshot such a run retires. It is empty here because this population has no predecessor,
+# and the value is part of what the population is hashed over.
+#
+# `create` refuses a changed member list under an existing name unless this names the
+# current snapshot, so the parameter is how a refit is possible at all rather than a
+# precaution against corrupting anything. Republishing an identical list is a no-op.
 
 # %%
 # `11_model_analysis` and `12_backtest` resolve this population by name, so the default is
 # the contract with them and not a label of convenience. A run that narrows the member set
 # has to pass its own.
 population_name = POPULATION_NAME or "sp500-options-linear-validation-v1"
-execution, population = run_model_population(study, resolved, population_name=population_name)
+execution, population = run_model_population(
+    study,
+    resolved,
+    population_name=population_name,
+    supersedes=supersedes_for_run(
+        study,
+        population_name=population_name,
+        declared=SUPERSEDES_POPULATION or None,
+        execution_tier=EXECUTION_TIER,
+    ),
+)
 
 fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
 reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)
@@ -317,9 +340,13 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # **Measured on the development sample only.** The label artifact on disk runs to the end of the
 # data, holdout included, and `02_labels` says so: the files carry the sealed sessions and no
 # diagnostic reads them. Describing the target across all of it would put a statistic computed
-# partly on sealed outcomes into a validation-stage notebook, so the rows are cut at the
-# development boundary the fits above were resolved against, taken from the plan rather than
-# re-derived from `setup.yaml`.
+# partly on sealed outcomes into a validation-stage notebook.
+#
+# The cut is on the date each straddle settles, not the date its signal is observed. A straddle
+# entered in December 2020 expires in January, and its return is decided by prices inside the
+# holdout however early the signal was read; a cut on the signal date keeps it. `02_labels` and
+# `05_evaluation` both apply the settlement rule, and the artifact carries `dte_calendar`, so the
+# same rule is available here.
 #
 # Two features of it matter. There is a hard ceiling: the most a short straddle can earn is the
 # premium it collected, so nothing exceeds a return of one. There is no floor: a large enough move
@@ -331,16 +358,22 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # The label the strategy trades, read from `setup.yaml` rather than from a constant here, so
 # this section describes the same target the sweep publishes against.
 primary = primary_label(study)
-development_end = plan.get_column("validation_end").max()
-label_values = (
-    study.labels.get(primary, execution_tier=EXECUTION_TIER)
-    .load()
-    .filter(pl.col("timestamp") <= development_end)
-    .get_column(primary)
-    .drop_nulls()
-    .to_numpy()
+holdout_start = (
+    pl.Series([str(load_evaluation_config("sp500_options")["holdout_start"])]).str.to_date().item()
 )
-print(f"{len(label_values):,} straddles resolved on or before {development_end}")
+labels = study.labels.get(primary, execution_tier=EXECUTION_TIER).load()
+if "dte_calendar" not in labels.columns or labels.get_column("dte_calendar").null_count():
+    raise ValueError("the primary label artifact carries no expiry horizon to settle on")
+settlement = pl.col("timestamp") + pl.duration(days=pl.col("dte_calendar"))
+development = labels.with_columns(settlement.alias("settles")).filter(
+    pl.col("settles") < holdout_start
+)
+label_values = development.get_column(primary).drop_nulls().to_numpy()
+last_settlement = development.get_column("settles").max()
+print(
+    f"{len(label_values):,} straddles settling before the {holdout_start} holdout, "
+    f"the last of them on {last_settlement:%Y-%m-%d}"
+)
 
 summary = pl.DataFrame(
     {
@@ -422,6 +455,12 @@ catalog = (
 if catalog.filter(~pl.col("complete")).height:
     raise RuntimeError("linear execution returned a partial prediction set")
 
+# %% [markdown]
+# The catalog now holds one row per configuration, with the sweep's own declarations joined onto
+# what the run measured. What remains is to mark which rows were measured on every validation
+# date, refuse a shape these figures cannot draw, and show the ranking.
+
+# %% tags=["results"]
 # Coverage is judged against each label's own maximum. The sweep declares one label today, so
 # this is the same number either way; it is written per label because adding a variant to
 # `setup.yaml` is all it takes for a global maximum to mark a whole grid incomplete for a reason

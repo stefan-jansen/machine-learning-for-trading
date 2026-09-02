@@ -132,12 +132,30 @@ def _canonical_key_frame(frame, key_columns: tuple[str, ...] | None = None):
         raise ValueError(
             f"prediction coverage requires columns {sorted(required)}; missing {missing}"
         )
-    return frame.select(
-        *(
-            pl.col(name).cast(pl.Int64) if name == "fold_id" else pl.col(name).cast(pl.String)
-            for name in key_columns
-        )
-    )
+    return frame.select(*(_canonical_key_column(frame, name) for name in key_columns))
+
+
+def _canonical_key_column(frame, name: str):
+    """One key column rendered so two frames from different paths can be joined on it.
+
+    Casting a temporal column straight to String renders whatever dtype it happens to carry:
+    a `Date` becomes `2016-01-29` and a `Datetime("ms")` of the same instant becomes
+    `2016-01-29 00:00:00.000`. The two never join, so a registry frame meeting a dataset
+    frame reports every expected row missing and every actual row extra - a 100% mismatch
+    that reads as a data problem and is a dtype problem. Family runners never see it because
+    both of their frames come from one source.
+
+    Every temporal dtype is therefore normalized to microsecond UTC first, so the rendering
+    is decided by this function rather than by which loader produced the frame.
+    """
+    import polars as pl
+
+    if name == "fold_id":
+        return pl.col(name).cast(pl.Int64)
+    dtype = frame.schema[name]
+    if dtype == pl.Date or isinstance(dtype, pl.Datetime):
+        return pl.col(name).cast(pl.Datetime("us")).cast(pl.String).alias(name)
+    return pl.col(name).cast(pl.String)
 
 
 def _key_digest(frame, key_columns: tuple[str, ...]) -> str:

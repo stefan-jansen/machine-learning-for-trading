@@ -38,11 +38,16 @@ import json
 
 import polars as pl
 import torch
-import yaml
 
-from case_studies.research import ExecutionTier, Study, plan_models
+from case_studies.research import (
+    ExecutionTier,
+    declared_labels,
+    open_study,
+    plan_models,
+    population_supersedes,
+    sweep_labels,
+)
 from utils.modeling import load_configs
-from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
 
 # %% tags=["parameters"]
@@ -57,6 +62,14 @@ LOOKBACK = 0
 BATCH_SIZE = 0
 DEVICE = ""
 SEED = 42
+POPULATION_NAME = ""
+SUPERSEDES_POPULATION: str = "5415fd1d8d0f"
+# The tier is a parameter, not something inferred from whether a reduction happens to be set.
+# Inferring it meant a run could be reduced and still open the case study's own artifacts in
+# place, which is the production path; a reader under test then wrote where the published run
+# writes. WORKSPACE is the other half: a preview has nowhere else to put its results.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str | None = None
 
 # %% [markdown]
 # ## Plan the sequence request
@@ -68,24 +81,51 @@ SEED = 42
 
 # %%
 set_global_seeds(SEED)
-case_dir = get_case_study_dir(CASE_STUDY_ID)
-setup = yaml.safe_load((case_dir / "config" / "setup.yaml").read_text())
+# The reductions are read before the study is opened, because which study to open is decided by
+# the tier and the two have to agree: a preview that reduces nothing is a canonical run wearing
+# the wrong tier, and a canonical run carrying reductions would publish a narrowed population
+# under the canonical name.
+REDUCTION_PARAMETERS = {
+    "folds": list(range(MAX_FOLDS)) if MAX_FOLDS else None,
+    "max_symbols": MAX_SYMBOLS or None,
+}
+reductions = {key: value for key, value in REDUCTION_PARAMETERS.items() if value is not None}
+tier = ExecutionTier(EXECUTION_TIER)
+if tier is ExecutionTier.PREVIEW and not reductions:
+    raise ValueError("preview execution must declare at least one reduction")
+if tier is ExecutionTier.CANONICAL and reductions:
+    raise ValueError(f"canonical execution cannot carry reductions: {sorted(reductions)}")
+study = open_study(CASE_STUDY_ID, execution_tier=tier, workspace=WORKSPACE or None)
+
+# Which labels this notebook fits is a question for the training menus, not for the sweep list:
+# `setup.yaml` says which labels the case study carries, a menu says what to fit for one of them,
+# and a sweep label whose menu declares no `deep_learning:` section owes nothing here. The two
+# agree in this case study today, so restating the sweep list produced the right answer by
+# coincidence and would have kept producing it silently after a menu changed. The order stays
+# `setup.yaml`'s rather than `declared_labels`' menu-file order because the population is named
+# after its labels and hashed over its members as an ordered list, so re-ordering would give the
+# published population a new identity and demand a supersedes for a run that fits the same models.
+declared = declared_labels(study, "deep_learning")
 labels = (
     [PRIMARY_LABEL]
     if PRIMARY_LABEL
-    else [setup["labels"]["primary"], *setup["labels"].get("variants", [])]
+    else [label for label in sweep_labels(study) if label in set(declared)]
 )
+
+# A run that fits fewer labels than the menus declare is not the canonical population, and the
+# architecture is fixed below, so the label set is the only knob that narrows it. Such a run must
+# publish under its own name rather than register a partial snapshot under the canonical one.
+if set(labels) != set(declared) and not POPULATION_NAME:
+    raise ValueError(
+        f"this run fits {len(labels)} of the {len(declared)} declared labels, so it cannot "
+        "publish the canonical population; pass POPULATION_NAME to give it its own"
+    )
 
 if PREDICTION_SPLIT != "validation":
     raise ValueError("model selection uses validation predictions; holdout runs start from a lock")
 if FORCE_RETRAIN:
     raise ValueError("valid checkpoints are reloaded by identity; change the request to refit")
 
-reductions = {
-    **({"folds": list(range(MAX_FOLDS))} if MAX_FOLDS else {}),
-    **({"max_symbols": MAX_SYMBOLS} if MAX_SYMBOLS else {}),
-}
-tier = ExecutionTier.PREVIEW if reductions else ExecutionTier.CANONICAL
 # An empty DEVICE resolves to what the machine has. The runners refuse "cuda" on a host without
 # it rather than falling back silently - which is the right contract for a run whose results get
 # registered - so a hardcoded "cuda" default made the notebook unrunnable for any reader without
@@ -99,7 +139,6 @@ overrides = {
     **({"batch_size": BATCH_SIZE} if BATCH_SIZE else {}),
     **({"lookback": LOOKBACK} if LOOKBACK else {}),
 }
-study = Study.regenerate(CASE_STUDY_ID)
 ARCHITECTURE = "tcn"
 menu = {
     label: [
@@ -180,12 +219,32 @@ checkpoint_schedule
 #
 # The same resolved request is used by the notebook and direct Python callers. Publication fails if
 # any fold is missing, any prediction is non-finite, or the prediction keys differ from eligibility.
+#
+# `SUPERSEDES_POPULATION` names the population hash this run replaces. A population is the set of
+# prediction identities it publishes, so anything that moves a training identity produces a
+# different population under the same name, and the registry refuses to write it without being
+# told which snapshot it supersedes. That lineage is the only record of which generation is which,
+# and what moved the identities here was a change to the family's own source file rather than to
+# anything the notebook declares.
+#
+# `population_supersedes` decides whether the declared hash may be offered. It is offered when the
+# name already carries the generation this declaration produced, so a re-run resolves to the
+# population it published, and when the declaration names the generation in force, so a refit
+# publishes the next one. It is withheld everywhere else - on a reader's clean clone, where
+# `run_log/` is gitignored and the registry has no generation at all; under a caller's own
+# `POPULATION_NAME`; and in a preview, whose isolated registry holds nothing under this name.
 
 # %% tags=["results"]
 if len(plan.expected_prediction_hashes) != checkpoint_schedule.height * len(labels):
     raise RuntimeError("the plan does not cover every declared epoch checkpoint on every label")
+population_name = POPULATION_NAME or f"{CASE_STUDY_ID}:{'+'.join(labels)}:tcn"
 population = (
-    plan.create_population(name=f"{CASE_STUDY_ID}:{'+'.join(labels)}:tcn")
+    plan.create_population(
+        name=population_name,
+        supersedes=population_supersedes(
+            study, name=population_name, declared=SUPERSEDES_POPULATION
+        ),
+    )
     if tier is ExecutionTier.CANONICAL
     else None
 )

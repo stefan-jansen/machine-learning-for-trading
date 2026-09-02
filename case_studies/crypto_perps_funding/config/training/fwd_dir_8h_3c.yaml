@@ -29,5 +29,10 @@ tabular_dl:
 - tabm_s
 - tabm_m
 - tabm_l
-causal_dml:
-- dml
+# No `causal_dml`. The DML nuisance models are regressors - `case_studies/utils/causal.py`
+# builds both as `HistGradientBoostingRegressor` - and there is no classification branch, so
+# running a declared causal menu on this label fits a regressor to a class target and banks the
+# result as a canonical causal estimate. Declaring it here was the whole of the trap in
+# ml4t/agent-workspace#396: nothing runs it today, and the next reader comparing the config count
+# against the production count sees a missing causal result and extends the notebook to cover it.
+# The return labels keep theirs; a continuous target is what DML as implemented estimates.

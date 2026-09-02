@@ -82,7 +82,9 @@ from utils.paths import get_case_study_dir
 CASE_STUDY_ID = "nasdaq100_microstructure"
 LABEL = ""
 MAX_SYMBOLS = 0
-MAX_RISK_VARIANTS = 0  # 0 = all; >0 limits position + portfolio controls each
+# Zero means all controls; a positive value limits position and portfolio
+# controls each.
+MAX_RISK_VARIANTS = 0
 TOP_N_COMBOS = None
 
 # %%
@@ -105,17 +107,17 @@ if excluded_families(CASE_STUDY_ID):
     )
 
 # %% [markdown]
-# ## 1. Load Top Combos from Allocation Stage
+# ## 1. Load the allocation-stage combinations
 #
-# We load the best full-universe slot-mechanism backtests as the baseline.
-# These reach positive validation Sharpe on the full universe — but, as Act 1
-# established (Ch16 §3), the full-universe slot winners are a validation
-# coin-flip that collapses out of sample, so a high in-sample Sharpe here is a
-# selection artifact, not a tradeable result. The point of this notebook is the
-# *mechanics* of position-level overlays — how stop-loss, trailing-stop, and
-# time-exit rules reshape the drawdown profile — not to crown a configuration.
-# The case study's tradeable strategy is the cost-feasible carrier (Ch16 §4),
-# carried into the synthesis chapter.
+# The overlays below are applied to the highest-scoring full-universe
+# slot-mechanism backtests from the allocation stage. Those serve as a fixed
+# base so the overlay is the only thing that varies between rows.
+#
+# What this notebook establishes is the mechanics of position-level overlays -
+# how a stop-loss, a trailing stop and a time-based exit each reshape the
+# distribution of outcomes. It does not select a configuration, and the level of
+# the underlying results is not the subject: two overlays are compared against
+# each other on one base, not against the rest of the pipeline.
 
 # %%
 top_combos = resolve_best_backtest_runs(
@@ -312,29 +314,25 @@ else:
 # %% [markdown]
 # ## Key Takeaways
 #
-# At 15-minute cadence the dominant risk is cost drag, not tail events. Every
-# position-level overlay trades one round-trip cost band for a tighter risk
-# profile — the question is whether the cost is worth the drawdown reduction.
+# Each position-level overlay exits a position on a condition other than the
+# signal: a stop-loss on a loss threshold, a trailing stop on a retreat from the
+# best level reached, a time exit after a fixed holding period. Every one of them
+# buys a tighter loss distribution by trading more, because each triggered exit
+# is a round trip that the signal did not ask for.
 #
-# The clearest pattern is the threshold gradient: longer time-exits (20–40 bars)
-# and looser stop / trailing thresholds (≥15%) sit at the top of the overlay
-# Sharpe distribution because they minimize cost-induced churn, while tight
-# thresholds (1–5%) trigger constantly at 15-minute cadence and stack the
-# largest cost drag (the 1% trailing stop is the worst overlay tested). That
-# ordering is the transferable lesson — overlay aggressiveness trades drawdown
-# reduction against turnover cost.
+# That makes the threshold the whole of the design. A tight threshold triggers
+# often, so it pays for its protection frequently, and at a short rebalancing
+# interval it can trigger on ordinary fluctuation rather than on the loss it was
+# meant to catch. A loose threshold rarely triggers, costs little and protects
+# little. The gradient across thresholds is what transfers to another strategy;
+# the level of any single row does not.
 #
-# The validation Sharpes here are computed on full-universe slot configs and
-# look strong, but they are Act-1 numbers: the full-universe slot winners do
-# not survive out of sample (Ch16 §3, Ch20). The case study's tradeable result
-# is the cost-feasible carrier (slot ensemble, validation +1.13 / holdout
-# +0.53), not any configuration ranked in this sweep.
-#
-# Portfolio-level kill switches (max-drawdown, daily-loss) are NOT swept here:
-# their permanent-halt semantics produce zero-std Sharpe artifacts in ranking.
-# They remain available as governance instruments via the engine's
-# `MaxDrawdownLimit` / `DailyLossLimit` classes — Ch19 §19.8 demonstrates that
-# usage. The lesson the case study narrates is that intraday signal economics,
-# not overlay choice, is the binding constraint here.
+# Portfolio-level kill switches - a maximum drawdown limit, a daily loss limit -
+# are deliberately not swept here. They halt trading permanently once breached,
+# so every configuration that trips one produces a truncated return series whose
+# summary statistics are not comparable with those of a configuration that ran
+# to the end. They remain available through the engine's `MaxDrawdownLimit` and
+# `DailyLossLimit` classes as governance instruments rather than as parameters
+# to optimise.
 #
 # **Next**: Ch20 synthesis aggregates results from Ch16–19 across all case studies.

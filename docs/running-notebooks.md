@@ -190,7 +190,7 @@ Every case study follows the same sequence of phases, and **each phase maps to a
 Each case study's own `README.md` lists its exact stage files with this mapping. To see a given case study's stages, list them:
 
 ```bash
-ls case_studies/etfs/        # 01_feasibility_analysis.py … 18_strategy_analysis.py
+ls case_studies/etfs/        # 01_feasibility_analysis.py … 20_strategy_analysis.py
 ```
 
 ### Running a Case Study End to End
@@ -214,9 +214,11 @@ uv run python case_studies/etfs/13_model_analysis.py
 # Build the strategy — backtest, portfolio, costs, risk, synthesis (Ch16–20)
 uv run python case_studies/etfs/14_backtest.py
 uv run python case_studies/etfs/15_portfolio_management.py
-uv run python case_studies/etfs/16_costs.py
-uv run python case_studies/etfs/17_risk_management.py
-uv run python case_studies/etfs/18_strategy_analysis.py
+uv run python case_studies/etfs/16_risk_management.py
+uv run python case_studies/etfs/17_costs.py
+uv run python case_studies/etfs/18_holdout_predictions.py
+uv run python case_studies/etfs/19_holdout_backtest.py
+uv run python case_studies/etfs/20_strategy_analysis.py
 ```
 
 Each stage checks for the artifacts it needs and tells you which earlier stage to run if anything is missing, so you can always pick up partway through.
@@ -460,7 +462,7 @@ Run the analysis notebook with the same output root so it reads the copied regis
 
 ```bash
 ML4T_OUTPUT_DIR=/tmp/ml4t-etf-experiment \
-  uv run python case_studies/etfs/18_strategy_analysis.py
+  uv run python case_studies/etfs/20_strategy_analysis.py
 ```
 
 ### Declarations That Always Come From the Repository

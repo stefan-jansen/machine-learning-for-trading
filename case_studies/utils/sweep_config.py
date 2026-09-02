@@ -654,7 +654,16 @@ def get_top_k_values_for(
 
     Filters out k >= n_assets (holding everything is the equal-weight
     benchmark, not a prediction-based portfolio). Raises ``KeyError`` if
-    ``backtest.sweep.top_k_grid[label]`` is not declared.
+    ``backtest.sweep.top_k_grid[label]`` is not declared, and ``ValueError``
+    when the filter empties the grid.
+
+    An empty grid is never a legitimate result: the caller multiplies it into
+    a sweep size, so zero concentrations means zero backtests, and the sweep
+    loop then completes without registering anything while still reporting
+    itself done. The downstream risk-overlay notebook is the only thing that
+    notices, and it blames the operator for not having run this stage. Raise
+    here instead, where the cause - a universe cap smaller than the smallest
+    declared k - is still visible.
     """
     sweep = load_sweep(case_study)
     grid = (sweep.get("top_k_grid") or {}).get(label)
@@ -663,7 +672,15 @@ def get_top_k_values_for(
             f"backtest.sweep.top_k_grid[{label!r}] not declared in "
             f"case_studies/{case_study}/config/setup.yaml"
         )
-    return [int(k) for k in grid if int(k) < n_assets]
+    values = [int(k) for k in grid if int(k) < n_assets]
+    if not values:
+        raise ValueError(
+            f"top_k_grid[{label!r}] = {list(grid)} is empty after filtering against "
+            f"n_assets={n_assets} for case_studies/{case_study}: every declared k holds "
+            f"the whole universe. Raise the universe cap (MAX_SYMBOLS) above "
+            f"{min(int(k) for k in grid)} or declare a smaller k."
+        )
+    return values
 
 
 _MOMENT_ALLOCATORS = {"inverse_vol", "risk_parity", "hrp", "mvo_ledoit_wolf", "mvo"}
@@ -766,7 +783,7 @@ def get_universe_filters_for(case_study: str) -> list[str | None]:
     ``signal.universe_filter`` in their spec) remain hash-stable.
 
     Note: ``backtest.sweep.htm_cost_cascade.universes`` is a separate
-    Ch18-only block consumed directly by ``14_costs.py`` via
+    Ch18-only block consumed directly by ``15_costs.py`` via
     ``get_htm_cost_cascade``; it is the cost-comparison axis (full vs
     liquid) and does NOT participate in the canonical rank-1 sweep.
     """

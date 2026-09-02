@@ -45,6 +45,7 @@ import torch  # noqa: F401
 
 from case_studies.utils.analytics import PRIMARY_LABELS, SHORT_NAMES
 from case_studies.utils.conformal import split_conformal_coverage
+from case_studies.utils.registry.specs import declared_fold_count
 from utils.paths import get_case_study_dir
 
 LabelResolver = Callable[[str], str | None]
@@ -210,7 +211,7 @@ def _raw_primary_candidates(
     declared_folds = []
     for spec_json in metrics["spec_json"].drop_nulls().to_list():
         with contextlib.suppress(json.JSONDecodeError, TypeError, ValueError):
-            value = int(json.loads(spec_json).get("n_folds", 0))
+            value = declared_fold_count(json.loads(spec_json))
             if value > 0:
                 declared_folds.append(value)
     return metrics, fold_metrics, max(declared_folds, default=0)
@@ -282,7 +283,7 @@ def collect_checkpoint_fold_trajectories(rank1: pl.DataFrame) -> pl.DataFrame:
     rows = []
     for selected in rank1.iter_rows(named=True):
         spec = json.loads(selected["spec_json"])
-        n_folds = int(spec.get("n_folds", 0))
+        n_folds = declared_fold_count(spec)
         if n_folds <= 0:
             raise RegistrySelectionError(
                 f"{selected['case_study']}/{selected['training_hash']}: n_folds is not declared"
@@ -351,7 +352,7 @@ def conformal_coverage_for_selected_prediction(
         raise RegistrySelectionError(f"selected row missing conformal fields: {sorted(missing)}")
 
     spec = json.loads(selected["spec_json"])
-    n_folds = int(spec.get("n_folds", 0))
+    n_folds = declared_fold_count(spec)
     if n_folds < 2:
         raise RegistrySelectionError(
             f"{selected['case_study']}/{selected['prediction_hash']}: "

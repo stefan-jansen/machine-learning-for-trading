@@ -80,6 +80,14 @@ class TestUsFirmLoader:
         assert get_top_k_values_for(self.CS, label, n_assets=2500) == [5, 10, 20, 50]
 
     @pytest.mark.parametrize("label", ["fwd_ret_1m", "fwd_ret_1m_win", "fwd_class_1m"])
+    def test_top_k_grid_raises_when_the_universe_empties_it(self, label):
+        # The smallest declared k is 5. A universe of 5 holds everything at every k,
+        # so the grid filters to nothing - which a caller multiplies into a sweep size
+        # of zero and then reports as a completed sweep that registered no rows.
+        with pytest.raises(ValueError, match="empty after filtering"):
+            get_top_k_values_for(self.CS, label, n_assets=5)
+
+    @pytest.mark.parametrize("label", ["fwd_ret_1m", "fwd_ret_1m_win", "fwd_class_1m"])
     def test_entry_schemes_per_label(self, label):
         schemes = get_entry_schemes_for(self.CS, label, n_assets=2500, long_short=True)
         # Exactly the four equal_weight_top_k schemes declared in setup.yaml.
@@ -142,16 +150,31 @@ class TestQuarantinePolicy:
 
 
 def test_crypto_long_short_grid_keeps_only_disjoint_selections() -> None:
+    """A long-short k needs 2k names, so the declared grid is filtered by the cross-section.
+
+    Crypto's median tradeable cross-section is 19 perps, which seats k=3 and k=5 on both
+    sides and cannot seat k=10 - the long and short legs would have to share names. The
+    point of the test is that the filtering happens at all: a declared k that the panel
+    cannot support must be dropped rather than silently producing overlapping legs.
+    """
+    declared = load_sweep("crypto_perps_funding")["top_k_grid"]["fwd_ret_8h"]
+    assert declared == [3, 5, 10]
+
     schemes = get_entry_schemes_for(
         "crypto_perps_funding",
         "fwd_ret_8h",
         n_assets=19,
         long_short=True,
     )
-
     top_k = [scheme["top_k"] for scheme in schemes if scheme["method"] == "equal_weight_top_k"]
-    assert top_k == [5]
-    assert load_sweep("crypto_perps_funding")["top_k_grid"]["fwd_ret_8h"] == [5, 10]
+    assert top_k == [3, 5]
+    assert [k for k in declared if k not in top_k] == [10]
+
+    # 20 names is the first cross-section that seats the whole declared grid.
+    seated = get_entry_schemes_for(
+        "crypto_perps_funding", "fwd_ret_8h", n_assets=20, long_short=True
+    )
+    assert [s["top_k"] for s in seated if s["method"] == "equal_weight_top_k"] == declared
 
 
 # ---------------------------------------------------------------------------

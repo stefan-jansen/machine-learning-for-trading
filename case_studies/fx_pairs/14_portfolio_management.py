@@ -14,411 +14,538 @@
 # ---
 
 # %% [markdown]
-# # FX Pairs: Portfolio Allocation
+# # Portfolio Allocation - FX Pairs
 #
-# **Chapter 17 - Portfolio Construction**
+# This notebook compares allocation methods after the equal-weight baseline. Production advances
+# the ten model configurations with highest validation backtest Sharpe for each label. Each carries
+# its best checkpoint and signal mapping into the allocation comparison. Preview mode uses a
+# deterministic reduced catalog selection and never writes an official population or candidate set.
 #
-# Allocation changes the point estimate, not the verdict. Across the frozen validation registry,
-# the best allocation is a 21-day Ridge signal with HRP and five pairs. Its Sharpe rises from
-# -0.085 under equal weighting to 0.037, but its 95% interval spans -0.643 to 0.777.
+# **Learning objectives**
 #
-# 1. **Reproduction contract** - analyze the registry without writing by default
-# 2. **Allocation sweep** - optionally compare seven sizing rules at two concentration levels
-# 3. **Validation evidence** - separate the best point estimate from statistical uncertainty
+# - Select configurations from an immutable equal-weight candidate set.
+# - Preserve the selected checkpoint and signal mapping when configurations advance to allocation.
+# - Change allocation while holding prediction, signal, costs, and execution fixed.
 #
-# **Book Reference:** Chapter 17, Sections 17.2-17.8
+# **Book reference**: Chapter 17
 #
-# **Prerequisites:** Completed Ch16 equal-weight baseline results in `registry.db`.
+# **Prerequisite**: `13_backtest`.
 
 # %%
-"""Ch17 portfolio allocation for the FX pairs case study."""
+"""Run the FX allocation sweep from the frozen equal-weight population."""
 
-import sqlite3
-import time
-from collections import defaultdict
-from datetime import UTC, datetime
+from collections.abc import Iterable
+from copy import deepcopy
+from typing import Any
 
-import matplotlib.pyplot as plt
-import numpy as np
 import polars as pl
+import yaml
 
-from case_studies.utils.backtest_loaders import (
-    get_backtest_config,
-    load_backtest_prices_for,
-    warmup_periods_for,
-)
-from case_studies.utils.backtest_presets import (
-    build_backtest_spec,
-    serializable_backtest_spec,
-)
-from case_studies.utils.backtest_runner import (
-    normalize_prediction_columns,
-    run_backtest,
-)
-from case_studies.utils.registry import (
-    backtest_hash_from_parts,
-    load_existing_backtest_hashes,
-    read_predictions,
-    resolve_best_predictions,
+from case_studies.research import (
+    BacktestResult,
+    CandidateSet,
+    OfficialPopulation,
+    PredictionResult,
+    Result,
+    candidate_set_supersedes,
+    open_study,
+    plan_backtests,
+    population_supersedes,
+    research_name,
+    run_backtests,
+    strategy_warmup_periods,
+    superseded_members,
 )
 from case_studies.utils.sweep_config import (
     get_allocators,
-    get_checkpoints_per_config,
-    get_top_k_values_for,
     get_top_n_predictions,
 )
 from utils.paths import get_case_study_dir
-from utils.style import COLORS
+from utils.reproducibility import set_global_seeds
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "fx_pairs"
-LABEL = "fwd_ret_21d"
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
+LABEL = ""
 SPLIT = "validation"
-MAX_SYMBOLS = 0
+TOP_N_CONFIGS = 0
+TOP_K = 0
 TOP_N_PREDICTIONS = None
-RUN_SWEEP = False
+SEED = 42
+RUN_SWEEP = True
 FORCE_REBACKTEST = False
+POPULATION_NAME = ""
+BASELINE_POPULATION_NAME = None
+SUPERSEDES_ALLOCATION_BACKTESTS: str = "e487eb0d75db"
+
+# A candidate set is sealed once written, so a run whose members differ from the recorded
+# generation has to name the set it replaces - the same shape 15_risk_management and 16_costs
+# already carry, and keyed by the full set name because that is what the refusal prints. These
+# three moved when 10a_dl_lstm registered the lstm_h64 checkpoints the training menu declares:
+# the equal-weight baselines went from 1,452 to 1,572, so every label's candidate set gained
+# the 40 backtests riding the new predictions. Resolved through `candidate_set_supersedes`
+# rather than passed straight to `create`, because a reader's clean clone has no generation to
+# supersede and `create` refuses a first version that claims to replace one.
+SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
+    "fx_pairs:fwd_ret_1d:equal-weight-candidates": "77b9631c7f13",
+    "fx_pairs:fwd_ret_5d:equal-weight-candidates": "1c6a3826af9f",
+    "fx_pairs:fwd_ret_21d:equal-weight-candidates": "db7b24f2a58b",
+}
 
 # %% [markdown]
-# ## 1. The default path is read-only
+# ## Resolve the equal-weight inputs
 #
-# The registered comparison uses validation predictions, next-bar-open execution, and the 5 bps
-# commission plus 2 bps slippage configured for this case study. The 2024-2025 holdout remains
-# outside this allocation decision.
+# Canonical execution reads the exact population frozen by the baseline notebook. Its label-specific
+# candidate sets provide the only performance ranking used here. The selected unit is a model
+# configuration. After a configuration advances, its best checkpoint and signal mapping advance.
 
 # %%
-CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
-REGISTRY_PATH = CASE_DIR / "run_log" / "registry.db"
-bt_config = get_backtest_config(CASE_STUDY_ID)
-if TOP_N_PREDICTIONS is None:
-    TOP_N_PREDICTIONS = get_top_n_predictions(CASE_STUDY_ID, "allocation")
-CHECKPOINTS_PER_CONFIG = get_checkpoints_per_config(CASE_STUDY_ID)
-
-print(f"""=== Protocol Term Sheet ===
-  Case study:    {CASE_STUDY_ID}
-  Sweep label:   {LABEL}
-  Analysis:      all validation labels
-  Calendar:      {bt_config.calendar}
-  Cadence:       {bt_config.cadence}
-  Execution:     {bt_config.execution_delay}
-  Total cost:    {bt_config.commission_bps + bt_config.slippage_bps:.1f} bps/leg
-  Long/short:    {bt_config.long_short}
-  Registry mode: {"write enabled" if RUN_SWEEP else "read only"}
-""")
-
-# %%
-prices = load_backtest_prices_for(
-    CASE_STUDY_ID,
-    LABEL,
-    split=SPLIT,
-    warmup_periods=warmup_periods_for(CASE_STUDY_ID),
-    max_symbols=MAX_SYMBOLS,
-)
-n_assets = prices["symbol"].n_unique()
-validation_end = prices["timestamp"].max()
-if isinstance(validation_end, datetime):
-    validation_end = validation_end.date()
-holdout_start = datetime.fromisoformat(bt_config.holdout_start).date()
-assert validation_end < holdout_start
-print(f"Prices: {len(prices):,} rows, {n_assets} pairs")
-print(f"Validation ends {validation_end}; sealed holdout starts {holdout_start}")
-
-# %% [markdown]
-# ## 2. The optional sweep starts from the 21-day baselines
-#
-# Ch16 found that every net equal-weight baseline was negative. The 21-day label was least weak,
-# so it is the appropriate allocation input. The sweep advances the ten best model configurations,
-# then compares top-5 and top-10 portfolios under the configured sizing rules.
-
-# %%
-top_predictions = resolve_best_predictions(
-    CASE_STUDY_ID,
-    LABEL,
-    split=SPLIT,
-    stage="signal",
-    top_n=TOP_N_PREDICTIONS,
-    checkpoints_per_config=CHECKPOINTS_PER_CONFIG,
-)
-if top_predictions.is_empty():
-    raise RuntimeError(f"No equal-weight baselines found for {CASE_STUDY_ID}/{LABEL}/{SPLIT}")
-print(f"Advancing {len(top_predictions)} prediction sources from the equal-weight baseline:")
-print(top_predictions.select("source", "sharpe"))
-
-# %%
-TOP_K_VALUES = get_top_k_values_for(CASE_STUDY_ID, LABEL, n_assets)
-ALLOC_CONFIGS = get_allocators(CASE_STUDY_ID)
-print(f"Top-k grid: {TOP_K_VALUES}")
-print(f"Allocators: {[config['method'] for config in ALLOC_CONFIGS]}")
-
-
-# %%
-def _build_sweep_jobs() -> list[dict]:
-    jobs = []
-    for prediction in top_predictions.iter_rows(named=True):
-        for top_k in TOP_K_VALUES:
-            for allocation in ALLOC_CONFIGS:
-                spec = build_backtest_spec(
-                    CASE_STUDY_ID,
-                    bt_config,
-                    prices=prices,
-                    prediction_hash=prediction["prediction_hash"],
-                    initial_cash=bt_config.initial_cash,
-                    chapter="ch17",
-                    signal={
-                        "method": "equal_weight_top_k",
-                        "top_k": top_k,
-                        "long_short": bt_config.long_short,
-                    },
-                    allocation={
-                        **allocation,
-                        "top_k": top_k,
-                        "long_short": bt_config.long_short,
-                    },
-                )
-                jobs.append(
-                    {
-                        "prediction": prediction,
-                        "allocator": allocation["method"],
-                        "top_k": top_k,
-                        "spec": spec,
-                        "hash": backtest_hash_from_parts(
-                            prediction["prediction_hash"], serializable_backtest_spec(spec)
-                        ),
-                    }
-                )
-    return jobs
-
-
-sweep_jobs = _build_sweep_jobs()
-print(f"Allocation grid: {len(sweep_jobs)} backtests")
-
-# %%
-existing_hashes = load_existing_backtest_hashes(CASE_STUDY_ID, stage="allocation")
-expected_hashes = {job["hash"] for job in sweep_jobs}
-portable_overlap = expected_hashes & existing_hashes
-print(f"Stored allocation hashes: {len(existing_hashes):,}")
-print(f"Current-grid portable-hash overlap: {len(portable_overlap)}/{len(expected_hashes)}")
-
-if RUN_SWEEP and existing_hashes and not portable_overlap:
-    raise RuntimeError(
-        "RUN_SWEEP refused: this registry uses legacy hashes. Migrate it or use a fresh registry."
-    )
+set_global_seeds(SEED)
+universe_symbols = yaml.safe_load(
+    (get_case_study_dir(CASE_STUDY_ID) / "config" / "setup.yaml").read_text()
+)["universe"]["symbols"]
+n_assets = len(universe_symbols)
+max_sleeve = n_assets // 2
+if SPLIT != "validation":
+    raise ValueError("allocation selection uses validation backtests")
+if FORCE_REBACKTEST:
+    raise ValueError("identical complete backtests are reused by identity")
 if not RUN_SWEEP:
-    print("Reproduce-only mode: no backtests or registry rows will be written.")
+    raise ValueError("set RUN_SWEEP=True to execute the visible allocation request")
+
+study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
+# The execution tier decides which registry namespace this run reads and writes;
+# the reduction knobs decide only how much of it is covered. Inferring the tier
+# from the knobs conflated the two, so any reduced run went looking for preview
+# predictions - and a reduced run over a canonical upstream, which is what the
+# test suite exercises, then resolved no rows at all.
+include_preview = EXECUTION_TIER == "preview"
 
 
-# %%
-def _run_job(job: dict, predictions: pl.DataFrame) -> dict:
-    prediction = job["prediction"]
-    result = run_backtest(
-        CASE_STUDY_ID,
-        prediction["prediction_hash"],
-        job["spec"],
-        prices=prices,
-        predictions=predictions,
-        label=LABEL,
-        register=True,
-        force_rebacktest=FORCE_REBACKTEST,
-        initial_cash=bt_config.initial_cash,
-        calendar=bt_config.calendar,
+def _resolve_baseline_scope(output_scope: str, input_scope: str | None) -> str:
+    return output_scope if input_scope is None else input_scope
+
+
+baseline_population_name = _resolve_baseline_scope(POPULATION_NAME, BASELINE_POPULATION_NAME)
+
+# The tier decides the namespace, so a canonical run may legitimately be narrowed -
+# but a narrowed run declares a different set of members than the canonical
+# population does, and a population is immutable once written. Such a run must
+# publish under its own name rather than register a partial snapshot of the allocation sweep
+# under the canonical one.
+if (
+    (TOP_K or TOP_N_PREDICTIONS is not None or TOP_N_CONFIGS or LABEL)
+    and not include_preview
+    and not POPULATION_NAME
+):
+    raise ValueError(
+        "this run narrows the allocation sweep, so it cannot publish the canonical "
+        "population; pass POPULATION_NAME to give it its own"
     )
-    return {
-        "prediction_hash": prediction["prediction_hash"],
-        "source": prediction["source"],
-        "allocator": job["allocator"],
-        "top_k": job["top_k"],
-        "backtest_hash": result.backtest_hash,
-        "sharpe": result.metrics.get("sharpe"),
-    }
+catalog = study.predictions.table(include_preview=include_preview).filter(
+    (pl.col("identity_status") == "current")
+    & (pl.col("split") == SPLIT)
+    & pl.col("complete")
+    & (pl.col("execution_tier") == ("preview" if include_preview else "canonical"))
+)
+# `identity_status` is the schema version a row was written under, not a statement about which
+# generation its producer publishes. A model notebook that refits leaves the generation it
+# replaced in the registry, complete and current, so this filter alone would carry a retired
+# prediction set into the sweep. `superseded_members` reads the lineage instead - see
+# `13_backtest`, which drops the same set before it freezes the baseline population.
+# `SUPERSEDES_ALLOCATION_BACKTESTS` names the snapshot this run replaces under the name it publishes,
+# offered through `population_supersedes` on the same rule. It is empty until that name has a
+# first generation; after that, an upstream refit changes this population's member list and
+# the registry refuses the write without it. `13_backtest` states the reasoning once.
+retired = superseded_members(study, member_kind="prediction")
+if retired:
+    catalog = catalog.filter(~pl.col("prediction_hash").is_in(list(retired)))
+if LABEL:
+    catalog = catalog.filter(pl.col("label") == LABEL)
+if catalog.is_empty():
+    raise RuntimeError("allocation resolved no complete prediction rows")
 
 
-# %%
-sweep_results = []
-if RUN_SWEEP:
-    pending = [job for job in sweep_jobs if FORCE_REBACKTEST or job["hash"] not in existing_hashes]
-    grouped = defaultdict(list)
-    for job in pending:
-        grouped[job["prediction"]["prediction_hash"]].append(job)
-    started = time.time()
-    completed = failed = 0
-    for prediction_hash, jobs in grouped.items():
-        predictions = normalize_prediction_columns(read_predictions(CASE_STUDY_ID, prediction_hash))
-        for job in jobs:
-            try:
-                sweep_results.append(_run_job(job, predictions))
-                completed += 1
-            except Exception as exc:
-                failed += 1
-                stamp = datetime.now(UTC).isoformat(timespec="seconds")
-                print(f"[{stamp}] FAILED {job['hash']}: {type(exc).__name__}: {exc}")
-            processed = completed + failed
-            if processed % 10 == 0 or processed == len(pending):
-                stamp = datetime.now(UTC).isoformat(timespec="seconds")
-                print(f"[{stamp}] completed={completed} failed={failed} total={len(pending)}")
-    print(f"Sweep elapsed: {time.time() - started:.1f}s")
-    if failed:
-        raise RuntimeError(f"Allocation sweep finished with {failed} failed backtests")
+def _result_config(result: BacktestResult) -> tuple[str, str, str]:
+    training = result.lineage()["training_spec"]
+    return str(training["label"]), str(training["family"]), str(training["config_name"])
+
+
+def _select_configuration_survivors(
+    ranked_results: Iterable[BacktestResult], limit: int
+) -> list[BacktestResult]:
+    """Keep the best baseline result for each distinct model configuration."""
+    survivors = []
+    seen: set[tuple[str, str]] = set()
+    for result in ranked_results:
+        config = _result_config(result)[1:]
+        if config in seen:
+            continue
+        survivors.append(result)
+        seen.add(config)
+        if len(survivors) == limit:
+            break
+    return survivors
+
+
+def _baseline_top_k(result: BacktestResult) -> int:
+    signal = result.spec()["strategy"]["signal"]
+    if signal.get("method") != "equal_weight_top_k" or not isinstance(signal.get("top_k"), int):
+        raise RuntimeError(f"baseline {result.hash} does not carry a valid top-k signal mapping")
+    return int(signal["top_k"])
+
+
+def _open_backtests(hashes: Iterable[str]) -> list[BacktestResult]:
+    results = [Result.open(study, value, include_preview=include_preview) for value in hashes]
+    if any(not isinstance(result, BacktestResult) for result in results):
+        raise TypeError("the equal-weight population contains a non-backtest result")
+    return [result for result in results if isinstance(result, BacktestResult)]
+
+
+def _preview_baselines(rows: pl.DataFrame) -> list[BacktestResult]:
+    """The baselines 13_backtest registered, read rather than reconstructed.
+
+    Rebuilding the identity here meant restating the upstream run's `top_k`, and the two
+    notebooks reduce independently: a preview gives 13_backtest its own `TOP_K` and says
+    nothing to this one, so the reconstruction was a guess about someone else's
+    parameters. A wrong guess does not report a disagreement - it computes a hash that
+    was never written and fails looking for it, or worse, finds an unrelated run. The
+    canonical branch below already reads its members from the published population; this
+    is the same read against the preview registry.
+    """
+    registered = study.backtests.table(include_preview=True).filter(
+        (pl.col("stage") == "signal")
+        & (pl.col("execution_tier") == "preview")
+        & pl.col("prediction_hash").is_in(rows.get_column("prediction_hash").implode())
+        & (pl.col("identity_status") == "current")
+        & pl.col("complete")
+    )
+    if registered.is_empty():
+        raise RuntimeError(
+            "no preview equal-weight baselines are registered for this prediction "
+            "catalog; run 13_backtest at the same reduction before this notebook"
+        )
+    return _open_backtests(registered.get_column("backtest_hash").unique().sort())
+
+
+if include_preview:
+    baseline_results = _preview_baselines(catalog)
+else:
+    baseline_population = OfficialPopulation.one(
+        study,
+        name=research_name(
+            CASE_STUDY_ID,
+            "equal-weight-baselines",
+            scope=baseline_population_name,
+        ),
+    )
+    baseline_population.require_complete()
+    baseline_results = _open_backtests(baseline_population.members)
+
+if any(result.registry_record()["stage"] != "signal" for result in baseline_results):
+    raise RuntimeError("the allocation input contains a non-baseline backtest")
 
 # %% [markdown]
-# ## 3. Compare the latest stored run for each allocation design
+# ## Advance one checkpoint and mapping per configuration
 #
-# The frozen registry contains 814 allocation rows from several historical executions. Repeated
-# runs can differ because the backtest engine evolved. To avoid double-counting them, the query
-# defines a design by prediction, entry rule, concentration, and allocator, then retains the most
-# recent stored run. This produces 768 distinct validation designs without mixing in holdout data.
+# Production ranks the complete baseline results for each label. The first result for a model
+# configuration is its best checkpoint and signal mapping by validation Sharpe. That result occupies
+# one declared slot and is the only member of the configuration that advances.
 
-# %%
-ALLOCATION_SQL = """
-WITH ranked AS (
-    SELECT br.backtest_hash, br.prediction_hash, br.created_at,
-           tr.family, tr.config_name, tr.label,
-           json_extract(br.spec_json, '$.strategy.signal.method') AS signal_method,
-           CAST(json_extract(br.spec_json, '$.strategy.signal.top_k') AS INTEGER) AS signal_top_k,
-           json_extract(br.spec_json, '$.strategy.allocation.method') AS allocator,
-           CAST(json_extract(br.spec_json, '$.strategy.allocation.top_k') AS INTEGER)
-               AS allocation_top_k,
-           bm.sharpe, bm.sharpe_ci95_lo, bm.sharpe_ci95_hi,
-           bm.cagr, bm.max_drawdown, bm.total_return, bm.volatility, bm.num_trades,
-           COUNT(*) OVER (
-               PARTITION BY br.prediction_hash,
-                            json_extract(br.spec_json, '$.strategy.signal.method'),
-                            CAST(json_extract(br.spec_json, '$.strategy.signal.top_k') AS INTEGER),
-                            json_extract(br.spec_json, '$.strategy.allocation.method'),
-                            CAST(json_extract(br.spec_json, '$.strategy.allocation.top_k') AS INTEGER)
-           ) AS stored_runs,
-           ROW_NUMBER() OVER (
-               PARTITION BY br.prediction_hash,
-                            json_extract(br.spec_json, '$.strategy.signal.method'),
-                            CAST(json_extract(br.spec_json, '$.strategy.signal.top_k') AS INTEGER),
-                            json_extract(br.spec_json, '$.strategy.allocation.method'),
-                            CAST(json_extract(br.spec_json, '$.strategy.allocation.top_k') AS INTEGER)
-               ORDER BY br.created_at DESC, br.backtest_hash DESC
-           ) AS recency_rank
-    FROM backtest_runs br
-    JOIN backtest_metrics bm USING (backtest_hash)
-    JOIN prediction_sets ps USING (prediction_hash)
-    JOIN training_runs tr USING (training_hash)
-    WHERE br.stage = 'allocation' AND ps.split = 'validation'
-)
-SELECT * FROM ranked WHERE recency_rank = 1 ORDER BY sharpe DESC
-"""
+# %% tags=["results"]
+top_n = TOP_N_CONFIGS or get_top_n_predictions(CASE_STUDY_ID, "allocation")
+selected_baselines: dict[str, list[BacktestResult]] = {}
+candidate_sets: dict[str, CandidateSet] = {}
 
-
-# %%
-def _read_registry(query: str) -> pl.DataFrame:
-    connection = sqlite3.connect(f"file:{REGISTRY_PATH}?mode=ro&immutable=1", uri=True)
-    try:
-        return pl.read_database(query, connection)
-    finally:
-        connection.close()
-
-
-allocation_runs = _read_registry(ALLOCATION_SQL)
-stored_rows = int(allocation_runs["stored_runs"].sum())
-print(
-    f"Allocation rows: {stored_rows} stored, {len(allocation_runs)} latest designs, "
-    f"{stored_rows - len(allocation_runs)} repeated historical runs"
-)
-
-# %% [markdown]
-# ### Only the 21-day label reaches a positive point estimate
-#
-# Nine of 768 latest designs have positive Sharpe estimates, all on the 21-day label. This is a
-# sparse outcome after a large search, so the positive point estimates require uncertainty context.
-
-# %%
-label_summary = (
-    allocation_runs.group_by("label")
-    .agg(
-        designs=pl.len(),
-        positive_designs=(pl.col("sharpe") > 0).sum(),
-        median_sharpe=pl.col("sharpe").median(),
-        best_sharpe=pl.col("sharpe").max(),
+# The labels come from the baselines this run resolved, not from this notebook's own
+# catalog. A narrowed upstream covers fewer labels than the catalog holds, and rebuilding
+# the label list locally means reproducing 13_backtest's narrowing by convention - the
+# same guess that reading the registered population exists to avoid. When the run is not
+# scoped it is publishing canonical names, and then the two must agree exactly.
+baseline_labels = sorted({_result_config(result)[0] for result in baseline_results})
+if not baseline_labels:
+    raise RuntimeError("the equal-weight baselines carry no labels")
+if not POPULATION_NAME and baseline_labels != sorted(catalog.get_column("label").unique()):
+    raise RuntimeError(
+        "the canonical baseline population does not cover every label in the catalog: "
+        f"baselines {baseline_labels}, catalog {sorted(catalog.get_column('label').unique())}"
     )
-    .sort("label")
-)
-print(label_summary)
 
-# %%
-top_designs = allocation_runs.head(10).select(
-    "backtest_hash",
+for label in baseline_labels:
+    label_results = [result for result in baseline_results if _result_config(result)[0] == label]
+    if include_preview:
+        ranked_results = sorted(
+            label_results,
+            key=lambda result: (*_result_config(result)[1:], result.hash),
+        )
+    else:
+        _set_name = research_name(
+            CASE_STUDY_ID, f"{label}:equal-weight-candidates", scope=POPULATION_NAME
+        )
+        candidates = CandidateSet.create(
+            study,
+            name=_set_name,
+            members=label_results,
+            supersedes=candidate_set_supersedes(
+                study, name=_set_name, declared=SUPERSEDES_CANDIDATE_SETS.get(_set_name)
+            ),
+        )
+        candidate_sets[label] = candidates
+        ranked_results = list(candidates.ranked_validation_sharpe())
+        if any(not isinstance(result, BacktestResult) for result in ranked_results):
+            raise TypeError("validation-Sharpe ranking returned a non-backtest result")
+    selected_baselines[label] = _select_configuration_survivors(ranked_results, top_n)
+    available_configs = {_result_config(result)[1:] for result in label_results}
+    if len(selected_baselines[label]) != min(top_n, len(available_configs)):
+        raise RuntimeError(f"configuration selection for {label} is incomplete")
+
+baseline_predictions = {result.registry_record()["prediction_hash"] for result in baseline_results}
+if not POPULATION_NAME:
+    missing = set(catalog.get_column("prediction_hash")) - baseline_predictions
+    if missing:
+        raise RuntimeError(
+            "the canonical baseline population does not cover every prediction in the "
+            f"catalog: {len(missing)} uncovered"
+        )
+selected_rows = []
+for label, survivors in selected_baselines.items():
+    for baseline in survivors:
+        prediction_hash = baseline.registry_record()["prediction_hash"]
+        member = catalog.filter(pl.col("prediction_hash") == prediction_hash)
+        if member.height != 1:
+            raise RuntimeError(
+                f"selected baseline {baseline.hash} resolved to {member.height} prediction rows"
+            )
+        selected_rows.append(member.with_columns(pl.lit(_baseline_top_k(baseline)).alias("top_k")))
+
+selected = pl.concat(selected_rows).unique(subset=["prediction_hash"], maintain_order=True)
+if selected.get_column("prediction_hash").n_unique() != selected.height:
+    raise RuntimeError("allocation input contains duplicate prediction identities")
+selected.select(
+    "label",
     "family",
     "config_name",
-    "label",
-    "allocator",
-    "allocation_top_k",
-    "sharpe",
-    "sharpe_ci95_lo",
-    "sharpe_ci95_hi",
-)
-print(top_designs)
+    "checkpoint_kind",
+    "checkpoint_value",
+    "top_k",
+    "prediction_hash",
+).sort("label", "family", "config_name", "checkpoint_value")
 
 # %% [markdown]
-# ### HRP modestly improves the selected 21-day carrier
+# ## Plan and freeze the allocation grid
 #
-# The leading prediction is a 21-day Ridge model. Within this exact prediction lineage, HRP at
-# top-5 raises Sharpe by 0.122 relative to equal weighting. Its wide interval still crosses zero,
-# and every stored top-10 variant for the same carrier is negative.
+# Each request changes only the allocator. The selected prediction and `top_k` mapping pass directly
+# from the winning baseline result to the shared backtest boundary. Production freezes every
+# expected identity before the first allocation result is written.
 
 # %%
-LEADER_PREDICTION_HASH = allocation_runs["prediction_hash"][0]
-leader_lineage = allocation_runs.filter(pl.col("prediction_hash") == LEADER_PREDICTION_HASH).sort(
-    ["allocation_top_k", "sharpe"], descending=[False, True]
+allocators = get_allocators(CASE_STUDY_ID)
+if not allocators or any(config.get("method") == "equal_weight" for config in allocators):
+    raise RuntimeError("allocation methods must be non-empty and exclude the equal-weight baseline")
+
+jobs: list[dict[str, Any]] = []
+if TOP_K and selected.filter(pl.col("top_k") != TOP_K).height:
+    raise RuntimeError("TOP_K differs from the mapping selected by the upstream baseline")
+for label, top_k in selected.select("label", "top_k").unique().sort("label", "top_k").iter_rows():
+    rows = selected.filter((pl.col("label") == label) & (pl.col("top_k") == top_k)).drop("top_k")
+    if top_k > max_sleeve:
+        raise RuntimeError(
+            f"selected top_k {top_k} exceeds the {max_sleeve}-pair sleeve ceiling for a "
+            f"long-short account on {n_assets} pairs"
+        )
+    for allocation in allocators:
+        jobs.append(
+            {
+                "label": label,
+                "top_k": top_k,
+                "allocation": allocation,
+                "predictions": rows,
+                "expected": rows.height,
+            }
+        )
+
+pl.DataFrame(
+    [
+        {
+            "label": job["label"],
+            "top_k": job["top_k"],
+            "allocator": job["allocation"]["method"],
+            "prediction_sets": job["expected"],
+        }
+        for job in jobs
+    ]
 )
-print(
-    leader_lineage.select(
-        "allocator", "allocation_top_k", "sharpe", "sharpe_ci95_lo", "sharpe_ci95_hi"
+
+# %% tags=["results"]
+planned_hashes = []
+for job in jobs:
+    plan = plan_backtests(
+        study,
+        predictions=job["predictions"],
+        signal={"method": "equal_weight_top_k", "top_k": job["top_k"]},
+        allocation=job["allocation"],
+        chapter="17",
     )
-)
+    if len(plan.members) != job["expected"]:
+        raise RuntimeError("an allocation plan omitted a selected prediction")
+    planned_hashes.extend(plan.expected_hashes)
+if len(planned_hashes) != len(set(planned_hashes)):
+    raise RuntimeError("two planned allocation requests collapse to the same identity")
 
-leader = leader_lineage.sort("sharpe", descending=True).row(0, named=True)
-equal_weight = leader_lineage.filter(
-    (pl.col("allocator") == "equal_weight") & (pl.col("allocation_top_k") == 5)
-).row(0, named=True)
-allocation_delta = leader["sharpe"] - equal_weight["sharpe"]
+allocation_population = None
+if not include_preview:
+    allocations_name = research_name(CASE_STUDY_ID, "allocation-backtests", scope=POPULATION_NAME)
+    allocation_population = OfficialPopulation.create(
+        study,
+        name=allocations_name,
+        member_kind="backtest",
+        members=planned_hashes,
+        supersedes=population_supersedes(
+            study, name=allocations_name, declared=SUPERSEDES_ALLOCATION_BACKTESTS
+        ),
+    )
+    print(f"Frozen expected allocation population: {allocation_population.hash}")
+
+# %% [markdown]
+# ## Execute the frozen allocation grid, then validate what was frozen
+#
+# The population is validated in the cell that fills it, because the two are one act: the expected
+# set was written down before the first member ran, and `require_complete` is what turns that
+# declaration into a published result.
+
+# %% tags=["results"]
+# A sweep that recomputes everything and a sweep that recomputes nothing print the same summary
+# unless the two are counted apart. `run_backtests` serves an identity that is already registered
+# and complete instead of running it again, which is what makes a re-run affordable and what makes
+# a bare member count say nothing about whether this run did any work.
+#
+# The runner already knows which it did and says so per member in `execution.diagnostics`, as
+# `status` "reused" or "completed". Comparing against the registered hashes instead would be
+# wrong in both directions: a registered-but-partial backtest is in that set, gets recomputed and
+# would report as reused, and a preview re-run reads a table that excludes preview rows by default
+# and would report every reused member as computed.
+run_status: list[str] = []
+allocation_results = []
+for job in jobs:
+    execution = run_backtests(
+        study,
+        predictions=job["predictions"],
+        signal={"method": "equal_weight_top_k", "top_k": job["top_k"]},
+        allocation=job["allocation"],
+        chapter="17",
+    )
+    if len(execution.results) != job["expected"]:
+        raise RuntimeError("an allocation member disappeared during execution")
+    allocation_results.extend(execution.results)
+    run_status.extend(entry["status"] for entry in execution.diagnostics)
+
+expected_count = sum(job["expected"] for job in jobs)
+if len(allocation_results) != expected_count:
+    raise RuntimeError(
+        f"expected {expected_count} allocation runs, found {len(allocation_results)}"
+    )
+if {result.hash for result in allocation_results} != set(planned_hashes):
+    raise RuntimeError("completed allocation identities differ from the frozen plan")
+if any(
+    not result.complete or result.registry_record()["stage"] != "allocation"
+    for result in allocation_results
+):
+    raise RuntimeError("the allocation population is incomplete or misclassified")
+
+served = run_status.count("reused")
 print(
-    f"Best lineage: {leader['allocator']} top-{leader['allocation_top_k']} "
-    f"Sharpe={leader['sharpe']:.3f} "
-    f"95% CI=[{leader['sharpe_ci95_lo']:.3f}, {leader['sharpe_ci95_hi']:.3f}]"
+    f"Allocation backtests: {len(allocation_results) - served} computed, {served} served from the registry, "
+    f"{len(allocation_results)} in the population"
 )
-print(f"Equal-weight top-5 Sharpe={equal_weight['sharpe']:.3f}; delta={allocation_delta:+.3f}")
 
-# %%
-figure_data = leader_lineage.sort("sharpe")
-labels = [
-    f"{allocator.replace('_', ' ').title()} (top {top_k})"
-    for allocator, top_k in figure_data.select("allocator", "allocation_top_k").iter_rows()
-]
-points = figure_data["sharpe"].to_numpy()
-lower = figure_data["sharpe_ci95_lo"].to_numpy()
-upper = figure_data["sharpe_ci95_hi"].to_numpy()
-errors = np.vstack([points - lower, upper - points])
-colors = [
-    COLORS["blue"] if top_k == 5 else COLORS["amber"] for top_k in figure_data["allocation_top_k"]
-]
 
-fig, ax = plt.subplots(figsize=(10, 6))
-y = np.arange(len(figure_data))
-ax.errorbar(points, y, xerr=errors, fmt="none", ecolor=COLORS["slate"], capsize=3, alpha=0.7)
-ax.scatter(points, y, c=colors, s=55, zorder=3)
-ax.axvline(0, color=COLORS["neutral"], linewidth=1, linestyle="--")
-ax.set_yticks(y, labels)
-ax.set_xlabel("Validation Sharpe ratio with 95% interval")
-ax.set_title("No allocator is statistically separated from zero")
-ax.grid(axis="x", alpha=0.25)
-fig.show()
+def _leaves(value: Any, prefix: str = "") -> dict[str, Any]:
+    """Flatten a nested spec to dotted paths so a mismatch can name what moved."""
+    if isinstance(value, dict):
+        flat: dict[str, Any] = {}
+        for key, item in value.items():
+            flat.update(_leaves(item, f"{prefix}.{key}" if prefix else str(key)))
+        return flat
+    return {prefix: value}
+
+
+def _non_allocation_projection(spec: dict[str, Any], *, drop_prices: bool) -> dict[str, Any]:
+    projected = deepcopy(spec)
+    projected.pop("chapter", None)
+    projected.pop("_runtime_backtest_config", None)
+    projected.get("strategy", {}).pop("allocation", None)
+    metadata = projected.get("backtest_config", {}).get("metadata")
+    if isinstance(metadata, dict):
+        metadata.pop("chapter", None)
+    if drop_prices:
+        projected.get("input_identity", {}).pop("prices", None)
+    return projected
+
+
+for result in allocation_results:
+    prediction_hash = result.registry_record()["prediction_hash"]
+    signal = result.spec()["strategy"]["signal"]
+    siblings = [
+        baseline
+        for baseline in baseline_results
+        if baseline.registry_record()["prediction_hash"] == prediction_hash
+        and baseline.spec()["strategy"]["signal"] == signal
+    ]
+    if len(siblings) != 1:
+        raise RuntimeError(
+            f"allocation {result.hash} resolved to {len(siblings)} equal-weight siblings"
+        )
+    # input_identity.prices is a function of the allocation, not something held constant
+    # across it. A moment allocator declares a warmup, load_backtest_prices_for leaves the
+    # start of the load window unconstrained by that many periods, and the frame it returns
+    # digests differently from the equal-weight baseline's - by design, with the extra
+    # prefix consumed by the rolling window and excluded from return aggregation.
+    #
+    # The decision is taken once, from the allocation, and applied to both sides. Asking
+    # each spec about its own allocation drops the key from the allocation projection and
+    # keeps it in the baseline's, so the two differ on the key's presence rather than its
+    # value - a comparison made unequal by the very step meant to make it fair.
+    #
+    # Where the allocator declares no warmup both sides load the same window, and the
+    # digest is a real check that the allocation did not move the price input.
+    drop_prices = bool(
+        strategy_warmup_periods({"allocation": result.spec()["strategy"].get("allocation")})
+        if result.spec()["strategy"].get("allocation")
+        else 0
+    )
+    allocation_projection = _non_allocation_projection(result.spec(), drop_prices=drop_prices)
+    baseline_projection = _non_allocation_projection(siblings[0].spec(), drop_prices=drop_prices)
+    if allocation_projection != baseline_projection:
+        # Naming the fields is the difference between a check and a diagnosis. The
+        # projections are nested, so compare the flattened leaves and report only the
+        # paths that actually disagree.
+        divergent = sorted(
+            path
+            for path in set(_leaves(allocation_projection)) | set(_leaves(baseline_projection))
+            if _leaves(allocation_projection).get(path) != _leaves(baseline_projection).get(path)
+        )
+        raise RuntimeError(
+            f"allocation {result.hash} changed a non-allocation strategy field against "
+            f"baseline {siblings[0].hash}: "
+            + "; ".join(
+                f"{path}: baseline={_leaves(baseline_projection).get(path)!r} "
+                f"allocation={_leaves(allocation_projection).get(path)!r}"
+                for path in divergent
+            )
+        )
+
+if not include_preview:
+    if allocation_population is None:
+        raise RuntimeError("the canonical allocation population was not frozen before execution")
+    allocation_population.require_complete()
+    print(f"Official allocation population: {allocation_population.hash}")
+else:
+    print("Preview allocation results remain outside official populations and candidate sets.")
 
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. **Allocation improves the best point estimate.** HRP top-5 lifts the selected 21-day Ridge
-#    carrier from -0.085 under equal weighting to 0.037, a Sharpe change of +0.122.
-# 2. **The improvement is not statistically resolved.** The HRP leader's 95% interval spans
-#    -0.643 to 0.777. Allocation does not establish a dependable validation edge.
-# 3. **Concentration helps this thin signal.** The available top-5 variants dominate the top-10
-#    variants within the leading lineage, consistent with dilution in the broader book.
-# 4. **Selection remains provisional.** Only 9 of 768 latest allocation designs are positive, all
-#    on the 21-day label. Ch18 must test whether the small point estimate survives cost changes.
-#
-# **Next:** The costs notebook applies the configured transaction-cost grid to the selected
-# allocation lineage.
+# - Validation Sharpe ranks an immutable equal-weight candidate set for each label.
+# - Each advancing configuration retains its best baseline checkpoint and signal mapping.
+# - Preview reductions exercise the same backtest engine without entering production populations.

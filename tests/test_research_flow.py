@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sqlite3
 from contextlib import closing
 from datetime import date
@@ -9,19 +8,10 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from case_studies.research import CandidateSet, PredictionResult, Result, Strategy, Study
+from case_studies.research import PredictionResult, Result, Strategy, Study
+from case_studies.utils import conformal
 from tests.test_research_registry import _predictions, _training_spec
 from tests.test_research_workspace import _seed_release
-
-
-@pytest.fixture(autouse=True)
-def _restore_output_root():
-    yield
-    os.environ.pop("ML4T_OUTPUT_DIR", None)
-    from case_studies.research import workspace
-
-    workspace._ACTIVE_OUTPUT_ROOT = None
-    workspace._clear_root_sensitive_caches()
 
 
 def _prices() -> pl.DataFrame:
@@ -39,7 +29,7 @@ def _prices() -> pl.DataFrame:
 
 
 def _patch_holdout_prices(monkeypatch: pytest.MonkeyPatch, prices: pl.DataFrame) -> list[int]:
-    from case_studies.research import lifecycle, strategy
+    from case_studies.research import strategy
 
     warmups: list[int] = []
 
@@ -54,7 +44,6 @@ def _patch_holdout_prices(monkeypatch: pytest.MonkeyPatch, prices: pl.DataFrame)
         warmups.append(warmup_periods)
         return prices
 
-    monkeypatch.setattr(lifecycle, "load_backtest_prices_for", load_prices)
     monkeypatch.setattr(strategy, "load_backtest_prices_for", load_prices)
     return warmups
 
@@ -168,7 +157,7 @@ def test_strategy_normalizes_conformal_identity_before_hashing(tmp_path: Path) -
     spec = strategy.resolve(prices=_prices())
     allocation = spec["strategy"]["allocation"]
 
-    assert allocation["calibration_version"] == "walk_forward_v2"
+    assert allocation["calibration_version"] == conformal.CALIBRATION_VERSION
     assert allocation["min_calibration_n"] == 30
     assert allocation["sparse_fallback"] == "pooled_prior_oos"
 
@@ -263,67 +252,16 @@ def test_preview_prediction_to_backtest_flow_stays_isolated(tmp_path: Path) -> N
         Result.open(study, preview_backtest.hash)
 
 
-def test_lock_transition_failure_is_atomic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    release = _seed_release(tmp_path)
-    study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
-    training = study.results.register_training(_training_spec())
-    frame = _predictions()
-    prediction = study.results.publish_predictions(
-        training,
-        checkpoint_kind="final",
-        checkpoint_value=None,
-        split="validation",
-        predictions=frame,
-        expected_keys=frame.select("symbol", "timestamp", "fold_id"),
-    )
-    backtest = study.strategy(
-        prediction=prediction,
-        signal={"method": "equal_weight_top_k", "top_k": 1},
-        execution_mode="vectorized",
-    ).run(prices=_prices())
-    candidates = CandidateSet.create(study, "selection", [backtest])
-    assert candidates.best_validation_sharpe().hash == backtest.hash
-    _patch_holdout_prices(
-        monkeypatch,
-        _prices().with_columns(pl.lit(date(2024, 1, 11)).alias("timestamp")),
-    )
-    invalid_holdout_spec = _training_spec(
-        cv={"phase": "holdout", "train_end": "2024-01-04"},
-        model={"class": "Ridge", "params": {"alpha": 2.0}},
-    )
-    with pytest.raises(ValueError, match="only in CV interval"):
-        study.lifecycle.lock(
-            candidate_set_hash=candidates.hash,
-            selected_backtest_hash=backtest.hash,
-            selection_evidence={"metric": "validation_backtest_sharpe"},
-            holdout_training_spec=invalid_holdout_spec,
-        )
-    with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
-        assert db.execute("SELECT COUNT(*) FROM research_locks").fetchone()[0] == 0
-
-    lock = study.lifecycle.lock(
-        candidate_set_hash=candidates.hash,
-        selected_backtest_hash=backtest.hash,
-        selection_evidence={"metric": "validation_backtest_sharpe"},
-        holdout_training_spec=_training_spec(cv={"phase": "holdout", "train_end": "2024-01-04"}),
-    )
-
-    with pytest.raises(ValueError, match="exact complete canonical lineage"):
-        study.lifecycle.record_holdout(
-            lock.hash,
-            holdout_training_hash=training.hash,
-            holdout_prediction_hash=prediction.hash,
-            holdout_backtest_hash=backtest.hash,
-        )
-
-    assert study.lifecycle.open(lock.hash).state == "LOCKED"
-    with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
-        assert db.execute("SELECT COUNT(*) FROM holdout_evaluations").fetchone()[0] == 0
-
-
-def test_locked_rolling_allocator_holdout_preserves_warmup_and_transitions_once(
+def test_rolling_allocator_holdout_preserves_warmup_and_loads_canonical_prices(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A holdout backtest resolves its own canonical prices and keeps the allocator's warmup.
+
+    The holdout is the same strategy on a later window, so the two properties that have to
+    survive the move are the ones a caller could quietly break: the prices come from the
+    canonical loader for the holdout split rather than from whatever the caller passes in, and
+    the rolling allocator gets the same warmup it had on validation.
+    """
     release = _seed_release(tmp_path)
     study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
     frame = _predictions()
@@ -342,11 +280,8 @@ def test_locked_rolling_allocator_holdout_preserves_warmup_and_transitions_once(
         "allocation": {"method": "inverse_vol", "vol_window": 2},
         "execution_mode": "vectorized",
     }
-    validation_backtest = study.strategy(
-        prediction=validation_prediction,
-        **request,
-    ).run(prices=_prices())
-    candidates = CandidateSet.create(study, "selection", [validation_backtest])
+    study.strategy(prediction=validation_prediction, **request).run(prices=_prices())
+
     holdout_spec = _training_spec(cv={"phase": "holdout", "train_end": "2024-01-04"})
     holdout_prices = pl.concat(
         [
@@ -358,90 +293,40 @@ def test_locked_rolling_allocator_holdout_preserves_warmup_and_transitions_once(
         ]
     )
     warmups = _patch_holdout_prices(monkeypatch, holdout_prices)
-    lock = study.lifecycle.lock(
-        candidate_set_hash=candidates.hash,
-        selected_backtest_hash=validation_backtest.hash,
-        selection_evidence={"metric": "validation_backtest_sharpe"},
-        holdout_training_spec=holdout_spec,
-    )
     holdout_training = study.results.register_training(holdout_spec)
     holdout_frame = frame.with_columns(pl.lit(date(2024, 1, 11)).alias("timestamp"))
-    holdout_expected = holdout_frame.select("symbol", "timestamp", "fold_id")
-    wrong_checkpoint = study.results.publish_predictions(
-        holdout_training,
-        checkpoint_kind="epoch",
-        checkpoint_value=4,
-        split="holdout",
-        predictions=holdout_frame,
-        expected_keys=holdout_expected,
-    )
-    with pytest.raises(ValueError, match="locked retraining contract"):
-        study.strategy(prediction=wrong_checkpoint, **request)
-
     holdout_prediction = study.results.publish_predictions(
         holdout_training,
         checkpoint_kind="epoch",
         checkpoint_value=3,
         split="holdout",
         predictions=holdout_frame,
-        expected_keys=holdout_expected,
+        expected_keys=holdout_frame.select("symbol", "timestamp", "fold_id"),
     )
-    holdout_backtest = study.strategy(
-        prediction=holdout_prediction,
-        **request,
-    ).run()
 
+    holdout_backtest = study.strategy(prediction=holdout_prediction, **request).run()
+    assert holdout_backtest.complete
+
+    # Prices are the holdout loader's, never the caller's: a reader-supplied frame is how a
+    # holdout silently gets evaluated over the wrong window.
     with pytest.raises(ValueError, match="canonical holdout prices"):
         study.strategy(prediction=holdout_prediction, **request).run(prices=holdout_prices)
-    with pytest.raises(ValueError, match="locked validation strategy"):
-        study.strategy(
-            prediction=holdout_prediction,
-            signal={"method": "equal_weight_top_k", "top_k": 2},
-            allocation={"method": "inverse_vol", "vol_window": 2},
-            execution_mode="vectorized",
-        ).run()
 
-    from case_studies.research import lifecycle
-
-    changed_prices = holdout_prices.with_columns((pl.col("close") + 1).alias("close"))
-    monkeypatch.setattr(
-        lifecycle,
-        "load_backtest_prices_for",
-        lambda case_study, label, *, split, warmup_periods=0: changed_prices,
-    )
-    with pytest.raises(ValueError, match="exact complete canonical lineage"):
-        study.lifecycle.record_holdout(
-            lock.hash,
-            holdout_training_hash=holdout_training.hash,
-            holdout_prediction_hash=holdout_prediction.hash,
-            holdout_backtest_hash=holdout_backtest.hash,
-        )
-    assert study.lifecycle.open(lock.hash).state == "LOCKED"
-    with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
-        assert db.execute("SELECT COUNT(*) FROM holdout_evaluations").fetchone()[0] == 0
-    restored_warmups = _patch_holdout_prices(monkeypatch, holdout_prices)
-
-    evaluated = study.lifecycle.record_holdout(
-        lock.hash,
-        holdout_training_hash=holdout_training.hash,
-        holdout_prediction_hash=holdout_prediction.hash,
-        holdout_backtest_hash=holdout_backtest.hash,
-    )
-
-    assert evaluated.state == "HOLDOUT_EVALUATED"
-    assert warmups + restored_warmups == [2, 2, 2, 2]
-    with pytest.raises(ValueError, match="LOCKED"):
-        study.lifecycle.record_holdout(
-            lock.hash,
-            holdout_training_hash=holdout_training.hash,
-            holdout_prediction_hash=holdout_prediction.hash,
-            holdout_backtest_hash=holdout_backtest.hash,
-        )
+    # One load, from the run that was allowed to proceed: the reader-supplied call refuses
+    # before it reaches the loader. The value is the allocator's vol_window, carried across.
+    assert warmups == [2]
 
 
-def test_locked_conformal_holdout_uses_validation_residuals(
+def test_conformal_holdout_requires_widths_calibrated_on_validation_residuals(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A conformal holdout refuses to size itself on its own residuals.
+
+    ``load_conformal_widths`` auto-generates from the prediction set it is asked about when the
+    artifact is missing, so an unwritten holdout would self-calibrate silently rather than fail.
+    The run must refuse until ``compute_holdout_conformal_widths`` has written widths taken from
+    the validation residuals, which it marks with ``fold_id = -1``.
+    """
     release = _seed_release(tmp_path)
     study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
     timestamps = pl.date_range(date(2023, 12, 18), date(2024, 1, 9), eager=True)
@@ -490,20 +375,11 @@ def test_locked_conformal_holdout_uses_validation_residuals(
         },
         "execution_mode": "vectorized",
     }
-    validation_backtest = study.strategy(
-        prediction=validation_prediction,
-        **request,
-    ).run(prices=prices)
+    study.strategy(prediction=validation_prediction, **request).run(prices=prices)
+
     holdout_prices = _prices().with_columns(pl.lit(date(2024, 1, 11)).alias("timestamp"))
     _patch_holdout_prices(monkeypatch, holdout_prices)
-    candidates = CandidateSet.create(study, "conformal-selection", [validation_backtest])
     holdout_spec = _training_spec(cv={"phase": "holdout", "train_end": "2024-01-09"})
-    lock = study.lifecycle.lock(
-        candidate_set_hash=candidates.hash,
-        selected_backtest_hash=validation_backtest.hash,
-        selection_evidence={"metric": "validation_backtest_sharpe"},
-        holdout_training_spec=holdout_spec,
-    )
     holdout_training = study.results.register_training(holdout_spec)
     holdout_frame = _predictions().with_columns(pl.lit(date(2024, 1, 11)).alias("timestamp"))
     holdout_prediction = study.results.publish_predictions(
@@ -515,7 +391,25 @@ def test_locked_conformal_holdout_uses_validation_residuals(
         expected_keys=holdout_frame.select("symbol", "timestamp", "fold_id"),
     )
 
+    with pytest.raises(ValueError, match="no widths artifact"):
+        study.strategy(prediction=holdout_prediction, **request).run()
+
+    # The declared embargo for etfs/fwd_ret_21d, not the writer's permissive default. A
+    # 21-session label needs 21 sessions of embargo before the trailing calibration residuals
+    # stop overlapping the holdout window, and the writer takes whatever it is handed.
+    declared_embargo = conformal.HOLDOUT_CONFORMAL_EMBARGO_STEPS["etfs/fwd_ret_21d"]
+    assert declared_embargo == 21
+    conformal.compute_holdout_conformal_widths(
+        "etfs",
+        validation_prediction.hash,
+        holdout_prediction.hash,
+        alpha=0.2,
+        min_calibration_n=1,
+        embargo_steps=declared_embargo,
+        write=True,
+    )
     holdout_backtest = study.strategy(prediction=holdout_prediction, **request).run()
+
     widths = pl.read_parquet(
         study.root
         / "run_log"
@@ -523,13 +417,86 @@ def test_locked_conformal_holdout_uses_validation_residuals(
         / holdout_prediction.hash
         / "conformal_widths.parquet"
     )
-    evaluated = study.lifecycle.record_holdout(
-        lock.hash,
-        holdout_training_hash=holdout_training.hash,
-        holdout_prediction_hash=holdout_prediction.hash,
-        holdout_backtest_hash=holdout_backtest.hash,
-    )
-
     assert widths.get_column("fold_id").unique().to_list() == [-1]
-    assert widths.get_column("calibration_n").min() == 2
-    assert evaluated.state == "HOLDOUT_EVALUATED"
+    # Per symbol, the validation observations of that symbol that survive the embargo: 23 dates
+    # less the 21 embargoed leaves 2, and the count is per-symbol rather than pooled (which
+    # would be 4 across the two symbols).
+    assert widths.get_column("calibration_n").unique().to_list() == [2]
+    assert holdout_backtest.complete
+
+    # `fold_id = -1` alone is not enough. `load_conformal_widths` REGENERATES an artifact that
+    # carries no row at the current calibration version, and it regenerates through
+    # `compute_conformal_widths`, which self-calibrates on the prediction set it is handed. So
+    # widths stamped for the holdout under a superseded version would pass a fold check and then
+    # be silently replaced, mid-run, by holdout-calibrated ones. Restaging exactly that state:
+    widths_path = (
+        study.root
+        / "run_log"
+        / "predictions"
+        / holdout_prediction.hash
+        / "conformal_widths.parquet"
+    )
+    widths.with_columns(calibration_version=pl.lit("walk_forward_v1")).write_parquet(widths_path)
+    with pytest.raises(ValueError, match="calibration version"):
+        study.strategy(prediction=holdout_prediction, **request).run()
+
+    # Neither marker says WHICH validation prediction calibrated these, and that is the question
+    # that decides whether the interval sizing this holdout belongs to the model being evaluated.
+    # The writer stamps its `val_prediction_hash` and `embargo_steps` arguments, so the artifact
+    # can answer it.
+    assert widths.get_column("calibration_source").unique().to_list() == [
+        validation_prediction.hash
+    ]
+    assert widths.get_column("calibration_embargo_steps").unique().to_list() == [declared_embargo]
+
+    # A single-valued embargo is not the same as the right one. The writer accepts zero, and
+    # zero keeps the trailing validation residuals whose 21-session horizon already reaches into
+    # the holdout window - a leak that passes every other marker the guard checks.
+    widths.with_columns(calibration_embargo_steps=pl.lit(0, dtype=pl.Int64)).write_parquet(
+        widths_path
+    )
+    with pytest.raises(ValueError, match="declares 21"):
+        study.strategy(prediction=holdout_prediction, **request).run()
+
+    # The shortest path to self-calibration: hand the holdout its own hash as the calibration
+    # source. It is the same configuration by construction, so the configuration check below
+    # cannot separate them; only the split can.
+    widths.with_columns(calibration_source=pl.lit(holdout_prediction.hash)).write_parquet(
+        widths_path
+    )
+    with pytest.raises(ValueError, match="not validation"):
+        study.strategy(prediction=holdout_prediction, **request).run()
+
+    # An artifact written before the stamp existed cannot be checked, and passing it would be
+    # the finding this guard closes.
+    widths.drop("calibration_source").write_parquet(widths_path)
+    with pytest.raises(ValueError, match="no 'calibration_source' column"):
+        study.strategy(prediction=holdout_prediction, **request).run()
+
+    # A source this registry does not hold is not a benign gap: the widths came from a
+    # prediction set the study cannot account for.
+    widths.with_columns(calibration_source=pl.lit("f" * 12)).write_parquet(widths_path)
+    with pytest.raises(ValueError, match="no such prediction"):
+        study.strategy(prediction=holdout_prediction, **request).run()
+
+    # The finding itself: widths calibrated on a DIFFERENT model pass every marker the guard
+    # could previously check - `fold_id = -1` and a current calibration version are both true of
+    # them. Only the stamped source separates them from the right ones.
+    other_training = study.results.register_training(
+        _training_spec(model={"class": "Lasso", "params": {"alpha": 0.5}})
+    )
+    other_validation = study.results.publish_predictions(
+        other_training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=validation,
+        expected_keys=validation.select("symbol", "timestamp", "fold_id"),
+    )
+    widths.with_columns(calibration_source=pl.lit(other_validation.hash)).write_parquet(widths_path)
+    with pytest.raises(ValueError, match="different configuration"):
+        study.strategy(prediction=holdout_prediction, **request).run()
+
+    # And the artifact the writer produced still runs, so the guard admits what it should.
+    widths.write_parquet(widths_path)
+    assert study.strategy(prediction=holdout_prediction, **request).run().complete

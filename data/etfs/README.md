@@ -82,4 +82,4 @@ Schema (canonical):
 - **Ch16**: `06_framework_parity.py`, `09_performance_reporting.py`, `11_sharpe_ratio_inference.py`.
 - **Ch18**: `01_cost_taxonomy.py`, `03_market_impact_calibration.py`, `06_ml4t_execution_demo.py`.
 - **`case_studies/etfs/`**: full pipeline from `01_feasibility_analysis.py` through
-  `18_strategy_analysis.py` — the flagship reader case study.
+  `20_strategy_analysis.py` — the flagship reader case study.

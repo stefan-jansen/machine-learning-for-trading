@@ -52,7 +52,10 @@ import yaml
 from ml4t.diagnostic.metrics import cross_sectional_ic
 
 from case_studies.research.contracts import ExecutionTier
-from case_studies.research.cv import require_fold_scoped_temporal_compatibility
+from case_studies.research.cv import (
+    require_fold_scoped_temporal_compatibility,
+    require_fold_scoped_temporal_holdout_coverage,
+)
 from case_studies.research.identity import ResolvedSpec
 from case_studies.research.models import ModelRun
 from case_studies.research.recovery import ExecutionAttempt, ExecutionLedger
@@ -1486,7 +1489,9 @@ def _gbm_runtime_identity() -> dict[str, str]:
     }
 
 
-def _gbm_runtime_provenance(study: Study, device: str) -> dict[str, Any]:
+def _gbm_runtime_provenance(
+    study: Study, device: str, *, notebook: str | None = None
+) -> dict[str, Any]:
     try:
         commit = subprocess.check_output(
             ["git", "-C", str(study.release_root), "rev-parse", "HEAD"],
@@ -1509,6 +1514,14 @@ def _gbm_runtime_provenance(study: Study, device: str) -> dict[str, Any]:
     if device == "cuda":
         record["cuda_runtime"] = torch.version.cuda
         record["gpu"] = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+    # `notebook_path` says which notebook produced a row; `entry_point` says which module ran.
+    # Different questions, and the module is legitimately shared - several notebooks call this one,
+    # so `entry_point` cannot name a notebook and should not try. Both sit in
+    # `registry/specs.py:_V2_PROVENANCE_FIELDS`, so neither reaches the training identity. Absent
+    # when the caller names no notebook: a holdout reconstruction is not a notebook run, and a
+    # wrong notebook name would be worse than none.
+    if notebook:
+        record["notebook_path"] = notebook
     return record
 
 
@@ -1633,7 +1646,7 @@ def _load_gbm_request_config(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     from utils.modeling import load_configs
 
-    configs = load_configs(study.case_study, label, family="gbm")
+    configs = load_configs(study.case_study, label, family="gbm", case_dir=study.root)
     matches = [config for config in configs if config["config_name"] == config_name]
     if len(matches) != 1:
         raise ValueError(f"unknown GBM config {config_name!r}")
@@ -1804,7 +1817,7 @@ def _build_gbm_resolved_request(
     }
     if tier is ExecutionTier.PREVIEW:
         computation["preview_reductions"] = reductions
-    runtime_provenance = _gbm_runtime_provenance(study, device)
+    runtime_provenance = _gbm_runtime_provenance(study, device, notebook=request.get("notebook"))
     spec = ResolvedSpec.create(
         family="gbm",
         label=label_ref.name,
@@ -1915,6 +1928,122 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     )
 
 
+def _gbm_fold_invariant_params(
+    recorded: dict[str, dict[str, Any]],
+) -> tuple[dict[str, Any], bool]:
+    """The parameters every recorded fold agreed on, and whether the Huber delta varied.
+
+    Almost every LightGBM parameter comes from the preset and is the same on every fold.
+    The one exception is ``alpha`` under a ``huber`` objective without a declared alpha:
+    :func:`_scaled_huber_alpha` resolves it from the fold's own training labels, so it is a
+    different number on every fold and cannot be carried across one.
+
+    Anything else differing between folds means the recorded parameters were not produced by
+    the rule this understands, and re-keying them would invent a configuration nobody ran. So
+    it refuses and names the parameters, rather than picking one fold's values.
+    """
+    if not isinstance(recorded, dict) or not recorded:
+        raise ValueError("GBM training spec records no effective parameters to re-key")
+    witness = dict(recorded[sorted(recorded)[0]])
+    divergent = {
+        name
+        for fold_params in recorded.values()
+        for name in set(witness) | set(fold_params)
+        if witness.get(name) != fold_params.get(name)
+    }
+    unexpected = divergent - {"alpha"}
+    if unexpected:
+        raise ValueError(
+            f"GBM parameters differ across the recorded folds in {sorted(unexpected)}. Only the "
+            "Huber delta is derived per fold, so there is no rule here that reproduces these on "
+            "the holdout fold, and carrying one fold's values forward would evaluate a "
+            "configuration that was never ranked."
+        )
+    return witness, "alpha" in divergent
+
+
+def rekey_holdout_spec(
+    study: Study,
+    spec: dict[str, Any],
+    *,
+    validation_spec: dict[str, Any],
+) -> None:
+    """Recompute the fold-derived fields against the holdout fold, in place.
+
+    ``spec`` arrives with its CV already replaced by the single derived holdout fold, and with
+    ``expected_prediction_keys`` and ``effective_params_by_fold`` still describing the
+    VALIDATION folds. :func:`reconstruct_locked_request` checks both against the holdout fold
+    before it will build a request, so carrying them forward produces a spec that fails at
+    execution. They have to be recomputed.
+
+    The eligibility manifest is recomputed from the dataset over the holdout window, by the
+    same call the validation request used.
+
+    The parameters are re-keyed rather than re-derived from the preset, which is the same
+    choice :func:`reconstruct_locked_request` makes and for the same reason: a request can
+    carry overrides the spec does not record separately, so a preset reloaded by name is not
+    guaranteed to be the configuration that ran. What the spec does record is every fold's
+    resolved parameters, and those are enough - see :func:`_gbm_fold_invariant_params` for
+    what varies across folds and what refuses.
+    """
+    from case_studies.research.models import locked_holdout_split
+    from utils.modeling import load_modeling_dataset
+
+    computation = spec["computation"]
+    label_ref = study.labels.get(spec["label"], execution_tier=ExecutionTier.CANONICAL)
+    mds = load_modeling_dataset(study.case_study, label_ref.name, max_symbols=0)
+    if mds.date_col != "timestamp" or not mds.entity_cols:
+        raise ValueError("GBM holdout re-keying requires timestamp and an entity key")
+
+    split = locked_holdout_split(spec, mds.dataset, mds.date_col, study.case_study)
+    expected = _gbm_expected_keys_from_dataset(mds, [split])
+    computation["expected_prediction_keys"] = {
+        "digest": value_digest(expected, ("symbol", "timestamp", "fold")),
+        "n_rows": expected.height,
+        "n_folds": expected.get_column("fold").n_unique(),
+    }
+
+    model = computation.get("model")
+    if not isinstance(model, dict) or "effective_params_by_fold" not in model:
+        return
+    recorded = model["effective_params_by_fold"]
+    if isinstance(recorded, dict):
+        declared = {
+            str(int(fold["fold"]))
+            for fold in validation_spec["computation"]["cv"]["folds"]
+            if isinstance(fold, dict)
+        }
+        stray = set(recorded) - declared
+        if stray:
+            raise ValueError(
+                f"GBM spec records parameters for folds {sorted(stray)}, which the validation CV "
+                "does not declare. These are not the validation folds this re-keys from."
+            )
+    params, alpha_is_fold_derived = _gbm_fold_invariant_params(recorded)
+
+    if alpha_is_fold_derived:
+        scale = model.get("huber_alpha_scale")
+        if params.get("objective") != "huber" or scale is None:
+            raise ValueError(
+                "GBM alpha varies across the recorded folds but the spec declares no "
+                "huber_alpha_scale to re-derive it from, so the holdout delta cannot be "
+                "computed by the rule that produced the validation ones"
+            )
+        # The same selection the request planner derives its own thresholds from
+        # (`_gbm_sampled_training_labels`), and for the reason recorded there: reading the
+        # labels through fold preparation casts them to LightGBM's float32, which quantizes
+        # to a different delta than the float64 labels validation resolved its alpha from,
+        # and one declared configuration would then carry two identities. It also reads the
+        # labels without materializing the fold's feature matrix.
+        labels = training_labels_for_split(mds, split, train_sample_frac=1.0, seed=RANDOM_SEED)
+        if not len(labels):
+            raise ValueError("GBM holdout fold has no training labels to re-derive the Huber delta")
+        params["alpha"] = _scaled_huber_alpha(float(scale), labels)
+
+    _validate_lightgbm_params(params)
+    model["effective_params_by_fold"] = {str(int(split["fold"])): params}
+
+
 def reconstruct_locked_request(
     study: Study,
     spec: dict[str, Any],
@@ -1990,7 +2119,43 @@ def reconstruct_locked_request(
 
     split = locked_holdout_split(spec, mds.dataset, mds.date_col, study.case_study)
     if mds.temporal_by_fold is not None and mds.temporal_keys and mds.temporal_feature_names:
-        require_fold_scoped_temporal_compatibility([split], mds.temporal_artifact_splits)
+        # Coverage, not fold-boundary compatibility - the same branch
+        # `latent_factors/adapter.py` takes on this path, and for the same reason.
+        # Compatibility asks whether the stage-04 artifact declares a fold with this geometry.
+        # For a holdout that question has no good answer: the holdout fold is derived after
+        # stage 04 ran, so the artifact never declares it, and it cannot be rebuilt to declare
+        # it without changing the sha256 the selection was made under. Asking it here refused
+        # every holdout refit on a gbm-carried case study with fold-scoped model-based
+        # features - measured on etfs, whose carrier is `gbm/default_mae`, with
+        # "custom CV is incompatible with fold-scoped temporal features".
+        #
+        # The features are joined by (entity, date), so what the run needs is rows spanning
+        # the dates it trains and evaluates on, not a fold labelled for it. That is what
+        # `require_fold_scoped_temporal_holdout_coverage` asks, and its docstring already said
+        # this was the question to ask - it just had no caller on this family.
+        #
+        # What coverage cannot check, and where the guarantee actually comes from. A producer
+        # declares its rolling folds 0..N-1 in `temporal_artifact_splits` and appends the
+        # holdout rows as fold N without declaring that fold's geometry, so the boundary its
+        # holdout rows were fitted under is not in the artifact for anything here to verify.
+        # It is enforced upstream instead: `case_studies/etfs/04_model_based_features.py:345`
+        # asserts `train_end <= HOLDOUT_START` over `all_folds`, the holdout fold included, with
+        # the message "fold N estimates parameters from sessions inside the holdout". That
+        # source is inside the sha256 the artifact is pinned by, so the property is pinned even
+        # though the declaration is missing. Filed as a gap in what the artifact can attest.
+        #
+        # One difference that is not a leak and is easy to read as one: the model's training
+        # window ends a label buffer earlier than the feature estimator's, because the buffer
+        # pulls the label cutoff back. So features on the model's training rows embed sessions
+        # after its label cutoff and before the holdout opens - fresher than the labels beside
+        # them, and drawn entirely from outside the evaluated window, so they cannot move the
+        # holdout number.
+        require_fold_scoped_temporal_holdout_coverage(
+            split,
+            mds.temporal_by_fold,
+            source_timeline=mds.dataset.get_column(mds.date_col),
+            date_col=mds.date_col,
+        )
     expected = _gbm_expected_keys_from_dataset(mds, [split])
     validate_locked_expected_keys(spec, expected)
     folds = prepare_gbm_folds(
@@ -2898,6 +3063,8 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: GBMContext
         if not _valid_gbm_model_dir(model_dir, context):
             raise ValueError(f"partial fitted-state directory requires inspection: {model_dir}")
         result = _predict_from_gbm_models(model_dir, spec, context)
+        reused_folds = sorted(context.fold_ids)
+        fitted_folds: list[int] = []
     else:
         staging = train_dir / f".models.{uuid.uuid4().hex}.tmp"
         staging.mkdir(parents=True)
@@ -2927,6 +3094,8 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: GBMContext
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
             raise
+        reused_folds = []
+        fitted_folds = sorted(context.fold_ids)
     prediction_results = []
     published = context.published_checkpoints or tuple(
         int(item["value"]) for item in computation["checkpoint_schedule"]
@@ -2962,7 +3131,19 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: GBMContext
     # a resolved request runs through here rather than through the batch path, so recording it
     # only there left every row this path produced with a NULL elapsed_s.
     _record_gbm_runtime(study, training, elapsed_s=elapsed_s, cpu_s=cpu_seconds() - started_cpu)
-    return ModelRun(training=training, predictions=tuple(prediction_results))
+    # Every other GBM path reports which folds it fitted and which it reused, and so does the
+    # linear runner's single-request path (linear.py:1498-1502). This one returned no diagnostics
+    # at all, so `execution.diagnostics` came back as {"status", "training_hash"} and a notebook
+    # reading `item["fitted_folds"]` raised KeyError rather than reporting the run.
+    return ModelRun(
+        training=training,
+        predictions=tuple(prediction_results),
+        diagnostics={
+            "cache_hit": False,
+            "reused_folds": reused_folds,
+            "fitted_folds": fitted_folds,
+        },
+    )
 
 
 def validate_locked_run(

@@ -18,7 +18,10 @@ import numpy as np
 import polars as pl
 import torch
 
-from case_studies.research.cv import require_fold_scoped_temporal_compatibility
+from case_studies.research.cv import (
+    require_fold_scoped_temporal_compatibility,
+    require_fold_scoped_temporal_holdout_coverage,
+)
 from case_studies.research.identity import ResolvedSpec
 from case_studies.research.models import ModelRun
 from case_studies.utils.artifact_digest import value_digest
@@ -32,7 +35,13 @@ from case_studies.utils.latent_factors.cv import (
 from case_studies.utils.latent_factors.library_bridge import (
     predict_latent_fold_from_artifact,
 )
+from case_studies.utils.latent_factors.versions import (
+    _LATENT_MODELS,
+    LATENT_ADAPTER_VERSION,
+    LATENT_MODEL_VERSIONS,
+)
 from case_studies.utils.registry import prediction_hash_from_parts, training_hash_from_spec
+from case_studies.utils.runtime import cpu_seconds
 from utils.modeling import RANDOM_SEED
 
 if TYPE_CHECKING:
@@ -40,7 +49,6 @@ if TYPE_CHECKING:
     from case_studies.utils.latent_factors.case_study import LatentFactorCaseStudyContext
 
 
-_LATENT_MODELS = {"cae", "ipca", "pca", "sae", "sdf"}
 _PREVIEW_FIELDS = {
     "folds",
     "max_iter",
@@ -98,26 +106,16 @@ def _package_version(name: str) -> str | None:
         return None
 
 
-def _source_identity() -> dict[str, str]:
-    root = Path(__file__).parent
-    release_root = root.parents[2]
-    files = [
-        root / "adapter.py",
-        root / "cae.py",
-        root / "case_study.py",
-        root / "common.py",
-        root / "cv.py",
-        root / "ipca.py",
-        root / "library_bridge.py",
-        root / "macro_context.py",
-        root / "panel.py",
-        root / "pca.py",
-        root / "sae.py",
-        root / "sdf.py",
-        release_root / "utils" / "artifact_specs.py",
-        release_root / "utils" / "modeling.py",
-    ]
-    return {path.relative_to(release_root).as_posix(): _sha256(path) for path in files}
+def _source_identity(model_name: str) -> dict[str, int | str]:
+    """Return the shared adapter version and the requested factor model version."""
+    try:
+        version = LATENT_MODEL_VERSIONS[model_name]
+    except KeyError as exc:
+        raise ValueError(f"no latent implementation version declared for {model_name!r}") from exc
+    return {
+        "latent_adapter": LATENT_ADAPTER_VERSION,
+        "latent_model": f"{model_name}/v{version}",
+    }
 
 
 def _runtime_identity() -> dict[str, str | None]:
@@ -129,7 +127,9 @@ def _runtime_identity() -> dict[str, str | None]:
     }
 
 
-def _runtime_provenance(study: Study, device: str) -> dict[str, Any]:
+def _runtime_provenance(
+    study: Study, device: str, *, notebook: str | None = None
+) -> dict[str, Any]:
     try:
         commit = subprocess.check_output(
             ["git", "-C", str(study.release_root), "rev-parse", "HEAD"],
@@ -152,6 +152,14 @@ def _runtime_provenance(study: Study, device: str) -> dict[str, Any]:
     if device == "cuda":
         record["cuda_runtime"] = torch.version.cuda
         record["gpu"] = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+    # `notebook_path` says which notebook produced a row; `entry_point` says which module ran.
+    # Different questions, and the module is legitimately shared - several notebooks call this one,
+    # so `entry_point` cannot name a notebook and should not try. Both sit in
+    # `registry/specs.py:_V2_PROVENANCE_FIELDS`, so neither reaches the training identity. Absent
+    # when the caller names no notebook: a holdout reconstruction is not a notebook run, and a
+    # wrong notebook name would be worse than none.
+    if notebook:
+        record["notebook_path"] = notebook
     return record
 
 
@@ -499,12 +507,12 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
             "num_threads": num_threads,
         },
         "sampling": {"max_symbols": max_symbols},
-        "source_identity": _source_identity(),
+        "source_identity": _source_identity(model_name),
         "runtime_identity": _runtime_identity(),
     }
     if tier is ExecutionTier.PREVIEW:
         computation["preview_reductions"] = reductions
-    runtime_provenance = _runtime_provenance(study, device)
+    runtime_provenance = _runtime_provenance(study, device, notebook=request.get("notebook"))
     spec = ResolvedSpec.create(
         family="latent_factors",
         label=label_ref.name,
@@ -572,7 +580,7 @@ def reconstruct_locked_request(
         "feature_artifacts": case.input_data_spec["files"],
         "feature_names": list(case.feature_names),
         "input_data_spec": case.input_data_spec,
-        "source_identity": _source_identity(),
+        "source_identity": _source_identity(model_name),
         "runtime_identity": _runtime_identity(),
         "task": {
             "type": case.task_type,
@@ -587,7 +595,17 @@ def reconstruct_locked_request(
             )
     split = locked_holdout_split(spec, case.dataset, case.date_col, study.case_study)
     if case.temporal_by_fold is not None and case.temporal_keys and case.temporal_feature_names:
-        require_fold_scoped_temporal_compatibility([split], case.temporal_artifact_splits)
+        # Coverage, not fold-boundary compatibility. The holdout fold is derived when the lock is
+        # taken, so a stage-04 artifact built before any lock never declares it, and it cannot be
+        # rebuilt to declare it without changing the sha256 the lock pins. What the run needs is
+        # rows spanning the dates it trains and evaluates on; that is what this asserts, and it
+        # is the same check `rekey_holdout_spec` ran before the lock was taken.
+        require_fold_scoped_temporal_holdout_coverage(
+            split,
+            case.temporal_by_fold,
+            source_timeline=case.dataset.get_column(case.date_col),
+            date_col=case.date_col,
+        )
     case.splits = [split]
     expected = _prepare_expected_keys(case, model_name)
     validate_locked_expected_keys(spec, expected)
@@ -923,6 +941,7 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: LatentFact
     if cached is not None:
         return cached
     started = time.perf_counter()
+    started_cpu = cpu_seconds()
     computation = spec["computation"]
     training = study.results.register_training(
         spec,
@@ -931,7 +950,8 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: LatentFact
     )
     train_dir = training.root / "run_log" / "training" / training.hash
     model_dir = train_dir / "models"
-    if model_dir.exists():
+    reused_fitted_state = model_dir.exists()
+    if reused_fitted_state:
         if not _valid_model_dir(model_dir, context):
             raise ValueError(f"partial fitted-state directory requires inspection: {model_dir}")
         prediction_frames = _reconstruct_predictions(model_dir, context)
@@ -1023,13 +1043,37 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: LatentFact
                 label=context.case.primary_label,
             )
         )
+    elapsed_s = time.perf_counter() - started
     runtime_path = train_dir / "runtime.json"
     if runtime_path.exists():
         runtime = json.loads(runtime_path.read_text())
-        runtime["elapsed_s"] = time.perf_counter() - started
+        runtime["elapsed_s"] = elapsed_s
         temporary = runtime_path.with_name(f".{runtime_path.name}.{uuid.uuid4().hex}.tmp")
         temporary.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
         os.replace(temporary, runtime_path)
+    # The same seconds also go to the registry column. runtime.json is the artifact compared byte
+    # for byte when the same identity is registered again, and no query reads it;
+    # `training_runs.elapsed_s` is what `reference/case-study-runtimes.md` is built from. Only
+    # this fitting path records - `_cached_run` above returns without a fit cost, and
+    # writing one there would overwrite what the original fit measured.
+    #
+    # `reused_fitted_state` is the second half of that rule and was missing: reconstructing
+    # from a persisted `models/` directory reaches here too, and it costs seconds where the
+    # fit cost hours. Recording that would price every later CAE and SDF run off the cost of
+    # reading the answer back. `deep_learning.py` already gates on the same condition.
+    if not reused_fitted_state:
+        from case_studies.utils.registry.registration import record_training_runtime
+        from case_studies.utils.runtime import resource_measurement
+
+        record_training_runtime(
+            study.case_study,
+            training.hash,
+            case_dir=training.root,
+            measured=resource_measurement(
+                elapsed_s=elapsed_s,
+                cpu_s=cpu_seconds() - started_cpu,
+            ),
+        )
     return ModelRun(training=training, predictions=tuple(prediction_results))
 
 

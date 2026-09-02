@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 import polars as pl
+import yaml
 
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
@@ -46,6 +47,7 @@ from sklearn.preprocessing import StandardScaler
 from case_studies.research.models import ModelRun
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.registry import clear_prediction_sets, compute_fold_metrics_from_predictions
+from case_studies.utils.runtime import cpu_seconds
 
 if TYPE_CHECKING:
     from case_studies.research.workspace import Study
@@ -57,6 +59,12 @@ from utils.modeling import RANDOM_SEED, seed_everything
 
 _TABM_PREVIEW_FIELDS = {"checkpoint_interval", "folds", "max_symbols", "n_epochs"}
 _TABM_IMBALANCE_METHODS = {"balanced", "none"}
+# What a case study gets when its setup.yaml declares no `modeling.tabular_dl` block. Eight of the
+# nine declare none, so these are the values every existing TabM identity was fitted under.
+DEFAULT_TABM_DEVICE = "cuda"
+DEFAULT_TABM_NUM_THREADS = 8
+TABM_RUNNER_VERSION = 1
+TABM_STATE_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -90,16 +98,11 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _tabm_source_identity() -> dict[str, str]:
-    from case_studies.utils import deep_model_state
-
-    deep_model_state_file = deep_model_state.__file__
-    if deep_model_state_file is None:
-        raise RuntimeError("deep_model_state has no source file")
-    deep_model_state_path = Path(deep_model_state_file)
+def _tabm_source_identity() -> dict[str, int]:
+    """Return declared versions for fitting TabM and persisting its state."""
     return {
-        Path(__file__).name: _sha256(Path(__file__)),
-        deep_model_state_path.name: _sha256(deep_model_state_path),
+        "tabm_runner": TABM_RUNNER_VERSION,
+        "tabm_state": TABM_STATE_VERSION,
     }
 
 
@@ -111,7 +114,7 @@ def _tabm_runtime_identity() -> dict[str, str]:
     }
 
 
-def _tabm_runtime_provenance(study: Study) -> dict[str, Any]:
+def _tabm_runtime_provenance(study: Study, *, notebook: str | None = None) -> dict[str, Any]:
     try:
         commit = subprocess.check_output(
             ["git", "-C", str(study.release_root), "rev-parse", "HEAD"],
@@ -121,13 +124,22 @@ def _tabm_runtime_provenance(study: Study) -> dict[str, Any]:
         ).strip()
     except (OSError, subprocess.SubprocessError):
         commit = "unknown"
-    return {
+    record: dict[str, Any] = {
         "entry_point": "case_studies.utils.tabular_dl",
         "packages": _tabm_runtime_identity(),
         "platform": platform.platform(),
         "python": platform.python_version(),
         "source_commit": commit,
     }
+    # `notebook_path` says which notebook produced a row; `entry_point` says which module ran.
+    # Different questions, and the module is legitimately shared - several notebooks call this one,
+    # so `entry_point` cannot name a notebook and should not try. Both sit in
+    # `registry/specs.py:_V2_PROVENANCE_FIELDS`, so neither reaches the training identity. Absent
+    # when the caller names no notebook: a holdout reconstruction is not a notebook run, and a
+    # wrong notebook name would be worse than none.
+    if notebook:
+        record["notebook_path"] = notebook
+    return record
 
 
 def _normalize_splits(splits: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
@@ -300,8 +312,7 @@ def _resolve_model_request_from_materialized(
             if field in reductions:
                 config[field] = int(reductions[field])
         _tabm_checkpoint_epochs(config)
-    device = str(request["overrides"].get("device", "cuda"))
-    num_threads = int(request["overrides"].get("num_threads", 8))
+    device, num_threads = _tabm_execution_settings(study, request["overrides"])
     runtime = tabm_runtime_spec(device, num_threads=num_threads)
     expected = _tabm_expected_keys(mds, splits)
     input_lineage = mds.input_lineage
@@ -419,13 +430,15 @@ def _materialize_tabm_request_group(study: Study, request: dict[str, Any]):
     )
     configured_by_name = {
         config["config_name"]: config
-        for config in load_configs(study.case_study, label_ref.name, "tabular_dl")
+        for config in load_configs(
+            study.case_study, label_ref.name, "tabular_dl", case_dir=study.root
+        )
     }
     return (
         label_ref,
         mds,
         configured_by_name,
-        _tabm_runtime_provenance(study),
+        _tabm_runtime_provenance(study, notebook=request.get("notebook")),
     )
 
 
@@ -451,7 +464,9 @@ def reconstruct_locked_request(
 ):
     """Reconstruct a TabM holdout fit without consulting a mutable preset."""
     from case_studies.research.contracts import ExecutionTier
-    from case_studies.research.cv import require_fold_scoped_temporal_compatibility
+    from case_studies.research.cv import (
+        require_fold_scoped_temporal_holdout_coverage,
+    )
     from case_studies.research.models import (
         ResolvedModelRequest,
         locked_holdout_split,
@@ -488,7 +503,19 @@ def reconstruct_locked_request(
             raise ValueError(f"locked TabM {name} does not match the available computation")
     split = locked_holdout_split(spec, mds.dataset, mds.date_col, study.case_study)
     if mds.temporal_by_fold is not None and mds.temporal_keys and mds.temporal_feature_names:
-        require_fold_scoped_temporal_compatibility([split], mds.temporal_artifact_splits)
+        # Coverage, not fold-boundary compatibility - the branch `latent_factors/adapter.py:603`
+        # and `gbm.py` already take, for the same reason. Compatibility asks whether the stage-04
+        # artifact declares a fold with this geometry, and for a holdout that question has no good
+        # answer: the fold is derived after stage 04 ran, so the artifact does not declare it, and
+        # rebuilding it to declare it changes the sha256 the selection was made under. The
+        # features are joined by (entity, date), so what the run needs is rows spanning the dates
+        # it trains and evaluates on, not a fold labelled for it.
+        require_fold_scoped_temporal_holdout_coverage(
+            split,
+            mds.temporal_by_fold,
+            source_timeline=mds.dataset.get_column(mds.date_col),
+            date_col=mds.date_col,
+        )
     expected = _tabm_expected_keys(mds, [split])
     validate_locked_expected_keys(spec, expected)
 
@@ -643,16 +670,28 @@ def _cached_research_run(study: Study, spec: dict[str, Any], context: TabMResear
     required = {
         "all_predictions.parquet",
         "learning_curves.parquet",
-        "predictions.parquet",
         "result.json",
         "training_log.parquet",
     }
-    if not diagnostics.is_dir() or required - {path.name for path in diagnostics.iterdir()}:
+    present = {path.name for path in diagnostics.iterdir()} if diagnostics.is_dir() else set()
+    # `best_epoch_predictions.parquet` was written as `predictions.parquet` until 2026-09-01, and
+    # every cached run from before then carries the old name. Accepting either keeps those runs
+    # reusable; requiring the new one alone would refit every tabm cohort in every case study to
+    # rename a diagnostic file.
+    best_epoch = next(
+        (
+            name
+            for name in ("best_epoch_predictions.parquet", "predictions.parquet")
+            if name in present
+        ),
+        None,
+    )
+    if not diagnostics.is_dir() or required - present or best_epoch is None:
         return None
     try:
-        for name in required - {"result.json"}:
+        for name in (required - {"result.json"}) | {best_epoch}:
             pl.read_parquet(diagnostics / name)
-        selected = pl.read_parquet(diagnostics / "predictions.parquet")
+        selected = pl.read_parquet(diagnostics / best_epoch)
         if "model_id" not in selected.columns or {"config", "epoch"} & set(selected.columns):
             return None
         json.loads((diagnostics / "result.json").read_text())
@@ -722,6 +761,41 @@ def _record_tabm_runtime(train_dir: Path, result: dict[str, Any], config_name: s
     runtime_path.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
 
 
+def _record_tabm_training_runtime(
+    study: Study,
+    training,
+    *,
+    elapsed_s: float,
+    cpu_s: float,
+    preparation_s: float | None = None,
+) -> None:
+    """Record what this TabM run cost, against its registry row.
+
+    ``_record_tabm_runtime`` above writes the same seconds into the run's ``runtime.json``, which
+    is the artifact compared byte for byte when the same identity is registered again. Nothing
+    queries that file. ``training_runs.elapsed_s`` is the column
+    ``reference/case-study-runtimes.md`` is built from, and it was NULL on every TabM row the
+    fleet had ever registered, so a run could be timed and still leave the next agent nothing to
+    cost the family from.
+
+    Only the fitting path calls this. A run served from the registry has no fit cost to record,
+    and writing one would overwrite the measurement its original fit left behind.
+    """
+    from case_studies.utils.registry.registration import record_training_runtime
+    from case_studies.utils.runtime import resource_measurement
+
+    record_training_runtime(
+        study.case_study,
+        training.hash,
+        case_dir=training.root,
+        measured=resource_measurement(
+            elapsed_s=elapsed_s,
+            cpu_s=cpu_s,
+            fold_preparation_s=preparation_s,
+        ),
+    )
+
+
 def _persist_tabm_diagnostics(train_dir: Path, result: dict[str, Any], candidate_key: str) -> None:
     diagnostics_dir = train_dir / "diagnostics"
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
@@ -739,7 +813,13 @@ def _persist_tabm_diagnostics(train_dir: Path, result: dict[str, Any], candidate
         .drop("config", "epoch")
     )
     predictions.write_parquet(diagnostics_dir / "all_predictions.parquet")
-    best.write_parquet(diagnostics_dir / "predictions.parquet")
+    # Named for what it holds. Filtered to `best_epoch`, which is an IC-selected single epoch,
+    # so a reader wiring up "the predictions" from this directory under the old name
+    # `predictions.parquet` would have collapsed the checkpoint dimension on IC - the reduction
+    # the pipeline does at the allocation gate on baseline Sharpe and nowhere else. Every
+    # checkpoint reaches the registry through `_publish_tabm_predictions`; this file is a
+    # diagnostic beside them.
+    best.write_parquet(diagnostics_dir / "best_epoch_predictions.parquet")
     curves.write_parquet(diagnostics_dir / "learning_curves.parquet")
     training_log.write_parquet(diagnostics_dir / "training_log.parquet")
     (diagnostics_dir / "result.json").write_text(
@@ -1283,6 +1363,8 @@ def _run_tabm_compatible_group(study: Study, items):
         execution_diagnostics = result["execution_diagnostics"]
         preparation_elapsed_s = float(execution_diagnostics["base_fold_preparation_s"])
         fit_elapsed_by_candidate = execution_diagnostics["candidate_fit_s"]
+        fit_cpu_by_candidate = execution_diagnostics.get("candidate_fit_cpu_s", {})
+        fit_folds_by_candidate = execution_diagnostics.get("candidate_fitted_folds", {})
         measured_s = preparation_elapsed_s + sum(
             float(value) for value in fit_elapsed_by_candidate.values()
         )
@@ -1308,6 +1390,21 @@ def _run_tabm_compatible_group(study: Study, items):
                 candidate.attempt = None
                 continue
             _record_tabm_runtime(train_dir, result, candidate_key)
+            # A candidate whose every fold was replayed from persisted state fitted nothing,
+            # so its fit seconds are 0.0 - not a measurement of a very fast run. The gate
+            # skips reused rows, so a zero written here reaches
+            # `reference/case-study-runtimes.md` unchallenged and prices the next run at
+            # nothing. Leaving `elapsed_s` NULL keeps the original fit's measurement as the
+            # only thing that column ever holds, the same rule the latent and cached paths
+            # follow.
+            if int(fit_folds_by_candidate.get(candidate_key, 0)) > 0:
+                _record_tabm_training_runtime(
+                    study,
+                    training,
+                    elapsed_s=float(fit_elapsed_by_candidate[candidate_key]),
+                    cpu_s=float(fit_cpu_by_candidate.get(candidate_key, 0.0)),
+                    preparation_s=preparation_elapsed_s,
+                )
             _persist_tabm_diagnostics(train_dir, result, candidate_key)
             predictions = _publish_tabm_predictions(
                 study,
@@ -1481,6 +1578,36 @@ def tabm_runtime_spec(
         "num_threads": num_threads,
         "seed": seed,
     }
+
+
+def _tabm_execution_settings(study: Study, overrides: Mapping[str, Any]) -> tuple[str, int]:
+    """Resolve the declared TabM backend, with a request override taking precedence.
+
+    Both values reach ``computation.numerics`` and are therefore part of a training identity, not
+    provenance recorded beside one: a network's arithmetic depends on the device it runs on and on
+    how many host threads reduce a batch, so a CUDA fit and a CPU fit of the same configuration
+    are different computations and must hash differently.
+
+    That is exactly why the declaration has to be read. Until this function existed the resolver
+    took ``cuda`` and 8 from its own defaults and consulted ``setup.yaml`` nowhere, so a case study
+    declaring ``device: cpu`` would have trained on CUDA and published members whose recorded
+    device says otherwise - silently, because ``resolve_torch_device`` only refuses a device the
+    host lacks and the host has one. ``_gbm_execution_settings`` reads its equivalent block and
+    this is the same shape.
+    """
+    setup_path = study.root / "config" / "setup.yaml"
+    declared: dict[str, Any] = {}
+    if setup_path.is_file():
+        setup = yaml.safe_load(setup_path.read_text()) or {}
+        declared = (setup.get("modeling") or {}).get("tabular_dl") or {}
+    config = {
+        **declared,
+        **{key: overrides[key] for key in ("device", "num_threads") if key in overrides},
+    }
+    num_threads = int(config.get("num_threads", DEFAULT_TABM_NUM_THREADS))
+    if num_threads < 1:
+        raise ValueError("modeling.tabular_dl.num_threads must be at least 1")
+    return str(config.get("device", DEFAULT_TABM_DEVICE)), num_threads
 
 
 def _tabm_checkpoint_epochs(config: dict[str, Any]) -> tuple[int, ...]:
@@ -2120,7 +2247,9 @@ def _assemble_tabm_results(
     if save_dir is not None:
         save_dir.mkdir(parents=True, exist_ok=True)
         if best_predictions.height:
-            best_predictions.write_parquet(save_dir / "predictions.parquet")
+            # Same file, same reason as `_persist_tabm_diagnostics`: it is one IC-selected
+            # epoch, and the name says so.
+            best_predictions.write_parquet(save_dir / "best_epoch_predictions.parquet")
         if all_predictions.height:
             all_predictions.write_parquet(save_dir / "all_predictions.parquet")
         if curves.height:
@@ -2578,6 +2707,8 @@ def run_tabm_cv(
             "available": True,
             "config": cfg,
             "elapsed_s": 0.0,
+            "cpu_s": 0.0,
+            "fitted_folds": 0,
             "error": None,
             "fold_checkpoint_ics": {},
             "prediction_frames": [],
@@ -2630,6 +2761,7 @@ def run_tabm_cv(
             cfg_checkpoint = cfg.get("checkpoint_interval", 25)
             is_tabpfn = artifact_name.startswith("tabpfn")
             fold_t0 = time.perf_counter()
+            fold_cpu0 = cpu_seconds()
             seed_everything(seed + fd["fold"])
             fold_prediction_frame = None
             fold_training_record = None
@@ -2862,6 +2994,8 @@ def run_tabm_cv(
                     print(f"    Fold {fd['fold']}: {artifact_name} persistence failed: {error}")
                     continue
             state["elapsed_s"] += time.perf_counter() - fold_t0
+            state["cpu_s"] += cpu_seconds() - fold_cpu0
+            state["fitted_folds"] += 1
         del fd
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -3061,6 +3195,12 @@ def run_tabm_cv(
         "base_fold_preparations": preparation_count,
         "candidate_fit_s": {
             candidate_key: float(state["elapsed_s"]) for candidate_key, state in states.items()
+        },
+        "candidate_fit_cpu_s": {
+            candidate_key: float(state["cpu_s"]) for candidate_key, state in states.items()
+        },
+        "candidate_fitted_folds": {
+            candidate_key: int(state["fitted_folds"]) for candidate_key, state in states.items()
         },
     }
     if not config_results:

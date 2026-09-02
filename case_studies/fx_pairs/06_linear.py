@@ -78,7 +78,9 @@ from case_studies.research import (
     declared_labels,
     load_model_configs,
     model_requests,
+    narrows_declared_catalog,
     open_study,
+    population_supersedes,
     primary_label,
     resolved_model_plan,
     run_model_population,
@@ -92,6 +94,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
+SUPERSEDES_POPULATION: str = "d1b0c5a302f8"
 
 # %%
 study = open_study("fx_pairs", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -161,10 +164,11 @@ configs
 # either knob, and says so here rather than several cells later in a message about hashes.
 
 # %%
-if configs.height < load_model_configs(study, "linear").height and not POPULATION_NAME:
+if narrows_declared_catalog(study, "linear", configs) and not POPULATION_NAME:
     raise ValueError(
-        f"this run fits {configs.height} of the declared configurations, so it cannot publish "
-        "the canonical population; pass POPULATION_NAME to give it its own"
+        f"this run declares {configs.height} label-configuration pairs, which is not the "
+        "complete declared catalog, so it cannot publish the canonical population; pass "
+        "POPULATION_NAME to give it its own"
     )
 
 # %% [markdown]
@@ -256,9 +260,27 @@ plan.select(
 # notebook fitted them together. Everything that finished stays registered, and re-running fits
 # only what is missing.
 
+# %% [markdown]
+# `SUPERSEDES_POPULATION` names the population hash this run replaces. A population is the set
+# of prediction identities it publishes, so anything that moves a training identity produces a
+# different population under the same name and the registry refuses to write it without being
+# told which snapshot it retires. The feature artifact is part of that identity: `03` and `04`
+# are pinned into every training spec by digest, so a stage-04 artifact that gains a fold moves
+# every model fitted on it even where the values those models read are unchanged.
+#
+# It names the hash the published population superseded rather than being left empty, because
+# the declared value is part of what the snapshot is hashed over: a re-run that left it blank
+# would compute a different population and be refused against the one on record. Carrying the
+# published value is what lets this notebook re-run and resolve to what it published.
+
 # %%
 population_name = POPULATION_NAME or "fx_pairs-linear-validation-v1"
-execution, population = run_model_population(study, resolved, population_name=population_name)
+execution, population = run_model_population(
+    study,
+    resolved,
+    population_name=population_name,
+    supersedes=population_supersedes(study, name=population_name, declared=SUPERSEDES_POPULATION),
+)
 
 fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
 reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)

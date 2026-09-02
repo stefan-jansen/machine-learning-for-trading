@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import gc
 import json
-import os
 import weakref
 from copy import deepcopy
 from types import SimpleNamespace
@@ -42,16 +41,6 @@ from case_studies.utils.latent_factors.sdf import run_sdf_fold
 from tests.test_research_registry import _predictions
 from tests.test_research_workspace import _seed_release
 from utils import modeling
-
-
-@pytest.fixture(autouse=True)
-def _restore_output_root():
-    yield
-    os.environ.pop("ML4T_OUTPUT_DIR", None)
-    from case_studies.research import workspace
-
-    workspace._ACTIVE_OUTPUT_ROOT = None
-    workspace._clear_root_sensitive_caches()
 
 
 def _linear_study(tmp_path, monkeypatch, *, n_symbols: int = 6):
@@ -627,7 +616,7 @@ def test_tabm_corrupt_diagnostics_are_rebuilt_from_completed_folds(tmp_path, mon
     assert prepared_folds == [0, 1]
     assert set(pl.read_parquet(training_log)["fold"]) == {0, 1}
 
-    selected_path = training_log.parent / "predictions.parquet"
+    selected_path = training_log.parent / "best_epoch_predictions.parquet"
     obsolete = (
         pl.read_parquet(selected_path)
         .drop("model_id")
@@ -736,12 +725,12 @@ def test_tabm_variants_from_one_named_preset_keep_separate_identities(
         diagnostics = run.training.root / "run_log" / "training" / run.training.hash / "diagnostics"
         assert {path.name for path in diagnostics.iterdir()} == {
             "all_predictions.parquet",
+            "best_epoch_predictions.parquet",
             "learning_curves.parquet",
-            "predictions.parquet",
             "result.json",
             "training_log.parquet",
         }
-        selected = pl.read_parquet(diagnostics / "predictions.parquet")
+        selected = pl.read_parquet(diagnostics / "best_epoch_predictions.parquet")
         assert "model_id" in selected.columns
         assert {"config", "epoch"}.isdisjoint(selected.columns)
 
@@ -898,7 +887,18 @@ def test_thread_limit_does_not_leak_into_families_that_already_record_threads(
 
     tabm_study, *_ = _tabm_study(tmp_path / "tabm", monkeypatch)
     tabm_spec = (
-        tabm_study.model(family="tabular_dl", label="fwd_ret_1d", config_name="tabm_s")
+        # device="cpu" for the same reason the gbm resolve above and the latent_factors
+        # resolve below carry it, and this one did not: tabm_runtime_spec resolves the
+        # torch device while building the spec, so the default config raises "CUDA was
+        # requested but is unavailable" on any machine without a GPU. The assertion is
+        # about the spec and says nothing about where the fit would run. It went
+        # unnoticed because this file ran in no CI job - the workstation has a 3090.
+        tabm_study.model(
+            family="tabular_dl",
+            label="fwd_ret_1d",
+            config_name="tabm_s",
+            overrides={"device": "cpu"},
+        )
         .resolve()
         .spec
     )
@@ -1010,6 +1010,9 @@ def _observe_fold_sets(monkeypatch) -> list[tuple[int, float]]:
 
     folds_module.clear_memo()
     built: list[tuple[int, float]] = []
+    # `iter_raw_folds`, not `prepare_raw_folds`: preparation streams, and the list-collecting
+    # wrapper is what nothing on the execution path calls. Observing the wrapper recorded an
+    # empty list and asserted against it, which is a test that cannot fail.
     original = folds_module.iter_raw_folds
 
     # `iter_raw_folds`, not `prepare_raw_folds`: the batch paths stream folds so that only one is
@@ -2710,7 +2713,9 @@ def _latent_study(tmp_path, monkeypatch):
         "case_studies.utils.latent_factors.case_study.load_case_study_context",
         lambda *args, **kwargs: context,
     )
-    monkeypatch.setattr(latent_adapter, "_source_identity", lambda: {"fixture": "v1"})
+    monkeypatch.setattr(
+        latent_adapter, "_source_identity", lambda model_name: {model_name: "fixture-v1"}
+    )
     return study
 
 

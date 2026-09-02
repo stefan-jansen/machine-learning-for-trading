@@ -11,7 +11,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .specs import _validate_spec, canonical_json, training_hash_from_spec
+from .specs import (
+    IDENTITY_VERSION,
+    _validate_spec,
+    canonical_json,
+    training_hash_from_spec,
+)
 
 if TYPE_CHECKING:
     import numpy as np
@@ -42,6 +47,18 @@ CREATE TABLE IF NOT EXISTS training_runs (
 
 CREATE INDEX IF NOT EXISTS idx_training_family_label ON training_runs(family, label);
 CREATE INDEX IF NOT EXISTS idx_training_config_name ON training_runs(config_name);
+
+CREATE TABLE IF NOT EXISTS training_identity_migrations (
+    target_training_hash TEXT PRIMARY KEY REFERENCES training_runs(training_hash),
+    source_training_hash TEXT NOT NULL,
+    target_spec_json     TEXT NOT NULL,
+    prediction_map_json TEXT NOT NULL,
+    proof_json          TEXT NOT NULL,
+    created_at          TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_training_migration_source
+    ON training_identity_migrations(source_training_hash);
 
 CREATE TABLE IF NOT EXISTS prediction_sets (
     prediction_hash     TEXT PRIMARY KEY,
@@ -148,11 +165,20 @@ CREATE TABLE IF NOT EXISTS causal_runs (
     naive_effect     REAL,
     confounding_bias_pct REAL,
     refutation_p     REAL,
+    refutation_n_successful INTEGER,
+    refutation_placebo_json TEXT,
     spec_json        TEXT,
     notebook         TEXT,
     started_at       TEXT,
     elapsed_s        REAL,
     git_commit       TEXT,
+    -- The causal identity this run retires, mirroring official_populations. A causal
+    -- refit produces a second canonical identity for the same label, and without a
+    -- declared chain CausalResult.one sees two and refuses forever - there is no
+    -- recency rule to fall back on, and there should not be one in a registry that is
+    -- otherwise entirely spec-addressed. Declared by a person through the notebook's
+    -- SUPERSEDES_CAUSAL parameter, never inferred from created_at.
+    supersedes_hash  TEXT REFERENCES causal_runs(causal_hash),
     created_at       TEXT NOT NULL
 );
 
@@ -193,6 +219,11 @@ CREATE TABLE IF NOT EXISTS cohort_metrics (
     family        TEXT,
     leader_hash   TEXT NOT NULL REFERENCES backtest_runs(backtest_hash),
     k_variants                  INTEGER NOT NULL,
+    -- sha256 over the cohort's sorted member backtest hashes. A count cannot say
+    -- which variants a stored correction was computed over: swap one retired member
+    -- for one live member and k_variants is unchanged, so a reader comparing counts
+    -- accepts a correction from a different cohort than the one it asked for.
+    member_digest               TEXT,
     periods_per_year            REAL NOT NULL,
     computed_at                 TEXT NOT NULL,
     n_trials_effective_mp       REAL,
@@ -230,7 +261,8 @@ CREATE TABLE IF NOT EXISTS candidate_sets (
     member_kind              TEXT NOT NULL,
     comparison_contract_json TEXT NOT NULL,
     created_at               TEXT NOT NULL,
-    git_commit               TEXT
+    git_commit               TEXT,
+    supersedes_hash          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS candidate_set_members (
@@ -241,23 +273,6 @@ CREATE TABLE IF NOT EXISTS candidate_set_members (
     UNIQUE (set_hash, member_hash)
 );
 
-CREATE TABLE IF NOT EXISTS research_locks (
-    lock_hash  TEXT PRIMARY KEY,
-    lock_json  TEXT NOT NULL,
-    state      TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_research_singleton ON research_locks((1));
-
-CREATE TABLE IF NOT EXISTS holdout_evaluations (
-    lock_hash               TEXT PRIMARY KEY REFERENCES research_locks(lock_hash),
-    holdout_training_hash   TEXT NOT NULL,
-    holdout_prediction_hash TEXT NOT NULL,
-    holdout_backtest_hash   TEXT NOT NULL,
-    fitted_state_digest     TEXT,
-    evaluated_at            TEXT NOT NULL
-);
 
 CREATE TABLE IF NOT EXISTS execution_attempts (
     attempt_id          TEXT PRIMARY KEY,
@@ -321,15 +336,6 @@ CREATE TABLE IF NOT EXISTS decision_artifacts (
     created_at          TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS holdout_staging (
-    lock_hash               TEXT PRIMARY KEY REFERENCES research_locks(lock_hash),
-    holdout_training_hash   TEXT NOT NULL,
-    holdout_prediction_hash TEXT NOT NULL,
-    holdout_backtest_hash   TEXT NOT NULL,
-    fitted_state_digest     TEXT,
-    lineage_digest          TEXT NOT NULL,
-    staged_at               TEXT NOT NULL
-);
 """
 
 
@@ -409,13 +415,22 @@ def _infer_stage(
             # Registry not initialized yet — fall through to spec inference.
             pass
     strategy = spec.get("strategy", spec)
-    risk = strategy.get("risk", {})
-    if risk and risk.get("name") != "baseline":
-        return "risk_overlay"
-    # Cost sensitivity: explicit chapter tag of ch18, or caller should set explicitly
+    # The explicit tag is read before the risk block, because it states what the caller is
+    # doing while the risk block only says what the strategy contains. Once cost sensitivity
+    # runs on the winner of the risk stage - which is the order the backtest sequence now
+    # takes, risk before costs - every cost row carries an overlay, and inferring from the
+    # overlay first made `cost_sensitivity` unreachable for exactly the runs that are cost
+    # sensitivity. Measured on sp500_equity_option_analytics: a 17-point cost surface over a
+    # `trailing_5pct` carrier registered all 17 rows as `risk_overlay`.
+    #
+    # This did not bite while costs and risk were parallel branches off allocation, because a
+    # cost run then carried no overlay and fell through to the tag.
     chapter = spec.get("chapter", "")
     if chapter == "ch18":
         return "cost_sensitivity"
+    risk = strategy.get("risk", {})
+    if risk and risk.get("name") != "baseline":
+        return "risk_overlay"
     if "allocation" in strategy:
         alloc = strategy["allocation"]
         if isinstance(alloc, dict) and alloc.get("method", "equal_weight") != "equal_weight":
@@ -578,6 +593,61 @@ def _table_has_column(db: sqlite3.Connection, table: str, column: str) -> bool:
     return column in {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
+def current_causal_identities(
+    db, *, label: str, tier: str = "canonical", exclude: str | None = None
+) -> list[str]:
+    """The causal identities a reader would currently resolve for *label*.
+
+    A row is current when its spec carries the current ``identity_version``, its
+    ``execution_tier`` is the one asked for, and no other row declares that it
+    supersedes it.
+
+    This lives here, and not beside either caller, because it has to be one derivation.
+    ``CausalResult.one`` decides what a reader resolves and ``register_causal_run``
+    decides what may be written; if those two sets differ, a registration is refused
+    for an ambiguity the reader never sees, or permitted into one it cannot resolve.
+    The first draft duplicated the logic and the copies disagreed within the hour -
+    one counted every SUPPORTED_IDENTITY_VERSION, the other only the current one, so a
+    legacy row made the first v3 registration for its label impossible to satisfy.
+    The reader's rule is the authority, because it is the one a person hits.
+    """
+    columns = {row[1] for row in db.execute("PRAGMA table_info(causal_runs)").fetchall()}
+    supersedes_column = (
+        "supersedes_hash" if "supersedes_hash" in columns else "NULL AS supersedes_hash"
+    )
+    rows = db.execute(
+        f"SELECT causal_hash, spec_json, {supersedes_column} FROM causal_runs "
+        "WHERE label = ? ORDER BY causal_hash",
+        (label,),
+    ).fetchall()
+    retired = {row[2] for row in rows if row[2]}
+    current = []
+    for causal_hash, spec_json, _ in rows:
+        spec = json.loads(spec_json or "{}")
+        if spec.get("identity_version") != IDENTITY_VERSION:
+            continue
+        if str(spec.get("execution_tier", tier)) != tier:
+            continue
+        if causal_hash in retired or causal_hash == exclude:
+            continue
+        current.append(causal_hash)
+    return current
+
+
+def causal_identities_retired(db, *, label: str) -> set[str]:
+    """Every causal hash some other row declares it supersedes."""
+    columns = {row[1] for row in db.execute("PRAGMA table_info(causal_runs)").fetchall()}
+    if "supersedes_hash" not in columns:
+        return set()
+    return {
+        row[0]
+        for row in db.execute(
+            "SELECT supersedes_hash FROM causal_runs WHERE label = ? AND supersedes_hash IS NOT NULL",
+            (label,),
+        ).fetchall()
+    }
+
+
 def _migrate_registry(db: sqlite3.Connection) -> None:
     """Apply incremental schema migrations to an existing registry."""
     # Check if backtest_runs table exists at all
@@ -623,6 +693,11 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
             if column not in prediction_cols:
                 db.execute(f"ALTER TABLE prediction_sets ADD COLUMN {column} {sql_type}")
 
+    if "cohort_metrics" in tables:
+        cohort_cols = {row[1] for row in db.execute("PRAGMA table_info(cohort_metrics)").fetchall()}
+        if "member_digest" not in cohort_cols:
+            db.execute("ALTER TABLE cohort_metrics ADD COLUMN member_digest TEXT")
+
     if "prediction_coverage" in tables:
         coverage_cols = {
             row[1] for row in db.execute("PRAGMA table_info(prediction_coverage)").fetchall()
@@ -646,9 +721,36 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
             if column not in cols:
                 db.execute(f"ALTER TABLE backtest_runs ADD COLUMN {column} {sql_type}")
 
-    for table in ("holdout_staging", "holdout_evaluations"):
-        if table in tables and not _table_has_column(db, table, "fitted_state_digest"):
-            db.execute(f"ALTER TABLE {table} ADD COLUMN fitted_state_digest TEXT")
+    # The number of successful placebo draws decides whether the refutation could have
+    # rejected at all: the plus-one correction floors the p-value at 1 / (n + 1), so at
+    # 19 or fewer no data could produce a pass. Without it a reader holding only
+    # refutation_p cannot tell an underpowered run from a failed one.
+    if "causal_runs" in tables and not _table_has_column(
+        db, "causal_runs", "refutation_n_successful"
+    ):
+        db.execute("ALTER TABLE causal_runs ADD COLUMN refutation_n_successful INTEGER")
+
+    # Additive, and it costs no recompute: the column is outside the causal computation
+    # specification, so it moves no causal hash and invalidates no registered row.
+    if "causal_runs" in tables and not _table_has_column(db, "causal_runs", "supersedes_hash"):
+        db.execute("ALTER TABLE causal_runs ADD COLUMN supersedes_hash TEXT")
+
+    # The candidate-set equivalent of the line above. A candidate set is derived from a
+    # registry that moves, so re-running the stage that freezes it produces a second set
+    # under the same name; without a declared predecessor the name resolves to two live
+    # identities and every reader of it raises.
+    if "candidate_sets" in tables and not _table_has_column(
+        db, "candidate_sets", "supersedes_hash"
+    ):
+        db.execute("ALTER TABLE candidate_sets ADD COLUMN supersedes_hash TEXT")
+
+    # The placebo draws behind refutation_p. Only the scalars were stored, so the
+    # permutation-distribution figure every causal notebook draws had no source in the
+    # registry and rendered empty behind its guard while the prose described it.
+    if "causal_runs" in tables and not _table_has_column(
+        db, "causal_runs", "refutation_placebo_json"
+    ):
+        db.execute("ALTER TABLE causal_runs ADD COLUMN refutation_placebo_json TEXT")
 
     # Migration 3: tall → wide metric tables
     if "prediction_metrics" in tables:

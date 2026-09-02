@@ -1,0 +1,8 @@
+# `max_samples` reaches a canonical causal run nowhere - see the note in `dml.yaml`. The one
+# case study on this configuration, us_firm_characteristics, resolves through the shared causal
+# request, so the cap below is read by nothing.
+max_samples: 250000
+n_folds: 5
+n_placebo: 100
+params: {}
+seed: 42

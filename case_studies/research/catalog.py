@@ -19,7 +19,15 @@ CATALOG_VERSION = 1
 _METRIC_COLUMNS = (
     "ic_mean",
     "ic_std",
+    # Two different statistics, and the difference is the difference between ten numbers and a
+    # hundred. `ic_t` is computed over the fold-level mean ICs - ten of them for a ten-fold run -
+    # and `registry/metrics.py` calls it a diagnostic in terms. `ic_t_hac` is the inferential one:
+    # Newey-West on the per-date IC series, which is what a reader means by a t-statistic on an IC.
+    # `auc_t_hac` was already carried and its IC counterpart was not, so a notebook wanting the
+    # inferential statistic had only the diagnostic to reach for, and reaching for it while calling
+    # it Newey-West is a mistake this column exists to stop.
     "ic_t",
+    "ic_t_hac",
     # Validation dates that produced a defined cross-sectional IC. A configuration whose
     # predictions collapse to near-constant on some folds yields no IC on those dates, so its
     # ic_mean is measured over fewer of them and is not comparable to a full-coverage one.
@@ -59,6 +67,7 @@ RESERVED_COLUMNS: dict[str, Any] = {
     "execution_tier": pl.String,
     "approval": pl.String,
     "complete": pl.Boolean,
+    "decision_key_digest": pl.String,
     "created_at": pl.String,
     "metrics_computed_at": pl.String,
     "artifact_available": pl.Boolean,
@@ -91,6 +100,12 @@ _BACKTEST_METRIC_COLUMNS = (
     "total_commission",
     "total_slippage",
     "avg_turnover",
+    # The block-bootstrap Sharpe interval is registered on every backtest by
+    # ``compute_backtest_uncertainty``. Without it here, a catalog reader can
+    # only report point estimates and has to drop to raw SQL to say whether a
+    # Sharpe clears zero.
+    "sharpe_ci95_lo",
+    "sharpe_ci95_hi",
 )
 BACKTEST_RESERVED_COLUMNS: dict[str, Any] = {
     "catalog_version": pl.Int64,
@@ -170,12 +185,18 @@ def _open_value(value: Any) -> Any:
     return canonical_json({"value": value})[9:-1]
 
 
-def _registry_rows(root: Path, origin: str) -> list[dict[str, Any]]:
+def _registry_rows(root: Path, origin: str, *, immutable: bool = False) -> list[dict[str, Any]]:
     db_path = root / "run_log" / "registry.db"
     if not db_path.is_file() or db_path.stat().st_size == 0:
         return []
     query = f"file:{db_path}?mode=ro"
-    if origin == "released":
+    if immutable:
+        # `immutable=1` promises SQLite the file cannot change while open, which lets it skip
+        # locking and WAL recovery. That is true of a released case directory and false of any
+        # root a `Study.at` handle was pointed at - a fixture, an output tree, a live case
+        # directory another notebook is writing. Deciding it from the caller rather than from
+        # the `origin` label keeps the two questions apart: `origin` records where a row came
+        # from, this records whether the file can still move underneath the read.
         query += "&immutable=1"
     with closing(sqlite3.connect(query, uri=True)) as db:
         tables = _tables(db)
@@ -209,6 +230,7 @@ def _registry_rows(root: Path, origin: str) -> list[dict[str, Any]]:
             _select("created_at", prediction_columns, "p"),
             _select("status", coverage_columns, "c"),
             _select("n_folds_expected", coverage_columns, "c"),
+            _select("actual_key_digest", coverage_columns, "c"),
             _select("prediction_hash", metric_columns, "m"),
             _select("computed_at", metric_columns, "m"),
             _select("task_type", metric_columns, "m"),
@@ -334,6 +356,7 @@ def _registry_rows(root: Path, origin: str) -> list[dict[str, Any]]:
             "execution_tier": record["t_execution_tier"] or "canonical",
             "approval": "unapproved",
             "complete": complete,
+            "decision_key_digest": record["c_actual_key_digest"],
             "created_at": record["p_created_at"],
             "metrics_computed_at": record["m_computed_at"],
             "artifact_available": artifact.is_file(),
@@ -397,12 +420,20 @@ def _frame(
     return pl.DataFrame(normalized, schema=schema).select(columns)
 
 
-def _backtest_registry_rows(root: Path, origin: str) -> list[dict[str, Any]]:
+def _backtest_registry_rows(
+    root: Path, origin: str, *, immutable: bool = False
+) -> list[dict[str, Any]]:
     db_path = root / "run_log" / "registry.db"
     if not db_path.is_file() or db_path.stat().st_size == 0:
         return []
     query = f"file:{db_path}?mode=ro"
-    if origin == "released":
+    if immutable:
+        # `immutable=1` promises SQLite the file cannot change while open, which lets it skip
+        # locking and WAL recovery. That is true of a released case directory and false of any
+        # root a `Study.at` handle was pointed at - a fixture, an output tree, a live case
+        # directory another notebook is writing. Deciding it from the caller rather than from
+        # the `origin` label keeps the two questions apart: `origin` records where a row came
+        # from, this records whether the file can still move underneath the read.
         query += "&immutable=1"
     with closing(sqlite3.connect(query, uri=True)) as db:
         tables = _tables(db)
@@ -567,7 +598,11 @@ def _backtest_registry_rows(root: Path, origin: str) -> list[dict[str, Any]]:
             "artifact_available": returns_artifact.is_file(),
             "signal_method": signal.get("method"),
             "allocation_method": allocation.get("method"),
-            "risk_method": risk.get("method"),
+            # `name`, not `method`: a risk control is declared under `strategy.risk.name`,
+            # unlike signal and allocation which spell theirs `method`. Reading `method`
+            # here left the column NULL for every backtest ever registered, so a risk
+            # overlay was indistinguishable from an unprotected book in any catalog read.
+            "risk_method": risk.get("name"),
             "decision_artifact_hash": decision.get("hash"),
             **{metric: record[f"bm_{metric}"] for metric in _BACKTEST_METRIC_COLUMNS},
             "metrics_json": canonical_json(metrics),
@@ -648,12 +683,34 @@ def _resolve_authoritative_selection(
     return tuple(resolved)
 
 
+def prediction_rows_at(case_dir: str | Path) -> pl.DataFrame:
+    """The prediction catalog for a case-study directory the caller has already resolved.
+
+    A notebook that resolved its case directory through ``get_case_study_dir`` cannot open a
+    ``Study`` to ask which of its predictions are admissible. Every ``Study.open`` branch ends
+    in ``activate()``, which pops ``ML4T_OUTPUT_DIR`` on the read-only branch and rewrites it
+    otherwise, then clears the root-sensitive caches (``workspace.py:264-292``). Two things go
+    wrong at once: the catalog answers for whichever registry the activation selected rather
+    than the one the notebook read its predictions from, so a join between them drops every
+    row and reports a healthy population as inadmissible; and every later resolution in that
+    notebook follows the activated root, which for the canonical no-workspace path is the
+    published case study, so an isolated run registers its results into the real registry.
+
+    This reads the registry under ``case_dir`` and changes no process state.
+    """
+    return _frame(_registry_rows(Path(case_dir), "workspace")).sort("prediction_hash")
+
+
 class PredictionCatalog:
     def __init__(self, study: Study) -> None:
         self.study = study
 
     def table(self, *, include_preview: bool = False) -> pl.DataFrame:
-        released = _registry_rows(self.study.release_case_root, "released")
+        released = _registry_rows(
+            self.study.release_case_root,
+            "released",
+            immutable=self.study.release_root_is_immutable,
+        )
         if self.study.read_only:
             return _frame(released).sort("prediction_hash")
         workspace = _registry_rows(self.study.root, "workspace")
@@ -703,6 +760,7 @@ class PredictionCatalog:
         *,
         name: str,
         comparison_contract: dict[str, Any] | None = None,
+        supersedes: str | None = None,
     ) -> CandidateSet:
         """Freeze exact authoritative prediction members selected with Polars."""
         from .comparison import CandidateSet
@@ -717,6 +775,7 @@ class PredictionCatalog:
             name,
             members,
             comparison_contract=comparison_contract,
+            supersedes=supersedes,
         )
 
 
@@ -725,7 +784,11 @@ class BacktestCatalog:
         self.study = study
 
     def table(self, *, include_preview: bool = False) -> pl.DataFrame:
-        released = _backtest_registry_rows(self.study.release_case_root, "released")
+        released = _backtest_registry_rows(
+            self.study.release_case_root,
+            "released",
+            immutable=self.study.release_root_is_immutable,
+        )
         if self.study.read_only:
             return _frame(released, BACKTEST_RESERVED_COLUMNS).sort("backtest_hash")
         workspace = _backtest_registry_rows(self.study.root, "workspace")
@@ -779,6 +842,7 @@ class BacktestCatalog:
         *,
         name: str,
         comparison_contract: dict[str, Any] | None = None,
+        supersedes: str | None = None,
     ) -> CandidateSet:
         """Freeze exact authoritative backtest members selected with Polars."""
         from .comparison import CandidateSet
@@ -793,4 +857,5 @@ class BacktestCatalog:
             name,
             members,
             comparison_contract=comparison_contract,
+            supersedes=supersedes,
         )

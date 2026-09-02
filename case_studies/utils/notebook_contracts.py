@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sqlite3
+from collections.abc import Iterable
+from contextlib import closing
 from pathlib import Path
 
 import polars as pl
@@ -10,6 +13,25 @@ _BACKTEST_EXCLUDED_FAMILIES: set[str] = {"causal_dml"}
 # The minimum cross-section `cross_sectional_ic_series` needs before it will return a
 # coefficient for a date. 5 at every case-study call site; the library default is 10.
 IC_MIN_OBS = 5
+
+
+def defined_ic(frame: pl.DataFrame, ic_col: str = "ic") -> pl.DataFrame:
+    """Drop the dates of an IC series whose coefficient is undefined.
+
+    A date with fewer than `IC_MIN_OBS` names, or with every prediction or every
+    return tied, has no rank correlation. ml4t-diagnostic 0.1.2 and later report
+    such a date as null, but polars treats null and NaN as different values and
+    `daily_metrics.parquet` files written before that release carry NaN instead.
+    A `drop_nulls` alone therefore leaves the NaN in place, and one NaN turns any
+    mean, std or rolling mean taken afterwards into NaN.
+
+    Use this wherever an IC series is read back from disk or crosses into a
+    statistic, rather than `drop_nulls(ic_col)`.
+    """
+    if ic_col not in frame.columns:
+        return frame
+    return frame.filter(pl.col(ic_col).is_not_null() & pl.col(ic_col).is_finite())
+
 
 # The predictions parquet schema is not uniform across the nine case studies, so the
 # validity rule has to resolve its own column names before it can count anything.
@@ -55,6 +77,9 @@ def excluded_family_sql(
     return f" AND {family_column} NOT IN ({placeholders})", excluded
 
 
+_DEGENERATE_SUBQUERY = "SELECT prediction_hash FROM fold_metrics WHERE ic IS NULL"
+
+
 def degenerate_prediction_sql(prediction_hash_column: str = "p.prediction_hash") -> str:
     """SQL clause excluding prediction sets with any constant-prediction fold.
 
@@ -70,16 +95,202 @@ def degenerate_prediction_sql(prediction_hash_column: str = "p.prediction_hash")
     WHERE clause; takes no bound parameters. Pass the column expression naming
     ``prediction_hash`` in the surrounding query (default ``p.prediction_hash``).
     """
-    return (
-        f" AND {prediction_hash_column} NOT IN "
-        "(SELECT prediction_hash FROM fold_metrics WHERE ic IS NULL)"
+    return f" AND {prediction_hash_column} NOT IN ({_DEGENERATE_SUBQUERY})"
+
+
+def degenerate_prediction_hashes(case_dir: Path) -> set[str]:
+    """The prediction sets ``degenerate_prediction_sql`` excludes, as a set.
+
+    Same rule and same source, for a caller that has to reason about the exclusion rather than
+    apply it. A population is declared before anything is fitted and degeneracy is only visible
+    afterwards, so a cross-check between a declared population and a leaderboard has to allow
+    for the rows the leaderboard drops - otherwise it reports a correct exclusion as a missing
+    member. Returns an empty set when the registry or the table is absent.
+    """
+    import sqlite3
+
+    db_path = Path(case_dir) / "run_log" / "registry.db"
+    if not db_path.is_file():
+        return set()
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
+        if not db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='fold_metrics'"
+        ).fetchone():
+            return set()
+        return {row[0] for row in db.execute(f"SELECT DISTINCT {_DEGENERATE_SUBQUERY[7:]}")}
+
+
+def incompletely_registered_predictions(case_dir: Path, hashes: Iterable[str]) -> dict[str, str]:
+    """Which of ``hashes`` are registered but not finished, and what is short in each.
+
+    A headline row in ``prediction_metrics`` is not evidence that a prediction set arrived.
+    Coverage, the headline metrics and the per-fold metrics are committed as separate writes,
+    so a run interrupted between them leaves a hash that every metrics query returns and that
+    `PredictionResult.complete` rejects. A leaderboard reading the headline alone then scores a
+    member over the folds it managed, and a short window is an easier window.
+
+    Checks coverage reporting ``complete``, one ``fold_metrics`` row per expected fold, and the
+    predictions parquet on disk. A member with no coverage row at all is not reported here -
+    see :func:`predictions_without_coverage`, which separates a gap in the evidence from a run
+    that stopped part way. The file is checked for existence and not read:
+    `PredictionResult.complete` re-digests it, which is minutes of I/O for a caller running this
+    over a thousand members on every execution, and the failure that catches is corruption after
+    registration rather than the interrupted registration at issue. A member whose artifact was
+    deleted or never written is a different matter - the registry still lists it, the leaderboard
+    still ranks it, and `load_predictions` then returns nothing for it without saying so.
+
+    Returns ``{hash: reason}`` for the members that fall short, empty when they all arrived or
+    when the registry has no coverage table to check them against.
+    """
+    run_log = Path(case_dir) / "run_log"
+    db_path = run_log / "registry.db"
+    predictions_dir = run_log / "predictions"
+    wanted = sorted(set(hashes))
+    if not wanted or not db_path.is_file():
+        return {}
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
+        tables = {
+            row[0]
+            for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        if not {"prediction_coverage", "fold_metrics"} <= tables:
+            return {}
+        coverage = {
+            row[0]: (row[1], row[2])
+            for row in db.execute(
+                "SELECT prediction_hash, status, n_folds_expected FROM prediction_coverage"
+            )
+        }
+        folds = dict(
+            db.execute("SELECT prediction_hash, COUNT(*) FROM fold_metrics GROUP BY 1").fetchall()
+        )
+    short: dict[str, str] = {}
+    for member in wanted:
+        if member not in coverage:
+            # Not reported. A member with no coverage row at all is not evidence of an
+            # interrupted run: coverage arrived as a later migration, so a registry written
+            # before it, or a producer that wrote metrics without it, leaves the row absent
+            # while the prediction set is whole. Measured on etfs, where all 40 such members
+            # had their `prediction_sets` row and their parquet. `predictions_without_coverage`
+            # reports them separately, as a gap in the evidence rather than a partial run.
+            continue
+        status, expected = coverage[member]
+        actual = folds.get(member, 0)
+        artifact = predictions_dir / member / "predictions.parquet"
+        if status != "complete":
+            short[member] = f"coverage {status}"
+        elif expected is not None and actual != expected:
+            short[member] = f"{actual} of {expected} folds scored"
+        elif not artifact.is_file():
+            short[member] = "no predictions.parquet"
+    return short
+
+
+def predictions_without_coverage(case_dir: Path, hashes: Iterable[str]) -> set[str]:
+    """Which of ``hashes`` the registry holds no ``prediction_coverage`` row for.
+
+    Separated from :func:`incompletely_registered_predictions` because the two look alike and
+    call for opposite responses. A coverage row that says something other than ``complete``, or
+    a fold count short of what that row declares expected, is a run that stopped part way and
+    must not be ranked. An absent row is a gap in the evidence: ``prediction_coverage`` arrived
+    as a later migration, so a registry written before it - or a producer that wrote metrics
+    without it - leaves the row missing while the prediction set itself is whole. Measured on
+    etfs, where all 40 such members had both their ``prediction_sets`` row and their parquet.
+
+    Report these; do not refuse on them. Returns an empty set where the registry or the table is
+    absent, since neither says anything about a particular member.
+    """
+    db_path = Path(case_dir) / "run_log" / "registry.db"
+    wanted = set(hashes)
+    if not wanted or not db_path.is_file():
+        return set()
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
+        if not db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='prediction_coverage'"
+        ).fetchone():
+            return set()
+        covered = {row[0] for row in db.execute("SELECT prediction_hash FROM prediction_coverage")}
+    return wanted - covered
+
+
+def prediction_members_in_force(study) -> tuple[frozenset[str] | None, list[str]]:
+    """Every prediction set the registry's populations currently publish, and the notes to print.
+
+    A downstream sweep does not name the families it draws from - it ranks whatever is
+    admissible - so the question here is not `declared_population_members`' "did these declared
+    names resolve" but "which members are in force at all". The answer takes two steps and
+    neither is enough alone.
+
+    A population is immutable and every generation stays readable, so a candidate pool built
+    straight from the registry counts a refitted configuration twice: nothing in the read path
+    filters on supersession (`case_studies/utils/registry/queries.py` contains no occurrence of
+    ``supersed``), and the published leaders are then fewer distinct strategies than they look.
+    Resolving each published name through `OfficialPopulation.one` takes the generation nothing
+    supersedes - it refuses rather than guesses if a chain has forked. Subtracting the retired
+    members is still needed after that, because a narrowed or preview run freezes its own
+    snapshot of whatever the catalog held that day and stays in force under its own name
+    forever, so the union alone hands a retired generation back through the frozen name that
+    still lists it.
+
+    Refuses if any member is registered but unfinished, by the rule
+    :func:`incompletely_registered_predictions` applies - a pool that is selected from cannot
+    carry a member scored over fewer folds than it was asked for.
+
+    Returns ``None`` and a note where the registry publishes no populations - a fixture or a
+    reader's clean clone, where there is no declaration to filter against. ``None`` rather than
+    an empty set because these callers pass the result straight to a ``prediction_hashes``
+    parameter that already reads ``None`` as unscoped, and because an empty set there would turn
+    "nothing to filter by" into "nothing is admissible" - a candidate pool of zero reported as
+    an ordinary result.
+    """
+    from case_studies.research import (
+        OfficialPopulation,
+        published_population_names_at,
+        superseded_members_at,
     )
+
+    names = sorted(published_population_names_at(study.root))
+    if not names:
+        return None, [
+            f"{study.root} publishes no official populations, so no supersession filter is "
+            "applied: the candidate pool rests on catalog admissibility alone."
+        ]
+    published: set[str] = set()
+    for name in names:
+        published.update(OfficialPopulation.one(study, name=name).members)
+    members = frozenset(published - superseded_members_at(study.root))
+
+    # A population is written down before its members are fitted, so being in force is not
+    # evidence of having finished. Every caller here ranks what comes back and selects from the
+    # ranking, and an unfinished member is scored over the folds it managed - a shorter window
+    # is an easier window, so the error runs toward the top of the ranking. Refusing is the only
+    # safe answer: there is no way to rank around a member without saying the pool changed.
+    short = incompletely_registered_predictions(study.root, members)
+    if short:
+        named = ", ".join(f"{member}: {why}" for member, why in sorted(short.items())[:5])
+        raise RuntimeError(
+            f"{len(short)} member(s) of the populations in force are registered but "
+            f"unfinished: {named}. Selecting from this pool would compare a partial run "
+            "against complete ones."
+        )
+    uncovered = predictions_without_coverage(study.root, members)
+    notes = (
+        [
+            f"{len(uncovered):,} of {len(members):,} members carry no prediction_coverage row, "
+            "so their completeness is unevidenced rather than established. They are ranked; "
+            "the gap is in the registry, not in the run."
+        ]
+        if uncovered
+        else []
+    )
+    return members, notes
 
 
 def full_coverage_prediction_sql(
     prediction_set_alias: str = "p",
     training_run_alias: str = "t",
     prediction_metric_alias: str = "pm",
+    population_subquery: str | None = None,
 ) -> str:
     """SQL clause retaining the maximum-coverage rows for each family and label.
 
@@ -87,12 +298,18 @@ def full_coverage_prediction_sql(
     its peers even when no fold-level IC is NULL. Comparing or selecting those
     rows against full-coverage checkpoints changes the evaluation sample. The
     eligible surface therefore keeps rows whose ``ic_n_days`` equals the maximum
-    for the same ``(split, family, label)``.
+    for the same ``(split, family, label)``. When ``population_subquery`` is
+    supplied, that maximum is computed within the explicitly locked prediction
+    population rather than across retired identities.
 
     The surrounding query must join ``prediction_sets``, ``training_runs``, and
     ``prediction_metrics`` under the supplied aliases. The returned fragment
-    begins with ``" AND "`` and takes no bound parameters.
+    begins with ``" AND "``. Any bound parameters required by
+    ``population_subquery`` belong to the surrounding query.
     """
+    population_clause = ""
+    if population_subquery is not None:
+        population_clause = f" AND p_full.prediction_hash IN ({population_subquery})"
     return f"""
         AND {prediction_metric_alias}.ic_n_days IS NOT NULL
         AND {prediction_metric_alias}.ic_n_days = (
@@ -105,6 +322,7 @@ def full_coverage_prediction_sql(
             WHERE p_full.split = {prediction_set_alias}.split
               AND t_full.family = {training_run_alias}.family
               AND t_full.label = {training_run_alias}.label
+              {population_clause}
         )
     """
 
@@ -224,3 +442,171 @@ def filter_active_model_rows(
         return df
 
     return df.filter(~pl.col(family_col).is_in(sorted(excluded)))
+
+
+def declared_population_members(
+    study,
+    case_dir: Path,
+    names: dict[str, str],
+    *,
+    produced: dict[str, int],
+) -> tuple[dict[str, set[str]], list[str]]:
+    """Resolve each family's declared population, or report that none is declared.
+
+    Three states reach this, and `OfficialPopulation.one` reports two of them in the same
+    words, which is why the decision lives here rather than in an exception handler.
+
+    A registry that has published no population is not broken - a fixture, or a reader's clean
+    clone. It is answered with a note, and the comparison downstream rests on catalog
+    admissibility, which is a weaker claim than a declared population but a statable one. The
+    resolver is not asked at all: on a registry whose schema predates the mechanism it raises
+    ``sqlite3.OperationalError: no such table``, so tolerating that state means not entering it.
+
+    A registry that has published populations and cannot resolve this name has a broken
+    lineage. That refuses when the family has registered rows, because comparing them would
+    report a family no declaration covers; where the family produced nothing it is only a note,
+    since there is nothing yet to be undeclared.
+
+    A notebook naming its *real* populations will not find them in a CI fixture. The seeded
+    registries publish under a ``{cs}-fixture-{family}-validation-v1`` prefix, which they have
+    to: ``OfficialPopulation.create`` matches on the member list, so a modelling notebook
+    publishing its own newly-fitted hashes under a name the fixture had frozen is refused. Point
+    the notebook's population-name parameters at the fixture names in ``tests/overrides.yaml``
+    rather than working around it here - the name a notebook declares is the one it means in
+    production, and the fixture is the thing that differs.
+
+    Returns the resolved members per family and the notes to print.
+    """
+    from case_studies.research import OfficialPopulation, published_population_names_at
+
+    published = published_population_names_at(case_dir)
+    if not published:
+        return {}, [
+            f"{case_dir} publishes no official populations, so nothing is checked against a "
+            "declaration: every comparison rests on catalog admissibility alone."
+        ]
+
+    members: dict[str, set[str]] = {}
+    notes: list[str] = []
+    for family, name in names.items():
+        try:
+            members[family] = set(OfficialPopulation.one(study, name=name).members)
+        except (ValueError, FileNotFoundError) as error:
+            if produced.get(family):
+                msg = (
+                    f"{family} has {produced[family]} registered prediction sets but its "
+                    f"declared population {name} does not resolve ({error}). This registry "
+                    f"publishes {len(published)} population name(s), so the declaration is "
+                    "missing rather than unused. Comparing them would report a family no "
+                    "declaration covers. Republish the population, or name the one in force."
+                )
+                raise RuntimeError(msg) from error
+            notes.append(f"no current official population for {family} ({name}): {error}")
+    return members, notes
+
+
+_STRATEGY_ANALYSIS_TABLES = ("backtest_runs", "cohort_metrics", "backtest_paired_metrics")
+
+
+def strategy_input_counts(case_dir: Path) -> dict[str, int]:
+    """Row counts for the three tables a strategy-analysis notebook reads.
+
+    ``backtest_runs`` is what the backtesting stages register. ``cohort_metrics`` and
+    ``backtest_paired_metrics`` are *derived* from those runs, and until recently only
+    ``cme_futures/17`` derived them inside its own case study - everywhere else they existed
+    solely because ``20_strategy_synthesis/01_aggregate_synthesis.py`` had been run, which makes
+    a case study depend upward on the chapter that aggregates it.
+
+    The distinction the caller needs is between "no runs to analyse" and "runs exist but nothing
+    has derived from them". The first is a refusal: every figure and gate downstream is computed
+    from backtest runs, so with none registered the notebook does not produce a weaker answer,
+    it produces an empty one that reads like a finished analysis. The second is work to do, and
+    both producers are already case-study-scoped functions.
+
+    A missing registry or a missing table counts as zero, which is the ordinary state of a clean
+    clone, and is reported rather than raised so the caller decides what it means.
+    """
+    import sqlite3
+
+    db_path = Path(case_dir) / "run_log" / "registry.db"
+    if not db_path.is_file():
+        return dict.fromkeys(_STRATEGY_ANALYSIS_TABLES, 0)
+    counts: dict[str, int] = {}
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
+        present = {
+            row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        for table in _STRATEGY_ANALYSIS_TABLES:
+            counts[table] = (
+                db.execute(f"SELECT count(*) FROM {table}").fetchone()[0] if table in present else 0
+            )
+    return counts
+
+
+_DERIVED_TABLE_REFERENCES: dict[str, tuple[str, ...]] = {
+    "cohort_metrics": ("leader_hash",),
+    "backtest_paired_metrics": ("challenger_hash", "benchmark_hash"),
+}
+
+
+def derived_tables_off_canonical_universe(case_dir: Path, universe_filter: str | None) -> set[str]:
+    """Derived tables holding rows that were selected under a different universe.
+
+    A row count answers "has this been populated", which is not the question a rerun needs.
+    ``cohort_metrics`` and ``backtest_paired_metrics`` are written from a *selection*, and a
+    table populated by an earlier run that made a different selection is fully populated and
+    wrong. Nothing in either table records which selection produced it, so it is recovered
+    from what the rows point at: every referenced ``backtest_runs`` row carries its universe in
+    ``spec_json``, and a canonical table cannot reference a run outside the canonical universe.
+
+    Only hashes that name a ``backtest_runs`` row are judged. ``backtest_paired_metrics``
+    carries no FK on ``benchmark_hash`` and its equal-weight side is a synthetic
+    ``side_ew:<cs>:<label>`` identifier that is deliberately not a run; an identifier that
+    names no run cannot be evidence of a run outside the universe. Treating an absent hash as
+    ``"full"`` instead would report the paired table stale on every run forever.
+
+    ``cohort_metrics`` records only ``leader_hash``, so a cohort whose leader is canonical but
+    whose membership was drawn from a wider universe reads as clean here. Its trial counts,
+    DSR and PBO are computed over that wider membership, and ``k_variants`` counts the members
+    that had usable return series rather than the members selected, so it cannot stand in for
+    the missing selection identity. Closing that gap needs the selection persisted on the row.
+
+    Returns the table names to rebuild. An unpinned case study passes ``None`` and gets the
+    empty set, because there is no canonical universe for a row to be outside of.
+    """
+    if universe_filter is None:
+        return set()
+
+    from case_studies.utils.backtest_explorer import _parse_spec
+    from case_studies.utils.backtest_presets import strategy_view
+
+    db_path = case_dir / "run_log" / "registry.db"
+    if not db_path.is_file():
+        return set()
+
+    stale: set[str] = set()
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
+        present = {
+            row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        if "backtest_runs" not in present:
+            return set()
+        universes = {
+            row[0]: (
+                strategy_view(_parse_spec(row[1]) or {}).get("signal", {}).get("universe_filter")
+                or "full"
+            )
+            for row in db.execute("SELECT backtest_hash, spec_json FROM backtest_runs")
+        }
+        for table, columns in _DERIVED_TABLE_REFERENCES.items():
+            if table not in present:
+                continue
+            for column in columns:
+                referenced = [
+                    row[0]
+                    for row in db.execute(f"SELECT {column} FROM {table}")  # noqa: S608
+                    if row[0] is not None
+                ]
+                if any(universes[h] != universe_filter for h in referenced if h in universes):
+                    stale.add(table)
+    return stale

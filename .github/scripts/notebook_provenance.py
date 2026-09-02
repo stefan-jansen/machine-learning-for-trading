@@ -52,9 +52,27 @@ Gate (``check``): for every tracked ``.ipynb`` that HAS a stamp,
 
 * ``source_py_blob`` must equal ``git hash-object`` of the current paired ``.py``
   (else the ``.py`` changed since the notebook was executed — STALE),
-* ``production`` must be True (else a TEST-mode run was committed), and
+* ``production`` must be True (else a TEST-mode run was committed),
+* some code cell must show it ran - an output or an execution count (else the stamp
+  is over a render nothing produced — HOLLOW), and
 * the stamp must not contradict a committed ``injected-parameters`` cell (else the
   notebook was re-executed with overrides after it was stamped).
+
+Two states are legal at commit time, and the second is what keeps the workflow
+linear:
+
+1. **Stamped and in sync** — the notebook is its current ``.py``, executed in
+   production. The checks above apply.
+2. **Cleared** — no stamp and no outputs. It makes no claim about a run, so there
+   is nothing to be stale. ``clear`` puts a notebook in this state. Edit the
+   ``.py``, ``jupytext --sync``, ``clear``, commit; execute later and the stamp and
+   the checks come back. Without this the gate has no legal path for a correction
+   to an already-executed notebook, because clearing the stale stamp read as
+   DE-STAMPED and keeping it read as STALE.
+
+The state the gate must still reject is the one that looks like (2) but claims (1):
+a stamp over a notebook showing no trace of execution — a render rebuilt from the
+``.py`` and re-stamped without a run behind it. That is HOLLOW and it fails.
 
 Notebooks WITHOUT a stamp are reported as "unverified" but do not fail unless
 ``--strict`` is passed. This is deliberate: adoption is gradual — stamp notebooks
@@ -66,6 +84,7 @@ Usage::
     uv run python .github/scripts/notebook_provenance.py stamp <nb.ipynb> --executor ml4t-gpu --production
     uv run python .github/scripts/notebook_provenance.py stamp <nb.ipynb> --executor ml4t-gpu --parameters '{"MAX_SYMBOLS": 5}'
     uv run python .github/scripts/notebook_provenance.py stamp <nb.ipynb> --executor ml4t-gpu --production --notes "..."
+    uv run python .github/scripts/notebook_provenance.py clear <nb.ipynb>  # commit it unexecuted
     uv run python .github/scripts/notebook_provenance.py check          # gate (stamped-only)
     uv run python .github/scripts/notebook_provenance.py check --strict  # also fail on unverified
 """
@@ -126,6 +145,11 @@ PRODUCTION_SAFE_PARAMETERS: dict[str, object] = {
     # adds a declaration rather than removing work, so it cannot reduce the run, and
     # population.py raises unless it equals the current population hash exactly.
     "SUPERSEDES_POPULATION": VALIDATED_BY_CONSUMER,
+    # The causal identity this run retires. Same shape as SUPERSEDES_POPULATION and
+    # for the same reason: it adds a declaration rather than removing work, so it
+    # cannot reduce the run, and register_causal_run refuses a hash that is not a
+    # current canonical identity for the same label.
+    "SUPERSEDES_CAUSAL": VALIDATED_BY_CONSUMER,
 }
 
 
@@ -432,7 +456,9 @@ def _semicolon_flags(code: str, tree: ast.Module) -> tuple[bool, ...]:
 _PAPERMILL_MARKER = re.compile(r"\s+papermill=\{.*\}(?=(?:\s+[A-Za-z_][A-Za-z0-9_-]*=)|\r?\n?$)")
 
 
-def _comparable(src: str, *, strip_papermill: bool = False) -> list[tuple] | None:
+def _comparable(
+    src: str, *, strip_papermill: bool = False, blank_alts: bool = True
+) -> list[tuple] | None:
     """Cells of *src* reduced to what an alt-text edit is allowed to leave alone.
 
     Per cell: the marker line, the kind, and for a code cell an alt-blanked AST dump
@@ -447,6 +473,12 @@ def _comparable(src: str, *, strip_papermill: bool = False) -> list[tuple] | Non
 
     A markdown cell's body is dropped: it is a comment in the ``.py`` and cannot affect
     outputs, so its text may change freely while its marker and position still count.
+
+    ``blank_alts=False`` keeps the alt literals in the dump, which is what a caller wants
+    when it is deciding whether a drift is *prose*. Blanking them is right for
+    ``alt_text_only_drift``, which pairs it with a check that the outputs already carry the
+    new alt; a caller without that check would read a corrected alt as prose and then
+    preserve output metadata still holding the old text.
     """
     out: list[tuple] = []
     for marker, kind, body in _percent_cells(src):
@@ -463,14 +495,18 @@ def _comparable(src: str, *, strip_papermill: bool = False) -> list[tuple] | Non
             else:
                 out.append((marker, kind, body))
             continue
-        blanked = _blank_alts(body)
-        if blanked is None:
-            return None
+        if blank_alts:
+            blanked = _blank_alts(body)
+            if blanked is None:
+                return None
+            source = blanked[0]
+        else:
+            source = body
         try:
-            tree = ast.parse(blanked[0])
+            tree = ast.parse(source)
         except SyntaxError:
             return None
-        out.append((marker, kind, ast.dump(tree), _semicolon_flags(blanked[0], tree)))
+        out.append((marker, kind, ast.dump(tree), _semicolon_flags(source, tree)))
     return out
 
 
@@ -595,6 +631,17 @@ def stamp_notebook(
     conflict = contradicts_injected_cell(nb, parameters)
     if conflict:
         raise SystemExit(f"refusing to stamp {nb_path.relative_to(REPO_ROOT)}: {conflict}")
+    if not was_executed(nb):
+        # The gate catches this at commit time as HOLLOW; catching it here names the
+        # step that went wrong while the run is still on screen. The way it happens is
+        # a `jupytext --sync` that rebuilds the .ipynb from a newer .py after the run
+        # and before the stamp, which discards the outputs; nb-run.sh orders the sync
+        # after the stamp for exactly this reason.
+        raise SystemExit(
+            f"refusing to stamp {nb_path.relative_to(REPO_ROOT)}: no code cell carries an "
+            "output or an execution count, so nothing in it was executed. A stamp on this "
+            "would claim a run that left no trace. Execute it, or leave it cleared."
+        )
     stamp = {
         "source_py_blob": git_blob(py),
         "executed_at": datetime.now(UTC).isoformat(),
@@ -654,6 +701,52 @@ def stamp_reference(base_branch: str = "main") -> str:
     return "HEAD"
 
 
+def was_executed(nb: dict) -> bool:
+    """True if any non-empty code cell in *nb* shows evidence of having been run.
+
+    Evidence is an output OR a non-null ``execution_count``. Outputs alone are not
+    enough to ask about: a cell that only assigns, writes a file or logs somewhere
+    else runs successfully and displays nothing, and a notebook made entirely of
+    those would otherwise read as never executed. The counter is written by the
+    kernel on every execution and cleared only deliberately, so the two together
+    separate "ran and said little" from "did not run".
+
+    The distinction matters twice below: a CLEARED notebook shows no evidence and so
+    claims nothing, and a STAMPED one claims a production run that left no evidence
+    at all, which no real run does.
+    """
+    saw_code = False
+    for cell in nb.get("cells", []):
+        if cell.get("cell_type") != "code":
+            continue
+        if not "".join(cell.get("source") or []).strip():
+            continue
+        saw_code = True
+        if cell.get("outputs") or cell.get("execution_count") is not None:
+            return True
+    return not saw_code
+
+
+def is_cleared(nb_path: Path) -> bool:
+    """True if *nb_path* carries neither a provenance stamp nor any output.
+
+    This is the state an edited-but-not-yet-executed notebook is committed in, and
+    it is the one state that makes the workflow linear: edit the ``.py``, sync,
+    clear the ``.ipynb``, commit. The notebook then asserts nothing about a run, so
+    there is nothing for the gate to catch it lying about. Execution restores the
+    outputs and the stamp, and the gate resumes checking them.
+
+    It is precisely distinguishable from the render the gate exists to reject. A
+    hollow render carries ``production: True`` over an empty output set - it claims
+    a run that did not happen. A cleared notebook carries no stamp at all.
+    """
+    try:
+        nb = json.loads(nb_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    return not nb.get("metadata", {}).get(STAMP_KEY) and not was_executed(nb)
+
+
 def destamped(ref: str | None = None, only: set[str] | None = None) -> list[str]:
     """Notebooks stamped at *ref* and unstamped now.
 
@@ -676,16 +769,20 @@ def destamped(ref: str | None = None, only: set[str] | None = None) -> list[str]
         and not json.loads((REPO_ROOT / rel).read_text(encoding="utf-8"))
         .get("metadata", {})
         .get(STAMP_KEY)
+        # Dropping the stamp AND the outputs together is the documented way to
+        # commit an edited notebook before it is re-executed; only dropping the
+        # stamp while outputs stay is the regression this looks for.
+        and not is_cleared(REPO_ROOT / rel)
     )
 
 
 def check_all(
     strict: bool = False,
     only: set[str] | None = None,
-) -> tuple[list[str], list[str], list[str], list[str], list[str]]:
-    """Return (stale, testmode, contradicted, unverified, alt_only) repo-relative rows.
+) -> tuple[list[str], list[str], list[str], list[str], list[str], list[str]]:
+    """Return (stale, testmode, contradicted, unverified, alt_only, hollow) rows.
 
-    Only the first four fail. ``alt_only`` is reported so that forgiving a drift is
+    ``stale``, ``testmode``, ``contradicted`` and ``hollow`` fail. ``alt_only`` is reported so that forgiving a drift is
     never silent: a notebook in that list has a ``.py`` that no longer matches its
     stamp, and the reason it is allowed is printed rather than assumed.
 
@@ -701,6 +798,7 @@ def check_all(
     contradicted: list[str] = []
     unverified: list[str] = []
     alt_only: list[str] = []
+    hollow: list[str] = []
     for nb_path in iter_notebooks():
         rel = str(nb_path.relative_to(REPO_ROOT))
         py = paired_py(nb_path)
@@ -727,7 +825,190 @@ def check_all(
         conflict = contradicts_injected_cell(nb, stamp.get("parameters") or {})
         if conflict:
             contradicted.append(f"{rel} ({conflict})")
-    return stale, testmode, contradicted, unverified, alt_only
+        if not was_executed(nb):
+            hollow.append(rel)
+    return stale, testmode, contradicted, unverified, alt_only, hollow
+
+
+def code_cells_only(comparable: list[tuple] | None) -> list[tuple] | None:
+    """*comparable* with the pure-markdown cells dropped.
+
+    A markdown cell is a comment block in the ``.py``. Adding, deleting, merging or
+    retagging one cannot change what any code cell computes: each code cell carries its
+    own ``# %%`` marker, so removing a markdown cell between two of them does not join
+    them, and markdown produces no outputs of its own to be invalidated.
+
+    `_comparable` keeps a non-code cell's body when that body is not all comments,
+    because then the marker does not describe the content and dropping the body would
+    hide executable text. Those entries are three-tuples and are kept here for the same
+    reason - only the two-tuple form, which is provably nothing but prose, is dropped.
+    """
+    if comparable is None:
+        return None
+    return [cell for cell in comparable if cell[1] == "code" or len(cell) != 2]
+
+
+def drift_is_prose_only(stamped_blob: str, py: Path) -> bool:
+    """Whether a stale-reading drift changes no code cell, so ``sync-prose`` resolves it.
+
+    The gate compares whole-file blobs, so any edit to the ``.py`` reads as stale. That is
+    the right default - it is one hash and it cannot be argued with - but it makes the
+    report say "re-run" to an author who moved a paragraph, and a re-run of
+    ``us_equities_panel`` is 52 hours to relocate a heading. This does not forgive the
+    drift: the ``.ipynb`` still carries the old prose and still has to be brought forward.
+    It only decides which of the two ways of doing that the report should name.
+
+    Same comparison ``sync_prose`` gates itself on, so a notebook this calls prose-only is
+    exactly one ``sync-prose`` away from passing, and one it calls executable really does
+    need the run.
+    """
+    old = subprocess.run(
+        ["git", "cat-file", "blob", stamped_blob],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if old.returncode != 0:
+        return False  # stamped blob is gone; cannot compare, so do not soften the report
+    before = code_cells_only(_comparable(old.stdout, blank_alts=False))
+    after = code_cells_only(_comparable(py.read_text(encoding="utf-8"), blank_alts=False))
+    return before is not None and after is not None and before == after
+
+
+def _output_counts(nb: dict) -> list[int]:
+    """Outputs per code cell, in order. The unit a prose sync must leave untouched."""
+    return [len(c.get("outputs", [])) for c in nb.get("cells", []) if c.get("cell_type") == "code"]
+
+
+def sync_prose(nb_path: Path) -> str:
+    """Fold a prose-only ``.py`` edit into an executed notebook, without re-running it.
+
+    A stamp records the ``.py`` blob that was executed, so any edit to the ``.py`` reads
+    as stale. For a prose edit that is the wrong answer, and it is the reason correcting a
+    notebook to a written standard has been treated as unaffordable: consolidating four
+    paragraphs into one is a markdown change that cannot move a single number, and pricing
+    it at a re-run of `us_equities_panel` prices it at 52 hours.
+
+    Editing the *text* of a markdown cell in place was already forgiven, by
+    `alt_text_only_drift`. What was not is changing the *shape* of the prose - deleting a
+    cell, merging two, adding one - and that is exactly what bringing a notebook under the
+    three-tagged-cells rule requires. So the gate was stricter than the physics.
+
+    This is not a way past the gate; it makes the gate's claim true again. The claim is
+    "this .ipynb was produced by this .py", and after a prose edit that is still true of
+    every cell that computes anything. So:
+
+    * every code cell must match the stamped source exactly - same marker, same tags, same
+      AST, same display suppression, same order. Anything else and this refuses, and the
+      notebook needs the re-run it always needed.
+    * ``jupytext --update`` writes the new prose into the existing ``.ipynb`` and keeps the
+      outputs, rather than rebuilding the file and losing them.
+    * the stamp keeps its original ``executed_at`` and ``executor``, because that is when
+      the notebook really was executed and by what. Only the blob moves, and a note records
+      that the move was prose.
+    """
+    py = paired_py(nb_path)
+    rel = nb_path.relative_to(REPO_ROOT)
+    if py is None:
+        raise SystemExit(f"no paired .py for {rel}")
+    nb = json.loads(nb_path.read_text(encoding="utf-8"))
+    stamp = nb.get("metadata", {}).get(STAMP_KEY)
+    if not stamp:
+        raise SystemExit(
+            f"{rel} carries no provenance stamp, so there is no executed state to preserve. Run it."
+        )
+    stamped_blob = stamp["source_py_blob"]
+    old = subprocess.run(
+        ["git", "cat-file", "blob", stamped_blob],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if old.returncode != 0:
+        raise SystemExit(
+            f"{rel} is stamped against blob {stamped_blob[:12]}, which is not in this repo, "
+            "so the code cells cannot be compared. Re-run it."
+        )
+    # Alt literals are NOT blanked here. This command keeps the outputs, so an alt the
+    # output metadata does not carry would be stamped as current while rendering the old
+    # text. A genuine alt correction is adjudicated by `alt_text_only_drift`, which checks
+    # the outputs already carry it, and never reaches this command.
+    before = code_cells_only(_comparable(old.stdout, blank_alts=False))
+    after = code_cells_only(_comparable(py.read_text(encoding="utf-8"), blank_alts=False))
+    if before is None or after is None:
+        raise SystemExit(f"{rel}: could not parse one of the two sources - refusing")
+    if before == after:
+        pass
+    else:
+        # Name the first difference. "something changed" sends an author back to a full
+        # diff of a two-thousand-line file to find out whether it was theirs.
+        where = next(
+            (i for i, (a, b) in enumerate(zip(before, after)) if a != b),
+            min(len(before), len(after)),
+        )
+        detail = f"code cell {where + 1} differs"
+        if len(before) != len(after):
+            detail = f"{len(before)} code cells in the executed source, {len(after)} now"
+        raise SystemExit(
+            f"{rel}: {detail}, so this is not a prose-only edit and the outputs on disk are "
+            "not the ones this source produces. Re-run the notebook."
+        )
+
+    before_counts = _output_counts(nb)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "jupytext", "--to", "ipynb", "--update", str(py)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        if "No module named jupytext" in result.stderr:
+            raise SystemExit(
+                f"{rel}: jupytext is not installed in {sys.executable}. Run this command through "
+                "the repository environment with `uv run python`."
+            )
+        raise SystemExit(f"{rel}: jupytext --update failed:\n{result.stderr}")
+
+    # Per cell, not "the notebook still has some outputs". `was_executed` is True as soon as
+    # ONE code cell carries an output, so it cannot see an update that kept the first cell's
+    # and dropped the rest - which is the failure mode that matters, because the notebook
+    # would then be re-stamped as a complete execution while most of it renders blank.
+    after_counts = _output_counts(json.loads(nb_path.read_text(encoding="utf-8")))
+    if after_counts != before_counts:
+        lost = [i + 1 for i, (b, a) in enumerate(zip(before_counts, after_counts)) if a < b]
+        raise SystemExit(
+            f"{rel}: the update changed the outputs, which is the one thing it exists to "
+            + (
+                f"avoid - code cell(s) {lost} lost theirs. "
+                if lost
+                else f"avoid - {len(before_counts)} code cells before, {len(after_counts)} now. "
+            )
+            + "The file has been left as jupytext wrote it; restore it with `git checkout`."
+        )
+    nb = json.loads(nb_path.read_text(encoding="utf-8"))
+    stamp = dict(stamp)
+    stamp["source_py_blob"] = git_blob(py)
+    stamp["notes"] = (
+        f"prose synced from the .py at {datetime.now(UTC).isoformat()} without re-executing; "
+        f"every code cell is identical to blob {stamped_blob[:12]}"
+    )
+    nb.setdefault("metadata", {})[STAMP_KEY] = stamp
+    nb_path.write_text(json.dumps(nb, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    return stamp["source_py_blob"]
+
+
+def _cmd_sync_prose(args: argparse.Namespace) -> int:
+    for name in args.notebooks:
+        path = Path(name).resolve()
+        if path.suffix == ".py":
+            path = path.with_suffix(".ipynb")
+        blob = sync_prose(path)
+        print(f"prose synced {path.relative_to(REPO_ROOT)}: source_py_blob={blob[:12]}")
+    return 0
 
 
 def _cmd_stamp(args: argparse.Namespace) -> int:
@@ -750,21 +1031,91 @@ def _cmd_stamp(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_clear(args: argparse.Namespace) -> int:
+    """Strip outputs, execution counts and the provenance stamp from a notebook.
+
+    The result is committable: it claims no run, so nothing about it can be stale.
+    Use it after editing a ``.py`` and before the notebook is re-executed, so the
+    correction lands on ``main`` in one commit instead of waiting on a run.
+    """
+    cleared = 0
+    for name in args.notebooks:
+        nb_path = Path(name).resolve()
+        nb = json.loads(nb_path.read_text(encoding="utf-8"))
+        nb.get("metadata", {}).pop(STAMP_KEY, None)
+        nb.get("metadata", {}).pop("papermill", None)
+        kept = []
+        for cell in nb.get("cells", []):
+            if cell.get("cell_type") == "code":
+                cell["outputs"] = []
+                cell["execution_count"] = None
+                cell.get("metadata", {}).pop("papermill", None)
+                cell.get("metadata", {}).pop("execution", None)
+                if "injected-parameters" in (cell.get("metadata", {}).get("tags") or []):
+                    continue
+            kept.append(cell)
+        nb["cells"] = kept
+        nb_path.write_text(json.dumps(nb, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+        try:
+            shown = nb_path.relative_to(REPO_ROOT)
+        except ValueError:
+            shown = nb_path
+        print(f"cleared {shown}")
+        cleared += 1
+    if not cleared:
+        print("nothing to clear")
+    return 0
+
+
 def _cmd_check(args: argparse.Namespace) -> int:
     only = {str(Path(p)) for p in args.paths} or None
-    stale, testmode, contradicted, unverified, alt_only = check_all(strict=args.strict, only=only)
+    stale, testmode, contradicted, unverified, alt_only, hollow = check_all(
+        strict=args.strict, only=only
+    )
     lost = destamped(only=only)
-    fail = bool(stale or testmode or contradicted or lost) or (args.strict and bool(unverified))
+    fail = bool(stale or testmode or contradicted or lost or hollow) or (
+        args.strict and bool(unverified)
+    )
+    if hollow:
+        print(
+            "HOLLOW (carries a provenance stamp over a notebook with no trace of a run — "
+            "a run that left nothing behind; clear the notebook or re-execute it):"
+        )
+        for r in hollow:
+            print(f"  {r}")
     if lost:
         print("DE-STAMPED (carried a provenance stamp where this branch forked, and does not now):")
         for r in lost:
             print(f"  {r}")
     if stale:
-        print(
-            "STALE (paired .py changed since the notebook was executed — re-run in the canonical env):"
-        )
+        prose, executable = [], []
         for r in stale:
-            print(f"  {r}")
+            nb_path = REPO_ROOT / r
+            py = paired_py(nb_path)
+            stamped = (
+                json.loads(nb_path.read_text(encoding="utf-8"))
+                .get("metadata", {})
+                .get(STAMP_KEY, {})
+                .get("source_py_blob")
+            )
+            if py is not None and stamped and drift_is_prose_only(stamped, py):
+                prose.append(r)
+            else:
+                executable.append(r)
+        if prose:
+            print(
+                "STALE, prose only (no code cell moved - fold it in, do NOT re-run:\n"
+                "  uv run python .github/scripts/notebook_provenance.py sync-prose <nb.py>):"
+            )
+            for r in prose:
+                print(f"  {r}")
+        if executable:
+            print(
+                "STALE (a code cell changed since the notebook was executed - re-run in the "
+                "canonical env):"
+            )
+            for r in executable:
+                print(f"  {r}")
     if testmode:
         print(
             "TEST-MODE (committed a run with papermill parameter overrides — must be production):"
@@ -833,6 +1184,26 @@ def main() -> int:
         "with none given, the whole tree is scanned",
     )
     cp.set_defaults(func=_cmd_check)
+
+    lp = sub.add_parser(
+        "clear",
+        help="strip outputs and the stamp so an edited notebook can be committed unexecuted",
+    )
+    lp.add_argument("notebooks", nargs="+")
+    lp.set_defaults(func=_cmd_clear)
+
+    yp = sub.add_parser(
+        "sync-prose",
+        help="fold a prose-only .py edit into the executed .ipynb, keeping its outputs",
+        description=(
+            "For a change that touches only markdown - rewording, merging, deleting or "
+            "adding a markdown cell. Refuses if any code cell moved, so it cannot be used "
+            "to commit an untested change; the notebook is not re-executed and the stamp "
+            "keeps the time and executor of the run that produced the outputs."
+        ),
+    )
+    yp.add_argument("notebooks", nargs="+", help=".ipynb or .py paths")
+    yp.set_defaults(func=_cmd_sync_prose)
 
     args = ap.parse_args()
     return args.func(args)

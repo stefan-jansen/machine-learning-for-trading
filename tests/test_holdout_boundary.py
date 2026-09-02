@@ -835,6 +835,27 @@ def test_the_narrative_states_the_configured_horizon() -> None:
     )
 
 
+def _point_case_study_dir_at(monkeypatch, case_dir) -> None:
+    """Route every setup.yaml read for a synthetic case study at ``case_dir``.
+
+    ``append_holdout_fold_if_needed`` derives its boundaries through
+    ``build_holdout_cv``, which reads the holdout window and the label buffers itself
+    rather than taking them from the caller - that is what makes it the one derivation.
+    Both readers resolve through ``get_case_study_dir`` and both memoize, so a test that
+    patches one of them or forgets the caches silently measures a different case study.
+    """
+    import case_studies.utils.cv_window as cv_window
+    import utils.artifact_specs as artifact_specs
+    import utils.modeling as modeling
+
+    for module in (modeling, artifact_specs, cv_window):
+        monkeypatch.setattr(module, "get_case_study_dir", lambda *_a, **_k: case_dir)
+    artifact_specs._load_setup_config_cached.cache_clear()
+    cv_window._load_setup_yaml.cache_clear()
+    cv_window._holdout_window.cache_clear()
+    monkeypatch.setattr(artifact_specs, "load_label_spec", lambda *_a, **_k: None, raising=False)
+
+
 def test_the_holdout_fold_trains_on_everything_before_the_seal(tmp_path, monkeypatch) -> None:
     """The holdout retrain is the one fit the sealed holdout ever sees, so the window it
     trains on has to be everything available before the seal.
@@ -847,17 +868,23 @@ def test_the_holdout_fold_trains_on_everything_before_the_seal(tmp_path, monkeyp
     and only on the holdout path where nothing else would show it.
     """
     import pandas as pd
+    import polars as pl
 
-    import utils.modeling as modeling
     from utils.modeling import ModelingDataset, append_holdout_fold_if_needed
 
     case_dir = tmp_path / "cs"
     (case_dir / "config").mkdir(parents=True)
     (case_dir / "config" / "setup.yaml").write_text(
-        yaml.safe_dump({"evaluation": {"holdout_start": "2018-01-02", "holdout_end": "2018-12-31"}})
+        yaml.safe_dump(
+            {
+                "evaluation": {"holdout_start": "2018-01-02", "holdout_end": "2018-12-31"},
+                "labels": {"primary": "fwd_ret_5d", "buffer": "5D"},
+            }
+        )
     )
-    monkeypatch.setattr(modeling, "get_case_study_dir", lambda _cs: case_dir)
+    _point_case_study_dir_at(monkeypatch, case_dir)
 
+    sessions = pd.bdate_range("2005-01-03", "2018-12-31")
     # Newest fold first, as generate_cv_splits emits them.
     splits = [
         {
@@ -871,6 +898,8 @@ def test_the_holdout_fold_trains_on_everything_before_the_seal(tmp_path, monkeyp
     ]
     mds = ModelingDataset.__new__(ModelingDataset)
     mds.splits = splits
+    mds.date_col = "timestamp"
+    mds.dataset = pl.DataFrame({"timestamp": list(sessions)})
     mds._input_lineage = object()
 
     append_holdout_fold_if_needed(mds, "holdout", "whatever")
@@ -881,7 +910,14 @@ def test_the_holdout_fold_trains_on_everything_before_the_seal(tmp_path, monkeyp
         "the holdout fold must start at the earliest train_start across folds, "
         f"not splits[0]'s {splits[0]['train_start']}"
     )
-    assert holdout["train_end"] == pd.Timestamp("2018-01-02")
+    # Not `holdout_start`. Training stops one declared buffer short of the boundary, counted
+    # in sessions along the panel's own grid, which is what `build_holdout_cv` derives and
+    # what this function used to get wrong in both directions at once: the last training
+    # label's outcome window reached into the holdout, and because the training mask is
+    # inclusive at both ends, the boundary session was trained on and scored on in one fold.
+    excluded = [d for d in sessions if holdout["train_end"] < d < holdout["val_start"]]
+    assert len(excluded) == 5, "a 5D buffer seals five sessions, not zero"
+    assert holdout["train_end"] < holdout["val_start"] == pd.Timestamp("2018-01-02")
     assert mds._input_lineage is None, "the memoized lineage describes the pre-append fold set"
 
 
@@ -898,16 +934,21 @@ def test_the_holdout_fold_covers_every_bar_of_the_final_configured_session(
     rows, none of which the consumer could read.
     """
     import pandas as pd
+    import polars as pl
 
-    import utils.modeling as modeling
     from utils.modeling import ModelingDataset, append_holdout_fold_if_needed
 
     case_dir = tmp_path / "cs"
     (case_dir / "config").mkdir(parents=True)
     (case_dir / "config" / "setup.yaml").write_text(
-        yaml.safe_dump({"evaluation": {"holdout_start": "2021-01-04", "holdout_end": "2021-12-31"}})
+        yaml.safe_dump(
+            {
+                "evaluation": {"holdout_start": "2021-01-04", "holdout_end": "2021-12-31"},
+                "labels": {"primary": "fwd_ret_60m", "buffer": "60min"},
+            }
+        )
     )
-    monkeypatch.setattr(modeling, "get_case_study_dir", lambda _cs: case_dir)
+    _point_case_study_dir_at(monkeypatch, case_dir)
 
     mds = ModelingDataset.__new__(ModelingDataset)
     mds.splits = [
@@ -919,6 +960,10 @@ def test_the_holdout_fold_covers_every_bar_of_the_final_configured_session(
             "val_end": pd.Timestamp("2020-12-31 15:58"),
         }
     ]
+    mds.date_col = "timestamp"
+    mds.dataset = pl.DataFrame(
+        {"timestamp": list(pd.date_range("2020-01-02 09:32", "2021-12-31 15:58", freq="30min"))}
+    )
     mds._input_lineage = object()
 
     append_holdout_fold_if_needed(mds, "holdout", "whatever")

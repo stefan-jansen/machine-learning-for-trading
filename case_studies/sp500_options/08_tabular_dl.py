@@ -14,418 +14,331 @@
 # ---
 
 # %% [markdown]
-# # Tabular Deep Learning: S&P 500 Equity Straddles
+# # S&P 500 Options: Tabular Deep Learning
 #
-# TabM applies a shared multilayer perceptron with rank-1 ensemble adapters to the
-# same option-feature snapshot used by the linear and gradient-boosted models. This
-# notebook tests whether that parameter-efficient ensemble extracts a stronger
-# cross-sectional signal for the return-to-expiry target.
+# Gradient boosting has been the default answer for tabular data for a decade, and neural networks
+# have repeatedly failed to beat it there. TabM is one of the architectures built to close that
+# gap, and it gets an ensemble's benefit without an ensemble's cost.
 #
-# **Learning Objectives**:
-# - Compare small, medium, and large TabM ensembles on the same option features
-# - Select checkpoints using two purged walk-forward validation folds
-# - Assess whether model capacity improves return-to-expiry IC
-# - Generate registered predictions for Chapter 16 strategy simulation
+# Every member shares one two-layer network, so the features are transformed once. What separates
+# the members is applied after that: each owns a vector, the same length as the shared layer's
+# output, that multiplies those activations element by element, and its own final linear layer
+# mapping the scaled activations to a prediction. The vectors are randomly initialised and trained,
+# so each member reads a differently emphasised view of the same representation and reaches a
+# different answer; the model's prediction is their mean. Disagreement between members is where an
+# ensemble's benefit comes from, and here it is bought with one vector and one output layer per
+# member rather than a whole additional network.
 #
-# **Book Reference**: Chapter 12, Section 12.3 (Deep Learning Alternatives)
+# This notebook fits the three declared TabM sizes on the short-straddle return and publishes a
+# prediction set for every training epoch the configuration checkpoints at. The epoch is part of
+# the model's identity, exactly as the boosting iteration is in
+# [`07_gbm`](07_gbm.ipynb): a network at epoch 50 and the same network at epoch 200 are two
+# candidates, not one candidate observed twice.
 #
-# **Prerequisites**: [`02_labels`](02_labels.ipynb) (`dte_calendar`),
-# [`03_financial_features`](03_financial_features.ipynb) (47 financial features), and
-# [`04_model_based_features`](04_model_based_features.ipynb) (4 GARCH/SV features)
+# **Learning objectives**
+#
+# - Fit an ensembling neural architecture on the same panel the linear and boosting notebooks used,
+#   so that the comparison is between model families and not between inputs.
+# - Publish every checkpoint as its own candidate rather than keeping the epoch that scored best,
+#   and say why keeping one would be a selection.
+# - Pin the compute device the population was fitted on, because it is part of what the training
+#   identity is computed from.
+#
+# **Book reference**: Chapter 12 (Deep Learning for Trading).
+#
+# **Prerequisites**: [`03_financial_features`](03_financial_features.ipynb) and
+# [`04_model_based_features`](04_model_based_features.ipynb) have written the feature matrices, and
+# [`05_evaluation`](05_evaluation.ipynb) has established the walk-forward folds.
+#
+# **What it writes**: one training run per configuration and one complete validation prediction set
+# per checkpoint, grouped under a named population that
+# [`11_model_analysis`](11_model_analysis.ipynb) and [`12_backtest`](12_backtest.ipynb) resolve by
+# name. Selection happens in `12_backtest`, on validation backtest Sharpe. The information
+# coefficient shown here is a diagnostic and decides nothing.
 
 # %%
-"""Tabular DL grid search - TabM via walk-forward CV."""
-
-import warnings
+"""Fit the declared S&P 500 options tabular deep-learning population."""
 
 import plotly.graph_objects as go
 import polars as pl
-import torch
-import yaml
-from ml4t.diagnostic.metrics import cross_sectional_ic
 
-import utils.style as style
-from case_studies.utils.registry import (
-    build_training_spec,
-    compute_fold_metrics_from_predictions,
-    load_prediction_sets,
-    read_predictions,
-    training_hash_from_spec,
+from case_studies.research import (
+    declared_labels,
+    load_model_configs,
+    model_requests,
+    narrows_declared_catalog,
+    open_study,
+    resolved_model_plan,
+    run_model_population,
+    supersedes_for_run,
 )
-from case_studies.utils.tabular_dl import run_tabm_cv
-from utils.modeling import load_configs, load_modeling_dataset
-from utils.paths import get_case_study_dir
-
-warnings.filterwarnings("ignore")
-COLORS = style.COLORS
+from case_studies.sp500_options.research_workflow import (
+    declared_dl_device,
+    published_dl_device,
+)
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
-CASE_STUDY_ID = "sp500_options"
-PRIMARY_LABEL = ""  # Read from setup.yaml if empty
-MAX_SYMBOLS = 0
-FORCE_RETRAIN = False  # Set True to retrain configs that already have complete hashes
-PREDICTION_SPLIT = "validation"
-N_EPOCHS = 100
-BATCH_SIZE = 4096
-MAX_FOLDS = 0
+LABELS: list[str] = []
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
+PREVIEW_REDUCTIONS: dict = {}
+CONFIG_NAMES: list[str] = []
+POPULATION_NAME = ""
+SUPERSEDES_POPULATION: str = "4b8eaa6991ec"
+DEVICE: str = ""
 
 # %%
-# Resolve config from setup.yaml
-CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
-setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
-
-if not PRIMARY_LABEL:
-    PRIMARY_LABEL = setup["labels"]["primary"]
-    print(f"Label from setup.yaml: {PRIMARY_LABEL}")
-else:
-    print(f"Label override: {PRIMARY_LABEL}")
-
-tdl_config = setup.get("modeling", {}).get("tabular_dl", {})
-MODELS = tdl_config.get("models", ["tabm"])
-DEVICE = tdl_config.get("device", "gpu")
-
-device_str = "cuda" if DEVICE == "gpu" and torch.cuda.is_available() else "cpu"
-print(f"Case study: {CASE_STUDY_ID}")
-print(f"Device: {device_str} | Models: {MODELS}")
-print(f"Epochs: {N_EPOCHS} | Batch: {BATCH_SIZE}")
+study = open_study("sp500_options", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 
 # %% [markdown]
-# ## 1. Load Artifacts
+# ## 1. Which labels, and which models
 #
-# Load the same 52-feature modeling panel used by the linear and GBM notebooks: 47
-# financial features, 4 model-based features, and `dte_calendar` from the label pipeline.
-# The comparison therefore isolates model architecture rather than additional inputs.
+# The label set comes from the study's own declaration rather than from a constant in this
+# notebook. `config/setup.yaml` says which labels the sweep fits, and each label's menu at
+# `config/training/{label}.yaml` says what to fit for it; `declared_labels` is the intersection.
+# That distinction matters here more than anywhere else in the repository: this case study keeps
+# full training menus for four fixed-horizon labels that `02_labels` writes for other notebooks to
+# read and that the sweep dropped, and each of those four declares the same three TabM sizes. A
+# notebook holding its own copy of the label list would agree with the declaration until someone
+# changed one of them, and then fit a different population without saying so.
 
 # %%
-mds = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, max_symbols=MAX_SYMBOLS)
+labels = tuple(LABELS) or declared_labels(study, "tabular_dl")
+configs = load_model_configs(
+    study,
+    "tabular_dl",
+    labels=labels,
+    config_names=CONFIG_NAMES or None,
+)
+# `model_class` is empty for every row: the TabM presets under `case_studies/config/tabm/`
+# declare their architecture in `params` and carry no `model_class` key, the way the LightGBM
+# presets do not either. Showing the column would put a blank field in front of the reader.
+configs.drop("model_class")
 
-dataset = mds.dataset
-feature_names = mds.feature_names
-label_col = mds.label_col
-date_col = mds.date_col
-entity_col = mds.entity_cols[0] if mds.entity_cols else "symbol"
-splits = mds.splits
-if MAX_FOLDS:
-    splits = splits[:MAX_FOLDS]
-n_features = len(feature_names)
+# %% [markdown]
+# The three configurations differ on one axis, capacity, in two places at once: the width of each
+# hidden layer and the number of ensemble members sharing the backbone. `tabm_s` is 64 units wide
+# with 4 members, `tabm_m` doubles both, and `tabm_l` doubles them again. Dropout, batch size,
+# training length and the checkpoint interval are identical across the three, so what separates
+# them is how much the model can represent and how many disagreeing views it averages, and not how
+# long or how hard it was trained.
 
-print(f"Dataset: {len(dataset):,} rows × {n_features} features")
-print(f"Label: {label_col} | Date: {date_col} | Entity: {entity_col}")
-for s in splits:
-    print(
-        f"  Fold {s['fold']}: train {str(s['train_start'])[:10]}\u2192{str(s['train_end'])[:10]}  "
-        f"val {str(s['val_start'])[:10]}\u2192{str(s['val_end'])[:10]}"
+# %% [markdown]
+# `LABELS` and `CONFIG_NAMES` both narrow what is fitted, and a narrowed run declares a different
+# set of members than the canonical population does. A population is immutable once written, so
+# such a run must publish under its own name. The comparison is over `(label, config_name)` pairs
+# rather than over a count, because the four out-of-sweep menus each declare exactly these three
+# configurations - so a narrowed run can match the canonical population on size while sharing none
+# of its members.
+#
+# The device is checked in the same cell. A network trained on a GPU and the same network trained
+# on a CPU accumulate their sums in different orders and reach different weights, so the device is
+# part of what the fitted model is and is recorded inside the computation's identity rather than
+# beside it. The device this population was fitted on is declared once, in `modeling.dl.device` in
+# `config/setup.yaml`, and read from there by all four deep-learning notebooks rather than retyped
+# in each. On a machine with no NVIDIA card the run therefore stops at the next cell rather than
+# quietly training something else: set `DEVICE="cpu"` and pass a `POPULATION_NAME` to fit the same
+# grid there, under its own name.
+
+# %%
+published_device = published_dl_device()
+device = declared_dl_device(DEVICE)
+print(f"training device: {device} (declared: {published_device})")
+
+if (
+    narrows_declared_catalog(study, "tabular_dl", configs) or device != published_device
+) and not POPULATION_NAME:
+    raise ValueError(
+        f"this run declares {configs.height} label-configuration pairs on device {device!r}, "
+        f"which is not the complete declared catalog on {published_device!r}, so it cannot "
+        f"publish the canonical population; pass POPULATION_NAME to give it its own"
     )
 
 # %% [markdown]
-# ### Data integrity
-
-# %%
-dataset_pd = dataset.to_pandas()
-
-label_nans = dataset_pd[label_col].isna().sum()
-feat_nan_rate = dataset_pd[feature_names].isna().mean().mean()
-n_entities = dataset_pd[entity_col].nunique()
-
-print(f"Entities: {n_entities}")
-print(f"Label NaN: {label_nans:,} / {len(dataset_pd):,} ({label_nans / len(dataset_pd):.1%})")
-print(f"Feature NaN rate: {feat_nan_rate:.1%}")
-
-# %% [markdown]
-# ## 2. Build Grid
+# ## 2. Binding the declarations to the data
 #
-# The grid scales the shared hidden representation and number of rank-1 ensemble
-# members: small (64h x 4m), medium (128h x 8m), and large (256h x 16m).
-
-# %%
-tabdl_configs = load_configs(CASE_STUDY_ID, PRIMARY_LABEL, "tabular_dl")
-
-# Apply Papermill overrides to configs (test mode: fewer epochs)
-for cfg in tabdl_configs:
-    if cfg.get("n_epochs", 100) != N_EPOCHS:
-        cfg["n_epochs"] = N_EPOCHS
-    if cfg.get("batch_size", 4096) != BATCH_SIZE:
-        cfg["batch_size"] = BATCH_SIZE
-
-print(f"Grid: {len(tabdl_configs)} configs × {N_EPOCHS} epochs × {len(splits)} folds")
-for cfg in tabdl_configs:
-    name = cfg["config_name"]
-    params = cfg.get("params", {})
-    if name.startswith("tabpfn"):
-        print(f"  {name:15s}  max_samples={params.get('max_samples', 2000)}")
-    else:
-        print(
-            f"  {name:15s}  hidden={params['hidden_dim']}  "
-            f"members={params['n_members']}  dropout={params['dropout']}"
-        )
-
-# %% [markdown]
-# ## 3. Run Tabular DL CV
+# Resolving reads the label and feature files, computes the fold boundaries, works out the exact
+# rows each fit must predict, and fixes the checkpoint schedule. Nothing is fitted yet, so the plan
+# can be inspected first. Four things to check:
 #
-# Train each configuration within each fold, fitting imputation and scaling on the
-# training window only. A reproduce run reads complete registered artifacts without
-# fitting a model or writing to the registry.
+# - **`feature_count`, `eligible_entities` and `eligible_rows` agree across every row**, so the
+#   three sizes are being measured on the same sample as each other and as the linear and boosting
+#   notebooks.
+# - **`folds` is the same everywhere** and equals the number of walk-forward splits `05_evaluation`
+#   established.
+# - **`validation_start` and `validation_end` bracket the development sample**, with none of the
+#   held-out tail visible.
+# - **`checkpoints` is the number of training states each configuration will publish predictions
+#   for.** Multiply it by the number of rows to get how many candidate models this notebook is
+#   about to create.
 
 # %%
-result = run_tabm_cv(
-    dataset_pd,
-    splits,
-    feature_names=feature_names,
-    label_col=label_col,
-    date_col=date_col,
-    entity_col=entity_col,
-    configs=tabdl_configs,
-    n_features=n_features,
-    device=device_str,
-    save_dir=CASE_DIR / "run_log" / "training" / "tabular_dl",
-    register=True,
-    force_retrain=FORCE_RETRAIN,
-    prediction_split=PREDICTION_SPLIT,
-    case_study=CASE_STUDY_ID,
-    notebook="08_tabular_dl",
-    temporal_by_fold=mds.temporal_by_fold,
-    temporal_keys=mds.temporal_keys,
-    temporal_feature_names=mds.temporal_feature_names,
+requests = model_requests(
+    study,
+    configs,
+    execution_tier=EXECUTION_TIER,
+    overrides={"device": device},
+    preview_reductions=PREVIEW_REDUCTIONS,
+)
+resolved = tuple(request.resolve() for request in requests)
+
+plan = resolved_model_plan(resolved)
+plan.select(
+    "config_name",
+    "feature_count",
+    "eligible_entities",
+    "eligible_rows",
+    "folds",
+    "validation_start",
+    "validation_end",
+    "checkpoints",
 )
 
 # %% [markdown]
-# ### Normalize registered checkpoints
+# ## 3. Fitting the population
 #
-# A prediction artifact may contain either one checkpoint or a complete checkpoint
-# path. Normalize both layouts to one observation per configuration and epoch before
-# computing IC. This keeps cached and freshly trained runs on the same metric contract.
-
-# %%
-legacy_frames = []
-legacy_curves = []
-for cfg in tabdl_configs:
-    spec = build_training_spec(
-        cfg["family"],
-        cfg["config_name"],
-        label_col,
-        n_folds=len(splits),
-        n_epochs=cfg.get("n_epochs"),
-    )
-    prediction_sets = load_prediction_sets(
-        CASE_STUDY_ID,
-        training_hash=training_hash_from_spec(spec),
-        split=PREDICTION_SPLIT,
-    )
-    if prediction_sets.height != 1:
-        continue
-    stored = read_predictions(CASE_STUDY_ID, prediction_sets["prediction_hash"][0])
-    if "epoch" not in stored.columns or stored["epoch"].n_unique() <= 1:
-        continue
-    legacy_frames.append(stored)
-    for epoch in sorted(stored["epoch"].unique().to_list()):
-        epoch_predictions = stored.filter(pl.col("epoch") == epoch)
-        ic = cross_sectional_ic(
-            epoch_predictions,
-            epoch_predictions,
-            pred_col="y_score",
-            ret_col="y_true",
-            date_col=date_col,
-            entity_col=entity_col,
-            min_obs=5,
-        )
-        legacy_curves.append(
-            {"config": cfg["config_name"], "epoch": epoch, "ic_mean": ic["ic_mean"]}
-        )
-
-# %%
-if legacy_frames:
-    all_predictions = pl.concat(legacy_frames)
-    curves = pl.DataFrame(legacy_curves)
-    grid_results = []
-    for cfg_name in curves["config"].unique().to_list():
-        peak = curves.filter(pl.col("config") == cfg_name).sort("ic_mean", descending=True).row(0)
-        grid_results.append(
-            {"config_name": cfg_name, "best_epoch": peak[1], "best_ic": peak[2], "elapsed_s": 0.0}
-        )
-    grid_results.sort(key=lambda row: row["best_ic"], reverse=True)
-    best_name = grid_results[0]["config_name"]
-    best_epoch = grid_results[0]["best_epoch"]
-    best_ic = grid_results[0]["best_ic"]
-    fold_metrics = compute_fold_metrics_from_predictions(
-        all_predictions,
-        best_name,
-        best_epoch,
-        date_col=date_col,
-        entity_col=entity_col,
-    )
-    result = {
-        **result,
-        "grid_results": grid_results,
-        "best_config_name": best_name,
-        "best_epoch": best_epoch,
-        "best_ic": best_ic,
-        "predictions": all_predictions.filter(
-            (pl.col("config") == best_name) & (pl.col("epoch") == best_epoch)
-        ),
-        "all_predictions": all_predictions,
-        "fold_metrics": fold_metrics,
-        "all_learning_curves": curves,
-    }
-
-# %% [markdown]
-# ## 4. Capacity Comparison
+# `run_model_population` fits every resolved request. For one request it walks the folds, and on
+# each one imputes and standardizes the features on the training rows alone, trains the network for
+# the declared number of epochs, and at each checkpoint epoch predicts that fold's validation rows
+# with the weights as they stand. The per-fold predictions are concatenated into one series
+# covering the whole validation period, one series per checkpoint.
 #
-# Peak validation IC compares each configuration at its selected checkpoint. Signed
-# bars retain the economically important zero baseline.
+# **Every checkpoint becomes its own registered prediction set.** Keeping only the epoch whose
+# information coefficient came out highest would be a choice made on validation data and then
+# reported as if the training procedure had produced it, which is the same error as reporting the
+# best of a hyperparameter search as a single experiment. The stopping point is a free parameter
+# like any other, so it is carried into the comparison and paid for there.
+#
+# `SUPERSEDES_POPULATION` names an earlier snapshot this run replaces. It is empty because this
+# population has no predecessor; a re-fit under a corrected parameter would set it, and the value
+# is part of what the population is hashed over.
 
 # %%
-grid_results = result["grid_results"]
-best_name = result["best_config_name"]
-best_epoch = result["best_epoch"]
-best_ic = result["best_ic"]
-
-size_order = ["tabm_s", "tabm_m", "tabm_l"]
-size_labels = {
-    "tabm_s": "Small (64h x 4m)",
-    "tabm_m": "Medium (128h x 8m)",
-    "tabm_l": "Large (256h x 16m)",
-}
-grid_by_name = {row["config_name"]: row for row in grid_results}
-ordered_grid = [grid_by_name[name] for name in size_order if name in grid_by_name]
-
-fig = go.Figure(
-    go.Bar(
-        x=[size_labels.get(row["config_name"], row["config_name"]) for row in ordered_grid],
-        y=[row["best_ic"] for row in ordered_grid],
-        marker_color=[
-            COLORS["amber"] if row["config_name"] == best_name else COLORS["blue"]
-            for row in ordered_grid
-        ],
-        text=[f"{row['best_ic']:+.4f}" for row in ordered_grid],
-        textposition="outside",
-    )
+population_name = POPULATION_NAME or "sp500-options-tabular-dl-validation-v1"
+execution, population = run_model_population(
+    study,
+    resolved,
+    population_name=population_name,
+    supersedes=supersedes_for_run(
+        study,
+        population_name=population_name,
+        declared=SUPERSEDES_POPULATION or None,
+        execution_tier=EXECUTION_TIER,
+    ),
 )
-fig.add_hline(y=0.0, line=dict(color=COLORS["neutral"], dash="dot"))
-fig.update_layout(
-    title_text=f"All TabM variants stay near zero; {size_labels[best_name]} leads at {best_ic:+.4f}",
-    xaxis_title="TabM configuration",
-    yaxis_title="Peak validation IC",
-    height=390,
-    showlegend=False,
+
+print(f"{len(execution.runs)} configurations fitted")
+print(f"population {population.name}: {len(population.members)} prediction sets")
+
+# %% [markdown]
+# ## 4. What came out
+#
+# One row per configuration and checkpoint. `ic_mean` is the **information coefficient**: on each
+# validation date, rank the positions by the model's prediction, rank them by the return they went
+# on to earn, correlate the two rankings, and average that daily correlation over the validation
+# period. It describes the predictions; it selects nothing, here or downstream.
+
+# %% tags=["results"]
+catalog = execution.catalog_rows.select(
+    "config_name",
+    "label",
+    "complete",
+    "checkpoint_value",
+    "ic_mean",
+    "ic_std",
+    "ic_n_days",
+    "n_folds",
+    "training_hash",
+    "prediction_hash",
+).sort("config_name", "checkpoint_value")
+if catalog.filter(~pl.col("complete")).height:
+    raise RuntimeError("tabular execution returned a partial checkpoint")
+catalog = catalog.with_columns(
+    full_coverage=pl.col("ic_n_days") == pl.col("ic_n_days").max().over("label")
 )
-fig.show()
-
-# %% [markdown]
-# ## 5. Learning Curves
-#
-# Validation IC at each 25-epoch checkpoint shows whether added optimization improves
-# the signal or merely moves a near-zero estimate around.
-
-# %%
-curves = result["all_learning_curves"]
-if curves.height > 0:
-    fig = go.Figure()
-    curve_colors = {
-        "tabm_s": COLORS["blue"],
-        "tabm_m": COLORS["amber"],
-        "tabm_l": COLORS["copper"],
-    }
-    for cfg_name in size_order:
-        cfg_curve = curves.filter(pl.col("config") == cfg_name).sort("epoch")
-        if cfg_curve.height:
-            fig.add_trace(
-                go.Scatter(
-                    x=cfg_curve["epoch"],
-                    y=cfg_curve["ic_mean"],
-                    mode="lines+markers",
-                    name=size_labels[cfg_name],
-                    line=dict(color=curve_colors[cfg_name]),
-                )
-            )
-    fig.add_hline(y=0.0, line=dict(color=COLORS["neutral"], dash="dot"))
-    fig.update_layout(
-        title_text="Checkpoint search keeps every TabM estimate in a narrow near-zero band",
-        xaxis_title="Training epoch",
-        yaxis_title="Validation IC",
-        height=420,
-        legend_title_text="Configuration",
+if catalog.get_column("label").n_unique() > 1:
+    raise NotImplementedError(
+        "this notebook charts one label; facet the figure before adding a sweep variant"
     )
-    fig.show()
+print(f"{catalog.height} candidate models: {catalog.n_unique('config_name')} configurations")
+print(f"at {catalog.n_unique('checkpoint_value')} checkpoints each")
+catalog.select("config_name", "checkpoint_value", "ic_mean", "ic_std", "ic_n_days", "full_coverage")
 
 # %% [markdown]
-# ## 6. Fold Metrics
+# ### What more training does
 #
-# Evaluate the selected model separately on each validation fold. This comparison
-# exposes temporal concentration that a single average can hide.
+# Each line traces one configuration's out-of-sample information coefficient as training proceeds.
+# This is the figure the checkpoint dimension exists to produce, and it separates two things that a
+# single end-of-training number cannot.
+#
+# A line that rises and then falls has an interior optimum: the network was still learning, then
+# began fitting the training window at the expense of the validation folds. A line that wanders
+# around zero without trend never had anything to learn, and its highest point is wherever the
+# noise happened to peak. Both produce a respectable-looking maximum, which is why the maximum is
+# not what gets carried forward.
 
 # %%
-fold_metrics = result["fold_metrics"]
-if fold_metrics.height > 0:
-    mean_ic = fold_metrics["ic_mean"].mean()
-    fig = go.Figure(
-        go.Bar(
-            x=[f"Fold {fold}" for fold in fold_metrics["fold_id"]],
-            y=fold_metrics["ic_mean"],
-            marker_color=[
-                COLORS["positive"] if value >= 0 else COLORS["negative"]
-                for value in fold_metrics["ic_mean"]
-            ],
-            text=[f"{value:+.4f}" for value in fold_metrics["ic_mean"]],
-            textposition="outside",
+curves = catalog.filter("full_coverage").sort("config_name", "checkpoint_value")
+sizes = {"tabm_s": COLORS["blue"], "tabm_m": COLORS["amber"], "tabm_l": COLORS["copper"]}
+fig_curves = go.Figure()
+for config_name in curves.get_column("config_name").unique(maintain_order=True):
+    series = curves.filter(pl.col("config_name") == config_name)
+    fig_curves.add_trace(
+        go.Scatter(
+            x=series.get_column("checkpoint_value").to_list(),
+            y=series.get_column("ic_mean").to_list(),
+            mode="lines+markers",
+            name=config_name,
+            line=dict(color=sizes.get(config_name, COLORS["neutral"]), width=1.8),
         )
     )
-    fig.add_hline(y=0.0, line=dict(color=COLORS["neutral"], dash="dot"))
-    fig.update_layout(
-        title_text=f"The {size_labels[best_name]} estimate is concentrated in one validation fold",
-        xaxis_title="Walk-forward validation fold",
-        yaxis_title="Cross-sectional IC",
-        height=380,
-        showlegend=False,
-    )
-    fig.show()
+fig_curves.add_hline(y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"])
+fig_curves.update_layout(
+    title="Validation information coefficient against training epoch, by ensemble size",
+    height=520,
+    width=1000,
+    margin=dict(t=70),
+    legend=dict(font=dict(size=10)),
+)
+fig_curves.update_xaxes(title_text="Training epochs completed")
+fig_curves.update_yaxes(title_text="Mean cross-sectional IC (validation)")
+show_plotly_with_alt(
+    fig_curves,
+    "Line chart of mean cross-sectional validation information coefficient against training "
+    "epoch, one line per declared TabM ensemble size.",
+)
 
 # %% [markdown]
-# ## 7. Registered Artifacts
+# ### Running configurations of your own
 #
-# `run_tabm_cv()` registers predictions and metrics during training. A cached run
-# reads those artifacts without changing the registry.
-
-# %%
-predictions = result["predictions"]
-all_predictions = result["all_predictions"]
-
-print(f"selected predictions: {predictions.height:,} rows")
-print(f"all checkpoint predictions: {all_predictions.height:,} rows")
-print(f"learning curve: {curves.height:,} config-checkpoint rows")
-print(f"fold metrics: {fold_metrics.height} rows")
-
-val_ic_mean = float(fold_metrics["ic_mean"].mean()) if fold_metrics.height > 0 else None
-
-# %% [markdown]
-# ## 8. Run Summary
-
-# %%
-print(f"\n{'=' * 60}")
-print(f"Tabular DL Grid Search: {CASE_STUDY_ID}")
-print(f"{'=' * 60}")
-print(f"Features: {n_features}  |  Folds: {len(splits)}  |  Label: {label_col}")
-print(f"Device: {device_str}  |  Epochs: {N_EPOCHS}")
-print(f"Grid: {len(tabdl_configs)} configs ({', '.join(MODELS)})")
-print(f"{'-' * 60}")
-print(f"Best config: {best_name} @ epoch {best_epoch}")
-print(f"Validation IC (cross-sectional): {best_ic:+.4f}")
-if val_ic_mean is not None:
-    print(f"Mean fold IC: {val_ic_mean:+.4f}")
-
-# %% [markdown]
-# ## Key Takeaways
+# The published run log is read-only. To add runs, open the study against a workspace, which holds
+# its own registry and artifacts and reads the same labels and features:
 #
-# 1. **TabM does not improve the primary-label signal.** All three ensembles remain
-#    close to zero on `ret_to_expiry`, well below the linear and GBM results on the
-#    same two validation folds.
-# 2. **Capacity offers no robust rescue.** The leading configuration's advantage is
-#    concentrated in one fold and remains small.
-# 3. **Checkpoint selection matters without creating evidence.** IC changes across
-#    the 25-epoch checkpoints, yet every path stays in a narrow band around zero.
-# 4. **Prediction is not profitability.** Chapter 16 must still test the registered
-#    scores under the hold-to-expiry execution and cost model; near-zero IC provides
-#    no standalone economic case.
+# ```python
+# study = open_study("sp500_options", workspace="~/ml4t-experiments")
+# configs = load_model_configs(study, "tabular_dl", config_names=["tabm_s"])
+# requests = model_requests(study, configs, overrides={"device": "cuda"})
+# resolved = tuple(request.resolve() for request in requests)
+# execution, population = run_model_population(study, resolved, population_name="my-tabm-v1")
+# ```
 #
-# **Next**: Chapter 13 notebooks ([`09a_lstm`](09a_lstm.ipynb) and
-# [`09b_patchtst`](09b_patchtst.ipynb)) test whether the temporal evolution of IV
-# surfaces adds value beyond a flat feature snapshot.
+# To fit something new, add a preset at `case_studies/config/tabm/tabm_xl.yaml` and list `tabm_xl`
+# under `tabular_dl:` in the label's menu. Editing an existing preset changes that configuration's
+# identity, so its result registers as a new row beside the old one rather than replacing it.
+#
+# ## Key takeaways
+#
+# - A checkpoint is part of a model's identity. Publishing every one and letting the downstream
+#   backtest choose keeps the cost of that choice inside the comparison, where it can be accounted
+#   for, instead of hiding it in a number reported as a single experiment.
+# - Anything that enters the identity is pinned rather than discovered. The compute device is the
+#   example here: reading it off the hardware present would give the same notebook different
+#   identities on different machines.
+# - The label set has one home. A notebook that restates it agrees with the declaration until the
+#   declaration moves, and then fits a different population silently.
+#
+# **Known limitations**: three sizes on one axis is a demonstration of how capacity is varied, not
+# a search over TabM's hyperparameters, and dropout, learning rate and depth are held at the
+# preset's values throughout. The information coefficient shown is pooled across folds and carries
+# no interval here; `11_model_analysis` is where the predictions are compared with uncertainty.

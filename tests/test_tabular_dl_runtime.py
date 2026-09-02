@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import polars as pl
 import pytest
+import yaml
 
 from case_studies.utils import registry, tabular_dl
 
@@ -167,6 +170,60 @@ def test_cuda_request_fails_instead_of_silently_falling_back(
 
     with pytest.raises(RuntimeError, match="CUDA was requested but is unavailable"):
         tabular_dl.resolve_torch_device("cuda")
+
+
+class _StubStudy:
+    """Only what `_tabm_execution_settings` reads: where the case study's config lives."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+
+def _study_declaring(tmp_path: Path, block: dict | None) -> _StubStudy:
+    root = tmp_path / "case_study"
+    (root / "config").mkdir(parents=True)
+    setup: dict = {"labels": {"primary": "fwd_ret_1m"}}
+    if block is not None:
+        setup["modeling"] = {"tabular_dl": block}
+    (root / "config" / "setup.yaml").write_text(yaml.safe_dump(setup))
+    return _StubStudy(root)
+
+
+def test_declared_tabular_dl_device_reaches_the_runtime_spec(tmp_path: Path) -> None:
+    """A declared device must be the one recorded, because it is part of the identity.
+
+    `computation.numerics` carries the device, so a case study declaring `cpu` while the
+    resolver takes `cuda` from its own default publishes members fitted somewhere other than
+    where their recorded device says - and `resolve_torch_device` cannot catch it, because it
+    only refuses a device the host lacks.
+    """
+    study = _study_declaring(tmp_path, {"device": "cpu", "num_threads": 2})
+
+    assert tabular_dl._tabm_execution_settings(study, {}) == ("cpu", 2)
+
+
+def test_undeclared_tabular_dl_execution_keeps_the_defaults(tmp_path: Path) -> None:
+    """Eight of the nine case studies declare no block, and their identities must not move."""
+    study = _study_declaring(tmp_path, None)
+
+    assert tabular_dl._tabm_execution_settings(study, {}) == (
+        tabular_dl.DEFAULT_TABM_DEVICE,
+        tabular_dl.DEFAULT_TABM_NUM_THREADS,
+    )
+
+
+def test_request_override_beats_the_declared_tabular_dl_execution(tmp_path: Path) -> None:
+    """A reader on a machine without CUDA overrides the declaration and gets their own identity."""
+    study = _study_declaring(tmp_path, {"device": "cuda", "num_threads": 8})
+
+    assert tabular_dl._tabm_execution_settings(study, {"device": "cpu"}) == ("cpu", 8)
+
+
+def test_declared_tabular_dl_thread_count_must_be_usable(tmp_path: Path) -> None:
+    study = _study_declaring(tmp_path, {"num_threads": 0})
+
+    with pytest.raises(ValueError, match="modeling.tabular_dl.num_threads"):
+        tabular_dl._tabm_execution_settings(study, {})
 
 
 def test_runtime_spec_records_strict_determinism() -> None:
@@ -833,3 +890,38 @@ def test_tabm_selection_rejects_higher_ic_with_partial_decision_time_coverage(
     assert result["best_config_name"] == "full"
     assert result["grid_results"][0]["selectable"] is True
     assert result["grid_results"][1]["selectable"] is False
+
+
+def test_tabm_training_runtime_records_cores(monkeypatch):
+    """The TabM helper must hand the registry a core count, not just seconds.
+
+    `pre_run_gate.py` fails "the run reports how much of the machine it used"
+    when no training row carries `cores_used`, and that key appears only when
+    `cpu_s` accompanies `elapsed_s`. This helper omitted it, so no tabular_dl
+    row could clear the gate. The contract itself is held in
+    `test_training_runtime_records_cores.py`, which stays torch-free so it can
+    run in `test-unit`; this one lives here because it needs `tabular_dl`.
+    """
+    captured = {}
+
+    def _capture(case_study, training_hash, *, case_dir, measured):
+        captured.update(measured)
+
+    monkeypatch.setattr(
+        "case_studies.utils.registry.registration.record_training_runtime", _capture
+    )
+
+    class _Training:
+        hash = "abc123"
+        root = None
+
+    class _Study:
+        case_study = "etfs"
+
+    tabular_dl._record_tabm_training_runtime(
+        _Study(), _Training(), elapsed_s=100.0, cpu_s=350.0, preparation_s=4.0
+    )
+
+    assert captured["elapsed_s"] == 100.0
+    assert captured["cores_used"] == pytest.approx(3.5)
+    assert captured["fold_preparation_s"] == 4.0

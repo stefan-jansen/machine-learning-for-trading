@@ -69,6 +69,7 @@ import polars as pl
 import yaml
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 
+from case_studies.sp500_options._htm_backtest import SPLIT_GUARD_HIGH, SPLIT_GUARD_LOW
 from case_studies.sp500_options._label_artifacts import accrued_hedge_pnl, ensure_label_artifacts
 from case_studies.sp500_options._underlying_returns import reconcile_underlying_log_returns
 from case_studies.utils.artifact_digest import value_digest, write_artifact
@@ -299,7 +300,9 @@ print(f"{N_SESSIONS:,} panel sessions; {panel['timestamp'].n_unique():,} carry a
 # where $K_i$ is the strike, $T$ the expiration, and $S_{i,T}$ the underlying's close that
 # day. Settlement reads the unadjusted historical close, because the listed strike and the
 # expiration spot are quoted in the same contemporaneous price basis and adjusting one
-# without the other would put them on different scales.
+# without the other would put them on different scales. That basis holds only while no
+# corporate action falls between entry and expiry, which is tested below and nulls the label
+# where it does not.
 #
 # **The three conventions divide by the price at entry rather than differencing a price
 # series, so none of them is a shift, and `fixed_time_horizon_labels` cannot express any of
@@ -315,21 +318,77 @@ panel = panel.join(accrued_hedge_pnl(hedge_path), on=["timestamp", "symbol"], ho
 # entry and varies from trade to trade. Section D checks both against the calendar, and it
 # is that date, not the signal date, that decides what Sections E to G are allowed to read.
 
+# %% [markdown]
+# Settling the strike against the expiration close assumes the two are quoted in one price
+# basis, and a corporate action between entry and expiry breaks that assumption: the listed
+# strike stays where it was written while the underlying is restated, so a four-for-one split
+# prices a $200 strike against a $50 stock and books a loss of many times the premium that
+# nobody could have taken. The contract is adjusted in reality and this panel does not carry
+# the adjusted terms, so the outcome is not knowable here and the label is null rather than
+# wrong.
+#
+# A session is a regime change when the vendor's own `adjustment_factor` leaves the band, or
+# when the unadjusted close does relative to the session before it - the second catches a
+# restatement the vendor did not flag, at the cost of nulling a handful of contracts whose
+# underlying genuinely moved that far in one session. `SPLIT_GUARD_LOW/HIGH` are imported
+# from `_htm_backtest` rather than restated, because the backtest applies the same test to
+# the same question one stage later and two copies of a threshold drift apart.
+#
+# 67 sessions across the panel are regime changes, and 731 of 354,473 contracts hold one
+# between entry and expiry. Their median `ret_to_expiry` is -5.59 against +0.19 for the whole
+# set, and 139 of the 244 contracts booking a loss beyond ten times the premium are in that
+# group.
+
 # %%
 settlement = underlying.select(
     "symbol",
     pl.col("timestamp").alias("expiration"),
     pl.col("close").alias("_close_at_expiry"),
 )
-panel = panel.join(settlement, on=["symbol", "expiration"], how="left").with_columns(
-    (
-        (pl.col("entry_straddle_mid") - (pl.col("_close_at_expiry") - pl.col("strike")).abs())
-        / pl.col("entry_straddle_mid")
-    ).alias(PRIMARY_LABEL),
-    (pl.col("expiration") - pl.col("timestamp"))
-    .dt.total_days()
-    .cast(pl.Int32)
-    .alias("dte_calendar"),
+regime = (
+    underlying.sort(["symbol", "timestamp"])
+    .with_columns(
+        (
+            (
+                ~(pl.col("close") / pl.col("close").shift(1).over("symbol")).is_between(
+                    SPLIT_GUARD_LOW, SPLIT_GUARD_HIGH
+                )
+            ).fill_null(False)
+            | (
+                ~pl.col("adjustment_factor").is_between(SPLIT_GUARD_LOW, SPLIT_GUARD_HIGH)
+            ).fill_null(False)
+        )
+        .cast(pl.Int32)
+        .alias("_is_regime_change")
+    )
+    .with_columns(pl.col("_is_regime_change").cum_sum().over("symbol").alias("_regime_id"))
+    .select("symbol", "timestamp", "_regime_id")
+)
+panel = (
+    panel.join(settlement, on=["symbol", "expiration"], how="left")
+    .join(
+        regime.rename({"_regime_id": "_regime_at_entry"}),
+        on=["symbol", "timestamp"],
+        how="left",
+    )
+    .join(
+        regime.rename({"timestamp": "expiration", "_regime_id": "_regime_at_expiry"}),
+        on=["symbol", "expiration"],
+        how="left",
+    )
+    .with_columns(
+        pl.when(pl.col("_regime_at_expiry") > pl.col("_regime_at_entry"))
+        .then(None)
+        .otherwise(
+            (pl.col("entry_straddle_mid") - (pl.col("_close_at_expiry") - pl.col("strike")).abs())
+            / pl.col("entry_straddle_mid")
+        )
+        .alias(PRIMARY_LABEL),
+        (pl.col("expiration") - pl.col("timestamp"))
+        .dt.total_days()
+        .cast(pl.Int32)
+        .alias("dte_calendar"),
+    )
 )
 for name, horizon in HORIZONS.items():
     exit_mid = pl.col(f"exit_straddle_mid_{horizon}d")
@@ -399,8 +458,8 @@ print(
 # label is attributed to exactly one cause - no premium quoted at entry, an exit session
 # past the end of the panel, no quote for the held contract on the exit date, a hedge path
 # the contract was not quoted on every day of, an expiration past the end of the underlying
-# panel, or an expiration on which the underlying itself did not trade - and the counts have
-# to sum to the height of the frame. A label built from a stale exit, or one that had
+# panel, an expiration on which the underlying itself did not trade, or a corporate action
+# between entry and expiry - and the counts have to sum to the height of the frame. A label built from a stale exit, or one that had
 # silently taken its exit price from a neighbouring contract, would break that identity.
 #
 # The third assertion is what ties the recorded exit dates to the declared horizons. The
@@ -416,6 +475,8 @@ CAUSES = {
         "no entry premium": NO_PREMIUM,
         "expiry past the underlying panel": pl.col("expiration") > underlying["timestamp"].max(),
         "no underlying close at expiry": pl.col("_close_at_expiry").is_null(),
+        "corporate action between entry and expiry": pl.col("_regime_at_expiry")
+        > pl.col("_regime_at_entry"),
     }
 } | {
     name: {
@@ -905,7 +966,7 @@ for name in LABEL_NAMES:
 #    fact about the cross-section that a mean-level argument about the premium would miss.
 #
 # **Known limitations.** Mid-to-mid pricing is not what a trader receives; the entry
-# half-spread and the commission are swept in `14_costs.py`, and the primary label avoids
+# half-spread and the commission are swept in `15_costs.py`, and the primary label avoids
 # the exit half-spread only because cash settlement needs no closing trade. The delta hedge
 # is rebalanced at the close and charges nothing for doing so. The universe is every name
 # with a quoted matched-strike straddle, with the liquidity screen applied downstream rather

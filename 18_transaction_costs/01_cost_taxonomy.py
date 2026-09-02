@@ -72,7 +72,8 @@ from utils.paths import REPO_ROOT, get_case_study_source_dir
 from utils.style import COLORS, add_message_title, ml4t_palette, show_with_alt
 
 # %% tags=["parameters"]
-MAX_SYMBOLS = 0  # 0 = all symbols
+# 0 = all symbols
+MAX_SYMBOLS = 0
 SOURCE_CHECK_DATE = "2026-07-21"
 
 # %% [markdown]

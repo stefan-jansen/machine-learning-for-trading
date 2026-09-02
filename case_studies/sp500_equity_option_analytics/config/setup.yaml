@@ -10,6 +10,14 @@ decision:
   snapshot: friday_16:00_et
   execution_delay: monday_open
   iv_feature_lag: 1_day
+  # Per-label decision cadence; `cadence` above applies to every label not named here. The five
+  # 5-day labels trade the weekly grid, which is what they forecast. The two 10-day labels
+  # resolve after two weeks, so on the weekly grid a new position is opened while the previous
+  # one is still inside its own horizon - overlapping the very quantity being measured. They
+  # rebalance every other week instead.
+  cadence_by_label:
+    fwd_ret_10d: biweekly
+    fwd_dir_10d: biweekly
 
 # The feature-specification register for 03_financial_features, and every window
 # it computes over. It lives here rather than in the notebook for the same reason
@@ -183,7 +191,7 @@ costs:
   per_leg_cost_bps_range: [3, 10]
   round_trip_cost_bps: 13    # Midpoint of per_leg_cost_bps_range (6.5 bps × 2 legs).
   # per_share is the commission rate for the exploratory per-share
-  # cost-sensitivity regime (read by Ch18 16_costs.py and the run_sweep
+  # cost-sensitivity regime (read by Ch18 17_costs.py and the run_sweep
   # planner). IBKR Pro Tiered top tier. NOT used in the headline bps
   # regime — bps regime is the production cost model.
   per_share: 0.0035
@@ -236,6 +244,13 @@ backtest:
       - {name: risk_parity,     method: risk_parity}
       - {name: mvo_ledoit_wolf, method: mvo_ledoit_wolf, lookback: 126}
       - {name: hrp,             method: hrp}
+      # Sizes each position by the width of its conformal prediction interval rather than by a
+      # moment of returns, so it is the one allocator here that reads the model's own
+      # uncertainty. It was absent while etfs, cme_futures and fx_pairs declared it, which made
+      # this case study's sweep narrower than theirs for no stated reason. 13_model_analysis
+      # measures the coverage those widths come from, so a run of this allocator is also the
+      # test of whether that calibration is good enough to size with.
+      - {name: conformal_weighted, method: conformal_weighted}
     # Ch18 cost sensitivity (bps regime — headline). A companion per-share
     # regime is run from Ch18 cost notebooks for regime comparison; for
     # sp500_eoa it is exploratory only because flat-default half-spread on
@@ -295,12 +310,17 @@ labels:
     fwd_dir_10d: 10D
   # Vectorized-backtest thinning step per label: number of schedule slots
   # to advance per trade so holding periods don't overlap.
+  # The step is ceil(horizon / cadence), and `cadence` is now per label, so it must be read
+  # against decision.cadence_by_label rather than against the weekly default. The two 10-day
+  # labels moved to the biweekly grid, which already spaces their decisions 10 sessions apart;
+  # leaving their step at 2 would thin an already-thinned schedule and trade them every four
+  # weeks under a spec that says biweekly.
   rebalance_step:
-    fwd_ret_5d: 1            # ceil(5 / 5) on the weekly_friday schedule
-    fwd_ret_10d: 2           # ceil(10 / 5)
+    fwd_ret_5d: 1            # ceil(5 / 5) on the weekly_friday_close schedule
+    fwd_ret_10d: 1           # ceil(10 / 10) on the biweekly schedule
     fwd_ret_risk_adj_5d: 1   # ceil(5 / 5)
     fwd_dir_5d: 1            # ceil(5 / 5)
-    fwd_dir_10d: 2           # ceil(10 / 5)
+    fwd_dir_10d: 1           # ceil(10 / 10) on the biweekly schedule
   # Continuous return that each classification label is derived from.
   classification_eval_label:
     fwd_dir_5d: fwd_ret_5d
@@ -319,6 +339,15 @@ modeling:
     max_bin: 255
   latent_factors:
     persistent_entities: true
+    # The device the family is fitted on. Declared rather than left out: it sits inside
+    # the hashed computation (case_studies/utils/latent_factors/adapter.py, computation
+    # .runtime and .numerical_runtime), and with no key here case_study.py falls back to
+    # preferred_latent_device(), which returns cuda or cpu depending on what the machine
+    # running it happens to have. That makes the training identity a property of the host.
+    # The three neural members are fitted here; 11a_pca and 11b_ipca override it to cpu,
+    # because run_pca_fold and run_ipca_fold are numpy and scipy and take no device at
+    # all, so recording cuda for them would describe a computation that did not happen.
+    device: cuda
     model_kwargs:
       ipca:
         max_iter: 10000
@@ -328,8 +357,26 @@ modeling:
         checkpoint_epochs: [256, 512, 768, 1024]  # conditional-relative; publishes global 256..1280
         beta_checkpoint_epochs: [256]
         beta_default_checkpoint: 256
+      sae:
+        # Rows per gradient step. Declared because the alternative is not a smaller batch but
+        # no batching at all: SAEConfig.batch_size defaults to None and the library reads that
+        # as one batch holding the whole training window, about 250,000 rows here, which does
+        # not fit a 24 GB card. Its sibling run_cae_fold has carried this same value as a
+        # runner default all along; only the SAE runner never passed one.
+        batch_size: 10000
 
 causal:
   treatment: ivrv_spread
+  # Bars the treatment's own construction window spans, which is what the placebo block has
+  # to cover: permuting ivrv_spread in blocks shorter than this destroys the serial
+  # dependence the refutation exists to preserve, and the resulting p-value reads like a
+  # refutation without being one. Declared here rather than inferred, because guessing which
+  # element of a window list a column was built from puts a wrong number behind a right-looking
+  # one. Derived from the construction, not chosen:
+  #
+  # `iv_30_atm - rv_{realized_vol[0]}` in 03_financial_features, and features.windows
+  # declares realized_vol as [20, 63]. The implied leg is a quote and rolls nothing; the
+  # realized leg is what makes the spread autocorrelated, over its own 20 sessions.
+  treatment_window: 20
   confounders: [rv_20, mom_21d, skew_rr_30_25d]
   method: walk_forward_dml

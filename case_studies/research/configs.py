@@ -20,7 +20,6 @@ import yaml
 
 from case_studies.utils.registry.specs import training_hash_from_spec
 from utils.modeling import load_configs
-from utils.paths import get_case_study_dir
 
 from .contracts import ExecutionTier
 from .model_planning import ModelPlan
@@ -38,7 +37,7 @@ def _format_params(params: dict | None) -> str:
 
 
 def _setup_labels(study: Study) -> dict:
-    setup_path = get_case_study_dir(study.case_study) / "config" / "setup.yaml"
+    setup_path = study.root / "config" / "setup.yaml"
     return (yaml.safe_load(setup_path.read_text()) or {}).get("labels") or {}
 
 
@@ -84,7 +83,7 @@ def declared_labels(study: Study, family: str) -> tuple[str, ...]:
     ``supersedes``. A sweep label whose menu does not declare ``family`` is skipped rather than
     raising - not every label declares every family.
     """
-    menu_dir = get_case_study_dir(study.case_study) / "config" / "training"
+    menu_dir = study.root / "config" / "training"
     if not menu_dir.is_dir():
         raise FileNotFoundError(f"{study.case_study} has no training menus: {menu_dir}")
     in_sweep = set(sweep_labels(study))
@@ -136,7 +135,7 @@ def load_model_configs(
     rows: list[dict] = []
     declared: set[str] = set()
     for label in requested:
-        for config in load_configs(study.case_study, label, family):
+        for config in load_configs(study.case_study, label, family, case_dir=study.root):
             name = str(config["config_name"])
             declared.add(name)
             if selected is not None and name not in selected:
@@ -169,10 +168,16 @@ def model_requests(
     execution_tier: str | ExecutionTier = ExecutionTier.CANONICAL,
     overrides: dict | None = None,
     preview_reductions: dict | None = None,
+    notebook: str | None = None,
 ) -> tuple[ModelRequest, ...]:
     """Build one unresolved request per catalog row.
 
     Only the identity columns reach the request; the display columns exist for the reader.
+
+    ``notebook`` is the stem of the notebook submitting these requests, recorded as
+    ``runtime_provenance["notebook_path"]`` so a registered row says which notebook produced it.
+    It is provenance rather than identity, so passing it moves no hash. Default ``None`` records
+    nothing: a wrong notebook name is worse than an absent one.
     """
     missing = set(REQUEST_COLUMNS) - set(catalog.columns)
     if missing:
@@ -184,6 +189,7 @@ def model_requests(
             execution_tier=tier,
             overrides=dict(overrides or {}),
             preview_reductions=dict(preview_reductions or {}),
+            notebook=notebook,
         )
         for row in catalog.select(*REQUEST_COLUMNS).iter_rows(named=True)
     )
@@ -254,6 +260,7 @@ def resolved_model_plan(resolved_requests: Iterable[ResolvedModelRequest]) -> pl
                 "feature_count": len(computation.get("feature_names") or []),
                 "eligible_entities": expected.get_column(entity).n_unique(),
                 "eligible_rows": expected.height,
+                "eligible_dates": timestamps.n_unique(),
                 "folds": expected.get_column(fold).n_unique(),
                 "validation_start": timestamps.min(),
                 "validation_end": timestamps.max(),

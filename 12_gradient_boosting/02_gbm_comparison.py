@@ -174,7 +174,8 @@ def detect_gpu_capabilities() -> dict[str, Any]:
 # %% tags=["parameters"]
 CASE_STUDY = "etfs"
 LABEL = "fwd_ret_21d"
-MAX_SYMBOLS = 0  # 0 = all symbols
+# 0 = all symbols
+MAX_SYMBOLS = 0
 SEED = 42
 # Cap parallelism to mirror a representative reader machine. All libraries
 # are forced to N_JOBS threads; this also requires invoking with

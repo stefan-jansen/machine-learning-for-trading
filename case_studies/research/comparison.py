@@ -18,6 +18,58 @@ if TYPE_CHECKING:
     from .workspace import Study
 
 
+def _unsuperseded_hash(db: sqlite3.Connection, name: str) -> str | None:
+    """The one generation of ``name`` that no later generation replaces, if it is unique."""
+    rows = db.execute(
+        "SELECT set_hash, supersedes_hash FROM candidate_sets WHERE name = ?", (name,)
+    ).fetchall()
+    replaced = {row[1] for row in rows if row[1] is not None}
+    heads = [row[0] for row in rows if row[0] not in replaced]
+    return heads[0] if len(heads) == 1 else None
+
+
+def candidate_set_supersedes(study: Study, *, name: str, declared: str | None) -> str | None:
+    """Whether a declared candidate-set generation may be offered to :meth:`CandidateSet.create`.
+
+    The same decision :func:`case_studies.research.population.population_supersedes` makes for an
+    official population, applied to a candidate set. It exists because the declaration is
+    committed source that has to be right in three situations the notebook cannot tell apart:
+
+    - **A clean clone.** ``run_log/`` is gitignored, so a reader starts with an empty registry -
+      often with no ``candidate_sets`` table at all, which raises ``OperationalError`` rather
+      than ``ValueError``. ``create`` refuses a first generation that claims to supersede
+      something, so the declared hash must be withheld and the reader's run publishes generation
+      one. **This is the ordinary case for anyone who is not the author**, and offering the hash
+      unconditionally is what stops a published notebook running for the people it is published
+      for.
+    - **The re-run.** The generation in force is the one this declaration produced, so
+      ``current.supersedes == declared``, and offering the hash resolves to the set already
+      published rather than writing a new one.
+    - **The refit.** The declaration names the tip itself, and offering it publishes the next
+      generation over that tip.
+
+    Anything else is withheld, and ``create`` then refuses and names the hash it requires, which
+    is a better answer than this function guessing.
+
+    ``CandidateSet.create`` already takes and enforces ``supersedes``; what had no shared
+    implementation is this decision, so every notebook that declares a lineage either resolved it
+    itself or - four in ``crypto_perps_funding`` alone - did not resolve it and would have stopped
+    on a reader's first run.
+    """
+    if not declared:
+        return None
+    try:
+        current = CandidateSet.one(study, name=name)
+    except (ValueError, KeyError, sqlite3.OperationalError):
+        # No generation under this name, or no table at all: `one` raises `ValueError` when the
+        # name resolves to other than exactly one head, `open` raises `KeyError` for a hash the
+        # table does not hold, and a clean clone has no `candidate_sets` table for either to read.
+        return None
+    if declared in (current.supersedes, current.hash):
+        return declared
+    return None
+
+
 @dataclass(frozen=True)
 class CandidateSet:
     study: Study
@@ -26,6 +78,7 @@ class CandidateSet:
     member_kind: str
     members: tuple[str, ...]
     comparison_contract: dict[str, Any]
+    supersedes: str | None = None
 
     @classmethod
     def create(
@@ -35,6 +88,7 @@ class CandidateSet:
         members: Iterable[Result],
         *,
         comparison_contract: dict[str, Any] | None = None,
+        supersedes: str | None = None,
     ) -> CandidateSet:
         study.require_writable()
         study.activate()
@@ -49,8 +103,14 @@ class CandidateSet:
         member_kind = resolved[0].kind
         if any(member.execution_tier == "preview" for member in resolved):
             raise ValueError("preview results cannot enter a canonical candidate set")
-        if any(not member.complete for member in resolved):
-            raise ValueError("partial results cannot enter a candidate set")
+        partial = [
+            (member.hash, reason)
+            for member in resolved
+            if (reason := member.completeness()) is not None
+        ]
+        if partial:
+            detail = "; ".join(f"{member_hash}: {reason}" for member_hash, reason in partial)
+            raise ValueError(f"partial results cannot enter a candidate set - {detail}")
         if member_kind == "backtest" and any(
             (member.spec().get("decision_artifact") or {}).get("canonical") is False
             for member in resolved
@@ -101,11 +161,31 @@ class CandidateSet:
             if existing is not None and existing != expected:
                 raise ValueError(f"immutable candidate-set conflict for {set_hash}")
             if existing is None:
+                # A candidate set is derived, so re-running the stage that freezes it produces
+                # a second set under the same name whenever the registry or the admission rule
+                # moved. Two live generations make the name unresolvable and every reader of it
+                # raises, so a changed set has to say which one it replaces - the same contract
+                # OfficialPopulation.create holds, for the same reason.
+                head = _unsuperseded_hash(db, name)
+                if head is not None and supersedes != head:
+                    raise ValueError(
+                        f"a changed candidate set named {name!r} must explicitly supersedes {head}"
+                    )
+                if head is None and supersedes is not None:
+                    raise ValueError("first candidate set version cannot supersede another set")
                 db.execute(
                     "INSERT INTO candidate_sets "
-                    "(set_hash, name, member_kind, comparison_contract_json, created_at, git_commit) "
-                    "VALUES (?,?,?,?,?,?)",
-                    (set_hash, name, member_kind, expected[1], _utc_now(), _git_hash()),
+                    "(set_hash, name, member_kind, comparison_contract_json, created_at, "
+                    "git_commit, supersedes_hash) VALUES (?,?,?,?,?,?,?)",
+                    (
+                        set_hash,
+                        name,
+                        member_kind,
+                        expected[1],
+                        _utc_now(),
+                        _git_hash(),
+                        supersedes,
+                    ),
                 )
                 db.executemany(
                     "INSERT INTO candidate_set_members (set_hash, member_hash, ordinal) "
@@ -113,32 +193,44 @@ class CandidateSet:
                     [(set_hash, value, ordinal) for ordinal, value in enumerate(member_hashes)],
                 )
                 db.commit()
+            else:
+                supersedes = db.execute(
+                    "SELECT supersedes_hash FROM candidate_sets WHERE set_hash = ?",
+                    (set_hash,),
+                ).fetchone()[0]
         except Exception:
             db.rollback()
             raise
         finally:
             db.close()
-        return cls(study, set_hash, name, member_kind, member_hashes, contract)
+        return cls(study, set_hash, name, member_kind, member_hashes, contract, supersedes)
 
     @classmethod
     def one(cls, study: Study, *, name: str) -> CandidateSet:
-        """Resolve one immutable set by its reader-facing name without a hash handoff."""
+        """Resolve the generation of a named set that nothing supersedes.
+
+        Earlier generations stay readable by hash, which is what makes recording the lineage
+        worth anything: a result registered against a superseded set can still be traced to
+        the comparison it was made in.
+        """
         with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
-            rows = db.execute(
-                "SELECT set_hash FROM candidate_sets WHERE name = ? ORDER BY set_hash",
-                (name,),
-            ).fetchall()
-        if len(rows) != 1:
-            raise ValueError(f"candidate set name {name!r} resolved to {len(rows)} identities")
-        return cls.open(study, rows[0][0])
+            head = _unsuperseded_hash(db, name)
+            if head is None:
+                count = db.execute(
+                    "SELECT count(*) FROM candidate_sets WHERE name = ?", (name,)
+                ).fetchone()[0]
+                raise ValueError(
+                    f"candidate set name {name!r} resolved to {count} unsuperseded identities"
+                )
+        return cls.open(study, head)
 
     @classmethod
     def open(cls, study: Study, set_hash: str) -> CandidateSet:
         db_path = study.root / "run_log" / "registry.db"
         with closing(sqlite3.connect(db_path)) as db:
             row = db.execute(
-                "SELECT name, member_kind, comparison_contract_json FROM candidate_sets "
-                "WHERE set_hash = ?",
+                "SELECT name, member_kind, comparison_contract_json, supersedes_hash "
+                "FROM candidate_sets WHERE set_hash = ?",
                 (set_hash,),
             ).fetchone()
             if row is None:
@@ -151,15 +243,26 @@ class CandidateSet:
                     (set_hash,),
                 ).fetchall()
             )
-        return cls(study, set_hash, row[0], row[1], members, json.loads(row[2]))
+        return cls(study, set_hash, row[0], row[1], members, json.loads(row[2]), row[3])
 
-    def extend(self, name: str, members: Iterable[Result]) -> CandidateSet:
+    def extend(
+        self, name: str, members: Iterable[Result], *, supersedes: str | None = None
+    ) -> CandidateSet:
+        """A new set holding this one's members and *members*, under *name*.
+
+        *supersedes* names the generation of *name* this one retires, and is required
+        whenever one is already recorded - ``create`` refuses a changed set under a live
+        name without it. An extension is exactly where that happens: re-running the stage
+        after upstream results moved produces different members under the same name, and
+        without a way to pass the retired hash the notebook has no answer to give.
+        """
         existing = [Result.open(self.study, member_hash) for member_hash in self.members]
         return self.create(
             self.study,
             name,
             [*existing, *members],
             comparison_contract=self.comparison_contract,
+            supersedes=supersedes,
         )
 
     def best_validation_sharpe(self) -> Result:

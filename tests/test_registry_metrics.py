@@ -36,6 +36,11 @@ import numpy as np
 import polars as pl
 import pytest
 
+# `model_analysis` imports lightgbm at module scope and stands in for it in the
+# OpenMP import-order gate (.github/scripts/check_openmp_import_order.py). It has
+# to come up before anything pulls scikit-learn in, which `compute_prediction_fold_metrics`
+# does on its first call, so the import is here rather than inside the test that uses it.
+from case_studies.utils import model_analysis
 from case_studies.utils.registry.metrics import compute_prediction_fold_metrics
 
 # -----------------------------------------------------------------------------
@@ -436,3 +441,116 @@ def test_deterministic_across_calls(regression_predictions) -> None:
             assert a_folds[fold_id][key] == pytest.approx(b_folds[fold_id][key], abs=1e-10), (
                 f"fold {fold_id} / {key}"
             )
+
+
+# -----------------------------------------------------------------------------
+# Undefined daily IC (issue #493)
+#
+# ml4t-diagnostic 0.1.2 reports a date it cannot compute as null. Everything
+# below defends the other half: a `daily_metrics.parquet` written before that
+# release stores NaN, and polars keeps NaN through `drop_nulls`, so a reader
+# that trusts drop_nulls alone still gets a NaN mean. Measured on the live
+# artifacts: 32 NaN and 0 null across 477 files.
+# -----------------------------------------------------------------------------
+
+
+def test_defined_ic_drops_nan_as_well_as_null() -> None:
+    """`drop_nulls` is not enough; `defined_ic` removes both spellings."""
+    from case_studies.utils.notebook_contracts import defined_ic
+
+    frame = pl.DataFrame({"ic": [0.1, float("nan"), None, -0.3]})
+
+    assert frame.drop_nulls("ic").height == 3  # the NaN survives drop_nulls
+    assert math.isnan(frame.drop_nulls("ic")["ic"].mean())
+
+    kept = defined_ic(frame)
+    assert kept.height == 2
+    assert kept["ic"].to_list() == [0.1, -0.3]
+    assert kept["ic"].mean() == pytest.approx(-0.1)
+
+
+def test_defined_ic_passes_through_a_frame_without_an_ic_column() -> None:
+    frame = pl.DataFrame({"date": ["2024-01-01"], "n_obs": [7]})
+    from case_studies.utils.notebook_contracts import defined_ic
+
+    assert defined_ic(frame).equals(frame)
+
+
+def test_daily_ic_headline_survives_a_tied_date(regression_predictions) -> None:
+    """A date where every score ties must not turn the daily headline into NaN."""
+    tied_date = regression_predictions["timestamp"].min()
+    with_tie = regression_predictions.with_columns(
+        y_score=pl.when(pl.col("timestamp") == tied_date).then(1.0).otherwise(pl.col("y_score"))
+    )
+
+    headline, _ = compute_prediction_fold_metrics(with_tie, task_type="regression")
+
+    assert headline["ic_mean_daily"] is not None
+    assert np.isfinite(headline["ic_mean_daily"])
+    assert np.isfinite(headline["ic_t_hac"])
+    # The tied date is excluded, not counted as a zero-IC day.
+    assert headline["ic_n_days"] == with_tie["timestamp"].n_unique() - 1
+
+
+def test_load_daily_metrics_series_normalises_a_legacy_nan(tmp_path, monkeypatch) -> None:
+    """A parquet written before 0.1.2 holds NaN; the loader must hand back null."""
+    prediction_hash = "deadbeefcafe"
+    artifact_dir = tmp_path / "run_log" / "predictions" / prediction_hash
+    artifact_dir.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "date": ["2024-01-01", "2024-01-02", "2024-01-03"],
+            "fold_id": [0, 0, 0],
+            "ic": [0.2, float("nan"), -0.4],
+            "n_obs": [12, 12, 12],
+        }
+    ).write_parquet(artifact_dir / "daily_metrics.parquet")
+
+    monkeypatch.setattr(model_analysis, "get_case_study_dir", lambda _cs: tmp_path)
+    loaded = model_analysis.load_daily_metrics_series("any_case_study", prediction_hash)
+
+    assert loaded["ic"].is_nan().sum() == 0
+    assert loaded["ic"].null_count() == 1
+    assert loaded.drop_nulls("ic")["ic"].mean() == pytest.approx(-0.1)
+
+
+def test_plot_rolling_daily_ic_ignores_an_undefined_date(monkeypatch) -> None:
+    """One NaN day must not blank out a whole window of the rolling-mean line."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from case_studies.utils import model_viz as model_viz_module
+    from case_studies.utils.model_viz import plot_rolling_daily_ic
+
+    window = 20
+    dates = pl.date_range(pl.date(2024, 1, 1), pl.date(2024, 3, 20), interval="1d", eager=True)
+    ic = [0.05] * len(dates)
+    ic[10] = float("nan")
+    frame = pl.DataFrame({"date": dates, "ic": ic, "n_obs": [12] * len(dates)})
+
+    # `plot_rolling_daily_ic` hands its figure to `show_with_alt`, which closes it.
+    # Reading `plt.gcf()` afterwards therefore gets a fresh, empty figure and the
+    # search below finds no lines at all - the test asserted nothing about the
+    # rolling mean and failed on an IndexError instead. Capture the figure at the
+    # hand-off, which is the only point where it still has its artists.
+    captured: list = []
+    monkeypatch.setattr(model_viz_module, "show_with_alt", lambda fig, alt: captured.append(fig))
+
+    plt.close("all")
+    plot_rolling_daily_ic(frame, window=window, label="test")
+
+    (fig,) = captured
+    (line,) = [
+        artist
+        for artist in fig.axes[0].get_lines()
+        if artist.get_label().startswith("Rolling mean")
+    ]
+    ydata = np.asarray(line.get_ydata(), dtype=float)
+
+    # Only the window warm-up may be undefined. Leaving the NaN in would blank a
+    # further `window` points, since every window covering that day is NaN.
+    assert np.count_nonzero(~np.isfinite(ydata)) == window - 1
+    assert np.isfinite(ydata[-1])
+    plt.close("all")

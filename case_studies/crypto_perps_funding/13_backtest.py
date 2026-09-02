@@ -14,584 +14,862 @@
 # ---
 
 # %% [markdown]
-# # Equal-Weight Baseline: Crypto Perpetual Futures
+# # Crypto perpetuals: the baseline that turns a ranking into a book
 #
-# Which prediction and entry-rule configurations survive an equal-weight strategy simulation, and
-# how does explicit funding settlement change the selected carrier's return? This notebook reads the
-# frozen registry, then replays the selected carrier without registration to isolate funding cash
-# flows from model and allocation changes.
+# The model notebooks produced rankings. At each eight-hour funding timestamp, each configuration
+# scores the contracts it can see and orders them. A ranking is not a portfolio, and nothing so
+# far says what a reader would have earned holding one.
 #
-# **Learning objectives**
+# This notebook builds the crudest portfolio that a ranking supports and runs it. An **entry
+# rule** turns the scores at one timestamp into a set of positions - take the five highest-scored
+# contracts long and the five lowest short, say - and every position gets the same weight. Equal
+# weight is deliberate. It is the one sizing choice that contributes no information of its own, so
+# a difference between two configurations here is a difference between their rankings and nothing
+# else. [`14_portfolio_management`](14_portfolio_management.ipynb) is where sizing starts to vary.
 #
-# - Interpret `stage='signal'` as the equal-weight allocation baseline
-# - Keep validation-based carrier selection separate from holdout evaluation
-# - Reproduce a frozen backtest without changing the results registry
-# - Add position-signed official funding settlements to perpetual-futures P&L
+# **Funding is the reason this case study exists, and it is settled inside the run.** A perpetual
+# future never expires, so no delivery date forces its price towards spot. The exchange applies a
+# **funding rate** instead: every eight hours, whoever is long pays whoever is short an amount
+# proportional to the gap between the perpetual and the index, and when the gap is negative the
+# payment runs the other way. That is a cash flow the holder receives or pays whatever the price
+# does. A position can pay while its price prediction is wrong, and a price-only equity curve is
+# therefore not the return on a perpetual position - it is a different quantity. The backtest
+# boundary settles the official rate against the position carried into each timestamp, before any
+# fill at that same timestamp, and the rates it used are part of what identifies the result.
 #
-# **Book reference**: Chapter 16, Strategy Simulation
+# **Nothing is selected here.** Every declared configuration gets a baseline, the results are
+# registered, and the ranking of one against another is read in
+# [`19_strategy_analysis`](19_strategy_analysis.ipynb).
 #
-# **Prerequisites**: [`12_model_analysis`](12_model_analysis.ipynb) and registered validation
-# predictions for all configured labels
+# **Learning objectives.** By the end of this notebook you will be able to:
+#
+# - State, for one strategy, the moment the decision is taken, the moment it is filled, how long
+#   the position is held, and when the next decision is allowed, and check that the four agree
+#   with the horizon the label was built on.
+# - Say why a long-short rule that asks for ten contracts a side cannot be run on a universe of
+#   nineteen, and read which members of a declared grid the shared selector dropped.
+# - Run every member of a frozen prediction population through one entry rule and have each
+#   result registered with the funding settlements that produced it.
+# - Recognise an equal-weight backtest as the reference every later sizing, cost and risk variant
+#   is measured against, rather than as a candidate in its own right.
+#
+# **Book reference**: Chapter 16 (Strategy Simulation).
+#
+# **Prerequisites**: the model notebooks [`06_linear`](06_linear.ipynb) through
+# [`10_dl_tcn`](10_dl_tcn.ipynb) have registered their complete validation prediction populations.
+#
+# **What it writes**: one `stage='signal'` backtest per prediction set and entry rule, in
+# `run_log/registry.db`, grouped into one immutable population per entry rule and one candidate
+# set per label. [`14_portfolio_management`](14_portfolio_management.ipynb) reads those candidate
+# sets.
 
 # %%
-"""Read-only baseline analysis with an explicit funding-cashflow replay."""
+"""Run the equal-weight baseline for every declared crypto perpetuals prediction set."""
 
 import json
-import sqlite3
-import warnings
-from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, timedelta
 
-import numpy as np
 import plotly.graph_objects as go
 import polars as pl
-import yaml
+from plotly.subplots import make_subplots
 
-from case_studies.crypto_perps_funding.funding_data import load_funding_rates
+from case_studies.crypto_perps_funding.research_workflow import (
+    ALL_LABELS,
+    freeze_official_model_population,
+    preview_prediction_candidates,
+)
+from case_studies.research import (
+    CandidateSet,
+    Result,
+    open_study,
+    run_backtests,
+)
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
+    get_rebalance_step,
     load_backtest_prices_for,
-    warmup_periods_for,
 )
-from case_studies.utils.backtest_presets import build_backtest_spec
-from case_studies.utils.backtest_runner import precompute_weights, run_backtest
-from case_studies.utils.cv_window import canonical_window
-from case_studies.utils.registry import read_predictions
-from utils.paths import get_case_study_dir, get_case_study_source_dir
-from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from case_studies.utils.coverage import check_prediction_coverage
+from case_studies.utils.sweep_config import get_entry_schemes_for
+from utils.artifact_specs import load_setup_config
+from utils.paths import get_case_study_dir
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
-CASE_STUDY = "crypto_perps_funding"
-SEED = 42
-BAR_HOURS = 8
+LABELS: list[str] = []
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
+POPULATION_SUFFIX = "v1"
+# The generation of `crypto-validation-predictions-v1` this run replaces, when it replaces one.
+# Re-declaring a population under a name that already exists with different members is refused
+# unless the run says which generation it supersedes: the model notebooks each take the same
+# parameter, and this one publishes the case-wide list they feed. Left empty on a first run and
+# on any re-run whose membership is unchanged; the refusal names the hash to put here.
+SUPERSEDES_POPULATION: str = ""
+# The baseline sweep publishes one population per (label, entry rule), so a run that changes
+# them cannot name the generation it retires with a single value the way the model population
+# can. Keyed by population name; the refusal prints the name and the hash to put here.
+SUPERSEDES_BACKTESTS: dict[str, str] = {}
+# The candidate set each label hands downstream is a third generation-bearing name, one per
+# label. Keyed the same way; the refusal prints the name and the hash.
+SUPERSEDES_CANDIDATES: dict[str, str] = {}
+# How many prediction sets a preview run backtests per label. A preview reads the predictions
+# its own model notebooks wrote into its workspace, and what it is proving is that the chain
+# executes rather than that the sweep is wide, so it is capped instead of taking whatever the
+# reduced fits happened to leave. Read only on a preview run; a canonical run backtests the
+# declared population and nothing else.
+PREVIEW_MAX_PREDICTIONS = 4
 
 # %%
-set_global_seeds(SEED)
-FROZEN_CASE_DIR = get_case_study_dir(CASE_STUDY, create=False)
-REGISTRY_PATH = FROZEN_CASE_DIR / "run_log" / "registry.db"
-SOURCE_CASE_DIR = get_case_study_source_dir(CASE_STUDY)
-setup = yaml.safe_load((SOURCE_CASE_DIR / "config" / "setup.yaml").read_text())
-config = get_backtest_config(CASE_STUDY)
-
-print(f"Registry: {REGISTRY_PATH.name} (read-only analysis)")
-print("Database stage value 'signal' is reported below as the equal-weight baseline.")
-print(f"Costs: {config.commission_bps + config.slippage_bps:.1f} bps per leg")
+study = open_study(
+    "crypto_perps_funding", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None
+)
+setup = load_setup_config("crypto_perps_funding")
+labels = list(LABELS) if LABELS else list(ALL_LABELS)
 
 # %% [markdown]
-# ## Read the frozen baseline cohort
+# ## 1. The population this notebook backtests
 #
-# The baseline allocates equally across the positions admitted by each entry rule. Model training and
-# entry-rule variants are selected on validation only. The cohort table records one selection-adjusted
-# leader per label; the holdout is not queried or used here.
+# A **population** is a named, immutable list of results, written down before the work that
+# produces them starts. The model notebooks each published one; the call below re-derives the
+# complete case-wide list from the training menus and records it under one name, so that what
+# follows is measured against a declaration rather than against whatever the registry happens to
+# contain. If a configuration is declared and missing, or present and incomplete, the check two
+# cells down fails here rather than producing a baseline over a silently smaller set.
+#
+# Freezing is a canonical-run step. A preview run against a private workspace backtests the
+# predictions its own model notebooks wrote there; it does not read the released population and
+# does not redeclare it.
+
+# %%
+CANONICAL_RUN = EXECUTION_TIER == "canonical" and not WORKSPACE
+if CANONICAL_RUN:
+    prediction_population = freeze_official_model_population(
+        study, supersedes=SUPERSEDES_POPULATION or None
+    )
+    print(
+        f"declared population {prediction_population.name}: "
+        f"{len(prediction_population.members)} prediction sets"
+    )
+
+# %% [markdown]
+# The catalog is what gets backtested, and on a canonical run it is **the declared population
+# read back**, not the registry filtered down to it. The distinction is the whole point of
+# freezing: a query returns whatever is registered under a set of predicates, and the registry
+# is immutable, so a superseded generation's rows are still there and still `complete`. Filtering
+# by `split`, `label` and `complete` therefore returns both generations, and a sweep over both
+# ranks a retired identity against a live one and carries whichever wins into every stage
+# downstream. Reading the population back cannot do that: it is a fixed list of hashes, declared
+# before this notebook ran.
+#
+# The membership check is the other half. A declared member with no registry row means the
+# population names something the model notebooks never produced, and that has to fail here rather
+# than produce a baseline over a silently smaller set.
+
+# %% tags=["results"]
+if CANONICAL_RUN:
+    declared = list(prediction_population.members)
+    catalog = (
+        study.predictions.table()
+        .filter(pl.col("prediction_hash").is_in(declared))
+        .filter(pl.col("label").is_in(labels))
+    )
+    # Every declared member has a registry row, asked of the declaration and not of the catalog.
+    # The catalog is narrowed to the requested labels, so comparing against it reports the other
+    # labels' members as missing on a narrowed run; suppressing the check on a narrowed run
+    # instead lets a requested label's member go missing in silence, which is what it exists to
+    # catch. Asked this way it holds either way, because a population member that nothing
+    # registered is a declaration the model notebooks never produced.
+    registered = set(
+        study.predictions.table()
+        .filter(pl.col("prediction_hash").is_in(declared))
+        .get_column("prediction_hash")
+        .to_list()
+    )
+    absent = set(declared) - registered
+    if absent:
+        raise RuntimeError(
+            f"{len(absent)} declared population members have no registry row, "
+            f"first {sorted(absent)[0]}"
+        )
+    if catalog.filter(pl.col("split") != "validation").height:
+        raise RuntimeError("the declared model population contains a non-validation member")
+else:
+    catalog = preview_prediction_candidates(study, labels=labels, limit=PREVIEW_MAX_PREDICTIONS)
+if catalog.is_empty():
+    raise RuntimeError("no validation prediction sets to backtest")
+
+if catalog.filter(~pl.col("complete")).height:
+    raise RuntimeError("the validation prediction catalog contains incomplete members")
+if catalog.get_column("identity_status").n_unique() != 1:
+    raise RuntimeError("the validation prediction catalog mixes identity versions")
+
+catalog.group_by("family", "label").agg(
+    configurations=pl.col("config_name").n_unique(),
+    prediction_sets=pl.len(),
+    checkpoints=pl.col("checkpoint_value").n_unique(),
+).sort("family", "label")
+
+# %% [markdown]
+# Gradient boosting contributes many more prediction sets than configurations because a boosted
+# model is scored at ten points along its own training, and each of those checkpoints is a
+# separate configuration to be backtested rather than a variant of one. A linear fit has a single
+# state and so contributes one prediction set per configuration.
+#
+# ## 2. The decision clock
+#
+# Four moments define a trade, and a backtest is only meaningful when they line up with the label
+# the model was fitted on. For this case study `config/setup.yaml` declares them in the `decision`
+# block:
+#
+# - **The information cutoff** is the pre-funding snapshot. Features are computed from data
+#   observable strictly before the settlement, so nothing the model reads is contemporaneous with
+#   the payment it is trading around.
+# - **The fill** is at the funding timestamp itself. The engine executes at that bar rather than
+#   the next one, which is what makes the position the funding is charged against the position the
+#   decision asked for.
+# - **The holding period** is the label's own horizon: eight hours for the three eight-hour
+#   labels, twenty-four for `fwd_ret_24h`.
+# - **The next decision** comes one *rebalance step* later. A step is counted in slots of the
+#   eight-hour funding schedule, and it is what keeps holding periods from overlapping: a
+#   twenty-four-hour position cannot be re-decided at the next settlement without the second trade
+#   sitting inside the first one's window, so `fwd_ret_24h` advances three slots and the
+#   eight-hour labels advance one.
+#
+# The check below reads the decision times out of the prediction sets and confirms that
+# consecutive decisions inside a fold are exactly one rebalance step apart.
+#
+# **A step apart on the panel's own clock, not eight hours apart on the calendar.** The two
+# readings agree wherever the panel is contiguous and diverge exactly where it is not, and this
+# panel is not: `features/financial.parquet` carries a 57-day hole opening 2021-08-27, an outage
+# in the premium-index feed. That hole sits in fold 1's *training* window, so a calendar check
+# happens to pass today - and would have failed, on correct data and a correctly fitted model,
+# had the outage fallen a year later. A missing settlement is a fact about the exchange feed;
+# what the decision clock claims is that the model decided at every settlement the panel holds
+# and at no other moment, and a gap the panel itself has is not a violation of that.
+#
+# So each decision is located on the panel's settlement index, and the check is that the index
+# advances by `step` and never by anything else. This is strictly the stronger reading: it also
+# refuses a decision at a timestamp the panel does not hold at all, which a gap-tolerant calendar
+# check would wave through, and it refuses a fabricated grid whose stride happens to be a whole
+# multiple of the horizon.
+#
+# It cannot read one set and let it speak for the label. The `complete` column two cells up is a
+# verdict on each member taken by itself, so a member registered as complete against a different
+# set of keys is still complete, and completeness never compares two members to each other. What
+# does compare them is `prediction_coverage.actual_key_digest`, which records the keys each
+# member was actually written at: members sharing a digest were predicted at the same keys, and
+# each distinct digest is a separate grid that has to be checked on its own. This case study
+# carries more than one per label - the sequence models write a sparser panel than the
+# cross-sectional ones over the same decision times - and every one of them is backtested, so
+# every one of them is checked here and appears in the table below.
 
 
 # %%
-def _baseline_leaders(registry_path) -> pl.DataFrame:
-    """Return the frozen equal-weight-baseline leader for each label."""
-    query = """
-        SELECT c.label, t.family, t.config_name, p.checkpoint_value,
-               b.prediction_hash, b.backtest_hash, b.spec_json,
-               c.k_variants, c.dsr_er, c.dsr_er_pvalue,
-               m.sharpe, m.sharpe_ci95_lo, m.sharpe_ci95_hi, m.psr_pvalue
-        FROM cohort_metrics c
-        JOIN backtest_runs b ON b.backtest_hash = c.leader_hash
-        JOIN backtest_metrics m USING (backtest_hash)
-        JOIN prediction_sets p USING (prediction_hash)
-        JOIN training_runs t USING (training_hash)
-        WHERE c.cohort_type = 'stagelabel' AND c.stage = 'signal'
-        ORDER BY c.label
+def decision_grids(label: str) -> pl.DataFrame:
+    """The distinct key sets one label was predicted at, with a representative member of each."""
+    members = catalog.filter(pl.col("label") == label)
+    if members.get_column("decision_key_digest").null_count():
+        blank = members.filter(pl.col("decision_key_digest").is_null())
+        raise RuntimeError(
+            f"{label}: {blank.height} of {members.height} prediction sets record no decision-key "
+            f"digest, so the keys they were written at are unknown and cannot be checked; "
+            f"first {blank.item(0, 'prediction_hash')}"
+        )
+    return (
+        members.group_by("decision_key_digest")
+        .agg(
+            prediction_sets=pl.len(),
+            families=pl.col("family").unique().sort(),
+            reference=pl.col("prediction_hash").min(),
+        )
+        .sort("prediction_sets", "decision_key_digest", descending=[True, False])
+    )
+
+
+# %%
+def decision_timeline(prediction_hash: str) -> pl.DataFrame:
+    """Return the distinct fold and decision timestamps one prediction set was written at."""
+    return (
+        Result.open(study, prediction_hash, include_preview=not CANONICAL_RUN)
+        .load()
+        .select("fold", "timestamp")
+        .unique()
+        .sort("fold", "timestamp")
+    )
+
+
+# %%
+def decision_clock() -> pl.DataFrame:
+    """Every settlement the feature panel holds, numbered. The clock decisions are read on.
+
+    The panel rather than the label file: a model decides where it has features, and the two
+    differ here by the 57-day premium-index outage, which the label file does not have because a
+    forward return is computed from prices alone.
     """
-    with sqlite3.connect(f"file:{registry_path}?mode=ro", uri=True) as connection:
-        return pl.read_database(query, connection)
-
-
-# %%
-leaders = _baseline_leaders(REGISTRY_PATH)
-if leaders.is_empty():
-    raise RuntimeError("The frozen baseline cohort is missing")
-
-signals = [json.loads(value)["strategy"]["signal"] for value in leaders["spec_json"]]
-leaders = leaders.with_columns(
-    pl.Series("entry_rule", [signal["method"] for signal in signals]),
-    pl.Series("top_k", [signal.get("top_k") for signal in signals], dtype=pl.Int64),
-    (pl.col("family") + pl.lit("/") + pl.col("config_name")).alias("source"),
-)
-print(
-    leaders.select(
-        "label",
-        "source",
-        "entry_rule",
-        "top_k",
-        "k_variants",
-        "sharpe",
-        "sharpe_ci95_lo",
-        "sharpe_ci95_hi",
-        "dsr_er_pvalue",
+    panel = (
+        pl.read_parquet(
+            get_case_study_dir("crypto_perps_funding") / "features" / "financial.parquet"
+        )
+        .select("timestamp")
+        .unique()
+        .sort("timestamp")
     )
-)
-
-# %% [markdown]
-# ## Only the 24-hour return leader clears zero
-#
-# The four label-specific leaders already include selection over their registered baseline cohorts.
-# Error bars describe sampling uncertainty for each leader; the effective-rank DSR p-value in the
-# table above addresses selection over the frozen variants.
-
-# %%
-label_names = {
-    "fwd_dir_8h": "8-hour direction",
-    "fwd_dir_8h_3c": "3-class direction",
-    "fwd_ret_8h": "8-hour return",
-    "fwd_ret_24h": "24-hour return",
-}
-fig = go.Figure(
-    go.Scatter(
-        x=leaders["sharpe"],
-        y=[label_names[value] for value in leaders["label"]],
-        mode="markers+text",
-        text=[f"{value:+.2f}" for value in leaders["sharpe"]],
-        textposition="top center",
-        marker={"size": 11, "color": COLORS["amber"]},
-        error_x={
-            "type": "data",
-            "symmetric": False,
-            "array": (leaders["sharpe_ci95_hi"] - leaders["sharpe"]).to_list(),
-            "arrayminus": (leaders["sharpe"] - leaders["sharpe_ci95_lo"]).to_list(),
-        },
-    )
-)
-fig.add_vline(x=0, line_color=COLORS["neutral"], line_width=1)
-fig.update_layout(
-    title={
-        "text": "Only the 24-hour return baseline leader clears zero"
-        "<br><sup>Validation Sharpe with block-bootstrap 95% intervals</sup>",
-        "x": 0.02,
-        "xanchor": "left",
-    },
-    xaxis_title="Annualized validation Sharpe",
-    yaxis_title="Prediction label",
-    showlegend=False,
-    margin={"l": 140},
-)
-fig.show()
-
-# %% [markdown]
-# ## Freeze the selected carrier before touching funding
-#
-# The validation winner is GBM on the 24-hour return label. Its frozen v3.0 artifact predates the
-# availability-clock migration and stores the legacy bar-open timestamp. The target check below
-# verifies that vintage against current raw prices. Prediction and price timestamps are then advanced
-# together to the completed 8-hour bar boundary, preserving the economic pairing without look-ahead.
-# Target weights are sorted by timestamp and symbol before execution so cash-constrained fills have a
-# deterministic order. `register=False` prevents any registry write.
-
-# %%
-carrier = leaders.sort("sharpe", descending=True).row(0, named=True)
-CARRIER_LABEL = carrier["label"]
-CARRIER_PREDICTION = carrier["prediction_hash"]
-if CARRIER_LABEL != "fwd_ret_24h":
-    raise RuntimeError("The frozen baseline winner changed; review the fixed 24-hour narrative")
-with warnings.catch_warnings():
-    warnings.filterwarnings("ignore", message="'Y' is deprecated", category=FutureWarning)
-    validation_window = canonical_window(CASE_STUDY, CARRIER_LABEL, split="validation")
-if validation_window is None:
-    raise RuntimeError("No canonical validation window for the selected carrier")
-validation_start, validation_end = validation_window
-
-print(
-    f"Carrier: {carrier['source']} checkpoint={carrier['checkpoint_value']} "
-    f"label={CARRIER_LABEL} prediction={CARRIER_PREDICTION}"
-)
-print(f"Validation window: {validation_start} through {validation_end}")
-
-# %%
-frozen_predictions = read_predictions(CASE_STUDY, CARRIER_PREDICTION, case_dir=FROZEN_CASE_DIR)
-raw_prices = load_backtest_prices_for(
-    CASE_STUDY,
-    CARRIER_LABEL,
-    split="validation",
-    max_symbols=0,
-    warmup_periods=warmup_periods_for(CASE_STUDY),
-)
-
-legacy_targets = (
-    raw_prices.sort("symbol", "timestamp")
-    .with_columns(
-        pl.col("close").shift(-3).over("symbol").alias("end_close"),
-        pl.col("timestamp").shift(-3).over("symbol").alias("end_timestamp"),
-    )
-    .filter(pl.col("end_timestamp") == pl.col("timestamp") + pl.duration(hours=24))
-    .select(
-        pl.col("timestamp").dt.replace_time_zone("UTC"),
-        "symbol",
-        (pl.col("end_close") / pl.col("close") - 1).alias("current_raw_target"),
-    )
-)
-alignment = frozen_predictions.join(legacy_targets, on=["timestamp", "symbol"], how="inner")
-target_correlation = alignment.select(pl.corr("y_true", "current_raw_target")).item()
-if target_correlation < 0.99:
-    raise ValueError("Frozen prediction timestamps do not match the legacy raw-price clock")
-print(f"Frozen target/current raw-price correlation: {target_correlation:.6f}")
-
-# %%
-predictions = frozen_predictions.with_columns(
-    pl.col("timestamp") + pl.duration(hours=BAR_HOURS)
-).filter(pl.col("timestamp").dt.date() <= validation_end)
-prices = raw_prices.with_columns(pl.col("timestamp") + pl.duration(hours=BAR_HOURS)).filter(
-    pl.col("timestamp").dt.date() <= validation_end
-)
-funding = (
-    load_funding_rates(symbols=prices["symbol"].unique().to_list())
-    .with_columns(pl.col("timestamp").cast(prices.schema["timestamp"]))
-    .filter(
-        (pl.col("timestamp") >= prices["timestamp"].min())
-        & (pl.col("timestamp") <= prices["timestamp"].max())
-    )
-)
-
-print(
-    f"Predictions: {predictions.height:,}; prices: {prices.height:,}; "
-    f"official settlements: {funding.height:,}"
-)
-
-# %% [markdown]
-# Repeated historical hashes collapse to one `(entry_rule, top_k)` specification. A rank-based
-# long-short request cannot admit more than half the available cross-section on either side. The
-# corrected replay therefore caps each requested side at `floor(n_assets / 2)` at every timestamp.
-# Frozen registry values remain visible as history, including cells generated before this repair.
+    return panel.with_row_index("slot")
 
 
-# %%
-def _carrier_cells(registry_path, prediction_hash: str) -> list[dict]:
-    """Return one stored specification per semantic baseline cell."""
-    query = """
-        SELECT b.spec_json, m.sharpe
-        FROM backtest_runs b JOIN backtest_metrics m USING (backtest_hash)
-        WHERE b.stage = 'signal' AND b.prediction_hash = ?
+CLOCK = decision_clock()
+CLOCK_DTYPE = CLOCK.schema["timestamp"]
+
+
+def on_clock_dtype(frame: pl.DataFrame) -> pl.DataFrame:
+    """One timestamp dtype, so a join on it cannot silently match nothing.
+
+    100 of this case study's 677 prediction artifacts - every `deep_learning` validation set
+    for the two return labels - carry a naive microsecond timestamp where the other 577 carry
+    ms/UTC, because the sequence path round-trips the frame through pandas and pandas drops the
+    zone. The instants are the same. A naive value is therefore read as the UTC it is, rather
+    than the zone being dropped from everything, which would hide the difference; and the
+    replace comes before the cast, because casting a naive column to a zoned dtype converts it
+    instead of stamping it.
     """
-    with sqlite3.connect(f"file:{registry_path}?mode=ro", uri=True) as connection:
-        rows = connection.execute(query, (prediction_hash,)).fetchall()
-    cells = {}
-    for spec_json, stored_sharpe in rows:
-        signal = json.loads(spec_json)["strategy"]["signal"]
-        key = (signal["method"], signal.get("top_k"))
-        if key not in cells or stored_sharpe > cells[key]["stored_sharpe"]:
-            cells[key] = {"signal": signal, "stored_sharpe": stored_sharpe}
-    return [cells[key] for key in sorted(cells)]
+    dtype = frame.schema["timestamp"]
+    if dtype == CLOCK_DTYPE:
+        return frame
+    stamp = pl.col("timestamp")
+    if getattr(dtype, "time_zone", None) is None:
+        stamp = stamp.dt.replace_time_zone("UTC")
+    return frame.with_columns(stamp.cast(CLOCK_DTYPE))
 
 
 # %%
-all_cells = _carrier_cells(REGISTRY_PATH, CARRIER_PREDICTION)
-rank_methods = {"equal_weight_top_k", "score_weighted_top_k"}
-panel_sizes = predictions.group_by("timestamp").len().rename({"len": "n_assets"})
-correction_rows = []
-for cell in all_cells:
-    signal = cell["signal"]
-    requested_k = signal.get("top_k")
-    if signal["method"] in rank_methods:
-        capped_timestamps = panel_sizes.filter(pl.col("n_assets") < 2 * requested_k).height
-        correction_rows.append(
+def holding_slots(timeline: pl.DataFrame, step: int) -> list[int]:
+    """The distinct clock distances between decisions `step` positions apart inside a fold."""
+    located = on_clock_dtype(timeline).join(CLOCK, on="timestamp", how="left")
+    if located.get_column("slot").null_count():
+        stray = located.filter(pl.col("slot").is_null()).get_column("timestamp")
+        raise RuntimeError(
+            f"{stray.len()} decisions sit at timestamps the feature panel does not hold, "
+            f"first {stray.min()}"
+        )
+    return (
+        located.sort("fold", "slot")
+        .with_columns(pl.col("slot").shift(-step).over("fold").alias("exit"))
+        .drop_nulls("exit")
+        .select((pl.col("exit") - pl.col("slot")).alias("advanced"))
+        .get_column("advanced")
+        .unique()
+        .sort()
+        .to_list()
+    )
+
+
+def holding_periods(timeline: pl.DataFrame, step: int) -> list[timedelta]:
+    """The distinct calendar gaps between decisions `step` slots apart, for the table below."""
+    return (
+        timeline.with_columns(pl.col("timestamp").shift(-step).over("fold").alias("exit"))
+        .drop_nulls("exit")
+        .select((pl.col("exit") - pl.col("timestamp")).alias("held"))
+        .get_column("held")
+        .unique()
+        .sort()
+        .to_list()
+    )
+
+
+def _utc(moment):
+    """One zone for the summary below, whatever the artifact it came from carried.
+
+    100 of this case study's 677 prediction artifacts - every deep_learning validation set
+    for fwd_ret_8h and fwd_ret_24h - carry a naive microsecond timestamp where the other 577
+    carry ms/UTC, because the sequence path round-trips the frame through pandas and pandas
+    drops the zone. The instants are the same: stamping one naive set UTC reproduces the
+    linear set's 2189 decision times exactly, all of them. So this reads a naive value as the
+    UTC it is, rather than dropping the zone from everything and hiding the difference.
+    """
+    return moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment.astimezone(UTC)
+
+
+# %% tags=["results"]
+decision = setup["decision"]
+intervals = []
+for label in labels:
+    step = get_rebalance_step("crypto_perps_funding", label)
+    horizon = study.labels.get(label).definition.horizon.upper()
+    if not horizon.endswith("H") or not horizon.removesuffix("H").isdigit():
+        raise RuntimeError(f"unsupported crypto label horizon {horizon!r}")
+    expected_gap = timedelta(hours=int(horizon.removesuffix("H")))
+    for grid in decision_grids(label).iter_rows(named=True):
+        timeline = decision_timeline(grid["reference"])
+        advanced = holding_slots(timeline, step)
+        if advanced != [step]:
+            raise RuntimeError(
+                f"{label} grid {grid['decision_key_digest'][:12]} "
+                f"({'/'.join(grid['families'])}, {grid['prediction_sets']} prediction sets, "
+                f"reference {grid['reference']}): decisions advance {advanced} settlements on "
+                f"the panel's clock, not the {step} its {horizon} horizon declares "
+                f"(calendar gaps {holding_periods(timeline, step)})"
+            )
+        intervals.append(
             {
-                "entry_rule": signal["method"],
-                "requested_top_k": requested_k,
-                "capped_timestamps": capped_timestamps,
+                "label": label,
+                "grid": grid["decision_key_digest"][:12],
+                "families": "/".join(grid["families"]),
+                "prediction_sets": grid["prediction_sets"],
+                "information_cutoff": decision["snapshot"],
+                "fill": decision["execution_delay"],
+                "outcome_horizon": horizon,
+                "rebalance_step_slots": step,
+                # The calendar gaps the clock check just accepted. One value on a contiguous
+                # stretch of the panel; a second, larger one wherever the panel has a hole, which
+                # is the difference between the two readings shown rather than described.
+                "calendar_gaps": [str(gap) for gap in holding_periods(timeline, step)],
+                "decision_times": timeline.height,
+                "first_decision": _utc(timeline.get_column("timestamp").min()),
+                "last_decision": _utc(timeline.get_column("timestamp").max()),
             }
         )
-
-cells = all_cells
-corrections = pl.DataFrame(correction_rows).sort("entry_rule", "requested_top_k")
-print(
-    f"Corrected baseline cells: {len(cells)}; panel size range: "
-    f"{panel_sizes['n_assets'].min()} to {panel_sizes['n_assets'].max()}"
-)
-print(corrections)
-
+pl.DataFrame(intervals).sort("label", "grid")
 
 # %% [markdown]
-# ## Reconstruct price P&L before adding settlements
+# ### Every decision the declaration asks for
 #
-# Funding at time $t$ belongs to the position carried into $t$. Orders filled at $t$ earn or pay the
-# next settlement, not the current one. Temporary off-grid settlements are processed with the last
-# observable mark and carried position. The first oracle reconstructs the engine equity curve from
-# fills and marks; funding is then added as a separate cash component.
-
-
-# %%
-def _as_utc(value: datetime) -> datetime:
-    """Normalize an engine timestamp to timezone-aware UTC."""
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-
-
-# %%
-def _replay_inputs(result, price_frame: pl.DataFrame, funding_frame: pl.DataFrame):
-    """Index fills, settlements, prices, and engine equity by UTC timestamp."""
-    engine = result.engine_result
-    if engine is None:
-        raise RuntimeError("Funding replay requires an uncached engine result")
-    fills = defaultdict(list)
-    for fill in engine.fills:
-        fills[_as_utc(fill.timestamp)].append(fill)
-    rates = defaultdict(dict)
-    for row in funding_frame.iter_rows(named=True):
-        rates[_as_utc(row["timestamp"])][row["symbol"]] = float(row["funding_rate"])
-    marks = defaultdict(dict)
-    for row in price_frame.select("timestamp", "symbol", "close").iter_rows(named=True):
-        marks[_as_utc(row["timestamp"])][row["symbol"]] = float(row["close"])
-    engine_equity = {_as_utc(ts): float(value) for ts, value in engine.equity_curve}
-    return fills, rates, marks, engine_equity
-
-
-# %%
-def _settlement_cash(positions, last_marks, timestamp_rates) -> float:
-    """Calculate funding cash for the position carried into a settlement."""
-    return sum(
-        -(positions.get(symbol, 0.0) * last_marks[symbol]) * rate
-        for symbol, rate in timestamp_rates.items()
-        if positions.get(symbol, 0.0) != 0 and symbol in last_marks
-    )
-
-
-# %%
-def _apply_fills(cash: float, positions, last_marks, timestamp_fills) -> float:
-    """Apply fills after funding at a shared timestamp."""
-    for fill in timestamp_fills:
-        quantity = float(fill.quantity) if fill.side.value == "buy" else -float(fill.quantity)
-        cash -= quantity * float(fill.price) + float(fill.commission)
-        last_marks.setdefault(fill.asset, float(fill.price))
-        positions[fill.asset] += quantity
-        if abs(positions[fill.asset]) < 1e-12:
-            del positions[fill.asset]
-    return cash
-
-
-# %%
-def _replay_equity(result, price_frame: pl.DataFrame, funding_frame: pl.DataFrame):
-    """Return funding-adjusted equity, cash flow, events, and reconstruction error."""
-    fills, rates, marks, engine_equity = _replay_inputs(result, price_frame, funding_frame)
-    cash = float(config.initial_cash)
-    positions = defaultdict(float)
-    cumulative_funding = 0.0
-    events = 0
-    settlements_processed = 0
-    adjusted = []
-    reconstructed = []
-    last_marks = {}
-    timeline = sorted(set(engine_equity) | set(rates))
-    for timestamp in timeline:
-        last_marks.update(marks[timestamp])
-        timestamp_rates = rates.get(timestamp, {})
-        settlements_processed += len(timestamp_rates)
-        event_cash = _settlement_cash(positions, last_marks, timestamp_rates)
-        if event_cash:
-            cash += event_cash
-            cumulative_funding += event_cash
-            events += 1
-        cash = _apply_fills(cash, positions, last_marks, fills.get(timestamp, []))
-        if timestamp in engine_equity:
-            marked = sum(quantity * last_marks[symbol] for symbol, quantity in positions.items())
-            adjusted.append((timestamp, cash + marked))
-            reconstructed.append((timestamp, cash - cumulative_funding + marked))
-    error = max(abs(value - engine_equity[ts]) for ts, value in reconstructed)
-    expected_settlements = sum(len(values) for values in rates.values())
-    if settlements_processed != expected_settlements:
-        raise RuntimeError("Funding replay did not consume every official settlement exactly once")
-    return adjusted, cumulative_funding, events, error, settlements_processed
-
-
-# %%
-def _daily_sharpe(equity_curve: list[tuple[datetime, float]]) -> float:
-    """Compute crypto-calendar Sharpe from end-of-day equity."""
-    daily = (
-        pl.DataFrame(equity_curve, schema=["timestamp", "equity"], orient="row")
-        .with_columns(pl.col("timestamp").dt.date().alias("date"))
-        .group_by("date")
-        .agg(pl.col("equity").sort_by("timestamp").last())
-        .sort("date")
-        .with_columns(pl.col("equity").pct_change().alias("return"))
-        .filter((pl.col("date") >= validation_start) & (pl.col("date") <= validation_end))
-    )
-    values = daily["return"].drop_nulls().to_numpy()
-    return float(values.mean() / values.std(ddof=1) * np.sqrt(365))
-
-
-# %%
-def _run_registered_signal(signal: dict):
-    """Run one frozen signal specification with deterministic target order."""
-    spec = build_backtest_spec(
-        CASE_STUDY,
-        config,
-        prices=prices,
-        prediction_hash=CARRIER_PREDICTION,
-        initial_cash=config.initial_cash,
-        chapter="ch16",
-        signal=signal,
-    )
-    weights = precompute_weights(
-        predictions,
-        spec,
-        prices,
-        label=CARRIER_LABEL,
-        case_study=CASE_STUDY,
-        prediction_hash=CARRIER_PREDICTION,
-    ).sort("timestamp", "symbol")
-    return run_backtest(
-        CASE_STUDY,
-        CARRIER_PREDICTION,
-        spec,
-        prices=prices,
-        predictions=predictions,
-        label=CARRIER_LABEL,
-        register=False,
-        precomputed_weights=weights,
-        initial_cash=config.initial_cash,
-        calendar=config.calendar,
-    )
-
-
-# %%
-def _replay_cell(cell: dict) -> dict:
-    """Add official funding settlement to one frozen signal cell."""
-    signal = cell["signal"]
-    result = _run_registered_signal(signal)
-    curve, funding_pnl, events, reconstruction_error, settlements_processed = _replay_equity(
-        result, prices, funding
-    )
-    return {
-        "entry_rule": signal["method"],
-        "top_k": signal.get("top_k"),
-        "stored_sharpe": cell["stored_sharpe"],
-        "price_only_sharpe": float(result.metrics["sharpe"]),
-        "with_funding_sharpe": _daily_sharpe(curve),
-        "funding_pnl": funding_pnl,
-        "funding_events": events,
-        "settlements_processed": settlements_processed,
-        "reconstruction_error": reconstruction_error,
-    }
-
-
-# %%
-def _validate_replay(replay_frame: pl.DataFrame, expected_settlements: int) -> None:
-    """Fail closed when accounting reconstruction or settlement conservation fails."""
-    errors = replay_frame["reconstruction_error"]
-    if not errors.is_finite().all() or errors.max() > 1e-6:
-        raise RuntimeError("Fill-and-mark reconstruction does not match engine equity")
-    if replay_frame["settlements_processed"].min() != expected_settlements:
-        raise RuntimeError("At least one replay missed an official funding row")
-
-
-# %%
-replay_rows = [_replay_cell(cell) for cell in cells]
-replay = pl.DataFrame(replay_rows).sort("price_only_sharpe", descending=True)
-_validate_replay(replay, funding.height)
-print(f"Official settlement rows processed exactly once per replay: {funding.height:,}")
-print(replay)
-for row in replay.iter_rows(named=True):
-    print(
-        f"{row['entry_rule']} requested_top_k={row['top_k']}: "
-        f"price_only={row['price_only_sharpe']:+.6f}, "
-        f"with_funding={row['with_funding_sharpe']:+.6f}, "
-        f"funding_pnl=${row['funding_pnl']:+,.2f}"
-    )
-
-# %% [markdown]
-# ## Funding changes the corrected cells by different amounts
+# The interval check above reads the gaps between consecutive decisions and cannot see a decision
+# that is not there. A fold that ends early, or is missing outright, still has correct gaps
+# between the decisions it does contain, so the check passes on a prediction set covering half
+# the period it claims. Every other guard in the pipeline is relative in the same way -
+# completeness compares one configuration's key count against its peers', and a fault upstream of
+# the fit moves every peer together.
 #
-# The replay preserves each requested entry rule while enforcing a disjoint long-short book at every
-# timestamp. The difference between each pair of points is only realized funding settlement. A
-# positive rate debits long notional and credits short notional.
+# `check_prediction_coverage` compares against the declaration instead: the fold boundaries in
+# `config/setup.yaml`, and the sessions inside them. It asks that the folds present are the folds
+# declared, that every declared session carries a row, and that the declared folds account for the
+# whole window.
+#
+# Which sessions it declares is the same question the clock check just answered, and it gets the
+# same answer. Left to itself the gate takes them from the label artifact, and a forward return
+# survives a premium-index outage that every feature built on that feed does not - so the label
+# file declares 2,189 validation sessions where the panel holds fewer. Passing the panel as the
+# decision axis is what stops the gate reporting a model incomplete for not predicting where it
+# was blind. It narrows and never widens: a timestamp the panel has and the label file does not is
+# still not a session.
 
-# %%
-labels = [
+# %% tags=["results"]
+coverage = [
     (
-        f"EW requested {row['top_k']}"
-        if row["entry_rule"] == "equal_weight_top_k"
-        else "Quintile L/S (5 quantiles)"
+        grid,
+        check_prediction_coverage(
+            Result.open(study, grid["reference"], include_preview=not CANONICAL_RUN).load(),
+            "crypto_perps_funding",
+            label,
+            case_dir=study.root,
+            decision_axis=CLOCK.get_column("timestamp"),
+        ),
     )
-    for row in replay.iter_rows(named=True)
+    for label in labels
+    for grid in decision_grids(label).iter_rows(named=True)
 ]
-
-# %%
-fig = go.Figure()
-_ = fig.add_trace(
-    go.Scatter(
-        x=replay["price_only_sharpe"],
-        y=labels,
-        mode="markers",
-        name="Price P&L net costs",
-        marker={"size": 10, "color": COLORS["blue"]},
-    )
-)
-_ = fig.add_trace(
-    go.Scatter(
-        x=replay["with_funding_sharpe"],
-        y=labels,
-        mode="markers",
-        name="Including funding",
-        marker={"size": 10, "color": COLORS["amber"]},
-    )
-)
+pl.DataFrame(
+    [
+        {
+            "label": report.label,
+            "grid": grid["decision_key_digest"][:12],
+            "families": "/".join(grid["families"]),
+            "declared_folds": report.declared_folds,
+            "declared_sessions": report.expected_sessions,
+            "observed_sessions": report.observed_sessions,
+        }
+        for grid, report in coverage
+    ]
+).sort("label", "grid")
 
 # %% [markdown]
-# Connecting segments show the within-cell accounting change; the zero line remains the common
-# performance baseline.
+# ## 3. Which entry rules the universe can support
+#
+# `config/setup.yaml` declares two axes for this stage. The **top-k** axis takes the k
+# highest-scored contracts long and the k lowest short. The **quantile** axis cuts the
+# cross-section into equal-sized groups and trades the extreme two against each other; with five
+# groups that is the top fifth long and the bottom fifth short.
+#
+# Both are long-short, and a long-short book cannot hold the same contract on both sides, so a
+# top-k rule needs `2k` distinct contracts quoting at every timestamp it trades. The universe here
+# is nineteen perpetual contracts and it is unbalanced - a contract enters the panel when it is
+# listed, so early timestamps carry fewer than nineteen. The declared grid asks for k of 3, 5 and
+# 10; ten a side needs twenty names and there are nineteen at the very best, so that member is
+# not a strategy that performs badly, it is a request the cross-section cannot fill.
+#
+# `get_entry_schemes_for` applies that arithmetic and returns the feasible members. Reading which
+# ones it dropped is worth doing explicitly: a rule silently missing from a sweep looks exactly
+# like a rule that was never declared.
+#
+# **Feasible is not the same as filled at every decision.** The selector asks whether a rule can
+# ever be filled, against the nineteen contracts the universe declares. Whether it is filled at
+# one particular timestamp is a different question, and the answer varies across the period: the
+# allocator computes `min(k, n/2)` per timestamp, so a rule the selector kept still takes fewer
+# names than it asked for wherever the cross-section is thin. The figure below is what separates
+# the two questions, and neither the feasibility table nor the backtest reports it.
 
 # %%
-for index in range(replay.height):
-    fig.add_shape(
-        type="line",
-        x0=replay["price_only_sharpe"][index],
-        x1=replay["with_funding_sharpe"][index],
-        y0=labels[index],
-        y1=labels[index],
-        line={"color": COLORS["neutral"], "width": 1},
+n_assets = int(setup["universe"]["n_assets"])
+declared = setup["backtest"]["sweep"]
+schemes_by_label = {}
+for label in labels:
+    schemes = get_entry_schemes_for(
+        "crypto_perps_funding", label, n_assets=n_assets, long_short=True
     )
-fig.add_vline(x=0, line_color=COLORS["neutral"], line_width=1)
-fig.update_layout(
+    if not schemes:
+        raise RuntimeError(f"no feasible entry rule remains for {label}")
+    schemes_by_label[label] = schemes
+
+feasibility = pl.DataFrame(
+    [
+        {
+            "label": label,
+            "axis": "top_k",
+            "requested": f"k={k}",
+            "contracts_needed": 2 * int(k),
+            "runs": any(scheme.get("top_k") == int(k) for scheme in schemes_by_label[label]),
+        }
+        for label in labels
+        for k in declared["top_k_grid"][label]
+    ]
+    + [
+        {
+            "label": label,
+            "axis": "quantile",
+            "requested": f"{q} groups",
+            "contracts_needed": 2 * int(q),
+            "runs": any(scheme.get("n_quantiles") == int(q) for scheme in schemes_by_label[label]),
+        }
+        for label in labels
+        for q in declared["quantile_grid"][label]
+    ]
+).sort("label", "axis", "requested")
+feasibility
+
+# %% [markdown]
+# ### How thin the panel actually gets
+#
+# The count above is the universe at full listing. What decides whether a rule can be filled on a
+# given day is how many contracts were quoting *then*, and that is a series rather than a
+# constant. The chart draws it against the two thresholds the declared grid asks for.
+#
+# It counts the contracts scored on the widest of the label's decision grids - the one the most
+# prediction sets share. A sparser grid would draw a narrower panel than the market offered,
+# which is a fact about that model's own coverage rather than about what could be traded.
+
+# %%
+widest_grid = decision_grids(labels[0]).row(0, named=True)
+breadth = (
+    Result.open(study, widest_grid["reference"], include_preview=not CANONICAL_RUN)
+    .load()
+    .group_by("timestamp")
+    .len()
+    .sort("timestamp")
+)
+
+# %%
+fig_breadth = go.Figure(
+    go.Scatter(
+        x=breadth.get_column("timestamp").to_list(),
+        y=breadth.get_column("len").to_list(),
+        mode="lines",
+        line={"color": COLORS["blue"], "width": 1.5},
+        name="Contracts scored",
+    )
+)
+for k, style in ((5, "dot"), (10, "dash")):
+    fig_breadth.add_hline(
+        y=2 * k,
+        line={"color": COLORS["amber"] if k == 10 else COLORS["neutral"], "dash": style},
+        annotation_text=f"needed for k={k} a side",
+        annotation_position="top left",
+    )
+fig_breadth.update_layout(
     title={
-        "text": "Official funding changes the corrected baseline cells"
-        "<br><sup>Register-free replay on the selected 24-hour GBM carrier</sup>",
+        "text": "The panel never supports a ten-a-side long-short book"
+        "<br><sup>Contracts scored at each eight-hour decision, validation period</sup>",
         "x": 0.02,
         "xanchor": "left",
     },
-    xaxis_title="Annualized validation Sharpe",
-    yaxis_title="Entry rule",
-    legend_title="Return definition",
-    margin={"l": 140},
+    xaxis_title="Decision timestamp",
+    yaxis_title="Contracts scored",
+    showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig_breadth,
+    "Line chart of the number of perpetual contracts scored at each eight-hour decision over the "
+    "validation period, with two horizontal reference lines at ten and twenty contracts marking "
+    "what a five-a-side and a ten-a-side long-short book need. The series starts at fourteen "
+    "contracts in January 2022 and ends at nineteen, and it never touches the twenty line, so "
+    "the ten-a-side rule is never fillable. It drops below the ten line in two separate "
+    "episodes rather than trending: to five between 2 October and 2 November 2022, and to eight "
+    "between 9 April and 10 May 2023, ninety-three decisions each and 186 of 2,189 in total. "
+    "Across those the five-a-side rule truncates to whatever the cross-section holds rather "
+    "than failing.",
+)
 
 # %% [markdown]
-# ## Baseline judgment
+# ## 4. Running the grid
 #
-# The frozen validation cohort selects `gbm/leaves_7_huber` at checkpoint 500 on the 24-hour return
-# label. Its registered equal-weight top-5 baseline Sharpe is 2.09 with a 95% interval of
-# [0.61, 3.78]. The label-level effective-rank DSR p-value is 0.0048 across 114 frozen variants.
-# This selection uses no holdout information.
+# `run_backtests` takes the selected catalog rows and one entry rule, resolves each into a
+# complete strategy specification, computes the identity that specification implies, and only then
+# executes. Resolution is where the case-study specifics enter: the engine configuration from
+# `config/backtest/base.yaml`, the fee schedule, the fill timing, the price series, and - for this
+# case study alone - the official funding rates joined to the exact symbol-timestamp pairs the
+# prices cover. All of it is hashed into the result's identity, so a run whose funding data
+# changed is a different result rather than the same one with different numbers.
 #
-# The register-free replay separates two return definitions. Price P&L net of commissions and
-# slippage reconstructs the engine before official settlement is added. The current replay also
-# repairs the frozen rank-based cells by dynamically capping each side at half the available panel.
-# The resulting values replace the overlapping or one-sided implementation in this corrected
-# historical replay. The corrected top-5 price-only Sharpe is +2.169; official funding raises it to
-# +2.292 and contributes +$36,269. Funding cannot be treated as a constant uplift because its sign
-# depends on the carried long and short notionals.
+# Prices are loaded once per label and passed in. The boundary would load them itself, and loads
+# the same rows either way, but it would do so twice for every configuration.
 #
-# This notebook establishes a frozen v3.0 baseline and corrects its accounting interpretation. It
-# does not claim that the same carrier wins on the corrected 44-feature lineage, and it does not use
-# the holdout. Allocation alternatives are evaluated next.
+# Each call publishes an immutable population of exactly the backtests it is about to produce, and
+# requires every member to exist and be complete afterwards. Re-running the notebook re-derives
+# the same identities, finds them registered, and returns the stored results rather than
+# re-executing - so the cost of a second run is reading the data.
+
+# %%
+config = get_backtest_config("crypto_perps_funding")
+print(
+    f"Costs: {config.commission_bps:.1f} bps commission and "
+    f"{config.slippage_bps:.1f} bps slippage per leg, on {config.initial_cash:,.0f} of capital"
+)
+
+# %%
+executions = []
+for label in labels:
+    prices = load_backtest_prices_for(
+        "crypto_perps_funding", label, split="validation", warmup_periods=0
+    )
+    label_rows = catalog.filter(pl.col("label") == label)
+    for scheme in schemes_by_label[label]:
+        signal = {key: value for key, value in scheme.items() if key != "name"}
+        signal_population = f"crypto-signal-{label}-{scheme['name']}-{POPULATION_SUFFIX}"
+        execution = run_backtests(
+            study,
+            predictions=label_rows,
+            signal=signal,
+            prices=prices,
+            chapter="ch16",
+            # A population is canonical by definition and is written to the shared registry
+            # whatever tier is active, so a preview run names none and the stages below read
+            # its executions directly instead.
+            population_name=signal_population if CANONICAL_RUN else None,
+            supersedes=SUPERSEDES_BACKTESTS.get(signal_population) if CANONICAL_RUN else None,
+        )
+        executions.append((label, scheme["name"], execution))
+        print(
+            f"{label} / {scheme['name']}: {len(execution.results)} backtests registered\n"
+            f"  this execution: {execution.n_computed} computed, "
+            f"{execution.n_reused} served from the registry"
+        )
 
 # %% [markdown]
-# ## Key takeaways
+# ### The candidate set each label hands on
 #
-# 1. Database `stage='signal'` means the equal-weight allocation baseline.
-# 2. The frozen 24-hour GBM leader is the only label-specific baseline whose Sharpe interval clears
-#    zero.
-# 3. Official funding settlements belong in total return and must be position-signed at each event.
-# 4. Requested top-k is dynamically capped at half the available panel, repairing both early top-5
-#    timestamps and every top-10 timestamp without silently dropping registered cells.
-# 5. Funding changes are strategy-dependent, so a price-only Sharpe cannot stand in for total return.
-# 6. Every replay uses `register=False`; the frozen registry remains unchanged.
+# A **candidate set** is the population downstream stages are allowed to choose from. Registry
+# presence is not membership: a result exists in the registry the moment it is written, and the
+# candidate set is the separate statement admitting it to a comparison. One set per label holds
+# every baseline for that label, across both entry rules, and
+# [`14_portfolio_management`](14_portfolio_management.ipynb) opens it by name rather than being
+# handed a list of hashes.
 #
-# **Next**: [`14_portfolio_management`](14_portfolio_management.ipynb) compares alternative
-# allocation mechanisms on the validation-selected baseline carriers.
+# A candidate set is canonical too - `CandidateSet.create` refuses a preview member - so a
+# preview run leaves the funnel's named pools alone and the stages downstream read its backtest
+# catalog directly.
+
+# %%
+signal_candidate_members: dict[str, list[str]] = {}
+for label in labels:
+    members = [
+        result
+        for member_label, _, execution in executions
+        if member_label == label
+        for result in execution.results
+    ]
+    candidate_set_name = f"crypto-signal-{label}"
+    if CANONICAL_RUN:
+        candidates = CandidateSet.create(
+            study,
+            candidate_set_name,
+            members,
+            supersedes=SUPERSEDES_CANDIDATES.get(candidate_set_name),
+        )
+        signal_candidate_members[label] = list(candidates.members)
+        print(f"{candidates.name}: {len(candidates.members)} members")
+    else:
+        signal_candidate_members[label] = [result.hash for result in members]
+        print(f"{candidate_set_name} (preview): {len(members)} members, not frozen")
+
+# %% [markdown]
+# ## 5. What came out
+#
+# One row per label and entry rule, read back from the registry rather than from the objects the
+# loop returned. `sharpe` is the annualized ratio of mean daily return to its standard deviation,
+# on the crypto calendar of 365 days; the median and the spread across configurations describe the
+# population, and the count of configurations above zero says how much of it made money at all.
+# `avg_turnover` is the fraction of the book replaced at an average rebalance, which is what the
+# commission and slippage columns are charged on.
+#
+# The rows are the ones this run just registered, named by hash, and not every signal-stage row
+# the registry holds. The registry keeps every generation ever run, so the wider read reports a
+# retired generation's backtests alongside the live one: the rendered notebook said 346
+# `fwd_ret_8h` backtests per rule after executing 262, and every median and spread below was
+# computed over the union.
+
+# %% tags=["results"]
+swept = [result.hash for _, _, execution in executions for result in execution.results]
+results = study.backtests.table(include_preview=not CANONICAL_RUN).filter(
+    pl.col("backtest_hash").is_in(swept)
+)
+if results.height != len(swept):
+    raise RuntimeError(
+        f"{len(swept)} backtests were executed and {results.height} read back from the registry"
+    )
+if results.filter(~pl.col("complete")).height:
+    raise RuntimeError("the signal-stage backtest catalog contains incomplete members")
+
+signal_grid = (
+    results.with_columns(
+        entry_rule=pl.when(pl.col("signal_method") == "equal_weight_top_k")
+        .then(
+            pl.lit("top-")
+            + pl.col("spec_json").str.json_path_match("$.strategy.signal.top_k")
+            + pl.lit(" a side")
+        )
+        .otherwise(pl.col("signal_method"))
+    )
+    .group_by("label", "entry_rule")
+    .agg(
+        backtests=pl.len(),
+        median_sharpe=pl.col("sharpe").median(),
+        min_sharpe=pl.col("sharpe").min(),
+        max_sharpe=pl.col("sharpe").max(),
+        above_zero=(pl.col("sharpe") > 0).sum(),
+        median_turnover=pl.col("avg_turnover").median(),
+        median_trades=pl.col("num_trades").median(),
+    )
+    .sort("label", "entry_rule")
+)
+signal_grid
+
+# %% [markdown]
+# **`entry_rule` is what was requested, not what every decision traded.** The label is read from
+# `strategy.signal.top_k` in the registered specification, so a `top-5 a side` row is named for the
+# book it asked for. The allocator takes `min(k, n/2)` at each decision, so how often the name
+# overstates the book depends on `k` and not only on the panel:
+#
+# - **`top-5 a side` narrows at 186 of the decisions** - both sub-ten episodes, because five a
+#   side needs ten names and the panel holds five in the first and eight in the second.
+# - **`top-3 a side` narrows at 93** - only the five-contract episode. Where the panel holds
+#   eight, `min(3, 4)` is 3 and a three-a-side book fills exactly as named.
+# - The quantile rule takes a fraction of whatever is quoted, so it has no fixed width to fall
+#   short of and is not affected.
+#
+# The counts are the same for all four labels: every one predicts on the same eight-hour decision
+# grid, and `fwd_ret_24h` differs only in how long a position is then held, not in when it is
+# opened. `fwd_ret_24h` has 2,187 decisions to the others' 2,189, which is its longer horizon
+# retiring the last two of each fold.
+#
+# This is a caveat on reading the table, not a defect in the results. Within a label every
+# configuration met the same cross-section on the same dates, so the comparison between rows holds
+# even where the name overstates the book.
+
+# %% [markdown]
+# ### The spread the baseline produces
+#
+# One panel per label, one distribution per entry rule, over every configuration that label
+# declared. The zero line is the reference: a point below it is a configuration whose ranking,
+# traded equally weighted and charged the declared costs and the funding it actually paid, lost
+# money over the validation period.
+#
+# Read the *width* rather than the extreme. Every configuration in a panel saw the same contracts
+# over the same timestamps, so the spread within a panel is what changing the model does at fixed
+# sizing, and it is the quantity the later stages have to beat to be worth their extra machinery.
+# A panel's highest point is the largest of many draws, and how much of it is the draw rather than
+# the model is what [`19_strategy_analysis`](19_strategy_analysis.ipynb) accounts for.
+
+# %%
+panel_labels = [label for label in labels if results.filter(pl.col("label") == label).height]
+fig_spread = make_subplots(
+    rows=len(panel_labels),
+    cols=1,
+    shared_xaxes=True,
+    vertical_spacing=0.05,
+    subplot_titles=panel_labels,
+)
+rules = sorted(set(results.get_column("signal_method")))
+for row, label in enumerate(panel_labels, start=1):
+    for rule, color in zip(rules, (COLORS["blue"], COLORS["amber"]), strict=False):
+        panel = results.filter((pl.col("label") == label) & (pl.col("signal_method") == rule))
+        fig_spread.add_trace(
+            go.Box(
+                x=panel.get_column("sharpe").to_list(),
+                name=rule,
+                marker_color=color,
+                boxpoints="all",
+                jitter=0.4,
+                pointpos=0,
+                marker={"size": 3, "opacity": 0.5},
+                showlegend=row == 1,
+            ),
+            row=row,
+            col=1,
+        )
+    fig_spread.add_vline(
+        x=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"], row=row, col=1
+    )
+fig_spread.update_xaxes(title_text="Annualized validation Sharpe", row=len(panel_labels), col=1)
+fig_spread.update_layout(
+    title="Equal-weight baseline Sharpe by label and entry rule",
+    height=260 * len(panel_labels),
+    width=1000,
+    legend_title="Entry rule",
+    margin=dict(t=90),
+)
+show_plotly_with_alt(
+    fig_spread,
+    "Box plots with every configuration overlaid as a point, one panel per prediction label and "
+    "one box per entry rule within each panel, showing annualized validation Sharpe. Each panel "
+    "carries a dashed vertical line at zero. The distributions straddle zero in every panel and "
+    "the two entry rules overlap heavily within each label, so neither rule separates from the "
+    "other and no label separates from the rest.",
+)
+
+# %% [markdown]
+# ## 6. What to notice
+#
+# **An equal-weight baseline is a measuring instrument, not a candidate.** It exists so that the
+# stages after it can change exactly one thing and attribute the difference. Sizing changes in
+# `14_portfolio_management`, the cost assumption in [`16_costs`](16_costs.ipynb), an exit overlay
+# in [`15_risk_management`](15_risk_management.ipynb) - each against the same rankings, the same
+# timestamps and the same funding. A comparison that changes the model *and* the sizing measures
+# neither.
+#
+# **The funding settlement is inside the identity, which is what makes the later comparisons
+# possible.** Nothing here reconstructs the equity curve afterwards to add funding on top. Had it
+# done so, the registered return and the funding-adjusted return would be two different series
+# with one hash between them, and every downstream stage would have to be told which one it was
+# reading. Because the settlement happens in the engine, the registered return, the turnover and
+# the drawdown all describe the same book.
+#
+# **A grid member the cross-section cannot fill is a declaration problem, not a result.** The
+# ten-a-side rule is in `setup.yaml` and is never run, and the count of what was requested against
+# what executed is in the notebook for that reason. The alternative - letting the engine take
+# whatever names are available and calling it a ten-a-side book - produces a result that is
+# reported under a name it does not match.
+#
+# **Two folds, and a cross-section under twenty.** Each Sharpe above is estimated from two
+# validation years on a panel that starts thinner than it ends. The spread within a panel is
+# therefore wide for reasons that have nothing to do with the models, and a difference of the
+# same size as that spread is not evidence of anything.
+#
+# **Known limitations.** The baseline charges a flat commission and slippage to every contract,
+# while the fee schedule this exchange publishes separates the largest contracts from the rest;
+# `16_costs` is where that assumption is varied rather than assumed away. Positions are held for
+# exactly the label horizon with no exit condition, which `15_risk_management` relaxes. And every
+# number here is measured on the validation folds, which the case study has read many times by the
+# time it reaches this notebook.
+#
+# **Next**: [`14_portfolio_management`](14_portfolio_management.ipynb) keeps the rankings and the
+# entry rules fixed and varies how much capital each admitted position gets.

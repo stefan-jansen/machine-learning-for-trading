@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sqlite3
 import time
 from pathlib import Path
@@ -35,16 +34,6 @@ from tests.test_research_flow import _prices
 from tests.test_research_models import _linear_study
 from tests.test_research_registry import _predictions, _training_spec
 from tests.test_research_workspace import _seed_release
-
-
-@pytest.fixture(autouse=True)
-def _restore_output_root():
-    yield
-    os.environ.pop("ML4T_OUTPUT_DIR", None)
-    from case_studies.research import workspace
-
-    workspace._ACTIVE_OUTPUT_ROOT = None
-    workspace._clear_root_sensitive_caches()
 
 
 def _study(tmp_path: Path) -> Study:
@@ -577,6 +566,14 @@ def test_preview_prediction_is_excluded_from_official_population(
     assert preview_selection.height == 1
     with pytest.raises(ValueError, match="preview.*candidate set"):
         study.predictions.freeze(preview_selection, name="preview-must-not-freeze")
+    # Back to canonical first, because the tier is ambient and sticky: `run_models`
+    # calls `study.activate` per request and nothing restores it, so the process is
+    # still in preview here. `OfficialPopulation.create` checks the running tier
+    # before it checks its members (population.py, `_refuse_preview_activation`), so
+    # without this the run-level guard fires and the member-tier check below - which
+    # is what this asserts - is never reached. A notebook re-activates the same way
+    # when it moves from a preview to a canonical step.
+    study.activate("canonical")
     with pytest.raises(ValueError, match="preview.*cannot enter"):
         OfficialPopulation.create(
             study,
@@ -584,6 +581,15 @@ def test_preview_prediction_is_excluded_from_official_population(
             member_kind="prediction",
             members=[preview.hash],
         )
+    with monkeypatch.context() as canonical_env:
+        canonical_env.delenv("ML4T_OUTPUT_DIR", raising=False)
+        with pytest.raises(ValueError, match="preview.*cannot enter"):
+            OfficialPopulation.create(
+                study,
+                name="preview-must-not-enter-official",
+                member_kind="prediction",
+                members=[preview.hash],
+            )
     preview_returns = pl.DataFrame({"timestamp": ["2024-01-05"], "return": [0.01]}).with_columns(
         pl.col("timestamp").str.to_date()
     )
@@ -1047,6 +1053,85 @@ def test_resolving_a_population_by_name_returns_the_generation_in_force(tmp_path
     assert OfficialPopulation.one(study, name="gbm-v1").hash == third.hash
 
 
+def test_declared_supersedes_applies_only_to_the_generation_it_produces(tmp_path: Path) -> None:
+    """A notebook declaring the hash it supersedes must reproduce a tip, never extend past one.
+
+    fx_pairs/07_gbm carries a non-empty ``SUPERSEDES_POPULATION`` so that re-running it resolves
+    to the published generation rather than writing a new one. That declaration describes exactly
+    one generation - the one produced by superseding that hash - so it applies only while that
+    generation is the one in force. Asking instead whether *any* generation exists gets the second
+    run on a clean clone wrong: run 1 writes the first generation, whose own supersedes is None,
+    and offering the hash again there writes a second generation nobody asked for.
+    """
+    study = _study(tmp_path)
+
+    def request(alpha: float) -> ResolvedModelRequest:
+        spec = _resolved_spec(alpha=alpha)
+        spec["computation"]["checkpoint_schedule"] = [{"kind": "epoch", "value": 1}]
+        return ResolvedModelRequest(study=study, family="linear", spec=spec, _context=None)
+
+    def declared_for(name: str, declared: str | None) -> str | None:
+        """The notebook's rule, in one place, so the assertions below exercise it rather than restate it."""
+        try:
+            current = OfficialPopulation.one(study, name=name)
+        except (ValueError, sqlite3.OperationalError):
+            return None
+        return declared if declared in (current.supersedes, current.hash) else None
+
+    # Run 1 on an empty registry: nothing to supersede, so the declaration is withheld.
+    assert declared_for("gbm-declared-v1", "deadbeefcafe") is None
+    first = snapshot_official_models(
+        study,
+        [request(1.0)],
+        population_name="gbm-declared-v1",
+        supersedes=declared_for("gbm-declared-v1", "deadbeefcafe"),
+    )
+
+    # Run 2 on that same registry is the case the wrong rule breaks. The generation in force is
+    # the first one, whose supersedes is None, so the declaration still does not apply and the
+    # rerun resolves to the identical hash rather than writing a second generation.
+    assert declared_for("gbm-declared-v1", "deadbeefcafe") is None
+    rerun = snapshot_official_models(
+        study,
+        [request(1.0)],
+        population_name="gbm-declared-v1",
+        supersedes=declared_for("gbm-declared-v1", "deadbeefcafe"),
+    )
+    assert rerun.hash == first.hash
+    assert OfficialPopulation.one(study, name="gbm-declared-v1").hash == first.hash
+
+    # Now supersede for real, and the declaration naming the retired hash becomes the one that
+    # reproduces the tip - which is the state a maintainer's registry is in.
+    second = snapshot_official_models(
+        study, [request(2.0)], population_name="gbm-declared-v1", supersedes=first.hash
+    )
+    assert declared_for("gbm-declared-v1", first.hash) == first.hash
+    again = snapshot_official_models(
+        study,
+        [request(2.0)],
+        population_name="gbm-declared-v1",
+        supersedes=declared_for("gbm-declared-v1", first.hash),
+    )
+    assert again.hash == second.hash
+
+    # And a declaration naming some other generation does not apply, so it cannot fork the chain.
+    assert declared_for("gbm-declared-v1", "deadbeefcafe") is None
+
+    # The authoring case, which testing only `current.supersedes == declared` blocks. An author
+    # holding the tip and declaring THAT hash is publishing the next generation, not reproducing
+    # one, and withholding there would fix the reader by making the publication impossible.
+    tip = OfficialPopulation.one(study, name="gbm-declared-v1")
+    assert declared_for("gbm-declared-v1", tip.hash) == tip.hash
+    third = snapshot_official_models(
+        study,
+        [request(3.0)],
+        population_name="gbm-declared-v1",
+        supersedes=declared_for("gbm-declared-v1", tip.hash),
+    )
+    assert third.hash != tip.hash
+    assert OfficialPopulation.one(study, name="gbm-declared-v1").hash == third.hash
+
+
 def test_interrupted_linear_run_reuses_completed_fold_on_retry(tmp_path: Path, monkeypatch) -> None:
     study = _linear_study(tmp_path, monkeypatch)
     request = study.model(family="linear", label="fwd_ret_1d", config_name="ridge")
@@ -1126,3 +1211,262 @@ def test_prediction_retry_finishes_metrics_without_new_identity(
 
     assert finalized.hash == prediction_hash
     assert finalized.complete
+
+
+def test_backtest_catalog_carries_the_registered_sharpe_interval(tmp_path: Path) -> None:
+    """A catalog reader can say whether a Sharpe clears zero without raw SQL.
+
+    The uncertainty layer registers ``sharpe_ci95_lo``/``_hi`` on every backtest, but the
+    catalog used to project only point estimates, so a notebook reading it could report a
+    Sharpe surface and had no interval to compare against zero.
+    """
+    study = _study(tmp_path)
+    prediction_hash = _publish_prediction(study, alpha=1.0, checkpoint=1)
+    returns = pl.DataFrame({"timestamp": ["2024-01-05"], "return": [0.01]}).with_columns(
+        pl.col("timestamp").str.to_date()
+    )
+    backtest_hash = register_backtest_run(
+        "etfs",
+        prediction_hash,
+        {
+            "execution_tier": "canonical",
+            "strategy": {"signal": {"method": "equal_weight_top_k", "top_k": 1}},
+        },
+        stage="signal",
+        returns=returns,
+        trades=pl.DataFrame({"symbol": ["SPY"], "pnl": [1.0]}),
+        metrics={"sharpe": 1.25, "sharpe_ci95_lo": 0.4, "sharpe_ci95_hi": 2.1},
+        case_dir=study.root,
+    )
+
+    row = study.backtests.one(backtest_hash=backtest_hash)
+
+    assert row["sharpe"] == pytest.approx(1.25)
+    assert row["sharpe_ci95_lo"] == pytest.approx(0.4)
+    assert row["sharpe_ci95_hi"] == pytest.approx(2.1)
+
+
+def test_a_workspace_resolves_the_released_canonical_causal_result(tmp_path: Path) -> None:
+    """A workspace opened over a release starts with an empty run_log; the release still counts.
+
+    `11_model_analysis` reads canonical prediction populations at every tier, so it asks for the
+    canonical causal artifact at every tier too. The prediction and backtest catalogs overlay the
+    release; the causal lookup read only `study.root`, so in a workspace it found nothing.
+    """
+    import json
+
+    from case_studies.research import CausalResult
+    from case_studies.utils.registry.registration import register_causal_run
+    from case_studies.utils.registry.specs import IDENTITY_VERSION
+
+    release = _seed_release(tmp_path)
+    register_causal_run(
+        "etfs",
+        "causalreleased01",
+        label="fwd_ret_21d",
+        treatment="ivrv_spread",
+        confounders_json='["rv_20"]',
+        embargo=10,
+        n_folds=5,
+        n_obs=100,
+        dml_effect=-0.03,
+        dml_se_hac=0.02,
+        p_value_hac=0.25,
+        naive_effect=-0.02,
+        confounding_bias_pct=-0.5,
+        refutation_p=0.01,
+        spec_json=json.dumps(
+            {
+                "family": "causal_dml",
+                "identity_version": IDENTITY_VERSION,
+                "execution_tier": "canonical",
+            }
+        ),
+        notebook="10_causal_dml",
+        started_at="2024-01-05T00:00:00Z",
+        elapsed_s=1.0,
+        case_dir=release / "case_studies" / "etfs",
+    )
+    study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
+
+    result = CausalResult.one(study, label="fwd_ret_21d", execution_tier="canonical")
+
+    assert result.hash == "causalreleased01"
+    assert result.metrics["dml_effect"] == pytest.approx(-0.03)
+
+
+def test_a_workspace_causal_result_wins_over_the_release_it_supersedes(tmp_path: Path) -> None:
+    """The nearer registry answers; the release is a fallback, not a second opinion.
+
+    Merging the two makes a workspace that re-derived the result under a corrected input read
+    as two current identities against the release's prior one, and refuse rather than return
+    the result the workspace just wrote.
+    """
+    import json
+
+    from case_studies.research import CausalResult
+    from case_studies.utils.registry.registration import register_causal_run
+    from case_studies.utils.registry.specs import IDENTITY_VERSION
+
+    def _spec() -> str:
+        return json.dumps(
+            {
+                "family": "causal_dml",
+                "identity_version": IDENTITY_VERSION,
+                "execution_tier": "canonical",
+            }
+        )
+
+    release = _seed_release(tmp_path)
+    common = dict(
+        label="fwd_ret_21d",
+        treatment="ivrv_spread",
+        confounders_json='["rv_20"]',
+        embargo=10,
+        n_folds=5,
+        n_obs=100,
+        dml_se_hac=0.02,
+        p_value_hac=0.25,
+        naive_effect=-0.02,
+        confounding_bias_pct=-0.5,
+        refutation_p=0.01,
+        spec_json=_spec(),
+        notebook="10_causal_dml",
+        started_at="2024-01-05T00:00:00Z",
+        elapsed_s=1.0,
+    )
+    register_causal_run(
+        "etfs",
+        "causalreleasedaa",
+        dml_effect=-0.03,
+        case_dir=release / "case_studies" / "etfs",
+        **common,
+    )
+    study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
+    register_causal_run("etfs", "causalworkspace1", dml_effect=-0.07, case_dir=study.root, **common)
+
+    result = CausalResult.one(study, label="fwd_ret_21d", execution_tier="canonical")
+
+    assert result.hash == "causalworkspace1"
+    assert result.metrics["dml_effect"] == pytest.approx(-0.07)
+
+    # A workspace row at an older identity is not a result at this one, so the release answers.
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        db.execute(
+            "UPDATE causal_runs SET spec_json = ? WHERE causal_hash = ?",
+            (json.dumps({"family": "causal_dml", "identity_version": 1}), "causalworkspace1"),
+        )
+        db.commit()
+
+    fallback = CausalResult.one(study, label="fwd_ret_21d", execution_tier="canonical")
+
+    assert fallback.hash == "causalreleasedaa"
+
+
+def test_a_release_registry_without_causal_runs_reports_nothing_rather_than_erroring(
+    tmp_path: Path,
+) -> None:
+    """A release seeded before any causal run holds a registry with no `causal_runs` table.
+
+    Naming an absent table in a SELECT is an error rather than an empty result, so the fallback
+    that exists to reach the release turns "no causal artifact anywhere" into an OperationalError
+    from sqlite unless the lookup checks the table is there.
+    """
+    from case_studies.research import CausalResult
+
+    release = _seed_release(tmp_path)
+    study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
+
+    with pytest.raises(ValueError, match="resolved to 0 identities"):
+        CausalResult.one(study, label="fwd_ret_21d", execution_tier="canonical")
+
+    with pytest.raises(KeyError, match="unknown causal result"):
+        CausalResult.open(study, "causalmissing001")
+
+
+def test_reproducing_a_published_population_is_a_no_op_whatever_it_says_it_supersedes(
+    tmp_path: Path,
+) -> None:
+    """A notebook must be able to re-run itself. `supersedes` sits inside the hashed
+    snapshot as well as in its own column, so a second generation's hash depends on which
+    generation it replaced. The notebook that published it holds no record of that - all six
+    multi-generation ETF populations are produced by notebooks declaring
+    `SUPERSEDES_POPULATION = ""` - so re-running one recomputes the same members and a
+    different hash, and the name check rejects it as changed. Reproducing the published list
+    is not a change and must return the published snapshot."""
+    study = _study(tmp_path)
+
+    def request(alpha: float) -> ResolvedModelRequest:
+        spec = _resolved_spec(alpha=alpha)
+        spec["computation"]["checkpoint_schedule"] = [{"kind": "epoch", "value": 1}]
+        return ResolvedModelRequest(study=study, family="linear", spec=spec, _context=None)
+
+    first = snapshot_official_models(study, [request(1.0)], population_name="pca-v1")
+    second = snapshot_official_models(
+        study, [request(2.0)], population_name="pca-v1", supersedes=first.hash
+    )
+    assert second.hash != first.hash
+
+    # The notebook re-run: same members as the published generation, and no predecessor to
+    # name, because the notebook never recorded one.
+    again = snapshot_official_models(study, [request(2.0)], population_name="pca-v1")
+
+    assert again.hash == second.hash
+    assert again.members == second.members
+    assert OfficialPopulation.one(study, name="pca-v1").hash == second.hash
+
+
+def test_a_member_list_that_actually_differs_still_needs_its_predecessor(tmp_path: Path) -> None:
+    """The relaxation above must not reach a list that changed. Publishing different members
+    under a live name without naming what they replace is what leaves a reader unable to tell
+    which snapshot a downstream result was computed over."""
+    study = _study(tmp_path)
+
+    def request(alpha: float) -> ResolvedModelRequest:
+        spec = _resolved_spec(alpha=alpha)
+        spec["computation"]["checkpoint_schedule"] = [{"kind": "epoch", "value": 1}]
+        return ResolvedModelRequest(study=study, family="linear", spec=spec, _context=None)
+
+    snapshot_official_models(study, [request(1.0)], population_name="ipca-v1")
+
+    with pytest.raises(ValueError, match="supersedes"):
+        snapshot_official_models(study, [request(2.0)], population_name="ipca-v1")
+
+
+def test_a_sweep_that_computes_nothing_reports_that_it_computed_nothing(tmp_path: Path) -> None:
+    """A re-run served entirely from the registry must not report the full count as work.
+
+    `len(execution.results)` counts what the sweep resolved, not what it did. Every member of
+    a second identical sweep is served from cache, so a summary built on that length reports
+    the same number as the cold run and reads exactly like it - a wrong number indistinguishable
+    from a right one. A reader cannot tell a real sweep from a no-op, and neither can anyone
+    checking whether a re-run did anything.
+
+    `run_backtests` has always recorded per member whether it was computed or reused; nothing
+    surfaced it.
+
+    The fix is not to replace the length with the computed count, which would answer the
+    maintainer's question in the reader's slot: a published page saying "0 computed" is a true
+    record of that execution and a misleading record of what the stage contains. The notebooks
+    print both facts on separate lines, so this pins both - the length stays the stage-facing
+    number across a warm re-run, and the two counts move.
+    """
+    study = _study(tmp_path)
+    first = _publish_prediction(study, alpha=1.0, checkpoint=1)
+    second = _publish_prediction(study, alpha=2.0, checkpoint=2)
+    selected = study.predictions.table().filter(pl.col("prediction_hash").is_in([first, second]))
+    sweep = dict(
+        predictions=selected,
+        signal={"method": "equal_weight_top_k", "top_k": 1},
+        prices=_prices(),
+    )
+
+    cold = run_backtests(study, **sweep)
+
+    assert (cold.n_computed, cold.n_reused) == (2, 0)
+
+    warm = run_backtests(study, **sweep)
+
+    assert len(warm.results) == 2, "the re-run still resolves both members"
+    assert (warm.n_computed, warm.n_reused) == (0, 2)
+    assert {r.hash for r in warm.results} == {r.hash for r in cold.results}

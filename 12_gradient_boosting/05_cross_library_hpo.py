@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -73,31 +73,14 @@ import optuna
 import polars as pl
 import torch  # noqa: F401
 import xgboost as xgb
-from ml4t.diagnostic.metrics import cross_sectional_ic_series
 from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
 
 from data import load_firm_characteristics
-
-
-def cross_sectional_ic_mean(y_true, y_pred, dates, entities):
-    pred_df = pl.DataFrame({"timestamp": dates, "entity": entities, "prediction": y_pred})
-    ret_df = pl.DataFrame({"timestamp": dates, "entity": entities, "forward_return": y_true})
-    ic_per_date = cross_sectional_ic_series(
-        pred_df,
-        ret_df,
-        pred_col="prediction",
-        ret_col="forward_return",
-        date_col="timestamp",
-        entity_col="entity",
-    )
-    ic_clean = ic_per_date.drop_nulls("ic")
-    return float(ic_clean["ic"].mean()) if ic_clean.height else float("nan")
-
-
+from utils.modeling import cross_sectional_ic_mean
 from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -107,7 +90,8 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 N_TRIALS = 50
 N_WARMUP_TRIALS = 5
 EARLY_STOPPING_ROUNDS = 50
-N_LIBRARIES = 0  # 0 = all libraries, 1-3 = first N only
+# 0 = all libraries, 1-3 = first N only
+N_LIBRARIES = 0
 SEED = 42
 
 
@@ -518,7 +502,7 @@ detailed_df.write_csv(OUTPUT_DIR / "hpo_gbm_detailed.csv")
 
 # %%
 loss_comparison = []
-for lib in ["XGB", "LGB", "CB"]:
+for lib in detailed_df["library"].unique(maintain_order=True).to_list():
     lib_mse = detailed_df.filter((pl.col("library") == lib) & (pl.col("loss_type") == "MSE"))
     lib_mae = detailed_df.filter((pl.col("library") == lib) & (pl.col("loss_type") == "MAE"))
     if len(lib_mse) > 0 and len(lib_mae) > 0:
@@ -534,51 +518,84 @@ for lib in ["XGB", "LGB", "CB"]:
             }
         )
 
-loss_comparison_df = pl.DataFrame(loss_comparison)
+loss_comparison_df = pl.DataFrame(
+    loss_comparison,
+    schema={
+        "library": pl.Utf8,
+        "mse_test_ic": pl.Float64,
+        "mae_test_ic": pl.Float64,
+        "difference": pl.Float64,
+        "loss_choice": pl.Utf8,
+    },
+)
 loss_comparison_df
 
 # %% [markdown]
-# The grouped bars make the pattern unmistakable: for every library the MAE bar
-# clears the MSE bar on the held-out 2000–2016 test window.
+# A library appears below only when its study completed a trial under each loss,
+# which a short search need not do: the sampler can spend every trial on one of the
+# two. Each bar is the best configuration the search found *conditional on* that
+# loss, scored on the held-out 2000-2016 window. The two therefore differ in depth,
+# learning rate and regularization as well as in the loss, and the sampler did not
+# spend equal effort on each - the loss distribution printed further down says how
+# unequal. So the gap is the difference between the best the search reached under
+# each loss, which is the practical question, and not the isolated effect of the
+# loss function on an otherwise matched model.
 
 # %%
-libs = loss_comparison_df["library"].to_list()
-mse_ics = loss_comparison_df["mse_test_ic"].to_list()
-mae_ics = loss_comparison_df["mae_test_ic"].to_list()
+if loss_comparison_df.is_empty():
+    print(
+        "No library completed a trial under both losses in this run, so there is no\n"
+        "MSE-against-MAE pair to draw. The comparison needs one configuration of each."
+    )
+else:
+    libs = loss_comparison_df["library"].to_list()
+    mse_ics = loss_comparison_df["mse_test_ic"].to_list()
+    mae_ics = loss_comparison_df["mae_test_ic"].to_list()
 
-x = np.arange(len(libs))
-width = 0.38
+    x = np.arange(len(libs))
+    width = 0.38
 
-fig, ax = plt.subplots(figsize=(8, 5))
-bars_mse = ax.bar(x - width / 2, mse_ics, width, label="MSE loss", color=COLORS["slate"])
-bars_mae = ax.bar(x + width / 2, mae_ics, width, label="MAE loss", color=COLORS["amber"])
-for bars in (bars_mse, bars_mae):
-    for bar in bars:
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + 0.0007,
-            f"{bar.get_height():.4f}",
-            ha="center",
-            fontsize=9,
-        )
-ax.set_xticks(x)
-ax.set_xticklabels(libs)
-ax.set_xlabel("Library")
-ax.set_ylabel("Held-out test IC (2000–2016)")
-ax.legend()
-mean_gain = loss_comparison_df["difference"].mean()
-ax.set_title(
-    f"MAE beats MSE on heavy-tailed returns for all three libraries (+{mean_gain:.4f} IC on average)"
-)
-plt.tight_layout()
-plt.show()
+    fig, ax = plt.subplots(figsize=(8, 5))
+    bars_mse = ax.bar(x - width / 2, mse_ics, width, label="MSE loss", color=COLORS["slate"])
+    bars_mae = ax.bar(x + width / 2, mae_ics, width, label="MAE loss", color=COLORS["amber"])
+    for bars in (bars_mse, bars_mae):
+        for bar in bars:
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + 0.0007,
+                f"{bar.get_height():.4f}",
+                ha="center",
+                fontsize=9,
+            )
+    ax.set_xticks(x)
+    ax.set_xticklabels(libs)
+    ax.set_xlabel("Library")
+    ax.set_ylabel("Held-out test IC (2000-2016)")
+    ax.legend()
+    ax.set_title("Which loss wins is a per-library search result, not a prior")
+    plt.tight_layout()
+    show_with_alt(
+        fig,
+        "Grouped bars of held-out test information coefficient, one pair per library, "
+        "comparing its best MSE configuration against its best MAE configuration.",
+    )
+
+    # The count and the average gap are results, so they belong here rather than in
+    # the title, where a reader would have to check them against the chart.
+    n_mae = int((loss_comparison_df["loss_choice"] == "MAE").sum())
+    mean_gain = float(loss_comparison_df["difference"].mean())
+    print(
+        f"MAE scores higher on the held-out window for {n_mae} of "
+        f"{loss_comparison_df.height} libraries, by {mean_gain:+.4f} IC on average."
+    )
 
 # %% [markdown]
-# **Interpretation**: On this academic dataset with heavy-tailed returns, the
-# choice between MSE and MAE materially affects IC. MAE is more robust to
-# outliers, which matters when the target distribution has fat tails. Including
-# loss type as a hyperparameter lets the optimizer discover this automatically
-# rather than fixing it by prior.
+# **What to read off it.** The gap between the two bars of one library is the
+# cost of fixing the loss by prior instead of letting the search choose it. MAE
+# is the more robust of the two to outliers, which is the reason to expect it to
+# matter on a target with fat tails - but expecting it is not the same as
+# measuring it, and the sign of the gap is what the run reports. Declaring the
+# loss a hyperparameter is what makes the question answerable at all.
 
 # %% [markdown]
 # ## 10. Hyperparameter Importance
@@ -629,7 +646,11 @@ fig.suptitle(
     fontsize=13,
 )
 plt.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "One horizontal bar panel per library, ranking its hyperparameters by fANOVA "
+    "importance, with the loss-type bar picked out in gold.",
+)
 
 # %%
 importance_df.write_csv(OUTPUT_DIR / "hpo_gbm_importance.csv")
@@ -678,12 +699,20 @@ ax.axvline(N_WARMUP_TRIALS, linestyle="--", color="gray", linewidth=0.8, label="
 ax.set_xlabel("Trial number")
 ax.set_ylabel("Best validation IC so far")
 ax.legend()
-earliest_late_best = min(best_trials.values())
-ax.set_title(
-    f"Best configs surface late: every library keeps improving past trial {earliest_late_best}"
-)
+ax.set_title("Best validation IC so far, by trial, against the TPE warm-up")
 plt.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Best validation information coefficient found so far against trial number, one "
+    "line per library, with a dashed vertical line at the end of the TPE warm-up.",
+)
+earliest_late_best = min(best_trials.values())
+_late = sum(1 for t in best_trials.values() if t > N_WARMUP_TRIALS)
+print(
+    f"{_late} of {len(best_trials)} libraries found their best configuration after the "
+    f"{N_WARMUP_TRIALS}-trial warm-up; the earliest any of them found it was trial "
+    f"{earliest_late_best}."
+)
 
 # %%
 best_overall = results_df.row(0, named=True)
@@ -701,9 +730,10 @@ print(
 # 2. **Early stopping tames a large search range.** Setting `n_estimators` up to
 #    1000 with an early-stopping patience of 50 lets the data pick the tree count
 #    instead of the search wasting compute on over-grown models.
-# 3. **The library matters less than the tuning.** XGBoost, LightGBM, and CatBoost
-#    land within about 0.002 test IC of each other on the CPZ dataset, so a careful
-#    search over loss and depth buys more than switching implementations.
+# 3. **The library matters less than the tuning.** Read the spread of the three
+#    libraries' test IC in the summary table against the MSE-to-MAE gap in the loss
+#    comparison: the second is the larger of the two here, so a careful search over
+#    loss and depth buys more than switching implementations.
 # 4. **These GBM results connect to Chapter 20.** The per-library, per-loss IC
 #    values illustrate the kind of tuned tabular baselines the cross-model
 #    synthesis in Chapter 20 builds on.

@@ -49,6 +49,11 @@ from case_studies.crypto_perps_funding.research_workflow import (
 
 # %% tags=["parameters"]
 EXECUTION_TIER = "canonical"
+SUPERSEDES_POPULATION: str = ""
+# The generation of this notebook's own checkpoint population that this run replaces, if any.
+# Distinct from SUPERSEDES_POPULATION above, which is the case-wide official model population:
+# the two are separate declarations and a refit can move either without moving the other.
+SUPERSEDES_MODEL_POPULATION: str = ""
 WORKSPACE = os.environ.get("ML4T_OUTPUT_DIR", "")
 LABELS = ALL_LABELS
 PREVIEW_REDUCTIONS = {}
@@ -60,7 +65,9 @@ OVERRIDES = {"class_weight": "balanced", "device": "cuda"}
 # %%
 study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 official_population = (
-    freeze_official_model_population(study) if EXECUTION_TIER == "canonical" else None
+    freeze_official_model_population(study, supersedes=SUPERSEDES_POPULATION or None)
+    if EXECUTION_TIER == "canonical"
+    else None
 )
 requests = model_request_catalog("tabular_dl", labels=LABELS, config_prefix="tabm")
 requests
@@ -75,7 +82,7 @@ plan = plan_model_catalog(
 )
 # Task semantics and imbalance treatment are resolved inputs, so read them from the frozen
 # specification rather than restating the configuration file here.
-resolved_tasks = [spec.get("computation", spec)["task"] for spec in plan_specs(plan)]
+resolved_tasks = [spec["computation"]["task"] for spec in plan_specs(plan)]
 resolved_contracts = declared_contracts(plan).with_columns(
     pl.Series("metrics", [task.get("metrics", []) for task in resolved_tasks]),
     pl.Series("imbalance", [task.get("imbalance") for task in resolved_tasks]),
@@ -111,6 +118,7 @@ if official_population is not None:
 # %% tags=["results"]
 execution = run_model_plan(
     plan,
+    supersedes=SUPERSEDES_MODEL_POPULATION or None,
     population_name="crypto-tabm-validation-predictions-v1"
     if EXECUTION_TIER == "canonical"
     else None,

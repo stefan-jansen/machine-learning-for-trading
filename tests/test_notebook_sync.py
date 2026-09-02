@@ -38,8 +38,10 @@ from notebook_provenance import (  # noqa: E402
     contradicts_injected_cell,
     destamped,
     injected_parameters,
+    is_cleared,
     production_parameters,
     stamp_notebook,
+    was_executed,
 )
 
 
@@ -258,8 +260,8 @@ def test_stamp_records_declared_overrides_as_test_mode(tmp_path, monkeypatch) ->
 
 
 def test_stamped_notebooks_are_current_and_production() -> None:
-    stale, testmode, contradicted, _unverified, _alt_only = check_all(strict=False)
-    assert not stale and not testmode and not contradicted, (
+    stale, testmode, contradicted, _unverified, _alt_only, hollow = check_all(strict=False)
+    assert not stale and not testmode and not contradicted and not hollow, (
         "Committed notebooks are out of sync with their source .py:\n"
         + (
             "  STALE (re-run in the canonical env):\n    " + "\n    ".join(stale) + "\n"
@@ -275,6 +277,11 @@ def test_stamped_notebooks_are_current_and_production() -> None:
             "  CONTRADICTED (stamp disagrees with the injected-parameters cell):\n    "
             + "\n    ".join(contradicted)
             if contradicted
+            else ""
+        )
+        + (
+            "  HOLLOW (stamped over an empty output set):\n    " + "\n    ".join(hollow)
+            if hollow
             else ""
         )
     )
@@ -603,3 +610,141 @@ def test_the_paired_py_selects_its_notebook() -> None:
 def test_an_empty_restriction_still_scans_everything() -> None:
     """`only=None` is the whole tree, which is what CI calls and must not change."""
     assert check_all(only=None) == check_all()
+
+
+# -----------------------------------------------------------------------------
+# The cleared state
+#
+# Before this existed the gate had no legal way to land a correction to a notebook
+# that had already been executed: keeping the stale stamp read as STALE and dropping
+# it read as DE-STAMPED, and clearing either one needed the production run that the
+# uncommitted correction was a prerequisite for. Work accumulated in worktrees
+# instead - 177 uncommitted files across 24 of them on 2026-08-23.
+#
+# A cleared notebook (no stamp, no outputs) asserts nothing about a run, so there is
+# nothing for the gate to catch it lying about. What still fails is the render that
+# looks cleared but claims a run: a stamp over an empty output set.
+# -----------------------------------------------------------------------------
+
+
+def _code(source: str, outputs: list | None = None) -> dict:
+    return {
+        "cell_type": "code",
+        "metadata": {},
+        "source": source,
+        "outputs": outputs if outputs is not None else [],
+        "execution_count": None,
+    }
+
+
+def _stdout(text: str) -> dict:
+    return {"output_type": "stream", "name": "stdout", "text": text}
+
+
+def test_a_notebook_with_outputs_was_executed() -> None:
+    assert was_executed(_notebook([_code("print(1)", [_stdout("1")])]))
+
+
+def test_a_notebook_whose_code_never_ran_was_not_executed() -> None:
+    assert not was_executed(_notebook([_code("print(1)")]))
+
+
+def test_a_silent_cell_with_an_execution_count_was_executed() -> None:
+    """A cell that only assigns or writes a file runs fine and displays nothing.
+
+    The kernel still stamps ``execution_count``, so the notebook is not hollow.
+    """
+    cell = _code("x = 1")
+    cell["execution_count"] = 3
+    assert was_executed(_notebook([cell]))
+
+
+def test_a_blank_code_cell_does_not_count_as_unexecuted_code() -> None:
+    """jupytext leaves empty trailing cells; they must not make a live notebook hollow."""
+    assert was_executed(_notebook([_code("print(1)", [_stdout("1")]), _code("   ")]))
+
+
+def test_a_markdown_only_notebook_is_not_hollow() -> None:
+    assert was_executed(_notebook([{"cell_type": "markdown", "source": "# hi", "metadata": {}}]))
+
+
+def test_cleared_is_no_stamp_and_no_outputs(tmp_path) -> None:
+    nb = tmp_path / "cleared.ipynb"
+    nb.write_text(json.dumps(_notebook([_code("print(1)")])), encoding="utf-8")
+    assert is_cleared(nb)
+
+
+def test_a_notebook_keeping_its_outputs_is_not_cleared(tmp_path) -> None:
+    nb = tmp_path / "live.ipynb"
+    nb.write_text(json.dumps(_notebook([_code("print(1)", [_stdout("1")])])), encoding="utf-8")
+    assert not is_cleared(nb)
+
+
+def test_a_stamped_notebook_is_not_cleared_even_with_no_outputs(tmp_path) -> None:
+    """The hollow render: it claims a production run and has nothing to show for it."""
+    nb = tmp_path / "hollow.ipynb"
+    nb.write_text(
+        json.dumps(
+            _notebook(
+                [_code("print(1)")],
+                metadata={notebook_provenance.STAMP_KEY: {"production": True}},
+            )
+        ),
+        encoding="utf-8",
+    )
+    assert not is_cleared(nb)
+
+
+def test_clearing_a_notebook_makes_it_committable(tmp_path) -> None:
+    """End to end on the state that used to be unreachable: stamped, edited, cleared."""
+    nb = tmp_path / "nb.ipynb"
+    nb.write_text(
+        json.dumps(
+            _notebook(
+                [
+                    _injected_cell("MAX_SYMBOLS = 5"),
+                    _code("print(1)", [_stdout("1")]),
+                ],
+                metadata={
+                    notebook_provenance.STAMP_KEY: {"production": True, "source_py_blob": "abc"},
+                    "papermill": {"parameters": {"MAX_SYMBOLS": 5}},
+                },
+            )
+        ),
+        encoding="utf-8",
+    )
+    notebook_provenance._cmd_clear(__import__("argparse").Namespace(notebooks=[str(nb)]))
+    written = json.loads(nb.read_text(encoding="utf-8"))
+    assert notebook_provenance.STAMP_KEY not in written["metadata"]
+    assert "papermill" not in written["metadata"]
+    assert not any(
+        "injected-parameters" in (c.get("metadata", {}).get("tags") or []) for c in written["cells"]
+    )
+    assert is_cleared(nb)
+
+
+def test_stamp_refuses_a_notebook_that_never_ran(tmp_path, monkeypatch) -> None:
+    """Fail at the stamp, not two steps later at the commit.
+
+    The way an unexecuted notebook gets stamped is a `jupytext --sync` between the run
+    and the stamp: the .py is newer, so the .ipynb is rebuilt from it and the outputs
+    go. Refusing here names the step that went wrong.
+    """
+    monkeypatch.setattr(notebook_provenance, "REPO_ROOT", tmp_path)
+    (tmp_path / "nb.py").write_text("# %%\nprint(1)\n", encoding="utf-8")
+    nb = tmp_path / "nb.ipynb"
+    nb.write_text(json.dumps(_notebook([_code("print(1)")])), encoding="utf-8")
+    with pytest.raises(SystemExit, match="nothing in it was executed"):
+        stamp_notebook(nb, "local-uv", parameters={})
+
+
+def test_stamp_accepts_a_notebook_whose_cells_only_have_execution_counts(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(notebook_provenance, "REPO_ROOT", tmp_path)
+    (tmp_path / "nb.py").write_text("# %%\nx = 1\n", encoding="utf-8")
+    cell = _code("x = 1")
+    cell["execution_count"] = 1
+    nb = tmp_path / "nb.ipynb"
+    nb.write_text(json.dumps(_notebook([cell])), encoding="utf-8")
+    assert stamp_notebook(nb, "local-uv", parameters={})["production"] is True

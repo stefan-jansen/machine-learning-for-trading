@@ -69,7 +69,6 @@ from utils.paths import display_path, get_case_study_dir, get_output_dir
 from utils.style import COLORS, FIGSIZE, add_message_title
 
 # %% tags=["parameters"]
-HORIZON = 21
 PREDICTION_THRESHOLD = 0.0
 # What this export depends on: the configuration the registry selects, and the
 # bytes of that configuration's sealed holdout predictions. The registry file
@@ -77,8 +76,11 @@ PREDICTION_THRESHOLD = 0.0
 # so its hash moves whether or not the selection moves, which would make a
 # whole-file pin fail on runs that export exactly the right predictions. Set a
 # pin to None to report the observed value instead of asserting it.
-EXPECTED_TRAINING_HASH = "0488120b490e"
-EXPECTED_PREDICTIONS_SHA256 = "b3b12dcdfac8a0c59b80609b6c81aff203828a3e19a2d992b1da993185a34b48"
+# The validation training run of the promoted configuration, gbm/leaves_63_mse on fwd_ret_5d.
+# It moved when the etfs holdout was re-evaluated on the corrected carrier; the previous value,
+# 0488120b490e, named the configuration promoted before that.
+EXPECTED_TRAINING_HASH = "b937b23afab5"
+EXPECTED_PREDICTIONS_SHA256 = "b76202842ba56742c3c2748722b60dc1210fdf37687c687a7800da388750bfc8"
 EXPORT_PATH = get_output_dir(25, "quantconnect_export") / "ml4t_qc_predictions.json"
 
 
@@ -92,20 +94,51 @@ registry_hash_before = hashlib.sha256(registry_path.read_bytes()).hexdigest()
 # journal, or transaction side effect in the canonical case-study registry.
 registry_uri = f"{registry_path.resolve().as_uri()}?mode=ro&immutable=1"
 with sqlite3.connect(registry_uri, uri=True) as conn:
+    # The winner has to be a configuration whose holdout predictions were sealed, because
+    # that is what this export ships. Ranking without that condition asks a different
+    # question - the best development backtest, promoted or not - and picks a row that has
+    # no holdout set behind it, which surfaced as "Expected one sealed holdout set, found 0"
+    # several lines below the point where the wrong row was chosen.
+    #
+    # The link is the CONFIGURATION, not the training hash. A holdout fit is a retrain: on
+    # etfs the validation carrier is training run b937b23afab5 and its holdout counterpart is
+    # d5062f7f0eaa, same family, config_name and label, and the holdout run has no development
+    # backtest of its own. Matching on training_hash therefore finds nothing for any promoted
+    # configuration in any registry - it is satisfiable only where a single training run wrote
+    # both splits, which the pipeline stopped doing.
     winner = conn.execute(
         """SELECT ps.training_hash, br.backtest_hash, br.stage, bm.sharpe
            FROM backtest_runs br
            JOIN backtest_metrics bm ON br.backtest_hash = bm.backtest_hash
            JOIN prediction_sets ps ON br.prediction_hash = ps.prediction_hash
+           JOIN training_runs t ON t.training_hash = ps.training_hash
            WHERE br.stage IN ('signal', 'allocation', 'risk_overlay')
+             AND ps.split = 'validation'
+             AND EXISTS (
+                 SELECT 1 FROM prediction_sets h
+                 JOIN training_runs ht ON ht.training_hash = h.training_hash
+                 WHERE h.split = 'holdout'
+                   AND ht.family = t.family
+                   AND ht.config_name = t.config_name
+                   AND ht.label = t.label
+             )
            ORDER BY bm.sharpe DESC LIMIT 1"""
     ).fetchone()
     if winner is None:
         raise RuntimeError("ETF registry has no eligible cross-stage backtest winner")
+    carrier_family, carrier_config, carrier_label = conn.execute(
+        "SELECT family, config_name, label FROM training_runs WHERE training_hash = ?",
+        (winner[0],),
+    ).fetchone()
     holdout_rows = conn.execute(
-        """SELECT prediction_hash FROM prediction_sets
-           WHERE training_hash = ? AND split = 'holdout'
-           ORDER BY prediction_hash""",
+        """SELECT h.prediction_hash FROM prediction_sets h
+           JOIN training_runs ht ON ht.training_hash = h.training_hash
+           WHERE h.split = 'holdout'
+             AND (ht.family, ht.config_name, ht.label) = (
+                 SELECT t.family, t.config_name, t.label
+                 FROM training_runs t WHERE t.training_hash = ?
+             )
+           ORDER BY h.prediction_hash""",
         (winner[0],),
     ).fetchall()
 
@@ -125,10 +158,30 @@ predictions = normalize_demo_predictions(pl.read_parquet(prediction_path), "symb
 registry_hash_after_load = hashlib.sha256(registry_path.read_bytes()).hexdigest()
 assert registry_hash_after_load == registry_hash_before
 
+# The horizon is a property of the promoted configuration, not a constant. It was declared as
+# 21 here and never read, so when the ETF carrier moved to `fwd_ret_5d` the notebook went on
+# exporting a signal it described as monthly. Reading it off the label makes the mismatch
+# impossible: everything downstream that names a holding period names this number.
+horizon_days = int(carrier_label.removeprefix("fwd_ret_").removesuffix("d"))
+# The rebalance follows the horizon so a position is closed before the next signal is formed.
+# Trading sessions, not calendar days: 5 sessions is a week, 21 is a month.
+REBALANCE_RULES = {5: ("weekly", "week_start"), 21: ("monthly", "month_start")}
+if horizon_days not in REBALANCE_RULES:
+    raise ValueError(
+        f"no rebalance cadence declared for a {horizon_days}-session horizon "
+        f"(label {carrier_label}); add one to REBALANCE_RULES"
+    )
+rebalance_cadence, rebalance_date_rule = REBALANCE_RULES[horizon_days]
+
 print(f"Registry SHA256: {registry_hash_before}")
 print(f"Prediction parquet SHA256: {prediction_file_hash}")
 print(f"Training hash: {winner[0]} | holdout prediction hash: {prediction_hash}")
 print(f"Selection stage: {winner[2]} | backtest hash: {winner[1]}")
+print(f"Carrier: {carrier_family}/{carrier_config} on {carrier_label}")
+print(
+    f"Horizon: {horizon_days} sessions -> {rebalance_cadence} rebalance "
+    f"(LEAN date_rules.{rebalance_date_rule})"
+)
 
 n_dates = predictions["timestamp"].n_unique()
 n_symbols = predictions["symbol"].n_unique()
@@ -277,53 +330,73 @@ print(f"  Entries: {len(qc_predictions)} dates")
 # ### Algorithm: Select and Rebalance
 #
 # The algorithm subscribes to assets with positive predictions and forms an
-# equal-weighted portfolio. The exported signal is a 21-day forward return, so
-# the rebalance fires monthly, matching the holding period the signal was
-# trained for and the ETF strategy's own monthly cadence (Chapters 16-17).
+# equal-weighted portfolio. The rebalance fires on the cadence read off the
+# promoted configuration's label: the signal a configuration produces is a
+# forecast over a stated number of sessions, and holding a position longer than
+# that means trading on a forecast that has already expired.
 #
-# ```python
-# class PredictionUniverseAlgorithm(QCAlgorithm):
-#     def initialize(self):
-#         self.set_start_date(2020, 1, 1)
-#         self.set_cash(100_000)
-#         self.settings.seed_initial_prices = True
-#         self._return_prediction_threshold = 0
-#
-#         self.universe_settings.resolution = Resolution.DAILY
-#         self._universe = self.add_universe(
-#             PredictionUniverse, self._select_assets
-#         )
-#
-#         # Rebalance monthly to match the 21-day prediction horizon. The
-#         # universe still streams daily; only the rebalance is throttled.
-#         self.schedule.on(
-#             self.date_rules.month_start('SPY'),
-#             self.time_rules.at(8, 0),
-#             self._rebalance,
-#         )
-#
-#     def _select_assets(self, data):
-#         return [
-#             stock.symbol for stock in data
-#             if stock.value > self._return_prediction_threshold
-#         ]
-#
-#     def _rebalance(self):
-#         symbols = self._universe.selected
-#         if not symbols:
-#             return
-#         targets = [
-#             PortfolioTarget(symbol, 1 / len(symbols))
-#             for symbol in symbols
-#         ]
-#         self.set_holdings(targets, True)
-# ```
-#
-# The entire algorithm is ~30 lines. Portfolio rules (threshold, weighting,
-# rebalance frequency) can be changed without touching the ML pipeline. Matching
-# the rebalance to the signal's 21-day horizon is itself an instance of that
-# freedom: aligning cadence with the prediction is a one-line change here, not a
-# retraining run.
+# The listing is generated from that cadence rather than written out here, so
+# there is no second place for the horizon to be stated and go stale. It is the
+# same reason the horizon itself is derived: this notebook previously carried a
+# monthly rebalance in prose while the case study deployed a five-session
+# signal, and nothing in it could fail.
+
+# %%
+ALGORITHM_TEMPLATE = """class PredictionUniverseAlgorithm(QCAlgorithm):
+    def initialize(self):
+        self.set_start_date(2020, 1, 1)
+        self.set_cash(100_000)
+        self.settings.seed_initial_prices = True
+        self._return_prediction_threshold = {threshold}
+
+        self.universe_settings.resolution = Resolution.DAILY
+        self._universe = self.add_universe(
+            PredictionUniverse, self._select_assets
+        )
+
+        # Rebalance {cadence} to match the {horizon}-session prediction horizon.
+        # The universe still streams daily; only the rebalance is throttled.
+        self.schedule.on(
+            self.date_rules.{date_rule}('SPY'),
+            self.time_rules.at(8, 0),
+            self._rebalance,
+        )
+
+    def _select_assets(self, data):
+        return [
+            stock.symbol for stock in data
+            if stock.value > self._return_prediction_threshold
+        ]
+
+    def _rebalance(self):
+        symbols = self._universe.selected
+        if not symbols:
+            return
+        targets = [
+            PortfolioTarget(symbol, 1 / len(symbols))
+            for symbol in symbols
+        ]
+        self.set_holdings(targets, True)
+"""
+
+algorithm_source = ALGORITHM_TEMPLATE.format(
+    threshold=PREDICTION_THRESHOLD,
+    cadence=rebalance_cadence,
+    horizon=horizon_days,
+    date_rule=rebalance_date_rule,
+)
+algorithm_path = EXPORT_PATH.parent / "main.py"
+algorithm_path.write_text(algorithm_source)
+print(algorithm_source)
+print(f"Written to {display_path(algorithm_path)}")
+
+# %% [markdown]
+# The entire algorithm is ~30 lines, and it is written next to the predictions
+# so the two travel together. Portfolio rules (threshold, weighting, rebalance
+# frequency) can be changed without touching the ML pipeline. Matching the
+# rebalance to the signal's horizon is itself an instance of that freedom: when
+# the ETF case study promoted a 5-session carrier over its 21-session one,
+# aligning the cadence was this one line, not a retraining run.
 
 # %% [markdown]
 # ## 4. Running on QuantConnect
@@ -393,7 +466,7 @@ ax.hist(
     linewidth=0.4,
 )
 ax.axvline(PREDICTION_THRESHOLD, color=COLORS["amber"], linewidth=1.5, label="Long threshold")
-ax.set(xlabel="Predicted 21-day return", ylabel="Prediction count")
+ax.set(xlabel=f"Predicted {horizon_days}-day return", ylabel="Prediction count")
 ax.legend(frameon=False)
 add_message_title(
     ax,

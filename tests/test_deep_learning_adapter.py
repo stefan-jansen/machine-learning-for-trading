@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from importlib.metadata import version
+from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
@@ -14,18 +15,8 @@ from case_studies.utils import deep_learning, tabular_dl
 from tests.test_research_workspace import _seed_release
 
 
-@pytest.fixture(autouse=True)
-def _restore_output_root():
-    yield
-    os.environ.pop("ML4T_OUTPUT_DIR", None)
-    from case_studies.research import workspace
-
-    workspace._ACTIVE_OUTPUT_ROOT = None
-    workspace._clear_root_sensitive_caches()
-
-
 def _resolve_nlinear_request(
-    tmp_path, monkeypatch, entity: str = "symbol", library: str = "pytorch"
+    tmp_path, monkeypatch, entity: str = "symbol", library: str = "pytorch", **request_overrides
 ):
     study = Study.open(
         "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
@@ -103,8 +94,34 @@ def _resolve_nlinear_request(
         label=label.name,
         config_name="nlinear_probe",
         overrides={"device": "cpu", "n_epochs": 3},
+        **request_overrides,
     ).resolve()
     return study, label, resolved
+
+
+def test_preview_sequence_resolution_stays_inside_the_preview_output_root(
+    tmp_path, monkeypatch
+) -> None:
+    """Resolving a preview request must not switch the active output root back to canonical.
+
+    Every other family adapter passes the request tier into ``study.labels.get``. The sequence
+    adapter resolved the label at the default canonical tier, which re-activates the study at the
+    base workspace and drops the ``.preview`` root that ``activate`` had just linked the label
+    artifacts into - so a sequence preview could not find its own label and no sequence
+    notebook could run a reduced-scale proof at all.
+    """
+    from case_studies.research.contracts import ExecutionTier
+
+    study, _label, resolved = _resolve_nlinear_request(
+        tmp_path,
+        monkeypatch,
+        execution_tier="preview",
+        preview_reductions={"folds": [0], "max_symbols": 2, "max_train_sequences": 8},
+    )
+
+    preview_root = study.storage_root(ExecutionTier.PREVIEW)
+    assert os.environ["ML4T_OUTPUT_DIR"] == str(preview_root.parent)
+    assert resolved.spec["execution_tier"] == "preview"
 
 
 def test_sequence_resolver_builds_complete_resolved_request(tmp_path, monkeypatch) -> None:
@@ -550,3 +567,26 @@ def test_sequence_publishes_predictions_under_the_expected_key_names(entity) -> 
         .sort("symbol")
         .equals(expected_keys.sort("symbol"))
     )
+
+
+def test_sequence_resolver_keeps_a_preview_request_inside_the_preview_root(
+    tmp_path, monkeypatch
+) -> None:
+    """Resolving under the preview tier must not repoint the output root at the workspace.
+
+    `LabelCatalog.get` activates the study on the tier it is handed, defaulting to canonical.
+    A resolver that omits the argument silently moves `ML4T_OUTPUT_DIR` from
+    `<workspace>/.preview` back to `<workspace>`, so a preview writes where a canonical run
+    would. Every sequence preview failed this way until the tier was threaded through.
+    """
+    study, _label, resolved = _resolve_nlinear_request(
+        tmp_path,
+        monkeypatch,
+        execution_tier="preview",
+        preview_reductions={"max_symbols": 2},
+    )
+
+    preview_root = study.output_root / ".preview"
+    assert Path(os.environ["ML4T_OUTPUT_DIR"]) == preview_root
+    assert study.storage_root("preview") == preview_root / study.case_study
+    assert resolved.spec["execution_tier"] == "preview"

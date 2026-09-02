@@ -96,3 +96,30 @@ def test_min_obs_excludes_a_thin_cross_section() -> None:
     assert math.isfinite(
         cross_sectional_ic_mean(returns, predictions, dates, entities, min_obs=thin)
     )
+
+
+def test_a_nan_from_a_pre_0_1_2_library_is_still_filtered(monkeypatch) -> None:
+    """0.1.1 reported an undefined date as NaN, and `drop_nulls` does not remove NaN.
+
+    pyproject pins the 0.1.2 floor, which reports null instead, so without
+    simulating the older library the NaN half of the guard is never exercised.
+    """
+    import polars as pl
+    from ml4t.diagnostic import metrics as diagnostic_metrics
+
+    def old_library_series(*_args, **_kwargs):
+        return pl.DataFrame(
+            {
+                "timestamp": ["2020-01-01", "2020-01-02", "2020-01-03"],
+                "n_obs": [N_ENTITIES] * 3,
+                "ic": [0.2, float("nan"), -0.4],
+            }
+        )
+
+    monkeypatch.setattr(diagnostic_metrics, "cross_sectional_ic_series", old_library_series)
+
+    # Precondition: the naive reading of that frame really is NaN.
+    assert math.isnan(old_library_series().drop_nulls("ic")["ic"].mean())
+
+    dates, entities, predictions, returns = _ranked_block("2020-01-01", tied=False)
+    assert cross_sectional_ic_mean(returns, predictions, dates, entities) == pytest.approx(-0.1)

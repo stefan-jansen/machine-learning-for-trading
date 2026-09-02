@@ -123,6 +123,30 @@ def test_backtest_readers_exclude_partial_coverage(tmp_path) -> None:
     assert explorer.best(top_n=10, label="fwd_ret_5d", prediction_hashes=["full_a"])[
         "prediction_hash"
     ].to_list() == ["full_a"]
+    assert explorer.best(top_n=10, label="fwd_ret_5d", prediction_hashes=["partial"])[
+        "prediction_hash"
+    ].to_list() == ["partial"]
+    assert explorer.best(
+        top_n=10,
+        label="fwd_ret_5d",
+        prediction_hashes=["partial", "full_a"],
+    )["prediction_hash"].to_list() == ["full_a"]
+    assert (
+        explorer.compare_allocators(
+            stages=("signal",),
+            label="fwd_ret_5d",
+            prediction_hashes=["partial"],
+        )["n"].item()
+        == 1
+    )
+    assert (
+        explorer.compare_allocators(
+            stages=("signal",),
+            label="fwd_ret_5d",
+            prediction_hashes=["partial", "full_a"],
+        )["n"].item()
+        == 1
+    )
 
 
 def test_downstream_resolution_excludes_partial_coverage(tmp_path) -> None:
@@ -150,6 +174,191 @@ def test_downstream_resolution_excludes_partial_coverage(tmp_path) -> None:
         case_dir=case_dir,
     )
     assert backtests["prediction_hash"].to_list() == ["tabular", "full_a", "full_b"]
+
+
+def test_prediction_population_is_filtered_before_checkpoint_ranking(tmp_path) -> None:
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        for prediction_hash, sharpe, n_days in [
+            ("retired", 5.0, 5),
+            ("current", 0.75, 4),
+        ]:
+            training_hash = f"train_{prediction_hash}"
+            db.execute(
+                "INSERT INTO training_runs VALUES (?, 'gbm', 'shared', 'fwd_ret_5d')",
+                (training_hash,),
+            )
+            db.execute(
+                "INSERT INTO prediction_sets VALUES (?, ?, 'validation', 0)",
+                (prediction_hash, training_hash),
+            )
+            db.execute(
+                "INSERT INTO prediction_metrics VALUES (?, 0.1, 0.1, 0.0, 0.2, ?)",
+                (prediction_hash, n_days),
+            )
+            db.execute(
+                "INSERT INTO backtest_runs VALUES (?, ?, '{}', 'signal')",
+                (f"bt_{prediction_hash}", prediction_hash),
+            )
+            db.execute(
+                "INSERT INTO backtest_metrics VALUES (?, ?, 0.1, -0.1, 0.2, 0.1, 1)",
+                (f"bt_{prediction_hash}", sharpe),
+            )
+
+    selected = resolve_best_predictions(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        stage="signal",
+        top_n=10,
+        case_dir=case_dir,
+        prediction_hashes={"current"},
+    )
+
+    assert selected["prediction_hash"].to_list() == ["current"]
+
+
+def test_backtest_population_is_filtered_before_run_ranking(tmp_path) -> None:
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+
+    selected = resolve_best_backtest_runs(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        stage="signal",
+        top_n=1,
+        case_dir=case_dir,
+        prediction_hashes={"full_b"},
+    )
+
+    assert selected["prediction_hash"].to_list() == ["full_b"]
+
+
+def test_backtest_population_sets_the_raw_coverage_bar(tmp_path) -> None:
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+
+    selected = resolve_best_backtest_runs(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        stage="signal",
+        top_n=1,
+        case_dir=case_dir,
+        prediction_hashes={"partial"},
+    )
+
+    assert selected["prediction_hash"].to_list() == ["partial"]
+
+    selected_with_peer = resolve_best_backtest_runs(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        stage="signal",
+        top_n=10,
+        case_dir=case_dir,
+        prediction_hashes={"partial", "full_a"},
+    )
+
+    assert selected_with_peer["prediction_hash"].to_list() == ["full_a"]
+
+
+def test_canonical_backtest_population_is_filtered_before_run_ranking(
+    tmp_path, monkeypatch
+) -> None:
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+    monkeypatch.setattr(
+        "case_studies.utils.registry.queries.canonical_coverage_days",
+        lambda case_study, label, split, prediction_hash, case_dir: {
+            "partial": 2,
+            "full_a": 4,
+            "full_b": 4,
+            "tabular": 2,
+        }[prediction_hash],
+    )
+
+    selected = resolve_best_backtest_runs(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        stage="signal",
+        top_n=1,
+        case_dir=case_dir,
+        coverage_window="canonical",
+        prediction_hashes={"full_b"},
+    )
+
+    assert selected["prediction_hash"].to_list() == ["full_b"]
+
+
+def test_canonical_backtest_population_sets_the_coverage_bar(tmp_path, monkeypatch) -> None:
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+    monkeypatch.setattr(
+        "case_studies.utils.registry.queries.canonical_coverage_days",
+        lambda case_study, label, split, prediction_hash, case_dir: {
+            "partial": 2,
+            "full_a": 4,
+            "full_b": 4,
+            "tabular": 2,
+        }[prediction_hash],
+    )
+
+    selected = resolve_best_backtest_runs(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        stage="signal",
+        top_n=1,
+        case_dir=case_dir,
+        coverage_window="canonical",
+        prediction_hashes={"partial"},
+    )
+
+    assert selected["prediction_hash"].to_list() == ["partial"]
+
+    selected_with_peer = resolve_best_backtest_runs(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        stage="signal",
+        top_n=10,
+        case_dir=case_dir,
+        coverage_window="canonical",
+        prediction_hashes={"partial", "full_a"},
+    )
+
+    assert selected_with_peer["prediction_hash"].to_list() == ["full_a"]
+
+
+def test_canonical_prediction_population_sets_the_coverage_bar(tmp_path, monkeypatch) -> None:
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+    monkeypatch.setattr(
+        "case_studies.utils.registry.queries.canonical_coverage_days",
+        lambda case_study, label, split, prediction_hash, case_dir: {
+            "partial": 2,
+            "full_a": 4,
+            "full_b": 4,
+            "tabular": 2,
+        }[prediction_hash],
+    )
+
+    selected = resolve_best_predictions(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        stage="signal",
+        top_n=1,
+        case_dir=case_dir,
+        coverage_window="canonical",
+        prediction_hashes={"partial"},
+    )
+
+    assert selected["prediction_hash"].to_list() == ["partial"]
 
 
 def test_cohort_members_and_leader_exclude_partial_coverage(tmp_path) -> None:
@@ -226,3 +435,184 @@ def test_fold_metric_backfill_is_restricted_to_requested_label(tmp_path, monkeyp
 
     assert count == 1
     assert seen == ["bt_full_a"]
+
+
+def test_a_population_whose_only_backtested_run_is_incomplete_refuses(tmp_path) -> None:
+    """An empty frame here says "no backtests"; the truth is "no COMPLETE run was backtested".
+
+    etfs measured this under a preview reduction: a scoped population of six predictions and
+    one backtest, where the maximum coverage belonged to a prediction nothing had backtested.
+    The bar is the population's maximum `ic_n_days`, deliberately - that is what makes a run
+    complete, and computing it over only the backtested rows would let an incomplete run set
+    its own bar and win. So the filter is right to admit nothing, and wrong to say nothing.
+    """
+    import pytest
+
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        # full_a is the coverage bar for gbm/fwd_ret_5d at 4.0 days. Take away its backtest
+        # and the scoped population below has a bar no backtested member can reach.
+        db.execute("DELETE FROM backtest_runs WHERE backtest_hash = 'bt_full_a'")
+        db.execute("DELETE FROM backtest_metrics WHERE backtest_hash = 'bt_full_a'")
+    explorer = BacktestExplorer("test", case_dir=case_dir)
+
+    with pytest.raises(RuntimeError) as raised:
+        explorer.best(top_n=10, label="fwd_ret_5d", prediction_hashes=["partial", "full_a"])
+    message = str(raised.value)
+    assert "coverage bar" in message
+    assert "partial" in message, f"the refusal must name the run it rejected, got: {message}"
+
+    # The same population with its complete member backtested still resolves, and a
+    # population with no backtests at all is still an ordinary empty answer.
+    assert explorer.best(top_n=10, label="fwd_ret_5d", prediction_hashes=["full_b"])[
+        "prediction_hash"
+    ].to_list() == ["full_b"]
+    assert explorer.best(top_n=10, label="fwd_ret_5d", prediction_hashes=["nothing"]).is_empty()
+
+
+def test_an_empty_result_from_another_filter_is_not_blamed_on_the_coverage_bar(
+    tmp_path,
+) -> None:
+    """The refusal must isolate the coverage clause, or it sends the reader after the wrong thing.
+
+    `best` also drops runs that traded nothing and families the case study excludes. If the
+    diagnostic query does not mirror those, a population emptied by one of them is reported
+    as a coverage failure.
+    """
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        db.execute("DELETE FROM backtest_runs WHERE backtest_hash = 'bt_full_a'")
+        db.execute("DELETE FROM backtest_metrics WHERE backtest_hash = 'bt_full_a'")
+        # The one remaining backtested member of the population traded nothing, so `best`
+        # drops it for that reason - not because it sits below the bar.
+        db.execute("UPDATE backtest_metrics SET num_trades = 0 WHERE backtest_hash = 'bt_partial'")
+    explorer = BacktestExplorer("test", case_dir=case_dir)
+
+    assert explorer.best(
+        top_n=10, label="fwd_ret_5d", prediction_hashes=["partial", "full_a"]
+    ).is_empty()
+
+
+def _add_retired_sweep(case_dir) -> None:
+    """A second, better-scoring backtest of a still-current prediction.
+
+    This is what a re-swept baseline leaves behind: the registry is immutable, so the
+    entry-rule grid the previous generation was run under keeps its rows, and they belong
+    to predictions that are themselves still live.
+    """
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        db.execute(
+            """
+            INSERT INTO backtest_runs VALUES (
+                'bt_full_b_retired', 'full_b',
+                '{"allocation":{"method":"score_weighted"}}', 'signal'
+            )
+            """
+        )
+        db.execute(
+            "INSERT INTO backtest_metrics VALUES ('bt_full_b_retired', 9.0, 0.1, -0.1, 0.2, 0.1, 1)"
+        )
+
+
+def test_a_retired_sweep_of_a_live_prediction_outranks_it_until_the_backtests_are_named(
+    tmp_path,
+) -> None:
+    """`prediction_hashes` cannot exclude it, because the prediction is not the retired thing."""
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+    _add_retired_sweep(case_dir)
+    live = {"bt_partial", "bt_full_a", "bt_full_b", "bt_tabular"}
+
+    unrestricted = resolve_best_predictions(
+        "test", "fwd_ret_5d", split="validation", case_dir=case_dir, top_n=10
+    )
+    by_prediction = resolve_best_predictions(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        case_dir=case_dir,
+        top_n=10,
+        prediction_hashes={"full_a", "full_b", "tabular"},
+    )
+    by_backtest = resolve_best_predictions(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        case_dir=case_dir,
+        top_n=10,
+        backtest_hashes=live,
+    )
+
+    def sharpe_of(frame, prediction_hash):
+        return frame.filter(pl.col("prediction_hash") == prediction_hash)["sharpe"].item()
+
+    # The retired 9.0 is what both unrestricted reads rank full_b on.
+    assert sharpe_of(unrestricted, "full_b") == 9.0
+    assert sharpe_of(by_prediction, "full_b") == 9.0
+    # Naming the live backtests is the only one that returns the number a current result
+    # actually carries.
+    assert sharpe_of(by_backtest, "full_b") == 0.5
+
+
+def test_naming_every_registered_backtest_changes_nothing(tmp_path) -> None:
+    """The restriction is a filter, not a different ranking rule."""
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+    everything = {"bt_partial", "bt_full_a", "bt_full_b", "bt_tabular"}
+
+    unrestricted = resolve_best_predictions(
+        "test", "fwd_ret_5d", split="validation", case_dir=case_dir, top_n=10
+    )
+    restricted = resolve_best_predictions(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        case_dir=case_dir,
+        top_n=10,
+        backtest_hashes=everything,
+    )
+
+    assert restricted.equals(unrestricted)
+
+
+def test_a_retired_prediction_cannot_set_a_bar_the_named_population_fails(tmp_path) -> None:
+    """The eligibility bar moves with the restriction, or the restriction returns nothing.
+
+    `full_coverage_prediction_sql` keeps rows whose `ic_n_days` equals the maximum for their
+    (split, family, label). Computed over every historical identity, a retired prediction with
+    wider stored coverage sets a bar no live member can reach.
+    """
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        # A retired gbm prediction with the widest coverage in its family, and its backtest.
+        db.execute(
+            "INSERT INTO training_runs VALUES ('train_retired', 'gbm', 'retired', 'fwd_ret_5d')"
+        )
+        db.execute(
+            "INSERT INTO prediction_sets VALUES ('retired', 'train_retired', 'validation', 0)"
+        )
+        db.execute("INSERT INTO prediction_metrics VALUES ('retired', 0.1, 0.1, 0.0, 0.2, 99.0)")
+        db.execute(
+            "INSERT INTO backtest_runs VALUES ('bt_retired', 'retired', "
+            '\'{"allocation":{"method":"score_weighted"}}\', \'signal\')'
+        )
+        db.execute(
+            "INSERT INTO backtest_metrics VALUES ('bt_retired', 7.0, 0.1, -0.1, 0.2, 0.1, 1)"
+        )
+
+    live = {"bt_full_a", "bt_full_b"}
+    ranked = resolve_best_predictions(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        case_dir=case_dir,
+        top_n=10,
+        backtest_hashes=live,
+    )
+
+    # The two live gbm predictions both survive: 4.0 is the widest coverage among them, and the
+    # retired 99.0 is not in the population the bar is taken over.
+    assert sorted(ranked["prediction_hash"].to_list()) == ["full_a", "full_b"]
