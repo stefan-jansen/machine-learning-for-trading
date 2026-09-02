@@ -2019,6 +2019,12 @@ case_studies/nasdaq100_microstructure/13_model_analysis:
     # are here, makes the notebook refuse a family it cannot check.
     LINEAR_POPULATION: nasdaq100_microstructure-fixture-linear-validation-v1
     GBM_POPULATION: nasdaq100_microstructure-fixture-gbm-validation-v1
+    # The four sequence populations, added when 08 through 11 converted onto the research
+    # boundary and began publishing one population each. Same prefix and the same reason.
+    NLINEAR_POPULATION: nasdaq100_microstructure-fixture-nlinear-validation-v1
+    LSTM_POPULATION: nasdaq100_microstructure-fixture-lstm_h64-validation-v1
+    TCN_POPULATION: nasdaq100_microstructure-fixture-tcn-validation-v1
+    PATCHTST_POPULATION: nasdaq100_microstructure-fixture-patchtst-validation-v1
   timeout: 300
 case_studies/nasdaq100_microstructure/14_backtest:
   parameters:
