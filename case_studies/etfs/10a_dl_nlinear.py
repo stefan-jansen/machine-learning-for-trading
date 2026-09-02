@@ -38,13 +38,12 @@
 # %%
 """Fit the declared ETF NLinear population on the walk-forward folds."""
 
-import sqlite3
-
 import plotly.graph_objects as go
 import polars as pl
 from IPython.display import Markdown, display
 
 from case_studies.research import (
+    OfficialPopulation,
     Result,
     load_model_configs,
     model_requests,
@@ -52,10 +51,11 @@ from case_studies.research import (
     primary_label,
     resolved_model_plan,
     run_model_population,
-    split_retired_members,
+    split_unpublished_members,
 )
 from case_studies.utils.analytics import load_best_ic_per_family, load_model_ic
 from case_studies.utils.model_analysis import common_sample_daily_ic, load_predictions
+from case_studies.utils.notebook_contracts import prediction_members_in_force
 from case_studies.utils.registry import load_prediction_metrics
 from utils.style import COLORS
 
@@ -88,28 +88,15 @@ PRIMARY_LABEL = primary_label(study)
 # this notebook existed. Each names its own population rather than the family's, because each
 # publishes a different slice of it.
 #
-# The reconciliation below is what keeps that a fact rather than a comment. This is the last
-# sequence notebook to run, so by here the registry holds whatever the family fitted, and the
-# menu can be checked against it. Nothing else reconciles a declaration against what was
-# executed - which is how a declared-and-never-fitted configuration stayed invisible for as long
-# as it did - so the gap is printed every run rather than asserted once here.
+# The reconciliation in section 5 is what keeps that a fact rather than a comment. This is the
+# last sequence notebook to run, so once it has fitted, the registry holds whatever the family
+# fitted and the menu can be checked against it. Nothing else reconciles a declaration against
+# what was executed - which is how a declared-and-never-fitted configuration stayed invisible for
+# as long as it did - so the gap is printed every run rather than asserted once here.
 
 # %%
 SEQUENCE_CONFIGS = ("nlinear",)
 declared = load_model_configs(study, "deep_learning", config_names=list(SEQUENCE_CONFIGS))
-
-_menu = set(load_model_configs(study, "deep_learning")["config_name"].to_list())
-with sqlite3.connect(str(study.root / "run_log" / "registry.db")) as _db:
-    _fitted = {
-        row[0]
-        for row in _db.execute(
-            "SELECT DISTINCT config_name FROM training_runs WHERE family = 'deep_learning'"
-        )
-    }
-_unfitted = sorted(_menu - _fitted)
-print(f"deep_learning menu: {', '.join(sorted(_menu))}")
-print(f"fitted in this registry: {', '.join(sorted(_fitted)) or 'none'}")
-print(f"declared and never fitted: {', '.join(_unfitted) or 'none'}")
 configs = load_model_configs(
     study,
     "deep_learning",
@@ -171,17 +158,31 @@ baseline_hashes = {}
 # `06_linear` or `07_gbm` refits, the generation it replaced stays behind scored and complete,
 # and the family leader read back here can be the retired one. The comparison in section 7 would
 # then measure this network against a baseline its own publisher no longer stands behind.
-# `split_retired_members` asks the population lineage instead.
+#
+# The question is membership, not retirement. `split_retired_members` asks whether a publisher
+# moved past an identity, which admits every row no population ever listed - an experimental fit,
+# a one-off, a row written before its notebook declared a population. Nobody retired those, so
+# they pass an exclusion test and can outrank the published leader.
+# `split_unpublished_members` asks the population lineage what is listed at all.
+#
+# The inventory it is asked about is the complete one. `load_model_ic` filters to the maximum
+# coverage within each family and label by default, and a retired generation scored over a
+# shorter window is dropped by that filter before the split ever sees it - so its hash never
+# reaches `exclude_prediction_hashes`, and `load_best_ic_per_family`, applying its own coverage
+# bar, can hand that row back as the leader. Loading without the filter is what makes the
+# exclusion set complete.
 #
 # The exclusion goes in before the per-family maximum, not after it. Filtering the returned frame
-# would drop a family outright whenever its highest-IC row happened to be retired - the live
+# would drop a family outright whenever its highest-IC row happened to be excluded - the live
 # runner-up is already gone by then - and section 7 looks the baselines up by name, so the family
-# would not fall back, it would raise. Retired rows are named rather than counted, so a baseline
+# would not fall back, it would raise. Excluded rows are named rather than counted, so a baseline
 # that moves is visible as a refit upstream.
-_candidates = load_model_ic(["linear", "gbm"], case_studies=[CASE_STUDY_ID])
-_retired = split_retired_members(study, _candidates).retired
+_candidates = load_model_ic(
+    ["linear", "gbm"], case_studies=[CASE_STUDY_ID], require_full_coverage=False
+)
+_retired = split_unpublished_members(study, _candidates).retired
 if not _retired.is_empty():
-    print("Retired by their publisher, excluded before the family leaders are taken:")
+    print("Not listed by any current population, excluded before the family leaders are taken:")
     for _row in _retired.iter_rows(named=True):
         print(f"  {_row['family']}/{_row['config_name']}: {_row['prediction_hash']}")
 _baselines = load_best_ic_per_family(
@@ -327,17 +328,14 @@ _daily = pl.concat(
         for prediction_hash in execution.catalog_rows["prediction_hash"].to_list()
     ]
 )
-checkpoints = (
+coverage = (
     execution.catalog_rows.select(
         "config_name", "label", "complete", "checkpoint_value", "n_folds", "prediction_hash"
     )
     .join(_daily, on="prediction_hash", how="inner")
-    .filter(pl.col("label") == PRIMARY_LABEL)
     .join(
-        plan.filter(pl.col("label") == PRIMARY_LABEL).select(
-            "config_name", pl.col("eligible_dates").alias("expected_days")
-        ),
-        on="config_name",
+        plan.select("config_name", "label", pl.col("eligible_dates").alias("expected_days")),
+        on=["config_name", "label"],
         how="left",
     )
     # Against the dates the resolved eligibility says this configuration should have scored, not
@@ -345,12 +343,18 @@ checkpoints = (
     # has a maximum that is itself short, and calling that full coverage would publish truncated
     # coverage as complete.
     .with_columns((pl.col("ic_n_days") == pl.col("expected_days")).alias("full_coverage"))
-    .sort("checkpoint_value")
+    .sort("label", "checkpoint_value")
 )
+if coverage.is_empty():
+    raise RuntimeError(f"no registered checkpoints for {CASE_STUDY_ID}")
+if not coverage["complete"].all():
+    raise RuntimeError("an incomplete checkpoint is registered; the population cannot be read")
+
+# Coverage is measured over every label the run fitted, because the population spans them all and
+# the cell below republishes it. The table this section shows is the primary label's slice of it.
+checkpoints = coverage.filter(pl.col("label") == PRIMARY_LABEL)
 if checkpoints.is_empty():
     raise RuntimeError(f"no registered checkpoints for {CASE_STUDY_ID}/{PRIMARY_LABEL}")
-if not checkpoints["complete"].all():
-    raise RuntimeError("an incomplete checkpoint is registered; the population cannot be read")
 
 # %% [markdown]
 # Every full-coverage checkpoint is published as a candidate; this notebook chooses none of them.
@@ -385,6 +389,70 @@ print(f"\nPublished as candidates: {PUBLISHED_CHECKPOINTS} full-coverage checkpo
 print(f"Highest validation IC: epoch {PEAK_EPOCH} (IC={PEAK_IC:+.4f})")
 if partial_epochs:
     print(f"Excluded before selection, partial coverage: epochs {partial_epochs}")
+
+# %% [markdown]
+# **The published population is narrowed to what covered its dates.** A population is declared
+# before the first fit, so it necessarily lists every checkpoint the run intended, including one
+# that ends up scored on fewer dates than its own resolved eligibility declares. Coverage is only
+# knowable afterwards, and [`14_backtest`](14_backtest.ipynb) sweeps whatever the current
+# population lists - so leaving a partial checkpoint in it would carry a collapsed epoch,
+# flattered by the days it could not score, into validation-Sharpe selection. Republishing the
+# full-coverage subset under the same name supersedes the declared generation, which is the
+# lineage record of what left the candidate set and why.
+#
+# When every checkpoint covered its dates the member list is unchanged, and the registry returns
+# the published snapshot rather than writing a second generation. That is the case here, and it is
+# what makes a re-run of this notebook a no-op rather than a new lineage entry.
+
+# %%
+_full_coverage = set(coverage.filter("full_coverage")["prediction_hash"].to_list())
+_declared = tuple(population.members)
+_selectable = [member for member in _declared if member in _full_coverage]
+if not _selectable:
+    raise RuntimeError("no checkpoint covered its dates; there is nothing to publish")
+if len(_selectable) != len(_declared):
+    population = OfficialPopulation.create(
+        study,
+        name=population.name,
+        member_kind="prediction",
+        members=_selectable,
+        supersedes=population.hash,
+    )
+print(
+    f"population {population.name}: {len(_selectable)} of {len(_declared)} declared prediction "
+    "sets are selectable"
+)
+
+# %% [markdown]
+# **What the menu declares, against what the registry holds.** The check runs here rather than
+# before the fit for two reasons. This notebook is itself one of the entries, so asking before
+# section 4 reports NLinear as never fitted on the run that is fitting it. And a row in
+# `training_runs` is not a fitted configuration: an interrupted run leaves one behind, and a run
+# narrowed to one label leaves one that says nothing about the other. The pair a menu entry
+# declares - a configuration and a label - is fitted when a prediction set for it is registered
+# and listed by a population currently in force, which is the same bar
+# [`14_backtest`](14_backtest.ipynb) sweeps at.
+
+# %%
+_menu_pairs = set(
+    load_model_configs(study, "deep_learning").select("config_name", "label").unique().iter_rows()
+)
+_registered = load_model_ic(
+    ["deep_learning"], case_studies=[CASE_STUDY_ID], require_full_coverage=False
+)
+_in_force, _in_force_notes = prediction_members_in_force(study)
+if _in_force is not None:
+    _registered = _registered.filter(pl.col("prediction_hash").is_in(list(_in_force)))
+for _note in _in_force_notes:
+    print(f"  note: {_note}")
+_fitted_pairs = set(_registered.select("config_name", "label").unique().iter_rows())
+_unfitted = sorted(_menu_pairs - _fitted_pairs)
+print(f"deep_learning menu: {len(_menu_pairs)} configuration-label pairs")
+print(f"published and scored in this registry: {len(_menu_pairs & _fitted_pairs)}")
+print(
+    "declared and never fitted: "
+    + (", ".join(f"{config}/{label}" for config, label in _unfitted) or "none")
+)
 
 # %% [markdown]
 # ## 6. The learning curve
@@ -508,9 +576,12 @@ fig_cmp.show()
 # %% [markdown]
 # ## 8. Is the average stable across time?
 #
-# The reported IC is an average over folds, and an average can be positive while most of its terms
-# are not. The per-fold breakdown is what separates a model with a weak but consistent edge from
-# one whose mean is carried by a single fold.
+# The headline IC above is the mean over every validation date, pooled across folds, and a mean
+# can be positive while whole stretches of it are not. The per-fold breakdown re-cuts the same
+# observations by fold, which is what separates a model with a weak but consistent edge from one
+# whose mean is carried by a single fold. The two numbers are not the same statistic: each fold
+# contributes a different number of dates to the pooled mean, so the fold ICs below do not
+# average to it.
 
 # %% tags=["results"]
 folds = (
@@ -542,7 +613,8 @@ display(
   `(symbol, timestamp)` and recomputed rather than assumed comparable. On that common sample the
   peak checkpoint scores **{COMMON_IC[f"NLinear ({CONFIG_NAME})"]:+.3f}**, against Ridge
   **{COMMON_IC["Ridge (Ch11)"]:+.3f}** and GBM **{COMMON_IC["GBM (Ch12)"]:+.3f}**. Its own
-  full-sample IC is **{PEAK_IC:+.3f}** at epoch **{PEAK_EPOCH}**.
+  mean daily IC over the whole validation sample is **{PEAK_IC:+.3f}** at epoch
+  **{PEAK_EPOCH}**.
 - **Coverage is comparable across the checkpoint choice.** {_coverage_text} The guard stays
   necessary either way: a collapsed checkpoint scores on fewer dates and can look better for it.
 - **The average is not the whole story.** The peak checkpoint is negative in
