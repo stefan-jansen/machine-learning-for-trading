@@ -234,8 +234,22 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
         with contextlib.suppress(sqlite3.OperationalError):
             dst.execute(row[0])
 
-    # 2. Copy model-side tables in full
-    for table in ["training_runs", "prediction_sets", "prediction_metrics", "fold_metrics"]:
+    # 2. Copy model-side tables in full.
+    #
+    # `prediction_coverage` belongs here and was missing, which nothing noticed while
+    # completeness was only asked after a field had been built. `PredictionResult.completeness`
+    # returns "no prediction_coverage row" without one, `BacktestResult.completeness` chains to
+    # it, and every backtest in the fixture therefore read as incomplete - so a caller that
+    # filters on completeness before tallying coverage found no rankable row for any label and
+    # reported the sweep unfinished. Production carries 1405 rows for
+    # `sp500_equity_option_analytics` alone.
+    for table in [
+        "training_runs",
+        "prediction_sets",
+        "prediction_metrics",
+        "prediction_coverage",
+        "fold_metrics",
+    ]:
         rows = src.execute(f"SELECT * FROM {table}").fetchall()
         n = _copy_rows(src, dst, table, rows)
         stats[table] = n
