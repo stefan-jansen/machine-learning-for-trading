@@ -727,9 +727,17 @@ def _assert_placebo_permutation_possible(
             "too finely."
         )
     if n_draws and short_segment_fraction > 0:
+        # `.1%` rounds any share below 0.05% to "0.0%", so the warning read "cannot move
+        # 0.0% of the treatment rows" - a sentence that tells the reader nothing is wrong
+        # while warning that something is, which is how a warning gets trained out. Two
+        # significant figures on the share keeps a genuinely tiny frozen fraction legible
+        # as tiny rather than as zero.
+        share = f"{short_segment_fraction:.2%} of"
+        if short_segment_fraction < 0.0001:
+            share = f"a {short_segment_fraction:.2e} fraction of"
         warnings.warn(
             f"block permutation with block_size={block_size} cannot move "
-            f"{short_segment_fraction:.1%} of the treatment rows: they sit in segments "
+            f"{share} the treatment rows: they sit in segments "
             "too short to hold two blocks, so the placebo distribution holds them at "
             "their observed values and the refutation p-value is biased toward 1. Read "
             "placebo_frozen_fraction alongside the p-value, and lower block_size or "
