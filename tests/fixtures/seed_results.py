@@ -791,7 +791,7 @@ ENTITY_COLUMN_CANDIDATES = ("symbol", "product", "entity", "ticker")
 SEEDED_DATE_BUDGET = 60
 
 
-def _reference_panels(cs_dir: Path, hash_rows: list, survives, entity_col: str, _pl) -> dict:
+def _reference_panels(cs_dir: Path, hash_rows: list, survives, _pl) -> dict:
     """One key/target panel per (split, label), taken from an artifact left in place.
 
     Which artifact: the panel that the most untouched artifacts in the group already
@@ -862,7 +862,7 @@ def _reference_panels(cs_dir: Path, hash_rows: list, survives, entity_col: str, 
             key=lambda item: (-len(item[1]), -item[0][0], item[1][0][0]),
         )
         _, frame, entity = entries[0]
-        panels[key] = _subsampled_panel(frame, entity, entity_col, _pl)
+        panels[key] = _subsampled_panel(frame, entity, _pl)
     return panels
 
 
@@ -891,16 +891,18 @@ def _intraday_split_skeleton(panels: dict, split, _pl):
     return candidates[0] if candidates else None
 
 
-def _subsampled_panel(frame, entity: str, entity_col: str, _pl):
+def _subsampled_panel(frame, entity: str, _pl):
     """A reference artifact reduced to the canonical seeded columns and date budget.
 
     Keeps the reference's own timestamp and identifier dtypes: a seeded artifact has
     to meet the reference on an exact join, and a cast on either side of that key
-    would silently drop every row. The identifier is still renamed to the case
-    study's declared ``entity_col`` - cme_futures registers ``product`` while its
-    copied artifacts carry ``symbol``, and the notebooks resolve that column per
-    frame, so following the reference's name here would change what every seeded
-    cme artifact is called to fix a join that already works on values.
+    would silently drop every row. The identifier keeps the reference's name too.
+    This used to rename it to a per-case-study ``entity_col`` on the belief that
+    "cme_futures registers ``product``". It does not: every prediction artifact in
+    all nine canonical registries is keyed ``symbol``, cme_futures included, where
+    that column holds the product roots its labels store under ``product``. The
+    rename made the fixture and `07_conformal_position_sizing` agree with each
+    other and with no registry.
     """
     dates = frame["timestamp"].unique().sort()
     # A stride is fine on a daily reference, whose own gaps are already uneven
@@ -957,7 +959,7 @@ def _subsampled_panel(frame, entity: str, entity_col: str, _pl):
             .alias("fold")
         )
     columns = [
-        _pl.col(entity).alias(entity_col),
+        _pl.col(entity).alias("symbol"),
         _pl.col("timestamp"),
         fold.alias("fold"),
         _pl.col("actual"),
@@ -1186,6 +1188,34 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
             (r[0], None, None)
             for r in db.execute("SELECT prediction_hash FROM prediction_sets").fetchall()
         ]
+    # How many folds each prediction's own training run declares. A fabricated panel that
+    # carries a different number is not a weaker fixture, it is a rejected one:
+    # `insight_chapter.load_selected_predictions` reads the declared count off the training
+    # spec and refuses an artifact whose fold column does not enumerate exactly
+    # `range(n_folds)`. Two was hard-coded here, so every notebook reaching that check saw
+    # `expected fold IDs [0..7], observed [0, 1]` for any hash the sampler happened to make
+    # selectable - which is how widening the sample took ch13 down on etfs/77ca2284b27b.
+    declared_folds: dict[str, int] = {}
+    try:
+        from case_studies.utils.registry.specs import declared_fold_count
+
+        for _p_hash, _spec_json in db.execute(
+            """
+            SELECT ps.prediction_hash, t.spec_json
+            FROM prediction_sets ps
+            JOIN training_runs t ON ps.training_hash = t.training_hash
+            """
+        ).fetchall():
+            if not _spec_json:
+                continue
+            try:
+                count = declared_fold_count(json.loads(_spec_json))
+            except (ValueError, TypeError):
+                continue
+            if count > 0:
+                declared_folds[_p_hash] = count
+    except (sqlite3.OperationalError, ImportError):
+        pass
     # Cohort-leader predictions - the frozen carrier a strategy-analysis/portfolio/
     # cost/risk notebook resolves via cohort_metrics(cohort_type='stagelabel',
     # stage='signal') and pins by hash. Those notebooks check the carrier's real
@@ -1223,7 +1253,10 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
     setup_path = CS_ROOT / cs_id / "config" / "setup.yaml"
     symbols = ["SYM0", "SYM1", "SYM2", "SYM3", "SYM4"]
     holdout_start = "2024-01-01"
-    entity_col = "symbol"
+    # The name the case study's LABELS use for the entity. Prediction artifacts do not
+    # follow it - they are keyed `symbol` in every registry - so this is only how the
+    # fabricated grid finds the dtype and the values to borrow.
+    label_entity_col = "symbol"
     # Labels whose predictions carry a continuous evaluation target beside the class
     # one. `labels.classification_eval_label` in setup.yaml is where production
     # decides this: utils.modeling.load_modeling_dataset reads it for a
@@ -1241,7 +1274,7 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         if assets:
             symbols = assets[:10]  # Cap at 10 for test speed
         if cs_id == "cme_futures":
-            entity_col = "product"
+            label_entity_col = "product"
         eval_cfg = setup.get("evaluation", {})
         if eval_cfg.get("holdout_start"):
             holdout_start = eval_cfg["holdout_start"]
@@ -1302,13 +1335,49 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         # global one used to be reached here and crossed it.
         return window if _weekday_grid(*window) else fallback
 
+    # The keys a fabricated panel has to meet. Production writes a prediction on the same
+    # (entity, timestamp) types its labels carry, and a notebook joins the two; a panel keyed
+    # on strings and dates when the labels carry UInt32 and Datetime does not fail here, it
+    # fails several stages downstream on a polars join:
+    #
+    #   symbol: str on left does not match symbol: u32 on right      (us_firm_characteristics)
+    #   timestamp: date on left does not match timestamp: datetime[us]  (nasdaq100_microstructure)
+    #
+    # So both the entity values and the two key dtypes come from the case study's own labels
+    # where it has them, and fall back to setup.yaml's symbol list otherwise. Only the fabricated
+    # grid needs this: a panel borrowed from a copied artifact already carries production's types.
+    entity_dtype = None
+    timestamp_dtype = None
+    for label_file in sorted((cs_dir / "labels").glob("*.parquet")):
+        try:
+            schema = _pl.read_parquet_schema(label_file)
+        except Exception:  # noqa: BLE001 - an unreadable label is not ours to fix here
+            continue
+        if label_entity_col not in schema or "timestamp" not in schema:
+            continue
+        entity_dtype = schema[label_entity_col]
+        timestamp_dtype = schema["timestamp"]
+        try:
+            entities = (
+                _pl.read_parquet(label_file, columns=[label_entity_col])[label_entity_col]
+                .unique()
+                .sort()
+                .head(10)
+                .to_list()
+            )
+        except Exception:  # noqa: BLE001
+            entities = []
+        if entities:
+            symbols = entities
+        break
+
     n_symbols = len(symbols)
     target_rng = np.random.default_rng(42)
-    templates: dict[tuple[date, date], tuple[object, int]] = {}
+    templates: dict[tuple[tuple[date, date], int], tuple[object, int]] = {}
 
-    def _template_for(window: tuple[date, date]):
-        """One reusable frame per distinct window; scores are added per hash."""
-        cached = templates.get(window)
+    def _template_for(window: tuple[date, date], n_folds: int = 2):
+        """One reusable frame per (window, fold count); scores are added per hash."""
+        cached = templates.get((window, n_folds))
         if cached is not None:
             return cached
         dates = _weekday_grid(*window)
@@ -1325,16 +1394,21 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         # i % 2) silently partitions symbols across folds and breaks per-symbol
         # conformal calibration (each symbol ends up in one fold only). Partition by
         # date instead so all symbols share the same fold on each date.
-        n_folds = 2
+        # Contiguous date blocks, one per fold, so the grid mirrors walk-forward CV and
+        # every declared fold id appears. The block is floored and the last one absorbs the
+        # remainder: a ceiling would leave the highest folds empty whenever the grid holds
+        # only slightly more dates than folds, and an absent fold id fails the same check
+        # a wrong fold count does.
+        block = max(1, n_dates // max(1, n_folds))
         rows_fold = [
-            (_di // max(1, n_dates // n_folds + 1)) % n_folds
-            for _di in range(n_dates)
-            for _ in range(n_symbols)
+            min(_di // block, n_folds - 1) for _di in range(n_dates) for _ in range(n_symbols)
         ]
         frame = _pl.DataFrame(
             {
-                entity_col: rows_symbol,
-                "timestamp": _pl.Series(rows_date).cast(_pl.Date),
+                "symbol": _pl.Series(rows_symbol, dtype=entity_dtype)
+                if entity_dtype is not None
+                else _pl.Series(rows_symbol),
+                "timestamp": _pl.Series(rows_date).cast(timestamp_dtype or _pl.Date),
                 "fold": rows_fold,
                 "actual": target_rng.normal(0, 0.01, n).tolist(),
             }
@@ -1345,8 +1419,8 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         # one column and keeps the panel a single object, so which labels need it is
         # decided at write time.
         frame = frame.with_columns(_pl.col("actual").alias("eval_actual"))
-        templates[window] = (frame, n)
-        return templates[window]
+        templates[(window, n_folds)] = (frame, n)
+        return templates[(window, n_folds)]
 
     rewrite_existing = cs_id == "crypto_perps_funding"
     missing_leaders = sorted(
@@ -1398,7 +1472,7 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
     # keys, folds and realized targets and synthesize only the score - preferring
     # one that survives, and otherwise using one that will be rewritten onto its
     # own keys. Only a group with no artifact at all keeps the fabricated grid.
-    reference_panels = _reference_panels(cs_dir, hash_rows, _survives, entity_col, _pl)
+    reference_panels = _reference_panels(cs_dir, hash_rows, _survives, _pl)
 
     for p_hash, split, label in hash_rows:
         pred_dir = cs_dir / "run_log" / "predictions" / p_hash
@@ -1424,7 +1498,7 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         if reference is not None:
             template, n = reference, reference.height
         else:
-            template, n = _template_for(_window_for(split, label))
+            template, n = _template_for(_window_for(split, label), declared_folds.get(p_hash, 2))
         pred_dir.mkdir(parents=True, exist_ok=True)
         score_seed = int(hashlib.sha256(p_hash.encode()).hexdigest()[:16], 16)
         scores = np.random.default_rng(score_seed).normal(0, 0.01, n).tolist()

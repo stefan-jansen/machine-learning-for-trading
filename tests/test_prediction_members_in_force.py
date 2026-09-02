@@ -127,3 +127,35 @@ class TestAPoolWithAnUnfinishedMember:
         members, notes = prediction_members_in_force(study)
         assert members == frozenset({"aaaa1111", "bbbb2222"})
         assert notes == []
+
+
+class TestAMemberThatScoredEveryFoldOnFewerDates:
+    """Fold completeness cannot see a checkpoint that collapsed inside its folds.
+
+    A sequence model that settles into predicting nearly the same value for every fund on a date
+    gives that date no spread to rank, and the date drops out of the daily IC. The member still
+    reports every fold scored, so the fold check above passes it, and it is flattered by the days
+    it could not score. Nothing in the pool is measured against the dates the resolved eligibility
+    declared, so the publishing notebook is the only place that knows - and narrowing what it
+    published is the only thing that takes such a member out of the sweep.
+    """
+
+    def test_the_fold_check_passes_it_and_it_stays_in_the_pool(self, study: Study) -> None:
+        _publish(study, "etfs-nlinear-validation-v1", ["aaaa1111", "bbbb2222"])
+        register = TestAPoolWithAnUnfinishedMember()._register
+        register(study, "aaaa1111", expected=5, scored=5)
+        register(study, "bbbb2222", expected=5, scored=5)
+        members, notes = prediction_members_in_force(study)
+        assert members == frozenset({"aaaa1111", "bbbb2222"})
+        assert notes == []
+
+    def test_narrowing_the_population_removes_it_from_the_candidate_set(self, study: Study) -> None:
+        declared = _publish(study, "etfs-nlinear-validation-v1", ["aaaa1111", "bbbb2222"])
+        register = TestAPoolWithAnUnfinishedMember()._register
+        register(study, "aaaa1111", expected=5, scored=5)
+        register(study, "bbbb2222", expected=5, scored=5)
+        # What `10a_dl_nlinear` does once coverage is measurable: republish the full-coverage
+        # subset under the same name, naming the declared generation it retires.
+        _publish(study, "etfs-nlinear-validation-v1", ["aaaa1111"], supersedes=declared.hash)
+        members, _ = prediction_members_in_force(study)
+        assert members == frozenset({"aaaa1111"})

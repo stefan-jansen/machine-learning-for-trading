@@ -243,6 +243,13 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
     # filters on completeness before tallying coverage found no rankable row for any label and
     # reported the sweep unfinished. Production carries 1405 rows for
     # `sp500_equity_option_analytics` alone.
+    #
+    # A table the source does not have is skipped rather than raising. Every canonical
+    # registry carries all five, but the stub registries the unit tests build carry only the
+    # tables the case under test needs, and requiring `prediction_coverage` there turned
+    # seven of them red. `test_prediction_coverage_rows_match_prediction_sets` asserts one
+    # coverage row per prediction on the SHIPPED fixture, which is where a real registry
+    # missing the table would have to be caught.
     for table in [
         "training_runs",
         "prediction_sets",
@@ -250,6 +257,11 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
         "prediction_coverage",
         "fold_metrics",
     ]:
+        if not src.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone():
+            stats[table] = 0
+            continue
         rows = src.execute(f"SELECT * FROM {table}").fetchall()
         n = _copy_rows(src, dst, table, rows)
         stats[table] = n
