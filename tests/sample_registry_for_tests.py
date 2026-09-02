@@ -192,6 +192,7 @@ def sample_registry(cs_id: str, intermediates_dir: Path = DEFAULT_INTERMEDIATES_
     # previous generation's directories behind alongside the new ones.
     dst_db.unlink(missing_ok=True)
     shutil.rmtree(dst_dir / "backtest", ignore_errors=True)
+    shutil.rmtree(dst_dir / "training", ignore_errors=True)
 
     src = sqlite3.connect(str(src_db))
     try:
@@ -208,6 +209,9 @@ def sample_registry(cs_id: str, intermediates_dir: Path = DEFAULT_INTERMEDIATES_
     stats["backtest_artifact_dirs"] = artifacts["copied"]
     stats["backtest_artifacts_missing_dir"] = artifacts["missing_dir"]
     stats["backtest_artifacts_missing_returns"] = artifacts["missing_returns"]
+    training = _copy_training_artifacts(src_db.parent, dst_dir, stats.pop("training_hashes", set()))
+    stats["training_artifact_dirs"] = training["copied"]
+    stats["training_artifacts_missing_dir"] = training["missing_dir"]
     return stats
 
 
@@ -344,6 +348,12 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
 
     stats["backtest_runs_sampled"] = len(sampled_bt_hashes)
     stats["sampled_hashes"] = sampled_bt_hashes
+    # Every training run whose rows this fixture carries, not only those behind a sampled
+    # backtest: step 2 copies `training_runs` in full, and a reader selecting rank-1 by IC
+    # reaches a training run that never entered a backtest at all.
+    stats["training_hashes"] = {
+        row[0] for row in src.execute("SELECT DISTINCT training_hash FROM training_runs")
+    }
 
     # 3d. Copy sampled backtest data (runs, metrics, fold_metrics)
     if sampled_bt_hashes:
@@ -436,6 +446,47 @@ def _copy_backtest_artifacts(src_run_log: Path, dst_run_log: Path, hashes: set) 
                 missing_returns += 1
         copied += 1
     return {"copied": copied, "missing_dir": missing_dir, "missing_returns": missing_returns}
+
+
+#: The small, notebook-read files inside a training dir. `models/` is deliberately absent:
+#: it holds fitted weights, which no reader in this repo opens and which would put gigabytes
+#: into a fixture repo.
+_TRAINING_ARTIFACTS = ("learning_curves.parquet", "fold_metrics.parquet", "spec.json")
+
+
+def _copy_training_artifacts(src_run_log: Path, dst_run_log: Path, hashes: set) -> dict:
+    """Copy each retained training run's small artifacts next to its rows.
+
+    Same failure as the backtest dirs one layer up, and it went unnoticed longer because
+    nothing placed these either: `training_runs` is copied in full, so selection reaches a
+    hash whose `run_log/training/<hash>/` was never written, and the read fails far from the
+    cause. `12_gradient_boosting/12_case_study_insights` raised `missing learning curve for
+    036284a71530` the first time the fixture gave it a `sp500_equity_option_analytics` row -
+    the row was there, the directory was not.
+
+    A hash with no source dir is counted rather than raised: `training_runs` holds rows from
+    preview and superseded generations whose artifacts were never kept, and refusing to build
+    a fixture over those would refuse every real registry.
+    """
+    src_tr = src_run_log / "training"
+    if not src_tr.is_dir():
+        return {"copied": 0, "missing_dir": len(hashes)}
+    dst_tr = dst_run_log / "training"
+    copied = 0
+    missing_dir = 0
+    for training_hash in hashes:
+        src_dir = src_tr / training_hash
+        if not src_dir.is_dir():
+            missing_dir += 1
+            continue
+        dst_dir = dst_tr / training_hash
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        for name in _TRAINING_ARTIFACTS:
+            src_file = src_dir / name
+            if src_file.is_file():
+                shutil.copy2(src_file, dst_dir / name)
+        copied += 1
+    return {"copied": copied, "missing_dir": missing_dir}
 
 
 def _copy_rows_onto_existing_schema(src, dst, table: str, where_col: str, value) -> int:
@@ -775,6 +826,9 @@ def preflight_pinned_predictions(cs_id: str, intermediates_dir: Path) -> None:
 
 
 def main() -> int:
+    # Rebound from --source below. Every reader of the source root takes it as a module
+    # global, and the alternative - threading it through nine call sites - buys nothing here.
+    global CODE_CS_DIR
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--output",
@@ -783,6 +837,20 @@ def main() -> int:
         help=(
             "Fixture intermediates root to write (the test-data repo's "
             "intermediates/ directory). Default: ~/ml4t/test-data/intermediates"
+        ),
+    )
+    parser.add_argument(
+        "--source",
+        type=Path,
+        default=CODE_CS_DIR,
+        help=(
+            "Root holding each case study's run_log to sample FROM. Default: this repo's "
+            "case_studies/, which in a --case-study worktree is a symlink to the canonical "
+            "store. Pass ~/ml4t/artifacts/case_studies to read the canonical store directly. "
+            "A plain worktree can hold a real run_log left behind by an earlier layout, and "
+            "it shadows the canonical one silently: on 2026-09-01 ~/ml4t/public/case_studies/"
+            "etfs/run_log was a 2026-07-24 snapshot with 759 backtests against the store's "
+            "3313, so every fixture sampled from that checkout carried a six-week-old etfs."
         ),
     )
     parser.add_argument(
@@ -798,6 +866,7 @@ def main() -> int:
         ),
     )
     args = parser.parse_args()
+    CODE_CS_DIR = args.source.expanduser().resolve()
     intermediates_dir = args.output.expanduser().resolve()
     case_study_ids = args.case_studies or CASE_STUDY_IDS
 
@@ -831,6 +900,12 @@ def main() -> int:
             parser.error(str(exc))
 
     print(f"Sampling registries from {CODE_CS_DIR}")
+    # Printed per case study and fully resolved, because the shadowing this guards against is
+    # invisible from the root alone: a symlinked run_log and a real one left behind by an
+    # earlier layout look identical here and resolve to different registries.
+    for cs_id in case_study_ids:
+        src = (CODE_CS_DIR / cs_id / "run_log" / "registry.db").resolve()
+        print(f"  {cs_id:32s} {src}")
     print(f"Writing to {intermediates_dir}")
     print(f"Top {TOP_N_PER_GROUP} backtests per (label × family × stage) + all holdout\n")
 
