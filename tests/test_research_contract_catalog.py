@@ -392,9 +392,12 @@ def test_prediction_rows_at_reads_the_case_dir_it_is_given_not_the_activated_roo
     assert rows.filter(pl.col("complete"))["prediction_hash"].to_list() == [in_workspace]
 
     # The contrast that makes the helper necessary: reading through a study activates a root,
-    # and here unsets the one the caller resolved against.
+    # and the one the caller resolved against is not the one left standing. Which root it
+    # leaves is the study's business - a read-only one now names its own rather than clearing
+    # the variable - and the point here is that a caller cannot rely on either, which is why
+    # `prediction_rows_at` takes the directory instead of a study.
     Study.open("etfs", release_root=release).predictions.table()
-    assert "ML4T_OUTPUT_DIR" not in os.environ
+    assert os.environ.get("ML4T_OUTPUT_DIR") != str(workspace)
 
 
 class TestASingleRootStudyReadsALiveRegistry:

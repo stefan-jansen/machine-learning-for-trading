@@ -859,6 +859,28 @@ class TestTheSingleRootReadOnlyForm:
         Study.at(case_dir, case_study="etfs")
         assert "ML4T_OUTPUT_DIR" not in os.environ
 
+    def test_activating_it_points_the_path_helpers_at_its_own_root(self, tmp_path: Path) -> None:
+        """`Study.at` never activates, but the things it hands out do.
+
+        `LabelCatalog.get` calls `study.activate(tier)` before resolving the artifact, so a
+        read-only study does reach `activate()`. That branch used to pop `ML4T_OUTPUT_DIR`,
+        and `get_case_study_dir` falls back to the repo's own `case_studies/` when the
+        variable is absent - so every later lookup answered for the repo instead of the
+        directory the notebook resolved, for the rest of the process. Under a redirected
+        output root the repo holds none of these artifacts and the failure reads as a
+        missing label rather than as a moved root.
+        """
+        release = _seed_release(tmp_path)
+        case_dir = release / "case_studies" / "etfs"
+        os.environ["ML4T_OUTPUT_DIR"] = str(tmp_path / "elsewhere")
+
+        study = Study.at(case_dir, case_study="etfs")
+        assert study.activate() == case_dir.resolve()
+
+        from utils.paths import get_case_study_dir
+
+        assert get_case_study_dir("etfs", create=False) == case_dir.resolve()
+
     def test_both_roots_are_the_directory_it_was_given(self, tmp_path: Path) -> None:
         """`OfficialPopulation.one` reads `root`; `Result.open` reads `release_case_root`.
 

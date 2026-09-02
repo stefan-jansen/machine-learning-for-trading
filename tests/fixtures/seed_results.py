@@ -771,13 +771,68 @@ def _backfill_all_backtest_artifacts(cs_dir: Path) -> None:
         artifact_dir = bt_root / b_hash
         artifact_dir.mkdir(parents=True, exist_ok=True)
         path = artifact_dir / "daily_returns.parquet"
-        if path.exists():
-            continue
-        returns = rng.normal(loc=0.0005, scale=0.012, size=n_days).astype("float64")
-        df = _pl.DataFrame({"timestamp": day_list, "daily_return": returns}).with_columns(
-            _pl.col("timestamp").cast(_pl.Date)
-        )
-        df.write_parquet(path)
+        if not path.exists():
+            returns = rng.normal(loc=0.0005, scale=0.012, size=n_days).astype("float64")
+            df = _pl.DataFrame({"timestamp": day_list, "daily_return": returns}).with_columns(
+                _pl.col("timestamp").cast(_pl.Date)
+            )
+            df.write_parquet(path)
+
+    _redescribe_backtest_digests(db_path, bt_root)
+
+
+def _redescribe_backtest_digests(db_path: Path, bt_root: Path) -> None:
+    """Make every backtest_runs row's digest map describe the artifacts on disk.
+
+    The rows sampled from production carry the digest map production wrote - six
+    files, `equity.parquet` and `weights.parquet` among them - and the fixture holds
+    one of them, synthesized, so its content does not hash to the recorded value
+    either. `BacktestResult.completeness` walks that map and reports the first file
+    it cannot find, which makes every sampled backtest incomplete.
+
+    Nothing surfaces that until a notebook asks for completeness. `_complete_only`
+    then drops the whole field, and `resolve_field_members` reports it as declared
+    labels having no rankable validation backtest - the run reads as unfinished when
+    what is actually wrong is that the fixture row describes artifacts the fixture
+    never had. sp500_equity_option_analytics' 17_costs and 20_strategy_analysis fail
+    that way.
+
+    So the map is rewritten from what is on disk, digested the same way the checker
+    digests it. That keeps the digest-verification branch exercised in CI rather than
+    routing every fixture row down the legacy NULL fallback, and it holds the rule
+    the rest of this seeder holds: a fixture row describes what the fixture has.
+    """
+    try:
+        import polars as _pl
+
+        from case_studies.research.results import _verified_digest
+    except ImportError:
+        return
+
+    from functools import partial
+
+    db = sqlite3.connect(str(db_path))
+    try:
+        hashes = [row[0] for row in db.execute("SELECT backtest_hash FROM backtest_runs")]
+        for b_hash in hashes:
+            present = sorted(
+                path for path in (bt_root / b_hash).glob("*.parquet") if path.is_file()
+            )
+            if not present:
+                continue
+            digests = {
+                path.name: _verified_digest(path, partial(_pl.read_parquet, path))
+                for path in present
+            }
+            db.execute(
+                "UPDATE backtest_runs SET artifact_digests_json = ? WHERE backtest_hash = ?",
+                (json.dumps(digests, sort_keys=True), b_hash),
+            )
+        db.commit()
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        db.close()
 
 
 # The identifier a prediction artifact names its assets with. `symbol` everywhere
