@@ -320,3 +320,55 @@ def test_sweep_read_does_not_create_case_study_dir(tmp_path, monkeypatch):
     with pytest.raises((FileNotFoundError, KeyError)):
         load_sweep("etfs")  # no config seeded under tmp_path
     assert not (tmp_path / "etfs").exists()
+
+
+# ---------------------------------------------------------------------------
+# Long-short feasibility: a k above half the panel cannot be filled
+# ---------------------------------------------------------------------------
+
+
+class TestLongShortHalfPanel:
+    """`signals.py` clamps each side of a long-short selection to `n_assets // 2`.
+
+    A k above half the panel therefore executes with fewer names than the spec
+    it registers under, and two declared k values collapse to the same
+    portfolio while registering as distinct rows. The sweep helpers must not
+    offer such a k. Production universes are wide enough that none of the
+    declared grids is affected; the CI fixture is not, which is where this
+    first surfaced (nasdaq100 at 12 symbols admitted top_k=10 and realized 6
+    a side).
+    """
+
+    def test_long_short_case_study_drops_k_above_half_the_panel(self):
+        # nasdaq100 declares [5, 10, 20] and is long-short. At 12 symbols only
+        # k=5 is fillable: k=10 needs 20 names, k=20 needs 40.
+        assert get_top_k_values_for("nasdaq100_microstructure", "fwd_ret_15m", 12) == [5]
+
+    def test_long_only_case_study_keeps_k_up_to_the_whole_panel(self):
+        # etfs declares the same grid and is long-only, so half-panel does not
+        # apply and only k >= n_assets is dropped.
+        assert get_top_k_values_for("etfs", "fwd_ret_21d", 12) == [5, 10]
+
+    def test_the_empty_grid_error_names_the_long_short_cause(self):
+        with pytest.raises(ValueError, match="cannot fill"):
+            get_top_k_values_for("nasdaq100_microstructure", "fwd_ret_15m", 8)
+
+    @pytest.mark.parametrize(
+        ("case_study", "label", "n_assets"),
+        [
+            ("us_firm_characteristics", "fwd_ret_1m", 2500),
+            ("nasdaq100_microstructure", "fwd_ret_15m", 100),
+            ("fx_pairs", "fwd_ret_5d", 20),
+            ("cme_futures", "fwd_ret_5d", 30),
+            ("crypto_perps_funding", "fwd_ret_8h", 19),
+            ("us_equities_panel", "fwd_ret_5d", 2000),
+        ],
+    )
+    def test_every_offered_k_is_fillable_at_production_width(self, case_study, label, n_assets):
+        # The guard must not silently shrink a production grid: every value it
+        # still offers has to be executable as declared.
+        for k in get_top_k_values_for(case_study, label, n_assets):
+            assert 2 * k <= n_assets, (
+                f"{case_study}/{label}: top_k={k} needs {2 * k} names a side "
+                f"but the panel holds {n_assets}"
+            )

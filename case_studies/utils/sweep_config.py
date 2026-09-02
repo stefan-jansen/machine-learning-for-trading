@@ -22,6 +22,8 @@ Usage:
 
 from __future__ import annotations
 
+import re
+
 import polars as pl
 import yaml
 
@@ -612,7 +614,12 @@ def get_signal_nasdaq100_schemes_for(
             for direction in directions:
                 ls = direction == "long_short"
                 for top_k in top_k_grid:
-                    if top_k >= n_assets:
+                    # `signals.py` clamps each side of a long-short selection to
+                    # `n_assets // 2`, so a k above half the panel executes with
+                    # fewer names than it registers under. Two declared k values
+                    # then collapse to the same portfolio while registering as
+                    # distinct rows. Same test as `get_entry_schemes_for`.
+                    if top_k >= n_assets or (ls and 2 * top_k > n_assets):
                         continue
                     dtag = "ls" if ls else direction[0]
                     schemes.append(
@@ -645,6 +652,20 @@ def get_signal_nasdaq100_schemes_for(
     return schemes
 
 
+def is_long_short(case_study: str) -> bool:
+    """Whether ``case_study`` builds cross-sectional long-short portfolios.
+
+    Reads the same field, by the same token rule, as
+    ``backtest_loaders.load_backtest_config``: ``mapping.position_state_space``
+    is long-short only when it names both sides, so a one-sided short state
+    (``short_straddle_hedged``) does not count.
+    """
+    setup = _load_setup(case_study)
+    space = str((setup.get("mapping") or {}).get("position_state_space", "long_only"))
+    tokens = [tok for tok in re.split(r"[^a-z0-9]+", space.strip().lower()) if tok]
+    return "long" in tokens and "short" in tokens
+
+
 def get_top_k_values_for(
     case_study: str,
     label: str,
@@ -653,7 +674,10 @@ def get_top_k_values_for(
     """Return the top-K grid for ``(case_study, label)`` used by Ch17.
 
     Filters out k >= n_assets (holding everything is the equal-weight
-    benchmark, not a prediction-based portfolio). Raises ``KeyError`` if
+    benchmark, not a prediction-based portfolio), and, for a long-short case
+    study, k above half the panel: ``signals.py`` clamps each side to
+    ``n_assets // 2``, so such a k executes with fewer names than it registers
+    under. Raises ``KeyError`` if
     ``backtest.sweep.top_k_grid[label]`` is not declared, and ``ValueError``
     when the filter empties the grid.
 
@@ -672,13 +696,23 @@ def get_top_k_values_for(
             f"backtest.sweep.top_k_grid[{label!r}] not declared in "
             f"case_studies/{case_study}/config/setup.yaml"
         )
-    values = [int(k) for k in grid if int(k) < n_assets]
+    long_short = is_long_short(case_study)
+    values = [
+        int(k) for k in grid if int(k) < n_assets and not (long_short and 2 * int(k) > n_assets)
+    ]
     if not values:
         raise ValueError(
             f"top_k_grid[{label!r}] = {list(grid)} is empty after filtering against "
-            f"n_assets={n_assets} for case_studies/{case_study}: every declared k holds "
-            f"the whole universe. Raise the universe cap (MAX_SYMBOLS) above "
-            f"{min(int(k) for k in grid)} or declare a smaller k."
+            f"n_assets={n_assets} for case_studies/{case_study}: every declared k "
+            + (
+                "needs more than half the panel a side, which a long-short "
+                f"selection cannot fill. Raise the universe above "
+                f"{2 * min(int(k) for k in grid)} or declare a smaller k."
+                if long_short
+                else "holds the whole universe. Raise the universe cap "
+                f"(MAX_SYMBOLS) above {min(int(k) for k in grid)} or declare a "
+                "smaller k."
+            )
         )
     return values
 
