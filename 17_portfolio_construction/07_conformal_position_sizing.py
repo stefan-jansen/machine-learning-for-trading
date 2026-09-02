@@ -96,13 +96,16 @@ REGISTRY_ROOTS = {
     "cme_futures": get_case_study_dir("cme_futures", create=False) / "run_log",
 }
 
-# Each panel retains its canonical identifier: `symbol` for ETFs and `product`
-# for CME futures. Selection is explicitly on the validation IC recorded in the
-# registry, so the results below are selection-conditioned validation evidence,
-# not a final holdout estimate.
+# Prediction panels carry one entity column, `symbol`, in every case study. That
+# is a property of the prediction artifact, not of the case study: CME futures
+# name their entity `product` in labels and features, and the training step
+# writes the same product roots (`ES`, `CL`, `6E`, ...) under `symbol` when it
+# records a prediction set. Selection is explicitly on the validation IC recorded
+# in the registry, so the results below are selection-conditioned validation
+# evidence, not a final holdout estimate.
 BEST_GBM = {
     "etfs": {"label": "fwd_ret_21d", "id_col": "symbol"},
-    "cme_futures": {"label": "fwd_ret_5d", "id_col": "product"},
+    "cme_futures": {"label": "fwd_ret_5d", "id_col": "symbol"},
 }
 
 # %% [markdown]
@@ -180,7 +183,10 @@ for cs, df in preds.items():
     print(
         f"{cs}: {df.height:,} rows, {df[cfg['id_col']].n_unique()} entities, "
         f"{df['fold'].n_unique()} validation folds, "
-        f"{df['timestamp'].min().date()} to {df['timestamp'].max().date()}"
+        # strftime, not .date(): a prediction artifact's timestamp is Date in some case
+        # studies and Datetime in others - etfs ships both - and `datetime.date` has no
+        # .date(). Both types format the same way.
+        f"{df['timestamp'].min():%Y-%m-%d} to {df['timestamp'].max():%Y-%m-%d}"
     )
 
 # %% [markdown]
@@ -549,14 +555,15 @@ for label, key in [
 # ## 7. CME Futures (`fwd_ret_5d`)
 #
 # The same protocol excludes the first fold and uses a global five-session
-# schedule across the rest. Keeping `product` as the identifier preserves the
-# canonical CME schema.
+# schedule across the rest. The entity values are CME product roots; the
+# prediction artifact stores them under `symbol`, as it does for every case
+# study.
 
 # %%
 cme_rets, cme_weights = build_portfolio_returns(
-    preds["cme_futures"], widths["cme_futures"], "product", TOP_K_CME, HORIZON_CME
+    preds["cme_futures"], widths["cme_futures"], "symbol", TOP_K_CME, HORIZON_CME
 )
-cme_metrics = metric_block(cme_rets, cme_weights, "product", HORIZON_CME)
+cme_metrics = metric_block(cme_rets, cme_weights, "symbol", HORIZON_CME)
 print(f"CME futures: {cme_rets.height} non-overlapping validation rebalances")
 
 # %%

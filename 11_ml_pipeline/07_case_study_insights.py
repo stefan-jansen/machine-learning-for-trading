@@ -163,6 +163,41 @@ def load_complete_metrics(
     )
 
 
+# %% tags=[]
+# The identity a tie has to agree on before it can be resolved. `config_name` alone is not a
+# configuration: a name can be reused across generations while the parameters behind it move, and
+# collapsing two such rows would pick one arbitrarily by hash order - the failure the strict form
+# existed to prevent. A refit that only re-declared an input leaves the whole row bit-identical
+# apart from its two hashes, so requiring agreement on every other column - the config name, the
+# checkpoint, and each recorded statistic - separates the duplicate from the genuine ambiguity
+# without needing the training spec here. Two configurations that merely tie on ic_mean_daily
+# will differ somewhere in that vector and still raise.
+# Everything except the two identities that a refit is expected to move. Naming the
+# fields instead would be a second list to keep in step with METRICS_QUERY, and the
+# first draft of it already omitted ic_mean and ic_std while claiming to check every
+# recorded statistic.
+TIE_IDENTITY_EXCLUDED = frozenset({"training_hash", "prediction_hash"})
+
+
+def resolve_generation_tie(tied: pl.DataFrame, what: str) -> pl.DataFrame:
+    """Collapse generations of one configuration; raise on anything else."""
+    if tied.height == 1:
+        return tied
+    fields = [column for column in tied.columns if column not in TIE_IDENTITY_EXCLUDED]
+    distinct = tied.select(fields).unique()
+    if distinct.height != 1:
+        differing = [column for column in fields if tied[column].n_unique() > 1]
+        names = (
+            sorted(tied["config_name"].unique().to_list()) if "config_name" in tied.columns else []
+        )
+        raise RuntimeError(
+            f"{what}: daily-IC rank one is ambiguous"
+            + (f" between {', '.join(names)}" if names else "")
+            + f"; the tied rows differ on {', '.join(differing)}"
+        )
+    return tied.sort("prediction_hash").head(1)
+
+
 # %% [markdown] tags=[]
 # The primary-label collector applies the same completeness rule independently
 # to every case study before selecting the highest mean daily IC.
@@ -179,8 +214,13 @@ def collect_complete_rank1(case_studies: list[str]) -> pl.DataFrame:
             raise RuntimeError(f"{cs}: no complete linear result for {label}")
         best_ic = df["ic_mean_daily"].max()
         winner = df.filter(pl.col("ic_mean_daily") == best_ic)
-        if winner.height != 1:
-            raise RuntimeError(f"{cs}: primary linear rank one is ambiguous")
+        # A tie across two configurations is a real ambiguity and still raises. A tie between
+        # two generations of the SAME configuration is not: refitting one writes a second
+        # prediction set under a new training hash, and where the refit reproduced the scores
+        # the two ICs are bit-identical. Every fx_pairs linear configuration carries exactly
+        # two such generations - in production, not only in the fixture - so this check
+        # rejected the case study on a duplicate rather than on an ambiguity.
+        winner = resolve_generation_tie(winner, f"{cs}: primary linear")
         frames.append(
             winner.with_columns(
                 case_study=pl.lit(cs),
@@ -295,14 +335,21 @@ def replace_with_chronological_hac(
 
 # %% tags=[]
 def select_unique_best(frame: pl.DataFrame, groups: list[str]) -> pl.DataFrame:
-    """Select one unambiguous highest daily-IC row in every requested group."""
+    """Select one unambiguous highest daily-IC row in every requested group.
+
+    Fails closed on a tie between two configurations, because arbitrary row order must never
+    decide the reported winner. A tie between two generations of ONE configuration is a
+    different thing and resolves rather than raising: refitting writes a second prediction set
+    under a new training hash, and where the refit reproduced the scores the two ICs are
+    bit-identical. Every fx_pairs linear configuration carries exactly two such generations in
+    the production registry, so the strict form rejected the case study on a duplicate.
+    """
     winners = []
     for group in frame.partition_by(groups, maintain_order=True):
         best_ic = group["ic_mean_daily"].max()
         best = group.filter(pl.col("ic_mean_daily") == best_ic)
-        if best.height != 1:
-            identity = {column: group[0, column] for column in groups}
-            raise RuntimeError(f"ambiguous daily-IC rank one for {identity}")
+        identity = {column: group[0, column] for column in groups}
+        best = resolve_generation_tie(best, str(identity))
         winners.append(best)
     return pl.concat(winners, how="diagonal_relaxed") if winners else pl.DataFrame()
 
