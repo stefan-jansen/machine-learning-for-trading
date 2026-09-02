@@ -353,7 +353,15 @@ explorer = BacktestExplorer(CASE_STUDY_ID)
 # as one that must scope, and it was not scoping.
 
 # %%
-cost_df = explorer.cost_sensitivity(backtest_hashes=swept_hashes or None)
+if not swept_hashes:
+    # Falling back to an unscoped read here would be the worst of both: the curve reappears,
+    # mixed across every generation the stage has ever held, precisely on the runs where the
+    # sweep above registered nothing and there is no curve to draw. An empty frame says the
+    # sweep produced nothing, which is what happened.
+    print("The sweep above registered no cost rows, so there is no curve for this run to plot.")
+    cost_df = pl.DataFrame()
+else:
+    cost_df = explorer.cost_sensitivity(backtest_hashes=swept_hashes)
 
 if not cost_df.is_empty():
     import matplotlib.pyplot as plt
