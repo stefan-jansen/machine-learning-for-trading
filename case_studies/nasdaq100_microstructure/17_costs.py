@@ -279,6 +279,11 @@ t0 = time.time()
 # `cost_sensitivity` stage has ever held. Collected here because the hash is only known after
 # the run returns.
 swept_hashes: list[str] = []
+# Grid points that did not produce a backtest. A cost curve with holes is not a slower
+# version of the curve - it is a different one, and the breakeven read off it states a cost
+# level the strategy was never tested at. Collected rather than only printed, so the
+# rendering below can refuse instead of interpolating across the gap.
+failed_points: list[str] = []
 
 for combo_row in top_combos.iter_rows(named=True):
     pred_hash = combo_row["prediction_hash"]
@@ -321,11 +326,19 @@ for combo_row in top_combos.iter_rows(named=True):
                     f"Sharpe={result.metrics.get('sharpe', 0):.3f}"
                 )
         except Exception as e:
+            failed_points.append(f"{alloc_method} @ {cost_bps}bps: {e}")
             print(f"  [{n_done}/{n_total}] {alloc_method} @ {cost_bps}bps: FAILED — {e}")
 
 # %%
 elapsed = time.time() - t0
 print(f"Cost sweep complete: {n_done} backtests in {elapsed:.0f}s")
+if failed_points:
+    raise RuntimeError(
+        f"{len(failed_points)} of {n_total} cost-grid points did not produce a backtest, so "
+        "the decay curve below would be drawn through the gaps and the breakeven read off it "
+        "would name a cost level nothing was tested at. Fix the failures and re-run; the "
+        "points that succeeded are registered and will be reused.\n  " + "\n  ".join(failed_points)
+    )
 
 # %% [markdown]
 # ## 3. Cost Sensitivity Analysis
