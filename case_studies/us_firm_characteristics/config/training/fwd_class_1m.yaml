@@ -33,10 +33,12 @@ latent_factors:
 - cae
 - sdf
 - sae
-causal_dml:
-# A DML row cap is spent on whole decision months, so the history it buys is the cap
-# divided by the width of the cross-section. This panel is a monthly cross-section
-# thousands of firms wide, and the fleet default preset leaves it under two years of
-# decision months to compute a time-clustered standard error and a block permutation
-# over. dml_250k is that same design with a cap sized for a panel this wide.
-- dml_250k
+# No `causal_dml`. The DML nuisance models are regressors - `case_studies/utils/causal.py`
+# builds both as `HistGradientBoostingRegressor` - and there is no classification branch, so
+# running a declared causal menu on this label fits a regressor to a class target and banks the
+# result as a canonical causal estimate. Nothing has ever run it here: all six rows in
+# `causal_runs` are on `fwd_ret_1m`. The trap was that the declaration outlived the absence of a
+# path to honour it, so a reader comparing the declared menu against the production count sees a
+# missing causal result and extends the notebook to produce it. The return labels keep their
+# `causal_dml` - a continuous target is what DML as implemented estimates. See
+# ml4t/agent-workspace#396.

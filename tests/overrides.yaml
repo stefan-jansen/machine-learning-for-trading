@@ -2285,7 +2285,13 @@ case_studies/sp500_options/02_labels:
 case_studies/sp500_options/03_financial_features:
   timeout: 120
 case_studies/sp500_options/04_model_based_features:
-  # Skipped in CI (gpu: true), so this timeout bounds only fixture generation via
+  # This entry has no `gpu` key and the notebook is NOT skipped: cs-sp500_options
+  # runs it, and it passes by executing about nine minutes of MCMC. The comment
+  # here said "Skipped in CI (gpu: true)" long after that stopped being true,
+  # which is the kind of note that makes a green job look like it proves less
+  # than it does.
+  #
+  # The timeout therefore bounds the CI run as well as fixture generation via
   # tests/generate_intermediates.py, where 300s was not enough to finish even on a
   # GPU. The stage silently failed there, which is why the committed temporal
   # artifact had no `fold` column and 05_evaluation, 07_gbm and 09_deep_learning
