@@ -27,5 +27,12 @@ deep_learning:
 - lstm_h64
 - tcn
 - patchtst
-causal_dml:
-- dml
+# No `causal_dml`. The DML nuisance models are regressors - `case_studies/utils/causal.py`
+# builds both as `HistGradientBoostingRegressor` - and there is no classification branch, so
+# running a declared causal menu on this label fits a regressor to a class target and banks the
+# result as a canonical causal estimate. `12_causal_dml` estimates on `labels.primary`
+# (`fwd_ret_15m`) and never reads this file, so the key ran nothing; what it did was tell the
+# next reader, comparing the declared menu against the production count, that a causal result
+# for the direction label was missing and the notebook should be extended to produce it.
+# ml4t/agent-workspace#396. The three return labels keep theirs: a continuous target is what
+# DML as implemented estimates.
