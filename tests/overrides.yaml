@@ -1773,6 +1773,21 @@ case_studies/fx_pairs/10_dl_nlinear:
     MAX_SYMBOLS: 5
     N_EPOCHS: 2
   timeout: 120
+case_studies/fx_pairs/10a_dl_lstm:
+  # The notebook builds its own reduction dict from MAX_FOLDS and MAX_SYMBOLS and refuses a
+  # preview that reduces nothing, so an absent block here is not "run at full scope" - it is a
+  # failed job. That is what cs-fx_pairs was reporting: ValueError, preview execution must
+  # declare at least one reduction.
+  # The two knobs match 10_dl_nlinear, the other sequence model on this case study, so the two
+  # are measured on the same folds and the same pairs under test.
+  # DEVICE is pinned rather than resolved from the host: it sits inside the training identity,
+  # and a runner that happened to have a card would fit and register a different model.
+  parameters:
+    DEVICE: cpu
+    MAX_FOLDS: 2
+    MAX_SYMBOLS: 5
+    N_EPOCHS: 2
+  timeout: 180
 case_studies/fx_pairs/11_causal_dml:
   parameters:
     CV_FOLDS: 2

@@ -118,14 +118,17 @@ if catalog.select(identity_columns).n_unique() != catalog.height:
 # configured model reads exactly like a complete one. This compares the assembled population to the
 # menu itself.
 #
-# `deep_learning` is the one family split across two notebooks, `09_dl_tcn` and `10_dl_nlinear`, so
-# any configured architecture outside that pair has no notebook to produce it. Those members are
-# excluded by name and reason rather than passing unnoticed. The exclusions are derived from the
-# menu per label, not listed, so a label that never declares a member does not gain a phantom
-# exclusion for it.
+# `deep_learning` is the one family split across several notebooks - `09_dl_tcn`,
+# `10_dl_nlinear` and `10a_dl_lstm` - so a configured architecture outside that set would have
+# no notebook to produce it. Such members are excluded by name and reason rather than passing
+# unnoticed, and the exclusions are derived from the menu per label rather than listed, so a
+# label that never declares a member does not gain a phantom exclusion for it. The set is empty
+# today: `lstm_h64` was the one configured architecture nothing fitted, and `10a_dl_lstm` closed
+# it. The derivation stays because a menu that grows again should say so here rather than
+# silently publish a population short of what it declares.
 
 # %% tags=["results"]
-SEQUENCE_NOTEBOOK_ARCHITECTURES = {"tcn", "nlinear"}
+SEQUENCE_NOTEBOOK_ARCHITECTURES = {"tcn", "nlinear", "lstm_h64"}
 EXCLUSION_REASON = "configured but no scoped fx_pairs notebook runs it; coverage decision open"
 
 configured_members = {
