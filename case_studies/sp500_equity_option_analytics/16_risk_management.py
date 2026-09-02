@@ -391,7 +391,16 @@ RISK_POPULATION = sweep_plan_name(
 # The generation this run retires, per population name. A plan that has grown - a new carrier
 # advancing, another risk control declared - is a changed population under a live name and has
 # to say which one it replaces; the refusal prints the current hash.
-SUPERSEDES_RISK_POPULATIONS: dict[str, str] = {}
+# All five moved with the allocation plans above them: the risk grid is built over the strategy
+# 15_portfolio_management selects, and that selection changed for the labels whose top-ten was
+# ranked before the baseline sweep finished.
+SUPERSEDES_RISK_POPULATIONS: dict[str, str] = {
+    "sp500_equity_option_analytics-risk-fwd_ret_5d-9fa26d693a25": "b8ad08c1f941",
+    "sp500_equity_option_analytics-risk-fwd_ret_10d-9fa26d693a25": "797f1549c148",
+    "sp500_equity_option_analytics-risk-fwd_ret_risk_adj_5d-9fa26d693a25": "3cbb8a51f7ad",
+    "sp500_equity_option_analytics-risk-fwd_dir_5d-9fa26d693a25": "d618dc9197fe",
+    "sp500_equity_option_analytics-risk-fwd_dir_10d-9fa26d693a25": "31d87449e2ec",
+}
 
 _risk_plan = None
 try:
@@ -666,12 +675,15 @@ fig_tradeoff.show()
 # per-stage count of advancing configurations, which admitted a label whose sweep had produced
 # one row per configuration and stopped; `04cb35eec43f` replaced that one later the same day and
 # held 3,710 members, 66 of them allocation backtests from a grid no current sweep plan declares.
-# `37169a5be187` replaced it with the declared grids only and holds 3,644. The validation
-# selection is `ec0cfd449843` in both, so what moved is the membership and not the choice made
-# over it. Only the tip is declarable - `create` refuses anything else and names the tip - so
-# this value moves on every generation.
+# `37169a5be187` replaced it with the declared grids only and holds 3,644, and `774c32c6e79b`
+# replaced that. Every one of those five was frozen over a field that was still being produced:
+# the allocation and risk plans behind them were all written at 21:40 UTC on 2026-09-01, while
+# the baseline sweeps that feed them published at 22:34-22:46 and three of the baselines they
+# rank were registered at 22:42. This generation is the first frozen over sweeps that ran in
+# stage order and recorded that they finished. Only the tip is declarable - `create` refuses
+# anything else and names the tip - so this value moves on every generation.
 SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
-    "sp500_equity_option_analytics:holdout-candidates": "37169a5be187",
+    "sp500_equity_option_analytics:holdout-candidates": "774c32c6e79b",
 }
 
 # %% [markdown]

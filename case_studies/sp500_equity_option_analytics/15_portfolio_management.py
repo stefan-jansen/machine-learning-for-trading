@@ -262,7 +262,19 @@ ALLOCATION_POPULATION = sweep_plan_name(
 # configuration advancing, a widened top-k grid - is a changed population under a live name and
 # has to say which one it replaces; the refusal prints the current hash. Absent for a name this
 # registry has never held, which is every clean clone and every first run of a label.
-SUPERSEDES_ALLOCATION_POPULATIONS: dict[str, str] = {}
+#
+# All five moved on 2026-09-01. The generation each replaces was planned at 21:40 UTC, before
+# 14_backtest published its baseline sweep at 22:34-22:46 and before the tabm_m, tabm_s and sae
+# baselines were registered at 22:42. The top-ten those runs ranked was therefore taken over a
+# baseline set that was still being produced, and three of the ten it named are not the ten the
+# complete set gives. This is the state 16_risk_management declines to freeze over.
+SUPERSEDES_ALLOCATION_POPULATIONS: dict[str, str] = {
+    "sp500_equity_option_analytics-allocation-fwd_ret_5d-9fa26d693a25": "4c8b7e599f0a",
+    "sp500_equity_option_analytics-allocation-fwd_ret_10d-9fa26d693a25": "e2dafb6c6c99",
+    "sp500_equity_option_analytics-allocation-fwd_ret_risk_adj_5d-9fa26d693a25": "54af78c5ff08",
+    "sp500_equity_option_analytics-allocation-fwd_dir_5d-9fa26d693a25": "881044c0bb38",
+    "sp500_equity_option_analytics-allocation-fwd_dir_10d-9fa26d693a25": "38fd426dc700",
+}
 
 _plan = None
 try:
