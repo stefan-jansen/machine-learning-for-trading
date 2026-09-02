@@ -30,6 +30,7 @@ from case_studies.utils.sweep_config import (
     get_entry_schemes_for,
     get_portfolio_risk_controls,
     get_position_risk_controls,
+    get_signal_nasdaq100_schemes_for,
     get_top_k_values_for,
     load_sweep,
 )
@@ -401,3 +402,36 @@ def test_the_ceiling_follows_the_selection_mode_not_the_account_permission():
     # etfs is long-only, so its ceiling is the whole universe: on 30 assets the whole
     # declared grid survives, where a long-short ceiling of 15 would drop 20.
     assert get_top_k_values_for("etfs", "fwd_ret_21d", 30) == [5, 10, 20]
+
+
+class TestSignalNasdaq100EqWTopKCeiling:
+    """The `eq_w_topk` branch needs the same ceiling as the concentration grid.
+
+    It sets `long_short` from its own `direction` axis rather than the case
+    study's declared mode, so it is a second, independent place where a `k` in
+    `(n_assets // 2, n_assets)` can be offered - registering as `ewtopk_ls_k<k>`
+    while executing at the clamped half.
+    """
+
+    CS = "nasdaq100_microstructure"
+    LABEL = "fwd_ret_15m"
+
+    def _eq_w_topk(self, n_assets):
+        schemes = get_signal_nasdaq100_schemes_for(self.CS, self.LABEL, n_assets)
+        return [s for s in schemes if s["method"] == "equal_weight_top_k"]
+
+    def test_long_short_schemes_stop_at_half_the_panel(self):
+        offered = [s["top_k"] for s in self._eq_w_topk(12) if s["long_short"]]
+        assert offered == [5], (
+            "a long-short eq_w_topk scheme above half the panel executes with "
+            f"fewer names than it registers under; got {offered}"
+        )
+
+    def test_long_only_schemes_keep_k_up_to_the_panel(self):
+        offered = [s["top_k"] for s in self._eq_w_topk(12) if not s["long_short"]]
+        assert offered == [5, 10]
+
+    def test_every_long_short_scheme_is_fillable_at_production_width(self):
+        for s in self._eq_w_topk(100):
+            if s["long_short"]:
+                assert 2 * s["top_k"] <= 100

@@ -629,7 +629,13 @@ def get_signal_nasdaq100_schemes_for(
             for direction in directions:
                 ls = direction == "long_short"
                 for top_k in top_k_grid:
-                    if top_k >= n_assets:
+                    # Same ceiling as `get_top_k_values_for`, and it has to be
+                    # applied here too: this branch sets `long_short` off its own
+                    # `direction` axis, so a `k` in `(n_assets // 2, n_assets)`
+                    # would register as `ewtopk_ls_k<k>` and run at the clamped
+                    # half. `direction` is per-scheme, so use it rather than the
+                    # case study's declared mode.
+                    if top_k >= n_assets or (ls and 2 * top_k > n_assets):
                         continue
                     dtag = "ls" if ls else direction[0]
                     schemes.append(
