@@ -298,13 +298,19 @@ def label_horizon(label: str) -> int:
 
 # %%
 def selected_predictions(case_study: str, row: dict, score_name: str) -> pl.DataFrame:
-    """Load one selected validation prediction set with a common entity key."""
+    """Load one selected validation prediction set with a common entity key.
+
+    Addressed by `prediction_hash`, which is the identity, rather than by the four
+    attributes that describe it. They are not a key: refitting a configuration under a
+    changed estimator parameter writes a second prediction set with the same family, label,
+    configuration and checkpoint, and `sp500_equity_option_analytics` has four generations
+    of every `latent_factors/sae` checkpoint. Selecting on the attributes returned all four,
+    so every (timestamp, entity) pair appeared four times and the guard below fired - which
+    is what it is for, but the fix is to ask for the row that was selected.
+    """
     frame = load_predictions(
         case_study,
-        family=row["family"],
-        label=row["label"],
-        config_name=row["config_name"],
-        checkpoint_value=row["checkpoint_value"],
+        prediction_hash=row["prediction_hash"],
         split="validation",
     )
     entity = "product" if "product" in frame.columns else "symbol"

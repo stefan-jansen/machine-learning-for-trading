@@ -623,7 +623,21 @@ for row in mvo_data.iter_rows(named=True):
         }
     )
 
-mvo_df = pl.DataFrame(mvo_rows)
+# The schema is declared so an empty result is still a frame with these columns. A bare
+# `pl.DataFrame([])` has no columns at all, and the cells below then raise ColumnNotFoundError
+# on `ew_sharpe` rather than reporting that nothing qualified - which is what happened as soon
+# as the join above returned nothing.
+mvo_df = pl.DataFrame(
+    mvo_rows,
+    schema={
+        "case_study": pl.Utf8,
+        "display_name": pl.Utf8,
+        "ew_sharpe": pl.Float64,
+        "best_sharpe": pl.Float64,
+        "uplift": pl.Float64,
+        "universe_size": pl.Int64,
+    },
+)
 
 # %%
 # Scatter plot: signal strength vs allocation uplift
@@ -709,20 +723,25 @@ else:
 # %% [markdown]
 #
 # %% tags=["results"]
+_qualified = (
+    "Their baselines run from "
+    f"{mvo_df['ew_sharpe'].min():+.2f} to {mvo_df['ew_sharpe'].max():+.2f} "
+    f"Sharpe and their uplifts from {mvo_df['uplift'].min():+.2f} to "
+    f"{mvo_df['uplift'].max():+.2f}.\n\n"
+    "Every point sits in the same region of the plane, so the quadrant "
+    "labels describe where a case study could fall rather than where any of "
+    "these do. Nothing here separates a weak-signal regime from a "
+    "strong-signal one, because no weak-signal case study reached this "
+    "comparison."
+    if mvo_df.height
+    else "None qualified, so there is no range to report and the plane is empty."
+)
 display(
     Markdown(
         f"The scatter carries {mvo_df.height} case studies: only those with both "
         "a Ch16 equal-weight baseline and Ch17 allocation backtests on the spine "
-        "prediction qualify. Their baselines run from "
-        f"{mvo_df['ew_sharpe'].min():+.2f} to {mvo_df['ew_sharpe'].max():+.2f} "
-        f"Sharpe and their uplifts from {mvo_df['uplift'].min():+.2f} to "
-        f"{mvo_df['uplift'].max():+.2f}.\n\n"
-        "Every point sits in the same region of the plane, so the quadrant "
-        "labels describe where a case study could fall rather than where any of "
-        "these do. Nothing here separates a weak-signal regime from a "
-        "strong-signal one, because no weak-signal case study reached this "
-        "comparison. The chart is a template waiting for the registries still "
-        "being rebuilt."
+        f"prediction qualify. {_qualified} The chart is a template waiting for the "
+        "registries still being rebuilt."
     )
 )
 

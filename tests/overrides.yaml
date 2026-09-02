@@ -1115,10 +1115,16 @@
   timeout: 180
 25_live_trading/06_quantconnect_case_study:
   parameters:
-    # The fixture registry selects the same configuration, but conftest rewrites
-    # the copied prediction parquet to canonical column names, so its bytes
-    # differ from the sealed artifact. EXPECTED_TRAINING_HASH still asserts.
+    # Both pins name what the PRODUCTION etfs registry selects, and this job reads a
+    # sample of it. conftest rewrites the copied prediction parquet to canonical column
+    # names, so its bytes differ from the sealed artifact; and the winner of a
+    # `ORDER BY sharpe DESC LIMIT 1` over a sample is whichever configuration the
+    # sampler drew, not the one production promoted. EXPECTED_TRAINING_HASH held here
+    # only while the sample happened to contain that row, and stopped the moment the
+    # sample widened. Both are set to null, which the notebook reads as "report the
+    # observed value"; the assertions still bind on a production run.
     EXPECTED_PREDICTIONS_SHA256: null
+    EXPECTED_TRAINING_HASH: null
   timeout: 180
 25_live_trading/07_order_state_machine:
   timeout: 180
@@ -1572,6 +1578,22 @@ case_studies/etfs/10_dl_tsmixer:
   parameters:
     DEVICE: cpu
     POPULATION_NAME: etfs-tsmixer-preview
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+  timeout: 180
+case_studies/etfs/10a_dl_nlinear:
+  # Without a block here the notebook runs as a preview that declares no reduction, which
+  # `run_model_population` refuses outright, so an absent entry is a failed job rather than a
+  # slow one.
+  # The reductions match 10_dl_tsmixer rather than 09_dl_lstm: no max_symbols, for the reason
+  # that block states - a cap on the cross-section that the temporal artifact does not share is
+  # what #988 measured diverging.
+  # DEVICE and POPULATION_NAME travel together, as in 09_dl_lstm: the device is inside the
+  # training identity, so a CPU run declares a different member set and must name its own
+  # population rather than publish into the canonical one.
+  parameters:
+    DEVICE: cpu
+    POPULATION_NAME: etfs-nlinear-preview
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
   timeout: 180
