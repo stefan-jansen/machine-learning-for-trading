@@ -56,9 +56,11 @@ from case_studies.research import (
     attest_sweep,
     open_study,
     open_sweep_attempt,
+    planned_backtests,
     population_supersedes,
     predictions_identity,
     sweep_plan_name,
+    upstream_plan_hashes,
 )
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
@@ -134,6 +136,29 @@ CURRENT_MEMBERS = _members
 # so a long checkpoint grid cannot crowd other model families out of the
 # allocation round.
 
+# %% [markdown]
+# The baseline sweep this ranks is required first. Its plan says which backtests
+# the current grid contains, and its attestation says the run that filled them
+# finished; without both, the leading configurations here are whatever the
+# registry happens to hold, which is how three of ten configurations advanced on
+# an unfinished baseline once already.
+
+# %%
+UPSTREAM_PLANS = upstream_plan_hashes(
+    _study,
+    case_study=CASE_STUDY_ID,
+    label=ALLOCATION_LABEL,
+    stage="allocation",
+    prediction_hashes=CURRENT_MEMBERS,
+)
+BASELINE_GRID = planned_backtests(
+    _study,
+    case_study=CASE_STUDY_ID,
+    label=ALLOCATION_LABEL,
+    stage="signal",
+    prediction_hashes=CURRENT_MEMBERS,
+)
+
 # %%
 top_preds = resolve_best_predictions(
     CASE_STUDY_ID,
@@ -143,6 +168,7 @@ top_preds = resolve_best_predictions(
     top_n=TOP_N,
     checkpoints_per_config=CHECKPOINTS_PER_CONFIG,
     prediction_hashes=CURRENT_MEMBERS,
+    backtest_hashes=BASELINE_GRID,
 )
 if len(top_preds) != TOP_N:
     raise RuntimeError(f"Expected {TOP_N} advancing configurations, found {len(top_preds)}")
@@ -268,13 +294,13 @@ ALLOCATION_POPULATION = sweep_plan_name(
 # baselines were registered at 22:42. The top-ten those runs ranked was therefore taken over a
 # baseline set that was still being produced, and three of the ten it named are not the ten the
 # complete set gives. This is the state 16_risk_management declines to freeze over.
-SUPERSEDES_ALLOCATION_POPULATIONS: dict[str, str] = {
-    "sp500_equity_option_analytics-allocation-fwd_ret_5d-9fa26d693a25": "4c8b7e599f0a",
-    "sp500_equity_option_analytics-allocation-fwd_ret_10d-9fa26d693a25": "e2dafb6c6c99",
-    "sp500_equity_option_analytics-allocation-fwd_ret_risk_adj_5d-9fa26d693a25": "54af78c5ff08",
-    "sp500_equity_option_analytics-allocation-fwd_dir_5d-9fa26d693a25": "881044c0bb38",
-    "sp500_equity_option_analytics-allocation-fwd_dir_10d-9fa26d693a25": "38fd426dc700",
-}
+# Empty: this run reproduces the grid each name already holds, and `create` returns the
+# recorded population unchanged when the member list matches. A declaration that names the
+# generation currently in force is not a record of a retirement, it is standing permission to
+# change that name's membership without saying so, and the refusal it pre-empts is the one
+# thing that makes a changed grid visible. Add an entry when a run is actually refused, with
+# the hash the refusal prints.
+SUPERSEDES_ALLOCATION_POPULATIONS: dict[str, str] = {}
 
 _plan = None
 try:
@@ -299,7 +325,7 @@ else:
         ),
     )
     # Before any member executes; see `sweep_attestation_name`.
-    _attempt = open_sweep_attempt(_writable, _plan)
+    _attempt = open_sweep_attempt(_writable, _plan, UPSTREAM_PLANS)
     print(
         f"Allocation plan {ALLOCATION_POPULATION}: {_plan.hash}, {len(planned)} planned, "
         f"attempt {_attempt}"
@@ -348,7 +374,7 @@ print(f"Allocation surface complete in {(time.monotonic() - started):.1f}s")
 if _plan is not None:
     _plan.require_complete()
     # Only a run that raised on nothing reaches this. See `sweep_attestation_name`.
-    _attestation = attest_sweep(_writable, _plan, _attempt)
+    _attestation = attest_sweep(_writable, _plan, _attempt, UPSTREAM_PLANS)
     print(f"Allocation plan {ALLOCATION_POPULATION} complete: {len(planned)} backtests")
     print(f"Sweep attested as {_attestation.name}")
 

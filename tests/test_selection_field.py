@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import polars as pl
@@ -13,13 +13,15 @@ import pytest
 from case_studies.research.selection_field import (
     COVERAGE_STAGE,
     FIELD_STAGES,
+    PLAN_STAGE_KEYS,
+    UPSTREAM_STAGES,
     label_of,
-    members_digest,
     open_selection_field,
     predictions_identity,
     resolve_field_members,
     sweep_attempt_name,
     sweep_attestation_name,
+    sweep_generation,
 )
 
 #: What `resolve_best_backtest_runs` actually returns. The fixture resolver is held to this
@@ -33,6 +35,10 @@ RESOLVER_COLUMNS = ("backtest_hash", "prediction_hash", "spec_json", "sharpe")
 class _Study:
     root: Path
     case_study: str = "fixture"
+    #: Every field construction opens its members to ask whether they are complete, so a study
+    #: without one is not a study the code under test can be handed. Tests that care about a
+    #: specific member's completeness replace it.
+    results: _Results = field(default_factory=lambda: _Results())
 
 
 def _prediction_hash(label: str, config: str) -> str:
@@ -231,6 +237,37 @@ def test_an_unrankable_row_does_not_satisfy_coverage(tmp_path: Path) -> None:
         )
 
 
+def _recorded_upstream(study: _Study, name: str) -> tuple[str, ...]:
+    """The plan identities `_upstream_hashes` will find when it reads this plan back.
+
+    A fixture writes its rows straight to the table, so it has to name the attempt after the
+    same generation the reader derives - which, for a downstream stage, includes the plans it
+    was derived from. Deriving it from the name here rather than passing it at each call site
+    keeps the fixture honest: a test that records an allocation plan after a baseline one gets
+    the lineage a real run would have written, without saying so.
+    """
+    case_study, key, label, predictions = name.split("-", 3)
+    stage = {value: stage for stage, value in PLAN_STAGE_KEYS.items()}[key]
+    db = sqlite3.connect(study.root / "run_log" / "registry.db")
+    hashes: list[str] = []
+    try:
+        for upstream in UPSTREAM_STAGES.get(stage, ()):
+            upstream_name = f"{case_study}-{PLAN_STAGE_KEYS[upstream]}-{label}-{predictions}"
+            rows = db.execute(
+                "SELECT population_hash, supersedes_hash FROM official_populations WHERE name = ?",
+                (upstream_name,),
+            ).fetchall()
+            superseded = {row[1] for row in rows if row[1]}
+            current = [row[0] for row in rows if row[0] not in superseded]
+            if len(current) == 1:
+                hashes.append(current[0])
+    except sqlite3.OperationalError:
+        return ()
+    finally:
+        db.close()
+    return tuple(hashes)
+
+
 def _record_plan(
     study: _Study,
     *,
@@ -272,7 +309,7 @@ def _record_plan(
             "2026-09-01T00:00:00+00:00",
         ),
     )
-    generation = members_digest(members)
+    generation = sweep_generation(population_hash, _recorded_upstream(study, name))
     records = [sweep_attempt_name(name, generation, attempt)]
     if attested:
         records.append(sweep_attestation_name(name, generation, attempt))
@@ -740,3 +777,85 @@ def test_a_re_run_that_succeeds_after_a_failure_is_accepted(tmp_path: Path) -> N
         "fwd_ret_5d-allocation-c1",
         "fwd_ret_5d-risk_overlay-c1",
     }
+
+
+def test_a_downstream_plan_does_not_survive_its_upstream_grid_being_superseded(
+    tmp_path: Path,
+) -> None:
+    """The allocation grid is the baseline sweep's leading configurations, so it depends on them.
+
+    A downstream plan is complete and attested against the grid that was upstream when it ran,
+    and both stay true after that upstream grid is superseded: its members are still registered
+    and its attestation is still on record. This case study published its allocation and risk
+    plans while its baseline sweep was still running, and three of the ten configurations they
+    advanced were not the ten the finished baseline gives - every independent check passed once
+    the baseline caught up. Folding the upstream identities into the generation an attestation
+    is named after is what makes that state readable afterwards.
+    """
+    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1", "c2"))
+    predictions = predictions_identity(None)
+    first_baseline = _record_plan(
+        study,
+        name=f"fixture-baseline-fwd_ret_5d-{predictions}",
+        members=["fwd_ret_5d-signal-c1"],
+    )
+    for key, stage in (("allocation", "allocation"), ("risk", "risk_overlay")):
+        _record_plan(
+            study,
+            name=f"fixture-{key}-fwd_ret_5d-{predictions}",
+            members=[f"fwd_ret_5d-{stage}-c1"],
+        )
+
+    def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
+        return _rows(label, stage, configs=("c1", "c2"))
+
+    # Attested end to end while the grids agree.
+    assert resolve_field_members(
+        study,
+        case_study="fixture",
+        prediction_hashes=None,
+        resolve_best_backtest_runs=resolver,
+    ).height == len(FIELD_STAGES)
+
+    # The baseline sweep re-runs over a wider grid and attests it. The allocation plan is
+    # untouched, so it is still complete and its own attestation is still on record.
+    _record_plan(
+        study,
+        name=f"fixture-baseline-fwd_ret_5d-{predictions}",
+        members=["fwd_ret_5d-signal-c1", "fwd_ret_5d-signal-c2"],
+        supersedes=first_baseline,
+    )
+
+    with pytest.raises(ValueError, match="upstream grid that has since been superseded"):
+        resolve_field_members(
+            study,
+            case_study="fixture",
+            prediction_hashes=None,
+            resolve_best_backtest_runs=resolver,
+        )
+
+
+def test_a_label_whose_only_baseline_is_incomplete_does_not_satisfy_coverage(
+    tmp_path: Path,
+) -> None:
+    """Coverage counted a member the ranking then dropped, and the two paths disagreed.
+
+    Completeness was applied by the live ranking alone, after the field was built and after the
+    coverage tally had already accepted the row. So a label whose only baseline was half-written
+    passed coverage and then vanished from the field a reader's clean clone ranks, while the
+    freeze - where `CandidateSet.create` refuses partial members - would have refused it. The
+    check runs before the tally now, so both paths answer the same question.
+    """
+    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=["fwd_ret_10d"])
+    study.results = _Results({"fwd_ret_10d-signal-c1": "no metrics row"})
+
+    def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
+        return _rows(label, stage)
+
+    with pytest.raises(RuntimeError, match="no rankable validation backtests"):
+        resolve_field_members(
+            study,
+            case_study="fixture",
+            prediction_hashes=None,
+            resolve_best_backtest_runs=resolver,
+        )

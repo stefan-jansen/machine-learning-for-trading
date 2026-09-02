@@ -68,12 +68,14 @@ from case_studies.research import (
     candidate_set_supersedes,
     open_study,
     open_sweep_attempt,
+    planned_backtests,
     population_supersedes,
     predictions_identity,
     resolve_field_members,
     sweep_labels,
     sweep_plan_name,
     unfinished_sweep_plans,
+    upstream_plan_hashes,
 )
 from case_studies.utils.backtest_loaders import (
     VECTORIZED_CASE_STUDIES,
@@ -172,21 +174,58 @@ if CURRENT_MEMBERS is not None:
 
 # %%
 active_allocators = {item["method"] for item in get_allocators(CASE_STUDY_ID)}
-baseline_pool = resolve_best_backtest_runs(
-    CASE_STUDY_ID,
-    RISK_LABEL,
-    split="validation",
-    stage="signal",
-    top_n=9999,
+# The carrier is chosen out of the baseline and allocation grids, so both are required before
+# either is ranked: their plans say which backtests the current grids contain, and their
+# attestations say the runs that filled them finished. Ranking the registry unrestricted picks
+# the carrier out of whatever historical rows survive, which is not the same question.
+UPSTREAM_PLANS = upstream_plan_hashes(
+    _study,
+    case_study=CASE_STUDY_ID,
+    label=RISK_LABEL,
+    stage="risk_overlay",
     prediction_hashes=CURRENT_MEMBERS,
 )
-allocation_pool = resolve_best_backtest_runs(
-    CASE_STUDY_ID,
-    RISK_LABEL,
-    split="validation",
-    stage="allocation",
-    top_n=9999,
-    prediction_hashes=CURRENT_MEMBERS,
+_stage_grids = {
+    stage: planned_backtests(
+        _study,
+        case_study=CASE_STUDY_ID,
+        label=RISK_LABEL,
+        stage=stage,
+        prediction_hashes=CURRENT_MEMBERS,
+    )
+    for stage in ("signal", "allocation")
+}
+
+
+def _within_plan(rows: pl.DataFrame, stage: str) -> pl.DataFrame:
+    """The rows the current plan for this stage admits, or all of them where none is recorded."""
+    grid = _stage_grids[stage]
+    if grid is None:
+        return rows
+    return rows.filter(pl.col("backtest_hash").is_in(list(grid)))
+
+
+baseline_pool = _within_plan(
+    resolve_best_backtest_runs(
+        CASE_STUDY_ID,
+        RISK_LABEL,
+        split="validation",
+        stage="signal",
+        top_n=9999,
+        prediction_hashes=CURRENT_MEMBERS,
+    ),
+    "signal",
+)
+allocation_pool = _within_plan(
+    resolve_best_backtest_runs(
+        CASE_STUDY_ID,
+        RISK_LABEL,
+        split="validation",
+        stage="allocation",
+        top_n=9999,
+        prediction_hashes=CURRENT_MEMBERS,
+    ),
+    "allocation",
 )
 candidate_pool = pl.concat([baseline_pool, allocation_pool], how="diagonal_relaxed").unique(
     "backtest_hash"
@@ -394,13 +433,10 @@ RISK_POPULATION = sweep_plan_name(
 # All five moved with the allocation plans above them: the risk grid is built over the strategy
 # 15_portfolio_management selects, and that selection changed for the labels whose top-ten was
 # ranked before the baseline sweep finished.
-SUPERSEDES_RISK_POPULATIONS: dict[str, str] = {
-    "sp500_equity_option_analytics-risk-fwd_ret_5d-9fa26d693a25": "b8ad08c1f941",
-    "sp500_equity_option_analytics-risk-fwd_ret_10d-9fa26d693a25": "797f1549c148",
-    "sp500_equity_option_analytics-risk-fwd_ret_risk_adj_5d-9fa26d693a25": "3cbb8a51f7ad",
-    "sp500_equity_option_analytics-risk-fwd_dir_5d-9fa26d693a25": "d618dc9197fe",
-    "sp500_equity_option_analytics-risk-fwd_dir_10d-9fa26d693a25": "31d87449e2ec",
-}
+# Empty, for the reason `SUPERSEDES_ALLOCATION_POPULATIONS` is: a declaration naming the
+# generation in force pre-authorizes a membership change under that name instead of recording
+# one that happened. Add an entry when a run is refused, with the hash the refusal prints.
+SUPERSEDES_RISK_POPULATIONS: dict[str, str] = {}
 
 _risk_plan = None
 try:
@@ -426,7 +462,7 @@ else:
         ),
     )
     # Before any member executes; see `sweep_attestation_name`.
-    _attempt = open_sweep_attempt(_risk_writable, _risk_plan)
+    _attempt = open_sweep_attempt(_risk_writable, _risk_plan, UPSTREAM_PLANS)
     print(
         f"Risk plan {RISK_POPULATION}: {_risk_plan.hash}, {len(plans)} planned, attempt {_attempt}"
     )
@@ -451,7 +487,7 @@ print(f"Risk surface complete in {(time.monotonic() - started):.1f}s")
 if _risk_plan is not None:
     _risk_plan.require_complete()
     # Only a run that raised on nothing reaches this. See `sweep_attestation_name`.
-    _attestation = attest_sweep(_risk_writable, _risk_plan, _attempt)
+    _attestation = attest_sweep(_risk_writable, _risk_plan, _attempt, UPSTREAM_PLANS)
     print(f"Risk plan {RISK_POPULATION} complete: {len(plans)} backtests")
     print(f"Sweep attested as {_attestation.name}")
 

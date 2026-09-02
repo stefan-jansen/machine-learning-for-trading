@@ -144,17 +144,45 @@ def sweep_plan_name(case_study: str, label: str, stage: str, predictions: str) -
     return f"{case_study}-{PLAN_STAGE_KEYS[stage]}-{label}-{predictions}"
 
 
-def sweep_generation(plan: OfficialPopulation) -> str:
-    """Which grid a recorded attempt was an attempt at.
+#: Which stages a stage's grid is derived from, upstream first.
+#:
+#: The allocation grid is the baseline sweep's leading configurations by allocator and
+#: concentration; the risk grid is one carrier chosen out of the baseline and allocation rows.
+#: So a change to an upstream grid is a change to what the downstream grid should have been,
+#: and the identity below carries it.
+UPSTREAM_STAGES: Mapping[str, tuple[str, ...]] = {
+    "signal": (),
+    "allocation": ("signal",),
+    "risk_overlay": ("signal", "allocation"),
+}
+
+
+def sweep_generation(plan_hash: str, upstream: Sequence[str] = ()) -> str:
+    """Which grid, derived from which upstream grids, a recorded attempt was an attempt at.
 
     The plan name carries the predictions it was planned against, and not the grid: a sweep
     whose declared configurations change - an allocator added, a schedule withdrawn - supersedes
     the plan under the same name. Attempts numbered by plan name alone would then span the two
     grids, and the previous grid's successful attempt would be the latest one on record for a
-    grid that has not run. Naming the attempts after the members makes each generation start
-    its own numbering, so an unexecuted new grid has no attempts rather than an inherited one.
+    grid that has not run. Naming the attempts after the generation makes each one start its own
+    numbering, so an unexecuted new grid has no attempts rather than an inherited one.
+
+    **The plan's own identity, not a digest of its members.** A grid that changes from A to B
+    and back to A publishes a third population, and its hash differs from the first A's because
+    ``supersedes`` is inside the hashed snapshot - so the returning grid starts fresh numbering
+    rather than inheriting the attempts the original A left. A member digest cannot tell the two
+    A generations apart, and an interruption between publishing the plan and opening its attempt
+    would then let the original A's attestation stand for the new one.
+
+    **``upstream`` is the identities of the plans this grid was derived from.** A downstream plan
+    is complete and attested against the grid that was upstream when it ran, and neither says
+    anything once that upstream grid is superseded: the allocation plan built on ten advancing
+    configurations stays complete after the baseline sweep re-runs and advances a different ten.
+    Folding the upstream identities in makes the downstream attestation belong to one upstream
+    generation, so superseding an upstream plan leaves the dependent grid unattested until its
+    own sweep re-runs.
     """
-    return members_digest(plan.members)
+    return members_digest((plan_hash, *upstream))
 
 
 def sweep_attempt_name(plan_name: str, generation: str, attempt: int) -> str:
@@ -198,15 +226,18 @@ def _attempts(names: Collection[str], plan_name: str, generation: str) -> list[i
     return sorted(found)
 
 
-def open_sweep_attempt(study: Study, plan: OfficialPopulation) -> int:
+def open_sweep_attempt(study: Study, plan: OfficialPopulation, upstream: Sequence[str] = ()) -> int:
     """Record that this run is about to execute ``plan``, and return the attempt number.
 
     Called immediately after the plan is published and before any member executes, so that a
     run which dies part-way leaves an attempt with no attestation behind it. The members are
     the plan's own, sorted, so the record is addressable and carries what was attempted.
+
+    ``upstream`` is what :func:`upstream_plan_hashes` returned for this sweep, and the caller
+    has it because it had to require those plans before it could rank anything.
     """
     names = _population_names(study) or set()
-    generation = sweep_generation(plan)
+    generation = sweep_generation(plan.hash, upstream)
     attempt = (max(_attempts(names, plan.name, generation), default=0)) + 1
     OfficialPopulation.create(
         study,
@@ -217,7 +248,9 @@ def open_sweep_attempt(study: Study, plan: OfficialPopulation) -> int:
     return attempt
 
 
-def attest_sweep(study: Study, plan: OfficialPopulation, attempt: int) -> OfficialPopulation:
+def attest_sweep(
+    study: Study, plan: OfficialPopulation, attempt: int, upstream: Sequence[str] = ()
+) -> OfficialPopulation:
     """Record that attempt ``attempt`` of ``plan`` executed in full, with no failure.
 
     Called by a sweep notebook after it has raised on any failure, so reaching it is the
@@ -227,23 +260,23 @@ def attest_sweep(study: Study, plan: OfficialPopulation, attempt: int) -> Offici
     """
     return OfficialPopulation.create(
         study,
-        name=sweep_attestation_name(plan.name, sweep_generation(plan), attempt),
+        name=sweep_attestation_name(plan.name, sweep_generation(plan.hash, upstream), attempt),
         member_kind="backtest",
         members=sorted(set(plan.members)),
     )
 
 
-def _attested(names: set[str] | None, plan: OfficialPopulation) -> bool:
+def _attested(names: set[str] | None, plan: OfficialPopulation, upstream: Sequence[str]) -> bool:
     """Whether the latest recorded attempt at this plan's grid finished without a failure.
 
     An absent attempt is not a success. Plans recorded before attempts existed have none, and
-    their sweeps are exactly the runs whose outcome was never written down. The plan rather than
-    its name, because the question is asked of one generation of the grid: see
-    :func:`sweep_generation`.
+    their sweeps are exactly the runs whose outcome was never written down. The question is
+    asked of one generation of the grid, derived from one generation of the grids upstream of
+    it: see :func:`sweep_generation`.
     """
     if names is None:
         return False
-    generation = sweep_generation(plan)
+    generation = sweep_generation(plan.hash, upstream)
     attempts = _attempts(names, plan.name, generation)
     if not attempts:
         return False
@@ -294,10 +327,39 @@ def publishes_sweep_plans(study: Study, case_study: str) -> bool:
     return any(name.startswith(prefixes) for name in names)
 
 
-def _plan_members(
+def _upstream_hashes(
     study: Study, case_study: str, label: str, stage: str, predictions: str
-) -> set[str] | None:
-    """The backtests a sweep planned, or ``None`` where this registry records no such plan.
+) -> tuple[str, ...]:
+    """The identities of the plans this stage's grid was derived from, upstream first.
+
+    Requiring them is what makes a downstream sweep unable to rank an upstream sweep that has
+    not finished. That is not hypothetical: this case study's allocation and risk plans were
+    once published while its baseline sweep was still running, and three of the ten
+    configurations they advanced were not the ten the finished baseline gives.
+
+    Reads through :func:`_current_plan`, so each upstream plan is required complete and
+    attested against its own upstream in turn, and the recursion ends at the baseline, which
+    has none.
+
+    An upstream plan that is absent contributes nothing rather than raising here. Whether a
+    case study is allowed to have one absent is a question about the field, and
+    :func:`planned_backtests` already answers it at every stage the field is built from - and
+    at the two stages a sweep notebook requires before it ranks. Raising here as well would
+    make a single stage unaskable in isolation, which is how ``unfinished_sweep_plans`` reports
+    per stage.
+    """
+    hashes: list[str] = []
+    for upstream in UPSTREAM_STAGES.get(stage, ()):
+        plan = _current_plan(study, case_study, label, upstream, predictions)
+        if plan is not None:
+            hashes.append(plan.hash)
+    return tuple(hashes)
+
+
+def _current_plan(
+    study: Study, case_study: str, label: str, stage: str, predictions: str
+) -> OfficialPopulation | None:
+    """The plan in force for this stage, complete and attested, or ``None`` where none is recorded.
 
     Absent is distinct from empty: ``create`` refuses an empty member list, so a recorded plan
     always admits something. It is also distinct from unreadable and from ambiguous - a name
@@ -321,12 +383,69 @@ def _plan_members(
         return None
     plan = OfficialPopulation.one(study, name=name)
     plan.require_complete()
-    if not _attested(names, plan):
+    upstream = _upstream_hashes(study, case_study, label, stage, predictions)
+    if not _attested(names, plan, upstream):
         raise ValueError(
-            f"sweep plan {name} is complete but records no attestation, so the run that "
-            "filled it either reported failures or did not finish; re-run that sweep"
+            f"sweep plan {name} is complete but records no attestation for the grid it now "
+            "describes, so the run that filled it either reported failures, did not finish, "
+            "or ran against an upstream grid that has since been superseded; re-run that sweep"
         )
-    return set(plan.members)
+    return plan
+
+
+def _plan_members(
+    study: Study, case_study: str, label: str, stage: str, predictions: str
+) -> set[str] | None:
+    """The backtests the plan in force admits, or ``None`` where no plan is recorded."""
+    plan = _current_plan(study, case_study, label, stage, predictions)
+    return None if plan is None else set(plan.members)
+
+
+def upstream_plan_hashes(
+    study: Study,
+    *,
+    case_study: str,
+    label: str,
+    stage: str,
+    prediction_hashes: Collection[str] | None,
+) -> tuple[str, ...]:
+    """What a sweep notebook passes to :func:`open_sweep_attempt` and :func:`attest_sweep`.
+
+    Calling it is also the requirement: it raises unless every upstream sweep this grid is
+    derived from has published a plan against the prediction sets in force, filled it, and
+    attested it. A sweep that ranks before calling it is ranking rows that no current upstream
+    plan need contain.
+    """
+    return _upstream_hashes(
+        study, case_study, label, stage, predictions_identity(prediction_hashes)
+    )
+
+
+def planned_backtests(
+    study: Study,
+    *,
+    case_study: str,
+    label: str,
+    stage: str,
+    prediction_hashes: Collection[str] | None,
+) -> set[str] | None:
+    """The backtests a stage's plan admits, for a caller that ranks that stage's rows.
+
+    ``None`` where this case study records no plan for any stage, which is how the case studies
+    that predate plans keep the field they were published with. Where it records plans and this
+    one is absent, the sweep has not run against the prediction sets in force and ranking its
+    historical rows would rank another generation's grid, so it raises.
+    """
+    predictions = predictions_identity(prediction_hashes)
+    members = _plan_members(study, case_study, label, stage, predictions)
+    if members is None and publishes_sweep_plans(study, case_study):
+        raise RuntimeError(
+            f"{case_study} publishes sweep plans, and none is recorded for {label} "
+            f"at the {stage!r} stage against the prediction sets in force ({predictions}). "
+            "That sweep has not been run against them, so the rows this stage does have "
+            "belong to another generation. Run the sweep for this label."
+        )
+    return members
 
 
 def unfinished_sweep_plans(
@@ -385,14 +504,52 @@ def unfinished_sweep_plans(
             try:
                 plan = OfficialPopulation.one(study, name=name)
                 plan.require_complete()
-                if not _attested(names, plan):
+                upstream = _upstream_hashes(study, case_study, label, stage, predictions)
+                if not _attested(names, plan, upstream):
                     raise ValueError(
-                        "complete, but the run that filled it recorded no attestation - it "
-                        "reported failures or did not finish"
+                        "complete, but no attestation for the grid it now describes - the run "
+                        "that filled it reported failures, did not finish, or ran against an "
+                        "upstream grid that has since been superseded"
                     )
             except (KeyError, ValueError, sqlite3.OperationalError) as exc:
                 unfinished.append(f"{label} {stage} ({name}): {exc}")
     return unfinished
+
+
+def _complete_only(study: Study, rows: pl.DataFrame, *, planned: bool) -> pl.DataFrame:
+    """The rows whose backtest is registered whole, refusing rather than ranking around the rest.
+
+    Completeness used to be applied after the field was built, by the live ranking alone. That
+    put it after the coverage check and after the freeze had already accepted the row, so a
+    label whose only baseline was half-written counted towards coverage and then vanished from
+    the ranking - and a reader's clean clone, which takes the live path, could select a
+    configuration the frozen path had refused. ``CandidateSet.create`` refuses partial members,
+    so the freeze reaches the same answer; the two paths now reach it at the same point.
+
+    Where a plan decided the membership, incomplete is a hard stop: the plan was published
+    before its sweep ran and required complete on the way in, so a member that is not complete
+    now means the registry no longer holds what the plan says it does, and ranking the rest
+    would publish a grid the sweep never finished. Where no plan did - the case studies that
+    predate them - the member is dropped, which is what the live ranking always did with it;
+    what changes is that it is dropped before the coverage tally rather than after.
+    """
+    if rows.is_empty():
+        return rows
+    incomplete: list[str] = []
+    for member_hash in rows["backtest_hash"].to_list():
+        reason = study.results.open(member_hash).completeness()
+        if reason is not None:
+            incomplete.append(f"{member_hash} ({reason})")
+    if not incomplete:
+        return rows
+    if planned:
+        raise RuntimeError(
+            "a sweep plan admits validation backtests that are registered but not complete, "
+            "so the registry no longer holds the grid the plan describes and the field cannot "
+            "be built until that sweep is re-run: " + "; ".join(incomplete[:5])
+        )
+    dropped = {entry.split(" ", 1)[0] for entry in incomplete}
+    return rows.filter(~pl.col("backtest_hash").is_in(list(dropped)))
 
 
 def resolve_field_members(
@@ -433,20 +590,29 @@ def resolve_field_members(
     the published field the grid the sweep actually declared, and requiring the plan complete
     keeps a rebuild run mid-sweep from ranking the half of the grid that finished. A stage with
     no recorded plan is admitted whole, which is how the case studies that predate plans keep
-    the field they were published with - and that is decided by
-    whether this registry has ever recorded a plan for this case study, not by whether this one
-    happens to be missing. Where it has, an absent plan is a sweep that has not run against the
-    predictions in force, and building the field anyway would hand every reader who rebuilds it
-    live a different membership from the one that was frozen. It raises instead.
+    the field they were published with - and that is decided by whether this registry has ever
+    recorded a plan for this case study, not by whether this one happens to be missing. Where it
+    has, an absent plan is a sweep that has not run against the predictions in force, and
+    building the field anyway would hand every reader who rebuilds it live a different
+    membership from the one that was frozen. It raises instead.
+
+    **A plan is asked about the grid it describes now, not the grid it described when it ran.**
+    Its attestation is named after a generation that carries the identities of the plans
+    upstream of it, so a baseline sweep that re-runs and advances a different ten configurations
+    leaves the allocation and risk plans built on the previous ten unattested until their own
+    sweeps re-run. Without that they stay complete and attested indefinitely, which is the state
+    this case study was actually in: its allocation and risk plans were published an hour before
+    the baseline sweep that feeds them finished.
 
     Rows with no Sharpe are dropped before any of this. They are ineligible by
     construction, since the selection ranks on validation backtest Sharpe, and leaving them
     in makes them count towards coverage and then fails the whole frozen set later, when
-    ``best_validation_sharpe`` rejects it for holding a member it cannot rank.
+    ``best_validation_sharpe`` rejects it for holding a member it cannot rank. Members that are
+    registered but not complete are settled at the same point, by :func:`_complete_only`, and
+    for the same reason: both used to be handled after the coverage tally, so a label whose only
+    baseline was unrankable or half-written satisfied coverage and then left the field.
     """
     labels = sweep_labels(study)
-    predictions = predictions_identity(prediction_hashes)
-    planned = publishes_sweep_plans(study, case_study)
     frames: list[pl.DataFrame] = []
     reached: dict[str, set[str]] = {label: set() for label in labels}
     for label in labels:
@@ -461,18 +627,18 @@ def resolve_field_members(
             )
             if "sharpe" in rows.columns:
                 rows = rows.filter(pl.col("sharpe").is_not_null())
+            admitted: set[str] | None = None
             if stage in PLAN_STAGE_KEYS:
-                admitted = _plan_members(study, case_study, label, stage, predictions)
-                if admitted is None and planned:
-                    raise RuntimeError(
-                        f"{case_study} publishes sweep plans, and none is recorded for {label} "
-                        f"at the {stage!r} stage against the prediction sets in force "
-                        f"({predictions}). That sweep has not been run against them, so the "
-                        "rows this stage does have belong to another generation and the field "
-                        "cannot be built. Run the sweep for this label."
-                    )
+                admitted = planned_backtests(
+                    study,
+                    case_study=case_study,
+                    label=label,
+                    stage=stage,
+                    prediction_hashes=prediction_hashes,
+                )
                 if admitted is not None:
                     rows = rows.filter(pl.col("backtest_hash").is_in(list(admitted)))
+            rows = _complete_only(study, rows, planned=admitted is not None)
             if rows.is_empty():
                 continue
             reached[label].add(stage)
@@ -564,32 +730,25 @@ def open_selection_field(
         resolve_best_backtest_runs=resolve_best_backtest_runs,
         stages=stages,
     )
-    # `CandidateSet.create` refuses partial members, so a frozen field is complete by
-    # construction and everything downstream may assume it; `resolve_best_backtest_runs` ranks
-    # on registered metrics and applies no such filter. Checking only the selection would leave
-    # the two fields different in exactly the way that matters to a reader of the membership.
-    #
     # A candidate with no registered Sharpe cannot be ranked, so it is not eligible - and
     # `completeness()` does not catch it, because a backtest is complete once a metrics ROW
     # exists whether or not that row carries a Sharpe. Polars sorts nulls first on a descending
     # sort, so without this a null-Sharpe row would sort above every real one and be selected.
+    # Completeness itself is `resolve_field_members`' job now, ahead of the coverage check, so
+    # that the live field and the frozen one are the same set rather than the same set minus
+    # whatever the live path quietly dropped.
     rankable = live.filter(pl.col("sharpe").is_not_null())
-    complete: list[Result] = []
-    incomplete: list[str] = []
-    for row in rankable.sort("sharpe", "backtest_hash", descending=[True, False]).iter_rows(
-        named=True
-    ):
-        member = study.results.open(row["backtest_hash"])
-        reason = member.completeness()
-        if reason is None:
-            complete.append(member)
-        else:
-            incomplete.append(f"{row['backtest_hash']} ({reason})")
+    complete: list[Result] = [
+        study.results.open(row["backtest_hash"])
+        for row in rankable.sort("sharpe", "backtest_hash", descending=[True, False]).iter_rows(
+            named=True
+        )
+    ]
     if not complete:
         raise RuntimeError(
             f"no candidate set {name!r} in this registry and none of the {live.height} "
-            "eligible validation backtests is both rankable and complete, so there is no "
-            "selection to carry forward: " + "; ".join(incomplete[:5])
+            "eligible validation backtests carries a Sharpe, so there is no selection to "
+            "carry forward"
         )
     selected = complete[0]
     return SelectionField(

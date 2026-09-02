@@ -73,12 +73,14 @@ from .selection_field import (
     label_of,
     open_selection_field,
     open_sweep_attempt,
+    planned_backtests,
     predictions_identity,
     publishes_sweep_plans,
     resolve_field_members,
     sweep_attestation_name,
     sweep_plan_name,
     unfinished_sweep_plans,
+    upstream_plan_hashes,
 )
 from .strategy import Strategy, strategy_warmup_periods
 from .workspace import Study, open_study
@@ -153,6 +155,8 @@ __all__ = [
     "sweep_attestation_name",
     "sweep_plan_name",
     "unfinished_sweep_plans",
+    "planned_backtests",
+    "upstream_plan_hashes",
     "population_supersedes",
     "research_name",
     "resolved_model_plan",

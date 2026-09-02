@@ -2204,15 +2204,6 @@ case_studies/sp500_equity_option_analytics/15_portfolio_management:
     TOP_N_PREDICTIONS: 2
   timeout: 300
 case_studies/sp500_equity_option_analytics/17_costs:
-  # Travels with 18 and 19 for the same reason they give, and it became true of this notebook
-  # when it moved onto the shared selection field: the field spans every label `setup.yaml`
-  # declares, and the fixture registry holds no rankable `fwd_dir_5d` baseline at all - four of
-  # the five labels have signal backtests and that one has none, in a build dated 2026-07-27.
-  # CI runs `14_backtest` once, unparameterized, so it sweeps the primary label and can never
-  # produce the missing one. The construction is right to refuse: a declared label with no
-  # baseline is an unfinished sweep, and the alternative is a field that silently excludes a
-  # label. Restore per-commit execution when the fixture carries every declared label.
-  tier: on_demand
   parameters:
     MAX_SYMBOLS: 5
     TOP_N_COMBOS: 1
@@ -2237,8 +2228,6 @@ case_studies/sp500_equity_option_analytics/19_holdout_backtest:
   tier: on_demand
   timeout: 600
 case_studies/sp500_equity_option_analytics/20_strategy_analysis:
-  # Same field, same fixture gap as 17_costs above.
-  tier: on_demand
 case_studies/sp500_options/01_feasibility_analysis:
   timeout: 120
 case_studies/sp500_options/02_labels:
