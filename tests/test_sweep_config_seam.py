@@ -25,8 +25,8 @@ import yaml
 
 from case_studies.utils.sweep_config import (
     get_allocators,
-    get_allow_short_selling,
     get_cost_grid_bps,
+    get_declared_long_short,
     get_entry_schemes_for,
     get_portfolio_risk_controls,
     get_position_risk_controls,
@@ -347,7 +347,7 @@ def test_the_two_grid_helpers_agree_on_every_declared_case_study(case_study):
     n_assets = (setup.get("universe") or {}).get("n_assets")
     if not isinstance(n_assets, int):
         pytest.skip(f"{case_study} declares no universe.n_assets")
-    long_short = get_allow_short_selling(case_study)
+    long_short = get_declared_long_short(case_study)
 
     for label, grid in (load_sweep(case_study).get("top_k_grid") or {}).items():
         schemes = get_entry_schemes_for(case_study, label, n_assets, long_short)
@@ -382,17 +382,21 @@ def test_a_long_short_k_above_half_the_universe_is_not_offered():
     ]
 
 
-def test_the_ceiling_defaults_to_what_the_case_study_declares():
-    """No caller passes the flag, so the default has to be the declared account.
+def test_the_ceiling_follows_the_selection_mode_not_the_account_permission():
+    """A case study may be allowed to short without selecting a short sleeve.
 
-    `get_top_k_values_for` is called before any strategy spec exists, so
-    `backtest_runner.resolved_allow_short_selling` has nothing to resolve from. The
-    declared `account.allow_short_selling` is the same field that resolution reads
-    first, and reading it here is what makes the default correct rather than
-    long-only-by-omission.
+    `sp500_options` sets `account.allow_short_selling` because it sells straddles, and
+    its `12_backtest` passes `long_short: False` because the state space is
+    `short_straddle_hedged` - one-sided, with no cross-sectional short sleeve to halve
+    the ceiling for. Defaulting off the account permission would drop concentrations
+    that run perfectly well.
     """
-    assert get_allow_short_selling("crypto_perps_funding") is True
-    assert get_allow_short_selling("etfs") is False
+    assert get_declared_long_short("crypto_perps_funding") is True
+    assert get_declared_long_short("sp500_options") is False
+    assert get_declared_long_short("etfs") is False
+    # 20 assets, long-only selection: k=10 is half the universe and survives, where the
+    # long-short ceiling would have excluded it.
+    assert 10 in get_top_k_values_for("sp500_options", "ret_to_expiry", 20)
     # etfs is long-only, so its ceiling is the whole universe: on 30 assets the whole
     # declared grid survives, where a long-short ceiling of 15 would drop 20.
     assert get_top_k_values_for("etfs", "fwd_ret_21d", 30) == [5, 10, 20]
