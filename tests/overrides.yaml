@@ -1922,50 +1922,80 @@ case_studies/nasdaq100_microstructure/07_gbm:
   tier: weekly
   timeout: 900
 case_studies/nasdaq100_microstructure/08_dl_nlinear:
-  # The CPU CI image has no CUDA and this case study declares gpu for production. DEVICE
-  # is passed so the run is registered as the CPU run it is, rather than skipped.
+  # Converted onto the research boundary, so BATCH_SIZE, LOOKBACK, MAX_FOLDS, MAX_SYMBOLS and
+  # N_EPOCHS name nothing this notebook binds any more: the window and the batch come from the
+  # preset, the epoch budget from tests/preset_patches.py (two epochs at checkpoint_interval
+  # one), and a sample reduction reaches the notebook only under PREVIEW_REDUCTIONS.
+  # DEVICE and POPULATION_NAME travel together: the device is inside the training identity, so
+  # a CPU run declares a different member set and must name its own population rather than
+  # publish into the canonical one. The CPU CI image has no CUDA and this case study declares
+  # gpu for production.
+  # max_train_sequences is what keeps this affordable on a minute panel, where five symbols of
+  # a fold still hold six figures of overlapping windows. It is a reduction below the declared
+  # `modeling.dl.max_train_sequences`, which a preview may lower and cannot raise.
   parameters:
-    BATCH_SIZE: 32
     DEVICE: cpu
-    LOOKBACK: 5
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
+    POPULATION_NAME: nasdaq100_microstructure-nlinear-preview
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
+      max_train_sequences: 2000
   timeout: 600
 case_studies/nasdaq100_microstructure/09_dl_lstm:
-  # The CPU CI image has no CUDA and this case study declares gpu for production. DEVICE
-  # is passed so the run is registered as the CPU run it is, rather than skipped.
+  # Converted onto the research boundary, so BATCH_SIZE, LOOKBACK, MAX_FOLDS, MAX_SYMBOLS and
+  # N_EPOCHS name nothing this notebook binds any more: the window and the batch come from the
+  # preset, the epoch budget from tests/preset_patches.py (two epochs at checkpoint_interval
+  # one), and a sample reduction reaches the notebook only under PREVIEW_REDUCTIONS.
+  # DEVICE and POPULATION_NAME travel together: the device is inside the training identity, so
+  # a CPU run declares a different member set and must name its own population rather than
+  # publish into the canonical one. The CPU CI image has no CUDA and this case study declares
+  # gpu for production.
+  # max_train_sequences is what keeps this affordable on a minute panel, where five symbols of
+  # a fold still hold six figures of overlapping windows. It is a reduction below the declared
+  # `modeling.dl.max_train_sequences`, which a preview may lower and cannot raise.
   parameters:
-    BATCH_SIZE: 32
     DEVICE: cpu
-    LOOKBACK: 5
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
+    POPULATION_NAME: nasdaq100_microstructure-lstm_h64-preview
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
+      max_train_sequences: 2000
   timeout: 600
 case_studies/nasdaq100_microstructure/10_dl_tcn:
-  # The CPU CI image has no CUDA and this case study declares gpu for production. DEVICE
-  # is passed so the run is registered as the CPU run it is, rather than skipped.
+  # Converted onto the research boundary, so BATCH_SIZE, LOOKBACK, MAX_FOLDS, MAX_SYMBOLS and
+  # N_EPOCHS name nothing this notebook binds any more: the window and the batch come from the
+  # preset, the epoch budget from tests/preset_patches.py (two epochs at checkpoint_interval
+  # one), and a sample reduction reaches the notebook only under PREVIEW_REDUCTIONS.
+  # DEVICE and POPULATION_NAME travel together: the device is inside the training identity, so
+  # a CPU run declares a different member set and must name its own population rather than
+  # publish into the canonical one. The CPU CI image has no CUDA and this case study declares
+  # gpu for production.
+  # max_train_sequences is what keeps this affordable on a minute panel, where five symbols of
+  # a fold still hold six figures of overlapping windows. It is a reduction below the declared
+  # `modeling.dl.max_train_sequences`, which a preview may lower and cannot raise.
   parameters:
-    BATCH_SIZE: 32
     DEVICE: cpu
-    LOOKBACK: 5
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
+    POPULATION_NAME: nasdaq100_microstructure-tcn-preview
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
+      max_train_sequences: 2000
   timeout: 600
 case_studies/nasdaq100_microstructure/11_dl_patchtst:
-  # Needs CUDA: MAX_SYMBOLS=5 of a 15-minute panel is ~26x the rows of the
-  # daily-frequency patchtst notebooks, which share these parameters and
-  # finish in under 180s. On CPU this overruns any sane cell timeout (measured
-  # 625s against a 600s budget); on GPU it completes in 155s.
-  gpu: true
+  # Converted onto the research boundary alongside 08 through 10, so the same five names are
+  # gone for the same reasons; see 08_dl_nlinear above.
+  # `gpu: true` is dropped with them. It was there because CPU overran a 600s budget at 625s
+  # with LOOKBACK=24 and no sequence cap, and what it did in exchange was skip this test on
+  # every runner without a card - which is all of them - so the attention architecture had no
+  # coverage at all. The declared cap is what makes CPU affordable: the run is bounded by
+  # max_train_sequences rather than by the panel, so it no longer scales with the fixture.
   parameters:
-    BATCH_SIZE: 32
-    LOOKBACK: 24
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
+    DEVICE: cpu
+    POPULATION_NAME: nasdaq100_microstructure-patchtst-preview
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
+      max_train_sequences: 2000
   timeout: 600
 case_studies/nasdaq100_microstructure/12_causal_dml:
   parameters:
