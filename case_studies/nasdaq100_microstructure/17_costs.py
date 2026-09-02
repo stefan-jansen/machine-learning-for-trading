@@ -94,6 +94,7 @@ from case_studies.utils.sweep_config import (
     get_cost_grid_bps,
     get_cost_grid_half_spread_usd,
     get_top_n_predictions,
+    get_universe_filters_for,
 )
 from case_studies.utils.uncertainty import STAGE_SEQUENCE
 from utils.paths import get_case_study_dir
@@ -142,12 +143,43 @@ if excluded_families(CASE_STUDY_ID):
 # `cost_sensitivity` is the one member excluded, because that is the stage this notebook
 # writes: including it would re-price rows that already carry a cost model.
 #
+# **The pool is also pinned to the canonical universe.** `setup.yaml` declares
+# `universe_filter: cost_feasible` and says in the same breath that the full-universe variant
+# "is NOT a canonical rank-1 / cohort / DSR candidate". Widening the stages without pinning the
+# universe would admit exactly that variant, because the signal stage holds both screened and
+# full-universe runs and the full-universe ones are not screened out anywhere else - the cost
+# curve would then price a strategy the case study excludes by declaration. The filter is read
+# out of each run's own `spec_json`, the same place `derived_tables_off_canonical_universe`
+# reads it, so the pool cannot disagree with the sweep that produced the runs.
+#
+# Section 4 is unaffected and has to be: the full-versus-screened contrast is the one place
+# the excluded variant belongs, and it reads `universe_filter` in its own query rather than
+# through this pool.
+#
 # This is also why the notebook is numbered after `16_risk_management` rather than before it.
 # Run the other way round, the overlay rows do not exist yet and the pool is `allocation`
 # whatever it declares.
 
 # %%
 PRE_COST_STAGES = tuple(stage for stage in STAGE_SEQUENCE if stage != "cost_sensitivity")
+CANONICAL_UNIVERSE = get_universe_filters_for(CASE_STUDY_ID)[0]
+
+
+def _on_canonical_universe(frame: pl.DataFrame) -> pl.DataFrame:
+    """Drop runs selected under a universe this case study does not treat as canonical.
+
+    `None` means the case study pins no universe, and then every run qualifies - the filter
+    has to be a no-op there rather than dropping everything, because a spec that predates the
+    universe axis carries no filter at all.
+    """
+    if CANONICAL_UNIVERSE is None:
+        return frame
+    keep = [
+        strategy_view(json.loads(spec)).get("signal", {}).get("universe_filter")
+        == CANONICAL_UNIVERSE
+        for spec in frame["spec_json"]
+    ]
+    return frame.filter(pl.Series(keep, dtype=pl.Boolean))
 
 
 def resolve_pre_cost_runs(top_n: int) -> pl.DataFrame:
@@ -163,8 +195,10 @@ def resolve_pre_cost_runs(top_n: int) -> pl.DataFrame:
         for stage, frame in (
             (
                 stage,
-                resolve_best_backtest_runs(
-                    CASE_STUDY_ID, LABEL, split="validation", stage=stage, top_n=1_000_000
+                _on_canonical_universe(
+                    resolve_best_backtest_runs(
+                        CASE_STUDY_ID, LABEL, split="validation", stage=stage, top_n=1_000_000
+                    )
                 ),
             )
             for stage in PRE_COST_STAGES
@@ -185,7 +219,7 @@ top_combos = resolve_pre_cost_runs(TOP_N_COMBOS)
 
 if top_combos.is_empty():
     print(
-        "No results found at any of "
+        f"No results on the {CANONICAL_UNIVERSE or 'full'} universe at any of "
         f"{', '.join(PRE_COST_STAGES)}. Run 14_backtest through 16_risk_management first."
     )
 else:

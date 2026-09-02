@@ -471,7 +471,11 @@ backtest:
     top_n_predictions:
       signal: 0                 # all signal predictions (eq-weight baseline)
       allocation: 10            # top-10 model configs by equal-weight baseline Sharpe
-      cost_sensitivity: 1       # top-1 of {signal+allocation} per label
+      # top-1 of every pre-cost stage per label. `17_costs` pools {signal, allocation,
+      # risk_overlay} - `STAGE_SEQUENCE` minus the stage it writes - because an overlay is a
+      # candidate to carry the case study and pricing only its parent would put a cost curve
+      # in the chapter for a strategy this case study does not select.
+      cost_sensitivity: 1
       risk_overlay: 1           # top-1 of {signal+allocation} per label
     # No expensive allocators on nasdaq. At 15-min frequency the 1.3M-bar
     # panel makes covariance estimation on the rebalance schedule
