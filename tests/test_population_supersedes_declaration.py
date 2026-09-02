@@ -2,17 +2,25 @@
 
 `OfficialPopulation.create` refuses to publish a changed list under a name that already
 has one unless the run names the snapshot it supersedes - `case_studies/research/
-population.py:246`, `a changed population named ... must explicitly supersedes ...`. It
-refuses at publish time, which is after every fold of every configuration has been fitted.
-A notebook that cannot be handed the predecessor therefore cannot complete a second run at
-all, and it discovers that at the end.
+population.py:246`, `a changed population named ... must explicitly supersedes ...`.
+
+The refusal is cheap, and that is what makes it easy to leave unanswered.
+`run_model_population` creates the population before it fits anything - `execution.py:584`
+and `:596` both snapshot, then call `run_official_model_subset` - so a notebook missing the
+parameter fails in seconds rather than after the sweep. What it cannot do is proceed: the
+run that changes the member list cannot publish until someone edits the notebook, and a
+notebook is edited under a provenance gate rather than at a prompt.
+
+`create` matches on the member list first, so a re-run publishing a byte-identical list
+returns the existing population whatever `supersedes` says. The parameter is dead weight on
+every re-run and the only way through on the one that widens or narrows the list - which is
+exactly the shape of thing a rewrite drops without noticing it was load-bearing.
 
 The only way to answer the refusal is a papermill-settable parameter, so this checks the
 three things that have to hold together: the name exists, it is in the tagged cell where
 papermill can set it, and it reaches the call. Any one of them alone is inert.
 
-The exposure is not hypothetical for a case study that has already published once. It was
-found on `origin/rescue/nasdaq100-07-gbm-rewrite-main`, a rewrite of `07_gbm` that dropped
+Found on `origin/rescue/nasdaq100-07-gbm-rewrite-main`, a rewrite of `07_gbm` that dropped
 the parameter its predecessor carried, against a registry that already holds two
 populations named `nasdaq100_microstructure-gbm-validation-v1`.
 """
