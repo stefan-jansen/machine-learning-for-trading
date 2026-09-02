@@ -766,7 +766,7 @@ def get_universe_filters_for(case_study: str) -> list[str | None]:
     ``signal.universe_filter`` in their spec) remain hash-stable.
 
     Note: ``backtest.sweep.htm_cost_cascade.universes`` is a separate
-    Ch18-only block consumed directly by ``14_costs.py`` via
+    Ch18-only block consumed directly by ``15_costs.py`` via
     ``get_htm_cost_cascade``; it is the cost-comparison axis (full vs
     liquid) and does NOT participate in the canonical rank-1 sweep.
     """

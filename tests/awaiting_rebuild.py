@@ -14,7 +14,8 @@ only while the registry agrees the input is missing.
         needs: {family: deep_learning, of: fx_pairs}
         issue: 874
 
-``needs`` names what has to exist. The moment the registry holds a complete family, the skip
+``needs`` names what has to exist: a ``family``, a ``backtest_stage``, the official
+``populations`` a notebook resolves by name, or bare ``registry``. The moment the registry holds a complete family, the skip
 stops applying and the test runs - so the skip cannot outlive its reason, and nobody has to
 remember to delete it. ``test_awaiting_rebuild.py`` fails the build on any entry whose condition
 is already satisfied, so a stale declaration is a red test rather than a quiet gap.
@@ -92,6 +93,38 @@ def backtest_stage_is_available(case_study: str, stage: str) -> bool:
         con.close()
 
 
+def missing_populations(case_study: str, names: list[str]) -> list[str]:
+    """Which of ``names`` the registry has no official population for.
+
+    A model-analysis notebook resolves populations by name, and it needs *every* name it
+    resolves: three of four present is as unrunnable as none. So the condition is the set,
+    not the count, and the reason names what is actually absent rather than saying the
+    registry is empty when it is not.
+
+    A registry written before the research boundary has no ``official_populations`` table at
+    all, which is not the same as having it and finding nothing, but it answers the same way
+    here: either way there is no population for the notebook to resolve.
+    """
+    db = _registry(case_study)
+    if not db.is_file():
+        return list(names)
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    except sqlite3.OperationalError:
+        return list(names)
+    try:
+        if not con.execute(
+            "select 1 from sqlite_master where type = 'table' and name = 'official_populations'"
+        ).fetchone():
+            return list(names)
+        present = {row[0] for row in con.execute("select distinct name from official_populations")}
+    except sqlite3.DatabaseError:
+        return list(names)
+    finally:
+        con.close()
+    return [name for name in names if name not in present]
+
+
 def unmet_reason(declaration: dict) -> str | None:
     """The skip reason if the declared input is still missing, else None.
 
@@ -114,6 +147,18 @@ def unmet_reason(declaration: dict) -> str | None:
         if backtest_stage_is_available(case_study, stage):
             return None
         return f"awaiting rebuild: no {case_study} backtest at stage {stage!r} in the registry"
+
+    if declared := needs.get("populations"):
+        names = [declared] if isinstance(declared, str) else list(declared)
+        if not names:
+            raise ValueError(f"awaiting_rebuild needs.populations is empty: {declaration!r}")
+        absent = missing_populations(case_study, names)
+        if not absent:
+            return None
+        return (
+            f"awaiting rebuild: {case_study} has no official population named "
+            f"{', '.join(repr(name) for name in absent)}"
+        )
 
     if not _registry(case_study).is_file():
         return f"awaiting rebuild: {case_study} has no registry yet"

@@ -26,9 +26,14 @@ from utils.paths import get_case_study_dir
 # `resolve_canonical_rank1_lineage` raise on the first substantive cell of that case
 # study's strategy analysis, and the only defensible replacement value was the one
 # the rule already selects - a pin that overrides nothing and goes stale again.
-CARRIER_PINS: dict[str, str] = {
-    "sp500_options": "7f32a34d107b",
-}
+#
+# `sp500_options` was the last entry and went the same way on 2026-09-01. Its value
+# dated from the original release, carried no reason, and matched zero rows once the
+# sweep was rebuilt, so `select_best_model` raised before the holdout could run. The
+# only replacement that could be derived is one read off the current results, which
+# is the thing a pin is documented not to be. The mapping is now empty, which is what
+# the paragraph above calls the normal state.
+CARRIER_PINS: dict[str, str] = {}
 
 
 def carrier_pin(case_study: str) -> str | None:

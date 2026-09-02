@@ -161,21 +161,3 @@ tests/test_backtest_presets.py
 tests/test_etf_baseline_parity.py
 tests/test_sp500_options_research.py::test_official_population_is_snapshotted_before_option_execution
 tests/test_us_firm_research_workflow.py::test_open_study_writes_canonical_results_to_output_dir
-
-# ---------------------------------------------------------------------------
-# Red on main today, against code this job does not own. Each one is a defect
-# to fix, not a test to delete - the entry comes out when the notebook does.
-# ---------------------------------------------------------------------------
-# Six tests, each lifting one private helper out of
-# case_studies/sp500_options/07_gbm.py by name and exec'ing it:
-# _normal_hac_inference, _training_cache_path, _assert_preset_matches,
-# _validate_curve_frame, _metric_payload, _validate_raw_checkpoint_grid. None
-# of the six exists in that file, or anywhere else in the repo - the notebook
-# moved that logic into case_studies/utils/ and the contract test was left
-# behind. Every test raises KeyError before it asserts anything, and has since
-# the release commit that added the file. Rewriting it against where the
-# helpers actually live is sp500_options' notebook work, not this job's.
-tests/test_sp500_options_gbm_contract.py
-# The `results` cell at case_studies/sp500_options/06_linear.py:401 runs 47
-# lines against the standard's hard maximum of 40.
-tests/test_sp500_options_linear_fold_alignment.py::test_no_code_cell_exceeds_the_standards_hard_maximum

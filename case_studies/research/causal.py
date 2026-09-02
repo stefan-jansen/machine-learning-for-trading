@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from case_studies.utils.causal import classify_refutation
@@ -18,6 +19,33 @@ from .contracts import ExecutionTier
 
 if TYPE_CHECKING:
     from .workspace import Study
+
+
+def _has_causal_runs(db: sqlite3.Connection) -> bool:
+    """Whether this registry has the table at all.
+
+    A release seeded before any causal run holds a registry with no ``causal_runs`` in it, and
+    naming an absent table in a SELECT is an error rather than an empty result. Reaching those
+    registries is the point of the fallback below, so the check belongs with it.
+    """
+    return (
+        db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'causal_runs'"
+        ).fetchone()
+        is not None
+    )
+
+
+def _registry_paths(study: Study, tier: ExecutionTier) -> list[Path]:
+    """Registries a causal lookup at this tier reads, nearest first.
+
+    Canonical includes the release: a workspace opened over one holds an empty ``run_log`` until
+    something is written into it, so a released canonical result is only ever found there.
+    """
+    roots = [study.storage_root(tier)]
+    if tier is ExecutionTier.CANONICAL and study.release_case_root != study.root:
+        roots.append(study.release_case_root)
+    return [path for path in (root / "run_log" / "registry.db" for root in roots) if path.is_file()]
 
 
 @dataclass(frozen=True)
@@ -38,17 +66,27 @@ class CausalResult:
     ) -> CausalResult:
         """Resolve one causal result by declared label and execution tier."""
         tier = ExecutionTier(execution_tier)
-        root = study.storage_root(tier)
-        db_path = root / "run_log" / "registry.db"
-        if not db_path.is_file():
-            raise ValueError(f"causal selection for {label!r} resolved to 0 identities")
-        with sqlite3.connect(db_path) as db:
-            # One derivation, shared with register_causal_run's write-time check. Two
-            # copies of this disagreed within an hour of being written, and the shape
-            # of that disagreement is a refusal to register for an ambiguity the
-            # reader never sees. It also probes for supersedes_hash rather than naming
-            # it, because this read does not go through the migrating opener.
-            current = current_causal_identities(db, label=label, tier=tier.value)
+
+        def _current(db_path: Path) -> list[str]:
+            with sqlite3.connect(db_path) as db:
+                if not _has_causal_runs(db):
+                    return []
+                # One derivation, shared with register_causal_run's write-time check. Two
+                # copies of this disagreed within an hour of being written, and the shape
+                # of that disagreement is a refusal to register for an ambiguity the
+                # reader never sees.
+                return current_causal_identities(db, label=label, tier=tier.value)
+
+        # Nearest registry holding a result at the requested identity and tier wins outright.
+        # Merging them would make a workspace that has re-derived the result under a corrected
+        # input read as two current identities against the release's prior one, and refuse; and
+        # stopping on any row for the label would let a stale workspace row at an older identity
+        # hide a current released one.
+        current: list[str] = []
+        for db_path in _registry_paths(study, tier):
+            current = _current(db_path)
+            if current:
+                break
         if len(current) != 1:
             hint = ""
             if len(current) > 1:
@@ -75,6 +113,13 @@ class CausalResult:
         include_preview: bool = False,
     ) -> CausalResult:
         roots = [(study.root, ExecutionTier.CANONICAL.value)]
+        # A workspace opened over a release starts with an empty `run_log`, so a canonical
+        # artifact registered by the release lives only there. The prediction and backtest
+        # catalogs already overlay it; without the same fallback here, a preview run asking for
+        # the canonical causal result finds nothing.
+        release_root = study.release_case_root
+        if release_root != study.root:
+            roots.append((release_root, ExecutionTier.CANONICAL.value))
         if include_preview and study.output_root is not None:
             roots.insert(
                 0,
@@ -88,6 +133,8 @@ class CausalResult:
             if not db_path.is_file():
                 continue
             with sqlite3.connect(db_path) as db:
+                if not _has_causal_runs(db):
+                    continue
                 # `refutation_n_successful` arrived with a migration, and this read does
                 # not go through the migrating opener - deliberately, because a read that
                 # rewrites the schema of a registry it was only asked to look at is a

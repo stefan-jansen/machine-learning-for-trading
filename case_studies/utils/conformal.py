@@ -86,6 +86,16 @@ HOLDOUT_CONFORMAL_EMBARGO_STEPS: dict[str, int] = {
     "sp500_equity_option_analytics/fwd_ret_10d": 10,
     "sp500_equity_option_analytics/fwd_dir_5d": 5,
     "sp500_equity_option_analytics/fwd_dir_10d": 10,
+    # ret_to_expiry has no fixed horizon: each row is a 30-day ATM straddle held to its
+    # own expiry, so the residual at session t resolves at that contract's expiry rather
+    # than a constant number of steps later. The bound is labels.buffer = 35D, the widest
+    # DTE the selection admits (measured max dte_calendar = 35), and five calendar weeks
+    # hold exactly 25 weekdays, which NYSE holidays can only reduce. The prediction panel
+    # is one row per session per symbol, so 25 sessions is the tight bound and the
+    # measured maximum over the label panel is 25 steps (median 21). Embargoing the
+    # median would leave the longest-dated quarter of the calibration residuals still
+    # resolving inside the holdout.
+    "sp500_options/ret_to_expiry": 25,
     "us_equities_panel/fwd_ret_5d": 5,
     "us_equities_panel/fwd_ret_1d": 1,
     "us_equities_panel/fwd_ret_21d": 21,

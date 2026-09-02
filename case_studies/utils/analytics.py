@@ -363,6 +363,12 @@ def load_classification_metrics(
     company in ``sp500_equity_option_analytics`` at 0.5308 pooled against 0.5063
     cross-sectional. Ranking on the pooled figure was ranking partly on the calendar.
 
+    ``auc`` is null where no cross-sectional AUC was computed - a registry written before the
+    metric existed, or a row whose cross-section is too thin to average one. It is never filled
+    in from ``auc_roc``, because a reader cannot then tell which figure a row is carrying, and
+    ordering would rank the two against each other. Rows with a null ``auc`` sort last, by
+    ``auc_roc`` among themselves.
+
     Returns a DataFrame with columns:
         case_study, family, config_name, label, split,
         ic_mean, auc, auc_roc, accuracy, balanced_accuracy, log_loss, brier_score, auc_pr
@@ -386,12 +392,18 @@ def load_classification_metrics(
 
         params.append(split)
 
-        # A registry written before the cross-sectional block existed has no such column, and
-        # naming it in the SELECT is an error rather than a null. Fall back to the pooled value
-        # under the same output name so the caller reads one column either way.
+        # `auc` is the cross-sectional value or nothing. Substituting the pooled one where a row
+        # has no cross-sectional AUC cannot be made correct, because the two cases that produce
+        # a NULL are indistinguishable from the column: a registry written before the metric
+        # existed (`_declare_uncertainty_columns` ALTERs the column into every registry on open,
+        # so it is present and empty), and a current row whose cross-section is too thin to
+        # average. The pooled value is returned unchanged as `auc_roc`, so a caller that wants it
+        # has it under the name that says what it is.
         has_daily = _has_column(db_path, "prediction_metrics", "auc_mean_daily")
-        auc_select = "pm.auc_mean_daily AS auc" if has_daily else "pm.auc_roc AS auc"
-        auc_order = "pm.auc_mean_daily" if has_daily else "pm.auc_roc"
+        auc_select = ("pm.auc_mean_daily" if has_daily else "NULL") + " AS auc"
+        # Two keys rather than one, so a registry that has no cross-sectional AUC anywhere still
+        # comes back in a defined order instead of an arbitrary one over an all-NULL key.
+        auc_order = "pm.auc_mean_daily DESC NULLS LAST, pm.auc_roc" if has_daily else "pm.auc_roc"
 
         sql = f"""
             SELECT
@@ -418,7 +430,31 @@ def load_classification_metrics(
         """
         df = _query(db_path, sql, tuple(params))
         if len(df) > 0:
-            frames.append(df.with_columns(pl.lit(cs_id).alias("case_study")))
+            # Any of these is all-null for a registry that does not compute it, which polars
+            # reads back as the Null dtype: `ic_mean` where no fold has a defined
+            # cross-sectional IC, `auc` where no cross-section yields one, and
+            # `auc_pr` / `log_loss` / `brier_score` for the multiclass rows that never emit
+            # them. The concat below is over registries, and one returning Null where another
+            # returns Float64 raises rather than widening. Casting rather than relaxing the
+            # concat also keeps the returned schema the same when every registry is null.
+            frames.append(
+                df.with_columns(
+                    *(
+                        pl.col(column).cast(pl.Float64, strict=False)
+                        for column in (
+                            "ic_mean",
+                            "auc",
+                            "auc_roc",
+                            "accuracy",
+                            "balanced_accuracy",
+                            "log_loss",
+                            "brier_score",
+                            "auc_pr",
+                        )
+                    ),
+                    pl.lit(cs_id).alias("case_study"),
+                )
+            )
 
     if not frames:
         return pl.DataFrame()

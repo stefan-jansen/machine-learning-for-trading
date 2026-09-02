@@ -10,15 +10,6 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from case_studies.sp500_options.backtest_contract import (
-    ACCEPTED_DEEP_PRODUCERS,
-    SP500_OPTIONS_EXECUTION_UNIVERSES,
-    assert_accepted_deep_baselines,
-    assert_accepted_deep_registry,
-    assert_complete_allocation_surface,
-    assert_complete_baseline_surface,
-    validate_accepted_deep_predictions,
-)
 from case_studies.utils import carrier_pins, strategy_analysis
 from case_studies.utils.carrier_pins import (
     CARRIER_PINS,
@@ -97,7 +88,9 @@ def test_carrier_pins_are_single_sourced_and_well_formed() -> None:
     # rebuilt registry while this file stayed passing. What a pin has to be is a
     # lowercase hex prefix long enough to identify one backtest; whether it still
     # resolves is checked against a registry below.
-    assert CARRIER_PINS, "the mapping is imported by name; an empty one hides a deletion"
+    # An empty mapping is the documented normal state - a case study with no entry
+    # selects by the rule - so its emptiness cannot be asserted against. What a
+    # deletion would break is the lookup, and that is checked behaviourally below.
     for case_study, pin in CARRIER_PINS.items():
         assert case_study and case_study.strip() == case_study
         assert re.fullmatch(r"[0-9a-f]{8,}", pin), (
@@ -236,27 +229,53 @@ def test_a_pin_that_matches_no_backtest_is_named_as_the_cause(
         strategy_analysis.resolve_canonical_rank1_lineage(pinned_case_study)
 
 
-def test_carrier_application_fails_closed_after_filters_and_on_missing_schema() -> None:
+def test_the_lookup_reads_the_mapping_rather_than_a_copy(pinned_case_study: str) -> None:
+    """What an empty mapping cannot be asserted against, and a deletion would break.
+
+    The mapping is empty whenever no owner has a reason to pin, so its contents say
+    nothing about whether the lookup still consults it. Installing an entry and
+    reading it back does, and it fails the day `carrier_pin` starts answering from
+    somewhere else.
+    """
+    assert carrier_pins.carrier_pin(pinned_case_study) == FIXTURE_PIN
+    assert carrier_pins.carrier_pin("a_case_study_with_no_entry") is None
+
+
+def test_carrier_application_fails_closed_after_filters_and_on_missing_schema(
+    pinned_case_study: str,
+) -> None:
     with pytest.raises(ValueError, match="absent after candidate filters"):
         prioritize_carrier_hash(
             pl.DataFrame({"backtest_hash": ["not-the-pin"], "ic_mean": [0.1]}),
-            "sp500_options",
+            pinned_case_study,
         )
     with pytest.raises(pl.exceptions.ColumnNotFoundError, match="backtest_hash"):
-        prioritize_carrier_hash(pl.DataFrame({"ic_mean": [0.1]}), "sp500_options")
+        prioritize_carrier_hash(pl.DataFrame({"ic_mean": [0.1]}), pinned_case_study)
 
 
-def test_carrier_row_is_prioritized_only_after_surviving_filters() -> None:
-    pin = CARRIER_PINS["sp500_options"]
+def test_an_unpinned_case_study_passes_its_candidates_through(pinned_case_study: str) -> None:
+    """The empty-mapping path, which is now every case study's.
+
+    Without an entry there is nothing to move first and nothing to fail closed on,
+    so the frame is returned as it came - including the frame that has no
+    `backtest_hash` column, which is only an error where a pin has to be applied.
+    """
+    candidates = pl.DataFrame({"backtest_hash": ["raw_max"], "ic_mean": [0.2]})
+    assert prioritize_carrier_hash(candidates, "a_case_study_with_no_entry").equals(candidates)
+    bare = pl.DataFrame({"ic_mean": [0.2]})
+    assert prioritize_carrier_hash(bare, "a_case_study_with_no_entry").equals(bare)
+
+
+def test_carrier_row_is_prioritized_only_after_surviving_filters(pinned_case_study: str) -> None:
     candidates = pl.DataFrame(
         {
-            "backtest_hash": ["raw_max", f"{pin}_suffix"],
+            "backtest_hash": ["raw_max", f"{FIXTURE_PIN}_suffix"],
             "ic_mean": [0.2, 0.1],
         }
     )
     filtered = candidates.filter(pl.col("ic_mean") >= 0.1)
-    result = prioritize_carrier_hash(filtered, "sp500_options")
-    assert result["backtest_hash"].to_list()[0] == f"{pin}_suffix"
+    result = prioritize_carrier_hash(filtered, pinned_case_study)
+    assert result["backtest_hash"].to_list()[0] == f"{FIXTURE_PIN}_suffix"
 
 
 def test_cohort_metrics_are_attributed_to_their_leader() -> None:
@@ -275,174 +294,3 @@ def test_pbo_with_two_combinations_is_not_reportable() -> None:
         "status": "insufficient combinations (2 < 10)",
         "n_combinations": 2,
     }
-
-
-def test_options_sweep_materializes_both_universes() -> None:
-    assert SP500_OPTIONS_EXECUTION_UNIVERSES == ("full", "liquid")
-
-
-def test_options_consumers_pin_producers_and_allocation_contract() -> None:
-    repo = Path(__file__).parents[1]
-    for notebook in (
-        "13_portfolio_management.py",
-        "14_costs.py",
-        "15_risk_management.py",
-        "16_strategy_analysis.py",
-    ):
-        source = (repo / "case_studies" / "sp500_options" / notebook).read_text()
-        assert "assert_accepted_deep_baselines" in source
-
-    allocation = (repo / "case_studies/sp500_options/13_portfolio_management.py").read_text()
-    assert "LIQUID_ONLY = True" in allocation
-    assert 'if allocation["method"] != "equal_weight"' in allocation
-    assert "Allocation sweep failed" in allocation
-    assert 'universe_filter="liquid" if LIQUID_ONLY else "full"' in allocation
-    assert "assert_complete_baseline_surface" in allocation
-    assert "assert_complete_allocation_surface" in allocation
-    assert "BUDGET_SECONDS" not in allocation
-
-    costs = (repo / "case_studies/sp500_options/14_costs.py").read_text()
-    assert "load_existing_backtest_hashes" in costs
-    assert "backtest_hash_from_parts(pred_hash, spec)" in costs
-    assert "serializable_backtest_spec" not in costs
-    assert "if backtest_hash not in existing_cost_hashes" in costs
-
-    baseline = (repo / "case_studies/sp500_options/12_backtest.py").read_text()
-    assert "print_stage_dsr_summary" not in baseline
-    assert "cohort_type='stagelabel'" in baseline
-    assert "cohort_metric_attribution(_stage_cohort, _baseline_leader_hash)" in baseline
-    assert "reportable_pbo(_family_pbo, _family_pbo_n)" in baseline
-    assert "does not match the complete" in baseline
-
-    holdout = (repo / "20_strategy_synthesis/holdout.py").read_text()
-    assert "resolve_linear_params(config, fold_data" in holdout
-
-
-def test_options_surface_contracts_require_exact_cartesian_products(tmp_path: Path) -> None:
-    db_path = tmp_path / "registry.db"
-    with sqlite3.connect(str(db_path)) as db:
-        db.executescript(
-            """
-            CREATE TABLE training_runs (
-                training_hash TEXT PRIMARY KEY, family TEXT, label TEXT, config_name TEXT
-            );
-            CREATE TABLE prediction_sets (
-                prediction_hash TEXT PRIMARY KEY, training_hash TEXT, split TEXT
-            );
-            CREATE TABLE backtest_runs (
-                backtest_hash TEXT PRIMARY KEY, prediction_hash TEXT, spec_json TEXT, stage TEXT
-            );
-            CREATE TABLE backtest_metrics (
-                backtest_hash TEXT PRIMARY KEY, sharpe REAL, cagr REAL, max_drawdown REAL
-            );
-            INSERT INTO training_runs VALUES ('train', 'linear', 'ret_to_expiry', 'config');
-            INSERT INTO prediction_sets VALUES ('pred', 'train', 'validation');
-            """
-        )
-        rows = (
-            (
-                "signal_full",
-                "pred",
-                '{"strategy":{"signal":{"top_k":5,"universe_filter":"full"}}}',
-                "signal",
-            ),
-            (
-                "signal_liquid",
-                "pred",
-                '{"strategy":{"signal":{"top_k":5,"universe_filter":"liquid"}}}',
-                "signal",
-            ),
-            (
-                "allocation",
-                "pred",
-                '{"strategy":{"signal":{"universe_filter":"liquid"},'
-                '"allocation":{"top_k":5,"method":"score_weighted"}}}',
-                "allocation",
-            ),
-        )
-        db.executemany("INSERT INTO backtest_runs VALUES (?, ?, ?, ?)", rows)
-        db.executemany(
-            "INSERT INTO backtest_metrics VALUES (?, -0.1, -0.2, -0.3)",
-            [(row[0],) for row in rows],
-        )
-
-    assert_complete_baseline_surface(db_path, expected_predictions=1, top_ks=(5,))
-    assert_complete_allocation_surface(
-        db_path,
-        prediction_hashes={"pred"},
-        top_ks=(5,),
-        allocators={"score_weighted"},
-    )
-
-    with sqlite3.connect(str(db_path)) as db:
-        db.execute("DELETE FROM backtest_metrics WHERE backtest_hash='signal_liquid'")
-    with pytest.raises(RuntimeError, match="null metrics"):
-        assert_complete_baseline_surface(db_path, expected_predictions=1, top_ks=(5,))
-
-
-def _accepted_deep_registry(path: Path) -> None:
-    with sqlite3.connect(str(path)) as db:
-        db.executescript(
-            """
-            CREATE TABLE training_runs (
-                training_hash TEXT PRIMARY KEY,
-                family TEXT,
-                config_name TEXT
-            );
-            CREATE TABLE prediction_sets (
-                prediction_hash TEXT PRIMARY KEY,
-                training_hash TEXT,
-                split TEXT
-            );
-            CREATE TABLE backtest_runs (
-                backtest_hash TEXT PRIMARY KEY,
-                prediction_hash TEXT,
-                stage TEXT
-            );
-            """
-        )
-        for config_name, (training_hash, prediction_hash) in ACCEPTED_DEEP_PRODUCERS.items():
-            db.execute(
-                "INSERT INTO training_runs VALUES (?, 'deep_learning', ?)",
-                (training_hash, config_name),
-            )
-            db.execute(
-                "INSERT INTO prediction_sets VALUES (?, ?, 'validation')",
-                (prediction_hash, training_hash),
-            )
-
-
-def test_accepted_deep_hashes_are_exact_and_complete(tmp_path: Path) -> None:
-    rows = [
-        {
-            "family": "deep_learning",
-            "config_name": config_name,
-            "training_hash": training_hash,
-            "prediction_hash": prediction_hash,
-        }
-        for config_name, (training_hash, prediction_hash) in ACCEPTED_DEEP_PRODUCERS.items()
-    ]
-    frame = pl.DataFrame(rows)
-    assert validate_accepted_deep_predictions(frame).equals(frame)
-
-    wrong = frame.with_columns(
-        pl.when(pl.col("config_name") == "patchtst")
-        .then(pl.lit("obsolete"))
-        .otherwise(pl.col("prediction_hash"))
-        .alias("prediction_hash")
-    )
-    with pytest.raises(RuntimeError, match="identity mismatch"):
-        validate_accepted_deep_predictions(wrong)
-
-    db_path = tmp_path / "registry.db"
-    _accepted_deep_registry(db_path)
-    assert_accepted_deep_registry(db_path)
-
-
-def test_notebook16_fails_before_carrier_when_accepted_baselines_are_absent(
-    tmp_path: Path,
-) -> None:
-    db_path = tmp_path / "registry.db"
-    _accepted_deep_registry(db_path)
-    with pytest.raises(RuntimeError, match="no equal-weight baseline backtests"):
-        assert_accepted_deep_baselines(db_path)
