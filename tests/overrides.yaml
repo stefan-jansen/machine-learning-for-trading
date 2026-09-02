@@ -2002,7 +2002,12 @@ case_studies/nasdaq100_microstructure/15_portfolio_management:
   parameters:
     # Same constraint as 14_backtest above: the test data has 6 nasdaq symbols and
     # the smallest top_k in the grid is 5, so a cap of 5 filters the whole grid out
-    # and the allocation sweep registers nothing.
+    # and the allocation sweep registers nothing. 6 is the whole fixture universe and
+    # is still not enough to realize top_k=5 long-short - signals.py caps each side at
+    # n_assets // 2, so these rows trade 3 names per side under a top_k=5 label. That
+    # is a limit of a 6-symbol fixture, not of the sweep: measured against the
+    # production universes the cap never binds (nasdaq100 115 symbols at top_k=20,
+    # cme_futures 30 at 10, fx_pairs 20 at 10, crypto_perps_funding 19 at 5).
     MAX_SYMBOLS: 6
     TOP_N_PREDICTIONS: 2
   timeout: 300
@@ -2243,7 +2248,8 @@ case_studies/sp500_equity_option_analytics/14_backtest:
 case_studies/sp500_equity_option_analytics/15_portfolio_management:
   parameters:
     # top_k_grid starts at 5, so a cap of 5 empties the grid and the sweep registers
-    # nothing; the fixture's seeded allocation rows then hide it downstream.
+    # nothing; the fixture's seeded allocation rows then hide it downstream. This case
+    # study is long-only, so 6 realizes top_k=5 in full.
     MAX_SYMBOLS: 6
     TOP_N_PREDICTIONS: 2
   timeout: 300
@@ -2887,8 +2893,11 @@ case_studies/us_firm_characteristics/11_backtest:
 case_studies/us_firm_characteristics/12_portfolio_management:
   parameters:
     # top_k_grid starts at 5, so a cap of 5 empties the grid and the sweep registers
-    # nothing; the fixture's seeded allocation rows then hide it downstream.
-    MAX_SYMBOLS: 6
+    # nothing; the fixture's seeded allocation rows then hide it downstream. This case
+    # study is long-short, and signals.py caps each side at n_assets // 2, so a cap of 6
+    # would register rows labelled top_k=5 that trade 3 names per side. The fixture holds
+    # 200 symbols, so 12 realizes the concentration the row claims.
+    MAX_SYMBOLS: 12
     TOP_N_PREDICTIONS: 2
   timeout: 300
 case_studies/us_firm_characteristics/14_costs:
