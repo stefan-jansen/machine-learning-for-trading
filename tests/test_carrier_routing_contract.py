@@ -88,7 +88,9 @@ def test_carrier_pins_are_single_sourced_and_well_formed() -> None:
     # rebuilt registry while this file stayed passing. What a pin has to be is a
     # lowercase hex prefix long enough to identify one backtest; whether it still
     # resolves is checked against a registry below.
-    assert CARRIER_PINS, "the mapping is imported by name; an empty one hides a deletion"
+    # An empty mapping is the documented normal state - a case study with no entry
+    # selects by the rule - so its emptiness cannot be asserted against. What a
+    # deletion would break is the lookup, and that is checked behaviourally below.
     for case_study, pin in CARRIER_PINS.items():
         assert case_study and case_study.strip() == case_study
         assert re.fullmatch(r"[0-9a-f]{8,}", pin), (
@@ -227,27 +229,53 @@ def test_a_pin_that_matches_no_backtest_is_named_as_the_cause(
         strategy_analysis.resolve_canonical_rank1_lineage(pinned_case_study)
 
 
-def test_carrier_application_fails_closed_after_filters_and_on_missing_schema() -> None:
+def test_the_lookup_reads_the_mapping_rather_than_a_copy(pinned_case_study: str) -> None:
+    """What an empty mapping cannot be asserted against, and a deletion would break.
+
+    The mapping is empty whenever no owner has a reason to pin, so its contents say
+    nothing about whether the lookup still consults it. Installing an entry and
+    reading it back does, and it fails the day `carrier_pin` starts answering from
+    somewhere else.
+    """
+    assert carrier_pins.carrier_pin(pinned_case_study) == FIXTURE_PIN
+    assert carrier_pins.carrier_pin("a_case_study_with_no_entry") is None
+
+
+def test_carrier_application_fails_closed_after_filters_and_on_missing_schema(
+    pinned_case_study: str,
+) -> None:
     with pytest.raises(ValueError, match="absent after candidate filters"):
         prioritize_carrier_hash(
             pl.DataFrame({"backtest_hash": ["not-the-pin"], "ic_mean": [0.1]}),
-            "sp500_options",
+            pinned_case_study,
         )
     with pytest.raises(pl.exceptions.ColumnNotFoundError, match="backtest_hash"):
-        prioritize_carrier_hash(pl.DataFrame({"ic_mean": [0.1]}), "sp500_options")
+        prioritize_carrier_hash(pl.DataFrame({"ic_mean": [0.1]}), pinned_case_study)
 
 
-def test_carrier_row_is_prioritized_only_after_surviving_filters() -> None:
-    pin = CARRIER_PINS["sp500_options"]
+def test_an_unpinned_case_study_passes_its_candidates_through(pinned_case_study: str) -> None:
+    """The empty-mapping path, which is now every case study's.
+
+    Without an entry there is nothing to move first and nothing to fail closed on,
+    so the frame is returned as it came - including the frame that has no
+    `backtest_hash` column, which is only an error where a pin has to be applied.
+    """
+    candidates = pl.DataFrame({"backtest_hash": ["raw_max"], "ic_mean": [0.2]})
+    assert prioritize_carrier_hash(candidates, "a_case_study_with_no_entry").equals(candidates)
+    bare = pl.DataFrame({"ic_mean": [0.2]})
+    assert prioritize_carrier_hash(bare, "a_case_study_with_no_entry").equals(bare)
+
+
+def test_carrier_row_is_prioritized_only_after_surviving_filters(pinned_case_study: str) -> None:
     candidates = pl.DataFrame(
         {
-            "backtest_hash": ["raw_max", f"{pin}_suffix"],
+            "backtest_hash": ["raw_max", f"{FIXTURE_PIN}_suffix"],
             "ic_mean": [0.2, 0.1],
         }
     )
     filtered = candidates.filter(pl.col("ic_mean") >= 0.1)
-    result = prioritize_carrier_hash(filtered, "sp500_options")
-    assert result["backtest_hash"].to_list()[0] == f"{pin}_suffix"
+    result = prioritize_carrier_hash(filtered, pinned_case_study)
+    assert result["backtest_hash"].to_list()[0] == f"{FIXTURE_PIN}_suffix"
 
 
 def test_cohort_metrics_are_attributed_to_their_leader() -> None:
