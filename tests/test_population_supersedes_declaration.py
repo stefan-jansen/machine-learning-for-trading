@@ -34,10 +34,12 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 
-# Notebooks owned by another lane that call the publish without the parameter. Each entry is
-# asserted to still be earned by `test_every_exemption_is_still_earned`, so it has to be
-# deleted in the same change that adds the parameter rather than outliving it unread.
-KNOWN_UNDECLARED = {"case_studies/crypto_perps_funding/06_linear.py"}
+# Notebooks that call the publish without the parameter. Empty, and the emptiness is checked:
+# `test_every_exemption_is_still_earned` asserts each entry is still needed, so an exemption
+# has to be deleted in the same change that adds the parameter rather than outliving it
+# unread. `crypto_perps_funding/06_linear.py` was the one entry and lost it the same day, in
+# stefan-jansen/machine-learning-for-trading#721.
+KNOWN_UNDECLARED: set[str] = set()
 
 
 def _publishes_a_population(source: str) -> bool:
