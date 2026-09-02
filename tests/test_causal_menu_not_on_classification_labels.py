@@ -31,7 +31,12 @@ SETUPS = sorted((REPO_ROOT / "case_studies").glob("*/config/setup.yaml"))
 # exemption here is asserted to still be needed by `test_every_exemption_is_still_earned`, so
 # the entry has to be deleted in the same change that fixes the config rather than outliving
 # it as a permanently unread allowance.
-KNOWN_UNFIXED = {("us_firm_characteristics", "fwd_class_1m")}
+#
+# Empty since 2026-09-02, and the emptiness is the point: `us_firm_characteristics/fwd_class_1m`
+# was the last entry, and #717 removed that declaration in the window between this file being
+# written and merged. The exemption assertion is what caught it - it failed on `main` the moment
+# both landed, which is exactly the regression it exists to find, one step earlier than expected.
+KNOWN_UNFIXED: set[tuple[str, str]] = set()
 
 
 def _classification_labels(setup_path) -> list[str]:
