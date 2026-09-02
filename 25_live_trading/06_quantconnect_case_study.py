@@ -330,56 +330,72 @@ print(f"  Entries: {len(qc_predictions)} dates")
 # ### Algorithm: Select and Rebalance
 #
 # The algorithm subscribes to assets with positive predictions and forms an
-# equal-weighted portfolio. The rebalance fires on the cadence printed above,
-# which is read off the promoted configuration's label rather than fixed here:
-# the signal a configuration produces is a forecast over a stated number of
-# sessions, and holding a position longer than that means trading on a forecast
-# that has already expired. The listing below shows the weekly rule for the
-# 5-session ETF carrier; swap `week_start` for `month_start` on a 21-session
-# one.
+# equal-weighted portfolio. The rebalance fires on the cadence read off the
+# promoted configuration's label: the signal a configuration produces is a
+# forecast over a stated number of sessions, and holding a position longer than
+# that means trading on a forecast that has already expired.
 #
-# ```python
-# class PredictionUniverseAlgorithm(QCAlgorithm):
-#     def initialize(self):
-#         self.set_start_date(2020, 1, 1)
-#         self.set_cash(100_000)
-#         self.settings.seed_initial_prices = True
-#         self._return_prediction_threshold = 0
-#
-#         self.universe_settings.resolution = Resolution.DAILY
-#         self._universe = self.add_universe(
-#             PredictionUniverse, self._select_assets
-#         )
-#
-#         # Rebalance weekly to match the 5-session prediction horizon. The
-#         # universe still streams daily; only the rebalance is throttled.
-#         self.schedule.on(
-#             self.date_rules.week_start('SPY'),
-#             self.time_rules.at(8, 0),
-#             self._rebalance,
-#         )
-#
-#     def _select_assets(self, data):
-#         return [
-#             stock.symbol for stock in data
-#             if stock.value > self._return_prediction_threshold
-#         ]
-#
-#     def _rebalance(self):
-#         symbols = self._universe.selected
-#         if not symbols:
-#             return
-#         targets = [
-#             PortfolioTarget(symbol, 1 / len(symbols))
-#             for symbol in symbols
-#         ]
-#         self.set_holdings(targets, True)
-# ```
-#
-# The entire algorithm is ~30 lines. Portfolio rules (threshold, weighting,
-# rebalance frequency) can be changed without touching the ML pipeline. Matching
-# the rebalance to the signal's horizon is itself an instance of that freedom:
-# when the ETF case study promoted a 5-session carrier over its 21-session one,
+# The listing is generated from that cadence rather than written out here, so
+# there is no second place for the horizon to be stated and go stale. It is the
+# same reason the horizon itself is derived: this notebook previously carried a
+# monthly rebalance in prose while the case study deployed a five-session
+# signal, and nothing in it could fail.
+
+# %%
+ALGORITHM_TEMPLATE = """class PredictionUniverseAlgorithm(QCAlgorithm):
+    def initialize(self):
+        self.set_start_date(2020, 1, 1)
+        self.set_cash(100_000)
+        self.settings.seed_initial_prices = True
+        self._return_prediction_threshold = {threshold}
+
+        self.universe_settings.resolution = Resolution.DAILY
+        self._universe = self.add_universe(
+            PredictionUniverse, self._select_assets
+        )
+
+        # Rebalance {cadence} to match the {horizon}-session prediction horizon.
+        # The universe still streams daily; only the rebalance is throttled.
+        self.schedule.on(
+            self.date_rules.{date_rule}('SPY'),
+            self.time_rules.at(8, 0),
+            self._rebalance,
+        )
+
+    def _select_assets(self, data):
+        return [
+            stock.symbol for stock in data
+            if stock.value > self._return_prediction_threshold
+        ]
+
+    def _rebalance(self):
+        symbols = self._universe.selected
+        if not symbols:
+            return
+        targets = [
+            PortfolioTarget(symbol, 1 / len(symbols))
+            for symbol in symbols
+        ]
+        self.set_holdings(targets, True)
+"""
+
+algorithm_source = ALGORITHM_TEMPLATE.format(
+    threshold=PREDICTION_THRESHOLD,
+    cadence=rebalance_cadence,
+    horizon=horizon_days,
+    date_rule=rebalance_date_rule,
+)
+algorithm_path = EXPORT_PATH.parent / "main.py"
+algorithm_path.write_text(algorithm_source)
+print(algorithm_source)
+print(f"Written to {display_path(algorithm_path)}")
+
+# %% [markdown]
+# The entire algorithm is ~30 lines, and it is written next to the predictions
+# so the two travel together. Portfolio rules (threshold, weighting, rebalance
+# frequency) can be changed without touching the ML pipeline. Matching the
+# rebalance to the signal's horizon is itself an instance of that freedom: when
+# the ETF case study promoted a 5-session carrier over its 21-session one,
 # aligning the cadence was this one line, not a retraining run.
 
 # %% [markdown]
