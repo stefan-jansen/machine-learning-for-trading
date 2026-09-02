@@ -2005,12 +2005,13 @@ case_studies/nasdaq100_microstructure/14_backtest:
   timeout: 360
 case_studies/nasdaq100_microstructure/15_portfolio_management:
   parameters:
-    # Same constraint as 14_backtest above, and the widened fixture relaxes it. At 6 symbols
-    # a top_k=5 long-short label could not be realized - signals.py caps each side at
-    # n_assets // 2, so those rows traded 3 names per side and the grid's smallest top_k was
-    # a fixture limit rather than a property of the sweep. At 12 the cap is 6 per side and
-    # top_k=5 is realizable. It never bound in production anyway (nasdaq100 115 symbols at
-    # top_k=20, cme_futures 30 at 10, fx_pairs 20 at 10, crypto_perps_funding 19 at 5).
+    # Same constraint as 14_backtest above, and the widened fixture relaxes it.
+    # `signals.py:219` takes `eff_k = min(top_k, n_assets // 2)` on a long-short label, so at
+    # 6 symbols the ceiling was 3: a `top_k=5` row traded 3 names a side and registered under
+    # a k it had not run. At 12 the ceiling is 6 and `top_k=5` binds first, so the sweep
+    # trades the 5 a side it declares. The ceiling never bound in production (nasdaq100 115
+    # symbols at top_k=20, cme_futures 30 at 10, fx_pairs 20 at 10, crypto 19 at 5); it was
+    # a property of a 6-symbol fixture.
     MAX_SYMBOLS: 12
     TOP_N_PREDICTIONS: 2
   timeout: 300
