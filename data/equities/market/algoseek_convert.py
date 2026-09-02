@@ -47,7 +47,14 @@ that produce what the notebooks actually load, and they run after this one:
     uv run python data/equities/market/sp500/materialize_options.py
 
 Both conversions resume: an output partition that already exists is skipped, so an
-interrupted run continues where it stopped. Pass ``--force`` to rebuild.
+interrupted run continues where it stopped. The NASDAQ-100 conversion also stages each
+day as it is parsed, so a run interrupted midway through a month resumes at the day it
+stopped on rather than restarting the month. Pass ``--force`` to rebuild.
+
+Peak memory is one day of bars while parsing, and about two thirds of a month while a
+month is assembled - roughly 1.3 GB in total for the NASDAQ-100 archive. Give a
+container at least 2 GB; Docker Desktop's own allocation is the ceiling that applies,
+not the host's RAM.
 """
 
 from __future__ import annotations
@@ -56,6 +63,7 @@ import argparse
 import gzip
 import io
 import re
+import shutil
 import sys
 import time
 import zipfile
@@ -66,6 +74,7 @@ from datetime import datetime
 from pathlib import Path
 
 import polars as pl
+import pyarrow.parquet as pq
 
 from utils.downloading import print_section, resolve_data_dir
 
@@ -444,12 +453,78 @@ def _parse_day(payloads: list[bytes], parse, workers: int) -> pl.DataFrame | Non
     return pl.concat(frames, how="vertical")
 
 
-def _write(df: pl.DataFrame, path: Path) -> float:
+def _write(df: pl.DataFrame, path: Path, compression_level: int = 9) -> float:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".parquet.tmp")
-    df.write_parquet(tmp, compression="zstd", compression_level=9, statistics=True)
+    df.write_parquet(tmp, compression="zstd", compression_level=compression_level, statistics=True)
     tmp.replace(path)
     return path.stat().st_size / 1024 / 1024
+
+
+# Symbols per pass when a month is assembled from its staged days. The batches are
+# written in ascending symbol order, so the file ends up ordered by (symbol, timestamp)
+# exactly as the whole-month sort left it, while only one batch is resident at a time.
+# Measured on a 2.0M x 62 month (about 1.0 GB in memory), assembly over and above the
+# interpreter: 5 -> 483 MB in 3.7s, 10 -> 665 MB in 3.0s, 25 -> 1176 MB in 2.4s.
+_SYMBOL_BATCH = 10
+
+
+def _assemble_month(staging: Path, out_path: Path) -> tuple[int, int]:
+    """Combine one month's staged days into the single parquet the loader scans.
+
+    Sorting a whole month at once costs about three times the month in memory - the
+    staged frames, the concatenation and the sort result are all live together. Reading
+    one batch of symbols at a time instead bounds the peak at a fraction of a month,
+    and appending each batch as its own row group reproduces the whole-month sort's
+    output row for row, in the same order.
+    """
+    pattern = str(staging / "*.parquet")
+    symbols = (
+        pl.scan_parquet(pattern)
+        .select("symbol")
+        .unique()
+        .collect()
+        .get_column("symbol")
+        .sort()
+        .to_list()
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_path.with_suffix(".parquet.tmp")
+    rows = 0
+    writer: pq.ParquetWriter | None = None
+    try:
+        for start in range(0, len(symbols), _SYMBOL_BATCH):
+            batch = symbols[start : start + _SYMBOL_BATCH]
+            part = (
+                pl.scan_parquet(pattern)
+                .filter(pl.col("symbol").is_in(batch))
+                .sort("symbol", "timestamp")
+                .collect()
+            )
+            rows += part.height
+            table = part.to_arrow()
+            del part
+            if writer is None:
+                # pyarrow's default dictionary encoding, which is what suits this data:
+                # the published conversion is 3.5 GB for 505 days of 95,480 x 62, i.e.
+                # ~1.2 bytes per 8-byte value, so the columns are highly repetitive and
+                # dictionaries pay on the floats as well as the strings. On
+                # bar-shaped data it writes 10-20% smaller than polars' own writer;
+                # on uniform noise, which this data is not, it is larger.
+                writer = pq.ParquetWriter(
+                    tmp,
+                    table.schema,
+                    compression="zstd",
+                    compression_level=9,
+                    write_statistics=True,
+                )
+            writer.write_table(table)
+            del table
+    finally:
+        if writer is not None:
+            writer.close()
+    tmp.replace(out_path)
+    return rows, len(symbols)
 
 
 def convert_nasdaq100(source: Path, out_root: Path, workers: int, force: bool) -> int:
@@ -464,6 +539,12 @@ def convert_nasdaq100(source: Path, out_root: Path, workers: int, force: bool) -
     for day, reader in days:
         by_month[(day[:4], day[4:6])].append((day, reader))
 
+    # Outside minute_bars/, because load_nasdaq100_bars() scans it as
+    # `minute_bars/**/*.parquet` with hive_partitioning=True: a staging directory left
+    # behind by a killed run would otherwise be read back as data with an unparseable
+    # partition key.
+    staging_root = out_dir.parent / ".minute_bars_staging"
+
     _log(f"{len(days)} days across {len(by_month)} months -> {out_dir}")
     total_rows = 0
     for (year, month), entries in sorted(by_month.items()):
@@ -473,32 +554,49 @@ def convert_nasdaq100(source: Path, out_root: Path, workers: int, force: bool) -
             continue
 
         t0 = time.time()
-        frames = []
-        # One line per day. A month is ~21 days of ~504 symbol files each, and nothing is
-        # written until the whole month is concatenated, so without this the longest phase of
-        # the run produces no output and creates no directory - reported as the converter
-        # "not working" when it was working the whole time.
+        # Each day is written out and dropped rather than held. A month is ~21 days of
+        # ~100 symbol files each, and keeping them all resident to concatenate and sort
+        # at the end held about three copies of the month at once - enough for a
+        # memory-capped container to kill the run partway through. Because the skip
+        # above is per month, that kill discarded every day already parsed, so a retry
+        # restarted the same month and died in the same place. Staged days survive it.
+        staging = staging_root / f"{year}{month}"
+        staging.mkdir(parents=True, exist_ok=True)
+        staged = 0
         for n, (day, reader) in enumerate(entries, start=1):
+            day_path = staging / f"{day}.parquet"
+            if day_path.exists() and not force:
+                _log(f"  {day} ({n}/{len(entries)}): already staged")
+                staged += 1
+                continue
             df = _parse_day(reader(), parse_nasdaq100_csv, workers)
-            if df is not None:
-                frames.append(df)
-                _log(f"  {day} ({n}/{len(entries)}): {df.height:,} rows")
-            else:
+            if df is None:
                 _log(f"  {day} ({n}/{len(entries)}): no rows")
-        if not frames:
+                continue
+            height = df.height
+            # Sorted here as well as on assembly: it costs nothing at this size and lets
+            # the per-batch filter below skip whole row groups on their statistics.
+            _write(df.sort("symbol", "timestamp"), day_path, compression_level=1)
+            del df
+            staged += 1
+            _log(f"  {day} ({n}/{len(entries)}): {height:,} rows")
+        if not staged:
             _log(f"{year}-{month}: nothing to write")
+            shutil.rmtree(staging, ignore_errors=True)
             continue
 
-        _log(f"{year}-{month}: concatenating and sorting {len(frames)} days")
-        month_df = pl.concat(frames, how="vertical").sort("symbol", "timestamp")
-        del frames
-        size_mb = _write(month_df, out_path)
-        total_rows += month_df.height
+        _log(f"{year}-{month}: assembling {staged} staged days")
+        month_rows, n_symbols = _assemble_month(staging, out_path)
+        shutil.rmtree(staging, ignore_errors=True)
+        total_rows += month_rows
+        size_mb = out_path.stat().st_size / 1024 / 1024
         _log(
-            f"{year}-{month}: {month_df.height:,} rows, {month_df['symbol'].n_unique()} symbols, "
+            f"{year}-{month}: {month_rows:,} rows, {n_symbols} symbols, "
             f"{size_mb:.0f} MB, {time.time() - t0:.0f}s"
         )
 
+    if staging_root.exists() and not any(staging_root.iterdir()):
+        staging_root.rmdir()
     _log(f"NASDAQ-100 minute bars: {total_rows:,} rows written")
     return 0
 

@@ -514,3 +514,99 @@ def test_convert_reports_an_empty_source(convert, tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
     assert convert.convert_sp500_options(empty, tmp_path / "data", workers=1, force=False) == 1
+
+
+def _nasdaq_archive(convert, path: Path, days: list[str], symbols: list[str]) -> Path:
+    """The archive as AlgoSeek serves it: an outer zip of one zip per day."""
+    with zipfile.ZipFile(path, "w") as outer:
+        for day in days:
+            inner = io.BytesIO()
+            with zipfile.ZipFile(inner, "w") as z:
+                for symbol in symbols:
+                    z.writestr(
+                        f"{day}/{symbol[0]}/{symbol}.csv",
+                        _nasdaq100_csv(convert, symbol=symbol, day=day),
+                    )
+            outer.writestr(f"{day[:4]}/{day}.zip", inner.getvalue())
+    return path
+
+
+def _month_path(out: Path) -> Path:
+    return (
+        out / "equities" / "market" / "nasdaq100" / "minute_bars" / "year=2020" / "month=03.parquet"
+    )
+
+
+def _staging_root(out: Path) -> Path:
+    return out / "equities" / "market" / "nasdaq100" / ".minute_bars_staging"
+
+
+def test_nasdaq_month_is_ordered_by_symbol_then_timestamp(convert, tmp_path):
+    """The month is assembled a batch of symbols at a time, so the ordering the
+    whole-month sort used to produce has to survive that."""
+    archive = _nasdaq_archive(
+        convert, tmp_path / "n.zip", ["20200311", "20200312", "20200313"], ["MSFT", "AAPL"]
+    )
+    out = tmp_path / "data"
+    assert convert.convert_nasdaq100(archive, out, workers=1, force=False) == 0
+
+    df = pl.read_parquet(_month_path(out))
+    assert df.equals(df.sort("symbol", "timestamp")), "not ordered by (symbol, timestamp)"
+    # Interleaved across days rather than day-by-day: every AAPL row precedes every MSFT row.
+    assert df["symbol"].to_list() == ["AAPL"] * 6 + ["MSFT"] * 6
+    assert not _staging_root(out).exists(), "staging must not outlive a finished month"
+
+
+def test_nasdaq_interrupted_month_resumes_from_the_days_it_staged(convert, tmp_path, monkeypatch):
+    """A killed run used to lose the whole month and restart it, so a run that could not
+    hold a month could never finish one however often it was retried."""
+    days = ["20200311", "20200312", "20200313"]
+    archive = _nasdaq_archive(convert, tmp_path / "n.zip", days, ["AAPL"])
+
+    clean = tmp_path / "clean"
+    assert convert.convert_nasdaq100(archive, clean, workers=1, force=False) == 0
+    expected = pl.read_parquet(_month_path(clean))
+
+    out = tmp_path / "resumed"
+    parse_day = convert._parse_day
+    parsed = 0
+    interrupt_after = 2
+
+    def counting_parse_day(*args, **kwargs):
+        nonlocal parsed
+        parsed += 1
+        if interrupt_after is not None and parsed > interrupt_after:
+            raise KeyboardInterrupt("stands in for the OOM kill")
+        return parse_day(*args, **kwargs)
+
+    monkeypatch.setattr(convert, "_parse_day", counting_parse_day)
+    with pytest.raises(KeyboardInterrupt):
+        convert.convert_nasdaq100(archive, out, workers=1, force=False)
+
+    assert not _month_path(out).exists()
+    staged = sorted(q.name for q in _staging_root(out).rglob("*.parquet"))
+    assert staged == ["20200311.parquet", "20200312.parquet"], "the parsed days must survive"
+
+    interrupt_after = None
+    parsed = 0
+    assert convert.convert_nasdaq100(archive, out, workers=1, force=False) == 0
+    assert pl.read_parquet(_month_path(out)).equals(expected)
+    assert parsed == 1, "a resumed run re-parses only the day it stopped on"
+
+
+def test_staged_days_are_not_visible_to_the_loader(convert, tmp_path, monkeypatch):
+    """load_nasdaq100_bars() scans minute_bars/**/*.parquet with hive_partitioning=True,
+    so a staging directory left inside it would be read back as data."""
+    archive = _nasdaq_archive(convert, tmp_path / "n.zip", ["20200311", "20200312"], ["AAPL"])
+    out = tmp_path / "data"
+
+    def die_immediately(*args, **kwargs):
+        raise KeyboardInterrupt("stands in for the OOM kill")
+
+    monkeypatch.setattr(convert, "_parse_day", die_immediately)
+    with pytest.raises(KeyboardInterrupt):
+        convert.convert_nasdaq100(archive, out, workers=1, force=False)
+
+    minute_bars = out / "equities" / "market" / "nasdaq100" / "minute_bars"
+    assert _staging_root(out).is_dir(), "the run must have staged somewhere"
+    assert list(minute_bars.rglob("*.parquet")) == []
