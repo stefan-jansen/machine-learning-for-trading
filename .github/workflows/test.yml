@@ -495,6 +495,11 @@ jobs:
         # against a restatement of its rules - and without the package the helper has no one to
         # ask, so the corpus sweep would pass while checking nothing. Pinned to the version in
         # `uv.lock`, as jupytext above is.
+        # nest-asyncio is a core project dependency and the import surface of
+        # `25_live_trading/async_utils.py`, whose run_async is what
+        # tests/test_async_utils.py exercises. It is pure Python and a few KB, so
+        # it does not compromise the fast-gate intent of this list.
+        #
         # pyarrow is what polars converts through in `DataFrame.to_pandas`, which
         # `load_modeling_dataset` calls on the fold-tagged temporal artifact. The
         # variant-geometry guard hangs off exactly that frame, so without pyarrow
@@ -504,7 +509,7 @@ jobs:
         run: |
           uv venv --python 3.14
           uv pip install pytest pytest-timeout numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
-            scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow \
+            scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow nest-asyncio \
             "ml4t-diagnostic>=0.1.2" jupytext==1.19.3 papermill==2.7.0 ml4t-backtest ml4t-data ml4t-engineer databento
       - name: Run download-logic unit tests
         env:
