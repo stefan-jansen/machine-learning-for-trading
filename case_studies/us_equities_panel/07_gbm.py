@@ -136,14 +136,17 @@ declared_labels(study, "gbm")
 # - **A capacity ladder** at 7, 15, 31 and 63 leaves, plus a `default` profile.
 # - **Three objectives**, as described above.
 #
-# **`default` is not a fifth rung, and the grid does not isolate capacity.** The three `default_*`
-# presets declare only `objective` and `seed`, so everything else is whatever LightGBM supplies:
-# `num_leaves` 31 - which is the `leaves_31` rung, not a value outside the ladder - a
-# `learning_rate` of 0.1 against the 0.05 the twelve `leaves_*` presets declare, and none of the
-# `bagging_fraction` 0.8, `feature_fraction` 0.7, `lambda_l1` 0.5, `lambda_l2` 5.0 or
-# `min_child_samples` 50 that all four ladder profiles carry. So `default` and `leaves_31` are the
-# same capacity at double the learning rate with regularization off, and they differ on six
-# parameters rather than none.
+# **`default` is not a fifth rung, and the grid does not isolate capacity.** The `params` block of
+# each `default_*` preset holds only `objective` and `seed`. `default_huber` also declares a
+# top-level `huber_alpha_scale: 0.5`, but every `leaves_*_huber` declares the same value, so it
+# separates the objectives from each other and not `default` from the ladder. Everything else in a
+# `default_*` fit is whatever LightGBM supplies: `num_leaves` 31 - which is the `leaves_31` rung,
+# not a value outside the ladder - a `learning_rate` of 0.1 against the 0.05 the twelve `leaves_*`
+# presets declare, and none of the `bagging_fraction` 0.8, `bagging_freq` 1, `feature_fraction` 0.7,
+# `lambda_l1` 0.5, `lambda_l2` 5.0 or `min_child_samples` 50 that all four ladder profiles carry.
+# With `bagging_freq` unset LightGBM disables subsampling outright, so `default` and `leaves_31` are
+# the same capacity at double the learning rate with both regularization and subsampling off, and
+# they differ on seven parameters rather than none.
 #
 # Read the gap between them as capacity and you will be reading the wrong axis: at 500 iterations
 # `default_mse` reaches an IC of 0.0243 and `leaves_31_mse` 0.0222, at identical leaf counts.
