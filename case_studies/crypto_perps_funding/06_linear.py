@@ -98,6 +98,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
+SUPERSEDES_POPULATION: str = ""
 
 # %%
 study = open_study(
@@ -266,10 +267,21 @@ plan.select(
 # publish the first label and be refused for the second, which is what happened before this
 # notebook fitted them together. Everything that finished stays registered, and re-running fits
 # only what is missing.
+#
+# `SUPERSEDES_POPULATION` names the population hash this run replaces. A changed estimator
+# parameter moves every training identity as surely as a changed menu does, so the refit is a
+# different population under the same name and the registry refuses to write it without being told
+# which snapshot it supersedes. It refuses at publish time, after every fold of every configuration
+# has been fitted, so a run that cannot name its predecessor spends the whole fit and then raises.
 
 # %%
 population_name = POPULATION_NAME or "crypto_perps_funding-linear-validation-v1"
-execution, population = run_model_population(study, resolved, population_name=population_name)
+execution, population = run_model_population(
+    study,
+    resolved,
+    population_name=population_name,
+    supersedes=SUPERSEDES_POPULATION or None,
+)
 
 fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
 reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)
