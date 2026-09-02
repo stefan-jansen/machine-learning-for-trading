@@ -167,17 +167,23 @@ def load_complete_metrics(
 # The identity a tie has to agree on before it can be resolved. `config_name` alone is not a
 # configuration: a name can be reused across generations while the parameters behind it move, and
 # collapsing two such rows would pick one arbitrarily by hash order - the failure the strict form
-# existed to prevent. A refit that only re-declared an input leaves the whole metric vector
-# bit-identical, so requiring agreement on the checkpoint and on every recorded statistic
-# separates the duplicate from the genuine ambiguity without needing the training spec here.
-TIE_IDENTITY_FIELDS = ["config_name", "checkpoint_kind", "checkpoint_value", *FINITE_METRIC_FIELDS]
+# existed to prevent. A refit that only re-declared an input leaves the whole row bit-identical
+# apart from its two hashes, so requiring agreement on every other column - the config name, the
+# checkpoint, and each recorded statistic - separates the duplicate from the genuine ambiguity
+# without needing the training spec here. Two configurations that merely tie on ic_mean_daily
+# will differ somewhere in that vector and still raise.
+# Everything except the two identities that a refit is expected to move. Naming the
+# fields instead would be a second list to keep in step with METRICS_QUERY, and the
+# first draft of it already omitted ic_mean and ic_std while claiming to check every
+# recorded statistic.
+TIE_IDENTITY_EXCLUDED = frozenset({"training_hash", "prediction_hash"})
 
 
 def resolve_generation_tie(tied: pl.DataFrame, what: str) -> pl.DataFrame:
     """Collapse generations of one configuration; raise on anything else."""
     if tied.height == 1:
         return tied
-    fields = [column for column in TIE_IDENTITY_FIELDS if column in tied.columns]
+    fields = [column for column in tied.columns if column not in TIE_IDENTITY_EXCLUDED]
     distinct = tied.select(fields).unique()
     if distinct.height != 1:
         differing = [column for column in fields if tied[column].n_unique() > 1]
