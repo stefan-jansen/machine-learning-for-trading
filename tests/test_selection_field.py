@@ -14,6 +14,7 @@ from case_studies.research.selection_field import (
     COVERAGE_STAGE,
     FIELD_STAGES,
     label_of,
+    members_digest,
     open_selection_field,
     predictions_identity,
     resolve_field_members,
@@ -271,9 +272,10 @@ def _record_plan(
             "2026-09-01T00:00:00+00:00",
         ),
     )
-    records = [sweep_attempt_name(name, attempt)]
+    generation = members_digest(members)
+    records = [sweep_attempt_name(name, generation, attempt)]
     if attested:
-        records.append(sweep_attestation_name(name, attempt))
+        records.append(sweep_attestation_name(name, generation, attempt))
     for record in records:
         db.execute(
             "INSERT OR REPLACE INTO official_populations VALUES (?, ?, ?, ?, ?, ?)",

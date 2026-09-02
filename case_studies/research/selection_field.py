@@ -144,12 +144,25 @@ def sweep_plan_name(case_study: str, label: str, stage: str, predictions: str) -
     return f"{case_study}-{PLAN_STAGE_KEYS[stage]}-{label}-{predictions}"
 
 
-def sweep_attempt_name(plan_name: str, attempt: int) -> str:
+def sweep_generation(plan: OfficialPopulation) -> str:
+    """Which grid a recorded attempt was an attempt at.
+
+    The plan name carries the predictions it was planned against, and not the grid: a sweep
+    whose declared configurations change - an allocator added, a schedule withdrawn - supersedes
+    the plan under the same name. Attempts numbered by plan name alone would then span the two
+    grids, and the previous grid's successful attempt would be the latest one on record for a
+    grid that has not run. Naming the attempts after the members makes each generation start
+    its own numbering, so an unexecuted new grid has no attempts rather than an inherited one.
+    """
+    return members_digest(plan.members)
+
+
+def sweep_attempt_name(plan_name: str, generation: str, attempt: int) -> str:
     """The population a sweep publishes when it starts executing its plan, once per attempt."""
-    return f"{plan_name}-attempt-{attempt}"
+    return f"{plan_name}-g{generation}-attempt-{attempt}"
 
 
-def sweep_attestation_name(plan_name: str, attempt: int) -> str:
+def sweep_attestation_name(plan_name: str, generation: str, attempt: int) -> str:
     """The population a sweep publishes when that attempt finished with no failure.
 
     The plan alone cannot say this. It is published *before* the sweep runs, so that an
@@ -170,12 +183,12 @@ def sweep_attestation_name(plan_name: str, attempt: int) -> str:
     this sweep finish" answerable, which is the actual question. Each name is used once, so no
     attempt or attestation ever needs a supersedes declaration.
     """
-    return f"{plan_name}-swept-{attempt}"
+    return f"{plan_name}-g{generation}-swept-{attempt}"
 
 
-def _attempts(names: Collection[str], plan_name: str) -> list[int]:
-    """The attempt numbers this registry records for ``plan_name``, ascending."""
-    prefix = f"{plan_name}-attempt-"
+def _attempts(names: Collection[str], plan_name: str, generation: str) -> list[int]:
+    """The attempt numbers this registry records for this generation of ``plan_name``."""
+    prefix = f"{plan_name}-g{generation}-attempt-"
     found = []
     for name in names:
         if name.startswith(prefix):
@@ -193,10 +206,11 @@ def open_sweep_attempt(study: Study, plan: OfficialPopulation) -> int:
     the plan's own, sorted, so the record is addressable and carries what was attempted.
     """
     names = _population_names(study) or set()
-    attempt = (max(_attempts(names, plan.name), default=0)) + 1
+    generation = sweep_generation(plan)
+    attempt = (max(_attempts(names, plan.name, generation), default=0)) + 1
     OfficialPopulation.create(
         study,
-        name=sweep_attempt_name(plan.name, attempt),
+        name=sweep_attempt_name(plan.name, generation, attempt),
         member_kind="backtest",
         members=sorted(set(plan.members)),
     )
@@ -213,24 +227,27 @@ def attest_sweep(study: Study, plan: OfficialPopulation, attempt: int) -> Offici
     """
     return OfficialPopulation.create(
         study,
-        name=sweep_attestation_name(plan.name, attempt),
+        name=sweep_attestation_name(plan.name, sweep_generation(plan), attempt),
         member_kind="backtest",
         members=sorted(set(plan.members)),
     )
 
 
-def _attested(names: set[str] | None, plan_name: str) -> bool:
-    """Whether the latest recorded attempt of this sweep finished without a failure.
+def _attested(names: set[str] | None, plan: OfficialPopulation) -> bool:
+    """Whether the latest recorded attempt at this plan's grid finished without a failure.
 
     An absent attempt is not a success. Plans recorded before attempts existed have none, and
-    their sweeps are exactly the runs whose outcome was never written down.
+    their sweeps are exactly the runs whose outcome was never written down. The plan rather than
+    its name, because the question is asked of one generation of the grid: see
+    :func:`sweep_generation`.
     """
     if names is None:
         return False
-    attempts = _attempts(names, plan_name)
+    generation = sweep_generation(plan)
+    attempts = _attempts(names, plan.name, generation)
     if not attempts:
         return False
-    return sweep_attestation_name(plan_name, attempts[-1]) in names
+    return sweep_attestation_name(plan.name, generation, attempts[-1]) in names
 
 
 def _population_names(study: Study) -> set[str] | None:
@@ -304,7 +321,7 @@ def _plan_members(
         return None
     plan = OfficialPopulation.one(study, name=name)
     plan.require_complete()
-    if not _attested(names, name):
+    if not _attested(names, plan):
         raise ValueError(
             f"sweep plan {name} is complete but records no attestation, so the run that "
             "filled it either reported failures or did not finish; re-run that sweep"
@@ -368,7 +385,7 @@ def unfinished_sweep_plans(
             try:
                 plan = OfficialPopulation.one(study, name=name)
                 plan.require_complete()
-                if not _attested(names, name):
+                if not _attested(names, plan):
                     raise ValueError(
                         "complete, but the run that filled it recorded no attestation - it "
                         "reported failures or did not finish"

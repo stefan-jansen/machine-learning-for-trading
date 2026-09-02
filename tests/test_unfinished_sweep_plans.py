@@ -216,11 +216,12 @@ def _rename_population(study: Study, old: str, new: str) -> None:
     """
     with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
         db.execute("UPDATE official_populations SET name = ? WHERE name = ?", (new, old))
-        for suffix in ("-swept-%", "-attempt-%"):
-            db.execute(
-                "UPDATE official_populations SET name = ? || substr(name, ?) WHERE name LIKE ?",
-                (new, len(old) + 1, f"{old}{suffix}"),
-            )
+        # One pattern covers both: an attempt and its attestation are named after the plan's
+        # grid, so each is `<plan>-g<generation>-...` and the rename touches only the prefix.
+        db.execute(
+            "UPDATE official_populations SET name = ? || substr(name, ?) WHERE name LIKE ?",
+            (new, len(old) + 1, f"{old}-g%"),
+        )
         db.commit()
 
 
@@ -390,3 +391,48 @@ def test_a_complete_plan_says_nothing_about_the_window_its_members_ran_on(study:
 
     # Complete either way. Nothing in the plan distinguishes the two.
     assert OfficialPopulation.one(study, name=name).require_complete() == (other_window,)
+
+
+def test_a_plan_superseded_by_a_wider_grid_does_not_inherit_the_old_grid_s_attestation(
+    study: Study,
+) -> None:
+    """A sweep that declares more configurations has not run because its predecessor did.
+
+    The plan name carries the predictions and not the grid, so a sweep whose declared
+    configurations change - an allocator added, a schedule withdrawn - supersedes under the
+    same name. Numbering attempts by that name alone let the retired grid's successful attempt
+    stand as the latest one on record, and the freeze read a grid that had never executed as
+    finished. Attempts are named after the grid, so the second generation starts at none.
+    """
+    name = "etfs-allocation-fwd_ret_5d-pending"
+    prediction_hash = _complete_plan(study, name=name, alpha=1.0)
+    first = OfficialPopulation.one(study, name=name)
+    widened = register_backtest_run(
+        "etfs",
+        prediction_hash,
+        {"strategy": {"top_k": 1}, "stage": "allocation", "alpha": 3.0},
+        returns=pl.DataFrame({"timestamp": [date(2024, 1, 5)], "daily_return": [0.003]}),
+        metrics={"sharpe": 3.0, "sharpe_se_lo": 0.0},
+        case_dir=study.root,
+    )
+    OfficialPopulation.create(
+        study,
+        name=name,
+        member_kind="backtest",
+        members=[*first.members, widened],
+        supersedes=first.hash,
+    )
+    _rename_population(
+        study, name, f"etfs-allocation-fwd_ret_5d-{predictions_identity({prediction_hash})}"
+    )
+
+    unfinished = unfinished_sweep_plans(
+        study,
+        case_study="etfs",
+        labels=["fwd_ret_5d"],
+        stages=["allocation"],
+        prediction_hashes={prediction_hash},
+    )
+
+    assert len(unfinished) == 1
+    assert "no attestation" in unfinished[0]
