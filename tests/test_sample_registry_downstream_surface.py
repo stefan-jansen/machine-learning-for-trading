@@ -51,7 +51,7 @@ def _build_source_db(path: Path, cohort_schema: str | None = COHORT_SCHEMA) -> N
     """
     db = sqlite3.connect(str(path))
     db.executescript("""
-        CREATE TABLE training_runs (training_hash TEXT PRIMARY KEY, family TEXT);
+        CREATE TABLE training_runs (training_hash TEXT PRIMARY KEY, family TEXT, label TEXT);
         CREATE TABLE prediction_sets (
             prediction_hash TEXT PRIMARY KEY, training_hash TEXT, split TEXT
         );
@@ -65,7 +65,11 @@ def _build_source_db(path: Path, cohort_schema: str | None = COHORT_SCHEMA) -> N
     """)
     if cohort_schema:
         db.executescript(cohort_schema)
-    db.execute("INSERT INTO training_runs VALUES ('T1', 'gbm')")
+    # `label` is on training_runs in production, and step 3a partitions on it: a family that
+    # fits two labels holds two independent grids, and ranking them together lets the louder
+    # label take every slot. This fixture is one label, so the partition is the same one the
+    # assertions below were written against; the two-label case is its own test.
+    db.execute("INSERT INTO training_runs VALUES ('T1', 'gbm', 'labelA')")
     if cohort_schema:
         # One leader ranked out of top-N in every stage, which only step 3c can pull
         # into the sample, and one whose leader_hash was never a real backtest_run at
@@ -311,3 +315,46 @@ def test_a_source_with_no_backtest_dir_reports_every_hash_missing(tmp_path: Path
     result = _copy_backtest_artifacts(tmp_path / "nothing", tmp_path / "dst", {"a", "b"})
 
     assert result == {"copied": 0, "missing_dir": 2, "missing_returns": 0}
+
+
+def test_a_second_label_keeps_its_own_grid(tmp_path: Path) -> None:
+    """The failure that emptied a case study's fixture of one label.
+
+    `sp500_equity_option_analytics` declares five labels. Ranking a family's backtests by
+    |Sharpe| across all of them puts every top-N slot in whichever label happens to run
+    higher, and the quieter label reaches the fixture with no signal-stage row at all - so a
+    notebook that reads its baseline finds nothing and its CI job cannot pass. Partitioning on
+    the label is what gives each one its own ranking.
+    """
+    src_path = tmp_path / "src.db"
+    _build_source_db(src_path)
+    src = sqlite3.connect(str(src_path))
+    # A second label under the same family, uniformly quieter than every labelA row, so a
+    # ranking that ignores the label keeps none of it.
+    src.execute("INSERT INTO training_runs VALUES ('T2', 'gbm', 'labelB')")
+    src.execute("INSERT INTO prediction_sets VALUES ('Q1', 'T2', 'validation')")
+    src.execute("INSERT INTO prediction_metrics VALUES ('Q1', 0.005)")
+    for i in range(3):
+        bt = f"Q1_signal_{i}"
+        src.execute("INSERT INTO backtest_runs VALUES (?, 'Q1', 'signal')", (bt,))
+        src.execute("INSERT INTO backtest_metrics VALUES (?, ?)", (bt, 0.01 - i * 0.001))
+        src.execute("INSERT INTO backtest_fold_metrics VALUES (?, 0)", (bt,))
+    src.commit()
+
+    dst = sqlite3.connect(str(tmp_path / "dst.db"))
+    try:
+        _populate_sample_db(src, dst, tmp_path / "dst.db")
+        dst.commit()
+        kept = {
+            row[0]
+            for row in dst.execute(
+                "SELECT b.backtest_hash FROM backtest_runs b "
+                "JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash "
+                "JOIN training_runs t ON p.training_hash = t.training_hash "
+                "WHERE t.label = 'labelB' AND b.stage = 'signal'"
+            )
+        }
+    finally:
+        src.close()
+        dst.close()
+    assert kept, "the quieter label kept no signal-stage backtest"
