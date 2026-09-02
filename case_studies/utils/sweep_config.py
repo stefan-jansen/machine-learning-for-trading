@@ -714,12 +714,24 @@ def get_top_k_values_for(
         int(k) for k in grid if int(k) < n_assets and not (long_short and 2 * int(k) > n_assets)
     ]
     if not values:
-        side = "long-short ceiling" if long_short else "universe"
+        smallest = min(int(k) for k in grid)
+        # What the universe has to hold, which is not the same number in the two
+        # cases. Long-short takes `k` names on each side, so it needs `2k`, and
+        # saying "raise MAX_SYMBOLS above k" there sends the reader to a cap that
+        # cannot fix it - or worse, to a cap the fixture cannot reach at all.
+        needed = (
+            f"at least {2 * smallest} names for the smallest declared k of {smallest} "
+            f"({smallest} long and {smallest} short)"
+            if long_short
+            else f"more than {smallest} names for the smallest declared k"
+        )
+        side = f"long-short ceiling ({ceiling})" if long_short else "universe"
         raise ValueError(
             f"top_k_grid[{label!r}] = {list(grid)} is empty after filtering against "
             f"n_assets={n_assets} for case_studies/{case_study}: every declared k holds "
-            f"the whole {side} ({ceiling}). Raise the universe cap (MAX_SYMBOLS) above "
-            f"{min(int(k) for k in grid)} or declare a smaller k."
+            f"the whole {side}. A cross-sectional sweep here needs {needed}. Raise the "
+            f"universe cap (MAX_SYMBOLS) if the panel has them, widen the panel if it "
+            f"does not, or declare a smaller k."
         )
     return values
 
