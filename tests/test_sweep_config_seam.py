@@ -80,6 +80,14 @@ class TestUsFirmLoader:
         assert get_top_k_values_for(self.CS, label, n_assets=2500) == [5, 10, 20, 50]
 
     @pytest.mark.parametrize("label", ["fwd_ret_1m", "fwd_ret_1m_win", "fwd_class_1m"])
+    def test_top_k_grid_raises_when_the_universe_empties_it(self, label):
+        # The smallest declared k is 5. A universe of 5 holds everything at every k,
+        # so the grid filters to nothing - which a caller multiplies into a sweep size
+        # of zero and then reports as a completed sweep that registered no rows.
+        with pytest.raises(ValueError, match="empty after filtering"):
+            get_top_k_values_for(self.CS, label, n_assets=5)
+
+    @pytest.mark.parametrize("label", ["fwd_ret_1m", "fwd_ret_1m_win", "fwd_class_1m"])
     def test_entry_schemes_per_label(self, label):
         schemes = get_entry_schemes_for(self.CS, label, n_assets=2500, long_short=True)
         # Exactly the four equal_weight_top_k schemes declared in setup.yaml.

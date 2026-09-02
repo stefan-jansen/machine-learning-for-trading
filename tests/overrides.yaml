@@ -2000,7 +2000,10 @@ case_studies/nasdaq100_microstructure/14_backtest:
   timeout: 180
 case_studies/nasdaq100_microstructure/15_portfolio_management:
   parameters:
-    MAX_SYMBOLS: 5
+    # Same constraint as 14_backtest above: the test data has 6 nasdaq symbols and
+    # the smallest top_k in the grid is 5, so a cap of 5 filters the whole grid out
+    # and the allocation sweep registers nothing.
+    MAX_SYMBOLS: 6
     TOP_N_PREDICTIONS: 2
   timeout: 300
 case_studies/nasdaq100_microstructure/16_costs:
@@ -2008,7 +2011,9 @@ case_studies/nasdaq100_microstructure/16_costs:
 case_studies/nasdaq100_microstructure/17_risk_management:
   parameters:
     MAX_RISK_VARIANTS: 3
-    MAX_SYMBOLS: 5
+    # Matches 15_portfolio_management: the overlays are applied to that notebook's
+    # allocation rows, so both must price the same cross-section.
+    MAX_SYMBOLS: 6
     TOP_N_COMBOS: 1
   timeout: 600
 case_studies/nasdaq100_microstructure/18_strategy_analysis:
@@ -2237,7 +2242,9 @@ case_studies/sp500_equity_option_analytics/14_backtest:
   timeout: 600
 case_studies/sp500_equity_option_analytics/15_portfolio_management:
   parameters:
-    MAX_SYMBOLS: 5
+    # top_k_grid starts at 5, so a cap of 5 empties the grid and the sweep registers
+    # nothing; the fixture's seeded allocation rows then hide it downstream.
+    MAX_SYMBOLS: 6
     TOP_N_PREDICTIONS: 2
   timeout: 300
 case_studies/sp500_equity_option_analytics/17_costs:
@@ -2879,7 +2886,9 @@ case_studies/us_firm_characteristics/11_backtest:
   timeout: 120
 case_studies/us_firm_characteristics/12_portfolio_management:
   parameters:
-    MAX_SYMBOLS: 5
+    # top_k_grid starts at 5, so a cap of 5 empties the grid and the sweep registers
+    # nothing; the fixture's seeded allocation rows then hide it downstream.
+    MAX_SYMBOLS: 6
     TOP_N_PREDICTIONS: 2
   timeout: 300
 case_studies/us_firm_characteristics/14_costs:
