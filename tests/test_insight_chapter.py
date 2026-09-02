@@ -228,3 +228,26 @@ def test_selected_prediction_conformal_coverage_still_rejects_a_single_fold(
             },
             levels=(0.80,),
         )
+
+
+class TestTheDeclaredFoldCount:
+    """Both live spec shapes, because reading only one silently answers zero.
+
+    Every caller raises "n_folds is not declared" on a 0, and that is what
+    `13_dl_time_series/12_case_study_insights` and `14_latent_factors/09_case_study_insights`
+    did the first time the CI fixture gave them a `sp500_equity_option_analytics` row: the
+    specs declare two folds under `computation.expected_prediction_keys`, and the readers
+    looked only at the top level. Four training runs across the seven live registries carry
+    the top-level key; 1193 do not.
+    """
+
+    def test_reads_the_v3_location(self) -> None:
+        spec = {"computation": {"expected_prediction_keys": {"n_folds": 2}}}
+        assert insight_chapter.declared_fold_count(spec) == 2
+
+    def test_reads_the_legacy_top_level_key(self) -> None:
+        assert insight_chapter.declared_fold_count({"n_folds": 5}) == 5
+
+    def test_answers_zero_when_neither_is_declared(self) -> None:
+        assert insight_chapter.declared_fold_count({"computation": {"cv": {}}}) == 0
+        assert insight_chapter.declared_fold_count({}) == 0

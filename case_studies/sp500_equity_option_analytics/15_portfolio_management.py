@@ -50,7 +50,18 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 
-from case_studies.research import Study
+from case_studies.research import (
+    OfficialPopulation,
+    Study,
+    attest_sweep,
+    open_study,
+    open_sweep_attempt,
+    planned_backtests,
+    population_supersedes,
+    predictions_identity,
+    sweep_plan_name,
+    upstream_plan_hashes,
+)
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
     load_backtest_prices_for,
@@ -125,6 +136,29 @@ CURRENT_MEMBERS = _members
 # so a long checkpoint grid cannot crowd other model families out of the
 # allocation round.
 
+# %% [markdown]
+# The baseline sweep this ranks is required first. Its plan says which backtests
+# the current grid contains, and its attestation says the run that filled them
+# finished; without both, the leading configurations here are whatever the
+# registry happens to hold, which is how three of ten configurations advanced on
+# an unfinished baseline once already.
+
+# %%
+UPSTREAM_PLANS = upstream_plan_hashes(
+    _study,
+    case_study=CASE_STUDY_ID,
+    label=ALLOCATION_LABEL,
+    stage="allocation",
+    prediction_hashes=CURRENT_MEMBERS,
+)
+BASELINE_GRID = planned_backtests(
+    _study,
+    case_study=CASE_STUDY_ID,
+    label=ALLOCATION_LABEL,
+    stage="signal",
+    prediction_hashes=CURRENT_MEMBERS,
+)
+
 # %%
 top_preds = resolve_best_predictions(
     CASE_STUDY_ID,
@@ -134,6 +168,7 @@ top_preds = resolve_best_predictions(
     top_n=TOP_N,
     checkpoints_per_config=CHECKPOINTS_PER_CONFIG,
     prediction_hashes=CURRENT_MEMBERS,
+    backtest_hashes=BASELINE_GRID,
 )
 if len(top_preds) != TOP_N:
     raise RuntimeError(f"Expected {TOP_N} advancing configurations, found {len(top_preds)}")
@@ -218,6 +253,85 @@ for pred_row in top_preds.iter_rows(named=True):
             )
 
 # %% [markdown]
+# ### Record the grid before running it
+#
+# `planned` is every backtest this sweep intends to register, identified before any of them
+# executes, and the loop below raises rather than dropping one. Publishing that list as an
+# official population is what lets the freeze in `16_risk_management` tell an interrupted sweep
+# from a finished one - which no reading of the registered rows can do, because an interruption
+# leaves rows that look exactly like a smaller finished grid whether they are counted as rows,
+# as model configurations, or as stages present.
+#
+# It is published *before* the sweep and checked with `require_complete` after, rather than
+# written once at the end. Writing it at the end leaves a changed sweep represented by the
+# previous generation: that generation is complete, so an interrupted re-run under a widened
+# grid reports as finished on the strength of a plan it has already replaced. Publishing first
+# means the name always describes the sweep in flight, and an interruption leaves a population
+# whose members are not all registered - which `require_complete` reports and the freeze reads.
+#
+# Writing it activates the study, which rewrites `ML4T_OUTPUT_DIR` process-wide, so the guard
+# below refuses if the study does not root at the directory the sweep resolves against. Doing
+# that here also means the mismatch costs nothing, where at the end it cost the whole sweep. A
+# reader's clean clone has no writable registry and reports that instead of failing; it has no
+# field to freeze either.
+
+# %%
+# The name carries which prediction sets the sweep planned against, so "has this sweep run
+# against the predictions in force" is a lookup rather than an inference over its members. An
+# inference answers one direction only: comparing members against the current predictions
+# catches one the refit removed and cannot see one it added, because the backtests riding a new
+# prediction do not exist until this notebook runs again.
+ALLOCATION_POPULATION = sweep_plan_name(
+    CASE_STUDY_ID, ALLOCATION_LABEL, "allocation", predictions_identity(CURRENT_MEMBERS)
+)
+# The generation this run retires, per population name. A plan that has grown - a new
+# configuration advancing, a widened top-k grid - is a changed population under a live name and
+# has to say which one it replaces; the refusal prints the current hash. Absent for a name this
+# registry has never held, which is every clean clone and every first run of a label.
+#
+# All five moved on 2026-09-01. The generation each replaces was planned at 21:40 UTC, before
+# 14_backtest published its baseline sweep at 22:34-22:46 and before the tabm_m, tabm_s and sae
+# baselines were registered at 22:42. The top-ten those runs ranked was therefore taken over a
+# baseline set that was still being produced, and three of the ten it named are not the ten the
+# complete set gives. This is the state 16_risk_management declines to freeze over.
+# Empty: this run reproduces the grid each name already holds, and `create` returns the
+# recorded population unchanged when the member list matches. A declaration that names the
+# generation currently in force is not a record of a retirement, it is standing permission to
+# change that name's membership without saying so, and the refusal it pre-empts is the one
+# thing that makes a changed grid visible. Add an entry when a run is actually refused, with
+# the hash the refusal prints.
+SUPERSEDES_ALLOCATION_POPULATIONS: dict[str, str] = {}
+
+_plan = None
+try:
+    _writable = open_study(CASE_STUDY_ID, entry_point="15_portfolio_management")
+except PermissionError as exc:
+    print(f"Not recording the allocation plan here: {exc}")
+else:
+    if _writable.root != CASE_DIR:
+        raise RuntimeError(
+            f"15 ran its sweep against {CASE_DIR} but opened a study rooted at {_writable.root}. "
+            "Recording the plan there would describe a registry this run did not write."
+        )
+    _plan = OfficialPopulation.create(
+        _writable,
+        name=ALLOCATION_POPULATION,
+        member_kind="backtest",
+        members=[row["backtest_hash"] for row in planned],
+        supersedes=population_supersedes(
+            _writable,
+            name=ALLOCATION_POPULATION,
+            declared=SUPERSEDES_ALLOCATION_POPULATIONS.get(ALLOCATION_POPULATION),
+        ),
+    )
+    # Before any member executes; see `sweep_attestation_name`.
+    _attempt = open_sweep_attempt(_writable, _plan, UPSTREAM_PLANS)
+    print(
+        f"Allocation plan {ALLOCATION_POPULATION}: {_plan.hash}, {len(planned)} planned, "
+        f"attempt {_attempt}"
+    )
+
+# %% [markdown]
 # A production run fails if any planned backtest fails. The notebook does not
 # silently drop expensive allocators based on elapsed time.
 
@@ -257,6 +371,12 @@ for index, row in enumerate(planned, start=1):
 if failures:
     raise RuntimeError("Allocation sweep failures:\n" + "\n".join(failures))
 print(f"Allocation surface complete in {(time.monotonic() - started):.1f}s")
+if _plan is not None:
+    _plan.require_complete()
+    # Only a run that raised on nothing reaches this. See `sweep_attestation_name`.
+    _attestation = attest_sweep(_writable, _plan, _attempt, UPSTREAM_PLANS)
+    print(f"Allocation plan {ALLOCATION_POPULATION} complete: {len(planned)} backtests")
+    print(f"Sweep attested as {_attestation.name}")
 
 # %% [markdown]
 # ## 3. Compare the active allocation surface
