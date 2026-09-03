@@ -214,7 +214,7 @@ padded = (
         symbols=UNIVERSE,
         lazy=True,
     )
-    .select(["timestamp", "symbol", "close_bid_price", "close_ask_price"])
+    .select(["timestamp", "symbol", "close_bid_price", "close_ask_price", "vwap"])
     .filter((_clock >= _widest[0]) & (_clock < _widest[1]))
     .with_columns(
         ((_bid + _ask) / 2).alias("mid_close"),
@@ -270,27 +270,55 @@ print(f"Bar spacing {BAR}, uniform within every session; horizons in bars {HORIZ
 #
 # One execution convention, written once and applied at all three horizons:
 #
-# $$r^{(H)}_{s,t} = \frac{M_{s,t+H}}{M_{s,t+B}} - 1$$
+# $$r^{(H)}_{s,t} = \frac{V_{s,t+B+H}}{V_{s,t+B}} - 1$$
 #
-# where $M$ is symbol $s$'s quote midpoint, $B$ is one bar and $H$ is the declared horizon.
-# The decision is taken on the bar closing at $t$, so the earliest bar that can be acted on
-# is the one after it, and the position is held until $H$ after the decision. Both ends are
-# quote midpoints observed inside the session, so what the formula measures is how far the
-# market moved over the holding period; a trade capturing that move pays half the spread at
-# each end, one full spread over the round trip, which Section E prices separately.
+# where $V$ is symbol $s$'s volume-weighted traded price over a bar, $B$ is one bar and $H$ is
+# the declared horizon. The decision is taken on the bar closing at $t$, the earliest bar that
+# can be acted on is the one after it, and the position is held for $H$ from that fill to the
+# next one - so the span from entry to exit is exactly $H$, and the exit of one decision is
+# the entry of the next.
+#
+# **Both ends are prices something actually traded at, and that is the change.** An earlier
+# version of this notebook used the quote midpoint at each end, which measures how far the
+# market moved rather than what a trade would have realised, and paired it with a backtest
+# filling on a fifteen-minute clock - so the interval the label predicted and the interval the
+# strategy held did not overlap at all. That is ml4t/agent-workspace#187, and the reason it
+# survived review is that both intervals were fifteen minutes long and nothing printed
+# distinguished them.
+#
+# A VWAP is not a price any single order is guaranteed, and it is not free of the spread: it
+# is where the minute's volume actually transacted, which sits inside the quoted spread on
+# average and reflects which side was pressing. What it is not is a midpoint, so the spread is
+# no longer an unpriced extra sitting outside the label - part of it is already inside these
+# two prices. The cost stage charges execution explicitly under two regimes, a flat basis-point
+# assumption and the half spread quoted at the time, and reports the difference rather than
+# picking one. Section G below still draws the median round trip against the label
+# distribution, and under this convention it reads as how the realised move compares with the
+# spread a round trip crosses, rather than as a cost the label ignores.
+#
+# **A minute in which nothing traded has no VWAP, and therefore no fill and no label.** That is
+# not a gap to be filled: at the close of bar $t$ nothing knows whether $t+B$ will print, so
+# substituting a midpoint or carrying the last trade would put information into the label that
+# the decision could not have had. The rows drop out on both legs instead. Within the session
+# this costs 0.0211% of otherwise usable bars on the fixture and 0.2384% on production - the
+# rate is an order of magnitude higher outside regular hours, which this notebook already
+# excludes.
 #
 # All four labels are computed on the **minute** grid the data arrives on, and what differs
 # between them is the horizon: five, fifteen and sixty minutes, plus a direction label cut
 # from the fifteen-minute return. $B$ is therefore one minute, and a horizon of $H$ minutes
 # is a shift of $H$ rows only where the minute grid is complete, which is what the section
 # above measures and Section D asserts. Chapter 16 rebalances this case study on a coarser
-# schedule than the one the labels are built on; reconciling the two is that chapter's
-# problem and no claim is made here about how the two line up.
+# schedule than the one the labels are built on. Chapter 16 now decides every fifteen minutes
+# and fills on the minute after the decision, which is the same convention as this one; that
+# the two agree is the point of ml4t/agent-workspace#187 and is asserted there rather than
+# assumed here.
 #
-# The entry price is the next bar's midpoint, which the uniform grid asserted above makes
-# exactly one bar of wall-clock time later; the last bar of a session has no next bar, so it
-# carries no entry and no label. The exit is resolved by **time**, not by counting rows: the
-# library looks for a bar at exactly $H - B$ past the entry, and a bar that is missing
+# The entry price is the next bar's VWAP, which the uniform grid asserted above makes exactly
+# one bar of wall-clock time later. Two things carry no entry and therefore no label: the last
+# bar of a session, which has no next bar, and a bar whose successor did not trade, which has
+# no volume-weighted price to fill at. The exit is resolved by **time**, not by counting rows:
+# the library looks for a bar at exactly $H$ past the entry, and a bar that is missing
 # resolves to nothing and nulls the label instead of letting a shift reach past the hole and
 # return a longer window under a shorter name. Materialising the entry price as its own
 # column is what lets the library express this convention - it divides by the price at $t$,
@@ -298,23 +326,29 @@ print(f"Bar spacing {BAR}, uniform within every session; horizons in bars {HORIZ
 
 # %%
 priced = quoted.with_columns(
-    pl.col("mid_close").shift(-1).over(GROUP_COLS).alias("entry_mid")
-).drop_nulls("entry_mid")
+    pl.col("vwap").shift(-1).over(GROUP_COLS).alias("entry_vwap")
+).drop_nulls("entry_vwap")
 
 # %%
 for name in RETURN_LABELS:
-    held = f"{(HORIZONS[name] - BAR) // timedelta(minutes=1)}m"
+    # The declared horizon, not the horizon minus a bar. The subtraction the previous version
+    # carried existed only because the library divides by the price at t, so materialising the
+    # entry one bar forward had already spent a bar of the span - and it made a fourteen-minute
+    # label read as fifteen to anyone who saw `HORIZONS - BAR` and rounded it in their head.
+    # That is how ml4t/agent-workspace#187 stayed invisible for months. Under this convention
+    # the span from entry fill to exit fill *is* the horizon, so it is written as one.
+    held = f"{HORIZONS[name] // timedelta(minutes=1)}m"
     priced = fixed_time_horizon_labels(
         priced,
         horizon=held,
         method="returns",
-        price_col="entry_mid",
+        price_col="entry_vwap",
         group_col=GROUP_COLS,
         timestamp_col="timestamp",
         tolerance="0s",
     ).rename({f"label_return_{held}": name})
 
-print(f"Constructed {', '.join(RETURN_LABELS)} on {priced.height:,} bars with a tradable entry")
+print(f"Constructed {', '.join(RETURN_LABELS)} on {priced.height:,} bars with a fillable entry")
 
 # %% [markdown]
 # The direction label is the primary return discretised into a band around zero: a move
