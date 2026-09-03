@@ -96,22 +96,18 @@ def test_a_minute_that_did_not_trade_carries_no_label():
     assert datetime(2021, 3, 1, 10, 1) in labelled
 
 
-class TestTheDecisionGridIsAnUnenforcedPrecondition:
-    """`rebalance_step` thins decisions, and only if it is handed a decision grid.
+class TestTheDecisionGridIsBuiltFromTheDeclaration:
+    """The declared cadence builds the decision schedule; the panel's own spacing does not.
 
-    `backtest_loaders.py:1421-1425` applies `gather_every(step)` to the output of
-    `resolve_rebalance_timestamps`, so step 4 keeps every fourth *scheduled decision* - which
-    is the sixty minutes `setup.yaml` claims, if and only if the schedule is fifteen-minute.
+    These pinned the opposite until stefan-jansen/machine-learning-for-trading#736. The
+    resolver returned an intraday panel's timestamps unchanged, on the comment that the data
+    was already at the correct granularity, so `rebalance_step` thinned whatever it was
+    handed. A minute-grid panel therefore made step 4 four minutes rather than sixty, and
+    "predictions are emitted on the decision grid" was a precondition nothing enforced.
 
-    It is not guaranteed to be. `all_dates` comes from the prediction panel's own timestamps,
-    and the resolver returns them unchanged for every intraday cadence (:1318-1320, "the data
-    is already at the correct granularity"). It does not build a fifteen-minute schedule; it
-    assumes it was given one. Hand it a minute-grid panel and step 4 is four minutes, not
-    sixty, and nothing raises.
-
-    So "predictions are emitted on the decision grid, the feed stays at one minute" is a
-    precondition rather than a consequence, and these pin both readings so the difference is
-    visible before a Sharpe is computed on the wrong one.
+    It is enforced now, at the source: the schedule is constructed from the token, so a panel
+    at any resolution produces the same decisions. What these keep is the shape of the check -
+    the reading the old code produced is still asserted to be gone, not merely unasserted.
     """
 
     @staticmethod
@@ -121,26 +117,25 @@ class TestTheDecisionGridIsAnUnenforcedPrecondition:
             "ts", [start + timedelta(minutes=minutes * i) for i in range(count)]
         ).sort()
 
-    def test_step_four_on_a_fifteen_minute_panel_trades_hourly(self):
+    def test_a_fifteen_minute_cadence_decides_every_fifteen_minutes(self):
         from case_studies.utils.backtest_loaders import resolve_rebalance_timestamps
 
-        schedule = resolve_rebalance_timestamps(self._panel(15, 16), "15_minute").gather_every(4)
+        schedule = resolve_rebalance_timestamps(self._panel(15, 16), "15_minute")
+        assert schedule.diff().drop_nulls().unique().to_list() == [timedelta(minutes=15)]
+
+    def test_a_minute_panel_gives_the_same_schedule_as_a_fifteen_minute_one(self):
+        """The panel's resolution is no longer decisive, which is the whole of the fix."""
+        from case_studies.utils.backtest_loaders import resolve_rebalance_timestamps
+
+        coarse = resolve_rebalance_timestamps(self._panel(15, 16), "15_minute")
+        fine = resolve_rebalance_timestamps(self._panel(1, 16 * 15), "15_minute")
+        assert fine.to_list() == coarse.to_list()
+
+    def test_a_minute_panel_no_longer_trades_every_four_minutes(self):
+        """The reading the old code produced, asserted to be gone rather than left unchecked."""
+        from case_studies.utils.backtest_loaders import resolve_decision_schedule
+
+        schedule = resolve_decision_schedule(self._panel(1, 64 * 15), "15_minute", 4)
         gaps = schedule.diff().drop_nulls().unique().to_list()
         assert gaps == [timedelta(hours=1)]
-
-    def test_the_same_step_on_a_minute_panel_trades_every_four_minutes(self):
-        """The reading the code produces when the precondition is not met, pinned so a change
-        that starts enforcing the grid fails here and says why, rather than silently."""
-        from case_studies.utils.backtest_loaders import resolve_rebalance_timestamps
-
-        schedule = resolve_rebalance_timestamps(self._panel(1, 64), "15_minute").gather_every(4)
-        gaps = schedule.diff().drop_nulls().unique().to_list()
-        assert gaps == [timedelta(minutes=4)]
-        assert gaps != [timedelta(hours=1)]
-
-    def test_the_resolver_does_not_build_an_intraday_schedule(self):
-        """It is the identity on an intraday cadence, which is what makes the panel decisive."""
-        from case_studies.utils.backtest_loaders import resolve_rebalance_timestamps
-
-        panel = self._panel(1, 30)
-        assert resolve_rebalance_timestamps(panel, "15_minute").to_list() == panel.to_list()
+        assert gaps != [timedelta(minutes=4)]
