@@ -16,7 +16,9 @@ Two properties, and the second is the one the old code failed:
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -139,3 +141,78 @@ class TestTheDecisionGridIsBuiltFromTheDeclaration:
         gaps = schedule.diff().drop_nulls().unique().to_list()
         assert gaps == [timedelta(hours=1)]
         assert gaps != [timedelta(minutes=4)]
+
+
+class TestTheWindowIsOneBarWiderThanItsName:
+    """A label at t reads a quote at t+H+1, so every gap taken from it has to cover H+1.
+
+    The entry leg is the VWAP of the bar after the decision and the exit leg is H past the
+    entry, so the window is `[t+1, t+H+1]` - H minutes wide, but ending one bar past the
+    horizon the label's name states. Two things follow, and both were wrong when the
+    convention changed: a session goes short by H+1 rows rather than H, and a purge or embargo
+    of H minutes leaves the last training bar inside the first validation label's window.
+
+    RoboRev job #17885.
+    """
+
+    @staticmethod
+    def _session(bars: int) -> pl.DataFrame:
+        start = datetime(2024, 1, 2, 9, 30)
+        return pl.DataFrame(
+            {
+                "symbol": ["A"] * bars,
+                "session_date": [start.date()] * bars,
+                "timestamp": [start + timedelta(minutes=i) for i in range(bars)],
+                "vwap": [100.0 + i for i in range(bars)],
+            }
+        )
+
+    def _label(self, bars: int, horizon_minutes: int) -> pl.DataFrame:
+        from ml4t.engineer.labeling import fixed_time_horizon_labels
+
+        group = ["symbol", "session_date"]
+        priced = (
+            self._session(bars)
+            .with_columns(pl.col("vwap").shift(-1).over(group).alias("entry_vwap"))
+            .drop_nulls("entry_vwap")
+        )
+        return fixed_time_horizon_labels(
+            priced,
+            horizon=f"{horizon_minutes}m",
+            method="returns",
+            price_col="entry_vwap",
+            group_col=group,
+            timestamp_col="timestamp",
+            tolerance="0s",
+        )
+
+    def test_a_session_goes_short_by_the_horizon_plus_the_entry_bar(self):
+        """The count `02_labels` section D asserts. At H it is off by exactly one and raises."""
+        bars, horizon = 12, 3
+        out = self._label(bars, horizon)
+        column = next(c for c in out.columns if c.startswith("label_return"))
+        assert bars - out[column].drop_nulls().len() == horizon + 1
+
+    def test_the_last_quote_the_label_reads_is_one_bar_past_the_horizon(self):
+        """Directly, on prices chosen so the two legs identify themselves."""
+        horizon = 3
+        out = self._label(12, horizon)
+        column = next(c for c in out.columns if c.startswith("label_return"))
+        first = out.sort("timestamp").row(0, named=True)
+        # vwap is 100 + i, so the entry leg is the 09:31 quote and the exit leg is 09:34 -
+        # the bar at t + H + 1, not the bar at t + H.
+        assert first["entry_vwap"] == 101.0
+        assert first[column] == pytest.approx(104.0 / 101.0 - 1)
+
+    def test_the_declared_buffer_covers_the_window(self):
+        """setup.yaml has to purge what the label reads, which is one bar more than its name."""
+        import yaml
+
+        setup = yaml.safe_load(
+            Path("case_studies/nasdaq100_microstructure/config/setup.yaml").read_text()
+        )
+        labels = setup["labels"]
+        buffers = {labels["primary"]: labels["buffer"], **labels["variant_buffers"]}
+        for name, declared in buffers.items():
+            horizon = int(re.search(r"(\d+)m$", name).group(1))
+            assert declared == f"{horizon + 1}min", (name, declared)

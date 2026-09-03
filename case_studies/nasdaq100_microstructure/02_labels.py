@@ -256,6 +256,11 @@ spacing = quoted.select(_gap.drop_nulls().unique().alias("gap"))["gap"].to_list(
 assert len(spacing) == 1, f"the intraday grid is not uniform: spacings {sorted(spacing)}"
 BAR = spacing[0]
 HORIZON_BARS = {name: horizon // BAR for name, horizon in HORIZONS.items()}
+# The bar the exit leg is read from: the horizon, plus the one bar the entry already spent.
+# Named rather than written as `+ 1` wherever an endpoint is needed, because the `+ 1` is
+# exactly what a later reader who trusts the label's name would drop - and because a purge
+# taken from the horizon alone leaves the last training bar inside the first held-out label.
+LABEL_HORIZON_END_BARS = {name: bars + 1 for name, bars in HORIZON_BARS.items()}
 for name, horizon in HORIZONS.items():
     assert horizon % BAR == timedelta(0), f"{name}: {horizon} is not a whole number of {BAR} bars"
     assert HORIZON_BARS[name] >= 2, (
@@ -377,8 +382,10 @@ labels_df = (
     .with_columns(
         (pl.len().over(GROUP_COLS) - 1 - _position).alias("from_end"),
         _position.alias("bar_in_session"),
+        # t+H+1, not t+H: the label reads a quote its own horizon does not name, and every
+        # gap taken from this column has to cover it.
         pl.col("timestamp")
-        .shift(-HORIZON_BARS[PRIMARY_LABEL])
+        .shift(-LABEL_HORIZON_END_BARS[PRIMARY_LABEL])
         .over(GROUP_COLS)
         .alias("_label_end"),
     )
@@ -401,23 +408,26 @@ print(f"market_data digest: {MARKET_DATA_DIGEST}")
 # would raise here rather than ship a longer return under a shorter name.
 #
 # The third catches a short label masked by a longer one's null set. Each session has to be
-# short by exactly its own horizon and no more, so `fwd_ret_5m` carries ten more rows per
-# session than `fwd_ret_15m`; an equal count means one label was gated by the other's nulls.
+# short by exactly its own horizon **plus one**, and no more, so `fwd_ret_5m` carries ten more
+# rows per session than `fwd_ret_15m`; an equal count means one label was gated by the other's
+# nulls. The extra bar is the entry: the last bar of a session has no bar after it to fill at,
+# so it carries no entry price and no label however complete the rest of the window is.
 
 # %%
 for name, h_bars in ((n, HORIZON_BARS[n]) for n in RETURN_LABELS):
     span = pl.col("timestamp").shift(-h_bars).over(GROUP_COLS) - pl.col("timestamp")
     checked = labels_df.with_columns(span.alias("_span"))
-    tail = checked.filter(pl.col("from_end") < h_bars)
+    tail = checked.filter(pl.col("from_end") <= h_bars)
     labelled = checked.drop_nulls(name)
     # 1. An incomplete forward window is null, never a value.
     assert tail[name].null_count() == tail.height, name
     # 2. Every labelled window spans exactly the declared horizon in wall-clock time.
     assert labelled.filter(pl.col("_span") != HORIZONS[name]).height == 0, name
-    # 3. Each session labels its first n - h bars, so no label crosses a session boundary and
-    #    none is gated by another label's null set.
+    # 3. Each session labels its first n - h - 1 bars, so no label crosses a session
+    #    boundary and none is gated by another label's null set. The `+ 1` is the entry bar,
+    #    not slack: the window runs from the bar after the decision to H past that.
     counted = checked.group_by(GROUP_COLS).agg(
-        (pl.len() - pl.col(name).is_not_null().sum() - h_bars).alias("excess")
+        (pl.len() - pl.col(name).is_not_null().sum() - LABEL_HORIZON_END_BARS[name]).alias("excess")
     )
     assert counted.filter(pl.col("excess") != 0).height == 0, name
     print(f"{name}: {labelled.height:,} labelled, every window exactly {HORIZONS[name]}")
@@ -448,7 +458,7 @@ profile = (
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 for name, colour in PALETTE.items():
     ax.plot(profile["from_end"], profile[name], ds="steps-mid", lw=1.8, c=colour, label=name)
-    ax.axvline(HORIZON_BARS[name] - 0.5, color=colour, linestyle=":", lw=1)
+    ax.axvline(HORIZON_BARS[name] + 0.5, color=colour, linestyle=":", lw=1)
 ax.set_xlabel("Bars from the end of the session")
 ax.set_ylabel("Share of bars carrying a label")
 sub = "Dotted lines mark each horizon; curves lying on top of each other mean one masked another"
@@ -477,7 +487,10 @@ show_with_alt(fig, "Non-null label rate by bar position from the end of each tra
 _entity = (pl.col("symbol") + "|" + pl.col("session_date").cast(pl.Utf8)).alias("entity")
 dev = {
     name: labels_df.with_columns(
-        pl.col("timestamp").shift(-HORIZON_BARS[name]).over(GROUP_COLS).alias("_label_end"),
+        pl.col("timestamp")
+        .shift(-LABEL_HORIZON_END_BARS[name])
+        .over(GROUP_COLS)
+        .alias("_label_end"),
         _entity,
     )
     .filter(pl.col("_label_end") < HOLDOUT_TS)
@@ -624,14 +637,12 @@ for key, tag in classes.items():
 # horizon was converted into, and both treat the symbol-session as the entity, because a
 # window cannot be concurrent with one on the other side of an overnight gap.
 #
-# What a label consumes is return intervals, and it consumes one fewer than its horizon in
-# bars: entering a bar after the decision and leaving at the horizon spans the moves between
-# those two prices, not the move into the entry. Consecutive rows share all but one of those
-# intervals, so the decay reads as a straight line falling by one interval per lag. Two rows
-# `lag` bars apart share `H - 1 - lag` of them, which runs out one bar short of the horizon:
-# the last lag that still shares an interval is `H - 2`, and the first that shares none is
-# `H - 1`. That is where the dotted lines sit, and marking the horizon instead would put them
-# a lag past the thing the section is about.
+# What a label consumes is return intervals, and it consumes exactly its horizon in bars:
+# entering a bar after the decision and leaving H bars after that spans the H moves between
+# those two prices. Consecutive rows share all but one of them, so the decay reads as a
+# straight line falling by one interval per lag. Two rows `lag` bars apart share `H - lag` of
+# them, so the last lag that still shares an interval is `H - 1` and the first that shares
+# none is `H`. That is where the dotted lines sit.
 # The longest label does not stop at zero when it gets there but keeps going negative, and
 # that is a property of the session rather than of the label - a one-hour window is a fifth of
 # a trading day, so each session holds few independent windows, and subtracting the session's
@@ -651,7 +662,7 @@ fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 lags = np.arange(1, max_lag + 1)
 for name, colour in PALETTE.items():
     ax.plot(lags, acf[name], lw=1.8, color=colour, label=name)
-    ax.axvline(HORIZON_BARS[name] - 1, color=colour, linestyle=":", lw=1.2)
+    ax.axvline(HORIZON_BARS[name], color=colour, linestyle=":", lw=1.2)
 ax.axhline(0, color=COLORS["neutral"], lw=0.8)
 ax.set_xlabel("Lag in bars")
 ax.set_ylabel("Panel autocorrelation")
@@ -662,7 +673,7 @@ show_with_alt(fig, "Panel autocorrelation of each forward-return label against l
 
 # %%
 for name in RETURN_LABELS:
-    spans = HORIZON_BARS[name] - 1
+    spans = HORIZON_BARS[name]
     n_rows, n_eff = effective_sample_size(
         dev[name], horizon=spans, bar_col="bar_in_session", entity_col="entity"
     )
