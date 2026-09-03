@@ -94,3 +94,53 @@ def test_a_minute_that_did_not_trade_carries_no_label():
     assert datetime(2021, 3, 1, 10, 0) not in labelled
     # Its neighbours are unaffected: the hole drops one decision, not the series.
     assert datetime(2021, 3, 1, 10, 1) in labelled
+
+
+class TestTheDecisionGridIsAnUnenforcedPrecondition:
+    """`rebalance_step` thins decisions, and only if it is handed a decision grid.
+
+    `backtest_loaders.py:1421-1425` applies `gather_every(step)` to the output of
+    `resolve_rebalance_timestamps`, so step 4 keeps every fourth *scheduled decision* - which
+    is the sixty minutes `setup.yaml` claims, if and only if the schedule is fifteen-minute.
+
+    It is not guaranteed to be. `all_dates` comes from the prediction panel's own timestamps,
+    and the resolver returns them unchanged for every intraday cadence (:1318-1320, "the data
+    is already at the correct granularity"). It does not build a fifteen-minute schedule; it
+    assumes it was given one. Hand it a minute-grid panel and step 4 is four minutes, not
+    sixty, and nothing raises.
+
+    So "predictions are emitted on the decision grid, the feed stays at one minute" is a
+    precondition rather than a consequence, and these pin both readings so the difference is
+    visible before a Sharpe is computed on the wrong one.
+    """
+
+    @staticmethod
+    def _panel(minutes: int, count: int) -> pl.Series:
+        start = datetime(2021, 3, 1, 9, 30)
+        return pl.Series(
+            "ts", [start + timedelta(minutes=minutes * i) for i in range(count)]
+        ).sort()
+
+    def test_step_four_on_a_fifteen_minute_panel_trades_hourly(self):
+        from case_studies.utils.backtest_loaders import resolve_rebalance_timestamps
+
+        schedule = resolve_rebalance_timestamps(self._panel(15, 16), "15_minute").gather_every(4)
+        gaps = schedule.diff().drop_nulls().unique().to_list()
+        assert gaps == [timedelta(hours=1)]
+
+    def test_the_same_step_on_a_minute_panel_trades_every_four_minutes(self):
+        """The reading the code produces when the precondition is not met, pinned so a change
+        that starts enforcing the grid fails here and says why, rather than silently."""
+        from case_studies.utils.backtest_loaders import resolve_rebalance_timestamps
+
+        schedule = resolve_rebalance_timestamps(self._panel(1, 64), "15_minute").gather_every(4)
+        gaps = schedule.diff().drop_nulls().unique().to_list()
+        assert gaps == [timedelta(minutes=4)]
+        assert gaps != [timedelta(hours=1)]
+
+    def test_the_resolver_does_not_build_an_intraday_schedule(self):
+        """It is the identity on an intraday cadence, which is what makes the panel decisive."""
+        from case_studies.utils.backtest_loaders import resolve_rebalance_timestamps
+
+        panel = self._panel(1, 30)
+        assert resolve_rebalance_timestamps(panel, "15_minute").to_list() == panel.to_list()
