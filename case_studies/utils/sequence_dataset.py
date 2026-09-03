@@ -465,8 +465,16 @@ def sequence_validation_keys(
     entity_col: str,
     lookback: int,
     calendar_id: str | None = None,
+    max_predict_sequences: int = 0,
 ) -> pl.DataFrame:
-    """Return exact validation keys eligible for gap-free sequence prediction."""
+    """Return exact validation keys eligible for gap-free sequence prediction.
+
+    ``max_predict_sequences`` caps the windows drawn per fold, using the same
+    even-spacing rule and full-symbol-coverage guarantee that
+    ``max_train_sequences`` applies to training. It must match what
+    :func:`prepare_fold_sequence_stores` is given for the same fold, because these
+    keys are the contract the published predictions are checked against.
+    """
     _ensure_sequence_periods(dataset_pd, date_col=date_col, calendar_id=calendar_id)
     use_cols = [date_col, entity_col, label_col, _SEQUENCE_PERIOD_COL]
     frames: list[pl.DataFrame] = []
@@ -490,6 +498,10 @@ def sequence_validation_keys(
             entity_col=entity_col,
             lookback=lookback,
         )
+        sampled = _sample_sequence_positions(
+            np.asarray([len(positions) for positions in valid_positions], dtype=np.int64),
+            max_predict_sequences,
+        )
         rows = [
             {
                 "symbol": entities[symbol_id],
@@ -497,7 +509,9 @@ def sequence_validation_keys(
                 "fold": int(split["fold"]),
             }
             for symbol_id, positions in enumerate(valid_positions)
-            for position in positions
+            for position in (
+                positions if sampled[symbol_id] is None else positions[sampled[symbol_id]]
+            )
         ]
         if rows:
             frames.append(pl.from_dicts(rows))
@@ -522,6 +536,7 @@ def prepare_fold_sequence_stores(
     entity_col: str,
     lookback: int,
     max_train_sequences: int = 0,
+    max_predict_sequences: int = 0,
     temporal_by_fold=None,
     temporal_keys: list[str] | None = None,
     temporal_feature_names: list[str] | None = None,
@@ -650,7 +665,9 @@ def prepare_fold_sequence_stores(
     train_symbol_idx, train_end_idx = _build_sequence_index(
         train_positions, train_entities, max_train_sequences
     )
-    val_symbol_idx, val_end_idx = _build_sequence_index(val_positions, val_entities, 0)
+    val_symbol_idx, val_end_idx = _build_sequence_index(
+        val_positions, val_entities, max_predict_sequences
+    )
 
     train_store = SequenceStore(
         features=train_features,

@@ -34,7 +34,11 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import polars as pl
 
-from case_studies.utils.backtest_loaders import BacktestConfig, get_backtest_config
+from case_studies.utils.backtest_loaders import (
+    BacktestConfig,
+    declared_rebalance_step,
+    get_backtest_config,
+)
 from case_studies.utils.backtest_presets import (
     apply_calendar_session_enforcement,
     ensure_backtest_spec,
@@ -467,6 +471,7 @@ def precompute_weights(
             case_study=case_study,
             prediction_hash=prediction_hash,
             conformal_widths=conformal_widths,
+            rebalance_step=rebal_spec.get("step"),
         )
     return weights
 
@@ -1031,6 +1036,16 @@ def run_backtest(
     # drawdown on bar 1 when the function-arg default ($1M) diverges from the
     # spec ($100K) — halting the strategy before any trade is placed.
     initial_cash = float(strategy_spec["backtest_config"]["cash"]["initial"])
+    # The step decides which slots are traded, so the spec has to record the one this run
+    # uses - otherwise two runs at different steps hash alike and the second is skipped
+    # (ml4t/agent-workspace#1005). Stamped here rather than only in build_backtest_spec
+    # because several notebooks build a spec without passing `label`, and this is the one
+    # place that always has both the case study and the label.
+    if label:
+        _declared = declared_rebalance_step(case_study, label)
+        if _declared is not None:
+            _rb = strategy_spec.setdefault("strategy", {}).setdefault("rebalance", {})
+            _rb.setdefault("step", _declared)
     strategy = strategy_view(strategy_spec)
     signal_config = strategy["signal"]
     allow_short = resolved_allow_short_selling(strategy_spec, precomputed_weights)
@@ -1145,6 +1160,7 @@ def run_backtest(
                 label=label,
                 case_study=case_study,
                 prediction_hash=prediction_hash,
+                rebalance_step=rebal_spec.get("step"),
             )
 
     # 2. Dispatch to engine or vectorized
@@ -1222,6 +1238,7 @@ def run_backtest(
                 initial_cash=initial_cash,
                 risk_spec=strategy.get("risk", {}),
                 prediction_hash=prediction_hash,
+                rebalance_step=rebal_spec.get("step"),
             )
     else:
         result = _run_engine(
@@ -1381,17 +1398,14 @@ def _run_engine(
     # ~step× too rarely. The on_data callback already gates on
     # ``timestamp in weight_dict``, so dates without weights are skipped.
     from case_studies.utils.backtest_loaders import (
-        get_rebalance_step,
-        resolve_rebalance_timestamps,
+        resolve_decision_schedule,
+        resolved_rebalance_step,
     )
 
     cadence = rebalance_spec.get("cadence", "monthly_month_end")
     all_pred_ts = pl.Series("ts", predictions["timestamp"].unique().sort().to_list())
-    schedule_dates = resolve_rebalance_timestamps(all_pred_ts, cadence, calendar)
-    if case_study and label:
-        step = get_rebalance_step(case_study, label)
-        if step > 1:
-            schedule_dates = schedule_dates.gather_every(step)
+    step = resolved_rebalance_step(rebalance_spec, case_study, label) if case_study and label else 1
+    schedule_dates = resolve_decision_schedule(all_pred_ts, cadence, step, calendar)
     rebalance_schedule = {
         _engine_timestamp(
             timestamp,
@@ -1887,6 +1901,7 @@ def _run_vectorized(
     initial_cash: float,
     risk_spec: dict | None = None,
     prediction_hash: str | None = None,
+    rebalance_step: int | None = None,
 ) -> dict:
     """Run vectorized backtest (weight × forward return - costs).
 
@@ -1909,9 +1924,9 @@ def _run_vectorized(
     """
     from case_studies.utils.backtest_loaders import get_rebalance_step, thin_to_rebalance_dates
 
-    # Thin predictions to non-overlapping periods. Step is declared per-label
-    # in the case study's setup.yaml under labels.rebalance_step.
-    step = get_rebalance_step(case_study, label)
+    # The step the spec recorded, so the run trades what its identity says. setup.yaml is
+    # the fallback for a spec written before the step entered the identity.
+    step = rebalance_step if rebalance_step is not None else get_rebalance_step(case_study, label)
     thinned = thin_to_rebalance_dates(predictions, cadence=cadence, step=step)
 
     # Re-compute weights on thinned predictions
@@ -2159,6 +2174,7 @@ def _apply_allocation(
     case_study: str = "",
     prediction_hash: str | None = None,
     conformal_widths: pl.DataFrame | None = None,
+    rebalance_step: int | None = None,
 ) -> pl.DataFrame:
     """Post-process signal weights with an allocation method.
 
@@ -2223,7 +2239,8 @@ def _apply_allocation(
             "_apply_allocation requires both case_study and label to look up "
             "labels.rebalance_step from setup.yaml. Pass them from the caller."
         )
-    step = get_rebalance_step(case_study, label)
+    # The step the spec recorded; setup.yaml only when the spec predates the key.
+    step = rebalance_step if rebalance_step is not None else get_rebalance_step(case_study, label)
     rebal_preds = thin_to_rebalance_dates(filtered_preds, cadence=cadence, step=step)
 
     # Max weight cap — applied after all covariance-based allocators

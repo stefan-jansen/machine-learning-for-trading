@@ -203,12 +203,29 @@ def load_us_equities(
 
 
 # Resampling aggregation specs for group_by_dynamic
+# A resampled vwap is the volume-weighted mean of its constituents, not any positional pick
+# among them. Every other entry here is a first, a last, an extremum or a sum, and each is
+# right for its column - which is exactly why this one is a trap: the shape of the list
+# invites a fifth positional pick, and `.mean()` is the one that looks correct. `.mean()` is
+# right only when volume is flat across the window, and intraday volume is U-shaped across
+# the session, so its error is largest at the open and the close - where a microstructure
+# case study is most interested.
+#
+# Minutes with no trade contribute nothing rather than dragging the weight down: `vwap` is
+# null exactly when `volume` is 0, and a null weight is excluded from both sums rather than
+# counted as a zero-priced share. A window in which nothing traded at all has no
+# volume-weighted price, and resolves to null rather than to a division by zero.
+_VWAP_WEIGHT = pl.when(pl.col("vwap").is_not_null()).then(pl.col("volume")).otherwise(None)
 _TRADE_OHLCV_AGGS = [
     pl.col("open").first().alias("open"),
     pl.col("high").max().alias("high"),
     pl.col("low").min().alias("low"),
     pl.col("close").last().alias("close"),
     pl.col("volume").sum().alias("volume"),
+    pl.when(_VWAP_WEIGHT.sum() > 0)
+    .then((pl.col("vwap") * _VWAP_WEIGHT).sum() / _VWAP_WEIGHT.sum())
+    .otherwise(None)
+    .alias("vwap"),
 ]
 
 _QUOTE_OHLCV_AGGS = [
@@ -371,6 +388,13 @@ def load_nasdaq100_bars(
         pl.col("low_trade_price").alias("low"),
         pl.col("last_trade_price").alias("close"),
         pl.col("volume"),
+        # The AlgoSeek `VolumeWeightPrice`, projected because a backtest that fills at VWAP
+        # needs it on the bar it fills. It is null exactly when `volume` is 0 - a minute in
+        # which nothing traded - and the OHLC filter below does not drop those rows, because
+        # the trade prices are carried from the last print and are not null. So a null vwap
+        # reaches the caller by design: a minute with no trade has no volume-weighted price,
+        # and the alternative to a null is a stale carried close standing in for one.
+        pl.col("vwap"),
     ]
     quote_cols = [
         pl.col("open_bid_price").alias("bid_open"),

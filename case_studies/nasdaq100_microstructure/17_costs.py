@@ -639,6 +639,7 @@ def run_cadence_cost_backtest(
         prediction_hash=best_pred_hash,
         initial_cash=bt_config.initial_cash,
         chapter="ch18",
+        label=LABEL,
         # The universe travels with the spec, not just with the query above. A row registered
         # without it reads as full-universe to every later reader - including section 4's
         # full-versus-screened query and `derived_tables_off_canonical_universe` - so the
