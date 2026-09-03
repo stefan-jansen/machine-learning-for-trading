@@ -267,6 +267,42 @@ class TestNoConsumerReadsThePurgeAsTheHorizon:
                 "label measures from the interval that has to be held back"
             )
 
+    def test_every_horizon_name_resolves_from_horizons_and_every_purge_name_from_the_buffer(
+        self,
+    ):
+        """Checked per assignment, because a file-wide search cannot fail on the regression.
+
+        `05_evaluation` reads both keys legitimately, so asserting that `["horizons"]` appears
+        somewhere in it passes even if `LABEL_HORIZON` is put back on the buffer - the
+        `LABEL_HORIZONS` mapping below it satisfies the search on its own. The invariant that
+        does bite is per name: a constant whose name says horizon may not be resolved from the
+        purge, and a constant whose name says purge or buffer may not be resolved from the
+        horizons. RoboRev jobs #17888, #17889 and the follow-up on this test.
+        """
+        purge_keys = ('["buffer"]', "variant_buffers")
+        checked = 0
+        for stem in ("01_feasibility_analysis", "04_model_based_features", "05_evaluation"):
+            source = Path(f"case_studies/nasdaq100_microstructure/{stem}.py").read_text()
+            for line in source.splitlines():
+                code = line.split("#", 1)[0]
+                match = re.match(r"\s*([A-Z][A-Z0-9_]*)\s*=\s*(.+)$", code)
+                if match is None:
+                    continue
+                name, rhs = match.group(1), match.group(2)
+                if "HORIZON" in name:
+                    assert not any(key in rhs for key in purge_keys), (
+                        f"{stem}: {name} is resolved from the purge, which is one bar wider "
+                        "than the interval its name claims"
+                    )
+                    checked += 1
+                if "PURGE" in name or "BUFFER" in name:
+                    assert '["horizons"]' not in rhs, (
+                        f"{stem}: {name} is resolved from the outcome horizon, so it purges "
+                        "one bar less than the label reads"
+                    )
+                    checked += 1
+        assert checked >= 4, f"only {checked} declarations inspected; the pattern stopped matching"
+
     def test_the_notebooks_take_their_horizons_from_the_horizons(self):
         """A source check, in the same shape as tests/test_holdout_boundary.py's.
 
