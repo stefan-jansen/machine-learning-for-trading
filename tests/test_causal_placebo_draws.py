@@ -104,3 +104,23 @@ def test_a_fit_that_produced_no_draws_stores_nothing(tmp_path) -> None:
     assert _placebo_draws_json({"placebo_effects": []}) is None
     assert _placebo_draws_json({}) is None
     assert _placebo_draws_json({"placebo_effects": [0.0, 0.0]}) == "[0.0, 0.0]"
+
+
+def test_a_tiny_frozen_share_does_not_read_as_zero():
+    """The warning has to say how much is frozen, and `.1%` rounded small shares to "0.0%".
+
+    A warning whose text says nothing is wrong is worse than no warning: it trains the
+    reader to skip the next one. Measured on nasdaq100_microstructure's 1.2M-row causal
+    preview, which froze a share small enough to print as zero under the old format.
+    """
+    import warnings as _warnings
+
+    from case_studies.utils.causal import _assert_placebo_permutation_possible
+
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        _assert_placebo_permutation_possible(0, 100, 15, 2e-05)
+    assert caught, "a nonzero frozen share must warn"
+    message = str(caught[0].message)
+    assert "0.0% of" not in message, message
+    assert "2.00e-05" in message, message

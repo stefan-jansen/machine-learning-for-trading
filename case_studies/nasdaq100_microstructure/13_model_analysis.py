@@ -110,11 +110,22 @@ ENTITY_COL = "symbol"
 N_BUCKETS = 10
 TOP_N_FEATURES = 15
 REGIME_WINDOW = 252
-# The populations 06_linear and 07_gbm publish. Named rather than hashed: a name resolves to the
-# generation in force, so a refit that supersedes its predecessor is picked up without editing
-# this notebook, while every superseded snapshot stays readable by hash.
+# The populations the execution notebooks publish. Named rather than hashed: a name resolves to
+# the generation in force, so a refit that supersedes its predecessor is picked up without
+# editing this notebook, while every superseded snapshot stays readable by hash.
+#
+# The four sequence architectures publish four populations rather than one, because each has its
+# own notebook and a population is what one run declares before it fits. So a population key is
+# not always a family: `linear` and `gbm` name a whole family, and the four sequence names each
+# name one slice of `deep_learning`. `POPULATION_SLICES` carries that distinction, because the
+# membership check below has to compare each declared population against the rows that belong to
+# it rather than against everything its family registered.
 LINEAR_POPULATION = "nasdaq100_microstructure-linear-validation-v1"
 GBM_POPULATION = "nasdaq100_microstructure-gbm-validation-v1"
+NLINEAR_POPULATION = "nasdaq100_microstructure-nlinear-validation-v1"
+LSTM_POPULATION = "nasdaq100_microstructure-lstm_h64-validation-v1"
+TCN_POPULATION = "nasdaq100_microstructure-tcn-validation-v1"
+PATCHTST_POPULATION = "nasdaq100_microstructure-patchtst-validation-v1"
 
 # %% [markdown]
 # This notebook reads; it registers nothing. That decides how it opens the registry, and the
@@ -289,13 +300,47 @@ else:
 # than an exception handler, is stated at `declared_population_members`. In short: a registry
 # that publishes no population is not broken, and `OfficialPopulation.one` reports that state
 # and a broken lineage in the same words.
+# Population key -> (family, the config names it covers, or None for the whole family).
+POPULATION_SLICES = {
+    "linear": ("linear", None),
+    "gbm": ("gbm", None),
+    "nlinear": ("deep_learning", ("nlinear",)),
+    "lstm_h64": ("deep_learning", ("lstm_h64",)),
+    "tcn": ("deep_learning", ("tcn",)),
+    "patchtst": ("deep_learning", ("patchtst",)),
+}
+POPULATIONS = {
+    "linear": LINEAR_POPULATION,
+    "gbm": GBM_POPULATION,
+    "nlinear": NLINEAR_POPULATION,
+    "lstm_h64": LSTM_POPULATION,
+    "tcn": TCN_POPULATION,
+    "patchtst": PATCHTST_POPULATION,
+}
+
+
+def _slice_rows(frame: pl.DataFrame, key: str) -> pl.DataFrame:
+    """The rows belonging to one declared population."""
+    family, config_names = POPULATION_SLICES[key]
+    rows = frame.filter(pl.col("family") == family)
+    if config_names is not None:
+        rows = rows.filter(pl.col("config_name").is_in(list(config_names)))
+    return rows
+
+
+# `produced` is per family rather than per population, because which registered row belongs to
+# which of a family's populations is what the population itself declares. A family with rows and
+# an unresolvable declared name is the refusing case whichever of its names failed.
+_family_produced = {
+    _family: _catalog.filter(pl.col("family") == _family).height
+    for _family in {_family for _family, _ in POPULATION_SLICES.values()}
+}
 _population_members, _population_notes = declared_population_members(
     study,
     CASE_DIR,
-    {"linear": LINEAR_POPULATION, "gbm": GBM_POPULATION},
+    POPULATIONS,
     produced={
-        _family: _catalog.filter(pl.col("family") == _family).height
-        for _family in ("linear", "gbm")
+        _key: _family_produced.get(_family, 0) for _key, (_family, _) in POPULATION_SLICES.items()
     },
 )
 for _note in _population_notes:
@@ -310,9 +355,10 @@ _degenerate = degenerate_prediction_hashes(study.root)
 _registered = set(_catalog.get_column("prediction_hash"))
 
 for _family, _members in _population_members.items():
-    _have = set(
-        all_labels_metrics.filter(pl.col("family") == _family).get_column("prediction_hash")
-    )
+    # Scoped to the population's own slice, not to its whole family. Four sequence populations
+    # share the `deep_learning` family, so filtering on family alone would report every one of
+    # them as holding three undeclared rows for every one it declares.
+    _have = set(_slice_rows(all_labels_metrics, _family).get_column("prediction_hash"))
     _dropped = _members & _degenerate
     _missing, _extra = _members - _degenerate - _have, _have - _members
     # Both halves of the sentence this prints have to be true before it is printed. "None of
