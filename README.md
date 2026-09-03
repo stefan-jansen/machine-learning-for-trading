@@ -21,7 +21,7 @@ machine to a running notebook, prerequisites included. The short version is unde
 [Quick Start](#quick-start) below.
 
 <!-- offerings:next start -->
-> **Next free session:** [Managing Your Strategy Research Process](https://maven.com/p/bc9fd4), a 30-minute live session on **Wednesday, September 2, 2026, 12:00 PM ET / 16:00 UTC**. [All courses, workshops, and free lessons](https://ml4trading.io/courses/?utm_source=github&utm_medium=readme&utm_campaign=ml4t3e&utm_content=offerings).
+> **Next free session:** [How to Engineer a Multi-Agent System](https://maven.com/p/c7565e), a 30-minute live session on **Wednesday, September 9, 2026, 12:00 PM ET / 16:00 UTC**. [All courses, workshops, and free lessons](https://ml4trading.io/courses/?utm_source=github&utm_medium=readme&utm_campaign=ml4t3e&utm_content=offerings).
 <!-- offerings:next end -->
 
 <p align="center">
@@ -146,7 +146,6 @@ the workflow:
 
 | When | Session |
 |------|---------|
-| Wed, Sep 2, 12:00 PM ET / 16:00 UTC | [Managing Your Strategy Research Process](https://maven.com/p/bc9fd4) |
 | Wed, Sep 9, 12:00 PM ET / 16:00 UTC | [How to Engineer a Multi-Agent System](https://maven.com/p/c7565e) |
 | Wed, Sep 30, 12:00 PM ET / 16:00 UTC | [How to Be Productive with Coding Agents, Beyond Code](https://maven.com/p/efe730) |
 | Wed, Nov 4, 12:00 PM ET / 17:00 UTC | [Why Multi-Agent Systems Break, and How To Fix It](https://maven.com/p/393eee) |
