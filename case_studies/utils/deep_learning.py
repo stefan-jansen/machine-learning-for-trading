@@ -75,7 +75,12 @@ from utils.modeling import RANDOM_SEED, seed_everything
 if TYPE_CHECKING:
     from case_studies.research.workspace import Study
 
-_SEQUENCE_PREVIEW_FIELDS = {"folds", "max_symbols", "max_train_sequences"}
+_SEQUENCE_PREVIEW_FIELDS = {
+    "folds",
+    "max_symbols",
+    "max_train_sequences",
+    "max_predict_sequences",
+}
 
 SEQUENCE_RUNNER_VERSION = 1
 SEQUENCE_PREPARATION_VERSION = 1
@@ -110,6 +115,9 @@ class SequenceResearchContext:
     runtime_provenance: dict[str, Any]
     prediction_split: str = "validation"
     published_checkpoints: tuple[int, ...] | None = None
+    # Preview-only, and deliberately absent from `sequence_identity_params`: capping how
+    # many validation windows are scored changes what the run covers, never what it fits.
+    max_predict_sequences: int = 0
 
 
 def _sha256(path: Path) -> str:
@@ -463,6 +471,16 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         (setup.get("modeling") or {}).get("dl") or {},
         int(reductions.get("max_train_sequences", 0)),
     )
+    # Preview-only, with no counterpart under `modeling.dl`: a declared cap on the
+    # training sample is a property of the model, while a cap on how much of validation
+    # gets scored is only ever a reduction in coverage. There is nothing for a
+    # configuration to declare here, so this reads from the preview alone.
+    predict_reduction = int(reductions.get("max_predict_sequences", 0))
+    if predict_reduction < 0:
+        raise ValueError(
+            "the max_predict_sequences preview reduction must be zero or positive, "
+            f"not {predict_reduction}"
+        )
     calendar_id = make_walk_forward_config(study.case_study, date_col=mds.date_col).calendar_id
     lookback = int(config["params"].get("lookback", 60))
     dataset_pd = dataset.to_pandas()
@@ -479,6 +497,15 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         # than fail later on a key that is missing from the digest.
         if entity_col != "symbol":
             raise ValueError(f"Darts presets require the symbol entity key, not {entity_col!r}")
+        # Refused rather than ignored. Darts forecasts whole series, so thinning the key
+        # set would not shorten the forward pass - it would only publish fewer keys than
+        # the model produced. A reduction that silently does nothing is worse than one
+        # that is unavailable, because the preview would still look reduced.
+        if predict_reduction:
+            raise ValueError(
+                "max_predict_sequences is not supported for Darts presets: they forecast "
+                "whole series, so capping prediction keys saves no work"
+            )
 
         expected = darts_validation_keys(
             dataset_pd,
@@ -518,6 +545,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
             entity_col=entity_col,
             lookback=lookback,
             calendar_id=calendar_id,
+            max_predict_sequences=predict_reduction,
         )
         sequence_identity = {
             "input_data_spec": mds.input_lineage,
@@ -568,9 +596,14 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         # declares. The locked holdout runner reads it as "was this run reduced" and
         # refuses anything non-zero, so a declared cap - which is part of the model and
         # applies to the holdout refit too - rides in `input_data_spec` instead.
+        # The key is omitted when unused rather than written as zero: `computation` is
+        # hashed whole, so an unconditional third key would move the training_hash of
+        # every sequence run ever registered. A preview that sets it gets a spec the
+        # locked holdout runner already refuses, which is the behaviour we want.
         "sampling": {
             "max_symbols": int(reductions.get("max_symbols", 0)),
             "max_train_sequences": sequence_reduction,
+            **({"max_predict_sequences": predict_reduction} if predict_reduction else {}),
         },
         "numerics": runtime,
         "source_identity": _sequence_source_identity(config),
@@ -603,6 +636,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         temporal_feature_names=tuple(mds.temporal_feature_names),
         expected_keys=expected,
         max_train_sequences=max_train_sequences,
+        max_predict_sequences=predict_reduction,
         runtime_provenance=runtime_provenance,
     )
     return spec, context
@@ -1275,6 +1309,7 @@ def run_resolved_request(
                 device=computation["numerics"]["device"],
                 save_dir=train_dir / "diagnostics",
                 max_train_sequences=context.max_train_sequences,
+                max_predict_sequences=context.max_predict_sequences,
                 register=False,
                 case_study=study.case_study,
                 temporal_by_fold=context.temporal_by_fold,
@@ -1850,6 +1885,7 @@ def run_dl_cv(
     device: str = "cuda",
     save_dir: Path | None = None,
     max_train_sequences: int = 0,
+    max_predict_sequences: int = 0,
     register: bool = False,
     case_study: str | None = None,
     notebook: str | None = None,
@@ -2165,6 +2201,7 @@ def run_dl_cv(
             entity_col=entity_col,
             lookback=lookback,
             max_train_sequences=max_train_sequences,
+            max_predict_sequences=max_predict_sequences,
             temporal_by_fold=temporal_by_fold if _has_fold_temporal else None,
             temporal_keys=temporal_keys,
             temporal_feature_names=temporal_feature_names,
