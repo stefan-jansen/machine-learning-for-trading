@@ -1996,6 +1996,12 @@ case_studies/nasdaq100_microstructure/11_dl_patchtst:
       folds: [0, 1]
       max_symbols: 5
       max_train_sequences: 2000
+      # The training cap bounded the fit and left the forward pass over validation
+      # scaling with the panel, which is why this cell sat at its 600s budget while
+      # nlinear, lstm and tcn finished in 92-94s: patchtst pays the most per window
+      # and was scoring every one of them. Matched to the training cap, three orders
+      # below the panel, and above the symbol count so the cross-section is intact.
+      max_predict_sequences: 2000
   timeout: 600
 case_studies/nasdaq100_microstructure/12_causal_dml:
   parameters:
