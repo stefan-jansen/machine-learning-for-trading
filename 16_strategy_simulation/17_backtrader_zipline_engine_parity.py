@@ -59,6 +59,7 @@ CASE_NAMES = {
     "cme_futures": "CME futures",
     "crypto_perps_funding": "Crypto perpetual funding",
     "fx_pairs": "FX allocation (USD-quoted pairs)",
+    "us_equities_panel": "US equity panel (3,175 assets)",
 }
 
 # %% [markdown]
@@ -87,17 +88,18 @@ results = (
     .sort("strategy", "engine")
 )
 
-assert results.height == 4
-assert results.filter(pl.col("status") == "pass").height == 4
+assert results.height == 6
+assert results.filter(pl.col("status") == "pass").height == 6
 assert results["valuation_timestamps_match"].all()
 
 display(results)
 
 # %% [markdown]
-# Backtrader and Zipline both participate in the ETF comparison. Backtrader also participates in the
-# CME and USD-quoted foreign-exchange comparisons. The fill stream is compared at eight-decimal
-# precision, while account values must round to the same cent. Zipline has no required CME or spot-FX
-# row because the frozen inputs do not map to its native asset models.
+# Backtrader and Zipline both participate in the ETF and US equity-panel comparisons. Backtrader
+# also participates in the CME and USD-quoted foreign-exchange comparisons. The fill stream is
+# compared at eight-decimal price precision and five-decimal quantity precision, while account
+# values must round to the same cent. Zipline has no required CME or spot-FX row because the frozen
+# inputs do not map to its native asset models.
 
 # %% [markdown]
 # ## 2. Unsupported asset models
@@ -138,7 +140,7 @@ timing = (
     .select("strategy", "engine", "external_seconds", "ml4t_seconds", "external_div_ml4t")
 )
 
-assert timing.height == 4
+assert timing.height == 6
 display(timing)
 
 # %% [markdown]

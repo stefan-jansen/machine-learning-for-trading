@@ -77,9 +77,9 @@ def _validate_sources(
     unsupported = [record for record in records if record.get("status") == "unsupported"]
     if scope.get("real_strategy_equivalence_gate_passed") is not True:
         raise ValueError("real-strategy equivalence evidence has not passed")
-    if scope.get("required_pairs") != 12 or scope.get("unsupported_pairs") != 8:
+    if scope.get("required_pairs") != 17 or scope.get("unsupported_pairs") != 8:
         raise ValueError(
-            "real-strategy evidence does not contain the 12 required and 8 unsupported pairs"
+            "real-strategy evidence does not contain the 17 required and 8 unsupported pairs"
         )
     if len(required) != scope.get("required_pairs") or any(
         record.get("status") != "pass" for record in required
@@ -168,6 +168,7 @@ def build_snapshot(source_root: Path) -> dict[str, Any]:
         capture_output=True,
         text=True,
     ).stdout.strip()
+    evidence_root = f"https://github.com/ml4t/backtest/blob/{current_library_commit}/validation"
     required = [record for record in correctness["records"] if record["status"] != "unsupported"]
     unsupported = [record for record in correctness["records"] if record["status"] == "unsupported"]
 
@@ -235,9 +236,9 @@ def build_snapshot(source_root: Path) -> dict[str, Any]:
         "engine_commit": correctness["provenance"]["ml4t"]["commit"],
         "engine_source_sha256": correctness["provenance"]["ml4t"]["engine_source_sha256"],
         "evidence": {
-            "correctness": "https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json",
-            "performance": "https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_PERFORMANCE.json",
-            "synthetic_stress": "https://github.com/ml4t/backtest/blob/main/validation/LARGE_SCALE_RESULTS.json",
+            "correctness": f"{evidence_root}/REAL_STRATEGY_RESULTS.json",
+            "performance": f"{evidence_root}/REAL_STRATEGY_PERFORMANCE.json",
+            "synthetic_stress": f"{evidence_root}/LARGE_SCALE_RESULTS.json",
             "source_artifacts": source_artifacts,
         },
         "comparison_policy": correctness["comparison_policy"],

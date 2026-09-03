@@ -1,5 +1,5 @@
 {
-  "audit_generated_at": "2026-08-21T21:11:55.069529+00:00",
+  "audit_generated_at": "2026-09-03T11:44:14.344493+00:00",
   "comparison_policy": {
     "account_money_fields": [
       "cash",
@@ -9,36 +9,38 @@
     ],
     "account_money_quantum": "0.01",
     "fill_order": "canonical timestamp, asset, side, quantity, price, commission",
-    "meaning": "account-money gaps round to zero cents; all other numeric gaps round to zero at 1e-8",
+    "meaning": "account-money gaps round to zero cents; quantity gaps round to zero at 1e-5 shares or contracts; all other numeric gaps round to zero at 1e-8",
+    "quantity_quantum": "0.00001",
     "record_numeric_quantum": "0.00000001",
     "rounding": "ROUND_HALF_EVEN",
     "timestamp_domain": {
       "cme_futures": "session date",
       "crypto_perps_funding": "exact UTC event timestamp",
       "etfs": "session date",
-      "fx_pairs": "session date"
+      "fx_pairs": "session date",
+      "us_equities_panel": "session date"
     }
   },
-  "engine_commit": "c4b1a6b3fc4422d50840cde41ffd5d5990f2f17a",
-  "engine_source_sha256": "f41accebe035368b398ca801a1affdf3d8093abe0fb0ad553bb5292c48ac728c",
+  "engine_commit": "7034236519cc0a99df6ef34a21d07ec2a81fc87c",
+  "engine_source_sha256": "8011ecdaf90807b4fe4fb5ada518a237311774b32891179bf1fad0a0baad8a58",
   "evidence": {
-    "correctness": "https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json",
-    "performance": "https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_PERFORMANCE.json",
+    "correctness": "https://github.com/ml4t/backtest/blob/602db92275ac1b35eb7ac18f23854a051a442172/validation/REAL_STRATEGY_RESULTS.json",
+    "performance": "https://github.com/ml4t/backtest/blob/602db92275ac1b35eb7ac18f23854a051a442172/validation/REAL_STRATEGY_PERFORMANCE.json",
     "source_artifacts": [
       {
         "path": "validation/REAL_STRATEGY_RESULTS.json",
-        "sha256": "23f5e6c11cf8ebcfcc7e035247c9c633dac427e16580fcb5ac0e055372bf3306"
+        "sha256": "d7c6460fcb5ebf9ecf74c31d06e227996c66f488de46a5beaa2145104209916b"
       },
       {
         "path": "validation/REAL_STRATEGY_PERFORMANCE.json",
-        "sha256": "bbb0f3945572e444360357fdb8d75f4ff10d85d90365d462827ba6e1e8bad27b"
+        "sha256": "7276dfba4356c4ce2e6e45c256e4431a4e01cd47ca5710e9d341893286929c40"
       },
       {
         "path": "validation/LARGE_SCALE_RESULTS.json",
-        "sha256": "9805a5ec4d336b10a76da82284b1cc0089b5a5031400ce421fc8825a95fbee78"
+        "sha256": "fb3a06a7c485bfb131dfef286ff743af18fa4ba673f5f1075245d7a9123cb3f5"
       }
     ],
-    "synthetic_stress": "https://github.com/ml4t/backtest/blob/main/validation/LARGE_SCALE_RESULTS.json"
+    "synthetic_stress": "https://github.com/ml4t/backtest/blob/602db92275ac1b35eb7ac18f23854a051a442172/validation/LARGE_SCALE_RESULTS.json"
   },
   "frameworks": {
     "backtrader": {
@@ -133,7 +135,7 @@
       "version": "3.1.1"
     }
   },
-  "library_commit": "d5b1e4afc81ac75ae982cf180ea60d4ac6f0064b",
+  "library_commit": "602db92275ac1b35eb7ac18f23854a051a442172",
   "performance_policy": {
     "boundary": "engine call only",
     "excluded": [
@@ -156,181 +158,256 @@
       "case_study": "etfs",
       "framework": "vectorbt_pro",
       "framework_ci95_seconds": [
-        0.28847578540444374,
-        0.3614198446739465
+        0.28554552848800085,
+        0.2885417409997899
       ],
-      "framework_median_seconds": 0.29225580720230937,
-      "framework_to_ml4t_ratio": 0.6940652756525386,
+      "framework_median_seconds": 0.2872375610168092,
+      "framework_to_ml4t_ratio": 0.6924827859284183,
       "ml4t_ci95_seconds": [
-        0.41282037599012256,
-        0.576591697987169
+        0.4141692244884325,
+        0.41945260000647977
       ],
-      "ml4t_median_seconds": 0.4210782723966986
+      "ml4t_median_seconds": 0.4147937925008591
     },
     {
       "case_study": "etfs",
       "framework": "vectorbt_oss",
       "framework_ci95_seconds": [
-        0.17324630869552493,
-        0.2349593280814588
+        0.17068579950137064,
+        0.17357376401196234
       ],
-      "framework_median_seconds": 0.1776289890985936,
-      "framework_to_ml4t_ratio": 0.4318145650186349,
+      "framework_median_seconds": 0.17132284450053703,
+      "framework_to_ml4t_ratio": 0.4124410450618539,
       "ml4t_ci95_seconds": [
-        0.4103026920929551,
-        0.42414869787171483
+        0.41297478799242526,
+        0.41699278698069975
       ],
-      "ml4t_median_seconds": 0.4113547885790467
+      "ml4t_median_seconds": 0.4153874754993012
     },
     {
       "case_study": "etfs",
       "framework": "backtrader",
       "framework_ci95_seconds": [
-        9.368097475497052,
-        9.547873334726319
+        9.30285160850326,
+        9.423639220010955
       ],
-      "framework_median_seconds": 9.424181156558916,
-      "framework_to_ml4t_ratio": 22.345613420960998,
+      "framework_median_seconds": 9.355300096503925,
+      "framework_to_ml4t_ratio": 21.7615755934312,
       "ml4t_ci95_seconds": [
-        0.4202949027530849,
-        0.4259240021929145
+        0.42605314050160814,
+        0.431600633499329
       ],
-      "ml4t_median_seconds": 0.4217463615350425
+      "ml4t_median_seconds": 0.4298999425082002
     },
     {
       "case_study": "etfs",
       "framework": "zipline",
       "framework_ci95_seconds": [
-        3.932438634801656,
-        3.9689703576732427
+        3.8670725979900453,
+        3.9098115700180642
       ],
-      "framework_median_seconds": 3.955013405298814,
-      "framework_to_ml4t_ratio": 9.523748429176669,
+      "framework_median_seconds": 3.8715068249875912,
+      "framework_to_ml4t_ratio": 6.126579592244658,
       "ml4t_ci95_seconds": [
-        0.40678976522758603,
-        0.4178313952870667
+        0.6284003740001936,
+        0.6377887904964155
       ],
-      "ml4t_median_seconds": 0.41527907154522836
+      "ml4t_median_seconds": 0.6319197794946376
     },
     {
       "case_study": "etfs",
       "framework": "lean",
       "framework_ci95_seconds": [
-        2.760114834178239,
-        2.87603570939973
+        2.4874195760057773,
+        2.599079799008905
       ],
-      "framework_median_seconds": 2.82640195148997,
-      "framework_to_ml4t_ratio": 5.3275148481162775,
+      "framework_median_seconds": 2.564114402513951,
+      "framework_to_ml4t_ratio": 3.418485618498456,
       "ml4t_ci95_seconds": [
-        0.5276247598230839,
-        0.5357543616555631
+        0.7486901020165533,
+        0.7566314754949417
       ],
-      "ml4t_median_seconds": 0.5305291551630944
+      "ml4t_median_seconds": 0.750073186980444
     },
     {
       "case_study": "cme_futures",
       "framework": "vectorbt_pro",
       "framework_ci95_seconds": [
-        0.2846600250340998,
-        0.29552265210077167
+        0.28389174649782944,
+        0.2887275889952434
       ],
-      "framework_median_seconds": 0.28874702262692153,
-      "framework_to_ml4t_ratio": 0.7084598041853621,
+      "framework_median_seconds": 0.28636373148765415,
+      "framework_to_ml4t_ratio": 0.6631588833815962,
       "ml4t_ci95_seconds": [
-        0.405915146227926,
-        0.4146845890209079
+        0.428688713509473,
+        0.43454156002553646
       ],
-      "ml4t_median_seconds": 0.4075700850225985
+      "ml4t_median_seconds": 0.43181768149952404
     },
     {
       "case_study": "cme_futures",
       "framework": "backtrader",
       "framework_ci95_seconds": [
-        2.4880768058355898,
-        2.5447541787289083
+        2.487967457011109,
+        2.526018163494882
       ],
-      "framework_median_seconds": 2.520101289032027,
-      "framework_to_ml4t_ratio": 6.064512605687949,
+      "framework_median_seconds": 2.494809443000122,
+      "framework_to_ml4t_ratio": 5.811638815571466,
       "ml4t_ci95_seconds": [
-        0.4061634261161089,
-        0.4256952619180083
+        0.4273611745011294,
+        0.4325851899920963
       ],
-      "ml4t_median_seconds": 0.4155488582327962
+      "ml4t_median_seconds": 0.4292781300027855
     },
     {
       "case_study": "crypto_perps_funding",
       "framework": "lean",
       "framework_ci95_seconds": [
-        2.8170627960935235,
-        3.0600946531631052
+        2.7094629269995494,
+        2.8912153329874855
       ],
-      "framework_median_seconds": 2.9539654976688325,
-      "framework_to_ml4t_ratio": 4.403559916097216,
+      "framework_median_seconds": 2.801038935489487,
+      "framework_to_ml4t_ratio": 4.266156698399411,
       "ml4t_ci95_seconds": [
-        0.6642375104129314,
-        0.6799703510478139
+        0.6548837659938727,
+        0.6614908079791348
       ],
-      "ml4t_median_seconds": 0.6708130589686334
+      "ml4t_median_seconds": 0.6565719764912501
     },
     {
       "case_study": "fx_pairs",
       "framework": "vectorbt_pro",
       "framework_ci95_seconds": [
-        0.28750781808048487,
-        0.3131138819735497
+        0.2809414380026283,
+        0.28584351851895917
       ],
-      "framework_median_seconds": 0.2904321881942451,
-      "framework_to_ml4t_ratio": 1.967098673506246,
+      "framework_median_seconds": 0.28271306499664206,
+      "framework_to_ml4t_ratio": 1.9393634353319569,
       "ml4t_ci95_seconds": [
-        0.1444422695785761,
-        0.14924310077913105
+        0.14505504499538802,
+        0.14667728898348287
       ],
-      "ml4t_median_seconds": 0.14764495147392154
+      "ml4t_median_seconds": 0.1457762170030037
     },
     {
       "case_study": "fx_pairs",
       "framework": "vectorbt_oss",
       "framework_ci95_seconds": [
-        0.1378668718971312,
-        0.14379341201856732
+        0.13754021801287308,
+        0.1413268009928288
       ],
-      "framework_median_seconds": 0.14058990101329982,
-      "framework_to_ml4t_ratio": 0.9634308361703942,
+      "framework_median_seconds": 0.1387957935075974,
+      "framework_to_ml4t_ratio": 0.9517668155264412,
       "ml4t_ci95_seconds": [
-        0.14473228203132749,
-        0.14766141306608915
+        0.1447887455142336,
+        0.14715092899859883
       ],
-      "ml4t_median_seconds": 0.14592630392871797
+      "ml4t_median_seconds": 0.14582962049462367
     },
     {
       "case_study": "fx_pairs",
       "framework": "backtrader",
       "framework_ci95_seconds": [
-        0.42471007420681417,
-        0.43551292177289724
+        0.4199030729942024,
+        0.43193558798520826
       ],
-      "framework_median_seconds": 0.4295559488236904,
-      "framework_to_ml4t_ratio": 2.9609633978949073,
+      "framework_median_seconds": 0.42490502599684987,
+      "framework_to_ml4t_ratio": 2.919662876838548,
       "ml4t_ci95_seconds": [
-        0.1437274080235511,
-        0.1479789635632187
+        0.14518085900635924,
+        0.14739416650263593
       ],
-      "ml4t_median_seconds": 0.14507303573191166
+      "ml4t_median_seconds": 0.1455322220135713
     },
     {
       "case_study": "fx_pairs",
       "framework": "lean",
       "framework_ci95_seconds": [
-        0.8826397017110139,
-        0.9328753231093287
+        0.8773026489943732,
+        0.9533085440052673
       ],
-      "framework_median_seconds": 0.9095882326364517,
-      "framework_to_ml4t_ratio": 5.867385458980778,
+      "framework_median_seconds": 0.9130055215064203,
+      "framework_to_ml4t_ratio": 5.951507252400165,
       "ml4t_ci95_seconds": [
-        0.15304899495095015,
-        0.15713128028437495
+        0.1521106895088451,
+        0.15719534500385635
       ],
-      "ml4t_median_seconds": 0.15502445492893457
+      "ml4t_median_seconds": 0.1534074450028129
+    },
+    {
+      "case_study": "us_equities_panel",
+      "framework": "vectorbt_pro",
+      "framework_ci95_seconds": [
+        0.7874248115113005,
+        0.8377640749968123
+      ],
+      "framework_median_seconds": 0.7949095129879424,
+      "framework_to_ml4t_ratio": 0.03867173809347579,
+      "ml4t_ci95_seconds": [
+        20.48596853449999,
+        20.599761563003995
+      ],
+      "ml4t_median_seconds": 20.555308661496383
+    },
+    {
+      "case_study": "us_equities_panel",
+      "framework": "vectorbt_oss",
+      "framework_ci95_seconds": [
+        16.959977449994767,
+        17.023569879005663
+      ],
+      "framework_median_seconds": 16.9949149099848,
+      "framework_to_ml4t_ratio": 0.8292416699730313,
+      "ml4t_ci95_seconds": [
+        20.453040241001872,
+        20.533734439013642
+      ],
+      "ml4t_median_seconds": 20.49452593299793
+    },
+    {
+      "case_study": "us_equities_panel",
+      "framework": "backtrader",
+      "framework_ci95_seconds": [
+        494.2269169654901,
+        510.27303914300865
+      ],
+      "framework_median_seconds": 495.55252874150756,
+      "framework_to_ml4t_ratio": 23.08159898786381,
+      "ml4t_ci95_seconds": [
+        21.38583242200548,
+        21.54328417198849
+      ],
+      "ml4t_median_seconds": 21.46959268298815
+    },
+    {
+      "case_study": "us_equities_panel",
+      "framework": "zipline",
+      "framework_ci95_seconds": [
+        106.83352753649524,
+        109.14979357349512
+      ],
+      "framework_median_seconds": 107.60890489349549,
+      "framework_to_ml4t_ratio": 4.862239476470224,
+      "ml4t_ci95_seconds": [
+        22.08169161299884,
+        22.23382121999748
+      ],
+      "ml4t_median_seconds": 22.131551811515237
+    },
+    {
+      "case_study": "us_equities_panel",
+      "framework": "lean",
+      "framework_ci95_seconds": [
+        47.33300897400477,
+        48.01486862101592
+      ],
+      "framework_median_seconds": 47.68267791901599,
+      "framework_to_ml4t_ratio": 1.8083761067475683,
+      "ml4t_ci95_seconds": [
+        26.22179457700986,
+        26.472655913996277
+      ],
+      "ml4t_median_seconds": 26.36767746548867
     }
   ],
   "protocol_scope": {
@@ -540,6 +617,86 @@
       "terminal_raw_gap": "0.00000000",
       "valuation_timestamps_match": true,
       "valuations": 2108
+    },
+    {
+      "case_study": "us_equities_panel",
+      "equity_gap": "0.00",
+      "equity_raw_gap": "0.00001950",
+      "fill_gap": "0.00000000",
+      "fills": 54295,
+      "framework": "vectorbt_pro",
+      "input_bundle_sha256": "02926d8a7f1c1f5b4855b2393d1763885288ef64950d5cf521ca96c61f454d88",
+      "negative_control_detected": true,
+      "profile": "vectorbt_strict",
+      "status": "pass",
+      "terminal_gap": "0.00",
+      "terminal_raw_gap": "0.00001880",
+      "valuation_timestamps_match": true,
+      "valuations": 4146
+    },
+    {
+      "case_study": "us_equities_panel",
+      "equity_gap": "0.00",
+      "equity_raw_gap": "0.00001910",
+      "fill_gap": "0.00000000",
+      "fills": 49120,
+      "framework": "vectorbt_oss",
+      "input_bundle_sha256": "02926d8a7f1c1f5b4855b2393d1763885288ef64950d5cf521ca96c61f454d88",
+      "negative_control_detected": true,
+      "profile": "vectorbt_oss_strict",
+      "status": "pass",
+      "terminal_gap": "0.00",
+      "terminal_raw_gap": "0.00001870",
+      "valuation_timestamps_match": true,
+      "valuations": 4146
+    },
+    {
+      "case_study": "us_equities_panel",
+      "equity_gap": "0.00",
+      "equity_raw_gap": "0.00000170",
+      "fill_gap": "0.00000000",
+      "fills": 54242,
+      "framework": "backtrader",
+      "input_bundle_sha256": "02926d8a7f1c1f5b4855b2393d1763885288ef64950d5cf521ca96c61f454d88",
+      "negative_control_detected": true,
+      "profile": "backtrader_strict",
+      "status": "pass",
+      "terminal_gap": "0.00",
+      "terminal_raw_gap": "0.00000160",
+      "valuation_timestamps_match": true,
+      "valuations": 4146
+    },
+    {
+      "case_study": "us_equities_panel",
+      "equity_gap": "0.00",
+      "equity_raw_gap": "0.00000190",
+      "fill_gap": "0.00000000",
+      "fills": 54259,
+      "framework": "zipline",
+      "input_bundle_sha256": "02926d8a7f1c1f5b4855b2393d1763885288ef64950d5cf521ca96c61f454d88",
+      "negative_control_detected": true,
+      "profile": "zipline_strict",
+      "status": "pass",
+      "terminal_gap": "0.00",
+      "terminal_raw_gap": "0.00000030",
+      "valuation_timestamps_match": true,
+      "valuations": 4027
+    },
+    {
+      "case_study": "us_equities_panel",
+      "equity_gap": "0.00",
+      "equity_raw_gap": "0.00000460",
+      "fill_gap": "0.00000000",
+      "fills": 54265,
+      "framework": "lean",
+      "input_bundle_sha256": "02926d8a7f1c1f5b4855b2393d1763885288ef64950d5cf521ca96c61f454d88",
+      "negative_control_detected": true,
+      "profile": "lean",
+      "status": "pass",
+      "terminal_gap": "0.00",
+      "terminal_raw_gap": "0.00000420",
+      "valuation_timestamps_match": true,
+      "valuations": 4027
     }
   ],
   "schema_version": 2,
@@ -551,7 +708,8 @@
       "etfs",
       "cme_futures",
       "crypto_perps_funding",
-      "fx_pairs"
+      "fx_pairs",
+      "us_equities_panel"
     ],
     "frameworks": [
       "vectorbt_pro",
@@ -561,7 +719,7 @@
       "lean"
     ],
     "real_strategy_equivalence_gate_passed": true,
-    "required_pairs": 12,
+    "required_pairs": 17,
     "unsupported_pairs": 8
   },
   "synthetic_stress": {
@@ -571,7 +729,7 @@
       "account_money_quantum": "0.01",
       "record_numeric_quantum": "1E-8"
     },
-    "generated_at": "2026-08-21T20:08:27.907530+00:00",
+    "generated_at": "2026-09-03T08:44:03.035191+00:00",
     "records": [
       {
         "fills": 423313,

@@ -17,8 +17,8 @@
 # # VectorBT Pro and OSS on Current Case-Study Strategies
 #
 # This notebook reports the VectorBT Pro and VectorBT OSS rows from the current real-strategy audit.
-# Required comparisons use ETF, CME futures, and USD-quoted foreign-exchange target streams where
-# the pinned VectorBT edition supports the asset and accounting contract.
+# Required comparisons use ETF, CME futures, USD-quoted foreign-exchange, and US equity-panel target
+# streams where the pinned VectorBT edition supports the asset and accounting contract.
 #
 # **Learning objectives**
 #
@@ -59,6 +59,7 @@ CASE_NAMES = {
     "cme_futures": "CME futures",
     "crypto_perps_funding": "Crypto perpetual funding",
     "fx_pairs": "FX allocation (USD-quoted pairs)",
+    "us_equities_panel": "US equity panel (3,175 assets)",
 }
 
 # %% [markdown]
@@ -87,16 +88,17 @@ results = (
     .sort("strategy", "engine")
 )
 
-assert results.height == 5
-assert results.filter(pl.col("status") == "pass").height == 5
+assert results.height == 7
+assert results.filter(pl.col("status") == "pass").height == 7
 assert results["valuation_timestamps_match"].all()
 
 display(results)
 
 # %% [markdown]
-# Both VectorBT editions participate in the ETF and USD-quoted foreign-exchange comparisons.
-# VectorBT Pro also supplies contract multipliers and futures-style leverage for the CME comparison.
-# Fill records retain eight-decimal precision; account monetary values must round to the same cent.
+# Both VectorBT editions participate in the ETF, USD-quoted foreign-exchange, and US equity-panel
+# comparisons. VectorBT Pro also supplies contract multipliers and futures-style leverage for the
+# CME comparison. Fill prices retain eight-decimal precision, quantities retain five-decimal
+# precision, and account monetary values must round to the same cent.
 
 # %% [markdown]
 # ## 2. Unsupported asset models
@@ -137,7 +139,7 @@ timing = (
     .select("strategy", "engine", "vectorbt_seconds", "ml4t_seconds", "vectorbt_div_ml4t")
 )
 
-assert timing.height == 5
+assert timing.height == 7
 display(timing)
 
 # %% [markdown]

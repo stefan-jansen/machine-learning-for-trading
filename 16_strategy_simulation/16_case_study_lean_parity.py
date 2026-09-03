@@ -17,9 +17,10 @@
 # # Real-Strategy Cross-Framework Audit
 #
 # This notebook reports the current framework comparison on ETF allocation, CME futures, crypto
-# perpetual futures with funding, and foreign exchange. Every engine in a required pair receives
-# the same content-addressed market data and frozen model-derived targets. Unsupported pairs are
-# disclosed instead of being approximated with a different asset or accounting model.
+# perpetual futures with funding, foreign exchange, and a 3,175-asset US equity panel. Every engine
+# in a required pair receives the same content-addressed market data and frozen model-derived
+# targets. Unsupported pairs are disclosed instead of being approximated with a different asset or
+# accounting model.
 #
 # The result is narrower than universal framework equivalence. It tests a shared target-replay
 # protocol on real historical inputs. Transaction costs and position rules are disabled on both
@@ -57,7 +58,7 @@ AUDIT_PATH = get_chapter_dir(16) / "resources" / "framework_parity_audit.json"
 audit = json.loads(AUDIT_PATH.read_text(encoding="utf-8"))
 
 assert audit["schema_version"] == 2
-assert audit["scope"]["required_pairs"] == 12
+assert audit["scope"]["required_pairs"] == 17
 assert audit["scope"]["unsupported_pairs"] == 8
 
 FRAMEWORK_NAMES = {
@@ -68,6 +69,7 @@ CASE_NAMES = {
     "cme_futures": "CME futures",
     "crypto_perps_funding": "Crypto perpetual funding",
     "fx_pairs": "FX allocation (USD-quoted pairs)",
+    "us_equities_panel": "US equity panel (3,175 assets)",
 }
 
 display(
@@ -139,7 +141,7 @@ results = (
 )
 
 passing = results.filter(pl.col("status") == "pass").height
-assert passing == audit["scope"]["required_pairs"] == 12
+assert passing == audit["scope"]["required_pairs"] == 17
 assert results["valuation_timestamps_match"].all()
 assert results["negative_control_detected"].all()
 
@@ -151,11 +153,12 @@ display(
 )
 
 # %% [markdown]
-# The fill stream retains eight-decimal precision. Account values use cent precision because they
-# represent monetary balances. The raw equity and terminal gaps remain in the audit resource, so a
-# reader can distinguish exact arithmetic agreement from agreement at the monetary comparison unit.
-# The foreign-exchange rows use only USD-quoted pairs from the frozen target stream, which gives
-# every required engine the same native USD valuation basis.
+# Fill prices retain eight-decimal precision and quantities retain five-decimal precision. Account
+# values use cent precision because they represent monetary balances. The raw equity and terminal
+# gaps remain in the audit resource, so a reader can distinguish exact arithmetic agreement from
+# agreement at the monetary comparison unit. The foreign-exchange rows use only USD-quoted pairs
+# from the frozen target stream, which gives every required engine the same native USD valuation
+# basis.
 
 # %% [markdown]
 # ## 3. Unsupported pairs
@@ -231,9 +234,10 @@ ax.grid(axis="x", alpha=0.25)
 plt.show()
 
 # %% [markdown]
-# VectorBT is faster on the ETF workload. ML4T is faster than Backtrader, Zipline, and LEAN on the
-# measured rows. These are dated case-and-machine measurements, not stable framework-wide speed
-# rankings.
+# Ratios below one mean the external engine was faster in that row; ratios above one mean ML4T was
+# faster. The direction changes across the VectorBT workloads. Backtrader, Zipline, and LEAN have
+# ratios above one on every row in this run. These are dated case-and-machine measurements, not
+# stable framework-wide speed rankings.
 
 # %% [markdown]
 # ## 5. What the evidence supports

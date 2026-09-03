@@ -23,7 +23,7 @@
 # **Learning objectives**
 #
 # - Identify which selected asset classes are valid LEAN comparisons
-# - Read LEAN parity across fills, valuations, cash, and terminal value
+# - Read LEAN parity across fills, valuations, and terminal value
 # - Interpret LEAN engine-only timing on the measured strategies
 # - Keep synthetic stress evidence separate from real-strategy equivalence
 #
@@ -56,6 +56,7 @@ CASE_NAMES = {
     "cme_futures": "CME futures",
     "crypto_perps_funding": "Crypto perpetual funding",
     "fx_pairs": "FX allocation (USD-quoted pairs)",
+    "us_equities_panel": "US equity panel",
 }
 
 # %% tags=["results"]
@@ -64,9 +65,10 @@ display(Markdown(f"**Pinned engine:** {LEAN_NAME} with ML4T profile `{lean['prof
 # %% [markdown]
 # ## 1. Supported real strategies
 #
-# LEAN is required for the ETF, crypto-perpetual, and USD-quoted foreign-exchange workloads. The CME
-# row is unsupported for this particular frozen bundle: it contains continuous root prices but lacks
-# the dated contract chain and roll map needed to construct a native LEAN futures subscription.
+# LEAN is required for the ETF, crypto-perpetual, USD-quoted foreign-exchange, and US equity-panel
+# workloads. The CME row is unsupported for this particular frozen bundle: it contains continuous
+# root prices but lacks the dated contract chain and roll map needed to construct a native LEAN
+# futures subscription.
 
 # %% tags=["results"]
 lean_results = (
@@ -87,8 +89,8 @@ lean_results = (
     )
 )
 
-assert lean_results.height == 3
-assert lean_results["status"].to_list() == ["pass", "pass", "pass"]
+assert lean_results.height == 4
+assert lean_results["status"].to_list() == ["pass"] * 4
 assert lean_results["valuation_timestamps_match"].all()
 assert lean_results["negative_control_detected"].all()
 
