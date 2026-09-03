@@ -216,3 +216,26 @@ class TestTheWindowIsOneBarWiderThanItsName:
         for name, declared in buffers.items():
             horizon = int(re.search(r"(\d+)m$", name).group(1))
             assert declared == f"{horizon + 1}min", (name, declared)
+
+    def test_the_horizon_is_the_label_name_and_not_the_buffer(self):
+        """`resolve_label_horizon` falls back to the buffer, so a wider purge lengthens the return.
+
+        The buffer has to exceed the horizon here, and the fallback turns that into a silent
+        redefinition: with no `labels.horizons`, a 16-minute purge made `fwd_ret_15m` a
+        SIXTEEN-minute return that `05_evaluation` and every downstream reader still called
+        fifteen. The horizons are declared for that reason and this asserts both halves of the
+        pair, so widening one without the other fails here. RoboRev job #17887.
+        """
+        import yaml
+
+        from utils.artifact_specs import resolve_label_buffer, resolve_label_horizon
+
+        setup = yaml.safe_load(
+            Path("case_studies/nasdaq100_microstructure/config/setup.yaml").read_text()
+        )
+        for name in [setup["labels"]["primary"], *setup["labels"]["variants"]]:
+            stated = int(re.search(r"(\d+)m$", name).group(1))
+            assert resolve_label_horizon("nasdaq100_microstructure", name, setup) == f"{stated}min"
+            assert (
+                resolve_label_buffer("nasdaq100_microstructure", name, setup) == f"{stated + 1}min"
+            )
