@@ -113,6 +113,12 @@ class TestThroughTheLoader:
                         "low_trade_price": 99.0,
                         "last_trade_price": 100.5,
                         "volume": 1_000.0,
+                        # The archive always carries it (AlgoSeek `VolumeWeightPrice`), and the
+                        # loader projects it, so a fixture without it no longer stands in for
+                        # one. Distinct from every other price here, so a test that confuses
+                        # the vwap with the close or a trade price fails rather than passing
+                        # on a coincidence.
+                        "vwap": 100.25,
                     }
                 )
                 stamp += dt.timedelta(minutes=15)
