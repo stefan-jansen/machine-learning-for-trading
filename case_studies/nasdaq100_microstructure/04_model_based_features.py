@@ -192,28 +192,41 @@ READ = [
     "trade_at_ask",
 ]
 
-df = load_nasdaq100_bars(
+# `lazy=True` is what makes the projection above worth writing. `include_microstructure`
+# returns the raw archive schema with no projection of its own, so collecting first and
+# selecting afterwards reads all sixty columns into memory to keep eleven. Deferring the
+# collect pushes the projection, the universe filter and the session-hours filter into the
+# parquet scan, so only the columns and rows this notebook reads are ever materialized.
+_lf = load_nasdaq100_bars(
     start_date=START_DATE,
     end_date=str(END_DATE),
     include_microstructure=True,
     symbols=UNIVERSE,
+    lazy=True,
 ).select(READ)
 
 if MAX_SYMBOLS:
     top_syms = (
-        df.group_by("symbol")
+        _lf.group_by("symbol")
         .agg(pl.len().alias("n"))
         .sort("n", descending=True)
-        .head(MAX_SYMBOLS)["symbol"]
+        .head(MAX_SYMBOLS)
+        .collect()["symbol"]
         .to_list()
     )
-    df = df.filter(pl.col("symbol").is_in(top_syms))
+    _lf = _lf.filter(pl.col("symbol").is_in(top_syms))
     print(f"Restricted to {MAX_SYMBOLS} symbols: {top_syms}")
 
 _hour, _minute = pl.col("timestamp").dt.hour(), pl.col("timestamp").dt.minute()
-df = df.filter(
-    ((_hour > OPEN_HOUR) | ((_hour == OPEN_HOUR) & (_minute >= OPEN_MINUTE))) & (_hour < CLOSE_HOUR)
-).with_columns(pl.col("timestamp").dt.date().alias("session_date"))
+df = (
+    _lf.filter(
+        ((_hour > OPEN_HOUR) | ((_hour == OPEN_HOUR) & (_minute >= OPEN_MINUTE)))
+        & (_hour < CLOSE_HOUR)
+    )
+    .with_columns(pl.col("timestamp").dt.date().alias("session_date"))
+    .collect()
+)
+del _lf
 
 # %% [markdown]
 # The vendor emits a padded 390-bar grid on every date, including the afternoons the exchange
