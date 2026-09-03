@@ -996,6 +996,7 @@ jobs:
             tests/test_family_hook_dispatch.py \
             tests/test_model_analysis_selection.py \
             tests/test_model_source_identity_versions.py \
+            tests/test_prediction_sequence_cap.py \
             tests/test_registry_metrics.py \
             tests/test_research_contract_execution.py \
             tests/test_research_model_planning.py \

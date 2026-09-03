@@ -79,6 +79,10 @@ tests/test_lightning_announcement_silence.py
 tests/test_family_hook_dispatch.py
 tests/test_model_analysis_selection.py
 tests/test_model_source_identity_versions.py
+# `test_prediction_sequence_cap` tests the same module as `test_sequence_dataset`
+# below. `case_studies/utils/sequence_dataset.py` imports torch at :10 for the
+# Dataset subclass; these cases exercise the index builders, which never touch it.
+tests/test_prediction_sequence_cap.py
 tests/test_registry_metrics.py
 tests/test_research_contract_execution.py
 tests/test_research_model_planning.py
