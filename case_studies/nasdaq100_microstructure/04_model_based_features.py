@@ -108,7 +108,6 @@ LABELS_DIR = CASE_DIR / "labels"
 SETUP = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
 EVAL_CFG = load_evaluation_config(CASE_STUDY_ID)
 PRIMARY_LABEL = SETUP["labels"]["primary"]
-LABEL_BUFFER = SETUP["labels"]["buffer"]
 CONFIGURED_LABELS = [PRIMARY_LABEL, *SETUP["labels"].get("variants", [])]
 UNIVERSE = sorted(SETUP["universe"]["symbols"])
 CALENDAR = EVAL_CFG["calendar"]
@@ -121,7 +120,11 @@ HOLDOUT_END_EXCLUSIVE = HOLDOUT_END + pd.Timedelta(days=1)
 
 # The bar is one minute, so a horizon written as a duration converts to a bar count exactly.
 BAR = pd.Timedelta(minutes=1)
-LABEL_HORIZON_BARS = int(pd.Timedelta(LABEL_BUFFER) // BAR)
+# The horizon the label measures, not the buffer that purges it. The buffer is one bar
+# wider, because the label reads a quote one bar past its own horizon, and sampling IC
+# on the buffer would space observations by an interval no label spans.
+LABEL_HORIZON = SETUP["labels"]["horizons"][PRIMARY_LABEL]
+LABEL_HORIZON_BARS = int(pd.Timedelta(LABEL_HORIZON) // BAR)
 IC_SAMPLE_STEP = LABEL_HORIZON_BARS
 
 # The three lengths of history the HAR regression averages squared returns over, the amount of
@@ -146,7 +149,7 @@ print(
     "windows that end before it, so that a model scored there has inputs."
 )
 print(
-    f"Predictions are made for {PRIMARY_LABEL}, the return over the next {LABEL_BUFFER} "
+    f"Predictions are made for {PRIMARY_LABEL}, the return over the next {LABEL_HORIZON} "
     f"({LABEL_HORIZON_BARS} bars). The case study also configures "
     f"{', '.join(CONFIGURED_LABELS[1:])}, whose horizons differ, and each of them asks for a "
     "different walk-forward split - which is why Section B resolves one per label."

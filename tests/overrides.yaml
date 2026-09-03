@@ -1876,6 +1876,7 @@ case_studies/nasdaq100_microstructure/02_labels:
   timeout: 120
 case_studies/nasdaq100_microstructure/03_financial_features:
   parameters:
+    MAX_SYMBOLS: 5
     START_DATE: '2000-01-01'
   timeout: 120
 case_studies/nasdaq100_microstructure/04_model_based_features:
