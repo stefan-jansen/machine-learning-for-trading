@@ -1384,8 +1384,12 @@ del har_df, fft_df, sig_df
 meta_cols = ["timestamp", "symbol"]
 temporal_feature_cols = [c for c in temporal_df.columns if c not in meta_cols]
 
-for col in temporal_feature_cols:
-    temporal_df = temporal_df.with_columns(pl.col(col).fill_nan(None))
+# One `with_columns` over every feature rather than one per feature: each call returns a new
+# frame, so the loop form built 22 intermediates of a 20-million-row panel to reach the same
+# result. Same values, a fraction of the peak.
+temporal_df = temporal_df.with_columns(
+    [pl.col(col).fill_nan(None) for col in temporal_feature_cols]
+)
 
 warmup_cols = ["har_rv5_pred", "vol_spectral_energy", "sig1_ret"]
 temporal_clean = temporal_df.drop_nulls(subset=warmup_cols)
@@ -1395,10 +1399,12 @@ print(
 )
 del temporal_df
 
-for col in temporal_feature_cols:
-    temporal_clean = temporal_clean.with_columns(
+temporal_clean = temporal_clean.with_columns(
+    [
         pl.when(pl.col(col).is_infinite()).then(None).otherwise(pl.col(col)).alias(col)
-    )
+        for col in temporal_feature_cols
+    ]
+)
 
 # %% [markdown]
 # What is in the feature block, measured on validation rows so that nothing here is a
@@ -1496,7 +1502,12 @@ assert holdout_df.filter(pl.col("timestamp").dt.date() == HOLDOUT_END.date()).he
 fold_frames.append(holdout_df)
 print(f"  Fold {N_FOLDS} (holdout): {holdout_df.height:,} rows")
 
-temporal_with_folds = pl.concat(fold_frames)
+# `rechunk=False` is what keeps this affordable. The default allocates a fresh contiguous
+# buffer for the concatenated frame, so the fold frames and their copy are both resident at the
+# peak - on this panel that is twice 40 million rows of float64. Chaining the existing chunks
+# instead costs nothing here, because every consumer of this frame either writes it out or
+# aggregates over it, and neither needs one chunk.
+temporal_with_folds = pl.concat(fold_frames, rechunk=False)
 del fold_frames, holdout_df
 print(f"{temporal_with_folds.height:,} rows across {temporal_with_folds['fold'].n_unique()} folds")
 
