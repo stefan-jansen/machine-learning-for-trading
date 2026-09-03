@@ -1251,6 +1251,24 @@ def _intraday_cadence_interval(cadence: str) -> timedelta | None:
     return timedelta(seconds=int(parts[0]) * seconds)
 
 
+def _on_the_clock(ts: pl.Series, interval: timedelta) -> pl.Series:
+    """The timestamps whose time of day is a whole number of ``interval`` past midnight."""
+    seconds = int(interval.total_seconds())
+    return (
+        pl.DataFrame({"ts": ts})
+        .filter(
+            (
+                pl.col("ts").dt.hour().cast(pl.Int64) * 3600
+                + pl.col("ts").dt.minute().cast(pl.Int64) * 60
+                + pl.col("ts").dt.second().cast(pl.Int64)
+            )
+            % seconds
+            == 0
+        )
+        .get_column("ts")
+    )
+
+
 def resolve_rebalance_timestamps(
     available_timestamps: pl.Series,
     cadence: str,
@@ -1364,20 +1382,7 @@ def resolve_rebalance_timestamps(
         # would put the decisions of a panel that starts at 10:31 - which this one does,
         # after the warmup hour the features pay - at 10:31, 10:46, 11:01, agreeing with no
         # other statement of the grid in the case study.
-        seconds = int(interval.total_seconds())
-        return (
-            pl.DataFrame({"ts": ts})
-            .filter(
-                (
-                    pl.col("ts").dt.hour().cast(pl.Int64) * 3600
-                    + pl.col("ts").dt.minute().cast(pl.Int64) * 60
-                    + pl.col("ts").dt.second().cast(pl.Int64)
-                )
-                % seconds
-                == 0
-            )
-            .get_column("ts")
-        )
+        return _on_the_clock(ts, interval)
 
     # Daily and coarser cadences that name no interval: every timestamp is a valid slot.
     return ts
@@ -1457,6 +1462,36 @@ def resolved_rebalance_step(rebalance_spec: dict | None, case_study: str, label:
     return get_rebalance_step(case_study, label)
 
 
+def resolve_decision_schedule(
+    available_timestamps: pl.Series,
+    cadence: str,
+    step: int = 1,
+    calendar: str = "NYSE",
+) -> pl.Series:
+    """The timestamps a strategy decides on: the cadence, advanced by ``step`` slots.
+
+    The pair is what fixes the schedule, so it is resolved as a pair. On an intraday cadence
+    a step is folded into the interval - eight hours stepped by three is resolved as one
+    twenty-four-hour grid - rather than applied as `gather_every` over the resolved slots.
+    The two agree on a complete panel and disagree on a real one: `gather_every` counts rows,
+    so a venue outage that removes one slot shifts every decision after it to a different
+    time of day, permanently, and a session shorter than the rest does the same. Which
+    funding time a 24-hour strategy trades on is then a property of the gaps in the data
+    rather than of the strategy.
+
+    Daily and coarser cadences keep the row-counting form. A slot there is a session, which
+    is the unit the step is meant to count, and folding a step into a monthly interval is not
+    a duration in the first place.
+    """
+    if step < 1:
+        raise ValueError(f"rebalance step must be >= 1, got {step}")
+    interval = _intraday_cadence_interval(cadence)
+    if interval is not None:
+        return _on_the_clock(available_timestamps.unique().sort(), interval * step)
+    schedule = resolve_rebalance_timestamps(available_timestamps, cadence, calendar)
+    return schedule.gather_every(step) if step > 1 else schedule
+
+
 def declared_rebalance_step(case_study: str, label: str) -> int | None:
     """The declared step for ``(case_study, label)``, or None when none is declared.
 
@@ -1512,12 +1547,8 @@ def thin_to_rebalance_dates(
     if n_dates <= 1:
         return predictions
 
-    # Step 1: Calendar-aware schedule resolution
-    schedule_dates = resolve_rebalance_timestamps(all_dates, cadence)
-
-    # Step 2: Apply design-time non-overlapping step
-    if step > 1:
-        schedule_dates = schedule_dates.gather_every(step)
+    # The cadence and the step fix the schedule together, so they resolve together.
+    schedule_dates = resolve_decision_schedule(all_dates, cadence, step)
 
     # Semi-join to filter — avoids Polars is_in precision mismatch
     # (group_by().agg(max) can change Datetime precision)

@@ -121,3 +121,35 @@ def test_an_eight_hourly_panel_under_its_own_cadence_is_unchanged() -> None:
     panel = pl.Series("ts", stamps)
     out = resolve_rebalance_timestamps(panel, "8_hour_funding_aligned")
     assert out.to_list() == panel.to_list()
+
+
+def test_a_stepped_intraday_schedule_does_not_move_when_a_slot_is_missing() -> None:
+    """crypto_perps_funding trades every third funding time; an outage must not re-phase it.
+
+    `gather_every(3)` counts rows, so removing one funding time shifts every decision after
+    it to a different time of day and leaves it there - which funding time the strategy
+    trades then depends on the gaps in the data. Folding the step into the interval resolves
+    24 hours on the clock instead, so the outage costs the decisions inside it and nothing
+    else. RoboRev job #17879.
+    """
+    from case_studies.utils.backtest_loaders import resolve_decision_schedule
+
+    complete = [datetime(2024, 7, 1) + timedelta(hours=8 * i) for i in range(30)]
+    with_outage = pl.Series("ts", [t for i, t in enumerate(complete) if i != 11])
+
+    chosen = resolve_decision_schedule(with_outage, "8_hour_funding_aligned", 3)
+    assert {t.isoformat() for t in chosen.dt.time().to_list()} == {"00:00:00"}
+
+    unaffected = resolve_decision_schedule(pl.Series("ts", complete), "8_hour_funding_aligned", 3)
+    assert chosen.to_list() == unaffected.to_list()
+
+
+def test_a_daily_cadence_still_counts_sessions() -> None:
+    """A slot on a daily-or-coarser grid is a session, which is what the step means there."""
+    from case_studies.utils.backtest_loaders import resolve_decision_schedule
+
+    daily = pl.Series("ts", [datetime(2024, 7, 1, 16, 0) + timedelta(days=i) for i in range(30)])
+    assert (
+        resolve_decision_schedule(daily, "daily_close", 3).to_list()
+        == daily.gather_every(3).to_list()
+    )
