@@ -1377,6 +1377,52 @@ def get_rebalance_step(case_study: str, label: str) -> int:
     return step
 
 
+def apply_rebalance_step(schedule: pl.Series, step: int) -> pl.Series:
+    """Keep every ``step``-th scheduled slot, anchored per session when the schedule is intraday.
+
+    A plain ``gather_every`` over the whole schedule is right for a daily-or-coarser grid,
+    where one slot is one session and sessions are what the step counts. It is wrong for an
+    intraday grid, because the count then runs across the overnight boundary: a session whose
+    length is not a multiple of the step shifts the phase of every session after it, and the
+    shift accumulates.
+
+    NASDAQ regular sessions hold 390 minutes and early closes 210. Both divide by 5 and by 15,
+    so those steps survive a global gather by coincidence; 60 divides neither, so an hourly
+    cadence would start 30 minutes later after every early close and never come back. Anchoring
+    per session makes the first decision of each session its first slot, which is what a
+    declared intraday cadence means and what a reader checking one day against another expects.
+
+    A schedule with at most one timestamp per calendar date is not intraday, and is gathered
+    globally so daily, weekly and monthly cadences keep the identity they already have.
+    """
+    if step <= 1 or schedule.is_empty():
+        return schedule
+    dates = schedule.dt.date()
+    if dates.n_unique() == schedule.len():
+        return schedule.gather_every(step)
+    return (
+        pl.DataFrame({"ts": schedule})
+        .with_columns(_d=pl.col("ts").dt.date())
+        .filter(pl.int_range(pl.len()).over("_d") % step == 0)
+        .get_column("ts")
+    )
+
+
+def declared_rebalance_step(case_study: str, label: str) -> int | None:
+    """The declared step for ``(case_study, label)``, or None when none is declared.
+
+    :func:`get_rebalance_step` raises for an undeclared label, which is right at the
+    point of use: a run must not infer a step. Spec construction needs the softer
+    question, because a case study that declares no step for a label is not in error -
+    it trades every scheduled slot - and its spec must stay byte-identical to what it
+    produced before the step became part of the identity.
+    """
+    try:
+        return get_rebalance_step(case_study, label)
+    except (KeyError, FileNotFoundError):
+        return None
+
+
 def thin_to_rebalance_dates(
     predictions: pl.DataFrame,
     cadence: str = "",
@@ -1420,9 +1466,9 @@ def thin_to_rebalance_dates(
     # Step 1: Calendar-aware schedule resolution
     schedule_dates = resolve_rebalance_timestamps(all_dates, cadence)
 
-    # Step 2: Apply design-time non-overlapping step
-    if step > 1:
-        schedule_dates = schedule_dates.gather_every(step)
+    # Step 2: Apply design-time non-overlapping step, anchored per session on an
+    # intraday schedule (see apply_rebalance_step).
+    schedule_dates = apply_rebalance_step(schedule_dates, step)
 
     # Semi-join to filter — avoids Polars is_in precision mismatch
     # (group_by().agg(max) can change Datetime precision)

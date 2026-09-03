@@ -1381,6 +1381,7 @@ def _run_engine(
     # ~step× too rarely. The on_data callback already gates on
     # ``timestamp in weight_dict``, so dates without weights are skipped.
     from case_studies.utils.backtest_loaders import (
+        apply_rebalance_step,
         get_rebalance_step,
         resolve_rebalance_timestamps,
     )
@@ -1390,8 +1391,7 @@ def _run_engine(
     schedule_dates = resolve_rebalance_timestamps(all_pred_ts, cadence, calendar)
     if case_study and label:
         step = get_rebalance_step(case_study, label)
-        if step > 1:
-            schedule_dates = schedule_dates.gather_every(step)
+        schedule_dates = apply_rebalance_step(schedule_dates, step)
     rebalance_schedule = {
         _engine_timestamp(
             timestamp,
