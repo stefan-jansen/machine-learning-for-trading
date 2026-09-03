@@ -549,10 +549,14 @@ backtest:
       long_q: [0.90, 0.95, 0.99]
       direction: [long_only, long_short]
       max_slots: [5, 10, 20]
-      hold_bars: [8, 16, 32]              # 2h, 4h, 8h at 15-min grid
+      # hold_bars and bars_per_day count rows of the grid the slot simulator walks, which is
+      # the PRICE grid, now one minute. Restated from the fifteen-minute counts they carried
+      # (8/16/32 and 14) at the same wall-clock durations, so the sweep asks the same question
+      # of the same intervals rather than silently asking about 8, 16 and 32 minutes.
+      hold_bars: [120, 240, 480]          # 2h, 4h, 8h, in minute bars
       exit_signal_q: [null, 0.30, 0.50, 0.70]  # null disables signal-exit
-      pred_freshness_max_min: 14          # variant-A: freshest 1m pred per 15m bar
-      bars_per_day_grid: [14]             # 15m only; 1m cadence failed comprehensively
+      pred_freshness_max_min: 14          # tolerated staleness of a prediction, in minutes
+      bars_per_day_grid: [210]            # was 14 bars of 15 minutes; same 3.5h window
       top_k_grid: [5, 10, 20]
       lookback_days: 21
     # Ch19 risk overlays.
@@ -593,13 +597,25 @@ labels:
     fwd_ret_5m: 5min
     fwd_ret_60m: 60min
     fwd_dir_15m: 15min
-  # Vectorized-backtest thinning step per label: number of schedule slots
-  # to advance per trade so holding periods don't overlap.
+  # How many slots of the prediction panel to advance per decision, so a position is held
+  # for its label's horizon and no two holdings overlap.
+  #
+  # The panel is MINUTE-level: 03_financial_features emits every minute and thins to the
+  # decision grid only for two figures. So a slot is one minute and the step is the horizon
+  # in minutes - not `ceil(horizon / 15)`, which is what these values were before and which
+  # made every label trade every minute against a fifteen-minute price feed
+  # (ml4t/agent-workspace#187).
+  #
+  # `apply_rebalance_step` anchors the count inside each session. That is load-bearing here
+  # rather than a nicety: the panel starts at 10:31 after the warmup the features pay, so a
+  # regular session carries 329 slots, and 329 is divisible by none of 5, 15 or 60. Counted
+  # across the close, every one of these steps would walk to a different time of day and stay
+  # there.
   rebalance_step:
-    fwd_ret_15m: 1
-    fwd_ret_5m: 1
-    fwd_ret_60m: 4   # 15min schedule, 60min horizon -> ceil(60/15) = 4
-    fwd_dir_15m: 1
+    fwd_ret_15m: 15
+    fwd_ret_5m: 5
+    fwd_ret_60m: 60
+    fwd_dir_15m: 15
   # Continuous return that each classification label is derived from.
   classification_eval_label:
     fwd_dir_15m: fwd_ret_15m

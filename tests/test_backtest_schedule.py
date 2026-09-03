@@ -296,22 +296,30 @@ class TestGetRebalanceStep:
 
         assert get_rebalance_step("us_firm_characteristics", "fwd_ret_1m") == 1
 
-    def test_nasdaq100_fwd_ret_60m_is_4(self):
-        """nasdaq100 fwd_ret_60m on 15-minute schedule -> ceil(60/15) = 4."""
-        from case_studies.utils.backtest_loaders import get_rebalance_step
+    def test_nasdaq100_steps_are_the_horizon_in_minutes(self):
+        """Every nasdaq100 step is its label's horizon in minutes, because a slot is a minute.
 
-        assert get_rebalance_step("nasdaq100_microstructure", "fwd_ret_60m") == 4
-
-    def test_nasdaq100_fwd_ret_5m_is_1(self):
-        """Regression: fwd_ret_5m on 15-minute schedule must stay at 1.
-
-        Pre-fix, the regex matched `(5, m)` and the old `n <= 12` branch
-        mis-read it as 5 MONTHS, computing step ~10,000 and collapsing
-        backtests to a handful of points.
+        These were `ceil(horizon / 15)` - 1, 1, 4, 1 - which is right only if the panel the
+        step thins is a fifteen-minute one. It is not: `03_financial_features` emits every
+        minute and thins to the decision grid for two figures only. So the old values traded
+        every minute for three of the four labels, against a fifteen-minute price feed that
+        held a different interval entirely (ml4t/agent-workspace#187).
         """
         from case_studies.utils.backtest_loaders import get_rebalance_step
 
-        assert get_rebalance_step("nasdaq100_microstructure", "fwd_ret_5m") == 1
+        horizons = {"fwd_ret_5m": 5, "fwd_ret_15m": 15, "fwd_ret_60m": 60, "fwd_dir_15m": 15}
+        for label, minutes in horizons.items():
+            assert get_rebalance_step("nasdaq100_microstructure", label) == minutes, label
+
+    def test_nasdaq100_fwd_ret_5m_is_not_read_as_five_months(self):
+        """Regression: `(5, m)` once parsed as 5 MONTHS, giving a step near 10,000.
+
+        The value moved from 1 to 5 with the minute grid; what this pins is the order of
+        magnitude, which is what the months misreading destroyed.
+        """
+        from case_studies.utils.backtest_loaders import get_rebalance_step
+
+        assert get_rebalance_step("nasdaq100_microstructure", "fwd_ret_5m") < 60
 
     def test_crypto_fwd_ret_24h_is_3(self):
         """crypto 24h label on 8h schedule -> ceil(24/8) = 3."""

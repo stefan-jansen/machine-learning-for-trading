@@ -156,3 +156,22 @@ def test_an_undeclared_step_leaves_the_spec_byte_identical() -> None:
     from case_studies.utils.backtest_loaders import declared_rebalance_step
 
     assert declared_rebalance_step("etfs", "a_label_no_case_study_declares") is None
+
+
+def test_execution_reads_the_recorded_step_not_the_editable_file() -> None:
+    """The spec is the record of what ran, so execution takes the step from it.
+
+    setup.yaml is mutable and the spec is not. While execution read setup.yaml, a run could
+    hash one step and trade another: edit the file after the spec is built and the registry
+    keeps a spec that names a step nothing used.
+    """
+    from case_studies.utils.backtest_loaders import resolved_rebalance_step
+
+    # The spec wins over whatever setup.yaml currently says.
+    assert resolved_rebalance_step({"step": 7}, "nasdaq100_microstructure", "fwd_ret_15m") == 7
+    # A spec written before the step entered the identity falls back to the declaration.
+    assert resolved_rebalance_step({}, "nasdaq100_microstructure", "fwd_ret_15m") == 15
+    assert resolved_rebalance_step(None, "nasdaq100_microstructure", "fwd_ret_5m") == 5
+
+    with pytest.raises(ValueError, match="must be >= 1"):
+        resolved_rebalance_step({"step": 0}, "nasdaq100_microstructure", "fwd_ret_15m")

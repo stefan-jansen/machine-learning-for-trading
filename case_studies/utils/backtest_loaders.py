@@ -860,7 +860,10 @@ def _load_via_canonical(
     if loader_name == "nasdaq100_bars":
         from data.equities.loader import load_nasdaq100_bars
 
-        freq = frequency or "15m"
+        # The bar this case study is sampled at. A caller that wants a coarser grid asks for
+        # one; the default must not silently resample, which is how a fifteen-minute backtest
+        # came to hold an interval the minute-level labels never predicted (#187).
+        freq = frequency or "1m"
         return load_nasdaq100_bars(
             frequency=freq,
             max_symbols=max_symbols,
@@ -1375,6 +1378,23 @@ def get_rebalance_step(case_study: str, label: str) -> int:
             f"case_studies/{case_study}/config/setup.yaml — must be >= 1."
         )
     return step
+
+
+def resolved_rebalance_step(rebalance_spec: dict | None, case_study: str, label: str) -> int:
+    """The step this run executes, taken from the spec when the spec records one.
+
+    `setup.yaml` is mutable and the spec is not. Reading the step from setup.yaml at
+    execution time lets a run hash one step and trade another - edit the file between the
+    hash and the run and nothing says so. The spec is the record of what was run, so it is
+    what execution reads; setup.yaml is the fallback for a spec written before the step
+    became part of the identity (ml4t/agent-workspace#1005).
+    """
+    if rebalance_spec and "step" in rebalance_spec:
+        step = int(rebalance_spec["step"])
+        if step < 1:
+            raise ValueError(f"strategy.rebalance.step must be >= 1, got {step}")
+        return step
+    return get_rebalance_step(case_study, label)
 
 
 def apply_rebalance_step(schedule: pl.Series, step: int) -> pl.Series:
