@@ -52,37 +52,39 @@ def test_the_panel_is_not_the_schedule() -> None:
     assert resolve_rebalance_timestamps(panel, "15_minute").len() < panel.len() / 10
 
 
-def test_every_session_decides_first_at_its_own_first_slot() -> None:
-    """Anchored on the session, so the first decision is not a different lag each day."""
-    for cadence in ("5_minute", "15_minute", "60_minute"):
+def test_decisions_land_on_the_clock_in_every_session() -> None:
+    """A fifteen-minute cadence decides on the quarter hour, whatever time the panel starts.
+
+    This is the grid `03_financial_features.py` already calls the decision grid
+    (`minute % DECISION_MINUTES == 0`). Anchoring on the panel's first row instead would put
+    them at 10:31, 10:46, 11:01 for this panel and agree with nothing else in the case study.
+    """
+    for cadence, seconds in (("5_minute", 300), ("15_minute", 900), ("60_minute", 3600)):
         schedule = resolve_rebalance_timestamps(_panel(), cadence)
-        firsts = (
-            pl.DataFrame({"ts": schedule})
-            .with_columns(d=pl.col("ts").dt.date())
-            .group_by("d")
-            .agg(pl.col("ts").min())
-            .get_column("ts")
-            .dt.time()
-            .unique()
-            .to_list()
-        )
-        assert [t.isoformat() for t in firsts] == [f"{REGULAR_FIRST}:00"], cadence
+        assert schedule.len() > 0, cadence
+        offsets = {t.hour * 3600 + t.minute * 60 + t.second for t in schedule.dt.time().to_list()}
+        assert all(o % seconds == 0 for o in offsets), cadence
 
 
-def test_an_hourly_cadence_does_not_walk_across_the_close() -> None:
-    """329 and 149 are multiples of no cadence here, which is what a global count would break."""
+def test_an_early_close_simply_holds_fewer_decisions() -> None:
+    """The grid does not move when a session is short; the session just runs out of it.
+
+    A count anchored on the first row would instead put a different time of day at the head
+    of every session whose length is not a multiple of the cadence - and neither 329 nor 149
+    minutes is a multiple of 5, 15 or 60.
+    """
     schedule = resolve_rebalance_timestamps(_panel(), "60_minute")
     per_session = (
         pl.DataFrame({"ts": schedule})
         .with_columns(d=pl.col("ts").dt.date())
         .group_by("d")
-        .len()
+        .agg(pl.col("ts").min().dt.time().alias("first"), pl.len())
         .sort("d")
-        .get_column("len")
-        .to_list()
     )
-    # ceil(329/60) = 6 decisions in a regular session, ceil(149/60) = 3 in the early close.
-    assert per_session == [6, 3, 6]
+    # The panel opens at 10:31, so the first hour mark is 11:00 in every session.
+    assert per_session.get_column("first").cast(pl.String).to_list() == ["11:00:00"] * 3
+    # 11:00 through 15:00 in a full session; 11:00 and 12:00 before a 13:00 early close.
+    assert per_session.get_column("len").to_list() == [5, 2, 5]
 
 
 def test_the_sweep_arms_differ_only_in_the_token() -> None:
