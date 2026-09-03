@@ -8,6 +8,7 @@ import polars as pl
 import yaml
 
 from case_studies.utils.backtest_loaders import BacktestConfig as CaseStudyBacktestConfig
+from case_studies.utils.backtest_loaders import declared_rebalance_step
 from utils.paths import get_case_study_dir
 
 try:
@@ -357,6 +358,8 @@ def ensure_backtest_spec(
             else getattr(case_config, "min_trade_value", 100.0)
         ),
     }
+    if "step" in execution:
+        rebalance["step"] = int(execution["step"])
     strategy = {
         "signal": deepcopy(strategy_spec.get("signal", {})),
         "rebalance": rebalance,
@@ -470,6 +473,16 @@ def build_backtest_spec(
             # default for an unlabelled caller and for a label with no override, so a case study
             # that declares nothing produces byte-identical specs to before this parameter existed.
             "cadence": case_config.cadence_for(label),
+            # The step composes with the cadence to decide which slots are traded, so it
+            # belongs to the identity beside it (ml4t/agent-workspace#1005). Emitted only
+            # when the case study declares one, so a case study that declares nothing
+            # produces byte-identical specs to before this key existed - the same rule
+            # `cadence_for` follows above.
+            **(
+                {"step": _step}
+                if (_step := declared_rebalance_step(case_study, label)) is not None
+                else {}
+            ),
             "fill_timing": case_config.execution_delay.upper().replace(" ", "_"),
             "min_weight_change": (
                 min_weight_change

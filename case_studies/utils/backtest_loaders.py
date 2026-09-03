@@ -31,6 +31,7 @@ import re
 import sqlite3
 import warnings
 from dataclasses import dataclass, field
+from datetime import timedelta
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -860,7 +861,10 @@ def _load_via_canonical(
     if loader_name == "nasdaq100_bars":
         from data.equities.loader import load_nasdaq100_bars
 
-        freq = frequency or "15m"
+        # The bar this case study is sampled at. A caller that wants a coarser grid asks for
+        # one; the default must not silently resample, which is how a fifteen-minute backtest
+        # came to hold an interval the minute-level labels never predicted (#187).
+        freq = frequency or "1m"
         return load_nasdaq100_bars(
             frequency=freq,
             max_symbols=max_symbols,
@@ -1223,6 +1227,48 @@ def load_backtest_prices_for(
 # ---------------------------------------------------------------------------
 
 
+_CADENCE_UNIT_SECONDS = {
+    "min": 60,
+    "minute": 60,
+    "hour": 3600,
+    "h": 3600,
+}
+
+
+def _intraday_cadence_interval(cadence: str) -> timedelta | None:
+    """The interval a cadence token names, or None when it names no intraday interval.
+
+    Tokens are `<n>_<unit>` possibly with a trailing qualifier: `15_minute`, `4_hour`,
+    `8_hour_funding_aligned`. Anything that does not parse - `daily_close`,
+    `monthly_month_end` - is not an intraday cadence and is left to the callers above.
+    """
+    parts = cadence.split("_")
+    if len(parts) < 2 or not parts[0].isdigit():
+        return None
+    seconds = _CADENCE_UNIT_SECONDS.get(parts[1])
+    if seconds is None:
+        return None
+    return timedelta(seconds=int(parts[0]) * seconds)
+
+
+def _on_the_clock(ts: pl.Series, interval: timedelta) -> pl.Series:
+    """The timestamps whose time of day is a whole number of ``interval`` past midnight."""
+    seconds = int(interval.total_seconds())
+    return (
+        pl.DataFrame({"ts": ts})
+        .filter(
+            (
+                pl.col("ts").dt.hour().cast(pl.Int64) * 3600
+                + pl.col("ts").dt.minute().cast(pl.Int64) * 60
+                + pl.col("ts").dt.second().cast(pl.Int64)
+            )
+            % seconds
+            == 0
+        )
+        .get_column("ts")
+    )
+
+
 def resolve_rebalance_timestamps(
     available_timestamps: pl.Series,
     cadence: str,
@@ -1315,8 +1361,30 @@ def resolve_rebalance_timestamps(
         )
         return week_ends["rebal_ts"]
 
-    # All other cadences: daily, 8_hour, 15_min, etc.
-    # The data is already at the correct granularity — every timestamp is valid.
+    interval = _intraday_cadence_interval(cadence)
+    if interval is not None:
+        # Construct the schedule rather than assume the panel already is one.
+        #
+        # This branch used to return `ts` unchanged for every intraday cadence, on the
+        # comment "the data is already at the correct granularity". That is a precondition
+        # nothing checked, and nasdaq100_microstructure did not meet it: its prediction panel
+        # carries every minute, so a declared fifteen-minute cadence resolved to a decision
+        # every minute and the backtest traded fifteen times more often than the config said
+        # (ml4t/agent-workspace#187). Constructing the schedule makes the declaration
+        # decisive and makes a panel at any resolution produce the same schedule - which is
+        # what the Ch18 cadence sweep needs, since its arms differ only in this token.
+        #
+        # Anchored on the clock, not on the session's first row. That is the grid
+        # `03_financial_features.py` already calls the decision grid (`minute % 15 == 0`),
+        # and it is the one a reader can name: a fifteen-minute cadence decides on the
+        # quarter hour, every session, whatever time the panel happens to start at and
+        # however early the session closes. Anchoring on the first available row instead
+        # would put the decisions of a panel that starts at 10:31 - which this one does,
+        # after the warmup hour the features pay - at 10:31, 10:46, 11:01, agreeing with no
+        # other statement of the grid in the case study.
+        return _on_the_clock(ts, interval)
+
+    # Daily and coarser cadences that name no interval: every timestamp is a valid slot.
     return ts
 
 
@@ -1377,6 +1445,68 @@ def get_rebalance_step(case_study: str, label: str) -> int:
     return step
 
 
+def resolved_rebalance_step(rebalance_spec: dict | None, case_study: str, label: str) -> int:
+    """The step this run executes, taken from the spec when the spec records one.
+
+    `setup.yaml` is mutable and the spec is not. Reading the step from setup.yaml at
+    execution time lets a run hash one step and trade another - edit the file between the
+    hash and the run and nothing says so. The spec is the record of what was run, so it is
+    what execution reads; setup.yaml is the fallback for a spec written before the step
+    became part of the identity (ml4t/agent-workspace#1005).
+    """
+    if rebalance_spec and "step" in rebalance_spec:
+        step = int(rebalance_spec["step"])
+        if step < 1:
+            raise ValueError(f"strategy.rebalance.step must be >= 1, got {step}")
+        return step
+    return get_rebalance_step(case_study, label)
+
+
+def resolve_decision_schedule(
+    available_timestamps: pl.Series,
+    cadence: str,
+    step: int = 1,
+    calendar: str = "NYSE",
+) -> pl.Series:
+    """The timestamps a strategy decides on: the cadence, advanced by ``step`` slots.
+
+    The pair is what fixes the schedule, so it is resolved as a pair. On an intraday cadence
+    a step is folded into the interval - eight hours stepped by three is resolved as one
+    twenty-four-hour grid - rather than applied as `gather_every` over the resolved slots.
+    The two agree on a complete panel and disagree on a real one: `gather_every` counts rows,
+    so a venue outage that removes one slot shifts every decision after it to a different
+    time of day, permanently, and a session shorter than the rest does the same. Which
+    funding time a 24-hour strategy trades on is then a property of the gaps in the data
+    rather than of the strategy.
+
+    Daily and coarser cadences keep the row-counting form. A slot there is a session, which
+    is the unit the step is meant to count, and folding a step into a monthly interval is not
+    a duration in the first place.
+    """
+    if step < 1:
+        raise ValueError(f"rebalance step must be >= 1, got {step}")
+    interval = _intraday_cadence_interval(cadence)
+    if interval is not None:
+        return _on_the_clock(available_timestamps.unique().sort(), interval * step)
+    schedule = resolve_rebalance_timestamps(available_timestamps, cadence, calendar)
+    return schedule.gather_every(step) if step > 1 else schedule
+
+
+def declared_rebalance_step(case_study: str, label: str) -> int | None:
+    """The declared step for ``(case_study, label)``, or None when none is declared.
+
+    :func:`get_rebalance_step` raises for an undeclared label, which is right at the
+    point of use: a run must not infer a step. Spec construction needs the softer
+    question, because a case study that declares no step for a label is not in error -
+    it trades every scheduled slot - and its spec must stay byte-identical to what it
+    produced before the step became part of the identity.
+    """
+    try:
+        return get_rebalance_step(case_study, label)
+    except (KeyError, FileNotFoundError):
+        return None
+
+
 def thin_to_rebalance_dates(
     predictions: pl.DataFrame,
     cadence: str = "",
@@ -1417,12 +1547,8 @@ def thin_to_rebalance_dates(
     if n_dates <= 1:
         return predictions
 
-    # Step 1: Calendar-aware schedule resolution
-    schedule_dates = resolve_rebalance_timestamps(all_dates, cadence)
-
-    # Step 2: Apply design-time non-overlapping step
-    if step > 1:
-        schedule_dates = schedule_dates.gather_every(step)
+    # The cadence and the step fix the schedule together, so they resolve together.
+    schedule_dates = resolve_decision_schedule(all_dates, cadence, step)
 
     # Semi-join to filter — avoids Polars is_in precision mismatch
     # (group_by().agg(max) can change Datetime precision)

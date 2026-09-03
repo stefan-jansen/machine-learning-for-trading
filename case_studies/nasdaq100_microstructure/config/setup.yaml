@@ -253,6 +253,19 @@ decision:
   # of dividing by this number. Reading this field as the bar size yields an
   # answer fifteen times too small and nothing in the result shows it.
   bar_frequency: 15_minute
+  # A model decides on its own horizon: a five-minute model every five minutes, a
+  # sixty-minute model every hour. `bar_frequency` above is the default for a label that
+  # declares nothing here, and stays the primary label's cadence.
+  #
+  # This is the decision schedule only. The engine's price feed is one minute
+  # (`config/backtest/base.yaml::calendar.data_frequency`), so a position entered on one
+  # decision is watched every minute until the next - which is what a stop or a
+  # take-profit is measured on, and what a fifteen-minute feed could not express.
+  cadence_by_label:
+    fwd_ret_5m: 5_minute
+    fwd_ret_15m: 15_minute
+    fwd_dir_15m: 15_minute
+    fwd_ret_60m: 60_minute
   decision_snapshot: bar_close
   execution_delay: 1_bar
   execution_price_assumption: next_bar_open_or_vwap
@@ -549,10 +562,14 @@ backtest:
       long_q: [0.90, 0.95, 0.99]
       direction: [long_only, long_short]
       max_slots: [5, 10, 20]
-      hold_bars: [8, 16, 32]              # 2h, 4h, 8h at 15-min grid
+      # hold_bars and bars_per_day count rows of the grid the slot simulator walks, which is
+      # the PRICE grid, now one minute. Restated from the fifteen-minute counts they carried
+      # (8/16/32 and 14) at the same wall-clock durations, so the sweep asks the same question
+      # of the same intervals rather than silently asking about 8, 16 and 32 minutes.
+      hold_bars: [120, 240, 480]          # 2h, 4h, 8h, in minute bars
       exit_signal_q: [null, 0.30, 0.50, 0.70]  # null disables signal-exit
-      pred_freshness_max_min: 14          # variant-A: freshest 1m pred per 15m bar
-      bars_per_day_grid: [14]             # 15m only; 1m cadence failed comprehensively
+      pred_freshness_max_min: 14          # tolerated staleness of a prediction, in minutes
+      bars_per_day_grid: [210]            # was 14 bars of 15 minutes; same 3.5h window
       top_k_grid: [5, 10, 20]
       lookback_days: 21
     # Ch19 risk overlays.
@@ -593,12 +610,24 @@ labels:
     fwd_ret_5m: 5min
     fwd_ret_60m: 60min
     fwd_dir_15m: 15min
-  # Vectorized-backtest thinning step per label: number of schedule slots
-  # to advance per trade so holding periods don't overlap.
+  # How many slots of the DECISION schedule to advance per trade, so a position is held for
+  # its label's horizon and no two holdings overlap. A slot is one interval of the declared
+  # cadence, so these are `ceil(horizon / cadence)` and nothing else.
+  #
+  # That reading is only true because `resolve_rebalance_timestamps` now builds the schedule
+  # from the declared cadence. It used to return the panel's own timestamps unchanged for
+  # every intraday cadence, and this panel carries every minute, so these values thinned
+  # minutes rather than fifteen-minute slots and three of the four labels traded every
+  # minute (ml4t/agent-workspace#187). The values did not change; what they count did.
+  # Every label now trades on a cadence equal to its own horizon (decision.cadence_by_label
+  # above), so one slot is one holding period and no label needs a multi-slot step. The
+  # `fwd_ret_60m: 4` this replaces was `ceil(60 / 15)` against a single fifteen-minute
+  # default; the cadence carries that now, and carries it for the Ch18 sweep arms too,
+  # which differ from the default in exactly this token.
   rebalance_step:
     fwd_ret_15m: 1
     fwd_ret_5m: 1
-    fwd_ret_60m: 4   # 15min schedule, 60min horizon -> ceil(60/15) = 4
+    fwd_ret_60m: 1
     fwd_dir_15m: 1
   # Continuous return that each classification label is derived from.
   classification_eval_label:
