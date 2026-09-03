@@ -407,11 +407,17 @@ print(f"market_data digest: {MARKET_DATA_DIGEST}")
 # bar count that happens to agree - so a grid that was ever coarser or gappier than it looks
 # would raise here rather than ship a longer return under a shorter name.
 #
-# The third catches a short label masked by a longer one's null set. Each session has to be
-# short by exactly its own horizon **plus one**, and no more, so `fwd_ret_5m` carries ten more
-# rows per session than `fwd_ret_15m`; an equal count means one label was gated by the other's
-# nulls. The extra bar is the entry: the last bar of a session has no bar after it to fill at,
-# so it carries no entry price and no label however complete the rest of the window is.
+# The third catches a short label masked by a longer one's null set. A session's tail is
+# short by its own horizon **plus one** - the extra bar is the entry, since the last bar of a
+# session has no bar after it to fill at - and every other missing label has to name its own
+# reason. Under the previous midpoint construction there were no other reasons: a midpoint
+# exists on every bar, so an exact count was the whole check. A VWAP does not. A minute that
+# did not trade has no volume-weighted price, so it drops the label of the bar that would
+# enter on it and the label of the bar that would exit on it, anywhere in the session.
+#
+# So the check is that every unlabelled row outside the tail has a null leg, rather than that
+# there are none. That is the stronger statement: an exact count would pass on a label gated
+# by another's nulls if the totals happened to agree, and this cannot - it asks each row why.
 
 # %%
 for name, h_bars in ((n, HORIZON_BARS[n]) for n in RETURN_LABELS):
@@ -423,14 +429,27 @@ for name, h_bars in ((n, HORIZON_BARS[n]) for n in RETURN_LABELS):
     assert tail[name].null_count() == tail.height, name
     # 2. Every labelled window spans exactly the declared horizon in wall-clock time.
     assert labelled.filter(pl.col("_span") != HORIZONS[name]).height == 0, name
-    # 3. Each session labels its first n - h - 1 bars, so no label crosses a session
-    #    boundary and none is gated by another label's null set. The `+ 1` is the entry bar,
-    #    not slack: the window runs from the bar after the decision to H past that.
-    counted = checked.group_by(GROUP_COLS).agg(
-        (pl.len() - pl.col(name).is_not_null().sum() - LABEL_HORIZON_END_BARS[name]).alias("excess")
+    # 3. Outside that tail, a row is unlabelled only when one of its two legs did not
+    #    trade. No label crosses a session boundary, and none is gated by another's nulls.
+    exit_vwap = pl.col("vwap").shift(-LABEL_HORIZON_END_BARS[name]).over(GROUP_COLS)
+    unexplained = (
+        checked.with_columns(pl.col("vwap").shift(-1).over(GROUP_COLS).alias("_entry"))
+        .with_columns(exit_vwap.alias("_exit"))
+        .filter(
+            pl.col("from_end").gt(h_bars)
+            & pl.col(name).is_null()
+            & pl.col("_entry").is_not_null()
+            & pl.col("_exit").is_not_null()
+        )
     )
-    assert counted.filter(pl.col("excess") != 0).height == 0, name
-    print(f"{name}: {labelled.height:,} labelled, every window exactly {HORIZONS[name]}")
+    assert unexplained.height == 0, (
+        f"{name}: {unexplained.height:,} rows carry no label with both legs quoted"
+    )
+    untraded = checked.filter(pl.col("from_end").gt(h_bars) & pl.col(name).is_null()).height
+    print(
+        f"{name}: {labelled.height:,} labelled, every window exactly {HORIZONS[name]}; "
+        f"{untraded:,} in-session bars dropped for an untraded leg"
+    )
 
 # %%
 # 4. No discrete label is derived from a null return.
