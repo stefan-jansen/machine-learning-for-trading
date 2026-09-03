@@ -14,15 +14,15 @@
 # If a step here fails, the corresponding paragraph of docs/installation.md is
 # wrong. Fix the docs or fix the dependency; do not relax the job.
 #
-# Two kinds of job, because two platforms are documented as unsupported:
+# Two kinds of job, because one documented platform is still unsupported:
 #
 #   ubuntu-latest, macos-15   walk the whole path and expect it to work
-#   windows-latest            assert `uv sync` fails, and fails on scikit-learn
-#   macos-15-intel            assert `uv sync` fails, and fails on torch
+#   windows-latest            walks it too, since econml 0.17.0 made `uv sync` complete
+#   macos-15-intel            asserts `uv sync` fails, and fails on torch
 #
-# The asserting jobs are green while the docs are accurate and red the day either
-# platform becomes installable, which is the day the docs need rewriting. They also
-# fail when the cause changes, so an unrelated break cannot quietly certify the claim.
+# The asserting job is green while the docs are accurate and red the day the platform
+# becomes installable, which is the day the docs need rewriting. It also fails when the
+# cause changes, so an unrelated break cannot quietly certify the claim.
 #
 # What this workflow cannot see. GitHub-hosted Windows runners have no WSL2 and no
 # Docker Desktop, so the recommended Windows path and the Docker path are covered by
@@ -152,18 +152,23 @@ jobs:
           du -sh .venv data 2>/dev/null || true
           df -h . | tail -1
 
-  # docs/installation.md states that installing into Windows Python does not work. This
-  # job is what keeps that statement true, by asserting the failure rather than tolerating
-  # it: `uv sync` is expected to fail, so the job is green while the docs are accurate and
-  # goes red the day native Windows starts installing, which is the day the docs need to
-  # change. `continue-on-error` on the job would have accepted a broken installer or a
-  # regression anywhere else just as happily.
+  # Native Windows used to be asserted unsupported here: `uv sync` died building
+  # scikit-learn 1.6.1, which has no Windows wheel for Python 3.14, and the job's
+  # purpose was to go red the day that stopped being true. It did, on run
+  # 33801342717, once econml 0.17.0 lifted the `scikit-learn<1.7` ceiling.
   #
-  # The observed failure: scikit-learn 1.6.1 has no Windows wheel for Python 3.14 and its
-  # meson build dies on a generated path past the 260-character limit, even on this runner,
-  # which already has the Visual Studio Build Tools.
+  # So this job now walks the same path the unix matrix walks, in pwsh, rather than
+  # asserting a failure. A sync that completes is not a supported platform: the rest
+  # of the documented path - the data-root anchor, the free download, the first
+  # notebook, the LightGBM OpenMP smoke - has never run on native Windows, and
+  # docs/installation.md must describe whatever this job proves, not the sync alone.
+  #
+  # Still outside this job's reach: GitHub-hosted Windows runners have no WSL2 and no
+  # Docker Desktop, so the recommended Windows path stays covered by the manual VM
+  # walk. The runner also arrives with the Visual Studio Build Tools, so the compiler
+  # requirement the docs state is never tested here either.
   windows:
-    name: Windows native (asserted unsupported)
+    name: Windows native
     runs-on: windows-latest
     timeout-minutes: 90
     defaults:
@@ -172,46 +177,87 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The docs give no Windows uv command, because there is no supported Windows path.
-      - name: Install uv
+      # docs/installation.md, "Local Setup with uv" - the PowerShell line of the same step.
+      - name: Install uv as the docs instruct
         run: |
           irm https://astral.sh/uv/install.ps1 | iex
           "$env:USERPROFILE\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
-      - name: uv sync is expected to fail here, for the documented reason
+      - name: uv sync
         run: |
-          uv sync 2>&1 | Tee-Object -Variable out
-          $code = $LASTEXITCODE
-          $text = $out -join "`n"
+          uv sync
+          if ($LASTEXITCODE -ne 0) { throw "uv sync failed with exit $LASTEXITCODE" }
 
-          if ($code -eq 0) {
-            Write-Error @"
-          uv sync SUCCEEDED on native Windows.
-
-          docs/installation.md tells readers that installing into Windows Python is not
-          supported and does not work. That is no longer true, so the documentation is now
-          wrong and should be updated to describe the native Windows path.
-          "@
-            exit 1
+      # The unix half of this check caught a data root that resolved relative to the
+      # working directory, which is what every Jupyter kernel gives a notebook. Windows
+      # resolves paths through a different branch of pathlib, so it is checked separately
+      # rather than assumed to follow.
+      - name: The data root is anchored to the repo, not to the working directory
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = (Get-Location).Path
+          $root = uv run python -c "import os;print(os.environ['ML4T_DATA_PATH'])"
+          Push-Location 01_process_is_edge
+          $chapter = uv run python -c "import os;print(os.environ['ML4T_DATA_PATH'])"
+          Pop-Location
+          $hook = uv run python -c "import sitecustomize;print(sitecustomize.__file__)"
+          Write-Host "repo root:     $root"
+          Write-Host "chapter:       $chapter"
+          Write-Host "sitecustomize: $hook"
+          # Compare resolved paths, not strings: pathlib and PowerShell disagree on
+          # separators and on drive-letter case, and neither disagreement is a defect.
+          function Norm($p) { [IO.Path]::GetFullPath($p).TrimEnd('\').ToLowerInvariant() }
+          if ((Norm $root) -ne (Norm (Join-Path $repo 'data'))) {
+            throw "ML4T_DATA_PATH is $root, expected $(Join-Path $repo 'data')"
+          }
+          if ((Norm $chapter) -ne (Norm $root)) {
+            throw "ML4T_DATA_PATH moved to $chapter inside a chapter directory; it must stay $root"
+          }
+          if ((Norm $hook) -ne (Norm (Join-Path $repo 'sitecustomize.py'))) {
+            throw "sitecustomize resolved to $hook, expected $(Join-Path $repo 'sitecustomize.py')"
           }
 
-          # Any failure would otherwise read as proof of the documented one. A network
-          # blip, a bad lockfile or a broken installer must not quietly certify the claim.
-          if ($text -notmatch 'Failed to build `?scikit-learn') {
-            Write-Error @"
-          uv sync failed on native Windows, but not for the documented reason.
+      - name: Copy the environment template
+        run: Copy-Item .env.example .env
 
-          Expected a scikit-learn build failure, which is what makes native Windows
-          unsupported. Something else broke instead, and this job cannot tell you the
-          documented claim still holds. Read the output above.
-          "@
-            exit 1
+      - name: Verify the installation
+        run: |
+          uv run python scripts/verify_installation.py
+          if ($LASTEXITCODE -ne 0) { throw "verify_installation.py failed with exit $LASTEXITCODE" }
+
+      - name: Download the free datasets
+        run: |
+          uv run python data/download_all.py --free-only
+          if ($LASTEXITCODE -ne 0) { throw "download_all.py failed with exit $LASTEXITCODE" }
+
+      - name: Run the first notebook
+        env:
+          MPLBACKEND: Agg
+          PLOTLY_RENDERER: json
+        run: |
+          uv run python 01_process_is_edge/factor_regimes.py
+          if ($LASTEXITCODE -ne 0) { throw "factor_regimes.py failed with exit $LASTEXITCODE" }
+
+      # LightGBM's OpenMP runtime is the macOS failure this smoke test was written for,
+      # but Windows links a third OpenMP (the MSVC one) and has never been checked.
+      - name: LightGBM fits multithreaded after scikit-learn is on the path
+        run: |
+          uv run python .github/scripts/smoke_lightgbm_openmp.py
+          if ($LASTEXITCODE -ne 0) { throw "smoke_lightgbm_openmp.py failed with exit $LASTEXITCODE" }
+
+      - name: Report the footprint a reader pays
+        if: always()
+        run: |
+          foreach ($dir in '.venv', 'data') {
+            if (Test-Path $dir) {
+              $mb = (Get-ChildItem $dir -Recurse -File -ErrorAction SilentlyContinue |
+                     Measure-Object -Property Length -Sum).Sum / 1MB
+              Write-Host ("{0,-8} {1:N0} MB" -f $dir, $mb)
+            }
           }
-
-          Write-Host "uv sync failed building scikit-learn, as documented (exit $code); native Windows remains unsupported."
-          # GitHub's pwsh shell appends `exit $LASTEXITCODE`, so the non-zero status from
-          # the expected failure would fail this step. Clear it deliberately.
-          exit 0
+          Get-PSDrive -Name (Get-Location).Drive.Name |
+            Select-Object Name, @{n='UsedGB';e={[math]::Round($_.Used/1GB)}},
+                                @{n='FreeGB';e={[math]::Round($_.Free/1GB)}}
 
   # docs/installation.md tells Intel Mac readers to use Docker because the local uv path
   # cannot work there: PyTorch publishes no macOS x86_64 wheel and torch has no sdist, so
