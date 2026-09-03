@@ -31,6 +31,7 @@ import re
 import sqlite3
 import warnings
 from dataclasses import dataclass, field
+from datetime import timedelta
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -1226,6 +1227,30 @@ def load_backtest_prices_for(
 # ---------------------------------------------------------------------------
 
 
+_CADENCE_UNIT_SECONDS = {
+    "min": 60,
+    "minute": 60,
+    "hour": 3600,
+    "h": 3600,
+}
+
+
+def _intraday_cadence_interval(cadence: str) -> timedelta | None:
+    """The interval a cadence token names, or None when it names no intraday interval.
+
+    Tokens are `<n>_<unit>` possibly with a trailing qualifier: `15_minute`, `4_hour`,
+    `8_hour_funding_aligned`. Anything that does not parse - `daily_close`,
+    `monthly_month_end` - is not an intraday cadence and is left to the callers above.
+    """
+    parts = cadence.split("_")
+    if len(parts) < 2 or not parts[0].isdigit():
+        return None
+    seconds = _CADENCE_UNIT_SECONDS.get(parts[1])
+    if seconds is None:
+        return None
+    return timedelta(seconds=int(parts[0]) * seconds)
+
+
 def resolve_rebalance_timestamps(
     available_timestamps: pl.Series,
     cadence: str,
@@ -1318,8 +1343,34 @@ def resolve_rebalance_timestamps(
         )
         return week_ends["rebal_ts"]
 
-    # All other cadences: daily, 8_hour, 15_min, etc.
-    # The data is already at the correct granularity — every timestamp is valid.
+    interval = _intraday_cadence_interval(cadence)
+    if interval is not None:
+        # Construct the schedule rather than assume the panel already is one.
+        #
+        # This branch used to return `ts` unchanged for every intraday cadence, on the
+        # comment "the data is already at the correct granularity". That is a precondition
+        # nothing checked, and nasdaq100_microstructure did not meet it: its prediction panel
+        # carries every minute, so a declared fifteen-minute cadence resolved to a decision
+        # every minute and the backtest traded fifteen times more often than the config said
+        # (ml4t/agent-workspace#187). Constructing the schedule makes the declaration
+        # decisive and makes a panel at any resolution produce the same schedule - which is
+        # what the Ch18 cadence sweep needs, since its arms differ only in this token.
+        #
+        # Anchored on each session's first available timestamp, not on midnight: the panel
+        # starts when the features finish warming up (10:31 for nasdaq100), and an offset
+        # from midnight would put the first decision of every session at a different lag
+        # from the data it can actually see. Sessions are also not all the same length, so a
+        # count that runs across the close walks to a different time of day and stays there.
+        seconds = int(interval.total_seconds())
+        return (
+            pl.DataFrame({"ts": ts})
+            .with_columns(_d=pl.col("ts").dt.date())
+            .with_columns(_o=(pl.col("ts") - pl.col("ts").min().over("_d")).dt.total_seconds())
+            .filter(pl.col("_o") % seconds == 0)
+            .get_column("ts")
+        )
+
+    # Daily and coarser cadences that name no interval: every timestamp is a valid slot.
     return ts
 
 

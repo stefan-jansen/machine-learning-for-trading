@@ -125,20 +125,28 @@ def test_a_declared_step_reaches_the_registered_spec() -> None:
     from case_studies.utils.backtest_loaders import (
         declared_rebalance_step,
         get_backtest_config,
-        load_backtest_prices,
     )
     from case_studies.utils.backtest_presets import build_backtest_spec
 
-    case_study, label = "etfs", "fwd_ret_21d"
+    case_study, label = "cme_futures", "fwd_ret_21d"
     step = declared_rebalance_step(case_study, label)
     assert step is not None, f"{case_study}/{label} declares no step; pick one that does"
 
-    bt = get_backtest_config(case_study)
-    prices = load_backtest_prices(case_study, max_symbols=2)
+    prices = pl.DataFrame(
+        {
+            "timestamp": [datetime(2024, 1, d) for d in range(2, 12) for _ in range(2)],
+            "symbol": ["AAA", "BBB"] * 10,
+            "open": [100.0, 50.0] * 10,
+            "high": [101.0, 51.0] * 10,
+            "low": [99.0, 49.0] * 10,
+            "close": [100.5, 50.5] * 10,
+            "volume": [1000.0, 900.0] * 10,
+        }
+    )
     spec = build_backtest_spec(
         case_study,
-        bt,
-        signal={"method": "equal_weight_top_k", "top_k": 10, "long_short": False},
+        get_backtest_config(case_study),
+        signal={"method": "equal_weight_top_k", "top_k": 2, "long_short": False},
         prices=prices,
         prediction_hash="pred123",
         initial_cash=1_000_000.0,
@@ -170,8 +178,8 @@ def test_execution_reads_the_recorded_step_not_the_editable_file() -> None:
     # The spec wins over whatever setup.yaml currently says.
     assert resolved_rebalance_step({"step": 7}, "nasdaq100_microstructure", "fwd_ret_15m") == 7
     # A spec written before the step entered the identity falls back to the declaration.
-    assert resolved_rebalance_step({}, "nasdaq100_microstructure", "fwd_ret_15m") == 15
-    assert resolved_rebalance_step(None, "nasdaq100_microstructure", "fwd_ret_5m") == 5
+    assert resolved_rebalance_step({}, "nasdaq100_microstructure", "fwd_ret_15m") == 1
+    assert resolved_rebalance_step(None, "cme_futures", "fwd_ret_21d") == 3
 
     with pytest.raises(ValueError, match="must be >= 1"):
         resolved_rebalance_step({"step": 0}, "nasdaq100_microstructure", "fwd_ret_15m")

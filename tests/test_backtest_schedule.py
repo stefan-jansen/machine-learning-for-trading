@@ -296,20 +296,27 @@ class TestGetRebalanceStep:
 
         assert get_rebalance_step("us_firm_characteristics", "fwd_ret_1m") == 1
 
-    def test_nasdaq100_steps_are_the_horizon_in_minutes(self):
-        """Every nasdaq100 step is its label's horizon in minutes, because a slot is a minute.
+    def test_nasdaq100_trades_each_label_on_its_own_horizon(self):
+        """Each label declares a cadence equal to its horizon, so one slot is one holding.
 
-        These were `ceil(horizon / 15)` - 1, 1, 4, 1 - which is right only if the panel the
-        step thins is a fifteen-minute one. It is not: `03_financial_features` emits every
-        minute and thins to the decision grid for two figures only. So the old values traded
-        every minute for three of the four labels, against a fifteen-minute price feed that
-        held a different interval entirely (ml4t/agent-workspace#187).
+        These steps read as `ceil(horizon / cadence)` and are all 1 because the cadence now
+        varies per label rather than being a single fifteen-minute default. What changed is
+        not the arithmetic but what a slot is: `resolve_rebalance_timestamps` builds the
+        schedule from the declared cadence instead of returning the panel unchanged, and
+        this panel carries every minute (ml4t/agent-workspace#187).
         """
-        from case_studies.utils.backtest_loaders import get_rebalance_step
+        from case_studies.utils.backtest_loaders import get_backtest_config, get_rebalance_step
 
-        horizons = {"fwd_ret_5m": 5, "fwd_ret_15m": 15, "fwd_ret_60m": 60, "fwd_dir_15m": 15}
-        for label, minutes in horizons.items():
-            assert get_rebalance_step("nasdaq100_microstructure", label) == minutes, label
+        config = get_backtest_config("nasdaq100_microstructure")
+        expected = {
+            "fwd_ret_5m": "5_minute",
+            "fwd_ret_15m": "15_minute",
+            "fwd_dir_15m": "15_minute",
+            "fwd_ret_60m": "60_minute",
+        }
+        for label, cadence in expected.items():
+            assert config.cadence_for(label) == cadence, label
+            assert get_rebalance_step("nasdaq100_microstructure", label) == 1, label
 
     def test_nasdaq100_fwd_ret_5m_is_not_read_as_five_months(self):
         """Regression: `(5, m)` once parsed as 5 MONTHS, giving a step near 10,000.

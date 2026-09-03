@@ -253,6 +253,19 @@ decision:
   # of dividing by this number. Reading this field as the bar size yields an
   # answer fifteen times too small and nothing in the result shows it.
   bar_frequency: 15_minute
+  # A model decides on its own horizon: a five-minute model every five minutes, a
+  # sixty-minute model every hour. `bar_frequency` above is the default for a label that
+  # declares nothing here, and stays the primary label's cadence.
+  #
+  # This is the decision schedule only. The engine's price feed is one minute
+  # (`config/backtest/base.yaml::calendar.data_frequency`), so a position entered on one
+  # decision is watched every minute until the next - which is what a stop or a
+  # take-profit is measured on, and what a fifteen-minute feed could not express.
+  cadence_by_label:
+    fwd_ret_5m: 5_minute
+    fwd_ret_15m: 15_minute
+    fwd_dir_15m: 15_minute
+    fwd_ret_60m: 60_minute
   decision_snapshot: bar_close
   execution_delay: 1_bar
   execution_price_assumption: next_bar_open_or_vwap
@@ -597,25 +610,25 @@ labels:
     fwd_ret_5m: 5min
     fwd_ret_60m: 60min
     fwd_dir_15m: 15min
-  # How many slots of the prediction panel to advance per decision, so a position is held
-  # for its label's horizon and no two holdings overlap.
+  # How many slots of the DECISION schedule to advance per trade, so a position is held for
+  # its label's horizon and no two holdings overlap. A slot is one interval of the declared
+  # cadence, so these are `ceil(horizon / cadence)` and nothing else.
   #
-  # The panel is MINUTE-level: 03_financial_features emits every minute and thins to the
-  # decision grid only for two figures. So a slot is one minute and the step is the horizon
-  # in minutes - not `ceil(horizon / 15)`, which is what these values were before and which
-  # made every label trade every minute against a fifteen-minute price feed
-  # (ml4t/agent-workspace#187).
-  #
-  # `apply_rebalance_step` anchors the count inside each session. That is load-bearing here
-  # rather than a nicety: the panel starts at 10:31 after the warmup the features pay, so a
-  # regular session carries 329 slots, and 329 is divisible by none of 5, 15 or 60. Counted
-  # across the close, every one of these steps would walk to a different time of day and stay
-  # there.
+  # That reading is only true because `resolve_rebalance_timestamps` now builds the schedule
+  # from the declared cadence. It used to return the panel's own timestamps unchanged for
+  # every intraday cadence, and this panel carries every minute, so these values thinned
+  # minutes rather than fifteen-minute slots and three of the four labels traded every
+  # minute (ml4t/agent-workspace#187). The values did not change; what they count did.
+  # Every label now trades on a cadence equal to its own horizon (decision.cadence_by_label
+  # above), so one slot is one holding period and no label needs a multi-slot step. The
+  # `fwd_ret_60m: 4` this replaces was `ceil(60 / 15)` against a single fifteen-minute
+  # default; the cadence carries that now, and carries it for the Ch18 sweep arms too,
+  # which differ from the default in exactly this token.
   rebalance_step:
-    fwd_ret_15m: 15
-    fwd_ret_5m: 5
-    fwd_ret_60m: 60
-    fwd_dir_15m: 15
+    fwd_ret_15m: 1
+    fwd_ret_5m: 1
+    fwd_ret_60m: 1
+    fwd_dir_15m: 1
   # Continuous return that each classification label is derived from.
   classification_eval_label:
     fwd_dir_15m: fwd_ret_15m
