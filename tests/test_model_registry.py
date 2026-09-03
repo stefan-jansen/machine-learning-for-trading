@@ -166,26 +166,21 @@ _REGISTERING_SUFFIXES = frozenset(
 )
 
 
-# Notebooks whose recorded entry point is the MODEL name rather than their own stem, which is
-# what the pre-migration `run_case_study_model(..., notebook=f"dl_{MODEL}")` wrote.
+# A registering notebook records its own stem, in every case study. There used to be a map of
+# four exceptions here, holding notebooks that recorded the MODEL name instead - what the
+# pre-migration `run_case_study_model(..., notebook=f"dl_{MODEL}")` wrote. All four have since
+# migrated onto the research boundary and now record the stem, so the map expected values no
+# registry held any more and this assertion failed on a fully successful run. Measured on the
+# canonical registries on 2026-09-02:
 #
-# `sp500_equity_option_analytics` is not in this map: its ten registering notebooks all record
-# their stem, which is the value that answers the question the column exists for - which
-# notebook produced this row. `dl_lstm` names a model, and two notebooks in different case
-# studies can fit the same one. The remaining four entries are other case studies' to settle,
-# and until they do, the fleet has both conventions in circulation - measured 2026-08-25, when
-# the only two non-NULL rows in all nine registries were `09_dl_lstm` and `dl_tsmixer`.
-_DL_FAMILY_ENTRY_POINTS = {
-    ("cme_futures", "09_dl_lstm"): "dl_lstm",
-    ("etfs", "10_dl_tsmixer"): "dl_tsmixer",
-    ("sp500_options", "09a_lstm"): "dl_lstm",
-    ("sp500_options", "09b_patchtst"): "dl_patchtst",
-}
-
-
-def _expected_entry_point(case_study: str, stage: str) -> str:
-    """Return the exact entry point declared by one model notebook."""
-    return _DL_FAMILY_ENTRY_POINTS.get((case_study, stage), stage)
+#   cme_futures  09_dl_lstm     2026-08-30   (was expected to write `dl_lstm`)
+#   etfs         10_dl_tsmixer  2026-08-28   (`dl_tsmixer` on 2026-08-24, then the stem)
+#   sp500_options 09a_lstm      2026-09-01   (was expected to write `dl_lstm`)
+#   sp500_options 09b_patchtst  2026-09-01   (was expected to write `dl_patchtst`)
+#
+# The stem is the value that answers the question the column exists for - which notebook
+# produced this row. A model name cannot: two notebooks in different case studies fit the same
+# model. Do not reintroduce the map; if a notebook stops recording its stem, that is the defect.
 
 
 def _quick_parameters(
@@ -251,24 +246,27 @@ def test_etf_checkpoint_contract_parameters_come_from_notebook_overrides() -> No
 
 
 @pytest.mark.parametrize(
-    ("case_study", "stage", "entry_point"),
+    "stage",
     [
-        ("etfs", "09_dl_lstm", "09_dl_lstm"),
-        ("etfs", "10_dl_tsmixer", "dl_tsmixer"),
-        ("sp500_options", "09a_lstm", "dl_lstm"),
-        ("sp500_options", "09b_patchtst", "dl_patchtst"),
-        ("etfs", "11b_ipca", "11b_ipca"),
-        ("etfs", "11c_conditional_autoencoder", "11c_conditional_autoencoder"),
+        "09_dl_lstm",
+        "10_dl_tsmixer",
+        "09a_lstm",
+        "09b_patchtst",
+        "11b_ipca",
+        "11c_conditional_autoencoder",
     ],
 )
-def test_registering_stage_maps_to_its_actual_entry_point(
-    case_study: str, stage: str, entry_point: str
-) -> None:
+def test_a_registering_stage_is_recognised_by_its_suffix(stage: str) -> None:
+    """The six stages whose registration the entry-point assertion below covers.
+
+    This used to also assert a stage-to-entry-point mapping. The mapping is gone - every
+    notebook records its stem - so what is left to check is that the suffix is one the
+    registration assertion is reached for. A stage missing from ``_REGISTERING_SUFFIXES``
+    is skipped there rather than failed, which is the silence the assertion exists to break.
+    """
     match = STAGE_RE.match(stage)
     assert match is not None
-    suffix = stage[len(match.group(0)) :]
-    assert suffix in _REGISTERING_SUFFIXES
-    assert _expected_entry_point(case_study, stage) == entry_point
+    assert stage[len(match.group(0)) :] in _REGISTERING_SUFFIXES
 
 
 # ---------------------------------------------------------------------------
@@ -581,7 +579,7 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
             f"{case_study}::{stage} expects to register but wrote no registry under "
             f"{isolated_model_output}"
         )
-        expected_notebook = _expected_entry_point(case_study, stage)
+        expected_notebook = stage
         runs = _query_registry(
             registry_db,
             "training_runs",
