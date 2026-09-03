@@ -9,6 +9,7 @@ Two modes of operation:
 import json
 import os
 import shutil
+import sys
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -32,6 +33,50 @@ CASE_STUDY_IDS = [
     "sp500_options",
     "us_equities_panel",
 ]
+
+
+# Set by ``seeded_output_dir`` so the per-test restore below knows the value the
+# session deliberately installed, rather than reverting it.
+_SESSION_OUTPUT_DIR: str | None = None
+
+
+@pytest.fixture(autouse=True)
+def restore_output_root():
+    """No test leaves ML4T_OUTPUT_DIR pointing at its own tmp_path.
+
+    ``Study.activate()`` sets ML4T_OUTPUT_DIR for the whole process and caches the
+    root it installed, which is what a notebook wants and what makes the test corpus
+    order-dependent: the last test to activate leaves every later test resolving
+    ``config/setup.yaml`` under a tmp_path pytest has since deleted.
+
+    Measured on 2026-08-24: ``tests/test_sweep_config_seam.py`` passes 22 on its own
+    and fails 19 when it runs after ``tests/test_sp500_options_research.py``, on
+    ``FileNotFoundError: .../test_official_population_is_sn0/workspace/
+    us_firm_characteristics/config/setup.yaml``. Six test files already carry a
+    module-level ``os.environ.pop("ML4T_OUTPUT_DIR", None)`` against this; each one
+    protects only the file that remembers to write it, and only against a leak from
+    a file that ran earlier.
+
+    The module-level cache has to be cleared with the variable. ``activate()`` skips
+    the write when the root it is asked for equals the one it last installed, so
+    restoring the environment alone leaves the next activation of the same root
+    silently doing nothing.
+    """
+    before = os.environ.get("ML4T_OUTPUT_DIR")
+    yield
+    target = _SESSION_OUTPUT_DIR if _SESSION_OUTPUT_DIR is not None else before
+    if os.environ.get("ML4T_OUTPUT_DIR") == target:
+        return
+    if target is None:
+        os.environ.pop("ML4T_OUTPUT_DIR", None)
+    else:
+        os.environ["ML4T_OUTPUT_DIR"] = target
+    # Only if the workspace module was imported: touching it otherwise would pull the
+    # research package into every test in the corpus.
+    workspace = sys.modules.get("case_studies.research.workspace")
+    if workspace is not None:
+        workspace._ACTIVE_OUTPUT_ROOT = None
+        workspace._clear_root_sensitive_caches()
 
 
 def generated_env_contents(repo_root: Path, environ: Mapping[str, str]) -> str:
@@ -163,17 +208,42 @@ def populated_data_dir(test_data_dir):
     pytest.skip("No test data available. Set ML4T_DATA_PATH or run in CI.")
 
 
+def _resolve_intermediates_root() -> Path | None:
+    """Where the pre-computed pipeline intermediates are, or ``None``.
+
+    Two candidates, in order, because the two places this runs disagree on both:
+    beside the resolved data path (the test-data repo layout, which is what CI has -
+    the checkout lands under the workspace), then the well-known workstation path.
+    Taking only the first misses a workstation whose ``ML4T_DATA_PATH`` points at the
+    canonical Dropbox data root, whose parent holds no intermediates; taking only the
+    second misses every CI runner. The seeding fixture below has always tried both;
+    ``intermediates_dir`` tried only the first, which is why the tests that consume it
+    skipped everywhere.
+    """
+    data_path = _resolve_data_path()
+    candidates = []
+    if data_path:
+        candidates.append(Path(data_path).parent / "intermediates")
+    candidates.append(Path.home() / "ml4t" / "test-data" / "intermediates")
+    for candidate in candidates:
+        if candidate.exists() and any(candidate.iterdir()):
+            return candidate
+    return None
+
+
 @pytest.fixture(scope="session")
 def intermediates_dir(test_data_dir):
     """Return directory with pre-computed pipeline intermediates.
 
     When running downstream chapters (Ch11+), they need labels/features
     from pipeline stages. These are pre-computed and stored in test-data repo.
+
+    ``test_data_dir`` is requested for its side effect - it puts the resolved data
+    path in ``ML4T_DATA_PATH`` for the rest of the session - not for a skip, which it
+    does not do (``populated_data_dir`` is the fixture that skips). The path itself
+    comes from ``_resolve_intermediates_root``, which the seeding fixture uses too.
     """
-    idir = test_data_dir.parent / "intermediates"
-    if idir.exists() and any(idir.iterdir()):
-        return idir
-    return None
+    return _resolve_intermediates_root()
 
 
 SEEDED_SUBDIRS = ("features", "labels", "evaluation", "run_log", "results", "benchmark")
@@ -235,7 +305,9 @@ def seeded_output_dir(tmp_path_factory):
         output_dir = tmp_path_factory.mktemp("ml4t_output")
 
     # Set the env var so notebooks see this worker's output dir
+    global _SESSION_OUTPUT_DIR
     os.environ["ML4T_OUTPUT_DIR"] = str(output_dir)
+    _SESSION_OUTPUT_DIR = str(output_dir)
 
     cs_root = REPO_ROOT / "case_studies"
 
@@ -266,16 +338,7 @@ def seeded_output_dir(tmp_path_factory):
     # executing the full pipeline first.
     # Look for intermediates next to data (test-data repo layout) or at well-known path.
     data_path = _resolve_data_path()
-    intermediates_root = None
-    if data_path:
-        candidate = Path(data_path).parent / "intermediates"
-        if candidate.exists():
-            intermediates_root = candidate
-    if intermediates_root is None:
-        # Well-known test-data repo location
-        candidate = Path.home() / "ml4t" / "test-data" / "intermediates"
-        if candidate.exists():
-            intermediates_root = candidate
+    intermediates_root = _resolve_intermediates_root()
     if intermediates_root and intermediates_root.exists():
         for cs_id in CASE_STUDY_IDS:
             src = intermediates_root / cs_id
@@ -312,6 +375,38 @@ def seeded_output_dir(tmp_path_factory):
     from tests.fixtures.seed_results import seed_results
 
     seed_results(output_dir, CASE_STUDY_IDS)
+
+    # The preview root is deliberately NOT seeded. `Study.activate()` links only `labels` and
+    # `features` into the preview case directory and opens an empty registry there, and it was
+    # tempting to seed that root too so a read-only downstream notebook would find a candidate
+    # index. Measured on etfs, that does more harm than the gap it fills: the seeded rows land
+    # in the same `(split, family, label)` coverage group as the predictions the preview run
+    # actually fits, and they cannot win it - a seeded artifact carries 60 dates against a
+    # fitted 447-483 - so `full_coverage_prediction_sql` admits neither and `14_backtest`
+    # refuses to rank anything. With the preview root left empty, `13_model_analysis` passes
+    # anyway and that refusal does not arise.
+    #
+    # A notebook that genuinely has nothing to read under preview should say so, which is what
+    # the refusals in 14 through 18 already do.
+
+    # The reader-facing crypto workflow opens the seeded case directory as a Study workspace.
+    # Mark that existing fixture root explicitly so Study.open does not confuse it with an
+    # unrelated directory and so preview outputs remain under this test worker's output root.
+    crypto_root = output_dir / "crypto_perps_funding"
+    (crypto_root / ".study.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "case_study": "crypto_perps_funding",
+                "baseline_source_commit": "test-fixture",
+                "baseline_manifest_sha256": "test-fixture",
+                "fixture": True,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
 
     # Symlink AQR factor data so AQRFactorProvider finds it at ~/ml4t/data/aqr_factors
     aqr_src = data_path.parent / "data" / "factors" / "aqr" if data_path else None
@@ -473,6 +568,41 @@ def pytest_runtest_logreport(report):
     with open(_RESULTS_PATH, "a") as f:
         f.write(json.dumps(record) + "\n")
         f.flush()
+
+
+@pytest.fixture(autouse=True)
+def _restore_output_root():
+    """Put back the process-global output root a test may have redirected.
+
+    ``Study.open``/``Study.activate`` set ``ML4T_OUTPUT_DIR`` and
+    ``workspace._ACTIVE_OUTPUT_ROOT``, and a test that leaves either pointing into its own
+    tmp_path makes ``get_case_study_dir`` resolve there for every later test in the worker.
+
+    Restored rather than deleted: ``seeded_output_dir`` is session-scoped and writes the
+    per-worker path exactly once, so a teardown that removes the variable removes it for the
+    rest of the worker, and every later module resolving through ``get_case_study_dir`` then
+    reads the committed ``case_studies/`` tree instead of the seeded output dir. This lives here
+    rather than in each module because thirteen copies of it drifted apart once already.
+    """
+    previous = os.environ.get("ML4T_OUTPUT_DIR")
+    yield
+    if previous is None:
+        os.environ.pop("ML4T_OUTPUT_DIR", None)
+    else:
+        os.environ["ML4T_OUTPUT_DIR"] = previous
+    # Read out of sys.modules rather than importing. The module holds the only state this
+    # resets, so a test that never imported it left nothing to reset - and importing it here
+    # would make every test in the run pay for the import. `case_studies.research` pulls in
+    # `utils.config`, which raises FileNotFoundError at import when ML4T_DATA_PATH names a
+    # directory that is not there. The `test-unit` job is exactly that environment: it checks
+    # out no test-data, and its Chapter 21 step does not override the workflow-level path. An
+    # autouse fixture that imports turns that into a teardown error on every test in the step -
+    # 70 passed, 70 errors - against tests that read nothing from disk.
+    workspace = sys.modules.get("case_studies.research.workspace")
+    if workspace is None:
+        return
+    workspace._ACTIVE_OUTPUT_ROOT = None
+    workspace._clear_root_sensitive_caches()
 
 
 @pytest.fixture

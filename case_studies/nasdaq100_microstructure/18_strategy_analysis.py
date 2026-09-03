@@ -16,25 +16,31 @@
 # %% [markdown]
 # # NASDAQ-100 Microstructure — Strategy Analysis
 #
-# This notebook converts the locked May 2026 backtest registry for the
-# NASDAQ-100 15-minute microstructure case study into a per-case-study
-# strategy assessment. Every metric is reported with its block-bootstrap
-# 95% confidence interval, every comparison goes through
-# `backtest_paired_metrics`, and the holdout closure uses paired rather
-# than point-difference reasoning. Cross-case-study comparison is
-# reserved for Chapter 20.
+# This notebook turns the backtest registry for the NASDAQ-100 microstructure
+# case study into one strategy assessment. It reports every metric with an
+# interval rather than as a point, compares strategies against each other in
+# pairs rather than by subtracting summary numbers, and reads the holdout once.
+# Comparison against other case studies is reserved for the synthesis chapter.
+#
+# Two ideas run through it. **Paired comparison**: two strategies evaluated on
+# the same days are compared day by day, so the shared market movement cancels
+# and what is left is the difference between them. Subtracting one summary
+# statistic from another throws that pairing away and produces an interval far
+# wider than the evidence warrants. **Block bootstrap**: intervals are built by
+# resampling contiguous blocks of days rather than individual days, because
+# returns on consecutive days are related and resampling them independently would
+# understate the uncertainty.
 #
 # **Learning objectives**
 #
-# - Read uncertainty-aware backtest metrics (Sharpe ± CI, PSR, DSR) from
-#   the registry rather than transcribing point estimates.
-# - Trace a rank-1 lineage through pipeline stages with paired-bootstrap
-#   stage-transition deltas.
-# - Use the equal-weight universe benchmark (the 100-stock NASDAQ-100
-#   panel) for both validation and holdout diagnostics.
-# - Read a case study where the rank-1 strategy Sharpe excludes zero on
-#   the *negative* side — the strategy-analysis notebook's CI continuum represents that
-#   outcome the same way it represents a credible positive edge.
+# - Read backtest metrics with their intervals from the registry rather than
+#   transcribing point estimates
+# - Trace one selected lineage through the pipeline stages and attribute the
+#   change at each stage to the field that stage varied
+# - Compare a strategy against an equal-weight benchmark on the same days, on
+#   both the validation and the holdout window
+# - State a gate so that it can fail, and say what passing it does and does not
+#   establish
 #
 # **Book reference**: Chapter 20, §20.1 (the §9 handoff feeds Ch20's
 # cross-case-study aggregation).
@@ -42,9 +48,12 @@
 # **Prerequisites**: case-study pipeline through `14_backtest`; the
 # locked registry (`case_studies/nasdaq100_microstructure/run_log/registry.db`).
 #
-# **Scope**: registry-read only — no training, no re-backtesting, no
-# registry writes. The `backtest_paired_metrics` table was populated by
-# `20_strategy_synthesis/01_aggregate_synthesis.py`.
+# **Scope**: no training and no re-backtesting. The notebook reads what
+# `14_backtest` through `17_costs` registered, and derives
+# `cohort_metrics` and `backtest_paired_metrics` from those runs itself when
+# they are absent, so the case study no longer depends on a chapter-20
+# notebook having been run first. On an already-populated registry it writes
+# nothing.
 
 # %%
 """NASDAQ-100 Microstructure — Strategy Analysis."""
@@ -71,6 +80,7 @@ from ml4t.diagnostic.integration import (
 
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_metrics, load_benchmark_returns
+from case_studies.utils.cohort_metrics import compute_and_register
 from case_studies.utils.factor_attribution import (
     compute_bootstrap_ci,
     compute_rolling_exposures,
@@ -80,7 +90,12 @@ from case_studies.utils.factor_attribution import (
     plot_rolling_exposures,
     run_factor_regression,
 )
-from case_studies.utils.notebook_contracts import excluded_families
+from case_studies.utils.notebook_contracts import (
+    derived_tables_off_canonical_universe,
+    excluded_families,
+    strategy_input_counts,
+)
+from case_studies.utils.paired_metrics import populate_paired_metrics, rung_for
 from case_studies.utils.registry import (
     load_backtest_fold_metrics,
     load_backtest_metrics,
@@ -98,6 +113,7 @@ from case_studies.utils.strategy_analysis import (
     plot_sharpe_waterfall,
     write_strategy_assessment,
 )
+from case_studies.utils.sweep_config import get_universe_filters_for
 from utils.paths import get_case_study_dir, get_output_dir
 
 # %% tags=["parameters"]
@@ -105,11 +121,6 @@ MAX_SYMBOLS = 0
 
 # %%
 CASE_STUDY = "nasdaq100_microstructure"
-# Strategy-analysis convention: use the cross-stage rank-1 backtest's
-# actual label for the lineage analysis. PRIMARY_LABEL is derived from
-# the rank-1 selection below; the hardcoded default mirrors
-# setup.yaml::labels.primary.
-PRIMARY_LABEL = "fwd_ret_15m"
 PERIODS_PER_YEAR = 252  # strategy returns are aggregated to daily before Sharpe
 CASE_DIR = get_case_study_dir(CASE_STUDY)
 OUTPUT_DIR = get_output_dir(20, CASE_STUDY)
@@ -120,10 +131,116 @@ with open(CASE_DIR / "config" / "setup.yaml") as f:
 
 explorer = BacktestExplorer(CASE_STUDY)
 print(explorer)
-if excluded_families(CASE_STUDY):
-    print(
-        "Active-model filter: excluding "
-        f"{', '.join(sorted(excluded_families(CASE_STUDY)))} pending corrected reruns"
+
+# %% [markdown]
+# ### Produce the derived tables this notebook reads
+#
+# `cohort_metrics` and `backtest_paired_metrics` are read below - the first for the deflated
+# Sharpe and PBO columns, the second to find the validation counterpart of a holdout run. Until
+# now nothing in this case study wrote either. The header of this notebook said so outright:
+# they "were populated by `20_strategy_synthesis/01_aggregate_synthesis.py`", a chapter-20
+# notebook. A case study that depends upward into the chapter that aggregates it cannot be run
+# from its own pipeline, and its numbers exist only after something outside it happens to run.
+#
+# Both producers already exist as case-study-scoped functions, extracted from those very Ch20
+# loops - `populate_paired_metrics` says so in its own docstring - and `cme_futures/17` is the
+# notebook that uses them. This adopts the same pattern.
+#
+# Population is idempotent (keyed upserts, reproducing stored values exactly), but it still
+# rewrites the registry, so it runs only when a table is absent or empty. On an already-populated
+# registry this notebook stays a pure reader and touches nothing.
+
+# %%
+_db = CASE_DIR / "run_log" / "registry.db"
+_counts_before = strategy_input_counts(CASE_DIR)
+_n_backtests = _counts_before["backtest_runs"]
+_n_cohorts = _counts_before["cohort_metrics"]
+_n_pairs = _counts_before["backtest_paired_metrics"]
+
+if _n_backtests == 0:
+    # Refuse rather than report. Every figure and gate below is computed from backtest runs, so
+    # with none registered this notebook does not produce a weaker answer - it produces an empty
+    # one that reads like a finished analysis. `14_backtest` is what fills this.
+    raise RuntimeError(
+        f"{CASE_STUDY} has no registered backtest runs, so there is nothing to analyse. "
+        "Run 14_backtest through 17_costs first; this notebook reads what they "
+        "register and computes no backtests of its own."
+    )
+
+# Both producers need this case study's canonical selection, and passing neither is not a
+# smaller version of passing both - it is a different selection. `setup.yaml` says the
+# full-universe variant "is NOT a canonical rank-1 / cohort / DSR candidate" and lives only in
+# the 17_costs comparison, so a cohort computed without the filter mixes rows the case study
+# excludes by declaration into the leaders, trial counts, DSR and PBO. The filter is read from
+# `setup.yaml` rather than written here, so it cannot disagree with the sweep that produced the
+# runs. The rung pin is the matching statement for paired metrics: nasdaq's carrier is the
+# cost-feasible ensemble, fixed before the holdout was opened.
+_UNIVERSE_FILTER = get_universe_filters_for(CASE_STUDY)[0]
+_RUNG = rung_for(CASE_STUDY)
+
+# The two tables are filled independently. A single `if either is empty` guard recomputed both,
+# and `compute_and_register` writes with `replace_all=True` - so a registry with correct cohorts
+# and an empty paired table would have had its cohorts replaced as a side effect of populating
+# the pairs.
+# A row count answers "has this been populated", which is not what a rerun needs to know. Both
+# tables are written from a selection, and one populated by an earlier run that selected
+# differently - before this notebook passed the universe filter, say - is fully populated and
+# wrong. Neither table records the selection that produced it, so it is recovered from what the
+# rows point at: a canonical row cannot reference a backtest run outside the canonical universe.
+_stale = derived_tables_off_canonical_universe(CASE_DIR, _UNIVERSE_FILTER)
+for _table in sorted(_stale):
+    print(f"{_table} references runs outside {_UNIVERSE_FILTER}, so it is rebuilt")
+
+if _n_cohorts == 0 or "cohort_metrics" in _stale:
+    # `compute_and_register` writes with `replace_all=True`, so a rebuild that computes no
+    # cohort empties the table rather than leaving the previous one - the opposite of what
+    # `populate_paired_metrics` does on the same failure. An emptied table is also clean by
+    # the universe check below, which reads rows and finds none, so the wipe would pass
+    # unnoticed and every cohort figure would render blank. Catch it here, where the before
+    # and after counts are both in hand.
+    _n_cohorts_before = _n_cohorts
+    _counts = compute_and_register(CASE_STUDY, universe_filter=_UNIVERSE_FILTER)
+    _n_cohorts = sum(_counts[k] for k in ("family", "stagelabel", "label"))
+    if _n_cohorts == 0:
+        # Backtests are registered - the refusal above guarantees it - so a run that computes
+        # no cohort means the canonical selection matched nothing, or matched too few variants
+        # per group for a cohort to exist. Either way the selection-bias figures have no input,
+        # and rendering them blank reads like an analysis that found nothing rather than one
+        # that was never computed. That is the same reason this notebook refuses an empty
+        # `backtest_runs`, so it refuses here too.
+        _lost = (
+            f" and replaced {_n_cohorts_before} existing rows with none"
+            if _n_cohorts_before > 0
+            else ""
+        )
+        raise RuntimeError(
+            f"rebuilding cohort_metrics for {_UNIVERSE_FILTER} produced no cohort{_lost}. "
+            f"Check that {_UNIVERSE_FILTER} matches the backtest runs this case study "
+            f"registered, and that the sweep left more than one variant per cohort."
+        )
+    print(f"populated cohort_metrics: {_n_cohorts} rows")
+else:
+    print(f"already populated: cohort_metrics {_n_cohorts} rows")
+
+if _n_pairs == 0 or "backtest_paired_metrics" in _stale:
+    _pairs = populate_paired_metrics(CASE_STUDY, explorer, rung=_RUNG, replace_all=True)
+    _n_pairs = sum(1 for row in _pairs if "skip" not in row)
+    print(f"populated backtest_paired_metrics: {_n_pairs} pairs")
+else:
+    print(f"already populated: backtest_paired_metrics {_n_pairs} pairs")
+
+# A rebuild that could not produce a canonical table leaves the previous one in place, which
+# is the right call for the data - a stale table is recoverable and deleted rows are not - but
+# the wrong one for this notebook, which would go on to read those rows and present selection
+# statistics computed under a universe the chapter does not claim. Refuse instead of rendering
+# them. An unpopulated registry has nothing off-universe to find and never reaches this.
+_still_stale = derived_tables_off_canonical_universe(CASE_DIR, _UNIVERSE_FILTER)
+if _still_stale:
+    raise RuntimeError(
+        f"{', '.join(sorted(_still_stale))} still reference runs outside "
+        f"{_UNIVERSE_FILTER} after rebuilding. The rebuild produced nothing to replace them "
+        f"with, so every figure below would describe a selection this case study does not "
+        f"make. Re-run the backtests for {_UNIVERSE_FILTER} before this notebook."
     )
 
 
@@ -143,26 +260,24 @@ def _fmt(val: float | None, fmt: str = ".4f") -> str:
 # %% [markdown]
 # ## §1 Handoff from model analysis
 #
-# The strategy phase inherits the cross-stage rank-1 lineage selected
-# across (signal + allocation + risk_overlay) on validation Sharpe per
-# the `HOLDOUT_SELECTION_STAGES` convention. The upstream prior is the
-# rank-1 prediction's daily-pooled IC with its HAC 95% CI from
-# `prediction_metrics`. For NASDAQ-100 microstructure the rank-1
-# prediction's IC point estimate is faintly positive but the HAC 95%
-# CI straddles zero on the lower side (`t_HAC ≈ 1.5`, `p ≈ 0.13`);
-# the rank-1 strategy Sharpe is deeply negative on validation with a
-# CI whose upper bound just barely clips positive. Every cell in the
-# locked sweep is loss-making — the rank-1 is the least-bad
-# combination, a position-level `time_exit_20` overlay on a
-# `score_weighted` allocation against a long-horizon linear signal.
-# The kill-gate read in §9 traces how this val-side reading degrades
-# in the 2021-H2 holdout window.
+# The strategy phase inherits one configuration, chosen once across the stages
+# that are eligible for the holdout - signal, allocation and risk overlay -
+# on validation results only. Pooling those stages and keeping the highest-scoring
+# strategy per trained model means a model appears once, represented by the
+# strongest use that was made of it, rather than once per stage it reached.
+#
+# Two properties make this a selection rule rather than a search. It reads
+# validation results only, so the holdout is untouched at the moment of choosing.
+# And it is deterministic: where two strategies have identical Sharpe, the tie is
+# broken on the backtest identifier rather than on whichever row the database
+# returned first, so the same registry always yields the same choice.
+#
+# The label is taken from the selected configuration rather than assumed. The
+# selection pools stages across labels, so the chosen strategy may rest on a
+# variant label rather than the primary one, and every loader downstream has to
+# follow the selection rather than the default.
 
 # %%
-# Rank-1 selection pools validation backtests across the holdout-eligible
-# stages (signal / allocation / risk_overlay) and dedupes by prediction_hash,
-# keeping the highest-Sharpe strategy_spec per trained model. Mirrors
-# `20_strategy_synthesis/holdout.py::HOLDOUT_SELECTION_STAGES`.
 _HOLDOUT_STAGES = ("signal", "allocation", "risk_overlay")
 top_signal = (
     pl.concat(
@@ -170,19 +285,23 @@ top_signal = (
         how="diagonal_relaxed",
     )
     .filter(pl.col("family") != "benchmark")
-    .sort("sharpe", descending=True)
+    # backtest_hash breaks exact Sharpe ties the same way on every machine.
+    .sort(["sharpe", "backtest_hash"], descending=[True, False])
     .unique(subset=["prediction_hash"], keep="first", maintain_order=True)
     .head(1)
 )
-TOP_HASH = top_signal.row(0, named=True)["backtest_hash"]
-TOP_PHASH = top_signal.row(0, named=True)["prediction_hash"]
-RANK1_FAMILY = top_signal.row(0, named=True)["family"]
-RANK1_CONFIG = top_signal.row(0, named=True)["config_name"]
-RANK1_LABEL = top_signal.row(0, named=True)["label"]
-# The rank-1 backtest's label can differ from setup.yaml's primary
-# (cross-stage selection across signal/allocation/risk_overlay can
-# pick up a variant label's rank-1 if its overlay-rescued Sharpe is
-# higher). Use the rank-1's actual label for all downstream loaders.
+if top_signal.is_empty():
+    raise RuntimeError(
+        f"No validation backtest for {CASE_STUDY} across stages {_HOLDOUT_STAGES}; "
+        f"the strategy phase has nothing to carry forward."
+    )
+
+_selected = top_signal.row(0, named=True)
+TOP_HASH = _selected["backtest_hash"]
+TOP_PHASH = _selected["prediction_hash"]
+RANK1_FAMILY = _selected["family"]
+RANK1_CONFIG = _selected["config_name"]
+RANK1_LABEL = _selected["label"]
 PRIMARY_LABEL = RANK1_LABEL
 
 _db = CASE_DIR / "run_log" / "registry.db"
@@ -206,29 +325,35 @@ print(f"  n_days = {int(ic_ndays)}, pct_positive = {ic_pct:.1%}")
 print(f"  CI status: {ci_status(ic_lo, ic_hi)}")
 
 # %% [markdown]
-# Daily-pooled IC at the rank-1 prediction set is faintly positive
-# but the HAC 95% CI straddles zero on the lower side (cells above
-# report the live values from `prediction_metrics`; `t_HAC ≈ 1.5`,
-# `p ≈ 0.13`). The strategy Sharpe in §3 is deeply negative and the
-# CI's upper bound barely clips positive — PSR does not reject H₀:
-# Sharpe ≤ 0. The §6 holdout-closure paired bootstrap is the canonical
-# out-of-sample read.
+# The cells above report the selected prediction set's own score and interval
+# from `prediction_metrics`. Read the interval rather than the point: it says
+# whether the ordering the strategy trades on is distinguishable from no
+# ordering at all, which is the precondition for anything downstream.
 #
-# **Kill conditions** are not encoded in `setup.yaml` for this case
-# study. The notebook evaluates two universal gates in §9: (i) the
-# validation Sharpe CI lower bound ≥ 0, and (ii) the holdout
-# strategy-vs-EW paired CI does not exclude zero on the negative side.
-# Both are reported as pass / partial / fail without verdict labels.
+# The probabilistic Sharpe ratio reported later asks a related question about
+# the strategy rather than the signal - whether its Sharpe is distinguishable
+# from zero once the shape of its return distribution is accounted for. A
+# strategy with occasional large gains and many small losses can show a
+# flattering Sharpe that this correction discounts.
+#
+# This case study declares no strategy-specific stopping conditions in
+# `setup.yaml`, so §9 evaluates two conditions that apply to any strategy:
+# whether the validation interval's lower bound reaches zero, and whether the
+# holdout comparison against the benchmark excludes zero on the negative side.
+# Each is reported as pass, partial or fail.
 
 # %% [markdown]
 # ## §2 Search context, family comparison, and lineage waterfall
 #
-# The signal stage of the locked sweep produced thousands of validation
-# backtests across three model families and four label horizons (5m, 15m,
-# 60m, plus a 15m direction classification). The rank-1 row emerges as
-# one realization of that search; what matters next is its context —
-# where the rank-1 sits in the family-level distribution and how its
-# performance evolves through the pipeline stages.
+# The signal stage produced many validation backtests across the model families
+# and label horizons. The selected row is one outcome of that search, and a
+# search over many configurations produces a highest value even when none of the
+# configurations has an edge.
+#
+# Two things put it in context. Where it sits within its own family's
+# distribution says whether it stands apart from its neighbours or is the top of
+# a tightly packed band. How it changes through the pipeline stages says which
+# stage moved it, and by how much relative to the uncertainty in that move.
 
 # %%
 ctx = explorer.search_context("signal")
@@ -246,10 +371,11 @@ search_table = pl.DataFrame(
 print("Signal-stage search context:")
 print(search_table)
 
+# %% [markdown]
+# The family comparison reads each backtest's stored interval rather than
+# recomputing one, so the plot can show error bars instead of points alone.
+
 # %%
-# Family comparison reads sharpe_ci95 from backtest_metrics directly so
-# the forest plot can render proper error bars rather than median-only
-# points.
 with sqlite3.connect(str(_db)) as _con:
     _famdf = pl.DataFrame(
         _con.execute(
@@ -320,23 +446,27 @@ fig.tight_layout()
 fig.show()
 
 # %% [markdown]
-# At the signal stage every backtest in the locked sweep lands in
-# negative-Sharpe territory under the engine's 5 bps commission + 2 bps
-# slippage cost model. Family medians cluster between roughly −13 and
-# −18; the maxima within each family are also negative. The
-# friction-dominance reading: at 26 rebalances per day a few-bps cost
-# compounds to several hundred percent annualized cost drag against a
-# per-bar expected return of order 1 bp. The cross-stage rank-1
-# selection in §3 still comes from the risk_overlay stage, but it is
-# the least-bad cell — a `time_exit_20` overlay on a `score_weighted`
-# allocation against a `linear/ridge_a1e6` `fwd_ret_60m` signal. The
-# overlay's role is to cap how long any single position stays on the
-# book, modestly slowing the cost bleed rather than rescuing the
-# strategy.
+# **How to read the family distribution.** The bars show each family's spread of
+# validation outcomes, not one number per family. That is deliberate: the sweep
+# ran many configurations per family, so a family's best result is the maximum of
+# a sample, and maxima grow with sample size whether or not the family has an
+# edge.
+#
+# Compare the medians to compare families, and read the width of each band as
+# what separates a configuration from its neighbours. Where the bands overlap
+# heavily, the families are producing the same range of outcomes and the ordering
+# of their maxima is not evidence that one is better.
+#
+# The cost model charged here is the engine's, applied identically to every
+# configuration, so differences between families are not differences in what they
+# were charged.
+
+# %% [markdown]
+# The lineage gives one backtest per pipeline stage for this prediction. Each
+# stage's stored interval is pulled alongside it so the change from one stage to
+# the next can be read against the uncertainty in each.
 
 # %%
-# Lineage with CI bars. champion_lineage gives stage hashes; we re-pull
-# Sharpe CIs from backtest_metrics for each stage to render error bars.
 lineage = explorer.champion_lineage(TOP_PHASH)
 ci_lo: dict[str, float] = {}
 ci_hi: dict[str, float] = {}
@@ -347,16 +477,11 @@ for stage_name, info in lineage.items():
         ci_lo[stage_name] = row.get("sharpe_ci95_lo")
         ci_hi[stage_name] = row.get("sharpe_ci95_hi")
 
-print("Lineage stages present for rank-1 prediction:")
+print("Lineage stages present for selected prediction:")
 for s, info in lineage.items():
     lo, hi = ci_lo.get(s), ci_hi.get(s)
     print(f"  {s}: hash={info['backtest_hash']}, Sharpe={_fmt_ci(info['sharpe'], lo, hi)}")
 
-# Cost_sensitivity and risk_overlay stages exist in the registry but
-# may be registered against different prediction sets — not the
-# rank-1's. Stage transitions that are unavailable for this
-# prediction are reported as "stage not run" rather than recomputed
-# inline.
 missing_stages = [s for s in ("cost_sensitivity", "risk_overlay") if s not in lineage]
 if missing_stages:
     print()
@@ -366,11 +491,13 @@ if missing_stages:
 fig = plot_sharpe_waterfall(lineage, ci_lo=ci_lo, ci_hi=ci_hi)
 fig.show()
 
+# %% [markdown]
+# Stage transitions are read from the stored paired comparisons rather than
+# recomputed here. A stage registered against a different prediction set has no
+# transition for this lineage, and is reported as not run rather than
+# reconstructed from unpaired numbers.
+
 # %%
-# Stage-transition deltas via load_paired_metrics — never recompute
-# paired metrics inline. The only present transition for this prediction
-# is signal → allocation, registered as benchmark_kind=signal_leader
-# with the allocation-stage backtest as challenger.
 ALLOC_HASH = lineage.get("allocation", {}).get("backtest_hash")
 if ALLOC_HASH is not None:
     pair = load_paired_metrics(
@@ -410,21 +537,25 @@ else:
     print("No concentration data — allocation stage absent for this prediction.")
 
 # %% [markdown]
-# The concentration curve maps how the allocation step's Sharpe responds
-# to portfolio breadth. With 100 NASDAQ-100 constituents, narrow
-# concentration (top_k = 5) maximizes per-stock exposure and turnover,
-# while top_k = 50 is half-universe and dilutes any cross-sectional
-# spread. The best Sharpe by top_k surfaces where the rebalance
-# cadence × allocator combination spends turnover most efficiently. No
-# top_k value is positive enough to clear the validation EW universe
-# Sharpe of 0.35.
+# **How to read the concentration curve.** Position count trades two things off
+# against each other. Holding few names concentrates capital into the ordering's
+# strongest views, so a correct ordering is rewarded more and an incorrect one
+# punished more, and each name turns over more often as the ranking shifts.
+# Holding many names dilutes both, and as the count approaches the size of the
+# universe the portfolio converges on the universe itself, leaving nothing for
+# the ordering to express.
+#
+# The useful reading is the shape rather than the maximum. A curve with a clear
+# interior peak says breadth is a real decision for this strategy. A flat curve
+# says the ordering is not strong enough for concentration to matter, and the
+# apparent best count is picking out noise.
 
 # %% [markdown]
 # ## §3 Headline performance with uncertainty
 #
-# The rank-1 specification is the validation-window backtest associated
+# The selected specification is the validation-window backtest associated
 # with the highest signal-stage Sharpe. Every metric is reported with
-# its block-bootstrap 95% CI from `backtest_metrics`; the equity overlay
+# its block-bootstrap interval from `backtest_metrics`; the equity overlay
 # shows the cumulative trajectory against the equal-weight NASDAQ-100
 # universe benchmark.
 
@@ -432,13 +563,6 @@ else:
 full = load_backtest_metrics(CASE_STUDY, backtest_hash=TOP_HASH).row(0, named=True)
 full = dict(full)  # mutate-friendly
 
-# Per-row DSR / expected-max-Sharpe / MinTRL / PBO live in `cohort_metrics`
-# (selection-bias migration). The spine's rank-1 may sit at a stage whose
-# cohort_metrics row is absent (cross-stage timestamp alignment limitation
-# documented in `memory/UNCERTAINTY_ARCHITECTURE.md`). Cascade through
-# (rank-1 stage → allocation → signal) and resolve the first non-empty
-# family cohort row at (label, family). ER is the maintainer-recommended
-# default; we also surface RAW and MP for transparency.
 _db = CASE_DIR / "run_log" / "registry.db"
 _cohort_leader_hash = None
 _cohort_leader_sharpe = None
@@ -522,10 +646,6 @@ print("Rank-1 specification (cross-stage selection, validation window):")
 for k, v in spec_block.items():
     print(f"  {k}: {v}")
 
-# Audit: bootstrap_block_length encodes the autocorrelation horizon of
-# the Sharpe target. rebalance_step is the per-label trade frequency
-# in 15-minute bars. The two are independent — block length comes from
-# the daily-MTM Sharpe series; rebalance_step comes from setup.yaml.
 _block = int(full["bootstrap_block_length"])
 _rstep = setup["labels"]["rebalance_step"][RANK1_LABEL]
 print(
@@ -533,23 +653,23 @@ print(
     f"rebalance_step={_rstep} bar(s) ({_rstep * 15} minutes)"
 )
 
-# Cohort cascade audit: surface where DSR comes from when the rank-1
+# Cohort cascade audit: surface where DSR comes from when the selected lineage
 # stage's cohort row is missing.
 if _cohort_stage and _cohort_stage != _stage_for_rank1:
     print(
-        f"  cohort cascade: rank-1 stage `{_stage_for_rank1}` has no "
+        f"  cohort cascade: selected stage `{_stage_for_rank1}` has no "
         f"cohort_metrics row (cross-stage timestamp-alignment limit); "
         f"DSR/EMS/MinTRL/PBO sourced from family cohort `{_cohort_stage}/"
         f"{RANK1_LABEL}/{RANK1_FAMILY}` (k={int(full['k_variants'])}, "
         f"leader_hash={_cohort_leader_hash}, leader_sharpe="
-        f"{_cohort_leader_sharpe:+.3f}; spine rank-1 sibling differs by "
+        f"{_cohort_leader_sharpe:+.3f}; spine sibling differs by "
         f"{full['sharpe'] - _cohort_leader_sharpe:+.3f})."
     )
 elif _cohort_stage:
     print(
         f"  cohort: family cohort `{_cohort_stage}/{RANK1_LABEL}/"
         f"{RANK1_FAMILY}` (k={int(full['k_variants'])}, leader_hash="
-        f"{_cohort_leader_hash}); spine rank-1 sibling differs by "
+        f"{_cohort_leader_hash}); spine sibling differs by "
         f"{full['sharpe'] - _cohort_leader_sharpe:+.3f}."
     )
 
@@ -675,7 +795,7 @@ print("Rank-1 headline metrics with 95% CIs:")
 print(headline)
 
 # %%
-# Forest plot: rank-1 metrics with CI bars + reference lines
+# Forest plot: selected-lineage metrics with CI bars + reference lines
 ew_val = load_benchmark_metrics(CASE_STUDY, PRIMARY_LABEL, period="validation")
 forest_metrics = [
     ("Sharpe", full["sharpe"], full["sharpe_ci95_lo"], full["sharpe_ci95_hi"]),
@@ -715,7 +835,7 @@ if _alloc_sharpe is not None:
         color="#E53935",
         linestyle=":",
         linewidth=1.0,
-        label=f"Allocation rank-1 Sharpe ({_alloc_sharpe:.2f})",
+        label=f"Allocation selection Sharpe ({_alloc_sharpe:.2f})",
     )
 ax.set_yticks(y)
 ax.set_yticklabels([m[0] for m in forest_metrics])
@@ -726,10 +846,13 @@ ax.legend(loc="lower right", fontsize=8, frameon=False)
 fig.tight_layout()
 fig.show()
 
+# %% [markdown]
+# The strategy's returns are stored daily while the benchmark is stored at the
+# decision cadence, so the benchmark is aggregated to daily before the two are
+# aligned. Comparing series at different frequencies would otherwise pair a day
+# against a fraction of one.
+
 # %%
-# Equity-curve overlay vs validation EW benchmark.
-# Strategy returns are stored at daily frequency; the benchmark series
-# is at 15-minute frequency and is aggregated to daily before alignment.
 strat_returns_path = CASE_DIR / "run_log" / "backtest" / TOP_HASH / "daily_returns.parquet"
 strat_df = (
     pl.read_parquet(strat_returns_path)
@@ -754,41 +877,31 @@ print(
 cum_strat = np.cumprod(1 + aligned["strategy"].to_numpy()) - 1
 cum_bench = np.cumprod(1 + aligned["benchmark"].to_numpy()) - 1
 fig, ax = plt.subplots(figsize=(10, 4.2))
-ax.plot(aligned["ts"], cum_strat, color="#1565C0", linewidth=1.2, label="Rank-1 strategy")
+ax.plot(aligned["ts"], cum_strat, color="#1565C0", linewidth=1.2, label="Selected strategy")
 ax.plot(aligned["ts"], cum_bench, color="#43A047", linewidth=1.2, label="EW universe")
 ax.axhline(0, color="#9E9E9E", linewidth=0.6, linestyle="--")
 ax.set_ylabel("Cumulative return")
-ax.set_title("Validation-window cumulative return: rank-1 strategy vs EW universe")
+ax.set_title("Validation-window cumulative return: selected strategy vs EW universe")
 ax.legend(loc="best", frameon=False)
 fig.tight_layout()
 fig.show()
 
 # %% [markdown]
-# The headline rank-1 lineage is the cross-stage maximum-Sharpe
-# backtest from the (signal + allocation + risk_overlay) pool — read
-# the live values printed above for the current carrier, validation
-# Sharpe + CI, and benchmark-relative paired-bootstrap statistics.
-# Every cell in the post-purge sweep is loss-making; the rank-1 is
-# the least-bad combination — a position-level `time_exit` overlay
-# on a `score_weighted` allocation against a long-horizon linear
-# signal. The overlay caps how long any single position stays on the
-# book; it does not produce a credibility-resolved positive Sharpe
-# (CI lower bounds remain below zero across the validation window).
-# The §6 holdout closure on the same lineage decays further (see §6).
+# **How to read the selection-bias adjustment.** The deflated Sharpe ratio asks
+# what the highest result from a search of this size would look like if none of
+# the configurations had an edge, and discounts the observed result by that
+# amount. The more configurations searched, the higher the bar it sets.
 #
-# Selection-bias adjustment: the rank-1's stage cohort
-# `family/risk_overlay/fwd_ret_60m/linear` is present in
-# `cohort_metrics` (k=20 variants); no cascade fallback is needed. The
-# DSR triad reads `DSR_ER ≈ -0.25`, `DSR_MP ≈ -0.23`, and `DSR_RAW`
-# (naive raw-K counting) `≈ -0.52`, all at `p ≈ 1.0` — selection-bias
-# deflation cannot resolve any cell in this stage cohort above zero.
-# Expected-max-Sharpe under ER lands around `1.0`, comfortably above
-# the observed `-1.985`, and `MinTRL` is infinite (the library returns
-# `inf` when the expected maximum exceeds the observed Sharpe). PBO
-# under CSCV is `0.0` with only `2` walk-forward folds — the
-# combinatorial space is too small for PBO to be load-bearing on this
-# CS. The §6 paired holdout-decay bootstrap is the canonical
-# out-of-sample resolution.
+# Its inputs are the number of variants in the cohort searched, the shape of the
+# return distribution, and the length of the record. All three are printed above
+# rather than assumed, because the count of variants in particular decides how
+# large the adjustment is, and a count that quietly includes duplicates of an
+# already-chosen configuration inflates the correction.
+#
+# The companion quantity is the track record length required for a result of this
+# size to become distinguishable from zero. When it exceeds the history
+# available, the honest statement is that the window cannot settle the question,
+# whatever the point estimate.
 
 # %% [markdown]
 # ## §4 Risk and drawdown analysis
@@ -851,7 +964,7 @@ print(f"Fold Sharpe std:   {fold_df['sharpe'].std():.3f}")
 
 # %% [markdown]
 # Per-fold Sharpes are both negative across the two walk-forward
-# blocks (live values printed above), confirming that the rank-1's
+# blocks (live values printed above), confirming that the selected lineage's
 # loss profile is not a single-fold artifact. The tail-risk read
 # carries a moderately-low tail ratio with elevated kurtosis and
 # positive skew — the realized P&L distribution is dominated by many
@@ -867,24 +980,20 @@ print(f"Fold Sharpe std:   {fold_df['sharpe'].std():.3f}")
 # %% [markdown]
 # ## §5 Friction budget & cost sensitivity
 #
-# NASDAQ-100 microstructure runs at 15-minute cadence — the highest
-# turnover regime in the book — so cost sensitivity is the section
-# where this case study earns its place. The locked sweep populated two
-# stage-level sensitivity surfaces against the rank-1 prediction
-# family: a **cost grid** (commission + slippage walked from 0 to 50
-# bps per leg) and a **risk-overlay grid** (trailing-stop, stop-loss
-# and time-exit families, ~20 overlays per label). Together they
-# answer two distinct questions: (i) how much the strategy can pay
-# in friction before the per-bar edge runs out, and (ii) whether a
-# position-level overlay (capping per-position holding time or loss)
-# can preserve edge by *trading less* on bad positions. The two grids
-# are independent — overlays were applied at zero-cost engine
-# assumptions in their stage, so an overlay's Sharpe must still be
-# read net of the realistic-friction penalty established below.
+# Cost sensitivity is where a short-rebalancing strategy is decided, because
+# every cost is charged per trade and this one trades often. Two sweeps run
+# against the selected lineage: a **cost grid** that walks commission and
+# slippage from zero upward, and a **risk-overlay grid** of rules that close a
+# position on a condition other than the signal.
 #
-# Realistic NQ100 costs from `setup.yaml`: large-cap effective spreads
-# of 1–3 bps, mid-cap 3–8 bps, with a 5 bps friction floor;
-# institutional commission of 0.1¢ per share.
+# They answer different questions. The cost grid asks how much friction the
+# strategy can absorb before its edge runs out, which states the execution
+# quality it requires rather than the profit it made under one assumption. The
+# overlay grid asks whether trading *less* on positions that are going wrong
+# preserves more than the extra trading costs.
+#
+# The two are swept independently, with overlays applied at zero engine cost, so
+# each result is attributable to the field that sweep varied.
 
 # %% [markdown]
 # ### §5.1 Cost sensitivity stratified by label horizon
@@ -1038,10 +1147,13 @@ ax.legend(loc="best", fontsize=8, frameon=False)
 fig.tight_layout()
 fig.show()
 
+# %% [markdown]
+# Trade counts at zero cost say how exposed each label is to friction before any
+# cost is charged. A configuration that trades twice as often loses twice as much
+# to the same per-trade cost, so this count predicts the slope of each label's
+# cost curve rather than its level.
+
 # %%
-# Per-label trade-count contrast at zero cost — the cadence × turnover
-# evidence. Higher cadence -> higher num_trades -> higher friction
-# elasticity.
 turnover_table = (
     cost_df.filter(pl.col("cost_bps") == 0)
     .group_by("label")
@@ -1059,9 +1171,15 @@ print("Trade count and turnover at zero cost by label horizon:")
 print(turnover_table)
 
 
+# %% [markdown]
+# Two breakeven costs are reported per label. The first is the highest cost at
+# which the point estimate stays positive. The second is the highest cost at
+# which the interval's lower bound stays positive, which is the stricter and more
+# useful of the two: it is the cost the strategy can absorb and still be
+# distinguishable from no strategy at all.
+
+
 # %%
-# Per-label breakeven costs: (a) point-estimate Sharpe still > 0,
-# (b) Sharpe CI lower bound still > 0 (the credibility-aware breakeven).
 def _breakevens(curve: pl.DataFrame) -> dict:
     point_be = curve.filter(pl.col("sharpe_max") > 0)["cost_bps"].max()
     ci_be = curve.filter(pl.col("best_ci_lo") > 0)["cost_bps"].max()
@@ -1089,33 +1207,25 @@ print(f"  Half-spread source: {setup['costs'].get('asset_spreads_source', 'n/a')
 print("See Chapter 18 for transaction-cost framework details.")
 
 # %% [markdown]
-# The cadence × cost interaction is the case study's central finding.
-# The cost sweep populates one prediction lineage per label across
-# eleven cost levels (live row counts print above). The stylized
-# reading by label horizon:
+# **How to read the cost surface.** Each row walks one label's lineage across
+# the cost levels. Two features carry the information.
 #
-# - **fwd_ret_5m**: every cell is deeply negative even at zero cost.
-#   The 5-minute strategy is already losing on raw signal at this
-#   cadence; cost levels do not change the verdict. The cumulative
-#   integral of small adverse-selection events at 5-minute bars is
-#   the binding constraint, not commission.
-# - **fwd_ret_15m**: no cost-grid cell clears zero on point estimate.
-#   The 15-minute horizon does not produce a point-estimate-positive
-#   configuration even at zero cost.
-# - **fwd_ret_60m**: the longest horizon in the locked grid carries
-#   the least-negative cost trajectory. linear/ridge configs survive
-#   to roughly `-0.8 Sharpe` at zero cost and decay monotonically
-#   with friction; no cell clears zero on point estimate or CI.
+# The value at zero cost is the strategy before friction. If it is not
+# positive there, no cost assumption rescues it, and the rest of that row is
+# describing how a losing strategy loses.
 #
-# CI lower bounds sit below zero across the entire grid for every
-# label — the cost sweep does not surface a credibility-resolved
-# positive cell. The dispersion across horizons mirrors the per-bar
-# edge × per-bar friction trade-off: longer horizons reduce trade
-# count enough that friction matters less, but the per-bar signal
-# at the NQ100 spread band of 1–3 bps for large caps is still too
-# small to clear zero by itself. The §5.2 risk-overlay sweep modulates
-# the magnitude of the loss via position-level exits; it does not turn
-# the strategy positive.
+# Where a row crosses zero is the breakeven cost: the execution quality the
+# strategy needs to be worth running. That number is comparable against what a
+# venue and order size actually achieve, which a profit figure computed at one
+# assumed cost is not.
+#
+# Read the intervals as well as the points. A row whose interval spans zero at
+# every cost level has not established its sign anywhere on the grid, and its
+# apparent breakeven crossing is not a measurement.
+#
+# The horizons differ in how much friction they can absorb, and the reason is
+# arithmetic rather than modelling: a longer horizon holds each position over
+# more time, so the same per-trade cost is spread over a larger expected move.
 
 # %% [markdown]
 # ### §5.2 Risk-overlay sensitivity sweep
@@ -1124,18 +1234,20 @@ print("See Chapter 18 for transaction-cost framework details.")
 # top of the base allocation: **trailing stop** (exit a position when
 # its price retraces a threshold from its high-water mark since entry),
 # **stop-loss** (exit when unrealized loss exceeds a threshold), and
-# **time exit** (close a position after a fixed number of bars). Each
-# rule acts on individual positions; the rest of the book continues
-# trading. Portfolio-level kill switches (max_drawdown / daily_loss)
-# are NOT swept here — their permanent-halt semantics produced
-# zero-std Sharpe artifacts in earlier passes, so they are reserved
-# for Ch19 §19.8 governance demos instead of model selection.
+# **time exit** (close a position after a fixed number of bars). Each acts on a
+# single position and leaves the rest of the book trading.
 #
-# At 15-minute cadence every overlay trades cost-induced churn for a
-# tighter risk profile. Tight thresholds (1–5%) trigger constantly and
-# stack large cost drag; loose thresholds (≥15%) and long time exits
-# (20–40 bars) cluster near the top of the sweep distribution because
-# they let the (already loss-making) configuration trade more freely.
+# Portfolio-level halts - a maximum drawdown limit, a daily loss limit - are not
+# swept here. They stop trading permanently once breached, so a configuration
+# that trips one produces a truncated return series whose summary statistics are
+# not comparable with those of a configuration that ran the full window. They
+# are governance instruments rather than parameters to sweep.
+#
+# The threshold is what the sweep is really varying. A tight threshold triggers
+# often, so it pays for its protection frequently and can fire on ordinary
+# fluctuation rather than on the loss it was meant to catch. A loose threshold
+# rarely fires, costs little and protects little. The gradient across thresholds
+# transfers to other strategies; the level of any individual cell does not.
 
 # %%
 with sqlite3.connect(str(_db)) as _con:
@@ -1342,57 +1454,51 @@ print(
 )
 
 # %% [markdown]
-# The best-overlay-per-label cells printed above carry the headline
-# story: every cell is loss-making, and the cross-stage rank-1 is the
-# least-bad combination — a `linear/ridge_a1e6 fwd_ret_60m` signal
-# under `score_weighted top_k=5` with a `time_exit_20` overlay. The
-# overlay does not rescue the strategy; it makes a loss-making
-# configuration slightly less loss-making by capping how long any
-# single position stays on the book.
+# **How to read the overlay comparison.** Each row pairs a label's best signal-
+# stage result with its best overlay result, and the difference between them is
+# what the overlay contributed on that lineage.
 #
-# Family ordering matters less than threshold magnitude. Longer time
-# exits (20–40 bars) and looser stop/trailing thresholds (≥15%)
-# cluster at the top of the distribution — they minimize the
-# cost-induced churn that dominates at 15-minute cadence. Tight
-# thresholds (1–5%) compound the friction trap. The §6 holdout closure
-# on the same lineage decays further (see §6); the signal does not
-# generalize and Universal kill gate 2 fails (§9).
+# The difference is the quantity to read, not the level. Both sides share the
+# same signal, allocation and costs, so what separates them is the exit rule
+# alone - which is the only way to attribute a change to the overlay rather than
+# to the configuration it was applied to.
 #
-# Caveat: the risk_overlay stage runs with the engine default cost
-# model (5 bps commission + 2 bps slippage per leg). The realistic
-# NQ100 spread band of 1–3 bps for large caps and 3–8 bps for mid caps
-# would shift every cell, but is unlikely to push the rank-1 into
-# credibility-resolved positive territory given the val-window
-# distribution.
+# An overlay changes when positions are closed. It cannot create an edge that
+# the signal does not have, and its effect on a losing configuration is to change
+# how that configuration loses. Reading a small improvement as a rescue is the
+# error this pairing exists to prevent.
 
 # %% [markdown]
 # ## §6 Holdout closure with paired bootstrap
 #
-# The deployed holdout carrier is the ensemble (`gbm_reg12_mean`) fallback,
-# not the validation rank-1. The validation rank-1 (a long-horizon linear
-# signal) retrained to degenerate, near-constant holdout predictions, so
-# `generate_holdout` advanced to the next non-degenerate trained model. Two
-# paired tests anchor the holdout read: (i) the carrier versus its own
-# validation backtest ("did Sharpe hold?"), and (ii) the carrier versus the
-# holdout-window equal-weight benchmark ("did the strategy beat random in
-# the holdout?"). Numbers come from `backtest_paired_metrics` — never from
-# val_sharpe minus holdout_sharpe arithmetic.
+# The model deployed on the holdout need not be the one selected on validation.
+# Retraining the selected model on the holdout's training window can produce
+# degenerate predictions - near-constant scores that give no ordering to trade -
+# and when that happens the holdout generator advances to the next trained model
+# rather than backtesting a model that predicts nothing.
+#
+# This means the holdout read must be anchored on whichever model was actually
+# deployed, and compared against *that* model's own validation backtest. Two
+# paired tests follow: the deployed model against its own validation result,
+# which asks whether its performance held; and the deployed model against the
+# equal-weight benchmark over the holdout window, which asks whether it did
+# better than holding the universe.
+#
+# Both come from paired comparison on shared days. Subtracting a validation
+# Sharpe from a holdout Sharpe would discard the pairing and produce a difference
+# with no usable interval.
+
+# %% [markdown]
+# The case study has exactly one holdout backtest. Where a conformal-weighted
+# sibling exists it is a transparency variant and is excluded here by its
+# allocation method, so the one resolved below is the canonical read.
+#
+# The holdout is resolved directly rather than by requiring it to share the
+# selected prediction's lineage, because the deployed model may be a fallback.
+# The paired tests that follow are then anchored on whichever model was deployed,
+# against that model's own validation backtest.
 
 # %%
-# Identify the canonical holdout backtest. Per the one-holdout-per-CS rule
-# there is exactly one canonical (non-conformal) holdout backtest for the
-# case study; the conformal_weighted sweep, when present, adds a separate
-# transparency sibling that is excluded here by its allocation method.
-#
-# The holdout's training lineage can differ from the validation rank-1
-# (TOP_PHASH): generate_holdout falls back from the rank-1 to a rank-K
-# trained model when the rank-1's holdout retrain produces degenerate
-# (constant) predictions. For NASDAQ-100 the validation rank-1 is a
-# long-horizon linear signal whose holdout retrain was degenerate, so the
-# deployed carrier is the ensemble (gbm_reg12_mean) fallback. We therefore
-# resolve the canonical holdout directly rather than constraining it to
-# TOP_PHASH's lineage, and anchor §6's paired tests on the carrier's own
-# validation lineage below.
 with sqlite3.connect(str(_db)) as _con:
     _ho_row = _con.execute(
         """
@@ -1415,7 +1521,7 @@ if _ho_row is None:
 HO_HASH, _HO_TRAINING = _ho_row
 
 # Conformal sibling holdout (if registered) — recorded for transparency.
-# Keyed off the canonical holdout's own lineage, not the validation rank-1.
+# Keyed off the canonical holdout's own lineage, not the validation selection.
 with sqlite3.connect(str(_db)) as _con:
     _ho_conformal_row = _con.execute(
         """
@@ -1436,7 +1542,7 @@ with sqlite3.connect(str(_db)) as _con:
 HO_HASH_CONFORMAL = _ho_conformal_row[0] if _ho_conformal_row else None
 HO_SHARPE_CONFORMAL = _ho_conformal_row[1] if _ho_conformal_row else None
 
-print(f"Validation rank-1 hash:        {TOP_HASH}")
+print(f"Validation the selected lineage hash:        {TOP_HASH}")
 print(f"Holdout (canonical) hash:      {HO_HASH}")
 if HO_HASH_CONFORMAL:
     print(
@@ -1446,11 +1552,7 @@ if HO_HASH_CONFORMAL:
     )
 
 ho_full = load_backtest_metrics(CASE_STUDY, backtest_hash=HO_HASH).row(0, named=True)
-# Anchor the val→holdout decay on the carrier's OWN validation lineage so the
-# displayed validation column matches the paired-bootstrap diff below. When the
-# holdout carrier shares the validation rank-1's lineage this equals `full`;
-# when it is a degeneracy fallback (NASDAQ-100), it is the fallback model's
-# validation backtest.
+
 with sqlite3.connect(str(_db)) as _con:
     _val_self_row = _con.execute(
         "SELECT benchmark_hash FROM backtest_paired_metrics "
@@ -1554,7 +1656,7 @@ val_ho_table = pl.DataFrame(
         ),
     ]
 )
-print("val → holdout paired-bootstrap decay (rank-1 self):")
+print("val → holdout paired-bootstrap decay (the selected lineage self):")
 print(val_ho_table)
 print(f"prob_challenger_wins: {vh['prob_challenger_wins']:.3f}")
 print(f"CI status (Sharpe diff): {ci_status(vh['sharpe_diff_ci95_lo'], vh['sharpe_diff_ci95_hi'])}")
@@ -1575,10 +1677,6 @@ ho_vs_ew = load_paired_metrics(
     benchmark_kind="equal_weight_holdout_side_artifact",
 )
 if ho_vs_ew.is_empty():
-    # Populator skipped this pair because the holdout backtest had zero
-    # trades (or all-zero returns), so the paired bootstrap on
-    # `strategy − EW_holdout` is undefined. Surface a placeholder so the
-    # rest of the section renders with clear "no trades" context.
     print(
         "[WARN] Missing equal_weight_holdout_side_artifact pair for "
         "nasdaq100_microstructure — holdout has no trades or all-zero returns; "
@@ -1623,21 +1721,25 @@ print(f"  CI status: {ci_status(he['sharpe_diff_ci95_lo'], he['sharpe_diff_ci95_
 # **Decay reading (val_rank1_self pair):** holdout Sharpe is more
 # negative than validation Sharpe; the paired diff CI excludes zero on
 # the negative side (live numbers from the cell above). The val→holdout
-# decay is statistically resolved as negative under bootstrap-paired
-# draws. The interpretation is unchanged from the validation reading:
-# at 15-minute cadence the residual cross-sectional signal is dominated
-# by friction, and the position-level overlay slows but does not
-# reverse the bleed.
+# **How to read the two paired rows.** Each reports a difference with an
+# interval, and the interval is what decides the reading.
 #
-# **Strategy vs EW benchmark on holdout:** the rank-1 strategy
-# underperforms EW NQ100 on the holdout with a diff-Sharpe CI on the
-# negative side. The universal kill gate 2 (holdout strategy-vs-EW CI
-# does not exclude zero negatively) FAILs on this lineage; gate 1
-# (val Sharpe CI lower bound ≥ 0) also fails. Both pair rows enter
-# Ch20 as `excludes_zero_strong` decay classifications on the negative
-# side. The CS reads as a methodology study — what 15-minute equity
-# microstructure looks like under honest accounting — not as a
-# deployable strategy.
+# The first compares the deployed model's holdout result against its own
+# validation result. A difference whose interval excludes zero on the negative
+# side means performance fell by more than the resampling can explain. A
+# difference whose interval includes zero means this window cannot separate the
+# two, which on a short holdout is the common outcome and is not evidence that
+# performance held.
+#
+# The second compares the strategy against the equal-weight benchmark over the
+# same holdout days. This is the comparison that matters for whether the strategy
+# was worth running: a strategy can decay from validation and still beat the
+# benchmark, or hold its level and still trail it.
+#
+# The holdout is read once, on the lineage selected in §1, and neither row can be
+# recomputed against a different configuration without the holdout ceasing to
+# be one.
+
 
 # %% [markdown]
 # ## §7 Benchmark-aware diagnostics
@@ -1647,7 +1749,7 @@ print(f"  CI status: {ci_status(he['sharpe_diff_ci95_lo'], he['sharpe_diff_ci95_
 # Layer 2 — equity factor attribution (FF5+MOM with HAC standard errors)
 # — applies because this is an equity-class case study; for a
 # dollar-neutral intraday strategy on the NQ100, factor attribution
-# answers whether residual α survives standard equity-style risk
+# answers whether residual α remains after standard equity-style risk
 # decomposition.
 
 # %%
@@ -1662,7 +1764,7 @@ attr_df = pl.DataFrame(
         {"metric": "down capture", "value": _fmt(getattr(metrics, "down_capture", None))},
     ]
 )
-print("Layer 1: rank-1 vs validation EW NASDAQ-100 universe (PortfolioAnalysis):")
+print("Layer 1: the selected lineage vs validation EW NASDAQ-100 universe (PortfolioAnalysis):")
 print(attr_df)
 
 # %%
@@ -1683,10 +1785,13 @@ print(f"  α t-stat = {alpha_t:.3f}, p = {alpha_p:.3f}")
 print(f"  β        = {beta_ew:.3f}, β t-stat = {beta_t:.3f}")
 print(f"  CI status (α): {'excludes_zero_strong' if alpha_p < 0.05 else 'straddles_zero'}")
 
+# %% [markdown]
+# The strategy holds equal value long and short, so its return already nets out
+# the cost of capital and raw returns are regressed rather than returns in excess
+# of the risk-free rate. Standard errors are computed to tolerate correlation
+# between consecutive days.
+
 # %%
-# Layer 2: FF5+MOM factor attribution with HAC standard errors.
-# Strategy returns are dollar-neutral (long top-K minus short bottom-K),
-# so we regress raw daily returns rather than excess returns.
 strategy_rets = pd.Series(
     strat_arr,
     index=pd.to_datetime(aligned["ts"].to_list()),
@@ -1752,23 +1857,31 @@ fig_attr.show()
 attr_summary = format_attribution_summary(reg, boot)
 
 # %% [markdown]
-# Layer-1 Layer-2 results read consistently with §3: the rank-1
-# strategy's α is deeply negative on both the placebo (EW-only)
-# regression and the FF5+MOM regression, and the residual Sharpe stays
-# negative after factor decomposition. The strategy did not learn a
-# factor proxy — there is nothing for the factor model to absorb. The
-# FF5+MOM betas surface whether the long-minus-short construction
-# produced inadvertent factor tilts; in this case the loadings are
-# small relative to the magnitude of the negative α, and any apparent
-# tilt is dominated by friction. The block bootstrap CI on α widens
-# the parametric HAC interval, but the lower bound remains far below
-# zero — there is no inference under which this strategy carried
-# positive risk-adjusted alpha during the validation window.
+# **How to read the factor attribution.** The regression asks how much of the
+# strategy's return is explained by exposure to known equity factors, and what
+# is left over once they are accounted for.
+#
+# The loadings say whether the long-minus-short construction picked up a factor
+# tilt it did not intend. A strategy meant to be neutral that carries a large
+# loading is taking a bet it did not mean to take, and its result is partly that
+# factor's result.
+#
+# The intercept is what the factors do not explain. Read it with its interval:
+# the block bootstrap interval is wider than the parametric one because it does
+# not assume the errors are independent across days, and it is the one to rely
+# on. An intercept whose interval spans zero means the factor model has absorbed
+# whatever the strategy produced, leaving nothing attributable to the strategy
+# itself.
+#
+# The placebo regression against the benchmark alone is the control. Comparing
+# the two says how much of the reading depends on the wider factor set rather
+# than on market exposure.
+
 
 # %% [markdown]
 # ## §8 Strategy tear sheet
 #
-# The diagnostic library renders the rank-1 lineage's full tear sheet
+# The diagnostic library renders the selected lineage's full tear sheet
 # directly from the on-disk artifacts; the validation-window
 # equal-weight NASDAQ-100 benchmark is wired in as the comparison
 # series. The tear sheet HTML is written under `OUTPUT_DIR` and is
@@ -1864,57 +1977,53 @@ print(f"  [{fmt_gate(gate2_status)}] Holdout strategy CI does not exclude zero n
 print(f"      {gate2_evidence}")
 
 # %% [markdown]
-# **What §3–§6 say.** The cross-stage rank-1 lineage is the live
-# carrier printed in §3 above — a position-level overlay on a
-# `score_weighted` allocation of a long-horizon linear signal. Every
-# cost-grid cell is negative across the 11-level bps surface for the
-# rank-1 prediction. Every risk-overlay cell is negative; the rank-1
-# is the least-bad combination (longest time-exit on the cleanest
-# signal horizon). Validation Sharpe CI lower bound stays below zero
-# (kill gate 1 FAILs); holdout decays further and underperforms EW
-# NQ100 by a margin whose CI excludes zero on the negative side
-# (kill gate 2 FAILs). Selection-bias-adjusted DSR cannot resolve
-# any cell above zero.
+# ### What the two gates establish, and what they cannot
 #
-# **The case study's reading.** Intraday NQ100 microstructure under
-# honest accounting (per-share + half-spread cost dispatch at the
-# realistic NQ100 spread band of 1–3 bps for large caps and 3–8 bps
-# for mid caps, integer share sizing, daily MTM despite intraday
-# signal cadence) does not produce a deployable long-short
-# cross-sectional equity strategy at 15-minute cadence. Position-
-# level overlays modulate the magnitude of the loss but do not
-# reverse it. This is a methodology study, not a candidate strategy
-# — it demonstrates what friction-dominance looks like at intraday
-# cadence under honest accounting.
+# The gates above are stated so that failing them is possible. Each asks a
+# question with a definite answer on this evidence, and each is answered from an
+# interval rather than from a point estimate.
 #
-# **What this analysis does not say.** Engine costs are 5 bps
-# commission + 2 bps slippage; the realistic NQ100 spread band is
-# 1–3 bps large-cap, 3–8 bps mid-cap, and the per-share
-# `$0.0035 + half-spread` model in `setup.yaml` is the production
-# cost dispatch. The holdout window of 128 trading days is short
-# relative to the bootstrap block length, so the diff-Sharpe CI
-# widths reflect both the disjoint window structure and the
-# regime-dependent strategy reading. No sector-cap or
-# position-limit overlay is applied; a production version would
-# constrain per-sector exposure given the NQ100's technology
-# concentration. The conformal-weighted holdout sibling (if
-# registered) is recorded as a transparency variant against the
-# canonical baseline holdout; it does not replace the rank-1
-# holdout closure analyzed above.
+# The first asks whether the validation result is distinguishable from zero on
+# its favourable side. A strategy whose interval includes zero has not shown that
+# it makes money on the window it was developed on, which is the weakest
+# possible bar and the one to apply first.
+#
+# The second asks whether the holdout result is distinguishable from the
+# benchmark on the unfavourable side. It is deliberately not the mirror of the
+# first. Passing does not establish that the strategy works, only that this
+# window does not establish that it fails; a holdout of a few months is short
+# enough that failing to reject is a weak statement.
+#
+# Both are read on the strategy selected in §1, evaluated on the holdout exactly
+# once. Neither can be re-run against a different configuration without the
+# holdout ceasing to be one.
+#
+# The cost and overlay sweeps in §5 vary one field at a time against that same
+# lineage, so the differences they show are attributable to the field varied.
+# What they cannot establish is a level: a sweep in which every cell falls on the
+# same side of zero says the conclusion does not depend on where in the swept
+# range the truth lies, which is a stronger statement about robustness than
+# about profitability.
+#
+# **What this analysis does not cover.** The holdout window is short relative to
+# the block length the bootstrap resamples, so the interval widths reflect that
+# structure as well as the strategy's variability. No sector or position limit is
+# applied, and this universe is concentrated in one sector, so a production
+# version would constrain that exposure. The cost model used for the registered
+# results combines a fixed per-share commission with a measured per-asset
+# half-spread; the sweeps use a simplified single-axis cost so cadence and cost
+# can be read together.
 
-# %% [markdown]
-# **Forward pointer to Ch20.** This case study contributes the
-# intraday-cadence friction-dominance datapoint to Ch20 nb01's
-# cross-CS rank-1-Sharpe + holdout-decay aggregation. The §6 decay
-# magnitude (validation rank-1 negative; holdout decays further;
-# both pair rows excludes_zero_strong on the negative side) and the
-# strategy-vs-holdout-EW read (excludes_zero_strong on the negative
-# side) feed Ch20 nb04's cost-survival comparison. The §5 cadence ×
-# cost surface (3 labels × 11 cost levels; no cell positive at
-# credibility-resolved level) and the §5.2 risk-overlay sweep
-# (position-level overlays only; no portfolio kill switch swept;
-# rank-1 cell still negative on point estimate) feed Ch20 nb04's
-# cost-survival comparison and nb05's regime risk layer.
+# %% [markdown] tags=["results"]
+# ### The gates on this run
+
+# %%
+print(f"Selected lineage: {RANK1_FAMILY}/{RANK1_CONFIG} on {RANK1_LABEL}")
+print(f"  backtest {TOP_HASH}  prediction {TOP_PHASH}")
+print(f"[{fmt_gate(gate1_status)}] Validation Sharpe interval lower bound at or above zero")
+print(f"    {gate1_evidence}")
+print(f"[{fmt_gate(gate2_status)}] Holdout difference from benchmark not negative-excluding")
+print(f"    {gate2_evidence}")
 
 # %%
 # Strategy-assessment JSON: extend the existing schema with strategy-analysis notebook fields.
@@ -1945,7 +2054,7 @@ assessment = {
             ),
             "spine_rank1_sharpe": val_full["sharpe"],
             "divergence_reason": (
-                "cross_stage_alignment_library_limit: rank-1 stage cohort row absent; "
+                "cross_stage_alignment_library_limit: selected stage cohort row absent; "
                 f"cascade resolved to family/{_cohort_stage}/{RANK1_LABEL}/{RANK1_FAMILY}"
                 if (_cohort_stage and _cohort_stage != _stage_for_rank1)
                 else "rank1_is_cohort_stage_match"
@@ -2178,7 +2287,7 @@ assessment = {
     },
     "ch20_handoff": {
         "contributes_to": [
-            "Ch20 nb01 — cross-CS rank-1 Sharpe and holdout-decay aggregation",
+            "Ch20 nb01 — cross-CS the selected lineage Sharpe and holdout-decay aggregation",
             "Ch20 nb04 — cost-survival comparison (cadence × cost grid + overlay rescue)",
             "Ch20 nb05 — regime risk layer (position-level overlays modulate magnitude; do not reverse loss)",
         ],

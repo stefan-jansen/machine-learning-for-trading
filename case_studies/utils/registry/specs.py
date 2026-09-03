@@ -421,3 +421,30 @@ def build_training_spec(
         spec["train_sample_frac"] = float(train_sample_frac)
 
     return spec
+
+
+# Kept here rather than in `insight_chapter`, which imports torch at module scope to win
+# the CUDA-runtime ordering. Reading a fold count off a spec needs nothing of the sort, and
+# the `test-unit-data` job installs no torch - importing it there for this one function
+# turned the job red. `insight_chapter` re-exports the name, so its callers are unchanged.
+def declared_fold_count(spec: dict) -> int:
+    """The number of folds a training spec declares, 0 where it declares none.
+
+    Two spec shapes are live. Identity v3 nests the count under
+    ``computation.expected_prediction_keys``; the v2 shape that ``build_training_spec`` still
+    emits - ``run_dl_cv`` uses it, and ``LEGACY_IDENTITY_VERSION`` is still supported - carries
+    ``n_folds`` at the top level and has no ``computation`` key at all.
+
+    Reading only the top level answers 0 for every v3 row, which is all but four training runs
+    across the seven live registries. Every caller that did so was reachable only while its
+    case study had no rows to select from: widening the CI fixture to sample per label gave
+    `13_dl_time_series/12_case_study_insights` and `14_latent_factors/09_case_study_insights`
+    a `sp500_equity_option_analytics` row for the first time, and both raised "n_folds is not
+    declared" against specs that declare two.
+    """
+    computation = spec.get("computation") or {}
+    return int(
+        (computation.get("expected_prediction_keys") or {}).get("n_folds")
+        or spec.get("n_folds")
+        or 0
+    )

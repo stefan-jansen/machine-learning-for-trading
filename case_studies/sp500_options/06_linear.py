@@ -88,19 +88,24 @@ from case_studies.research import (
     declared_labels,
     load_model_configs,
     model_requests,
+    narrows_declared_catalog,
     open_study,
+    primary_label,
     resolved_model_plan,
     run_model_population,
+    supersedes_for_run,
 )
+from utils.cv_splits import load_evaluation_config
 from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
-LABEL = "ret_to_expiry"
+LABELS: list[str] = []
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
-POPULATION_NAME = "sp500_options-linear-validation-v1"
+POPULATION_NAME = ""
+SUPERSEDES_POPULATION: str = "6c60d6f2089a"
 
 # %%
 study = open_study("sp500_options", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -108,17 +113,24 @@ study = open_study("sp500_options", execution_tier=EXECUTION_TIER, workspace=WOR
 # %% [markdown]
 # ## 1. Which label, and which models
 #
-# A label is the thing being predicted. This case study defines one that the modelling stages
-# use: `ret_to_expiry`, the return the short straddle earns from the decision date to the
-# option's expiry. Unlike the equity case studies there is no choice of horizon here, because the
-# horizon is a property of the instrument rather than of the experiment - the position runs until
-# the contracts expire, which in this universe is between three and five weeks out.
+# A label is the thing being predicted. This case study puts one label in its sweep:
+# `ret_to_expiry`, the return the short straddle earns from the decision date to the option's
+# expiry. Unlike the equity case studies there is no choice of horizon here, because the horizon
+# is a property of the instrument rather than of the experiment - the position runs until the
+# contracts expire, which in this universe is between three and five weeks out.
 #
-# **This notebook fits one label per run.** `LABEL` above selects it, and every choice below
-# follows from that one setting, because each label has its own training menu at
-# `config/training/{label}.yaml`. The menu lists, family by family, the named configurations to
-# fit for that label. A label with no menu file has nothing declared and nothing to fit; these
-# are the ones that declare linear models.
+# **This notebook fits every label the sweep declares**, which here is that one. The set comes
+# from `labels.primary` and `labels.variants` in `config/setup.yaml`, and `variants` is empty.
+# `LABELS` above restricts the run to a subset when you want one.
+#
+# **`config/training/` holds five menus, and four of them are not in the sweep.** `fwd_ret_5d`,
+# `fwd_ret_10d`, `fwd_ret_dh_5d` and `fwd_ret_dh_10d` are fixed-horizon labels that
+# [`02_labels`](02_labels.ipynb) still writes, because
+# [`03_financial_features`](03_financial_features.ipynb),
+# [`05_evaluation`](05_evaluation.ipynb) and [`90_ic_diagnostic`](90_ic_diagnostic.ipynb) read
+# them, and their menus were left in place when they were dropped from the sweep. What a menu
+# says is what to fit *for* a label; what `setup.yaml` says is which labels the sweep fits. The
+# cell below is the second of those, and it prints a one-element tuple.
 
 # %%
 declared_labels(study, "linear")
@@ -126,8 +138,8 @@ declared_labels(study, "linear")
 # %% [markdown]
 # Each name in the menu resolves to a preset file in the shared directory
 # `case_studies/config/{model_type}/`, which holds that configuration's hyperparameters. The
-# frame below is the menu for `LABEL`, with each name resolved to the estimator class it names
-# and the arguments that class is constructed with. To change what runs, edit the menu or the
+# frame below is the menu for every label above, with each name resolved to the estimator class
+# it names and the arguments that class is constructed with. To change what runs, edit the menu or the
 # presets rather than this notebook.
 #
 # The grid covers the two shapes a penalty can take:
@@ -149,10 +161,25 @@ declared_labels(study, "linear")
 configs = load_model_configs(
     study,
     "linear",
-    labels=[LABEL],
+    labels=LABELS or None,
     config_names=CONFIG_NAMES or None,
 )
 configs
+
+# %% [markdown]
+# `LABELS` and `CONFIG_NAMES` both narrow what is fitted, and a narrowed run declares a different
+# set of members than the canonical population does. A population is immutable once written, so
+# such a run must publish under its own name. Comparing the loaded rows against the complete
+# declared catalog catches either knob, and says so here rather than several cells later in a
+# message about hashes.
+
+# %%
+if narrows_declared_catalog(study, "linear", configs) and not POPULATION_NAME:
+    raise ValueError(
+        f"this run declares {configs.height} label-configuration pairs, which is not the "
+        f"complete declared catalog, so it cannot publish the canonical population; pass "
+        f"POPULATION_NAME to give it its own"
+    )
 
 # %% [markdown]
 # ## 2. Binding the declarations to the data
@@ -236,9 +263,33 @@ plan.select(
 # predictions happen to be in the registry - and it is why a configuration that raises fails the
 # whole call rather than publishing a population one member short. Everything that finished stays
 # registered, and re-running fits only what is missing.
+#
+# **A name holds one generation at a time.** Anything that moves a training identity moves
+# every prediction hash with it, so the members this run computes are no longer the members
+# an earlier snapshot under the same name declared. `SUPERSEDES_POPULATION` names the
+# snapshot such a run retires. It is empty here because this population has no predecessor,
+# and the value is part of what the population is hashed over.
+#
+# `create` refuses a changed member list under an existing name unless this names the
+# current snapshot, so the parameter is how a refit is possible at all rather than a
+# precaution against corrupting anything. Republishing an identical list is a no-op.
 
 # %%
-execution, population = run_model_population(study, resolved, population_name=POPULATION_NAME)
+# `11_model_analysis` and `12_backtest` resolve this population by name, so the default is
+# the contract with them and not a label of convenience. A run that narrows the member set
+# has to pass its own.
+population_name = POPULATION_NAME or "sp500-options-linear-validation-v1"
+execution, population = run_model_population(
+    study,
+    resolved,
+    population_name=population_name,
+    supersedes=supersedes_for_run(
+        study,
+        population_name=population_name,
+        declared=SUPERSEDES_POPULATION or None,
+        execution_tier=EXECUTION_TIER,
+    ),
+)
 
 fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
 reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)
@@ -282,9 +333,20 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # ## 4. What the target looks like
 #
 # Before the model results, the target itself, because the shape of this distribution is what the
-# results below turn on. Each observation is one straddle held to expiry. The histogram is drawn
-# on a symmetric-log scale, because a linear axis wide enough to show the left tail would compress
-# everything else into a single bar.
+# results below turn on. Each observation is one straddle held to expiry. The counts are drawn on
+# a logarithmic axis, because the left tail is thousands of times rarer than the mode and a
+# linear count axis would flatten it to nothing.
+#
+# **Measured on the development sample only.** The label artifact on disk runs to the end of the
+# data, holdout included, and `02_labels` says so: the files carry the sealed sessions and no
+# diagnostic reads them. Describing the target across all of it would put a statistic computed
+# partly on sealed outcomes into a validation-stage notebook.
+#
+# The cut is on the date each straddle settles, not the date its signal is observed. A straddle
+# entered in December 2020 expires in January, and its return is decided by prices inside the
+# holdout however early the signal was read; a cut on the signal date keeps it. `02_labels` and
+# `05_evaluation` both apply the settlement rule, and the artifact carries `dte_calendar`, so the
+# same rule is available here.
 #
 # Two features of it matter. There is a hard ceiling: the most a short straddle can earn is the
 # premium it collected, so nothing exceeds a return of one. There is no floor: a large enough move
@@ -293,12 +355,24 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # mean is dragged below zero by a small number of very large losses.
 
 # %% tags=["results"]
-label_values = (
-    study.labels.get(LABEL, execution_tier=EXECUTION_TIER)
-    .load()
-    .get_column(LABEL)
-    .drop_nulls()
-    .to_numpy()
+# The label the strategy trades, read from `setup.yaml` rather than from a constant here, so
+# this section describes the same target the sweep publishes against.
+primary = primary_label(study)
+holdout_start = (
+    pl.Series([str(load_evaluation_config("sp500_options")["holdout_start"])]).str.to_date().item()
+)
+labels = study.labels.get(primary, execution_tier=EXECUTION_TIER).load()
+if "dte_calendar" not in labels.columns or labels.get_column("dte_calendar").null_count():
+    raise ValueError("the primary label artifact carries no expiry horizon to settle on")
+settlement = pl.col("timestamp") + pl.duration(days=pl.col("dte_calendar"))
+development = labels.with_columns(settlement.alias("settles")).filter(
+    pl.col("settles") < holdout_start
+)
+label_values = development.get_column(primary).drop_nulls().to_numpy()
+last_settlement = development.get_column("settles").max()
+print(
+    f"{len(label_values):,} straddles settling before the {holdout_start} holdout, "
+    f"the last of them on {last_settlement:%Y-%m-%d}"
 )
 
 summary = pl.DataFrame(
@@ -370,15 +444,37 @@ catalog = (
         "training_hash",
         "prediction_hash",
     )
-    .sort("ic_mean", descending=True)
-    .join(configs.select("config_name", "model_class", "params"), on="config_name", how="left")
+    .sort(["label", "ic_mean"], descending=[False, True])
+    .join(
+        configs.select("config_name", "label", "model_class", "params"),
+        on=["config_name", "label"],
+        how="left",
+    )
 )
 
 if catalog.filter(~pl.col("complete")).height:
     raise RuntimeError("linear execution returned a partial prediction set")
 
-full_days = int(catalog.get_column("ic_n_days").max())
-catalog = catalog.with_columns(full_coverage=pl.col("ic_n_days") == full_days)
+# %% [markdown]
+# The catalog now holds one row per configuration, with the sweep's own declarations joined onto
+# what the run measured. What remains is to mark which rows were measured on every validation
+# date, refuse a shape these figures cannot draw, and show the ranking.
+
+# %% tags=["results"]
+# Coverage is judged against each label's own maximum. The sweep declares one label today, so
+# this is the same number either way; it is written per label because adding a variant to
+# `setup.yaml` is all it takes for a global maximum to mark a whole grid incomplete for a reason
+# that has nothing to do with the models.
+catalog = catalog.with_columns(
+    full_coverage=pl.col("ic_n_days") == pl.col("ic_n_days").max().over("label")
+)
+# The charts below are one panel, which is only right while the sweep is one label. A variant
+# added to `setup.yaml` has to be faceted the way `fx_pairs` and `cme_futures` facet theirs,
+# rather than silently pooled into one ranking.
+if catalog.get_column("label").n_unique() > 1:
+    raise NotImplementedError(
+        "this notebook charts one label; facet the figures before adding a sweep variant"
+    )
 catalog.select(
     "config_name",
     "model_class",
@@ -460,9 +556,9 @@ if ridge.height:
     peak = int(np.argmax(ridge_ic))
 else:
     print(
-        f"{LABEL} declares no Ridge configurations, so there is no penalty sweep to trace. "
-        f"Which estimators this section can show is decided by the menu at "
-        f"config/training/{LABEL}.yaml."
+        "No declared label declares Ridge configurations, so there is no penalty sweep to trace. "
+        "Which estimators this section can show is decided by the menus at "
+        "config/training/*.yaml."
     )
 
 # %% [markdown]

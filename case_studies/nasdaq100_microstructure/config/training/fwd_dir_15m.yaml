@@ -22,10 +22,20 @@ gbm:
 - leaves_15_multiclass
 - leaves_31_multiclass
 - leaves_63_multiclass
-deep_learning:
-- nlinear
-- lstm_h64
-- tcn
-- patchtst
-causal_dml:
-- dml
+# No `deep_learning`, for the same reason and one family over. The sequence runner refuses a
+# non-regression label outright - `case_studies/utils/deep_learning.py:374`, "sequence runner
+# currently supports regression labels only" - and it refuses inside `resolve_model_request`,
+# so the four architectures declared here could never have been fitted on this label. The
+# refusal is cheap, which is exactly why the declaration survived: nothing ran it. What it did
+# was put four members in the declared menu that no notebook can produce, so the run either
+# narrows to the return labels silently or stops at planning. The three return labels keep
+# theirs.
+# No `causal_dml`. The DML nuisance models are regressors - `case_studies/utils/causal.py`
+# builds both as `HistGradientBoostingRegressor` - and there is no classification branch, so
+# running a declared causal menu on this label fits a regressor to a class target and banks the
+# result as a canonical causal estimate. `12_causal_dml` estimates on `labels.primary`
+# (`fwd_ret_15m`) and never reads this file, so the key ran nothing; what it did was tell the
+# next reader, comparing the declared menu against the production count, that a causal result
+# for the direction label was missing and the notebook should be extended to produce it.
+# ml4t/agent-workspace#396. The three return labels keep theirs: a continuous target is what
+# DML as implemented estimates.

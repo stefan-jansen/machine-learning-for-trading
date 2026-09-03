@@ -139,7 +139,7 @@ universe:
   # spec-hash input — like the 'liquid' filter, the hash carries only the
   # filter name). The full 115 universe collapses out of sample (featured
   # config holdout -0.42) while the cost-feasible universe is positive; the
-  # screen is load-bearing. See 16_costs.py for the full-vs-screened contrast.
+  # screen is load-bearing. See 17_costs.py for the full-vs-screened contrast.
   cost_feasible:
     validation:
       - AAPL
@@ -245,7 +245,27 @@ universe:
       - UAL
 
 decision:
+  # How often the strategy is allowed to act, NOT the size of a bar in the panel.
+  # The observations are one minute apart; 03_financial_features keeps every
+  # fifteenth of them to build the decision schedule. Nothing here declares the
+  # observation grid, so anything that needs it - an embargo, a permutation block,
+  # any count of periods spanning a duration - measures it from the data instead
+  # of dividing by this number. Reading this field as the bar size yields an
+  # answer fifteen times too small and nothing in the result shows it.
   bar_frequency: 15_minute
+  # A model decides on its own horizon: a five-minute model every five minutes, a
+  # sixty-minute model every hour. `bar_frequency` above is the default for a label that
+  # declares nothing here, and stays the primary label's cadence.
+  #
+  # This is the decision schedule only. The engine's price feed is one minute
+  # (`config/backtest/base.yaml::calendar.data_frequency`), so a position entered on one
+  # decision is watched every minute until the next - which is what a stop or a
+  # take-profit is measured on, and what a fifteen-minute feed could not express.
+  cadence_by_label:
+    fwd_ret_5m: 5_minute
+    fwd_ret_15m: 15_minute
+    fwd_dir_15m: 15_minute
+    fwd_ret_60m: 60_minute
   decision_snapshot: bar_close
   execution_delay: 1_bar
   execution_price_assumption: next_bar_open_or_vwap
@@ -454,7 +474,7 @@ backtest:
     # (holdout -0.42) but is positive on the cost-feasible subset (the
     # cheapest-to-trade names, frozen per split — see universe.cost_feasible).
     # The full-universe variant is NOT a canonical rank-1 / cohort / DSR
-    # candidate; it lives only in the 16_costs.py full-vs-screened comparison,
+    # candidate; it lives only in the 17_costs.py full-vs-screened comparison,
     # mirroring sp500_options' liquid screen. Read by
     # case_studies.utils.sweep_config.get_universe_filters_for.
     universe_filter: cost_feasible
@@ -464,7 +484,11 @@ backtest:
     top_n_predictions:
       signal: 0                 # all signal predictions (eq-weight baseline)
       allocation: 10            # top-10 model configs by equal-weight baseline Sharpe
-      cost_sensitivity: 1       # top-1 of {signal+allocation} per label
+      # top-1 of every pre-cost stage per label. `17_costs` pools {signal, allocation,
+      # risk_overlay} - `STAGE_SEQUENCE` minus the stage it writes - because an overlay is a
+      # candidate to carry the case study and pricing only its parent would put a cost curve
+      # in the chapter for a strategy this case study does not select.
+      cost_sensitivity: 1
       risk_overlay: 1           # top-1 of {signal+allocation} per label
     # No expensive allocators on nasdaq. At 15-min frequency the 1.3M-bar
     # panel makes covariance estimation on the rebalance schedule
@@ -501,7 +525,7 @@ backtest:
     # per_share_plus_spread. Values: 0¢, 0.5¢, 1¢, 2.5¢, 5¢, 10¢.
     cost_grid_half_spread_usd: [0.0, 0.005, 0.01, 0.025, 0.05, 0.10]
     # Alternative rebalance cadences explored by Ch18's cadence × cost
-    # heatmap (16_costs.py Section 4). The first entry must be the CS's
+    # heatmap (17_costs.py Section 4). The first entry must be the CS's
     # default cadence (``decision.bar_frequency``). Each cadence reuses the
     # ``cost_grid_half_spread_usd`` grid above. Tokens are the same cadence
     # vocabulary recognized by the engine; the notebook pulls the list from
@@ -538,10 +562,14 @@ backtest:
       long_q: [0.90, 0.95, 0.99]
       direction: [long_only, long_short]
       max_slots: [5, 10, 20]
-      hold_bars: [8, 16, 32]              # 2h, 4h, 8h at 15-min grid
+      # hold_bars and bars_per_day count rows of the grid the slot simulator walks, which is
+      # the PRICE grid, now one minute. Restated from the fifteen-minute counts they carried
+      # (8/16/32 and 14) at the same wall-clock durations, so the sweep asks the same question
+      # of the same intervals rather than silently asking about 8, 16 and 32 minutes.
+      hold_bars: [120, 240, 480]          # 2h, 4h, 8h, in minute bars
       exit_signal_q: [null, 0.30, 0.50, 0.70]  # null disables signal-exit
-      pred_freshness_max_min: 14          # variant-A: freshest 1m pred per 15m bar
-      bars_per_day_grid: [14]             # 15m only; 1m cadence failed comprehensively
+      pred_freshness_max_min: 14          # tolerated staleness of a prediction, in minutes
+      bars_per_day_grid: [210]            # was 14 bars of 15 minutes; same 3.5h window
       top_k_grid: [5, 10, 20]
       lookback_days: 21
     # Ch19 risk overlays.
@@ -582,25 +610,83 @@ labels:
     fwd_ret_5m: 5min
     fwd_ret_60m: 60min
     fwd_dir_15m: 15min
-  # Vectorized-backtest thinning step per label: number of schedule slots
-  # to advance per trade so holding periods don't overlap.
+  # How many slots of the DECISION schedule to advance per trade, so a position is held for
+  # its label's horizon and no two holdings overlap. A slot is one interval of the declared
+  # cadence, so these are `ceil(horizon / cadence)` and nothing else.
+  #
+  # That reading is only true because `resolve_rebalance_timestamps` now builds the schedule
+  # from the declared cadence. It used to return the panel's own timestamps unchanged for
+  # every intraday cadence, and this panel carries every minute, so these values thinned
+  # minutes rather than fifteen-minute slots and three of the four labels traded every
+  # minute (ml4t/agent-workspace#187). The values did not change; what they count did.
+  # Every label now trades on a cadence equal to its own horizon (decision.cadence_by_label
+  # above), so one slot is one holding period and no label needs a multi-slot step. The
+  # `fwd_ret_60m: 4` this replaces was `ceil(60 / 15)` against a single fifteen-minute
+  # default; the cadence carries that now, and carries it for the Ch18 sweep arms too,
+  # which differ from the default in exactly this token.
   rebalance_step:
     fwd_ret_15m: 1
     fwd_ret_5m: 1
-    fwd_ret_60m: 4   # 15min schedule, 60min horizon -> ceil(60/15) = 4
+    fwd_ret_60m: 1
     fwd_dir_15m: 1
   # Continuous return that each classification label is derived from.
   classification_eval_label:
     fwd_dir_15m: fwd_ret_15m
 
 modeling:
+  dl:
+    # The backend the sequence families are trained on in production. Declared rather
+    # than defaulted: the four deep-learning notebooks refuse to train on a device other
+    # than the one asked for, because the device is part of what the run is registered
+    # under, and a notebook that invents `gpu` from a missing section makes a
+    # CUDA-free environment fail on a requirement nobody wrote down. A run on other
+    # hardware sets the notebook's DEVICE parameter, which is then what gets registered.
+    device: gpu
+    # How many training windows one sequence configuration draws per fold. This is the only
+    # case study that needs the key: every row of a panel starts a window, and this panel is
+    # minute bars, so an uncapped fold builds about 4.0 million near-identical overlapping
+    # sequences where the daily case studies build tens of thousands. Measured on the
+    # canonical plan, 2026-09-02: fold 0 has 4,066,041 training rows and fold 1 has 3,997,571,
+    # across 115 symbols, so uncapped is 5.4x this value and the family's cost goes with it.
+    #
+    # **This number is a compute budget, not a modelling claim, and it is stated that way
+    # deliberately.** It has been 750,000 since the original release and was carried unchanged
+    # through the stage-06 rebuild that moved the folds underneath it, so nothing derives it.
+    # For scale: consecutive windows share 59 of their 60 observations, one window per 60-bar
+    # lookback would give about 67,800 per fold, and one per 15-minute label horizon about
+    # 271,000. At 750,000 a window is drawn every 5.4 minutes, which is finer than the horizon,
+    # so neighbouring training windows still carry overlapping labels.
+    #
+    # Overlapping training windows are not wrong - they are correlated examples rather than
+    # invalid ones, and a noisy intraday target is a reasonable place to want many of them.
+    # What is missing is an argument for this value rather than another, and the value is now
+    # part of the training identity, so the argument has to exist before the number can be
+    # defended. That is ml4t/agent-workspace#1015. It is left at 750,000 here because changing
+    # it changes what every deep-learning result in this chapter describes, and that is a
+    # decision to take on the evidence rather than hours before a production run.
+    max_train_sequences: 750000
   gbm:
     libraries: [lightgbm]
     preset: default
     device: cpu
-    max_bin: 63
+    # LightGBM's own CPU default. 63 is the GPU default and was carried over with the
+    # device when these runs moved off the GPU, so every CPU fit was quantizing the design
+    # matrix into a quarter of the bins the library would have used. Coarser bins are
+    # faster and lose split points; the reader running this on a CPU gets what the
+    # documentation describes.
+    max_bin: 255
 
 causal:
   treatment: signed_vol_share
+  # Bars the treatment's own construction window spans, which is what the placebo block has
+  # to cover: permuting signed_vol_share in blocks shorter than this destroys the serial
+  # dependence the refutation exists to preserve, and the resulting p-value reads like a
+  # refutation without being one. Declared here rather than inferred, because guessing which
+  # element of a window list a column was built from puts a wrong number behind a right-looking
+  # one. Derived from the construction, not chosen:
+  #
+  # `signed / TRADED_VOLUME` in 03_financial_features, both from the same bar. The smoothed
+  # versions this feeds are separate columns; the treatment itself spans one bar.
+  treatment_window: 1
   confounders: [rel_spread_close, rv_5m, r1m]
   method: walk_forward_dml

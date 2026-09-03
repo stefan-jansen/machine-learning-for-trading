@@ -90,7 +90,8 @@ PINNED_TRACES = [
     "08_forecasting_pipeline_20260609T142158Z_24e083e7fe54.json",  # rate hike (contested)
 ]
 
-LLM_PROVIDER = ""  # empty = auto-detect; "mock" for CI (live path only)
+# empty = auto-detect; "mock" for CI (live path only)
+LLM_PROVIDER = ""
 N_AGENTS = 3
 DEBATE_ROUNDS = 3
 MAX_STEPS = 5

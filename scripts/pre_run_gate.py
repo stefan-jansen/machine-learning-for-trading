@@ -123,7 +123,7 @@ def check_fold_preparation(report: Report, study, requests) -> None:
     than at hour four of the canonical run.
     """
     from case_studies.utils import linear as linear_runner
-    from case_studies.utils.folds import clear_memo, prepare_standardized_folds
+    from case_studies.utils.folds import clear_memo, holds_in_memory, prepare_standardized_folds
 
     request = requests[0].as_dict() if hasattr(requests[0], "as_dict") else requests[0]
     base = linear_runner._load_batch_base(study, request)
@@ -168,12 +168,23 @@ def check_fold_preparation(report: Report, study, requests) -> None:
         rows=rows,
         prepare_all_folds_s=total,
     )
+    # The memo only holds a fold set that fits the budget. When it declines, the second call
+    # legitimately re-prepares, and asserting a tenth of the time would report the arrangement as
+    # broken while it is working as designed. Report the timing either way; assert only where
+    # reuse is what should have happened.
+    memoized = holds_in_memory(base["mds"], base["splits"][:1])
     report.add(
         "prepared folds are reused, not rebuilt per configuration",
-        second < max(first, 1e-6) / 10,
-        f"first preparation {first:.1f}s, reuse {second:.3f}s",
+        second < max(first, 1e-6) / 10 if memoized else True,
+        (
+            f"first preparation {first:.1f}s, reuse {second:.3f}s"
+            if memoized
+            else f"fold set exceeds the memo budget, so each configuration re-prepares "
+            f"(first {first:.1f}s, second {second:.1f}s)"
+        ),
         first_s=first,
         reuse_s=second,
+        memoized=memoized,
     )
 
 
@@ -224,6 +235,19 @@ def check_preview_run(report: Report, case_study: str, family: str, label: str) 
             traceback.format_exc(limit=6).strip().splitlines()[-1],
         )
     finally:
+        # Activating the preview tier pointed ML4T_OUTPUT_DIR at this throwaway workspace. Restore
+        # the canonical activation before the workspace is removed: every check that runs after
+        # this one resolves its paths through that variable, and the cost extrapolation reads the
+        # modeling dataset, so leaving it pointed at a deleted directory fails the gate on exactly
+        # the branch that exists to serve a family with no recorded cost.
+        try:
+            open_study(case_study).activate()
+        except Exception:
+            report.add(
+                "the canonical study is restored after the preview",
+                False,
+                traceback.format_exc(limit=6).strip().splitlines()[-1],
+            )
         shutil.rmtree(workspace, ignore_errors=True)
     return measurements
 

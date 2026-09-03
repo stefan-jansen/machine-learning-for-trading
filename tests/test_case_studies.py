@@ -18,17 +18,19 @@ Usage:
     pytest tests/test_case_studies.py -v -k "03_features"
 """
 
-import re
 from pathlib import Path
 
 import pytest
 
+from tests.awaiting_rebuild import unmet_reason
 from tests.pm_helpers import (
+    STAGE_RE,
     current_test_tier,
     get_overrides,
     get_tier,
     missing_required_env,
     run_notebook,
+    stage_sort_key,
 )
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -46,10 +48,6 @@ CASE_STUDIES = [
     "us_equities_panel",
 ]
 
-# Pattern for numbered pipeline stages — allows optional single-letter suffix
-# (e.g., 10a_pca, 11b_ipca) for per-estimator notebook splits.
-_STAGE_RE = re.compile(r"^\d{2}[a-z]?_")
-
 
 def _collect_case_study_tests():
     """Collect all case study pipeline notebooks as (case_study, stage, path) tuples.
@@ -63,10 +61,10 @@ def _collect_case_study_tests():
         if not cs_dir.exists():
             continue
 
-        for notebook in sorted(cs_dir.glob("[0-9][0-9]*.py")):
+        for notebook in sorted(cs_dir.glob("[0-9][0-9]*.py"), key=stage_sort_key):
             if notebook.name.startswith("_"):
                 continue
-            if not _STAGE_RE.match(notebook.name):
+            if not STAGE_RE.match(notebook.name):
                 continue
             stage = notebook.stem  # e.g., "06_linear" or "11a_pca"
             tests.append((cs, stage, notebook))
@@ -112,6 +110,13 @@ def test_case_study_pipeline(
         reason = overrides.get("skip_reason", "marked skip in overrides")
         pytest.skip(f"Skipped: {reason}")
 
+    # Inputs the rebuild has not produced yet. Unlike `skip`, this is checked against the
+    # registry every run and stops applying the moment the input exists, so it cannot outlive
+    # its reason; tests/test_awaiting_rebuild.py fails the build on a declaration that has.
+    if declaration := overrides.get("awaiting_rebuild"):
+        if reason := unmet_reason(declaration):
+            pytest.skip(f"{reason} (#{declaration['issue']})")
+
     # Credentials the notebook cannot run without.
     if absent := missing_required_env(overrides):
         pytest.skip(f"Requires {', '.join(absent)} (unset in this environment)")
@@ -144,7 +149,7 @@ def test_case_study_pipeline(
         timeout=timeout,
         output_dir=seeded_output_dir,
         data_dir=populated_data_dir,
-        research_preview=True,
+        research_preview=overrides.get("research_preview", True),
     )
 
     if result["status"] == "error":

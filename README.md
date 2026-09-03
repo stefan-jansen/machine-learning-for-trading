@@ -20,10 +20,9 @@ strategy you can actually run, and keep running, in a live market.
 machine to a running notebook, prerequisites included. The short version is under
 [Quick Start](#quick-start) below.
 
-> **Free reader's guide:** Join [Navigate ML for Trading, 3rd Edition](https://maven.com/p/c6e0e7/navigate-ml-for-trading-3rd-edition)
-> on **July 30, 2026 at 11:00 AM ET** for a 30-minute map of the book, case studies, code, and companion resources.
-> See all current [courses and workshops](https://maven.com/stefan-jansen); the cohort courses are listed under
-> [Courses](#courses) below.
+<!-- offerings:next start -->
+> **Next free session:** [Managing Your Strategy Research Process](https://maven.com/p/bc9fd4), a 30-minute live session on **Wednesday, September 2, 2026, 12:00 PM ET / 16:00 UTC**. [All courses, workshops, and free lessons](https://ml4trading.io/courses/?utm_source=github&utm_medium=readme&utm_campaign=ml4t3e&utm_content=offerings).
+<!-- offerings:next end -->
 
 <p align="center">
   <a href="https://amzn.to/4eigy2F"><img src="assets/cover.png" width="45%" alt="Machine Learning for Trading, 3rd Edition"></a>
@@ -92,63 +91,27 @@ why.
 | [S&P 500 Options](case_studies/sp500_options/)                          | Options            | Daily     | Options-only strategies (straddles, delta-hedged positions)                  |
 | [US Equities](case_studies/us_equities_panel/)                          | Equities           | Daily     | Broad cross-section of US stocks with classic factor exposures               |
 
-### 112 Primer Topics
+### Companion Resources
 
-Free concept explainers for every idea the book relies on. Each part links to its full list; a few topics show the
-range:
+The [companion website](https://ml4trading.io) carries three things the chapters
+lean on but do not reprint.
 
-- [Foundations](https://ml4trading.io/primer/): 8 topics spanning limit order book mechanics, bitemporal data models,
-  and the stylized facts a simulator must reproduce.
-- [Research Design and Feature Engineering](https://ml4trading.io/primer/): 21 topics, including multiple testing in
-  factor research, fractional differencing, and path signatures for financial sequences.
-- [Model Development](https://ml4trading.io/primer/): 22 topics, among them regularization geometry, conformal
-  prediction in finance, and the mechanism behind double machine learning.
-- [Strategy Implementation](https://ml4trading.io/primer/): 27 topics, from the deflated Sharpe ratio and hierarchical
-  risk parity to Almgren-Chriss optimal execution.
-- [Advanced AI](https://ml4trading.io/primer/): 8 topics such as Markov decision processes, the policy-gradient theorem,
-  and proper scoring rules for event forecasts.
-- [Production](https://ml4trading.io/primer/): 2 topics, champion-challenger evaluation and training-serving skew with
-  feature stores.
-- [Cross-cutting concepts](https://ml4trading.io/primer/): 24 building blocks referenced across chapters, for example
-  momentum and mean reversion, the bias-variance tradeoff, and walk-forward validation.
-
-### 61 Agent Skills
-
-Reusable, guard-railed tasks for coding agents, each with built-in defenses against lookahead bias, data leakage, and
-multiple-testing errors. Each category links to its full set; a few skills show the range:
-
-- [Concepts](https://ml4trading.io/skills/): 10 skills, including lookahead bias, data leakage, and the information
-  coefficient.
-- [Data Acquisition](https://ml4trading.io/skills/): 7 skills spanning fetching data, building bars, and data
-  validation.
-- [Feature Engineering](https://ml4trading.io/skills/): 10 skills, among them computing features, triple-barrier labels,
-  and feature selection.
-- [Evaluation & Validation](https://ml4trading.io/skills/): 8 skills, from walk-forward CV and purging-and-embargo to
-  the deflated Sharpe ratio.
-- [Backtesting](https://ml4trading.io/skills/): 5 skills such as running backtests, cost models, and tear sheets.
-- [Portfolio Management](https://ml4trading.io/skills/): 5 skills, including position sizing, risk metrics, and kill
-  switches.
-- [Infrastructure](https://ml4trading.io/skills/): 4 skills, for example the canonical schema, the registry system, and
-  Polars patterns.
-- [Workflows](https://ml4trading.io/skills/): 5 skills covering factor research, model validation, and production
-  readiness.
-- [Production](https://ml4trading.io/skills/): 2 skills, live trading and monitoring & alerting.
-- [Advanced AI](https://ml4trading.io/skills/): 5 skills covering research operators, agent memory, forecasting,
-  governance, and RAG evaluation.
-
-### Courses
-
-[Cohort-based courses](https://ml4trading.io/courses/) on [Maven](https://maven.com/stefan-jansen) that work through
-the material live, with direct feedback:
-
-- [Machine Learning for Trading: From Research to Production](https://maven.com/stefan-jansen/research-to-production):
-  take a research idea all the way to a deployed, monitored strategy.
-- [Engineering a Multi-Agent Forecasting System](https://maven.com/stefan-jansen/agent-engineering):
-  design auditable multi-agent systems for financial research.
-
-Each course runs as a scheduled cohort; the links above always point to the next one, where you can enroll or join the
-waitlist. *Stay current between cohorts with the
-[**Insights** newsletter](https://insights.ml4trading.io/).*
+- **[112 primers](https://ml4trading.io/primer/)** are free, open explainers, one
+  page per concept, covering what a chapter assumes you already know: limit order
+  book mechanics, bitemporal data models, fractional differencing, multiple
+  testing in factor research, conformal prediction, the deflated Sharpe ratio,
+  hierarchical risk parity, Almgren-Chriss execution, walk-forward validation.
+  Nothing to install and nothing to sign up for.
+- **[61 agent skills](https://ml4trading.io/skills/)** are task recipes for coding
+  agents, each carrying the same guards against lookahead bias, leakage, and
+  multiple testing that the task needs when a person does it by hand. They span
+  the research loop: building bars and triple-barrier labels, feature selection,
+  purged walk-forward CV, cost models and tear sheets, position sizing, kill
+  switches, live monitoring. Browsing the catalog is free; opening a skill's
+  detail requires a website account.
+- **[Six Python libraries](https://ml4trading.io/libraries/)** carry the pipeline
+  the notebooks are built on, one per stage of the workflow. They are listed
+  below and each is documented and usable on its own.
 
 ---
 
@@ -168,220 +131,149 @@ the workflow:
 
 ---
 
-An introduction and a closing chapter bookend six workflow-aligned parts. Each chapter title links to its guide;
-notebooks are added directory by directory as they are finalized.
+## Courses, Workshops, and Free Lessons
 
-## Introduction
+<!-- offerings:all start -->
+**Cohorts and workshops.** Live, scheduled, and worked through with direct feedback on your own research.
 
-### [1. The Process Is Your Edge](01_process_is_edge/)
+| Starts | Offering | What you leave with |
+|--------|----------|---------------------|
+| Sep 16 – Dec 2, 2026 | [ML for Trading: From Research to Production](https://maven.com/stefan-jansen/research-to-production) | Take one research idea from a question to a costed, monitored strategy, with the evidence trail that makes the result checkable. |
+| Sep 26, 2026 | [Engineering a Multi-Agent Forecasting System](https://maven.com/stefan-jansen/agent-engineering) | Build a multi-agent forecasting system whose reasoning is auditable end to end. |
+| Oct 10, 2026 | [Loop Engineering: Reliable Work From Coding Agents](https://maven.com/stefan-jansen/loop-engineering) | Get reliable work out of coding agents: harness design, verification, and recovery from a bad run. |
 
-Why process discipline beats model sophistication. Introduces the ML4T workflow as a research-to-production system,
-regime detection on factor returns and macro indicators, and the evidence boundary that separates exploration from
-confirmation.
+**Free live sessions.** Thirty minutes to an hour, no cost, recording sent to everyone who registers.
 
-## Part I — Financial Data (Chapters 2–5)
+| When | Session |
+|------|---------|
+| Wed, Sep 2, 12:00 PM ET / 16:00 UTC | [Managing Your Strategy Research Process](https://maven.com/p/bc9fd4) |
+| Wed, Sep 9, 12:00 PM ET / 16:00 UTC | [How to Engineer a Multi-Agent System](https://maven.com/p/c7565e) |
+| Wed, Sep 30, 12:00 PM ET / 16:00 UTC | [How to Be Productive with Coding Agents, Beyond Code](https://maven.com/p/efe730) |
+| Wed, Nov 4, 12:00 PM ET / 17:00 UTC | [Why Multi-Agent Systems Break, and How To Fix It](https://maven.com/p/393eee) |
 
-The markets, instruments, and infrastructure the rest of the book builds on: a taxonomy of sources, raw exchange
-messages turned into feature-ready bars, point-in-time fundamentals, and synthetic histories for robust validation.
+*Between cohorts, the [**Insights** newsletter](https://insights.ml4trading.io/) covers the same ground weekly, source by source.*
+<!-- offerings:all end -->
 
-### [2. The Financial Data Universe](02_financial_data_universe/)
+---
 
-A taxonomy of market, fundamental, and alternative data. Surveys eight asset classes, quantifies survivorship bias,
-benchmarks storage formats (Parquet, DuckDB, kdb+, TimescaleDB), and establishes the data-quality framework used
-throughout the book.
+## The Book, Chapter by Chapter
 
-### [3. Market Microstructure](03_market_microstructure/)
+An introduction and a closing chapter bookend six workflow-aligned parts. Every
+chapter title links to its own guide, which carries the full description, the
+notebooks, and the data each one needs.
 
-From raw exchange messages to feature-ready bars. Parses NASDAQ ITCH, reconstructs limit order books from multiple
-data sources, validates Lee-Ready trade classification, and compares bar-sampling methods — dollar bars deliver the
-best return normality.
+### Introduction
 
-### [4. Fundamental and Alternative Data](04_fundamental_alternative_data/)
+| Chapter | What it covers |
+|---------|----------------|
+| **[1. The Process Is Your Edge](01_process_is_edge/)** | Why process discipline beats model sophistication: the ML4T workflow as a research-to-production system, regime detection on factor returns and macro indicators, and the evidence boundary that separates exploration from confirmation. |
 
-Point-in-time pipelines for SEC EDGAR filings, entity resolution across identifier systems, macro and commodity
-fundamentals, and alternative-data evaluation — including on-chain crypto fundamentals and prediction markets
-(Kalshi, Polymarket).
+### Part I - Financial Data (Chapters 2-5)
 
-### [5. Synthetic Financial Data](05_synthetic_data/)
+The markets, instruments, and infrastructure the rest of the book builds on: a taxonomy of sources, raw exchange messages turned into feature-ready bars, point-in-time fundamentals, and synthetic histories for robust validation.
 
-Generating alternative market histories for robust validation. Implements TimeGAN, Tail-GAN, Sig-CWGAN,
-Diffusion-TS, and LLM-based tabular generation, evaluated through a fidelity–utility–privacy framework.
+| Chapter | What it covers |
+|---------|----------------|
+| **[2. The Financial Data Universe](02_financial_data_universe/)** | Eight asset classes surveyed, survivorship bias quantified, storage formats benchmarked (Parquet, DuckDB, kdb+, TimescaleDB), and the data-quality framework used throughout the book. |
+| **[3. Market Microstructure](03_market_microstructure/)** | NASDAQ ITCH parsing, limit order book reconstruction from several sources, Lee-Ready trade classification validated, and bar-sampling methods compared; dollar bars deliver the best return normality. |
+| **[4. Fundamental and Alternative Data](04_fundamental_alternative_data/)** | Point-in-time SEC EDGAR pipelines, entity resolution across identifier systems, macro and commodity fundamentals, and alternative-data evaluation including on-chain crypto and prediction markets (Kalshi, Polymarket). |
+| **[5. Synthetic Financial Data](05_synthetic_data/)** | TimeGAN, Tail-GAN, Sig-CWGAN, Diffusion-TS, and LLM-based tabular generation, each evaluated through a fidelity, utility, and privacy framework. |
 
-## Part II — Research Design and Feature Engineering (Chapters 6–10)
+### Part II - Research Design and Feature Engineering (Chapters 6-10)
 
-Define the trading problem, then turn data into model-ready signals: research design, labels, features, and the
-evaluation that determines what any model can learn.
+Define the trading problem, then turn data into model-ready signals: research design, labels, features, and the evaluation that determines what any model can learn.
 
-### [6. Strategy Research Framework](06_strategy_definition/)
+| Chapter | What it covers |
+|---------|----------------|
+| **[6. Strategy Research Framework](06_strategy_definition/)** | Universe rules, decision schedule, cost model, evaluation protocol, and run logging. Introduces the nine case studies and the walk-forward cross-validation discipline that anchors Chapters 7 to 20. |
+| **[7. Defining the Learning Task](07_defining_the_learning_task/)** | Forward-return, triple-barrier, and trend-scanning labels; information coefficients, quantile analysis, and feasibility screens; multiple-testing control with BH-FDR and the Deflated Sharpe Ratio; causal plausibility checks. |
+| **[8. Financial Feature Engineering](08_financial_features/)** | Five feature families from price (momentum, reversal, volatility, liquidity, microstructure), structural and cross-instrument features, macro and calendar context, and selection with robustness testing. |
+| **[9. Model-Based Feature Extraction](09_model_based_features/)** | Features from fitted models: stationarity diagnostics, Kalman filters, Fourier and wavelet spectral features, GARCH volatility, and HMM regime probabilities, all point-in-time correct. |
+| **[10. Text Feature Engineering](10_text_feature_engineering/)** | Bag-of-words through transformers: TF-IDF, Word2Vec and GloVe embeddings, LSTM sequence models, FinBERT sentiment, financial NER fine-tuning, and news-return signal construction. |
 
-Defining the trading game before building models: universe rules, decision schedule, cost model, evaluation
-protocol, and run logging. Introduces the nine case studies and the walk-forward cross-validation discipline that
-anchors Chapters 7–20.
-
-### [7. Defining the Learning Task](07_defining_the_learning_task/)
-
-Label engineering (forward returns, triple-barrier, trend scanning), univariate feature evaluation (information
-coefficients, quantile analysis, feasibility screens), multiple-testing control (BH-FDR, Deflated Sharpe Ratio),
-and causal plausibility checks.
-
-### [8. Financial Feature Engineering](08_financial_features/)
-
-Five feature families from price data (momentum, reversal, volatility, liquidity, microstructure), structural and
-cross-instrument features (yield curve, term structure, relative value), contextual features (macro regime, calendar,
-sentiment), and feature selection with robustness testing.
-
-### [9. Model-Based Feature Extraction](09_model_based_features/)
-
-Features from fitted models: stationarity diagnostics, Kalman filters, Fourier and wavelet spectral features, GARCH
-volatility, and HMM regime probabilities — with point-in-time correctness enforced throughout.
-
-### [10. Text Feature Engineering](10_text_feature_engineering/)
-
-From bag-of-words through transformers: TF-IDF, Word2Vec and GloVe embeddings, LSTM sequence models, FinBERT
-sentiment, financial NER fine-tuning, and news-return signal construction.
-
-## Part III — Model Development (Chapters 11–15)
+### Part III - Model Development (Chapters 11-15)
 
 Five model families applied to the same nine case studies, each building on the linear baseline.
 
-### [11. The ML Pipeline](11_ml_pipeline/)
+| Chapter | What it covers |
+|---------|----------------|
+| **[11. The ML Pipeline](11_ml_pipeline/)** | Ridge, LASSO, and Elastic Net as the baseline every later model must beat, logistic regression for direction, SHAP interpretability, conformal prediction for uncertainty, and a comparison across all nine case studies. |
+| **[12. Gradient Boosting and Advanced Tabular Models](12_gradient_boosting/)** | XGBoost, LightGBM, and CatBoost with Optuna multi-objective tuning, plus the deep tabular alternatives TabPFN and TabM. TreeSHAP explainability, and gradient boosting the strongest tabular model in most case studies. |
+| **[13. Deep Learning for Time Series](13_dl_time_series/)** | LSTM, N-BEATS, PatchTST, iTransformer, TFT, TSMixer, TCN, and Mamba set against the LTSF-Linear debate, with a selection framework and cross-dataset evidence on when depth helps. |
+| **[14. Latent Factor Models](14_latent_factors/)** | PCA eigenportfolios, IPCA with time-varying loadings, conditional and supervised autoencoders, adversarial SDF estimation, and yield-curve decomposition. |
+| **[15. Causal Machine Learning](15_causal_estimation/)** | Double Machine Learning for isolating factor treatment effects, Bayesian Structural Time Series for event impact, and causal discovery with PCMCI, NOTEARS, and VAR-LiNGAM. |
 
-Regularized linear models (Ridge, LASSO, Elastic Net) as the baseline every later model must beat. Logistic
-regression for direction, SHAP interpretability, conformal prediction for uncertainty, and a cross-dataset
-comparison across all nine case studies.
+### Part IV - Strategy Implementation (Chapters 16-20)
 
-### [12. Gradient Boosting and Advanced Tabular Models](12_gradient_boosting/)
+From predictions to deployable strategies: backtesting, portfolio construction, costs, risk, and synthesis.
 
-XGBoost, LightGBM, and CatBoost with Optuna multi-objective tuning, plus deep-learning tabular alternatives (TabPFN,
-TabM). TreeSHAP explainability and cross-dataset results, where gradient boosting is the strongest tabular model in
-most case studies.
+| Chapter | What it covers |
+|---------|----------------|
+| **[16. Strategy Simulation](16_strategy_simulation/)** | Backtesting as falsification: trading-protocol specification, vectorized against event-driven engines, an ETF baseline, regime diagnostics, and overfitting control with the Deflated Sharpe Ratio, the Rademacher Anti-Serum, and White's Reality Check. |
+| **[17. Portfolio Construction](17_portfolio_construction/)** | From scores to portfolios: mean-variance optimization and its pitfalls, Hierarchical Risk Parity, the Kelly criterion, conformal position sizing, deep allocation, and a controlled allocator comparison. |
+| **[18. Transaction Costs](18_transaction_costs/)** | Cost taxonomy, spread estimation, market-impact calibration, execution algorithms (VWAP, TWAP, Almgren-Chriss), transaction-cost analysis, and breakeven costs that vary widely by asset class. |
+| **[19. Risk Management](19_risk_management/)** | VaR and CVaR tail measurement, drawdown and path-risk controls, factor and sector decomposition, stress testing, adaptive risk overlays, deep hedging, and kill switches; overlay effectiveness turns out to be strategy-specific. |
+| **[20. Strategy Synthesis](20_strategy_synthesis/)** | What nine experiments reveal about turning predictions into strategies: IC-Sharpe decorrelation, Fundamental Law diagnostics, the model-family cascade, cost-survival analysis, and holdout failure modes. |
 
-### [13. Deep Learning for Time Series](13_dl_time_series/)
-
-LSTM, N-BEATS, Transformers (PatchTST, iTransformer, TFT), TSMixer, TCN, and Mamba, set against the LTSF-Linear
-debate. A practitioner selection framework and cross-dataset evidence on when deep learning helps and when simpler
-models suffice.
-
-### [14. Latent Factor Models](14_latent_factors/)
-
-PCA eigenportfolios, IPCA with time-varying loadings, conditional and supervised autoencoders, adversarial SDF
-estimation, and yield-curve decomposition — with cross-dataset results on when latent factors add predictive value.
-
-### [15. Causal Machine Learning](15_causal_estimation/)
-
-Double Machine Learning for isolating factor treatment effects, Bayesian Structural Time Series for event impact, and
-causal discovery (PCMCI, NOTEARS, VAR-LiNGAM), applied across the nine case studies.
-
-## Part IV — Strategy Implementation (Chapters 16–20)
-
-From predictions to deployable strategies — backtesting, portfolio construction, costs, risk, and synthesis.
-
-### [16. Strategy Simulation](16_strategy_simulation/)
-
-Backtesting as falsification: trading-protocol specification, vectorized vs event-driven engines, an ETF baseline
-strategy, core metric reporting, regime diagnostics, and strategy-level overfitting control (Deflated Sharpe Ratio,
-Rademacher Anti-Serum, White's Reality Check).
-
-### [17. Portfolio Construction](17_portfolio_construction/)
-
-From scores to portfolios: mean-variance optimization and its pitfalls, Hierarchical Risk Parity, the Kelly
-criterion, conformal position sizing, deep portfolio allocation, and a controlled allocator comparison across case
-studies.
-
-### [18. Transaction Costs](18_transaction_costs/)
-
-Cost taxonomy, spread estimation, market-impact calibration, execution algorithms (VWAP, TWAP, Almgren-Chriss
-optimal execution), transaction-cost analysis, and practical guardrails — with breakeven costs that vary widely by
-asset class.
-
-### [19. Risk Management](19_risk_management/)
-
-VaR/CVaR tail measurement, drawdown and path-risk controls, factor and sector decomposition, stress testing,
-adaptive risk overlays, deep hedging, and kill switches. Overlay effectiveness turns out to be strategy-specific.
-
-### [20. Strategy Synthesis](20_strategy_synthesis/)
-
-What nine experiments reveal about translating ML predictions into strategies: IC–Sharpe decorrelation, Fundamental
-Law diagnostics, the model-family cascade, cost-survival analysis, holdout failure modes, and a practitioner's
-decision framework.
-
-## Part V — Advanced AI (Chapters 21–24)
+### Part V - Advanced AI (Chapters 21-24)
 
 Reinforcement learning, large language models, knowledge graphs, and autonomous agents for finance.
 
-### [21. Reinforcement Learning for Execution and Hedging](21_rl_execution_hedging/)
+| Chapter | What it covers |
+|---------|----------------|
+| **[21. Reinforcement Learning for Execution and Hedging](21_rl_execution_hedging/)** | MDP formulation for finance, DQN, PPO and SAC, optimal execution, market making with inventory management, deep hedging with PFHedge, inverse RL for strategy recovery, and the sim-to-real gap. |
+| **[22. RAG for Financial Research](22_rag_financial_research/)** | Retrieval-augmented generation grounded in SEC filings: ingestion, domain-specific embeddings, hybrid retrieval with re-ranking, constraint-based prompting, evaluation and failure diagnostics, and the move to agentic workflows. |
+| **[23. Knowledge Graphs](23_knowledge_graphs/)** | When graphs earn their infrastructure cost: construction from SEC filings, Graph RAG for multi-hop reasoning, GNN embeddings and centrality as ML features, financial networks, and temporal-leakage prevention. |
+| **[24. Autonomous Agents](24_autonomous_agents/)** | ReAct, Tree of Thoughts, and Reflexion architectures, memory systems, tool contracts, the engineering stack (LangGraph, Claude SDK), a stateful equity-research agent, multi-agent forecasting with adversarial debate, and production reliability. |
 
-MDP formulation for finance, DQN/PPO/SAC algorithms, optimal execution, market making with inventory management, deep
-hedging with PFHedge, inverse RL for strategy recovery, and the sim-to-real gap.
+### Part VI - Production (Chapters 25-26)
 
-### [22. RAG for Financial Research](22_rag_financial_research/)
+Taking strategies live: trading systems and the operational infrastructure that keeps them running.
 
-Retrieval-augmented generation grounded in SEC filings: ingestion, domain-specific embeddings, hybrid retrieval with
-re-ranking, constraint-based prompting, RAG evaluation and failure diagnostics, and the transition to agentic
-workflows.
+| Chapter | What it covers |
+|---------|----------------|
+| **[25. Live Trading Systems](25_live_trading/)** | A framework bridging research and production: Interactive Brokers and Alpaca integration, managed platforms (QuantConnect), order-lifecycle management, pipeline verification, and operational readiness. |
+| **[26. MLOps and Governance](26_mlops_governance/)** | A failure taxonomy separating pipeline divergence from performance decay, drift detection, safe model rollout, circuit breakers, feature stores, and experiment tracking. |
 
-### [23. Knowledge Graphs](23_knowledge_graphs/)
+### Conclusion
 
-When graphs earn their infrastructure cost: KG construction from SEC filings, Graph RAG for multi-hop reasoning,
-graph features for ML (GNN embeddings, centrality, community detection), financial networks, and temporal-leakage
-prevention.
-
-### [24. Autonomous Agents](24_autonomous_agents/)
-
-Agent architectures (ReAct, Tree of Thoughts, Reflexion), memory systems, tool contracts, the engineering stack
-(LangGraph, Claude SDK), a stateful equity-research agent, multi-agent forecasting with adversarial debate, and
-production reliability.
-
-## Part VI — Production (Chapters 25–26)
-
-Taking strategies live — trading systems and the operational infrastructure that keeps them running.
-
-### [25. Live Trading Systems](25_live_trading/)
-
-A unified framework bridging research and production: Interactive Brokers and Alpaca integration, managed platforms
-(QuantConnect), order-lifecycle management, pipeline verification, and operational readiness.
-
-### [26. MLOps and Governance](26_mlops_governance/)
-
-An ML failure taxonomy (pipeline divergence vs performance decay), drift detection, safe model rollout, circuit
-breakers, feature stores, experiment tracking, and the MLOps infrastructure financial ML systems need.
-
-## Conclusion
-
-### [27. The Systematic Edge](27_systematic_edge/)
-
-The systematic philosophy, quant career paths, learning resources, research frontiers, and how to build your own
-edge. The closing bookend to Chapter 1: the process is the edge.
+| Chapter | What it covers |
+|---------|----------------|
+| **[27. The Systematic Edge](27_systematic_edge/)** | The systematic philosophy, quant career paths, learning resources, research frontiers, and how to build your own edge. The closing bookend to Chapter 1: the process is the edge. |
 
 ---
 
 ## Quick Start
 
-**New here? Read these three, in order:**
+**New here? Read these three, in order.**
 
-1. **[What this repository is, and what it is not](docs/what-this-is.md)** - what you can reproduce
-   with one command, what a configuration change buys you, what needs real compute or licensed data,
-   and what is not promised. Five minutes, and it sets expectations before you install anything.
-2. **[Installation](docs/installation.md)** - Linux, Windows WSL2, macOS, Docker, and GPU.
-3. **[Running notebooks](docs/running-notebooks.md)** - the case-study pipeline, the run log, and how
-   to experiment without disturbing the downloaded results.
+1. **[What this repository is, and what it is not](docs/what-this-is.md)** - what reproduces with
+   one command, what a configuration change buys you, what needs real compute or licensed data,
+   and what is not promised. Five minutes, before you install anything.
+2. **[Installation](docs/installation.md)** - Linux, Windows WSL2, macOS, Docker, and GPU, in full.
+3. **[Running notebooks](docs/running-notebooks.md)** - the case-study pipeline, the run log, and
+   how to experiment without disturbing the downloaded results.
 
-These commands are typed into a terminal on your own computer, not into GitHub. New to the command
-line? Start with **[Before You Begin](docs/installation.md#before-you-begin)**.
+Everything below is typed into a terminal on your own computer, not into GitHub, and run **from the
+repository root**. New to the command line? Start with
+**[Before You Begin](docs/installation.md#before-you-begin)**.
 
-Run everything **from the repository root**. Clone and set up with Docker or a local `uv` environment:
+### 1. Clone and install
 
 ```bash
 git clone https://github.com/stefan-jansen/machine-learning-for-trading.git
 cd machine-learning-for-trading
 cp .env.example .env
-
-docker compose pull ml4t # Option A — Docker (recommended)
 ```
 
-Option B is a local `uv` environment, on **macOS, Linux, or inside WSL2**. Install `uv` with its
-own installer rather than with `pip`, which is missing or refuses to install on most current
-systems:
+Then pick one environment. **Option A, Docker**, carries every dependency and needs no compiler:
+
+```bash
+docker compose pull ml4t
+```
+
+**Option B, a local `uv` environment**, on macOS, Linux, or inside WSL2. Install `uv` with its own
+installer, not with `pip`, which is missing or refuses to install on most current systems:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -389,60 +281,49 @@ source $HOME/.local/bin/env   # the installer's own line; puts uv on PATH here a
 uv sync
 ```
 
-Option B compiles several dependencies from source, `scikit-learn` among them, so it needs a
-**C/C++ compiler and the Python headers**: on Ubuntu, Debian and WSL2
-`sudo apt install build-essential python3-dev`, on macOS `xcode-select --install`. Docker
-carries its own and needs none of this.
+Option B compiles several dependencies from source, `scikit-learn` among them, so it needs a C/C++
+compiler and the Python headers: `sudo apt install build-essential python3-dev` on Ubuntu, Debian
+and WSL2, `xcode-select --install` on macOS. Budget about **16 GB** of disk (11 GB environment,
+4 GB free datasets, 0.9 GB of git history).
 
-**macOS readers:** on **Apple Silicon** take Option B. It is the path walked on real hardware
-before each release, and it needs only the Xcode command-line tools for the packages that build
-from source. Docker there is worth its disk only for the twelve `ml4t-py312` notebooks, which have no
-arm64 build and ship pre-executed, and for Chapter 2's containerized database benchmarks. On an **Intel Mac** take Option A: PyTorch publishes
-no macOS x86_64 wheel, so Option B cannot work there.
+| Platform | Take | Why |
+|----------|------|-----|
+| Linux | either | Both paths are exercised on every release |
+| macOS, Apple Silicon | **B** | Walked on real hardware before each release. Docker there earns its disk only for the twelve pre-executed `ml4t-py312` notebooks, which have no arm64 build, and Chapter 2's containerized database benchmarks |
+| macOS, Intel | **A** | PyTorch publishes no macOS x86_64 wheel, so the local path cannot resolve |
+| Windows | either, **inside WSL2** | Run `wsl --install -d Ubuntu` from an Administrator PowerShell, restart, then run it a second time: the first run usually installs the WSL runtime without a distribution. Then follow the Linux instructions in the Ubuntu terminal. Installing into Windows Python is unsupported and does not work |
 
-**Windows readers:** both options run inside WSL2, not in PowerShell. Run
-`wsl --install -d Ubuntu` from an Administrator PowerShell, restart, run it a second time
-(the first run usually installs the WSL runtime without a distribution), and then follow the
-Linux instructions in the Ubuntu terminal. Installing into Windows Python is not supported and does
-not work — `scikit-learn` has no Windows wheel for this Python version and its source build
-fails. The [installation guide](docs/installation.md) has the full WSL2 walkthrough.
+### 2. Download data
 
-Budget about **16 GB** for Option B (11 GB environment, 4 GB free datasets, 0.9 GB of git
-history) and about 12 minutes for the data.
-
-See the **[installation guide](docs/installation.md)** for platform-specific setup and GPU
-instructions. Intel Macs are Docker-only: PyTorch no longer publishes macOS x86_64 wheels, so the
-local `uv` path cannot resolve there.
-
-**Download data.** Most notebooks need datasets; start with the free ones (no API keys):
+Most notebooks need datasets. Start with the free ones, which need no API keys:
 
 ```bash
 uv run python data/download_all.py --free-only
 ```
 
-Docker readers run this in the Jupyter Lab terminal (**File → New → Terminal**) as
-`python data/download_all.py --free-only` — there is no host Python on the Docker path.
-
-That command fetches seven datasets and takes about **4 GB** and twelve minutes, almost all of it
-the firm-characteristics panel, first needed in Ch04. To start in about 75 MB, leave it out and
-fetch it when a chapter asks for it:
+That fetches seven datasets, about **4 GB** and twelve minutes, almost all of it the
+firm-characteristics panel first needed in Chapter 4. To start in about 75 MB and fetch it when a
+chapter asks:
 
 ```bash
 uv run python data/download_all.py --free-only --skip-firm-characteristics
 ```
 
-The **[data guide](data/README.md)** documents every dataset, API-key setup, the loaders, and
-storage tiers.
+On the Docker path there is no host Python: run the same command without `uv run`, in the Jupyter
+Lab terminal (**File → New → Terminal**). The **[data guide](data/README.md)** documents every
+dataset, API-key setup, the loaders, and the storage tiers.
 
-**(Optional) pre-computed results.** To explore the nine released Ch11-20 case studies without
+**Optional: pre-computed results.** To explore the nine released Chapter 11-20 case studies without
 retraining, download their verified registries, predictions, model files, and backtest artifacts:
 
 ```bash
 uv run python scripts/download_artifacts.py
 ```
 
-**Run notebooks.** Notebooks are paired [Jupytext](https://jupytext.readthedocs.io/) files (`.py` source + generated
-`.ipynb`). Run a quick smoke test, or open Jupyter Lab:
+### 3. Run notebooks
+
+Notebooks are paired [Jupytext](https://jupytext.readthedocs.io/) files, a `.py` source and a
+generated `.ipynb`. `uv sync` already installed Jupyter Lab.
 
 ```bash
 uv run python 01_process_is_edge/factor_regimes.py                # smoke test
@@ -450,13 +331,12 @@ ML4T_DATA_PATH="${ML4T_DATA_PATH:-$PWD/data}" uv run jupyter lab  # local: open 
 docker compose up -d ml4t                                         # Docker: same address
 ```
 
-`uv sync` already installed Jupyter Lab. Start it from the repo root: the `ML4T_DATA_PATH` prefix
-gives the loaders an absolute path, because Jupyter runs each notebook with its chapter folder as the
-working directory, and they would otherwise search inside that folder and report the datasets as
-missing. It keeps a value you have already exported and defaults to this repository's `data/`.
-
-See the guide to **[running notebooks](docs/running-notebooks.md)** for case-study pipelines, Papermill parameters, and
-the experiment workflow.
+Start Jupyter from the repository root. The `ML4T_DATA_PATH` prefix gives the loaders an absolute
+path, because Jupyter runs each notebook with its chapter folder as the working directory and the
+loaders would otherwise search inside that folder and report the datasets as missing. It keeps a
+value you have already exported and defaults to this repository's `data/`. See
+**[running notebooks](docs/running-notebooks.md)** for case-study pipelines, Papermill parameters,
+and the experiment workflow.
 
 ### Docker images
 

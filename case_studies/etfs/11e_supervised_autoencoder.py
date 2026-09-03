@@ -50,6 +50,7 @@ from IPython.display import Markdown, display
 from ml4t.diagnostic.metrics import compute_ic_uncertainty, cross_sectional_ic_series
 
 from case_studies.utils.latent_factors.case_study import (
+    INPUT_IDENTITY_VERSION,
     configured_models,
     load_case_study_context,
     run_case_study_model,
@@ -110,7 +111,10 @@ context = load_case_study_context(
     use_macro=USE_MACRO,
 )
 assert MODEL_NAME in configured_models(context)
-assert context.input_data_spec["version"] == "v1"
+assert context.input_data_spec["version"] == INPUT_IDENTITY_VERSION, (
+    f"this notebook records the {INPUT_IDENTITY_VERSION} input identity, "
+    f"and the context carries {context.input_data_spec['version']}"
+)
 assert context.macro_context_spec is not None
 assert context.macro_context_spec["policy"] == "disabled"
 assert context.temporal_by_fold is not None

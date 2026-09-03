@@ -89,11 +89,18 @@ backtest:
     # All others (equal_weight, score_weighted, inverse_vol) take the cheap path.
     # Ch16 signal-stage selection. Long-short by construction. With only
     # ~20 perps, every label exercises both top-k and quintile axes.
+    #
+    # k is a concentration choice and only means something against the tradeable
+    # cross-section. Measured from the label artifacts on 2026-08-23, that is 9 names
+    # per decision date at p10, 18 at the median and 19 at p90 - the smallest panel in
+    # the fleet. So k=5 is already 28% of the book and k=10 is 56%: both are the
+    # diversified end, and a grid of [5, 10] never shows a reader the concentrated
+    # side of the tradeoff. k=3 is 17% and supplies it.
     top_k_grid:
-      fwd_ret_8h:    [5, 10]
-      fwd_ret_24h:   [5, 10]
-      fwd_dir_8h:    [5, 10]
-      fwd_dir_8h_3c: [5, 10]
+      fwd_ret_8h:    [3, 5, 10]
+      fwd_ret_24h:   [3, 5, 10]
+      fwd_dir_8h:    [3, 5, 10]
+      fwd_dir_8h_3c: [3, 5, 10]
     quantile_grid:
       fwd_ret_8h:    [5]
       fwd_ret_24h:   [5]
@@ -296,7 +303,12 @@ modeling:
     libraries: [lightgbm]
     preset: default
     device: cpu
-    max_bin: 63
+    # LightGBM's own CPU default. 63 is the GPU default and was carried over with the
+    # device when these runs moved off the GPU, so every CPU fit was quantizing the design
+    # matrix into a quarter of the bins the library would have used. Coarser bins are
+    # faster and lose split points; the reader running this on a CPU gets what the
+    # documentation describes.
+    max_bin: 255
 
 causal:
   treatment: premium_zscore_14d

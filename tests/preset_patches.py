@@ -20,7 +20,16 @@ _TEST_PRESET_PATCHES: dict[str, dict] = {
     "tsmixer": {"n_epochs": 2, "checkpoint_interval": 1},
     "tcn": {"n_epochs": 2, "checkpoint_interval": 1},
     "nlinear": {"n_epochs": 2, "checkpoint_interval": 1},
-    "patchtst": {"n_epochs": 2, "checkpoint_interval": 1},
+    # PatchTST additionally has its window cut. It is channel-independent, so the encoder
+    # sees `batch_size x n_features` sequences - 2048 x 88 on this fixture's nasdaq panel -
+    # and the cost of each is set by the window. At the preset's 60 it does not finish a
+    # two-fold fit inside a 600s cell budget on a CPU runner. 24 holds two patches at the
+    # preset's patch_size 16 and stride 8, which is the smallest window that still exercises
+    # patching rather than degenerating to one patch. This is the reduction the research-
+    # boundary conversion dropped: `tests/overrides.yaml` carried `LOOKBACK: 24` for this
+    # notebook before it stopped binding the name, and no preview reduction can set it -
+    # `_SEQUENCE_PREVIEW_FIELDS` is {folds, max_symbols, max_train_sequences}.
+    "patchtst": {"n_epochs": 2, "checkpoint_interval": 1, "params": {"lookback": 24}},
     # TabDL: 2 epochs
     "tabm": {"n_epochs": 2, "checkpoint_interval": 1},
     # Latent factors: 2 epochs
@@ -38,7 +47,16 @@ _TEST_PRESET_PATCHES: dict[str, dict] = {
     # 1e-6 default (see tests/overrides.yaml's 11b_ipca entry for the
     # measured before/after). Regularizing is a conditioning fix, not a
     # bigger budget.
-    "ipca": {"n_epochs": 2, "checkpoint_interval": 1, "factor_ridge": 1e-2, "gamma_ridge": 1e-2},
+    #
+    # It carries no n_epochs or checkpoint_interval, and that asymmetry with the eight entries
+    # above is deliberate. IPCA is fitted by ALS once per fold and publishes a final checkpoint
+    # only, so it has no epochs to shorten and no interval to checkpoint on; `pca`, the other
+    # model of that shape, has no entry here at all. The two keys were present verbatim from the
+    # epoch-based neighbours and set checkpoint_interval to 1, which the latent-factor adapter
+    # rejects outright (latent_factors/adapter.py:236-239) because the value means nothing for
+    # these models - so every ipca run through that adapter failed at resolution. Do not restore
+    # them for symmetry with the block above.
+    "ipca": {"factor_ridge": 1e-2, "gamma_ridge": 1e-2},
 }
 
 
@@ -52,7 +70,12 @@ def _patch_presets_for_testing(config_dir: Path) -> None:
             preset = yaml.safe_load(preset_path.read_text())
             if preset is None:
                 continue
-            preset.update(overrides)
+            # `params` is merged rather than replaced: an entry that reduces one architecture
+            # parameter must not drop the rest of the block with it.
+            nested = overrides.get("params")
+            preset.update({k: v for k, v in overrides.items() if k != "params"})
+            if nested:
+                preset["params"] = {**(preset.get("params") or {}), **nested}
             with open(preset_path, "w") as f:
                 yaml.dump(preset, f, default_flow_style=False)
 

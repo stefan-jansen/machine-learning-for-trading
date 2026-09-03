@@ -33,11 +33,18 @@ from .store import (
     _training_dir,
     _upsert_wide_metrics,
     _utc_now,
+    causal_identities_retired,
+    current_causal_identities,
 )
 
 logger = logging.getLogger(__name__)
 
 VALID_PREDICTION_SPLITS = frozenset({"validation", "holdout"})
+
+# Columns a schema migration added, which an immutable row may therefore be missing
+# through no change of its own. Nothing else is filled on NULL: see the comment at the
+# backfill itself for why a nullable column is not the same as a migrated one.
+MIGRATION_BACKFILLED_COLUMNS = frozenset({"refutation_n_successful", "refutation_placebo_json"})
 MAX_PREDICTION_STD_RATIO = 100.0
 
 
@@ -50,7 +57,34 @@ def _atomic_save_json(path: Path, data: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _validate_prediction_dispersion(predictions) -> None:
+def _sampling_reduced(spec_json: str | None) -> bool:
+    """Whether the parent training run declared a sampling reduction.
+
+    Every family records ``computation.sampling`` and each writes its own no-op
+    value into it: a count reads 0 and a fraction reads 1.0 when nothing was
+    reduced (``deep_learning.py``, ``gbm.py``, ``linear.py``, ``tabular_dl.py``
+    and ``latent_factors/adapter.py`` each build the dict, and each already
+    compares against exactly that shape before reconstructing a locked request).
+    Anything else means a preview drew less than the run declares.
+    """
+    if not spec_json:
+        return False
+    try:
+        computation = json.loads(spec_json).get("computation")
+    except (TypeError, ValueError):
+        return False
+    sampling = (computation or {}).get("sampling") if isinstance(computation, dict) else None
+    if not isinstance(sampling, dict):
+        return False
+    for key, value in sampling.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if value != (1.0 if key.endswith("_frac") else 0):
+            return True
+    return False
+
+
+def _validate_prediction_dispersion(predictions, *, refuse: bool = True) -> None:
     """Reject a prediction set with an implausible score scale on any fold.
 
     The bound is deliberately wide. Across 8,090 finite folds in the nine
@@ -58,6 +92,22 @@ def _validate_prediction_dispersion(predictions) -> None:
     72.72. The known divergent folds started at 187.41 and extended to
     9.22e39. Rank correlation cannot detect this failure because it is invariant
     to score scale.
+
+    ``refuse`` is false for a run that declared a sampling reduction or a preview
+    tier. The ratio compares the score scale to the label scale, and that says
+    something about the fit only once the fit has converged: before then the
+    numerator is set by weight initialization and the input scale, the
+    denominator by the label alone, so the quotient tracks the label's magnitude
+    rather than the model's behaviour. Under the CI fixture a sequence preset
+    draws one batch of 2,048 windows from a 2,000-window sample and takes two
+    optimizer steps, which is not a fit that can have diverged; the eight case
+    studies that pass there do so because their labels sit near 1e-2, not
+    because anything about them converged. The ratio is still computed and
+    logged on such a run, so the number stays visible; it does not refuse.
+
+    A non-finite score is refused either way. That failure does not depend on how
+    far a fit progressed, and a NaN score breaks every downstream read of the
+    prediction set whatever produced it.
     """
     import math
 
@@ -118,12 +168,20 @@ def _validate_prediction_dispersion(predictions) -> None:
                 f"(score std {score_std:.6g} / target std {actual_std:.6g})"
             )
 
-    if violations:
-        raise ValueError(
-            "Refusing to register predictions with a diverged fold; "
-            f"the maximum allowed per-fold dispersion ratio is "
-            f"{MAX_PREDICTION_STD_RATIO:g}: " + "; ".join(violations)
+    if not violations:
+        return
+    detail = (
+        f"the maximum allowed per-fold dispersion ratio is "
+        f"{MAX_PREDICTION_STD_RATIO:g}: " + "; ".join(violations)
+    )
+    if not refuse:
+        logger.warning(
+            "Prediction dispersion exceeds the bound on a run that declared a reduction, so "
+            "it is reported rather than refused; %s",
+            detail,
         )
+        return
+    raise ValueError("Refusing to register predictions with a diverged fold; " + detail)
 
 
 def clear_prediction_sets(
@@ -769,20 +827,30 @@ def register_prediction_set(
     if case_dir is None:
         case_dir = _case_dir(case_study)
 
-    if predictions is not None:
-        _validate_prediction_dispersion(predictions)
-
     db = _open_registry(case_dir)
     try:
         parent = db.execute(
-            "SELECT identity_version, execution_tier FROM training_runs WHERE training_hash = ?",
+            "SELECT identity_version, execution_tier, spec_json FROM training_runs "
+            "WHERE training_hash = ?",
             (training_hash,),
         ).fetchone()
     finally:
         db.close()
     if parent is None:
         raise ValueError(f"unknown training_hash {training_hash}")
-    identity_version, _execution_tier = parent
+    identity_version, execution_tier, parent_spec_json = parent
+
+    # After the parent lookup, not before it: the dispersion bound is a statement about a
+    # converged fit, and only the parent row says whether this run claims to be one. The
+    # reduction is read from what was registered rather than from what the caller asserts.
+    if predictions is not None:
+        _validate_prediction_dispersion(
+            predictions,
+            refuse=not (
+                str(execution_tier or "canonical") == "preview"
+                or _sampling_reduced(parent_spec_json)
+            ),
+        )
     coverage = None
     if identity_version in SUPPORTED_IDENTITY_VERSIONS:
         if predictions is None or expected_keys is None:
@@ -1700,6 +1768,208 @@ def register_cohort_metrics(
 # ---------------------------------------------------------------------------
 
 
+def declare_causal_supersedes(
+    case_study: str,
+    causal_hash: str,
+    *,
+    supersedes_hash: str,
+    label: str,
+    tier: str = "canonical",
+    case_dir: Path | None = None,
+) -> None:
+    """Record which identity *causal_hash* retires, without re-running the fit.
+
+    The repair path needs this. A registry holding two undeclared identities is fixed
+    by re-registering the newer one naming the older, and re-registering reproduces the
+    same hash - so the fit is served from cache and never reaches the write. Fill-once,
+    and validated the same way the registering path is: a predecessor that is not
+    itself current is refused rather than recorded.
+    """
+    if case_dir is None:
+        case_dir = _case_dir(case_study)
+    db = _open_registry(case_dir)
+    try:
+        row = db.execute(
+            "SELECT supersedes_hash FROM causal_runs WHERE causal_hash = ?", (causal_hash,)
+        ).fetchone()
+        # This is the one function an author calls by hand, typing a hash copied out of
+        # the `CausalResult.one` error text. Without this check a truncated or mistyped
+        # hash makes the UPDATE below match zero rows, commit, and return None - so the
+        # repair reports success and the label still resolves to two identities.
+        if row is None:
+            raise ValueError(
+                f"no causal run {causal_hash!r} in {case_study}'s registry, so there is "
+                f"nothing to declare a predecessor for. Check the hash against "
+                f"`SELECT causal_hash FROM causal_runs WHERE label = '{label}'`."
+            )
+        stored = row[0]
+        if stored is not None:
+            if stored != supersedes_hash:
+                raise ValueError(
+                    f"causal run {causal_hash} already declares it supersedes {stored}; "
+                    f"it cannot also supersede {supersedes_hash}"
+                )
+            return
+        _enforce_causal_supersedes(
+            db,
+            causal_hash=causal_hash,
+            label=label,
+            tier=tier,
+            supersedes_hash=supersedes_hash,
+            is_repair=True,
+        )
+        db.execute(
+            "UPDATE causal_runs SET supersedes_hash = ? WHERE causal_hash = ?",
+            (supersedes_hash, causal_hash),
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def check_causal_supersedes(
+    case_study: str,
+    causal_hash: str,
+    *,
+    label: str,
+    tier: str,
+    supersedes_hash: str | None,
+    case_dir: Path | None = None,
+) -> None:
+    """Raise now what :func:`register_causal_run` would raise after the fit.
+
+    The refusal it wraps is correct and stays where it is; only its timing is the
+    problem. A causal identity moves whenever ``case_studies/utils/causal.py`` changes,
+    because the resolved spec carries a hash of that whole file, so an ordinary edit to
+    the shared resolver leaves every case study on it registering a second identity for
+    its label. The run then misses the cache, pays the full DML fit and every placebo
+    refit, and is refused at the write for naming no predecessor - which is an hour on
+    this panel to be told a hash the registry could have named before the first fold.
+
+    This calls the write-time rule itself rather than restating it. Two copies of this
+    condition would decide what may be written and what is worth starting, and a
+    disagreement between them either refuses a run that would have registered or starts
+    one that cannot. The one place they differ is unavoidable and harmless: another
+    writer can change the registry while the fit runs, so passing here is not a promise
+    that the write will succeed. ``register_causal_run`` remains the authority.
+    """
+    if case_dir is None:
+        case_dir = _case_dir(case_study)
+    db = _open_registry(case_dir)
+    try:
+        _enforce_causal_supersedes(
+            db,
+            causal_hash=causal_hash,
+            label=label,
+            tier=tier,
+            supersedes_hash=supersedes_hash,
+            is_repair=db.execute(
+                "SELECT 1 FROM causal_runs WHERE causal_hash = ?", (causal_hash,)
+            ).fetchone()
+            is not None,
+        )
+    finally:
+        db.close()
+
+
+def _enforce_causal_supersedes(
+    db,
+    *,
+    causal_hash: str,
+    label: str,
+    tier: str,
+    supersedes_hash: str | None,
+    is_repair: bool = False,
+) -> None:
+    """A second canonical identity for a label must say which one it retires.
+
+    Without the declaration the registry ends up holding two rows a reader cannot
+    choose between, and ``CausalResult.one`` refuses forever. Recency is not the
+    fallback: ``created_at`` ties on a fast refit, and it would be the only recency
+    rule in a registry that is otherwise entirely spec-addressed. So the chain is
+    declared by a person, the way a changed population is.
+
+    Refusing here rather than at read time is what makes it fixable. The read happens
+    in a downstream notebook, hours later, with no idea which run introduced the
+    ambiguity.
+
+    ``is_repair`` is what lets an already-broken registry be fixed. A new fit must
+    leave exactly one identity current, because that is the state it is responsible
+    for. Chaining rows that already exist cannot: with three stranded identities,
+    every single declaration leaves two current, so requiring one at every step
+    deadlocks - the middle row is refused because the newest is live and the newest is
+    refused because the middle is. A repair step is allowed to reduce the count
+    without finishing the job, and the reader's error still names what is left.
+    """
+    stored = (
+        db.execute(
+            "SELECT supersedes_hash FROM causal_runs WHERE causal_hash = ?", (causal_hash,)
+        ).fetchone()
+        or (None,)
+    )[0]
+    if supersedes_hash is not None and stored == supersedes_hash:
+        # Re-registering a row that already carries this exact declaration changes
+        # nothing, and it has to be allowed or a wired notebook is not idempotent on
+        # its second run. The check below would reject it: the predecessor is retired
+        # by this row's own edge, so it is no longer in the current set and reads as
+        # "not a current identity ... Current: none".
+        return
+    if stored is not None and supersedes_hash is not None:
+        # One column holds one edge, so a row cannot retire two identities. The INSERT
+        # this guards uses COALESCE, which keeps the stored value and drops the new one
+        # in silence; declare_causal_supersedes refuses the same case. Both paths answer
+        # the same question and must answer it the same way, or which one an author
+        # happened to call decides whether a contradiction is reported.
+        raise ValueError(
+            f"causal run {causal_hash} already declares it supersedes {stored}; "
+            f"it cannot also supersede {supersedes_hash}"
+        )
+    if causal_hash in causal_identities_retired(db, label=label):
+        # Reproducing a retired identity is a no-op, but the declaration it carries is
+        # not exempt from being checked. An author reproducing A from an older checkout
+        # with SUPERSEDES_CAUSAL still pointing at B - the run that retired A - would
+        # otherwise make both rows retired, and the reader would resolve to zero with
+        # no hint at all. Worse than the two-identity state this exists to prevent.
+        if supersedes_hash is not None and supersedes_hash != stored:
+            raise ValueError(
+                f"causal run {causal_hash} is already retired by a later identity, and "
+                f"declaring that it supersedes {supersedes_hash} would retire that one too. "
+                f"It carries {stored or 'no declaration'}; re-register without SUPERSEDES_CAUSAL."
+            )
+        return
+    others = current_causal_identities(db, label=label, tier=tier, exclude=causal_hash)
+    if supersedes_hash is not None:
+        if supersedes_hash == causal_hash:
+            raise ValueError(f"causal run {causal_hash} cannot supersede itself")
+        if supersedes_hash not in others:
+            raise ValueError(
+                f"causal run {causal_hash} declares it supersedes {supersedes_hash}, which is "
+                f"not a current {tier} identity for {label!r}. Current: {others or 'none'}"
+            )
+        remaining = [other for other in others if other != supersedes_hash]
+        if remaining and not is_repair:
+            # One column holds one edge, so a single declaration retires a single row.
+            # A *new* identity that retires one of several would let the write succeed
+            # and leave the label exactly as unresolvable as before, with nothing
+            # saying so - the failure moves back to the downstream notebook, which is
+            # what declaring the chain at the write is here to prevent. Repair first,
+            # then fit.
+            raise ValueError(
+                f"causal run {causal_hash} retires {supersedes_hash}, but {remaining} would "
+                f"still be current for {label!r}, so a reader still resolves to "
+                f"{len(remaining) + 1}. Chain the rows that already exist first: each "
+                "declares the one before it, oldest to newest."
+            )
+        return
+    if others:
+        raise ValueError(
+            f"registering {causal_hash} would leave {len(others) + 1} current {tier} causal "
+            f"identities for {label!r}, and a reader resolves a label to exactly one. Name the "
+            f"one this run retires: set SUPERSEDES_CAUSAL to "
+            f"{others[0] if len(others) == 1 else others}"
+        )
+
+
 def register_causal_run(
     case_study: str,
     causal_hash: str,
@@ -1716,10 +1986,13 @@ def register_causal_run(
     naive_effect: float | None,
     confounding_bias_pct: float | None,
     refutation_p: float | None,
+    refutation_n_successful: int | None = None,
+    refutation_placebo_json: str | None = None,
     spec_json: str,
     notebook: str | None,
     started_at: str | None,
     elapsed_s: float | None,
+    supersedes_hash: str | None = None,
     case_dir: Path | None = None,
 ) -> None:
     """Persist one causal-DML run to ``causal_runs``.
@@ -1728,21 +2001,65 @@ def register_causal_run(
     completeness contract (``ic_mean`` non-null, etc.) does not apply to
     treatment-effect estimates. Callers compute the spec and result fields
     upstream; this function owns the SQL row write.
+
+    ``supersedes_hash`` names the canonical identity this run retires, and a second
+    canonical identity for a label is refused without one. That refusal is the point:
+    ``CausalResult.one`` requires exactly one current identity per label, so an
+    undeclared refit leaves the registry in a state no reader can resolve, and it does
+    so silently at write time and loudly at read time in a different notebook. Mirrors
+    ``official_populations``, where a changed population under an existing name must
+    name the hash it supersedes.
     """
     if case_dir is None:
         case_dir = _case_dir(case_study)
     import json
 
-    version = (json.loads(spec_json) or {}).get("identity_version")
+    spec = json.loads(spec_json) or {}
+    version = spec.get("identity_version")
     immutable = version in SUPPORTED_IDENTITY_VERSIONS
     db = _open_registry(case_dir)
     try:
+        _enforce_causal_supersedes(
+            db,
+            causal_hash=causal_hash,
+            label=label,
+            tier=str(spec.get("execution_tier", "canonical")),
+            supersedes_hash=supersedes_hash,
+            # A row that already exists is not a new fit, so this call is a step in
+            # chaining what is already there rather than the write that must leave the
+            # label resolvable.
+            is_repair=db.execute(
+                "SELECT 1 FROM causal_runs WHERE causal_hash = ?", (causal_hash,)
+            ).fetchone()
+            is not None,
+        )
+        comparable_columns = (
+            "label",
+            "treatment",
+            "confounders_json",
+            "embargo",
+            "n_folds",
+            "n_obs",
+            "dml_effect",
+            "dml_se_hac",
+            "p_value_hac",
+            "naive_effect",
+            "confounding_bias_pct",
+            "refutation_p",
+            "refutation_n_successful",
+            "spec_json",
+            "notebook",
+        )
         existing = db.execute(
-            "SELECT label, treatment, confounders_json, embargo, n_folds, n_obs, "
-            "dml_effect, dml_se_hac, p_value_hac, naive_effect, confounding_bias_pct, "
-            "refutation_p, spec_json, notebook FROM causal_runs WHERE causal_hash = ?",
+            f"SELECT {', '.join(comparable_columns)} FROM causal_runs WHERE causal_hash = ?",
             (causal_hash,),
         ).fetchone()
+        existing_supersedes = (
+            db.execute(
+                "SELECT supersedes_hash FROM causal_runs WHERE causal_hash = ?", (causal_hash,)
+            ).fetchone()
+            or (None,)
+        )[0]
         expected = (
             label,
             treatment,
@@ -1756,13 +2073,58 @@ def register_causal_run(
             naive_effect,
             confounding_bias_pct,
             refutation_p,
+            refutation_n_successful,
             spec_json,
             notebook,
         )
         if immutable and existing is not None:
-            if existing != expected:
-                raise ValueError(f"immutable causal result conflict for {causal_hash}")
-            return
+            # A row written before a column existed carries NULL there, and filling it in
+            # is not a conflict: nothing about the run changed, the registry simply had no
+            # place to record that fact yet. Treating it as one would make an upgrade break
+            # re-registration of results that are identical - the same shape as a fix that
+            # forces a refit without changing a number.
+            #
+            # Only a column a migration added is filled this way. The other comparable
+            # columns are nullable for reasons that have nothing to do with the schema:
+            # refutation_p is None whenever the refutation produced too few successful
+            # placebos, so a later run that does produce one has genuinely changed and must
+            # still conflict. Filling on NULL alone would write that over an immutable row
+            # and refresh its execution provenance on the way through.
+            stored = list(existing)
+            backfilled_positions: set[int] = set()
+            for position, value in enumerate(expected):
+                if comparable_columns[position] not in MIGRATION_BACKFILLED_COLUMNS:
+                    continue
+                if stored[position] is None and value is not None:
+                    stored[position] = value
+                    backfilled_positions.add(position)
+            backfilled = bool(backfilled_positions)
+            if tuple(stored) != expected:
+                # Excluded because it was filled, not because of its name. A migrated
+                # column whose stored value is not NULL - a recording convention that
+                # changes 1000 to 998, or a re-registration passing None where 10 was
+                # stored - is a genuine difference, and excluding it by name would raise
+                # naming nothing. That empty message is the same defect this branch
+                # already fixed once, reached from the other side.
+                conflicting = [
+                    name
+                    for position, (name, was, now) in enumerate(
+                        zip(comparable_columns, existing, expected, strict=True)
+                    )
+                    if was != now and position not in backfilled_positions
+                ]
+                raise ValueError(
+                    f"immutable causal result conflict for {causal_hash}: "
+                    f"{', '.join(conflicting)} would change"
+                )
+            if supersedes_hash is not None and existing_supersedes is None:
+                db.execute(
+                    "UPDATE causal_runs SET supersedes_hash = ? WHERE causal_hash = ?",
+                    (supersedes_hash, causal_hash),
+                )
+                db.commit()
+            if not backfilled:
+                return
         # ON CONFLICT DO UPDATE rather than INSERT OR REPLACE — consistent with
         # register_paired_metrics, avoids the implicit DELETE that triggers
         # FK cascades and loses the original created_at timestamp.
@@ -1772,8 +2134,10 @@ def register_causal_run(
                 causal_hash, label, treatment, confounders_json, embargo,
                 n_folds, n_obs, dml_effect, dml_se_hac, p_value_hac,
                 naive_effect, confounding_bias_pct, refutation_p,
-                spec_json, notebook, started_at, elapsed_s, git_commit, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                refutation_n_successful, refutation_placebo_json,
+                spec_json, notebook, started_at, elapsed_s, git_commit,
+                supersedes_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(causal_hash) DO UPDATE SET
                 label=excluded.label,
                 treatment=excluded.treatment,
@@ -1787,11 +2151,24 @@ def register_causal_run(
                 naive_effect=excluded.naive_effect,
                 confounding_bias_pct=excluded.confounding_bias_pct,
                 refutation_p=excluded.refutation_p,
+                refutation_n_successful=excluded.refutation_n_successful,
+                -- Fill-once, like supersedes_hash. A row registered before this column
+                -- existed carries NULL, and a re-registration that recomputes the draws
+                -- should fill it; one that does not must not erase them.
+                refutation_placebo_json=COALESCE(
+                    excluded.refutation_placebo_json, causal_runs.refutation_placebo_json
+                ),
                 spec_json=excluded.spec_json,
                 notebook=excluded.notebook,
                 started_at=excluded.started_at,
                 elapsed_s=excluded.elapsed_s,
-                git_commit=excluded.git_commit
+                git_commit=excluded.git_commit,
+                -- Fill-once, matching the UPDATE above. A re-registration that
+                -- passes no declaration must not clobber one that was made: the row
+                -- it retired would go live again and the reader would see two.
+                -- Reachable through the migration backfill path, which skips the
+                -- early return.
+                supersedes_hash=COALESCE(excluded.supersedes_hash, causal_runs.supersedes_hash)
             WHERE causal_runs.label IS NOT excluded.label
                OR causal_runs.treatment IS NOT excluded.treatment
                OR causal_runs.confounders_json IS NOT excluded.confounders_json
@@ -1804,8 +2181,11 @@ def register_causal_run(
                OR causal_runs.naive_effect IS NOT excluded.naive_effect
                OR causal_runs.confounding_bias_pct IS NOT excluded.confounding_bias_pct
                OR causal_runs.refutation_p IS NOT excluded.refutation_p
+               OR causal_runs.refutation_n_successful IS NOT excluded.refutation_n_successful
                OR causal_runs.spec_json IS NOT excluded.spec_json
                OR causal_runs.notebook IS NOT excluded.notebook
+               OR (excluded.supersedes_hash IS NOT NULL
+                   AND causal_runs.supersedes_hash IS NOT excluded.supersedes_hash)
             """,
             (
                 causal_hash,
@@ -1821,11 +2201,14 @@ def register_causal_run(
                 naive_effect,
                 confounding_bias_pct,
                 refutation_p,
+                refutation_n_successful,
+                refutation_placebo_json,
                 spec_json,
                 notebook,
                 started_at,
                 elapsed_s,
                 _git_hash(),
+                supersedes_hash,
                 _utc_now(),
             ),
         )

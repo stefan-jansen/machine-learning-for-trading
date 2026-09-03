@@ -1,27 +1,34 @@
 from .adapters import AdapterBinding, get_adapter, register_adapter, registered_adapters
-from .catalog import BacktestCatalog, PredictionCatalog
-from .causal import CausalRequest, CausalResult, ResolvedCausalRequest
-from .comparison import CandidateSet
+from .catalog import BacktestCatalog, PredictionCatalog, prediction_rows_at
+from .causal import (
+    CausalRequest,
+    CausalResult,
+    ResolvedCausalRequest,
+    causal_supersedes,
+    supersedes_for,
+)
+from .comparison import CandidateSet, candidate_set_supersedes
 from .configs import (
     declared_labels,
     load_model_configs,
     model_requests,
+    narrows_declared_catalog,
     planned_model_plan,
+    primary_label,
     resolved_model_plan,
+    sweep_labels,
 )
-from .contracts import ExecutionTier, LifecycleState
+from .contracts import ExecutionTier
 from .cv import CVSpec, EligibilityManifest, ResolvedCVSpec
 from .decisions import DecisionArtifact, StateTransitionPolicy
 from .execution import (
     BacktestExecution,
     BacktestPlan,
-    HoldoutExecution,
     ModelExecution,
     PlannedBacktest,
     expected_prediction_hashes,
     plan_backtests,
     run_backtests,
-    run_locked_holdout,
     run_model_population,
     run_models,
     run_official_model_subset,
@@ -30,15 +37,57 @@ from .execution import (
 )
 from .identity import ResolvedSpec
 from .labels import LabelDefinition, LabelRef
-from .lifecycle import ResearchLock
-from .model_planning import ModelPlan, PlannedModel, plan_models
+from .model_planning import (
+    ModelPlan,
+    PlannedModel,
+    configured_model_menu,
+    plan_models,
+    require_declared_menu_coverage,
+)
 from .models import ModelRequest, ModelRun, ResolvedModelRequest
-from .population import OfficialPopulation
-from .results import BacktestResult, PredictionResult, Result, TrainingResult
-from .strategy import Strategy
+from .population import (
+    OfficialPopulation,
+    RetirementSplit,
+    population_supersedes,
+    published_members_at,
+    published_population_names_at,
+    research_name,
+    split_retired_members,
+    split_unpublished_members,
+    superseded_members,
+    superseded_members_at,
+    supersedes_for_run,
+)
+from .results import (
+    HORIZON_DEPENDENT_PROTOCOL_FIELDS,
+    BacktestResult,
+    PredictionResult,
+    Result,
+    TrainingResult,
+)
+from .selection_field import (
+    FIELD_STAGES,
+    PLAN_STAGE_KEYS,
+    SelectionField,
+    attest_sweep,
+    label_of,
+    open_selection_field,
+    open_sweep_attempt,
+    planned_backtests,
+    predictions_identity,
+    publishes_sweep_plans,
+    resolve_field_members,
+    sweep_attestation_name,
+    sweep_plan_name,
+    unfinished_sweep_plans,
+    upstream_plan_hashes,
+)
+from .strategy import Strategy, strategy_warmup_periods
 from .workspace import Study, open_study
 
 __all__ = [
+    "causal_supersedes",
+    "supersedes_for",
     "AdapterBinding",
     "BacktestResult",
     "BacktestCatalog",
@@ -53,42 +102,72 @@ __all__ = [
     "EligibilityManifest",
     "LabelDefinition",
     "LabelRef",
-    "LifecycleState",
     "ModelRequest",
     "ModelExecution",
     "ModelPlan",
     "ModelRun",
-    "HoldoutExecution",
+    "HORIZON_DEPENDENT_PROTOCOL_FIELDS",
     "PredictionResult",
     "PredictionCatalog",
     "PlannedBacktest",
     "PlannedModel",
     "OfficialPopulation",
-    "ResearchLock",
+    "supersedes_for_run",
     "ResolvedModelRequest",
     "ResolvedCausalRequest",
     "ResolvedSpec",
+    "RetirementSplit",
     "ResolvedCVSpec",
     "Result",
     "Strategy",
+    "strategy_warmup_periods",
     "Study",
     "StateTransitionPolicy",
     "TrainingResult",
     "declared_labels",
+    "sweep_labels",
     "get_adapter",
     "load_model_configs",
+    "narrows_declared_catalog",
     "model_requests",
     "open_study",
     "register_adapter",
     "registered_adapters",
     "plan_backtests",
+    "configured_model_menu",
     "plan_models",
+    "require_declared_menu_coverage",
     "expected_prediction_hashes",
     "planned_model_plan",
+    "prediction_rows_at",
+    "primary_label",
+    "candidate_set_supersedes",
+    "FIELD_STAGES",
+    "SelectionField",
+    "label_of",
+    "open_selection_field",
+    "resolve_field_members",
+    "predictions_identity",
+    "PLAN_STAGE_KEYS",
+    "attest_sweep",
+    "open_sweep_attempt",
+    "publishes_sweep_plans",
+    "sweep_attestation_name",
+    "sweep_plan_name",
+    "unfinished_sweep_plans",
+    "planned_backtests",
+    "upstream_plan_hashes",
+    "population_supersedes",
+    "research_name",
     "resolved_model_plan",
     "run_backtests",
-    "run_locked_holdout",
     "run_model_population",
+    "split_retired_members",
+    "split_unpublished_members",
+    "superseded_members",
+    "published_members_at",
+    "published_population_names_at",
+    "superseded_members_at",
     "run_models",
     "run_official_model_subset",
     "run_official_models",

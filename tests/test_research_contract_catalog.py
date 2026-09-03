@@ -9,20 +9,15 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from case_studies.research import EligibilityManifest, ResolvedSpec, Study
+from case_studies.research import (
+    EligibilityManifest,
+    ResolvedSpec,
+    Study,
+    prediction_rows_at,
+)
 from case_studies.utils.registry import register_prediction_set, register_training_run
 from tests.test_research_registry import _predictions
 from tests.test_research_workspace import _seed_release
-
-
-@pytest.fixture(autouse=True)
-def _restore_output_root():
-    yield
-    os.environ.pop("ML4T_OUTPUT_DIR", None)
-    from case_studies.research import workspace
-
-    workspace._ACTIVE_OUTPUT_ROOT = None
-    workspace._clear_root_sensitive_caches()
 
 
 def _tree_digest(root: Path) -> str:
@@ -334,3 +329,136 @@ def test_catalog_reads_legacy_rows_without_claiming_current_contract(tmp_path: P
     assert row["prediction_hash"] == "legacy-prediction"
     assert row["identity_status"] == "legacy"
     assert row["complete"] is False
+
+
+def test_catalog_says_which_sibling_a_regression_auc_was_scored_against(tmp_path: Path) -> None:
+    """A regression row's AUC is scored against a declared direction label, not its own classes.
+
+    Without ``direction_label`` the column reads as the classification path's AUC on a row that
+    has no classes, and the two are not the same quantity.
+    """
+    release = _seed_release(tmp_path)
+    study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
+    scored = _publish(study.root, spec=_resolved_spec(alpha=1.0))
+    unscored = _publish(study.root, spec=_resolved_spec(alpha=2))
+
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        # The metric writer adds this column the first time a regression AUC is recorded, the
+        # same way it adds any other metric name it has not seen.
+        db.execute("ALTER TABLE prediction_metrics ADD COLUMN direction_label TEXT")
+        for prediction_hash, direction in ((scored, "fwd_dir_21d"), (unscored, None)):
+            db.execute(
+                "UPDATE prediction_metrics SET auc_mean_daily = 0.53, direction_label = ? "
+                "WHERE prediction_hash = ?",
+                (direction, prediction_hash),
+            )
+
+    rows = {row["prediction_hash"]: row for row in study.predictions.table().iter_rows(named=True)}
+    assert rows[scored]["direction_label"] == "fwd_dir_21d"
+    assert rows[unscored]["direction_label"] is None
+    assert study.predictions.table().schema["direction_label"] == pl.String
+
+
+def test_prediction_rows_at_reads_the_case_dir_it_is_given_not_the_activated_root(
+    tmp_path: Path,
+) -> None:
+    """An admissibility filter must read the registry its caller read, and move no root.
+
+    ``nasdaq100_microstructure/14_backtest`` asked ``open_study(case_study)`` which of its
+    predictions were complete. With no workspace that is the canonical regeneration path, so
+    ``activate()`` re-pointed ``ML4T_OUTPUT_DIR`` at the published case study: the guard then
+    filtered the notebook's predictions against a different registry - the join drops every row
+    and a healthy population reads as inadmissible - and every later resolution in the notebook,
+    including where ``run_backtest(register=True)`` writes, followed the activated root.
+
+    Two registries here hold different rows, and the argument decides which one is read.
+    """
+    release = _seed_release(tmp_path)
+    release_case = release / "case_studies" / "etfs"
+    released = _publish(release_case, spec=_resolved_spec(alpha=1.0))
+
+    workspace = tmp_path / "workspace"
+    study = Study.open("etfs", workspace=workspace, release_root=release)
+    in_workspace = _publish(study.root, spec=_resolved_spec(alpha=2.0))
+    assert released != in_workspace
+
+    os.environ["ML4T_OUTPUT_DIR"] = str(workspace)
+
+    assert prediction_rows_at(study.root)["prediction_hash"].to_list() == [in_workspace]
+    assert prediction_rows_at(release_case)["prediction_hash"].to_list() == [released]
+    assert os.environ.get("ML4T_OUTPUT_DIR") == str(workspace)
+
+    rows = prediction_rows_at(study.root)
+    assert rows.filter(pl.col("complete"))["prediction_hash"].to_list() == [in_workspace]
+
+    # The contrast that makes the helper necessary: reading through a study activates a root,
+    # and the one the caller resolved against is not the one left standing. Which root it
+    # leaves is the study's business - a read-only one now names its own rather than clearing
+    # the variable - and the point here is that a caller cannot rely on either, which is why
+    # `prediction_rows_at` takes the directory instead of a study.
+    Study.open("etfs", release_root=release).predictions.table()
+    assert os.environ.get("ML4T_OUTPUT_DIR") != str(workspace)
+
+
+class TestASingleRootStudyReadsALiveRegistry:
+    """`Study.at` names a directory that can still be written, so it cannot promise immutability.
+
+    `immutable=1` lets SQLite skip locking and WAL recovery on the promise that the file will
+    not change while open. That holds for a released case directory, which is a checkout. It
+    does not hold for any root `Study.at` is pointed at - a fixture the harness is seeding, an
+    output tree, or a case directory another notebook is registering into - and a read under a
+    false promise misses rows rather than failing, which is the failure mode with no symptom.
+    """
+
+    def test_it_sees_a_row_a_concurrent_writer_has_committed(self, tmp_path: Path) -> None:
+        """The write is committed and still in the WAL, which is where `immutable=1` loses it.
+
+        A commit becomes invisible under a false immutability promise only while it lives in
+        the `-wal` file: `immutable=1` tells SQLite there is no journal to consult, so the read
+        goes straight to the main database and answers from before the commit. Closing the
+        writer checkpoints the WAL and folds the row in, which is why a test that publishes and
+        closes passes either way and proves nothing. The open writer here is not contrivance -
+        it is the case this form exists for, a second notebook registering into the directory
+        this one is reading.
+        """
+        release = _seed_release(tmp_path)
+        case_dir = release / "case_studies" / "etfs"
+        first = _publish(case_dir, spec=_resolved_spec(alpha=1.0))
+
+        study = Study.at(case_dir, case_study="etfs")
+        assert set(study.predictions.table()["prediction_hash"]) == {first}
+
+        db_path = case_dir / "run_log" / "registry.db"
+        writer = sqlite3.connect(db_path)
+        try:
+            writer.execute("PRAGMA journal_mode=WAL")
+            columns = [row[1] for row in writer.execute("PRAGMA table_info(prediction_sets)")]
+            source = dict(
+                zip(
+                    columns,
+                    writer.execute(
+                        "SELECT * FROM prediction_sets WHERE prediction_hash = ?", (first,)
+                    ).fetchone(),
+                    strict=True,
+                )
+            )
+            source["prediction_hash"] = "c0ncurrent01"
+            writer.execute(
+                f"INSERT INTO prediction_sets ({', '.join(columns)}) "
+                f"VALUES ({', '.join('?' for _ in columns)})",
+                [source[column] for column in columns],
+            )
+            writer.commit()
+            assert (case_dir / "run_log" / "registry.db-wal").stat().st_size > 0
+
+            assert set(study.predictions.table()["prediction_hash"]) == {first, "c0ncurrent01"}
+        finally:
+            writer.close()
+
+    def test_a_released_root_is_still_read_immutably(self, tmp_path: Path) -> None:
+        """The optimisation stays where its promise is true, so this is not a blanket removal."""
+        release = _seed_release(tmp_path)
+        study = Study.open("etfs", release_root=release)
+
+        assert study.release_root_is_immutable
+        assert not Study.at(release / "case_studies" / "etfs").release_root_is_immutable

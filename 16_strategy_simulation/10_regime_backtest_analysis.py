@@ -25,17 +25,20 @@
 #
 # ## Learning objectives
 #
-# - Reproduce the Section 16.4 baseline with month-end signals and next-open execution.
-# - Build volatility and trend states without using the return being classified.
-# - Compare conditional return, risk, tail loss, and drawdown across all four states.
-# - Separate descriptive state dependence from causal explanations or holdout evidence.
+# - Label every day of a backtest with the market conditions that were observable *before* that
+#   day's return began, and say why a label built from the day's own return would be worthless.
+# - Split a single track record four ways and compute return, risk and drawdown inside each slice.
+# - Read a conditional statistic against the number of days it was computed from, and say which
+#   slices are too thin to carry an estimate.
+# - Attribute a peak-to-trough loss across conditions exactly, using the one transformation of
+#   returns that adds.
 #
-# **Book reference**: Chapter 16, Section 16.6 (Diagnosing the Economic Value).
+# **Book reference**: Chapter 16, Section 16.6 (diagnosing economic value).
 #
-# **Prerequisites**: `01_backtest_first_principles` and the regime definitions in Section 16.6.
+# **Prerequisites**: `01_backtest_first_principles`, which builds the strategy this notebook slices.
 #
-# This is a descriptive analysis of a fixed teaching strategy. It has no model-selection split and
-# does not report a sealed holdout estimate.
+# Everything here is descriptive. No period is held out, nothing is selected, and a state that
+# looks good is a statement about when returns happened rather than about why.
 
 # %% [markdown]
 # ## 1. Setup and protocol
@@ -49,17 +52,15 @@
 """Point-in-time regime diagnostics for the Section 16.4 ETF baseline."""
 
 import hashlib
-from datetime import UTC, datetime
 
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
-from IPython.display import Markdown, display
 from ml4t.diagnostic.metrics import sharpe_ratio
 
 from data import load_etfs, load_macro
 from utils import ML4T_DATA_PATH
-from utils.style import COLORS, format_pct_axis
+from utils.style import COLORS, add_message_title, format_pct_axis
 
 # %% tags=["parameters"]
 START_DATE = "2010-01-01"
@@ -75,20 +76,42 @@ PERIODS_PER_YEAR = 252
 
 # %%
 ETF_SYMBOLS = ["SPY", "QQQ", "IWM", "EFA", "EEM", "AGG", "TLT", "GLD", "VNQ", "DBC"]
-
-display(
-    Markdown(
-        f"""**Protocol.** Rank {len(ETF_SYMBOLS)} ETFs by {MOMENTUM_LOOKBACK}-day return divided
-        by trailing annualized volatility. Hold the top {TOP_N} equally when the yield curve is
-        above {YIELD_CURVE_THRESHOLD:.1%}; otherwise hold 60% AGG and 40% TLT. Rebalance at the
-        next open and charge {FEE_RATE * 10_000:.0f} bps per traded dollar."""
-    )
-)
+DEFENSIVE_MIX = {"AGG": 0.60, "TLT": 0.40}
 
 # %% [markdown]
-# **Universe limitation.** This current, hand-curated set of surviving ETFs is a teaching
-# universe, not point-in-time historical membership. The results describe these funds and do not
-# estimate performance for a survivorship-free investable universe.
+# ### What each setting decides
+#
+# The first block reproduces `01_backtest_first_principles` exactly and is explained there. The
+# three lookbacks worth naming here are the ones that build the market states.
+#
+# **Volatility lookback.** How much recent history the realized-volatility estimate averages. Short
+# enough that it reacts within a market episode, long enough that a single bad week does not define
+# the state. Roughly a quarter of trading days.
+#
+# **Trend lookback.** The window over which the index's total return is measured. It is set to the
+# same length as the strategy's own momentum lookback, so that "trending up" means the same span of
+# history the strategy is ranking on.
+#
+# **Why medians rather than fixed levels.** Both states are defined against the median of that
+# statistic's own past, not against a number chosen in advance. A fixed volatility threshold would
+# put almost every day of 2017 in one state and almost every day of 2020 in the other, which
+# measures the decade rather than the condition. An expanding past median splits each statistic
+# against its own history and uses nothing from the future.
+
+# %%
+print(f"Strategy:     top {TOP_N} of {len(ETF_SYMBOLS)} ETFs on {MOMENTUM_LOOKBACK}-session")
+print("              risk-adjusted momentum, rebalanced monthly at the next open")
+print(f"Defensive:    {', '.join(f'{w:.0%} {s}' for s, w in DEFENSIVE_MIX.items())}")
+print(f"Risk-on when: the 10Y-2Y spread exceeds {YIELD_CURVE_THRESHOLD:.2%}")
+print(f"Costs:        {FEE_RATE * 10_000:.0f} bps per dollar traded")
+print(f"States:       volatility over {VOL_LOOKBACK} sessions, trend over {TREND_LOOKBACK}")
+print(f"Sample:       {START_DATE} to {END_DATE}")
+
+# %% [markdown]
+# These ten funds were picked because they exist today and are widely held, which is a reasonable
+# teaching universe and an unreasonable investment universe: a fund that closed during the sample
+# is not in it, and a fund that was not yet launched in 2010 would have been. Every figure below
+# describes these ten survivors.
 
 # %% [markdown]
 # ## 2. Load and validate the market panel
@@ -144,24 +167,15 @@ print(f"Date range: {dates[0]} to {dates[-1]}")
 # %%
 macro_frame = load_macro(start_date=START_DATE, end_date=END_DATE)
 fred_path = ML4T_DATA_PATH / "macro" / "fred_macro.parquet"
-fred_date = datetime.fromtimestamp(fred_path.stat().st_mtime, tz=UTC).date()
+fred_coverage_end = pl.read_parquet(fred_path, columns=["date"])["date"].max()
 fred_hash = hashlib.sha256(fred_path.read_bytes()).hexdigest()[:12]
 
-display(
-    Markdown(
-        f"**FRED input vintage.** Current local snapshot dated `{fred_date}` UTC "
-        f"(`sha256:{fred_hash}...`). No ALFRED release-vintage fields are available."
-    )
-)
+print(f"FRED snapshot covers observations through {fred_coverage_end}")
+print(f"FRED snapshot content hash: sha256:{fred_hash}")
 
-if "YIELD_CURVE_SLOPE" in macro_frame.columns:
-    yield_curve = macro_frame.select(
-        "timestamp", (pl.col("YIELD_CURVE_SLOPE") / 100).alias("slope")
-    ).drop_nulls()
-else:
-    yield_curve = macro_frame.select(
-        "timestamp", ((pl.col("dgs10") - pl.col("dgs2")) / 100).alias("slope")
-    ).drop_nulls()
+yield_curve = macro_frame.select(
+    "timestamp", (pl.col("YIELD_CURVE_SLOPE") / 100).alias("slope")
+).drop_nulls()
 
 # %%
 regime_panel = (
@@ -208,8 +222,8 @@ month_end_signal[-1] = True
 
 # %%
 defensive_weights = np.zeros(len(ETF_SYMBOLS))
-defensive_weights[ETF_SYMBOLS.index("AGG")] = 0.60
-defensive_weights[ETF_SYMBOLS.index("TLT")] = 0.40
+for symbol, weight in DEFENSIVE_MIX.items():
+    defensive_weights[ETF_SYMBOLS.index(symbol)] = weight
 
 signal_weights = np.zeros_like(close_prices)
 current_target = defensive_weights.copy()
@@ -289,13 +303,10 @@ baseline_max_drawdown = float(
     np.min(baseline_growth / np.maximum.accumulate(np.r_[1.0, baseline_growth])[1:] - 1)
 )
 
-display(
-    Markdown(
-        f"""**Reproduced baseline.** CAGR {baseline_cagr:.2%}, Sharpe {baseline_sharpe:.2f}, and
-        maximum drawdown {baseline_max_drawdown:.1%}, from {rebalance_at_open.sum()} scheduled
-        next-open rebalances. These are descriptive full-sample results."""
-    )
-)
+print(f"Baseline CAGR:         {baseline_cagr:.2%}")
+print(f"Baseline Sharpe:       {baseline_sharpe:.2f}")
+print(f"Baseline max drawdown: {baseline_max_drawdown:.1%}")
+print(f"Next-open rebalances:  {rebalance_at_open.sum()}")
 
 # %% [markdown]
 # ## 4. Build point-in-time volatility and trend states
@@ -409,12 +420,18 @@ for state in states:
         }
     )
 
-overall_statistics = summarize_returns(baseline_returns[active_mask])
+overall = summarize_returns(baseline_returns[active_mask])
+overall_row = {"regime": "All active days", "days": active_days, "share": 1.0, **overall}
 regime_summary = pl.DataFrame(rows)
-highest_sharpe = regime_summary.sort("sharpe", descending=True).row(0, named=True)
-lowest_sharpe = regime_summary.sort("sharpe").row(0, named=True)
-deepest_drawdown = regime_summary.sort("maximum_drawdown").row(0, named=True)
-thinnest_state = regime_summary.sort("days").row(0, named=True)
+regime_summary_with_total = pl.DataFrame([*rows, overall_row])
+regime_summary_with_total
+
+# %% [markdown]
+# The last row is every active day pooled, and it is the row the four above have to be read
+# against. A conditional Sharpe means nothing on its own: what carries information is whether a
+# state's figure is far from the pooled one, and whether it rests on enough days to be far from it
+# for a reason. The `days` and `share` columns are what decide the second question, and the
+# thinnest state is the one to distrust first.
 
 # %%
 fig, axes = plt.subplots(1, 2)
@@ -422,50 +439,50 @@ state_labels = regime_summary["regime"].to_list()
 state_colors = [COLORS["blue"], COLORS["amber"], COLORS["negative"], COLORS["positive"]]
 
 axes[0].barh(state_labels, regime_summary["sharpe"], color=state_colors)
+axes[0].axvline(overall["sharpe"], color=COLORS["neutral"], linestyle="--", linewidth=1)
 axes[0].axvline(0, color=COLORS["neutral"], linewidth=0.8)
 axes[0].set_xlabel("Annualized Sharpe ratio")
-axes[0].set_ylabel("Volatility x trend state")
+axes[0].set_ylabel("Volatility and trend state")
 
 axes[1].barh(state_labels, regime_summary["maximum_drawdown"], color=state_colors)
+axes[1].axvline(overall["maximum_drawdown"], color=COLORS["neutral"], linestyle="--", linewidth=1)
 axes[1].axvline(0, color=COLORS["neutral"], linewidth=0.8)
-axes[1].set_xlabel("Conditional max drawdown")
-axes[1].set_ylabel("Volatility x trend state")
+axes[1].set_xlabel("Drawdown along the state's own path")
+axes[1].tick_params(labelleft=False)
 format_pct_axis(axes[1], axis="x")
 
-fig.suptitle(
-    f"{highest_sharpe['regime']} has the highest conditional Sharpe",
-    x=0.02,
-    ha="left",
-    color=COLORS["blue"],
-    fontweight="bold",
+add_message_title(
+    axes[0],
+    "Four conditions, four different strategies",
+    subtitle="Dashed line is the pooled figure across all active days",
 )
-fig.text(
-    0.02,
-    0.91,
-    f"All {len(states)} pre-specified states; {active_days:,} active days",
-    color=COLORS["neutral"],
-)
+fig.tight_layout()
 plt.show()
 
-# %%
-display(
-    Markdown(
-        f"""**Reading the state comparison.** {highest_sharpe["regime"]} has the highest
-        conditional Sharpe ({highest_sharpe["sharpe"]:.2f}); {lowest_sharpe["regime"]} has the
-        lowest ({lowest_sharpe["sharpe"]:.2f}). {deepest_drawdown["regime"]} has the deepest
-        conditional-path drawdown ({deepest_drawdown["maximum_drawdown"]:.1%}). The thinnest state,
-        {thinnest_state["regime"]}, contains {thinnest_state["days"]:,} days
-        ({thinnest_state["share"]:.1%}), so its point estimates carry the most sampling uncertainty.
-        These slices describe where returns occurred; they do not identify the mechanism that
-        caused them."""
-    )
-)
+# %% [markdown]
+# The dashed line on each panel is the pooled figure, so the length of a bar past it is what the
+# condition is worth. Two cautions before reading anything into the spread.
+#
+# The drawdown panel measures a path that never existed. A state's days are scattered through the
+# sample rather than consecutive, so compounding only those days produces a synthetic equity curve
+# that no account followed. It is a fair way to compare states with each other and a bad way to
+# state what an investor would have lived through, which section 7 handles instead.
+#
+# And a state that covers a small share of the sample carries a wide error around every figure in
+# its row, whatever the bar looks like. Read the `days` column before the bar.
 
 # %% [markdown]
-# ## 6. Compare aggregate and crisis tail loss
+# ## 6. Are the bad days worse in a crisis?
 #
-# Value at Risk marks a tail threshold; Conditional Value at Risk averages observations beyond that
-# threshold. The same estimator is applied to the active sample and the pre-specified Crisis slice.
+# Value at Risk is a threshold: the loss that the worst one day in twenty exceeds. Conditional
+# Value at Risk is the average of those days, which is the more useful number because it says how
+# bad the tail is rather than only where it starts.
+#
+# The obvious expectation is that a strategy's tail is fatter on crisis days. Whether it is depends
+# on what the strategy is holding then, and this one rotates into bonds when the yield curve
+# flattens. The same estimator is applied to the pooled active sample and to the Crisis slice, and
+# the two histograms are drawn on shared bins so their shapes are comparable rather than each
+# rescaled to its own range.
 
 # %%
 overall_returns = baseline_returns[active_mask]
@@ -507,22 +524,32 @@ ax.set_xlabel("Daily strategy return")
 ax.set_ylabel("Probability density")
 format_pct_axis(ax, axis="x")
 ax.legend(frameon=False)
-ax.set_title(
-    f"Crisis 95% CVaR is {crisis_cvar_95:.2%} versus {overall_cvar_95:.2%} overall",
-    loc="left",
-    color=COLORS["blue"],
-    fontweight="bold",
+add_message_title(
+    ax,
+    "The crisis tail is not fatter than the tail of an ordinary day",
+    subtitle="Dashed lines mark each sample's 95% conditional value at risk",
 )
 plt.show()
 
 # %%
-display(
-    Markdown(
-        f"""The Crisis tail average is {crisis_cvar_95:.2%}, compared with
-        {overall_cvar_95:.2%} for all active days. The {crisis_cvar_95 - overall_cvar_95:.2%}
-        difference is descriptive state dependence, not an out-of-sample forecast."""
-    )
-)
+print(f"Crisis days:                 {len(crisis_returns):,}")
+print(f"95% CVaR, crisis days:       {crisis_cvar_95:.2%}")
+print(f"95% CVaR, all active days:   {overall_cvar_95:.2%}")
+print(f"Difference:                  {(crisis_cvar_95 - overall_cvar_95) * 10_000:.0f} bps")
+
+# %% [markdown]
+# The two are effectively the same, and the sign is the opposite of what the section set out to
+# find: the crisis tail is marginally *shallower*. That is a result, not a failed measurement, and
+# the mechanism is in the strategy rather than in the market. The rule holds bonds whenever the
+# yield curve is flat, and a flat curve is common in exactly the conditions this diagnostic labels
+# Crisis. The strategy's worst days are therefore mostly not crisis days; they are days when it was
+# holding equities and the label had not caught up.
+#
+# The useful reading is about the diagnostic, not the strategy. A state definition built from the
+# market says nothing about what a strategy was holding at the time, and a strategy that changes
+# exposure across states will not show its risk where the state labels say it should. To find where
+# this strategy's losses actually accumulated, the slice has to follow the losses - which is what
+# the next section does.
 
 # %% [markdown]
 # ## 7. Attribute the worst calendar drawdown
@@ -563,56 +590,58 @@ colors = [
 ax.barh(attribution["regime"], attribution["log_return_contribution"], color=colors)
 ax.axvline(0, color=COLORS["neutral"], linewidth=0.8)
 ax.set_xlabel("Additive log-return contribution")
-ax.set_ylabel("Volatility x trend state")
+ax.set_ylabel("Volatility and trend state")
 format_pct_axis(ax, axis="x")
-largest_loss_state = attribution.row(0, named=True)["regime"]
-ax.set_title(
-    f"{largest_loss_state} contributes the largest share of the worst drawdown",
-    loc="left",
-    color=COLORS["blue"],
-    fontweight="bold",
-    y=1.08,
-    pad=0,
-)
-ax.text(
-    0,
-    1.015,
-    f"Peak {dates[peak_index]} to trough {dates[trough_index]}",
-    transform=ax.transAxes,
-    color=COLORS["neutral"],
+add_message_title(
+    ax,
+    "The worst drawdown was not accumulated evenly across conditions",
+    subtitle=f"Peak {dates[peak_index]} to trough {dates[trough_index]}; contributions sum exactly",
 )
 plt.show()
 
 # %%
-display(
-    Markdown(
-        f"""The worst calendar drawdown runs from {dates[peak_index]} to {dates[trough_index]} and
-        reaches {drawdown[trough_index]:.1%}. {largest_loss_state} contributes the most negative
-        additive log return during that episode. Attribution identifies when the loss accumulated;
-        it does not show that the named state caused the loss."""
-    )
-)
+print(f"Worst drawdown: {dates[peak_index]} to {dates[trough_index]}, {drawdown[trough_index]:.1%}")
+print(f"Sessions in the episode: {int(episode_mask.sum()):,}")
 
 # %% [markdown]
-# ## Key Takeaways
+# Because log returns add, each bar is exactly the share of the peak-to-trough loss that
+# accumulated while the market was in that condition - the assertion above checks that they sum to
+# the episode's own log growth ratio, with nothing left over. A bar is not evidence that the
+# condition caused the loss. Two of these states are more common than the others, so a longer bar
+# can simply be more days.
 
-# %%
-display(
-    Markdown(
-        f"""1. **The diagnostic respects event time.** Each return is classified with volatility and trend
-   information available before that return begins.
-2. **State dependence is material but descriptive.** Conditional Sharpe ranges from
-   {lowest_sharpe["sharpe"]:.2f} in {lowest_sharpe["regime"]} to
-   {highest_sharpe["sharpe"]:.2f} in {highest_sharpe["regime"]}.
-3. **Coverage controls interpretation.** {thinnest_state["regime"]} has only
-   {thinnest_state["days"]:,} observations, so its estimate is less precise than the aggregate.
-4. **Tail loss and drawdown answer different questions.** CVaR summarizes bad individual days;
-   additive log-return attribution identifies which states accumulated the worst calendar loss.
-5. **The input limits remain visible.** The ETF universe is current and hand-curated, while the
-   FRED input is a finalized snapshot rather than an ALFRED vintage.
-
-**Next:** `11_sharpe_ratio_inference` quantifies uncertainty around a fixed strategy's Sharpe, and
-`14_cost_sensitivity` tests whether the baseline survives alternative fee assumptions.
-"""
-    )
-)
+# %% [markdown]
+# ## Key takeaways
+#
+# 1. **A state label has to be readable before the return it labels.** The volatility and trend
+#    figures for day $t$ use closes through $t-1$, both are compared against the median of their
+#    own past rather than of the whole sample, and the resulting label is shifted one bar before it
+#    is joined. Any of those three omitted, and a state would be partly defined by the return it is
+#    supposed to explain, which guarantees a strong-looking result that means nothing.
+# 2. **Read a conditional statistic next to its sample size, always.** Splitting one track record
+#    four ways divides the evidence four ways too, and the spread between the highest and lowest
+#    slice grows as the slices get thinner whether or not anything is happening.
+# 3. **A drawdown computed inside a slice is a path nobody experienced.** Compounding a state's
+#    scattered days produces a curve no account followed. It compares states fairly and describes
+#    an investor's experience badly.
+# 4. **Market conditions do not describe a strategy's exposure.** A rule that moves into bonds when
+#    the curve flattens has few equity-crisis days left to lose money on, which is why the crisis
+#    tail here is no worse than an ordinary one. Slicing by market state answers "when did the
+#    market do this", not "when did this strategy lose money".
+# 5. **Attribute compounded losses with log returns.** Simple returns do not add, so summing them
+#    by state gives a decomposition that does not reconcile with the loss it decomposes. Log returns
+#    do add, exactly, which is what makes the assertion in section 7 possible.
+#
+# ### Known limitations
+#
+# - Four states over one sample, and every slice's statistics are point estimates with no interval
+#   around them. The notebook shows the day counts rather than a confidence band because the
+#   overlapping-window dependence in the state definitions makes a naive interval wrong.
+# - The universe is ten funds that exist today. Nothing here is free of survivorship bias.
+# - The states are built from one index, SPY. A different proxy for market conditions would relabel
+#   days and move every conditional figure.
+# - The macro series is a present-day snapshot rather than a record of what was published at the
+#   time, so a spread used on a historical date may since have been revised.
+#
+# **Next:** `11_sharpe_ratio_inference` puts an interval around the aggregate Sharpe this notebook
+# takes as a point, and `14_cost_sensitivity` re-runs the baseline across fee assumptions.

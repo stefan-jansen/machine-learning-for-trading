@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from contextlib import closing
 from datetime import date
@@ -20,16 +19,6 @@ from case_studies.utils.registry.completeness import evaluate_prediction_coverag
 from case_studies.utils.registry.registration import register_backtest_run
 from case_studies.utils.registry.store import _open_registry
 from tests.test_research_workspace import _seed_release
-
-
-@pytest.fixture(autouse=True)
-def _restore_output_root():
-    yield
-    os.environ.pop("ML4T_OUTPUT_DIR", None)
-    from case_studies.research import workspace
-
-    workspace._ACTIVE_OUTPUT_ROOT = None
-    workspace._clear_root_sensitive_caches()
 
 
 def _study(tmp_path: Path) -> Study:
@@ -262,7 +251,7 @@ def test_legacy_registry_schema_migrates_additively(tmp_path: Path) -> None:
         migrated.close()
 
     assert {"identity_version", "execution_tier"} <= columns
-    assert {"prediction_coverage", "candidate_sets", "research_locks"} <= tables
+    assert {"prediction_coverage", "candidate_sets"} <= tables
     assert row == ("legacy-training", None, None)
 
 
@@ -557,6 +546,61 @@ def test_candidate_sets_are_immutable_and_validate_protocols(tmp_path: Path) -> 
     assert set(extended_comparison.members) == {first.hash, incompatible.hash, third.hash}
 
 
+def test_a_changed_candidate_set_supersedes_the_one_it_replaces(tmp_path: Path) -> None:
+    """A re-run that changes membership must say what it replaces, and the name must resolve.
+
+    The stage that freezes a candidate set is re-run whenever anything upstream of it is
+    corrected, and the admitted membership moves with it. Without a recorded lineage the name
+    carries two live identities and every reader of it raises instead of resolving.
+    """
+    study = _study(tmp_path)
+    training = study.results.register_training(_training_spec())
+    frame = _predictions()
+    expected = frame.select("symbol", "timestamp", "fold_id")
+    first = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=expected,
+    )
+    second = study.results.publish_predictions(
+        training,
+        checkpoint_kind="epoch",
+        checkpoint_value=2,
+        split="validation",
+        predictions=frame.with_columns((pl.col("y_score") * 2).alias("y_score")),
+        expected_keys=expected,
+    )
+
+    original = CandidateSet.create(study, "pool", [first])
+    assert CandidateSet.one(study, name="pool").hash == original.hash
+    assert CandidateSet.create(study, "pool", [first]).hash == original.hash
+
+    with pytest.raises(ValueError, match="must explicitly supersedes"):
+        CandidateSet.create(study, "pool", [first, second])
+
+    with pytest.raises(ValueError, match="cannot supersede"):
+        CandidateSet.create(study, "fresh", [second], supersedes=original.hash)
+
+    replacement = CandidateSet.create(study, "pool", [first, second], supersedes=original.hash)
+    assert replacement.supersedes == original.hash
+    assert CandidateSet.one(study, name="pool").hash == replacement.hash
+    assert CandidateSet.open(study, original.hash).members == (first.hash,)
+
+    third = study.results.publish_predictions(
+        training,
+        checkpoint_kind="epoch",
+        checkpoint_value=3,
+        split="validation",
+        predictions=frame.with_columns((pl.col("y_score") * 3).alias("y_score")),
+        expected_keys=expected,
+    )
+    head = CandidateSet.create(study, "pool", [first, second, third], supersedes=replacement.hash)
+    assert CandidateSet.one(study, name="pool").hash == head.hash
+
+
 def test_partial_and_preview_results_are_rejected_from_canonical_sets(tmp_path: Path) -> None:
     study = _study(tmp_path)
     canonical_training = study.results.register_training(_training_spec())
@@ -597,3 +641,168 @@ def test_partial_and_preview_results_are_rejected_from_canonical_sets(tmp_path: 
     with pytest.raises(KeyError):
         Result.open(study, preview.hash)
     assert Result.open(study, preview.hash, include_preview=True).hash == preview.hash
+
+
+def test_fitted_states_come_back_in_fold_order_not_filename_order(tmp_path: Path) -> None:
+    """A lexicographic sort puts fold_10 before fold_2, and one case study declares 16 splits."""
+    import joblib
+
+    from case_studies.research import TrainingResult
+
+    study = _study(tmp_path)
+    db = _open_registry(study.root)
+    try:
+        db.execute(
+            "INSERT INTO training_runs "
+            "(training_hash, family, label, spec_json, created_at) VALUES (?,?,?,?,?)",
+            ("many-folds", "linear", "fwd_ret_21d", "{}", "2024-01-01"),
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    models = study.root / "run_log" / "training" / "many-folds" / "models"
+    models.mkdir(parents=True)
+    for fold in range(12):
+        joblib.dump({"fold": fold}, models / f"fold_{fold}.joblib")
+
+    reopened = Result.open(study, "many-folds")
+
+    assert isinstance(reopened, TrainingResult)
+    assert [state["fold"] for state in reopened.fitted_states()] == list(range(12))
+
+
+def test_fold_metrics_come_back_in_fold_order_with_the_values_registered(tmp_path: Path) -> None:
+    """`ic_mean` is the equal-weight mean of these rows, so a notebook arguing from their spread -
+    how often the sign changes, how far the cross-section narrows - is reading them rather than the
+    average. That argument is only checkable if the rows come back complete and in fold order: a
+    lexicographic sort would put fold 10 before fold 2 and silently reorder the sequence the prose
+    walks through."""
+    study = _study(tmp_path)
+    registered = [
+        (0, -0.076172, 0.330584, 92.0),
+        (2, -0.003361, 0.175347, 88.0),
+        (10, 0.115767, 0.302743, 86.0),
+    ]
+    db = _open_registry(study.root)
+    try:
+        db.execute(
+            "INSERT INTO training_runs "
+            "(training_hash, family, label, spec_json, created_at) VALUES (?,?,?,?,?)",
+            ("folded-training", "latent_factors", "fwd_ret_21d", "{}", "2024-01-01"),
+        )
+        db.execute(
+            "INSERT INTO prediction_sets "
+            "(prediction_hash, training_hash, split, created_at) VALUES (?,?,?,?)",
+            ("folded-prediction", "folded-training", "validation", "2024-01-01"),
+        )
+        for fold_id, ic, ic_std, n_entities in reversed(registered):
+            db.execute(
+                "INSERT INTO fold_metrics "
+                "(prediction_hash, fold_id, computed_at, ic, ic_std, n_entities) "
+                "VALUES (?,?,?,?,?,?)",
+                ("folded-prediction", fold_id, "2024-01-01", ic, ic_std, n_entities),
+            )
+        db.commit()
+    finally:
+        db.close()
+
+    folds = Result.open(study, "folded-prediction").folds()
+
+    assert folds.columns == ["fold_id", "ic", "ic_std", "n_entities"]
+    assert [tuple(row) for row in folds.iter_rows()] == registered
+
+
+def test_a_prediction_set_with_no_registered_folds_returns_an_empty_frame(tmp_path: Path) -> None:
+    """Reading the folds of a result that has none must not raise. A legacy row carries no fold
+    metrics at all, and a caller that has to guard the call before making it will not make it."""
+    study = _study(tmp_path)
+    db = _open_registry(study.root)
+    try:
+        db.execute(
+            "INSERT INTO training_runs "
+            "(training_hash, family, label, spec_json, created_at) VALUES (?,?,?,?,?)",
+            ("foldless-training", "linear", "fwd_ret_21d", "{}", "2024-01-01"),
+        )
+        db.execute(
+            "INSERT INTO prediction_sets "
+            "(prediction_hash, training_hash, split, created_at) VALUES (?,?,?,?)",
+            ("foldless-prediction", "foldless-training", "validation", "2024-01-01"),
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    folds = Result.open(study, "foldless-prediction").folds()
+
+    assert folds.height == 0
+    assert folds.columns == ["fold_id", "ic", "ic_std", "n_entities"]
+
+
+def test_the_refusal_names_the_partial_member_and_the_sense_it_is_partial_in(
+    tmp_path: Path,
+) -> None:
+    """`partial results cannot enter a candidate set` used to name neither."""
+    study = _study(tmp_path)
+    training = study.results.register_training(_training_spec())
+    frame = _predictions()
+    partial = study.results.publish_predictions(
+        training,
+        checkpoint_kind="epoch",
+        checkpoint_value=1,
+        split="validation",
+        predictions=frame.head(1),
+        expected_keys=frame.select("symbol", "timestamp", "fold_id"),
+        allow_partial=True,
+    )
+    with pytest.raises(ValueError) as raised:
+        CandidateSet.create(study, "partial", [partial])
+    message = str(raised.value)
+    assert partial.hash in message, "the refusal must say which member"
+    assert "coverage" in message or "fold_metrics" in message, (
+        f"the refusal must say in which sense, got: {message}"
+    )
+
+
+def test_the_catalog_column_is_necessary_and_not_sufficient(tmp_path: Path) -> None:
+    """The registry column can say complete where the on-disk check says otherwise.
+
+    This is the disagreement that made a notebook's own guard pass at one cell and the
+    freeze refuse the same rows at another. The column reads the registry only; deleting
+    the artifact leaves every registry row it inspects untouched.
+    """
+    study = _study(tmp_path)
+    training = study.results.register_training(_training_spec())
+    frame = _predictions()
+    prediction = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=frame.select("symbol", "timestamp", "fold_id"),
+    )
+    assert prediction.complete
+    assert study.results.partial_members([prediction.hash]) == []
+
+    artifact = (
+        study.storage_root("canonical")
+        / "run_log"
+        / "predictions"
+        / prediction.hash
+        / "predictions.parquet"
+    )
+    assert artifact.is_file()
+    artifact.unlink()
+
+    reopened = Result.open(study, prediction.hash)
+    reason = reopened.completeness()
+    assert reason is not None, "an absent artifact is not a complete result"
+    assert str(artifact) in reason, f"the reason must name the file, got: {reason}"
+
+    partial = study.results.partial_members([prediction.hash])
+    assert [member_hash for member_hash, _ in partial] == [prediction.hash]
+
+    with pytest.raises(ValueError) as raised:
+        CandidateSet.create(study, "gone", [reopened])
+    assert prediction.hash in str(raised.value)

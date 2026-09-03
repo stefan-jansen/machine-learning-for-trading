@@ -24,24 +24,26 @@
 # 114 NASDAQ-100 constituents at 15-minute bar frequency, where the
 # prediction target (`fwd_ret_15m`) is the next 15-minute return. The
 # fundamental question here is different from daily case studies: at
-# intraday horizons, does microstructure information — order flow
-# imbalances, spread dynamics, volume patterns — contain any predictive
+# intraday horizons, does microstructure information - order flow
+# imbalances, spread dynamics, volume patterns - contain any predictive
 # content, or is it just noise?
 #
-# With only 2 walk-forward folds covering 2020--2021, the statistical
-# evidence is inherently thin. Supervised ICs range from 0.005 to 0.008,
-# but the compounding effect across 26 bars per trading day means that
-# even a tiny edge, if real, can produce meaningful annualized alpha --
-# provided execution costs don't consume it. At 15-minute frequency, the
-# expected return per bar is tiny, and even NASDAQ-100 stocks' 1--3 bps
-# effective spreads become a dominant consideration.
+# Two things make the evidence here thinner than the row count suggests.
+# There are only two walk-forward folds over 2020-2021, so two independent
+# windows stand behind every stability statement. And a rank correlation at this
+# horizon is small by construction: the expected return per bar is a fraction of
+# a basis point, the same order as the bid-ask spread a trade has to cross.
+# Whether a correlation of that size is worth anything is a question about costs
+# and rebalancing frequency, settled in the backtest and cost notebooks.
 #
 # **Learning Objectives**:
-# - Evaluate whether microstructure features contain short-horizon predictive signal
-# - Interpret very low IC values in the context of high-frequency compounding
-# - Assess execution decay risk: can you trade before the signal goes stale?
-# - Apply conservative judgment with minimal walk-forward evidence (2 folds)
-# - Compare model families for an inherently noisy, high-frequency cross-section
+# - Choose one representative prediction set per model family on a condition that
+#   makes the representatives comparable to each other
+# - Read a rank correlation together with its interval, and say when two families
+#   are not separated by the evidence
+# - Check whether a model's prediction intervals hold their stated coverage on a
+#   later period, which is a different question from whether it ranks well
+# - Keep estimated treatment effects out of a ranking of predictive scores
 #
 # **Prerequisites**: Model training notebooks Ch11–15 must have run for this
 # case study. Linear and GBM results come from the registry; DL results come
@@ -53,7 +55,7 @@
 # all families *within* a single dataset.
 
 # %%
-"""Model Analysis: NASDAQ-100 Microstructure — comparative evaluation across all model families."""
+"""Compare every declared model family on one registered, complete population."""
 
 import warnings
 
@@ -61,6 +63,11 @@ import numpy as np
 import polars as pl
 import yaml
 
+from case_studies.research import (
+    Result,
+    Study,
+    superseded_members,
+)
 from case_studies.utils.model_analysis import (
     best_model_per_family_fast,
     fold_performance_matrix,
@@ -83,7 +90,12 @@ from case_studies.utils.model_viz import (
     plot_learning_curves,
     plot_regime_bars,
 )
-from case_studies.utils.notebook_contracts import excluded_families, filter_active_model_rows
+from case_studies.utils.notebook_contracts import (
+    declared_population_members,
+    degenerate_prediction_hashes,
+    excluded_families,
+    filter_active_model_rows,
+)
 from case_studies.utils.notebook_render import conformal_coverage_diagnostic
 from utils.paths import get_case_study_dir
 
@@ -98,9 +110,42 @@ ENTITY_COL = "symbol"
 N_BUCKETS = 10
 TOP_N_FEATURES = 15
 REGIME_WINDOW = 252
+# The populations the execution notebooks publish. Named rather than hashed: a name resolves to
+# the generation in force, so a refit that supersedes its predecessor is picked up without
+# editing this notebook, while every superseded snapshot stays readable by hash.
+#
+# The four sequence architectures publish four populations rather than one, because each has its
+# own notebook and a population is what one run declares before it fits. So a population key is
+# not always a family: `linear` and `gbm` name a whole family, and the four sequence names each
+# name one slice of `deep_learning`. `POPULATION_SLICES` carries that distinction, because the
+# membership check below has to compare each declared population against the rows that belong to
+# it rather than against everything its family registered.
+LINEAR_POPULATION = "nasdaq100_microstructure-linear-validation-v1"
+GBM_POPULATION = "nasdaq100_microstructure-gbm-validation-v1"
+NLINEAR_POPULATION = "nasdaq100_microstructure-nlinear-validation-v1"
+LSTM_POPULATION = "nasdaq100_microstructure-lstm_h64-validation-v1"
+TCN_POPULATION = "nasdaq100_microstructure-tcn-validation-v1"
+PATCHTST_POPULATION = "nasdaq100_microstructure-patchtst-validation-v1"
+
+# %% [markdown]
+# This notebook reads; it registers nothing. That decides how it opens the registry, and the
+# distinction is not cosmetic. Every route through `open_study` ends in `Study.activate()`,
+# which rewrites `ML4T_OUTPUT_DIR` for the rest of the process and clears the caches keyed on
+# it, so every later `get_case_study_dir` answers for a different directory than the one
+# resolved here. On the canonical tier with no workspace that route is `Study.regenerate`,
+# which refuses outright unless `features`, `labels` and `run_log` are symlinks - true in a
+# maintainer worktree, false in every clean clone. On the preview tier it repoints the notebook
+# at `.preview/<case>`, whose registry `activate()` creates *empty*: measured here, the catalog
+# went from 30 registered prediction sets to 0 and the comparison below reported on nothing
+# while reporting success.
+#
+# `Study.at` is the read-only form: one root, no activation. `CASE_DIR` is that root, and every
+# question this notebook asks - the catalog, the lineage, the populations, the artifacts - is
+# answered from it.
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY)
+study = Study.at(CASE_DIR, case_study=CASE_STUDY, entry_point="13_model_analysis")
 
 with open(CASE_DIR / "config" / "setup.yaml") as f:
     setup = yaml.safe_load(f)
@@ -137,26 +182,24 @@ if excluded_families(CASE_STUDY):
 #
 # **Primary target tuple**: `fwd_ret_15m` | regression | IC | 15-minute rebalancing
 #
-# We predict the next 15-minute return for each of 114 NASDAQ-100
-# constituents, ranking them cross-sectionally at each bar close to
-# identify the highest-expected-return stocks over the next 15 minutes.
-# This is a high-frequency cross-sectional prediction task — the model
-# must decide, 26 times per trading day, which stocks will outperform
-# in the immediate future.
+# We predict the next 15-minute return for each NASDAQ-100 constituent, ranking
+# them against each other at each decision time. What the model has to produce is
+# an ordering across the cross-section at one moment, repeated through the
+# trading day.
 #
-# The feature set (66 features) is entirely microstructure-based:
+# The feature set is entirely microstructure-based:
 # relative spread, depth imbalance, quote arrival rate, microprice
 # deviation, signed volume share, tick imbalance, trade-to-mid
 # distance, realized volatility at multiple horizons (5m, 15m, 30m),
 # Kyle's lambda (price impact), FINRA off-exchange share, and
 # time-of-day indicators. Each raw feature also has a cross-sectional
-# z-score variant (`_xs` suffix), capturing how extreme a stock's
+# z-score variant, named with an `xs` suffix, capturing how extreme a stock's
 # microstructure state is relative to the rest of the universe at that
 # moment.
 #
 # This is fundamentally different from the daily momentum-based case
 # studies. Here the signal, if any, comes from order flow pressure,
-# liquidity imbalances, and short-lived mispricings — not from
+# liquidity imbalances, and short-lived mispricings - not from
 # multi-week price trends or carry. The universe is homogeneous
 # (large-cap US tech stocks), so cross-sectional dispersion is lower
 # than in multi-asset or size-diverse universes.
@@ -166,13 +209,181 @@ if excluded_families(CASE_STUDY):
 # inherently limited. Any finding must be interpreted with extreme
 # caution.
 
+# %% [markdown]
+# Every row below is one registered prediction set, and one condition decides which are
+# admissible: `complete`. It is applied here rather than at the point each figure is drawn, so
+# that no chart can be built from a row the comparison would not accept.
+#
+# `complete` is more than "the run finished". A run that failed partway still leaves rows in the
+# registry, and its score is an average over the folds that finished, which is not the quantity
+# every other row reports. The catalog also requires a current identity before it calls a row
+# complete (`case_studies/research/catalog.py:308-314`): a row registered before the identity
+# scheme carries no digest of the labels and features it was fitted on, so nothing can establish
+# what it was trained against. It stays inspectable and cannot enter a comparison.
+#
+# Execution tier is deliberately not tested. A preview is a reduced computation in a throwaway
+# workspace, so whether preview rows are in front of this notebook at all is settled by which
+# registry `study` opened, not by a column. Re-asserting it as a filter would reject a preview
+# run's own rows unconditionally, which is the defect `8fc28044` fixed on the registry path.
+#
+# This is the correction that unfroze this notebook. Selection used to run over whatever the
+# registry held, filtered only by which families the case study excludes - so the representative
+# of a family could be a legacy or partial row, and the table gave no sign of it.
+
 # %%
-# Phase 1: Load pre-computed metrics for ALL labels (coverage + multi-label analysis)
+# Admissibility is decided on the catalog and applied to the metrics frame by a join on
+# prediction_hash. The catalog is the authority on whether a row may be compared; the metrics
+# loader carries the richer per-row detail the figures below read - ic_mean_daily, the HAC
+# interval, the t statistic - which the catalog's metric projection does not expose. Reading
+# admissibility off one and detail off the other keeps both, where swapping wholesale to the
+# catalog would have narrowed the columns and silently emptied the interval on every forest tile.
+# `complete` is about the row; supersession is about the name that published it. A refit
+# leaves the retired generation complete and current - the schema version it was written under
+# has not moved - so a comparison selecting on the catalog alone puts two generations of the
+# same name in one table, and the family representative below can be drawn from either. The
+# table would not look wrong; it would just be answering two questions at once.
+#
+# Both calls take the study, and on a `Study.at` handle that is the same thing as naming the
+# directory: `root` and `release_case_root` are both `CASE_DIR`, and `PredictionCatalog.table`
+# short-circuits on a read-only study to read that one registry. The sibling calls in
+# `14_backtest` are `prediction_rows_at` and `superseded_members_at`, which take the directory
+# directly, because that notebook registers backtests and so holds no study at all.
+_catalog = study.predictions.table()
+_retired = superseded_members(study)
+_admissible = pl.col("complete") & ~pl.col("prediction_hash").is_in(list(_retired))
+_ok = _catalog.filter(_admissible).select("prediction_hash")
+_rejected = _catalog.filter(~_admissible)
+
+# `load_all_metrics` returns a bare frame with no columns when the registry holds no scored
+# rows, so every expression below it fails on a missing column instead of on the absence that
+# caused it. The distinction is worth one branch: "nothing has been fitted into this registry"
+# is a state a reader can act on, and `unable to find column "label"; valid columns: []` is not.
+_raw_metrics = load_all_metrics(CASE_STUDY, label=None)
+if _raw_metrics.is_empty():
+    msg = (
+        f"{CASE_DIR} holds no scored prediction sets, so there is nothing to compare. Its "
+        f"catalog lists {_catalog.height} registered prediction sets. Run the model notebooks "
+        "against this registry first."
+    )
+    raise RuntimeError(msg)
+
 all_labels_metrics = filter_active_model_rows(
-    load_all_metrics(CASE_STUDY, label=None).filter(pl.col("label").is_not_null()),
+    _raw_metrics.filter(pl.col("label").is_not_null()).join(_ok, on="prediction_hash", how="inner"),
     CASE_STUDY,
 )
 all_metrics = all_labels_metrics.filter(pl.col("label") == PRIMARY_LABEL)
+
+# Say what was set aside and why, rather than letting the row count speak for itself.
+if _rejected.height:
+    # Two conditions were tested, so two counts are reported. A superseded row is complete and
+    # was correct when it was written; reporting it as incomplete sends a reader looking for a
+    # fit that never failed. Supersession is named first because it decides the row on its own:
+    # a retired generation is not brought back by completing it. A legacy identity is named
+    # separately for the opposite reason - it is the one cause of incompleteness that no re-run
+    # of the same code will clear, because the row has to be refitted under the current scheme.
+    _superseded = _rejected.filter(pl.col("prediction_hash").is_in(list(_retired)))
+    _incomplete = _rejected.filter(~pl.col("prediction_hash").is_in(list(_retired)))
+    _legacy = _incomplete.filter(pl.col("identity_status") == "legacy").height
+    print(
+        f"{_rejected.height} of {_catalog.height} registered prediction sets are inadmissible: "
+        f"{_incomplete.height} not complete ({_legacy} of those carry a legacy identity), "
+        f"{_superseded.height} superseded by a later generation of their own population"
+    )
+else:
+    print(f"all {_catalog.height} registered prediction sets are admissible")
+
+# The two populations 06_linear and 07_gbm published. This is not a fourth filter - admissibility
+# above already holds - it is the check that the rows compared here are the ones those notebooks
+# declared before they fitted anything. A family whose cohort has not run yet resolves to no
+# population and is reported rather than silently omitted.
+# Which registry states this has to tell apart, and why the decision is a contract rather
+# than an exception handler, is stated at `declared_population_members`. In short: a registry
+# that publishes no population is not broken, and `OfficialPopulation.one` reports that state
+# and a broken lineage in the same words.
+# Population key -> (family, the config names it covers, or None for the whole family).
+POPULATION_SLICES = {
+    "linear": ("linear", None),
+    "gbm": ("gbm", None),
+    "nlinear": ("deep_learning", ("nlinear",)),
+    "lstm_h64": ("deep_learning", ("lstm_h64",)),
+    "tcn": ("deep_learning", ("tcn",)),
+    "patchtst": ("deep_learning", ("patchtst",)),
+}
+POPULATIONS = {
+    "linear": LINEAR_POPULATION,
+    "gbm": GBM_POPULATION,
+    "nlinear": NLINEAR_POPULATION,
+    "lstm_h64": LSTM_POPULATION,
+    "tcn": TCN_POPULATION,
+    "patchtst": PATCHTST_POPULATION,
+}
+
+
+def _slice_rows(frame: pl.DataFrame, key: str) -> pl.DataFrame:
+    """The rows belonging to one declared population."""
+    family, config_names = POPULATION_SLICES[key]
+    rows = frame.filter(pl.col("family") == family)
+    if config_names is not None:
+        rows = rows.filter(pl.col("config_name").is_in(list(config_names)))
+    return rows
+
+
+# `produced` is per family rather than per population, because which registered row belongs to
+# which of a family's populations is what the population itself declares. A family with rows and
+# an unresolvable declared name is the refusing case whichever of its names failed.
+_family_produced = {
+    _family: _catalog.filter(pl.col("family") == _family).height
+    for _family in {_family for _family, _ in POPULATION_SLICES.values()}
+}
+_population_members, _population_notes = declared_population_members(
+    study,
+    CASE_DIR,
+    POPULATIONS,
+    produced={
+        _key: _family_produced.get(_family, 0) for _key, (_family, _) in POPULATION_SLICES.items()
+    },
+)
+for _note in _population_notes:
+    print(_note)
+
+# A population is declared before anything is fitted; degeneracy is only visible afterwards.
+# `load_all_metrics` drops any prediction set with a constant-prediction fold, because its
+# pooled IC is computed over the surviving folds only and is not a model result. Those rows are
+# declared members that correctly never reach a leaderboard, so the comparison allows for them
+# and says how many rather than reporting a correct exclusion as a missing member.
+_degenerate = degenerate_prediction_hashes(study.root)
+_registered = set(_catalog.get_column("prediction_hash"))
+
+for _family, _members in _population_members.items():
+    # Scoped to the population's own slice, not to its whole family. Four sequence populations
+    # share the `deep_learning` family, so filtering on family alone would report every one of
+    # them as holding three undeclared rows for every one it declares.
+    _have = set(_slice_rows(all_labels_metrics, _family).get_column("prediction_hash"))
+    _dropped = _members & _degenerate
+    _missing, _extra = _members - _degenerate - _have, _have - _members
+    # Both halves of the sentence this prints have to be true before it is printed. "None of
+    # the declared members has been produced" is a question for the registry, not for `_have`:
+    # that set is the *admissible* rows, so a cohort that ran and whose every member is
+    # incomplete, legacy or superseded reaches here empty too, and reading it as "not run yet"
+    # would skip the check below in exactly the case the check exists for. "This family is
+    # absent from every comparison" is the other half, and it is a question for `_have`: a
+    # family can have no declared member registered and still contribute rows, which are
+    # undeclared by construction and are what `_extra` below exists to reject.
+    if not (_members & _registered) and not _have:
+        print(
+            f"{_family}: none of the {len(_members)} declared members has been produced yet - "
+            "the cohort has not run, so this family is absent from every comparison below"
+        )
+        continue
+    if _missing or _extra:
+        raise RuntimeError(
+            f"{_family}: admissible rows do not match the declared population - "
+            f"{len(_missing)} declared members absent, {len(_extra)} admissible rows undeclared"
+        )
+    _note = f" ({len(_dropped)} declared members degenerate and excluded)" if _dropped else ""
+    print(
+        f"{_family}: all {len(_members) - len(_dropped)} comparable declared members present{_note}"
+    )
 
 if all_metrics.height == 0:
     raise RuntimeError(f"No metrics found for {CASE_STUDY} / {PRIMARY_LABEL}")
@@ -201,100 +412,121 @@ EXPECTED_FAMILIES = {
 } - excluded_families(CASE_STUDY)
 missing = EXPECTED_FAMILIES - set(families_present)
 if missing:
-    n_present = len(families_present)
     print(
-        f"\n[WARNING] COVERAGE: {n_present}/6 model families present. Missing: {', '.join(sorted(missing))}"
+        f"\n[WARNING] COVERAGE: {len(families_present)} of {len(EXPECTED_FAMILIES)} model "
+        f"families present. Missing: {', '.join(sorted(missing))}"
     )
-    print("  Recommendations below may change when missing families are added.")
+    print("  Comparisons below describe only the families that are present.")
 else:
-    print("\n[OK] Full coverage: all 6 model families present.")
+    print(f"\n[OK] All {len(EXPECTED_FAMILIES)} expected model families present.")
+
+# %% [markdown]
+# ### How much of the period each prediction set was scored on
+#
+# A family's representative stands in for it in every comparison below, so it has
+# to have been scored over the same period as the sets it is compared against. A
+# run that failed partway still leaves rows in the registry, and its score is an
+# average over the days it managed rather than the days it was asked for - which
+# is frequently the higher number, because a shorter window is an easier window.
+#
+# `ic_n_days` counts the decision days behind a set's score. The restriction is
+# applied within each family and label, because families legitimately differ: a
+# sequence model cannot score the first observations of a fold, since no window
+# ends there yet, so it covers fewer days than a model that scores every row.
+# Comparing each family against its own peers is what keeps such a family in the
+# comparison at all.
+#
+# The table below shows where each family stands before that restriction runs.
 
 # %%
-# Best model per family
+coverage_by_family = (
+    all_metrics.group_by("family")
+    .agg(
+        pl.len().alias("sets"),
+        pl.col("ic_n_days").min().alias("min_days"),
+        pl.col("ic_n_days").max().alias("max_days"),
+    )
+    .sort("family")
+)
+print(f"Scored-day coverage per family for {PRIMARY_LABEL}:")
+print(coverage_by_family)
+
+# %% [markdown]
+# `best_model_per_family_fast` applies the full-coverage restriction itself,
+# within each family and label, and raises rather than dropping a group whose
+# coverage cannot be established.
+
+# %%
 best_per_family = best_model_per_family_fast(all_metrics)
 
-print("\nBest model per family:")
+print("\nRepresentative model per family:")
 print(best_per_family.select(["family", "config_name", "checkpoint_value", "ic_mean", "ic_std"]))
 
 # %%
-# Phase 2a: Load per-fold IC from registry (fast path — no prediction files needed)
+# Phase 2a: Load per-fold IC from registry (fast path - no prediction files needed)
 fold_metrics = load_fold_metrics_from_registry(CASE_STUDY, label=PRIMARY_LABEL)
 fold_metrics = filter_active_model_rows(fold_metrics, CASE_STUDY)
 if fold_metrics.height > 0:
     print(f"Fold metrics from registry: {fold_metrics.height} entries")
 else:
-    print("No fold_metrics in registry — will compute from raw predictions")
+    print("No fold_metrics in registry - will compute from raw predictions")
+
+# %% [markdown]
+# ### Load the representative predictions on a thinned timestamp grid
+#
+# The diagnostics that follow read the prediction rows themselves rather than
+# stored summaries, and on a minute panel that is millions of rows per family.
+# They are all cross-sectional: each one scores one decision time across the
+# symbols quoting at it, then looks at how those scores behave over time. Keeping
+# every `SAMPLE_EVERY_N`-th decision time therefore preserves what each statistic
+# measures - whole cross-sections, in order - while reducing what has to be held
+# in memory.
+#
+# What it does change is precision. Every figure and statistic below rests on
+# this thinned grid, not on all decision times, so their standard errors are
+# wider than the full panel would give. The registered scores above are computed
+# on the full grid and are unaffected.
 
 # %%
-# Phase 2: Load raw predictions ONLY for the best model per family
-# For high-frequency case studies (15-min bars), sample every Nth timestamp
-# to keep memory manageable (~50K rows per family instead of millions)
-import sqlite3 as _sqlite3
-
-SAMPLE_EVERY_N = 4  # keep every 4th timestamp (~100K rows per family)
+SAMPLE_EVERY_N = 4  # keep every 4th decision time
+# The registered artifact's names, and the names the analysis helpers read.
+_RAW_TO_ANALYSIS = {"fold": "fold_id", "prediction": "y_score", "actual": "y_true"}
 representative_preds = []
-_db = _sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db"))
 
+# The representative rows came from the catalog, so each already carries the identity of the
+# prediction set it names. Re-deriving that with a hand-written join against registry.db - which
+# is what stood here - reached past the interface to ask a question the row had already answered,
+# and did it with no admissibility condition of its own. `Result.open` resolves the same identity
+# through the study, so a hash that does not resolve fails here instead of silently contributing
+# no rows.
 for row in best_per_family.filter(pl.col("family") != "causal_dml").iter_rows(named=True):
-    family = row["family"]
-    config = row["config_name"]
-    checkpoint = row.get("checkpoint_value")
-
-    q = """
-        SELECT p.prediction_hash, p.checkpoint_value, p.checkpoint_kind
-        FROM training_runs t
-        JOIN prediction_sets p ON t.training_hash = p.training_hash
-        WHERE p.split = 'validation' AND t.label = ? AND t.family = ? AND t.config_name = ?
-    """
-    params = [PRIMARY_LABEL, family, config]
-    if checkpoint is not None:
-        q += " AND p.checkpoint_value = ?"
-        params.append(checkpoint)
-
-    pred_rows = _db.execute(q, params).fetchall()
-    pred_dir = CASE_DIR / "run_log" / "predictions"
-    family_rows = 0
-
-    for p_hash, cp_val, cp_kind in pred_rows:
-        parquet_path = pred_dir / p_hash / "predictions.parquet"
-        if not parquet_path.exists():
-            continue
-        df = pl.read_parquet(parquet_path)
-        rename_map = {}
-        if "prediction" in df.columns and "y_score" not in df.columns:
-            rename_map["prediction"] = "y_score"
-        if "actual" in df.columns and "y_true" not in df.columns:
-            rename_map["actual"] = "y_true"
-        if "fold" in df.columns and "fold_id" not in df.columns:
-            rename_map["fold"] = "fold_id"
-        if "date" in df.columns and "timestamp" not in df.columns:
-            rename_map["date"] = "timestamp"
-        if "asset" in df.columns and "symbol" not in df.columns:
-            rename_map["asset"] = "symbol"
-        if rename_map:
-            df = df.rename(rename_map)
-        # Sample: keep every Nth unique timestamp (preserves full cross-section per bar)
-        if SAMPLE_EVERY_N > 1 and "timestamp" in df.columns:
-            unique_ts = df["timestamp"].unique().sort()
-            keep_ts = unique_ts.gather_every(SAMPLE_EVERY_N)
-            df = df.filter(pl.col("timestamp").is_in(keep_ts))
-        df = df.with_columns(
-            pl.lit(family).alias("family"),
-            pl.lit(config).alias("config_name"),
-            pl.lit(PRIMARY_LABEL).alias("label"),
-            pl.lit(cp_val).alias("checkpoint_value"),
-        )
-        family_rows += df.height
-        representative_preds.append(df)
-
-    print(
-        f"  Loaded {family}/{config}: {family_rows:,} predictions (sampled 1/{SAMPLE_EVERY_N})"
-        if pred_rows
-        else f"  {family}/{config}: no predictions found",
-        flush=True,
+    family, config = row["family"], row["config_name"]
+    prediction = Result.open(study, row["prediction_hash"])
+    df = prediction.load()
+    # `Result.load` returns the registered artifact, whose columns are `fold`, `prediction` and
+    # `actual`. Every helper this notebook feeds the frame to - `fold_performance_matrix`,
+    # `select_best_checkpoint`, `cross_sectional_ic` - reads `fold_id`, `y_score` and `y_true`,
+    # which is the vocabulary `case_studies/utils/backtest_loaders.py` normalises raw prediction
+    # artifacts into (:278). This notebook used to reach the same rows through a loader that had
+    # already done that rename; going through the study resolves the identity properly but hands
+    # back the raw names, so do the rename here rather than teaching each call site a second
+    # vocabulary. Conditional because a family that already registered normalised names must not
+    # be renamed twice.
+    df = df.rename({old: new for old, new in _RAW_TO_ANALYSIS.items() if old in df.columns})
+    # Keep every Nth decision time, preserving the whole cross-section at each one it keeps. This
+    # reduces only what the correlation and bucket displays below read; every registered score is
+    # computed on the full grid and is unaffected.
+    if SAMPLE_EVERY_N > 1 and "timestamp" in df.columns:
+        keep_ts = df["timestamp"].unique().sort().gather_every(SAMPLE_EVERY_N)
+        df = df.filter(pl.col("timestamp").is_in(keep_ts))
+    df = df.with_columns(
+        pl.lit(family).alias("family"),
+        pl.lit(config).alias("config_name"),
+        pl.lit(PRIMARY_LABEL).alias("label"),
+        pl.lit(row.get("checkpoint_value")).alias("checkpoint_value"),
     )
-
-_db.close()
+    representative_preds.append(df)
+    print(f"  {family}/{config}: {df.height:,} predictions (sampled 1/{SAMPLE_EVERY_N})")
 
 if representative_preds:
     best_preds = pl.concat(representative_preds, how="diagonal_relaxed")
@@ -334,7 +566,7 @@ if best_preds.height > 0 and fold_ranges.height > 0:
 # bars, the validation evidence is inherently thin. Each fold contains
 # roughly $114 \times 26 \times 126 \approx 374{,}000$ predictions
 # (114 stocks × 26 bars/day × ~126 trading days), so per-fold sample
-# size is large. But the temporal diversity is minimal — both folds
+# size is large. But the temporal diversity is minimal - both folds
 # fall within the 2020–2021 period, which was dominated by COVID
 # recovery, meme-stock volatility, and an unprecedented retail trading
 # surge. Whether patterns learned here generalize to more normal market
@@ -343,12 +575,11 @@ if best_preds.height > 0 and fold_ranges.height > 0:
 # %% [markdown]
 # ## 2. What Was Actually Run?
 #
-# Before comparing results, we map what is actually comparable. Not all
-# model families were trained on all labels, and the five modeling
-# chapters contribute different kinds of evidence: Ch11–13 produce
-# predictive forecasts; Ch14 extracts latent structure; Ch15 estimates
-# causal effects. Forcing all of these into a single ranking would be
-# misleading.
+# Before comparing results, map what is comparable. Not every model family was
+# trained on every label, and the modelling chapters produce different kinds of
+# evidence: predictive forecasts, latent structure, and estimated causal effects.
+# Each kind is ranked against its own kind, and the map below records which is
+# which.
 
 # %%
 # Coverage map: family × label × evidence type
@@ -406,7 +637,7 @@ print(f"\nAll labels trained: {all_labels}")
 # %% [markdown]
 # The NASDAQ-100 microstructure case study has five model families on the
 # primary label (`fwd_ret_15m`), spanning four of the five modeling
-# chapters. Latent factor models (Ch14) were not trained — microstructure
+# chapters. Latent factor models (Ch14) were not trained - microstructure
 # features at 15-minute frequency do not have the cross-sectional depth
 # or temporal structure that factor models require. This is expected:
 # latent-factor methods are designed for panels with rich cross-sectional
@@ -421,8 +652,8 @@ print(f"\nAll labels trained: {all_labels}")
 # ## 3. Headline Comparative View
 #
 # Before comparing model families, we establish a baseline. If the
-# simplest possible model — linear regression on 66 microstructure
-# features — produces zero or negative IC, the prediction problem
+# simplest possible model - linear regression on 66 microstructure
+# features - produces zero or negative IC, the prediction problem
 # is fundamentally too noisy at this frequency.
 
 # %%
@@ -453,43 +684,42 @@ print(
 )
 
 # %% [markdown]
-# **Weak but nonzero signal.** A linear ridge baseline produces a
-# small positive IC at the primary 15-minute horizon. An IC of 0.005
-# means the model correctly ranks barely more than 50% of pairwise
-# stock comparisons beyond chance — near noise for any single bar.
-# The compounding arithmetic changes the picture: across 26 bars per
-# day and ~252 trading days per year, IC = 0.005 implies roughly
-# $0.005 \times \sqrt{26 \times 252} \approx 0.40$ in annualized IR
-# terms under the Fundamental Law of Active Management (assuming
-# independent bets, which is itself a heroic assumption at this
-# frequency).
+# **How to read a rank correlation this small.** A cross-sectional rank
+# correlation is the correlation between the predicted ordering of stocks at one
+# decision time and their realised ordering. A value near zero means the model
+# gets barely more pairwise comparisons right than chance would.
 #
-# At the primary `fwd_ret_15m` horizon the highest-IC supervised configs
-# from the locked registry are: `gbm/leaves_7_mae` IC = +0.0060 (CI
-# [+0.0026, +0.0094], t-HAC = 3.42), `linear/ridge_a1000000.0` IC =
-# +0.0049 (CI [+0.0022, +0.0076], t-HAC = 3.53), and
-# `deep_learning/nlinear` IC = +0.0046 (CI [+0.0001, +0.0090], t-HAC
-# = 2.00). All three CIs include each other, so the across-family
-# ordering is not statistically separable on this CS at this horizon.
+# The reason such a value is reported at all rather than dismissed is that the
+# ordering is acted on repeatedly. Under the Fundamental Law of Active
+# Management, an information ratio scales as the correlation times the square
+# root of the number of independent bets, so a correlation that is negligible on
+# one bar can accumulate over a year of bars. The condition in that sentence is
+# where the difficulty lies: consecutive 15-minute decisions on the same names
+# are not independent bets, so the square-root term overstates what is available,
+# and the multiplication says nothing about whether the trades survive their
+# costs.
 #
-# Causal DML is **not** in this ranking — it lives in the
-# `causal_runs` table and is reported as an ATE rather than an IC
-# (§7).
+# Read each family's interval alongside its point estimate. Where two intervals
+# overlap, the evidence does not separate those families, whatever the ordering
+# of the point estimates.
 #
-# With only 2 folds, t-statistics computed against the fold-level IC
-# distribution are unreliable. The HAC-based CIs above use
-# per-day IC as the unit of analysis (more degrees of freedom) and
-# are the appropriate tier-of-credibility check.
+# With two folds, a statistic computed across fold-level scores has almost no
+# degrees of freedom. The intervals here use the per-day score as the unit of
+# analysis instead, which is why they are the reading to rely on.
+#
+# Causal DML is not in this ranking. It lives in the `causal_runs` table and
+# reports an average treatment effect rather than a correlation.
 
 # %% [markdown]
-# ### Which Model Families Extract the Most Signal?
+# ### How much signal does each family extract?
 #
-# The primary comparison uses the best configuration from each family,
-# evaluated not just by mean IC but by consistency across the 2 folds.
-# With so few folds, even a single negative fold would be damning.
+# The comparison uses each family's representative and looks at consistency
+# across folds as well as the average. With two folds that is a weak check, but
+# it catches the case that matters most: a representative whose score changes
+# sign between folds has not established a stable relationship at all.
 
 # %%
-# Build fold × family IC matrix — prefer registry fast path
+# Build fold × family IC matrix - prefer registry fast path
 if fold_metrics.height > 0:
     # Fast path: use per-fold IC from registry (no raw predictions needed)
     best_keys = best_per_family.select(["family", "config_name", "checkpoint_value"])
@@ -547,31 +777,25 @@ if fold_ic.height > 0:
     print(family_stats)
 
 # %% [markdown]
-# The heatmap reads against the locked registry:
+# **How to read the heatmap.** Each row is a model family, each column a fold,
+# and the shading is that family's representative's score on that fold. Three
+# things are worth checking in it, in order.
 #
-# - **GBM** highest IC at `fwd_ret_15m` is `leaves_7_mae` with daily-pooled
-#   IC = +0.0060 (CI [+0.0026, +0.0094], t-HAC = 3.42, excludes zero
-#   strong). Small-leaf trees with MAE loss achieve a higher IC than
-#   deeper variants — at this frequency, regularization-against-noise
-#   is the binding signal-extraction principle, not capacity-for-
-#   interactions.
-# - **`deep_learning/nlinear`** highest IC = +0.0046 (CI [+0.0001,
-#   +0.0090], t-HAC = 2.00) — barely excludes zero. NLinear is the
-#   only DL family that landed for this CS; it is a near-linear
-#   architecture, consistent with the small-leaf-GBM and high-shrinkage
-#   ridge findings.
-# - **Linear (ridge)** highest-IC config is `ridge_a1000000.0` with IC = +0.0049
-#   (CI [+0.0022, +0.0076], t-HAC = 3.53, excludes zero strong). The
-#   most-shrunk ridge config in the grid achieves the highest IC — same pattern as in
-#   broader equity panels at daily frequency, but more pronounced.
-# - **`tabular_dl` and `latent_factors`** were not trained. Their rows
-#   would otherwise appear as "no run" tiles in the §6 horizon forest.
+# First, sign consistency across folds. A representative that is positive on one
+# fold and negative on the other has not shown a stable relationship, whatever
+# its average.
 #
-# All three trained families' CIs overlap at `fwd_ret_15m`: the
-# across-family ordering is not statistically separable on this CS
-# at this horizon. The 2-fold limit means fold-level conclusions about
-# stability remain provisional; the HAC-based per-day CIs above are
-# the better-behaved evidence.
+# Second, the spread within a row against the spread between rows. When the
+# variation across folds is as large as the variation across families, the
+# ranking between families is being read off noise.
+#
+# Third, which families are absent. A family with no tile was not trained for
+# this case study rather than trained and found wanting, and the two are not the
+# same conclusion. The coverage map above records which is which.
+#
+# With two folds, none of this supports a fold-level stability claim. It is a
+# check for the obvious failure - a representative that does not hold its sign -
+# rather than a measurement of consistency.
 
 # %% [markdown]
 # ## 4. Stability Over Time
@@ -594,7 +818,7 @@ plot_fold_boxplot(fold_ic)
 # `linear/ridge_a1000000.0`, `deep_learning/nlinear`) are positive in
 # both folds at the primary `fwd_ret_15m` label. Per-fold magnitudes
 # differ across families but the **HAC-based per-day CIs in §3 and
-# §6** are the more reliable evidence — they pool over many days
+# §6** are the more reliable evidence - they pool over many days
 # rather than two folds and produce overlapping CIs across all three
 # families.
 #
@@ -658,12 +882,12 @@ plot_bucket_monotonicity(
 #
 # **The edge-to-cost ratios are all below 1.** The per-bar decile
 # spread cannot survive a single round-trip at any reasonable cost
-# assumption — round-trip cost of 2--10 bps swamps the per-bar
+# assumption - round-trip cost of 2--10 bps swamps the per-bar
 # spread. The annualized perspective offers some hope: spreads
 # compound across 26 bars per day and ~252 days per year, and a
 # selective strategy (trading only the most extreme signals in the
 # most favorable regime) might achieve positive net returns. The
-# binding requirement is that you cannot trade every bar — only bars
+# binding requirement is that you cannot trade every bar - only bars
 # where the signal materially exceeds the spread.
 
 # %%
@@ -681,34 +905,33 @@ corr_matrix, corr_labels = (
 plot_correlation_matrix(corr_matrix, corr_labels)
 
 # %% [markdown]
-# The prediction correlation matrix reveals an extraordinarily low
-# average pairwise correlation across the three trained supervised
-# families (`linear`, `gbm`, `deep_learning`). At daily frequency,
-# linear and tree models typically correlate at 0.4--0.7, reflecting
-# shared dependence on the same momentum features. Here, the three
-# highest-IC configs exploit genuinely different aspects of the data:
+# **How to read the correlation matrix.** Each cell is the correlation between
+# two families' representative predictions over the same rows. It answers a
+# question the scores cannot: whether two models that rank comparably well are
+# ranking the same way.
 #
-# - **`linear/ridge_a1000000.0`**: captures additive relationships in
-#   cross-sectional microstructure features under heavy shrinkage.
-# - **`gbm/leaves_7_mae`**: captures shallow nonlinear thresholds
-#   under MAE loss (small-leaf trees only).
-# - **`deep_learning/nlinear`**: a near-linear architecture with a
-#   modest temporal context — its predictions are not redundant with
-#   the linear ridge despite the conceptual proximity.
+# High correlation between families means they have found the same structure,
+# and combining them adds little. Low correlation means they are reading
+# different things from the same features, and a combination could be steadier
+# than either alone even when neither is stronger.
 #
-# Causal DML lives in `causal_runs` (§7) and is not part of the
-# supervised correlation matrix. The near-zero supervised
-# correlations mean an ensemble would primarily reduce variance
-# rather than add edge — useful given §7's `nlinear` calibration
-# issue but not a free lunch on the highest IC.
+# Low correlation is not by itself good news. Two models can disagree because
+# each is fitting a different part of the noise, which looks identical in this
+# matrix to two models capturing genuinely different structure. What separates
+# the cases is whether both hold their ordering out of sample, which is what the
+# fold view and the intervals address.
+#
+# Causal DML is absent here by construction: it produces an effect estimate, not
+# a per-row prediction to correlate.
 
 # %% [markdown]
-# ### How Much Does Additional Model Complexity Help?
+# ### How much does additional model complexity help?
 #
-# For models with checkpoint data, we observe how validation IC evolves
-# with training. At 15-minute frequency, overfitting is a significant
-# risk: the large number of observations (374K per fold) can encourage
-# models to memorize noise patterns that don't generalize.
+# For models that recorded checkpoints, the curve shows how the validation score
+# evolves as training proceeds. A curve that rises and then falls locates the
+# point past which the extra capacity is fitting noise. Row count is no
+# protection here: many rows of a weak, heavily overlapping signal still let a
+# flexible model memorise the noise.
 
 # %%
 # Learning curves from pre-computed metrics (fast path)
@@ -733,7 +956,7 @@ plot_learning_curves(cp_data, cp_families)
 # %% [markdown]
 # The learning curves trace IC across training checkpoints for the
 # families that emit them. From the locked registry, `gbm` highest IC at
-# `fwd_ret_15m` is `leaves_7_mae` (small-leaf, MAE loss) — the
+# `fwd_ret_15m` is `leaves_7_mae` (small-leaf, MAE loss) - the
 # regularization-against-noise pattern is the binding principle,
 # not the capacity-for-interactions story. `deep_learning/nlinear` is an
 # architecturally near-linear sequence model, not a deep recurrent
@@ -832,7 +1055,7 @@ plot_feature_importance_heatmap(gbm_importance, TOP_N_FEATURES)
 # %% [markdown]
 # The feature importance analysis reveals a surprising result: the
 # only persistent features (top-5 in both folds) are **`is_first_30m`**
-# and **`is_last_30m`** — time-of-day indicators, not the order flow
+# and **`is_last_30m`** - time-of-day indicators, not the order flow
 # or liquidity features we expected.
 #
 # This is actually economically meaningful. The first and last 30
@@ -847,12 +1070,12 @@ plot_feature_importance_heatmap(gbm_importance, TOP_N_FEATURES)
 #
 # The microstructure features (signed volume share, relative spread,
 # microprice deviation) appear in the top 15 but are not persistent
-# across both folds — their importance shifts with market conditions.
+# across both folds - their importance shifts with market conditions.
 # This suggests the signal is diffuse: no single microstructure
 # feature carries the bulk of the signal, but the time-of-day context conditions which
 # features matter. The models may be implicitly learning "at the
 # open, order flow imbalance matters; at the close, spread dynamics
-# matter" — but with only 2 folds, we cannot confirm this.
+# matter" - but with only 2 folds, we cannot confirm this.
 
 # %% [markdown]
 # ## 6. Heterogeneity: Labels, Horizons, and Regimes
@@ -867,11 +1090,10 @@ plot_feature_importance_heatmap(gbm_importance, TOP_N_FEATURES)
 #
 # Three regression labels span the horizon: a shorter horizon
 # (`fwd_ret_5m`), the primary `fwd_ret_15m`, and a longer horizon
-# (`fwd_ret_60m`). The classification variant `fwd_dir_15m` is
-# evaluated separately (AUC + accuracy) and excluded from the
-# regression-IC forest below. The forest reports the highest IC ± HAC
-# 95% CI per family per label; "no run" tiles surface coverage
-# gaps explicitly.
+# (`fwd_ret_60m`). The classification variant `fwd_dir_15m` is scored on
+# different measures and is excluded from the forest below, which reports each
+# family's representative and its interval per label. Tiles marked as having no
+# run make coverage gaps visible rather than leaving them as absences.
 
 # %%
 multi_rows = []
@@ -910,48 +1132,33 @@ plot_label_horizon_forest(
         "fwd_ret_15m": "fwd_ret_15m (one-bar, primary)",
         "fwd_ret_60m": "fwd_ret_60m (four-bar)",
     },
-    title="NASDAQ-100 microstructure — highest IC per family × horizon (HAC 95% CI)",
+    title="NASDAQ-100 microstructure - highest IC per family × horizon (HAC 95% CI)",
 )
 
 # %% [markdown]
-# **Coverage**: Only `linear`, `gbm`, and `deep_learning` appear in
-# the registry. `tabular_dl` and `latent_factors` were not trained
-# (the latter intentionally — at 15-minute frequency, all 114
-# NASDAQ-100 names share dominant volatility modes, so a factor
-# decomposition would extract market-wide rather than tradeable
-# cross-sectional structure). `causal_dml` lives in a dedicated
-# `causal_runs` table, reported separately in §7. `deep_learning`
-# (`nlinear`) was only trained at the primary `fwd_ret_15m`; the
-# 5-minute and 60-minute panels show "no run" tiles for it.
+# **How to read the horizon forest.** Each row is one family at one label
+# horizon, the marker is its representative's score and the bar is that score's
+# confidence interval. Three readings, in order of what they can support.
 #
-# **Horizon effect, family by family**:
+# A bar that crosses zero means the sign of the relationship is not established
+# at that horizon. That is a stronger statement than a small point estimate, and
+# it is the first thing to check on every row.
 #
-# - `gbm`: signal **strengthens** as the horizon shortens. The highest IC
-#   moves from +0.0043 at 60m (CI [-0.0009, +0.0096], straddles zero)
-#   through +0.0060 at 15m (CI [+0.0026, +0.0094], excludes zero
-#   strong) to +0.0104 at 5m (CI [+0.0086, +0.0121], excludes zero
-#   strong). The highest-IC config is `leaves_7_mae` at 15m and 60m,
-#   `leaves_7_mse` at 5m — small-leaf GBMs lead across all horizons.
-# - `linear`: monotone in the same direction. The highest IC is +0.0069
-#   at 60m (CI [-0.0021, +0.0159], straddles zero), +0.0049 at 15m
-#   (CI [+0.0022, +0.0076], excludes zero strong), +0.0088 at 5m
-#   (CI [+0.0073, +0.0104], excludes zero strong). The highest-IC config is
-#   the most-shrunk ridge available (`ridge_a1000000.0` at 15m/60m,
-#   `ridge_a10000000.0` at 5m).
-# - `deep_learning`: only `fwd_ret_15m` trained. Highest IC = +0.0046,
-#   CI [+0.0001, +0.0090] — barely excludes zero (lower-bound just
-#   above zero, t-HAC = 2.00).
+# Comparing rows *down* a family shows how the horizon changes what is
+# detectable. A shorter horizon puts less time between the prediction and the
+# outcome, so less unrelated movement accumulates in between, and the
+# relationship is usually easier to detect. That says nothing about whether it is
+# easier to *trade*: a shorter horizon means more rebalances and more crossings
+# of the spread, which is exactly the tension the cost notebook resolves.
 #
-# **Ranking-across-families**: at each horizon where multiple
-# families are present, `gbm` and `linear` produce CI-overlapping ICs
-# — the small-leaf GBM and most-shrunk ridge live in the same CI
-# band. `deep_learning` is at the bottom of the `fwd_ret_15m` panel
-# but its CI overlaps both `linear` and `gbm`. There is no
-# horizon-stable family ordering: 5-minute is the most credible
-# panel for both `gbm` and `linear`, and the registry favors
-# small-leaf GBM and high-shrinkage ridge across every horizon —
-# both behaviors signal a genuinely thin per-bar signal that needs
-# very strong regularization to extract.
+# Comparing rows *across* families at one horizon is the weakest of the three.
+# Where the intervals overlap, the families are not separated, and the ordering
+# of their markers should not be reported as a ranking.
+#
+# A missing tile means the family was not trained at that horizon, which is not
+# the same as a family that was trained and scored poorly. The coverage map
+# records which families ran; `causal_dml` is absent by construction, since it
+# estimates an effect rather than an ordering.
 
 # %% [markdown]
 # ### Regime Conditioning
@@ -1021,7 +1228,7 @@ plot_regime_bars(regime_df)
 # Latent factor models were **not trained** for the NASDAQ-100
 # microstructure case study. At 15-minute frequency, the cross-section
 # of 114 stocks lacks the fundamental heterogeneity that factor models
-# require — these are all large-cap US tech stocks with highly
+# require - these are all large-cap US tech stocks with highly
 # correlated microstructure dynamics. PCA or CAE applied to intraday
 # microstructure features would extract market-wide volatility modes,
 # not tradeable cross-sectional factors.
@@ -1037,8 +1244,8 @@ plot_regime_bars(regime_df)
 # Causal results live in a dedicated `causal_runs` table (separate
 # from `prediction_metrics`). Causal DML estimates an **average
 # treatment effect** of a microstructure treatment on next-bar
-# returns, with HAC-robust standard errors and a refutation test —
-# it does not produce a per-asset cross-sectional score, so it is
+# returns, with HAC-robust standard errors and a refutation test.
+# It does not produce a per-asset cross-sectional score, so it is
 # reported as ATE/SE/p_HAC rather than IC.
 #
 # Treatment: `signed_vol_share` (signed volume share at the bar);
@@ -1061,36 +1268,40 @@ print("Causal DML on signed_vol_share:")
 print(causal_df)
 
 # %% [markdown]
-# The two `causal_runs` rows tell different stories:
+# **How to read the causal rows.** Each row is an estimated average treatment
+# effect: how much the outcome moves per unit change in `signed_vol_share`, after
+# adjusting for the confounders. Four columns decide what the row supports.
 #
-# - On the primary `fwd_ret_15m`, the DML effect of
-#   `signed_vol_share` is +5.81e-7 with HAC SE = 2.31e-7 and
-#   p_HAC = 0.012 — credibly non-zero at the 5% level (not at 1%).
-#   The naive (unconfounded) effect is +5.23e-7, so the orthogonalized
-#   estimate is **9.9% larger in magnitude** than the naive:
-#   confounding by spread, realized volatility, and lagged return
-#   depresses the raw association rather than inflating it.
-#   Block-permutation refutation_p = 0.11 — at the conventional
-#   0.05 gate, placebo shuffles cannot be distinguished from the
-#   actual effect, so HAC significance does not extend to a
-#   refutation-passing result.
-# - On the 5-minute label, the effect collapses: DML = +6.01e-8 with
-#   p_HAC = 0.624 (not distinguishable from zero) and confounding
-#   bias of +93%. Refutation_p = 0.70 also fails the 0.05 gate.
-#   At 5-minute horizon, signed volume share is dominated by the
-#   same micro-confounders it loads on, and the orthogonalized
-#   estimate disappears.
+# The naive and adjusted effects together say what the adjustment did. If the
+# adjusted effect is smaller, the confounders were carrying part of the raw
+# association. If it is larger, they were masking it. Either direction is
+# informative; a large gap in either direction is a reason to look at the
+# nuisance models before trusting the result.
 #
-# Reading: a positive HAC-significant (5%) per-bar treatment effect
-# of signed volume share on 15-minute returns survives orthogonalization
-# against spread / RV / r1m, but the same row fails block-permutation
-# refutation at the 5% gate — the HAC reading and the refutation
-# reading do not agree. Per-bar magnitude is microscopic — at
-# +5.8e-7 per unit treatment, the economic content depends entirely
-# on the dispersion of `signed_vol_share` across stocks; this is
-# context for §6's correlational highest-IC reads (`gbm/linear`
-# `fwd_ret_15m` ICs ≈ +0.005–+0.006), not a substitute for a
-# backtest.
+# The Newey-West p-value and the permutation p-value answer different questions
+# and frequently disagree, as `12_causal_dml` explains in full. When they do,
+# the parametric one is the one to distrust.
+#
+# **`refutation_p` is not yet a test this estimate can fail, and should not be read as a passing
+# check.** The permutation refutation shuffles the treatment within blocks, and the block has to be
+# at least as long as the autocorrelation the estimate rests on, or the shuffle destroys exactly
+# the structure the placebo is supposed to preserve. The block length is currently taken from the
+# label buffer rather than from the treatment's own window, and `signed_vol_share` declares no
+# window, so the block is not derived from the quantity it has to bound. A refutation built that
+# way passes by construction. `us_firm_characteristics` measured what that looks like on its own
+# treatment: p = 1.0000 at z = -13.89, with the placebos fourteen standard deviations above the
+# observed effect - a placebo distribution that cannot contain the truth is not evidence about it.
+# Read the column as unresolved until the treatment declares its window.
+#
+# The effect is measured per unit of the treatment, and treatment units are not
+# comparable across labels or case studies. An effect that looks microscopic in
+# absolute terms may or may not matter once multiplied by the spread of
+# `signed_vol_share` actually observed across stocks. The strategy notebooks
+# carry out that multiplication and add the costs of acting on it.
+#
+# These rows are not comparable to the correlations above. They estimate the
+# effect of intervening on one feature; a rank correlation measures how well an
+# ordering of all features anticipates an ordering of returns.
 
 # %% [markdown]
 # ### Calibration: Are Prediction Intervals Honest?
@@ -1103,7 +1314,7 @@ print(causal_df)
 # defines an interval $[\hat{y} - \hat{q}, \hat{y} + \hat{q}]$ that
 # should cover the true label at rate $1-\alpha$ on the remaining folds.
 # Empirical coverage materially below the nominal level signals
-# overconfident residual scaling — the model is more wrong, more often,
+# overconfident residual scaling - the model is more wrong, more often,
 # than its training-time spread suggests. Width is reported as a
 # fraction of the actuals' standard deviation so families with different
 # return scales are comparable; smaller width at matched coverage means
@@ -1127,42 +1338,36 @@ if conformal_df.height > 0:
     print(pivot)
 
 # %% [markdown]
-# Two regimes emerge on `fwd_ret_15m`:
+# **How to read the coverage table.** Two columns matter, and they fail
+# independently.
 #
-# - **`gbm/leaves_7_mae` and `linear/ridge_a1000000.0`**: empirical
-#   coverage tracks nominal closely. At 80% nominal, both reach ~77%
-#   empirical (3.0 pp deviation); at 90%, ~88.9% (1.0 pp under); at
-#   95%, ~94.8% (0.2 pp under). The two families are
-#   indistinguishable at every level on both coverage and width.
-#   Width-per-std is ~2.06 / 2.97 / 3.95 at the three levels — the
-#   primary-label residuals are heavy-tailed (a 95% interval needs
-#   ~4 standard deviations of width because intraday returns have
-#   meaningful tail mass), but the calibration itself is honest.
-# - **`deep_learning/nlinear`**: pathologically uncalibrated.
-#   Empirical coverage collapses to ~2.4--2.6% at all three nominal
-#   levels (~77 pp under at 80%, ~87 pp under at 90%, ~92 pp under
-#   at 95%) while width-per-std balloons to 3.47 / 4.36 / 5.30. The
-#   network's training-time residual scale is wildly out of step
-#   with its hold-out residual scale on this CS — possibly a
-#   calibration-set / target-scaling mismatch in `nlinear`'s
-#   single-CS run. The width grows with the nominal level (so the
-#   absolute-residual quantile is monotone), but the residuals
-#   themselves are systematically sized differently from the
-#   calibration sample.
+# Empirical coverage against nominal is the calibration check. An interval
+# advertised at a given confidence level should contain the realised value about
+# that often on the later folds. Coverage materially below nominal means the model is
+# confident more often than it is right, and any position size derived from its
+# interval is too large. Coverage materially above nominal means the intervals
+# are wider than they need to be, which is safe but wasteful.
 #
-# Implication for Ch19: only the `gbm` and `linear` highest-IC configs
-# can be position-sized using the symmetric residual quantile. The
-# `deep_learning` highest-IC config needs an isotonic recalibration step (or
-# CQR / ACI from `11_conformal_gbm`) before any interval-aware
-# sizing is honest.
+# Width per standard deviation says what that coverage cost. An interval that
+# reaches nominal coverage only by spanning several standard deviations of the
+# return distribution is honest and nearly useless for sizing. Read the two
+# together: a model is usable for interval-aware sizing only when it holds its
+# coverage at a width that still distinguishes one prediction from another.
+#
+# A family can rank well and fail this badly. Ranking depends only on the order
+# of the predictions; coverage depends on the scale of the residuals carrying
+# from the calibration window to a later one. When they diverge, the model needs
+# recalibration before any interval-aware sizing, even though its ordering is
+# unaffected.
 
 # %% [markdown]
 # ## 8. Pre-Backtest Judgment and Handoff
 #
-# We synthesize the evidence into explicit recommendations, applying
-# extra conservatism given the 2-fold limitation. With so little
-# temporal evidence, we should be skeptical of any model that requires
-# complexity to justify its selection.
+# The synthesis below collects, per family, the evidence a backtest depends on:
+# the representative's score with its interval, its behaviour across folds, and
+# whether its intervals are calibrated. Two folds is little temporal evidence, so
+# the summary is a description of what was measured rather than a
+# recommendation.
 
 # %%
 synthesis_rows = []
@@ -1227,54 +1432,52 @@ print("Synthesis Table:")
 print(synthesis)
 
 # %% [markdown]
-# ### What the synthesis table shows
+# ### How to read the synthesis table
 #
-# Three families are present at the primary `fwd_ret_15m` label —
-# `gbm`, `linear`, and `deep_learning` — with highest-IC magnitudes
-# in the +0.005 to +0.006 range and CIs from the locked registry
-# that all overlap each other. The synthesis table additionally
-# reports per-fold IC stability and decile bucket spread for each
-# highest-IC config; with only 2 folds, the per-fold columns are
-# noisy proxies for stability.
+# One row per family, collecting what the sections above measured separately:
+# the representative's score with its interval, its per-fold behaviour, its
+# decile bucket spread, and its interval calibration. Read across a row rather
+# than down a column, because a family is only usable when several of these hold
+# at once, and they fail independently.
 #
-# Width-per-std from §7 conformal is the cleaner read on residual
-# behavior: `gbm/leaves_7_mae` and `linear/ridge_a1000000.0` track
-# nominal coverage within ~3 pp at 80% and ~1 pp at 90%, with
-# nearly-identical width-per-std (~2.0 / 3.0 / 4.0 across the
-# three nominal levels). `deep_learning/nlinear`'s residual scale is
-# uncalibrated on this CS — its conformal coverage collapses near
-# zero — so any interval-aware position sizing for `nlinear` would
-# need recalibration first.
+# Where intervals overlap between rows, those families are not separated by this
+# evidence, and the ordering of their point estimates should not be reported as a
+# ranking. With two folds, the per-fold columns are weak evidence about stability
+# and are there to expose a sign change rather than to measure consistency.
 #
-# **Causal DML (covered in §7)** lives in `causal_runs` and reports
-# an ATE (+5.7e-7 per unit `signed_vol_share`, p_HAC = 0.007 on
-# `fwd_ret_15m`) rather than a per-asset IC; it cannot be inserted
-# into the supervised ranking above. It is a confounder-adjusted
-# robustness check, not a forecasting model.
+# The calibration columns are the ones most likely to disqualify a family that
+# looks fine on score alone. A model whose intervals do not hold their nominal
+# coverage can still be traded on its ordering, but not sized from its intervals
+# without recalibration first.
 #
-# **Key caveat — execution decay:**
-# - At 15-minute frequency, a signal generated at bar $t$ close is
-#   intended for execution at bar $t+1$ open. Any latency in
-#   signal computation, portfolio optimization, or order routing
-#   reduces the remaining signal. If half the signal decays in
-#   5 minutes, the effective IC drops from 0.007 to 0.0035 -- well
-#   below any reasonable cost threshold.
+# Causal rows are reported separately and are never inserted into this table.
+# They estimate the effect of a feature rather than forecast a return.
+#
+# ### The decay question this table cannot answer
+#
+# Every score here assumes the prediction made at one decision time is acted on
+# at the next. Between those two moments sit signal computation, portfolio
+# construction and order routing. If the relationship weakens over that interval,
+# the achievable version is smaller than the measured one, and at this horizon
+# there is little room for it to shrink before trading costs exceed it. Nothing
+# in a validation score measures that gap; a backtest that fills at the intended
+# time and one that fills a minute later do.
 #
 # ### Forecast Representation
 #
-# For backtesting, predictions should be used as:
-# - **Rank-based selection**: sort by `y_score`, select top-N and
-#   bottom-N stocks per bar (dollar-neutral).
-# - **Regime filter**: trade only during high-dispersion bars where
-#   the edge-to-cost ratio is more favorable. With per-bar IC ~0.005
-#   and round-trip costs of 2--10 bps, selective trading is the only
-#   path to a positive expected net return at this frequency.
-# - **Ensemble**: with pairwise correlations near 0.00, averaging
-#   across the three trained families would mechanically reduce
-#   variance — but the highest-IC magnitudes are so close that
-#   ensembling primarily protects against single-family
-#   miscalibration (especially `nlinear`'s residual-scale issue from
-#   §7) rather than adding edge.
+# For backtesting, predictions are used as:
+#
+# - **Rank-based selection**: sort by score, take the top and bottom names at
+#   each decision time in equal measure, so the position is on the ordering
+#   rather than on the market's direction.
+# - **Regime filter**: trade only when the cross-section is dispersed enough for
+#   the ordering to be worth acting on. When predicted differences between names
+#   are smaller than the cost of switching between them, trading on the ordering
+#   loses money however correct it is.
+# - **Ensemble**: averaging families that disagree reduces the variance of the
+#   combined ordering. It adds nothing to the ordering's strength, and it is
+#   worth most as protection against one family being miscalibrated rather than
+#   as a source of edge.
 #
 # ### What This Analysis Does Not Tell Us
 #
@@ -1297,45 +1500,73 @@ print(synthesis)
 # `15_portfolio_management.py` for position sizing, and
 # `18_strategy_analysis.py` for end-to-end results.
 
+# %% [markdown] tags=["results"]
+# ### What the comparison found on this run
+#
+# The representative of each family at full coverage, on the primary label, with
+# its HAC interval; the same measure across the label horizons; and the causal
+# rows, which are effects rather than correlations and are not comparable to the
+# rows above.
+
+# %%
+_ci_cols = [c for c in ("ic_ci_lo", "ic_ci_hi") if c in best_per_family.columns]
+print(f"Representative per family on {PRIMARY_LABEL} (full coverage only):")
+print(best_per_family.select(["family", "config_name", "checkpoint_value", "ic_mean", *_ci_cols]))
+
+# %%
+if "ic_n_days" in all_labels_metrics.columns:
+    _horizon = (
+        all_labels_metrics.filter(pl.col("family").is_in(["linear", "gbm", "deep_learning"]))
+        .group_by(["label", "family"])
+        .agg(pl.col("ic_mean").max().alias("highest_ic"), pl.len().alias("sets"))
+        .sort(["family", "label"])
+    )
+    print("\nHighest registered score by label and family:")
+    print(_horizon)
+
+# %%
+if causal_df.height > 0:
+    print("\nCausal rows (average treatment effects, not correlations):")
+    print(causal_df)
+
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Microstructure alpha is small and CI-credible at the
-#    highest-IC level**: at the primary `fwd_ret_15m` label, `gbm/leaves_7_mae`
-#    IC = +0.0060 (CI [+0.0026, +0.0094]) and
-#    `linear/ridge_a1000000.0` IC = +0.0049 (CI [+0.0022, +0.0076])
-#    both exclude zero strong; `deep_learning/nlinear` IC = +0.0046
-#    (CI [+0.0001, +0.0090]) barely excludes zero. All three CIs
-#    overlap each other.
-# 2. **Horizon: signal strengthens at the short end**: highest-IC GBM
-#    moves +0.0043 → +0.0060 → +0.0104 across 60m → 15m → 5m, and
-#    the highest-IC linear moves +0.0069 → +0.0049 → +0.0088. The 5-minute
-#    panel is the most CI-credible for both families; the 60-minute
-#    panel CIs straddle zero.
-# 3. **Regularization-against-noise is the binding principle**: small-leaf
-#    MAE GBM and `ridge_a1000000.0`-or-above achieve the highest IC across
-#    all horizons. At 15-minute frequency the data rewards regularization,
-#    not capacity-for-interactions.
-# 4. **Conformal calibration splits the families**: `gbm` and
-#    `linear` highest-IC configs track nominal coverage within ~3 pp at
-#    80% and ~1 pp at 90/95%, with width-per-std ~2.0 / 3.0 / 4.0
-#    across the three nominal levels. `deep_learning/nlinear`'s
-#    coverage collapses to ~2--3% empirical at all levels — its
-#    training-time residual scale does not transport to the hold-out
-#    folds.
-# 5. **Causal DML lives in `causal_runs`**: ATE of `signed_vol_share`
-#    on `fwd_ret_15m` is +5.8e-7 (HAC SE 2.3e-7, p = 0.012), with
-#    naive-vs-orthogonalized confounding bias of −10% (9.9% larger
-#    after orthogonalization). Block-permutation refutation_p = 0.11
-#    fails the 5% gate — HAC and refutation disagree. On
-#    `fwd_ret_5m` the effect is not distinguishable from zero
-#    (p = 0.624, 93% confounding bias, refutation_p = 0.70).
-#    Reported as ATE, not IC.
-# 6. **2-fold evidence is the binding limitation**: with only 2
-#    temporal windows from 2020--2021, fold-level stability claims
-#    are provisional. The HAC-based per-day CIs in §3 and §6 are
-#    the better-behaved evidence; treat the synthesis-table
-#    `pct_positive` columns as descriptive only.
+# 1. **Compare only what was measured over the same period.** A prediction set
+#    scored on fewer decision days than its neighbours is not a weaker version of
+#    the same number, it is a different number. Restricting representatives to
+#    full coverage before any comparison is what makes the ranking mean
+#    something, and it is the check most likely to change which configuration
+#    appears in front.
+#
+# 2. **A family's representative carries its checkpoint.** Two checkpoints of one
+#    configuration are two models. Collapsing them into a single row by
+#    configuration name doubles the folds behind a statistic and reports an
+#    average across two different fits.
+#
+# 3. **Correlation strength and interval width answer different questions.** A
+#    point estimate says which ordering was better on this sample; the interval
+#    says how much of that ordering the sample can actually support. On two
+#    walk-forward folds the intervals are wide enough that overlapping ones
+#    should be read as not separated, not as a close ranking.
+#
+# 4. **Conformal coverage is a property of transport, not of accuracy.** A model
+#    can rank well and still produce intervals that do not hold their nominal
+#    coverage out of sample, because the residual scale it learned in training
+#    does not carry to a later window. The two diagnostics are independent and a
+#    model has to pass the one you intend to rely on.
+#
+# 5. **Causal effects are not predictive scores.** The rows from `causal_runs`
+#    estimate what a change in one feature does to the outcome. They share no
+#    scale with a rank correlation, they answer a different question, and they
+#    never enter a predictive ranking or count toward family coverage.
+#
+# **Known limitations**: Two walk-forward folds over 2020-2021 is a small number
+# of independent windows, and that period included unusual market conditions, so
+# fold-level stability statements here are provisional. The row-level diagnostics
+# read a thinned decision-time grid, which widens their standard errors relative
+# to the registered scores. The universe is point-in-time NASDAQ-100 membership,
+# which is a large-cap technology cross-section rather than a broad one.
 #
 # **Next**: `14_backtest.py` applies these predictions to simulated
 # intraday trading.

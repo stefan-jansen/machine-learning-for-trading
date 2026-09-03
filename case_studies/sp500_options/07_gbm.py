@@ -85,36 +85,42 @@ from case_studies.research import (
     declared_labels,
     load_model_configs,
     model_requests,
+    narrows_declared_catalog,
     open_study,
     resolved_model_plan,
     run_model_population,
+    supersedes_for_run,
 )
 from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
-LABEL = "ret_to_expiry"
+LABELS: list[str] = []
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
-POPULATION_NAME = "sp500_options-gbm-validation-v1"
+POPULATION_NAME = ""
+SUPERSEDES_POPULATION: str = "65069e079063"
 
 # %%
 study = open_study("sp500_options", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 
 # %% [markdown]
-# ## 1. Which label, and which models
+# ## 1. Which labels, and which models
 #
-# The label is the same one the linear notebook used: `ret_to_expiry`, the return the short
-# straddle earns from the decision date to expiry. Keeping it fixed is what makes the two
-# populations comparable - the families differ, the target does not.
+# The labels are the same set the linear notebook fitted - the ones `config/setup.yaml` puts in
+# the sweep, which here is `ret_to_expiry` alone: the return the short straddle earns from the
+# decision date to expiry. Keeping the set fixed is what makes the two populations comparable;
+# the families differ, the targets do not. `06_linear` says why `config/training/` holds five
+# menus when the sweep declares one label.
 
 # %%
 declared_labels(study, "gbm")
 
 # %% [markdown]
-# The menu at `config/training/{label}.yaml` lists 15 named configurations under `gbm:`, and each
-# resolves to a preset in `case_studies/config/lgb/`. The grid is a product of two axes:
+# Each declared label's menu at `config/training/{label}.yaml` lists 15 named configurations
+# under `gbm:`, and each resolves to a preset in `case_studies/config/lgb/`. The grid is a
+# product of two axes:
 #
 # - **Five capacity profiles.** `default` uses the library's own leaf count; the rest fix it at 7,
 #   15, 31 and 63. Leaf count is the direct control on how finely one tree may partition the
@@ -131,10 +137,27 @@ declared_labels(study, "gbm")
 configs = load_model_configs(
     study,
     "gbm",
-    labels=[LABEL],
+    labels=LABELS or None,
     config_names=CONFIG_NAMES or None,
 )
-configs
+# `model_class` is empty for every row: the LightGBM presets under `case_studies/config/lgb/`
+# declare their objective in `params` and carry no `model_class` key, unlike the linear presets
+# where it names the estimator. Showing the column would put a blank field in front of the reader.
+configs.drop("model_class")
+
+# %% [markdown]
+# `LABELS` and `CONFIG_NAMES` both narrow what is fitted, and a narrowed run declares a different
+# set of members than the canonical population does. A population is immutable once written, so
+# such a run must publish under its own name, and this says so here rather than several cells
+# later in a message about hashes.
+
+# %%
+if narrows_declared_catalog(study, "gbm", configs) and not POPULATION_NAME:
+    raise ValueError(
+        f"this run declares {configs.height} label-configuration pairs, which is not the "
+        f"complete declared catalog, so it cannot publish the canonical population; pass "
+        f"POPULATION_NAME to give it its own"
+    )
 
 # %% [markdown]
 # ## 2. Binding the declarations to the data
@@ -194,19 +217,57 @@ plan.select(
 # one series per checkpoint covering the whole validation period, and each becomes its own
 # registered prediction set with its own identity.
 #
-# Preparation happens once per fold and is shared by every configuration, because slicing the
-# window and cleaning the rows depends on the data and not on the model. The run walks folds on
-# the outside and configurations on the inside for the same reason: one prepared fold is held at a
-# time rather than the whole set.
+# There are two ways to submit these fits and this notebook takes the first of them. Resolving
+# every request before submitting is what let the plan table above show real feature counts, fold
+# geometry and eligible-row counts, and it costs one fold preparation per configuration: each
+# resolved request holds its own prepared folds and runs on its own. Submitting the requests
+# unresolved instead reaches a family batch runner that walks folds on the outside and
+# configurations on the inside, so one prepared fold set serves every configuration - at the cost
+# of a plan built from placeholder folds rather than the real ones. The choice is between seeing
+# what will be fitted and holding less at once; on a grid this size the first is affordable.
 #
 # **What the call publishes is a population**: a named, immutable list of the prediction sets it
 # will produce, written down before the first fit. Afterwards every member must exist and be
 # complete, which is what makes the downstream comparison well defined.
+#
+# The default name is the contract with `11_model_analysis` and `12_backtest`, which resolve this
+# population by name, rather than a label of convenience; a run that narrows the member set has to
+# pass its own.
+#
+# `SUPERSEDES_POPULATION` names the earlier snapshot this one replaces. A population is hashed
+# over its members *and* over what it supersedes, so the default carries the hash the published
+# snapshot actually superseded: leaving it empty would compute a different population and the
+# registry would refuse it against the one on record.
+#
+# The default hash records what the published snapshot replaced, so it is only correct under that
+# population's name and in a registry that holds that generation. `supersedes_for_run` is that
+# decision: it withholds the hash for a preview, whose population lives and dies with its
+# workspace and has nothing to extend, for a run under a name of its own, whose first version
+# would be refused for claiming a predecessor, and for a reader's clean clone, which holds no
+# generation at all. The comparison this replaced tested the declaration against a second
+# hardcoded hash instead of against the registry, so a custom name kept a predecessor that name
+# never had.
 
 # %%
-execution, population = run_model_population(study, resolved, population_name=POPULATION_NAME)
+DEFAULT_POPULATION_NAME = "sp500-options-gbm-validation-v1"
 
-print(f"{len(execution.runs)} configurations fitted")
+population_name = POPULATION_NAME or DEFAULT_POPULATION_NAME
+supersedes = supersedes_for_run(
+    study,
+    population_name=population_name,
+    declared=SUPERSEDES_POPULATION or None,
+    execution_tier=EXECUTION_TIER,
+)
+execution, population = run_model_population(
+    study,
+    resolved,
+    population_name=population_name,
+    supersedes=supersedes,
+)
+
+fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
+reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)
+print(f"{len(execution.runs)} configurations: {fitted} folds fitted, {reused} reused")
 print(f"population {population.name}: {len(population.members)} prediction sets")
 
 # %% [markdown]
@@ -265,8 +326,25 @@ catalog = execution.catalog_rows.select(
 if catalog.filter(~pl.col("complete")).height:
     raise RuntimeError("gbm execution returned a partial prediction set")
 
-full_days = int(catalog.get_column("ic_n_days").max())
-catalog = catalog.with_columns(full_coverage=pl.col("ic_n_days") == full_days)
+# %% [markdown]
+# A configuration scores on every date its folds cover, and a configuration that covers fewer
+# dates than its neighbours is measured over a shorter window, so its IC is not comparable with
+# theirs. Coverage is judged against each label's own maximum rather than a global one: with one
+# label in the sweep the two are the same number, and adding a variant to `setup.yaml` is all it
+# would take for a global maximum to mark a whole grid incomplete for a reason that has nothing
+# to do with the models.
+#
+# The charts below are one panel, which is right only while the sweep is one label, so a second
+# label stops the notebook rather than pooling two horizons into one ranking.
+
+# %% tags=["results"]
+catalog = catalog.with_columns(
+    full_coverage=pl.col("ic_n_days") == pl.col("ic_n_days").max().over("label")
+)
+if catalog.get_column("label").n_unique() > 1:
+    raise NotImplementedError(
+        "this notebook charts one label; facet the figures before adding a sweep variant"
+    )
 
 print(f"{catalog.height} candidate models: {catalog.n_unique('config_name')} configurations")
 print(f"at {catalog.n_unique('checkpoint_value')} checkpoints each")
@@ -302,6 +380,11 @@ def objective_of(name: str) -> str:
     return next((key for key in objectives if name.endswith(key)), "mse")
 
 
+# %% [markdown]
+# One trace per configuration, coloured by the objective its name declares, so the question of
+# whether the loss function is what separates them can be read off the chart rather than argued.
+
+# %%
 fig_curves = go.Figure()
 for config_name in curves.get_column("config_name").unique(maintain_order=True):
     series = curves.filter(pl.col("config_name") == config_name)
@@ -329,10 +412,12 @@ show_plotly_with_alt(
     fig_curves,
     "Line chart of mean validation information coefficient against boosting iteration, one line "
     "per configuration, coloured by loss function: blue for squared error, amber for absolute "
-    "error, copper for Huber. A dashed line marks zero. The colours divide across it: the copper "
-    "Huber lines run above zero for most of the range, the blue squared-error lines below it, "
-    "and the amber absolute-error lines cross back and forth near it. Most lines reach their "
-    "highest point in the first fifth of the range and drift afterwards.",
+    "error, copper for Huber. A dashed line marks zero. The blue squared-error lines run below "
+    "it across the whole range without exception. The copper Huber and amber absolute-error "
+    "lines run above it for most of the range and are interleaved with one another rather than "
+    "separated; two Huber lines and one absolute-error line dip below zero as trees are added. "
+    "Ten of the fifteen reach their highest point at the first or second checkpoint and drift "
+    "afterwards.",
 )
 
 # %% [markdown]
@@ -380,10 +465,11 @@ show_plotly_with_alt(
     fig_obj,
     "Bar chart of mean validation information coefficient for every full-coverage configuration "
     "at its final boosting iteration, sorted descending and coloured by loss function, against a "
-    "dashed zero line. The bars divide by colour rather than by leaf count: every copper Huber "
-    "bar stands above the line at the left of the ranking, every blue squared-error bar hangs "
-    "below it at the right, and the amber absolute-error bars sit between them across the zero "
-    "line. Leaf count varies within each colour group without ordering it.",
+    "dashed zero line. The bars divide by colour rather than by leaf count: every blue "
+    "squared-error bar hangs below the line, and together they take the five rightmost places "
+    "with nothing else among them. The copper Huber and amber absolute-error bars are "
+    "interleaved to the left of that block, mostly above the line, with two copper and one "
+    "amber bar just below it. Leaf count varies within each colour group without ordering it.",
 )
 
 # %% [markdown]
@@ -416,13 +502,15 @@ spread
 # %% [markdown]
 # ## 5. What to notice
 #
-# **The objectives separate, in the predicted order, and almost without overlap.** Every
-# squared-error configuration ends training on the wrong side of zero. Every Huber configuration
-# ends on the right side of it. Absolute error sits between them and straddles zero. The
-# separation is by loss function and not by capacity: the deepest and shallowest settings appear
-# at both ends of the ranking, while the colour of a bar predicts which half of the table it is
-# in. This is the answer to the question `06_linear` could only ask, and it is as clean as this
-# kind of comparison gets.
+# **Squared error separates from the two robust objectives, and that is the whole of the
+# separation.** Every squared-error configuration ends training below zero, and every one of them
+# ends below every Huber and every absolute-error configuration: the five squared-error settings
+# take the bottom five places in the ranking with nothing else among them. Above that block the
+# other two objectives interleave rather than order. The leading Huber and the leading absolute-
+# error configuration tie for first, two Huber settings end just below zero, and four of the five
+# absolute-error settings end above it. So what the grid supports is squared error against the
+# rest, not the three-way ordering the mechanism might lead you to expect. Capacity orders nothing
+# either way: the shallowest setting appears both in the top three and in last place.
 #
 # **The mechanism is the payoff shape, and the linear result is consistent with it.** A short
 # straddle earns at most the premium and can lose many multiples of it, so the label's mass sits
@@ -431,7 +519,8 @@ spread
 # successive tree is fitted to - and getting those few right does nothing for a rank correlation,
 # which only asks whether the positions were ordered correctly. Huber caps how much any one
 # observation can pull, spends its capacity on the body of the distribution where most of the
-# ranking is decided, and comes out positive. The linear model in `06_linear` minimizes squared
+# ranking is decided, and ends above squared error everywhere in this grid. The linear model in
+# `06_linear` minimizes squared
 # error and finished close to where the squared-error configurations here finish, which is what
 # this reading predicts.
 #
@@ -445,11 +534,12 @@ spread
 # **Read the magnitudes with the sample in mind.** The positive numbers are small, they rest on
 # two validation folds covering 2019 and 2020, and the second of those is one event that a
 # short-volatility position exists to be paid for. A single regime can move a two-fold average a
-# long way. What the results support is the ordering of the objectives, which is consistent and
-# has a mechanism behind it; what they do not support is any particular configuration's value.
+# long way. What the results support is squared error's separation from the other two, which is
+# consistent across the grid and has a mechanism behind it; what they do not support is a ranking
+# of Huber against absolute error, or any particular configuration's value.
 #
-# **Most configurations peak early.** Twelve of the fifteen reach their highest IC within the first
-# fifth of the declared iterations and drift afterwards. Combined with the objective finding, the
+# **Most configurations peak early.** Ten of the fifteen reach their highest IC at the first or
+# second checkpoint - inside the first fifth of the declared iterations - and drift afterwards. Combined with the objective finding, the
 # picture is of a model that extracts what is available quickly and then spends the remaining
 # iterations fitting the tail of the training window - which is precisely what squared error
 # rewards it for doing, and part of why that objective ends up furthest below zero.

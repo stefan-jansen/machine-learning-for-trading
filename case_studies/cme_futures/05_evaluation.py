@@ -328,9 +328,24 @@ display(
 # across folds and read once. The assertion is what makes the second half safe: if a
 # column that is supposed to carry no fitted parameter ever started to depend on the
 # fold, this cell would stop rather than quietly average two different quantities.
+#
+# **`hmm_` is the only prefix left here, and `arima_` was moved out deliberately.** The
+# hidden Markov model fits once per fold on that fold's training sessions and then holds
+# its parameters fixed, so its value for a date genuinely depends on which fold is
+# asking, and reading it outside that fold's validation window would read a parameter
+# fitted on later data. ARIMA is not that shape: it re-estimates as its walk proceeds, so
+# a forecast for a session is made by weights fitted only on earlier ones, and since
+# 2026-08-23 it is one walk per product over the whole history rather than one per fold.
+# Every value it emits is out of sample wherever it is read.
+#
+# So it belongs with the invariants, and putting it there is not a formality - it is what
+# subjects the replication to the assertion below. The copies of a feature computed once
+# have to agree, and if they ever stop agreeing this cell is what says so. The artifact now
+# also carries a holdout period, which is the same walk continued past the boundary rather
+# than a sixth copy; it is checked against the others on the sessions they share.
 
 # %%
-FITTED_PREFIXES = ("arima_", "hmm_")
+FITTED_PREFIXES = ("hmm_",)
 # The artifact as written, one row per key and fold. The quality gate below reads this
 # rather than the resolved frame, because every fold's value is a value the training
 # notebooks can read, and the resolved frame has dropped most of them.
@@ -340,12 +355,43 @@ invariant_cols = [c for c in temporal_feature_cols if not c.startswith(FITTED_PR
 fitted_cols = [c for c in temporal_feature_cols if c.startswith(FITTED_PREFIXES)]
 
 folds = sorted(temporal["fold"].unique().to_list())
-_reference = temporal.filter(pl.col("fold") == folds[0]).select([*JOIN_COLS, *invariant_cols])
-for fold_id in folds[1:]:
+# The holdout period is the one the artifact carries that the walk-forward spec does not.
+# It holds the same history as the validation periods plus a forecast tail across the
+# holdout, so it agrees with them everywhere they overlap and has strictly more rows. A
+# plain frame comparison against it therefore fails on the row count alone, which says
+# nothing about whether the copies agree.
+_validation_folds = [f for f in folds if f in {int(s["fold"]) for s in splits}]
+_holdout_folds = [f for f in folds if f not in _validation_folds]
+assert len(_holdout_folds) <= 1, (
+    f"more than one period is outside the walk-forward spec: {_holdout_folds}"
+)
+
+_reference = temporal.filter(pl.col("fold") == _validation_folds[0]).select(
+    [*JOIN_COLS, *invariant_cols]
+)
+for fold_id in _validation_folds[1:]:
     other = temporal.filter(pl.col("fold") == fold_id).select([*JOIN_COLS, *invariant_cols])
     assert _reference.sort(JOIN_COLS).equals(other.sort(JOIN_COLS)), (
-        f"fold {fold_id} disagrees with fold {folds[0]} on {invariant_cols}, "
+        f"fold {fold_id} disagrees with fold {_validation_folds[0]} on {invariant_cols}, "
         "which this notebook reads once because they carry no fitted parameter"
+    )
+
+# The holdout period, checked on the sessions it shares with them rather than exempted.
+for fold_id in _holdout_folds:
+    shared = (
+        temporal.filter((pl.col("fold") == fold_id) & (pl.col(DATE_COL) < HOLDOUT_START))
+        .select([*JOIN_COLS, *invariant_cols])
+        .sort(JOIN_COLS)
+    )
+    assert _reference.filter(pl.col(DATE_COL) < HOLDOUT_START).sort(JOIN_COLS).equals(shared), (
+        f"period {fold_id} carries the holdout vintage and disagrees with period "
+        f"{_validation_folds[0]} on {invariant_cols} before {HOLDOUT_START}, where the two "
+        "are the same walk and must be identical"
+    )
+    _tail = temporal.filter((pl.col("fold") == fold_id) & (pl.col(DATE_COL) >= HOLDOUT_START))
+    print(
+        f"Period {fold_id} is the holdout vintage: it agrees with the walk-forward periods "
+        f"on every session before {HOLDOUT_START} and adds {len(_tail):,} rows after it."
     )
 
 val_windows = {int(s["fold"]): (_as_date(s["val_start"]), _as_date(s["val_end"])) for s in splits}
@@ -417,6 +463,85 @@ print(
 )
 print(f"  {len(financial_cols)} price-derived, {len(temporal_cols)} model-derived")
 print(f"  a session counts once at least {MIN_CROSS_SECTION} products carry both columns")
+
+# %% [markdown]
+# ### What each fold's training window can actually supply
+#
+# A feature can be present in the declared set, present in every model's recorded
+# specification, and still be almost entirely absent from the rows a given fold trains on.
+# Anything with a long warm-up does this by construction: a rolling statistic over a year
+# needs a year before it produces anything, and a feature derived from a model fitted on
+# history cannot exist before that model has enough history to fit.
+#
+# Nothing downstream will complain. The imputer fills a missing value with the training
+# median, the scaler standardises that median to zero, and the fit proceeds with a column
+# that is present, inert, and indistinguishable in the registry from a column carrying real
+# variation. The only case that raises is a feature missing from *every* training row, which
+# is a narrow escape rather than a safety net: it fires at zero coverage and says nothing at
+# one per cent.
+#
+# So the rate is reported here, before any model is fitted, for both halves of the declared
+# set. The price-derived columns are read from the artifact as written; the model-derived
+# ones from `temporal_artifact`, which still carries every fold's value, rather than from
+# the out-of-sample frame assembled above - that one has already dropped each fitted column
+# outside its own validation window, which is exactly the training rows this question is
+# about.
+#
+# **This table does not repair anything, and it is not meant to.** Whether a fold should be
+# fitted at all when one of its declared features barely exists there is a question about
+# what this case study is teaching, and it is answered by a reader looking at the numbers,
+# not by a notebook quietly imputing its way past them.
+
+# %%
+train_windows = {
+    int(split["fold"]): (_as_date(split["train_start"]), _as_date(split["train_end"]))
+    for split in splits
+}
+
+
+def _coverage_rows(
+    frame: pl.DataFrame, columns: list[str], source: str, fold_id: int
+) -> list[dict]:
+    height = frame.height
+    return [
+        {
+            "fold": fold_id,
+            "source": source,
+            "feature": column,
+            "train_rows": height,
+            "non_null_pct": (frame.get_column(column).drop_nulls().len() / height * 100)
+            if height
+            else 0.0,
+        }
+        for column in columns
+    ]
+
+
+fold_coverage_rows: list[dict] = []
+for fold_id, (start, end) in sorted(train_windows.items()):
+    in_window = pl.col(DATE_COL).is_between(start, end)
+    fold_coverage_rows += _coverage_rows(
+        features.filter(in_window), financial_cols, "price-derived", fold_id
+    )
+    fold_coverage_rows += _coverage_rows(
+        temporal_artifact.filter(in_window & (pl.col("fold") == fold_id)),
+        temporal_feature_cols,
+        "model-derived",
+        fold_id,
+    )
+fold_coverage = pl.DataFrame(fold_coverage_rows)
+
+SPARSE_PCT = 5.0
+sparse = fold_coverage.filter(pl.col("non_null_pct") < SPARSE_PCT).sort("fold", "feature")
+print(f"{fold_coverage.height} (fold, feature) pairs across {len(train_windows)} folds")
+print(f"{sparse.height} are below {SPARSE_PCT:.0f}% non-null in their fold's training window")
+
+# %% tags=["results"]
+# Every feature whose fold sees almost none of it, and the per-fold rate for the columns
+# that vary most across folds. A feature absent here is imputed, not refused.
+fold_coverage.filter(
+    pl.col("feature").is_in(sparse.get_column("feature").unique().to_list())
+).pivot(on="fold", index=["source", "feature"], values="non_null_pct").sort("source", "feature")
 
 # %% [markdown]
 # ## 0. Data quality gate

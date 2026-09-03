@@ -130,9 +130,14 @@ def fold_set_bytes(mds: Any, splits: Sequence[dict[str, Any]]) -> int:
     Each fold's training rows are a subset of the dataset, so the full height per fold is an
     over-estimate - which is the safe direction for a memory decision, and cheap enough to make
     before the first fold exists.
+
+    Sized at the declared feature precision. Assuming eight bytes everywhere doubled the estimate
+    for a case study declaring `features.storage_dtype: float32`, which pushed it past the budget
+    and turned off the memo the fold set was prepared once to enable.
     """
     height = getattr(getattr(mds, "dataset", None), "height", 0) or 0
-    return int(height) * len(mds.feature_names) * 8 * max(1, len(splits))
+    bytes_per_value = 4 if str(getattr(mds, "feature_dtype", "float64")) == "float32" else 8
+    return int(height) * len(mds.feature_names) * bytes_per_value * max(1, len(splits))
 
 
 def holds_in_memory(mds: Any, splits: Sequence[dict[str, Any]]) -> bool:

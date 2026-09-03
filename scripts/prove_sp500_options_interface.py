@@ -9,7 +9,13 @@ from pathlib import Path
 
 import polars as pl
 
-from case_studies.research import OfficialPopulation, PredictionResult, ResolvedSpec, Study
+from case_studies.research import (
+    OfficialPopulation,
+    PredictionResult,
+    ResolvedSpec,
+    Result,
+    Study,
+)
 from case_studies.sp500_options._htm_backtest import (
     _load_option_lifecycle,
     option_data_paths,
@@ -20,7 +26,9 @@ from case_studies.sp500_options.research_workflow import (
     open_study,
     publish_short_straddle_decisions,
     resolve_short_straddle_decisions,
+    run_official_backtest_requests,
     selected_prediction,
+    strategy_request_frame,
 )
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.backtest_loaders import load_backtest_prices_for
@@ -48,18 +56,27 @@ def _seed_real_preview_prediction(
 ) -> PredictionResult:
     if max_symbols < 2 or max_sessions < 5:
         raise ValueError("the real preview fixture requires at least two symbols and five sessions")
-    source_path = (
-        study.release_root
-        / "case_studies"
-        / "sp500_options"
-        / "run_log"
-        / "predictions"
-        / source_prediction_hash
-        / "predictions.parquet"
-    )
-    if not source_path.is_file():
-        raise FileNotFoundError(f"released source prediction is missing: {source_path}")
-    source = pl.read_parquet(source_path)
+    # Resolved through the registry, not read off a constructed path. The fixture republishes
+    # this frame as a complete `ret_to_expiry` validation prediction under a new identity, so a
+    # stale parquet, a partial one, or one scored on another label would enter the registry
+    # saying it is something it is not.
+    source_result = Result.open(study, source_prediction_hash)
+    if not isinstance(source_result, PredictionResult):
+        raise ValueError(f"{source_prediction_hash} is not a prediction result")
+    source_row = study.predictions.one(prediction_hash=source_prediction_hash)
+    expected = {
+        "label": "ret_to_expiry",
+        "split": "validation",
+        "execution_tier": "canonical",
+        "complete": True,
+    }
+    actual = {field: source_row[field] for field in expected}
+    if actual != expected:
+        raise ValueError(
+            f"released source prediction {source_prediction_hash} is {actual}, "
+            f"and the fixture requires {expected}"
+        )
+    source = source_result.load()
     required = {"symbol", "timestamp", "fold", "prediction", "actual"}
     missing = required - set(source.columns)
     if missing:
@@ -171,6 +188,7 @@ def main() -> None:
         prediction,
         prices=prices,
         signal=signal,
+        label="ret_to_expiry",
     )
     local_decision_digest = value_digest(prepared_decisions)
     clean_replay = _clean_replay_digests(
@@ -224,11 +242,27 @@ def main() -> None:
     )
     if not typed["daily_returns"].equals(direct["daily_returns"]):
         raise RuntimeError("typed and direct option returns differ")
-    strategy = study.strategy(prediction=prediction, signal=signal, decision=decision)
-    result = strategy.run(prices=prices, option_lifecycle=lifecycle)
-    replay = strategy.run(prices=prices, option_lifecycle=lifecycle)
+    requests = strategy_request_frame(
+        [
+            {
+                "request_name": "reduced-liquid-option-proof",
+                "prediction_hash": prediction.hash,
+                "label": "ret_to_expiry",
+                "signal": signal,
+                "allocation": None,
+                "risk": None,
+                "costs": None,
+            }
+        ]
+    )
+    execution = run_official_backtest_requests(study, requests, population_name=None)
+    replay_execution = run_official_backtest_requests(study, requests, population_name=None)
+    result = execution.results[0]
+    replay = replay_execution.results[0]
     if replay.hash != result.hash:
         raise RuntimeError("option backtest replay changed identity")
+    if execution.catalog_rows.item(0, "decision_hash") != decision.hash:
+        raise RuntimeError("reader-facing option execution changed the decision identity")
     try:
         OfficialPopulation.create(
             study,

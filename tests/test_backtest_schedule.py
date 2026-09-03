@@ -296,22 +296,37 @@ class TestGetRebalanceStep:
 
         assert get_rebalance_step("us_firm_characteristics", "fwd_ret_1m") == 1
 
-    def test_nasdaq100_fwd_ret_60m_is_4(self):
-        """nasdaq100 fwd_ret_60m on 15-minute schedule -> ceil(60/15) = 4."""
-        from case_studies.utils.backtest_loaders import get_rebalance_step
+    def test_nasdaq100_trades_each_label_on_its_own_horizon(self):
+        """Each label declares a cadence equal to its horizon, so one slot is one holding.
 
-        assert get_rebalance_step("nasdaq100_microstructure", "fwd_ret_60m") == 4
+        These steps read as `ceil(horizon / cadence)` and are all 1 because the cadence now
+        varies per label rather than being a single fifteen-minute default. What changed is
+        not the arithmetic but what a slot is: `resolve_rebalance_timestamps` builds the
+        schedule from the declared cadence instead of returning the panel unchanged, and
+        this panel carries every minute (ml4t/agent-workspace#187).
+        """
+        from case_studies.utils.backtest_loaders import get_backtest_config, get_rebalance_step
 
-    def test_nasdaq100_fwd_ret_5m_is_1(self):
-        """Regression: fwd_ret_5m on 15-minute schedule must stay at 1.
+        config = get_backtest_config("nasdaq100_microstructure")
+        expected = {
+            "fwd_ret_5m": "5_minute",
+            "fwd_ret_15m": "15_minute",
+            "fwd_dir_15m": "15_minute",
+            "fwd_ret_60m": "60_minute",
+        }
+        for label, cadence in expected.items():
+            assert config.cadence_for(label) == cadence, label
+            assert get_rebalance_step("nasdaq100_microstructure", label) == 1, label
 
-        Pre-fix, the regex matched `(5, m)` and the old `n <= 12` branch
-        mis-read it as 5 MONTHS, computing step ~10,000 and collapsing
-        backtests to a handful of points.
+    def test_nasdaq100_fwd_ret_5m_is_not_read_as_five_months(self):
+        """Regression: `(5, m)` once parsed as 5 MONTHS, giving a step near 10,000.
+
+        The value moved from 1 to 5 with the minute grid; what this pins is the order of
+        magnitude, which is what the months misreading destroyed.
         """
         from case_studies.utils.backtest_loaders import get_rebalance_step
 
-        assert get_rebalance_step("nasdaq100_microstructure", "fwd_ret_5m") == 1
+        assert get_rebalance_step("nasdaq100_microstructure", "fwd_ret_5m") < 60
 
     def test_crypto_fwd_ret_24h_is_3(self):
         """crypto 24h label on 8h schedule -> ceil(24/8) = 3."""

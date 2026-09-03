@@ -22,6 +22,12 @@ from utils.paths import get_case_study_dir
 
 logger = logging.getLogger(__name__)
 
+# The schema `training_input_identity` returns. A notebook that records the spec's
+# fields asserts against this rather than against a literal of its own: the literal
+# "v1" outlived the move to v2 and took etfs/11e down at its fourth cell, which
+# abandoned the eight etfs notebooks queued behind it.
+INPUT_IDENTITY_VERSION = "v2"
+
 
 @dataclass(slots=True)
 class LatentFactorCaseStudyContext:
@@ -341,7 +347,6 @@ def training_input_identity(
     eval_label: str | None = None,
 ) -> dict[str, Any]:
     """Return portable content identity for every materialized modeling input."""
-    case_dir = get_case_study_dir(case_study_id)
     inputs = {
         "financial": resolve_storage_path(
             case_study_id,
@@ -353,7 +358,6 @@ def training_input_identity(
             load_label_spec(case_study_id, label),
             f"labels/{label}.parquet",
         ),
-        "setup": case_dir / "config" / "setup.yaml",
     }
     temporal_path = resolve_storage_path(
         case_study_id,
@@ -380,7 +384,11 @@ def training_input_identity(
     aggregate = sha256(
         "\n".join(f"{item['role']}={item['sha256']}" for item in files).encode()
     ).hexdigest()
-    return {"version": "v1", "files": files, "input_digest": f"sha256:{aggregate}"}
+    return {
+        "version": INPUT_IDENTITY_VERSION,
+        "files": files,
+        "input_digest": f"sha256:{aggregate}",
+    }
 
 
 def _sha256_file(path: Path) -> str:

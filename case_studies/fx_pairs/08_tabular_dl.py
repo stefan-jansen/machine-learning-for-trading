@@ -16,46 +16,37 @@
 # %% [markdown]
 # # Tabular Deep Learning - FX Pairs
 #
-# Can a rank-1 adapter MLP ensemble improve one-day FX rankings after linear
-# and boosted-tree models plateau at low validation IC? This notebook compares
-# three TabM capacities on the same 61-feature, 20-pair learning task.
+# TabM applies a small neural network to each decision row without turning the history into a
+# sequence. This notebook submits the published capacity choices to the shared TabM runner. The
+# runner fits preprocessing inside each training fold, saves every declared weight checkpoint, and
+# publishes a separate complete validation prediction set for every checkpoint.
 #
-# **Learning Objectives**:
-# - Evaluate TabM checkpoints with pooled decision-time rank IC
-# - Require complete walk-forward coverage before selecting a checkpoint
-# - Compare TabM with the signed linear and GBM baselines
-# - Interpret a small IC difference using daily HAC uncertainty
+# **Learning objectives**
 #
-# **Book Reference**: Chapter 12, Section 12.3 (Deep Learning Alternatives)
+# - Express neural-network capacity and checkpoint schedules as visible requests.
+# - Verify that every fold and epoch checkpoint has reloadable fitted state.
+# - Continue from complete prediction rows without selecting a checkpoint by rank correlation.
 #
-# **Prerequisites**: [`03_financial_features`](03_financial_features.ipynb),
-# [`04_model_based_features`](04_model_based_features.ipynb), and
-# [`02_labels`](02_labels.ipynb)
+# **Book reference**: Chapter 12, Section 12.3
+#
+# **Prerequisites**: `02_labels`, `03_financial_features`, and `04_model_based_features`.
 
 # %%
-"""TabM capacity and checkpoint comparison for one-day FX rankings."""
+"""Fit and catalog the published TabM FX configurations."""
 
-import hashlib
-import json
-
-import numpy as np
-import pandas as pd
-import plotly.graph_objects as go
 import polars as pl
-import yaml
+import torch
 
-import utils.style as style
-from case_studies.utils.analytics import load_best_ic_per_family
-from case_studies.utils.registry import compute_prediction_fold_metrics
-from case_studies.utils.tabular_dl import run_tabm_cv
-from utils.cv_splits import generate_cv_splits
-from utils.modeling import (
-    ConfigError,
-    _replace_temporal_columns,
-    load_configs,
-    load_modeling_dataset,
+from case_studies.research import (
+    ExecutionTier,
+    declared_labels,
+    narrows_declared_catalog,
+    open_study,
+    plan_models,
+    population_supersedes,
+    sweep_labels,
 )
-from utils.paths import get_case_study_dir
+from utils.modeling import load_configs
 from utils.reproducibility import set_global_seeds
 
 # %% tags=["parameters"]
@@ -65,327 +56,248 @@ MAX_SYMBOLS = 0
 MAX_FOLDS = 0
 FORCE_RETRAIN = False
 PREDICTION_SPLIT = "validation"
-N_EPOCHS = 100  # Frozen registry cache key and reader-default fresh-run budget.
-BATCH_SIZE = 4096
-DEVICE = "cpu"  # Deterministic reader-default path for a fresh run.
+N_EPOCHS = 0
+BATCH_SIZE = 0
+DEVICE = ""
 SEED = 42
+POPULATION_NAME = ""
+SUPERSEDES_POPULATION: str = "7896f6bcaf7e"
+# The tier is a parameter, not something inferred from whether a reduction happens to be set.
+# Inferring it meant a run could be reduced and still open the case study's own artifacts in
+# place, which is the production path; a reader under test then wrote where the published run
+# writes. WORKSPACE is the other half: a preview has nowhere else to put its results.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str | None = None
+
+# %% [markdown]
+# ## Select the task and execution tier
+#
+# Canonical execution uses every configured fold, symbol, epoch, and batch setting. A preview
+# declares its reductions, takes an isolated workspace, and creates a preview identity there. A
+# preview proves the path but cannot join the official model population.
+#
+# The reductions are read before the study is opened, because which study to open is decided by
+# the tier and the two have to agree: a preview that reduces nothing is a canonical run wearing
+# the wrong tier, and a canonical run carrying reductions would publish a narrowed population
+# under the canonical name.
 
 # %%
 set_global_seeds(SEED)
-CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
-setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
-PRIMARY_LABEL = PRIMARY_LABEL or setup["labels"]["primary"]
+REDUCTION_PARAMETERS = {
+    "folds": list(range(MAX_FOLDS)) if MAX_FOLDS else None,
+    "max_symbols": MAX_SYMBOLS or None,
+    "n_epochs": N_EPOCHS or None,
+}
+reductions = {key: value for key, value in REDUCTION_PARAMETERS.items() if value is not None}
+tier = ExecutionTier(EXECUTION_TIER)
+if tier is ExecutionTier.PREVIEW and not reductions:
+    raise ValueError("preview execution must declare at least one reduction")
+if tier is ExecutionTier.CANONICAL and reductions:
+    raise ValueError(f"canonical execution cannot carry reductions: {sorted(reductions)}")
+study = open_study(CASE_STUDY_ID, execution_tier=tier, workspace=WORKSPACE or None)
 
-if setup["labels"]["primary"] != PRIMARY_LABEL:
-    raise ConfigError(
-        f"{PRIMARY_LABEL!r} has no matching fold-aware temporal artifact. "
-        f"Run this notebook with the primary label {setup['labels']['primary']!r}."
-    )
+# Which labels this notebook fits is a question for the training menus, not for the sweep list:
+# `setup.yaml` says which labels the case study carries, a menu says what to fit for one of them,
+# and a label in the sweep whose menu declares no `tabular_dl:` section owes nothing here. The two
+# agree in this case study today, so restating the sweep list produced the right answer by
+# coincidence and would have kept producing it silently after a menu changed. The order stays
+# `setup.yaml`'s rather than `declared_labels`' menu-file order because the population is named
+# after its labels and hashed over its members as an ordered list, so re-ordering would give the
+# published population a new identity and demand a supersedes for a run that fits the same models.
+fits_tabm = set(declared_labels(study, "tabular_dl"))
+labels = (
+    [PRIMARY_LABEL]
+    if PRIMARY_LABEL
+    else [label for label in sweep_labels(study) if label in fits_tabm]
+)
 
-print(f"Case study: {CASE_STUDY_ID} | Label: {PRIMARY_LABEL} | Device: {DEVICE}")
+if PREDICTION_SPLIT != "validation":
+    raise ValueError("model selection uses validation predictions; holdout runs start from a lock")
+if FORCE_RETRAIN:
+    raise ValueError("valid checkpoints are reloaded by identity; change the request to refit")
+
+
+print(f"Labels: {', '.join(labels)}")
+print(f"Execution tier: {tier.value}")
+# An empty DEVICE resolves to what the machine has. The runners refuse "cuda" on a host without
+# it rather than falling back silently - which is the right contract for a run whose results get
+# registered - so a hardcoded "cuda" default made the notebook unrunnable for any reader without
+# an NVIDIA card, and unrunnable on a CPU CI runner. Resolving here keeps the refusal for anyone
+# who asks for "cuda" explicitly, and prints what was chosen so a run never leaves it implicit.
+device = DEVICE or ("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Device: {device}")
 
 # %% [markdown]
-# ## 1. Load the Signed Learning Task
+# ## Build the published requests
 #
-# Fold boundaries come from `cv_config.json`, the same contract used to create
-# the fold-aware temporal features. The sealed holdout is not loaded or scored.
+# The YAML menu supplies the architecture settings and production checkpoint schedules. The
+# parameter cell can reduce epochs or change batch size for a preview without changing the menu.
 
 # %%
-mds = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, max_symbols=MAX_SYMBOLS)
-dataset = mds.dataset
-feature_names = mds.feature_names
-label_col = mds.label_col
-date_col = mds.date_col
-entity_col = mds.entity_cols[0] if mds.entity_cols else "symbol"
-
-cv_config = json.loads((CASE_DIR / "config" / "cv_config.json").read_text())
-splits = generate_cv_splits(
-    dataset,
-    cv_config=cv_config,
-    label_buffer=mds.label_buffer,
-    date_col=date_col,
-)
-splits = [
-    {
-        **split,
-        **{
-            key: pd.Timestamp(split[key])
-            for key in ("train_start", "train_end", "val_start", "val_end")
-        },
-    }
-    for split in splits[: MAX_FOLDS or None]
+overrides = {
+    "device": device,
+    **({"batch_size": BATCH_SIZE} if BATCH_SIZE else {}),
+}
+menu = [
+    (label, config)
+    for label in labels
+    for config in load_configs(CASE_STUDY_ID, label, family="tabular_dl")
 ]
 
-print(f"Dataset: {len(dataset):,} rows x {len(feature_names)} features")
-print(f"Task: {mds.task_type} | Entities: {dataset[entity_col].n_unique()} | Folds: {len(splits)}")
+# `PRIMARY_LABEL` narrows what is fitted, and a narrowed run declares a different set of members
+# than the canonical population does. A population is immutable once written, so such a run must
+# publish under its own name. The comparison is over `(label, config_name)` pairs rather than a
+# row count, and it says so here rather than several cells later in a message about hashes.
+if (
+    narrows_declared_catalog(
+        study,
+        "tabular_dl",
+        pl.DataFrame(
+            {
+                "label": [label for label, _ in menu],
+                "config_name": [config["config_name"] for _, config in menu],
+            }
+        ),
+    )
+    and not POPULATION_NAME
+):
+    raise ValueError(
+        f"this run declares {len(menu)} label-configuration pairs, which is not the complete "
+        "declared catalog, so it cannot publish the canonical population; pass POPULATION_NAME "
+        "to give it its own"
+    )
+requests = [
+    study.model(
+        family="tabular_dl",
+        label=label,
+        config_name=config["config_name"],
+        execution_tier=tier,
+        preview_reductions=reductions,
+        overrides=overrides,
+    )
+    for label, config in menu
+]
+
+pl.DataFrame(
+    {
+        "config_name": [request.config_name for request in requests],
+        "label": [request.label for request in requests],
+        "device": [device] * len(requests),
+        "execution_tier": [request.execution_tier.value for request in requests],
+    }
+)
 
 # %% [markdown]
-# ## 2. Audit Fold Alignment
+# ## Declare every epoch checkpoint before training
 #
-# Each fold ID must select its matching temporal artifact. The audit checks all
-# 61 inputs and rejects an all-missing temporal feature before model fitting.
+# The declared epoch schedule, not the run that follows, decides how many downstream configurations
+# this notebook owes. Planning resolves each one without training, so a failed member is visible as
+# a gap in the population rather than a shorter catalog.
 
-# %%
-dataset_pd = dataset.to_pandas()
-dates = pd.to_datetime(dataset_pd[date_col])
+# %% tags=["results"]
+plan = plan_models(study, requests=requests)
+if len(plan.expected_training_hashes) != len(requests):
+    raise RuntimeError("each TabM configuration must plan exactly one training identity")
 
-for split in splits:
-    train_mask = (dates >= split["train_start"]) & (dates <= split["train_end"])
-    val_mask = (dates >= split["val_start"]) & (dates <= split["val_end"])
-    train_df = _replace_temporal_columns(
-        dataset_pd,
-        train_mask,
-        mds.temporal_by_fold,
-        mds.temporal_keys,
-        mds.temporal_feature_names,
-        split["fold"],
-    )
-    val_df = _replace_temporal_columns(
-        dataset_pd,
-        val_mask,
-        mds.temporal_by_fold,
-        mds.temporal_keys,
-        mds.temporal_feature_names,
-        split["fold"],
-    )
-    missing_temporal = [
-        name
-        for name in mds.temporal_feature_names
-        if train_df[name].isna().all() or val_df[name].isna().all()
-    ]
-    if len(feature_names) != train_df[feature_names].shape[1]:
-        raise ConfigError(f"Fold {split['fold']} did not retain all {len(feature_names)} features")
-    if missing_temporal:
-        raise ConfigError(
-            f"Fold {split['fold']} has no observations for temporal features: {missing_temporal}"
-        )
-    print(f"  Fold {split['fold']}: train={len(train_df):,}  val={len(val_df):,}")
-
-# %% [markdown]
-# ## 3. Reconstruct or Train the TabM Grid
-#
-# TabM is a shared MLP backbone with rank-1 member adapters and separate output
-# heads. It is not an attention model. On the complete frozen registry, the
-# runner reads prediction files without writing and separates every physical
-# epoch before scoring. The legacy training key says 100 epochs, while each
-# physical file contains checkpoints through epoch 200; file contents therefore
-# determine the frozen curve. A fresh output root trains the 100-epoch grid on CPU.
-
-# %%
-tabdl_configs = load_configs(CASE_STUDY_ID, PRIMARY_LABEL, "tabular_dl")
-for config in tabdl_configs:
-    if N_EPOCHS > 0:
-        config["n_epochs"] = N_EPOCHS
-    config["batch_size"] = BATCH_SIZE
-
-effective_epochs = max(config.get("n_epochs", 200) for config in tabdl_configs)
-print(f"Grid: {len(tabdl_configs)} configs x up to {effective_epochs} epochs x {len(splits)} folds")
-for config in tabdl_configs:
-    params = config["params"]
-    print(
-        f"  {config['config_name']:8s} hidden={params['hidden_dim']:3d}  "
-        f"members={params['n_members']:2d}  dropout={params['dropout']:.1f}"
+configured = {(label, config["config_name"]) for label, config in menu}
+planned = {(member.label, member.config_name) for member in plan.members}
+if planned != configured:
+    raise RuntimeError(
+        "the plan does not match the configured TabM menu; "
+        f"missing {sorted(configured - planned)}, unexpected {sorted(planned - configured)}"
     )
 
-
-# %%
-def _file_md5(path):
-    """Return a compact immutability check for the frozen registry."""
-    if not path.exists():
-        return None
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "md5").hexdigest()
-
-
-registry_path = CASE_DIR / "run_log" / "registry.db"
-registry_before = _file_md5(registry_path)
-result = run_tabm_cv(
-    dataset_pd,
-    splits,
-    feature_names=feature_names,
-    label_col=label_col,
-    date_col=date_col,
-    entity_col=entity_col,
-    configs=tabdl_configs,
-    n_features=len(feature_names),
-    device=DEVICE,
-    save_dir=CASE_DIR / "run_log" / "training" / "tabular_dl",
-    register=True,
-    force_retrain=FORCE_RETRAIN,
-    prediction_split=PREDICTION_SPLIT,
-    case_study=CASE_STUDY_ID,
-    notebook="08_tabular_dl",
-    temporal_by_fold=mds.temporal_by_fold,
-    temporal_keys=mds.temporal_keys,
-    temporal_feature_names=mds.temporal_feature_names,
+pl.DataFrame(
+    {
+        "label": [member.label for member in plan.members],
+        "config_name": [member.config_name for member in plan.members],
+        "checkpoint_kind": [member.checkpoint_kind for member in plan.members],
+        "checkpoint_value": [member.checkpoint_value for member in plan.members],
+        "prediction_hash": [member.prediction_hash for member in plan.members],
+    }
 )
-registry_after = _file_md5(registry_path)
-frozen_mode = result["training_log"].is_empty() and registry_before is not None
-if frozen_mode and registry_after != registry_before:
-    raise RuntimeError("The frozen TabM reader path modified registry.db")
-
-print(f"Mode: {'frozen physical reconstruction' if frozen_mode else 'current CPU training'}")
 
 # %% [markdown]
-# Physical checkpoint files are ranked by pooled daily IC. A candidate must have
-# finite predictions, positive IC coverage, every expected fold, and the maximum
-# validation-date count. Fresh and frozen branches use this same selector and
-# return the same coverage fields to the reader-facing summary.
-
-# %%
-grid_results = result["grid_results"]
-curves = result["all_learning_curves"]
-best_name = result["best_config_name"]
-best_epoch = result["best_epoch"]
-predictions = result["predictions"]
-
-headline, _ = compute_prediction_fold_metrics(
-    predictions,
-    date_col=date_col,
-    entity_col=entity_col,
-    task_type=mds.task_type,
-    class_values=mds.class_values,
-    label=label_col,
-)
-best_ic = float(headline["ic_mean_daily"])
-
-grid_table = pl.DataFrame(grid_results).select(
-    pl.col("config_name").alias("config"),
-    pl.col("best_epoch").alias("epoch"),
-    pl.col("best_ic").alias("pooled_daily_ic"),
-    "ic_n_days",
-    "n_invalid",
-    "selectable",
-)
-grid_table
-
-# %% [markdown]
-# ## 4. Architecture Comparison
+# ## Record the official population, then fit or reload every capacity choice
 #
-# The small model leads this frozen vintage at epoch 25. The gap over the signed
-# linear and GBM baselines is descriptive, not evidence of a dependable edge.
+# Compatible TabM requests share base-fold materialization. Candidate-specific scaling, random
+# state, weights, and prediction identities remain separate. Any failed member stops the cell.
+#
+# `SUPERSEDES_POPULATION` names the population hash this run replaces. A population is the set of
+# prediction identities it publishes, so anything that moves a training identity produces a
+# different population under the same name, and the registry refuses to write it without being
+# told which snapshot it supersedes. That lineage is the only record of which generation is which,
+# and what moved the identities here was a change to the family's own source file rather than to
+# anything the notebook declares.
+#
+# `population_supersedes` decides whether the declared hash may be offered. It is offered when the
+# name already carries the generation this declaration produced, so a re-run resolves to the
+# population it published, and when the declaration names the generation in force, so a refit
+# publishes the next one. It is withheld everywhere else - on a reader's clean clone, where
+# `run_log/` is gitignored and the registry has no generation at all; under a caller's own
+# `POPULATION_NAME`; and in a preview, whose isolated registry holds nothing under this name.
 
-# %%
-baseline_rows = load_best_ic_per_family(["linear", "gbm"], case_studies=[CASE_STUDY_ID]).select(
-    "family", "ic_mean"
-)
-baselines = dict(baseline_rows.iter_rows())
-
-ranked_grid = sorted(grid_results, key=lambda row: row["best_ic"])
-grid_figure = go.Figure(
-    go.Bar(
-        x=[row["best_ic"] for row in ranked_grid],
-        y=[row["config_name"] for row in ranked_grid],
-        orientation="h",
-        marker_color=[
-            style.COLORS["amber"] if row["config_name"] == best_name else style.COLORS["blue"]
-            for row in ranked_grid
-        ],
-        text=[f"{row['best_ic']:+.4f}" for row in ranked_grid],
-        textposition="outside",
-        cliponaxis=False,
+# %% tags=["results"]
+population_name = POPULATION_NAME or f"{CASE_STUDY_ID}:{'+'.join(labels)}:tabular_dl"
+population = (
+    plan.create_population(
+        name=population_name,
+        supersedes=population_supersedes(
+            study, name=population_name, declared=SUPERSEDES_POPULATION
+        ),
     )
+    if tier is ExecutionTier.CANONICAL
+    else None
 )
-for family, color in (("linear", "copper"), ("gbm", "neutral")):
-    if family in baselines:
-        grid_figure.add_vline(
-            x=baselines[family],
-            line=dict(color=style.COLORS[color], dash="dash"),
-            annotation_text=f"{family} {baselines[family]:+.4f}",
-            annotation_position="top",
-        )
-grid_figure.update_layout(
-    template="ml4t",
-    title=f"{best_name} reaches {best_ic:+.4f}, but its HAC interval includes zero",
-    xaxis_title="Mean decision-time rank IC (validation)",
-    yaxis_title="TabM configuration",
-    height=380,
-    margin=dict(l=85, r=90, t=85),
-    showlegend=False,
+
+execution = plan.run()
+if len(execution.runs) != len(requests):
+    raise RuntimeError("the TabM runner did not return every requested configuration")
+
+catalog = execution.catalog_rows.sort("label", "config_name", "checkpoint_value")
+if set(catalog.get_column("prediction_hash")) != set(plan.expected_prediction_hashes):
+    raise RuntimeError("the published catalog differs from the population planned before fitting")
+if catalog.filter(~pl.col("complete")).height:
+    raise RuntimeError("partial TabM checkpoints cannot pass to backtesting")
+if catalog.select("label", "config_name", "checkpoint_value").n_unique() != catalog.height:
+    raise RuntimeError("each configuration and epoch checkpoint must identify one prediction set")
+if catalog.get_column("checkpoint_value").null_count():
+    raise RuntimeError("every TabM prediction must name its epoch checkpoint")
+
+catalog.select(
+    "label",
+    "config_name",
+    "checkpoint_kind",
+    "checkpoint_value",
+    "complete",
+    "ic_mean",
+    "ic_t",
+    "training_hash",
+    "prediction_hash",
 )
-grid_figure.show()
 
 # %% [markdown]
-# ## 5. Checkpoint Stability
+# ## Reload the checkpoint population
 #
-# Extra training does not improve the small model: its peak occurs at the first
-# saved checkpoint, while the larger variants follow different, unstable paths.
+# Repeating the same request validates the saved checkpoint manifests and returns the same catalog
+# identities. No empty cached summary or single IC-chosen checkpoint is substituted.
 
-# %%
-curve_figure = go.Figure()
-curve_colors = {
-    "tabm_s": style.COLORS["amber"],
-    "tabm_m": style.COLORS["blue"],
-    "tabm_l": style.COLORS["copper"],
-}
-for config_name in curves["config"].unique(maintain_order=True):
-    config_curve = curves.filter(pl.col("config") == config_name).sort("epoch")
-    curve_figure.add_trace(
-        go.Scatter(
-            x=config_curve["epoch"].to_list(),
-            y=config_curve["ic_mean"].to_list(),
-            mode="lines+markers",
-            name=config_name,
-            line=dict(
-                color=curve_colors.get(config_name, style.COLORS["neutral"]),
-                width=3 if config_name == best_name else 2,
-            ),
-        )
-    )
-curve_figure.add_hline(y=0.0, line=dict(color=style.COLORS["neutral"], dash="dash"))
-curve_figure.update_layout(
-    template="ml4t",
-    title="TabM small peaks at epoch 25, then loses ranking strength",
-    xaxis_title="Training epoch",
-    yaxis_title="Mean decision-time rank IC (validation)",
-    height=430,
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-)
-curve_figure.show()
+# %% tags=["results"]
+replayed = plan.run()
+if set(replayed.catalog_rows.get_column("prediction_hash")) != set(
+    catalog.get_column("prediction_hash")
+):
+    raise RuntimeError("TabM checkpoint reload changed the prediction population")
+
+if population is not None:
+    population.require_complete()
+    print(f"Official prediction population: {population.hash}")
+else:
+    print("Preview checkpoints remain outside official comparison and holdout selection.")
 
 # %% [markdown]
-# ## 6. Uncertainty and Fold Dispersion
+# ## Key takeaways
 #
-# Daily HAC inference treats dates, not pair-level rows, as observations. The
-# selected checkpoint spans 2,064 validation dates, yet its 95% interval crosses
-# zero and its fold signs vary. The comparison therefore remains weak.
-
-# %%
-fold_metrics = result["fold_metrics"]
-print(f"Selected: {best_name} at epoch {best_epoch}")
-print(f"Pooled daily IC: {best_ic:+.4f} across {int(headline['ic_n_days']):,} dates")
-print(
-    f"HAC 95% CI: [{headline['ic_ci_lo']:+.4f}, {headline['ic_ci_hi']:+.4f}]  "
-    f"t={headline['ic_t_hac']:.2f}  p={headline['ic_p_hac']:.3f}  "
-    f"lag={int(headline['ic_hac_lag'])}"
-)
-fold_metrics
-
-# %% [markdown]
-# ## 7. Result Disposition
-#
-# The default execution reconstructed 24 physical config-epoch checkpoints from
-# three legacy prediction files. It did not trust the mixed-file registry metric
-# and did not modify the frozen registry.
-
-# %%
-print(f"Selected predictions: {predictions.height:,} rows")
-print(f"All physical checkpoint predictions: {result['all_predictions'].height:,} rows")
-print(f"Checkpoint summaries: {curves.height:,} rows")
-print(f"Registry unchanged: {registry_before == registry_after if frozen_mode else 'fresh run'}")
-
-# %% [markdown]
-# ## 8. Key Takeaways
-#
-# 1. **The physical winner is TabM small at epoch 25.** Its pooled daily IC is
-#    +0.0096, compared with +0.0052 for Ridge and +0.0025 for the GBM winner.
-# 2. **The difference is not statistically resolved.** The daily HAC interval is
-#    [-0.0035, +0.0227] with p=0.149, and two of eight folds are negative.
-# 3. **More capacity and training do not form a stable pattern.** Medium peaks at
-#    +0.0025 and large at +0.0066; the small model weakens after epoch 25.
-# 4. **The book's rounded +0.007 used a mixed-epoch file metric.** Separating the
-#    same frozen predictions changes it to +0.010 without changing the conclusion.
-#    The corrected current-vintage CPU rerun belongs in the v3.1 measurement backlog.
-#
-# **Next**: [`09_dl_tcn`](09_dl_tcn.ipynb) tests whether temporal convolutions add
-# stable ranking information beyond the flat feature matrix.
+# - Train-only preprocessing and checkpoint persistence belong to the shared TabM computation.
+# - Every declared epoch remains available to the backtest stage.
+# - Rank correlation is a diagnostic field in the catalog, not a checkpoint-selection rule.

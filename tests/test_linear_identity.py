@@ -7,8 +7,6 @@ result - but a declared version is only worth what checks it, which is this file
 
 from __future__ import annotations
 
-import hashlib
-
 import numpy as np
 import pytest
 from sklearn.linear_model import Lasso, Ridge
@@ -25,7 +23,19 @@ from utils.modeling import resolve_linear_params
 from .test_folds import SPLITS, _dataset
 
 PINNED_VERSION = 1
-PINNED_RIDGE_COEFFICIENTS = "16f01d84576aadd5"
+# The three coefficients themselves, not a digest of their bytes. A SHA-256 over
+# `coef_.tobytes()` compares to the last bit, and a ridge solve reaches the last
+# bit differently on a different LAPACK - this file passed here and failed on the
+# CI runner over noise in the 13th significant digit, which is exactly the noise
+# the module docstring says it exists to absorb. `derived_params` already makes
+# that distinction for a scalar; three floats and a stated tolerance make it for
+# an array, and a real change to the runner moves them by orders of magnitude
+# more than 1e-9.
+PINNED_RIDGE_COEFFICIENTS = (
+    0.00038760841870323333,
+    -0.00026657319533138007,
+    -0.0001506637077594966,
+)
 PINNED_LASSO_ALPHA = 0.000197181801558
 
 
@@ -39,10 +49,6 @@ def _clean_memo():
 @pytest.fixture
 def fold():
     return standardized_fold(prepare_raw_folds(_dataset(), SPLITS, use_cache=False)[0])
-
-
-def _digest(array: np.ndarray) -> str:
-    return hashlib.sha256(np.ascontiguousarray(array, dtype=np.float64).tobytes()).hexdigest()[:16]
 
 
 class TestQuantizingADerivedParameter:
@@ -100,9 +106,15 @@ class TestTheDeclaredVersion:
     def test_a_fixed_alpha_fit_reproduces_its_pinned_coefficients(self, fold) -> None:
         model = Ridge(alpha=1.0, random_state=42).fit(fold["X_train"], fold["y_train"])
 
-        assert _digest(model.coef_) == PINNED_RIDGE_COEFFICIENTS, (
-            "the linear runner now fits different coefficients; bump LINEAR_RUNNER_VERSION in "
-            "case_studies/utils/linear.py and update this pin in the same commit"
+        np.testing.assert_allclose(
+            model.coef_,
+            PINNED_RIDGE_COEFFICIENTS,
+            rtol=1e-9,
+            err_msg=(
+                "the linear runner now fits different coefficients; bump "
+                "LINEAR_RUNNER_VERSION in case_studies/utils/linear.py and update this pin "
+                "in the same commit"
+            ),
         )
 
     def test_a_derived_alpha_reproduces_its_pinned_value(self, fold) -> None:

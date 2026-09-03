@@ -54,6 +54,9 @@ dependencies = [
     # detectors accept a date-typed timestamp column, and get_metadata() no longer lets a
     # null in the provider block erase the timestamp an update just wrote.
     "ml4t-data>=0.1.2",
+    # ml4t-diagnostic 0.1.2: cross_sectional_ic_series() reports an undefined date
+    # (all predictions or all returns tied) as null rather than NaN, so a
+    # drop_nulls("ic") followed by .mean() can no longer come back nan.
     "ml4t-diagnostic>=0.1.2",
     "ml4t-engineer>=0.1.3",
     "ml4t-backtest>=0.1.3",
@@ -279,7 +282,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["utils", "data", "case_studies"]
+include = ["utils", "data", "case_studies", "scripts"]
 namespaces = false
 
 # Auto-loaded at interpreter startup to put numbered chapter dirs on sys.path
@@ -328,3 +331,6 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short -p no:torchtyping"
+markers = [
+    "production_extract: asserts an absolute property of the full production dataset (a name count, a surplus), which no CI checkout carries - the test-data extract is reduced by design. Runs locally against the real data; deselected in CI.",
+]

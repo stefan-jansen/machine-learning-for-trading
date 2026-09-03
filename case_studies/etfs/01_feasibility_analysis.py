@@ -402,7 +402,7 @@ show_with_alt(
 #
 # One caveat on the spread. Daily bars record what traded, not what was quoted, so there is no bid
 # and no ask in this data and the half-spread cannot be measured from it. It is assigned by tier, as
-# B.1 described, and `16_costs` re-runs the strategy under harsher assumptions to see how much the
+# B.1 described, and `17_costs` re-runs the strategy under harsher assumptions to see how much the
 # answer depends on it.
 
 # %%

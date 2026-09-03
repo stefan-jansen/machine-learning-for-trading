@@ -61,6 +61,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -122,15 +123,65 @@ BINARY_MIME = frozenset(
 )
 
 
+def _ignored_notebooks() -> set[Path]:
+    """Untracked notebooks git is configured to ignore, so ones no reader ever gets.
+
+    Papermill stages every execution as `.<name>.papermill.<pid>.ipynb` beside the
+    notebook and leaves it behind when a run is killed. Those are gitignored scratch
+    carrying the `tags: []` and the machine paths of a run in progress, and the
+    guards here had been reading them as if they were part of the repository: a
+    working copy that had executed a notebook recently failed the gate while CI,
+    which clones fresh, passed. A file that is ignored but nonetheless tracked stays
+    in scope, because it does reach readers. Outside a git checkout nothing is
+    ignored and every notebook is scanned.
+    """
+    try:
+        listed = subprocess.run(
+            ["git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "*.ipynb"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return set()
+    return {REPO_ROOT / name for name in listed.split("\0") if name}
+
+
 def _iter_notebooks() -> list[Path]:
+    ignored = _ignored_notebooks()
     out = []
     for p in REPO_ROOT.rglob("*.ipynb"):
         if SKIP_PARTS & set(p.parts):
             continue
         if p.name.startswith("_executed_"):
             continue
+        if p in ignored:
+            continue
         out.append(p)
     return sorted(out)
+
+
+def iter_committed_notebooks() -> list[Path]:
+    """``_iter_notebooks`` restricted to what git tracks.
+
+    The two are deliberately different. This script fixes the working tree, so it has to see
+    a notebook that has not been added yet - that is the moment its fix is most wanted. A test
+    asserting about *committed* content must not see it: an untracked scratch copy in one
+    worktree then fails a gate that CI, checking out only tracked files, can never fail on the
+    same file, and the author has no way to reproduce it. Measured 2026-08-25 on
+    `cs6/cme_futures`, where leftover copies under `.workspace/preserved/` failed
+    `test_no_empty_cell_tags_in_committed_notebooks` locally while `test-unit` was green on the
+    same commit.
+    """
+    listed = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", "-z", "--", "*.ipynb"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    tracked = {REPO_ROOT / name for name in listed.split("\0") if name}
+    return [path for path in _iter_notebooks() if path in tracked]
 
 
 def sanitize_text(text: str) -> tuple[str, int]:
@@ -259,11 +310,18 @@ def sanitize_notebook(raw: str) -> tuple[str, int, list[str]]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--check", action="store_true", help="report only; exit 1 if any leak found")
+    # Named notebooks, so a caller that has just produced one can sanitize that one.
+    # `run-production-notebook.sh` does exactly that, between stripping papermill's cell
+    # fossils and stamping provenance; without an argument it would rewrite every notebook
+    # in the tree as a side effect of running one.
+    ap.add_argument("notebooks", nargs="*", type=Path, help="default: every tracked notebook")
     args = ap.parse_args()
+
+    targets = [p.resolve() for p in args.notebooks] if args.notebooks else _iter_notebooks()
 
     dirty: list[tuple[Path, int]] = []
     blocked: list[tuple[Path, str]] = []
-    for nb in _iter_notebooks():
+    for nb in targets:
         raw = nb.read_text(encoding="utf-8")
         new, n, skipped = sanitize_notebook(raw)
         blocked += [(nb.relative_to(REPO_ROOT), s) for s in skipped]
@@ -287,7 +345,8 @@ def main() -> int:
             print(f"  {n:4d}  {rel}")
 
     if not dirty and not blocked:
-        print("clean: no machine-specific paths in any notebook's outputs or metadata")
+        scope = "the named notebook(s)" if args.notebooks else "any notebook"
+        print(f"clean: no machine-specific paths in {scope}'s outputs or metadata")
 
     return 1 if blocked or (args.check and dirty) else 0
 

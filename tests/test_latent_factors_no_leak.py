@@ -377,6 +377,7 @@ def test_latent_training_identity_includes_input_splits_and_runtime() -> None:
             "label": "return",
             "seed": 42,
         },
+        "model_name": "cae",
         "n_factors": 5,
         "n_epochs": 50,
         "model_kwargs": {"checkpoint_interval": 5},
@@ -545,6 +546,7 @@ def test_latent_input_digest_excludes_sealed_holdout() -> None:
             "label": "return",
             "seed": 42,
         },
+        "model_name": "cae",
         "n_factors": 5,
         "n_epochs": 50,
         "model_kwargs": {"checkpoint_interval": 5},
@@ -583,7 +585,9 @@ def test_sdf_expected_spec_includes_library_output_defaults() -> None:
         "n_epochs_unc": 256,
         "n_epochs_moment": 64,
         "n_epochs_cond": 1024,
-        "checkpoint_epochs": [256, 512, 768, 1024, 1280],
+        # Conditional-relative, as every preset in the corpus now is. The published
+        # labels below are global and unchanged by the renumbering.
+        "checkpoint_epochs": [256, 512, 768, 1024],
         "beta_n_epochs": 256,
         "beta_checkpoint_epochs": [256],
         "beta_default_checkpoint": 256,
@@ -673,7 +677,14 @@ def test_latent_registration_builds_complete_training_identity(
         elapsed=1.0,
         model_kwargs={"checkpoint_interval": 5},
         fold_extras=[{"checkpoint_epochs": [0, 5]}],
-        fold_ics_df=pl.DataFrame({"fold_id": [0, 0], "epoch": [0, 5], "ic_mean": [0.1, 0.2]}),
+        fold_ics_df=pl.DataFrame(
+            {
+                "fold_id": [0, 0],
+                "epoch": [0, 5],
+                "ic_mean": [0.1, 0.2],
+                "n_scored_dates": [5, 5],
+            }
+        ),
         preds_df=pl.DataFrame(
             {
                 "timestamp": [datetime(2021, 1, 1), datetime(2021, 1, 1)],
@@ -982,6 +993,7 @@ def test_reporting_epoch_defaults_to_last_checkpoint() -> None:
             "fold_id": [0, 0, 1, 1],
             "epoch": [5, 10, 5, 10],
             "ic_mean": [0.12, 0.03, 0.11, 0.02],
+            "n_scored_dates": [40, 40, 40, 40],
         }
     )
 
@@ -1003,6 +1015,7 @@ def test_reporting_epoch_excludes_validation_selected_checkpoint_zero_by_default
             "fold_id": [0, 0, 1, 1],
             "epoch": [0, 10, 0, 10],
             "ic_mean": [0.04, 0.03, 0.05, 0.02],
+            "n_scored_dates": [40, 40, 40, 40],
         }
     )
 
@@ -1024,6 +1037,7 @@ def test_reporting_epoch_allows_explicit_checkpoint_zero() -> None:
             "fold_id": [0, 0, 1, 1],
             "epoch": [0, 10, 0, 10],
             "ic_mean": [0.04, 0.03, 0.05, 0.02],
+            "n_scored_dates": [40, 40, 40, 40],
         }
     )
 
@@ -1060,7 +1074,7 @@ def test_latent_registry_cache_replays_exact_complete_surface(
     assert result is not None
     training_hash, metrics, predictions = result
     assert training_hash == training_hash_from_spec(training_spec)
-    assert metrics.shape == (4, 3)
+    assert metrics.shape == (4, 4)
     assert predictions.shape == (20, 6)
 
 
@@ -1168,6 +1182,7 @@ def test_ipca_solver_controls_change_training_identity() -> None:
     }
     old = _apply_latent_factor_runtime_spec(
         spec=base,
+        model_name="ipca",
         n_factors=5,
         n_epochs=50,
         model_kwargs={"max_iter": 100},
@@ -1176,6 +1191,7 @@ def test_ipca_solver_controls_change_training_identity() -> None:
     )
     corrected = _apply_latent_factor_runtime_spec(
         spec=base,
+        model_name="ipca",
         n_factors=5,
         n_epochs=50,
         model_kwargs={"max_iter": 10_000},
@@ -1218,6 +1234,7 @@ def test_n_factors_changes_training_identity_even_when_the_preset_declares_one()
         "model_kwargs": {},
         "fold_extras": [],
         "n_epochs": 50,
+        "model_name": "ipca",
     }
     at_five = _apply_latent_factor_runtime_spec(spec=preset, n_factors=5, **identity)
     at_two = _apply_latent_factor_runtime_spec(spec=preset, n_factors=2, **identity)
@@ -1642,6 +1659,7 @@ def test_fold_temporal_assembly_changes_training_identity() -> None:
     }
     placeholder = _apply_latent_factor_runtime_spec(
         spec=base,
+        model_name="ipca",
         n_factors=5,
         n_epochs=50,
         model_kwargs={},
@@ -1650,6 +1668,7 @@ def test_fold_temporal_assembly_changes_training_identity() -> None:
     )
     fold_scoped = _apply_latent_factor_runtime_spec(
         spec=base,
+        model_name="ipca",
         n_factors=5,
         n_epochs=50,
         model_kwargs={},
@@ -1665,6 +1684,7 @@ def test_fold_temporal_assembly_changes_training_identity() -> None:
 
     changed_fold_data = _apply_latent_factor_runtime_spec(
         spec=base,
+        model_name="ipca",
         n_factors=5,
         n_epochs=50,
         model_kwargs={},
