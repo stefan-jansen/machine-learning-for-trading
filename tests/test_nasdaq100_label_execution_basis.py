@@ -239,3 +239,47 @@ class TestTheWindowIsOneBarWiderThanItsName:
             assert (
                 resolve_label_buffer("nasdaq100_microstructure", name, setup) == f"{stated + 1}min"
             )
+
+
+class TestNoConsumerReadsThePurgeAsTheHorizon:
+    """The two differ by a bar here, so every reader has to take the one it means.
+
+    They were equal in every case study until this one needed a purge wider than its
+    horizon, so reading either was correct and `01_feasibility_analysis`,
+    `04_model_based_features` and `05_evaluation` all read the buffer. Once they differ that
+    puts 6, 16 and 61 minutes on a figure axis, an IC sampling step and a HAC bandwidth under
+    labels called 5, 15 and 60. RoboRev jobs #17888 and #17889.
+    """
+
+    SETUP = Path("case_studies/nasdaq100_microstructure/config/setup.yaml")
+
+    def _labels(self) -> dict:
+        import yaml
+
+        return yaml.safe_load(self.SETUP.read_text())["labels"]
+
+    def test_the_two_are_declared_separately_and_differ(self):
+        labels = self._labels()
+        buffers = {labels["primary"]: labels["buffer"], **labels["variant_buffers"]}
+        for name, horizon in labels["horizons"].items():
+            assert buffers[name] != horizon, (
+                f"{name}: purge equals horizon, so nothing distinguishes the interval the "
+                "label measures from the interval that has to be held back"
+            )
+
+    def test_the_notebooks_take_their_horizons_from_the_horizons(self):
+        """A source check, in the same shape as tests/test_holdout_boundary.py's.
+
+        What it rules out is a reader resolving an outcome horizon from `buffer` or
+        `variant_buffers`, which is invisible in a result: every number still renders, under
+        a label name that no longer describes it.
+        """
+        for stem in ("01_feasibility_analysis", "04_model_based_features", "05_evaluation"):
+            source = Path(f"case_studies/nasdaq100_microstructure/{stem}.py").read_text()
+            code = "\n".join(
+                line for line in source.splitlines() if not line.lstrip().startswith("#")
+            )
+            assert '["horizons"]' in code, f"{stem} resolves no declared horizon"
+            assert "variant_buffers" not in code, (
+                f"{stem} reads labels.variant_buffers, which is the purge and not the horizon"
+            )

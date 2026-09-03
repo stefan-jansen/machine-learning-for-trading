@@ -131,7 +131,7 @@ DATE_COL = "timestamp"
 
 # %%
 def horizon_minutes(spec: str) -> int:
-    """Minutes in a `setup.yaml` label buffer such as `15min`."""
+    """Minutes in a `setup.yaml` duration such as `15min`."""
     match = re.fullmatch(r"(\d+)min", str(spec).strip())
     if match is None:
         msg = f"Label buffer {spec!r} is not expressed in minutes"
@@ -143,17 +143,24 @@ with open(CASE_DIR / "config" / "setup.yaml") as f:
     setup = yaml.safe_load(f)
 cv_config = setup["evaluation"]
 
-# The panel is a one-minute grid, so a buffer in minutes is a horizon in bars.
+# The panel is a one-minute grid, so a duration in minutes is a count of bars.
+#
+# The horizon and the purge are different numbers here and both are needed. The label reads
+# a quote one bar past the horizon it names - the entry leg is the bar after the decision -
+# so `labels.horizons` says what the return measures and `labels.buffer` says what has to be
+# held back for it. Sampling IC on the purge would space observations by an interval no
+# label spans; purging on the horizon would leave the last bar inside the held-out window.
 PRIMARY_LABEL = setup["labels"]["primary"]
-LABEL_HORIZON = horizon_minutes(setup["labels"]["buffer"])
+LABEL_HORIZON = horizon_minutes(setup["labels"]["horizons"][PRIMARY_LABEL])
+LABEL_PURGE = horizon_minutes(setup["labels"]["buffer"])
 # The continuous forward-return labels this case study ships, primary first. The
 # classification variant is excluded: a rank IC against a binary label answers a
 # different question and does not belong on the horizon profile.
 LABEL_HORIZONS = {
     name: horizon_minutes(spec)
     for name, spec in [
-        (PRIMARY_LABEL, setup["labels"]["buffer"]),
-        *sorted(setup["labels"]["variant_buffers"].items()),
+        (PRIMARY_LABEL, setup["labels"]["horizons"][PRIMARY_LABEL]),
+        *sorted(setup["labels"]["horizons"].items()),
     ]
     if name.startswith("fwd_ret")
 }
@@ -231,9 +238,10 @@ MIN_PERIODS_DEFAULT = 10
 # a period this case study reserves for one final test, several notebooks later.
 # Everything on this page is computed on the period before it, and the rule that draws
 # the line is about *when a label is known* rather than when a feature is observed: a
-# bar's forward return is only settled `LABEL_HORIZON` minutes after the bar, so a bar
-# keeps its place in the panel only when that settlement time falls strictly before the
-# boundary. The last `LABEL_HORIZON` minutes before the boundary go with it, since
+# bar's forward return is only settled `LABEL_PURGE` minutes after the bar - the horizon
+# plus the bar its entry leg is priced from - so a bar keeps its place in the panel only
+# when that settlement time falls strictly before the boundary. The last `LABEL_PURGE`
+# minutes before the boundary go with it, since
 # their returns are measured over price moves inside the reserved period.
 #
 # The filter is pushed into the lazy scans, so the reserved rows are never
@@ -287,7 +295,7 @@ if symbol_filter is not None:
     temporal = temporal.filter(symbol_filter)
     label_df = label_df.filter(symbol_filter)
 
-label_endpoint = pl.col(DATE_COL) + pl.duration(minutes=LABEL_HORIZON)
+label_endpoint = pl.col(DATE_COL) + pl.duration(minutes=LABEL_PURGE)
 before_holdout = label_endpoint < HOLDOUT_START
 features = _normalize_symbol_column(features.filter(before_holdout).collect())
 temporal = _normalize_symbol_column(temporal.filter(before_holdout).collect())
