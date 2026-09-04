@@ -629,7 +629,10 @@ jobs:
         run: |
           .venv/bin/python -m pytest \
             tests/test_pm_helpers.py \
+            tests/test_fork_pull_request_gating.py \
+            tests/test_env_matches_lock.py \
             tests/test_create_test_data.py \
+            tests/test_generate_intermediates.py \
             tests/test_sample_registry_for_tests.py \
             tests/test_toolchain_pins.py \
             tests/test_conformal_embargo_coverage.py \
@@ -950,6 +953,8 @@ jobs:
           .venv/bin/python -m pytest \
             tests/test_eoa_universe_roster.py \
             tests/test_fixture_registry_identity.py \
+            tests/test_reduced_universe_is_shared.py \
+            tests/test_fixture_manifest_matches_builders.py \
             tests/test_artifact_specs.py \
             tests/test_backtest_presets.py \
             tests/test_etf_baseline_parity.py \
@@ -1013,6 +1018,18 @@ jobs:
       - name: Install git (for checkout inside container)
         run: apt-get update && apt-get install -y git
       - uses: actions/checkout@v6
+      # The image is built from uv.lock and drifts from it silently the moment the
+      # lock moves. It carried ml4t-models 0.1.0a4 for eleven days after the repo
+      # declared >=0.1.0a6, so public CI measured a dependency set the repository
+      # did not declare - and the notebook that failed on it read as a numerical
+      # problem, which cost four rounds of investigation aimed at the notebook.
+      #
+      # This is the check that would have caught it on the day the pin moved. It
+      # runs first because everything after it is only evidence about this commit
+      # if it passes: a green job in a drifted image is not evidence of green under
+      # the declared lock.
+      - name: The image's installed distributions match uv.lock
+        run: python .github/scripts/check_env_matches_lock.py
       - name: Run modelling-environment unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -1093,12 +1110,42 @@ jobs:
       image: ml4t/ml4t:latest
 
     steps:
+      # secrets.TEST_DATA_DEPLOY_KEY is not exposed to a pull_request from a fork,
+      # so the "Checkout test data" step below cannot succeed there: actions/checkout
+      # falls back to the default token, which cannot see a private repository, and
+      # the job fails at a step that has nothing to do with the contribution. On #595,
+      # a two-line packaging fix from an outside contributor, that was 26 red checks -
+      # ch01 through ch26, all eight cs-* jobs and test-py312 - none of them the
+      # contributor's.
+      #
+      # Deciding once whether the run can reach the data, and gating the
+      # data-dependent steps on that, is the same shape as the fix #613 landed for
+      # test-unit-data. It is a step-level gate rather than a job-level `if:` for the
+      # reason recorded there: a job-level `if:` that evaluates false creates no check
+      # run at all, which is unsatisfiable when the context is required.
+      #
+      # What this does not fix, and is said out loud in the notice: a fork pull request
+      # is then green having exercised none of these notebooks. That is the honest
+      # state - it is what happens today, dressed as failure rather than as a skip -
+      # and the merge decision has to account for it.
+      - name: Can this run reach the test data?
+        id: reach
+        run: |
+          if [ -n "${{ secrets.TEST_DATA_DEPLOY_KEY }}" ]; then
+            echo "have_key=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_key=" >> "$GITHUB_OUTPUT"
+            echo "::notice::No test-data deploy key in this context, which is a fork pull request. This job checked out no test data and executed no notebook, so it asserts nothing about this change; the notebooks run on the branch once it is merged."
+          fi
       - name: Install git (for checkout inside container)
+        if: steps.reach.outputs.have_key
         run: apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null
 
       - uses: actions/checkout@v6
+        if: steps.reach.outputs.have_key
 
       - name: Checkout test data
+        if: steps.reach.outputs.have_key
         uses: actions/checkout@v6
         with:
           repository: ml4t/third-edition-test-data
@@ -1107,6 +1154,7 @@ jobs:
           lfs: false
 
       - name: Seed case study intermediates
+        if: steps.reach.outputs.have_key
         run: |
           mkdir -p $ML4T_OUTPUT_DIR
           if [ -d test-data/intermediates ]; then
@@ -1129,6 +1177,7 @@ jobs:
           fi
 
       - name: Run chapter notebooks (${{ matrix.name }})
+        if: steps.reach.outputs.have_key
         env:
           PYTHONPATH: ${{ github.workspace }}
           TEST_FILTER_INPUT: ${{ github.event.inputs.test_filter }}
@@ -1159,12 +1208,42 @@ jobs:
       image: ml4t/ml4t:latest
 
     steps:
+      # secrets.TEST_DATA_DEPLOY_KEY is not exposed to a pull_request from a fork,
+      # so the "Checkout test data" step below cannot succeed there: actions/checkout
+      # falls back to the default token, which cannot see a private repository, and
+      # the job fails at a step that has nothing to do with the contribution. On #595,
+      # a two-line packaging fix from an outside contributor, that was 26 red checks -
+      # ch01 through ch26, all eight cs-* jobs and test-py312 - none of them the
+      # contributor's.
+      #
+      # Deciding once whether the run can reach the data, and gating the
+      # data-dependent steps on that, is the same shape as the fix #613 landed for
+      # test-unit-data. It is a step-level gate rather than a job-level `if:` for the
+      # reason recorded there: a job-level `if:` that evaluates false creates no check
+      # run at all, which is unsatisfiable when the context is required.
+      #
+      # What this does not fix, and is said out loud in the notice: a fork pull request
+      # is then green having exercised none of these notebooks. That is the honest
+      # state - it is what happens today, dressed as failure rather than as a skip -
+      # and the merge decision has to account for it.
+      - name: Can this run reach the test data?
+        id: reach
+        run: |
+          if [ -n "${{ secrets.TEST_DATA_DEPLOY_KEY }}" ]; then
+            echo "have_key=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_key=" >> "$GITHUB_OUTPUT"
+            echo "::notice::No test-data deploy key in this context, which is a fork pull request. This job checked out no test data and executed no notebook, so it asserts nothing about this change; the notebooks run on the branch once it is merged."
+          fi
       - name: Install git
+        if: steps.reach.outputs.have_key
         run: apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null
 
       - uses: actions/checkout@v6
+        if: steps.reach.outputs.have_key
 
       - name: Checkout test data
+        if: steps.reach.outputs.have_key
         uses: actions/checkout@v6
         with:
           repository: ml4t/third-edition-test-data
@@ -1173,6 +1252,7 @@ jobs:
           lfs: false
 
       - name: Seed case study intermediates
+        if: steps.reach.outputs.have_key
         run: |
           mkdir -p $ML4T_OUTPUT_DIR
           if [ -d test-data/intermediates ]; then
@@ -1185,9 +1265,11 @@ jobs:
       # Without it, overrides.yaml's `reruns:` key (tests/conftest.py) silently adds no
       # retry marker, so a notebook marked flaky just fails outright here.
       - name: Install pytest-rerunfailures
+        if: steps.reach.outputs.have_key
         run: pip install --no-cache-dir "pytest-rerunfailures>=15.0"
 
       - name: Run pipeline (${{ matrix.case-study }})
+        if: steps.reach.outputs.have_key
         env:
           PYTHONPATH: ${{ github.workspace }}
           TEST_FILTER_INPUT: ${{ github.event.inputs.test_filter }}
@@ -1213,12 +1295,42 @@ jobs:
       image: ml4t/ml4t-py312:latest
 
     steps:
+      # secrets.TEST_DATA_DEPLOY_KEY is not exposed to a pull_request from a fork,
+      # so the "Checkout test data" step below cannot succeed there: actions/checkout
+      # falls back to the default token, which cannot see a private repository, and
+      # the job fails at a step that has nothing to do with the contribution. On #595,
+      # a two-line packaging fix from an outside contributor, that was 26 red checks -
+      # ch01 through ch26, all eight cs-* jobs and test-py312 - none of them the
+      # contributor's.
+      #
+      # Deciding once whether the run can reach the data, and gating the
+      # data-dependent steps on that, is the same shape as the fix #613 landed for
+      # test-unit-data. It is a step-level gate rather than a job-level `if:` for the
+      # reason recorded there: a job-level `if:` that evaluates false creates no check
+      # run at all, which is unsatisfiable when the context is required.
+      #
+      # What this does not fix, and is said out loud in the notice: a fork pull request
+      # is then green having exercised none of these notebooks. That is the honest
+      # state - it is what happens today, dressed as failure rather than as a skip -
+      # and the merge decision has to account for it.
+      - name: Can this run reach the test data?
+        id: reach
+        run: |
+          if [ -n "${{ secrets.TEST_DATA_DEPLOY_KEY }}" ]; then
+            echo "have_key=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_key=" >> "$GITHUB_OUTPUT"
+            echo "::notice::No test-data deploy key in this context, which is a fork pull request. This job checked out no test data and executed no notebook, so it asserts nothing about this change; the notebooks run on the branch once it is merged."
+          fi
       - name: Install git
+        if: steps.reach.outputs.have_key
         run: apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null
 
       - uses: actions/checkout@v6
+        if: steps.reach.outputs.have_key
 
       - name: Checkout test data
+        if: steps.reach.outputs.have_key
         uses: actions/checkout@v6
         with:
           repository: ml4t/third-edition-test-data
@@ -1227,6 +1339,7 @@ jobs:
           lfs: false
 
       - name: Run py312 notebooks
+        if: steps.reach.outputs.have_key
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
@@ -1269,12 +1382,42 @@ jobs:
           --health-retries 10
 
     steps:
+      # secrets.TEST_DATA_DEPLOY_KEY is not exposed to a pull_request from a fork,
+      # so the "Checkout test data" step below cannot succeed there: actions/checkout
+      # falls back to the default token, which cannot see a private repository, and
+      # the job fails at a step that has nothing to do with the contribution. On #595,
+      # a two-line packaging fix from an outside contributor, that was 26 red checks -
+      # ch01 through ch26, all eight cs-* jobs and test-py312 - none of them the
+      # contributor's.
+      #
+      # Deciding once whether the run can reach the data, and gating the
+      # data-dependent steps on that, is the same shape as the fix #613 landed for
+      # test-unit-data. It is a step-level gate rather than a job-level `if:` for the
+      # reason recorded there: a job-level `if:` that evaluates false creates no check
+      # run at all, which is unsatisfiable when the context is required.
+      #
+      # What this does not fix, and is said out loud in the notice: a fork pull request
+      # is then green having exercised none of these notebooks. That is the honest
+      # state - it is what happens today, dressed as failure rather than as a skip -
+      # and the merge decision has to account for it.
+      - name: Can this run reach the test data?
+        id: reach
+        run: |
+          if [ -n "${{ secrets.TEST_DATA_DEPLOY_KEY }}" ]; then
+            echo "have_key=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_key=" >> "$GITHUB_OUTPUT"
+            echo "::notice::No test-data deploy key in this context, which is a fork pull request. This job checked out no test data and executed no notebook, so it asserts nothing about this change; the notebooks run on the branch once it is merged."
+          fi
       - name: Install git
+        if: steps.reach.outputs.have_key
         run: apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null
 
       - uses: actions/checkout@v6
+        if: steps.reach.outputs.have_key
 
       - name: Checkout test data
+        if: steps.reach.outputs.have_key
         uses: actions/checkout@v6
         with:
           repository: ml4t/third-edition-test-data
@@ -1283,6 +1426,7 @@ jobs:
           lfs: false
 
       - name: Run Ch23 Knowledge Graph notebooks (pipeline order)
+        if: steps.reach.outputs.have_key
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
@@ -1371,13 +1515,43 @@ jobs:
           --health-retries 5
 
     steps:
+      # secrets.TEST_DATA_DEPLOY_KEY is not exposed to a pull_request from a fork,
+      # so the "Checkout test data" step below cannot succeed there: actions/checkout
+      # falls back to the default token, which cannot see a private repository, and
+      # the job fails at a step that has nothing to do with the contribution. On #595,
+      # a two-line packaging fix from an outside contributor, that was 26 red checks -
+      # ch01 through ch26, all eight cs-* jobs and test-py312 - none of them the
+      # contributor's.
+      #
+      # Deciding once whether the run can reach the data, and gating the
+      # data-dependent steps on that, is the same shape as the fix #613 landed for
+      # test-unit-data. It is a step-level gate rather than a job-level `if:` for the
+      # reason recorded there: a job-level `if:` that evaluates false creates no check
+      # run at all, which is unsatisfiable when the context is required.
+      #
+      # What this does not fix, and is said out loud in the notice: a fork pull request
+      # is then green having exercised none of these notebooks. That is the honest
+      # state - it is what happens today, dressed as failure rather than as a skip -
+      # and the merge decision has to account for it.
+      - name: Can this run reach the test data?
+        id: reach
+        run: |
+          if [ -n "${{ secrets.TEST_DATA_DEPLOY_KEY }}" ]; then
+            echo "have_key=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_key=" >> "$GITHUB_OUTPUT"
+            echo "::notice::No test-data deploy key in this context, which is a fork pull request. This job checked out no test data and executed no notebook, so it asserts nothing about this change; the notebooks run on the branch once it is merged."
+          fi
       - name: Install git
+        if: steps.reach.outputs.have_key
         run: |
           apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null 2>&1 || true
 
       - uses: actions/checkout@v6
+        if: steps.reach.outputs.have_key
 
       - name: Checkout test data
+        if: steps.reach.outputs.have_key
         uses: actions/checkout@v6
         with:
           repository: ml4t/third-edition-test-data
@@ -1386,6 +1560,7 @@ jobs:
           lfs: false
 
       - name: Run Ch02 database benchmark notebooks
+        if: steps.reach.outputs.have_key
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |

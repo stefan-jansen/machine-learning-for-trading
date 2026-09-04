@@ -855,36 +855,22 @@ def _reference_panels(cs_dir: Path, hash_rows: list, survives, _pl) -> dict:
     agrees on is what makes the seeded sets joinable with the copied ones rather
     than only with each other.
 
-    Artifacts this function will not rewrite are preferred, so the panel is normally
-    one that survives seeding. A group whose only on-disk artifacts WILL be rewritten
-    still uses one of them as the panel rather than falling back to the fabricated
-    grid: rewriting an artifact onto its own keys changes the scores and not the
-    grid, so the group stays joinable and keeps a real one.
-
-    That fallback is not cosmetic. crypto_perps_funding sets ``rewrite_existing``, so
-    only its cohort leaders survive - and its ``fwd_ret_8h`` leader has no artifact on
-    disk at all. Without the fallback the whole label fell to ``_weekday_grid``, which
-    emits about sixty *dates* across the window, roughly eight weekdays apart. An 8H
-    label cannot live on that grid, and 13_backtest rejected it in CI with
-    "decision intervals [9 days, 10 days, 12 days] do not match horizon 8H" while four
-    real artifacts on the correct 8-hour grid sat in the same group unused.
+    A real panel matters, not just any panel. When a group had none, its whole label
+    fell to ``_weekday_grid``, which emits about sixty *dates* across the window,
+    roughly eight weekdays apart. An 8H label cannot live on that grid, and
+    13_backtest rejected it in CI with "decision intervals [9 days, 10 days, 12 days]
+    do not match horizon 8H" while four real artifacts on the correct 8-hour grid sat
+    in the same case study unused. Every artifact on disk now survives seeding, so a
+    group with any artifact of its own has a real panel to be seeded onto.
 
     The dates are subsampled to ``SEEDED_DATE_BUDGET``; they are a subset of the
     reference's own dates, which the registry places inside the split window, so the
     split boundary the fabricated grid enforces still holds.
     """
     groups: dict = {}
-    fallback_groups: dict = {}
     for p_hash, split, label in hash_rows:
         if survives(p_hash):
             groups.setdefault((split, label), []).append(p_hash)
-        elif (cs_dir / "run_log" / "predictions" / p_hash / "predictions.parquet").is_file():
-            fallback_groups.setdefault((split, label), []).append(p_hash)
-    fallback_only = set()
-    for key, hashes in fallback_groups.items():
-        if key not in groups:
-            groups[key] = hashes
-            fallback_only.add(key)
 
     panels = {}
     for key, hashes in groups.items():
@@ -895,12 +881,6 @@ def _reference_panels(cs_dir: Path, hash_rows: list, survives, _pl) -> dict:
             )
             entity = next((c for c in ENTITY_COLUMN_CANDIDATES if c in frame.columns), None)
             if entity is None or not {"timestamp", "actual"} <= set(frame.columns):
-                continue
-            # A rewritten artifact is only worth keeping as the panel because it
-            # carries a real decision grid. One with a single timestamp carries no
-            # grid - it is the placeholder a superseded set leaves behind - so the
-            # group is better served by the fabricated one than by inheriting it.
-            if key in fallback_only and frame["timestamp"].n_unique() < 2:
                 continue
             # Only ever compared for equality, so stringifying the identifiers is
             # enough and keeps a column carrying nulls from raising in sorted().
@@ -1477,7 +1457,6 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         templates[(window, n_folds)] = (frame, n)
         return templates[(window, n_folds)]
 
-    rewrite_existing = cs_id == "crypto_perps_funding"
     missing_leaders = sorted(
         p_hash
         for p_hash in cohort_leader_hashes
@@ -1512,9 +1491,27 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         )
 
     def _survives(p_hash: str) -> bool:
-        """True when the loop below leaves this artifact exactly as it is."""
+        """True when the loop below leaves this artifact exactly as it is.
+
+        An artifact the fixture already carries is the one its registry row
+        describes, so replacing it makes the fixture contradict itself: the row
+        keeps reporting the coverage and the IC of a prediction set that is no
+        longer on disk, and a notebook obeying `rules/notebook-standards.md` C9 -
+        validate that the artifact you read is the one the registry describes -
+        then cannot pass under CI. `16_strategy_simulation/08_signal_method_comparison`
+        hit exactly that and had to weaken its check.
+
+        crypto_perps_funding used to be exempt from this, via a
+        `rewrite_existing = cs_id == "crypto_perps_funding"` line that arrived in a
+        bulk release commit (70924077) with no isolated rationale and none recorded
+        anywhere since. Measured across the shipped fixture: it was the only thing
+        rewriting an artifact the fixture ships - five of them, all crypto - and it
+        redrew their scores while their registry rows went on describing the old
+        ones. The other eight case studies already behaved this way, so dropping it
+        makes crypto agree with them rather than introducing a new rule.
+        """
         pred_file = cs_dir / "run_log" / "predictions" / p_hash / "predictions.parquet"
-        return pred_file.is_file() and (p_hash in cohort_leader_hashes or not rewrite_existing)
+        return pred_file.is_file()
 
     # Two prediction sets of one (split, label) have to be joinable on
     # (timestamp, entity), or a notebook that pairs them measures nothing:

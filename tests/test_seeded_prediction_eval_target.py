@@ -25,9 +25,9 @@ import pytest
 
 from tests.fixtures import seed_results
 
-# Two case studies, because the seeder has two paths. It rewrites every artifact of
-# crypto_perps_funding, so every set there is built on the fabricated grid; elsewhere
-# an artifact already on disk survives and supplies the panel the rest are seeded onto.
+# Two case studies, because the seeder has two paths. A group with no artifact of its
+# own is built on the fabricated grid, which is what the crypto fixtures below have;
+# a group with one supplies the panel the rest of it is seeded onto.
 REWRITTEN_CS = "crypto_perps_funding"
 REWRITTEN_CLS_LABEL = "fwd_dir_8h"
 CASE_STUDY = "sp500_equity_option_analytics"
