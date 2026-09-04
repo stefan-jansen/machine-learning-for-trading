@@ -3,25 +3,29 @@
 Research workspace for FX strategy work against MetaTrader 5
 (via `mt5_client` / Wine bridge on Linux).
 
+**Strategy (declared):** H4 range breakout + ATR → binary baseline
+`breakout` / `no_trade` (`false_breakout` deferred). FTMO $10k Challenge 2-Step.
+
 ## Repo / branch
 
 | Item | Value |
 |------|--------|
 | Path | `PKM/FX Strategy Research/` (inside ML4T monorepo) |
-| Branch | `fx-research` (base `c2c7b6ca`, FX commit only — no TabM) |
-| Tip | `4aa21442` — `chore(fx-research): init FX Strategy Research workspace` |
+| Branch | `fx-research` (base `c2c7b6ca`, FX commits only — no TabM) |
 | Remote | `fork` → `git@github.com:Rezzaa13/machine-learning-for-trading.git` |
-| Tracking | `fork/fx-research` (pushed 2026-09-04) |
+| Tracking | `fork/fx-research` |
+| Config | [`config/setup.yaml`](config/setup.yaml) |
 
 ```bash
 git switch fx-research
+git log --oneline -5
 git push fork fx-research
 ```
 
 ## Setup
 
 - Project root: this folder
-- Files: `mt5_client.py`, `test_connection.py`, `.gitignore`, `README.md`
+- Files: `mt5_client.py`, `test_connection.py`, `.gitignore`, `README.md`, `config/setup.yaml`
 - Linux Python needs `mt5linux` (do **not** use system `/usr/bin/python` 3.14)
 - Reuse the existing MQL-PYTHON venv (Python 3.12 + `mt5linux==1.0.11`):
 
@@ -64,8 +68,26 @@ cd "/run/media/me2/shared-data/vaults/PKM/02 - Projects/machine-learning-for-tra
 | 2026-09-04 | MQL-PYTHON `.venv` (3.12) | `FAIL: [Errno 111] Connection refused` (bridge down) |
 | 2026-09-04 | MQL-PYTHON `.venv` (3.12) + bridge up | `OK: connected` — version `(500, 6140, '21 Aug 2026')`, account logged in |
 
-**Status:** Stage 0 complete — committed on `fx-research`, pushed to `fork`
+**Status:** complete — on `fx-research` / `fork`
+
+### Stage 0.5 — Strategy setup config
+
+**Goal:** Declare FTMO/MT5 research setup (single source of truth before data pull).
+
+**File:** [`config/setup.yaml`](config/setup.yaml)
+
+| Field | Choice |
+|-------|--------|
+| Idea | range breakout + ATR (Donchian lookback 20, ATR 14) |
+| Baseline | binary `breakout` / `no_trade` (`false_breakout` deferred) |
+| Timeframe | H4 (provisional — needs feasibility) |
+| Universe | same 20 G10 pairs as `case_studies/fx_pairs` / `01_feasibility_analysis.py` (MT5 names: `EURUSD`, …) |
+| Account | FTMO $10k Challenge 2-Step, leverage 100, `initial_cash: 10000` |
+| Venue | MT5 bridge `127.0.0.1:18812`, server `FTMO-Server3` |
+
+**Status:** complete — config + README on `fx-research` / `fork`
 
 ### Next (planned)
 
-- Stage 1: pull price / bar data into `data/` (gitignored)
+- Stage 1: H4 feasibility (cost floor / breadth) + pull OHLCV into `data/ohlcv_h4/` (gitignored)
+- Confirm broker symbol suffixes (`EURUSD` vs `EURUSDm`) via `symbol_info`

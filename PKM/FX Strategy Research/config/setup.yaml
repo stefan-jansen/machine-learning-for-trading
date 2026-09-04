@@ -1,0 +1,186 @@
+# FX Strategy Research — setup (FTMO / MetaTrader 5)
+# Inspired by case_studies/fx_pairs/config/setup.yaml, localized for this workspace.
+# H4 cadence is provisional until Stage 1 feasibility confirms it.
+
+strategy_id: fx_range_breakout_atr
+setup_version: v1
+idea: range_breakout_atr
+baseline:
+  model: binary_classifier
+  classes: [breakout, no_trade]
+  deferred: false_breakout   # third class / filter — not in v1 baseline
+
+# ---------------------------------------------------------------------------
+# Venue & account (from Stage 0 smoke test; rules are challenge defaults)
+# ---------------------------------------------------------------------------
+venue:
+  platform: MetaTrader5
+  broker: FTMO
+  server: FTMO-Server3
+  company: FTMO Global Markets Ltd
+  data_source: mt5_bridge     # not OANDA; bars pulled via mt5_client / mt5linux
+
+mt5:
+  # Linux: Wine RPyC bridge. Windows: official MetaTrader5 package (host/port unused).
+  host: 127.0.0.1
+  port: 18812
+  timeframe: H4              # provisional — confirm in feasibility
+  # MT5 timeframe enum when using copy_rates_*: TIMEFRAME_H4
+  lookback_bars: 5000        # Stage 1 pull default; raise after feasibility
+
+account:
+  challenge: ftmo_2step
+  phase: challenge_1         # challenge_1 | challenge_2 | funded (update when advancing)
+  name: "$10k FTMO Challenge 2-Step"
+  currency: USD
+  leverage: 100
+  initial_cash: 10_000       # challenge starting balance (not IBKR 100k)
+  # Soft limits for research / risk overlays later — verify against live FTMO terms.
+  rules:
+    profit_target_pct:
+      challenge_1: 0.10
+      challenge_2: 0.05
+    max_daily_loss_pct: 0.05
+    max_loss_pct: 0.10
+    min_trading_days: 4
+
+# ---------------------------------------------------------------------------
+# Universe — same G10 set as case_studies/fx_pairs (feasibility source of truth)
+# Symbol names are MT5-style (no underscore). Confirm exact broker suffixes
+# (e.g. EURUSD vs EURUSDm) after Stage 1 symbol_info() probe.
+# ---------------------------------------------------------------------------
+universe:
+  symbols:
+    - AUDJPY
+    - AUDNZD
+    - AUDUSD
+    - CADJPY
+    - CHFJPY
+    - EURAUD
+    - EURCAD
+    - EURCHF
+    - EURGBP
+    - EURJPY
+    - EURUSD
+    - GBPAUD
+    - GBPCHF
+    - GBPJPY
+    - GBPUSD
+    - NZDJPY
+    - NZDUSD
+    - USDCAD
+    - USDCHF
+    - USDJPY
+  n_assets: 20
+  breadth_floor: 20          # same discipline as fx_pairs feasibility
+
+decision:
+  cadence: h4_bar_close      # provisional
+  snapshot: h4_close
+  execution_delay: next_bar_open
+  session_calendar: FX_24x5  # MT5 FX; not CME_FX daily rollover
+
+# ---------------------------------------------------------------------------
+# Strategy mapping — range breakout / ATR (per-pair, not cross-sectional rank)
+# ---------------------------------------------------------------------------
+mapping:
+  class: range_breakout_atr
+  position_state_space: long_flat_short   # breakout direction; no_trade = flat
+  entry_logic: |
+    Range from prior bars (point-in-time: no look-ahead).
+    Breakout when close clears range high/low by a multiple of ATR.
+    Baseline label: breakout vs no_trade (skip weak / inside-range bars).
+  range:
+    method: donchian          # rolling high/low; ATR used for strength / buffer
+    lookback_bars: 20         # H4 bars (~3.3 trading days); tune in feasibility
+  atr:
+    period: 14
+    breakout_buffer_atr: 0.0  # 0 = touch band; raise to demand extension
+  sizing: risk_pct_equity     # FTMO-aware; concrete % in backtest stage
+  risk_per_trade_pct: 0.005   # 0.5% equity placeholder — under daily/overall caps
+
+execution:
+  initial_cash: 10_000
+  share_type: lots            # MT5 FX lots, not integer share semantics
+  min_lot: 0.01
+  lot_step: 0.01
+  allocator_lookback: 63      # bars on H4 (~10.5 trading days); revisit after TF lock
+
+costs:
+  class: material
+  components: [spread, commission, swap]
+  # Rough FTMO/retail bands in bps one-way; replace with symbol_info spread samples.
+  spread_bps:
+    major_pairs: [1, 4]
+    cross_pairs: [3, 10]
+  note: Round-trip ≈ 2× one-way; calibrate on live MT5 ticks/spreads in Stage 1.
+
+# ---------------------------------------------------------------------------
+# Labels — binary baseline first; false-breakout deferred
+# ---------------------------------------------------------------------------
+labels:
+  primary: breakout_vs_no_trade
+  type: binary_classification
+  positive_class: breakout
+  negative_class: no_trade
+  # Holding / forward window on H4 grid (tune with cost exceedance in feasibility).
+  forward_horizon_bars: 6     # ~1 trading day on H4; provisional
+  buffer_bars: 1
+  deferred_variants:
+    - false_breakout          # later: failed breakout that re-enters range
+  # Regression-style returns kept as research variants after baseline.
+  research_variants:
+    - fwd_ret_6bar
+    - fwd_ret_30bar
+
+# ---------------------------------------------------------------------------
+# Features — breakout / range / ATR family (Stage 3+); windows in H4 bars
+# ---------------------------------------------------------------------------
+features:
+  windows:
+    donchian: [20]
+    atr: [14]
+    range_width_atr: [20]
+    consolidation_age: [20]
+    realized_vol: [14, 42]
+    rsi: [14]
+  families:
+    - name: range_breakout
+      role: signal
+      hypothesis: Close beyond a prior range, scaled by ATR, continues for a few H4 bars
+      inputs: H4 OHLC
+      lookback: 20
+      lag: 1                  # bands from prior bars only
+      failure_mode: false breakout back into range (deferred label)
+    - name: volatility_state
+      role: state
+      hypothesis: ATR and range width condition whether a breakout is tradable vs noise
+      inputs: H4 OHLC
+      lookback: 42
+      lag: 0
+      failure_mode: lag after a vol shock
+
+evaluation:
+  # Placeholders until H4 feasibility locks cadence and cost floor.
+  n_splits: 8
+  train_size: P2Y
+  val_size: P6M
+  holdout_start: "2024-01-01"
+  holdout_end: "2025-12-31"
+  calendar: FX
+  periods_per_year: 1560     # ~252 * 6 H4 bars / trading week; revise if weekend policy differs
+  status: provisional_pending_h4_feasibility
+
+modeling:
+  baseline:
+    task: binary_classification
+    libraries: [lightgbm, sklearn]
+    metric: [auc, precision_at_breakout, brier]
+  deferred:
+    - false_breakout_filter
+
+# Paths relative to this project root (PKM/FX Strategy Research/)
+paths:
+  data_dir: data/
+  ohlcv_dir: data/ohlcv_h4/
+  run_log_dir: run_log/
