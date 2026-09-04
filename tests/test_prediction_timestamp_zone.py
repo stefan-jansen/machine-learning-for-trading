@@ -83,7 +83,9 @@ def test_a_pandas_frame_is_localized_in_place_rather_than_skipped() -> None:
 
     localized = _timestamps_as_utc(frame)
 
-    assert str(localized["timestamp"].dtype) == "datetime64[ns, UTC]"
+    # The unit is pandas' own and differs across versions; the zone is what this pins.
+    assert localized["timestamp"].dt.tz is not None
+    assert str(localized["timestamp"].dtype).endswith(", UTC]")
     assert pl.from_pandas(localized).schema["timestamp"].time_zone == "UTC"
     # In place, not converted: the caller's frame type survives.
     assert isinstance(localized, pd.DataFrame)
