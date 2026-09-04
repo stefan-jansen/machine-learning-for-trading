@@ -868,7 +868,23 @@
 19_risk_management/11_systematic_risk_sweep:
   timeout: 900
 20_strategy_synthesis/00_holdout_predictions:
-  skip_reason: Requires trained model registry (not available in CI test data)
+  # No `skip: true` ever stood above the skip_reason this replaces, so the notebook has
+  # always run; the reason was describing a state that had stopped being true. It also
+  # carried no timeout, so it inherited the 300s default while 01 and 03 next to it carry
+  # 600 - it had never been priced, only kept under the default by work it was not doing.
+  #
+  # It is doing that work now. Until #746 the seeded fixtures gave cme_futures' two cohort
+  # leaders a fabricated entity grid (the RuntimeWarning naming b099266d758c and
+  # fbeb779467d5 is in the last green run's log), the holdout retrain found nothing real to
+  # fit, and the cell finished in about 135s while stepping over the case study. Seeding
+  # those leaders from the case study's own label parquet makes the retrain run: measured
+  # here at 350s for cme_futures and 60s for sp500_equity_option_analytics against 426s for
+  # the whole loop, with every other case study in single figures. Measured at 590s in the
+  # ml4t image with the wider fixture panels of #749 on top.
+  #
+  # 1800s is three times the widest of those against a runner slower than either machine,
+  # the same ratio 11d_conditional_autoencoder's cap carries, and it absorbs #749.
+  timeout: 1800
 20_strategy_synthesis/01_aggregate_synthesis:
   parameters:
     # Isolated test registry has no nasdaq out-of-band cost-feasible carrier,
@@ -1030,7 +1046,6 @@
   long_running: true
   parameters:
     MAX_COMPANIES: 3
-  skip_reason: Needs GPU + Neo4j
   timeout: 1200
 24_autonomous_agents/01_react_reasoning:
   parameters:
