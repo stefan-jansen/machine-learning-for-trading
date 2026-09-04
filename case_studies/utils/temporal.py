@@ -407,6 +407,7 @@ def walk_forward_feature(
     apply: Callable[[Any, np.ndarray], np.ndarray],
     n_features: int,
     window: int | None = None,
+    freeze_after: int | None = None,
     on_fit_error: str = "raise",
 ) -> np.ndarray:
     """Emit a fitted feature over one series, refitting on a schedule instead of per fold.
@@ -420,6 +421,12 @@ def walk_forward_feature(
     history, which is what cme_futures' ARIMA does - or an integer for a rolling one of that many
     observations, for a model whose parameters are expected to drift.
 
+    ``freeze_after`` is the index past which the walk stops re-estimating and keeps applying the
+    last parameters it fitted. It exists for the holdout: a coefficient refitted on holdout
+    sessions is a parameter estimated on the holdout however causal the recursion around it
+    looks, so the last estimate before the holdout opens is the one that speaks for all of it.
+    cme_futures' ARIMA already draws this distinction with a second ``refit=False`` walk.
+
     ``on_fit_error="skip"`` leaves a block null and carries on with the previous parameters where
     a single estimate fails to converge; the default raises, because a model that cannot be
     fitted on most of its blocks is not a feature.
@@ -430,14 +437,21 @@ def walk_forward_feature(
     if on_fit_error not in ("raise", "skip"):
         raise ValueError(f"on_fit_error must be 'raise' or 'skip', got {on_fit_error!r}")
     out = np.full((len(X), n_features), np.nan, dtype=float)
+    frozen: Any = None
     for fit_end, emit_end in refit_boundaries(len(X), burnin, refit_every):
-        fit_start = 0 if window is None else max(0, fit_end - window)
-        try:
-            model = fit(X[fit_start:fit_end])
-        except Exception:
-            if on_fit_error == "raise":
-                raise
-            continue
+        if freeze_after is not None and fit_end > freeze_after:
+            if frozen is None:
+                continue
+            model = frozen
+        else:
+            fit_start = 0 if window is None else max(0, fit_end - window)
+            try:
+                model = fit(X[fit_start:fit_end])
+            except Exception:
+                if on_fit_error == "raise":
+                    raise
+                continue
+            frozen = model
         values = np.asarray(apply(model, X[:emit_end]), dtype=float)
         if len(values) != emit_end:
             raise ValueError(

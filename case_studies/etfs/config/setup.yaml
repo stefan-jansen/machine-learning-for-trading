@@ -493,3 +493,40 @@ features:
       failure_mode: >-
         the revised Treasury history, not the initial release, so the lag is right for
         publication timing but not for revisions
+
+# What `04_model_based_features` decides, declared here for the same reason the
+# feature windows above are: an estimation window is part of a fitted feature's
+# definition, so it belongs where the definition lives rather than inside the
+# notebook that runs it. Every count is in trading sessions.
+#
+# A fitted feature is bounded by this schedule and not by a cross-validation
+# fold. The parameters behind a value are estimated from sessions strictly
+# before it, refreshed on the cadence below, and the same value is produced
+# whichever fold later selects the row - so the artifact carries no fold column.
+model_based:
+  hmm:
+    # Calm and stressed. Two states is what the transition matrix and the
+    # regime means below are read as, and section D reports them by name.
+    n_states: 2
+    # Sessions of market history spent before the first regime model is fitted.
+    # Three years. A two-state chain has to see both states switch several times
+    # before its transition matrix means anything, and the market series is one
+    # series rather than a panel, so this is paid once for the whole notebook.
+    # The panel starts 2007-01-03 and the earliest fold trains from 2013-01-17,
+    # so the burn-in is spent 1,521 sessions before any fold needs a value.
+    burnin: 756
+    # How often the chain is re-estimated. A quarter. Regime parameters are the
+    # slowest-moving thing this notebook fits, and each estimate costs
+    # `n_restarts` expectation-maximization searches.
+    refit_every: 63
+    # Expectation-maximization reaches a local optimum, so each fit is repeated
+    # from this many starting points and the highest training likelihood is kept.
+    n_restarts: 10
+  garch:
+    # Sessions of an ETF's own returns before its variance model is fitted. Two
+    # years. Below that the persistence term is estimated from too few
+    # volatility cycles, and it is the term the feature is most sensitive to.
+    burnin: 504
+    # Monthly. Faster than the regime model because a variance model tracks a
+    # level that moves, which is the property the feature exists to report.
+    refit_every: 21
