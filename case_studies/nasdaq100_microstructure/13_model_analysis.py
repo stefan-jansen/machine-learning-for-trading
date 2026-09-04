@@ -1369,11 +1369,12 @@ if conformal_df.height > 0:
 # and nothing in this table tests whether the widths rank one symbol's risk against
 # another correctly. Read it as a residual-scale diagnostic.
 #
-# Width per standard deviation says what that coverage cost. An interval that
-# reaches nominal coverage only by spanning several standard deviations of the
-# return distribution is honest and nearly useless for sizing. Read the two
-# together: a model is usable for interval-aware sizing only when it holds its
-# coverage at a width that still distinguishes one prediction from another.
+# Width per standard deviation says what that coverage cost. A width that reaches
+# nominal coverage only by spanning several standard deviations of the return
+# distribution is honest and says little. Read the two together as a description
+# of the residual scale: covered at what width. Neither column measures how the
+# widths differ across symbols, which is the only thing the allocator reads, so
+# neither settles whether a family can be sized on them.
 #
 # A family can rank well and fail this badly. Ranking depends only on the order
 # of the predictions; coverage depends on the scale of a symbol's past residuals

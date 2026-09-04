@@ -1145,10 +1145,16 @@ else:
 # An information coefficient says whether the ordering is right. It says nothing about
 # whether a model knows how wrong it is likely to be. The width measured here is the one
 # the `conformal_weighted` allocator sizes positions with: calibrated per firm on every
-# absolute residual known at `t - h`, where `h` is this label's horizon in data steps,
-# falling back to a quantile pooled over every firm where one has too few residuals of
-# its own. A decision is covered when its absolute residual falls inside that half-width,
-# and `n_uncalibrated` counts the decisions that cleared no warm-up.
+# absolute residual known at `t - h`, falling back to a quantile pooled over every firm
+# where one has too few residuals of its own. A decision is covered when its absolute
+# residual falls inside that half-width, and `n_uncalibrated` counts the decisions that
+# cleared no warm-up.
+#
+# `h` is the sizing lag, and for this case study it is one step while the label's horizon
+# is zero. The two differ here and nowhere else: a row is dated by the month the return was
+# earned, so nothing about the outcome reaches forward past its own row - but the position
+# that earned it was chosen at the end of the month before, so that row's residual is not
+# available to size it.
 #
 # Two numbers follow. Empirical coverage below nominal means the intervals are too
 # narrow and the model is overconfident. Empirical coverage above nominal means the
