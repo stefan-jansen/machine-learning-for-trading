@@ -479,7 +479,22 @@ def open_study(
     workspace = Path(workspace).expanduser().resolve()
     case_dir = release_root / "case_studies" / case_study
     generated = tuple(case_dir / name for name in ("features", "labels", "run_log"))
-    if not all(path.is_symlink() for path in generated):
+    linked = all(path.is_symlink() for path in generated)
+    # Say which branch this took. The two read their inputs from different places, and which
+    # one runs is decided by the checkout rather than by anything the caller asked for: a
+    # maintainer worktree symlinks its generated directories to shared artifacts and reads
+    # them in place, a CI checkout has real directories and adopts the workspace. Neither is
+    # wrong. A run that does not say which it took is, because the same notebook then reports
+    # different inputs on the two and nothing in the log tells them apart.
+    print(
+        f"open_study({case_study}): generated directories under {case_dir} are "
+        + (
+            "symlinks - reading inputs in place, writes redirected to the workspace"
+            if linked
+            else "real directories - the workspace is the study root"
+        )
+    )
+    if not linked:
         return Study.open(
             case_study,
             workspace=workspace,
