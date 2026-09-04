@@ -86,6 +86,7 @@ from case_studies.utils.feature_engineering import (
     quantile_profile,
 )
 from utils import style
+from utils.artifact_specs import resolve_label_buffer_unit
 from utils.cv_splits import generate_cv_splits, load_evaluation_config
 from utils.paths import get_case_study_dir
 from utils.style import (  # COLORS registers the ml4t Plotly template on import
@@ -376,6 +377,11 @@ cv_folds = generate_cv_splits(
     features.select(DATE_COL),
     case_study_id=CASE_STUDY_ID,
     label_buffer=str(_setup["labels"]["buffer"]),
+    # `ret_to_expiry` resolves on an expiration date, so its buffer is calendar days and
+    # `setup.yaml` declares it. The splitter defaults to sessions, and a caller that does not
+    # pass the declaration derives boundaries that disagree with the ones the models were
+    # fitted on - the folds this notebook evaluates over have to be those folds.
+    buffer_unit=resolve_label_buffer_unit(CASE_STUDY_ID, str(_setup["labels"]["primary"]), _setup),
 )
 evaluation_config = load_evaluation_config(CASE_STUDY_ID)
 HOLDOUT_START = pl.Series([str(evaluation_config["holdout_start"])]).str.to_date().item()
