@@ -547,7 +547,20 @@ def _backfill_candidate_set_names(db: sqlite3.Connection) -> None:
 
     One binding per existing row, carrying that row's lineage, so a migrated registry resolves
     every name it resolved before.
+
+    Probed with a read before writing, and this matters more than it looks. `_open_registry` is
+    on every path that touches a registry, so an unconditional `INSERT ... SELECT` took the
+    write lock on every open - and with `busy_timeout` at 60s, one contended open blocks for a
+    minute rather than proceeding. The probe is a covering read that answers instantly and
+    leaves the lock alone once the backfill has run, which is every open after the first.
     """
+    pending = db.execute(
+        "SELECT EXISTS (SELECT 1 FROM candidate_sets s WHERE NOT EXISTS ("
+        "  SELECT 1 FROM candidate_set_names n"
+        "  WHERE n.name = s.name AND n.set_hash = s.set_hash))"
+    ).fetchone()[0]
+    if not pending:
+        return
     db.execute(
         "INSERT OR IGNORE INTO candidate_set_names "
         "(name, set_hash, supersedes_hash, created_at, git_commit) "
