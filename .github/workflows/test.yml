@@ -592,6 +592,7 @@ jobs:
           .venv/bin/python -m pytest \
             tests/test_pm_helpers.py \
             tests/test_fork_pull_request_gating.py \
+            tests/test_env_matches_lock.py \
             tests/test_create_test_data.py \
             tests/test_generate_intermediates.py \
             tests/test_sample_registry_for_tests.py \
@@ -959,6 +960,18 @@ jobs:
       - name: Install git (for checkout inside container)
         run: apt-get update && apt-get install -y git
       - uses: actions/checkout@v6
+      # The image is built from uv.lock and drifts from it silently the moment the
+      # lock moves. It carried ml4t-models 0.1.0a4 for eleven days after the repo
+      # declared >=0.1.0a6, so public CI measured a dependency set the repository
+      # did not declare - and the notebook that failed on it read as a numerical
+      # problem, which cost four rounds of investigation aimed at the notebook.
+      #
+      # This is the check that would have caught it on the day the pin moved. It
+      # runs first because everything after it is only evidence about this commit
+      # if it passes: a green job in a drifted image is not evidence of green under
+      # the declared lock.
+      - name: The image's installed distributions match uv.lock
+        run: python .github/scripts/check_env_matches_lock.py
       - name: Run modelling-environment unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}
