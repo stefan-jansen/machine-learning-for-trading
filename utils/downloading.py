@@ -379,33 +379,54 @@ def last_complete_daily_bar(
     now: dt.datetime | None = None,
     exchange_tz: str = "America/New_York",
 ) -> dt.date:
-    """The last date a daily fetch may ask a vendor for.
+    """The newest date a daily fetch should ask a vendor for.
 
-    A daily bar for the session in progress is not a bar. Yahoo returns the
-    current exchange date with accumulating volume and null open/high/low/close
-    until the bar consolidates some hours after the close, and ml4t-data's
-    provider rejects a bar whose prices are null::
+    A daily bar for the session in progress is not a bar. Yahoo publishes the
+    current exchange date as a row with accumulating volume and null
+    open/high/low/close, and ml4t-data's provider rejects a bar whose prices are
+    null::
 
         DataValidationError: yahoo: Column 'open' contains 1 null values
 
-    The window that costs is the one after the close. Measured against the public
-    repository's `ch02-03` job across 2026-09-02 and 2026-09-03: green on every run
-    started between 02:53Z and 20:29Z, red on every run started between 23:55Z and
-    02:21Z. During the session the vendor returns no row for the current date at
-    all; from the 16:00 New York close until the bar consolidates - some six hours,
-    every trading day - it returns the volume-only row, on a reader's machine as
-    much as on a runner. The bound is the calendar date before the current exchange
-    date. When that date is a weekend or a holiday the vendor returns the last
-    session before it, which is the same bound.
+    So the newest date worth asking for is the one before the current exchange
+    date. Exchange time, not UTC: at 22:00 in New York the UTC date is already
+    tomorrow, so a UTC-derived bound still asks for the session that just closed.
+    When that date is a weekend or a holiday the vendor returns the last session
+    before it, which is the same bound.
 
-    Exchange time, not UTC: at 22:00 in New York the UTC date is already
-    tomorrow, so a UTC-derived bound still asks for the session that just closed
-    and that the vendor has not consolidated.
+    This is a starting point and not a guarantee, which is why
+    :func:`update_through_last_complete_bar` retreats from it rather than trusting
+    it. The placeholder row usually resolves a few hours after the close - the
+    public repository's `ch02-03` job was red on runs started between 23:55Z and
+    02:21Z and green from 02:53Z on 2026-09-02 - but it does not always: Yahoo's
+    2026-09-03 daily bar for AAPL was still `NaN, NaN, NaN, NaN, 37197362` at
+    04:20Z the next day, eight and a half hours after the close. No calendar rule
+    can tell those two apart.
     """
     from zoneinfo import ZoneInfo
 
     now = now or dt.datetime.now(dt.UTC)
     return now.astimezone(ZoneInfo(exchange_tz)).date() - dt.timedelta(days=1)
+
+
+def _rejected_as_incomplete(error: BaseException) -> bool:
+    """Whether the provider refused the window rather than failing to reach it.
+
+    `FetchManager.fetch_raw` re-raises a provider error as a bare `Exception`
+    with the original attached, so the class that says *why* is on `__cause__`.
+    A network or symbol error is not a reason to ask for a shorter window.
+    """
+    try:
+        from ml4t.data.core.exceptions import DataValidationError
+    except ImportError:  # pragma: no cover - ml4t-data is a hard dependency here
+        return False
+    return isinstance(error.__cause__ or error, DataValidationError)
+
+
+# How many days back to walk before giving up and re-raising. Five covers a long
+# weekend plus a holiday; a vendor further behind than that is not a bar the
+# caller should paper over.
+MAX_RETREAT_DAYS = 5
 
 
 def update_through_last_complete_bar(
@@ -418,13 +439,25 @@ def update_through_last_complete_bar(
     asset_class: str = "equities",
     frequency: str = "daily",
     through: dt.date | None = None,
+    max_retreat_days: int = MAX_RETREAT_DAYS,
 ) -> int:
     """Merge every bar since the last stored one into storage; return the row count.
 
     This is the delta ``DataManager.update()`` performs, with the one difference
     that decides whether it runs at all: ``update()`` fetches to
     ``datetime.now(UTC)`` and so always asks for the session in progress, which
-    the provider rejects. See :func:`last_complete_daily_bar`.
+    the provider rejects.
+
+    The end of the window is found rather than computed. It starts at
+    :func:`last_complete_daily_bar` and steps back a day at a time while the
+    provider refuses the window as incomplete, so the fetch lands on the newest
+    bar the vendor has actually published. A calendar rule cannot do this: the
+    placeholder row usually resolves a few hours after the close and sometimes
+    does not resolve at all, and both look identical from a date.
+
+    An error that is not the provider refusing the data - a network failure, an
+    unknown symbol - is raised immediately; a refusal that survives every
+    candidate is re-raised as it was first seen.
 
     ``lookback_days`` of overlap is refetched and deduplicated on ``timestamp``,
     so a bar the vendor revised after it was first stored is replaced rather than
@@ -439,11 +472,27 @@ def update_through_last_complete_bar(
 
     last_stored = stored["timestamp"].max().date()
     start = last_stored - dt.timedelta(days=lookback_days)
-    end = through or last_complete_daily_bar()
-    if start > end:
+    newest = through or last_complete_daily_bar()
+
+    fresh = None
+    refusal: BaseException | None = None
+    for step in range(max_retreat_days + 1):
+        end = newest - dt.timedelta(days=step)
+        if start > end:
+            break
+        try:
+            fresh = manager.fetch(symbol, start.isoformat(), end.isoformat(), provider=provider)
+            break
+        except Exception as error:
+            if not _rejected_as_incomplete(error):
+                raise
+            refusal = refusal or error
+
+    if fresh is None:
+        if refusal is not None:
+            raise refusal
         return stored.height
 
-    fresh = manager.fetch(symbol, start.isoformat(), end.isoformat(), provider=provider)
     merged = (
         pl.concat([stored, fresh.select(stored.columns)], how="vertical")
         .unique(subset=["timestamp"], keep="last")
@@ -454,7 +503,7 @@ def update_through_last_complete_bar(
     # The block ml4t-data's own `update_manager._write_updated` writes, field for
     # field. `preserve_metadata=True` keeps the rest of the load's block, so anything
     # left out here still describes the initial load - `18_data_management` prints
-    # `last_updated`, and `BulkManager.find_stale_symbols` reads the nested
+    # `last_updated`, and `BulkManager.get_stale_symbols` reads the nested
     # `attributes.last_update` and treats a symbol with none as stale. Passing
     # `last_updated=None` clears the inherited value so the commit's own fresh UTC
     # stamp is what a reader gets.

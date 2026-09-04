@@ -394,14 +394,17 @@ fig.show()
 # %% [markdown]
 # ### Update a Symbol
 #
-# The delta is everything since the last stored bar, bounded at the last
-# session the vendor has finished. That bound is not optional: Yahoo returns
-# the current exchange date as a row with accumulating volume and no
-# open/high/low/close until the bar consolidates hours after the close, and
-# the provider rejects a bar whose prices are null. `DataManager.update()`
-# fetches to `datetime.now()`, so it asks for that row on every weekday;
-# `update_through_last_complete_bar` asks for the same delta and stops one day
-# short of it.
+# The delta is everything since the last stored bar, up to the newest bar the
+# vendor has actually published. That bound is not optional: Yahoo returns the
+# current exchange date as a row with accumulating volume and no
+# open/high/low/close, and the provider rejects a bar whose prices are null.
+# `DataManager.update()` fetches to `datetime.now()`, so it asks for that row on
+# every trading day. `update_through_last_complete_bar` asks for the same delta
+# and finds the end of the window instead of computing it - it steps back a day
+# at a time while the provider refuses the window, because the placeholder row
+# usually resolves a few hours after the close and sometimes does not. A refused
+# window is logged at error level, so an error line followed by a row count is
+# the retreat working rather than a failure.
 
 # %%
 # Fetch every bar since the last stored one, up to the last complete session.

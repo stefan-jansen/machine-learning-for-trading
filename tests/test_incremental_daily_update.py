@@ -25,6 +25,7 @@ import datetime as dt
 
 import polars as pl
 import pytest
+from ml4t.data.core.exceptions import DataValidationError, NetworkError
 
 from utils.downloading import last_complete_daily_bar, update_through_last_complete_bar
 
@@ -61,14 +62,32 @@ class FakeStorage:
 
 
 class FakeManager:
-    """Records the window it was asked for and returns bars covering it."""
+    """Records the window it was asked for and returns bars covering it.
 
-    def __init__(self, response: pl.DataFrame | None = None) -> None:
+    ``refuse_through`` makes every window ending on or after that date raise the
+    way the provider does when the vendor has not published the last bar:
+    `FetchManager.fetch_raw` re-raises as a bare `Exception` with the
+    `DataValidationError` on `__cause__`.
+    """
+
+    def __init__(
+        self,
+        response: pl.DataFrame | None = None,
+        refuse_through: dt.date | None = None,
+        error: BaseException | None = None,
+    ) -> None:
         self.response = response if response is not None else _bars([])
+        self.refuse_through = refuse_through
+        self.error = error
         self.calls: list[tuple[str, str, str]] = []
 
     def fetch(self, symbol, start, end, provider=None):
         self.calls.append((symbol, start, end))
+        if self.error is not None:
+            raise self.error
+        if self.refuse_through and dt.date.fromisoformat(end) >= self.refuse_through:
+            cause = DataValidationError("yahoo", "Column 'open' contains 1 null values")
+            raise Exception(f"Failed to fetch data for {symbol}: {cause}") from cause
         return self.response
 
 
@@ -245,3 +264,73 @@ def test_the_refreshed_metadata_survives_a_real_storage_round_trip(tmp_path) -> 
     assert manager._bulk_manager.get_stale_symbols(max_age_days=1) == [], (
         "the symbol is still reported stale after an update that just wrote it"
     )
+
+
+# --- the end of the window is found, not computed ----------------------------
+
+
+def test_the_window_retreats_until_the_vendor_publishes_a_complete_bar() -> None:
+    """Measured on Yahoo, 2026-09-04T04:20Z: the 2026-09-03 AAPL daily bar was
+
+    still `NaN, NaN, NaN, NaN, 37197362` eight and a half hours after the close,
+    while the same window ending 2026-09-02 was clean on every column. The
+    placeholder usually resolves within hours and here it did not, and nothing in
+    a date distinguishes the two cases.
+    """
+    storage = FakeStorage({"equities/daily/AAPL": _bars(["2026-08-28"])})
+    manager = FakeManager(_bars(["2026-09-02"]), refuse_through=dt.date(2026, 9, 3))
+
+    rows = update_through_last_complete_bar(
+        manager, storage, "AAPL", provider="yahoo", through=dt.date(2026, 9, 3)
+    )
+
+    assert [end for _, _, end in manager.calls] == ["2026-09-03", "2026-09-02"]
+    assert rows == 2
+
+
+def test_a_refusal_that_survives_every_candidate_is_raised_as_first_seen() -> None:
+    storage = FakeStorage({"equities/daily/AAPL": _bars(["2026-08-01"])})
+    manager = FakeManager(refuse_through=dt.date(1900, 1, 1))
+
+    with pytest.raises(Exception, match="Column 'open' contains 1 null values"):
+        update_through_last_complete_bar(
+            manager,
+            storage,
+            "AAPL",
+            provider="yahoo",
+            through=dt.date(2026, 9, 3),
+            max_retreat_days=2,
+        )
+
+    assert len(manager.calls) == 3, "the walk is bounded by max_retreat_days"
+
+
+def test_a_failure_that_is_not_a_refusal_is_raised_at_once() -> None:
+    """A shorter window is no answer to a network error or an unknown symbol."""
+    storage = FakeStorage({"equities/daily/AAPL": _bars(["2026-08-28"])})
+    manager = FakeManager(error=NetworkError("yahoo", "connection reset"))
+
+    with pytest.raises(NetworkError):
+        update_through_last_complete_bar(
+            manager, storage, "AAPL", provider="yahoo", through=dt.date(2026, 9, 3)
+        )
+
+    assert len(manager.calls) == 1, "no retreat on an error the vendor did not refuse"
+
+
+def test_the_walk_stops_at_the_start_of_the_window() -> None:
+    """Retreating past the lookback start would ask for a window that is not one."""
+    storage = FakeStorage({"equities/daily/AAPL": _bars(["2026-09-03"])})
+    manager = FakeManager(refuse_through=dt.date(1900, 1, 1))
+
+    with pytest.raises(Exception, match="null values"):
+        update_through_last_complete_bar(
+            manager,
+            storage,
+            "AAPL",
+            provider="yahoo",
+            lookback_days=1,
+            through=dt.date(2026, 9, 3),
+        )
+
+    assert [end for _, _, end in manager.calls] == ["2026-09-03", "2026-09-02"]
