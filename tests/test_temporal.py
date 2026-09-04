@@ -13,8 +13,11 @@ value must not.
 from __future__ import annotations
 
 import warnings
+from datetime import datetime, timedelta
+from pathlib import Path
 
 import numpy as np
+import polars as pl
 import pytest
 from hmmlearn.hmm import GaussianHMM
 from threadpoolctl import threadpool_limits
@@ -25,6 +28,7 @@ from case_studies.utils.temporal import (
     relabel_states,
     sort_states_by_mean,
     sort_states_by_variance,
+    write_model_based,
 )
 
 # ---------------------------------------------------------------------------
@@ -257,3 +261,109 @@ def test_fit_hmm_kmeans_init_separates_the_two_regimes() -> None:
     model = fit_hmm_kmeans_init(X, n_states=2, random_state=42)
     calm, stressed = sort_states_by_variance(model)
     assert np.trace(model.covars_[calm]) < np.trace(model.covars_[stressed])
+
+
+# --- write_model_based -------------------------------------------------------------------
+#
+# Each guard gets a frame that violates exactly one thing, so a test that passes because the
+# helper rejected the frame for an unrelated reason would still fail on the message.
+
+
+def _emit_frame(n_symbols: int = 3, n_days: int = 6, folds: tuple[int, ...] = (0, 1)):
+    rows = []
+    for fold in folds:
+        for s in range(n_symbols):
+            for d in range(n_days):
+                rows.append(
+                    {
+                        "timestamp": datetime(2020, 1, 1) + timedelta(days=d),
+                        "symbol": f"S{s}",
+                        "fold": fold,
+                        "vol_state": float(d),
+                        "garch_sigma": float(d) * 0.5,
+                    }
+                )
+    return pl.DataFrame(rows)
+
+
+FEATURES = ["vol_state", "garch_sigma"]
+WRITE_KW = dict(
+    keys=["timestamp", "symbol"],
+    feature_columns=FEATURES,
+    time_column="timestamp",
+    written_by="tests/test_temporal.py",
+)
+
+
+def test_write_model_based_writes_the_artifact_and_its_sidecar(tmp_path: Path) -> None:
+    out = tmp_path / "model_based.parquet"
+    record = write_model_based(_emit_frame(), out, expected_folds=[0, 1], **WRITE_KW)
+    assert out.exists()
+    assert record["n_rows"] == 36
+    assert pl.read_parquet(out).height == 36
+
+
+def test_write_model_based_records_where_each_feature_starts(tmp_path: Path) -> None:
+    frame = _emit_frame().with_columns(
+        pl.when(pl.col("timestamp") < datetime(2020, 1, 3))
+        .then(None)
+        .otherwise(pl.col("garch_sigma"))
+        .alias("garch_sigma")
+    )
+    record = write_model_based(frame, tmp_path / "m.parquet", **WRITE_KW)
+    geometry = {(g["fold"], g["feature"]): g for g in record["fold_feature_geometry"]}
+    # The warm-up is visible in the sidecar rather than only in the values, which is the
+    # whole point: the defect it stands for left no trace anywhere before this.
+    assert geometry[(0, "garch_sigma")]["first_valid"].startswith("2020-01-03")
+    assert geometry[(0, "vol_state")]["first_valid"].startswith("2020-01-01")
+    assert geometry[(0, "garch_sigma")]["n_null"] == 6
+
+
+def test_write_model_based_rejects_a_duplicated_row_within_a_fold(tmp_path: Path) -> None:
+    frame = _emit_frame()
+    frame = pl.concat([frame, frame.head(1)])
+    with pytest.raises(ValueError, match="duplicate rows"):
+        write_model_based(frame, tmp_path / "m.parquet", **WRITE_KW)
+
+
+def test_write_model_based_allows_the_same_key_in_two_folds(tmp_path: Path) -> None:
+    # The identity is key + fold, not key: every fold re-emits the same panel rows.
+    record = write_model_based(_emit_frame(folds=(0, 1, 2)), tmp_path / "m.parquet", **WRITE_KW)
+    assert record["n_rows"] == 54
+
+
+def test_write_model_based_rejects_a_feature_that_is_null_across_a_whole_fold(
+    tmp_path: Path,
+) -> None:
+    frame = _emit_frame().with_columns(
+        pl.when(pl.col("fold") == 1).then(None).otherwise(pl.col("vol_state")).alias("vol_state")
+    )
+    with pytest.raises(ValueError, match="no value at all in a fold"):
+        write_model_based(frame, tmp_path / "m.parquet", **WRITE_KW)
+
+
+def test_write_model_based_rejects_a_fold_that_was_not_resolved(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="do not match the resolved folds"):
+        write_model_based(
+            _emit_frame(folds=(0, 1, 7)), tmp_path / "m.parquet", expected_folds=[0, 1], **WRITE_KW
+        )
+
+
+def test_write_model_based_rejects_a_null_key(tmp_path: Path) -> None:
+    frame = _emit_frame().with_columns(
+        pl.when(pl.int_range(pl.len()) == 0).then(None).otherwise(pl.col("symbol")).alias("symbol")
+    )
+    with pytest.raises(ValueError, match="null values in key"):
+        write_model_based(frame, tmp_path / "m.parquet", **WRITE_KW)
+
+
+def test_write_model_based_rejects_a_missing_declared_feature(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="missing declared columns"):
+        write_model_based(_emit_frame().drop("garch_sigma"), tmp_path / "m.parquet", **WRITE_KW)
+
+
+def test_write_model_based_writes_nothing_when_a_guard_fires(tmp_path: Path) -> None:
+    out = tmp_path / "m.parquet"
+    with pytest.raises(ValueError):
+        write_model_based(_emit_frame(folds=(0, 9)), out, expected_folds=[0, 1], **WRITE_KW)
+    assert not out.exists()
