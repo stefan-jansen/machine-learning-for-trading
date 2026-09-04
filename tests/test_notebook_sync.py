@@ -748,3 +748,174 @@ def test_stamp_accepts_a_notebook_whose_cells_only_have_execution_counts(
     nb = tmp_path / "nb.ipynb"
     nb.write_text(json.dumps(_notebook([cell])), encoding="utf-8")
     assert stamp_notebook(nb, "local-uv", parameters={})["production"] is True
+
+
+# --- The merge gate's scope: what a change is answerable for ------------------
+#
+# `check --since <base>` is what CI runs, so these cover the diff parse the scope is
+# built from. They use a real git repo because the mechanism *is* a `git diff`
+# invocation - rename detection, -z quoting and --diff-filter are the behaviour under
+# test, and a mocked diff would only assert that the mock returns what it was told to.
+
+
+def _git(repo: Path, *args: str) -> str:
+    import subprocess
+
+    return subprocess.run(
+        ["git", *args], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout
+
+
+def _repo_with_a_paired_notebook(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    (repo / "chapter").mkdir(parents=True)
+    _git(repo.parent, "init", "-q", str(repo))
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "chapter" / "demo.py").write_text("# %%\nX = 1\n")
+    (repo / "chapter" / "demo.ipynb").write_text(json.dumps({"cells": [], "metadata": {}}))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "paired notebook")
+    _git(repo, "branch", "-M", "main")
+    _git(repo, "checkout", "-qb", "topic")
+    return repo
+
+
+def test_deleting_the_source_and_keeping_the_notebook_is_reported(tmp_path, monkeypatch) -> None:
+    """check_all cannot see this by construction.
+
+    Its ``paired_py() is None`` branch cannot tell a notebook that was just orphaned
+    from one that was never paired, and tracked notebooks are deliberately unpaired,
+    so the distinction has to come from the diff.
+    """
+    repo = _repo_with_a_paired_notebook(tmp_path)
+    _git(repo, "rm", "-q", "chapter/demo.py")
+    _git(repo, "commit", "-qm", "drop the source, keep the render")
+    monkeypatch.setattr(notebook_provenance, "REPO_ROOT", repo)
+
+    orphaned = notebook_provenance.notebooks_orphaned_since("main")
+
+    assert len(orphaned) == 1
+    assert "chapter/demo.ipynb" in orphaned[0]
+    assert "chapter/demo.py" in orphaned[0]
+
+
+def test_moving_the_source_leaves_the_notebook_orphaned(tmp_path, monkeypatch) -> None:
+    """The case --no-renames exists for.
+
+    With rename detection on, git reports only the destination and the notebook
+    rendered from the old path goes unmentioned.
+    """
+    repo = _repo_with_a_paired_notebook(tmp_path)
+    _git(repo, "mv", "chapter/demo.py", "chapter/renamed.py")
+    _git(repo, "commit", "-qm", "move the source out from under the notebook")
+    monkeypatch.setattr(notebook_provenance, "REPO_ROOT", repo)
+
+    orphaned = notebook_provenance.notebooks_orphaned_since("main")
+
+    assert len(orphaned) == 1
+    assert "chapter/demo.ipynb" in orphaned[0]
+
+
+def test_deleting_both_halves_is_not_an_orphan(tmp_path, monkeypatch) -> None:
+    """Retiring a notebook properly must stay merge-able."""
+    repo = _repo_with_a_paired_notebook(tmp_path)
+    _git(repo, "rm", "-q", "chapter/demo.py", "chapter/demo.ipynb")
+    _git(repo, "commit", "-qm", "retire the notebook")
+    monkeypatch.setattr(notebook_provenance, "REPO_ROOT", repo)
+
+    assert notebook_provenance.notebooks_orphaned_since("main") == []
+
+
+def test_editing_a_paired_notebook_is_not_an_orphan(tmp_path, monkeypatch) -> None:
+    repo = _repo_with_a_paired_notebook(tmp_path)
+    (repo / "chapter" / "demo.py").write_text("# %%\nX = 2\n")
+    _git(repo, "commit", "-qam", "ordinary edit")
+    monkeypatch.setattr(notebook_provenance, "REPO_ROOT", repo)
+
+    assert notebook_provenance.notebooks_orphaned_since("main") == []
+
+
+def test_a_notebook_name_with_a_space_survives_the_diff_parse(tmp_path, monkeypatch) -> None:
+    """git quotes such a path under plain --name-only.
+
+    Splitting on whitespace then tears it into fragments matching no suffix - the
+    notebook leaves the gate's scope and passes unchecked, which is the one thing a
+    gate must never do.
+    """
+    repo = _repo_with_a_paired_notebook(tmp_path)
+    (repo / "chapter" / "my demo.py").write_text("# %%\nX = 1\n")
+    (repo / "chapter" / "my demo.ipynb").write_text(json.dumps({"cells": [], "metadata": {}}))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "a notebook with a space in its name")
+    monkeypatch.setattr(notebook_provenance, "REPO_ROOT", repo)
+
+    changed = [
+        str(p.relative_to(repo)) for p in notebook_provenance.notebooks_changed_since("main")
+    ]
+
+    assert "chapter/my demo.ipynb" in changed
+
+
+def test_editing_the_paired_py_puts_the_notebook_in_scope(tmp_path, monkeypatch) -> None:
+    """Changing the .py is exactly what makes the rendered notebook stale."""
+    repo = _repo_with_a_paired_notebook(tmp_path)
+    (repo / "chapter" / "demo.py").write_text("# %%\nX = 2\n")
+    _git(repo, "commit", "-qam", "edit the source only")
+    monkeypatch.setattr(notebook_provenance, "REPO_ROOT", repo)
+
+    changed = [
+        str(p.relative_to(repo)) for p in notebook_provenance.notebooks_changed_since("main")
+    ]
+
+    assert changed == ["chapter/demo.ipynb"]
+
+
+def test_a_notebook_nobody_touched_is_out_of_scope(tmp_path, monkeypatch) -> None:
+    """The whole point of scoping: one stale notebook elsewhere is somebody else's."""
+    repo = _repo_with_a_paired_notebook(tmp_path)
+    (repo / "unrelated.txt").write_text("hello\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "touch nothing paired")
+    monkeypatch.setattr(notebook_provenance, "REPO_ROOT", repo)
+
+    assert notebook_provenance.notebooks_changed_since("main") == []
+    assert notebook_provenance.notebooks_orphaned_since("main") == []
+
+
+def test_a_force_push_reverting_a_notebook_is_seen_only_against_the_previous_tip(
+    tmp_path, monkeypatch
+) -> None:
+    """The case ``--no-merge-base`` exists for.
+
+    A pull request asks what a branch adds on top of its base, so it diffs the merge
+    base. A push asks what the published tree *becomes*, and a force-push can revert a
+    notebook relative to the tip it replaces without the merge base ever seeing it: the
+    merge base of the new tip and the old one is their common ancestor, where the revert
+    has not happened yet.
+    """
+    repo = _repo_with_a_paired_notebook(tmp_path)
+    _git(repo, "checkout", "-q", "main")
+    fork = _git(repo, "rev-parse", "HEAD").strip()
+    (repo / "chapter" / "demo.py").write_text("# %%\nX = 2\n")
+    _git(repo, "commit", "-qam", "the edit that was published")
+    previous_tip = _git(repo, "rev-parse", "HEAD").strip()
+
+    # The force-push: main is rewound past the edit and re-grown, so the new tip does
+    # not descend from the old one and carries demo.py back at X = 1.
+    _git(repo, "reset", "-q", "--hard", fork)
+    (repo / "unrelated.txt").write_text("hello\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "rewrite main without the edit")
+    monkeypatch.setattr(notebook_provenance, "REPO_ROOT", repo)
+
+    merge_base_scope = [
+        str(p.relative_to(repo)) for p in notebook_provenance.notebooks_changed_since(previous_tip)
+    ]
+    assert merge_base_scope == [], "the revert is invisible from the common ancestor"
+
+    against_the_tip = [
+        str(p.relative_to(repo))
+        for p in notebook_provenance.notebooks_changed_since(previous_tip, merge_base=False)
+    ]
+    assert against_the_tip == ["chapter/demo.ipynb"]

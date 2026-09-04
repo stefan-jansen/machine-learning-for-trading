@@ -379,6 +379,41 @@ def isolated_model_output(tmp_path_factory):
     return test_root
 
 
+def absent_read_only_inputs(case_study: str) -> list[str]:
+    """The read-only inputs ``isolated_model_output`` found nothing to symlink.
+
+    ``config/`` is tracked. ``features/`` and ``labels/`` are not: they are stage
+    01-05 output, and a maintainer worktree reaches them through
+    ``case_studies/<case study>/{features,labels}`` symlinks into
+    ``~/ml4t/artifacts``. A CI runner has none of those (they are gitignored) and
+    neither does a freshly created worktree, so the fixture links nothing and every
+    notebook fails on its first read with "Missing prerequisites".
+
+    That produced 94 failures naming the notebooks, none of which said anything
+    about a notebook, and a suite whose reds are all environmental is a suite nobody
+    reads. A missing input is a skip, and the skip names the exact directories so it
+    cannot be mistaken for the notebook working.
+    """
+    prod = PROD_CS_DIR / case_study
+    return sorted(subdir for subdir in ("features", "labels") if not (prod / subdir).exists())
+
+
+def test_absent_read_only_inputs_reports_only_what_is_missing(tmp_path, monkeypatch) -> None:
+    """Two-sided, because a skip that swallows a present input is worse than a red.
+
+    The failure this guards is a skip condition that is always true: it would turn
+    all 94 notebook executions green-by-absence and nothing would say so.
+    """
+    monkeypatch.setattr("tests.test_model_registry.PROD_CS_DIR", tmp_path)
+    case = tmp_path / "demo_case"
+    case.mkdir()
+    assert absent_read_only_inputs("demo_case") == ["features", "labels"]
+    (case / "features").mkdir()
+    assert absent_read_only_inputs("demo_case") == ["labels"]
+    (case / "labels").mkdir()
+    assert absent_read_only_inputs("demo_case") == []
+
+
 LOG_PATH = Path("/tmp/model_registry_test.log")
 
 
@@ -463,6 +498,13 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
 
     if overrides.get("skip"):
         pytest.skip(overrides.get("skip_reason", "marked skip in overrides"))
+
+    if absent := absent_read_only_inputs(case_study):
+        pytest.skip(
+            f"case_studies/{case_study}/ has no {', '.join(absent)} to read - stage 01-05 "
+            "output, which a maintainer worktree reaches through a symlink into "
+            "~/ml4t/artifacts and which no CI runner and no fresh worktree has"
+        )
 
     if overrides.get("gpu"):
         try:

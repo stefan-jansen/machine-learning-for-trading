@@ -1212,6 +1212,13 @@ case_studies/cme_futures/05_evaluation:
   # evaluates, and the reduction bought nothing: the panel is 38k rows either way.
   timeout: 600
 case_studies/cme_futures/06_linear:
+  # 120s is measured here, not copied. Slowest of 5 green `cs-cme_futures` runs of
+  # .github/workflows/test.yml sampled 2026-09-04: 15.1s, 13% of the budget, against
+  # 20.9s for the gbm sibling on its 180. The premise that the linear stage does more work
+  # than its gbm sibling holds for us_equities_panel, whose reduction leaves all three
+  # labels x 16 configurations; it does not hold here, where the preview reduction cuts the
+  # grid and the gbm run is the slower of the two in every case study measured. The tier is
+  # the one-third line the raised entries elsewhere in this file state.
   parameters:
     # Restored after #560, same removal as 07_gbm below. This one has been passing on its 120s
     # budget rather than failing, which is the reason to fix it now: it is mispriced in exactly
@@ -1389,6 +1396,13 @@ case_studies/crypto_perps_funding/05_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/crypto_perps_funding/06_linear:
+  # 120s is measured here, not copied. Slowest of 5 green `cs-crypto_perps_funding` runs of
+  # .github/workflows/test.yml sampled 2026-09-04: 19.8s, 17% of the budget, against
+  # 27.9s for the gbm sibling on its 180. The premise that the linear stage does more work
+  # than its gbm sibling holds for us_equities_panel, whose reduction leaves all three
+  # labels x 16 configurations; it does not hold here, where the preview reduction cuts the
+  # grid and the gbm run is the slower of the two in every case study measured. The tier is
+  # the one-third line the raised entries elsewhere in this file state.
   timeout: 120
 case_studies/crypto_perps_funding/07_gbm:
   timeout: 180
@@ -1496,6 +1510,13 @@ case_studies/etfs/05_evaluation:
   # re-narrows the cross-section that 04 was widened to preserve.
   timeout: 900
 case_studies/etfs/06_linear:
+  # 120s is measured here, not copied. Slowest of 5 green `cs-etfs` runs of
+  # .github/workflows/test.yml sampled 2026-09-04: 16.1s, 13% of the budget, against
+  # 22.9s for the gbm sibling on its 180. The premise that the linear stage does more work
+  # than its gbm sibling holds for us_equities_panel, whose reduction leaves all three
+  # labels x 16 configurations; it does not hold here, where the preview reduction cuts the
+  # grid and the gbm run is the slower of the two in every case study measured. The tier is
+  # the one-third line the raised entries elsewhere in this file state.
   # #560 moved this notebook onto the shared boundary and removed `MAX_FOLDS: 2` /
   # `MAX_SYMBOLS: 5` without replacing them, leaving a timeout that had been measured
   # against them. `_collect_preview_reductions` defaults `max_symbols: 5` when nothing is
@@ -1580,7 +1601,14 @@ case_studies/etfs/10_dl_tsmixer:
     POPULATION_NAME: etfs-tsmixer-preview
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-  timeout: 180
+  # Budget raised from 180 on a CI measurement, not on another notebook's number.
+  # Slowest of 5 green `cs-etfs` runs of .github/workflows/test.yml sampled 2026-09-04:
+  # 103.1s, 57% of the old budget. A budget a green run already fills is one
+  # contention band away from a timeout that reads as a notebook defect. The line is a
+  # third, because the only measurement anyone has of that band is the
+  # us_equities_panel/06_linear timeout this rule comes from: a notebook that fit in 120s
+  # idle, did not fit in 120s loaded, and passed at 300.
+  timeout: 360
 case_studies/etfs/10a_dl_nlinear:
   # Without a block here the notebook runs as a preview that declares no reduction, which
   # `run_model_population` refuses outright, so an absent entry is a failed job rather than a
@@ -1636,7 +1664,14 @@ case_studies/etfs/11b_ipca:
       folds: [0, 1]
       max_symbols: 5
       n_factors: 1
-  timeout: 300
+  # Budget raised from 300 on a CI measurement, not on another notebook's number.
+  # Slowest of 5 green `cs-etfs` runs of .github/workflows/test.yml sampled 2026-09-04:
+  # 251.9s, 84% of the old budget. A budget a green run already fills is one
+  # contention band away from a timeout that reads as a notebook defect. The line is a
+  # third, because the only measurement anyone has of that band is the
+  # us_equities_panel/06_linear timeout this rule comes from: a notebook that fit in 120s
+  # idle, did not fit in 120s loaded, and passed at 300.
+  timeout: 780
 case_studies/etfs/11_latent_factors:
   gpu: true
   timeout: 900
@@ -1749,6 +1784,13 @@ case_studies/fx_pairs/05_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/fx_pairs/06_linear:
+  # 120s is measured here, not copied. Slowest of 5 green `cs-fx_pairs` runs of
+  # .github/workflows/test.yml sampled 2026-09-04: 17.2s, 14% of the budget, against
+  # 22.7s for the gbm sibling on its 180. The premise that the linear stage does more work
+  # than its gbm sibling holds for us_equities_panel, whose reduction leaves all three
+  # labels x 16 configurations; it does not hold here, where the preview reduction cuts the
+  # grid and the gbm run is the slower of the two in every case study measured. The tier is
+  # the one-third line the raised entries elsewhere in this file state.
   # Restores the reduction #560 removed. It dropped MAX_FOLDS: 2 / MAX_SYMBOLS: 5 when the
   # stage moved onto the shared boundary and left the timeout priced for them, so since
   # 2026-08-20 this has run all 8 folds over all 20 pairs on a budget measured against 2 and 5.
@@ -1780,7 +1822,14 @@ case_studies/fx_pairs/09_dl_tcn:
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
     N_EPOCHS: 1
-  timeout: 180
+  # Budget raised from 180 on a CI measurement, not on another notebook's number.
+  # Slowest of 5 green `cs-fx_pairs` runs of .github/workflows/test.yml sampled 2026-09-04:
+  # 104.7s, 58% of the old budget. A budget a green run already fills is one
+  # contention band away from a timeout that reads as a notebook defect. The line is a
+  # third, because the only measurement anyone has of that band is the
+  # us_equities_panel/06_linear timeout this rule comes from: a notebook that fit in 120s
+  # idle, did not fit in 120s loaded, and passed at 300.
+  timeout: 360
 case_studies/fx_pairs/10_dl_nlinear:
   parameters:
     BATCH_SIZE: 256
@@ -2045,7 +2094,14 @@ case_studies/nasdaq100_microstructure/14_backtest:
     TOP_N_PREDICTIONS: 2
   # Doubled with the universe. The slot grid does not widen with the ceiling, so this run
   # prices twice the names over the same number of schemes.
-  timeout: 360
+  # Budget raised from 360 on a CI measurement, not on another notebook's number.
+  # Slowest of 6 green `cs-nasdaq100_microstructure` runs of .github/workflows/test.yml sampled 2026-09-04:
+  # 354.1s, 98% of the old budget. A budget a green run already fills is one
+  # contention band away from a timeout that reads as a notebook defect. The line is a
+  # third, because the only measurement anyone has of that band is the
+  # us_equities_panel/06_linear timeout this rule comes from: a notebook that fit in 120s
+  # idle, did not fit in 120s loaded, and passed at 300.
+  timeout: 1080
 case_studies/nasdaq100_microstructure/15_portfolio_management:
   parameters:
     # Same constraint as 14_backtest above, and the widened fixture relaxes it.
@@ -2088,6 +2144,13 @@ case_studies/sp500_equity_option_analytics/05_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/sp500_equity_option_analytics/06_linear:
+  # 120s is measured here, not copied. Slowest of 5 green `cs-sp500_equity_option_analytics` runs of
+  # .github/workflows/test.yml sampled 2026-09-04: 20.0s, 17% of the budget, against
+  # 31.9s for the gbm sibling on its 180. The premise that the linear stage does more work
+  # than its gbm sibling holds for us_equities_panel, whose reduction leaves all three
+  # labels x 16 configurations; it does not hold here, where the preview reduction cuts the
+  # grid and the gbm run is the slower of the two in every case study measured. The tier is
+  # the one-third line the raised entries elsewhere in this file state.
   timeout: 120
 case_studies/sp500_equity_option_analytics/07_gbm:
   timeout: 180
@@ -2361,12 +2424,26 @@ case_studies/sp500_options/04_model_based_features:
   parameters:
     SV_N_PARTICLES: 100
     SV_POOL_SIZE: 2
-  timeout: 1800
+  # Budget raised from 1800 on a CI measurement, not on another notebook's number.
+  # Slowest of 5 green `cs-sp500_options` runs of .github/workflows/test.yml sampled 2026-09-04:
+  # 903.5s, 50% of the old budget. A budget a green run already fills is one
+  # contention band away from a timeout that reads as a notebook defect. The line is a
+  # third, because the only measurement anyone has of that band is the
+  # us_equities_panel/06_linear timeout this rule comes from: a notebook that fit in 120s
+  # idle, did not fit in 120s loaded, and passed at 300.
+  timeout: 2760
 case_studies/sp500_options/05_evaluation:
   parameters:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/sp500_options/06_linear:
+  # 120s is measured here, not copied. Slowest of 5 green `cs-sp500_options` runs of
+  # .github/workflows/test.yml sampled 2026-09-04: 22.8s, 19% of the budget, against
+  # 33.1s for the gbm sibling on its 180. The premise that the linear stage does more work
+  # than its gbm sibling holds for us_equities_panel, whose reduction leaves all three
+  # labels x 16 configurations; it does not hold here, where the preview reduction cuts the
+  # grid and the gbm run is the slower of the two in every case study measured. The tier is
+  # the one-third line the raised entries elsewhere in this file state.
   # The reductions these budgets were measured against, restored. #446 removed
   # NUM_BOOST_ROUND and #560 removed MAX_FOLDS and MAX_SYMBOLS from both entries, in each case
   # because the notebook could no longer receive that parameter - and left the timeouts, which
@@ -2789,6 +2866,13 @@ case_studies/us_firm_characteristics/04_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/us_firm_characteristics/05_linear:
+  # 120s is measured here, not copied. Slowest of 5 green `cs-us_firm_characteristics` runs of
+  # .github/workflows/test.yml sampled 2026-09-04: 13.9s, 12% of the budget, against
+  # 16.8s for the gbm sibling on its 180. The premise that the linear stage does more work
+  # than its gbm sibling holds for us_equities_panel, whose reduction leaves all three
+  # labels x 16 configurations; it does not hold here, where the preview reduction cuts the
+  # grid and the gbm run is the slower of the two in every case study measured. The tier is
+  # the one-third line the raised entries elsewhere in this file state.
   parameters:
     # Restored after #560 removed MAX_FOLDS/MAX_SYMBOLS and left the timeout that had
     # been measured against them, so this preview had been fitting the full declared

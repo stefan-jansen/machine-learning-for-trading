@@ -406,6 +406,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          # notebook_provenance.py --since diffs against the base or the previous
+          # tip, and neither is in a shallow clone.
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v6
         with:
           version: "latest"
@@ -437,6 +441,40 @@ jobs:
         run: |
           source .venv/bin/activate
           python -m pytest tests/test_notebook_output_hygiene.py -q
+      # A committed .ipynb must be its CURRENT .py, executed for real. The gate
+      # existed only as a pre-commit hook, so it fired on every local commit and
+      # on nothing that publishes - a stale render reaches a reader through a
+      # merge, and no merge was covered. Here it covers what this change touched:
+      # a notebook it edited, or one whose paired .py it edited. Scoped, so one
+      # stale notebook elsewhere is somebody else's and does not block this PR.
+      #
+      # It runs on push to main as well as on the PR. Branch protection means
+      # everything should arrive via a PR, but this workflow's own history is that
+      # exports used to land on main as pushes and nothing CI ran had seen them -
+      # a gate that only fires on the path we believe is the only path is how that
+      # happened. On a push the base is the previous tip, so the scope is exactly
+      # what the push introduced.
+      - name: Notebooks this change touched were executed from their current .py
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        run: |
+          source .venv/bin/activate
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # What does this branch add on top of the base: merge-base diff.
+            python .github/scripts/notebook_provenance.py check \
+              --since "origin/${{ github.base_ref }}"
+            exit $?
+          fi
+          # What does the published tree become: diff the previous tip directly,
+          # so a force-push that reverts a notebook relative to it is still seen.
+          base="${{ github.event.before }}"
+          if [[ "$base" =~ ^0+$ ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            # First push, or a force-push that dropped the old tip. There is no
+            # honest scope, so check everything rather than guess a narrower one.
+            echo "previous tip unavailable ($base) - checking every notebook"
+            python .github/scripts/notebook_provenance.py check
+            exit $?
+          fi
+          python .github/scripts/notebook_provenance.py check --since "$base" --no-merge-base
 
   # ---------------------------------------------------------------------------
   # Fast native unit tests — download-script logic (no Docker, no network,
@@ -857,8 +895,13 @@ jobs:
         if: steps.reach.outputs.have_key
         run: |
           uv venv --python 3.14
+          # ml4t-backtest joined with tests/test_backtest_presets.py:
+          # ensure_backtest_spec resolves the engine's own BacktestConfig
+          # (case_studies/utils/backtest_loaders.py:169 imports ml4t.backtest), and
+          # without the package four of its tests raise rather than skip. Measured in a
+          # venv holding exactly this list: 4 failed without it, 37 passed with it.
           uv pip install pytest numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
-            scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow \
+            scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow ml4t-backtest \
             "ml4t-diagnostic>=0.1.2" jupytext==1.19.3
       # The precondition is the load-bearing half, the same shape as the
       # data-root anchoring step above. Every test in this job skips politely
@@ -901,11 +944,24 @@ jobs:
           # CI job, which is a real gap and is stated in that file's docstring.
           # The other three tests in the same file assert relations that hold on any
           # extract - they collect as six cases - and are what this job gates.
+          # The two deselects below are not quarantine entries: the quarantine file
+          # describes what test-unit does not run, and both of these are inside a
+          # file this job DOES run. They need the stage 01-05 artifacts of
+          # us_equities_panel and nasdaq100_microstructure, the two case studies
+          # whose rebuild has not produced them, so they fail on any checkout -
+          # here and on a workstation alike. Take them out when those two rebuild.
           .venv/bin/python -m pytest \
             tests/test_eoa_universe_roster.py \
             tests/test_fixture_registry_identity.py \
             tests/test_reduced_universe_is_shared.py \
             tests/test_fixture_manifest_matches_builders.py \
+            tests/test_artifact_specs.py \
+            tests/test_backtest_presets.py \
+            tests/test_etf_baseline_parity.py \
+            tests/test_sp500_options_research.py::test_official_population_is_snapshotted_before_option_execution \
+            tests/test_us_firm_research_workflow.py::test_open_study_writes_canonical_results_to_output_dir \
+            --deselect tests/test_artifact_specs.py::test_us_equities_pilot_helpers_preserve_current_outputs \
+            --deselect tests/test_artifact_specs.py::test_microstructure_pilot_helpers_preserve_current_outputs \
             -m "not production_extract" \
             -v --tb=short -rs --junitxml=unit-data.xml
       # A skip here is a failure: these tests run in this job and nowhere else,

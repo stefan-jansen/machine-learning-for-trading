@@ -187,10 +187,11 @@ LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
 # one this test checks.
 # ``etfs/03_financial_features`` is deliberately absent. It was listed here while it
 # purged on a shifted label endpoint; public #447 replaced that mechanism with a seal
-# that rebuilds the whole panel with the holdout withheld and compares all 57 columns,
-# which is checked by executing the notebook rather than by reading its source. A
-# source pattern cannot see the stronger check, so listing it here only produces a
-# false red. See agent-workspace #141.
+# that rebuilds the whole panel with the holdout withheld and compares all 57 columns.
+# A source pattern for a shifted endpoint cannot see that, so listing it here only
+# produces a false red. The rebuild is checked instead by
+# ``RECONSTRUCTION_SEALED_NOTEBOOKS`` below, which is the list every stage-03 notebook
+# joins -- eight of the nine are on it now.
 # ``sp500_options/02_labels`` is deliberately absent, and for the opposite reason to
 # ``etfs/05``: its endpoint is not an approximation that needs the per-symbol form. The
 # hold-to-expiry label settles on the expiration written into the contract and the
@@ -995,3 +996,137 @@ def test_a_holdout_end_naming_an_instant_is_taken_literally() -> None:
     # An explicitly configured midnight is an instant, not a day. It parses to the
     # same Timestamp as the bare date, so the configured string is what decides.
     assert _inclusive_end_of("2021-12-31 00:00:00") == pd.Timestamp("2021-12-31")
+
+
+# The second seal mechanism. ``PER_SYMBOL_ENDPOINT_NOTEBOOKS`` above checks a purge on a
+# shifted label endpoint by reading it out of the source. Stage 03 does not purge: it
+# rebuilds the whole feature panel from the pre-holdout rows alone and requires every
+# emitted column to reproduce the values the full build produced on the rows the two
+# panels share (``case_studies/utils/feature_engineering.py::assert_values_agree``). That
+# catches a transform fitted across the sample -- a winsorization bound, a scaler, an
+# encoder -- for every column at once, rather than for the ones someone remembered to flag.
+#
+# The seal is stronger than a source pattern and it is checked by *executing* the notebook,
+# which is why nothing statically asserted it was still there: a future edit could delete it
+# and every static gate would stay green. That is the failure this file's docstring records
+# against the 2026-07-21 revert, so the seal gets a list of its own here. Eight of the nine
+# stage-03 notebooks carry it. ``us_equities_panel/03_financial_features`` is deliberately
+# absent and has its own test above
+# (``test_us_equities_panel_03_restricts_the_evaluation_on_the_label_endpoint``): it draws a
+# winsorization bound from development rows rather than rebuilding, so there is no second
+# build to compare against.
+RECONSTRUCTION_SEALED_NOTEBOOKS = [
+    "case_studies/cme_futures/03_financial_features.py",
+    "case_studies/crypto_perps_funding/03_financial_features.py",
+    "case_studies/etfs/03_financial_features.py",
+    "case_studies/fx_pairs/03_financial_features.py",
+    "case_studies/nasdaq100_microstructure/03_financial_features.py",
+    "case_studies/sp500_equity_option_analytics/03_financial_features.py",
+    "case_studies/sp500_options/03_financial_features.py",
+    "case_studies/us_firm_characteristics/03_financial_features.py",
+]
+
+
+def _module_level_bindings(tree: ast.Module) -> dict[str, ast.expr]:
+    """Every ``name = expr`` assigned once at module scope, by name."""
+    bindings: dict[str, ast.expr] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    bindings[target.id] = node.value
+    return bindings
+
+
+def _expanded_source(node: ast.expr, bindings: dict[str, ast.expr], source: str) -> str:
+    """The node's source with module-level names substituted, three levels deep.
+
+    A notebook may name the boundary filter (``_before``), the restricted frame
+    (``pre_holdout``) or both, so the boundary is not always spelled inside the
+    call itself. Following the binding is what lets one check cover all eight
+    rather than eight regexes.
+    """
+    text = ast.get_source_segment(source, node) or ""
+    for _ in range(3):
+        names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+        expansion = [
+            ast.get_source_segment(source, bindings[name]) or ""
+            for name in sorted(names)
+            if name in bindings
+        ]
+        if not expansion:
+            break
+        text = text + "\n" + "\n".join(expansion)
+        node = ast.parse("(" + ", ".join(f"({e})" for e in expansion) + ",)").body[0].value
+    return text
+
+
+@pytest.mark.parametrize("rel_path", RECONSTRUCTION_SEALED_NOTEBOOKS)
+def test_stage_03_is_sealed_by_reconstruction(rel_path: str) -> None:
+    """Stage 03 rebuilds the panel without the holdout and compares every column.
+
+    Four things have to hold together, and each of them alone is satisfiable by a
+    seal that checks nothing: the call is there, the second frame is *rebuilt*
+    rather than sliced out of the first, both frames stop at the boundary, and the
+    comparison covers the emitted feature columns rather than a hand-picked few.
+    """
+    path = REPO_ROOT / rel_path
+    source = path.read_text()
+    tree = ast.parse(source)
+    bindings = _module_level_bindings(tree)
+
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "assert_values_agree"
+    ]
+    assert calls, (
+        f"{rel_path}: no call to assert_values_agree. The holdout seal at this stage is a "
+        "rebuild of the panel from the pre-holdout rows compared against the full build; "
+        "deleting it leaves every other gate in this file green"
+    )
+    call = calls[0]
+    assert len(call.args) == 2, (
+        f"{rel_path}: assert_values_agree takes the full build and the withheld build as "
+        f"its two positional arguments; found {len(call.args)}"
+    )
+    full, withheld = call.args
+    keywords = {kw.arg: kw.value for kw in call.keywords}
+
+    # The withheld side must call a build function. Without this the seal is
+    # satisfiable by passing the same frame twice, which compares a panel to itself.
+    rebuilt = [
+        node
+        for node in ast.walk(withheld)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    ]
+    assert any(node.func.id.startswith("build") for node in rebuilt), (
+        f"{rel_path}: the second argument must rebuild the panel from the pre-holdout rows "
+        "(a build_* call); slicing the full build instead compares it against itself"
+    )
+
+    for label, side in (("full", full), ("withheld", withheld)):
+        expanded = _expanded_source(side, bindings, source)
+        assert "HOLDOUT_START" in expanded, (
+            f"{rel_path}: the {label} frame passed to assert_values_agree is not restricted "
+            "to the rows before HOLDOUT_START, so the comparison does not run on the rows "
+            "the two panels share"
+        )
+
+    assert "columns" in keywords, f"{rel_path}: assert_values_agree needs columns="
+    columns = keywords["columns"]
+    assert isinstance(columns, ast.Name), (
+        f"{rel_path}: columns= must be the notebook's emitted feature-column list, not a "
+        f"literal; a hand-written list seals only the columns someone typed out "
+        f"({ast.get_source_segment(source, columns)})"
+    )
+    assert columns.id in bindings, (
+        f"{rel_path}: columns={columns.id} is not assigned at module scope, so what the "
+        "seal covers cannot be read from the source"
+    )
+    assert "keys" in keywords, (
+        f"{rel_path}: assert_values_agree needs keys=, the panel key both builds are sorted "
+        "on before the values are compared"
+    )

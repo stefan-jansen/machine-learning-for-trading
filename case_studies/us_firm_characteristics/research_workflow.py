@@ -47,7 +47,7 @@ def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> S
     # in the same kernel would otherwise nest one preview root inside another.
     if resolved_root.name == PREVIEW_DIR_NAME:
         resolved_root = resolved_root.parent
-    study = Study.open(CASE_STUDY, workspace=resolved_root, release_root=REPO_ROOT)
+    study = Study.open(CASE_STUDY, workspace=resolved_root)
     study.activate(execution_tier)
     return study
 

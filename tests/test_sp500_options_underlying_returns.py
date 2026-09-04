@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -12,8 +13,10 @@ from case_studies.sp500_options._underlying_returns import (
     reconcile_underlying_log_returns,
     validate_reconciled_returns,
 )
-from data import load_sp500_daily_bars, load_sp500_options_straddles
-from data.exceptions import DataNotFoundError
+from data import load_sp500_daily_bars
+from data.equities import loader
+
+REPO_ROOT = Path(__file__).parent.parent
 
 TRUE_SPLITS = {
     "FAST": (64.28, 31.34, 2.668525, 5.337051),
@@ -152,12 +155,55 @@ def test_fails_loudly_on_invalid_input_or_boundary_return() -> None:
         validate_reconciled_returns(reconciled)
 
 
-def test_real_option_universe_nulls_all_identity_boundaries() -> None:
-    try:
-        symbols = load_sp500_options_straddles()["symbol"].unique().to_list()
-        bars = load_sp500_daily_bars(symbols=symbols)
-    except DataNotFoundError:
-        pytest.skip("Licensed S&P 500 data is unavailable")
+# Every security-identity change in the shipped bars, by the ticker and session it
+# falls on. The file is tracked (``data/equities/market/sp500/daily_bars.parquet``,
+# redistributed by AlgoSeek's permission), so this set is fixed by construction rather
+# than by whatever the machine running the test happens to hold.
+SHIPPED_IDENTITY_BOUNDARIES = {
+    ("AON", date(2020, 4, 2)),
+    ("APA", date(2021, 3, 2)),
+    ("ARNC", date(2020, 4, 6)),
+    ("DD", date(2019, 6, 3)),
+    ("DIS", date(2019, 6, 3)),
+    ("DLPH", date(2017, 12, 5)),
+    ("DOW", date(2019, 4, 2)),
+    ("FOX", date(2019, 3, 19)),
+    ("FOXA", date(2019, 3, 19)),
+    ("FTI", date(2017, 1, 17)),
+    ("IR", date(2020, 3, 2)),
+    ("STX", date(2021, 5, 19)),
+    ("ULTA", date(2017, 1, 30)),
+    ("XRX", date(2019, 8, 1)),
+    ("ZION", date(2018, 10, 1)),
+}
+
+
+def _shipped_daily_bars(monkeypatch: pytest.MonkeyPatch) -> pl.DataFrame:
+    """The repository's own S&P 500 daily bars, whatever ML4T_DATA_PATH points at.
+
+    ``_bundled`` prefers a copy under ``ML4T_DATA_PATH`` over the tracked one, and the
+    test-data fixture holds a reduced daily-bars file - 29 symbols against 638. So the
+    same assertion measured two different universes depending on the environment: 15
+    boundaries against the tracked file, 1 against the fixture, and a skip in
+    ``test-unit``, where the straddle dataset this test used to take its symbol list
+    from is absent. The invariant is a property of the bars this repository ships, so
+    it is those bars that get read.
+    """
+    monkeypatch.setattr(loader, "ML4T_DATA_PATH", REPO_ROOT / "data")
+    return load_sp500_daily_bars()
+
+
+def test_real_option_universe_nulls_all_identity_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every identity change in the shipped bars is nulled; no real shock is.
+
+    The straddle universe is not what this measures - it only ever supplied a symbol
+    filter, and filtering by it made the count a function of the machine. Naming the
+    boundaries rather than counting them says which reassignments are being caught, so
+    a bar file that gains or loses one reports which.
+    """
+    bars = _shipped_daily_bars(monkeypatch)
 
     reconciled = reconcile_underlying_log_returns(bars)
     boundaries = reconciled.filter(pl.col("identity_boundary"))
@@ -171,8 +217,8 @@ def test_real_option_universe_nulls_all_identity_boundaries() -> None:
         | ((pl.col("symbol") == "DXC") & (pl.col("timestamp") == pl.date(2019, 8, 9)))
     )
 
-    assert boundaries.height == 15
-    assert boundaries["clean_log_return"].null_count() == 15
+    assert set(boundaries.select(["symbol", "timestamp"]).rows()) == SHIPPED_IDENTITY_BOUNDARIES
+    assert boundaries["clean_log_return"].null_count() == boundaries.height
     assert known_splits["clean_log_return"].null_count() == 0
     assert known_splits["clean_log_return"].abs().max() < 0.04
     assert real_shocks["clean_log_return"].null_count() == 0
