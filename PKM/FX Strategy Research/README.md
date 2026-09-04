@@ -6,8 +6,11 @@ Research workspace for FX strategy work against MetaTrader 5
 **Strategy:** H4 range breakout + ATR → binary baseline `breakout` / `no_trade`
 (`false_breakout` deferred). FTMO $10k Challenge 2-Step.
 
-**Where we are:** Stage 0–1 complete. H4 **provisionally kept** after feasibility.
-Next = Stage 2 labels.
+**Focus pair (v1.1):** `USDJPY` only (simpler labels/baseline). Full 20-pair
+H4 history remains under `data/ohlcv_h4/` for later expansion.
+
+**Where we are:** Stage 0–1 complete. H4 kept. Universe narrowed to USDJPY.
+Next = Stage 2 labels on USDJPY.
 
 ## Repo / branch
 
@@ -15,7 +18,7 @@ Next = Stage 2 labels.
 |------|--------|
 | Path | `PKM/FX Strategy Research/` (inside ML4T monorepo) |
 | Branch | `fx-research` (base `c2c7b6ca` — no TabM) |
-| Tip | `bf2f3af8` — README refresh (Stage 1 complete / H4 keep) |
+| Tip | `git log -1` on `fx-research` |
 | Remote | `fork` → `git@github.com:Rezzaa13/machine-learning-for-trading.git` |
 | Tracking | `fork/fx-research` |
 | Config | [`config/setup.yaml`](config/setup.yaml) |
@@ -74,43 +77,44 @@ cd "/run/media/me2/shared-data/vaults/PKM/02 - Projects/machine-learning-for-tra
 
 ### Stage 0.5 — Strategy setup config
 
-**File:** [`config/setup.yaml`](config/setup.yaml)
+**File:** [`config/setup.yaml`](config/setup.yaml) (`setup_version: v1.1`)
 
 | Field | Choice |
 |-------|--------|
 | Idea | range breakout + ATR (Donchian 20, ATR 14) |
 | Baseline | binary `breakout` / `no_trade` |
-| Timeframe | H4 (locked provisional after Stage 1) |
-| Universe | 20 G10 pairs (same as `case_studies/fx_pairs`) — MT5 names |
+| Timeframe | H4 (kept after Stage 1) |
+| Universe | **`USDJPY` only** (v1.1 focus; was 20 G10 in Stage 1 screen) |
 | Account | FTMO $10k 2-Step, leverage 100, cash 10_000 |
 | Venue | bridge `127.0.0.1:18812`, `FTMO-Server3` |
 
-**Status:** complete
+**Status:** complete (narrowed to USDJPY)
 
-### Stage 1 — Probe, H4 pull, feasibility
+### Stage 1 — Probe, H4 pull, feasibility (full 20, then focus)
 
 ```bash
-"$MQL_PY" probe_symbols.py      # needs bridge
-"$MQL_PY" pull_ohlcv_h4.py      # needs bridge; retries; skips existing CSVs
-"$MQL_PY" feasibility_h4.py     # offline on data/
+"$MQL_PY" probe_symbols.py
+"$MQL_PY" pull_ohlcv_h4.py
+"$MQL_PY" feasibility_h4.py
 ```
 
 | Step | Result (2026-09-04) |
 |------|---------------------|
-| Probe | **20/20** exact (`EURUSD`, … — no suffix) |
-| Pull | **20/20** files in `data/ohlcv_h4/` |
-| Common window | ~2023-06-19 → 2026-09-04 (~99.8k panel rows) |
-| Breadth (dev) | min/median/max **20/20/20**, under floor **0** |
-| Cost exceedance | median **h6 = 80.1%**, **h30 = 90.6%** |
-| Verdict | **OK — provisional H4 keep** |
+| Probe | **20/20** exact names |
+| Pull | **20/20** H4 CSVs (kept on disk; research focus = USDJPY) |
+| Feasibility (panel) | H4 keep — median h6 exceedance ~80% |
+| **USDJPY** (focus) | live spread ~3 pts; h6 exceedance **~92%**; med \|r\| h6 ~31 bps |
 
-Outputs (gitignored): `data/symbol_map.csv`, `data/ohlcv_h4/*.csv`,
-`data/feasibility_h4_summary.txt`, `data/feasibility_h4_by_symbol.csv`
+**Status:** complete
 
-**Status:** complete — committed `368648f4` on `fork/fx-research`
+### Stage 1.5 — Fix single pair
+
+**Choice:** `USDJPY` (user). Rationale: major, tight spread, strong H4 cost clearance;
+simpler path to Stage 2 labels than a 20-pair panel.
+
+**Status:** `setup.yaml` + README updated to `n_assets: 1`
 
 ### Next — Stage 2
 
-- Build point-in-time labels: `breakout` / `no_trade` from Donchian+ATR in `setup.yaml`
-- No look-ahead on range bands (`lag: 1`)
-- Then baseline binary model checkpoint (not yet)
+- Labels on **USDJPY** H4 only: `breakout` / `no_trade` (Donchian+ATR, point-in-time)
+- Then baseline binary model checkpoint

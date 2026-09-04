@@ -3,7 +3,7 @@
 # H4 cadence is provisional until Stage 1 feasibility confirms it.
 
 strategy_id: fx_range_breakout_atr
-setup_version: v1
+setup_version: v1.1
 idea: range_breakout_atr
 baseline:
   model: binary_classifier
@@ -45,34 +45,19 @@ account:
     min_trading_days: 4
 
 # ---------------------------------------------------------------------------
-# Universe — same G10 set as case_studies/fx_pairs (feasibility source of truth)
-# Symbol names are MT5-style (no underscore). Confirm exact broker suffixes
-# (e.g. EURUSD vs EURUSDm) after Stage 1 symbol_info() probe.
+# Universe — Stage 1.5: single-pair focus for simpler labeling / baseline.
+# Full G10 (20 pairs) already probed + pulled under data/ohlcv_h4/; restore
+# that list when expanding beyond USDJPY.
 # ---------------------------------------------------------------------------
 universe:
   symbols:
-    - AUDJPY
-    - AUDNZD
-    - AUDUSD
-    - CADJPY
-    - CHFJPY
-    - EURAUD
-    - EURCAD
-    - EURCHF
-    - EURGBP
-    - EURJPY
-    - EURUSD
-    - GBPAUD
-    - GBPCHF
-    - GBPJPY
-    - GBPUSD
-    - NZDJPY
-    - NZDUSD
-    - USDCAD
-    - USDCHF
     - USDJPY
-  n_assets: 20
-  breadth_floor: 20          # same discipline as fx_pairs feasibility
+  n_assets: 1
+  breadth_floor: 1
+  focus_reason: >
+    User pick for v1 simplicity. Major; Stage 1 feasibility h6 exceedance ~92%,
+    live spread ~3 pts. Full 20-pair list retained in git history / data CSVs.
+  candidates_deferred: [EURUSD, GBPUSD, AUDUSD]  # other strong majors if needed
 
 decision:
   cadence: h4_bar_close      # provisional
