@@ -15,7 +15,7 @@ Next = Stage 2 labels.
 |------|--------|
 | Path | `PKM/FX Strategy Research/` (inside ML4T monorepo) |
 | Branch | `fx-research` (base `c2c7b6ca` — no TabM) |
-| Tip | `368648f4` — Stage 1 probe / H4 pull / feasibility |
+| Tip | `bf2f3af8` — README refresh (Stage 1 complete / H4 keep) |
 | Remote | `fork` → `git@github.com:Rezzaa13/machine-learning-for-trading.git` |
 | Tracking | `fork/fx-research` |
 | Config | [`config/setup.yaml`](config/setup.yaml) |
