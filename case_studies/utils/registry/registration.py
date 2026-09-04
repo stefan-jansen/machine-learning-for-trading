@@ -30,6 +30,7 @@ from .store import (
     _prediction_dir,
     _save_json,
     _save_parquet,
+    _timestamps_as_utc,
     _training_dir,
     _upsert_wide_metrics,
     _utc_now,
@@ -851,6 +852,11 @@ def register_prediction_set(
                 or _sampling_reduced(parent_spec_json)
             ),
         )
+    # Before coverage, not after. `schema_json` records the dtypes of the frame handed in
+    # and the immutability check compares one checkpoint's against another's, so
+    # normalizing later would store a naive schema beside a UTC-aware parquet and make two
+    # equivalent checkpoints disagree on nothing but the zone.
+    predictions = _timestamps_as_utc(predictions)
     coverage = None
     if identity_version in SUPPORTED_IDENTITY_VERSIONS:
         if predictions is None or expected_keys is None:
@@ -943,7 +949,7 @@ def register_prediction_set(
                     if orphaned_digest != prediction_artifact_digest:
                         raise ValueError(f"immutable prediction artifact conflict for {p_hash}")
                 else:
-                    _save_parquet(temporary, predictions)
+                    _save_parquet(temporary, normalized_predictions)
                 try:
                     db.execute(
                         """

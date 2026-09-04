@@ -38,7 +38,11 @@ import pandas as pd
 import polars as pl
 import yaml
 
-from utils.artifact_specs import resolve_market_semantics
+from utils.artifact_specs import (
+    DEFAULT_LABEL_BUFFER_UNIT,
+    LABEL_BUFFER_UNITS,
+    resolve_market_semantics,
+)
 from utils.paths import get_case_study_dir
 
 if TYPE_CHECKING:
@@ -92,6 +96,32 @@ def normalize_label_buffer(s: str) -> str:
     return s
 
 
+def _horizon_for_config(
+    normalized_buffer: str,
+    *,
+    calendar_id: str | None,
+    buffer_unit: str,
+) -> int | str:
+    """Turn a normalized buffer into what the splitter should count.
+
+    A ``D`` buffer is passed as an ``int`` so the library counts **sessions**, which is
+    right for a session-gridded panel: "21D" as ``pd.Timedelta("21 days")`` is about 15
+    sessions, and under-buffering the holdout boundary leaks. It is wrong for a
+    calendar-anchored horizon such as ``sp500_options``' 35 days to option expiry, where
+    counting 35 sessions over-trims by about two weeks.
+
+    The duration cannot say which it is, so the label declares it -
+    ``utils.artifact_specs.resolve_label_buffer_unit``. Without a calendar there are no
+    sessions to count and the duration is the only reading available.
+    """
+    if buffer_unit not in LABEL_BUFFER_UNITS:
+        raise ValueError(f"buffer_unit is {buffer_unit!r}, not one of {list(LABEL_BUFFER_UNITS)}")
+    if buffer_unit != "sessions" or calendar_id is None:
+        return normalized_buffer
+    d_match = re.match(r"^(\d+)D$", normalized_buffer)
+    return int(d_match.group(1)) if d_match else normalized_buffer
+
+
 def _purge_holdout_touching_validation(
     val_idx: np.ndarray,
     timestamps: pd.DatetimeIndex,
@@ -99,8 +129,15 @@ def _purge_holdout_touching_validation(
     holdout_start: str | None,
     outcome_horizon: str,
     calendar_id: str | None,
+    buffer_unit: str = DEFAULT_LABEL_BUFFER_UNIT,
 ) -> np.ndarray:
-    """Exclude validation signals whose label endpoint reaches the holdout."""
+    """Exclude validation signals whose label endpoint reaches the holdout.
+
+    ``buffer_unit`` decides how ``outcome_horizon`` is read, the same way it decides it
+    for the fold geometry: sessions counted back from the boundary's position, or a
+    calendar duration subtracted from the boundary itself. A calendar-anchored horizon
+    read as sessions purges further than the label reaches.
+    """
     if not holdout_start or outcome_horizon in {"", "0D", "0H"}:
         return val_idx
 
@@ -115,7 +152,7 @@ def _purge_holdout_touching_validation(
         boundary = boundary.tz_localize(None)
 
     trading_day_match = re.fullmatch(r"(\d+)D", outcome_horizon)
-    if calendar_id is not None and trading_day_match:
+    if calendar_id is not None and trading_day_match and buffer_unit == "sessions":
         horizon = int(trading_day_match.group(1))
         holdout_pos = int(timestamps.searchsorted(boundary, side="left"))
         return val_idx[val_idx < holdout_pos - horizon]
@@ -172,6 +209,8 @@ def make_walk_forward_config(
     case_study_id: str,
     label_horizon: str = "0D",
     date_col: str = "timestamp",
+    *,
+    buffer_unit: str = DEFAULT_LABEL_BUFFER_UNIT,
 ) -> WalkForwardConfig:
     """Create a WalkForwardConfig from a case study's setup.yaml.
 
@@ -197,13 +236,9 @@ def make_walk_forward_config(
 
     eval_config = load_evaluation_config(case_study_id)
     calendar_id = _map_calendar_id(eval_config.get("calendar"))
-
-    # For D-unit buffers with a calendar, pass as int (trading days)
-    normalized_horizon: int | str = normalize_label_buffer(label_horizon)
-    if calendar_id is not None and isinstance(normalized_horizon, str):
-        d_match = re.match(r"^(\d+)D$", normalized_horizon)
-        if d_match:
-            normalized_horizon = int(d_match.group(1))
+    normalized_horizon = _horizon_for_config(
+        normalize_label_buffer(label_horizon), calendar_id=calendar_id, buffer_unit=buffer_unit
+    )
 
     return WalkForwardConfig(
         n_splits=eval_config["n_splits"],
@@ -222,12 +257,15 @@ def make_wf_config(
     case_study_id: str,
     label_horizon: str = "0D",
     date_col: str = "timestamp",
+    *,
+    buffer_unit: str = DEFAULT_LABEL_BUFFER_UNIT,
 ) -> WalkForwardConfig:
     """Backward-compatible alias for make_walk_forward_config."""
     return make_walk_forward_config(
         case_study_id=case_study_id,
         label_horizon=label_horizon,
         date_col=date_col,
+        buffer_unit=buffer_unit,
     )
 
 
@@ -239,6 +277,7 @@ def generate_cv_splits(
     outcome_horizon: str | None = None,
     date_col: str = "timestamp",
     *,
+    buffer_unit: str = DEFAULT_LABEL_BUFFER_UNIT,
     cv_config: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Generate walk-forward date splits from evaluation config.
@@ -332,11 +371,9 @@ def generate_cv_splits(
     # library interprets it as trading days (not calendar days). This fixes
     # the under-buffering where "21D" → pd.Timedelta("21 days") → ~15 trading
     # days instead of the intended 21 trading days.
-    label_horizon: int | str = label_buffer
-    if calendar_id is not None:
-        d_match = re.match(r"^(\d+)D$", label_buffer)
-        if d_match:
-            label_horizon = int(d_match.group(1))
+    label_horizon = _horizon_for_config(
+        label_buffer, calendar_id=calendar_id, buffer_unit=buffer_unit
+    )
 
     # Build WalkForwardConfig (library Pydantic model)
     config = LibWalkForwardConfig(
@@ -388,6 +425,7 @@ def generate_cv_splits(
             holdout_start=eval_config.get("holdout_start"),
             outcome_horizon=outcome_horizon,
             calendar_id=calendar_id,
+            buffer_unit=buffer_unit,
         )
         if len(val_idx) == 0:
             raise ValueError(

@@ -20,6 +20,7 @@ Usage::
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timezone
 from pathlib import Path
@@ -260,8 +261,39 @@ def is_refit_of(holdout_spec_json: str | None, validation_spec_json: str | None)
 def resolve_holdout_self_backtest(
     case_study: str,
     val_backtest_hash: str,
+    *,
+    labels: Sequence[str] | None = None,
+    admitted: frozenset[str] | None = None,
+) -> HoldoutSelfBacktest:
+    """Find the holdout replay of a validation run's strategy, or say why there is none.
+
+    A thin wrapper over :func:`_resolve_holdout_self_backtest`: every "not found" answer
+    goes through :func:`_refuse_a_selection_disagreement` first, so a caller that selected
+    a different carrier than the holdout notebooks ran is told that rather than being told
+    the holdout has not been produced.
+
+    ``labels`` and ``admitted`` are the caller's own selection scope, and they are carried
+    into that diagnosis rather than dropped. A carrier chosen from a preview's label subset
+    or from a frozen candidate set is a correct answer within its scope, and comparing it
+    against an unrestricted resolution would reject it for disagreeing with a question it
+    was never asked.
+    """
+    found = _resolve_holdout_self_backtest(case_study, val_backtest_hash)
+    if found.backtest_hash is None:
+        _refuse_a_selection_disagreement(
+            case_study, val_backtest_hash, labels=labels, admitted=admitted
+        )
+    return found
+
+
+def _resolve_holdout_self_backtest(
+    case_study: str,
+    val_backtest_hash: str,
 ) -> HoldoutSelfBacktest:
     """Find the holdout backtest that replays a validation run's strategy, or say why not.
+
+    The lookup itself. Callers go through :func:`resolve_holdout_self_backtest`, which adds
+    the selection-disagreement diagnosis to every "not found" answer.
 
     This is the canonical ``val_rank1_self`` lineage anchor for the section 6 holdout
     closure: the holdout backtest produced by replaying the validation rank-1 strategy on
@@ -407,20 +439,102 @@ def resolve_holdout_self_backtest(
     return HoldoutSelfBacktest(matched[0])
 
 
+def _refuse_a_selection_disagreement(
+    case_study: str,
+    val_backtest_hash: str,
+    *,
+    labels: Sequence[str] | None = None,
+    admitted: frozenset[str] | None = None,
+) -> None:
+    """Raise when a *different* carrier has the holdout the caller could not find.
+
+    A strategy-analysis notebook that ranks its pool's Sharpe column directly can select a
+    different configuration than `resolve_solvent_carrier` does - a Sharpe computed over a
+    configuration's own available history is not comparable across configurations that
+    priced different spans, so the raw ranking rewards whichever candidate had the most
+    forgiving window. Measured on cme_futures (992 signal / 120 allocation / 28 risk_overlay
+    backtests, rebuilt 2026-08-30): the raw column answered latent_factors/sdf on
+    fwd_ret_21d at 1.274, the resolver gbm/leaves_31_mse on fwd_ret_5d at 1.236 raw and
+    1.294 once compared over the 1,270 sessions they all price.
+
+    The failure that followed was silent and read as the wrong thing. `17_holdout_predictions`
+    and `18_holdout_backtest` resolve through `resolve_solvent_carrier`, so the notebook then
+    asked for the holdout replay of a configuration those notebooks never ran, got None, and
+    printed "not produced yet" while the holdout sat in the registry. A reader concluded the
+    holdout had not been run.
+
+    Only that exact shape raises: a *registered* hash other than the canonical one was asked
+    about, and the canonical carrier has a replay. A case study whose holdout stage genuinely
+    has not run reports "not produced yet" as before, which is a normal state for anyone
+    working the notebooks in order. An unregistered hash keeps its own answer, which is more
+    useful than this one - a hash the run log has never seen is a stale constant rather than
+    a carrier chosen from a pool. And a resolver that cannot answer - an empty registry, a
+    case study with no rank-1 - leaves the original answer standing rather than turning a
+    missing holdout into a resolver error.
+    """
+    import sqlite3
+
+    from utils.paths import get_case_study_dir
+
+    # Only a hash that is actually registered can be a *selection*. When the caller names a
+    # backtest the run log has never seen, `_resolve_holdout_self_backtest` already says
+    # exactly that, and it is the more useful answer - a stale hardcoded hash, not a
+    # carrier chosen from a pool.
+    try:
+        db_path = get_case_study_dir(case_study) / "run_log" / "registry.db"
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as db:
+            registered = db.execute(
+                "SELECT 1 FROM backtest_runs WHERE backtest_hash = ?", (val_backtest_hash,)
+            ).fetchone()
+    except sqlite3.Error:
+        return
+    if registered is None:
+        return
+
+    try:
+        canonical = resolve_canonical_rank1_lineage(case_study, admitted=admitted, labels=labels)
+    except Exception:  # noqa: BLE001 - this diagnoses; it must never replace the real answer
+        return
+    canonical_hash = canonical.get("val_backtest_hash")
+    if not canonical_hash or canonical_hash == val_backtest_hash:
+        return
+    if canonical.get("holdout_backtest_hash") is None:
+        return
+    raise RuntimeError(
+        f"{case_study}: no holdout replays validation backtest {val_backtest_hash}, but "
+        f"{canonical['holdout_backtest_hash']} replays {canonical_hash} - "
+        f"{canonical.get('family')}/{canonical.get('config_name')} on "
+        f"{canonical.get('label')}, which is what `resolve_solvent_carrier` selects and what "
+        "the holdout notebooks ran. This is a selection disagreement, not a missing holdout: "
+        "the caller ranked its own pool and chose a different carrier. Resolve the carrier "
+        "through `resolve_solvent_carrier`, which re-ranks candidates on exact common "
+        "timestamp support and applies LABEL_RESTRICTIONS, UNIVERSE_RESTRICTIONS and "
+        "CARRIER_PINS."
+    )
+
+
 def select_holdout_self_backtest(
     case_study: str,
     val_backtest_hash: str,
+    *,
+    labels: Sequence[str] | None = None,
+    admitted: frozenset[str] | None = None,
 ) -> str | None:
     """The holdout replay's hash, or ``None`` when there is not exactly one.
 
     Kept for callers that only need the hash. A notebook that has to tell its reader
     what is missing wants ``resolve_holdout_self_backtest``, which carries the reason.
     """
-    return resolve_holdout_self_backtest(case_study, val_backtest_hash).backtest_hash
+    return resolve_holdout_self_backtest(
+        case_study, val_backtest_hash, labels=labels, admitted=admitted
+    ).backtest_hash
 
 
 def resolve_canonical_rank1_lineage(
-    case_study: str, *, admitted: frozenset[str] | None = None
+    case_study: str,
+    *,
+    admitted: frozenset[str] | None = None,
+    labels: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Resolve the canonical val rank-1 + matching holdout for a case study.
 
@@ -458,7 +572,12 @@ def resolve_canonical_rank1_lineage(
     from utils.paths import get_case_study_dir
 
     db_path = get_case_study_dir(case_study) / "run_log" / "registry.db"
-    label_filter = LABEL_RESTRICTIONS.get(case_study)
+    # `labels` overrides the module-level restriction rather than adding to it. A preview
+    # run narrows its pool with PREVIEW_LABELS and the resolver knew nothing about that, so
+    # it could resolve a carrier on a label the pool excludes - the carrier is then not in
+    # the pool, and the notebook reports it missing. The default is the declared
+    # restriction, which is what every canonical run wants.
+    label_filter = tuple(labels) if labels is not None else LABEL_RESTRICTIONS.get(case_study)
     universe_pin = UNIVERSE_RESTRICTIONS.get(case_study)
     carrier_pin = CARRIER_PINS.get(case_study)
 
@@ -643,7 +762,13 @@ def resolve_canonical_rank1_lineage(
     # Match holdout by strategy spec to the val rank-1 backtest, so an
     # experimental side-channel allocator (e.g., conformal_weighted) on
     # the same holdout pred set does not displace the canonical lineage.
-    ho_bh = select_holdout_self_backtest(case_study, val_bh)
+    # The raw lookup, not the diagnosing wrapper. `_refuse_a_selection_disagreement` asks
+    # this function for the canonical carrier, so going through the wrapper here would
+    # re-enter it: every call would resolve the whole ranking again, one level deeper,
+    # until the recursion limit - and the diagnosis would swallow the RecursionError after
+    # hundreds of registry reads. There is nothing to diagnose on this path anyway: this
+    # function IS the canonical selection, so it can never disagree with itself.
+    ho_bh = _resolve_holdout_self_backtest(case_study, val_bh).backtest_hash
     ho_ph: str | None = None
     ho_sharpe: float | None = None
     if ho_bh is not None:
@@ -691,7 +816,11 @@ exists - including a Sharpe high enough to top a ranking.
 
 
 def resolve_solvent_carrier(
-    case_study: str, *, require_solvent: bool = True, admitted: frozenset[str] | None = None
+    case_study: str,
+    *,
+    require_solvent: bool = True,
+    admitted: frozenset[str] | None = None,
+    labels: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """The configuration downstream notebooks run, with its spec and drawdown.
 
@@ -715,6 +844,13 @@ def resolve_solvent_carrier(
     function exists to close. Selecting past a bankrupt rank-1 is a decision for
     whoever owns the sweep, taken by fixing the sweep or pinning a carrier.
 
+    ``labels`` narrows the candidate pool the same way ``LABEL_RESTRICTIONS`` does and
+    replaces it. A notebook run under preview restricts its own pool with ``PREVIEW_LABELS``
+    while this resolver read only the module-level restriction, so it could resolve a
+    carrier on a label the pool excludes - and the carrier is then simply not found in the
+    pool, which reads as a missing result rather than as two different questions. Pass the
+    same restriction to both.
+
     Returns ``resolve_canonical_rank1_lineage``'s dict with ``spec_json`` and
     ``max_drawdown`` for the validation rank-1 added.
     """
@@ -722,7 +858,7 @@ def resolve_solvent_carrier(
 
     from utils.paths import get_case_study_dir
 
-    lineage = resolve_canonical_rank1_lineage(case_study, admitted=admitted)
+    lineage = resolve_canonical_rank1_lineage(case_study, admitted=admitted, labels=labels)
     backtest_hash = lineage["val_backtest_hash"]
 
     db_path = get_case_study_dir(case_study) / "run_log" / "registry.db"

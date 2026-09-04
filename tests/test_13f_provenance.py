@@ -1,6 +1,8 @@
 import importlib
+import json
 import xml.etree.ElementTree as ET
 from datetime import date
+from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -315,3 +317,106 @@ def test_holdings_loader_parses_both_sec_dates(tmp_path, monkeypatch) -> None:
     assert result.schema["report_date"] == pl.Date
     assert result.schema["filing_date"] == pl.Date
     assert result["put_call"].to_list() == [None]
+
+
+def test_availability_waits_for_the_last_filing_of_the_quarter() -> None:
+    """A late options-only filing completes the quarter and must move the timestamp.
+
+    `_complete_report_dates` counts any disclosed row as evidence a manager filed, so an
+    options-only filing makes the newest quarter complete. Reading `timestamp` off the
+    long-equity rows alone left the graph claiming to have been available before that
+    filing was public, which is lookahead: the quarter was not usable until the last of
+    its filings landed.
+    """
+    holdings = _two_manager_holdings(date(2024, 9, 30)).with_columns(
+        pl.when(pl.col("accession_no") == "c")
+        .then(pl.lit("PUT"))
+        .otherwise(pl.col("put_call"))
+        .alias("put_call"),
+        pl.when(pl.col("accession_no") == "c")
+        .then(pl.lit(date(2024, 11, 14)))
+        .otherwise(pl.col("filing_date"))
+        .alias("filing_date"),
+    )
+
+    features, _edges, _matrix, _stocks = downloader.build_features_and_matrix(
+        holdings, expected_ciks=["1", "2"]
+    )
+
+    # Manager 1's long-equity filing landed 2024-11-10; manager 2's options-only filing,
+    # which is what made the quarter complete, landed 2024-11-14.
+    assert features["timestamp"].unique().to_list() == [date(2024, 11, 14)]
+
+
+def test_availability_is_the_last_filing_when_every_manager_holds_equity() -> None:
+    """The ordinary case is unchanged: all rows are long equity, so both readings agree."""
+    holdings = _two_manager_holdings(date(2024, 9, 30))
+
+    features, _edges, _matrix, _stocks = downloader.build_features_and_matrix(
+        holdings, expected_ciks=["1", "2"]
+    )
+
+    assert features["timestamp"].unique().to_list() == [date(2024, 11, 10)]
+
+
+def _multi_quarter_13f_artifact() -> bool:
+    """Two quarters at least: one is the case this test is not about.
+
+    The defect is a *display* horizon narrowing a multi-quarter artifact. A valid artifact
+    built with `--num-filings 1` takes the notebook's single-quarter branch correctly and
+    would fail the "Added momentum features" assertion for the right reason, so the skip
+    has to read the artifact rather than only look for it.
+    """
+    from utils.config import ML4T_DATA_PATH
+
+    path = (
+        Path(ML4T_DATA_PATH) / "equities" / "positioning" / "13f" / "institutional_holdings.parquet"
+    )
+    if not path.is_file():
+        return False
+    try:
+        return pl.read_parquet(path, columns=["report_date"])["report_date"].n_unique() > 1
+    except Exception:  # noqa: BLE001 - an unreadable artifact is a skip, not a failure
+        return False
+
+
+@pytest.mark.skipif(
+    not _multi_quarter_13f_artifact(),
+    reason="needs a multi-quarter production 13F artifact; CI checks out no such data",
+)
+def test_a_narrowed_display_horizon_still_matches_the_producer(tmp_path) -> None:
+    """`NUM_QUARTERS` narrows what the notebook shows, not what the producer compared.
+
+    Truncating `positions_df` before the ownership-change table was built left
+    `NUM_QUARTERS=1` over a multi-quarter artifact with nothing to compare, so the
+    no-comparison branch emitted 0.0 and null while the producer - which never sees this
+    parameter - compared the artifact's last two complete quarters, and the notebook's own
+    parity assertion failed. Momentum is built from every complete quarter now.
+
+    Executed rather than reimplemented: the assertion under test is the notebook's own, and
+    a test that recomputed the comparison here would be checking a second implementation.
+    """
+    import papermill
+
+    notebook = Path(__file__).resolve().parents[1] / "22_rag_financial_research"
+    notebook = notebook / "07_institutional_holdings_graph.ipynb"
+    executed = tmp_path / "num_quarters_1.ipynb"
+
+    papermill.execute_notebook(
+        str(notebook),
+        str(executed),
+        parameters={"NUM_QUARTERS": 1},
+        cwd=str(Path(__file__).resolve().parents[1]),
+        progress_bar=False,
+    )
+
+    printed = "\n".join(
+        "".join(output.get("text", []))
+        for cell in json.loads(executed.read_text())["cells"]
+        for output in cell.get("outputs", [])
+    )
+    assert "artifact parity: PASS" in printed
+    # The momentum table came from the untruncated panel: one displayed quarter cannot
+    # produce a comparison, so this line is what distinguishes the fix from the defect.
+    assert "Added momentum features" in printed
+    assert "across 1 reporting quarters" in printed
