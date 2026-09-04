@@ -162,14 +162,16 @@ def test_the_written_metadata_describes_the_merged_panel_not_the_load() -> None:
     )
 
     (_, metadata) = storage.writes[0]
-    assert metadata["start_date"].startswith("2026-08-20")
-    assert metadata["end_date"].startswith("2026-08-24")
+    assert str(metadata["start_date"]).startswith("2026-08-20")
+    assert str(metadata["end_date"]).startswith("2026-08-24")
     assert metadata["data_range"]["start"].startswith("2026-08-20")
     assert metadata["data_range"]["end"].startswith("2026-08-24")
-    for field in ("last_updated", "download_utc_timestamp"):
-        assert dt.datetime.fromisoformat(metadata[field]) >= before, (
-            f"{field} still describes the initial load"
-        )
+    assert metadata["last_updated"] is None, "cleared so the commit's own stamp wins"
+    stale_check = dt.datetime.fromisoformat(metadata["attributes"]["last_update"])
+    assert stale_check.astimezone(UTC) >= before, (
+        "BulkManager.find_stale_symbols reads attributes.last_update and calls a "
+        "symbol with an old one stale"
+    )
 
 
 def test_a_store_already_past_the_bound_fetches_nothing() -> None:
@@ -188,3 +190,58 @@ def test_an_empty_store_says_to_load_first() -> None:
     storage = FakeStorage({})
     with pytest.raises(ValueError, match="load it before updating"):
         update_through_last_complete_bar(FakeManager(), storage, "AAPL", provider="yahoo")
+
+
+def test_the_refreshed_metadata_survives_a_real_storage_round_trip(tmp_path) -> None:
+    """The fake records the dict; only the real backend says what a reader gets.
+
+    `HiveStorage.write` computes `last_updated` itself and, under
+    `preserve_metadata=True`, merges the supplied block over the load's custom
+    fields - so whether a supplied `last_updated` reaches
+    `DataManager.get_metadata()` is the backend's rule, not this module's, and
+    asserting the dict alone would pass even if the backend ignored it.
+    """
+    pytest.importorskip("ml4t.data")
+    from ml4t.data import DataManager
+    from ml4t.data.storage import HiveStorage
+    from ml4t.data.storage.backend import StorageConfig
+
+    storage = HiveStorage(config=StorageConfig(base_path=tmp_path, compression="zstd"))
+    manager = DataManager(storage=storage)
+    key = "equities/daily/AAPL"
+    loaded = _bars(["2026-08-20", "2026-08-21"])
+    storage.write(
+        loaded,
+        key,
+        metadata={
+            "start_date": "2026-08-20 00:00:00+00:00",
+            "end_date": "2026-08-21 00:00:00+00:00",
+            "data_range": {
+                "start": "2026-08-20 00:00:00+00:00",
+                "end": "2026-08-21 00:00:00+00:00",
+            },
+            "last_updated": "2020-01-01 00:00:00+00:00",
+            "attributes": {"last_update": "2020-01-01T00:00:00"},
+        },
+    )
+
+    rows = update_through_last_complete_bar(
+        FakeManager(_bars(["2026-08-24"])),
+        storage,
+        "AAPL",
+        provider="yahoo",
+        through=dt.date(2026, 8, 25),
+    )
+
+    meta = manager.get_metadata("AAPL")
+    assert rows == 3
+    assert meta["row_count"] == 3
+    assert str(meta["end_date"]).startswith("2026-08-24")
+    assert meta["data_range"]["end"].startswith("2026-08-24")
+    assert not str(meta["last_updated"]).startswith("2020-01-01"), (
+        "last_updated still carries the value the load wrote"
+    )
+    # The behaviour the nested field exists for, rather than the field itself.
+    assert manager._bulk_manager.get_stale_symbols(max_age_days=1) == [], (
+        "the symbol is still reported stale after an update that just wrote it"
+    )

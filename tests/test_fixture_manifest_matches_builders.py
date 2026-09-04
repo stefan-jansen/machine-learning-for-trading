@@ -261,3 +261,57 @@ def test_the_crypto_bars_stop_where_the_builder_bounds_them(fixture_root: Path) 
     assert last == CRYPTO_PERPS_END, (
         f"{CRYPTO_PERPS} ends at {last} and the builder bounds it at {CRYPTO_PERPS_END}"
     )
+
+
+# --- what a builder does to the date range -----------------------------------
+#
+# None of the checks above can see a truncated fixture: a panel cut at either end
+# keeps its entity count, its manifest entry and its timestamp type. Five of these
+# builders promise the whole production history for the entities they keep, and
+# `crypto` promises a declared bound instead, so both are stated as dates and both
+# are read off the fixture.
+#
+# The bounds are the fixture's, measured 2026-09-04, and a production refresh that
+# extends a panel is expected to move them. That is the point: the value here has
+# to be updated deliberately, by whoever regenerates the fixture.
+
+DATE_RANGE_CONTRACT = [
+    ("etfs/market/etf_universe.parquet", "timestamp", "2006-01-03", "2025-12-31"),
+    ("etfs/market/etf_universe_unadjusted.parquet", "timestamp", "2006-01-03", "2025-12-31"),
+    ("fx/market/4h.parquet", "timestamp", "2011-01-02 14:00:00+00:00", "2025-12-31 18:00:00+00:00"),
+    (
+        "fx/market/daily.parquet",
+        "timestamp",
+        "2011-01-03 00:00:00+00:00",
+        "2025-12-31 00:00:00+00:00",
+    ),
+    (
+        "crypto/market/perps_1h.parquet",
+        "timestamp",
+        "2020-01-01 00:00:00+00:00",
+        "2025-12-29 23:00:00+00:00",
+    ),
+    ("equities/market/us_equities/us_equities.parquet", "date", "1962-01-02", "2018-03-27"),
+    (
+        "futures/market/continuous/daily/continuous_daily.parquet",
+        "session_date",
+        "2011-01-03",
+        "2025-12-31",
+    ),
+]
+
+
+@pytest.mark.parametrize(("rel", "column", "first", "last"), DATE_RANGE_CONTRACT)
+def test_a_built_fixture_spans_the_dates_its_builder_promises(
+    rel: str, column: str, first: str, last: str, fixture_root: Path
+) -> None:
+    path = fixture_root / rel
+    if not path.exists():
+        pytest.skip(f"{rel} is not in this checkout")
+    frame = pl.scan_parquet(path)
+    observed_first = str(frame.select(pl.col(column).min()).collect().item())
+    observed_last = str(frame.select(pl.col(column).max()).collect().item())
+    assert (observed_first[: len(first)], observed_last[: len(last)]) == (first, last), (
+        f"{rel} spans {observed_first} to {observed_last}, and its builder writes "
+        f"{first} to {last}. A truncated panel keeps its entity count and its dtype."
+    )

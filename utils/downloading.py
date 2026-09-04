@@ -450,21 +450,23 @@ def update_through_last_complete_bar(
         .sort("timestamp")
     )
     first, last = merged["timestamp"].min(), merged["timestamp"].max()
-    now = dt.datetime.now(dt.UTC)
-    # Every field that describes *when* and *what* was fetched, not just the bounds.
-    # `preserve_metadata=True` keeps the rest of the load's block, so a field left out
-    # here still describes the initial load: notebook 18 prints `last_updated`, and a
-    # staleness check reading `data_range` while `end_date` says otherwise is worse
-    # than one reading neither.
+    updated_at = dt.datetime.now(dt.UTC)
+    # The block ml4t-data's own `update_manager._write_updated` writes, field for
+    # field. `preserve_metadata=True` keeps the rest of the load's block, so anything
+    # left out here still describes the initial load - `18_data_management` prints
+    # `last_updated`, and `BulkManager.find_stale_symbols` reads the nested
+    # `attributes.last_update` and treats a symbol with none as stale. Passing
+    # `last_updated=None` clears the inherited value so the commit's own fresh UTC
+    # stamp is what a reader gets.
     storage.write(
         merged,
         key,
         metadata={
-            "start_date": first.isoformat(),
-            "end_date": last.isoformat(),
+            "start_date": first,
+            "end_date": last,
+            "last_updated": None,
             "data_range": {"start": str(first), "end": str(last)},
-            "last_updated": str(now),
-            "download_utc_timestamp": str(now),
+            "attributes": {"last_update": updated_at.astimezone().replace(tzinfo=None).isoformat()},
         },
         preserve_metadata=True,
     )
