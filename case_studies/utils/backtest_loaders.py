@@ -1282,9 +1282,13 @@ def resolve_rebalance_timestamps(
     - ``monthly_month_end`` → last available timestamp in each calendar month
     - ``weekly_friday_close`` / ``weekly_friday`` → last available timestamp
       in each ISO week (typically Friday, or Thursday if Friday is a holiday)
-    - ``daily_*`` → every available timestamp
-    - ``8_hour_*`` / ``15_min`` → every available timestamp (fixed-interval
-      cadences where the data is already at the correct granularity)
+    - ``daily_*`` and coarser cadences naming no interval → every available timestamp
+    - ``8_hour_*`` / ``15_minute`` and every other fixed-interval cadence → the slots
+      on the clock at that interval, constructed rather than assumed. This line used
+      to say "every available timestamp ... already at the correct granularity",
+      which is the precondition nasdaq100_microstructure did not meet and
+      ml4t/agent-workspace#187 was filed about; the branch below has constructed the
+      schedule since public ``83141459`` and the description had not followed it.
 
     Parameters
     ----------
