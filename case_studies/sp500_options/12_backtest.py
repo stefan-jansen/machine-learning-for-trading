@@ -87,7 +87,7 @@ PREVIEW_MAX_PREDICTIONS = 0
 # say which generation it retires. Anything upstream that changes a backtest identity moves them:
 # here it was the corrected settlement in `02_labels`, which moved every training identity and so
 # every prediction the requests below resolve. Empty for a first snapshot.
-SUPERSEDES_BASELINE_POPULATION: str = "25421ed29ba5"
+SUPERSEDES_BASELINE_POPULATION: str = "2aa7959d3aba"
 
 # %% [markdown]
 # ## Which predictions are traded

@@ -61,7 +61,7 @@
 import plotly.express as px
 import polars as pl
 
-from case_studies.research import OfficialPopulation, Result
+from case_studies.research import OfficialPopulation, Result, supersedes_for_run
 from case_studies.sp500_options.research_workflow import (
     ALL_LABELS,
     open_study,
@@ -83,6 +83,15 @@ PREVIEW_LABELS: list[str] = []
 PREVIEW_MAX_BASELINE_CONFIGS = 0
 PREVIEW_COST_FRACTIONS: tuple[float, ...] = (0.203,)
 PREVIEW_UNIVERSES: tuple[str, ...] = ("liquid",)
+# The generation this run retires. A population is immutable under its name, so a re-run
+# whose members have moved has to say which one it replaces; the refusal names the current
+# hash, and empty is correct only for a name this registry has never held. This notebook
+# published its population with no supersedes at all, so the first upstream change to move
+# a baseline identity left it unable to register what it had just computed - which is what
+# happened when the label buffer was corrected. Stale the moment the run it authorizes
+# succeeds, in the same way as the declarations `12_backtest` and `13_portfolio_management`
+# carry.
+SUPERSEDES_COST_POPULATION: str = "70dd36df5992"
 
 # %% [markdown]
 # ## One strategy per model family
@@ -235,6 +244,12 @@ execution = run_official_backtest_requests(
     study,
     requests,
     population_name=COST_POPULATION if EXECUTION_TIER == "canonical" else None,
+    supersedes=supersedes_for_run(
+        study,
+        population_name=COST_POPULATION,
+        declared=SUPERSEDES_COST_POPULATION or None,
+        execution_tier=EXECUTION_TIER,
+    ),
 )
 catalog = execution.catalog_rows.sort("request_name")
 if catalog.height != requests.height or catalog.filter(~pl.col("complete")).height:
