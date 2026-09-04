@@ -572,3 +572,51 @@ def test_a_fitted_hidden_markov_model_walks_forward_without_reading_its_future()
     assert np.isnan(full[:100]).all()
     np.testing.assert_allclose(short, full[:220], rtol=1e-9, equal_nan=True)
     np.testing.assert_allclose(full[100:].sum(axis=1), 1.0, rtol=1e-9)
+
+
+def test_no_parameters_are_estimated_past_the_freeze_point() -> None:
+    """The holdout rule: the last estimate before it opens speaks for all of it."""
+    fitted_on: list[int] = []
+
+    def record(X: np.ndarray) -> float:
+        fitted_on.append(len(X))
+        return _mean_fit(X)
+
+    X = np.arange(60, dtype=float).reshape(-1, 1)
+    out = walk_forward_feature(
+        X,
+        burnin=20,
+        refit_every=10,
+        freeze_after=40,
+        fit=record,
+        apply=_emit_parameter,
+        n_features=1,
+    )
+    assert fitted_on == [20, 30, 40]
+    # Rows 40 onwards all carry the estimate made from the first 40 observations.
+    assert out[40, 0] == pytest.approx(X[:40, 0].mean())
+    assert out[59, 0] == pytest.approx(X[:40, 0].mean())
+    assert np.isfinite(out[20:]).all()
+
+
+def test_a_freeze_point_inside_the_burn_in_emits_nothing() -> None:
+    out = walk_forward_feature(
+        np.arange(60, dtype=float).reshape(-1, 1),
+        burnin=20,
+        refit_every=10,
+        freeze_after=5,
+        fit=_mean_fit,
+        apply=_emit_parameter,
+        n_features=1,
+    )
+    assert np.isnan(out).all()
+
+
+def test_freezing_does_not_change_the_values_before_the_freeze_point() -> None:
+    X = np.arange(60, dtype=float).reshape(-1, 1)
+    kwargs = dict(burnin=20, refit_every=10, fit=_mean_fit, apply=_emit_parameter, n_features=1)
+    np.testing.assert_allclose(
+        walk_forward_feature(X, freeze_after=40, **kwargs)[:41],
+        walk_forward_feature(X, **kwargs)[:41],
+        equal_nan=True,
+    )
