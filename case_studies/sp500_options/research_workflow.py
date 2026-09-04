@@ -108,7 +108,7 @@ def declared_dl_device(requested: str | None = None) -> str:
 def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> Study:
     """Open canonical regeneration or an isolated reader preview."""
     if execution_tier == "canonical":
-        return Study.regenerate(CASE_STUDY, release_root=REPO_ROOT)
+        return Study.regenerate(CASE_STUDY)
     if execution_tier != "preview":
         raise ValueError("execution_tier must be canonical or preview")
     if workspace is None:
@@ -141,7 +141,7 @@ def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> S
         )
         study.activate(execution_tier)
         return study
-    return Study.open(CASE_STUDY, workspace=workspace, release_root=REPO_ROOT)
+    return Study.open(CASE_STUDY, workspace=workspace)
 
 
 def model_request_catalog(

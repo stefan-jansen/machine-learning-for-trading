@@ -51,13 +51,12 @@ def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> S
     """Open canonical regeneration or an isolated preview workspace."""
     tier = ExecutionTier(execution_tier)
     if tier is ExecutionTier.CANONICAL:
-        return Study.regenerate(CASE_STUDY, release_root=REPO_ROOT)
+        return Study.regenerate(CASE_STUDY)
     if workspace is None:
         raise ValueError("preview execution requires an explicit workspace")
     return Study.open(
         CASE_STUDY,
         workspace=Path(workspace).expanduser().resolve(),
-        release_root=REPO_ROOT,
     )
 
 

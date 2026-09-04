@@ -139,11 +139,10 @@ def open_study(
     """
     if execution_tier == "canonical":
         if workspace is None:
-            return Study.regenerate(CASE_STUDY, release_root=REPO_ROOT, entry_point=entry_point)
+            return Study.regenerate(CASE_STUDY, entry_point=entry_point)
         return Study.open(
             CASE_STUDY,
             workspace=Path(workspace).expanduser().resolve(),
-            release_root=REPO_ROOT,
             entry_point=entry_point,
         )
     if execution_tier != "preview":
@@ -155,7 +154,6 @@ def open_study(
         return Study.open(
             CASE_STUDY,
             workspace=workspace,
-            release_root=REPO_ROOT,
             entry_point=entry_point,
             execution_tier=ExecutionTier.PREVIEW,
         )

@@ -281,6 +281,56 @@ def seed_case_study_intermediates(src: Path, dst: Path) -> None:
             shutil.copy2(item, dst / item.name)
 
 
+GENERATED_CASE_DIRS = ("features", "labels", "run_log")
+
+
+def _checkout_shaped_release_root(output_dir: Path) -> Path:
+    """A released tree shaped like a clean checkout, for the harness to read canonical from.
+
+    `open_study` resolves its canonical reads against a release root, and the default was
+    `REPO_ROOT`. In a maintainer worktree `case_studies/<cs>/run_log` there is a symlink
+    into `~/ml4t/artifacts`, so a harness run overlaid the machine's published catalog
+    onto its isolated workspace - measured on a freshly seeded fx_pairs fixture as 749
+    catalog rows where the workspace held 23 - while a CI runner, which has no such
+    symlink, read the seeded 23 and nothing else. The same code took different rows in
+    the two places, so a local pass was not evidence of a CI pass and a local failure was
+    not evidence of a CI failure. The reads that produced it are real: a backtest selected
+    two published predictions the fixture did not have, registered their identities, and
+    the next stage failed on a `predictions.parquet` the workspace has no copy of.
+
+    So the harness gives it a release root of its own, carrying what a checkout carries -
+    `config/` and the tracked top-level files - and, exactly like a checkout, no
+    `run_log`. Nothing else is read through the release root: the catalogs read
+    `<release case dir>/run_log`, `create_experiment` reads `config/`, and everything a
+    notebook loads goes through `get_case_study_dir()`, which follows ML4T_OUTPUT_DIR.
+
+    Symlinks rather than copies, so this costs nothing per session and cannot drift from
+    the tree it mirrors.
+    """
+    release = output_dir / ".release"
+    cases = release / "case_studies"
+    cases.mkdir(parents=True, exist_ok=True)
+    source_root = REPO_ROOT / "case_studies"
+    shared = cases / "config"
+    if not shared.exists() and (source_root / "config").is_dir():
+        shared.symlink_to(source_root / "config", target_is_directory=True)
+    for cs_id in CASE_STUDY_IDS:
+        source = source_root / cs_id
+        if not source.is_dir():
+            continue
+        target = cases / cs_id
+        target.mkdir(exist_ok=True)
+        for entry in source.iterdir():
+            if entry.name in GENERATED_CASE_DIRS or entry.name.startswith("."):
+                continue
+            if entry.is_dir() and entry.name != "config":
+                continue
+            link = target / entry.name
+            if not link.exists() and not link.is_symlink():
+                link.symlink_to(entry, target_is_directory=entry.is_dir())
+    return release
+
+
 @pytest.fixture(scope="session")
 def seeded_output_dir(tmp_path_factory):
     """Session-scoped output dir seeded with case study config files.
@@ -308,6 +358,11 @@ def seeded_output_dir(tmp_path_factory):
     global _SESSION_OUTPUT_DIR
     os.environ["ML4T_OUTPUT_DIR"] = str(output_dir)
     _SESSION_OUTPUT_DIR = str(output_dir)
+
+    # And a release root that is not REPO_ROOT, so a study opened here reads the same
+    # canonical rows a CI runner reads. See _checkout_shaped_release_root.
+    output_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["ML4T_RELEASE_ROOT"] = str(_checkout_shaped_release_root(output_dir))
 
     cs_root = REPO_ROOT / "case_studies"
 
