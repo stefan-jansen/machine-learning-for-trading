@@ -394,6 +394,99 @@ def official_prediction_catalog(
     )
 
 
+def preview_prediction_candidates(
+    study: Study,
+    *,
+    labels: Iterable[str],
+    limit: int,
+) -> pl.DataFrame:
+    """The preview validation predictions to backtest, capped per label.
+
+    A canonical run resolves named populations, which a preview cannot: preview results
+    never enter one. It used to name its prediction sets as literal hashes instead, and
+    that is why `12_backtest` could not run anywhere but on the workstation that had just
+    produced them - a hash is a property of the run, so nothing could declare one ahead
+    of time and the notebook was skipped in CI rather than executed.
+
+    The selection is declarative instead: the label, and how many configurations of it to
+    trade. The cap is applied per label rather than to the whole frame, so a later label
+    is not left short by whichever one sorts first; sp500_options declares a single label
+    today and the grouping is what keeps that true if it declares another.
+
+    This lives here rather than inline in the notebook so the notebook and its test call
+    the same code.
+    """
+    labels = list(labels)
+    if not labels:
+        raise ValueError("preview prediction selection requires at least one label")
+    if limit < 1:
+        raise ValueError("preview prediction selection requires a positive limit")
+    candidates = (
+        study.predictions.table(include_preview=True)
+        .filter(
+            (pl.col("execution_tier") == "preview")
+            & (pl.col("split") == "validation")
+            & pl.col("complete")
+            & pl.col("label").is_in(labels)
+        )
+        .sort("label", "family", "config_name", "checkpoint_kind", "checkpoint_value")
+        .group_by("label", maintain_order=True)
+        .head(limit)
+    )
+    starved = [label for label in labels if candidates.filter(pl.col("label") == label).is_empty()]
+    if starved:
+        raise RuntimeError(
+            f"preview execution found no complete validation predictions for {starved}"
+        )
+    return candidates
+
+
+def preview_baseline_candidates(
+    study: Study,
+    *,
+    labels: Iterable[str],
+    limit: int,
+) -> pl.DataFrame:
+    """The preview baseline backtests a downstream stage builds on, capped per label.
+
+    The counterpart of :func:`preview_prediction_candidates` one stage on. A canonical run
+    reads the named baseline population; a preview reads what the preview baseline stage
+    just registered in the same workspace, selected by label rather than by hash for the
+    same reason.
+
+    The cap counts model configurations, not backtest rows: the baseline stage registers
+    one row per concentration and per saved checkpoint, so a limit applied to rows would
+    spend the whole budget on the first configuration's grid and hand the next stage a
+    shortlist with one model in it. Every row of each selected configuration is returned,
+    because a downstream stage ranks within a configuration before it ranks across them.
+    """
+    labels = list(labels)
+    if not labels:
+        raise ValueError("preview baseline selection requires at least one label")
+    if limit < 1:
+        raise ValueError("preview baseline selection requires a positive limit")
+    baselines = (
+        study.backtests.table(include_preview=True)
+        .filter(
+            (pl.col("execution_tier") == "preview")
+            & (pl.col("stage") == "signal")
+            & pl.col("complete")
+            & pl.col("label").is_in(labels)
+        )
+        .sort("label", "family", "config_name", "backtest_hash")
+    )
+    selected = []
+    for label in labels:
+        rows = baselines.filter(pl.col("label") == label)
+        if rows.is_empty():
+            raise RuntimeError(
+                f"preview execution found no complete baseline backtests for {label!r}"
+            )
+        keep = rows.select("family", "config_name").unique(maintain_order=True).head(limit)
+        selected.append(rows.join(keep, on=["family", "config_name"], how="semi"))
+    return pl.concat(selected)
+
+
 def option_decision_dates(
     study: Study,
     prediction_hashes: Iterable[str],

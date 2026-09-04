@@ -63,7 +63,9 @@ import polars as pl
 
 from case_studies.research import OfficialPopulation, Result
 from case_studies.sp500_options.research_workflow import (
+    ALL_LABELS,
     open_study,
+    preview_baseline_candidates,
     run_official_backtest_requests,
     strategy_request_frame,
 )
@@ -77,7 +79,8 @@ COST_POPULATION = "sp500-options-cost-sensitivity-validation-v1"
 # %% tags=["parameters"]
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
-PREVIEW_BASELINE_HASHES: tuple[str, ...] = ()
+PREVIEW_LABELS: list[str] = []
+PREVIEW_MAX_BASELINE_CONFIGS = 0
 PREVIEW_COST_FRACTIONS: tuple[float, ...] = (0.203,)
 PREVIEW_UNIVERSES: tuple[str, ...] = ("liquid",)
 
@@ -96,18 +99,24 @@ PREVIEW_UNIVERSES: tuple[str, ...] = ("liquid",)
 # %%
 study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 if EXECUTION_TIER == "canonical":
+    if PREVIEW_LABELS or PREVIEW_MAX_BASELINE_CONFIGS:
+        raise ValueError("canonical execution cannot declare preview reductions")
     population = OfficialPopulation.one(study, name=BASELINE_POPULATION)
     baseline_hashes = population.require_complete()
     baseline = study.backtests.table().filter(pl.col("backtest_hash").is_in(baseline_hashes))
-else:
-    if not WORKSPACE or not PREVIEW_BASELINE_HASHES:
-        raise ValueError("preview execution requires WORKSPACE and PREVIEW_BASELINE_HASHES")
-    baseline = study.backtests.table(include_preview=True).filter(
-        (pl.col("execution_tier") == "preview")
-        & pl.col("backtest_hash").is_in(PREVIEW_BASELINE_HASHES)
+elif EXECUTION_TIER == "preview":
+    if not WORKSPACE or not PREVIEW_LABELS or PREVIEW_MAX_BASELINE_CONFIGS < 1:
+        raise ValueError(
+            "preview execution requires WORKSPACE, PREVIEW_LABELS and PREVIEW_MAX_BASELINE_CONFIGS"
+        )
+    unknown = sorted(set(PREVIEW_LABELS) - set(ALL_LABELS))
+    if unknown:
+        raise ValueError(f"preview labels this case study does not declare: {unknown}")
+    baseline = preview_baseline_candidates(
+        study, labels=PREVIEW_LABELS, limit=PREVIEW_MAX_BASELINE_CONFIGS
     )
-    if baseline.height != len(PREVIEW_BASELINE_HASHES):
-        raise ValueError("preview baseline selection is missing or ambiguous")
+else:
+    raise ValueError(f"unsupported execution tier: {EXECUTION_TIER!r}")
 if baseline.is_empty() or baseline.filter(~pl.col("complete")).height:
     raise RuntimeError("cost sensitivity requires complete baseline results")
 if baseline.get_column("sharpe").null_count():

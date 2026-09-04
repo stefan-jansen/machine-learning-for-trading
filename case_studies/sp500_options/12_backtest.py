@@ -54,10 +54,12 @@ import polars as pl
 
 from case_studies.research import supersedes_for_run
 from case_studies.sp500_options.research_workflow import (
+    ALL_LABELS,
     official_prediction_catalog,
     open_study,
     option_decision_dates,
     option_trade_calendar,
+    preview_prediction_candidates,
     run_official_backtest_requests,
     strategy_request_frame,
 )
@@ -78,7 +80,8 @@ MODEL_POPULATIONS = (
 # %% tags=["parameters"]
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
-PREVIEW_PREDICTION_HASHES: list[str] = []
+PREVIEW_LABELS: list[str] = []
+PREVIEW_MAX_PREDICTIONS = 0
 
 # The baseline population is immutable under its name, so a run whose members have moved has to
 # say which generation it retires. Anything upstream that changes a backtest identity moves them:
@@ -96,21 +99,31 @@ SUPERSEDES_BASELINE_POPULATION: str = "25421ed29ba5"
 # was expected and is missing raises instead of shrinking the population silently.
 #
 # A preview run has no populations to resolve, because preview results never enter one. It
-# names its prediction sets explicitly instead.
+# names the label it trades and how many of that label's configurations to take, and
+# `preview_prediction_candidates` selects them from what the preview model stages registered
+# in the same workspace. Naming them by hash instead would tie the run to the machine that
+# produced them, because a hash is a property of the run and nothing can declare one ahead
+# of time.
 
 # %%
 study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 if EXECUTION_TIER == "canonical":
+    if PREVIEW_LABELS or PREVIEW_MAX_PREDICTIONS:
+        raise ValueError("canonical execution cannot declare preview reductions")
     predictions = official_prediction_catalog(study, MODEL_POPULATIONS)
-else:
-    if not WORKSPACE or not PREVIEW_PREDICTION_HASHES:
-        raise ValueError("preview execution requires WORKSPACE and PREVIEW_PREDICTION_HASHES")
-    predictions = study.predictions.table(include_preview=True).filter(
-        (pl.col("execution_tier") == "preview")
-        & pl.col("prediction_hash").is_in(PREVIEW_PREDICTION_HASHES)
+elif EXECUTION_TIER == "preview":
+    if not WORKSPACE or not PREVIEW_LABELS or PREVIEW_MAX_PREDICTIONS < 1:
+        raise ValueError(
+            "preview execution requires WORKSPACE, PREVIEW_LABELS and PREVIEW_MAX_PREDICTIONS"
+        )
+    unknown = sorted(set(PREVIEW_LABELS) - set(ALL_LABELS))
+    if unknown:
+        raise ValueError(f"preview labels this case study does not declare: {unknown}")
+    predictions = preview_prediction_candidates(
+        study, labels=PREVIEW_LABELS, limit=PREVIEW_MAX_PREDICTIONS
     )
-    if predictions.height != len(PREVIEW_PREDICTION_HASHES):
-        raise ValueError("preview prediction selection is missing or ambiguous")
+else:
+    raise ValueError(f"unsupported execution tier: {EXECUTION_TIER!r}")
 if predictions.filter(~pl.col("complete")).height:
     raise RuntimeError("baseline requests contain incomplete predictions")
 

@@ -57,8 +57,10 @@ from case_studies.research import (
     supersedes_for_run,
 )
 from case_studies.sp500_options.research_workflow import (
+    ALL_LABELS,
     open_study,
     paired_sharpe_on_common_support,
+    preview_baseline_candidates,
     run_official_backtest_requests,
     strategy_request_frame,
 )
@@ -78,7 +80,8 @@ ALLOCATION_POPULATION = "sp500-options-allocation-validation-v1"
 # %% tags=["parameters"]
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
-PREVIEW_BASELINE_HASHES: tuple[str, ...] = ()
+PREVIEW_LABELS: list[str] = []
+PREVIEW_MAX_BASELINE_CONFIGS = 0
 PREVIEW_ALLOCATORS: tuple[str, ...] = ("score_weighted",)
 # The generation each named set retires. A set and a population are immutable under their
 # name, so a re-run whose membership moved has to say which one it replaces; the refusal
@@ -97,12 +100,17 @@ SUPERSEDES_STRATEGY_CANDIDATES: str = ""
 # ranges over is fixed: the same rule applied to a registry that has since gained a row returns a
 # different result, and the result alone does not record which set produced it.
 #
-# A preview run resolves its baselines by hash and freezes nothing, because a candidate set built
-# from reduced results would authorize a selection the reduced run cannot support.
+# A preview run selects its baselines by label and freezes nothing, because a candidate set built
+# from reduced results would authorize a selection the reduced run cannot support. It selects by
+# label rather than by hash so that the declaration can be written down: a backtest hash is a
+# property of the run that produced it, so a preview named by hash can only be launched from the
+# machine that has just produced one.
 
 # %%
 study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 baseline_candidates: CandidateSet | None
+if EXECUTION_TIER == "canonical" and (PREVIEW_LABELS or PREVIEW_MAX_BASELINE_CONFIGS):
+    raise ValueError("canonical execution cannot declare preview reductions")
 if EXECUTION_TIER == "canonical":
     baseline_population = OfficialPopulation.one(study, name=BASELINE_POPULATION)
     baseline_hashes = baseline_population.require_complete()
@@ -118,16 +126,20 @@ if EXECUTION_TIER == "canonical":
             declared=SUPERSEDES_BASELINE_CANDIDATES or None,
         ),
     )
-else:
-    if not WORKSPACE or not PREVIEW_BASELINE_HASHES:
-        raise ValueError("preview execution requires WORKSPACE and PREVIEW_BASELINE_HASHES")
-    baseline_table = study.backtests.table(include_preview=True).filter(
-        (pl.col("execution_tier") == "preview")
-        & pl.col("backtest_hash").is_in(PREVIEW_BASELINE_HASHES)
+elif EXECUTION_TIER == "preview":
+    if not WORKSPACE or not PREVIEW_LABELS or PREVIEW_MAX_BASELINE_CONFIGS < 1:
+        raise ValueError(
+            "preview execution requires WORKSPACE, PREVIEW_LABELS and PREVIEW_MAX_BASELINE_CONFIGS"
+        )
+    unknown = sorted(set(PREVIEW_LABELS) - set(ALL_LABELS))
+    if unknown:
+        raise ValueError(f"preview labels this case study does not declare: {unknown}")
+    baseline_table = preview_baseline_candidates(
+        study, labels=PREVIEW_LABELS, limit=PREVIEW_MAX_BASELINE_CONFIGS
     )
-    if baseline_table.height != len(PREVIEW_BASELINE_HASHES):
-        raise ValueError("preview baseline selection is missing or ambiguous")
     baseline_candidates = None
+else:
+    raise ValueError(f"unsupported execution tier: {EXECUTION_TIER!r}")
 if baseline_table.get_column("sharpe").null_count():
     raise RuntimeError("a baseline candidate carries no Sharpe ratio")
 
