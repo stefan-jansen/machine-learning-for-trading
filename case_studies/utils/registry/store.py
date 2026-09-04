@@ -1004,6 +1004,46 @@ def _save_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=2, default=str))
 
 
+_PREDICTION_TIME_COLUMNS = ("timestamp", "date", "datetime", "ts")
+
+
+def _timestamps_as_utc(predictions):
+    """Give a naive decision-time column an explicit UTC zone before it is written.
+
+    `gbm`, `linear` and `tabular_dl` write `Datetime(_, 'UTC')`; `deep_learning` reaches
+    this through `flush_fold_predictions`, whose dates come from a numpy `datetime64`
+    array and are therefore naive. Measured on crypto_perps_funding: 578 artifacts UTC-
+    aware and 100 naive, same label, same folds, same 19 symbols, same 2,189 decision
+    times, identical instants. A tz-aware value never equals a naive one, so an exact join
+    on (timestamp, symbol) between the two families returned nothing, and any code
+    assuming one dtype across a case study's artifacts dropped rows instead of failing.
+
+    Naive is read as UTC here, which is what it already meant: every producer derives
+    these timestamps from the label artifact's own axis, and the naive values are the same
+    instants the aware ones carry. This relabels; it never converts a wall time.
+
+    `value_digest` ignores the zone (it is time-unit sensitive and zone-insensitive), so
+    an artifact rewritten through here keeps its digest and no immutable-artifact check
+    moves. The time unit is deliberately left alone for the same reason.
+    """
+    try:
+        import polars as pl
+    except ImportError:  # pragma: no cover
+        return predictions
+    if not isinstance(predictions, pl.DataFrame):
+        return predictions
+    naive = [
+        column
+        for column in _PREDICTION_TIME_COLUMNS
+        if column in predictions.columns
+        and isinstance(predictions.schema[column], pl.Datetime)
+        and predictions.schema[column].time_zone is None
+    ]
+    if not naive:
+        return predictions
+    return predictions.with_columns(pl.col(column).dt.replace_time_zone("UTC") for column in naive)
+
+
 def _save_parquet(path: Path, frame) -> None:
     """Write a DataFrame to parquet, handling pl.Object columns safely.
 

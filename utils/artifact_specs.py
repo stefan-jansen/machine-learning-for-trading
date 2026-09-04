@@ -122,6 +122,58 @@ def resolve_label_buffer(
     return None
 
 
+LABEL_BUFFER_UNITS = ("sessions", "calendar")
+DEFAULT_LABEL_BUFFER_UNIT = "sessions"
+
+
+def resolve_label_buffer_unit(
+    case_study_id: str,
+    label: str,
+    setup: Mapping[str, Any] | None = None,
+) -> str:
+    """Say whether a label's buffer counts sessions or calendar time.
+
+    A buffer is written as a duration - ``21D``, ``35D``, ``8H`` - and the duration alone
+    does not say which of the two it means. Both readings are live. On a session-gridded
+    daily panel ``21D`` means 21 sessions, and subtracting 21 calendar days from the
+    holdout boundary leaks about six sessions into it. ``sp500_options`` declares
+    ``35D`` for ``ret_to_expiry``, which is a genuine calendar horizon to option expiry,
+    and reading it as 35 sessions trims about seven weeks where five is correct - data
+    loss rather than leakage, but still a frame that ends earlier than it needs to.
+
+    Without a declaration each consumer guesses, and the guess is made independently in
+    every consumer and is wrong for one class of label wherever it is made. This is the
+    declaration; ``sessions`` is the default because it is the reading every ``D`` buffer
+    already gets wherever a calendar is configured.
+
+    Declared the same way and in the same order as the buffer itself
+    (:func:`resolve_label_buffer`): on the label spec under ``definition.buffer_unit``, or
+    in ``setup.yaml`` under ``labels.buffer_unit`` for the primary and
+    ``labels.variant_buffer_units[<label>]`` for a variant.
+    """
+    label_spec = load_label_spec(case_study_id, label)
+    declared: Any = None
+    if label_spec is not None:
+        declared = (label_spec.get("definition", {}) or {}).get("buffer_unit")
+
+    if declared is None:
+        labels = (setup or {}).get("labels", {})
+        if labels.get("primary") == label:
+            declared = labels.get("buffer_unit")
+        if declared is None:
+            declared = (labels.get("variant_buffer_units") or {}).get(label)
+
+    if declared is None:
+        return DEFAULT_LABEL_BUFFER_UNIT
+    unit = str(declared)
+    if unit not in LABEL_BUFFER_UNITS:
+        raise ValueError(
+            f"{case_study_id}/{label}: buffer_unit is {unit!r}, "
+            f"not one of {list(LABEL_BUFFER_UNITS)}"
+        )
+    return unit
+
+
 def resolve_label_horizon(
     case_study_id: str,
     label: str,
@@ -163,10 +215,13 @@ def resolve_market_runtime(case_study_id: str) -> dict[str, Any]:
 
 
 __all__ = [
+    "DEFAULT_LABEL_BUFFER_UNIT",
+    "LABEL_BUFFER_UNITS",
     "load_feature_spec",
     "load_label_spec",
     "load_market_data_spec",
     "resolve_label_buffer",
+    "resolve_label_buffer_unit",
     "resolve_label_horizon",
     "resolve_market_runtime",
     "resolve_market_semantics",

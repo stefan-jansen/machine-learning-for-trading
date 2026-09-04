@@ -30,6 +30,7 @@ from .store import (
     _prediction_dir,
     _save_json,
     _save_parquet,
+    _timestamps_as_utc,
     _training_dir,
     _upsert_wide_metrics,
     _utc_now,
@@ -893,7 +894,7 @@ def register_prediction_set(
 
         from case_studies.utils.artifact_digest import value_digest
 
-        normalized_predictions = (
+        normalized_predictions = _timestamps_as_utc(
             predictions if isinstance(predictions, pl.DataFrame) else pl.from_pandas(predictions)
         )
         prediction_artifact_digest = value_digest(normalized_predictions)
@@ -943,7 +944,7 @@ def register_prediction_set(
                     if orphaned_digest != prediction_artifact_digest:
                         raise ValueError(f"immutable prediction artifact conflict for {p_hash}")
                 else:
-                    _save_parquet(temporary, predictions)
+                    _save_parquet(temporary, normalized_predictions)
                 try:
                     db.execute(
                         """
@@ -983,7 +984,7 @@ def register_prediction_set(
         # Save predictions
         if predictions is not None:
             pred_dir = _prediction_dir(case_dir, p_hash)
-            _save_parquet(pred_dir / "predictions.parquet", predictions)
+            _save_parquet(pred_dir / "predictions.parquet", _timestamps_as_utc(predictions))
 
         # Insert into DB
         db = _open_registry(case_dir)

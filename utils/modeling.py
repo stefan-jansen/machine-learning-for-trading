@@ -42,6 +42,7 @@ from utils.artifact_specs import (
     load_feature_spec,
     load_label_spec,
     resolve_label_buffer,
+    resolve_label_buffer_unit,
     resolve_label_horizon,
     resolve_market_semantics,
     resolve_storage_path,
@@ -910,6 +911,10 @@ def load_modeling_dataset(
     # CV splits — read buffer from setup.yaml (explicit, handles non-standard labels)
     setup = yaml.safe_load((case_dir / "config" / "setup.yaml").read_text())
     label_buffer = resolve_label_buffer(case_study_id, primary_label, setup)
+    # Whether that duration counts sessions or calendar time is the label's to declare,
+    # not each consumer's to guess: `35D` to option expiry is calendar, `21D` on a daily
+    # equity panel is 21 sessions, and the duration alone cannot tell them apart.
+    buffer_unit = resolve_label_buffer_unit(case_study_id, primary_label, setup)
     if not label_buffer:
         raise ValueError(
             f"No explicit label buffer found for '{primary_label}' in "
@@ -925,6 +930,7 @@ def load_modeling_dataset(
         label_buffer=label_buffer,
         outcome_horizon=resolve_label_horizon(case_study_id, primary_label, setup),
         date_col=date_col,
+        buffer_unit=buffer_unit,
     )
     temporal_artifact_splits: list[dict[str, Any]] = []
     if temporal_by_fold_pd is not None:
@@ -968,7 +974,12 @@ def load_modeling_dataset(
     if wf_horizon and wf_horizon.endswith("M") and wf_horizon[:-1].isdigit():
         wf_horizon = f"{int(wf_horizon[:-1]) * 30}D"
     try:
-        cv_config = make_wf_config(case_study_id, label_horizon=wf_horizon, date_col=date_col)
+        cv_config = make_wf_config(
+            case_study_id,
+            label_horizon=wf_horizon,
+            date_col=date_col,
+            buffer_unit=buffer_unit,
+        )
     except Exception as exc:
         warnings.warn(f"WalkForwardConfig creation failed for {case_study_id}: {exc}", stacklevel=2)
         cv_config = None
