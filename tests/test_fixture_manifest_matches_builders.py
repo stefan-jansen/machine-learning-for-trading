@@ -1,0 +1,233 @@
+"""data/manifest.json describes the fixture set, and nothing was checking that.
+
+`tests/create_test_data.py` writes each dataset's declared budget into the
+manifest at build time. Nothing compared the committed manifest against the
+builder afterwards, so a builder change that was not followed by a regeneration
+left the fixture silently describing data that is not on disk.
+
+It cost a case study a day. The manifest still said `sp500_options` kept 3 "most
+liquid" underlyings while the builder declared 30 named ones from #652 - a
+different subsampling scheme entirely, never regenerated. Downstream,
+`cs-sp500_options` failed five notebooks on main; every one was the stale
+fixture, and the failure text pointed at the notebook.
+
+Two halves, and the second is why this file is not one assertion:
+
+- the data-free half compares the manifest's `subsets` against the declarations,
+  which is the check that would have fired the day #652 landed;
+- the data-backed half compares the declarations against the fixture on disk,
+  which is what the first half cannot see. Measured 2026-09-03: the manifest and
+  the `nasdaq100_minute_bars` builder agreed with each other on 6 symbols while
+  the fixture carried 12, so manifest-equals-builder alone would have passed on a
+  fixture neither of them described.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import polars as pl
+import pytest
+
+REPO_ROOT = Path(__file__).parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tests.create_test_data import (  # noqa: E402
+    DATASETS,
+    SUPERSEDED_SUBSETS,
+    UNBUILT_FIXTURES,
+    declared_subsets,
+)
+
+
+@pytest.fixture
+def fixture_root(test_data_dir: Path) -> Path:
+    """The test-data checkout, or a skip.
+
+    Resolved through conftest's ``test_data_dir`` rather than by reading
+    ML4T_DATA_PATH here: that variable is rewritten during a session by the same
+    fixture, and under a full-suite run it resolves to the production root, where
+    these declarations are a category error rather than a failure. The manifest is
+    what distinguishes the two - production has none.
+    """
+    if not (test_data_dir / "manifest.json").is_file():
+        pytest.skip(f"{test_data_dir} is not a test-data checkout (no manifest.json)")
+    return test_data_dir
+
+
+@pytest.fixture
+def manifest(fixture_root: Path) -> dict:
+    return json.loads((fixture_root / "manifest.json").read_text())
+
+
+# --- the declarations themselves, no data needed -----------------------------
+
+
+def test_every_fixture_is_declared_exactly_once() -> None:
+    """A dataset with a builder and a declaration of having none is a contradiction."""
+    registered = {dataset.name for dataset in DATASETS}
+    unbuilt = {fixture.name for fixture in UNBUILT_FIXTURES}
+    assert not registered & unbuilt
+    assert not (registered | unbuilt) & set(SUPERSEDED_SUBSETS)
+
+
+def test_every_superseded_entry_names_the_dataset_that_owns_it() -> None:
+    registered = {dataset.name for dataset in DATASETS}
+    for name, owner in SUPERSEDED_SUBSETS.items():
+        assert owner in registered, f"{name} is superseded by {owner}, which has no builder"
+
+
+def test_every_unbuilt_fixture_records_why_it_has_none() -> None:
+    """Without the reason the entry is a shrug, which is what it replaced."""
+    for fixture in UNBUILT_FIXTURES:
+        assert fixture.reason.strip(), f"{fixture.name} declares no reason"
+        assert fixture.entities, f"{fixture.name} declares nothing a test can measure"
+
+
+def test_every_reducing_builder_declares_something_measurable() -> None:
+    """A builder with no `entities` is checked against nothing on the data side.
+
+    institutional_holdings_13f is the exemption and states it: it subsamples on no
+    axis, so there is no count to compare.
+    """
+    unmeasured = {
+        dataset.name
+        for dataset in DATASETS
+        if not dataset.entities and dataset.budget.get("subsample") != "none"
+    }
+    assert not unmeasured, f"{sorted(unmeasured)} declare no entity count to check"
+
+
+# --- the manifest against the declarations -----------------------------------
+
+
+def test_the_manifest_subsets_are_exactly_the_declared_ones(manifest: dict) -> None:
+    """Both directions: an undeclared entry and a missing one are the same defect."""
+    assert sorted(manifest["subsets"]) == sorted(declared_subsets())
+
+
+@pytest.mark.parametrize("name", sorted(declared_subsets()))
+def test_the_manifest_records_what_the_declaration_says(name: str, manifest: dict) -> None:
+    assert manifest["subsets"][name] == declared_subsets()[name], (
+        f"data/manifest.json's {name} entry has drifted from tests/create_test_data.py. "
+        "Regenerate the dataset, or rerun with --reconcile-manifest if only the "
+        "declaration moved."
+    )
+
+
+def test_no_superseded_entry_came_back(manifest: dict) -> None:
+    present = set(manifest["subsets"]) & set(SUPERSEDED_SUBSETS)
+    assert not present, f"{sorted(present)} describe fixtures another dataset already owns"
+
+
+# --- the declarations against the fixture on disk ----------------------------
+
+
+def test_every_file_the_manifest_lists_is_on_disk(fixture_root: Path, manifest: dict) -> None:
+    """133 of 176 entries pointed at the pre-reorganization layout before this ran.
+
+    A manifest listing files that are not there is the same wrong answer as a stale
+    budget: it is the only record of what the fixture set is supposed to contain.
+    """
+    missing = [rel for rel in manifest["files"] if not (fixture_root / rel).is_file()]
+    assert not missing, f"{len(missing)} manifest paths are not on disk, e.g. {missing[:5]}"
+
+
+def _distinct(path: Path, column: str) -> int:
+    source = path / "**" / "*.parquet" if path.is_dir() else path
+    return pl.scan_parquet(source).select(pl.col(column).n_unique()).collect().item()
+
+
+def _declared_files(root: Path) -> dict[str, list[str]]:
+    """{dataset name: the files on disk under the paths it declares}."""
+    declared = {dataset.name: dataset.owns for dataset in DATASETS}
+    declared.update({fixture.name: fixture.covers for fixture in UNBUILT_FIXTURES})
+    found = {}
+    for name, paths in declared.items():
+        files = []
+        for declared_path in paths:
+            path = root / declared_path
+            if path.is_file():
+                files.append(path.relative_to(root).as_posix())
+            elif path.is_dir():
+                files += [f.relative_to(root).as_posix() for f in path.rglob("*") if f.is_file()]
+        found[name] = sorted(files)
+    return found
+
+
+@pytest.mark.parametrize(
+    "name", sorted({d.name for d in DATASETS} | {f.name for f in UNBUILT_FIXTURES})
+)
+def test_every_file_a_dataset_owns_is_listed_in_the_manifest(
+    name: str, fixture_root: Path, manifest: dict
+) -> None:
+    """The other direction, and the one a recursive glob makes dangerous.
+
+    load_nasdaq100_bars globs '**/*.parquet' under its hive root, so a part left
+    behind by an earlier generation is unioned into the panel rather than replaced.
+    Manifest-to-disk membership cannot see that; disk-to-manifest can.
+    """
+    listed = set(manifest["files"])
+    unlisted = [rel for rel in _declared_files(fixture_root)[name] if rel not in listed]
+    assert not unlisted, (
+        f"{name} carries files the manifest does not list: {unlisted[:5]}. Either they are "
+        "left over from an earlier generation, or the manifest needs --reconcile-manifest."
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "rel", "column", "count"),
+    [
+        (dataset.name, rel, column, count)
+        for dataset in DATASETS
+        for rel, (column, count) in dataset.entities.items()
+    ],
+)
+def test_a_built_fixture_carries_the_universe_its_builder_declares(
+    name: str, rel: str, column: str, count: int, fixture_root: Path
+) -> None:
+    """The builder's own constants against the data, which is where drift shows.
+
+    Measured 2026-09-03: the manifest and the nasdaq100_minute_bars builder agreed
+    with each other on 6 symbols while the fixture carried 12, so comparing the two
+    proved nothing and the builder, run as it stood, would have narrowed the fixture
+    back and left the loader's glob reading two generations at once.
+    """
+    path = fixture_root / rel
+    if not path.exists():
+        pytest.skip(f"{name}: {rel} is not in this checkout")
+    observed = _distinct(path, column)
+    assert observed == count, (
+        f"{name}'s builder declares {count} distinct {column} in {rel} and the fixture "
+        f"carries {observed}. Regenerate the dataset, or correct the builder."
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "rel", "column", "count"),
+    [
+        (fixture.name, rel, column, count)
+        for fixture in UNBUILT_FIXTURES
+        for rel, (column, count) in fixture.entities.items()
+    ],
+)
+def test_an_unbuilt_fixture_carries_the_universe_it_declares(
+    name: str, rel: str, column: str, count: int, fixture_root: Path
+) -> None:
+    """These cannot drift against a builder, so they are measured against the data.
+
+    Every one of them declared a budget the fixture did not satisfy before this -
+    "15 most liquid ETFs" over 56 symbols, "8 major/cross FX pairs" over 20, "50
+    most liquid US equities" over 56, "8 most liquid CME products" over a 30-product
+    daily panel.
+    """
+    path = fixture_root / rel
+    if not path.exists():
+        pytest.skip(f"{name}: {rel} is not in this checkout")
+    observed = _distinct(path, column)
+    assert observed == count, (
+        f"{name} declares {count} distinct {column} in {rel} and the fixture carries {observed}"
+    )

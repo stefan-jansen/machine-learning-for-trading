@@ -12,12 +12,18 @@ repo, which is rewritten from DATASETS on every run so the manifest cannot drift
 from what was actually generated.
 
 DATASETS covers the fixtures whose absence or staleness has taken a CI job red,
-not every fixture the test-data repo carries. The rest - equities bars, crypto,
-futures, FX, the nasdaq minute set, options - were produced before this script
-existed and have no spec here yet, so this is not a from-empty rebuild of the
-fixture repo: it operates on a checkout of ml4t/third-edition-test-data and
-replaces the datasets it knows. Reconstructing the remaining specs is tracked in
-``agents/issues`` (test-data regeneration coverage).
+not every fixture the test-data repo carries. The rest - the ETF, crypto, FX, US
+equity and CME panels - were produced before this script existed, by paths that
+were not kept, so this is not a from-empty rebuild of the fixture repo: it
+operates on a checkout of ml4t/third-edition-test-data and replaces the datasets
+it knows. Those are declared in UNBUILT_FIXTURES with what the fixture actually
+carries and why there is no builder, so the manifest describes the whole set and
+``tests/test_fixture_manifest_matches_builders.py`` can check every entry of it
+against the declarations and against the data on disk.
+
+``--reconcile-manifest`` rewrites the manifest from those declarations and the
+files that are there, building nothing. Use it when a declaration moves without
+a regeneration; use a real regeneration when the data has to move.
 
 Usage:
     # Every dataset declared below, over an existing test-data checkout
@@ -75,6 +81,11 @@ class Dataset:
             directory.
         budget: Manifest ``subsets`` entry describing the reduction (e.g.
             ``{"max_entities": 200}``). Recorded verbatim in the manifest.
+        entities: ``{path: (column, count)}`` the built fixture has to carry, taken
+            from the builder's own constants. Checked against the data on disk, which
+            is the only place the drift shows: the manifest and the
+            ``nasdaq100_minute_bars`` builder agreed with each other on six symbols
+            while the fixture carried twelve, so comparing the two proved nothing.
     """
 
     name: str
@@ -82,6 +93,7 @@ class Dataset:
     build: Callable[[Path, Path], list[Path]]
     owns: tuple[Path, ...]
     budget: dict[str, object] = field(default_factory=dict)
+    entities: dict[str, tuple[str, int]] = field(default_factory=dict)
 
 
 # --- firm characteristics -----------------------------------------------------
@@ -383,7 +395,21 @@ def build_institutional_holdings_13f(source: Path, output: Path) -> list[Path]:
 # they had, so nothing the microstructure case study reads changes.
 
 NASDAQ100_MINUTE_DIR = Path("equities") / "market" / "nasdaq100" / "minute_bars"
-NASDAQ100_MINUTE_SYMBOLS = ("AAPL", "AMD", "AMZN", "FB", "GOOGL", "MSFT")
+# Twelve, not six. Six cannot carry a long-short cross-sectional sweep: signals.py
+# clamps each side to n_assets // 2, so the smallest k in nasdaq100_microstructure's
+# top_k_grid - 5 - needs ten distinct names, and at six the fixture could only ever
+# trade three a side while CI registered a top_k=5 identity it had not run. The six
+# added are the highest-volume nasdaq100 members not already present, so the widened
+# cross-section carries dispersion rather than six more of the same regime.
+NASDAQ100_MINUTE_SYMBOLS = (
+    "AAPL", "AMD", "AMZN", "CMCSA", "CSCO", "FB",
+    "GOOGL", "INTC", "MSFT", "QCOM", "SIRI", "TSLA",
+)  # fmt: skip
+# GitHub rejects any blob over 100 MB, and the widened year=2021 is 142 MB whole. Each
+# year is written as this many contiguous blocks of sessions instead. load_nasdaq100_bars
+# globs '**/*.parquet' under the hive root, so the split reads back as one panel.
+NASDAQ100_MINUTE_PARTS_PER_YEAR = 2
+NASDAQ100_MINUTE_MAX_BLOB_BYTES = 100_000_000
 # Six consecutive sessions kept per six skipped runs: one week in six, which
 # keeps a fifth of the fixture's sessions preceded by their true predecessor.
 NASDAQ100_MINUTE_RUN_SESSIONS = 6
@@ -401,6 +427,18 @@ def _session_runs(sessions: pl.Series, run: int, stride: int, dense_from: date) 
         keep.extend(strided[start : start + run].to_list())
     keep.extend(sessions.filter(sessions >= dense_from).to_list())
     return pl.Series("date", keep, dtype=sessions.dtype)
+
+
+def _contiguous_session_blocks(sessions: pl.Series, parts: int) -> list[pl.Series]:
+    """Split sorted sessions into ``parts`` contiguous, near-equal blocks.
+
+    Contiguous on the date axis so each part is a date range rather than a stripe:
+    a reader who opens one file sees a continuous stretch of the panel, and the
+    split is reproducible from the session list alone.
+    """
+    total = len(sessions)
+    size = -(-total // parts)  # ceiling, so the last block is the short one
+    return [sessions[start : start + size] for start in range(0, total, size)]
 
 
 def build_nasdaq100_minute_bars(source: Path, output: Path) -> list[Path]:
@@ -434,17 +472,44 @@ def build_nasdaq100_minute_bars(source: Path, output: Path) -> list[Path]:
     if spacing != [timedelta(minutes=1)]:
         raise ValueError(f"fixture grid is not one-minute within a session: {sorted(spacing)}")
 
-    written: list[Path] = []
-    for year, part in frame.group_by(pl.col("date").dt.year(), maintain_order=True):
-        dst = output / NASDAQ100_MINUTE_DIR / f"year={year[0]}" / "data.parquet"
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        part.write_parquet(dst)
-        print(
-            f"    year={year[0]}: {len(part):,} rows ({dst.stat().st_size / 1e6:.1f} MB), "
-            f"{part['date'].n_unique()} sessions, {part['symbol'].n_unique()} symbols"
-        )
-        written.append(dst)
-    return written
+    # Written to a staging directory and moved into place only once every part is
+    # written and under the blob limit. The hive root has to be emptied - the loader
+    # globs '**/*.parquet' under it, so a part left over from a previous generation
+    # is silently unioned into the panel rather than replaced - and emptying it
+    # before the build could leave the fixture with no bars at all, or with half a
+    # year, if a part turns out to be too large to push.
+    root = output / NASDAQ100_MINUTE_DIR
+    staging = root.parent / f"{root.name}.staging"
+    if staging.is_dir():
+        shutil.rmtree(staging)
+
+    staged: list[Path] = []
+    for year, year_frame in frame.group_by(pl.col("date").dt.year(), maintain_order=True):
+        sessions_in_year = year_frame["date"].unique().sort()
+        blocks = _contiguous_session_blocks(sessions_in_year, NASDAQ100_MINUTE_PARTS_PER_YEAR)
+        for index, block in enumerate(blocks):
+            part = year_frame.filter(pl.col("date").is_in(block.implode()))
+            dst = staging / f"year={year[0]}" / f"data-{index:02d}.parquet"
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            part.write_parquet(dst)
+            size = dst.stat().st_size
+            if size > NASDAQ100_MINUTE_MAX_BLOB_BYTES:
+                shutil.rmtree(staging)
+                raise ValueError(
+                    f"year={year[0]} part {index} is {size / 1e6:.1f} MB, above GitHub's "
+                    f"100 MB blob limit. Raise NASDAQ100_MINUTE_PARTS_PER_YEAR above "
+                    f"{NASDAQ100_MINUTE_PARTS_PER_YEAR}."
+                )
+            print(
+                f"    year={year[0]} part {index}: {len(part):,} rows ({size / 1e6:.1f} MB), "
+                f"{part['date'].n_unique()} sessions, {part['symbol'].n_unique()} symbols"
+            )
+            staged.append(dst)
+
+    if root.is_dir():
+        shutil.rmtree(root)
+    staging.rename(root)
+    return [root / path.relative_to(staging) for path in staged]
 
 
 # --- S&P 500 share bars and the option chains built on them -------------------
@@ -637,6 +702,13 @@ DATASETS: tuple[Dataset, ...] = (
             "raw_chain": "contracts entered by options_straddles_daily, full lifecycle",
             "min_surface_symbols_per_date": SP500_MIN_SURFACE_SYMBOLS_PER_DATE,
         },
+        # options_straddles_daily is deliberately not here: an underlying with no
+        # straddle meeting the pairing rule drops out of that panel, so it is a
+        # subset of the roster by construction rather than equal to it.
+        entities={
+            SP500_BARS.as_posix(): ("symbol", len(SP500_SYMBOLS)),
+            SP500_SURFACE.as_posix(): ("symbol", len(SP500_SYMBOLS)),
+        },
     ),
     Dataset(
         name="nasdaq100_minute_bars",
@@ -655,6 +727,10 @@ DATASETS: tuple[Dataset, ...] = (
             "run_stride": NASDAQ100_MINUTE_RUN_STRIDE,
             "dense_from": NASDAQ100_MINUTE_DENSE_FROM.isoformat(),
             "bar_spacing": "1m (unchanged from production)",
+            "parts_per_year": NASDAQ100_MINUTE_PARTS_PER_YEAR,
+        },
+        entities={
+            NASDAQ100_MINUTE_DIR.as_posix(): ("symbol", len(NASDAQ100_MINUTE_SYMBOLS)),
         },
     ),
     Dataset(
@@ -666,6 +742,13 @@ DATASETS: tuple[Dataset, ...] = (
         build=build_firm_characteristics,
         owns=(Path("equities") / "firm_characteristics",),
         budget={"max_entities": FIRM_CHAR_MAX_ENTITIES},
+        entities={
+            f"equities/firm_characteristics/firm_characteristics_{split}.parquet": (
+                "symbol",
+                FIRM_CHAR_MAX_ENTITIES,
+            )
+            for split, _, _ in FIRM_CHAR_SPLITS
+        },
     ),
     Dataset(
         name="institutional_holdings_13f",
@@ -682,6 +765,122 @@ DATASETS: tuple[Dataset, ...] = (
 )
 
 DATASETS_BY_NAME = {dataset.name: dataset for dataset in DATASETS}
+
+
+@dataclass(frozen=True)
+class UnbuiltFixture:
+    """A fixture the test-data repo carries that this script cannot rebuild.
+
+    Attributes:
+        name: Manifest ``subsets`` key.
+        description: What the fixture holds, mirrored into the manifest.
+        covers: Paths under the output root the fixture occupies.
+        entities: ``{path: (column, count)}`` measured on the fixture itself, so
+            the declaration is a measurement rather than an intention and a test
+            can check it against the files on disk.
+        reason: Why there is no ``Dataset`` spec.
+    """
+
+    name: str
+    description: str
+    covers: tuple[Path, ...]
+    entities: dict[str, tuple[str, int]]
+    reason: str
+
+
+# The fixtures produced before this script existed, by paths that were not kept.
+#
+# They are declared rather than left implicit because the manifest is the only
+# record of what the fixture set is supposed to contain, and an entry nothing can
+# confirm is worse than no entry: every one of these carried a budget the fixture
+# did not satisfy - "15 most liquid ETFs" over 56 symbols, "8 major/cross FX pairs"
+# over 20, "50 most liquid US equities" over 56, "8 most liquid CME products" over
+# a 30-product daily panel. What is recorded here is measured on the fixture.
+#
+# Why none of them has a builder, measured 2026-09-03 by filtering current
+# production to each fixture's own symbol set: the row counts match exactly, but
+# the shipped fixtures are snapshots of an older production state, so a builder
+# that filtered production today would not reproduce them. `etfs` and `fx` carry a
+# Datetime date column where production now carries Date; `crypto` ends
+# 2025-12-29 against production's 2025-12-31. Writing the specs is therefore a
+# regeneration of each fixture rather than a description of it - per-dataset work
+# with per-dataset verification against the notebooks that read it, and one push to
+# ml4t/third-edition-test-data that changes CI inputs for every open branch at once.
+UNBUILT_FIXTURES: tuple[UnbuiltFixture, ...] = (
+    UnbuiltFixture(
+        name="etfs",
+        description="56 ETFs across categories, of the 100 production carries",
+        covers=(Path("etfs") / "market",),
+        entities={
+            "etfs/market/etf_universe.parquet": ("symbol", 56),
+            "etfs/market/etf_universe_unadjusted.parquet": ("symbol", 56),
+        },
+        reason="produced before this script existed; the shipped extract predates the "
+        "current production schema (Datetime date column against production's Date)",
+    ),
+    UnbuiltFixture(
+        name="crypto",
+        description="5 perpetual futures of the 19 production carries, hourly bars "
+        "with their 8-hour premium index and funding rate",
+        covers=(Path("crypto") / "market",),
+        entities={
+            "crypto/market/perps_1h.parquet": ("symbol", 5),
+            "crypto/market/premium_index_8h.parquet": ("symbol", 5),
+            "crypto/market/funding_rate.parquet": ("symbol", 5),
+        },
+        reason="produced before this script existed; the shipped extract ends two "
+        "sessions before production, so filtering production does not reproduce it",
+    ),
+    UnbuiltFixture(
+        name="fx",
+        description="the whole production FX panel, 20 major and cross pairs at 4h "
+        "and daily - not reduced on any axis",
+        covers=(Path("fx") / "market",),
+        entities={
+            "fx/market/4h.parquet": ("symbol", 20),
+            "fx/market/daily.parquet": ("symbol", 20),
+        },
+        reason="produced before this script existed, and reduced on no axis: the row "
+        "counts equal production's exactly, so this fixture measures nothing about "
+        "reduction and only pins the panel",
+    ),
+    UnbuiltFixture(
+        name="us_equities",
+        description="56 tickers of the 3,199 production carries, full date range",
+        covers=(Path("equities") / "market" / "us_equities",),
+        entities={"equities/market/us_equities/us_equities.parquet": ("ticker", 56)},
+        reason="produced before this script existed; the reduction rule that chose "
+        "these 56 was not kept",
+    ),
+    UnbuiltFixture(
+        name="cme_futures",
+        description="the whole 30-product production daily panel, with the hourly "
+        "bars reduced to 8 products",
+        covers=(Path("futures") / "market" / "continuous",),
+        entities={
+            "futures/market/continuous/daily/continuous_daily.parquet": ("product", 30),
+        },
+        reason="produced before this script existed, and the two halves disagree: the "
+        "daily panel is byte-identical to production (same md5, 312,859 rows over 30 "
+        "products) while the hourly bars carry 8. cme_futures reads the daily one, and "
+        "config/setup.yaml declares 30 products with initial_cash and top_k_grid sized "
+        "for them, so the daily panel is the one that matches the study",
+    ),
+)
+
+UNBUILT_BY_NAME = {fixture.name: fixture for fixture in UNBUILT_FIXTURES}
+
+# Manifest entries that describe a fixture another dataset already owns, and are
+# dropped rather than declared. `sp500_daily` describes
+# equities/market/sp500/daily_bars.parquet, which build_sp500_options writes;
+# `nasdaq100` describes the minute bars build_nasdaq100_minute_bars writes. Both
+# still carried their pre-reorganization paths and their pre-widening budgets - 20
+# and 3 symbols against the 30 and 12 on disk - so a reader consulting the manifest
+# got a wrong answer about a fixture that does have a builder.
+SUPERSEDED_SUBSETS = {
+    "sp500_daily": "sp500_options",
+    "nasdaq100": "nasdaq100_minute_bars",
+}
 
 
 def _owned_by(dataset: Dataset, rel: str) -> bool:
@@ -726,6 +925,88 @@ def write_manifest(output: Path, built: dict[str, list[Path]]) -> Path:
     return manifest_path
 
 
+def declared_subsets() -> dict[str, dict]:
+    """What ``manifest.json``'s ``subsets`` block has to say, from the declarations.
+
+    One entry per registered ``Dataset`` and one per ``UnbuiltFixture``, and nothing
+    else. This is the comparison that would have fired the day #652 landed: the
+    manifest still said sp500_options kept 3 "most liquid" underlyings while the
+    builder declared 30 named ones, and nothing noticed until a case study spent a
+    day on five notebooks that were failing on the stale fixture rather than on
+    anything in the notebooks.
+    """
+    subsets = {
+        dataset.name: {**dataset.budget, "description": dataset.description} for dataset in DATASETS
+    }
+    subsets.update(
+        {
+            fixture.name: {
+                "description": fixture.description,
+                "entities": {
+                    path: {"column": column, "count": count}
+                    for path, (column, count) in fixture.entities.items()
+                },
+                "no_builder": fixture.reason,
+            }
+            for fixture in UNBUILT_FIXTURES
+        }
+    )
+    return subsets
+
+
+def reconcile_manifest(output: Path) -> tuple[Path, dict]:
+    """Rewrite ``manifest.json`` so it describes the fixture set that is on disk.
+
+    Two things go stale on their own and nothing was checking either. The ``subsets``
+    block drifts from the declarations whenever a builder changes without a
+    regeneration. The ``files`` block keeps every path it ever recorded, because
+    :func:`write_manifest` only drops entries under the dataset being rebuilt - so a
+    reorganization of the tree (``crypto/`` to ``crypto/market/``, and the same for
+    equities, etfs, fx and futures) left the manifest listing files that are not
+    there, which is the same wrong answer as a stale budget.
+
+    Sizes are re-read for the paths that do exist; a path that does not is dropped.
+    Every file under a declared dataset's own paths is then recorded, so the block
+    describes the declared fixture set completely rather than whatever the last
+    per-dataset run happened to write. Files under no declaration are kept if they
+    exist and never added, because what belongs in the fixture set is a declaration
+    and not whatever is in the directory.
+    """
+    manifest_path = output / "manifest.json"
+    manifest: dict = {"version": "1", "subsets": {}, "files": {}}
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text())
+
+    manifest["subsets"] = declared_subsets()
+
+    def record(rel: str, path: Path) -> None:
+        size = path.stat().st_size
+        files[rel] = {"size_bytes": size, "size_mb": round(size / 1e6, 2)}
+
+    files: dict[str, dict] = {}
+    for rel in sorted(manifest.get("files", {})):
+        path = output / rel
+        if path.is_file():
+            record(rel, path)
+    dropped = sorted(set(manifest.get("files", {})) - set(files))
+
+    declared_paths = [owned for dataset in DATASETS for owned in dataset.owns]
+    declared_paths += [covered for fixture in UNBUILT_FIXTURES for covered in fixture.covers]
+    added = []
+    for declared in declared_paths:
+        root = output / declared
+        found = [root] if root.is_file() else sorted(f for f in root.rglob("*") if f.is_file())
+        for path in found:
+            rel = path.relative_to(output).as_posix()
+            if rel not in files:
+                added.append(rel)
+            record(rel, path)
+
+    manifest["files"] = dict(sorted(files.items()))
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    return manifest_path, {"kept": len(files), "dropped": dropped, "added": sorted(added)}
+
+
 def roots_overlap(source: Path, output: Path) -> str | None:
     """Return why these roots cannot be used together, or None.
 
@@ -750,8 +1031,8 @@ def main() -> int:
     parser.add_argument(
         "--source",
         type=Path,
-        required=True,
-        help="Production data root to subsample from (e.g. ~/ml4t/code/data)",
+        help="Production data root to subsample from (e.g. ~/ml4t/code/data). "
+        "Required unless --reconcile-manifest, which reads no production data.",
     )
     parser.add_argument(
         "--output",
@@ -771,8 +1052,33 @@ def main() -> int:
         help="Remove each selected dataset's output directory before writing it",
     )
     parser.add_argument("--dry-run", action="store_true", help="Report the plan, write nothing")
+    parser.add_argument(
+        "--reconcile-manifest",
+        action="store_true",
+        help=(
+            "Rewrite data/manifest.json from the declarations and the files on disk, "
+            "building nothing. --source is not read."
+        ),
+    )
     args = parser.parse_args()
 
+    if args.reconcile_manifest:
+        if args.dry_run:
+            parser.error("--dry-run and --reconcile-manifest are mutually exclusive")
+        output = args.output.expanduser().resolve()
+        manifest_path, report = reconcile_manifest(output)
+        print(f"Manifest: {manifest_path}")
+        print(f"  subsets: {', '.join(sorted(declared_subsets()))}")
+        print(
+            f"  files: {report['kept']} recorded, {len(report['dropped'])} dropped as "
+            f"not on disk, {len(report['added'])} added from a declared path"
+        )
+        for rel in report["dropped"]:
+            print(f"  dropped, not on disk: {rel}")
+        return 0
+
+    if args.source is None:
+        parser.error("--source is required unless --reconcile-manifest is given")
     source = args.source.expanduser().resolve()
     output = args.output.expanduser().resolve()
     if not source.is_dir():
