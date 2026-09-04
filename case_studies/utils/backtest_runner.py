@@ -1273,6 +1273,7 @@ def run_backtest(
     # 3. Register
     backtest_hash = None
     if register:
+        _refuse_an_allocation_that_produced_no_target(weights, daily_returns, strategy_spec)
         from case_studies.utils.registry import (
             compute_backtest_fold_metrics,
             register_backtest_fold_metrics,
@@ -2386,6 +2387,52 @@ def _apply_allocation(
 # ---------------------------------------------------------------------------
 # Risk rules (Ch19) — engine-level integration
 # ---------------------------------------------------------------------------
+
+
+def _refuse_an_allocation_that_produced_no_target(
+    weights: pl.DataFrame | None,
+    daily_returns: pl.DataFrame | None,
+    strategy_spec: dict,
+) -> None:
+    """Refuse to register a run whose strategy produced no target weight at any rebalance.
+
+    An empty weight frame over a non-empty evaluation window is not a strategy that traded
+    little. It is a strategy the engine was never given anything to trade towards, so it holds
+    a flat account for the whole window and every return-derived metric it records is the
+    metric of that flat account: `total_return` 0, `sharpe` 0.0. Written to the registry those
+    read as a configuration that was tried and lost nothing, and a 0.0 Sharpe then sits above
+    every candidate whose Sharpe is negative. Nothing downstream filters it out of the trial
+    count - `cohort_metrics` lists cohort members straight from `backtest_runs` with no
+    zero-trade clause - so an absence is counted as a trial against every real candidate
+    beside it.
+
+    `fx_pairs`' `mvo_ledoit_wolf` at `top_k=2` is the measured case
+    (ml4t/agent-workspace#1004): `compute_mvo_weights` skipped every one of 2,063 rebalances
+    for having a two-name cross-section and returned the empty schema-only frame.
+
+    **The test is the weight frame, not the trade count.** A run with `num_trades == 0` and a
+    non-empty weight frame is a different condition with different causes, and at least one of
+    them is legitimate: a CI fixture whose panel is one or four bars long has a target and no
+    later bar to fill it on under `next_bar` execution. Refusing on the trade count alone
+    stopped eleven such fixture backtests across `test_research_contract_execution` and
+    `test_cme_futures_research`, which is the wrong answer - nothing is wrong with them.
+
+    An empty return series is a different failure with its own diagnosis upstream and is left
+    to it.
+    """
+    if weights is None or weights.height > 0:
+        return
+    if daily_returns is None or daily_returns.height == 0:
+        return
+    strategy = strategy_spec.get("strategy", strategy_spec)
+    raise ValueError(
+        "the strategy produced no target weight at any rebalance, over "
+        f"{daily_returns.height} periods, so this run is refused rather than registered as a "
+        f"Sharpe of 0.0: signal={strategy.get('signal')} "
+        f"allocation={strategy.get('allocation')} rebalance={strategy.get('rebalance')}. "
+        "A run with no target never opened a position and measured nothing; fix the allocator "
+        "or the selection that emptied the weight frame."
+    )
 
 
 def _build_position_rules(risk_spec: dict):
