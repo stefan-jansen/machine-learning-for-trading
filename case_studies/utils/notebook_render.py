@@ -34,7 +34,11 @@ from case_studies.utils.analytics import (
     _query,
     registry_path,
 )
-from case_studies.utils.conformal import split_conformal_coverage
+from case_studies.utils.conformal import (
+    DEFAULT_MIN_CALIBRATION_N,
+    holdout_conformal_embargo_steps,
+    walk_forward_conformal_coverage,
+)
 from case_studies.utils.notebook_contracts import (
     degenerate_prediction_sql,
     full_coverage_prediction_sql,
@@ -239,6 +243,7 @@ _CONFORMAL_COVERAGE_SCHEMA: dict[str, pl.DataType] = {
     "empirical_coverage": pl.Float64,
     "mean_interval_width_frac_std": pl.Float64,
     "n_test": pl.Int64,
+    "n_uncalibrated": pl.Int64,
 }
 
 
@@ -724,22 +729,29 @@ def conformal_coverage_diagnostic(
     *,
     levels: tuple[float, ...] = (0.80, 0.90, 0.95),
     families: list[str] | None = None,
+    embargo_steps: int | None = None,
+    min_calibration_n: int = DEFAULT_MIN_CALIBRATION_N,
 ) -> pl.DataFrame:
-    """Per-family inductive split-conformal coverage at nominal levels.
+    """Per-family realised coverage of the widths that size positions.
 
-    For each family's rank-1 validation config (by ``ic_mean_daily``), loads
-    OOF predictions and uses the earliest validation fold as a calibration
-    set to derive a symmetric absolute-residual quantile, then measures
-    empirical coverage on later folds at each nominal level. Numeric fold ids
-    are not chronological under backward walk-forward splitting, so the
-    calibration fold is the one with the earliest timestamp, not ``fold_id``
-    zero. Interval width is reported as a fraction of the calibration window's
-    return standard deviation, so families with different return scales are
-    comparable and no evaluation-fold outcome enters the reported width.
+    One row per family and nominal level, measured by
+    :func:`~case_studies.utils.conformal.walk_forward_conformal_coverage` on the estimator
+    `conformal_weighted` allocates with. It is a diagnostic of residual dispersion, not a
+    guarantee: nothing in the allocation path reads an interval or a coverage level.
+
+    **Which configuration each row describes.** The family's rank-1 validation config by
+    ``ic_mean_daily``, over the configs with the longest IC history. That is a model-level
+    ranking and not the pipeline's - every selection stage ranks on validation backtest Sharpe -
+    and it is used here because this diagnostic runs in the model-analysis notebook, before any
+    backtest exists to rank. So a row names the family's IC leader, in the ``family`` and
+    ``config_name`` columns, and says nothing about which configuration the funnel went on to
+    select.
+
+    ``embargo_steps`` defaults to the reviewed label horizon for this case study and label.
 
     Returns columns:
         family, config_name, nominal_level,
-        empirical_coverage, mean_interval_width_frac_std, n_test
+        empirical_coverage, mean_interval_width_frac_std, n_test, n_uncalibrated
     """
     label = label or PRIMARY_LABELS[case_study]
     db = registry_path(case_study)
@@ -783,6 +795,11 @@ def conformal_coverage_diagnostic(
         .first()
     )
 
+    # Resolved here rather than at the top: a registry with no validation rows yet returns the
+    # empty frame above, and a case study reaches that state before it has a reviewed horizon.
+    if embargo_steps is None:
+        embargo_steps = holdout_conformal_embargo_steps(case_study, label)
+
     pred_dir = db.parent / "predictions"
     out_rows: list[dict] = []
     for fam, cfg, p_hash in zip(
@@ -794,7 +811,12 @@ def conformal_coverage_diagnostic(
         if not pq.exists():
             continue
         try:
-            coverage_rows = split_conformal_coverage(pl.read_parquet(pq), levels=levels)
+            coverage_rows = walk_forward_conformal_coverage(
+                pl.read_parquet(pq),
+                levels=levels,
+                embargo_steps=embargo_steps,
+                min_calibration_n=min_calibration_n,
+            )
         except ValueError:
             continue
         out_rows.extend({"family": fam, "config_name": cfg, **row} for row in coverage_rows)

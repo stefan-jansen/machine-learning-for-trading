@@ -111,18 +111,46 @@ HOLDOUT_CONFORMAL_EMBARGO_STEPS: dict[str, int] = {
 }
 
 
-def split_conformal_coverage(
+def walk_forward_conformal_coverage(
     predictions: pl.DataFrame,
     *,
+    embargo_steps: int,
     levels: tuple[float, ...] = (0.80, 0.90, 0.95),
-    min_rows: int = 30,
+    min_calibration_n: int = DEFAULT_MIN_CALIBRATION_N,
 ) -> list[dict[str, float | int]]:
-    """Measure split-conformal coverage with chronological calibration.
+    """Realised coverage of the widths that size positions, at each nominal level.
 
-    The earliest validation fold supplies both the absolute-residual quantile
-    and the target scale. Later folds are evaluation data only. Quantiles use
-    the exact finite-sample order statistic rather than interpolation.
+    The estimator is :func:`walk_forward_widths`, the one `conformal_weighted` allocates on:
+    per entity with a pooled fallback, calibrated on everything known at ``t - embargo_steps``,
+    quantile taken at ``interpolation="higher"``. A decision is covered when its absolute
+    residual is inside the half-width the allocator would have sized it with.
+
+    What this replaced measured a different estimator - one pooled quantile over every entity,
+    fixed on the earliest fold, no embargo, exact order statistic - and printed it as the
+    strategy's coverage. Pooling was the largest of those differences: a pooled quantile over
+    contracts with different volatilities is not the quantity that sizes any single position,
+    and `compute_conformal_weights` normalizes ``1/width`` within each side at each timestamp,
+    so only the cross-sectional dispersion of the per-entity widths reaches the portfolio -
+    the axis pooling removes.
+
+    ``embargo_steps`` is the label horizon in prediction data steps, from
+    :data:`HOLDOUT_CONFORMAL_EMBARGO_STEPS`. Zero is admitted because the table records zero
+    for a zero-horizon label, where the outcome is realised at the observation and no residual
+    reaches forward at all.
+
+    **This is a diagnostic of residual dispersion, not a guarantee.** Split conformal's
+    finite-sample coverage requires the calibration and test scores to be exchangeable, and
+    return residuals are heteroskedastic and regime-dependent. Nothing in the allocation path
+    reads an interval or a coverage level; the width stands in for a volatility estimate.
+
+    Returns one row per level with ``nominal_level``, ``empirical_coverage``,
+    ``mean_interval_width_frac_std``, ``n_test`` and ``n_uncalibrated`` - the decisions that
+    cleared no warm-up, which are the ones the allocator sizes from a pooled width or not at
+    all, and which no coverage figure describes.
     """
+    if embargo_steps < 0:
+        raise ValueError(f"embargo_steps={embargo_steps} is not a label horizon")
+
     renames = {
         legacy: canonical
         for legacy, canonical in _LEGACY_RENAME.items()
@@ -131,50 +159,59 @@ def split_conformal_coverage(
     if renames:
         predictions = predictions.rename(renames)
 
-    required = {"timestamp", "fold_id", "y_true", "y_score"}
+    id_col = _detect_id_col(predictions.columns)
+    if id_col != "symbol":
+        predictions = predictions.rename({id_col: "symbol"})
+    id_col = "symbol"
+
+    required = {"timestamp", id_col, "fold_id", "y_true", "y_score"}
     missing = required - set(predictions.columns)
     if missing:
         raise ValueError(f"prediction artifact missing {sorted(missing)}")
-    predictions = predictions.drop_nulls(required).with_columns(
-        (pl.col("y_true") - pl.col("y_score")).abs().alias("abs_resid")
-    )
+    predictions = predictions.drop_nulls(required)
     if predictions.is_empty():
         raise ValueError("prediction artifact has no finite predictions")
-    for column in ("y_true", "y_score", "abs_resid"):
+    for column in ("y_true", "y_score"):
         if not np.isfinite(predictions[column].to_numpy()).all():
             raise ValueError(f"prediction artifact has non-finite {column} values")
 
-    fold_windows = (
-        predictions.group_by("fold_id")
-        .agg(pl.col("timestamp").min().alias("validation_start"))
-        .sort("validation_start")
-    )
-    if fold_windows.height < 2:
-        raise ValueError("conformal coverage requires at least two validation folds")
-    calibration_fold = fold_windows["fold_id"][0]
-    calibration = predictions.filter(pl.col("fold_id") == calibration_fold)
-    test = predictions.filter(pl.col("fold_id") != calibration_fold)
-    if calibration.height < min_rows or test.height < min_rows:
-        raise ValueError(f"conformal calibration or test panel has fewer than {min_rows} rows")
-
-    scale = float(calibration["y_true"].std() or 0.0)
-    if not math.isfinite(scale) or scale <= 0:
-        raise ValueError("conformal calibration target scale is invalid")
-    calibration_residuals = np.sort(calibration["abs_resid"].to_numpy())
-    test_residuals = test["abs_resid"].to_numpy()
-    n_calibration = len(calibration_residuals)
+    measured = predictions.with_columns(
+        abs_resid=(pl.col("y_true") - pl.col("y_score")).abs()
+    ).select("timestamp", id_col, "y_true", "abs_resid")
 
     rows: list[dict[str, float | int]] = []
     for level in levels:
         if not 0 < level < 1:
             raise ValueError(f"invalid conformal level: {level}")
-        quantile = conformal_quantile(calibration_residuals, level)
+        widths = walk_forward_widths(
+            predictions,
+            id_col=id_col,
+            alpha=1.0 - level,
+            min_calibration_n=min_calibration_n,
+            embargo_steps=embargo_steps,
+            context=f"conformal coverage at level {level}",
+        )
+        covered = measured.join(
+            widths.select("timestamp", id_col, "width"), on=["timestamp", id_col], how="left"
+        )
+        sized = covered.drop_nulls("width")
+        if sized.is_empty():
+            raise ValueError(f"no decision at level {level} carries a calibrated width")
+        # The scale is the spread of the outcomes the widths were measured against, so a family
+        # trading a different return magnitude stays comparable. Taken over the sized rows
+        # rather than over a calibration window, because the widths are not calibrated on one.
+        scale = float(sized["y_true"].std() or 0.0)
+        if not math.isfinite(scale) or scale <= 0:
+            raise ValueError("conformal coverage target scale is invalid")
         rows.append(
             {
                 "nominal_level": float(level),
-                "empirical_coverage": float((test_residuals <= quantile).mean()),
-                "mean_interval_width_frac_std": float((2.0 * quantile) / scale),
-                "n_test": int(len(test_residuals)),
+                "empirical_coverage": float(
+                    (sized["abs_resid"] <= sized["width"] / 2.0).mean() or 0.0
+                ),
+                "mean_interval_width_frac_std": float(sized["width"].mean()) / scale,
+                "n_test": int(sized.height),
+                "n_uncalibrated": int(covered.height - sized.height),
             }
         )
     return rows
@@ -360,93 +397,30 @@ def _expanding_calibration(frame: pl.DataFrame, *, alpha: float) -> pl.DataFrame
     )
 
 
-def compute_conformal_widths(
-    case_study: str,
-    prediction_hash: str,
+def walk_forward_widths(
+    preds: pl.DataFrame,
     *,
-    alpha: float = DEFAULT_ALPHA,
-    min_calibration_n: int = DEFAULT_MIN_CALIBRATION_N,
-    write: bool = True,
-    case_dir: Path | None = None,
-    label: str | None = None,
-    embargo_steps: int | None = None,
+    id_col: str,
+    alpha: float,
+    min_calibration_n: int,
+    embargo_steps: int,
+    context: str,
 ) -> pl.DataFrame:
-    """Compute and optionally persist expanding walk-forward conformal widths.
+    """The width at every (timestamp, entity) the ``walk_forward_v3`` rule can calibrate.
 
-    Returns one row per (timestamp, entity) for which a width could be
-    calibrated: columns ``[timestamp, <id_col>, fold_id, width, alpha,
-    calibration_n, calibration_scope, calibration_version]``.
+    ``preds`` carries canonical column names and ``id_col`` names its entity column; everything
+    that reads a prediction artifact from disk, checks it and renames it belongs to the caller.
+    Splitting it out is what lets the coverage a notebook prints be measured on these widths
+    rather than on a second estimator built to different rules.
 
-    Calibration rule, one rule for every fold: the width used at timestamp
-    ``t`` for entity ``s`` is ``2·q_{1-α}`` of ``|y_true − y_score|`` over
-    every residual for ``s`` at timestamps at or before ``t − h``, where ``h``
-    is the label horizon in prediction data steps. Residuals from earlier
-    folds and from the current fold's own elapsed history are both eligible,
-    which is what lets the earliest fold trade after a warm-up instead of
-    sitting out entirely.
-
-    ``h`` is the embargo, and it is the same quantity
-    :func:`compute_holdout_conformal_widths` applies at the validation/holdout
-    boundary: a residual at ``t'`` depends on the return realized over
-    ``(t', t'+h]``, so a residual with ``t' + h > t`` carries information from
-    after the decision. Pass ``embargo_steps`` directly or pass ``label`` to
-    take the reviewed value from :data:`HOLDOUT_CONFORMAL_EMBARGO_STEPS`.
-
-    Entities with fewer than ``min_calibration_n`` eligible residuals of their
-    own use a pooled quantile over every entity's eligible residuals, so
-    allocation never changes the selected basket by silently dropping an
-    uncalibrated entity.
-
-    Writes are alpha-aware (see module docstring): an existing
-    ``conformal_widths.parquet`` for the same prediction hash retains rows
-    at other alphas; rows at this ``alpha`` are replaced.
-
-    Raises ``ValueError`` when neither ``embargo_steps`` nor a ``label`` with a
-    reviewed embargo is given, when ``embargo_steps`` is below one, or when no
-    (timestamp, entity) pair clears the warm-up.
+    Returns ``[timestamp, <id_col>, fold_id, width, alpha, calibration_n, calibration_scope,
+    calibration_version]``, one row per decision that clears the warm-up.
     """
-    pred_dir = _predictions_dir(case_study, prediction_hash, case_dir=case_dir)
-    pred_path = pred_dir / "predictions.parquet"
-    if not pred_path.exists():
-        raise FileNotFoundError(f"predictions.parquet not found: {pred_path}")
-
-    if embargo_steps is None:
-        if label is None:
-            raise ValueError(
-                f"{case_study}/{prediction_hash}: conformal calibration needs the label "
-                "horizon as an embargo - pass embargo_steps, or label to look up the "
-                "reviewed value"
-            )
-        embargo_steps = holdout_conformal_embargo_steps(case_study, label)
-    if embargo_steps < 1:
-        raise ValueError(
-            f"{case_study}/{prediction_hash}: embargo_steps={embargo_steps} would calibrate "
-            "on a residual that is not yet realized at the decision it sizes"
-        )
-
-    preds = pl.read_parquet(pred_path)
-    legacy_present = {k: v for k, v in _LEGACY_RENAME.items() if k in preds.columns}
-    if legacy_present:
-        preds = preds.rename(legacy_present)
-    src_id_col = _detect_id_col(preds.columns)
-    # Canonical: emit widths keyed by "symbol", matching backtest_loaders normalization.
-    if src_id_col != "symbol":
-        preds = preds.rename({src_id_col: "symbol"})
-    id_col = "symbol"
-
-    required = {"timestamp", id_col, "y_true", "y_score", "fold_id"}
-    missing = required - set(preds.columns)
-    if missing:
-        raise ValueError(
-            f"{case_study}/{prediction_hash}: predictions.parquet missing "
-            f"columns {sorted(missing)}; got {preds.columns}"
-        )
-
     preds = preds.filter(
         pl.col("y_true").is_not_null() & pl.col("y_score").is_not_null()
     ).with_columns(abs_resid=(pl.col("y_true") - pl.col("y_score")).abs())
     if preds.is_empty():
-        raise ValueError(f"{case_study}/{prediction_hash}: no residuals to calibrate on")
+        raise ValueError(f"{context}: no residuals to calibrate on")
 
     # The embargo is expressed in data steps, so it is applied on the position of a
     # timestamp in the prediction set's own grid rather than on the calendar. A gap in
@@ -534,10 +508,103 @@ def compute_conformal_widths(
 
     if widths.is_empty():
         raise ValueError(
-            f"{case_study}/{prediction_hash}: no decision clears a warm-up of "
+            f"{context}: no decision clears a warm-up of "
             f"min_calibration_n={min_calibration_n} residuals plus an embargo of "
             f"{embargo_steps} steps"
         )
+    return widths
+
+
+def compute_conformal_widths(
+    case_study: str,
+    prediction_hash: str,
+    *,
+    alpha: float = DEFAULT_ALPHA,
+    min_calibration_n: int = DEFAULT_MIN_CALIBRATION_N,
+    write: bool = True,
+    case_dir: Path | None = None,
+    label: str | None = None,
+    embargo_steps: int | None = None,
+) -> pl.DataFrame:
+    """Compute and optionally persist expanding walk-forward conformal widths.
+
+    Returns one row per (timestamp, entity) for which a width could be
+    calibrated: columns ``[timestamp, <id_col>, fold_id, width, alpha,
+    calibration_n, calibration_scope, calibration_version]``.
+
+    Calibration rule, one rule for every fold: the width used at timestamp
+    ``t`` for entity ``s`` is ``2·q_{1-α}`` of ``|y_true − y_score|`` over
+    every residual for ``s`` at timestamps at or before ``t − h``, where ``h``
+    is the label horizon in prediction data steps. Residuals from earlier
+    folds and from the current fold's own elapsed history are both eligible,
+    which is what lets the earliest fold trade after a warm-up instead of
+    sitting out entirely.
+
+    ``h`` is the embargo, and it is the same quantity
+    :func:`compute_holdout_conformal_widths` applies at the validation/holdout
+    boundary: a residual at ``t'`` depends on the return realized over
+    ``(t', t'+h]``, so a residual with ``t' + h > t`` carries information from
+    after the decision. Pass ``embargo_steps`` directly or pass ``label`` to
+    take the reviewed value from :data:`HOLDOUT_CONFORMAL_EMBARGO_STEPS`.
+
+    Entities with fewer than ``min_calibration_n`` eligible residuals of their
+    own use a pooled quantile over every entity's eligible residuals, so
+    allocation never changes the selected basket by silently dropping an
+    uncalibrated entity.
+
+    Writes are alpha-aware (see module docstring): an existing
+    ``conformal_widths.parquet`` for the same prediction hash retains rows
+    at other alphas; rows at this ``alpha`` are replaced.
+
+    Raises ``ValueError`` when neither ``embargo_steps`` nor a ``label`` with a
+    reviewed embargo is given, when ``embargo_steps`` is below one, or when no
+    (timestamp, entity) pair clears the warm-up.
+    """
+    pred_dir = _predictions_dir(case_study, prediction_hash, case_dir=case_dir)
+    pred_path = pred_dir / "predictions.parquet"
+    if not pred_path.exists():
+        raise FileNotFoundError(f"predictions.parquet not found: {pred_path}")
+
+    if embargo_steps is None:
+        if label is None:
+            raise ValueError(
+                f"{case_study}/{prediction_hash}: conformal calibration needs the label "
+                "horizon as an embargo - pass embargo_steps, or label to look up the "
+                "reviewed value"
+            )
+        embargo_steps = holdout_conformal_embargo_steps(case_study, label)
+    if embargo_steps < 1:
+        raise ValueError(
+            f"{case_study}/{prediction_hash}: embargo_steps={embargo_steps} would calibrate "
+            "on a residual that is not yet realized at the decision it sizes"
+        )
+
+    preds = pl.read_parquet(pred_path)
+    legacy_present = {k: v for k, v in _LEGACY_RENAME.items() if k in preds.columns}
+    if legacy_present:
+        preds = preds.rename(legacy_present)
+    src_id_col = _detect_id_col(preds.columns)
+    # Canonical: emit widths keyed by "symbol", matching backtest_loaders normalization.
+    if src_id_col != "symbol":
+        preds = preds.rename({src_id_col: "symbol"})
+    id_col = "symbol"
+
+    required = {"timestamp", id_col, "y_true", "y_score", "fold_id"}
+    missing = required - set(preds.columns)
+    if missing:
+        raise ValueError(
+            f"{case_study}/{prediction_hash}: predictions.parquet missing "
+            f"columns {sorted(missing)}; got {preds.columns}"
+        )
+
+    widths = walk_forward_widths(
+        preds,
+        id_col=id_col,
+        alpha=alpha,
+        min_calibration_n=min_calibration_n,
+        embargo_steps=embargo_steps,
+        context=f"{case_study}/{prediction_hash}",
+    )
 
     if write:
         # `pred_dir` honours the `case_dir` override the predictions were read

@@ -44,7 +44,10 @@ import polars as pl
 import torch  # noqa: F401
 
 from case_studies.utils.analytics import PRIMARY_LABELS, SHORT_NAMES
-from case_studies.utils.conformal import split_conformal_coverage
+from case_studies.utils.conformal import (
+    holdout_conformal_embargo_steps,
+    walk_forward_conformal_coverage,
+)
 from case_studies.utils.registry.specs import declared_fold_count
 from utils.paths import get_case_study_dir
 
@@ -338,12 +341,22 @@ def conformal_coverage_for_selected_prediction(
     selected: dict,
     *,
     levels: tuple[float, ...] = (0.80, 0.90, 0.95),
+    embargo_steps: int | None = None,
 ) -> pl.DataFrame:
-    """Measure split-conformal coverage for one exact selected prediction artifact."""
+    """Realised coverage of the sizing widths, for one exact selected prediction artifact.
+
+    Measured on the estimator `conformal_weighted` allocates with - see
+    :func:`~case_studies.utils.conformal.walk_forward_conformal_coverage`, which also states
+    why the figure is a diagnostic of residual dispersion rather than a guarantee.
+
+    ``embargo_steps`` defaults to the reviewed horizon for this row's case study and label,
+    which is why ``label`` is now required of the selected row.
+    """
     required = {
         "case_study",
         "family",
         "config_name",
+        "label",
         "prediction_hash",
         "spec_json",
     }
@@ -393,8 +406,12 @@ def conformal_coverage_for_selected_prediction(
             f"{selected['case_study']}/{selected['prediction_hash']}: "
             f"expected fold IDs {list(range(n_folds))}, observed {fold_ids}"
         )
+    if embargo_steps is None:
+        embargo_steps = holdout_conformal_embargo_steps(selected["case_study"], selected["label"])
     try:
-        coverage_rows = split_conformal_coverage(predictions, levels=levels)
+        coverage_rows = walk_forward_conformal_coverage(
+            predictions, levels=levels, embargo_steps=embargo_steps
+        )
     except ValueError as error:
         raise RegistrySelectionError(
             f"{selected['case_study']}/{selected['prediction_hash']}: {error}"

@@ -45,7 +45,10 @@ from ml4t.diagnostic.metrics import cross_sectional_ic
 import utils.style  # noqa: F401
 from case_studies.research import CausalResult, Result, open_study, superseded_members
 from case_studies.research.results import PredictionResult
-from case_studies.utils.conformal import split_conformal_coverage
+from case_studies.utils.conformal import (
+    holdout_conformal_embargo_steps,
+    walk_forward_conformal_coverage,
+)
 from utils.modeling import load_configs
 from utils.paths import get_case_study_dir
 
@@ -377,18 +380,26 @@ with pl.Config(tbl_rows=bucket_summary.height):
     display(bucket_summary)
 
 # %% [markdown]
-# ## Chronological conformal coverage
+# ## Coverage of the widths that size positions
 #
-# The earliest validation fold supplies both the absolute-residual calibration sample and its return
-# scale. Later folds are evaluation data. The threshold is the finite-sample higher order statistic,
-# so no interpolated quantile enters the interval.
+# The width reported here is the one `conformal_weighted` allocates with: calibrated per symbol on
+# every residual known at `t - h`, where `h` is the label's horizon in data steps, with a pooled
+# quantile where a symbol has too few of its own. A decision is covered when its absolute residual
+# falls inside that half-width.
+#
+# Read it as a diagnostic of residual dispersion, not as a guarantee. Split conformal's
+# finite-sample coverage needs the calibration and evaluation residuals to be exchangeable, and
+# currency returns are heteroskedastic and regime-dependent. Nothing in the allocation path reads
+# an interval or a coverage level - the width stands in for a volatility estimate, and `n_test`
+# counts the decisions a width could be calibrated for.
 
 # %% tags=["results"]
 conformal_rows = []
 for keys, frame in representative_predictions.group_by(
     "label", "family", "config_name", "checkpoint_value", "prediction_hash"
 ):
-    for row in split_conformal_coverage(frame):
+    embargo_steps = holdout_conformal_embargo_steps("fx_pairs", keys[0])
+    for row in walk_forward_conformal_coverage(frame, embargo_steps=embargo_steps):
         conformal_rows.append(
             {
                 "label": keys[0],
