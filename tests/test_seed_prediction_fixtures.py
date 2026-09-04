@@ -2,7 +2,7 @@
 
 import sqlite3
 import warnings
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import polars as pl
 import pytest
@@ -380,3 +380,40 @@ def test_a_registry_without_cohort_metrics_still_seeds(tmp_path):
 
     for prediction_hash in (LEADER_PRED, "hash_other"):
         assert (run_log / "predictions" / prediction_hash / "predictions.parquet").is_file()
+
+
+def test_a_sub_daily_label_keeps_the_fabricated_grid(tmp_path):
+    """`_subsampled_panel` keeps a contiguous run at native spacing below a day.
+
+    It has to: a stride hands an 8H label decisions ten days apart and 13_backtest rejects
+    them against its horizon. On a minute-bar label that run is sixty consecutive minutes.
+    Measured on nasdaq100_microstructure, every seeded set collapsed to one hour of a
+    one-year window, every configuration in the sweep scored the same Sharpe, and
+    14_backtest failed at `hist(..., bins=30)` with "Too many bins for data range". The
+    fabricated grid spans the window, which is what an intraday case study is better
+    served by, so the label panel declines below a day.
+    """
+    cs_dir = tmp_path / "crypto_perps_funding"
+    run_log = cs_dir / "run_log"
+    _crypto_registry(run_log, _COHORT_DDL)
+    labels_dir = cs_dir / "labels"
+    labels_dir.mkdir(parents=True)
+    minutes = [datetime(2022, 3, 1) + timedelta(minutes=i) for i in range(600)]
+    pl.DataFrame(
+        {
+            "symbol": ["BTC", "ETH"] * 600,
+            "timestamp": [m for m in minutes for _ in (0, 1)],
+            "funding_next_8h": [i / 1000 for i in range(1200)],
+        }
+    ).write_parquet(labels_dir / "funding_next_8h.parquet")
+
+    with pytest.warns(RuntimeWarning, match=LEADER_PRED):
+        _backfill_all_prediction_parquets(cs_dir, "crypto_perps_funding")
+
+    leader = pl.read_parquet(run_log / "predictions" / LEADER_PRED / "predictions.parquet")
+    # The fabricated weekday grid, not the label's ten hours: the warning above already
+    # says the label panel declined, and the spacing is what the notebook depends on.
+    stamps = leader["timestamp"].unique().sort()
+    assert stamps.len() > 1
+    assert stamps.diff().drop_nulls().min() >= timedelta(days=1)
+    assert stamps.max() - stamps.min() > timedelta(days=30)

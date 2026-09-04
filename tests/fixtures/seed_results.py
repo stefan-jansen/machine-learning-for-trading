@@ -1049,6 +1049,8 @@ def _label_artifact_panel(cs_dir: Path, label: str, window, n_folds: int, _pl):
     Returns None when the artifact is absent, carries no usable key, or holds nothing
     inside the split window - the fabricated grid still covers those.
     """
+    from datetime import timedelta
+
     path = cs_dir / "labels" / f"{label}.parquet"
     if not path.is_file():
         return None
@@ -1067,6 +1069,22 @@ def _label_artifact_panel(cs_dir: Path, label: str, window, n_folds: int, _pl):
     frame = frame.filter((as_date >= start) & (as_date <= end)).drop_nulls([label])
     if frame.is_empty():
         return None
+
+    # Daily or coarser only. `_subsampled_panel` keeps a contiguous run at native spacing
+    # for a sub-daily panel - it has to, because a stride hands an 8H label decisions ten
+    # days apart and `13_backtest` rejects them against its horizon. On a minute-bar label
+    # that run is sixty consecutive minutes: measured on nasdaq100_microstructure, every
+    # seeded set collapsed to 2021-06-15 14:44 through 15:43, one hour of a one-year
+    # window, and every configuration in the sweep then scored the same Sharpe -
+    # `14_backtest` failed at `hist(..., bins=30)` with "Too many bins for data range".
+    # The fabricated grid spans the window instead, which is what an intraday case study
+    # is better served by until this can subsample a sub-daily label without breaking its
+    # spacing.
+    stamps = frame.get_column("timestamp").unique().sort()
+    if stamps.len() > 1:
+        gaps = stamps.diff().drop_nulls()
+        if gaps.len() and gaps.min() < timedelta(days=1):
+            return None
     # `actual` is the label's own realized value, so nothing is redrawn: this is the
     # target the pinning notebook expects to find, not a stand-in for it.
     frame = frame.select(
