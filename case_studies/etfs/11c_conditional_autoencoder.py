@@ -537,5 +537,8 @@ by_fold[panel_labels[0]]
 # **Next**: [`11d_stochastic_discount_factor`](11d_stochastic_discount_factor.ipynb) leaves the
 # two-stage shape behind entirely - it prices the cross-section rather than splitting the problem
 # into exposures and factor returns - and
-# [`11e_supervised_autoencoder`](11e_supervised_autoencoder.ipynb) keeps this notebook's network
-# and bottleneck while dropping the factor interpretation, which makes it the family's own control.
+# [`11e_supervised_autoencoder`](11e_supervised_autoencoder.ipynb) drops the factor
+# interpretation altogether and predicts the return from its bottleneck directly, which makes it
+# the one member fitted without the family's central assumption. Its network is not this one's -
+# it is deeper and wider, at a tenth of this learning rate - so the pair is not a controlled
+# comparison and that notebook does not read it as one.

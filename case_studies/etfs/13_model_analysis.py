@@ -68,7 +68,7 @@ import polars as pl
 import yaml
 from plotly.subplots import make_subplots
 
-from case_studies.research import CausalResult, open_study, split_retired_members
+from case_studies.research import CausalResult, open_study, split_unpublished_members
 from case_studies.utils.latent_factors import load_fold_extras
 from case_studies.utils.model_analysis import (
     best_model_per_family_fast,
@@ -186,8 +186,16 @@ print(
 # once as it is published and once as it was - and the representative chosen to stand for the
 # family in every comparison below can be the retired one.
 #
-# `split_retired_members` asks the population lineage instead, and the retired side is printed
-# rather than dropped silently, so the count is auditable against the registry.
+# `split_unpublished_members` asks the population lineage instead, and the excluded side is
+# printed rather than dropped silently, so the count is auditable against the registry.
+#
+# It asks **membership** and not retirement, which is the stronger of the two questions and the
+# one [`14_backtest`](14_backtest.ipynb) already scopes its sweep with. The two differ by the
+# identities no population ever listed: a row written before its notebook declared a population
+# is retired by nobody, so a retirement split admits it, and it can then stand for its family in
+# every comparison below while being invisible to the selection rule. Measured on this registry:
+# 60 such rows, all of them written by notebooks that have since moved onto the research
+# boundary and republished under a real identity.
 
 # %% [markdown]
 # **Present in the metrics is not the same as eligible for selection.** This section reads
@@ -203,13 +211,13 @@ print(
 # Phase 1: Load pre-computed metrics for ALL labels (coverage + multi-label analysis)
 all_labels_metrics = load_all_metrics(CASE_STUDY, label=None).filter(pl.col("label").is_not_null())
 
-_generations = split_retired_members(study, all_labels_metrics)
+_generations = split_unpublished_members(study, all_labels_metrics)
 all_labels_metrics = _generations.live
 print(f"Registered metric rows: {_generations.live.height + _generations.retired.height:,}")
 if _generations.retired.is_empty():
-    print("Retired by a later generation: none")
+    print("Not published by any current population: none")
 else:
-    print(f"Retired by a later generation: {_generations.retired.height:,}")
+    print(f"Not published by any current population: {_generations.retired.height:,}")
     print(
         _generations.retired.group_by("family", "config_name")
         .agg(n=pl.len())
