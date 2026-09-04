@@ -359,6 +359,34 @@ def compute_risk_parity_weights(
     return result.select([time_col, "symbol", "weight"]).filter(pl.col("weight") != 0.0)
 
 
+def _equal_weight_rows(
+    ts: object,
+    assets: list[str],
+    side_map: dict[str, str],
+    long_short: bool,
+    time_col: str,
+) -> list[dict]:
+    """Equal weight across the selected cross-section, normalized within each side.
+
+    The fallback every rolling-moment allocator takes when the return window is too short to
+    estimate a covariance from. It is deliberately a weight vector rather than nothing: an
+    allocator that emits no row for a rebalance leaves the engine with no target to trade
+    towards, and a run where that happens at every rebalance registers as a backtest that
+    booked zero orders and scored a Sharpe of 0.0 - an absence recorded as a measurement
+    (ml4t/agent-workspace#1004).
+    """
+    if not long_short:
+        weight = 1.0 / len(assets)
+        return [{time_col: ts, "symbol": a, "weight": weight} for a in assets]
+    rows = []
+    for side, sign in (("long", 1.0), ("short", -1.0)):
+        members = [a for a in assets if side_map.get(a) == side]
+        if members:
+            weight = sign / len(members)
+            rows.extend({time_col: ts, "symbol": a, "weight": weight} for a in members)
+    return rows
+
+
 def compute_mvo_weights(
     predictions: pl.DataFrame,
     prices_df: pl.DataFrame,
@@ -400,7 +428,12 @@ def compute_mvo_weights(
         side_map = dict(
             zip(ts_selected["symbol"].to_list(), ts_selected["side"].to_list(), strict=False)
         )
-        if len(assets) < 3:
+        if len(assets) < 2:
+            # One selected asset has exactly one feasible long-only weight, so there is
+            # nothing to optimize - but skipping the rebalance emits no target at all, and a
+            # selection that is this narrow at every rebalance then produces an empty weight
+            # frame and a backtest that never opens a position.
+            rows.extend(_equal_weight_rows(ts, assets, side_map, long_short, time_col))
             continue
 
         recent = rets.filter((pl.col(time_col) <= ts) & pl.col("symbol").is_in(assets)).sort(
@@ -414,21 +447,7 @@ def compute_mvo_weights(
         )
 
         if window_rets.height < lookback // 2:
-            if long_short:
-                long_assets = [a for a in assets if side_map.get(a) == "long"]
-                short_assets = [a for a in assets if side_map.get(a) == "short"]
-                if long_assets:
-                    lw = 1.0 / len(long_assets)
-                    for a in long_assets:
-                        rows.append({time_col: ts, "symbol": a, "weight": lw})
-                if short_assets:
-                    sw = -1.0 / len(short_assets)
-                    for a in short_assets:
-                        rows.append({time_col: ts, "symbol": a, "weight": sw})
-            else:
-                w = 1.0 / len(assets)
-                for a in assets:
-                    rows.append({time_col: ts, "symbol": a, "weight": w})
+            rows.extend(_equal_weight_rows(ts, assets, side_map, long_short, time_col))
             continue
 
         ret_matrix = window_rets.to_numpy()
@@ -438,22 +457,11 @@ def compute_mvo_weights(
         ret_matrix = ret_matrix[~np.any(np.isnan(ret_matrix), axis=1)]
 
         min_obs = max(top_k, lookback // 2)
-        if ret_matrix.shape[0] < min_obs or ret_matrix.shape[1] < 3:
-            if long_short:
-                long_assets = [a for a in assets if side_map.get(a) == "long"]
-                short_assets = [a for a in assets if side_map.get(a) == "short"]
-                if long_assets:
-                    lw = 1.0 / len(long_assets)
-                    for a in long_assets:
-                        rows.append({time_col: ts, "symbol": a, "weight": lw})
-                if short_assets:
-                    sw = -1.0 / len(short_assets)
-                    for a in short_assets:
-                        rows.append({time_col: ts, "symbol": a, "weight": sw})
-            else:
-                w = 1.0 / len(assets)
-                for a in assets:
-                    rows.append({time_col: ts, "symbol": a, "weight": w})
+        # Two assets are enough: Ledoit-Wolf shrinks a 2x2 covariance and the SLSQP solve
+        # below is well posed on two bounded weights that sum to one. The old floor of three
+        # made `mvo_ledoit_wolf` at `top_k=2` the one allocator that produced nothing.
+        if ret_matrix.shape[0] < min_obs or ret_matrix.shape[1] < 2:
+            rows.extend(_equal_weight_rows(ts, assets, side_map, long_short, time_col))
             continue
 
         cov = LedoitWolf().fit(ret_matrix).covariance_

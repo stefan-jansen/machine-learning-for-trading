@@ -1273,6 +1273,7 @@ def run_backtest(
     # 3. Register
     backtest_hash = None
     if register:
+        _refuse_a_backtest_that_never_traded(metrics, daily_returns, strategy_spec)
         from case_studies.utils.registry import (
             compute_backtest_fold_metrics,
             register_backtest_fold_metrics,
@@ -2354,6 +2355,48 @@ def _apply_allocation(
 # ---------------------------------------------------------------------------
 # Risk rules (Ch19) — engine-level integration
 # ---------------------------------------------------------------------------
+
+
+def _refuse_a_backtest_that_never_traded(
+    metrics: dict,
+    daily_returns: pl.DataFrame | None,
+    strategy_spec: dict,
+) -> None:
+    """Refuse to register a run that booked no order over a non-empty evaluation window.
+
+    A backtest that never opened a position has no return series to score, so every
+    return-derived metric it records is the metric of a flat account: `total_return` 0,
+    `sharpe` 0.0. Written to the registry those read as a strategy that was tried and lost
+    nothing, and a 0.0 Sharpe then sits above every candidate whose Sharpe is negative. The
+    row is not a leader, but it is counted - `cohort_metrics` takes the trial count and the
+    maximum-Sharpe distribution from the registry without a zero-trade filter, so a config
+    that traded nothing deflates every real candidate beside it.
+
+    `fx_pairs`' `mvo_ledoit_wolf` at `top_k=2` is the measured case
+    (ml4t/agent-workspace#1004): the allocator emitted an empty weight frame at every one of
+    2,063 rebalances and the engine booked nothing. It was the only such row in 14,048
+    backtests across nine registries, so this refuses nothing that is registered today, and
+    the etfs fixture in ml4t/agent-workspace#989 - twelve backtests, twelve Sharpes, zero
+    trades - would have stopped here instead of four notebooks downstream.
+
+    `num_trades` is absent on the vectorized path, which books no orders by construction, so
+    an absent count is not a zero one. An empty return series is a different failure with its
+    own diagnosis upstream and is left to it.
+    """
+    num_trades = metrics.get("num_trades")
+    if num_trades is None or float(num_trades) > 0:
+        return
+    if daily_returns is None or daily_returns.height == 0:
+        return
+    strategy = strategy_spec.get("strategy", strategy_spec)
+    raise ValueError(
+        "backtest booked no orders over "
+        f"{daily_returns.height} periods and is refused rather than registered as a "
+        f"Sharpe of {metrics.get('sharpe', 0.0)}: signal={strategy.get('signal')} "
+        f"allocation={strategy.get('allocation')} rebalance={strategy.get('rebalance')}. "
+        "A run that never opened a position measured nothing; fix the allocator or the "
+        "selection that produced an empty or unchanging weight frame."
+    )
 
 
 def _build_position_rules(risk_spec: dict):

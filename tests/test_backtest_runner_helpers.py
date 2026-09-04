@@ -12,7 +12,7 @@ Pins the P2.4 fixes from roborev jobs #2904, #2501, #2502, #2500:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from textwrap import dedent
 from types import SimpleNamespace
@@ -446,3 +446,58 @@ def test_the_continuous_return_label_is_read_from_the_isolated_output_root(
     )
 
     assert out["y_true"].to_list() == [0.011, 0.031]
+
+
+class TestARunThatBookedNoOrderIsRefused:
+    """A backtest that never opened a position is an absence, not a Sharpe of 0.0.
+
+    `_refuse_a_backtest_that_never_traded` runs immediately before `register_backtest_run`,
+    so the row never reaches the registry. It matters because nothing downstream filters it
+    out of the trial count: `cohort_metrics` takes K and the maximum-Sharpe distribution
+    straight from `backtest_runs`, so a config that traded nothing deflates every real
+    candidate beside it (ml4t/agent-workspace#1004).
+    """
+
+    @staticmethod
+    def _returns(n: int) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "timestamp": [datetime(2023, 1, 1) + timedelta(days=i) for i in range(n)],
+                "daily_return": [0.0] * n,
+            }
+        )
+
+    def test_zero_trades_over_a_non_empty_window_raises(self) -> None:
+        from case_studies.utils.backtest_runner import _refuse_a_backtest_that_never_traded
+
+        spec = {
+            "strategy": {
+                "signal": {"method": "equal_weight_top_k", "top_k": 2},
+                "allocation": {"method": "mvo_ledoit_wolf", "lookback": 63},
+                "rebalance": {"cadence": "daily_ny_close", "min_weight_change": 0.005},
+            }
+        }
+        with pytest.raises(ValueError, match="booked no orders"):
+            _refuse_a_backtest_that_never_traded(
+                {"num_trades": 0.0, "sharpe": 0.0}, self._returns(2063), spec
+            )
+
+    def test_a_traded_run_passes(self) -> None:
+        from case_studies.utils.backtest_runner import _refuse_a_backtest_that_never_traded
+
+        _refuse_a_backtest_that_never_traded(
+            {"num_trades": 1.0, "sharpe": -1.4}, self._returns(2063), {"strategy": {}}
+        )
+
+    def test_an_absent_count_is_not_a_zero_one(self) -> None:
+        # The vectorized path books no orders by construction and records no `num_trades`.
+        # `BacktestExplorer` reads that as `num_trades IS NULL OR num_trades > 0`, and the
+        # refusal has to agree with it or every vectorized run stops here.
+        from case_studies.utils.backtest_runner import _refuse_a_backtest_that_never_traded
+
+        _refuse_a_backtest_that_never_traded({"sharpe": 0.4}, self._returns(2063), {})
+
+    def test_an_empty_return_series_is_left_to_its_own_diagnosis(self) -> None:
+        from case_studies.utils.backtest_runner import _refuse_a_backtest_that_never_traded
+
+        _refuse_a_backtest_that_never_traded({"num_trades": 0.0}, self._returns(0), {})
