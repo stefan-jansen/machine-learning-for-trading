@@ -44,6 +44,32 @@ def test_display_path_preserves_unrelated_and_relative_paths(tmp_path, monkeypat
     assert display_path("relative/artifact.txt") == "relative/artifact.txt"
 
 
+def test_display_path_stays_relative_through_a_symlinked_subdirectory(
+    tmp_path, monkeypatch
+) -> None:
+    """A `--case-study` worktree reaches run_log/ through a symlink into the artifact store.
+
+    Resolving before relativizing followed that link out of the repository and
+    printed the absolute store path into the committed notebook output.
+    """
+    import utils.paths as paths
+
+    fake_repo = tmp_path / "public-cs"
+    (fake_repo / "case_studies" / "etfs").mkdir(parents=True)
+    store = tmp_path / "artifacts" / "case_studies" / "etfs" / "run_log"
+    store.mkdir(parents=True)
+    (store / "registry.db").touch()
+    (fake_repo / "case_studies" / "etfs" / "run_log").symlink_to(store)
+
+    monkeypatch.setattr(paths, "REPO_ROOT", fake_repo.resolve())
+    monkeypatch.setattr(paths, "_REPO_ROOT_AS_WRITTEN", fake_repo)
+
+    assert (
+        paths.display_path(fake_repo / "case_studies" / "etfs" / "run_log" / "registry.db")
+        == "case_studies/etfs/run_log/registry.db"
+    )
+
+
 def test_chapters_registry_covers_1_through_27() -> None:
     """The book ships 27 chapters; the registry must enumerate all of them."""
     assert set(CHAPTERS.keys()) == set(range(1, 28))

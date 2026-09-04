@@ -98,6 +98,68 @@ def test_a_dropped_fold_is_caught(case_dir):
     assert "5 of 5 declared sessions absent" in message
 
 
+def test_a_frame_with_no_prediction_column_is_not_a_prediction_set(case_dir):
+    """`check_prediction_coverage` read a row as a prediction, so a bare session axis passed."""
+    frame = _frame().drop("prediction")
+    with pytest.raises(CoverageError) as excinfo:
+        check_prediction_coverage(frame, "cs", LABEL, case_dir=case_dir)
+    assert "no prediction column" in str(excinfo.value)
+
+
+def test_a_backtest_input_frame_still_needs_no_score_column(case_dir):
+    """The requirement sits on the prediction entry point; `_coverage` is shared."""
+    report = check_backtest_input_coverage(
+        _frame().drop("prediction"), "cs", LABEL, case_dir=case_dir
+    )
+    assert report.complete
+
+
+def test_all_null_predictions_do_not_read_as_coverage(case_dir):
+    frame = _frame().with_columns(pl.lit(None, dtype=pl.Float64).alias("prediction"))
+    with pytest.raises(CoverageError) as excinfo:
+        check_prediction_coverage(frame, "cs", LABEL, case_dir=case_dir)
+    assert "no predictions" in str(excinfo.value)
+
+
+def test_non_finite_predictions_do_not_read_as_coverage(case_dir):
+    """NaN and infinity are non-null and rank against nothing; they are not decisions."""
+    for value in (float("nan"), float("inf"), float("-inf")):
+        frame = _frame().with_columns(pl.lit(value, dtype=pl.Float64).alias("prediction"))
+        with pytest.raises(CoverageError) as excinfo:
+            check_prediction_coverage(frame, "cs", LABEL, case_dir=case_dir)
+        assert "no finite value" in str(excinfo.value)
+
+
+def test_a_session_whose_predictions_are_all_nan_counts_as_missing(case_dir):
+    frame = _frame().with_columns(
+        pl.when(pl.col("timestamp").dt.day() == 8)
+        .then(float("nan"))
+        .otherwise(pl.col("prediction"))
+        .alias("prediction")
+    )
+    with pytest.raises(CoverageError) as excinfo:
+        check_prediction_coverage(frame, "cs", LABEL, case_dir=case_dir)
+    assert "1 of 5 declared sessions absent" in str(excinfo.value)
+
+
+def test_an_integer_score_column_needs_only_to_be_non_null(case_dir):
+    """`is_finite` is undefined off a float column, so the condition there is non-null."""
+    frame = _frame().with_columns(pl.col("prediction").cast(pl.Int64).alias("prediction"))
+    assert check_prediction_coverage(frame, "cs", LABEL, case_dir=case_dir).complete
+
+
+def test_a_session_whose_predictions_are_all_null_counts_as_missing(case_dir):
+    frame = _frame().with_columns(
+        pl.when(pl.col("timestamp").dt.day() == 8)
+        .then(None)
+        .otherwise(pl.col("prediction"))
+        .alias("prediction")
+    )
+    with pytest.raises(CoverageError) as excinfo:
+        check_prediction_coverage(frame, "cs", LABEL, case_dir=case_dir)
+    assert "1 of 5 declared sessions absent" in str(excinfo.value)
+
+
 def test_a_single_missing_interior_session_is_caught(case_dir):
     survivors = [ts for ts in SESSIONS if ts.day != 8]
     with pytest.raises(CoverageError) as excinfo:

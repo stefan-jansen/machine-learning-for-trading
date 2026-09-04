@@ -29,6 +29,29 @@ from .registry.specs import canonical_json, compute_hash
 
 DIGEST_LENGTH = 16
 
+# The parquet encoding every identity-defining artifact is written under.
+#
+# Registry training identity digests these files' *bytes* - `utils/modeling.py`'s
+# `_sha256_file` feeds `computation.feature_artifacts` and
+# `computation.input_data_spec.artifacts`, both inside the hashed `computation` block. Two
+# files holding identical data therefore hash differently if they were written with a
+# different compression codec or row-group size, so a polars upgrade that moves a default
+# would fork the `training_hash` of every run reading that artifact: cached runs stop
+# matching, the sweep refits everything, and no number has moved to say why.
+#
+# These are polars 1.41.1's own defaults, written out. Verified byte-identical to writing
+# with none of them passed, so stating them moves nothing today and pins the encoding
+# against a future default change. `tests/test_artifact_digest_encoding.py` records the
+# bytes a fixed frame produces under them, so a change arrives as a red test rather than as
+# a registry that has quietly grown two identities for one piece of work.
+_PARQUET_WRITE_SETTINGS: dict[str, Any] = {
+    "compression": "zstd",
+    "compression_level": None,
+    "statistics": True,
+    "row_group_size": None,
+    "data_page_size": None,
+}
+
 
 def value_digest(df: pl.DataFrame, columns: Sequence[str] | None = None) -> str:
     """Return the content digest of *df* over *columns* (default: all).
@@ -170,7 +193,7 @@ def write_artifact(
     # this pair exists to make impossible.
     serialized = json.dumps(record, indent=2, sort_keys=True) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
-    df.write_parquet(path)
+    df.write_parquet(path, **_PARQUET_WRITE_SETTINGS)
     sidecar_path(path).write_text(serialized)
     return record
 

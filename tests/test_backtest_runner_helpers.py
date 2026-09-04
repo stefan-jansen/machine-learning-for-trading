@@ -446,3 +446,55 @@ def test_the_continuous_return_label_is_read_from_the_isolated_output_root(
     )
 
     assert out["y_true"].to_list() == [0.011, 0.031]
+
+
+def _vectorized_with_missing_outcome(missing_weight: float) -> dict:
+    """One rebalance date, two selected names, one of which has no forward return."""
+    from case_studies.utils.backtest_runner import _run_vectorized
+
+    dates = [datetime(2024, 1, i) for i in (2, 3, 4)]
+    weights = pl.DataFrame(
+        {
+            "timestamp": dates * 2,
+            "symbol": ["AAA"] * 3 + ["BBB"] * 3,
+            "weight": [0.5, 0.5, 0.5] + [missing_weight, 0.5, 0.5],
+        }
+    )
+    # BBB has no outcome row on the first date - the position the engine cannot price.
+    outcomes = pl.DataFrame(
+        {
+            "timestamp": dates + dates[1:],
+            "symbol": ["AAA"] * 3 + ["BBB"] * 2,
+            "y_true": [0.01, 0.02, -0.01, 0.03, 0.0],
+        }
+    ).with_columns(y_pred=pl.col("y_true"))
+    return _run_vectorized(
+        weights=weights,
+        predictions=outcomes,
+        prices=pl.DataFrame(
+            {"timestamp": dates * 2, "symbol": ["AAA"] * 3 + ["BBB"] * 3, "close": 100.0}
+        ),
+        cost_spec={"model": "percentage", "commission_bps": 0.0, "slippage_bps": 0.0},
+        cadence="daily",
+        label="fwd_ret_1d",
+        case_study="us_firm_characteristics",
+        initial_cash=1e6,
+        prediction_hash=None,
+        rebalance_step=1,
+    )
+
+
+def test_a_selected_position_with_no_outcome_row_stops_the_run() -> None:
+    """The inner join marked it at exactly zero return while it still paid turnover.
+
+    That is an assertion about a position nobody could price, not an exclusion, and
+    `n_positions` reported the reduced count as though it were intended.
+    """
+    with pytest.raises(ValueError, match="no usable outcome"):
+        _vectorized_with_missing_outcome(0.5)
+
+
+def test_a_zero_weight_needs_no_outcome() -> None:
+    """A zero weight is not a position: its outcome cannot move any number here."""
+    out = _vectorized_with_missing_outcome(0.0)
+    assert out["daily_returns"].height == 3

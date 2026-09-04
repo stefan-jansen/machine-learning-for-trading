@@ -47,6 +47,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _boundary(moment) -> str:
+    """One rendering for a reduction boundary, whatever zone the artifact carries."""
+    return str(moment.replace(tzinfo=None) if getattr(moment, "tzinfo", None) else moment)
+
+
 def _seed_real_preview_prediction(
     study: Study,
     *,
@@ -112,8 +117,13 @@ def _seed_real_preview_prediction(
         "folds": [fold],
         "max_symbols": max_symbols,
         "max_sessions": max_sessions,
-        "date_start": str(preview.get_column("timestamp").min()),
-        "date_end": str(preview.get_column("timestamp").max()),
+        # Rendered without the zone. These boundaries go into `preview_reductions`, which
+        # is part of the spec the identity is computed over, so rendering them off the
+        # artifact's own dtype would give one reduction two identities depending on
+        # whether the prediction it reduces was written before or after decision times
+        # were stored UTC-aware. The instants are the same either way.
+        "date_start": _boundary(preview.get_column("timestamp").min()),
+        "date_end": _boundary(preview.get_column("timestamp").max()),
     }
     spec = ResolvedSpec.create(
         family="options_interface_fixture",

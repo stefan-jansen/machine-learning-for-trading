@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import gc
 import json
+import shutil
 import sqlite3
 import time
 from datetime import date as dt_date
@@ -601,10 +602,46 @@ def has_holdout_predictions(cs_id: str, *, top_n: int = 5) -> bool:
     return count > 0
 
 
-def delete_holdout_predictions(cs_id: str) -> int:
-    """Delete all existing holdout predictions and their backtests.
+def _referencing_columns(
+    db: sqlite3.Connection, parent_table: str, parent_column: str
+) -> list[tuple[str, str]]:
+    """Every ``(table, column)`` the schema declares as a foreign key into one column.
 
-    Deletion order respects FK constraints: child tables first, then parents.
+    Read from the schema rather than listed here. The hand-written list this replaces named
+    `fold_metrics`, `prediction_metrics`, `backtest_metrics`, `backtest_fold_metrics` and
+    `backtest_paired_metrics`, and omitted `prediction_coverage` and `cohort_metrics`, both
+    of which have been foreign keys into these tables since. Every registered holdout hits
+    that: `DELETE FROM prediction_sets` under `PRAGMA foreign_keys=ON` raises
+    `sqlite3.IntegrityError: FOREIGN KEY constraint failed` while its coverage row stands.
+    Reproduced on a copy of cme_futures' production registry, holdout 18d48c3b9cc2. A list
+    that has to be maintained by hand will be wrong again; the schema cannot be.
+    """
+    tables = [
+        row[0]
+        for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    ]
+    references = []
+    for table in tables:
+        for row in db.execute(f"PRAGMA foreign_key_list('{table}')").fetchall():
+            if row[2] == parent_table and row[4] == parent_column:
+                references.append((table, row[3]))
+    return sorted(references)
+
+
+def delete_holdout_predictions(cs_id: str) -> int:
+    """Delete all existing holdout predictions and their backtests, rows and artifacts.
+
+    Deletion order respects FK constraints: child tables first, then parents. Which tables
+    those are is read from the schema - see :func:`_referencing_columns`.
+
+    The artifact directories go with the rows. A prediction artifact is immutable per hash:
+    `register_prediction_set` refuses a hash whose `predictions.parquet` is already on disk
+    with a different digest, and the row it would have compared against is gone. Leaving the
+    directories behind therefore turns a regenerated holdout that lands on the same hash and
+    different content into an "immutable prediction artifact conflict" with nothing left in
+    the registry to explain it - which is exactly the state `force=True` exists to clear.
+    The directories are removed after the transaction commits, so a failed delete leaves both
+    halves intact rather than the rows behind their files.
     """
     case_dir = get_case_study_dir(cs_id)
     db_path = case_dir / "run_log" / "registry.db"
@@ -613,32 +650,44 @@ def delete_holdout_predictions(cs_id: str) -> int:
 
     db = sqlite3.connect(str(db_path))
     db.execute("PRAGMA foreign_keys=ON")
+    prediction_children = _referencing_columns(db, "prediction_sets", "prediction_hash")
+    backtest_children = _referencing_columns(db, "backtest_runs", "backtest_hash")
     rows = db.execute(
         "SELECT prediction_hash FROM prediction_sets WHERE split = 'holdout'"
     ).fetchall()
     deleted = 0
-    for (ph,) in rows:
-        bts = db.execute(
-            "SELECT backtest_hash FROM backtest_runs WHERE prediction_hash=?", (ph,)
-        ).fetchall()
-        for (bh,) in bts:
-            # Child tables first. backtest_paired_metrics has FK on
-            # challenger_hash; we also clean rows where the holdout backtest
-            # is referenced as benchmark_hash (no FK but logically stale).
-            db.execute(
-                "DELETE FROM backtest_paired_metrics WHERE challenger_hash=? OR benchmark_hash=?",
-                (bh, bh),
-            )
-            db.execute("DELETE FROM backtest_fold_metrics WHERE backtest_hash=?", (bh,))
-            db.execute("DELETE FROM backtest_metrics WHERE backtest_hash=?", (bh,))
-            db.execute("DELETE FROM backtest_runs WHERE backtest_hash=?", (bh,))
-        # Child tables of prediction_sets
-        db.execute("DELETE FROM fold_metrics WHERE prediction_hash=?", (ph,))
-        db.execute("DELETE FROM prediction_metrics WHERE prediction_hash=?", (ph,))
-        db.execute("DELETE FROM prediction_sets WHERE prediction_hash=?", (ph,))
-        deleted += 1
-    db.commit()
-    db.close()
+    stale_dirs: list[Path] = []
+    try:
+        for (ph,) in rows:
+            stale_dirs.append(case_dir / "run_log" / "predictions" / ph)
+            bts = db.execute(
+                "SELECT backtest_hash FROM backtest_runs WHERE prediction_hash=?", (ph,)
+            ).fetchall()
+            for (bh,) in bts:
+                stale_dirs.append(case_dir / "run_log" / "backtest" / bh)
+                for table, column in backtest_children:
+                    if table == "backtest_runs":
+                        continue
+                    db.execute(f"DELETE FROM {table} WHERE {column}=?", (bh,))
+                # No foreign key declares it, but a paired metric benchmarked against a
+                # deleted holdout backtest is as stale as one challenging it.
+                db.execute("DELETE FROM backtest_paired_metrics WHERE benchmark_hash=?", (bh,))
+                db.execute("DELETE FROM backtest_runs WHERE backtest_hash=?", (bh,))
+            for table, column in prediction_children:
+                if table == "backtest_runs":
+                    continue
+                db.execute(f"DELETE FROM {table} WHERE {column}=?", (ph,))
+            db.execute("DELETE FROM prediction_sets WHERE prediction_hash=?", (ph,))
+            deleted += 1
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+    for stale in stale_dirs:
+        shutil.rmtree(stale, ignore_errors=True)
     return deleted
 
 
@@ -1122,13 +1171,20 @@ def generate_holdout(
         if verbose:
             print(msg, flush=True)
 
-    if has_holdout_predictions(cs_id):
-        if force:
-            n = delete_holdout_predictions(cs_id)
-            _log(f"  Deleted {n} existing holdout prediction(s)")
-        else:
-            _log("  Holdout predictions exist - loading from registry")
-            return load_existing_holdout(cs_id)
+    # `force` deletes unconditionally. Gating the delete on `has_holdout_predictions`
+    # skipped it exactly when it was needed: that check looks for a holdout tied to one of
+    # the *current* validation top-N, and its own docstring says it returns False when a
+    # holdout exists but no top-N candidate matches it - which is the definition of stale.
+    # So a holdout whose training fell out of the top-N after a sweep reshuffle survived
+    # `force=True`, and the new holdout was written beside it, two holdouts for one case
+    # study. Measured on nasdaq100_microstructure: bf76fac27013 (training b8add3b63794)
+    # coexisted with 6f95e10992fe and had to be deleted by hand.
+    if force:
+        n = delete_holdout_predictions(cs_id)
+        _log(f"  Deleted {n} existing holdout prediction(s)")
+    elif has_holdout_predictions(cs_id):
+        _log("  Holdout predictions exist - loading from registry")
+        return load_existing_holdout(cs_id)
 
     label_filter = LABEL_RESTRICTIONS.get(cs_id)
     candidates = select_best_models(
