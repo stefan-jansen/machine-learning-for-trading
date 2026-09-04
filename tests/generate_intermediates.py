@@ -348,9 +348,37 @@ def main():
                 if v == state:
                     print(f"  - {k}")
 
-    # Show output size
+    # Show output size, and what this run did to it. The fixture is git-stored and
+    # unreduced production data reaches it silently: regenerating cme_futures stage 03
+    # replaced an 86,110-row, 8-product, 19.5 MB features artifact with a 310,947-row,
+    # 30-product, 75.9 MB one whose content digest equalled production's exactly, and
+    # nothing in the run said so. Whether that growth is wanted is a decision; it can
+    # only be made if the run reports it.
+    metadata_path = output_dir / "_metadata.json"
+    previous = {}
+    if metadata_path.is_file():
+        try:
+            previous = json.loads(metadata_path.read_text()).get("size_mb_by_case_study", {})
+        except (OSError, json.JSONDecodeError):
+            previous = {}
+
     total_bytes = sum(f.stat().st_size for f in output_dir.rglob("*") if f.is_file())
+    sizes = {
+        cs: round(
+            sum(f.stat().st_size for f in (output_dir / cs).rglob("*") if f.is_file()) / 1e6, 1
+        )
+        for cs in case_studies
+        if (output_dir / cs).is_dir()
+    }
     print(f"\nOutput: {output_dir} ({total_bytes / 1e6:.1f} MB)")
+    for cs, size in sizes.items():
+        before = previous.get(cs)
+        if before is None:
+            print(f"  {cs}: {size:.1f} MB")
+        else:
+            change = size - before
+            factor = f", {size / before:.1f}x" if before else ""
+            print(f"  {cs}: {before:.1f} -> {size:.1f} MB ({change:+.1f} MB{factor})")
 
     # Write metadata for staleness tracking
     metadata = {
@@ -360,8 +388,8 @@ def main():
         "results": results,
         "total_seconds": round(total_elapsed),
         "size_mb": round(total_bytes / 1e6, 1),
+        "size_mb_by_case_study": sizes,
     }
-    metadata_path = output_dir / "_metadata.json"
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
     print(f"Metadata: {metadata_path}")
