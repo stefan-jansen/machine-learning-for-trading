@@ -455,6 +455,48 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     )
 
 
+def rekey_holdout_spec(
+    study: Study,
+    spec: dict[str, Any],
+    *,
+    validation_spec: dict[str, Any],
+) -> None:
+    """Recompute the fold-derived fields against the holdout fold, in place, before a lock.
+
+    The TabM half of the hook `case_studies.research.holdout._rekey_holdout_spec` dispatches
+    to. Nothing has selected a TabM configuration for a holdout yet, so this closes a gap
+    rather than a failure - the same gap the sequence families had until `sp500_options`
+    walked into it, and the reason it is written now is that a gap nobody has hit is
+    indistinguishable from one nobody will.
+
+    `_tabm_expected_keys` is the function `resolve_model_request` and
+    `reconstruct_locked_request` both call, and this calls it too rather than restating what
+    it does. That matters more than it looks: `validate_locked_expected_keys` checks the
+    manifest against the rule that wrote it, so two statements of the rule would agree until
+    one changed, and the holdout built on the stale one would register and validate.
+
+    One field is re-keyed. A TabM `model` block is `{class, implementation, objective,
+    params}` with every value declared, so there is no `effective_params_by_fold` for
+    `linear`'s replay-and-verify step to apply to, and `validation_spec` has nothing to
+    verify against - it stays in the signature because the dispatch passes it to every family.
+    """
+    from case_studies.research.contracts import ExecutionTier
+    from case_studies.research.models import locked_holdout_split
+    from utils.modeling import load_modeling_dataset
+
+    label_ref = study.labels.get(spec["label"], execution_tier=ExecutionTier.CANONICAL)
+    mds = load_modeling_dataset(study.case_study, label_ref.name, max_symbols=0)
+    if mds.date_col != "timestamp" or mds.entity_cols[:1] not in (["symbol"], ["product"]):
+        raise ValueError("TabM holdout re-keying requires canonical entity and timestamp keys")
+    split = locked_holdout_split(spec, mds.dataset, mds.date_col, study.case_study)
+    expected = _tabm_expected_keys(mds, [split])
+    spec["computation"]["expected_prediction_keys"] = {
+        "digest": value_digest(expected, ("symbol", "timestamp", "fold")),
+        "n_rows": expected.height,
+        "n_folds": expected["fold"].n_unique(),
+    }
+
+
 def reconstruct_locked_request(
     study: Study,
     spec: dict[str, Any],
