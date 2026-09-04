@@ -11,15 +11,11 @@ subsample budgets are the ones recorded in ``data/manifest.json`` in the test-da
 repo, which is rewritten from DATASETS on every run so the manifest cannot drift
 from what was actually generated.
 
-DATASETS covers the fixtures whose absence or staleness has taken a CI job red,
-not every fixture the test-data repo carries. The rest - the ETF, crypto, FX, US
-equity and CME panels - were produced before this script existed, by paths that
-were not kept, so this is not a from-empty rebuild of the fixture repo: it
-operates on a checkout of ml4t/third-edition-test-data and replaces the datasets
-it knows. Those are declared in UNBUILT_FIXTURES with what the fixture actually
-carries and why there is no builder, so the manifest describes the whole set and
-``tests/test_fixture_manifest_matches_builders.py`` can check every entry of it
-against the declarations and against the data on disk.
+DATASETS covers every fixture the test-data repo carries, so
+``tests/test_fixture_manifest_matches_builders.py`` can check each entry of the
+manifest against a declaration and against the data on disk. It is still not a
+from-empty rebuild of the fixture repo: it operates on a checkout of
+ml4t/third-edition-test-data and replaces the datasets it is asked for.
 
 ``--reconcile-manifest`` rewrites the manifest from those declarations and the
 files that are there, building nothing. Use it when a declaration moves without
@@ -53,7 +49,7 @@ import shutil
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
@@ -685,7 +681,437 @@ def build_sp500_options(source: Path, output: Path) -> list[Path]:
     return written
 
 
+# --- ETFs ---------------------------------------------------------------------
+#
+# The production panel carries 100 tickers; the fixture carries these 56, and the
+# rule that chose them was not kept, so the list is the specification. What a
+# builder does have to reproduce is the date column: production stores `timestamp`
+# as a Datetime at midnight and the fixture stores it as a Date. Casting is the
+# whole difference - filtering production to these 56 gives the fixture's 274,037
+# rows exactly, and every value in them.
+
+ETF_DIR = Path("etfs") / "market"
+ETF_UNIVERSE = ETF_DIR / "etf_universe.parquet"
+ETF_UNIVERSE_UNADJUSTED = ETF_DIR / "etf_universe_unadjusted.parquet"
+ETF_METADATA = ETF_DIR / "etf_universe_metadata.json"
+ETF_SYMBOLS = (
+    "AGG",
+    "BND",
+    "DBC",
+    "DIA",
+    "DVY",
+    "EEM",
+    "EFA",
+    "EMB",
+    "EWA",
+    "EWC",
+    "EWG",
+    "EWH",
+    "EWI",
+    "EWJ",
+    "EWL",
+    "EWN",
+    "EWP",
+    "EWQ",
+    "EWT",
+    "EWU",
+    "EWW",
+    "EWZ",
+    "FXI",
+    "GLD",
+    "HYG",
+    "IAU",
+    "IEF",
+    "IEFA",
+    "IEMG",
+    "IWM",
+    "KRE",
+    "LQD",
+    "MDY",
+    "QQQ",
+    "SHY",
+    "SLV",
+    "SMH",
+    "SPY",
+    "TIP",
+    "TLT",
+    "USO",
+    "VEA",
+    "VNQ",
+    "VTV",
+    "VUG",
+    "VWO",
+    "XLB",
+    "XLE",
+    "XLF",
+    "XLI",
+    "XLK",
+    "XLP",
+    "XLRE",
+    "XLU",
+    "XLV",
+    "XLY",
+)
+
+
+def build_etfs(source: Path, output: Path) -> list[Path]:
+    """Write the adjusted and unadjusted ETF panels for ``ETF_SYMBOLS``.
+
+    The `timestamp` cast is not cosmetic: `utils.data_quality` and the chapter-2
+    notebooks compare this column against `date`-typed calendars, and a Datetime
+    at midnight compares unequal to the Date it prints as.
+
+    The metadata sidecar is rewritten rather than copied. Nothing reads it -
+    `data/etfs/market/download.py` is the only file in the repository that names
+    it, and it writes it - but the one the fixture shipped described 50 tickers in
+    a category schema production no longer uses, so it was a false statement about
+    a fixture carrying 56.
+    """
+    keep = list(ETF_SYMBOLS)
+    written: list[Path] = []
+    (output / ETF_DIR).mkdir(parents=True, exist_ok=True)
+
+    for rel in (ETF_UNIVERSE, ETF_UNIVERSE_UNADJUSTED):
+        panel = (
+            pl.scan_parquet(source / rel)
+            .filter(pl.col("symbol").is_in(keep))
+            .with_columns(pl.col("timestamp").cast(pl.Date))
+            .collect()
+        )
+        missing = sorted(set(keep) - set(panel["symbol"].unique().to_list()))
+        if missing:
+            raise ValueError(f"{rel}: production carries no rows for {missing}")
+        panel.write_parquet(output / rel)
+        written.append(output / rel)
+        print(f"    {rel.name}: {panel.height:,} rows, {panel['symbol'].n_unique()} symbols")
+
+    metadata = json.loads((source / ETF_METADATA).read_text())
+    metadata["categories"] = {
+        category: [t for t in tickers if t in set(keep)]
+        for category, tickers in metadata.get("categories", {}).items()
+    }
+    metadata["categories"] = {c: t for c, t in metadata["categories"].items() if t}
+    metadata["total_tickers"] = len(keep)
+    (output / ETF_METADATA).write_text(json.dumps(metadata, indent=2) + "\n")
+    written.append(output / ETF_METADATA)
+    return written
+
+
+# --- crypto perpetuals --------------------------------------------------------
+#
+# 5 of the 19 perpetuals production carries, across the hourly bars, the 8-hour
+# premium index and the funding rate.
+#
+# The bars stop two days before the other two files and before production. That is
+# where the fixture was cut, and the bound is declared rather than removed because
+# `intermediates/crypto_perps_funding` was generated against these bars: extending
+# them without regenerating it puts rows in the input that no label, feature or
+# fold covers, which is the shape of agent-workspace#970. The premium index and
+# the funding rate run to production's own last row, and the tail past the last bar
+# joins to nothing.
+
+CRYPTO_DIR = Path("crypto") / "market"
+CRYPTO_PERPS = CRYPTO_DIR / "perps_1h.parquet"
+CRYPTO_PREMIUM = CRYPTO_DIR / "premium_index_8h.parquet"
+CRYPTO_FUNDING = CRYPTO_DIR / "funding_rate.parquet"
+CRYPTO_SYMBOLS = ("ADAUSDT", "BTCUSDT", "ETHUSDT", "LINKUSDT", "XRPUSDT")
+CRYPTO_PERPS_END = datetime(2025, 12, 29, 23, 0, tzinfo=UTC)
+
+
+def build_crypto(source: Path, output: Path) -> list[Path]:
+    """Write the perpetual bars, premium index and funding rate for ``CRYPTO_SYMBOLS``."""
+    keep = list(CRYPTO_SYMBOLS)
+    written: list[Path] = []
+    (output / CRYPTO_DIR).mkdir(parents=True, exist_ok=True)
+
+    for rel, end in (
+        (CRYPTO_PERPS, CRYPTO_PERPS_END),
+        (CRYPTO_PREMIUM, None),
+        (CRYPTO_FUNDING, None),
+    ):
+        frame = pl.scan_parquet(source / rel).filter(pl.col("symbol").is_in(keep))
+        if end is not None:
+            frame = frame.filter(pl.col("timestamp") <= end)
+        panel = frame.collect()
+        missing = sorted(set(keep) - set(panel["symbol"].unique().to_list()))
+        if missing:
+            raise ValueError(f"{rel}: production carries no rows for {missing}")
+        panel.write_parquet(output / rel)
+        written.append(output / rel)
+        print(
+            f"    {rel.name}: {panel.height:,} rows, {panel['symbol'].n_unique()} symbols, "
+            f"through {panel['timestamp'].max()}"
+        )
+    return written
+
+
+# --- FX -----------------------------------------------------------------------
+#
+# Not reduced on any axis: the fixture is production's whole 20-pair panel at both
+# frequencies, and its row counts equal production's exactly. It pins the panel and
+# measures nothing about reduction. The pairs are still named here rather than left
+# implicit, because "whatever production has" and "these twenty" are different
+# statements and only the second one can fail when production changes.
+#
+# The timestamps are stored differently: the fixture is UTC-aware microseconds, the
+# daily panel in production is a Date and the 4h panel a naive millisecond Datetime.
+# `case_studies/fx_pairs` joins the two frequencies, so one representation is not
+# optional.
+
+FX_DIR = Path("fx") / "market"
+FX_4H = FX_DIR / "4h.parquet"
+FX_DAILY = FX_DIR / "daily.parquet"
+FX_PAIRS = (
+    "AUD_JPY",
+    "AUD_NZD",
+    "AUD_USD",
+    "CAD_JPY",
+    "CHF_JPY",
+    "EUR_AUD",
+    "EUR_CAD",
+    "EUR_CHF",
+    "EUR_GBP",
+    "EUR_JPY",
+    "EUR_USD",
+    "GBP_AUD",
+    "GBP_CHF",
+    "GBP_JPY",
+    "GBP_USD",
+    "NZD_JPY",
+    "NZD_USD",
+    "USD_CAD",
+    "USD_CHF",
+    "USD_JPY",
+)
+
+
+def build_fx(source: Path, output: Path) -> list[Path]:
+    """Write the 4h and daily FX panels for ``FX_PAIRS`` with UTC-aware timestamps."""
+    keep = list(FX_PAIRS)
+    written: list[Path] = []
+    (output / FX_DIR).mkdir(parents=True, exist_ok=True)
+
+    for rel in (FX_4H, FX_DAILY):
+        panel = (
+            pl.scan_parquet(source / rel)
+            .filter(pl.col("symbol").is_in(keep))
+            .with_columns(pl.col("timestamp").cast(pl.Datetime("us")).dt.replace_time_zone("UTC"))
+            .collect()
+        )
+        missing = sorted(set(keep) - set(panel["symbol"].unique().to_list()))
+        if missing:
+            raise ValueError(f"{rel}: production carries no rows for {missing}")
+        panel.write_parquet(output / rel)
+        written.append(output / rel)
+        print(f"    {rel.name}: {panel.height:,} rows, {panel['symbol'].n_unique()} pairs")
+    return written
+
+
+# --- US equities --------------------------------------------------------------
+#
+# 56 tickers of the 3,199 production carries, over the panel's whole 1962-2018
+# range. The rule that chose them was not kept and the list is the specification;
+# it is not a liquidity ranking - LBAI, MNTX, OCFC, PEBO and RDNT sit beside AAPL
+# and MSFT, so the sample spans the size distribution rather than the top of it.
+
+US_EQUITIES = Path("equities") / "market" / "us_equities" / "us_equities.parquet"
+US_EQUITIES_TICKERS = (
+    "AAL",
+    "AAPL",
+    "AIG",
+    "AMAT",
+    "AMD",
+    "BAC",
+    "BRCD",
+    "BRCM",
+    "C",
+    "CAR",
+    "CHK",
+    "CSCO",
+    "DAL",
+    "DELL",
+    "EBAY",
+    "EMC",
+    "ETFC",
+    "F",
+    "FB",
+    "FCX",
+    "FOXA",
+    "GE",
+    "GM",
+    "GOOGL",
+    "GRPN",
+    "HPE",
+    "INTC",
+    "JDSU",
+    "JNPR",
+    "JPM",
+    "KMI",
+    "LBAI",
+    "LVLT",
+    "LVS",
+    "MNTX",
+    "MS",
+    "MSFT",
+    "MSI",
+    "MU",
+    "NVDA",
+    "OCFC",
+    "ORCL",
+    "PEBO",
+    "PFE",
+    "PYPL",
+    "QCOM",
+    "RDNT",
+    "S",
+    "SIRI",
+    "T",
+    "TWTR",
+    "TWX",
+    "TYC",
+    "WFC",
+    "YHOO",
+    "ZNGA",
+)
+
+
+def build_us_equities(source: Path, output: Path) -> list[Path]:
+    """Write the US equities panel reduced to ``US_EQUITIES_TICKERS``."""
+    keep = list(US_EQUITIES_TICKERS)
+    (output / US_EQUITIES.parent).mkdir(parents=True, exist_ok=True)
+    panel = pl.scan_parquet(source / US_EQUITIES).filter(pl.col("ticker").is_in(keep)).collect()
+    missing = sorted(set(keep) - set(panel["ticker"].unique().to_list()))
+    if missing:
+        raise ValueError(f"{US_EQUITIES}: production carries no rows for {missing}")
+    panel.write_parquet(output / US_EQUITIES)
+    print(
+        f"    us_equities: {panel.height:,} rows, {panel['ticker'].n_unique()} tickers, "
+        f"{panel['date'].min().date()} to {panel['date'].max().date()}"
+    )
+    return [output / US_EQUITIES]
+
+
+# --- CME futures --------------------------------------------------------------
+#
+# Two halves reduced differently, and deliberately. The daily panel is production's
+# whole 30 products: `case_studies/cme_futures/config/setup.yaml` declares thirty
+# and sizes `initial_cash` and `top_k_grid` for them, and `05_evaluation` keeps a
+# date only where ten products carry the feature, so a reduced panel scores nothing.
+# The hourly bars are read by one notebook, `02_financial_data_universe/
+# 04_cme_futures_eda`, and only for ES, so eight products is already generous there
+# and 22 more would be 300 MB of weight.
+#
+# Neither half is transformed, so the builder copies rather than rewrites: all 121
+# files are byte-identical to production's, and a parquet round-trip through polars
+# would change their bytes while changing nothing a reader can see.
+
+CME_CONTINUOUS = Path("futures") / "market" / "continuous"
+CME_DAILY = CME_CONTINUOUS / "daily" / "continuous_daily.parquet"
+CME_HOURLY = CME_CONTINUOUS / "hourly"
+CME_HOURLY_PRODUCTS = ("6E", "CL", "ES", "GC", "NQ", "SI", "ZB", "ZN")
+
+
+def build_cme_futures(source: Path, output: Path) -> list[Path]:
+    """Copy the whole daily panel and the hourly bars for ``CME_HOURLY_PRODUCTS``."""
+    written: list[Path] = []
+
+    (output / CME_DAILY).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source / CME_DAILY, output / CME_DAILY)
+    written.append(output / CME_DAILY)
+    daily = pl.scan_parquet(output / CME_DAILY).select("product").collect()
+    print(f"    continuous_daily: {daily.height:,} rows, {daily['product'].n_unique()} products")
+
+    for product in CME_HOURLY_PRODUCTS:
+        src_dir = source / CME_HOURLY / f"product={product}"
+        if not src_dir.is_dir():
+            raise FileNotFoundError(f"production carries no hourly bars for {product}: {src_dir}")
+        parts = sorted(src_dir.glob("year=*/data.parquet"))
+        if not parts:
+            raise FileNotFoundError(f"no year partitions under {src_dir}")
+        for part in parts:
+            dst = output / CME_HOURLY / f"product={product}" / part.parent.name / part.name
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(part, dst)
+            written.append(dst)
+        print(f"    hourly product={product}: {len(parts)} year partitions")
+    return written
+
+
 DATASETS: tuple[Dataset, ...] = (
+    Dataset(
+        name="etfs",
+        description=(
+            f"{len(ETF_SYMBOLS)} ETFs of the 100 production carries, adjusted and "
+            "unadjusted, with the date column stored as a Date"
+        ),
+        build=build_etfs,
+        owns=(ETF_UNIVERSE, ETF_UNIVERSE_UNADJUSTED, ETF_METADATA),
+        budget={"symbols": list(ETF_SYMBOLS)},
+        entities={
+            ETF_UNIVERSE.as_posix(): ("symbol", len(ETF_SYMBOLS)),
+            ETF_UNIVERSE_UNADJUSTED.as_posix(): ("symbol", len(ETF_SYMBOLS)),
+        },
+    ),
+    Dataset(
+        name="crypto",
+        description=(
+            f"{len(CRYPTO_SYMBOLS)} perpetual futures of the 19 production carries, "
+            "hourly bars with their 8-hour premium index and funding rate"
+        ),
+        build=build_crypto,
+        owns=(CRYPTO_PERPS, CRYPTO_PREMIUM, CRYPTO_FUNDING),
+        budget={
+            "symbols": list(CRYPTO_SYMBOLS),
+            "bars_through": CRYPTO_PERPS_END.isoformat(),
+        },
+        entities={
+            CRYPTO_PERPS.as_posix(): ("symbol", len(CRYPTO_SYMBOLS)),
+            CRYPTO_PREMIUM.as_posix(): ("symbol", len(CRYPTO_SYMBOLS)),
+            CRYPTO_FUNDING.as_posix(): ("symbol", len(CRYPTO_SYMBOLS)),
+        },
+    ),
+    Dataset(
+        name="fx",
+        description=(
+            f"the whole production FX panel, {len(FX_PAIRS)} major and cross pairs at "
+            "4h and daily, with UTC-aware timestamps at both frequencies"
+        ),
+        build=build_fx,
+        owns=(FX_4H, FX_DAILY),
+        budget={"pairs": list(FX_PAIRS), "subsample": "none"},
+        entities={
+            FX_4H.as_posix(): ("symbol", len(FX_PAIRS)),
+            FX_DAILY.as_posix(): ("symbol", len(FX_PAIRS)),
+        },
+    ),
+    Dataset(
+        name="us_equities",
+        description=(
+            f"{len(US_EQUITIES_TICKERS)} tickers of the 3,199 production carries, "
+            "spanning the size distribution rather than the top of it, full date range"
+        ),
+        build=build_us_equities,
+        owns=(US_EQUITIES,),
+        budget={"tickers": list(US_EQUITIES_TICKERS)},
+        entities={US_EQUITIES.as_posix(): ("ticker", len(US_EQUITIES_TICKERS))},
+    ),
+    Dataset(
+        name="cme_futures",
+        description=(
+            "the whole 30-product production daily panel, with the hourly bars "
+            f"reduced to the {len(CME_HOURLY_PRODUCTS)} products a notebook reads"
+        ),
+        build=build_cme_futures,
+        owns=(CME_DAILY, CME_HOURLY),
+        budget={
+            "daily": "none - setup.yaml declares 30 products and sizes the backtest for them",
+            "hourly_products": list(CME_HOURLY_PRODUCTS),
+        },
+        entities={
+            CME_DAILY.as_posix(): ("product", 30),
+            CME_HOURLY.as_posix(): ("product", len(CME_HOURLY_PRODUCTS)),
+        },
+    ),
     Dataset(
         name="sp500_options",
         description=(
@@ -767,109 +1193,6 @@ DATASETS: tuple[Dataset, ...] = (
 DATASETS_BY_NAME = {dataset.name: dataset for dataset in DATASETS}
 
 
-@dataclass(frozen=True)
-class UnbuiltFixture:
-    """A fixture the test-data repo carries that this script cannot rebuild.
-
-    Attributes:
-        name: Manifest ``subsets`` key.
-        description: What the fixture holds, mirrored into the manifest.
-        covers: Paths under the output root the fixture occupies.
-        entities: ``{path: (column, count)}`` measured on the fixture itself, so
-            the declaration is a measurement rather than an intention and a test
-            can check it against the files on disk.
-        reason: Why there is no ``Dataset`` spec.
-    """
-
-    name: str
-    description: str
-    covers: tuple[Path, ...]
-    entities: dict[str, tuple[str, int]]
-    reason: str
-
-
-# The fixtures produced before this script existed, by paths that were not kept.
-#
-# They are declared rather than left implicit because the manifest is the only
-# record of what the fixture set is supposed to contain, and an entry nothing can
-# confirm is worse than no entry: every one of these carried a budget the fixture
-# did not satisfy - "15 most liquid ETFs" over 56 symbols, "8 major/cross FX pairs"
-# over 20, "50 most liquid US equities" over 56, "8 most liquid CME products" over
-# a 30-product daily panel. What is recorded here is measured on the fixture.
-#
-# Why none of them has a builder, measured 2026-09-03 by filtering current
-# production to each fixture's own symbol set: the row counts match exactly, but
-# the shipped fixtures are snapshots of an older production state, so a builder
-# that filtered production today would not reproduce them. `etfs` and `fx` carry a
-# Datetime date column where production now carries Date; `crypto` ends
-# 2025-12-29 against production's 2025-12-31. Writing the specs is therefore a
-# regeneration of each fixture rather than a description of it - per-dataset work
-# with per-dataset verification against the notebooks that read it, and one push to
-# ml4t/third-edition-test-data that changes CI inputs for every open branch at once.
-UNBUILT_FIXTURES: tuple[UnbuiltFixture, ...] = (
-    UnbuiltFixture(
-        name="etfs",
-        description="56 ETFs across categories, of the 100 production carries",
-        covers=(Path("etfs") / "market",),
-        entities={
-            "etfs/market/etf_universe.parquet": ("symbol", 56),
-            "etfs/market/etf_universe_unadjusted.parquet": ("symbol", 56),
-        },
-        reason="produced before this script existed; the shipped extract predates the "
-        "current production schema (Datetime date column against production's Date)",
-    ),
-    UnbuiltFixture(
-        name="crypto",
-        description="5 perpetual futures of the 19 production carries, hourly bars "
-        "with their 8-hour premium index and funding rate",
-        covers=(Path("crypto") / "market",),
-        entities={
-            "crypto/market/perps_1h.parquet": ("symbol", 5),
-            "crypto/market/premium_index_8h.parquet": ("symbol", 5),
-            "crypto/market/funding_rate.parquet": ("symbol", 5),
-        },
-        reason="produced before this script existed; the shipped extract ends two "
-        "sessions before production, so filtering production does not reproduce it",
-    ),
-    UnbuiltFixture(
-        name="fx",
-        description="the whole production FX panel, 20 major and cross pairs at 4h "
-        "and daily - not reduced on any axis",
-        covers=(Path("fx") / "market",),
-        entities={
-            "fx/market/4h.parquet": ("symbol", 20),
-            "fx/market/daily.parquet": ("symbol", 20),
-        },
-        reason="produced before this script existed, and reduced on no axis: the row "
-        "counts equal production's exactly, so this fixture measures nothing about "
-        "reduction and only pins the panel",
-    ),
-    UnbuiltFixture(
-        name="us_equities",
-        description="56 tickers of the 3,199 production carries, full date range",
-        covers=(Path("equities") / "market" / "us_equities",),
-        entities={"equities/market/us_equities/us_equities.parquet": ("ticker", 56)},
-        reason="produced before this script existed; the reduction rule that chose "
-        "these 56 was not kept",
-    ),
-    UnbuiltFixture(
-        name="cme_futures",
-        description="the whole 30-product production daily panel, with the hourly "
-        "bars reduced to 8 products",
-        covers=(Path("futures") / "market" / "continuous",),
-        entities={
-            "futures/market/continuous/daily/continuous_daily.parquet": ("product", 30),
-        },
-        reason="produced before this script existed, and the two halves disagree: the "
-        "daily panel is byte-identical to production (same md5, 312,859 rows over 30 "
-        "products) while the hourly bars carry 8. cme_futures reads the daily one, and "
-        "config/setup.yaml declares 30 products with initial_cash and top_k_grid sized "
-        "for them, so the daily panel is the one that matches the study",
-    ),
-)
-
-UNBUILT_BY_NAME = {fixture.name: fixture for fixture in UNBUILT_FIXTURES}
-
 # Manifest entries that describe a fixture another dataset already owns, and are
 # dropped rather than declared. `sp500_daily` describes
 # equities/market/sp500/daily_bars.parquet, which build_sp500_options writes;
@@ -928,30 +1251,15 @@ def write_manifest(output: Path, built: dict[str, list[Path]]) -> Path:
 def declared_subsets() -> dict[str, dict]:
     """What ``manifest.json``'s ``subsets`` block has to say, from the declarations.
 
-    One entry per registered ``Dataset`` and one per ``UnbuiltFixture``, and nothing
-    else. This is the comparison that would have fired the day #652 landed: the
-    manifest still said sp500_options kept 3 "most liquid" underlyings while the
-    builder declared 30 named ones, and nothing noticed until a case study spent a
-    day on five notebooks that were failing on the stale fixture rather than on
-    anything in the notebooks.
+    One entry per registered ``Dataset`` and nothing else. This is the comparison
+    that would have fired the day #652 landed: the manifest still said sp500_options
+    kept 3 "most liquid" underlyings while the builder declared 30 named ones, and
+    nothing noticed until a case study spent a day on five notebooks that were
+    failing on the stale fixture rather than on anything in the notebooks.
     """
-    subsets = {
+    return {
         dataset.name: {**dataset.budget, "description": dataset.description} for dataset in DATASETS
     }
-    subsets.update(
-        {
-            fixture.name: {
-                "description": fixture.description,
-                "entities": {
-                    path: {"column": column, "count": count}
-                    for path, (column, count) in fixture.entities.items()
-                },
-                "no_builder": fixture.reason,
-            }
-            for fixture in UNBUILT_FIXTURES
-        }
-    )
-    return subsets
 
 
 def reconcile_manifest(output: Path) -> tuple[Path, dict]:
@@ -991,7 +1299,6 @@ def reconcile_manifest(output: Path) -> tuple[Path, dict]:
     dropped = sorted(set(manifest.get("files", {})) - set(files))
 
     declared_paths = [owned for dataset in DATASETS for owned in dataset.owns]
-    declared_paths += [covered for fixture in UNBUILT_FIXTURES for covered in fixture.covers]
     added = []
     for declared in declared_paths:
         root = output / declared

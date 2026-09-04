@@ -38,7 +38,6 @@ if str(REPO_ROOT) not in sys.path:
 from tests.create_test_data import (  # noqa: E402
     DATASETS,
     SUPERSEDED_SUBSETS,
-    UNBUILT_FIXTURES,
     declared_subsets,
 )
 
@@ -66,25 +65,19 @@ def manifest(fixture_root: Path) -> dict:
 # --- the declarations themselves, no data needed -----------------------------
 
 
-def test_every_fixture_is_declared_exactly_once() -> None:
-    """A dataset with a builder and a declaration of having none is a contradiction."""
-    registered = {dataset.name for dataset in DATASETS}
-    unbuilt = {fixture.name for fixture in UNBUILT_FIXTURES}
-    assert not registered & unbuilt
-    assert not (registered | unbuilt) & set(SUPERSEDED_SUBSETS)
+def test_no_superseded_entry_names_a_registered_dataset() -> None:
+    """A superseded manifest key describes a fixture some other dataset owns.
+
+    A name that is both a `Dataset` and a superseded key would be dropped from the
+    manifest and written back into it by the same run.
+    """
+    assert not {dataset.name for dataset in DATASETS} & set(SUPERSEDED_SUBSETS)
 
 
 def test_every_superseded_entry_names_the_dataset_that_owns_it() -> None:
     registered = {dataset.name for dataset in DATASETS}
     for name, owner in SUPERSEDED_SUBSETS.items():
         assert owner in registered, f"{name} is superseded by {owner}, which has no builder"
-
-
-def test_every_unbuilt_fixture_records_why_it_has_none() -> None:
-    """Without the reason the entry is a shrug, which is what it replaced."""
-    for fixture in UNBUILT_FIXTURES:
-        assert fixture.reason.strip(), f"{fixture.name} declares no reason"
-        assert fixture.entities, f"{fixture.name} declares nothing a test can measure"
 
 
 def test_every_reducing_builder_declares_something_measurable() -> None:
@@ -137,14 +130,26 @@ def test_every_file_the_manifest_lists_is_on_disk(fixture_root: Path, manifest: 
 
 
 def _distinct(path: Path, column: str) -> int:
-    source = path / "**" / "*.parquet" if path.is_dir() else path
-    return pl.scan_parquet(source).select(pl.col(column).n_unique()).collect().item()
+    """Distinct values of ``column``, reading a hive directory the way its loader does.
+
+    The CME hourly bars keep `product` in the path (`product=ES/year=2011/...`) and
+    not in the parquet, so a non-hive scan of that tree cannot see the entity axis
+    at all. `hive_partitioning=True` is a no-op on a tree whose files carry the
+    column inline, which is the nasdaq100 minute-bar layout.
+    """
+    if not path.is_dir():
+        return pl.scan_parquet(path).select(pl.col(column).n_unique()).collect().item()
+    return (
+        pl.scan_parquet(path / "**" / "*.parquet", hive_partitioning=True)
+        .select(pl.col(column).n_unique())
+        .collect()
+        .item()
+    )
 
 
 def _declared_files(root: Path) -> dict[str, list[str]]:
     """{dataset name: the files on disk under the paths it declares}."""
     declared = {dataset.name: dataset.owns for dataset in DATASETS}
-    declared.update({fixture.name: fixture.covers for fixture in UNBUILT_FIXTURES})
     found = {}
     for name, paths in declared.items():
         files = []
@@ -158,9 +163,7 @@ def _declared_files(root: Path) -> dict[str, list[str]]:
     return found
 
 
-@pytest.mark.parametrize(
-    "name", sorted({d.name for d in DATASETS} | {f.name for f in UNBUILT_FIXTURES})
-)
+@pytest.mark.parametrize("name", sorted(d.name for d in DATASETS))
 def test_every_file_a_dataset_owns_is_listed_in_the_manifest(
     name: str, fixture_root: Path, manifest: dict
 ) -> None:
@@ -203,31 +206,4 @@ def test_a_built_fixture_carries_the_universe_its_builder_declares(
     assert observed == count, (
         f"{name}'s builder declares {count} distinct {column} in {rel} and the fixture "
         f"carries {observed}. Regenerate the dataset, or correct the builder."
-    )
-
-
-@pytest.mark.parametrize(
-    ("name", "rel", "column", "count"),
-    [
-        (fixture.name, rel, column, count)
-        for fixture in UNBUILT_FIXTURES
-        for rel, (column, count) in fixture.entities.items()
-    ],
-)
-def test_an_unbuilt_fixture_carries_the_universe_it_declares(
-    name: str, rel: str, column: str, count: int, fixture_root: Path
-) -> None:
-    """These cannot drift against a builder, so they are measured against the data.
-
-    Every one of them declared a budget the fixture did not satisfy before this -
-    "15 most liquid ETFs" over 56 symbols, "8 major/cross FX pairs" over 20, "50
-    most liquid US equities" over 56, "8 most liquid CME products" over a 30-product
-    daily panel.
-    """
-    path = fixture_root / rel
-    if not path.exists():
-        pytest.skip(f"{name}: {rel} is not in this checkout")
-    observed = _distinct(path, column)
-    assert observed == count, (
-        f"{name} declares {count} distinct {column} in {rel} and the fixture carries {observed}"
     )
