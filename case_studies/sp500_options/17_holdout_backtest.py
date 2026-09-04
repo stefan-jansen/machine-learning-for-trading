@@ -51,6 +51,7 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 
+from case_studies.research import supersedes_for_run
 from case_studies.research.holdout import build_holdout_training_spec
 from case_studies.sp500_options.research_workflow import (
     open_study,
@@ -66,6 +67,13 @@ from utils.paths import get_case_study_dir
 CASE_STUDY_ID = "sp500_options"
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
+# The generation of the holdout population this run retires. A population is immutable under
+# its name, so a re-run whose member has moved has to name the one it replaces; the refusal
+# prints the current hash. Empty is correct only for a name this registry has never held.
+# It moves whenever `16_holdout_predictions` refits a different configuration, which is what
+# an upstream correction does - the notebook carried no declaration at all, so the first such
+# correction left it unable to register the backtest it had just run.
+SUPERSEDES_HOLDOUT_POPULATION: str = "24482f766132"
 
 # %%
 study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -219,6 +227,12 @@ execution = run_official_backtest_requests(
     requests,
     population_name=HOLDOUT_POPULATION,
     split="holdout",
+    supersedes=supersedes_for_run(
+        study,
+        population_name=HOLDOUT_POPULATION,
+        declared=SUPERSEDES_HOLDOUT_POPULATION or None,
+        execution_tier=EXECUTION_TIER,
+    ),
 )
 result = execution.results[0]
 print(f"Holdout backtest: {result.hash}")

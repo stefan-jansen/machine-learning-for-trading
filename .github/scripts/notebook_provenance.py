@@ -159,6 +159,14 @@ PRODUCTION_SAFE_PARAMETERS: dict[str, object] = {
     # cannot reduce the run, and register_causal_run refuses a hash that is not a
     # current canonical identity for the same label.
     "SUPERSEDES_CAUSAL": VALIDATED_BY_CONSUMER,
+    # Replaces a holdout evaluation the window already carries instead of adding a second
+    # one. It deletes rows, which is why it is worth saying why it belongs here: it cannot
+    # reduce what the run computes - the refit, the registration and every check still
+    # happen - and the row it removes is one the notebook has already established is a
+    # superseded generation of the same window. Without it a correction that moves every
+    # training identity could be computed but never carried through to the holdout, because
+    # the only route would be editing the notebook's source for one run and editing it back.
+    "REPLACE_HOLDOUT": True,
 }
 
 
