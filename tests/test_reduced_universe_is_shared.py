@@ -25,7 +25,6 @@ Needs the test-data checkout, so it runs in test-unit-data.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import polars as pl
@@ -45,10 +44,18 @@ def _injected_max_symbols(stage: str) -> int | None:
 
 
 @pytest.fixture(scope="module")
-def bar_counts() -> pl.DataFrame:
-    """Rows per symbol on the panel stages 02, 03 and 04 all read."""
-    data_path = Path(os.environ.get("ML4T_DATA_PATH", ""))
-    hive = data_path / "equities" / "market" / "nasdaq100" / "minute_bars"
+def bar_counts(test_data_dir: Path) -> pl.DataFrame:
+    """Rows per symbol on the panel stages 02, 03 and 04 all read.
+
+    Resolved through conftest's ``test_data_dir`` rather than by reading
+    ML4T_DATA_PATH here: that variable is rewritten during a session by the same
+    fixture, and this is a statement about the CI fixture. Against the production
+    panel - 123 symbols where the fixture has 12 - the cut lands somewhere else
+    entirely and the question is not the one being asked.
+    """
+    if not (test_data_dir / "manifest.json").is_file():
+        pytest.skip(f"{test_data_dir} is not a test-data checkout (no manifest.json)")
+    hive = test_data_dir / "equities" / "market" / "nasdaq100" / "minute_bars"
     if not hive.is_dir() or not list(hive.glob("year=*")):
         pytest.skip(f"no nasdaq100 minute bars under {hive}")
 
