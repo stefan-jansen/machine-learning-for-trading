@@ -44,7 +44,10 @@ import polars as pl
 import torch  # noqa: F401
 
 from case_studies.utils.analytics import PRIMARY_LABELS, SHORT_NAMES
-from case_studies.utils.conformal import split_conformal_coverage
+from case_studies.utils.conformal import (
+    sizing_conformal_lag,
+    walk_forward_conformal_coverage,
+)
 from case_studies.utils.registry.specs import declared_fold_count
 from utils.paths import get_case_study_dir
 
@@ -338,8 +341,20 @@ def conformal_coverage_for_selected_prediction(
     selected: dict,
     *,
     levels: tuple[float, ...] = (0.80, 0.90, 0.95),
+    embargo_steps: int | None = None,
 ) -> pl.DataFrame:
-    """Measure split-conformal coverage for one exact selected prediction artifact."""
+    """Realised coverage of the sizing widths, for one exact selected prediction artifact.
+
+    Measured on the estimator `conformal_weighted` allocates with - see
+    :func:`~case_studies.utils.conformal.walk_forward_conformal_coverage`, which also states
+    why the figure is a diagnostic of residual dispersion rather than a guarantee.
+
+    ``embargo_steps`` defaults to :func:`~case_studies.utils.conformal.sizing_conformal_lag`
+    for this row's case study and label.
+    The label is taken from the selected row where it carries one and from the training spec
+    otherwise - `us_equities_panel/15_model_analysis` attaches it to the returned frame rather
+    than to the row it passes, and both know the same label.
+    """
     required = {
         "case_study",
         "family",
@@ -393,8 +408,19 @@ def conformal_coverage_for_selected_prediction(
             f"{selected['case_study']}/{selected['prediction_hash']}: "
             f"expected fold IDs {list(range(n_folds))}, observed {fold_ids}"
         )
+    if embargo_steps is None:
+        label = selected.get("label") or spec.get("label")
+        if not label:
+            raise RegistrySelectionError(
+                f"{selected['case_study']}/{selected['prediction_hash']}: neither the selected "
+                "row nor its training spec names a label, so no reviewed conformal embargo "
+                "can be resolved"
+            )
+        embargo_steps = sizing_conformal_lag(selected["case_study"], label)
     try:
-        coverage_rows = split_conformal_coverage(predictions, levels=levels)
+        coverage_rows = walk_forward_conformal_coverage(
+            predictions, levels=levels, embargo_steps=embargo_steps
+        )
     except ValueError as error:
         raise RegistrySelectionError(
             f"{selected['case_study']}/{selected['prediction_hash']}: {error}"

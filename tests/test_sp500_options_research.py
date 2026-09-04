@@ -99,6 +99,19 @@ def _prediction(
     )
 
 
+def test_an_empty_config_selection_is_blamed_on_the_caller_not_the_family() -> None:
+    """`config_names=[]` filters every row out, and the family's menu is not why.
+
+    The caller passes `config_names` in code, never from a parameters cell, so an empty list
+    cannot be an empty-means-all idiom; it is a mistake, and reporting it as "no declared
+    requests for 'linear'" sends a reader to the training menu to look for a row that is there.
+    """
+    assert model_request_catalog("linear").height > 0
+
+    with pytest.raises(ValueError, match="config_names is empty"):
+        model_request_catalog("linear", config_names=[])
+
+
 def test_resolved_model_plan_accepts_flat_sequence_specs(tmp_path: Path) -> None:
     study = _study(tmp_path)
     expected = pl.DataFrame(

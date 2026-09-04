@@ -4,7 +4,7 @@ import json
 import sqlite3
 from collections.abc import Iterable
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
@@ -18,14 +18,49 @@ if TYPE_CHECKING:
     from .workspace import Study
 
 
+def binding_table(db: sqlite3.Connection) -> str:
+    """The table this registry records candidate-set name bindings in.
+
+    ``candidate_set_names`` where the registry has been opened for writing since bindings moved
+    off the identity row, and ``candidate_sets`` where it has not - which is every registry a
+    reader clones and every one an older version wrote. The fallback resolves one name per
+    identity, the only bindings such a registry ever held.
+    """
+    exists = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'candidate_set_names'"
+    ).fetchone()
+    return "candidate_set_names" if exists is not None else "candidate_sets"
+
+
+def name_bindings(db: sqlite3.Connection, name: str) -> list[tuple[str, str | None]]:
+    """Every ``(set_hash, supersedes_hash)`` recorded under ``name``.
+
+    A name is a binding onto a candidate set, not part of its identity. ``candidate_set_names``
+    holds one row per ``(name, set_hash)``, so one set can carry several names - a union that
+    turns out to equal one of its inputs is the case that forces this - and a name can point at
+    a set first written under a different one.
+
+    Registries written before that table existed keep the binding in ``candidate_sets.name``,
+    one name per identity. Reading it here is what lets :meth:`CandidateSet.one` resolve against
+    a registry no writer has opened since, which is every registry a reader clones.
+    """
+    table = binding_table(db)
+    return db.execute(
+        f"SELECT set_hash, supersedes_hash FROM {table} WHERE name = ?",  # noqa: S608 - fixed set
+        (name,),
+    ).fetchall()
+
+
+def _live_heads(bindings: list[tuple[str, str | None]]) -> list[tuple[str, str | None]]:
+    """The generations of one name that no later generation replaces."""
+    replaced = {supersedes for _, supersedes in bindings if supersedes is not None}
+    return [binding for binding in bindings if binding[0] not in replaced]
+
+
 def _unsuperseded_hash(db: sqlite3.Connection, name: str) -> str | None:
     """The one generation of ``name`` that no later generation replaces, if it is unique."""
-    rows = db.execute(
-        "SELECT set_hash, supersedes_hash FROM candidate_sets WHERE name = ?", (name,)
-    ).fetchall()
-    replaced = {row[1] for row in rows if row[1] is not None}
-    heads = [row[0] for row in rows if row[0] not in replaced]
-    return heads[0] if len(heads) == 1 else None
+    heads = _live_heads(name_bindings(db, name))
+    return heads[0][0] if len(heads) == 1 else None
 
 
 def candidate_set_supersedes(study: Study, *, name: str, declared: str | None) -> str | None:
@@ -160,7 +195,18 @@ class CandidateSet:
             expected = (member_kind, canonical_json(contract))
             if existing is not None and existing != expected:
                 raise ValueError(f"immutable candidate-set conflict for {set_hash}")
-            if existing is None:
+
+            # The identity and the name are written under different conditions, so they are
+            # decided apart. A set already stored is not written again; a name not yet bound to
+            # it still has to be. Deciding both on the identity alone is what let a set
+            # requested under a second name return the stored one and bind nothing, so the
+            # caller held an object whose name the registry did not have and the next
+            # `one(name=...)` raised with nothing pointing at the cause.
+            bound = db.execute(
+                "SELECT supersedes_hash FROM candidate_set_names WHERE name = ? AND set_hash = ?",
+                (name, set_hash),
+            ).fetchone()
+            if bound is None:
                 # A candidate set is derived, so re-running the stage that freezes it produces
                 # a second set under the same name whenever the registry or the admission rule
                 # moved. Two live generations make the name unresolvable and every reader of it
@@ -173,6 +219,13 @@ class CandidateSet:
                     )
                 if head is None and supersedes is not None:
                     raise ValueError("first candidate set version cannot supersede another set")
+            else:
+                supersedes = bound[0]
+
+            if existing is None:
+                # `candidate_sets.name` and `.supersedes_hash` record the binding this identity
+                # was first written under. `candidate_set_names` is what resolution reads; these
+                # two columns stay for registries and readers that predate it.
                 db.execute(
                     "INSERT INTO candidate_sets "
                     "(set_hash, name, member_kind, comparison_contract_json, created_at, "
@@ -192,12 +245,13 @@ class CandidateSet:
                     "VALUES (?,?,?)",
                     [(set_hash, value, ordinal) for ordinal, value in enumerate(member_hashes)],
                 )
-                db.commit()
-            else:
-                supersedes = db.execute(
-                    "SELECT supersedes_hash FROM candidate_sets WHERE set_hash = ?",
-                    (set_hash,),
-                ).fetchone()[0]
+            if bound is None:
+                db.execute(
+                    "INSERT INTO candidate_set_names "
+                    "(name, set_hash, supersedes_hash, created_at, git_commit) VALUES (?,?,?,?,?)",
+                    (name, set_hash, supersedes, _utc_now(), _git_hash()),
+                )
+            db.commit()
         except Exception:
             db.rollback()
             raise
@@ -212,20 +266,38 @@ class CandidateSet:
         Earlier generations stay readable by hash, which is what makes recording the lineage
         worth anything: a result registered against a superseded set can still be traced to
         the comparison it was made in.
+
+        One set can carry several names, so this resolves the name rather than the identity:
+        two names for the same members each resolve to it, and superseding one does not retire
+        the other.
         """
         with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
-            head = _unsuperseded_hash(db, name)
-            if head is None:
-                count = db.execute(
-                    "SELECT count(*) FROM candidate_sets WHERE name = ?", (name,)
-                ).fetchone()[0]
+            bindings = name_bindings(db, name)
+            heads = _live_heads(bindings)
+            if len(heads) != 1:
+                # Heads rather than rows. Every generation of a name is a binding, so counting
+                # them reports a retired one as a live identity and tells a reader the name is
+                # ambiguous when it resolves. Bindings rather than `candidate_sets` rows for
+                # the mirror reason: a name pointing at a set first written under another name
+                # has no identity row of its own and would count zero.
                 raise ValueError(
-                    f"candidate set name {name!r} resolved to {count} unsuperseded identities"
+                    f"candidate set name {name!r} resolved to {len(heads)} unsuperseded identities"
                 )
-        return cls.open(study, head)
+            head, supersedes = heads[0]
+        identity = cls.open(study, head)
+        # The binding the caller asked for, not the one the identity was first written under.
+        # `open` answers by hash and has no way to know which of a set's names was meant, so a
+        # union that shares its members with an input would come back named for the input.
+        return replace(identity, name=name, supersedes=supersedes)
 
     @classmethod
     def open(cls, study: Study, set_hash: str) -> CandidateSet:
+        """Read one candidate set by identity.
+
+        ``name`` is the binding the identity was first written under. A set opened by hash has
+        no way to say which of its names the caller meant, and this is the one the registry
+        records on the identity row; :meth:`one` is the way in when the name is what matters.
+        """
         db_path = study.root / "run_log" / "registry.db"
         with closing(sqlite3.connect(db_path)) as db:
             row = db.execute(

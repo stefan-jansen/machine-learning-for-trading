@@ -592,13 +592,28 @@ def run_official_models(
     produce. This is the canonical entry point for a model-execution notebook.
 
     Unresolved requests are planned rather than resolved, and then handed to the batch runner
-    still unresolved. Both halves of that matter on a large panel. Resolving every request up
-    front holds every configuration's prepared folds at once - 90 GB per fold set times sixteen
-    configurations on `us_equities_panel` - while planning computes the same identities from
-    placeholder folds; and the batch runner walks folds on the outside and configurations on the
-    inside, so one fold set is live at a time instead of one per configuration. The declaration
-    is unchanged: the same identities are written down before the same fits happen, and
-    `pre_run_gate.py` checks that the two paths agree on them.
+    still unresolved. What that is worth on a large panel is narrower than it was. Resolving
+    every request up front repeats neither the shared work nor a copy of it per configuration
+    **while the fold set fits the memo budget**: `_load_inputs` holds the panel for the label
+    being resolved (`case_studies/utils/linear.py`) and `prepare_standardized_folds` holds the
+    prepared fold set (`case_studies/utils/folds.py`), so a grid of configurations over one
+    label reads the panel once, builds each fold once, and every resolved request references
+    the same arrays. Measured on `fx_pairs/fwd_ret_5d` with a cold cache: one dataset load and
+    eight folds built, flat at one, two and six configurations, and the same fold objects
+    behind all of them.
+
+    The budget is the qualification that matters at production width. `holds_in_memory` admits
+    a fold set only up to `memo_budget_bytes` (8 GB by default), so a panel whose prepared folds
+    exceed it is rebuilt per configuration and each copy stays alive as long as the resolved
+    request holding it. On such a panel the per-request path is the multiplier the batch runner
+    exists to avoid, and the plan path is not a preference.
+
+    What remains is when the folds are built and how long they stay alive: planning computes the
+    identities from placeholder folds and leaves preparation to the runner, which walks folds on
+    the outside and configurations on the inside, so a fold set is live for one pass rather than
+    for as long as the resolved requests are held. The declaration is unchanged either way: the
+    same identities are written down before the same fits happen, and `pre_run_gate.py` checks
+    that the two paths agree on them.
 
     A notebook that already built a :class:`ModelPlan` to show what it is about to fit passes the
     plan itself. Passing its requests instead would plan a second time, and planning a large panel

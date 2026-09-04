@@ -7,13 +7,17 @@ import polars as pl
 import pytest
 
 from case_studies.utils import notebook_render
+from case_studies.utils.conformal import (
+    holdout_conformal_embargo_steps,
+    walk_forward_conformal_coverage,
+)
 from case_studies.utils.registry.store import _open_registry
 
 
 def test_conformal_diagnostic_excludes_partial_and_orders_folds_chronologically(
     tmp_path, monkeypatch
 ):
-    """Coverage uses the full-history leader and the earliest validation fold."""
+    """The row describes the family's full-history IC leader, not a partial-history config."""
     run_log = tmp_path / "run_log"
     pred_dir = run_log / "predictions"
     pred_dir.mkdir(parents=True)
@@ -56,23 +60,18 @@ def test_conformal_diagnostic_excludes_partial_and_orders_folds_chronologically(
     for prediction_hash in ("pred_partial", "pred_full"):
         path = pred_dir / prediction_hash
         path.mkdir()
-        n = 80
-        scores = np.linspace(-1.0, 1.0, n)
-        residuals = np.concatenate([np.full(n // 2, 0.1), np.full(n // 2, 0.5)])
-        pl.DataFrame(
-            {
-                "timestamp": ["2020-01-02"] * (n // 2) + ["2019-01-02"] * (n // 2),
-                "y_true": scores + residuals,
-                "y_score": scores,
-                "fold_id": np.repeat([0, 1], n // 2),
-            }
-        ).write_parquet(path / "predictions.parquet")
+        _write_panel(path, {"AAA": [0.1] * 80, "BBB": [0.1] * 80})
 
     monkeypatch.setattr(notebook_render, "registry_path", lambda _case_study: db_path)
-    result = notebook_render.conformal_coverage_diagnostic("test", label="fwd_ret_5d")
+    result = notebook_render.conformal_coverage_diagnostic(
+        "test", label="fwd_ret_5d", embargo_steps=1
+    )
 
     assert result["config_name"].unique().to_list() == ["full"]
-    assert result["empirical_coverage"].to_list() == [1.0, 1.0, 1.0]
+    assert result["nominal_level"].to_list() == [0.80, 0.90, 0.95]
+    # A wider nominal level cannot cover fewer decisions on the same panel.
+    coverage = result["empirical_coverage"].to_list()
+    assert coverage == sorted(coverage)
 
 
 def _single_config_registry(tmp_path):
@@ -101,106 +100,81 @@ def _single_config_registry(tmp_path):
     return db_path, pred_dir
 
 
-def _write_predictions(pred_dir, calibration_residuals, test_residuals):
-    """Calibration fold is the earlier one and is deliberately not fold_id 0."""
-    n_cal, n_test = len(calibration_residuals), len(test_residuals)
+def _write_panel(pred_dir, panel: dict[str, list[float]]):
+    """One row per (day, symbol), with `y_true - y_score` taken from `panel`.
+
+    Every symbol supplies the same number of residuals, so the day grid is the row index and
+    an embargo of h steps is h days back. `fold_id` labels the later half 0 and the earlier
+    half 1, so a reader that treats fold ids as chronological gets the panel backwards.
+    """
+    lengths = {len(values) for values in panel.values()}
+    assert len(lengths) == 1, "every symbol supplies the same number of steps"
+    steps = lengths.pop()
+    days = [f"2020-{1 + step // 28:02d}-{1 + step % 28:02d}" for step in range(steps)]
+    # `y_score` ramps so the outcomes have a spread to normalize the width against; the
+    # residual is still exactly what `panel` says, because `y_true` is built from it.
+    scores = [float(step) / steps for step in range(steps)]
     pl.DataFrame(
         {
-            "timestamp": ["2019-01-02"] * n_cal + ["2020-01-02"] * n_test,
-            "y_true": list(calibration_residuals) + list(test_residuals),
-            "y_score": [0.0] * (n_cal + n_test),
-            "fold_id": [1] * n_cal + [0] * n_test,
+            "timestamp": [day for day in days for _ in panel],
+            "symbol": [symbol for _ in days for symbol in panel],
+            "y_true": [
+                scores[step] + panel[symbol][step] for step in range(steps) for symbol in panel
+            ],
+            "y_score": [scores[step] for step in range(steps) for _ in panel],
+            "fold_id": [1 if step < steps // 2 else 0 for step in range(steps) for _ in panel],
         }
     ).write_parquet(pred_dir / "predictions.parquet")
 
 
-def test_conformal_quantile_is_the_exact_order_statistic(tmp_path, monkeypatch):
-    """The calibration residual must be selected by rank, not via a probability.
+def test_the_diagnostic_reports_the_walk_forward_estimator(tmp_path, monkeypatch):
+    """The numbers a notebook prints are the ones the sizing widths produce.
 
-    Split conformal calls for the ceil((n+1)*level)-th smallest residual: with
-    40 calibration residuals at the 80% level that is the 33rd, i.e. 0.1 here.
-    The calibration set is built so the three plausible answers are all
-    distinct, which is what makes this test able to fail:
-
-        rank 33 (correct)                    0.1
-        np.quantile(k/n, method="higher")    5.0    - one rank too high
-        np.quantile(k/n) linear              0.9575 - a value no residual attains
+    Asserted against `walk_forward_conformal_coverage` on the same artifact rather than
+    against constants, because what this pins is that the two are the same measurement: the
+    diagnostic used to run a second estimator - pooled, earliest-fold, unembargoed - and print
+    its coverage as the strategy's.
     """
     db_path, pred_dir = _single_config_registry(tmp_path)
-    calibration = [0.1] * 33 + [5.0] * 7
-    _write_predictions(pred_dir, calibration, [1.0] * 40)
-
+    panel = {"CALM": [0.1] * 80, "WILD": [10.0] * 80}
+    _write_panel(pred_dir, panel)
     monkeypatch.setattr(notebook_render, "registry_path", lambda _cs: db_path)
+
     result = notebook_render.conformal_coverage_diagnostic(
-        "test", label="fwd_ret_5d", levels=(0.80,)
+        "test", label="fwd_ret_5d", levels=(0.80,), embargo_steps=1
+    )
+    expected = walk_forward_conformal_coverage(
+        pl.read_parquet(pred_dir / "predictions.parquet"), levels=(0.80,), embargo_steps=1
     )
 
-    scale = pl.Series(calibration).std()
-    implied_quantile = result["mean_interval_width_frac_std"][0] * scale / 2.0
-
-    n = len(calibration)
-    expected = sorted(calibration)[int(np.ceil((n + 1) * 0.80)) - 1]
-    assert expected == 0.1
-    assert implied_quantile == expected
-
-    # The two wrong branches this replaced would both be visible here.
-    assert implied_quantile != 5.0
-    assert implied_quantile != float(np.quantile(np.array(calibration), 33 / n))
-
-    # Every test residual is 1.0, above the 0.1 quantile, so nothing is covered.
-    assert result["empirical_coverage"].to_list() == [0.0]
+    assert result.height == 1
+    assert result.row(0, named=True) == {"family": "gbm", "config_name": "only", **expected[0]}
 
 
-def test_conformal_reports_an_unbounded_interval_when_the_level_is_unattainable(
-    tmp_path, monkeypatch
-):
-    """A level the calibration set cannot certify must not be clamped.
+def test_the_embargo_defaults_to_the_reviewed_horizon_for_the_label(tmp_path, monkeypatch):
+    """A caller that names no embargo gets the label's own horizon, not zero.
 
-    With 40 calibration residuals the 99% rank is ceil(41*0.99) = 41, which no
-    residual attains: the conformal interval is unbounded. Reporting the largest
-    residual instead would under-cover while still claiming 99%.
+    The reviewed table is the one `compute_conformal_widths` reads, so a coverage figure and
+    the widths it describes cannot drift apart over which horizon they embargoed.
     """
     db_path, pred_dir = _single_config_registry(tmp_path)
-    calibration = [0.1] * 33 + [5.0] * 7
-    _write_predictions(pred_dir, calibration, [1.0] * 40)
-
+    _write_panel(pred_dir, {"CALM": [0.1] * 80, "WILD": [10.0] * 80})
     monkeypatch.setattr(notebook_render, "registry_path", lambda _cs: db_path)
-    result = notebook_render.conformal_coverage_diagnostic(
-        "test", label="fwd_ret_5d", levels=(0.99,)
+
+    reviewed = holdout_conformal_embargo_steps("etfs", "fwd_ret_5d")
+    assert reviewed == 5
+    defaulted = notebook_render.conformal_coverage_diagnostic(
+        "etfs", label="fwd_ret_5d", levels=(0.80,)
     )
-
-    assert result["mean_interval_width_frac_std"][0] == float("inf")
-    assert result["empirical_coverage"][0] == 1.0
-
-    # The largest residual would have been the clamped answer, and is not used.
-    scale = pl.Series(calibration).std()
-    assert result["mean_interval_width_frac_std"][0] != 2.0 * max(calibration) / scale
-
-
-def test_conformal_width_is_scaled_by_the_calibration_window_alone(tmp_path, monkeypatch):
-    """The reported width must not be normalized by evaluation-fold outcomes.
-
-    The calibration fold and the evaluation fold are given deliberately
-    different return scales, so normalizing over the whole panel produces a
-    different number than normalizing over the calibration window.
-    """
-    db_path, pred_dir = _single_config_registry(tmp_path)
-    calibration = [0.1] * 33 + [5.0] * 7
-    test_residuals = [40.0, -40.0] * 20  # far wider spread than the calibration fold
-    _write_predictions(pred_dir, calibration, test_residuals)
-
-    monkeypatch.setattr(notebook_render, "registry_path", lambda _cs: db_path)
-    result = notebook_render.conformal_coverage_diagnostic(
-        "test", label="fwd_ret_5d", levels=(0.80,)
+    explicit = notebook_render.conformal_coverage_diagnostic(
+        "etfs", label="fwd_ret_5d", levels=(0.80,), embargo_steps=reviewed
     )
-
-    calibration_scale = pl.Series(calibration).std()
-    whole_panel_scale = pl.Series(calibration + test_residuals).std()
-    width = result["mean_interval_width_frac_std"][0]
-    q_hat = sorted(calibration)[int(np.ceil((len(calibration) + 1) * 0.80)) - 1]
-
-    assert width == 2.0 * q_hat / calibration_scale
-    assert width != 2.0 * q_hat / whole_panel_scale
+    assert defaulted.equals(explicit)
+    assert not defaulted.equals(
+        notebook_render.conformal_coverage_diagnostic(
+            "etfs", label="fwd_ret_5d", levels=(0.80,), embargo_steps=1
+        )
+    )
 
 
 def _empty_registry(tmp_path):
@@ -233,7 +207,14 @@ EMPTY_FRAME_READERS = [
     (
         "conformal_coverage_diagnostic",
         {"label": "fwd_ret_21d"},
-        ("family", "config_name", "nominal_level", "empirical_coverage", "n_test"),
+        (
+            "family",
+            "config_name",
+            "nominal_level",
+            "empirical_coverage",
+            "n_test",
+            "n_uncalibrated",
+        ),
     ),
 ]
 

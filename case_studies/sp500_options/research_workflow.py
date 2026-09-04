@@ -153,6 +153,11 @@ def model_request_catalog(
 ) -> pl.DataFrame:
     """Return the declared model population as visible Polars rows."""
     selected = set(config_names) if config_names is not None else None
+    if selected is not None and not selected:
+        # An empty selection is the caller's, so say so. Falling through left every row filtered
+        # out and the function reported "no declared requests for <family>", blaming the family's
+        # menu for a list the caller passed empty.
+        raise ValueError("config_names is empty; omit it to request every declared configuration")
     rows = []
     for label in labels:
         for config in load_configs(CASE_STUDY, label, family):
@@ -172,7 +177,18 @@ def resolve_model_requests(
     overrides: dict[str, Any] | None = None,
     preview_reductions: dict[str, Any] | None = None,
 ) -> tuple[ResolvedModelRequest, ...]:
-    """Resolve visible catalog rows through the shared family boundary."""
+    """Resolve visible catalog rows through the shared family boundary.
+
+    Its three callers - `09_deep_learning`, `09a_lstm`, `09b_patchtst` - are all family
+    `deep_learning`, and `case_studies/utils/deep_learning.py` defines neither
+    `run_model_requests` nor `plan_model_requests`. So `run_models` and `plan_models` both fall
+    through to the same per-request `resolve()` this does, and there is no batch runner for a
+    caller here to reach or to miss. Handing the results to `run_resolved_model_requests` is not
+    the batch bypass it looks like from the shape of the call.
+
+    The three notebooks that do reach a batch runner - `06_linear`, `07_gbm`, `08_tabular_dl` -
+    resolve inline and call the shared `run_model_population` rather than going through here.
+    """
     required = {"family", "label", "config_name"}
     missing = required - set(request_catalog.columns)
     if missing:
