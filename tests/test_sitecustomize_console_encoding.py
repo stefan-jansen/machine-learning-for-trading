@@ -44,8 +44,16 @@ def _run(code: str, encoding: str) -> subprocess.CompletedProcess:
     # under repair. The environment is inherited rather than replaced because Windows needs
     # `SystemRoot` to start an interpreter at all.
     env = {**os.environ, "PYTHONIOENCODING": encoding}
+    # Decode explicitly. `text=True` alone decodes with the *parent's* locale encoding,
+    # which on Windows is the same cp1252 this test is about, so the arrow the second
+    # subprocess deliberately writes as UTF-8 would come back as mojibake and the
+    # assertion would fail on the platform being fixed.
     return subprocess.run(
-        [sys.executable, "-S", "-c", code], capture_output=True, text=True, env=env, check=False
+        [sys.executable, "-S", "-c", code],
+        capture_output=True,
+        encoding="utf-8",
+        env=env,
+        check=False,
     )
 
 
