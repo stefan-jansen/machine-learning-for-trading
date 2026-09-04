@@ -98,3 +98,21 @@ def test_code_drift_still_wins_its_own_category(tmp_path):
     drift = sn.classify(py, ipynb)
     assert drift.code_diff is True
     assert drift.category == "code_drift_no_outputs"
+
+
+def test_leading_indentation_is_not_trimmed_away(tmp_path):
+    """Four leading spaces make a markdown code block. Trimming them would let the pair
+    diverge between prose and a rendered code block with nothing reported."""
+    py, ipynb = _pair(tmp_path, "    uv run pytest", "uv run pytest")
+    assert sn.classify(py, ipynb) is not None
+
+
+def test_a_markdown_hard_break_is_not_trimmed_away(tmp_path):
+    """Two trailing spaces are a hard line break; without them the lines run together."""
+    py, ipynb = _pair(tmp_path, "first  \nsecond", "first\nsecond")
+    assert sn.classify(py, ipynb) is not None
+
+
+def test_only_the_terminating_newline_is_normalized(tmp_path):
+    py, ipynb = _pair(tmp_path, PROSE + "\n", PROSE)
+    assert sn.classify(py, ipynb) is None

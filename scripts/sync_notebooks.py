@@ -135,8 +135,14 @@ def py_markdown_cells(py: Path) -> list[str]:
 
 
 def _normalized(cells: list[str]) -> list[str]:
-    """Trim each cell and drop the empty ones, so trailing-newline differences are not drift."""
-    return [c.strip() for c in cells if c.strip()]
+    """Drop only the cell-terminating newline, and skip cells that are empty after that.
+
+    Not `strip()`: leading indentation makes a code block, and two trailing spaces make a
+    markdown hard break, so trimming either hides a change that alters what the reader
+    sees. Jupytext's `# ` prefix and the `.ipynb`'s source list disagree about the final
+    newline and about nothing else, so that is all this removes.
+    """
+    return [t for c in cells if (t := c.rstrip("\r\n"))]
 
 
 def prose_drift(py: Path, ipynb: Path) -> bool:
