@@ -63,7 +63,11 @@ _TABM_IMBALANCE_METHODS = {"balanced", "none"}
 # nine declare none, so these are the values every existing TabM identity was fitted under.
 DEFAULT_TABM_DEVICE = "cuda"
 DEFAULT_TABM_NUM_THREADS = 8
-TABM_RUNNER_VERSION = 1
+# 2: an uncovered training row is dropped rather than fitted as the feature mean. TabM's source
+# identity carries only tabm_runner and tabm_state - not FOLD_PREPARATION_VERSION, which is what
+# moves this for linear and gbm - so without this bump a version-1 result would be reused for a
+# computation that now fits different rows.
+TABM_RUNNER_VERSION = 2
 TABM_STATE_VERSION = 1
 
 
@@ -2364,6 +2368,10 @@ def _prepare_tabm_fold(
             temporal_keys,
             temporal_feature_names,
             split["fold"],
+            drop_uncovered=True,
+            date_col=date_col,
+            entity_col=entity_col,
+            what=f"fold {split['fold']} train",
         )
         val_df = replace_temporal_columns(
             dataset_pd,

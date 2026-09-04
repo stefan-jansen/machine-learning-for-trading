@@ -738,6 +738,10 @@ def prepare_gbm_folds(
                 temporal_keys,
                 temporal_feature_names,
                 fold_id,
+                drop_uncovered=True,
+                date_col=date_col,
+                entity_col=entity_col,
+                what=f"fold {fold_id} train",
             )
             val_rows = replace_temporal_columns(
                 dataset_pd,

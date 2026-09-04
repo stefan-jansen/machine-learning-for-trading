@@ -271,7 +271,7 @@ class TestTheDeclaredVersion:
     so it moves with the same bump and has to be re-pinned in that commit as well.
     """
 
-    GOLDEN_VERSION = 1
+    GOLDEN_VERSION = 2
 
     def test_the_declared_version_matches_what_this_file_pins(self) -> None:
         assert FOLD_PREPARATION_VERSION == self.GOLDEN_VERSION, (

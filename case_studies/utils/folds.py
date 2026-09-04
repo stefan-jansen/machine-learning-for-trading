@@ -65,7 +65,11 @@ __all__ = [
 ]
 
 # Declared behaviour of the preparation below. See the module docstring.
-FOLD_PREPARATION_VERSION = 1
+# 2: an uncovered training row is dropped instead of being fitted as the feature mean.
+# This changes which rows a fold contains, so it changes a fitted result, which is exactly
+# what this constant declares. It enters the training identity, so registered v1 results keep
+# reproducing under v1 rather than being silently reinterpreted.
+FOLD_PREPARATION_VERSION = 2
 
 # Declared behaviour of :func:`standardized_fold`. Families that standardise record this string.
 PREPROCESSING_ID = "median-imputer-standard-scaler/v1"
@@ -473,7 +477,7 @@ def split_frames(mds: Any, split: dict[str, Any]) -> tuple[pl.DataFrame, pl.Data
         mds.temporal_by_fold is not None and mds.temporal_keys and mds.temporal_feature_names
     )
     if has_temporal:
-        from utils.modeling import fold_temporal_frame
+        from utils.modeling import drop_uncovered_temporal_pl, fold_temporal_frame
 
         fold_temporal = fold_temporal_frame(
             mds.temporal_by_fold,
@@ -481,9 +485,42 @@ def split_frames(mds: Any, split: dict[str, Any]) -> tuple[pl.DataFrame, pl.Data
             temporal_keys=mds.temporal_keys,
             schema=train_df.schema,
         )
-        train_df = train_df.drop(mds.temporal_feature_names).join(
-            fold_temporal, on=list(mds.temporal_keys), how="left"
+        # The artifact carries one fold geometry, so a label whose window is wider than the
+        # one that wrote it has rows the artifact never covered. A LEFT join keeps those rows
+        # with every temporal feature null, and nothing downstream removes them:
+        # `label_present` below filters null LABELS, not null features, and the sequence path
+        # calls `np.nan_to_num(..., nan=0.0)` (`sequence_dataset.py:217`), which after
+        # per-feature normalization presents them to the model as the feature's MEAN. So an
+        # uncovered row is not fitted as missing, it is fitted as an average observation, and
+        # no error, warning or metric ever showed it.
+        #
+        # `validate_temporal_alignment` already declines to score a leading warm-up prefix -
+        # it drops it from the coverage denominator (`utils/modeling.py:1483-1490`) - but
+        # nothing dropped it from the fit. A window the guard explicitly refuses to measure
+        # must not be handed to the estimator. Measured on etfs: 5,244 of 1,893,267 training
+        # rows across 8 folds, in all 64 registered `fwd_ret_5d` fits.
+        #
+        # The excuse itself stays. It is load-bearing where the gap is a real estimator
+        # warm-up affecting every label equally - fx_pairs 8 of 9 folds, crypto 2 of 3 - and
+        # failing on any leading gap would break those on a condition that is correct there.
+        train_df = drop_uncovered_temporal_pl(
+            train_df.drop(mds.temporal_feature_names).join(
+                fold_temporal, on=list(mds.temporal_keys), how="left"
+            ),
+            fold_temporal,
+            keys=list(mds.temporal_keys),
+            entity_col=mds.entity_cols[0] if mds.entity_cols else None,
+            date_col=date_col,
+            what=f"fold {fold_id} train",
         )
+        # Validation is deliberately NOT trimmed. A prediction set must cover every session its
+        # declared folds contain (`reference/CASE_STUDY_PIPELINE.md` section 3): a partial
+        # sequence is not a weaker result, it is an uninterpretable one, and the expected-key
+        # builders enforce exactly that (`gbm.py:1668` builds them from the dataset, not from
+        # the covered rows). So an uncovered validation row is a stop, not something to drop
+        # quietly - `validate_temporal_alignment` raises on it, and it grants validation no
+        # warm-up excuse. Trimming here would convert that stop into a short prediction set the
+        # registry would then reject further downstream, naming the wrong cause.
         val_df = val_df.drop(mds.temporal_feature_names).join(
             fold_temporal, on=list(mds.temporal_keys), how="left"
         )

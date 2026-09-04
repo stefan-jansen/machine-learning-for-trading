@@ -83,7 +83,11 @@ _SEQUENCE_PREVIEW_FIELDS = {
 }
 
 SEQUENCE_RUNNER_VERSION = 1
-SEQUENCE_PREPARATION_VERSION = 1
+# 2: an uncovered training row is dropped instead of being fitted as the feature mean
+# (utils/modeling.py::replace_temporal_columns, drop_uncovered). This changes which rows a
+# sequence fold contains and therefore what was fitted, so registered v1 deep-learning runs keep
+# their own identity rather than being reused for a v2 request.
+SEQUENCE_PREPARATION_VERSION = 2
 SEQUENCE_STATE_VERSION = 1
 SEQUENCE_BACKEND_VERSIONS = {"darts": 1, "pytorch": 1}
 SEQUENCE_ARCHITECTURE_VERSIONS = {
@@ -1138,6 +1142,11 @@ def _reconstruct_darts_predictions(
                 context.temporal_by_fold,
                 list(context.temporal_keys),
                 list(context.temporal_feature_names),
+                # Per symbol, not globally. Artifact coverage is ragged ACROSS symbols -
+                # etfs' fold 0 has six distinct first-dates over its 100 - so a global
+                # contiguity check reads one symbol's legitimate leading trim as an interior
+                # hole in another's series and refuses a fold that is fine.
+                context.entity_col,
             )
             if has_temporal
             else dataset
@@ -1847,6 +1856,11 @@ def sequence_identity_params(
 
     params = dict(identity_params or {})
     params["device"] = torch.device(str(device).lower().replace("gpu", "cuda")).type
+    # Every sequence fit goes through the shared preparation, so its declared version belongs
+    # here and not only in `_sequence_source_identity`. A notebook that registers through this
+    # function directly - `us_equities_panel/12_dl_weekly.py` does - would otherwise keep its
+    # version-1 identity for a fit whose training rows have changed.
+    params["sequence_preparation"] = SEQUENCE_PREPARATION_VERSION
     if input_data_spec is not None:
         if uses_darts_backend([config]):
             if case_study is None:

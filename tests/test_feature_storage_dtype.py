@@ -267,8 +267,13 @@ class TestTheFoldAddressIsPreservedForTheSameReason:
         "seed": 42,
     }
 
-    PRE_PRECISION_KEY = "92376ca3e260204a"
-    """What ``fold_cache_key`` at 719c9c14 returns for ``KEY``.
+    PRE_PRECISION_KEY = "4b3ea348c37b3a00"
+    """What ``fold_cache_key`` returns for ``KEY`` at ``FOLD_PREPARATION_VERSION`` 2.
+
+    Was ``92376ca3e260204a`` under version 1. The bump to 2 - an uncovered training row is
+    dropped rather than fitted as the feature mean - moved it, which is the point: a fold cache
+    written under version 1 holds the unfiltered arrays and must not be served to a version 2
+    run.
 
     ``FOLD_PREPARATION_VERSION`` is in this payload, so a deliberate bump moves this value too.
     ``tests/test_folds.py`` names ``GOLDEN_VERSION`` and ``PINNED_PREPARATION_DIGEST`` as the

@@ -27,6 +27,11 @@ def test_darts_fold_temporal_overlay_uses_requested_fold_values():
         {
             "fold": 1,
             "train_start": timestamps[0],
+            # `train_end` is part of the declared fold geometry (`_TEMPORAL_FOLD_FIELDS`) and
+            # `_prepare_fold_series` already requires it. The overlay reads it too now, to bound
+            # its uncovered-row trim to the training half. Both rows here are covered, so the
+            # trim is a no-op and the values below are what they always were.
+            "train_end": timestamps[1],
             "val_end": timestamps[1],
         },
         "timestamp",

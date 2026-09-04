@@ -1629,10 +1629,32 @@ def replace_temporal_columns(
     temporal_keys: list[str],
     temporal_feature_names: list[str],
     fold_id: int,
+    *,
+    drop_uncovered: bool = False,
+    drop_uncovered_through: Any = None,
+    date_col: str | None = None,
+    entity_col: str | None = None,
+    what: str = "this window",
 ) -> pd.DataFrame:
     """Replace temporal feature columns in a dataset slice with fold-specific values.
 
     Returns a copy of the masked rows with temporal columns overwritten.
+
+    ``drop_uncovered`` removes rows the fold artifact has no key for. It defaults to False
+    because this function serves both training and validation windows and only the training one
+    may be trimmed: a prediction set has to cover every session its declared folds contain, so an
+    uncovered validation row is a stop rather than something to drop. Every TRAINING caller
+    passes True; the validation callers must not.
+
+    Without it the merge is a LEFT join that keeps uncovered rows with null temporal features,
+    which nothing downstream removes - and ``np.nan_to_num(..., nan=0.0)`` in the sequence path
+    then presents them to the model as the feature's mean.
+
+    ``drop_uncovered_through`` bounds the trim to rows at or before a date, for the one caller
+    that cannot hand training and validation over separately: the Darts backend overlays one
+    frame spanning ``train_start..val_end`` and splits it on ``train_end`` afterwards. Passing
+    that boundary trims its training half and leaves its validation half whole, which is the
+    same rule the other callers get by passing two masks.
     """
     rows = dataset_pd.loc[mask].copy()
     fold_temp = fold_temporal_frame(
@@ -1641,8 +1663,157 @@ def replace_temporal_columns(
 
     # Drop old temporal columns and merge fold-specific ones
     rows = rows.drop(columns=temporal_feature_names, errors="ignore")
-    rows = rows.merge(fold_temp, on=temporal_keys, how="left")
-    return rows
+    rows = rows.merge(fold_temp, on=temporal_keys, how="left", indicator=drop_uncovered)
+    if not drop_uncovered:
+        return rows
+    return _drop_uncovered_rows(
+        rows,
+        date_col=date_col,
+        entity_col=entity_col,
+        what=what,
+        only_through=drop_uncovered_through,
+    )
+
+
+def _refuse_an_unexcused_trim(dropped: int, total: int, what: str) -> None:
+    """Trim only what the coverage guard is willing to excuse.
+
+    ``validate_temporal_alignment`` excuses a leading gap up to ``MAX_TEMPORAL_WARMUP_FRACTION``
+    of the window and scores the rest; anything larger it refuses to excuse and reports as a
+    coverage failure. This drop exists to remove exactly what that guard declines to score, so it
+    has to stop at the same boundary. Without this bound the drop is strictly more permissive
+    than the guard it serves: an artifact fold starting years into a window would have its whole
+    uncovered head removed in silence, which is the "training set reshaped rather than shortened"
+    failure the interior-hole check already refuses - just arriving from the end instead of the
+    middle. ``us_equities_panel/12_dl_weekly.py`` is the live shape, supplying a fold whose window
+    opens around five years before its artifact fold does.
+    """
+    if total <= 0:
+        return
+    fraction = dropped / total
+    if fraction <= MAX_TEMPORAL_WARMUP_FRACTION:
+        return
+    raise ValueError(
+        f"{what}: the temporal artifact does not cover {dropped} of {total} rows "
+        f"({fraction:.1%}), past the {MAX_TEMPORAL_WARMUP_FRACTION:.0%} the coverage guard will "
+        "excuse as a warm-up. A gap this size is a fold geometry that does not describe this "
+        "label rather than an estimator warming up, and dropping it would shorten the training "
+        "window by that much in silence. Regenerate the artifact for this label's geometry."
+    )
+
+
+def drop_uncovered_temporal_pl(
+    joined: pl.DataFrame,
+    fold_temporal: pl.DataFrame,
+    *,
+    keys: list[str],
+    entity_col: str | None,
+    date_col: str,
+    what: str,
+) -> pl.DataFrame:
+    """Remove rows the fold's temporal artifact does not cover, and refuse an interior hole.
+
+    Membership is decided by a semi-join on the artifact's own keys rather than by testing the
+    feature columns for null, because a feature may be legitimately null and that would delete a
+    covered row.
+
+    The contiguity check is the property the sequence builder actually depends on, and it is
+    not "no rows were dropped". `sequence_dataset.py:222-228` indexes windows by expected period
+    number, not by row position, so a removed row leaves a non-unit step and every window
+    spanning it is discarded rather than silently rebuilt across the hole. For a leading or
+    trailing trim that is exactly right - those windows would have been built on uncovered rows.
+    For an INTERIOR hole it is not: dropping k rows there costs k + lookback windows for that
+    entity, which is a structural change to the training set rather than a trim. Measured on
+    etfs, artifact coverage is contiguous within every (fold, symbol) that trains a model, so
+    this raises on a state no case study is in today and exists to keep it that way.
+    """
+    covered = fold_temporal.select(keys).unique()
+    kept = joined.join(covered, on=keys, how="semi")
+    if kept.height == joined.height:
+        return kept
+    if kept.is_empty():
+        raise ValueError(
+            f"{what}: the temporal artifact covers none of the window's rows, so there is "
+            "nothing to fit. The artifact's fold geometry does not describe this label."
+        )
+    _refuse_an_unexcused_trim(joined.height - kept.height, joined.height, what)
+    group = [entity_col] if entity_col else []
+    key_cols = [*group, date_col]
+    dropped = joined.select(key_cols).join(kept.select(key_cols), on=key_cols, how="anti")
+    if group:
+        bounds = kept.group_by(group).agg(
+            pl.col(date_col).min().alias("_lo"), pl.col(date_col).max().alias("_hi")
+        )
+        interior = dropped.join(bounds, on=group, how="inner")
+    else:
+        bounds = kept.select(
+            pl.col(date_col).min().alias("_lo"), pl.col(date_col).max().alias("_hi")
+        )
+        interior = dropped.join(bounds, how="cross")
+    interior = interior.filter(
+        (pl.col(date_col) > pl.col("_lo")) & (pl.col(date_col) < pl.col("_hi"))
+    )
+    if not interior.is_empty():
+        sample = interior.head(3).select(key_cols).rows()
+        raise ValueError(
+            f"{what}: the temporal artifact leaves {interior.height} interior gaps once "
+            f"uncovered rows are removed (e.g. {sample}). A leading or trailing trim only "
+            "costs the windows that span it, but an interior hole also costs the lookback "
+            "windows on either side, so the sequence families would be fitted on a different "
+            "training set rather than a shorter one. Regenerate the artifact for this label's "
+            "fold geometry rather than fitting across the hole."
+        )
+    return kept
+
+
+def _drop_uncovered_rows(
+    rows: pd.DataFrame,
+    *,
+    date_col: str | None,
+    entity_col: str | None,
+    what: str,
+    only_through: Any = None,
+) -> pd.DataFrame:
+    """Remove rows the fold artifact has no key for, and refuse an interior hole.
+
+    Membership comes from the merge indicator, not from testing the temporal columns for null.
+    A covered row may legitimately carry all-null features - temporal fitting can skip an
+    entity - and deleting it would be a second defect wearing the first one's clothes.
+    """
+    covered = rows["_merge"].to_numpy() == "both"
+    rows = rows.drop(columns="_merge")
+    if only_through is not None and date_col is not None and date_col in rows.columns:
+        # Rows past the boundary are validation and are never trimmed, whatever their coverage.
+        covered = covered | (rows[date_col].to_numpy() > pd.Timestamp(only_through).to_datetime64())
+    if covered.all():
+        return rows
+    kept = rows.loc[covered]
+    if kept.empty:
+        raise ValueError(
+            f"{what}: the temporal artifact covers none of the window's rows, so there is "
+            "nothing to fit. The artifact's fold geometry does not describe this label."
+        )
+    _refuse_an_unexcused_trim(int((~covered).sum()), len(rows), what)
+    if date_col is None or date_col not in rows.columns:
+        return kept
+    dropped = rows.loc[~covered]
+    if entity_col and entity_col in rows.columns:
+        lo = kept.groupby(entity_col)[date_col].min()
+        hi = kept.groupby(entity_col)[date_col].max()
+        ent = dropped[entity_col]
+        bounds_lo, bounds_hi = ent.map(lo), ent.map(hi)
+    else:
+        bounds_lo, bounds_hi = kept[date_col].min(), kept[date_col].max()
+    interior = dropped[(dropped[date_col] > bounds_lo) & (dropped[date_col] < bounds_hi)]
+    if not interior.empty:
+        raise ValueError(
+            f"{what}: the temporal artifact leaves {len(interior)} interior gaps once uncovered "
+            "rows are removed. A leading or trailing trim only costs the sequence windows that "
+            "span it, but an interior hole also costs the lookback windows on either side, so "
+            "the training set is reshaped rather than shortened. Regenerate the artifact for "
+            "this label's fold geometry."
+        )
+    return kept
 
 
 def prepare_cv_folds(
@@ -1721,6 +1892,10 @@ def prepare_cv_folds(
                 temporal_keys,
                 temporal_feature_names,
                 fold_id,
+                drop_uncovered=True,
+                date_col=date_col,
+                entity_col=entity_col,
+                what=f"fold {fold_id} train",
             )
             val_rows = replace_temporal_columns(
                 dataset_pd,
@@ -1889,7 +2064,19 @@ def prepare_single_fold(
                 df = df.drop(temporal_feature_names)
                 df = df.join(fold_temp_pl, on=temporal_keys, how="left")
                 if df_name == "train_df":
-                    train_df = df
+                    # Training only, for the reason `replace_temporal_columns` documents: a
+                    # prediction set has to cover its declared sessions, so an uncovered
+                    # validation row is a stop rather than something to drop. This branch is
+                    # what linear holdout preparation runs through, so leaving it out would
+                    # have kept the defect in exactly the fits the holdout is read on.
+                    train_df = drop_uncovered_temporal_pl(
+                        df,
+                        fold_temp_pl,
+                        keys=list(temporal_keys),
+                        entity_col=entity_col,
+                        date_col=date_col,
+                        what=f"fold {fold_id} train",
+                    )
                 else:
                     val_df = df
 
@@ -1927,6 +2114,10 @@ def prepare_single_fold(
                 temporal_keys,
                 temporal_feature_names,
                 fold_id,
+                drop_uncovered=True,
+                date_col=date_col,
+                entity_col=entity_col,
+                what=f"fold {fold_id} train",
             )
             val_rows = replace_temporal_columns(
                 dataset,

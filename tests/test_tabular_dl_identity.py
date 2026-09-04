@@ -23,7 +23,9 @@ from case_studies.utils.tabular_dl import (
 )
 from utils.modeling import seed_everything
 
-PINNED_RUNNER_VERSION = 1
+# 2 since TabM training drops rows the temporal artifact does not cover; its source identity
+# carries no fold_preparation, so this is the constant that separates the two computations.
+PINNED_RUNNER_VERSION = 2
 PINNED_TABM_STATE_VERSION = 1
 
 # The architecture, as the exact integers a build cannot change: every parameter tensor

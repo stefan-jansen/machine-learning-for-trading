@@ -764,6 +764,7 @@ def darts_validation_keys(
                 temporal_by_fold,
                 temporal_keys,
                 temporal_feature_names,
+                entity_col,
             )
             if has_fold_temporal
             else dataset_pd
@@ -908,6 +909,7 @@ def _overlay_fold_temporal_features(
     temporal_by_fold,
     temporal_keys: list[str] | None,
     temporal_feature_names: list[str] | None,
+    entity_col: str | None = None,
 ) -> pd.DataFrame:
     """Return the requested fold with its training-fitted temporal features."""
     if temporal_by_fold is None or not temporal_keys or not temporal_feature_names:
@@ -917,6 +919,11 @@ def _overlay_fold_temporal_features(
     fold_mask = (dataset_pd[date_col] >= split["train_start"]) & (
         dataset_pd[date_col] <= split["val_end"]
     )
+    # One frame spans train_start..val_end here and `_prepare_fold_series` splits it on
+    # `train_end` afterwards, so the training half cannot be handed over on its own. The trim is
+    # bounded to that boundary instead: uncovered training rows go, uncovered validation rows
+    # stay and raise through the coverage guard, which is the rule every other caller gets by
+    # passing two masks.
     return replace_temporal_columns(
         dataset_pd,
         fold_mask,
@@ -924,6 +931,11 @@ def _overlay_fold_temporal_features(
         temporal_keys,
         temporal_feature_names,
         split["fold"],
+        drop_uncovered=True,
+        drop_uncovered_through=split["train_end"],
+        date_col=date_col,
+        entity_col=entity_col,
+        what=f"fold {split['fold']} train",
     )
 
 
@@ -1130,6 +1142,7 @@ def run_darts_cv(
                     temporal_by_fold,
                     temporal_keys,
                     temporal_feature_names,
+                    entity_col,
                 )
                 if has_fold_temporal
                 else config_dataset

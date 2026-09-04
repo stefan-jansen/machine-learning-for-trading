@@ -573,6 +573,15 @@ def prepare_fold_sequence_stores(
     ):
         from utils.modeling import replace_temporal_columns
 
+        # The sequence families do not go through `split_frames`, so the drop it performs has
+        # to be repeated here or LSTM/PatchTST/TCN keep fitting rows the artifact never
+        # covered. They are the families where it costs most: `np.nan_to_num(..., nan=0.0)`
+        # below turns an uncovered row into the feature's mean, and a window built across one
+        # is a window of part-real, part-invented history.
+        #
+        # Only the training frame. The validation frames below are left whole for the reason
+        # `folds.py` states: a prediction set has to cover its declared sessions, so an
+        # uncovered validation row is a stop rather than something to drop.
         train_df = replace_temporal_columns(
             dataset_pd,
             train_mask,
@@ -580,6 +589,10 @@ def prepare_fold_sequence_stores(
             temporal_keys,
             temporal_feature_names,
             fold_id,
+            drop_uncovered=True,
+            date_col=date_col,
+            entity_col=entity_col,
+            what=f"fold {fold_id} train",
         )[use_cols].copy()
 
         if val_start_ts is not None:

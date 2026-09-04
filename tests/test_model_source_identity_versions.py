@@ -15,9 +15,13 @@ from case_studies.utils.latent_factors import adapter as latent_adapter
 from case_studies.utils.registry import training_hash_from_spec
 
 PINNED_SEQUENCE_RUNNER = 1
-PINNED_SEQUENCE_PREPARATION = 1
+# 2 since an uncovered training row is dropped rather than fitted as the feature mean; the
+# sequence fold contents changed, so the identity has to.
+PINNED_SEQUENCE_PREPARATION = 2
 PINNED_SEQUENCE_STATE = 1
-PINNED_TABM_RUNNER = 1
+# 2 since TabM training drops uncovered rows; its identity carries no fold_preparation, so this
+# constant is what distinguishes the two computations.
+PINNED_TABM_RUNNER = 2
 PINNED_TABM_STATE = 1
 PINNED_LATENT_ADAPTER = 1
 PINNED_CAUSAL_RUNNER = 1
@@ -53,7 +57,7 @@ def test_sequence_identity_is_declared_and_architecture_scoped() -> None:
 
     assert nlinear == {
         "sequence_runner": 1,
-        "sequence_preparation": 1,
+        "sequence_preparation": PINNED_SEQUENCE_PREPARATION,
         "sequence_state": 1,
         "backend": "pytorch/v1",
         "architecture": "nlinear/v1",
@@ -73,7 +77,7 @@ def test_tabm_identity_is_declared() -> None:
     assert tabular_dl.TABM_RUNNER_VERSION == PINNED_TABM_RUNNER
     assert tabular_dl.TABM_STATE_VERSION == PINNED_TABM_STATE
     assert tabular_dl._tabm_source_identity() == {
-        "tabm_runner": 1,
+        "tabm_runner": PINNED_TABM_RUNNER,
         "tabm_state": 1,
     }
 
