@@ -1,0 +1,17 @@
+# Data (pulled from MT5 — never commit)
+data/
+*.parquet
+*.csv
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.ipynb_checkpoints/
+
+# Notebook paired outputs
+*.ipynb_checkpoints
+
+# OS / editor
+.DS_Store
+.vscode/
