@@ -695,7 +695,9 @@ def frozen_garch_path(fitted: dict, returns_prefix: np.ndarray) -> np.ndarray:
         float(params[name]) for name in ("omega", "alpha[1]", "gamma[1]", "beta[1]")
     )
     shock = returns_prefix * 100
-    variance = fixed.conditional_volatility.to_numpy() ** 2
+    # `arch` returns whatever container it was handed, so this is an ndarray here and was a
+    # Series when the caller passed one. `np.asarray` covers both.
+    variance = np.asarray(fixed.conditional_volatility) ** 2
     forecast = omega + (alpha + gamma * (shock < 0)) * shock**2 + beta * variance
     return np.column_stack(
         [np.sqrt(forecast) / 100, np.full(len(returns_prefix), float(fitted["gamma"]))]
@@ -763,6 +765,12 @@ def extract_symbol_garch(
             "garch_asymmetry": values[:, 1],
         },
         schema=GARCH_SCHEMA,
+        # `walk_forward_feature` marks the burn-in and any skipped block with NaN, which
+        # polars keeps as a float value rather than a null. Without this the drop below
+        # keeps every burn-in row, `first_valid` reports the start of the series instead
+        # of the end of the burn-in, and the artifact's null counts read as zero on a
+        # column that is unavailable for its first 500 settlements.
+        nan_to_null=True,
     ).drop_nulls(subset=["garch_cond_vol"])
     provenance = {
         "symbol": symbol,
@@ -1022,6 +1030,9 @@ def extract_hmm_walk(agg_pd: pd.DataFrame) -> tuple[pl.DataFrame, list[dict]]:
             "hmm_regime_prob_calm": pl.Float64,
             "hmm_regime_prob_stress": pl.Float64,
         },
+        # Same reason as the volatility frame: the burn-in arrives as NaN, and NaN is a
+        # float in polars, not a null.
+        nan_to_null=True,
     ).drop_nulls()
     return frame, diagnostics
 
@@ -1494,14 +1505,20 @@ print(
 # about levels across time.
 
 # %%
+# A settlement now carries one value rather than one per fold, so a validation row is
+# selected by its timestamp alone. The windows do not overlap - `generate_cv_splits` lays
+# them end to end - so concatenating them cannot duplicate a row, and the assertion below
+# checks that rather than assuming it.
 validation_temporal = pl.concat(
     [
         temporal.filter(
-            (pl.col("fold") == fold["fold"])
-            & pl.col("timestamp").is_between(fold["test_start"], fold["test_end"], closed="both")
+            pl.col("timestamp").is_between(fold["test_start"], fold["test_end"], closed="both")
         )
         for fold in VALIDATION_FOLDS
     ]
+)
+assert validation_temporal.select("timestamp", "symbol").is_duplicated().sum() == 0, (
+    "two validation windows claim the same settlement, so a row would be scored twice"
 )
 eval_df = validation_temporal.join(training_frame, on=["timestamp", "symbol"], how="inner").sort(
     ["timestamp", "symbol"]
