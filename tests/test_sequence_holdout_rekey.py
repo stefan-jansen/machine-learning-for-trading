@@ -214,3 +214,49 @@ def test_the_tabm_hook_takes_its_keys_from_tabm_expected_keys(
         "n_rows": 1,
         "n_folds": 1,
     }
+
+
+def test_the_tabm_hook_rekeys_class_weights_from_the_function_that_wrote_them(
+    study: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A classification spec carries a second fold-keyed field, and it has to move too.
+
+    `validate_locked_holdout_keying` refuses a spec whose
+    `task.imbalance.effective_class_weights_by_fold` is still keyed to the validation folds, so
+    a hook that re-keys only `expected_prediction_keys` produces a spec that registers and then
+    fails at reconstruction. The weights come from `_tabm_class_weights_by_fold` - the function
+    that wrote the validation ones - rather than from a second statement of the same rule, which
+    is what this replaces it to prove.
+    """
+    from case_studies.utils import tabular_dl
+
+    monkeypatch.setattr(tabular_dl, "_tabm_expected_keys", lambda *a, **k: _marker_frame())
+    monkeypatch.setattr(tabular_dl, "_tabm_class_weights_by_fold", lambda *a, **k: {2: (0.25, 4.0)})
+
+    spec = _tabm_spec()
+    spec["computation"]["task"] = {
+        "type": "classification",
+        "imbalance": {
+            "method": "balanced",
+            "effective_class_weights_by_fold": {"0": [1.0, 1.0], "1": [2.0, 0.5]},
+        },
+    }
+    tabular_dl.rekey_holdout_spec(study, spec, validation_spec={"computation": {"cv": {}}})
+
+    assert spec["computation"]["task"]["imbalance"]["effective_class_weights_by_fold"] == {
+        "2": [0.25, 4.0]
+    }
+
+
+def test_a_regression_spec_keeps_no_class_weights_to_rekey(
+    study: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The common case must not acquire a field the family never wrote."""
+    from case_studies.utils import tabular_dl
+
+    monkeypatch.setattr(tabular_dl, "_tabm_expected_keys", lambda *a, **k: _marker_frame())
+
+    spec = _tabm_spec()
+    tabular_dl.rekey_holdout_spec(study, spec, validation_spec={"computation": {"cv": {}}})
+
+    assert "task" not in spec["computation"]

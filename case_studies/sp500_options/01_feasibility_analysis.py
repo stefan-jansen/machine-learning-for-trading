@@ -267,8 +267,13 @@ legs = research.select(
     .alias("spread"),
 )
 
+# `ne_missing` rather than `!=`. A comparison against a null is null in Polars, and `filter`
+# drops a null predicate, so a straddle missing a strike or an expiration would pass a `!=`
+# test by being unrepresentable in its result rather than by being paired. `ne_missing` treats
+# a null on one side as a difference, which is what the assertion is claiming there is none of.
 unpaired = research.filter(
-    (pl.col("put_strike") != pl.col("strike")) | (pl.col("put_expiration") != pl.col("expiration"))
+    pl.col("put_strike").ne_missing(pl.col("strike"))
+    | pl.col("put_expiration").ne_missing(pl.col("expiration"))
 )
 assert len(unpaired) == 0, "a straddle's legs do not share a strike and an expiration"
 assert research["instr_mid"].min() > 0, "a straddle mid is not a usable denominator"

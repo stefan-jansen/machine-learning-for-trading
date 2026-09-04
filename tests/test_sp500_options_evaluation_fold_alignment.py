@@ -154,6 +154,10 @@ def test_real_artifact_alignment_is_safe_after_regeneration() -> None:
         financial.select("timestamp"),
         setup_path=setup_path,
         label_buffer=str(setup["labels"]["buffer"]),
+        # Read from the same config as the buffer, for the same reason. The splitter defaults
+        # this to `sessions`, so leaving it out derives 35 sessions from a 35-calendar-day
+        # declaration and checks the artifact against windows nothing produced.
+        buffer_unit=str(setup["labels"].get("buffer_unit", "sessions")),
     )
 
     validation_folds = {int(split["fold"]) for split in folds}

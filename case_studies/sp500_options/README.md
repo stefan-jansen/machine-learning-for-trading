@@ -52,7 +52,7 @@ The cost-mitigation cascade (O'Donovan & Yu 2024) is encoded in the `strategy.si
 
 ## Key Results
 
-A negative-result case on the HTM primary label `ret_to_expiry`. The cross-stage validation rank-1 is `deep_learning / patchtst` with an HRP overlay on the top-5 cross-section of the cost-feasible liquid universe, rebalanced weekly on Fridays and exited ten days after entry or at expiry. Every number below is read from `run_log/registry.db` by [`18_strategy_analysis`](18_strategy_analysis.ipynb); the carrier is resolved there rather than pinned here, because a name written into prose agrees with the registry only until the next rebuild.
+A negative-result case on the HTM primary label `ret_to_expiry`. The cross-stage validation rank-1 is `deep_learning / patchtst` with an HRP overlay on the top-5 cross-section of the cost-feasible liquid universe. A cohort is entered on the last available session of each ISO week - Friday, or Thursday when Friday is a holiday - and held to expiry, where it is cash-settled: the HTM engine takes no market exit and pays no exit spread, so `decision.exit_time` in `setup.yaml` describes the label's horizon and not an early exit the backtest performs. Every number below is read from `run_log/registry.db` by [`18_strategy_analysis`](18_strategy_analysis.ipynb); the carrier is resolved there rather than pinned here, because a name written into prose agrees with the registry only until the next rebuild.
 
 **Signal direction.** The carrier's daily IC is +0.0128 [-0.0112, +0.0368] over 478 validation dates (HAC lag 34, t=1.047, p=0.296), positive on 55.4% of them. The interval straddles zero, and the prediction and strategy evidence agree that validation does not establish an edge.
 

@@ -475,10 +475,18 @@ def rekey_holdout_spec(
     manifest against the rule that wrote it, so two statements of the rule would agree until
     one changed, and the holdout built on the stale one would register and validate.
 
-    One field is re-keyed. A TabM `model` block is `{class, implementation, objective,
-    params}` with every value declared, so there is no `effective_params_by_fold` for
-    `linear`'s replay-and-verify step to apply to, and `validation_spec` has nothing to
-    verify against - it stays in the signature because the dispatch passes it to every family.
+    A TabM `model` block is `{class, implementation, objective, params}` with every value
+    declared, so there is no `effective_params_by_fold` for `linear`'s replay-and-verify step
+    to apply to, and `validation_spec` has nothing to verify against - it stays in the
+    signature because the dispatch passes it to every family.
+
+    A classification spec carries a second fold-keyed field, though.
+    `computation.task.imbalance.effective_class_weights_by_fold` is written per fold from each
+    fold's own training labels, and `validate_locked_holdout_keying` refuses a spec whose class
+    weights are still keyed to the validation folds. It is recomputed here by
+    `_tabm_class_weights_by_fold`, the function that wrote the validation ones, so the holdout
+    weights come from the holdout fold's training labels under the recorded method rather than
+    from a second implementation of the same rule.
     """
     from case_studies.research.contracts import ExecutionTier
     from case_studies.research.models import locked_holdout_split
@@ -490,10 +498,25 @@ def rekey_holdout_spec(
         raise ValueError("TabM holdout re-keying requires canonical entity and timestamp keys")
     split = locked_holdout_split(spec, mds.dataset, mds.date_col, study.case_study)
     expected = _tabm_expected_keys(mds, [split])
-    spec["computation"]["expected_prediction_keys"] = {
+    computation = spec["computation"]
+    computation["expected_prediction_keys"] = {
         "digest": value_digest(expected, ("symbol", "timestamp", "fold")),
         "n_rows": expected.height,
         "n_folds": expected["fold"].n_unique(),
+    }
+
+    task = computation.get("task")
+    imbalance = task.get("imbalance") if isinstance(task, dict) else None
+    if not isinstance(imbalance, dict) or "effective_class_weights_by_fold" not in imbalance:
+        return
+    weights = _tabm_class_weights_by_fold(mds, [split], method=str(imbalance["method"]))
+    if not weights:
+        raise ValueError(
+            "the spec records per-fold class weights but the dataset is not a classification "
+            "task, so the holdout weights cannot be re-derived by the rule that wrote them"
+        )
+    imbalance["effective_class_weights_by_fold"] = {
+        str(fold): list(values) for fold, values in sorted(weights.items())
     }
 
 

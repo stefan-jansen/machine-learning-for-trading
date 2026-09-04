@@ -1253,7 +1253,23 @@ def _record_prediction_artifact_digests(cs_dir: Path) -> None:
         db.commit()
 
 
-def _seeded_panel_width(setup: dict) -> int:
+def _declared_long_short(cs_id: str) -> bool:
+    """The case study's declared selection mode, or long-only if it cannot be read.
+
+    `get_declared_long_short` goes through `get_backtest_config`, which resolves more of the
+    case study's configuration than a fixture needs. Falling back to long-only on failure keeps
+    the seeder's old behaviour for a case study whose backtest block does not load, rather than
+    failing every fixture in the repo over one of them.
+    """
+    try:
+        from case_studies.utils.sweep_config import get_declared_long_short
+
+        return get_declared_long_short(cs_id)
+    except Exception:
+        return False
+
+
+def _seeded_panel_width(setup: dict, *, long_short: bool) -> int:
     """How many entities a fabricated prediction panel has to carry.
 
     Ten was a speed cap, and it silently decided what CI measures about concentration.
@@ -1265,9 +1281,18 @@ def _seeded_panel_width(setup: dict) -> int:
 
     The width is therefore whatever the widest declared concentration needs in order to be
     a restriction, floored at the old ten so a case study that declares nothing wide is
-    unaffected, and capped by what the case study's own label carries at the call site. One
-    name past the largest k is enough: the arm then selects a strict subset, which is the
-    property the filter is checking for.
+    unaffected, and capped by what the case study's own label carries at the call site.
+
+    What "a restriction" needs is not one number. A long-only arm at ``k`` needs ``k + 1``
+    names: the arm then selects a strict subset, which is the property the filter checks for.
+    A long-short arm takes ``k`` names on each side, so ``get_top_k_values_for`` drops every
+    ``k`` with ``2k > n_assets`` and it needs ``2k + 1``. Sizing every case study as if it were
+    long-only left the widest arms of the seven that declare a cross-sectional short sleeve
+    filtered out exactly as before, which is the defect this function exists to fix.
+
+    The selection mode comes from ``mapping.position_state_space``, read through the same
+    ``get_declared_long_short`` the sweep itself calls - not from ``account.allow_short_selling``,
+    which is an execution permission that ``sp500_options`` holds while selecting long-only.
     """
     sweep = ((setup.get("backtest") or {}).get("sweep")) or {}
     declared: set[int] = set()
@@ -1277,7 +1302,10 @@ def _seeded_panel_width(setup: dict) -> int:
     if cascade_k:
         declared.add(cascade_k)
     numeric = {int(k) for k in declared if isinstance(k, int | float)}
-    return max(10, max(numeric) + 1) if numeric else 10
+    if not numeric:
+        return 10
+    sides = 2 if long_short else 1
+    return max(10, sides * max(numeric) + 1)
 
 
 def _label_files_primary_first(cs_dir: Path, primary_label: str | None) -> list[Path]:
@@ -1437,7 +1465,7 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         setup = yaml.safe_load(setup_path.read_text())
         eval_target_labels = set((setup.get("labels") or {}).get("classification_eval_label") or {})
         primary_label = (setup.get("labels") or {}).get("primary")
-        panel_width = _seeded_panel_width(setup)
+        panel_width = _seeded_panel_width(setup, long_short=_declared_long_short(cs_id))
         universe = setup.get("universe", {})
         assets = universe.get("assets", [])
         if assets:
