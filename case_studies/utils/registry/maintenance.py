@@ -521,6 +521,36 @@ def _referencing_tables(
     return found
 
 
+# References the schema declares in prose but not as a foreign key, so
+# `PRAGMA foreign_key_list` cannot find them. Each is here with the reason it carries no key.
+#
+# `backtest_paired_metrics.benchmark_hash` holds a synthetic benchmark as often as a registered
+# one - the equal-weight universe a strategy is compared against is not a backtest_runs row - so
+# a foreign key would refuse the common case. `challenger_hash` next to it does have one.
+#
+# `holdout_evaluations` and `holdout_staging` are keyed on the research lock, and their three
+# hash columns record what the lock resolved to rather than pointing into those tables.
+#
+# The pragma and this list are complementary and neither replaces the other: the pragma covers a
+# table added later that declares its key, this covers the ones that deliberately do not, and
+# `test_delete_prediction_generation` pins both against `REGISTRY_SCHEMA_SQL` so a new
+# unenforced reference fails rather than being silently missed.
+_UNENFORCED_BACKTEST_REFERENCES = (
+    ("backtest_paired_metrics", "benchmark_hash"),
+    ("holdout_evaluations", "holdout_backtest_hash"),
+    ("holdout_staging", "holdout_backtest_hash"),
+)
+_UNENFORCED_PREDICTION_REFERENCES = (
+    ("holdout_evaluations", "holdout_prediction_hash"),
+    ("holdout_staging", "holdout_prediction_hash"),
+)
+
+
+def _existing(db: sqlite3.Connection, refs: tuple[tuple[str, str], ...]) -> list[tuple[str, str]]:
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    return [(table, column) for table, column in refs if table in tables]
+
+
 def delete_prediction_generation(db_path: Path, prediction_hash: str) -> dict[str, int]:
     """Delete one prediction set, every backtest on it, and every row that references either.
 
@@ -545,13 +575,19 @@ def delete_prediction_generation(db_path: Path, prediction_hash: str) -> dict[st
                 (prediction_hash,),
             )
         ]
-        for table, column in _referencing_tables(db, "backtest_runs", "backtest_hash"):
+        backtest_refs = _referencing_tables(db, "backtest_runs", "backtest_hash") + _existing(
+            db, _UNENFORCED_BACKTEST_REFERENCES
+        )
+        for table, column in backtest_refs:
             for backtest_hash in backtests:
                 cur = db.execute(f"DELETE FROM {table} WHERE {column} = ?", (backtest_hash,))
                 counts[table] = counts.get(table, 0) + cur.rowcount
         cur = db.execute("DELETE FROM backtest_runs WHERE prediction_hash = ?", (prediction_hash,))
         counts["backtest_runs"] = cur.rowcount
-        for table, column in _referencing_tables(db, "prediction_sets", "prediction_hash"):
+        prediction_refs = _referencing_tables(db, "prediction_sets", "prediction_hash") + _existing(
+            db, _UNENFORCED_PREDICTION_REFERENCES
+        )
+        for table, column in prediction_refs:
             cur = db.execute(f"DELETE FROM {table} WHERE {column} = ?", (prediction_hash,))
             counts[table] = counts.get(table, 0) + cur.rowcount
         cur = db.execute(

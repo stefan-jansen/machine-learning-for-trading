@@ -2,14 +2,21 @@
 
 `REPLACE_HOLDOUT` in a holdout-predictions notebook deletes a superseded generation. The first
 version of that deletion listed the child tables by hand, missed three of them, and left four
-rows in the live sp500_options registry keyed to a prediction set nothing resolves. Enabling
-foreign keys makes the same omission worse rather than better: `cohort_metrics.leader_hash`
-references `backtest_runs`, so deleting the parent with a `cohort_metrics` row still pointing at
-it raises `IntegrityError` and aborts the replacement half-done.
+rows in the live sp500_options registry keyed to a prediction set nothing resolves.
 
-These tests build a registry with the real schema, put a row in every table that references the
-two parents, and require the delete to leave none of them - and to leave a second generation
-completely alone.
+Two things then have to hold at once, and they pull in opposite directions:
+
+- Enabling foreign keys makes a missed table fail loudly rather than quietly:
+  `cohort_metrics.leader_hash` references `backtest_runs`, so deleting the parent while a
+  `cohort_metrics` row still points at it raises `IntegrityError` and aborts the replacement
+  half-done. Deriving the child tables from `PRAGMA foreign_key_list` is what closes that.
+- Deriving them is not sufficient. `backtest_paired_metrics.benchmark_hash` carries a synthetic
+  benchmark as often as a registered one - the equal-weight universe is not a `backtest_runs`
+  row - so it deliberately has no foreign key, and the pragma cannot see it.
+
+Every registry here is built from `REGISTRY_SCHEMA_SQL`, the DDL production uses. A fixture that
+declares its own schema is free to give `benchmark_hash` a foreign key production does not have,
+and would then pass while the real registry kept the row.
 """
 
 from __future__ import annotations
@@ -19,72 +26,84 @@ from pathlib import Path
 
 import pytest
 
-from case_studies.utils.registry.maintenance import delete_prediction_generation
+from case_studies.utils.registry.maintenance import (
+    _UNENFORCED_BACKTEST_REFERENCES,
+    _UNENFORCED_PREDICTION_REFERENCES,
+    _referencing_tables,
+    delete_prediction_generation,
+)
+from case_studies.utils.registry.store import REGISTRY_SCHEMA_SQL
 
-SCHEMA = """
-CREATE TABLE training_runs (training_hash TEXT PRIMARY KEY);
-CREATE TABLE prediction_sets (
-    prediction_hash TEXT PRIMARY KEY,
-    training_hash   TEXT NOT NULL REFERENCES training_runs(training_hash),
-    split           TEXT NOT NULL
-);
-CREATE TABLE prediction_coverage (
-    prediction_hash TEXT PRIMARY KEY REFERENCES prediction_sets(prediction_hash),
-    status          TEXT
-);
-CREATE TABLE prediction_metrics (
-    prediction_hash TEXT PRIMARY KEY REFERENCES prediction_sets(prediction_hash),
-    ic_mean         REAL
-);
-CREATE TABLE fold_metrics (
-    prediction_hash TEXT NOT NULL REFERENCES prediction_sets(prediction_hash),
-    fold_id         INTEGER NOT NULL,
-    ic              REAL
-);
-CREATE TABLE backtest_runs (
-    backtest_hash   TEXT PRIMARY KEY,
-    prediction_hash TEXT NOT NULL REFERENCES prediction_sets(prediction_hash),
-    stage           TEXT
-);
-CREATE TABLE backtest_metrics (
-    backtest_hash TEXT PRIMARY KEY REFERENCES backtest_runs(backtest_hash),
-    sharpe        REAL
-);
-CREATE TABLE backtest_fold_metrics (
-    backtest_hash TEXT NOT NULL REFERENCES backtest_runs(backtest_hash),
-    fold_id       INTEGER NOT NULL
-);
-CREATE TABLE backtest_paired_metrics (
-    challenger_hash TEXT NOT NULL REFERENCES backtest_runs(backtest_hash),
-    benchmark_hash  TEXT NOT NULL REFERENCES backtest_runs(backtest_hash)
-);
-CREATE TABLE cohort_metrics (
-    cohort_type TEXT NOT NULL,
-    leader_hash TEXT NOT NULL REFERENCES backtest_runs(backtest_hash),
-    k_variants  INTEGER NOT NULL
-);
-"""
+TS = "2026-01-01T00:00:00+00:00"
+
+
+def _generation(db: sqlite3.Connection, pred: str, bt: str, label: str) -> None:
+    """One prediction set and one backtest, with a row in every table that references either."""
+    db.execute(
+        "INSERT INTO prediction_sets (prediction_hash, training_hash, split, created_at) "
+        "VALUES (?, 't1', 'holdout', ?)",
+        (pred, TS),
+    )
+    db.execute(
+        "INSERT INTO prediction_coverage (prediction_hash, expected_key_digest, "
+        "actual_key_digest, n_expected, n_actual, n_duplicates, n_missing, n_extra, n_null, "
+        "n_non_finite, n_folds_expected, n_folds_actual, schema_json, artifact_digest, status) "
+        "VALUES (?, 'd', 'd', 1, 1, 0, 0, 0, 0, 0, 1, 1, '{}', 'a', 'ok')",
+        (pred,),
+    )
+    db.execute(
+        "INSERT INTO prediction_metrics (prediction_hash, computed_at) VALUES (?, ?)", (pred, TS)
+    )
+    for fold_id in (0, 1):
+        db.execute(
+            "INSERT INTO fold_metrics (prediction_hash, fold_id, computed_at) VALUES (?, ?, ?)",
+            (pred, fold_id, TS),
+        )
+    db.execute(
+        "INSERT INTO backtest_runs (backtest_hash, prediction_hash, stage, created_at) "
+        "VALUES (?, ?, 'holdout', ?)",
+        (bt, pred, TS),
+    )
+    db.execute("INSERT INTO backtest_metrics (backtest_hash, computed_at) VALUES (?, ?)", (bt, TS))
+    db.execute(
+        "INSERT INTO backtest_fold_metrics (backtest_hash, fold_id, computed_at) VALUES (?, 0, ?)",
+        (bt, TS),
+    )
+    db.execute(
+        "INSERT INTO cohort_metrics (cohort_type, label, leader_hash, k_variants, "
+        "periods_per_year, computed_at) VALUES ('stagelabel', ?, ?, 60, 252.0, ?)",
+        # A distinct label per generation: idx_cohort_unique is unique on
+        # (cohort_type, stage, label, family), so two generations cannot share one.
+        (label, bt, TS),
+    )
 
 
 def _registry(tmp_path: Path) -> Path:
-    """Two complete generations, `doomed` and `keeper`, with every child row populated."""
+    """Two generations, `doomed` and `keeper`, on the production schema."""
     run_log = tmp_path / "run_log"
     run_log.mkdir()
     db_path = run_log / "registry.db"
     with sqlite3.connect(db_path) as db:
-        db.executescript(SCHEMA)
-        db.execute("INSERT INTO training_runs VALUES ('t1')")
-        for pred, bt in (("doomed", "bt_doomed"), ("keeper", "bt_keeper")):
-            db.execute("INSERT INTO prediction_sets VALUES (?, 't1', 'holdout')", (pred,))
-            db.execute("INSERT INTO prediction_coverage VALUES (?, 'ok')", (pred,))
-            db.execute("INSERT INTO prediction_metrics VALUES (?, 0.01)", (pred,))
-            db.execute("INSERT INTO fold_metrics VALUES (?, 0, 0.01)", (pred,))
-            db.execute("INSERT INTO fold_metrics VALUES (?, 1, 0.02)", (pred,))
-            db.execute("INSERT INTO backtest_runs VALUES (?, ?, 'holdout')", (bt, pred))
-            db.execute("INSERT INTO backtest_metrics VALUES (?, 0.5)", (bt,))
-            db.execute("INSERT INTO backtest_fold_metrics VALUES (?, 0)", (bt,))
-            db.execute("INSERT INTO backtest_paired_metrics VALUES (?, ?)", (bt, bt))
-            db.execute("INSERT INTO cohort_metrics VALUES ('stagelabel', ?, 60)", (bt,))
+        db.executescript(REGISTRY_SCHEMA_SQL)
+        db.execute(
+            "INSERT INTO training_runs (training_hash, family, label, created_at) "
+            "VALUES ('t1', 'linear', 'lab', ?)",
+            (TS,),
+        )
+        _generation(db, "doomed", "bt_doomed", "lab_doomed")
+        _generation(db, "keeper", "bt_keeper", "lab_keeper")
+        # The deleted backtest as CHALLENGER against a synthetic benchmark, and - the case the
+        # pragma cannot reach - as the BENCHMARK a surviving backtest was compared against.
+        db.execute(
+            "INSERT INTO backtest_paired_metrics (challenger_hash, benchmark_hash, "
+            "benchmark_kind, computed_at) VALUES ('bt_doomed', 'ew_universe', 'synthetic', ?)",
+            (TS,),
+        )
+        db.execute(
+            "INSERT INTO backtest_paired_metrics (challenger_hash, benchmark_hash, "
+            "benchmark_kind, computed_at) VALUES ('bt_keeper', 'bt_doomed', 'registered', ?)",
+            (TS,),
+        )
         db.commit()
     for name in ("doomed", "keeper"):
         (run_log / "predictions" / name).mkdir(parents=True)
@@ -94,64 +113,85 @@ def _registry(tmp_path: Path) -> Path:
     return db_path
 
 
-CHILD_TABLES = (
-    "prediction_coverage",
-    "prediction_metrics",
-    "fold_metrics",
-    "backtest_metrics",
-    "backtest_fold_metrics",
-    "cohort_metrics",
-)
-
-
-def test_the_delete_leaves_no_row_referencing_the_removed_generation(tmp_path: Path) -> None:
+def test_no_row_referencing_the_removed_generation_survives(tmp_path: Path) -> None:
     db_path = _registry(tmp_path)
 
     delete_prediction_generation(db_path, "doomed")
 
     with sqlite3.connect(db_path) as db:
-        assert (
-            db.execute(
-                "SELECT COUNT(*) FROM prediction_sets WHERE prediction_hash = 'doomed'"
-            ).fetchone()[0]
-            == 0
-        )
-        assert (
-            db.execute(
-                "SELECT COUNT(*) FROM backtest_runs WHERE backtest_hash = 'bt_doomed'"
-            ).fetchone()[0]
-            == 0
-        )
-        orphans = {
+        remaining = {
             table: db.execute(
-                f"SELECT COUNT(*) FROM {table} WHERE "
-                + (
-                    "prediction_hash = 'doomed'"
-                    if table.startswith("prediction") or table == "fold_metrics"
-                    else "leader_hash = 'bt_doomed'"
-                    if table == "cohort_metrics"
-                    else "backtest_hash = 'bt_doomed'"
-                )
+                f"SELECT COUNT(*) FROM {table} WHERE {column} = ?", (value,)
             ).fetchone()[0]
-            for table in CHILD_TABLES
+            for table, column, value in (
+                ("prediction_sets", "prediction_hash", "doomed"),
+                ("prediction_coverage", "prediction_hash", "doomed"),
+                ("prediction_metrics", "prediction_hash", "doomed"),
+                ("fold_metrics", "prediction_hash", "doomed"),
+                ("backtest_runs", "backtest_hash", "bt_doomed"),
+                ("backtest_metrics", "backtest_hash", "bt_doomed"),
+                ("backtest_fold_metrics", "backtest_hash", "bt_doomed"),
+                ("cohort_metrics", "leader_hash", "bt_doomed"),
+                ("backtest_paired_metrics", "challenger_hash", "bt_doomed"),
+            )
         }
-    assert orphans == dict.fromkeys(CHILD_TABLES, 0)
+    assert remaining == dict.fromkeys(remaining, 0)
 
 
-def test_the_delete_survives_foreign_key_enforcement(tmp_path: Path) -> None:
-    """`cohort_metrics.leader_hash` is the one a hand-written list missed.
+def test_the_paired_row_that_names_it_only_as_the_benchmark_goes_too(tmp_path: Path) -> None:
+    """`benchmark_hash` has no foreign key, so nothing about the schema announces this row.
 
-    With foreign keys on, leaving it behind does not orphan a row - it raises, and the
-    replacement aborts with the parent gone and the children still there.
+    A surviving backtest compared AGAINST the deleted one leaves a paired row whose benchmark
+    resolves to nothing. `PRAGMA foreign_key_check` stays silent about it - which is exactly why
+    a purely schema-derived cascade is not enough.
     """
     db_path = _registry(tmp_path)
 
     delete_prediction_generation(db_path, "doomed")
 
     with sqlite3.connect(db_path) as db:
+        assert (
+            db.execute(
+                "SELECT COUNT(*) FROM backtest_paired_metrics WHERE benchmark_hash = 'bt_doomed'"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_benchmark_hash_really_has_no_foreign_key_in_the_production_schema() -> None:
+    """Pins the premise. If a key is added later, the declared entry becomes redundant."""
+    with sqlite3.connect(":memory:") as db:
+        db.executescript(REGISTRY_SCHEMA_SQL)
+        keyed = {fk[3] for fk in db.execute("PRAGMA foreign_key_list(backtest_paired_metrics)")}
+    assert "challenger_hash" in keyed
+    assert "benchmark_hash" not in keyed
+
+
+def test_every_declared_unenforced_reference_is_really_unenforced() -> None:
+    """A declared entry that the schema does in fact key is a duplicate, not a safety net."""
+    with sqlite3.connect(":memory:") as db:
+        db.executescript(REGISTRY_SCHEMA_SQL)
+        present = {
+            row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        for parent, key, declared in (
+            ("backtest_runs", "backtest_hash", _UNENFORCED_BACKTEST_REFERENCES),
+            ("prediction_sets", "prediction_hash", _UNENFORCED_PREDICTION_REFERENCES),
+        ):
+            derived = set(_referencing_tables(db, parent, key))
+            for table, column in declared:
+                if table in present:
+                    assert (table, column) not in derived
+
+
+def test_the_delete_survives_foreign_key_enforcement(tmp_path: Path) -> None:
+    db_path = _registry(tmp_path)
+
+    delete_prediction_generation(db_path, "doomed")
+
+    with sqlite3.connect(db_path) as db:
         db.execute("PRAGMA foreign_keys = ON")
-        violations = db.execute("PRAGMA foreign_key_check").fetchall()
-    assert violations == []
+        assert db.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
 def test_the_other_generation_is_untouched(tmp_path: Path) -> None:
@@ -160,26 +200,21 @@ def test_the_other_generation_is_untouched(tmp_path: Path) -> None:
     delete_prediction_generation(db_path, "doomed")
 
     with sqlite3.connect(db_path) as db:
-        for table, column, value in (
-            ("prediction_sets", "prediction_hash", "keeper"),
-            ("prediction_coverage", "prediction_hash", "keeper"),
-            ("prediction_metrics", "prediction_hash", "keeper"),
-            ("backtest_runs", "backtest_hash", "bt_keeper"),
-            ("backtest_metrics", "backtest_hash", "bt_keeper"),
-            ("cohort_metrics", "leader_hash", "bt_keeper"),
+        for table, column, value, expected in (
+            ("prediction_sets", "prediction_hash", "keeper", 1),
+            ("prediction_coverage", "prediction_hash", "keeper", 1),
+            ("prediction_metrics", "prediction_hash", "keeper", 1),
+            ("fold_metrics", "prediction_hash", "keeper", 2),
+            ("backtest_runs", "backtest_hash", "bt_keeper", 1),
+            ("backtest_metrics", "backtest_hash", "bt_keeper", 1),
+            ("cohort_metrics", "leader_hash", "bt_keeper", 1),
         ):
             assert (
                 db.execute(f"SELECT COUNT(*) FROM {table} WHERE {column} = ?", (value,)).fetchone()[
                     0
                 ]
-                == 1
-            )
-        assert (
-            db.execute(
-                "SELECT COUNT(*) FROM fold_metrics WHERE prediction_hash = 'keeper'"
-            ).fetchone()[0]
-            == 2
-        )
+                == expected
+            ), f"{table}.{column}"
     assert (db_path.parent / "predictions" / "keeper").is_dir()
 
 
@@ -202,6 +237,8 @@ def test_the_counts_report_what_was_removed(tmp_path: Path) -> None:
     assert deleted["backtest_runs"] == 1
     assert deleted["fold_metrics"] == 2
     assert deleted["cohort_metrics"] == 1
+    # Both paired rows: one where it is the challenger, one where it is the benchmark.
+    assert deleted["backtest_paired_metrics"] == 2
     assert 0 not in deleted.values()
 
 
@@ -214,28 +251,31 @@ def test_an_unknown_generation_deletes_nothing(tmp_path: Path) -> None:
         assert db.execute("SELECT COUNT(*) FROM prediction_sets").fetchone()[0] == 2
 
 
-@pytest.mark.parametrize("parent", ["backtest_runs", "prediction_sets"])
-def test_every_referencing_table_in_the_schema_is_reached(tmp_path: Path, parent: str) -> None:
-    """The list is derived, so a table added later is covered without an edit here."""
-    from case_studies.utils.registry.maintenance import _referencing_tables
-
-    db_path = _registry(tmp_path)
-    key = "backtest_hash" if parent == "backtest_runs" else "prediction_hash"
-    with sqlite3.connect(db_path) as db:
-        found = {table for table, _ in _referencing_tables(db, parent, key)}
-
-    expected = {
-        "backtest_runs": {
-            "backtest_metrics",
-            "backtest_fold_metrics",
-            "backtest_paired_metrics",
-            "cohort_metrics",
-        },
-        "prediction_sets": {
-            "prediction_coverage",
-            "prediction_metrics",
-            "fold_metrics",
+@pytest.mark.parametrize(
+    ("parent", "key", "expected"),
+    [
+        (
             "backtest_runs",
-        },
-    }[parent]
+            "backtest_hash",
+            {
+                "backtest_metrics",
+                "backtest_fold_metrics",
+                "backtest_paired_metrics",
+                "cohort_metrics",
+            },
+        ),
+        (
+            "prediction_sets",
+            "prediction_hash",
+            {"prediction_coverage", "prediction_metrics", "fold_metrics", "backtest_runs"},
+        ),
+    ],
+)
+def test_the_derived_tables_match_the_production_schema(
+    parent: str, key: str, expected: set[str]
+) -> None:
+    """Derived, not written down, so a table added later is covered without an edit here."""
+    with sqlite3.connect(":memory:") as db:
+        db.executescript(REGISTRY_SCHEMA_SQL)
+        found = {table for table, _ in _referencing_tables(db, parent, key)}
     assert found == expected
