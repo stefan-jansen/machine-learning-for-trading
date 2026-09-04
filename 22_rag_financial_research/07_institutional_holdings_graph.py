@@ -228,6 +228,14 @@ if partial_periods:
         f"{', '.join(str(p) for p in partial_periods)}"
     )
 positions_df = positions_df.filter(pl.col("report_period").is_in(complete_periods))
+# Every complete quarter, before NUM_QUARTERS narrows what this notebook displays. The
+# ownership-change table is part of the canonical feature set and the producer computes it
+# over the artifact's own last two complete quarters, so it has to be built from this frame
+# rather than from the displayed one: with NUM_QUARTERS=1 over a multi-quarter artifact the
+# truncated frame has nothing to compare, and emitting zero change there would contradict a
+# producer that compared two quarters. A one-quarter *artifact* is the different case the
+# no-comparison branch below handles.
+complete_positions_df = positions_df
 
 if NUM_QUARTERS > 0:
     recent_periods = (
@@ -392,8 +400,8 @@ def select_stock_quarter(df: pl.DataFrame, period, suffix: str) -> pl.DataFrame:
 
 
 # %%
-if len(positions_df) > 0 and positions_df["report_period"].n_unique() > 1:
-    stock_quarter = positions_df.group_by(["cusip", "report_period"]).agg(
+if len(complete_positions_df) > 0 and complete_positions_df["report_period"].n_unique() > 1:
+    stock_quarter = complete_positions_df.group_by(["cusip", "report_period"]).agg(
         pl.col("issuer").first().alias("issuer_name"),
         pl.col("reported_value_usd").sum().alias("quarter_value_usd"),
         pl.col("cik").n_unique().alias("n_institutions"),
@@ -401,7 +409,7 @@ if len(positions_df) > 0 and positions_df["report_period"].n_unique() > 1:
     )
     comparison_periods = stock_quarter["report_period"].unique().sort(descending=True).head(2)
     current_period, prior_period = comparison_periods.to_list()
-    current_availability = positions_df.filter(pl.col("report_period") == current_period)[
+    current_availability = complete_positions_df.filter(pl.col("report_period") == current_period)[
         "timestamp"
     ].max()
     prior = select_stock_quarter(stock_quarter, prior_period, "q1")
