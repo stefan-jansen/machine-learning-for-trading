@@ -1009,6 +1009,7 @@ jobs:
             tests/test_tabular_dl.py \
             tests/test_tabular_dl_adapter.py \
             tests/test_holdout_expected_keys.py \
+            tests/test_holdout_force_regenerates.py \
             tests/test_tabular_dl_identity.py \
             tests/test_tabular_dl_runtime.py \
             tests/test_training_identity_migration.py \
