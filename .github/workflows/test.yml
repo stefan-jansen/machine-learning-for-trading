@@ -892,8 +892,13 @@ jobs:
         if: steps.reach.outputs.have_key
         run: |
           uv venv --python 3.14
+          # ml4t-backtest joined with tests/test_backtest_presets.py:
+          # ensure_backtest_spec resolves the engine's own BacktestConfig
+          # (case_studies/utils/backtest_loaders.py:169 imports ml4t.backtest), and
+          # without the package four of its tests raise rather than skip. Measured in a
+          # venv holding exactly this list: 4 failed without it, 37 passed with it.
           uv pip install pytest numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
-            scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow \
+            scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow ml4t-backtest \
             "ml4t-diagnostic>=0.1.2" jupytext==1.19.3
       # The precondition is the load-bearing half, the same shape as the
       # data-root anchoring step above. Every test in this job skips politely
