@@ -257,8 +257,15 @@ def run_model_population(
     requests: Iterable[ResolvedModelRequest],
     *,
     population_name: str,
+    supersedes: str | None = None,
 ) -> tuple[ModelExecution, OfficialPopulation | None]:
-    """Snapshot a canonical population before fitting, then require exact completion."""
+    """Snapshot a canonical population before fitting, then require exact completion.
+
+    ``supersedes`` names the generation of ``population_name`` this run retires. A population is
+    the set of prediction identities, so anything that moves a training identity produces a
+    different member list under the same name, and ``OfficialPopulation.create`` refuses to write
+    it without being told which snapshot it replaces. Canonical tier only.
+    """
     resolved = tuple(requests)
     if not resolved:
         raise ValueError("model population requires at least one resolved request")
@@ -274,6 +281,7 @@ def run_model_population(
             name=population_name,
             member_kind="prediction",
             members=expected,
+            supersedes=supersedes,
         )
 
     execution = run_models(study, requests=resolved)

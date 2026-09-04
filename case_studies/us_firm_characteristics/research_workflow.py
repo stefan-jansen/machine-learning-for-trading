@@ -217,8 +217,16 @@ def expected_prediction_hashes(requests: Iterable[Any]) -> tuple[str, ...]:
     return tuple(hashes)
 
 
-def snapshot_model_population(study: Study, *, name: str) -> OfficialPopulation:
-    """Freeze the complete canonical prediction population before model execution."""
+def snapshot_model_population(
+    study: Study, *, name: str, supersedes: str | None = None
+) -> OfficialPopulation:
+    """Freeze the complete canonical prediction population before model execution.
+
+    ``supersedes`` names the generation of ``name`` this run retires. A population is the set of
+    prediction identities, so anything that moves a training identity produces a different member
+    list under the same name, and ``OfficialPopulation.create`` refuses to write it without being
+    told which snapshot it replaces.
+    """
     requests = tuple(
         request
         for family in PREDICTIVE_FAMILIES
@@ -233,6 +241,7 @@ def snapshot_model_population(study: Study, *, name: str) -> OfficialPopulation:
         name=name,
         member_kind="prediction",
         members=expected_prediction_hashes(requests),
+        supersedes=supersedes,
     )
 
 
