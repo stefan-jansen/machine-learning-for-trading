@@ -42,7 +42,7 @@ from pathlib import Path
 
 import polars as pl
 
-from case_studies.utils.notebook_contracts import _first_present
+from case_studies.utils.notebook_contracts import _first_present, _is_finite
 
 __all__ = [
     "CoverageError",
@@ -543,6 +543,11 @@ def _scored_rows(frame: pl.DataFrame, *, case_study: str, label: str, split: str
     prediction path that is not what the module promises: a frame with no score column
     at all, or one whose scores are all null, described a complete set of decisions
     that were never made.
+
+    Null is not the whole of it. NaN and infinity are non-null and rank against nothing,
+    so a session holding only those is as empty of decisions as one holding only nulls -
+    ``_is_finite`` is the same reading the IC series already applies, and on a non-float
+    column being non-null is the whole of the condition.
     """
     score_col = _first_present(frame.columns, _SCORE_ALIASES)
     if score_col is None:
@@ -551,11 +556,11 @@ def _scored_rows(frame: pl.DataFrame, *, case_study: str, label: str, split: str
             f"{_SCORE_ALIASES} in columns {sorted(frame.columns)}. A frame with no score "
             "is not a prediction set, and a check that cannot run must not read as a pass."
         )
-    scored = frame.filter(pl.col(score_col).is_not_null())
+    scored = frame.filter(_is_finite(frame.schema[score_col], score_col))
     if scored.is_empty():
         raise CoverageError(
-            f"{case_study}/{label}/{split} predictions: every value in {score_col!r} is "
-            f"null across {frame.height} rows; the frame carries sessions but no predictions."
+            f"{case_study}/{label}/{split} predictions: no finite value in {score_col!r} across "
+            f"{frame.height} rows; the frame carries sessions but no predictions."
         )
     return scored
 
