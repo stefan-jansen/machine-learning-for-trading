@@ -97,6 +97,7 @@ from case_studies.utils.cv_window import (
 from case_studies.utils.temporal import (
     filtered_state_probs,
     fit_hmm_kmeans_init,
+    garch11_conditional_volatility,
     refit_boundaries,
     sort_states_by_variance,
     walk_forward_feature,
@@ -427,101 +428,10 @@ display(
 )
 
 # %% [markdown]
-# Figure F1 draws the schedule against the folds. The dark bar is where each model emits values,
-# the pale bar to its left is the burn-in it paid first, and the ticks are the sessions it was
-# re-estimated on. The dashed line is the holdout boundary, past which nothing is re-estimated.
-# The thin amber bars underneath are the folds a later notebook selects rows by - they no longer
-# decide which parameters a row carries, which is what the single dark bar above them says.
+# The folds themselves, for reference: the windows a later notebook selects rows by, and the
+# windows the evaluation at the end of this notebook is allowed to read.
 
 # %%
-market_dates = market_sessions["timestamp"].to_list()
-hmm_schedule_dates = [
-    market_dates[fit_end - 1]
-    for fit_end, _ in refit_boundaries(
-        len(market_dates) - VOL_WINDOW, HMM_BURNIN_SESSIONS, HMM_REFIT_SESSIONS
-    )
-]
-
-fig_folds, ax = plt.subplots(figsize=(12, 0.42 * len(cv_splits) + 3.4))
-
-_holdout = pd.Timestamp(HOLDOUT_START)
-_first, _last = pd.Timestamp(market_dates[0]), pd.Timestamp(market_dates[-1])
-_rows = [
-    ("Regime model", pd.Timestamp(_burnin_ends), hmm_schedule_dates),
-    ("Volatility model", None, []),
-]
-for i, (name, burn_end, ticks) in enumerate(_rows):
-    y = -1.6 - 1.1 * i
-    if burn_end is not None:
-        ax.barh(y, burn_end - _first, left=_first, height=0.6, color=COLORS["silver_muted"])
-        ax.barh(y, _last - burn_end, left=burn_end, height=0.6, color=COLORS["blue"])
-        for tick in ticks:
-            ax.plot(
-                [pd.Timestamp(tick), pd.Timestamp(tick)],
-                [y - 0.3, y + 0.3],
-                color=COLORS["amber"],
-                linewidth=0.6,
-            )
-    else:
-        # One burn-in per ETF, so this row is a band rather than a single boundary.
-        ax.barh(y, _last - _first, left=_first, height=0.6, color=COLORS["blue"], alpha=0.35)
-    ax.text(_first, y + 0.55, name, fontsize=8, color=COLORS["blue"], va="bottom")
-
-for f in cv_splits:
-    y = f["fold"]
-    ax.barh(
-        y,
-        pd.Timestamp(f["val_end"]) - pd.Timestamp(f["val_start"]),
-        left=pd.Timestamp(f["val_start"]),
-        height=0.5,
-        color=COLORS["amber"],
-    )
-
-ax.axvline(_holdout, color=COLORS["negative"], linestyle="--", linewidth=1.0)
-ax.axvspan(
-    _holdout,
-    pd.Timestamp(HOLDOUT_END),
-    color=COLORS["neutral"],
-    alpha=0.10,
-    linewidth=0,
-)
-ax.set_yticks([f["fold"] for f in cv_splits])
-ax.set_yticklabels([f"Fold {f['fold']}" for f in cv_splits])
-ax.invert_yaxis()
-ax.set_xlabel("Date")
-handles = [
-    plt.Rectangle((0, 0), 1, 1, color=COLORS["silver_muted"]),
-    plt.Rectangle((0, 0), 1, 1, color=COLORS["blue"]),
-    plt.Rectangle((0, 0), 1, 1, color=COLORS["amber"]),
-]
-ax.legend(
-    handles,
-    ["Burn-in, no value emitted", "Emitting, re-estimated at each tick", "Fold validation window"],
-    frameon=False,
-    fontsize=8,
-    loc="upper left",
-    bbox_to_anchor=(0.0, -0.12),
-    ncol=3,
-)
-_span = _last - _first
-ax.set_xlim(_first - _span * 0.02, pd.Timestamp(HOLDOUT_END) + _span * 0.02)
-ax.set_title(
-    "One column of values, and no fold decides which version a model reads",
-    loc="left",
-    color=COLORS["blue"],
-    fontweight="semibold",
-)
-sns.despine(left=True)
-show_with_alt(
-    fig_folds,
-    "A date axis from 2006 to 2026. Two bars at the top are the two fitted models: each begins "
-    "with a pale burn-in segment carrying no values, then a long dark segment crossed by "
-    "regularly spaced amber ticks marking the sessions it was re-estimated on. Below them, "
-    "eight short amber bars step back one year at a time, marking the fold validation windows a "
-    "later notebook selects rows by. A dashed line and a shaded column mark the holdout, and no "
-    "tick falls inside it.",
-)
-
 display(
     pl.DataFrame(
         [
@@ -1043,23 +953,28 @@ def garch_walk(payload: tuple[str, np.ndarray, int]) -> tuple[str, np.ndarray, l
     symbol, returns, freeze_after = payload
     fits: list[dict] = []
 
-    def fit(X_train: np.ndarray):
+    def fit(X_train: np.ndarray) -> dict[str, float]:
         result = arch_model(X_train[:, 0], **GARCH_KW).fit(disp="off", show_warning=False)
-        fits.append(
-            {
-                "symbol": symbol,
-                "fit_end": int(len(X_train)),
-                "omega": float(result.params.get("omega", np.nan)),
-                "alpha": float(result.params.get("alpha[1]", np.nan)),
-                "beta": float(result.params.get("beta[1]", np.nan)),
-            }
-        )
-        return result.params
+        coefficients = {
+            "mu": float(result.params.get("mu", np.nan)),
+            "omega": float(result.params.get("omega", np.nan)),
+            "alpha": float(result.params.get("alpha[1]", np.nan)),
+            "beta": float(result.params.get("beta[1]", np.nan)),
+        }
+        fits.append({"symbol": symbol, "fit_end": int(len(X_train)), **coefficients})
+        return coefficients
 
-    def apply(params, X_prefix: np.ndarray) -> np.ndarray:
+    def apply(coefficients: dict[str, float], X_prefix: np.ndarray) -> np.ndarray:
+        # `garch11_conditional_volatility` rather than the fitted result object's own
+        # `conditional_volatility`: `arch` seeds its recursion from a backcast over whatever
+        # sample it is handed, and the sample here runs to the end of the block being emitted,
+        # so an emitted value would move when the block's later returns arrived. The shared
+        # helper seeds from the coefficients' own implied long-run variance instead, which is
+        # a function of the fit and of no observation in the array.
+        #
         # The recursion runs on percent returns; restore decimal and annualize.
-        frozen = arch_model(X_prefix[:, 0], **GARCH_KW).fix(params)
-        return frozen.conditional_volatility * np.sqrt(252) / 100
+        sigma = garch11_conditional_volatility(X_prefix[:, 0], **coefficients)
+        return sigma * np.sqrt(252) / 100
 
     values = walk_forward_feature(
         returns.reshape(-1, 1),
@@ -1177,27 +1092,130 @@ print(
 # ### The property, tested rather than described
 #
 # All of section A reduces to one claim: deleting the observations after a session does not move
-# that session's value. It is checked here on one ETF, by cutting its return series at a refit
-# boundary, walking the shortened series, and comparing every value the two walks share. The
-# shared driver carries the same check as a unit test over a synthetic series
+# that session's value. It is checked here on one ETF, by cutting its return series and walking
+# the shortened one, and the cut lands **inside** a block rather than on a refit boundary. That
+# is the part worth being careful about. A cut on a boundary leaves every retained block with
+# exactly the prefix it had, so the two walks agree whatever the recursion inside a block does;
+# only a cut inside one asks whether an emitted value moves when the rest of its own block
+# arrives. That is the question `arch`'s result object answers wrongly, which is why the
+# recursion is the shared helper's.
+#
+# The shared driver carries the same check as a unit test over a synthetic series
 # (`tests/test_temporal.py`); doing it here as well is what says this notebook's own
-# configuration of it holds.
+# configuration of it holds, on real returns.
 
 # %%
 _check_symbol, _check_returns, _check_freeze = payloads[0]
 _boundaries = refit_boundaries(len(_check_returns), GARCH_BURNIN_SESSIONS, GARCH_REFIT_SESSIONS)
-# Cut at the refit boundary nearest the middle of the development history: at a boundary so the
-# shortened walk runs whole blocks and the comparison is exact rather than up to a partial final
-# block, and in the middle so the check covers a useful stretch of the series rather than the
-# few sessions that follow the burn-in.
+# The middle of the development history, offset off the boundary so the cut falls inside a block.
 _midpoint = GARCH_BURNIN_SESSIONS + (_check_freeze - GARCH_BURNIN_SESSIONS) // 2
-_cut = max(fit_end for fit_end, _ in _boundaries if fit_end <= _midpoint)
+_cut = max(fit_end for fit_end, _ in _boundaries if fit_end <= _midpoint) + (
+    GARCH_REFIT_SESSIONS // 2
+)
+assert _cut not in {fit_end for fit_end, _ in _boundaries}, "the cut landed on a refit boundary"
 _full = next(values for symbol, values, _ in walked if symbol == _check_symbol)
 _, _short, _ = garch_walk((_check_symbol, _check_returns[:_cut], _check_freeze))
 np.testing.assert_allclose(_short, _full[:_cut], rtol=1e-12, equal_nan=True)
 print(
     f"{_check_symbol}: deleting the {len(_check_returns) - _cut:,} sessions after "
     f"{_cut:,} moved none of the {int((~np.isnan(_short)).sum()):,} values before it."
+)
+
+# %% [markdown]
+# ### Figure F1: the schedule that was run
+#
+# Both walks are done, so this draws what they did rather than what they were configured to do.
+# For each model the pale bar is the burn-in it paid before emitting anything and the dark bar is
+# where it emitted; the ticks on the regime row are the sessions its parameters were estimated
+# through, one per estimate that converged. The volatility row is a band rather than a line
+# because each ETF pays its own burn-in, so the pale part spans the earliest and latest session
+# any of them started emitting on.
+#
+# The dashed line is the holdout boundary. No tick falls to the right of it, which is the freeze:
+# the holdout is emitted from the last estimate made before it. The thin amber bars underneath
+# are the fold validation windows a later notebook selects rows by; they no longer decide which
+# parameters a row carries, which is what one dark bar spanning all of them says.
+
+# %%
+fig_folds, ax = plt.subplots(figsize=(12, 0.42 * len(cv_splits) + 3.4))
+
+_holdout = pd.Timestamp(HOLDOUT_START)
+_panel_start = pd.Timestamp(prices["timestamp"].min())
+_panel_end = pd.Timestamp(prices["timestamp"].max())
+_regime_start = pd.Timestamp(
+    hmm_features.filter(pl.col("regime_prob_stress").is_not_null())["timestamp"].min()
+)
+_rows = [
+    (
+        "Regime model",
+        _panel_start,
+        _regime_start,
+        [pd.Timestamp(d) for d in hmm_fit_df["fit_end_session"].to_list()],
+    ),
+    (
+        "Volatility model, per ETF",
+        pd.Timestamp(_first_value["first_value"].min()),
+        pd.Timestamp(_first_value["first_value"].max()),
+        [],
+    ),
+]
+for i, (name, burn_start, emit_start, ticks) in enumerate(_rows):
+    y = -1.6 - 1.1 * i
+    ax.barh(y, emit_start - burn_start, left=burn_start, height=0.6, color=COLORS["silver_muted"])
+    ax.barh(y, _panel_end - emit_start, left=emit_start, height=0.6, color=COLORS["blue"])
+    for tick in ticks:
+        ax.plot([tick, tick], [y - 0.3, y + 0.3], color=COLORS["amber"], linewidth=0.6)
+    ax.text(_panel_start, y + 0.55, name, fontsize=8, color=COLORS["blue"], va="bottom")
+
+for f in cv_splits:
+    ax.barh(
+        f["fold"],
+        pd.Timestamp(f["val_end"]) - pd.Timestamp(f["val_start"]),
+        left=pd.Timestamp(f["val_start"]),
+        height=0.5,
+        color=COLORS["amber"],
+    )
+
+ax.axvline(_holdout, color=COLORS["negative"], linestyle="--", linewidth=1.0)
+ax.axvspan(_holdout, pd.Timestamp(HOLDOUT_END), color=COLORS["neutral"], alpha=0.10, linewidth=0)
+ax.set_yticks([f["fold"] for f in cv_splits])
+ax.set_yticklabels([f"Fold {f['fold']}" for f in cv_splits])
+ax.invert_yaxis()
+ax.set_xlabel("Date")
+handles = [
+    plt.Rectangle((0, 0), 1, 1, color=COLORS["silver_muted"]),
+    plt.Rectangle((0, 0), 1, 1, color=COLORS["blue"]),
+    plt.Rectangle((0, 0), 1, 1, color=COLORS["amber"]),
+]
+ax.legend(
+    handles,
+    ["Burn-in, no value emitted", "Emitting, re-estimated at each tick", "Fold validation window"],
+    frameon=False,
+    fontsize=8,
+    loc="upper left",
+    bbox_to_anchor=(0.0, -0.12),
+    ncol=3,
+)
+assert max(pd.Timestamp(d) for d in hmm_fit_df["fit_end_session"].to_list()) < _holdout, (
+    "a regime estimate is dated inside the holdout, so the figure would draw a tick there"
+)
+_span = _panel_end - _panel_start
+ax.set_xlim(_panel_start - _span * 0.02, pd.Timestamp(HOLDOUT_END) + _span * 0.02)
+ax.set_title(
+    "One column of values, and no fold decides which version a model reads",
+    loc="left",
+    color=COLORS["blue"],
+    fontweight="semibold",
+)
+sns.despine(left=True)
+show_with_alt(
+    fig_folds,
+    "A date axis from 2006 to 2026. Two bars at the top are the two fitted models: each begins "
+    "with a pale burn-in segment carrying no values, then a long dark segment. The regime row is "
+    "crossed by regularly spaced amber ticks marking the sessions it was re-estimated through, "
+    "and none of them falls right of the holdout. Below, eight short amber bars step back one "
+    "year at a time, marking the fold validation windows a later notebook selects rows by. A "
+    "dashed line and a shaded column mark the holdout.",
 )
 
 # %% [markdown]

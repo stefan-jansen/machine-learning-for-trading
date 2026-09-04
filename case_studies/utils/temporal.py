@@ -24,6 +24,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 from hmmlearn.hmm import GaussianHMM
+from scipy.signal import lfilter
 from sklearn.cluster import KMeans
 from threadpoolctl import threadpool_limits
 
@@ -31,6 +32,7 @@ from case_studies.utils.artifact_digest import write_artifact
 
 __all__ = [
     "feature_geometry",
+    "garch11_conditional_volatility",
     "filtered_state_probs",
     "fit_hmm_kmeans_init",
     "refit_boundaries",
@@ -98,6 +100,54 @@ def filtered_state_probs(model: GaussianHMM, X: np.ndarray) -> np.ndarray:
 
     log_normalizer = np.logaddexp.reduce(fwdlattice, axis=1, keepdims=True)
     return np.exp(fwdlattice - log_normalizer)
+
+
+def garch11_conditional_volatility(
+    returns: np.ndarray,
+    *,
+    mu: float,
+    omega: float,
+    alpha: float,
+    beta: float,
+) -> np.ndarray:
+    r"""GARCH(1,1) conditional standard deviation, computed so a value cannot move later.
+
+    :math:`\sigma^2_t = \omega + \alpha \epsilon_{t-1}^2 + \beta \sigma^2_{t-1}`, with
+    :math:`\epsilon_t = r_t - \mu`. Returns one value per input observation, in the units of
+    *returns*.
+
+    **Why this exists rather than ``arch_model(...).fix(params)``.** Under a walk-forward refit
+    schedule the recursion is run over a prefix of the series that ends at the end of the block
+    being emitted, and only the block's own rows are kept. That is causal only if a value at
+    :math:`t` is a function of observations up to :math:`t` and of nothing else in the array it
+    was handed. ``arch``'s own result object does not satisfy that: it derives the residuals,
+    the backcast that seeds :math:`\sigma^2_0` and the variance bounds from the whole sample it
+    is given, so extending the sample moves earlier values. Measured on ``arch==8.0.0`` with SPY
+    returns and one fixed parameter vector: ``fix`` over 1,500 observations and over 2,000 differ
+    by up to 0.19% on the 1,500 they share, largest at the start and decaying to zero. Small, and
+    a dependence on the future all the same, in exactly the channel the schedule exists to close.
+
+    The seed here is the long-run variance the *parameters* imply, :math:`\omega/(1-\alpha-\beta)`
+    - a function of coefficients estimated strictly before the block, and of no observation in
+    the array. A fit with :math:`\alpha+\beta \ge 1` has no long-run variance, so the
+    persistence is clamped just below one for the seed alone; its influence on any later value
+    decays as :math:`\beta^t` either way. On the SPY series above that decay is complete well
+    inside any burn-in a case study declares: against ``arch``'s own recursion the two agree to
+    within 1e-3 relative from observation 83, and to floating-point equality from 292.
+
+    The recurrence is linear in :math:`\sigma^2` and evaluated with ``scipy.signal.lfilter``
+    rather than a Python loop: this runs once per block per entity, tens of thousands of times
+    per notebook, over series of thousands of observations.
+    """
+    resid = np.asarray(returns, dtype=float) - mu
+    if resid.size == 0:
+        return np.empty(0, dtype=float)
+    persistence = min(alpha + beta, 1.0 - 1e-6)
+    driver = np.empty(resid.size, dtype=float)
+    driver[0] = omega / (1.0 - persistence)
+    driver[1:] = omega + alpha * resid[:-1] ** 2
+    # y[0] = driver[0]; y[t] = driver[t] + beta * y[t-1] - the recursion above, in C.
+    return np.sqrt(lfilter([1.0], [1.0, -beta], driver))
 
 
 def sort_states_by_variance(model: GaussianHMM) -> np.ndarray:
