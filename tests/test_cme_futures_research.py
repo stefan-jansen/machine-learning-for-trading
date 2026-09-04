@@ -593,6 +593,21 @@ def test_visible_requests_snapshot_complete_canonical_backtests(
     assert shortlist[0].hash in set(candidate_sets["fwd_ret_21d"].members)
 
 
+def test_an_empty_config_selection_is_blamed_on_the_caller_not_the_family() -> None:
+    """`config_names=[]` filters every row out, and the family's menu is not why.
+
+    The caller passes `config_names` in code, never from a parameters cell, so an empty list
+    cannot be the empty-means-all idiom `labels` uses; it is a mistake, and reporting it as "no
+    declared requests for 'linear'" sends a reader to the training menu to look for a row that
+    is there.
+    """
+    complete = research_workflow.model_request_catalog("linear")
+    assert complete.height > 0
+
+    with pytest.raises(ValueError, match="config_names is empty"):
+        research_workflow.model_request_catalog("linear", config_names=[])
+
+
 def test_candidate_set_stage_outside_the_funnel_is_refused() -> None:
     """A stage the funnel does not define never reaches the registry as a new namespace."""
     for stage in research_workflow.CANDIDATE_SET_STAGES:
