@@ -96,6 +96,12 @@ tests/test_sequence_dataset.py
 # case_studies/utils/deep_learning.py imports torch at module scope (:42), and
 # this module imports sequence_identity_params from it.
 tests/test_sequence_identity_roundtrip.py
+# Behind the same import. The point of these cases is that the two holdout
+# re-key hooks read their keys from the same functions the validation path uses
+# rather than restating the rule, so they monkeypatch `sequence_validation_keys`,
+# `darts_validation_keys` and `_tabm_expected_keys` in place - which means
+# importing the modules that define them, and both reach torch.
+tests/test_sequence_holdout_rekey.py
 tests/test_tabular_dl.py
 tests/test_tabular_dl_adapter.py
 tests/test_tabular_dl_identity.py
