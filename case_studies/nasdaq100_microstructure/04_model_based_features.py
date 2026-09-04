@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -376,9 +376,11 @@ print(f"Minute panel digest: {RAW_DIGEST}")
 # parameter to place.
 #
 # Two consequences run through the rest of the notebook. First, the feature values do not depend
-# on the walk-forward split, so the `fold` column written at the end selects rows rather than
-# changing any of them - which is not true of a case study whose model is fitted once per fold,
-# and Section E says what changes there. Second, nothing protects a *diagnostic* the same way:
+# on the walk-forward split at all, which is why the artifact written in Section E carries no
+# fold column: there is nothing for a fold tag to distinguish, and the label being fitted selects
+# its own rows by its own boundaries. A case study whose model is fitted once per fold cannot do
+# that, and Section E says what changes there. Second, nothing protects a *diagnostic* the same
+# way:
 # a number printed about the features is as capable of reading the holdout as a fitted parameter
 # is. That is why the folds are resolved next, before anything is computed or printed.
 
@@ -462,11 +464,15 @@ for label, label_split in label_splits.items():
 print(f"The contract holds for {N_FOLDS} folds on each of {len(label_splits)} targets.")
 
 # %% [markdown]
-# A row is emitted under a fold if it falls anywhere in that fold's window, and the window has
-# to be wide enough for every target that will read it. So the emitted span for a fold runs from
-# the earliest training start to the latest validation end across the targets. The differences
-# are minutes, because the horizons are minutes, and minutes are exactly what a coverage check
-# downstream is counting.
+# The four targets disagree about where each fold starts and ends, by minutes, because their
+# horizons differ by minutes. The span a fold needs covered therefore runs from the earliest
+# training start to the latest validation end across the targets, and minutes are exactly what
+# a coverage check downstream is counting.
+#
+# These spans are what the artifact has to reach, not a tag it carries. Section E writes one row
+# per bar with no fold column, so nothing here decides which rows a model reads - the boundaries
+# of the label being fitted do. What the spans are used for is the coverage check in Section E
+# and the figure below.
 
 # %%
 fold_window = {
@@ -487,9 +493,9 @@ fold_window = {
     for s in splits
 }
 for fold, (start, end) in sorted(fold_window.items()):
-    print(f"  Fold {fold} emits {start} .. {end}")
+    print(f"  Fold {fold} needs {start} .. {end}")
 print(
-    f"  Fold {N_FOLDS} emits every bar from {min(w[0] for w in fold_window.values())} to "
+    f"  Fold {N_FOLDS} needs every bar from {min(w[0] for w in fold_window.values())} to "
     f"{HOLDOUT_END.date()}, and is trained on everything before the holdout opens."
 )
 
@@ -515,11 +521,14 @@ def validation_rows(frame: pl.DataFrame) -> pl.DataFrame:
 
 
 # %% [markdown]
-# **Figure F1** draws what the artifact will contain. Each fold is a training span and the
-# validation span that follows it; the top row is the extra fold written for the holdout
-# period, whose training bars all lie before the holdout opens so that a model scored on the
-# holdout has features for it without any of them having been built from it. The point to read
-# off the figure is that no bar of any training span lies to the right of the rule.
+# **Figure F1** draws the geometry the artifact has to cover. Each fold is a training span and
+# the validation span that follows it; the top row is the holdout, whose training bars all lie
+# before the holdout opens so that a model scored on the holdout has features for it without any
+# of them having been built from it. The point to read off the figure is that no bar of any
+# training span lies to the right of the rule.
+#
+# The artifact spans the union of everything drawn here, in one row per bar. The figure is a
+# picture of what will be asked of it, not of how it is laid out.
 
 # %%
 spans = [
@@ -1477,58 +1486,70 @@ display(
 del labels_keys, temporal_keys, joined
 
 # %% [markdown]
-# ### Tag each row with the walk-forward window it falls in
+# ### The artifact carries no fold column, and why that is the correct shape here
 #
-# Every row is written once per fold whose window contains it, and once more under the extra
-# fold covering the holdout. A row therefore appears several times, under different fold tags,
-# with identical feature values - which is correct here and worth being explicit about: these
-# procedures estimate nothing per fold, so the tag says which model may read the row, not what
-# the row contains. A case study whose model is fitted once per fold cannot do this, because
-# there the same bar genuinely has a different value under each fold's parameters.
+# The obvious thing to write is one row per (bar, fold): tag each row with every walk-forward
+# window that contains it, so a downstream reader can ask for fold 1 and get fold 1's rows. Six
+# of the eight case studies that produce this artifact do exactly that, and for a case study
+# whose model is fitted once per fold it is the only correct shape, because there the same bar
+# genuinely holds a different value under each fold's parameters.
 #
-# The fold numbering follows what `load_modeling_dataset` expects: the walk-forward folds keep
-# the numbers `generate_cv_splits` gave them, and the holdout fold takes the next number after
-# them.
+# It is the wrong shape here, and Section A said why before anything was computed: **these three
+# procedures estimate nothing per fold.** The HAR is refitted at every bar on the immediately
+# preceding stretch, and the Fourier transform and the path signature estimate no parameters at
+# all. A bar's twenty-two feature values are what they are whichever fold reads them.
+#
+# So a fold column would be a row selector and nothing else - and the reader downstream already
+# has a better one. `split_frames` filters the dataset to `train_start .. train_end` and
+# `val_start .. val_end` **of the label being fitted** before it looks at temporal features at
+# all, so the dates do the selecting either way. Writing the tag as well would replicate every
+# row once per fold to say something the dates already say.
+#
+# Two things follow, and the second is the one worth the paragraph.
+#
+# 1. **The artifact halves.** 40,110,414 rows over 20,010,985 keys becomes 20,010,985 rows;
+#    6.2 GB becomes 1.5 GB once the columns are narrowed below. That is what every stage from
+#    here on loads, and `06_linear` holds it while it fits.
+# 2. **A fold tag baked in at this stage can only be one label's.** The window a row is tagged
+#    under has to come from some label's split, and this case study configures four whose
+#    horizons differ, so their splits disagree about where training ends. Emitting the union of
+#    the four - which the previous version of this cell did - keeps every label covered, but it
+#    also means the tag is not any single label's geometry. Leaving the tag out entirely is what
+#    makes each label's own boundaries the only thing that selects its rows.
+#
+# The features are stored as `Float32`. They are stored values, not accumulators: every one was
+# computed in double precision and is written once, so the only error is representation, bounded
+# by the format at a relative 6e-08. The labels stay `Float64`. What is measured here is a rank
+# correlation of order 1e-03, and 6e-08 does not reach it.
 
 # %%
-fold_frames = []
-for fold, (start, end) in sorted(fold_window.items()):
-    fold_df = temporal_clean.filter(
-        (pl.col("timestamp") >= start) & (pl.col("timestamp") <= end)
-    ).with_columns(pl.lit(fold, dtype=pl.Int32).alias("fold"))
-    fold_frames.append(fold_df)
-    print(f"  Fold {fold}: {fold_df.height:,} rows")
-
-earliest_train_start = min(w[0] for w in fold_window.values())
-holdout_df = temporal_clean.filter(
-    (pl.col("timestamp") >= earliest_train_start) & (pl.col("timestamp") < HOLDOUT_END_EXCLUSIVE)
-).with_columns(pl.lit(N_FOLDS, dtype=pl.Int32).alias("fold"))
-assert holdout_df.filter(pl.col("timestamp").dt.date() == HOLDOUT_END.date()).height > 0, (
-    f"the holdout fold does not reach {HOLDOUT_END.date()}, the last date it is configured to cover"
+FEATURE_COLS = [c for c in temporal_clean.columns if c not in ("timestamp", "symbol")]
+temporal_out = temporal_clean.with_columns(
+    [pl.col(c).cast(pl.Float32) for c in FEATURE_COLS if temporal_clean.schema[c] == pl.Float64]
 )
-fold_frames.append(holdout_df)
-print(f"  Fold {N_FOLDS} (holdout): {holdout_df.height:,} rows")
-
-temporal_with_folds = pl.concat(fold_frames)
-del fold_frames, holdout_df
-print(f"{temporal_with_folds.height:,} rows across {temporal_with_folds['fold'].n_unique()} folds")
+print(
+    f"{temporal_out.height:,} rows, one per (timestamp, symbol), "
+    f"{len(FEATURE_COLS)} features stored as Float32."
+)
 
 # %% [markdown]
-# The check that the fold tags mean what the downstream reader will take them to mean. For every
+# The check that this artifact answers what the downstream reader will ask it. For every
 # configured target and every fold, take the decision times that target asks about inside the
 # training and the validation window, and ask two separate questions of them. **Is it in the
 # panel at all** - a bar with no quote produced no features and never will, and the count is
-# reported rather than asserted on. **Was it tagged with this fold** - and that one has to be
-# every single one, because a decision time the target asks for and this artifact answers under
-# the wrong fold is precisely the defect that shows up three stages downstream as a coverage
-# failure with no visible cause.
+# reported rather than asserted on. **Is it in the artifact** - and that one has to be every
+# single one, because a decision time the target asks for and this artifact does not carry is
+# precisely the defect that shows up three stages downstream as a coverage failure with no
+# visible cause.
+#
+# Dropping the fold column is what makes the second column the whole question. Under a tagged
+# artifact this cell had to check the tag as well, and a row present but tagged under another
+# fold read as missing to the fold that wanted it. There is no tag left to disagree with the
+# dates, so what is checked is coverage and nothing else.
 
 # %%
 panel_ts = set(temporal_clean["timestamp"].unique().to_list())
-emitted_ts = {
-    fold: set(temporal_with_folds.filter(pl.col("fold") == fold)["timestamp"].unique().to_list())
-    for fold in range(N_FOLDS)
-}
+written_ts = set(temporal_out["timestamp"].unique().to_list())
 coverage_rows = []
 for label, label_split in label_splits.items():
     label_ts = (
@@ -1546,7 +1567,7 @@ for label, label_split in label_splits.items():
             start, end = pd.Timestamp(s[start_key]), pd.Timestamp(s[end_key])
             asked = label_ts.filter((label_ts >= start) & (label_ts <= end)).to_list()
             available = [t for t in asked if t in panel_ts]
-            tagged = sum(t in emitted_ts[s["fold"]] for t in available)
+            carried = sum(t in written_ts for t in available)
             coverage_rows.append(
                 {
                     "label": label,
@@ -1554,19 +1575,19 @@ for label, label_split in label_splits.items():
                     "window": window,
                     "decision times asked for": len(asked),
                     "in the panel": len(available),
-                    "tagged with this fold": tagged,
+                    "in the artifact": carried,
                 }
             )
 coverage = pl.DataFrame(coverage_rows)
 display(coverage.sort(["label", "fold", "window"]))
-assert coverage.filter(pl.col("tagged with this fold") < pl.col("in the panel")).is_empty(), (
+assert coverage.filter(pl.col("in the artifact") < pl.col("in the panel")).is_empty(), (
     "a configured target has a fold window this artifact does not fully cover"
 )
 print(
-    f"Every fold window of all {len(label_splits)} configured targets is covered by the fold it "
-    "is tagged under."
+    f"Every fold window of all {len(label_splits)} configured targets is fully carried by the "
+    "artifact."
 )
-del emitted_ts, panel_ts
+del written_ts, panel_ts
 
 # %% [markdown]
 # The artifact is written with a sidecar recording the digest of its values, its row count and
@@ -1577,12 +1598,17 @@ del emitted_ts, panel_ts
 # its label values, none of which enters a feature, but its timeline, because that is what
 # decided the fold boundaries. Move a target's decision times and the `fold` column this
 # artifact ships moves with them.
+#
+# The timeline digests stay in `inputs` even though no fold column is written any more. They are
+# still what decided which bars had to be covered - the coverage check above is run against
+# them - so a target whose decision times move is a target this artifact may no longer answer,
+# and the sidecar has to say so.
 
 # %%
 record = write_artifact(
-    temporal_with_folds,
+    temporal_out,
     FEATURES_DIR / "model_based.parquet",
-    keys=["timestamp", "symbol", "fold"],
+    keys=["timestamp", "symbol"],
     written_by="case_studies/nasdaq100_microstructure/04_model_based_features.py",
     inputs={
         "load_nasdaq100_bars": RAW_DIGEST,
@@ -1593,13 +1619,22 @@ print(f"Wrote features/model_based.parquet, digest {record['digest']}, {record['
 
 # %%
 _written = pl.scan_parquet(FEATURES_DIR / "model_based.parquet")
-assert _written.select(pl.len()).collect().item() == temporal_with_folds.height
+_written_schema = _written.collect_schema()
+assert _written.select(pl.len()).collect().item() == temporal_out.height
 assert (
-    temporal_with_folds.select(pl.struct("timestamp", "symbol", "fold").n_unique()).item()
-    == temporal_with_folds.height
-), "duplicate (timestamp, symbol, fold) key in the artifact"
-assert set(temporal_with_folds["fold"].unique().to_list()) == set(range(N_FOLDS + 1))
-print(f"Artifact reconciled: {temporal_with_folds.height:,} rows, {N_FOLDS + 1} folds")
+    temporal_out.select(pl.struct("timestamp", "symbol").n_unique()).item() == temporal_out.height
+), "duplicate (timestamp, symbol) key in the artifact"
+assert "fold" not in _written_schema.names(), (
+    "the artifact carries a fold column: a reader would select rows by a tag rather than by the "
+    "boundaries of the label it is fitting"
+)
+assert {_written_schema[c] for c in FEATURE_COLS} == {pl.Float32}, (
+    "a feature column was not written as Float32"
+)
+print(
+    f"Artifact reconciled: {temporal_out.height:,} rows on (timestamp, symbol), "
+    f"{len(FEATURE_COLS)} Float32 features, no fold column."
+)
 
 # %% [markdown]
 # ## F. Incremental evaluation: does a temporal feature rank the cross-section on its own?
