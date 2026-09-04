@@ -60,13 +60,17 @@ jobs:
             cp -r test-data/intermediates/* $ML4T_OUTPUT_DIR/
           fi
 
+      # No --timeout. A per-test wall clock here contradicts the per-cell budgets in
+      # tests/overrides.yaml, which is where a notebook's cost is declared and measured:
+      # twelve chapter entries already exceed 600s, up to 07_hpo_comparison's 2400s, and
+      # pytest would kill those runs before their own budget ever applied. The job's
+      # timeout-minutes above bounds a hang, and test.yml runs this same file the same way.
       - name: Run ALL chapter notebooks
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
           python -m pytest tests/test_chapter_notebooks.py \
-            -v --tb=short \
-            --timeout=600
+            -v --tb=short
 
       - name: Upload test results
         if: always()
@@ -117,14 +121,16 @@ jobs:
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
 
+      # No --timeout, for the reason the chapters job gives: twenty-four case-study entries
+      # in tests/overrides.yaml declare budgets above 600s, up to sp500_options'
+      # 04_model_based_features at 2760s.
       - name: Run pipeline (${{ matrix.case-study }})
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
           python -m pytest tests/test_case_studies.py \
             -v --tb=short \
-            -k "${{ matrix.case-study }}" \
-            --timeout=600
+            -k "${{ matrix.case-study }}"
 
   # ---------------------------------------------------------------------------
   # Py312 notebooks (signatory, gensim, esig, tfcausalimpact, torch CUDA bug)
