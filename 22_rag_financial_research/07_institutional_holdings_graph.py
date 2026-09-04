@@ -137,6 +137,14 @@ if holdings_df.schema["report_date"] != pl.Date:
 # Filter to the CIKs listed in ALL_INSTITUTIONS. The artifact may contain a
 # wider or narrower set; rows outside this universe are dropped.
 holdings_df = holdings_df.filter(pl.col("cik").is_in(SELECTED_CIKS))
+# Whether a manager filed for a quarter, and when that quarter became public, are
+# questions about what was *disclosed* - not about what enters the graph. The producer
+# counts any disclosed row as evidence a manager filed, so both are answered from the
+# selected holdings before the option filter below. A manager that discloses options only
+# has filed; reading coverage off the filtered frame would make this notebook step back
+# from, or reject, a quarter the producer used, and the parity assertion at the end would
+# then compare two different quarters.
+disclosed_df = holdings_df
 option_rows = holdings_df.filter(
     pl.col("put_call").fill_null("").cast(pl.Utf8).str.strip_chars() != ""
 ).height
@@ -160,8 +168,10 @@ holdings_df = holdings_df.with_columns(
 # A reporting quarter becomes available only after the last included manager
 # files. Duplicate CIK/CUSIP rows in an information table are summed rather than
 # selected positionally.
-quarter_availability = holdings_df.group_by("report_period").agg(
-    pl.col("filing_date").max().alias("timestamp")
+quarter_availability = (
+    disclosed_df.with_columns(pl.col("report_date").alias("report_period"))
+    .group_by("report_period")
+    .agg(pl.col("filing_date").max().alias("timestamp"))
 )
 
 # %% [markdown]
@@ -196,9 +206,10 @@ positions_df = (
 # quarter holds the early filers only, and their peers' absence would read as a
 # mass exit rather than as missing coverage. The downloader applies the same rule,
 # so this is also what keeps the reconstruction below equal to its artifacts.
-covered_ciks = holdings_df["cik"].n_unique()
+covered_ciks = disclosed_df["cik"].n_unique()
 complete_periods = (
-    positions_df.group_by("report_period")
+    disclosed_df.with_columns(pl.col("report_date").alias("report_period"))
+    .group_by("report_period")
     .agg(pl.col("cik").n_unique().alias("n_ciks"))
     .filter(pl.col("n_ciks") == covered_ciks)["report_period"]
     .to_list()
@@ -849,6 +860,16 @@ if len(latest_holdings) > 0:
             .sort("cusip")
         )
         print("Added momentum features")
+    else:
+        # With one complete quarter there is nothing to compare against, and the producer
+        # emits both columns anyway - 0.0 and null - so an artifact built with
+        # `--num-filings 1` has the same schema as any other. Skipping them here left the
+        # parity assertion below comparing a frame two columns short.
+        stock_features = stock_features.with_columns(
+            pl.lit(0.0, dtype=pl.Float64).alias("inst_value_change_usd"),
+            pl.lit(None, dtype=pl.Float64).alias("inst_pct_change"),
+        ).sort("cusip")
+        print("Single complete quarter: momentum columns emitted as 0.0 / null")
 
     display(stock_features.head(10))
 
