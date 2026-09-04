@@ -169,7 +169,7 @@ evaluation:
   holdout_end: "2025-12-31"
   calendar: FX
   periods_per_year: 1560     # ~252 * 6 H4 bars / trading week; revise if weekend policy differs
-  status: provisional_pending_h4_feasibility
+  status: h4_provisional_ok   # Stage 1c: full breadth on common window; h6 exceedance ~80%
 
 modeling:
   baseline:

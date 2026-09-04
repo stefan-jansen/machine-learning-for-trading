@@ -25,7 +25,8 @@ git push fork fx-research
 ## Setup
 
 - Project root: this folder
-- Files: `mt5_client.py`, `test_connection.py`, `.gitignore`, `README.md`, `config/setup.yaml`
+- Files: `mt5_client.py`, `test_connection.py`, `load_config.py`, `probe_symbols.py`, `pull_ohlcv_h4.py`, `feasibility_h4.py`, `.gitignore`, `README.md`, `config/setup.yaml`
+- `feasibility_h4.py` — breadth + cost exceedance on pulled H4 (no MT5 needed)
 - Linux Python needs `mt5linux` (do **not** use system `/usr/bin/python` 3.14)
 - Reuse the existing MQL-PYTHON venv (Python 3.12 + `mt5linux==1.0.11`):
 
@@ -87,7 +88,35 @@ cd "/run/media/me2/shared-data/vaults/PKM/02 - Projects/machine-learning-for-tra
 
 **Status:** complete — config + README on `fx-research` / `fork`
 
+### Stage 1 — Symbol probe + H4 OHLCV pull
+
+**Goal:** Confirm FTMO symbol names, then pull H4 bars (no labels yet).
+
+**Files:**
+- `load_config.py` — read `config/setup.yaml`, connect via `mt5_client`
+- `probe_symbols.py` — resolve universe → `data/symbol_map.csv`
+- `pull_ohlcv_h4.py` — H4 bars → `data/ohlcv_h4/{symbol}.csv`
+- `feasibility_h4.py` — breadth + cost exceedance (offline on CSVs)
+
+**How to run** (bridge up for probe/pull; feasibility is offline):
+
+```bash
+cd "/run/media/me2/shared-data/vaults/PKM/02 - Projects/machine-learning-for-trading/PKM/FX Strategy Research"
+"$MQL_PY" probe_symbols.py
+"$MQL_PY" pull_ohlcv_h4.py
+"$MQL_PY" feasibility_h4.py
+```
+
+**Runs (2026-09-04):**
+| Step | Result |
+|------|--------|
+| `probe_symbols.py` | **20/20** exact names (no suffix); spreads sampled on live ticks |
+| `pull_ohlcv_h4.py` | **20/20** H4 CSVs under `data/ohlcv_h4/` (~5000 bars each, common window ~2023-06-19 → 2026-09-04) |
+| `feasibility_h4.py` | common-window breadth **20/20**; median cost exceedance **h6=80.1%**, **h30=90.6%** → provisional **H4 keep** |
+
+**Status:** Stage 1 complete (probe + pull + feasibility). Data gitignored.
+
 ### Next (planned)
 
-- Stage 1: H4 feasibility (cost floor / breadth) + pull OHLCV into `data/ohlcv_h4/` (gitignored)
-- Confirm broker symbol suffixes (`EURUSD` vs `EURUSDm`) via `symbol_info`
+- Stage 2: labels `breakout` / `no_trade` (Donchian+ATR from `setup.yaml`, point-in-time)
+- Then baseline binary model checkpoint
