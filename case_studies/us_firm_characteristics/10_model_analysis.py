@@ -1143,19 +1143,27 @@ else:
 # ### Calibration: Are Prediction Intervals Honest?
 #
 # An information coefficient says whether the ordering is right. It says nothing about
-# whether a model knows how wrong it is likely to be. Split-conformal prediction (Vovk
-# and co-authors, 2005; Lei and co-authors, 2018) gives a distribution-free check:
-# take the absolute residuals from one fold as a calibration sample, read off the
-# quantile at the nominal level, and use it to build an interval around every
-# prediction in the remaining folds. If the method is honest, the true label falls
-# inside that interval at close to the nominal rate.
+# whether a model knows how wrong it is likely to be. The width measured here is the one
+# the `conformal_weighted` allocator sizes positions with: calibrated per firm on every
+# absolute residual known at `t - h`, where `h` is this label's horizon in data steps,
+# falling back to a quantile pooled over every firm where one has too few residuals of
+# its own. A decision is covered when its absolute residual falls inside that half-width,
+# and `n_uncalibrated` counts the decisions that cleared no warm-up.
 #
 # Two numbers follow. Empirical coverage below nominal means the intervals are too
 # narrow and the model is overconfident. Empirical coverage above nominal means the
 # opposite, which is safer but wasteful. Width, reported as a multiple of the standard
-# deviation of realised returns so families on different scales can be compared, is
-# what separates two models that both cover correctly: the one with narrower intervals
-# at the same coverage is saying more.
+# deviation of the outcomes it was measured against so families on different scales can
+# be compared, is what separates two models that both cover correctly: the one with
+# narrower intervals at the same coverage is saying more.
+#
+# Read it as a diagnostic of residual dispersion rather than a guarantee. Split
+# conformal's finite-sample coverage (Vovk and co-authors, 2005; Lei and co-authors,
+# 2018) needs the calibration and evaluation residuals to be exchangeable and return
+# residuals are not, and nothing in the allocation path reads an interval or a coverage
+# level. Each row is the family's highest-IC configuration for the primary label, which
+# is a model-level ranking and not the funnel's - every selection stage ranks on
+# validation backtest Sharpe - used here because this runs before any backtest exists.
 
 # %%
 conformal_df = conformal_coverage_diagnostic(CASE_STUDY, label=PRIMARY_LABEL)

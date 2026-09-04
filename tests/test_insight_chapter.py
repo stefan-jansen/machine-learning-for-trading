@@ -129,9 +129,18 @@ def test_selected_prediction_conformal_coverage_defaults_to_the_reviewed_horizon
     )
     assert defaulted.equals(explicit)
 
-    with pytest.raises(insight_chapter.RegistrySelectionError, match="missing conformal fields"):
+    # A row with no `label` falls back to the training spec, which names the same one.
+    # `us_equities_panel/15_model_analysis` builds exactly that row: it attaches the label to
+    # the frame this returns rather than to the dict it passes in.
+    unlabelled = {key: value for key, value in row.items() if key != "label"}
+    unlabelled["spec_json"] = json.dumps({**_TWO_FOLD_SPEC, "label": "fwd_ret_5d"})
+    assert insight_chapter.conformal_coverage_for_selected_prediction(
+        unlabelled, levels=(0.80,)
+    ).equals(explicit)
+
+    with pytest.raises(insight_chapter.RegistrySelectionError, match="names a label"):
         insight_chapter.conformal_coverage_for_selected_prediction(
-            {key: value for key, value in row.items() if key != "label"}, levels=(0.80,)
+            unlabelled | {"spec_json": json.dumps(_TWO_FOLD_SPEC)}, levels=(0.80,)
         )
 
 

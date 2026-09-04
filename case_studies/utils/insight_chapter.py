@@ -349,14 +349,15 @@ def conformal_coverage_for_selected_prediction(
     :func:`~case_studies.utils.conformal.walk_forward_conformal_coverage`, which also states
     why the figure is a diagnostic of residual dispersion rather than a guarantee.
 
-    ``embargo_steps`` defaults to the reviewed horizon for this row's case study and label,
-    which is why ``label`` is now required of the selected row.
+    ``embargo_steps`` defaults to the reviewed horizon for this row's case study and label.
+    The label is taken from the selected row where it carries one and from the training spec
+    otherwise - `us_equities_panel/15_model_analysis` attaches it to the returned frame rather
+    than to the row it passes, and both know the same label.
     """
     required = {
         "case_study",
         "family",
         "config_name",
-        "label",
         "prediction_hash",
         "spec_json",
     }
@@ -407,7 +408,14 @@ def conformal_coverage_for_selected_prediction(
             f"expected fold IDs {list(range(n_folds))}, observed {fold_ids}"
         )
     if embargo_steps is None:
-        embargo_steps = holdout_conformal_embargo_steps(selected["case_study"], selected["label"])
+        label = selected.get("label") or spec.get("label")
+        if not label:
+            raise RegistrySelectionError(
+                f"{selected['case_study']}/{selected['prediction_hash']}: neither the selected "
+                "row nor its training spec names a label, so no reviewed conformal embargo "
+                "can be resolved"
+            )
+        embargo_steps = holdout_conformal_embargo_steps(selected["case_study"], label)
     try:
         coverage_rows = walk_forward_conformal_coverage(
             predictions, levels=levels, embargo_steps=embargo_steps
