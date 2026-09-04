@@ -852,6 +852,11 @@ def register_prediction_set(
                 or _sampling_reduced(parent_spec_json)
             ),
         )
+    # Before coverage, not after. `schema_json` records the dtypes of the frame handed in
+    # and the immutability check compares one checkpoint's against another's, so
+    # normalizing later would store a naive schema beside a UTC-aware parquet and make two
+    # equivalent checkpoints disagree on nothing but the zone.
+    predictions = _timestamps_as_utc(predictions)
     coverage = None
     if identity_version in SUPPORTED_IDENTITY_VERSIONS:
         if predictions is None or expected_keys is None:
@@ -894,7 +899,7 @@ def register_prediction_set(
 
         from case_studies.utils.artifact_digest import value_digest
 
-        normalized_predictions = _timestamps_as_utc(
+        normalized_predictions = (
             predictions if isinstance(predictions, pl.DataFrame) else pl.from_pandas(predictions)
         )
         prediction_artifact_digest = value_digest(normalized_predictions)
@@ -984,7 +989,7 @@ def register_prediction_set(
         # Save predictions
         if predictions is not None:
             pred_dir = _prediction_dir(case_dir, p_hash)
-            _save_parquet(pred_dir / "predictions.parquet", _timestamps_as_utc(predictions))
+            _save_parquet(pred_dir / "predictions.parquet", predictions)
 
         # Insert into DB
         db = _open_registry(case_dir)

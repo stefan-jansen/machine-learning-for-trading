@@ -1,5 +1,9 @@
+import tempfile
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
+import polars as pl
 import pytest
 import torch
 
@@ -152,3 +156,63 @@ def test_save_dir_none_selects_through_the_decision_time_path():
     pooled = (3 * fold_ics[0] + 30 * fold_ics[1]) / 33
     assert reported == pytest.approx(pooled, abs=5e-3)
     assert reported != pytest.approx(float(np.mean(fold_ics)), abs=5e-3)
+
+
+def test_a_config_with_fold_ics_and_no_predictions_refuses_rather_than_averaging(monkeypatch):
+    """The reachable remnant of the removed fallback: flushed predictions that never came back.
+
+    `run_tabm_cv` used to build `checkpoint_metrics` from the mean of the per-fold ICs there,
+    which weights a three-day fold like a thirty-day one and reports a different best epoch
+    than the registry's. There is no checkpoint metric to compute from fold ICs, so the run
+    stops instead.
+    """
+    import case_studies.utils.tabular_dl as tabular_dl
+
+    # The incremental predictions are written and read back through this one function;
+    # returning nothing is what a config whose flush produced no readable file looks like.
+    monkeypatch.setattr(
+        tabular_dl, "_load_incremental_preds_for_config", lambda incr_dir, key: pl.DataFrame()
+    )
+
+    n_days, n_symbols = 120, 20
+    timestamps = pd.date_range("2020-01-01", periods=n_days, freq="D")
+    rng = np.random.default_rng(3)
+    dataset = pd.DataFrame(
+        {
+            "timestamp": np.repeat(timestamps, n_symbols),
+            "symbol": np.tile([f"S{i}" for i in range(n_symbols)], n_days),
+            "feature": rng.normal(size=n_days * n_symbols),
+        }
+    )
+    dataset["target"] = dataset["feature"] * 0.3 + rng.normal(scale=0.5, size=len(dataset))
+    splits = [
+        {
+            "fold": 0,
+            "train_start": timestamps[0],
+            "train_end": timestamps[79],
+            "val_start": timestamps[80],
+            "val_end": timestamps[109],
+        }
+    ]
+    configs = [
+        {
+            "config_name": "tabm_test",
+            "params": {"hidden_dim": 4, "n_members": 2, "dropout": 0.0},
+            "n_epochs": 2,
+            "batch_size": 32,
+            "checkpoint_interval": 1,
+        }
+    ]
+
+    with pytest.raises(RuntimeError, match="no predictions to score"):
+        run_tabm_cv(
+            dataset,
+            splits,
+            configs=configs,
+            n_features=1,
+            feature_names=["feature"],
+            label_col="target",
+            date_col="timestamp",
+            device="cpu",
+            save_dir=Path(tempfile.mkdtemp()),
+        )

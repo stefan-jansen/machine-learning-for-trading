@@ -72,3 +72,98 @@ def test_without_force_a_matching_holdout_is_still_loaded(calls, monkeypatch) ->
     _HOLDOUT.generate_holdout("nasdaq100_microstructure", force=False, verbose=False)
 
     assert calls == ["load"]
+
+
+def _registry_with_a_holdout(tmp_path):
+    """The parent/child shape the delete has to walk, with the two FKs it used to miss."""
+    import sqlite3
+
+    case_dir = tmp_path / "cs"
+    (case_dir / "run_log").mkdir(parents=True)
+    db = sqlite3.connect(case_dir / "run_log" / "registry.db")
+    db.executescript(
+        """
+        CREATE TABLE prediction_sets (prediction_hash TEXT PRIMARY KEY, split TEXT);
+        CREATE TABLE prediction_coverage (
+            prediction_hash TEXT PRIMARY KEY
+                REFERENCES prediction_sets(prediction_hash));
+        CREATE TABLE prediction_metrics (
+            prediction_hash TEXT REFERENCES prediction_sets(prediction_hash));
+        CREATE TABLE fold_metrics (
+            prediction_hash TEXT REFERENCES prediction_sets(prediction_hash));
+        CREATE TABLE backtest_runs (
+            backtest_hash TEXT PRIMARY KEY,
+            prediction_hash TEXT REFERENCES prediction_sets(prediction_hash));
+        CREATE TABLE backtest_metrics (
+            backtest_hash TEXT REFERENCES backtest_runs(backtest_hash));
+        CREATE TABLE backtest_fold_metrics (
+            backtest_hash TEXT REFERENCES backtest_runs(backtest_hash));
+        CREATE TABLE backtest_paired_metrics (
+            challenger_hash TEXT REFERENCES backtest_runs(backtest_hash),
+            benchmark_hash TEXT);
+        CREATE TABLE cohort_metrics (
+            leader_hash TEXT REFERENCES backtest_runs(backtest_hash));
+
+        INSERT INTO prediction_sets VALUES ('p_hold', 'holdout');
+        INSERT INTO prediction_sets VALUES ('p_val', 'validation');
+        INSERT INTO prediction_coverage VALUES ('p_hold');
+        INSERT INTO prediction_coverage VALUES ('p_val');
+        INSERT INTO prediction_metrics VALUES ('p_hold');
+        INSERT INTO fold_metrics VALUES ('p_hold');
+        INSERT INTO backtest_runs VALUES ('b_hold', 'p_hold');
+        INSERT INTO backtest_metrics VALUES ('b_hold');
+        INSERT INTO backtest_fold_metrics VALUES ('b_hold');
+        INSERT INTO backtest_paired_metrics VALUES ('b_hold', 'other');
+        INSERT INTO backtest_paired_metrics VALUES ('other', 'b_hold');
+        INSERT INTO cohort_metrics VALUES ('b_hold');
+        """
+    )
+    db.commit()
+    db.close()
+    return case_dir
+
+
+def test_deleting_a_holdout_clears_every_row_the_schema_points_at(tmp_path, monkeypatch) -> None:
+    """`prediction_coverage` and `cohort_metrics` were missing from the hand-written list.
+
+    Both are declared foreign keys into the rows being deleted, so with
+    `PRAGMA foreign_keys=ON` every registered holdout raised
+    `sqlite3.IntegrityError: FOREIGN KEY constraint failed`. Reproduced on a copy of
+    cme_futures' production registry (holdout 18d48c3b9cc2) before the fix.
+    """
+    import sqlite3
+
+    case_dir = _registry_with_a_holdout(tmp_path)
+    monkeypatch.setattr(_HOLDOUT, "get_case_study_dir", lambda cs_id, **kwargs: case_dir)
+
+    assert _HOLDOUT.delete_holdout_predictions("cs") == 1
+
+    db = sqlite3.connect(case_dir / "run_log" / "registry.db")
+    counts = {
+        table: db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in (
+            "prediction_sets",
+            "prediction_coverage",
+            "prediction_metrics",
+            "fold_metrics",
+            "backtest_runs",
+            "backtest_metrics",
+            "backtest_fold_metrics",
+            "backtest_paired_metrics",
+            "cohort_metrics",
+        )
+    }
+    assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+    db.close()
+
+    # The validation prediction and its coverage row are untouched.
+    assert counts["prediction_sets"] == 1
+    assert counts["prediction_coverage"] == 1
+    assert counts["prediction_metrics"] == 0
+    assert counts["fold_metrics"] == 0
+    assert counts["backtest_runs"] == 0
+    assert counts["backtest_metrics"] == 0
+    assert counts["backtest_fold_metrics"] == 0
+    # Both the challenger row and the benchmark row referencing the holdout backtest.
+    assert counts["backtest_paired_metrics"] == 0
+    assert counts["cohort_metrics"] == 0
