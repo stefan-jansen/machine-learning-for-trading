@@ -905,6 +905,7 @@ jobs:
             tests/test_eoa_universe_roster.py \
             tests/test_fixture_registry_identity.py \
             tests/test_reduced_universe_is_shared.py \
+            tests/test_fixture_manifest_matches_builders.py \
             -m "not production_extract" \
             -v --tb=short -rs --junitxml=unit-data.xml
       # A skip here is a failure: these tests run in this job and nowhere else,
