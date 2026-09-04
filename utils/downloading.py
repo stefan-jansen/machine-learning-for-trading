@@ -388,10 +388,15 @@ def last_complete_daily_bar(
 
         DataValidationError: yahoo: Column 'open' contains 1 null values
 
-    So a daily fetch whose window reaches the current exchange date raises, on a
-    reader's machine as much as in CI, at any hour of any trading day. The bound
-    is the calendar date before it. When that date is a weekend or a holiday the
-    vendor returns the last session before it, which is the same bound.
+    The window that costs is the one after the close. Measured against the public
+    repository's `ch02-03` job across 2026-09-02 and 2026-09-03: green on every run
+    started between 02:53Z and 20:29Z, red on every run started between 23:55Z and
+    02:21Z. During the session the vendor returns no row for the current date at
+    all; from the 16:00 New York close until the bar consolidates - some six hours,
+    every trading day - it returns the volume-only row, on a reader's machine as
+    much as on a runner. The bound is the calendar date before the current exchange
+    date. When that date is a weekend or a holiday the vendor returns the last
+    session before it, which is the same bound.
 
     Exchange time, not UTC: at 22:00 in New York the UTC date is already
     tomorrow, so a UTC-derived bound still asks for the session that just closed

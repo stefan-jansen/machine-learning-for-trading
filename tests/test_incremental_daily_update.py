@@ -8,10 +8,15 @@ consolidates hours after the close, and ml4t-data's provider raises on it:
 
     DataValidationError: yahoo: Column 'open' contains 1 null values
 
-That is not vendor flakiness on one day and it is not a property of CI - it is
-every weekday, on a reader's machine as much as on a runner. The fix is the
-bound in `utils.downloading.last_complete_daily_bar`, exercised here without a
-network so the rule can fail in a test rather than only against a live vendor.
+That is not vendor flakiness on one day and it is not a property of CI. The row
+appears at the 16:00 New York close and stays until the daily bar consolidates
+some six hours later: across 2026-09-02 and 2026-09-03 the `ch02-03` job was
+green on every run started between 02:53Z and 20:29Z and red on every run
+started between 23:55Z and 02:21Z. A reader in Europe meets it every morning.
+
+The fix is the bound in `utils.downloading.last_complete_daily_bar`, exercised
+here without a network so the rule can fail in a test rather than only against a
+live vendor.
 """
 
 from __future__ import annotations
