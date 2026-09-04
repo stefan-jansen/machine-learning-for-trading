@@ -13,6 +13,7 @@ here rather than only on a Windows runner.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 
@@ -36,12 +37,15 @@ class _Stream:
         self.calls.append(kwargs)
 
 
-def _run(code: str, encoding: str | None) -> subprocess.CompletedProcess:
-    env = {"PATH": "", "SystemRoot": ""}
-    if encoding is not None:
-        env["PYTHONIOENCODING"] = encoding
+def _run(code: str, encoding: str) -> subprocess.CompletedProcess:
+    # `-S` skips `site`, which is what imports `sitecustomize`. Without it this checkout's
+    # own hook would run first and apply the fix on Windows, so the test meant to reproduce
+    # the failure would pass by never reaching it - green on every platform but the one
+    # under repair. The environment is inherited rather than replaced because Windows needs
+    # `SystemRoot` to start an interpreter at all.
+    env = {**os.environ, "PYTHONIOENCODING": encoding}
     return subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, env=env, check=False
+        [sys.executable, "-S", "-c", code], capture_output=True, text=True, env=env, check=False
     )
 
 
