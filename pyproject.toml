@@ -28,8 +28,11 @@ dependencies = [
     # kaleido>=1.0: 0.2.1 bundled its own Chromium but drives the deprecated
     # plotly.io.kaleido.scope.* API, which plotly 6.x emits DeprecationWarnings for
     # (support removed after Sept 2025). 1.x drives a system/self-provisioned Chrome
-    # (kaleido_get_chrome) and is warning-clean. Static PNG export is used only at
-    # figure-production time; reader-runtime kaleido calls (nb 21) already try/except.
+    # (kaleido_get_chrome) and is warning-clean. The default renderer is
+    # `plotly_mimetype+png`, so every `fig.show()` is a kaleido call and PNG export is a
+    # reader-runtime path, not only a figure-production one. Two things carry that:
+    # `utils/__init__` drops the `+png` half where no Chrome is resolvable, and
+    # `envs/ml4t/Dockerfile` installs Chrome for Testing so the image does resolve one.
     "kaleido>=1.3",
     # ===================
     # Machine Learning
