@@ -542,16 +542,22 @@ display(
 # %% [markdown]
 # ### 4b. Cross-fitted OOF fold calibration at the 90 % nominal level
 #
-# The oldest out-of-fold validation window calibrates a symmetric
-# absolute-residual quantile and the return scale. The diagnostic measures
-# empirical coverage on the later OOF windows at each nominal level. A
-# well-calibrated DL signal sits near the diagonal
-# (empirical coverage = nominal level); points below the diagonal indicate
-# the prediction interval is too narrow, points above indicate it is too
-# wide. Per-CS interval width is reported in calibration-window return
-# standard-deviation units. Because each OOF fold can come from a different
-# fitted model, this is a retrospective cross-fitted diagnostic, not a
-# same-model inductive split-conformal or operational coverage guarantee.
+# The width measured here is the one the `conformal_weighted` allocator sizes
+# positions with: calibrated per symbol on every residual known at `t - h`,
+# where `h` is that label's horizon in data steps, falling back to a quantile
+# pooled over every symbol where one has too few residuals of its own. A
+# decision is covered when its absolute residual falls inside that half-width.
+# A well-calibrated DL signal sits near the diagonal (empirical coverage =
+# nominal level); points below indicate the interval is too narrow, points
+# above that it is too wide. Per-CS interval width is reported in units of the
+# standard deviation of the outcomes it was measured against, so case studies
+# trading different return magnitudes stay comparable.
+#
+# Read it as a diagnostic of residual dispersion, not a guarantee. Split
+# conformal's finite-sample coverage needs the calibration and evaluation
+# residuals to be exchangeable and return residuals are not, each OOF fold can
+# come from a different fitted model, and nothing in the allocation path reads
+# an interval or a coverage level.
 
 # %%
 conformal_rows = []
