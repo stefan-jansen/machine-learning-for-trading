@@ -2626,28 +2626,58 @@ case_studies/sp500_options/11_model_analysis:
 case_studies/sp500_options/12_backtest:
   # MAX_SYMBOLS and TOP_K are gone: the notebook takes its concentration grid from
   # setup.yaml and its universe from the signal, and neither name is bound any more.
-  # A preview run needs WORKSPACE plus the exact PREVIEW_PREDICTION_HASHES of a preview
-  # model run, because a backtest population is defined by the prediction sets it names
-  # and never by registry presence. The fixture has no preview model run to name, so
-  # there is nothing for this notebook to resolve until one exists.
-  awaiting_rebuild:
-    needs: {of: sp500_options, backtest_stage: signal}
-    issue: 499
+  #
+  # This entry used to be an `awaiting_rebuild` declaration, and it was the wrong shape.
+  # The condition it declared was measured against ML4T_ARTIFACT_ROOT, which is the
+  # maintainer's registry and not the seeded one this job runs against, so it read as unmet
+  # on a runner and as satisfied on any workstation that had run the models - skipping in CI
+  # and failing `test_awaiting_rebuild` locally at the same time. What was actually missing
+  # was a way to name a preview run's prediction sets: the notebook took literal
+  # PREVIEW_PREDICTION_HASHES, and a hash is a property of the run that produced it, so
+  # nothing could declare one ahead of time.
+  #
+  # The notebook now selects them declaratively, the same way cme_futures/13_backtest does,
+  # and the preview stages above register the predictions it selects from. So there is
+  # nothing to skip: the notebook runs.
+  #
+  # PREVIEW_MAX_PREDICTIONS is the preview's own width. The canonical run trades every
+  # member of four named populations; the preview trades four prediction sets of the one
+  # declared label, which is enough for the shortlist the next stage takes from it.
+  parameters:
+    PREVIEW_LABELS: [ret_to_expiry]
+    PREVIEW_MAX_PREDICTIONS: 4
+  timeout: 900
 case_studies/sp500_options/13_portfolio_management:
-  awaiting_rebuild:
-    needs: {of: sp500_options, backtest_stage: signal}
-    issue: 500
+  # PREVIEW_MAX_BASELINE_CONFIGS is the preview's own shortlist width, and it counts model
+  # configurations rather than backtest rows: the baseline stage registers one row per
+  # concentration, so a row limit would spend the whole budget inside the first
+  # configuration's k grid and hand this notebook a shortlist with one model in it. The
+  # canonical width is setup.yaml's top_n_predictions.allocation and is 10, which a preview
+  # baseline stage capped at four prediction sets cannot supply.
+  parameters:
+    PREVIEW_LABELS: [ret_to_expiry]
+    PREVIEW_MAX_BASELINE_CONFIGS: 2
+  timeout: 900
 case_studies/sp500_options/14_risk_management:
-  awaiting_rebuild:
-    needs: {of: sp500_options, backtest_stage: allocation}
-    issue: 502
+  # Not `awaiting_rebuild`, and not runnable as a preview either. The notebook opens the
+  # canonical candidate set `sp500-options-strategy-candidates-v1` and refuses any other
+  # tier on its first cell, because what it validates is the boundary the *finalized* pool
+  # passes through. `13_portfolio_management` creates that set only in a canonical run -
+  # `CandidateSet.create` refuses a preview member - so a preview of this notebook has
+  # nothing to open. Same shape as `11_model_analysis` above and stated the same way: the
+  # condition is a property of the seeded fixture, and `awaiting_rebuild` can only express
+  # conditions over the maintainer's registry.
+  skip: true
+  skip_reason: "Opens the canonical candidate set `sp500-options-strategy-candidates-v1` and refuses a preview tier, and a preview run of 13_portfolio_management cannot create one (`CandidateSet.create` refuses a preview member). Runnable when the fixture registry ships that candidate set."
 case_studies/sp500_options/15_costs:
-  # An empty entry between two skipped siblings, which read as deliberate and did nothing. A
-  # preview run needs WORKSPACE plus the exact PREVIEW_BASELINE_HASHES of preview backtests, and
-  # those are 12_backtest's output - the same dependency 13 and 14 declare, one stage further on.
-  awaiting_rebuild:
-    needs: {of: sp500_options, backtest_stage: signal}
-    issue: 501
+  # The same conversion as 13 above, one stage further on: this notebook read literal
+  # PREVIEW_BASELINE_HASHES and now selects the preview baselines by label. One
+  # representative per family is what the canonical run prices, and two configurations is
+  # what the preview baseline stage above can supply.
+  parameters:
+    PREVIEW_LABELS: [ret_to_expiry]
+    PREVIEW_MAX_BASELINE_CONFIGS: 2
+  timeout: 900
 case_studies/sp500_options/16_holdout_predictions:
   # Canonical, not preview. `reconstruct_locked_model_request` refuses any spec whose
   # execution_tier is not canonical, and the harness injects EXECUTION_TIER="preview" for any
@@ -2668,9 +2698,16 @@ case_studies/sp500_options/17_holdout_backtest:
   skip: true
   skip_reason: "Derives which holdout prediction set to trade through the same `build_holdout_training_spec` call 16 makes, so it refuses for the same reason and one step earlier. The seeded fixture carries no resolved training specification, so the holdout fold cannot be derived. It would refuse a second time even if that were fixed: the option path resolves short straddles against the raw AlgoSeek chain and replays that resolution in a fresh interpreter, and the fixture carries neither. Remove this skip when the fixture seeds a resolved computation and an option chain, not before."
 case_studies/sp500_options/18_strategy_analysis:
-  awaiting_rebuild:
-    needs: {of: sp500_options, backtest_stage: allocation}
-    issue: 503
+  # Not `awaiting_rebuild`, for the reason recorded on 11_model_analysis and 14 above: it
+  # resolves the named official populations `sp500-options-baseline-validation-v1` and
+  # `sp500-options-cost-sensitivity-validation-v1` and calls `require_complete` on them, and
+  # a preview run cannot create an official population
+  # (research/population.py::_refuse_preview_activation). The condition is a property of the
+  # seeded fixture registry, which `awaiting_rebuild` cannot express - it reads
+  # ML4T_ARTIFACT_ROOT, so declaring it there turned this file red on every workstation that
+  # had run the models while still skipping here.
+  skip: true
+  skip_reason: "Resolves the named official baseline and cost-sensitivity populations and requires them complete, and a preview run cannot create one (research/population.py::_refuse_preview_activation). Runnable when the fixture registry ships canonical populations under those names."
 case_studies/sp500_options/90_ic_diagnostic:
   # MAX_SYMBOLS was 5 while the notebook screens every cross-section at MIN_SYMBOLS_PER_DATE = 10,
   # so the cap guaranteed that no date could ever qualify - a reduction that made the run

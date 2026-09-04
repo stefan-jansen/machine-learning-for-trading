@@ -49,7 +49,11 @@ def _model_based_artifacts() -> list[Path]:
 @pytest.mark.parametrize("artifact", _model_based_artifacts(), ids=lambda p: p.parent.parent.name)
 def test_fold_resolution_yields_unique_join_keys(artifact: Path) -> None:
     """Restricting each fold to its validation window leaves one row per join key."""
-    from utils.artifact_specs import load_setup_config, resolve_label_buffer
+    from utils.artifact_specs import (
+        load_setup_config,
+        resolve_label_buffer,
+        resolve_label_buffer_unit,
+    )
     from utils.cv_splits import generate_cv_splits
 
     case_study = artifact.parent.parent.name
@@ -66,10 +70,16 @@ def test_fold_resolution_yields_unique_join_keys(artifact: Path) -> None:
     if not label_path.exists():
         pytest.skip(f"{case_study}: no label artifact at {label_path.name}")
 
+    # `buffer_unit` as well as the buffer. `generate_cv_splits` defaults it to `sessions`,
+    # so omitting it derives the folds under the session reading whatever the case study
+    # declares - which is the exact defect ml4t/agent-workspace#1022 was about, and this test
+    # would have compared a calendar-buffered artifact against session-derived windows and
+    # called the difference an alignment failure.
     splits = generate_cv_splits(
         pl.scan_parquet(label_path).select(date_col).unique().sort(date_col).collect(),
         case_study_id=case_study,
         label_buffer=resolve_label_buffer(case_study, primary, setup),
+        buffer_unit=resolve_label_buffer_unit(case_study, primary, setup),
     )
     windows = {int(s["fold"]): (s["val_start"], s["val_end"]) for s in splits}
     ts_dtype = schema[date_col]

@@ -84,6 +84,7 @@ from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_ser
 from case_studies.sp500_options._underlying_returns import reconcile_underlying_log_returns
 from case_studies.utils.artifact_digest import read_digest, value_digest, write_artifact
 from data import load_sp500_daily_bars, load_sp500_options_straddles
+from utils.artifact_specs import resolve_label_buffer_unit
 from utils.cv_splits import generate_cv_splits, load_evaluation_config
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
@@ -177,12 +178,18 @@ _eval = load_evaluation_config(STRATEGY_ID)
 holdout_start = str(_eval["holdout_start"])
 holdout_end = str(_eval["holdout_end"])
 label_buffer = str(_setup["labels"]["buffer"])
+# What that buffer counts. `ret_to_expiry` resolves on an expiration date, so `setup.yaml`
+# declares `labels.buffer_unit: calendar`; `generate_cv_splits` defaults to sessions, and a
+# caller that does not pass the declaration silently gets fold boundaries that disagree with
+# the ones `utils/modeling.py` fits on.
+label_buffer_unit = resolve_label_buffer_unit(STRATEGY_ID, str(_setup["labels"]["primary"]), _setup)
 LABEL_HORIZON_TRADING_DAYS = int(_setup["features"]["hold_sessions"])
 PERIODS_PER_YEAR = int(_eval["periods_per_year"])
 cv_folds = generate_cv_splits(
     features.select("timestamp"),
     case_study_id=STRATEGY_ID,
     label_buffer=label_buffer,
+    buffer_unit=label_buffer_unit,
 )
 data_start = features["timestamp"].min()
 # The pass fitted on everything before the holdout is written as one more fold, numbered after the
@@ -191,7 +198,7 @@ data_start = features["timestamp"].min()
 HOLDOUT_FOLD = len(cv_folds)
 holdout_train_end = (date.fromisoformat(holdout_start) - timedelta(days=1)).isoformat()
 
-print(f"Label buffer between training and validation: {label_buffer}")
+print(f"Label buffer between training and validation: {label_buffer} ({label_buffer_unit})")
 print(f"Holding period: {LABEL_HORIZON_TRADING_DAYS} NYSE sessions")
 print(f"\nCross-validation folds: {len(cv_folds)}")
 for fold in cv_folds:
