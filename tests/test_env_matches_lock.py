@@ -19,6 +19,9 @@ import sys
 import tomllib
 from pathlib import Path
 
+from packaging.requirements import Requirement
+from packaging.version import Version
+
 REPO_ROOT = Path(__file__).parent.parent
 _spec = importlib.util.spec_from_file_location(
     "check_env_matches_lock", REPO_ROOT / ".github" / "scripts" / "check_env_matches_lock.py"
@@ -115,17 +118,28 @@ def test_the_repository_lock_parses_and_pins_the_ml4t_libraries() -> None:
 
 
 def test_every_declared_ml4t_floor_is_satisfied_by_the_lock() -> None:
-    """pyproject states a reason for each ml4t-* floor; the lock has to clear it."""
+    """pyproject states a reason for each ml4t-* floor; the lock has to clear it.
+
+    Compared with `packaging`, not by splitting on dots: the versions that matter
+    here are prereleases, and the filed instance was 0.1.0a4 against a 0.1.0a6
+    floor - two versions a numeric-component comparison reads as equal.
+    """
     project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
     locked = check.locked_versions(REPO_ROOT / "uv.lock")
-    floors = [
-        dep.split(">=")
-        for dep in project["project"]["dependencies"]
-        if dep.startswith("ml4t-") and ">=" in dep
+    requirements = [
+        Requirement(dep) for dep in project["project"]["dependencies"] if dep.startswith("ml4t-")
     ]
-    assert floors, "no ml4t-* floor found in pyproject dependencies"
-    for name, floor in floors:
-        got = locked[check.canonical(name)]
-        assert tuple(int(p) for p in got.split(".")[:3] if p.isdigit()) >= tuple(
-            int(p) for p in floor.split(".")[:3] if p.isdigit()
-        ), f"uv.lock resolves {name} {got}, below the declared floor {floor}"
+    assert requirements, "no ml4t-* dependency found in pyproject"
+    for requirement in requirements:
+        got = locked[check.canonical(requirement.name)]
+        assert requirement.specifier.contains(Version(got), prereleases=True), (
+            f"uv.lock resolves {requirement.name} {got}, "
+            f"which does not satisfy {requirement.specifier}"
+        )
+
+
+def test_the_floor_comparison_can_fail_on_a_prerelease() -> None:
+    """The filed instance, restated against the comparison that has to catch it."""
+    assert not Requirement("ml4t-models>=0.1.0a6").specifier.contains(
+        Version("0.1.0a4"), prereleases=True
+    )

@@ -81,6 +81,11 @@ class Dataset:
             directory.
         budget: Manifest ``subsets`` entry describing the reduction (e.g.
             ``{"max_entities": 200}``). Recorded verbatim in the manifest.
+        entities: ``{path: (column, count)}`` the built fixture has to carry, taken
+            from the builder's own constants. Checked against the data on disk, which
+            is the only place the drift shows: the manifest and the
+            ``nasdaq100_minute_bars`` builder agreed with each other on six symbols
+            while the fixture carried twelve, so comparing the two proved nothing.
     """
 
     name: str
@@ -88,6 +93,7 @@ class Dataset:
     build: Callable[[Path, Path], list[Path]]
     owns: tuple[Path, ...]
     budget: dict[str, object] = field(default_factory=dict)
+    entities: dict[str, tuple[str, int]] = field(default_factory=dict)
 
 
 # --- firm characteristics -----------------------------------------------------
@@ -466,37 +472,44 @@ def build_nasdaq100_minute_bars(source: Path, output: Path) -> list[Path]:
     if spacing != [timedelta(minutes=1)]:
         raise ValueError(f"fixture grid is not one-minute within a session: {sorted(spacing)}")
 
-    # Any year= directory already here is removed first. The loader globs
-    # '**/*.parquet' under the hive root, so a part left over from a previous
-    # generation is silently unioned into the panel rather than replaced - and a
-    # rebuild that narrows the universe or renames a part would leave the fixture
-    # reading two generations at once.
+    # Written to a staging directory and moved into place only once every part is
+    # written and under the blob limit. The hive root has to be emptied - the loader
+    # globs '**/*.parquet' under it, so a part left over from a previous generation
+    # is silently unioned into the panel rather than replaced - and emptying it
+    # before the build could leave the fixture with no bars at all, or with half a
+    # year, if a part turns out to be too large to push.
     root = output / NASDAQ100_MINUTE_DIR
-    if root.is_dir():
-        shutil.rmtree(root)
+    staging = root.parent / f"{root.name}.staging"
+    if staging.is_dir():
+        shutil.rmtree(staging)
 
-    written: list[Path] = []
+    staged: list[Path] = []
     for year, year_frame in frame.group_by(pl.col("date").dt.year(), maintain_order=True):
         sessions_in_year = year_frame["date"].unique().sort()
         blocks = _contiguous_session_blocks(sessions_in_year, NASDAQ100_MINUTE_PARTS_PER_YEAR)
         for index, block in enumerate(blocks):
             part = year_frame.filter(pl.col("date").is_in(block.implode()))
-            dst = root / f"year={year[0]}" / f"data-{index:02d}.parquet"
+            dst = staging / f"year={year[0]}" / f"data-{index:02d}.parquet"
             dst.parent.mkdir(parents=True, exist_ok=True)
             part.write_parquet(dst)
             size = dst.stat().st_size
             if size > NASDAQ100_MINUTE_MAX_BLOB_BYTES:
+                shutil.rmtree(staging)
                 raise ValueError(
-                    f"{dst} is {size / 1e6:.1f} MB, above GitHub's 100 MB blob limit. "
-                    f"Raise NASDAQ100_MINUTE_PARTS_PER_YEAR above "
+                    f"year={year[0]} part {index} is {size / 1e6:.1f} MB, above GitHub's "
+                    f"100 MB blob limit. Raise NASDAQ100_MINUTE_PARTS_PER_YEAR above "
                     f"{NASDAQ100_MINUTE_PARTS_PER_YEAR}."
                 )
             print(
                 f"    year={year[0]} part {index}: {len(part):,} rows ({size / 1e6:.1f} MB), "
                 f"{part['date'].n_unique()} sessions, {part['symbol'].n_unique()} symbols"
             )
-            written.append(dst)
-    return written
+            staged.append(dst)
+
+    if root.is_dir():
+        shutil.rmtree(root)
+    staging.rename(root)
+    return [root / path.relative_to(staging) for path in staged]
 
 
 # --- S&P 500 share bars and the option chains built on them -------------------
@@ -689,6 +702,13 @@ DATASETS: tuple[Dataset, ...] = (
             "raw_chain": "contracts entered by options_straddles_daily, full lifecycle",
             "min_surface_symbols_per_date": SP500_MIN_SURFACE_SYMBOLS_PER_DATE,
         },
+        # options_straddles_daily is deliberately not here: an underlying with no
+        # straddle meeting the pairing rule drops out of that panel, so it is a
+        # subset of the roster by construction rather than equal to it.
+        entities={
+            SP500_BARS.as_posix(): ("symbol", len(SP500_SYMBOLS)),
+            SP500_SURFACE.as_posix(): ("symbol", len(SP500_SYMBOLS)),
+        },
     ),
     Dataset(
         name="nasdaq100_minute_bars",
@@ -709,6 +729,9 @@ DATASETS: tuple[Dataset, ...] = (
             "bar_spacing": "1m (unchanged from production)",
             "parts_per_year": NASDAQ100_MINUTE_PARTS_PER_YEAR,
         },
+        entities={
+            NASDAQ100_MINUTE_DIR.as_posix(): ("symbol", len(NASDAQ100_MINUTE_SYMBOLS)),
+        },
     ),
     Dataset(
         name="firm_characteristics",
@@ -719,6 +742,13 @@ DATASETS: tuple[Dataset, ...] = (
         build=build_firm_characteristics,
         owns=(Path("equities") / "firm_characteristics",),
         budget={"max_entities": FIRM_CHAR_MAX_ENTITIES},
+        entities={
+            f"equities/firm_characteristics/firm_characteristics_{split}.parquet": (
+                "symbol",
+                FIRM_CHAR_MAX_ENTITIES,
+            )
+            for split, _, _ in FIRM_CHAR_SPLITS
+        },
     ),
     Dataset(
         name="institutional_holdings_13f",
@@ -1033,6 +1063,8 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.reconcile_manifest:
+        if args.dry_run:
+            parser.error("--dry-run and --reconcile-manifest are mutually exclusive")
         output = args.output.expanduser().resolve()
         manifest_path, report = reconcile_manifest(output)
         print(f"Manifest: {manifest_path}")

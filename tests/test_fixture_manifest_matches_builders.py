@@ -79,12 +79,18 @@ def test_every_unbuilt_fixture_records_why_it_has_none() -> None:
         assert fixture.entities, f"{fixture.name} declares nothing a test can measure"
 
 
-def test_the_nasdaq_builder_and_its_budget_name_the_same_symbols() -> None:
-    """The builder's literals and the budget it writes cannot drift apart."""
-    from tests.create_test_data import NASDAQ100_MINUTE_SYMBOLS
+def test_every_reducing_builder_declares_something_measurable() -> None:
+    """A builder with no `entities` is checked against nothing on the data side.
 
-    budget = declared_subsets()["nasdaq100_minute_bars"]
-    assert budget["symbols"] == list(NASDAQ100_MINUTE_SYMBOLS)
+    institutional_holdings_13f is the exemption and states it: it subsamples on no
+    axis, so there is no count to compare.
+    """
+    unmeasured = {
+        dataset.name
+        for dataset in DATASETS
+        if not dataset.entities and dataset.budget.get("subsample") != "none"
+    }
+    assert not unmeasured, f"{sorted(unmeasured)} declare no entity count to check"
 
 
 # --- the manifest against the declarations -----------------------------------
@@ -123,6 +129,77 @@ def test_every_file_the_manifest_lists_is_on_disk() -> None:
     assert not missing, f"{len(missing)} manifest paths are not on disk, e.g. {missing[:5]}"
 
 
+def _distinct(path: Path, column: str) -> int:
+    source = path / "**" / "*.parquet" if path.is_dir() else path
+    return pl.scan_parquet(source).select(pl.col(column).n_unique()).collect().item()
+
+
+def _declared_files(root: Path) -> dict[str, list[str]]:
+    """{dataset name: the files on disk under the paths it declares}."""
+    declared = {dataset.name: dataset.owns for dataset in DATASETS}
+    declared.update({fixture.name: fixture.covers for fixture in UNBUILT_FIXTURES})
+    found = {}
+    for name, paths in declared.items():
+        files = []
+        for declared_path in paths:
+            path = root / declared_path
+            if path.is_file():
+                files.append(path.relative_to(root).as_posix())
+            elif path.is_dir():
+                files += [f.relative_to(root).as_posix() for f in path.rglob("*") if f.is_file()]
+        found[name] = sorted(files)
+    return found
+
+
+@pytest.mark.parametrize(
+    "name", sorted({d.name for d in DATASETS} | {f.name for f in UNBUILT_FIXTURES})
+)
+def test_every_file_a_dataset_owns_is_listed_in_the_manifest(name: str) -> None:
+    """The other direction, and the one a recursive glob makes dangerous.
+
+    load_nasdaq100_bars globs '**/*.parquet' under its hive root, so a part left
+    behind by an earlier generation is unioned into the panel rather than replaced.
+    Manifest-to-disk membership cannot see that; disk-to-manifest can.
+    """
+    root = _fixture_root()
+    if not root.is_dir():
+        pytest.skip(f"no fixture root at {root}")
+    listed = set(_manifest()["files"])
+    unlisted = [rel for rel in _declared_files(root)[name] if rel not in listed]
+    assert not unlisted, (
+        f"{name} carries files the manifest does not list: {unlisted[:5]}. Either they are "
+        "left over from an earlier generation, or the manifest needs --reconcile-manifest."
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "rel", "column", "count"),
+    [
+        (dataset.name, rel, column, count)
+        for dataset in DATASETS
+        for rel, (column, count) in dataset.entities.items()
+    ],
+)
+def test_a_built_fixture_carries_the_universe_its_builder_declares(
+    name: str, rel: str, column: str, count: int
+) -> None:
+    """The builder's own constants against the data, which is where drift shows.
+
+    Measured 2026-09-03: the manifest and the nasdaq100_minute_bars builder agreed
+    with each other on 6 symbols while the fixture carried 12, so comparing the two
+    proved nothing and the builder, run as it stood, would have narrowed the fixture
+    back and left the loader's glob reading two generations at once.
+    """
+    path = _fixture_root() / rel
+    if not path.exists():
+        pytest.skip(f"{name}: {rel} is not in this checkout")
+    observed = _distinct(path, column)
+    assert observed == count, (
+        f"{name}'s builder declares {count} distinct {column} in {rel} and the fixture "
+        f"carries {observed}. Regenerate the dataset, or correct the builder."
+    )
+
+
 @pytest.mark.parametrize(
     ("name", "rel", "column", "count"),
     [
@@ -142,9 +219,9 @@ def test_an_unbuilt_fixture_carries_the_universe_it_declares(
     daily panel.
     """
     path = _fixture_root() / rel
-    if not path.is_file():
+    if not path.exists():
         pytest.skip(f"{name}: {rel} is not in this checkout")
-    observed = pl.scan_parquet(path).select(pl.col(column).n_unique()).collect().item()
+    observed = _distinct(path, column)
     assert observed == count, (
         f"{name} declares {count} distinct {column} in {rel} and the fixture carries {observed}"
     )
