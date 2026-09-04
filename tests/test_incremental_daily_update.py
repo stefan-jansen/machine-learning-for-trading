@@ -318,19 +318,37 @@ def test_a_failure_that_is_not_a_refusal_is_raised_at_once() -> None:
     assert len(manager.calls) == 1, "no retreat on an error the vendor did not refuse"
 
 
-def test_the_walk_stops_at_the_start_of_the_window() -> None:
-    """Retreating past the lookback start would ask for a window that is not one."""
-    storage = FakeStorage({"equities/daily/AAPL": _bars(["2026-09-03"])})
-    manager = FakeManager(refuse_through=dt.date(1900, 1, 1))
+def test_the_walk_stops_where_it_stops_adding_bars() -> None:
+    """A row the vendor has wrong *inside* the window must be raised, not stepped over.
+
+    Retreating past it would find a window that validates, merge nothing the panel
+    did not already carry, and then write metadata saying the panel is current -
+    a silent no-op dressed as a successful update. So the walk stops at the last
+    stored bar and the refusal stands.
+    """
+    storage = FakeStorage({"equities/daily/AAPL": _bars(["2026-08-28", "2026-08-31"])})
+    manager = FakeManager(refuse_through=dt.date(2026, 8, 30))
 
     with pytest.raises(Exception, match="null values"):
         update_through_last_complete_bar(
-            manager,
-            storage,
-            "AAPL",
-            provider="yahoo",
-            lookback_days=1,
-            through=dt.date(2026, 9, 3),
+            manager, storage, "AAPL", provider="yahoo", through=dt.date(2026, 9, 3)
         )
 
-    assert [end for _, _, end in manager.calls] == ["2026-09-03", "2026-09-02"]
+    assert [end for _, _, end in manager.calls] == [
+        "2026-09-03",
+        "2026-09-02",
+        "2026-09-01",
+    ], "the walk stops at 2026-08-31, the last bar already stored"
+    assert storage.writes == [], "nothing is written when no window could extend the panel"
+
+
+def test_a_store_that_already_reaches_the_newest_publishable_bar_fetches_nothing() -> None:
+    storage = FakeStorage({"equities/daily/AAPL": _bars(["2026-09-02", "2026-09-03"])})
+    manager = FakeManager()
+
+    rows = update_through_last_complete_bar(
+        manager, storage, "AAPL", provider="yahoo", through=dt.date(2026, 9, 3)
+    )
+
+    assert rows == 2
+    assert manager.calls == []

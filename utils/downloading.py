@@ -456,8 +456,10 @@ def update_through_last_complete_bar(
     does not resolve at all, and both look identical from a date.
 
     An error that is not the provider refusing the data - a network failure, an
-    unknown symbol - is raised immediately; a refusal that survives every
-    candidate is re-raised as it was first seen.
+    unknown symbol - is raised immediately, and so is a refusal that survives
+    every candidate. The walk never retreats to a window that cannot extend the
+    stored panel, because a row the vendor has wrong *inside* the window would
+    otherwise be stepped over rather than reported.
 
     ``lookback_days`` of overlap is refetched and deduplicated on ``timestamp``,
     so a bar the vendor revised after it was first stored is replaced rather than
@@ -474,11 +476,20 @@ def update_through_last_complete_bar(
     start = last_stored - dt.timedelta(days=lookback_days)
     newest = through or last_complete_daily_bar()
 
+    if newest <= last_stored:
+        return stored.height
+
     fresh = None
     refusal: BaseException | None = None
     for step in range(max_retreat_days + 1):
         end = newest - dt.timedelta(days=step)
-        if start > end:
+        # The walk stops where it stops adding bars. Without this an invalid row
+        # *inside* the window - not the trailing one the retreat exists for - is
+        # bypassed by retreating past it: the shorter window validates, merges
+        # nothing the panel did not already have, and writes metadata saying the
+        # panel is current. A window that cannot extend the stored data is not an
+        # answer to a refusal, so the refusal stands.
+        if end <= last_stored:
             break
         try:
             fresh = manager.fetch(symbol, start.isoformat(), end.isoformat(), provider=provider)
