@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from contextlib import closing
 from datetime import date
 from pathlib import Path
@@ -745,6 +746,61 @@ def test_a_registry_written_before_the_binding_table_still_resolves_its_names(
         assert db.execute(
             "SELECT set_hash FROM candidate_set_names WHERE name = 'pool'"
         ).fetchone() == (original.hash,)
+
+
+def _metrics_registry(tmp_path: Path, task_types: list) -> Path:
+    """A registry whose `prediction_metrics` rows carry the given `task_type` values."""
+    _open_registry(tmp_path).close()
+    db_path = tmp_path / "run_log" / "registry.db"
+    with closing(sqlite3.connect(db_path)) as db:
+        db.executemany(
+            "INSERT INTO prediction_metrics (prediction_hash, task_type, computed_at) "
+            "VALUES (?, ?, '2026-01-01T00:00:00Z')",
+            [(f"p{index}", value) for index, value in enumerate(task_types)],
+        )
+        db.commit()
+    return db_path
+
+
+def test_a_registry_holding_legacy_numeric_task_types_is_rewritten_on_open(
+    tmp_path: Path,
+) -> None:
+    """The conversion the migration exists for, which no test covered."""
+    db_path = _metrics_registry(tmp_path, [1.0, 0.0, "classification"])
+
+    _open_registry(tmp_path).close()
+
+    with closing(sqlite3.connect(db_path)) as db:
+        values = sorted(
+            row[0] for row in db.execute("SELECT task_type FROM prediction_metrics").fetchall()
+        )
+    assert values == ["classification", "classification", "regression"]
+
+
+def test_opening_a_migrated_registry_does_not_wait_for_the_write_lock(tmp_path: Path) -> None:
+    """The pass-through, which is the one every open after the first takes.
+
+    `_open_registry` is on every path that touches a registry, and an `UPDATE` asks for the
+    write lock whether or not a row matches. With `busy_timeout` at 60s that turns one open
+    contended by any other writer into a minute of waiting, for a rewrite that has had nothing
+    to do since the last legacy row was converted - nine of them is a notebook's whole cell
+    budget.
+
+    Timed against a held lock rather than counted, because the count cannot see this: an
+    `UPDATE` matching no row leaves `total_changes` at zero while still having asked.
+    """
+    db_path = _metrics_registry(tmp_path, ["classification", "regression"])
+
+    with closing(sqlite3.connect(db_path, timeout=1.0)) as holder:
+        holder.execute("BEGIN IMMEDIATE")
+        started = time.monotonic()
+        db = _open_registry(tmp_path)
+        elapsed = time.monotonic() - started
+        db.close()
+        holder.rollback()
+
+    # A request for the lock would block on `busy_timeout`, which `_open_registry` sets to 60s.
+    assert elapsed < 5.0, f"opening a migrated registry waited {elapsed:.1f}s for a write lock"
 
 
 def test_partial_and_preview_results_are_rejected_from_canonical_sets(tmp_path: Path) -> None:

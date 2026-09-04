@@ -812,28 +812,32 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
     # ("classification" / "regression"). The schema is now TEXT but legacy
     # rows still carry the float encoding; consumers that filter
     # ``task_type = 'classification'`` would otherwise miss them.
-    if "prediction_metrics" in tables:
-        pm_cols = {row[1] for row in db.execute("PRAGMA table_info(prediction_metrics)").fetchall()}
-        if "task_type" in pm_cols:
-            db.execute(
-                "UPDATE prediction_metrics SET task_type = 'classification' "
-                "WHERE task_type IN (1, 1.0, '1', '1.0')"
-            )
-            db.execute(
-                "UPDATE prediction_metrics SET task_type = 'regression' "
-                "WHERE task_type IN (0, 0.0, '0', '0.0')"
-            )
-    if "fold_metrics" in tables:
-        fm_cols = {row[1] for row in db.execute("PRAGMA table_info(fold_metrics)").fetchall()}
-        if "task_type" in fm_cols:
-            db.execute(
-                "UPDATE fold_metrics SET task_type = 'classification' "
-                "WHERE task_type IN (1, 1.0, '1', '1.0')"
-            )
-            db.execute(
-                "UPDATE fold_metrics SET task_type = 'regression' "
-                "WHERE task_type IN (0, 0.0, '0', '0.0')"
-            )
+    #
+    # Asked before written, because `_open_registry` is on every path that touches a registry
+    # and an `UPDATE` takes the write lock whether or not a row matches. With `busy_timeout` at
+    # 60s that turns one contended open into a minute of waiting, for a rewrite that has had
+    # nothing to do since the last legacy row was converted. The probe is a read over the same
+    # predicate and answers from the table it is about to leave alone.
+    for table in ("prediction_metrics", "fold_metrics"):
+        if table not in tables:
+            continue
+        columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}  # noqa: S608
+        if "task_type" not in columns:
+            continue
+        legacy = db.execute(
+            f"SELECT EXISTS (SELECT 1 FROM {table} "  # noqa: S608
+            "WHERE task_type IN (1, 1.0, '1', '1.0', 0, 0.0, '0', '0.0'))"
+        ).fetchone()[0]
+        if not legacy:
+            continue
+        db.execute(
+            f"UPDATE {table} SET task_type = 'classification' "  # noqa: S608
+            "WHERE task_type IN (1, 1.0, '1', '1.0')"
+        )
+        db.execute(
+            f"UPDATE {table} SET task_type = 'regression' "  # noqa: S608
+            "WHERE task_type IN (0, 0.0, '0', '0.0')"
+        )
 
     db.commit()
 
