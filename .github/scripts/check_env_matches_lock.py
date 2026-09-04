@@ -176,8 +176,9 @@ def main() -> int:
 
     if not mismatched:
         print(
-            "every installed distribution is at its locked version, or at one its "
-            "declared override allows"
+            f"all {compared} compared distributions are at their locked version, and "
+            f"{len(overridden)} at a version their override allows. Not compared: the "
+            "declared off-lock names above, and anything the lock does not pin."
         )
         return 0
 
