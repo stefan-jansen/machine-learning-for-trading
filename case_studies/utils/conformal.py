@@ -2,19 +2,28 @@
 
 Validation widths follow the ``walk_forward_v3`` contract, which is one rule for
 every fold: the width used at timestamp ``t`` for an entity is calibrated on every
-residual for that entity at or before ``t - h``, where ``h`` is the label horizon in
-prediction data steps. Residuals from earlier folds and from the current fold's own
-elapsed history are both eligible. An entity with fewer than ``min_calibration_n``
-eligible residuals receives a pooled width from every entity's eligible residuals, so
-allocation never changes the selected basket by silently dropping an uncalibrated entity.
+residual for that entity at or before ``t - h``, where ``h`` is the **sizing calibration
+lag** in prediction data steps - :func:`sizing_conformal_lag`, never
+:data:`HOLDOUT_CONFORMAL_EMBARGO_STEPS` directly. Residuals from earlier folds and from the
+current fold's own elapsed history are both eligible. An entity with fewer than
+``min_calibration_n`` eligible residuals receives a pooled width from every entity's
+eligible residuals, so allocation never changes the selected basket by silently dropping an
+uncalibrated entity.
 
-``h`` is an embargo and it is load-bearing in both directions. Without it, a residual at
-``t'`` whose forward return realizes over ``(t', t'+h]`` carries information from after
-the decision it sizes - which the prior-fold-only rule this replaces did at every fold
-boundary, not just at the holdout. With it, the earliest fold no longer has to abstain: it
-calibrates on its own elapsed history after a warm-up rather than sitting out entirely,
-which on a two-fold split is the difference between forfeiting half the evaluation period
-and forfeiting a warm-up.
+``h`` is load-bearing in both directions. Without it, a residual at ``t'`` whose forward
+return realizes over ``(t', t'+h]`` carries information from after the decision it sizes -
+which the prior-fold-only rule this replaces did at every fold boundary, not just at the
+holdout. With it, the earliest fold no longer has to abstain: it calibrates on its own
+elapsed history after a warm-up rather than sitting out entirely, which on a two-fold split
+is the difference between forfeiting half the evaluation period and forfeiting a warm-up.
+
+**The lag is not the holdout embargo, and the two tables answer different questions.**
+:data:`HOLDOUT_CONFORMAL_EMBARGO_STEPS` records how far a residual reaches forward, which is
+what decides whether a calibration residual leaks across the validation/holdout boundary; it
+is zero for a zero-horizon label. The sizing lag asks what was known when the position was
+chosen and is therefore at least one step whatever the horizon. They coincide for every
+label with a horizon of a step or more, which is why one table served both until a
+zero-horizon label was declared. :func:`sizing_conformal_lag` states the argument.
 
 **No coverage guarantee is claimed or consumed.** Split conformal's finite-sample coverage
 requires the calibration and test scores to be exchangeable, and return residuals are
@@ -58,6 +67,13 @@ _LEGACY_RENAME: dict[str, str] = {
 
 DEFAULT_ALPHA: float = 0.20
 DEFAULT_MIN_CALIBRATION_N: int = 30
+# `walk_forward_v3` has required a lag of at least one step since it was introduced in
+# `ee67b3b8`, so no artifact carrying this version was ever calibrated on the residual of the
+# decision it sizes and none has to be regenerated. Naming the lag (`sizing_conformal_lag`)
+# changed which number a caller passing `label` gets for a zero-horizon label, not what the
+# stored contract guarantees. A version bump belongs to a change in the calibration rule
+# itself, and it is expensive: it invalidates every stored width and moves the identity of
+# every backtest that consumes one, across nine case studies.
 CALIBRATION_VERSION: str = "walk_forward_v3"
 POOLED_FALLBACK: str = "pooled_prior_oos"
 
@@ -560,17 +576,19 @@ def compute_conformal_widths(
     Calibration rule, one rule for every fold: the width used at timestamp
     ``t`` for entity ``s`` is ``2·q_{1-α}`` of ``|y_true − y_score|`` over
     every residual for ``s`` at timestamps at or before ``t − h``, where ``h``
-    is the label horizon in prediction data steps. Residuals from earlier
+    is the sizing calibration lag in prediction data steps. Residuals from earlier
     folds and from the current fold's own elapsed history are both eligible,
     which is what lets the earliest fold trade after a warm-up instead of
     sitting out entirely.
 
-    ``h`` is the embargo, and it is the same quantity
-    :func:`compute_holdout_conformal_widths` applies at the validation/holdout
-    boundary: a residual at ``t'`` depends on the return realized over
-    ``(t', t'+h]``, so a residual with ``t' + h > t`` carries information from
-    after the decision. Pass ``embargo_steps`` directly or pass ``label`` to
-    take the reviewed value from :data:`HOLDOUT_CONFORMAL_EMBARGO_STEPS`.
+    ``h`` is the sizing calibration lag. It is the same number
+    :func:`compute_holdout_conformal_widths` applies at the validation/holdout boundary for
+    every label whose horizon is a step or more - a residual at ``t'`` depends on the return
+    realized over ``(t', t'+h]``, so one with ``t' + h > t`` carries information from after
+    the decision - and it is one step larger for a zero-horizon label, where nothing reaches
+    forward but the residual at ``t`` is still not known when the position for ``t`` is
+    chosen. Pass ``embargo_steps`` directly or pass ``label`` to take
+    :func:`sizing_conformal_lag`'s answer.
 
     Entities with fewer than ``min_calibration_n`` eligible residuals of their
     own use a pooled quantile over every entity's eligible residuals, so

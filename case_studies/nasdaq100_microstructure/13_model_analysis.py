@@ -1377,10 +1377,12 @@ if conformal_df.height > 0:
 #
 # A family can rank well and fail this badly. Ranking depends only on the order
 # of the predictions; coverage depends on the scale of a symbol's past residuals
-# carrying forward to the decision they size. When they diverge, what the shortfall
-# has established is that the residual scale is not stable out of time - which is a
-# reason to look at the widths' cross-section before trusting them to size, not a
-# result about the ordering, which is unaffected.
+# carrying forward to the decision they size. A shortfall is consistent with
+# residual scale that does not hold out of time, and also with finite-sample
+# variation, with residuals that are not independent, and with symbols sized from
+# the pooled fallback rather than their own history - this table does not separate
+# them. It is a reason to look at the widths' cross-section before trusting them to
+# size, and it says nothing about the ordering, which is unaffected.
 
 # %% [markdown]
 # ## 8. Pre-Backtest Judgment and Handoff
