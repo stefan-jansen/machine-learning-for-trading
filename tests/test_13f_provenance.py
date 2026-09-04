@@ -359,17 +359,30 @@ def test_availability_is_the_last_filing_when_every_manager_holds_equity() -> No
     assert features["timestamp"].unique().to_list() == [date(2024, 11, 10)]
 
 
-def _thirteen_f_artifact_present() -> bool:
+def _multi_quarter_13f_artifact() -> bool:
+    """Two quarters at least: one is the case this test is not about.
+
+    The defect is a *display* horizon narrowing a multi-quarter artifact. A valid artifact
+    built with `--num-filings 1` takes the notebook's single-quarter branch correctly and
+    would fail the "Added momentum features" assertion for the right reason, so the skip
+    has to read the artifact rather than only look for it.
+    """
     from utils.config import ML4T_DATA_PATH
 
-    return (
+    path = (
         Path(ML4T_DATA_PATH) / "equities" / "positioning" / "13f" / "institutional_holdings.parquet"
-    ).is_file()
+    )
+    if not path.is_file():
+        return False
+    try:
+        return pl.read_parquet(path, columns=["report_date"])["report_date"].n_unique() > 1
+    except Exception:  # noqa: BLE001 - an unreadable artifact is a skip, not a failure
+        return False
 
 
 @pytest.mark.skipif(
-    not _thirteen_f_artifact_present(),
-    reason="needs the production 13F artifact; CI checks out no such data",
+    not _multi_quarter_13f_artifact(),
+    reason="needs a multi-quarter production 13F artifact; CI checks out no such data",
 )
 def test_a_narrowed_display_horizon_still_matches_the_producer(tmp_path) -> None:
     """`NUM_QUARTERS` narrows what the notebook shows, not what the producer compared.
