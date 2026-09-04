@@ -352,3 +352,40 @@ def test_a_store_that_already_reaches_the_newest_publishable_bar_fetches_nothing
 
     assert rows == 2
     assert manager.calls == []
+
+
+def test_a_retreat_that_returns_no_newer_bar_raises_rather_than_writing() -> None:
+    """The weekend case a date bound cannot see.
+
+    Storage ends Friday 2026-08-28 and the vendor has 2026-08-31, the Monday,
+    wrong. Sunday 2026-08-30 is later than the last stored date, so a date bound
+    accepts it - and the window returns nothing past Friday, so accepting it would
+    step over the bad Monday and stamp the panel as current.
+    """
+    storage = FakeStorage({"equities/daily/AAPL": _bars(["2026-08-27", "2026-08-28"])})
+    manager = FakeManager(_bars(["2026-08-27", "2026-08-28"]), refuse_through=dt.date(2026, 8, 31))
+
+    with pytest.raises(Exception, match="null values"):
+        update_through_last_complete_bar(
+            manager, storage, "AAPL", provider="yahoo", through=dt.date(2026, 9, 1)
+        )
+
+    assert [end for _, _, end in manager.calls] == [
+        "2026-09-01",
+        "2026-08-31",
+        "2026-08-30",
+    ], "the Sunday window validates and carries nothing past Friday, so it is not an answer"
+    assert storage.writes == []
+
+
+def test_a_vendor_with_nothing_new_and_no_refusal_writes_nothing() -> None:
+    """A quiet weekend is not a failure; it is an update with no bars to add."""
+    storage = FakeStorage({"equities/daily/AAPL": _bars(["2026-08-27", "2026-08-28"])})
+    manager = FakeManager(_bars(["2026-08-27", "2026-08-28"]))
+
+    rows = update_through_last_complete_bar(
+        manager, storage, "AAPL", provider="yahoo", through=dt.date(2026, 8, 30)
+    )
+
+    assert rows == 2
+    assert storage.writes == []

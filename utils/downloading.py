@@ -472,7 +472,8 @@ def update_through_last_complete_bar(
     if stored.is_empty():
         raise ValueError(f"No stored data for {key}; load it before updating")
 
-    last_stored = stored["timestamp"].max().date()
+    latest_stored = stored["timestamp"].max()
+    last_stored = latest_stored.date()
     start = last_stored - dt.timedelta(days=lookback_days)
     newest = through or last_complete_daily_bar()
 
@@ -500,6 +501,16 @@ def update_through_last_complete_bar(
             refusal = refusal or error
 
     if fresh is None:
+        if refusal is not None:
+            raise refusal
+        return stored.height
+
+    # A date bound is not proof that a shorter window carries a bar. Storage ending
+    # on a Friday and a bad row on the Monday leaves Sunday as a candidate end that
+    # is later than the last stored date and still returns nothing past Friday, so
+    # the walk would step over the bad row and write metadata saying so. What the
+    # window returned is the only thing that settles it.
+    if fresh.is_empty() or fresh["timestamp"].max() <= latest_stored:
         if refusal is not None:
             raise refusal
         return stored.height
