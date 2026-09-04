@@ -1122,13 +1122,20 @@ def generate_holdout(
         if verbose:
             print(msg, flush=True)
 
-    if has_holdout_predictions(cs_id):
-        if force:
-            n = delete_holdout_predictions(cs_id)
-            _log(f"  Deleted {n} existing holdout prediction(s)")
-        else:
-            _log("  Holdout predictions exist - loading from registry")
-            return load_existing_holdout(cs_id)
+    # `force` deletes unconditionally. Gating the delete on `has_holdout_predictions`
+    # skipped it exactly when it was needed: that check looks for a holdout tied to one of
+    # the *current* validation top-N, and its own docstring says it returns False when a
+    # holdout exists but no top-N candidate matches it - which is the definition of stale.
+    # So a holdout whose training fell out of the top-N after a sweep reshuffle survived
+    # `force=True`, and the new holdout was written beside it, two holdouts for one case
+    # study. Measured on nasdaq100_microstructure: bf76fac27013 (training b8add3b63794)
+    # coexisted with 6f95e10992fe and had to be deleted by hand.
+    if force:
+        n = delete_holdout_predictions(cs_id)
+        _log(f"  Deleted {n} existing holdout prediction(s)")
+    elif has_holdout_predictions(cs_id):
+        _log("  Holdout predictions exist - loading from registry")
+        return load_existing_holdout(cs_id)
 
     label_filter = LABEL_RESTRICTIONS.get(cs_id)
     candidates = select_best_models(
