@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
-from .comparison import CandidateSet
+from .comparison import CandidateSet, binding_table
 from .configs import sweep_labels
 from .population import OfficialPopulation
 
@@ -77,9 +77,15 @@ def _recorded_set_count(registry: Any, name: str) -> int:
     """
     try:
         with sqlite3.connect(f"file:{registry}?mode=ro", uri=True) as db:
+            # A generation is a name binding, not an identity row: one set carries several
+            # names where a union equals one of its inputs, so counting `candidate_sets` rows
+            # by name answers 0 for a name that is bound and resolves. `binding_table` names
+            # the table this registry keeps its bindings in; only `name` is read from it, so
+            # this still answers for a registry that predates the rest of the columns.
             return int(
                 db.execute(
-                    "SELECT COUNT(*) FROM candidate_sets WHERE name = ?", (name,)
+                    f"SELECT COUNT(*) FROM {binding_table(db)} WHERE name = ?",  # noqa: S608
+                    (name,),
                 ).fetchone()[0]
             )
     except sqlite3.OperationalError as error:

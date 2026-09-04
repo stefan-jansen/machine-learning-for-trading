@@ -1174,11 +1174,28 @@ def shortlist_signal_configurations(
     return tuple(selected)
 
 
+def _union_members(study: Study, *pools: Iterable[str]) -> list[Result]:
+    """The distinct results across several stage pools, in first-seen order.
+
+    A backtest is identified by its prediction and its strategy spec, and the funnel stage is
+    not part of either. So two stages register one row whenever the later stage changed nothing
+    about a configuration - an allocation that resolves to the same spec the signal stage
+    already ran is exactly that - and the stages' pools then overlap. `CandidateSet.create`
+    refuses a repeated member, so concatenating the pools produced a union that raised precisely
+    when two stages agreed, which is the case the union exists to describe.
+    """
+    seen: dict[str, None] = {}
+    for pool in pools:
+        for value in pool:
+            seen.setdefault(value, None)
+    return [Result.open(study, value) for value in seen]
+
+
 def pre_overlay_candidate_set(study: Study, *, label: str) -> CandidateSet:
     """Return the immutable union of signal and allocation validation results."""
     signal = CandidateSet.one(study, name=candidate_set_name("signal", label))
     allocation = CandidateSet.one(study, name=candidate_set_name("allocation", label))
-    members = [Result.open(study, value) for value in (*signal.members, *allocation.members)]
+    members = _union_members(study, signal.members, allocation.members)
     return _create_comparable_set(study, candidate_set_name("pre-overlay", label), members)
 
 
@@ -1186,7 +1203,7 @@ def final_validation_candidate_set(study: Study, *, label: str) -> CandidateSet:
     """Return the selection pool across signal, allocation, and risk-overlay stages."""
     pre_overlay = pre_overlay_candidate_set(study, label=label)
     risk = CandidateSet.one(study, name=candidate_set_name("risk", label))
-    members = [Result.open(study, value) for value in (*pre_overlay.members, *risk.members)]
+    members = _union_members(study, pre_overlay.members, risk.members)
     return _create_comparable_set(study, candidate_set_name("final-validation", label), members)
 
 

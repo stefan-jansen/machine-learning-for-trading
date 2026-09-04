@@ -752,6 +752,46 @@ def _labelled_execution(study: Study, monkeypatch: pytest.MonkeyPatch) -> dict[s
     }
 
 
+def test_a_union_that_adds_nothing_still_resolves_under_the_union_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The funnel's union names have to resolve on every registry, not only on wide ones.
+
+    `pre-overlay` is the union of `signal` and `allocation`. Where the allocation stage
+    registered nothing the signal stage had not, the union has the same members as `signal` and
+    therefore the same identity - a candidate set is its members. Both names still name a step
+    of the funnel, and `stage_backtest_results(stage="pre-overlay")` reads the union by name, so
+    a union that binds no name takes the whole funnel down at the stage after it.
+    """
+    from case_studies.research import CandidateSet, Result
+
+    study = _study(tmp_path)
+    by_label = _labelled_execution(study, monkeypatch)
+    label = research_workflow.ALL_LABELS[0]
+    members = [Result.open(study, value) for value in by_label[label]]
+
+    signal = research_workflow._create_comparable_set(
+        study, research_workflow.candidate_set_name("signal", label), members
+    )
+    allocation = research_workflow._create_comparable_set(
+        study, research_workflow.candidate_set_name("allocation", label), members
+    )
+    assert allocation.hash == signal.hash
+
+    pre_overlay = research_workflow.pre_overlay_candidate_set(study, label=label)
+    assert pre_overlay.hash == signal.hash
+    assert set(pre_overlay.members) == set(by_label[label])
+
+    for stage in ("signal", "allocation", "pre-overlay"):
+        name = research_workflow.candidate_set_name(stage, label)
+        assert CandidateSet.one(study, name=name).hash == signal.hash
+
+    results = research_workflow.stage_backtest_results(
+        study, stage="pre-overlay", label=label, execution_tier="canonical"
+    )
+    assert {result.hash for result in results} == set(by_label[label])
+
+
 def test_final_selection_pool_spans_both_return_horizons(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

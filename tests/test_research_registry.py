@@ -601,6 +601,136 @@ def test_a_changed_candidate_set_supersedes_the_one_it_replaces(tmp_path: Path) 
     assert CandidateSet.one(study, name="pool").hash == head.hash
 
 
+def _two_validation_predictions(study: Study):
+    """Two comparable validation predictions from one training run."""
+    training = study.results.register_training(_training_spec())
+    frame = _predictions()
+    expected = frame.select("symbol", "timestamp", "fold_id")
+    first = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=expected,
+    )
+    second = study.results.publish_predictions(
+        training,
+        checkpoint_kind="epoch",
+        checkpoint_value=2,
+        split="validation",
+        predictions=frame.with_columns((pl.col("y_score") * 2).alias("y_score")),
+        expected_keys=expected,
+    )
+    return first, second
+
+
+def test_a_set_requested_under_a_second_name_is_bound_to_that_name(tmp_path: Path) -> None:
+    """The case a union produces: a set whose members already have a name needs its own.
+
+    `cme_futures` freezes `signal`, then freezes `pre-overlay` as the union of `signal` and
+    `allocation`. An allocation stage that registered nothing new for a label makes the union
+    equal to `signal`, so the two names describe the same members. Identity is the members, so
+    one row is written; both names still have to resolve, and a caller that asked for
+    `pre-overlay` has to be able to read it back.
+    """
+    study = _study(tmp_path)
+    first, _ = _two_validation_predictions(study)
+
+    signal = CandidateSet.create(study, "signal", [first])
+    pre_overlay = CandidateSet.create(study, "pre-overlay", [first])
+
+    assert pre_overlay.hash == signal.hash
+    assert pre_overlay.name == "pre-overlay"
+    assert CandidateSet.one(study, name="pre-overlay").hash == signal.hash
+    assert CandidateSet.one(study, name="signal").hash == signal.hash
+
+
+def test_a_second_name_supersedes_nothing_and_retires_no_other_name(tmp_path: Path) -> None:
+    """Binding a name is not a generation of any other name.
+
+    Naming an existing set is not a change to the comparison it already names, so it needs no
+    `supersedes` and must not be readable as one - otherwise freezing `pre-overlay` would put
+    `signal` out of force and every reader of `signal` would raise.
+    """
+    study = _study(tmp_path)
+    first, second = _two_validation_predictions(study)
+
+    signal = CandidateSet.create(study, "signal", [first])
+    CandidateSet.create(study, "pre-overlay", [first])
+    assert CandidateSet.one(study, name="signal").hash == signal.hash
+
+    # Lineage is per name: replacing `signal` leaves the set `pre-overlay` names in force.
+    replacement = CandidateSet.create(study, "signal", [first, second], supersedes=signal.hash)
+    assert CandidateSet.one(study, name="signal").hash == replacement.hash
+    assert CandidateSet.one(study, name="pre-overlay").hash == signal.hash
+
+
+def test_a_changed_set_under_a_bound_second_name_still_has_to_supersede(tmp_path: Path) -> None:
+    """The refusal the binding table must not weaken.
+
+    A name that resolves to a live set is a name a changed set cannot take silently, whether or
+    not that set was first written under a different name.
+    """
+    study = _study(tmp_path)
+    first, second = _two_validation_predictions(study)
+
+    CandidateSet.create(study, "signal", [first])
+    pre_overlay = CandidateSet.create(study, "pre-overlay", [first])
+
+    with pytest.raises(ValueError, match="must explicitly supersedes"):
+        CandidateSet.create(study, "pre-overlay", [first, second])
+
+    widened = CandidateSet.create(
+        study, "pre-overlay", [first, second], supersedes=pre_overlay.hash
+    )
+    assert CandidateSet.one(study, name="pre-overlay").hash == widened.hash
+
+
+def test_re_creating_a_bound_name_is_the_re_run_and_writes_nothing(tmp_path: Path) -> None:
+    study = _study(tmp_path)
+    first, second = _two_validation_predictions(study)
+
+    original = CandidateSet.create(study, "pool", [first])
+    replacement = CandidateSet.create(study, "pool", [first, second], supersedes=original.hash)
+
+    again = CandidateSet.create(study, "pool", [first, second], supersedes=original.hash)
+    assert again.hash == replacement.hash
+    assert again.supersedes == original.hash
+    with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
+        bindings = db.execute(
+            "SELECT count(*) FROM candidate_set_names WHERE name = 'pool'"
+        ).fetchone()[0]
+    assert bindings == 2
+
+
+def test_a_registry_written_before_the_binding_table_still_resolves_its_names(
+    tmp_path: Path,
+) -> None:
+    """The reader's clone: `candidate_sets.name` is the only binding such a registry has.
+
+    Resolution reads the binding table where there is one. A registry written by an earlier
+    version has none, and dropping it here is that registry exactly - one name per identity row,
+    in the column that used to carry it.
+    """
+    study = _study(tmp_path)
+    first, _ = _two_validation_predictions(study)
+    original = CandidateSet.create(study, "pool", [first])
+
+    with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
+        db.execute("DROP TABLE candidate_set_names")
+        db.commit()
+
+    assert CandidateSet.one(study, name="pool").hash == original.hash
+
+    # Opening it for writing restores the binding from the identity row, so the name resolves
+    # by the same path as one written today.
+    with closing(_open_registry(study.root)) as db:
+        assert db.execute(
+            "SELECT set_hash FROM candidate_set_names WHERE name = 'pool'"
+        ).fetchone() == (original.hash,)
+
+
 def test_partial_and_preview_results_are_rejected_from_canonical_sets(tmp_path: Path) -> None:
     study = _study(tmp_path)
     canonical_training = study.results.register_training(_training_spec())

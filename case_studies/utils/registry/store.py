@@ -273,6 +273,22 @@ CREATE TABLE IF NOT EXISTS candidate_set_members (
     UNIQUE (set_hash, member_hash)
 );
 
+-- A candidate set is identified by its members and its comparison contract, so two names for
+-- the same comparison resolve to one `candidate_sets` row. The binding therefore cannot live
+-- on that row: a union that adds nothing to one of its inputs has the input's identity and its
+-- own name, and both names have to resolve. Lineage is per name, because superseding is a
+-- statement about which generation of a named comparison is in force.
+CREATE TABLE IF NOT EXISTS candidate_set_names (
+    name            TEXT NOT NULL,
+    set_hash        TEXT NOT NULL REFERENCES candidate_sets(set_hash),
+    supersedes_hash TEXT,
+    created_at      TEXT NOT NULL,
+    git_commit      TEXT,
+    PRIMARY KEY (name, set_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_candidate_set_names_hash ON candidate_set_names(set_hash);
+
 
 CREATE TABLE IF NOT EXISTS execution_attempts (
     attempt_id          TEXT PRIMARY KEY,
@@ -515,8 +531,29 @@ def _open_registry(case_dir: Path) -> sqlite3.Connection:
     # Migrate existing DBs before running CREATE TABLE IF NOT EXISTS
     _migrate_registry(db)
     db.executescript(REGISTRY_SCHEMA_SQL)
+    _backfill_candidate_set_names(db)
     _declare_uncertainty_columns(db)
     return db
+
+
+def _backfill_candidate_set_names(db: sqlite3.Connection) -> None:
+    """Give every stored candidate set the name binding its identity row records.
+
+    `candidate_sets` holds one row per set of members, so its `name` column can only record the
+    first name a set was written under; a second name for the same members had nowhere to go and
+    was dropped. `candidate_set_names` is where a binding lives now, and this carries the
+    existing ones across. It runs after the schema script rather than in `_migrate_registry`,
+    which runs before the table exists.
+
+    One binding per existing row, carrying that row's lineage, so a migrated registry resolves
+    every name it resolved before.
+    """
+    db.execute(
+        "INSERT OR IGNORE INTO candidate_set_names "
+        "(name, set_hash, supersedes_hash, created_at, git_commit) "
+        "SELECT name, set_hash, supersedes_hash, created_at, git_commit FROM candidate_sets"
+    )
+    db.commit()
 
 
 # Metric columns the uncertainty layer produces on every run, which the CREATE TABLE statements
