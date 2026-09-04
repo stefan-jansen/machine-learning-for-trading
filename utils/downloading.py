@@ -14,6 +14,7 @@ Provides:
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import os
 import sys
 from pathlib import Path
@@ -367,3 +368,89 @@ def print_dry_run_notice() -> None:
     print("DRY RUN - No data will be downloaded")
     print("Remove --dry-run to actually download")
     print("=" * 60 + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Incremental daily updates
+# ---------------------------------------------------------------------------
+
+
+def last_complete_daily_bar(
+    now: dt.datetime | None = None,
+    exchange_tz: str = "America/New_York",
+) -> dt.date:
+    """The last date a daily fetch may ask a vendor for.
+
+    A daily bar for the session in progress is not a bar. Yahoo returns the
+    current exchange date with accumulating volume and null open/high/low/close
+    until the bar consolidates some hours after the close, and ml4t-data's
+    provider rejects a bar whose prices are null::
+
+        DataValidationError: yahoo: Column 'open' contains 1 null values
+
+    So a daily fetch whose window reaches the current exchange date raises, on a
+    reader's machine as much as in CI, at any hour of any trading day. The bound
+    is the calendar date before it. When that date is a weekend or a holiday the
+    vendor returns the last session before it, which is the same bound.
+
+    Exchange time, not UTC: at 22:00 in New York the UTC date is already
+    tomorrow, so a UTC-derived bound still asks for the session that just closed
+    and that the vendor has not consolidated.
+    """
+    from zoneinfo import ZoneInfo
+
+    now = now or dt.datetime.now(dt.UTC)
+    return now.astimezone(ZoneInfo(exchange_tz)).date() - dt.timedelta(days=1)
+
+
+def update_through_last_complete_bar(
+    manager: Any,
+    storage: Any,
+    symbol: str,
+    *,
+    provider: str,
+    lookback_days: int = 7,
+    asset_class: str = "equities",
+    frequency: str = "daily",
+    through: dt.date | None = None,
+) -> int:
+    """Merge every bar since the last stored one into storage; return the row count.
+
+    This is the delta ``DataManager.update()`` performs, with the one difference
+    that decides whether it runs at all: ``update()`` fetches to
+    ``datetime.now(UTC)`` and so always asks for the session in progress, which
+    the provider rejects. See :func:`last_complete_daily_bar`.
+
+    ``lookback_days`` of overlap is refetched and deduplicated on ``timestamp``,
+    so a bar the vendor revised after it was first stored is replaced rather than
+    duplicated.
+    """
+    import polars as pl
+
+    key = f"{asset_class}/{frequency}/{symbol}"
+    stored = storage.read(key).collect()
+    if stored.is_empty():
+        raise ValueError(f"No stored data for {key}; load it before updating")
+
+    last_stored = stored["timestamp"].max().date()
+    start = last_stored - dt.timedelta(days=lookback_days)
+    end = through or last_complete_daily_bar()
+    if start > end:
+        return stored.height
+
+    fresh = manager.fetch(symbol, start.isoformat(), end.isoformat(), provider=provider)
+    merged = (
+        pl.concat([stored, fresh.select(stored.columns)], how="vertical")
+        .unique(subset=["timestamp"], keep="last")
+        .sort("timestamp")
+    )
+    storage.write(
+        merged,
+        key,
+        metadata={
+            "start_date": merged["timestamp"].min().isoformat(),
+            "end_date": merged["timestamp"].max().isoformat(),
+        },
+        preserve_metadata=True,
+    )
+    return merged.height

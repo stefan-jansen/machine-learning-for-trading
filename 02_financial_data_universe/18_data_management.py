@@ -79,6 +79,7 @@ from ml4t.data.storage import HiveStorage
 from ml4t.data.storage.backend import StorageConfig
 from ml4t.data.universe import Universe
 
+from utils.downloading import update_through_last_complete_bar
 from utils.paths import REPO_ROOT, get_output_dir
 from utils.style import COLORS
 
@@ -392,12 +393,23 @@ fig.show()
 
 # %% [markdown]
 # ### Update a Symbol
+#
+# The delta is everything since the last stored bar, bounded at the last
+# session the vendor has finished. That bound is not optional: Yahoo returns
+# the current exchange date as a row with accumulating volume and no
+# open/high/low/close until the bar consolidates hours after the close, and
+# the provider rejects a bar whose prices are null. `DataManager.update()`
+# fetches to `datetime.now()`, so it asks for that row on every weekday;
+# `update_through_last_complete_bar` asks for the same delta and stops one day
+# short of it.
 
 # %%
-# update() checks what's already stored and only fetches new data
+# Fetch every bar since the last stored one, up to the last complete session.
 for symbol in symbols:
-    key = dm_stored.update(symbol, lookback_days=7, provider="yahoo")
-    print(f"  Updated {symbol} → {key}")
+    rows = update_through_last_complete_bar(
+        dm_stored, storage, symbol, provider="yahoo", lookback_days=7
+    )
+    print(f"  Updated {symbol} → {rows} rows")
 
 # Verify data is current
 for symbol in symbols:
