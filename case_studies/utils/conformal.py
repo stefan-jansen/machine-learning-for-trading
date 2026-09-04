@@ -557,8 +557,15 @@ def compute_conformal_widths(
     at other alphas; rows at this ``alpha`` are replaced.
 
     Raises ``ValueError`` when neither ``embargo_steps`` nor a ``label`` with a
-    reviewed embargo is given, when ``embargo_steps`` is below one, or when no
+    reviewed embargo is given, when ``embargo_steps`` is negative, or when no
     (timestamp, entity) pair clears the warm-up.
+
+    Zero is admitted because :data:`HOLDOUT_CONFORMAL_EMBARGO_STEPS` records zero for
+    ``us_firm_characteristics``' three labels, whose ``labels.horizons`` is ``0D``: the row is
+    dated by the month the return was earned, so the residual is realized at the observation and
+    reaches nothing forward. Refusing it here left that case study's `conformal_weighted`
+    allocation unable to compute the widths its own reviewed horizon calls for, and the
+    coverage a notebook prints beside it describing widths that could not be produced.
     """
     pred_dir = _predictions_dir(case_study, prediction_hash, case_dir=case_dir)
     pred_path = pred_dir / "predictions.parquet"
@@ -573,7 +580,7 @@ def compute_conformal_widths(
                 "reviewed value"
             )
         embargo_steps = holdout_conformal_embargo_steps(case_study, label)
-    if embargo_steps < 1:
+    if embargo_steps < 0:
         raise ValueError(
             f"{case_study}/{prediction_hash}: embargo_steps={embargo_steps} would calibrate "
             "on a residual that is not yet realized at the decision it sizes"

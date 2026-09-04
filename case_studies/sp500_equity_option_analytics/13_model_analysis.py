@@ -1777,9 +1777,10 @@ credible.select(
 # **The causal estimate is a separate framing and does not compete in this ranking.** It is a
 # conditional treatment effect for one declared treatment, not a cross-sectional ranking signal.
 #
-# **The calibration result in §7 constrains every tier.** Where intervals under-cover out of
-# time, no candidate should have its interval used for position sizing without the
-# online-updating correction, whatever its IC.
+# **The calibration result in §7 constrains every tier.** Where the widths under-cover out of
+# time, no candidate should be sized on its conformal width without the online-updating
+# correction, whatever its IC - and §7 measures the widths `conformal_weighted` would use, so
+# that constraint is about this allocator rather than about intervals in general.
 #
 # ### Forecast Representation
 #
@@ -1791,8 +1792,8 @@ credible.select(
 #   above, rather than routing every family to the primary label.
 # - **Ensemble**: the pairwise rank correlations in §5 decide whether averaging helps. Low
 #   correlation among families whose intervals all cover zero is diversity among weak signals,
-#   and averaging weak signals does not produce a strong one. Weight by how tight an interval
-#   is rather than by how large a point estimate is.
+#   and averaging weak signals does not produce a strong one. Weight by how tight a conformal
+#   width is rather than by how large a point estimate is.
 
 # %% [markdown]
 # ### The Option Feature Question

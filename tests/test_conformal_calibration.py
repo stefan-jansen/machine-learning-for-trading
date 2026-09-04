@@ -126,8 +126,38 @@ def test_conformal_widths_require_the_label_horizon(
 
     with pytest.raises(ValueError, match="not yet realized"):
         conformal.compute_conformal_widths(
-            "demo", "candidate", embargo_steps=0, min_calibration_n=3, write=False
+            "demo", "candidate", embargo_steps=-1, min_calibration_n=3, write=False
         )
+
+
+def test_a_zero_horizon_label_calibrates_on_the_residual_at_its_own_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Zero is a reviewed value, not a missing one.
+
+    `HOLDOUT_CONFORMAL_EMBARGO_STEPS` records 0 for `us_firm_characteristics`' three labels,
+    whose `labels.horizons` is `0D`: the row is dated by the month the return was earned, so the
+    residual is realized at the observation and reaches nothing forward. Refusing it here left
+    that case study unable to compute the widths its own reviewed horizon calls for, while the
+    coverage printed beside them measured an estimator at the same zero.
+    """
+    case_dir = tmp_path / "case_studies" / "demo"
+    _write_predictions(case_dir, _panel_rows())
+    monkeypatch.setattr(conformal, "get_case_study_dir", lambda _: case_dir)
+
+    assert conformal.holdout_conformal_embargo_steps("us_firm_characteristics", "fwd_ret_1m") == 0
+
+    widths = conformal.compute_conformal_widths(
+        "demo", "candidate", embargo_steps=0, min_calibration_n=3, write=False
+    )
+    assert not widths.is_empty()
+
+    # A step's own residual is eligible at zero and not at one, so the earliest decision a
+    # width exists for moves by exactly one step between them.
+    one = conformal.compute_conformal_widths(
+        "demo", "candidate", embargo_steps=1, min_calibration_n=3, write=False
+    )
+    assert widths["timestamp"].min() < one["timestamp"].min()
 
 
 def test_conformal_allocation_rejects_missing_selected_widths() -> None:

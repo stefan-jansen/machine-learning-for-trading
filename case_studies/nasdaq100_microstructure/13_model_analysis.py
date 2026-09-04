@@ -1354,11 +1354,11 @@ if conformal_df.height > 0:
 # **How to read the coverage table.** Two columns matter, and they fail
 # independently.
 #
-# Empirical coverage against nominal is the calibration check. An interval
-# advertised at a given confidence level should contain the realised value about
-# that often on the later folds. Coverage materially below nominal means the model is
+# Empirical coverage against nominal is the calibration check. A width advertised
+# at a given confidence level should contain the realised residual about that often
+# across the decisions it sized. Coverage materially below nominal means the model is
 # confident more often than it is right, and any position size derived from its
-# interval is too large. Coverage materially above nominal means the intervals
+# width is too large. Coverage materially above nominal means the widths
 # are wider than they need to be, which is safe but wasteful.
 #
 # Width per standard deviation says what that coverage cost. An interval that
@@ -1368,9 +1368,9 @@ if conformal_df.height > 0:
 # coverage at a width that still distinguishes one prediction from another.
 #
 # A family can rank well and fail this badly. Ranking depends only on the order
-# of the predictions; coverage depends on the scale of the residuals carrying
-# from the calibration window to a later one. When they diverge, the model needs
-# recalibration before any interval-aware sizing, even though its ordering is
+# of the predictions; coverage depends on the scale of a symbol's past residuals
+# carrying forward to the decision they size. When they diverge, the model needs
+# recalibration before any width-aware sizing, even though its ordering is
 # unaffected.
 
 # %% [markdown]
