@@ -262,13 +262,18 @@ class CandidateSet:
         Earlier generations stay readable by hash, which is what makes recording the lineage
         worth anything: a result registered against a superseded set can still be traced to
         the comparison it was made in.
+
+        One set can carry several names, so this resolves the name rather than the identity:
+        two names for the same members each resolve to it, and superseding one does not retire
+        the other.
         """
         with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
             head = _unsuperseded_hash(db, name)
             if head is None:
-                count = db.execute(
-                    "SELECT count(*) FROM candidate_sets WHERE name = ?", (name,)
-                ).fetchone()[0]
+                # Bindings, not identity rows: a name can point at a set first written under a
+                # different one, and counting `candidate_sets.name` would answer 0 for it and
+                # say the name was never written when two live generations are the problem.
+                count = len(name_bindings(db, name))
                 raise ValueError(
                     f"candidate set name {name!r} resolved to {count} unsuperseded identities"
                 )
@@ -276,6 +281,12 @@ class CandidateSet:
 
     @classmethod
     def open(cls, study: Study, set_hash: str) -> CandidateSet:
+        """Read one candidate set by identity.
+
+        ``name`` is the binding the identity was first written under. A set opened by hash has
+        no way to say which of its names the caller meant, and this is the one the registry
+        records on the identity row; :meth:`one` is the way in when the name is what matters.
+        """
         db_path = study.root / "run_log" / "registry.db"
         with closing(sqlite3.connect(db_path)) as db:
             row = db.execute(
