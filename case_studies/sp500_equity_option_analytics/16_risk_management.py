@@ -700,26 +700,30 @@ fig_tradeoff.show()
 # on every label - so the second label's run could not publish at all.
 
 # %%
-# A candidate set is immutable under its name, so a field that has grown has to name the
-# generation it replaces. Keyed by the full set name because that is what the refusal prints.
+# A candidate set is immutable under its name, so a field whose membership has moved has to name
+# the generation it replaces. Keyed by the full set name because that is what the refusal prints.
 # Resolved through `candidate_set_supersedes` rather than passed straight to `create`: a
 # reader's clean clone has no generation to supersede, and `create` refuses a first version that
-# claims to replace one. Two generations precede this one and both stay readable by hash, which
-# is what keeps a holdout registered against either traceable to the field it actually saw:
-# `328d2009685c` is the single-label field frozen on 2026-08-30, before the four variant labels
-# had baseline, allocation or overlay rows; `aa6b3986124b` replaced it on 2026-09-01 under a
-# per-stage count of advancing configurations, which admitted a label whose sweep had produced
-# one row per configuration and stopped; `04cb35eec43f` replaced that one later the same day and
-# held 3,710 members, 66 of them allocation backtests from a grid no current sweep plan declares.
-# `37169a5be187` replaced it with the declared grids only and holds 3,644, and `774c32c6e79b`
-# replaced that. Every one of those five was frozen over a field that was still being produced:
-# the allocation and risk plans behind them were all written at 21:40 UTC on 2026-09-01, while
-# the baseline sweeps that feed them published at 22:34-22:46 and three of the baselines they
-# rank were registered at 22:42. This generation is the first frozen over sweeps that ran in
-# stage order and recorded that they finished. Only the tip is declarable - `create` refuses
-# anything else and names the tip - so this value moves on every generation.
+# claims to replace one. Five generations precede this one and all five stay readable by hash,
+# which is what keeps a holdout registered against any of them traceable to the field it saw:
+# `328d2009685c` is the single-label field frozen on 2026-08-30 with 1,097 members, before the
+# four variant labels had baseline, allocation or overlay rows; `aa6b3986124b` replaced it on
+# 2026-09-01 with 3,680 under a per-stage count of advancing configurations, which admitted a
+# label whose sweep had produced one row per configuration and stopped; `04cb35eec43f` replaced
+# that one later the same day and held 3,710, 66 of them allocation backtests from a grid no
+# current sweep plan declares; `37169a5be187` replaced it with the declared grids only and held
+# 3,644; `774c32c6e79b` replaced that with 3,811. All five were frozen over a field that was
+# still being produced: the allocation and risk plans behind them were written at 21:40 UTC on
+# 2026-09-01, while the baseline sweeps that feed them published at 22:34-22:46 and three of the
+# baselines they rank were registered at 22:42. `57cb9eb3133c` is the tip, frozen 2026-09-02
+# over sweeps that ran in stage order and recorded that they finished. It holds 3,811 as well and
+# differs from `774c32c6e79b` in 54 members: the `fwd_ret_10d` allocation backtests registered at
+# 00:55 on 2026-09-01 gave way to the 54 the re-executed 15 registered at 00:30 on 2026-09-02, so
+# every member now rides an attestation that carries its own grid. Only the tip is declarable -
+# `create` refuses anything else and names the tip - so this value moves on every generation, and
+# it is wrong whenever it names a generation the registry has already superseded.
 SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
-    "sp500_equity_option_analytics:holdout-candidates": "774c32c6e79b",
+    "sp500_equity_option_analytics:holdout-candidates": "57cb9eb3133c",
 }
 
 # %% [markdown]
