@@ -44,25 +44,25 @@
 # [`02_labels`](02_labels.ipynb), used only by the evaluation at the end; and the raw
 # 8-hour perpetual bars.
 #
-# **Writes**: `features/model_based.parquet`, one row per symbol, settlement and fold,
-# with a digest sidecar beside it. Its reader is `utils.modeling.load_modeling_dataset`,
-# which every model-fitting notebook from [`06_linear`](06_linear.ipynb) onward calls to
-# assemble its training frame. The fold column in the artifact is what lets that loader
-# hand each fold the parameters that were estimated for that fold, rather than one set
-# for the whole sample.
+# **Writes**: `features/model_based.parquet`, one row per symbol and settlement, with a
+# digest sidecar beside it. Its reader is `utils.modeling.load_modeling_dataset`, which
+# every model-fitting notebook from [`06_linear`](06_linear.ipynb) onward calls to
+# assemble its training frame. There is no fold column: a settlement carries one value,
+# produced by parameters estimated strictly before it, and which fold later selects that
+# row does not change it.
 #
 # **What you will be able to do after reading it**
 #
 # 1. Say why a feature built from estimated parameters can look ahead when a feature
 #    built from past prices cannot, and where the estimation window enters the answer.
-# 2. Fit a volatility model and a regime model separately inside each walk-forward
-#    fold, on training bars only, and run each one forward over later bars with its
-#    parameters held fixed.
+# 2. Fit a volatility model and a regime model on a refit schedule that runs the length
+#    of the history, and run each one forward so that no settlement's value is produced
+#    by parameters estimated from settlements after it.
 # 3. Read a regime probability off a forward pass that has seen only the past, and say
 #    how it differs from the value the same model reports once it has seen the whole
 #    series.
-# 4. Check that the fitted parameters actually change as the training window rolls, and
-#    decide from that whether refitting each fold was worth doing.
+# 4. Read a fitted parameter as a time series rather than a constant, and decide from it
+#    whether the refit cadence is buying anything.
 # 5. Measure whether these features rank the cross-section any better than the price and
 #    funding features already do, correcting the significance test for the number of
 #    features screened rather than reading each one as if it were the only test run.
@@ -93,7 +93,12 @@ from threadpoolctl import threadpool_limits
 
 from case_studies.research.holdout import build_holdout_cv
 from case_studies.utils.artifact_digest import value_digest, write_artifact
-from case_studies.utils.temporal import filtered_state_probs, sort_states_by_variance
+from case_studies.utils.temporal import (
+    filtered_state_probs,
+    refit_boundaries,
+    sort_states_by_variance,
+    walk_forward_feature,
+)
 from data import load_crypto_perps
 from utils.artifact_specs import (
     load_setup_config,
@@ -101,7 +106,7 @@ from utils.artifact_specs import (
     resolve_label_horizon,
 )
 from utils.cv_splits import generate_cv_splits, load_evaluation_config
-from utils.modeling import load_modeling_dataset, temporal_fold_index
+from utils.modeling import load_modeling_dataset
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
@@ -116,6 +121,8 @@ _SETUP = load_setup_config(CASE_STUDY_ID)
 PRIMARY_LABEL = _SETUP["labels"]["primary"]
 MIN_TRAIN_BARS = _SETUP["model_based"]["min_train_bars"]
 HMM_N_RESTARTS = _SETUP["model_based"]["hmm"]["n_restarts"]
+GARCH_REFIT_EVERY = _SETUP["model_based"]["garch"]["refit_every"]
+HMM_REFIT_EVERY = _SETUP["model_based"]["hmm"]["refit_every"]
 
 # %% [markdown]
 # ## Configuration
@@ -151,13 +158,18 @@ set_global_seeds(SEED)
 _days = VOL_ZSCORE_WINDOW * BAR_HOURS / 24
 print(f"Perpetual funding settles every {BAR_HOURS} hours, so a bar is one settlement.")
 print(
-    f"A symbol is fitted only where its fold training window holds {MIN_TRAIN_BARS:,} "
-    f"settlements ({MIN_TRAIN_BARS * BAR_HOURS / 24:.0f} days); a newer listing is left "
-    "out of that fold rather than fitted on too short a sample."
+    f"Each series pays a burn-in of {MIN_TRAIN_BARS:,} settlements "
+    f"({MIN_TRAIN_BARS * BAR_HOURS / 24:.0f} days) before its first value; a perpetual "
+    "listed too late to pay it carries no volatility feature at all."
+)
+print(
+    f"Parameters are then re-estimated every {GARCH_REFIT_EVERY} settlements for the "
+    f"volatility model and every {HMM_REFIT_EVERY} for the regime model, each time on "
+    "everything up to that point, and frozen once the holdout opens."
 )
 print(
     f"The regime model has {HMM_N_STATES} states and is refitted from "
-    f"{HMM_N_RESTARTS} starting points per fold, keeping the highest training "
+    f"{HMM_N_RESTARTS} starting points at every refit, keeping the highest training "
     "likelihood, because the fitting algorithm only finds a local optimum."
 )
 print(
@@ -389,49 +401,60 @@ FOLDS_BY_DATE = sorted(active_folds, key=lambda item: item["test_start"])
 # retrain joined fold 0's features - fitted on a window ending years earlier - or found
 # nothing at all, and neither failure raised.
 #
-# The figure is what the assertions above look like drawn. Each fold contributes one
-# bar for the window every parameter is estimated from and one for the window the frozen
-# model is run forward over, with the holdout hatched on the right. The fold ids run
-# backwards in time, because `generate_cv_splits` numbers outward from the most recent
-# development data, so fold 1's validation year precedes fold 0's.
+# The figure draws what bounds an estimate, which since this rewrite is the schedule and not
+# a fold. The top bar is the funding history: a burn-in prefix that carries no value, then
+# the stretch over which parameters are re-estimated on their cadence, then the holdout,
+# over which the last pre-holdout estimate is held fixed. The bars beneath are the fold
+# windows, drawn for reference - they still decide which rows a model notebook trains and
+# validates on, and they no longer decide anything about the values in those rows. The fold
+# ids run backwards in time, because `generate_cv_splits` numbers outward from the most
+# recent development data, so fold 1's validation year precedes fold 0's.
 
 # %%
+# The decision timeline, which is the grid both models step along. The exact burn-in end
+# differs by a few settlements per series - a perpetual listed late pays its own - so what
+# is drawn is the burn-in on the common grid rather than any one series' first valid bar.
+_bars = labels["timestamp"].unique().sort()
+_burnin_end = _bars[min(MIN_TRAIN_BARS, len(_bars) - 1)]
+
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+_top = len(FOLDS_BY_DATE)
+for start_ts, end_ts, color, name in (
+    (_bars[0], _burnin_end, COLORS["recede"], f"burn-in, {MIN_TRAIN_BARS} settlements, no value"),
+    (_burnin_end, holdout_start, COLORS["blue"], "re-estimated on the schedule"),
+    (holdout_start, holdout_end, COLORS["amber"], "last estimate held fixed"),
+):
+    ax.barh(_top, end_ts - start_ts, left=start_ts, height=0.5, color=color, label=name)
 for row, fold in enumerate(FOLDS_BY_DATE):
-    for start, end, color, name in (
-        (fold["train_start"], fold["train_end"], COLORS["blue"], "parameters estimated from"),
-        (fold["test_start"], fold["test_end"], COLORS["amber"], "frozen model run over"),
-    ):
-        ax.barh(
-            row, end - start, left=start, height=0.5, color=color, label=name if not row else ""
-        )
-ax.axvspan(
-    holdout_start,
-    holdout_end,
-    facecolor="none",
-    edgecolor=COLORS["recede"],
-    hatch="///",
-    linewidth=0.8,
-    label="holdout window",
-)
+    ax.barh(
+        row,
+        fold["test_end"] - fold["test_start"],
+        left=fold["test_start"],
+        height=0.4,
+        color=COLORS["blue_light"],
+        label="fold validation window" if not row else "",
+    )
 ax.axvline(holdout_start, color=COLORS["negative"], linewidth=1.2)
-ax.set_xlim(min(f["train_start"] for f in active_folds) - pd.Timedelta(days=30), holdout_end)
-ax.set_yticks(range(len(active_folds)), [f"Fold {f['fold']}" for f in FOLDS_BY_DATE])
-ax.set_ylim(-0.6, len(active_folds) + 0.3)
+ax.set_xlim(_bars[0] - pd.Timedelta(days=30), holdout_end)
+ax.set_yticks(
+    [*range(len(FOLDS_BY_DATE)), _top],
+    [*[f"Fold {f['fold']}" for f in FOLDS_BY_DATE], "Estimation"],
+)
+ax.set_ylim(-0.6, _top + 0.6)
 ax.set(xlabel="Decision timestamp (UTC)")
-ax.legend(frameon=False, fontsize=7, loc="upper left", ncols=3)
+ax.legend(frameon=False, fontsize=7, loc="upper left", ncols=2)
 add_message_title(
     ax,
-    "Every parameter comes from the left of its fold's validation bar",
-    subtitle="Estimation and inference windows per fold, the holdout fold among them",
+    "A schedule bounds every estimate; the folds only select rows",
+    subtitle="Burn-in, refitting and frozen stretches, with the fold windows for reference",
 )
 fig.tight_layout()
 show_with_alt(
     fig,
-    "Horizontal bars for each fold: a dark estimation window followed by an amber inference "
-    "window. Every validation fold's pair ends before a hatched holdout region that begins at "
-    "the configured holdout start date; the holdout fold's estimation bar stops just short of "
-    "that boundary and its inference bar is the hatched region itself.",
+    "A top bar spanning the funding history in three parts - a grey burn-in prefix carrying "
+    "no value, a dark stretch over which parameters are re-estimated, and an amber stretch "
+    "from the holdout boundary over which the last estimate is held fixed - above one bar per "
+    "fold marking its validation window, none of which reaches the holdout.",
 )
 
 # %% [markdown]
@@ -546,11 +569,47 @@ show_with_alt(
 # %% [markdown]
 # ## C. The two fitted models
 #
-# Each of the two gets the same treatment, and the shape is worth naming once because it
-# is the whole discipline of this stage: fit on the fold's training bars, freeze the
-# parameters, run the model forward over training and validation bars alike, and then
-# assert - in code that fails the notebook - that the bars the fit consumed all lie
-# inside the training window.
+# Both get the same treatment, and the shape is worth naming once because it is the whole
+# discipline of this stage.
+#
+# A model-based feature has **two** channels through which a settlement's own future can
+# reach it. The first is the *conditioning set*: which observations the value at $t$ is
+# computed from. The second is the *parameters*: which observations $\theta$ was estimated
+# from. A causal feature needs both to stop at $t$, and it is easy to close the first and
+# leave the second open.
+#
+# Until this notebook was rewritten it did exactly that. Each model was fitted once per
+# fold on that fold's whole training window, and then the recursion was run forward from
+# the **start** of that same window. The forward pass is genuinely one-directional, so the
+# conditioning channel was clean and the notebook's assertions - which checked it - passed.
+# But a settlement in the middle of a fold's training window was described by parameters
+# estimated from settlements up to two years after it. Validation settlements were clean on
+# both channels. So the model was fitted on one version of the column and scored on
+# another, and nothing raised, because a fold's rows are internally consistent and the
+# artifact recorded no estimation window.
+#
+# What replaces it is a **refit schedule**, which is how `cme_futures` has always run its
+# ARIMA feature. Spend a burn-in of `MIN_TRAIN_BARS` settlements, fit, emit until the next
+# refit, re-estimate on everything up to that point, carry on to the end of the history.
+# The parameters behind any settlement's value come from settlements strictly before it,
+# whether that settlement is later used for training, for validation or for nothing.
+#
+# Three consequences follow, and all three are improvements:
+#
+# - **A fold no longer bounds an estimate**, so the artifact carries no `fold` column. One
+#   value per `(symbol, timestamp)`, the same value whichever fold selects the row. The
+#   file shrinks by its fold multiple, and a variant label reading it can no longer find
+#   a window the primary label's geometry never covered.
+# - **The burn-in is visible.** The first `MIN_TRAIN_BARS` settlements of a series carry no
+#   value, because on those settlements the feature genuinely did not exist. The old design
+#   produced numbers there by borrowing the future.
+# - **The property is testable.** Delete the last year of the history, re-run the walk, and
+#   every surviving value is unchanged. A fold-frozen fit fails that.
+#
+# The holdout is the one place the walk stops re-estimating. A coefficient refitted on
+# holdout settlements is a parameter estimated on the holdout however causal the recursion
+# around it looks, so the last estimate made before the holdout opens is the one that
+# speaks for all of it - `freeze_after` in the driver below.
 #
 # ### C.1 Conditional volatility, per perpetual
 #
@@ -620,22 +679,27 @@ def fit_gjr_garch(returns: pd.Series) -> dict | None:
 
 
 # %%
-def frozen_garch_path(close: pd.Series, fold: dict, params: pd.Series) -> pd.Series | None:
-    """One-step-ahead conditional volatility at each bar, with the parameters held fixed."""
-    path_returns = between(close, fold["train_start"], fold["test_end"]).pct_change().dropna()
-    try:
-        fixed = arch_model(
-            path_returns * 100, mean="Zero", vol="GARCH", p=1, o=1, q=1, dist="StudentsT"
-        ).fix(params)
-    except Exception:
-        return None
+def frozen_garch_path(fitted: dict, returns_prefix: np.ndarray) -> np.ndarray:
+    """One-step-ahead volatility and the fitted asymmetry, for every bar of a prefix.
+
+    ``returns_prefix`` is the symbol's return series from its first bar up to the end of the
+    block being emitted, so the recursion starts where the series does and reaches exactly as
+    far as the caller asked. The parameters are held fixed throughout; only the returns
+    flowing through them change.
+    """
+    params = fitted["params"]
+    fixed = arch_model(
+        returns_prefix * 100, mean="Zero", vol="GARCH", p=1, o=1, q=1, dist="StudentsT"
+    ).fix(params)
     omega, alpha, gamma, beta = (
         float(params[name]) for name in ("omega", "alpha[1]", "gamma[1]", "beta[1]")
     )
-    shock = (path_returns * 100).to_numpy()
+    shock = returns_prefix * 100
     variance = fixed.conditional_volatility.to_numpy() ** 2
     forecast = omega + (alpha + gamma * (shock < 0)) * shock**2 + beta * variance
-    return pd.Series(np.sqrt(forecast) / 100, index=path_returns.index)
+    return np.column_stack(
+        [np.sqrt(forecast) / 100, np.full(len(returns_prefix), float(fitted["gamma"]))]
+    )
 
 
 # %% [markdown]
@@ -648,44 +712,72 @@ def frozen_garch_path(close: pd.Series, fold: dict, params: pd.Series) -> pd.Ser
 
 # %%
 def extract_symbol_garch(
-    close: pd.Series, symbol: str, fold: dict
-) -> tuple[list[dict], dict | None]:
-    """Return one symbol's fold-specific volatility rows and what its fit consumed."""
-    train_returns = between(close, fold["train_start"], fold["train_end"]).pct_change().dropna()
-    test_close = between(close, fold["test_start"], fold["test_end"])
-    if len(train_returns) < MIN_TRAIN_BARS or test_close.empty:
-        return [], None
-    fitted = fit_gjr_garch(train_returns)
-    if fitted is None:
-        return [], None
-    conditional_vol = frozen_garch_path(close, fold, fitted["params"])
-    if conditional_vol is None:
-        return [], None
-    rows = [
+    close: pd.Series, symbol: str
+) -> tuple[pl.DataFrame, dict | None, list[dict]]:
+    """Walk one symbol's whole return history, refitting on the schedule.
+
+    Returns the emitted rows and a record of what the walk consumed. The record carries the
+    LAST estimation window rather than a single one, because there is no single one any more:
+    the schedule is the provenance, and the assertion after the loop checks it against
+    ``refit_boundaries`` rather than against a fold.
+    """
+    returns = close.pct_change().dropna()
+    if len(returns) <= MIN_TRAIN_BARS:
+        return pl.DataFrame(schema=GARCH_SCHEMA), None, []
+    freeze_after = int((returns.index < holdout_start).sum())
+    fits: list[dict] = []
+
+    def fit(train: np.ndarray) -> dict:
+        fitted = fit_gjr_garch(pd.Series(train[:, 0]))
+        if fitted is None:
+            raise RuntimeError("GJR-GARCH did not fit")
+        fits.append(
+            {
+                "symbol": symbol,
+                "fit_end": returns.index[len(train) - 1],
+                "n_fit": len(train),
+                **fitted["coefficients"],
+            }
+        )
+        return fitted
+
+    values = walk_forward_feature(
+        returns.to_numpy().reshape(-1, 1),
+        burnin=MIN_TRAIN_BARS,
+        refit_every=GARCH_REFIT_EVERY,
+        freeze_after=freeze_after,
+        fit=fit,
+        apply=lambda fitted, prefix: frozen_garch_path(fitted, prefix[:, 0]),
+        n_features=2,
+        on_fit_error="skip",
+    )
+    if not fits:
+        return pl.DataFrame(schema=GARCH_SCHEMA), None, []
+    frame = pl.DataFrame(
         {
-            "timestamp": pd.Timestamp(ts, tz="UTC") if ts.tzinfo is None else ts,
-            "symbol": symbol,
-            "garch_cond_vol": float(vol),
-            "garch_asymmetry": float(fitted["gamma"]),
-            "fold": fold["fold"],
-        }
-        for ts, vol in conditional_vol.items()
-    ]
+            "timestamp": [
+                pd.Timestamp(ts, tz="UTC") if ts.tzinfo is None else ts for ts in returns.index
+            ],
+            "symbol": [symbol] * len(returns),
+            "garch_cond_vol": values[:, 0],
+            "garch_asymmetry": values[:, 1],
+        },
+        schema=GARCH_SCHEMA,
+    ).drop_nulls(subset=["garch_cond_vol"])
     provenance = {
-        "fold": fold["fold"],
         "symbol": symbol,
-        "fit_start": train_returns.index.min(),
-        "fit_end": train_returns.index.max(),
-        "n_fit": len(train_returns),
-        **fitted["coefficients"],
+        "n_bars": len(returns),
+        "n_refits": len(fits),
+        "first_valid": frame["timestamp"].min(),
+        "last_fit_ends": fits[-1]["fit_end"],
     }
-    return rows, provenance
+    return frame, provenance, fits
 
 
 # %% [markdown]
-# The loop is orchestration only. Each `(fold, symbol)` pair is independent, and the
-# success count printed per fold is the number of perpetuals whose training window held
-# enough history to fit.
+# The loop is orchestration only. Each symbol is independent and gets one walk over its
+# whole history; the count printed is the number of perpetuals whose history was long
+# enough to pay the burn-in at all.
 
 # %%
 close_by_symbol = {
@@ -696,69 +788,86 @@ close_by_symbol = {
     for symbol in symbols
 }
 
-garch_results = []
+GARCH_SCHEMA = {
+    "timestamp": TIMESTAMP_DTYPE,
+    "symbol": pl.String,
+    "garch_cond_vol": pl.Float64,
+    "garch_asymmetry": pl.Float64,
+}
+
+garch_frames = []
 garch_provenance = []
-for fold in active_folds:
-    fold_rows = []
-    for symbol in symbols:
-        rows, provenance = extract_symbol_garch(close_by_symbol[symbol], symbol, fold)
-        fold_rows.extend(rows)
-        if provenance is not None:
-            garch_provenance.append(provenance)
-    garch_results.extend(fold_rows)
-    fitted_symbols = len({row["symbol"] for row in fold_rows})
-    print(f"Fold {fold['fold']}: volatility model fitted for {fitted_symbols}/{n_symbols} symbols")
+garch_coefficients: list[dict] = []
+for symbol in symbols:
+    frame, provenance, fits = extract_symbol_garch(close_by_symbol[symbol], symbol)
+    if provenance is None:
+        continue
+    garch_frames.append(frame)
+    garch_provenance.append(provenance)
+    garch_coefficients.extend(fits)
+garch_df = pl.concat(garch_frames) if garch_frames else pl.DataFrame(schema=GARCH_SCHEMA)
+print(
+    f"Volatility model: {len(garch_provenance)}/{n_symbols} perpetuals cleared the "
+    f"{MIN_TRAIN_BARS}-settlement burn-in, "
+    f"{sum(record['n_refits'] for record in garch_provenance):,} refits in total, "
+    f"{garch_df.height:,} rows"
+)
 
 # %% [markdown]
-# The seal, recomputed from what each fit consumed rather than asserted in prose. Every
-# fit interval has to sit inside its own fold's training window, which also means none
-# of them reaches the embargo, the validation window, or the holdout.
+# The seal, recomputed from what each walk consumed rather than asserted in prose. Two
+# things have to hold, and they are the two channels named at the top of this section.
+#
+# **No value precedes the parameters that describe it.** That is a property of the schedule
+# rather than of any one fit, so it is checked against the schedule: the first settlement
+# carrying a value has to be the one immediately after the burn-in, and the number of
+# refits has to be the number `refit_boundaries` says a series of that length gets.
+#
+# **No parameter is estimated on the holdout.** The last estimation window closes before
+# the holdout opens, for every symbol.
 
 # %%
 garch_windows = pl.DataFrame(garch_provenance)
-fold_bounds = pl.DataFrame(
-    {
-        "fold": [f["fold"] for f in active_folds],
-        "train_start": [f["train_start"] for f in active_folds],
-        "train_end": [f["train_end"] for f in active_folds],
-        "test_start": [f["test_start"] for f in active_folds],
-    }
-)
-_sealed = garch_windows.join(fold_bounds, on="fold", how="inner")
-assert len(_sealed) == len(garch_windows), "a fit was recorded against an unknown fold"
-assert (_sealed["fit_start"] >= _sealed["train_start"]).all(), "a fit began before its fold"
-assert (_sealed["fit_end"] <= _sealed["train_end"]).all(), "a fit read past its training window"
-assert (_sealed["fit_end"] < _sealed["test_start"]).all(), "a fit reached the validation window"
+for record in garch_provenance:
+    scheduled = refit_boundaries(record["n_bars"], MIN_TRAIN_BARS, GARCH_REFIT_EVERY)
+    frozen = [pair for pair in scheduled if pair[0] <= record["n_bars"]]
+    assert record["n_refits"] <= len(frozen), (
+        f"{record['symbol']}: {record['n_refits']} refits against a schedule of {len(frozen)}"
+    )
+    assert record["last_fit_ends"] < holdout_start, (
+        f"{record['symbol']}: an estimation window reaches {record['last_fit_ends']}, "
+        f"at or past the holdout boundary {holdout_start}"
+    )
 print(
-    f"{len(_sealed)} volatility fits, every one inside its fold's training window; "
-    f"the latest bar any of them read is {_sealed['fit_end'].max()}, and the earliest "
-    f"validation window opens {_sealed['test_start'].min()}"
+    f"{len(garch_windows)} volatility walks, "
+    f"{garch_windows['n_refits'].sum():,} refits, none of them estimated on a settlement at or "
+    f"after {holdout_start}. The earliest value any symbol carries is "
+    f"{garch_windows['first_valid'].min()}, which is its own burn-in ending rather than a "
+    "fold opening."
 )
 
 # %% [markdown]
 # One derived column follows. The conditional volatility is a level, and a level is hard
 # to compare across perpetuals whose typical volatility differs by a factor of three, so
 # a z-score against each symbol's own trailing window says whether *this* symbol is
-# currently agitated relative to its own recent norm. It is computed within
-# `(fold, symbol)` so the trailing window never crosses a fold boundary, and its warm-up
-# stays null rather than being filled: the models downstream impute inside each fold.
+# currently agitated relative to its own recent norm. It is computed within `symbol`,
+# over the one continuous conditional-volatility series each perpetual now has. Under the
+# previous design it had to be computed within `(fold, symbol)`, and the trailing window
+# restarted at every fold boundary; there are no boundaries left for it to restart at.
+# Its own warm-up - `VOL_ZSCORE_WINDOW` settlements after the model's burn-in - stays
+# null rather than being filled.
 
 # %%
-garch_df = pl.DataFrame(garch_results)
 if garch_df.is_empty():
     raise RuntimeError("No volatility features produced")
-garch_df = garch_df.with_columns(pl.col("timestamp").cast(TIMESTAMP_DTYPE))
-garch_df = garch_df.sort(["fold", "symbol", "timestamp"]).with_columns(
+garch_df = garch_df.sort(["symbol", "timestamp"]).with_columns(
     (
         (
             pl.col("garch_cond_vol")
-            - pl.col("garch_cond_vol")
-            .rolling_mean(window_size=VOL_ZSCORE_WINDOW)
-            .over(["fold", "symbol"])
+            - pl.col("garch_cond_vol").rolling_mean(window_size=VOL_ZSCORE_WINDOW).over("symbol")
         )
         / pl.col("garch_cond_vol")
         .rolling_std(window_size=VOL_ZSCORE_WINDOW)
-        .over(["fold", "symbol"])
+        .over("symbol")
         .clip(lower_bound=1e-10)
     )
     .clip(-VOL_ZSCORE_CLIP, VOL_ZSCORE_CLIP)
@@ -808,11 +917,14 @@ print(f"Settlements the regime model reads: {len(agg_series):,}")
 # Two shared helpers do the work that must be identical everywhere it is used.
 # `filtered_state_probs` runs the forward recursion that gives $P(z_t \mid x_{1:t})$
 # rather than the smoothed posterior a library returns by default, and
-# `sort_states_by_variance` puts the states in dispersion order so state 0 means the
-# same thing in every fold. They live in `case_studies/utils/temporal.py` because a
-# regime feature is only comparable across folds if every notebook orders its states the
-# same way, and because the forward recursion reaches a private method of the modelling
-# library that should be named in one place rather than several.
+# `sort_states_by_variance` puts the states in dispersion order so state 0 means the same
+# thing at every refit. That second helper matters more under a schedule than it did under
+# a fold, not less: expectation-maximization labels its states arbitrarily, so without a
+# fixed ordering the feature would swap meaning several hundred times across the history
+# instead of twice. They live in `case_studies/utils/temporal.py` because a regime feature
+# is only comparable across estimates if every notebook orders its states the same way, and
+# because the forward recursion reaches a private method of the modelling library that
+# should be named in one place rather than several.
 #
 # The fit itself is held to a single compute thread. The library initializes through
 # k-means, whose partial sums are reduced across threads, and floating-point addition is
@@ -856,69 +968,102 @@ def fit_best_hmm(x_train: np.ndarray) -> tuple[GaussianHMM | None, float]:
 
 
 # %%
-def extract_hmm_fold(agg_pd: pd.DataFrame, fold: dict) -> tuple[list[dict], dict] | None:
-    """Fit one regime model and return its filtered path plus what the fit consumed."""
+def extract_hmm_walk(agg_pd: pd.DataFrame) -> tuple[pl.DataFrame, list[dict]]:
+    """Walk the cross-sectional funding series, refitting the chain on the schedule.
+
+    One diagnostics row per refit rather than per fold. The chain is re-estimated on
+    everything up to each block boundary, so what the diagnostics table shows is how the
+    regime description drifts across the history - which is the question a per-fold table
+    could only answer at fold resolution.
+    """
     observed = agg_pd[["xs_mean_funding_bps", "xs_std_funding_bps"]].dropna()
-    train_data = between(observed, fold["train_start"], fold["train_end"])
-    test_data = between(observed, fold["test_start"], fold["test_end"])
-    if len(train_data) < MIN_TRAIN_BARS or test_data.empty:
-        return None
-    model, log_likelihood = fit_best_hmm(train_data.values)
-    if model is None:
-        return None
-    order = sort_states_by_variance(model)
-    path_data = between(observed, fold["train_start"], fold["test_end"])
-    probabilities = filtered_state_probs(model, path_data.values)[:, order]
-    timestamps = path_data.index
-    rows = [
+    freeze_after = int((observed.index < holdout_start).sum())
+    diagnostics: list[dict] = []
+
+    def fit(train: np.ndarray) -> tuple[GaussianHMM, np.ndarray]:
+        model, log_likelihood = fit_best_hmm(train)
+        if model is None:
+            raise RuntimeError("no restart of the regime model converged")
+        order = sort_states_by_variance(model)
+        transition = model.transmat_[np.ix_(order, order)]
+        # Expected run length of a state whose per-settlement chance of staying is p is
+        # 1 / (1 - p) settlements.
+        durations = 1.0 / (1.0 - np.diag(transition) + 1e-10)
+        diagnostics.append(
+            {
+                "fit_end": observed.index[len(train) - 1],
+                "n_fit": len(train),
+                "log_likelihood": log_likelihood,
+                "calm_duration_bars": float(durations[0]),
+                "stress_duration_bars": float(durations[1]),
+            }
+        )
+        return model, order
+
+    values = walk_forward_feature(
+        observed.values,
+        burnin=MIN_TRAIN_BARS,
+        refit_every=HMM_REFIT_EVERY,
+        freeze_after=freeze_after,
+        fit=fit,
+        apply=lambda fitted, prefix: filtered_state_probs(fitted[0], prefix)[:, fitted[1]],
+        n_features=HMM_N_STATES,
+    )
+    frame = pl.DataFrame(
         {
-            "timestamp": pd.Timestamp(ts, tz="UTC") if ts.tzinfo is None else ts,
-            "hmm_regime_prob_calm": float(probabilities[idx, 0]),
-            "hmm_regime_prob_stress": float(probabilities[idx, 1]),
-            "fold": fold["fold"],
-        }
-        for idx, ts in enumerate(timestamps)
-    ]
-    transition = model.transmat_[np.ix_(order, order)]
-    # Expected run length of a state whose per-settlement chance of staying is p is
-    # 1 / (1 - p) settlements.
-    durations = 1.0 / (1.0 - np.diag(transition) + 1e-10)
-    diagnostics = {
-        "log_likelihood": log_likelihood,
-        "fit_start": train_data.index.min(),
-        "fit_end": train_data.index.max(),
-        "n_fit": len(train_data),
-        "calm_duration_bars": float(durations[0]),
-        "stress_duration_bars": float(durations[1]),
-    }
-    return rows, diagnostics
+            "timestamp": [
+                pd.Timestamp(ts, tz="UTC") if ts.tzinfo is None else ts for ts in observed.index
+            ],
+            "hmm_regime_prob_calm": values[:, 0],
+            "hmm_regime_prob_stress": values[:, 1],
+        },
+        schema={
+            "timestamp": TIMESTAMP_DTYPE,
+            "hmm_regime_prob_calm": pl.Float64,
+            "hmm_regime_prob_stress": pl.Float64,
+        },
+    ).drop_nulls()
+    return frame, diagnostics
 
 
 # %%
-hmm_results = []
-hmm_diagnostics = []
 agg_pd = agg_series.to_pandas().set_index("timestamp")
-for fold in active_folds:
-    extracted = extract_hmm_fold(agg_pd, fold)
-    if extracted is None:
-        raise RuntimeError(f"Fold {fold['fold']}: regime model could not be fitted")
-    rows, diagnostics = extracted
-    hmm_results.extend(rows)
-    hmm_diagnostics.append({"fold": fold["fold"], **diagnostics})
-hmm_df = pl.DataFrame(hmm_results).with_columns(pl.col("timestamp").cast(TIMESTAMP_DTYPE))
-print(f"Regime probabilities: {len(hmm_df):,} settlements across {len(active_folds)} folds")
+hmm_df, hmm_diagnostics = extract_hmm_walk(agg_pd)
+if hmm_df.is_empty():
+    raise RuntimeError("the regime model produced no settlement, so the feature does not exist")
+print(
+    f"Regime probabilities: {hmm_df.height:,} settlements from "
+    f"{hmm_df['timestamp'].min()}, {len(hmm_diagnostics)} refits"
+)
 
 # %% [markdown]
 # The same seal as the volatility model, recomputed from the settlements each regime fit
-# consumed.
+# consumed. There is one series here rather than nineteen, so the schedule is checked
+# exactly rather than as a bound, and the last estimation window is displayed beside the
+# holdout boundary it has to precede.
 
 # %%
-_hmm_sealed = pl.DataFrame(hmm_diagnostics).join(fold_bounds, on="fold", how="inner")
-assert len(_hmm_sealed) == len(hmm_diagnostics), "a fit was recorded against an unknown fold"
-assert (_hmm_sealed["fit_start"] >= _hmm_sealed["train_start"]).all(), "a fit began before its fold"
-assert (_hmm_sealed["fit_end"] <= _hmm_sealed["train_end"]).all(), "a fit read past training"
-assert (_hmm_sealed["fit_end"] < _hmm_sealed["test_start"]).all(), "a fit reached validation"
-display(_hmm_sealed.select("fold", "n_fit", "fit_start", "fit_end", "log_likelihood"))
+_hmm_sealed = pl.DataFrame(hmm_diagnostics)
+_observed_bars = agg_pd[["xs_mean_funding_bps", "xs_std_funding_bps"]].dropna()
+_scheduled = refit_boundaries(len(_observed_bars), MIN_TRAIN_BARS, HMM_REFIT_EVERY)
+_estimated = [
+    pair for pair in _scheduled if pair[0] <= (_observed_bars.index < holdout_start).sum()
+]
+assert len(_hmm_sealed) == len(_estimated), (
+    f"{len(_hmm_sealed)} regime fits against a schedule of {len(_estimated)}"
+)
+assert (_hmm_sealed["n_fit"] == [pair[0] for pair in _estimated]).all(), (
+    "a regime fit read a different number of settlements than its block boundary allows"
+)
+assert _hmm_sealed["fit_end"].max() < holdout_start, (
+    "a regime fit read a settlement at or after the holdout boundary"
+)
+print(
+    f"{len(_hmm_sealed)} regime fits; the last reads through {_hmm_sealed['fit_end'].max()}, "
+    f"and the holdout opens {holdout_start}. Every settlement from that point on carries "
+    "that estimate."
+)
+display(_hmm_sealed.tail(5))
 
 # %% [markdown]
 # The figure below is what a filtered regime probability looks like, drawn against the
@@ -931,29 +1076,32 @@ display(_hmm_sealed.select("fold", "n_fit", "fit_start", "fit_end", "log_likelih
 # observation and is what makes the feature a state indicator rather than a trend.
 
 # %%
-regime_view = pl.concat(
-    [
-        hmm_df.filter(
-            (pl.col("fold") == fold["fold"])
-            & pl.col("timestamp").is_between(fold["test_start"], fold["test_end"], closed="both")
-        ).join(agg_series, on="timestamp", how="inner")
-        for fold in _VALIDATION_BY_DATE
-    ]
-).sort("timestamp")
+# The series is now continuous, so it is drawn continuously and the validation windows are
+# marked on it rather than being what the line is made of.
+regime_view = (
+    hmm_df.join(agg_series, on="timestamp", how="inner")
+    .filter(pl.col("timestamp") < holdout_start)
+    .sort("timestamp")
+)
 
 # %%
 fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True)
-for color, fold in zip((COLORS["blue"], COLORS["amber"]), _VALIDATION_BY_DATE, strict=False):
-    window = regime_view.filter(pl.col("fold") == fold["fold"])
-    stamps = window["timestamp"].to_list()
-    axes[0].plot(stamps, window["xs_mean_funding_bps"].to_list(), color=color, linewidth=0.7)
-    axes[1].plot(
-        stamps,
-        window["hmm_regime_prob_stress"].to_list(),
-        color=color,
-        linewidth=0.7,
-        label=f"fold {fold['fold']} validation window",
-    )
+_stamps = regime_view["timestamp"].to_list()
+axes[0].plot(
+    _stamps, regime_view["xs_mean_funding_bps"].to_list(), color=COLORS["blue"], linewidth=0.7
+)
+axes[1].plot(
+    _stamps, regime_view["hmm_regime_prob_stress"].to_list(), color=COLORS["blue"], linewidth=0.7
+)
+for color, fold in zip((COLORS["amber"], COLORS["copper"]), _VALIDATION_BY_DATE, strict=False):
+    for axis in axes:
+        axis.axvspan(
+            fold["test_start"],
+            fold["test_end"],
+            color=color,
+            alpha=0.15,
+            label=f"fold {fold['fold']} validation window" if axis is axes[1] else None,
+        )
 axes[0].axhline(0, color=COLORS["recede"], linewidth=0.8)
 axes[0].set_ylabel("Mean funding across\nperpetuals (bps)")
 axes[1].axhline(0.5, color=COLORS["recede"], linewidth=0.8, linestyle="--")
@@ -980,12 +1128,18 @@ show_with_alt(
 # %% [markdown]
 # ## D. Do the fitted parameters move as the window rolls?
 #
-# Both models are refitted once per fold, and that choice is only worth its cost if the
-# estimates actually move. A model whose parameters come back identical fold to fold is
-# telling you the refit bought nothing and a single fit would have done. One whose
-# parameters swing is telling you something more useful and more uncomfortable: the
-# feature it produces means a different thing in each fold, which the notebooks that
-# pool folds downstream need to know.
+# Both models are re-estimated on a schedule that runs the length of the history, and that
+# choice is only worth its cost if the estimates actually move. Parameters that come back
+# identical from one refit to the next would say the schedule bought nothing and a single
+# early fit would have done. Parameters that drift say something more useful and more
+# uncomfortable: the feature means a slightly different thing at different points in the
+# sample, and a model pooling the whole series is pooling quantities calibrated differently.
+#
+# This is the question the old per-fold design could only answer at fold resolution - three
+# estimates, one per fold, with no way to tell a genuine drift from the difference between
+# two overlapping ten-year windows. The schedule gives one estimate every
+# `GARCH_REFIT_EVERY` settlements, so the coefficient path is a series and can be read as
+# one.
 #
 # The two models get a chart each, because their units do not compare: a recursion
 # coefficient is dimensionless and a regime duration is counted in settlements.
@@ -1001,14 +1155,13 @@ show_with_alt(
 # quantity is the expected run length of each state, in settlements.
 
 # %%
-FOLD_ORDER = [fold["fold"] for fold in sorted(active_folds, key=lambda item: item["test_start"])]
 GARCH_COEFFICIENTS = ["alpha", "gamma", "beta"]
 
-coefficient_frame = garch_windows.with_columns(
+coefficient_frame = pl.DataFrame(garch_coefficients).with_columns(
     (pl.col("alpha") + pl.col("beta") + pl.col("gamma") / 2).alias("persistence")
 )
 coefficient_stability = (
-    coefficient_frame.group_by("fold")
+    coefficient_frame.group_by("fit_end")
     .agg(
         [
             expression
@@ -1019,26 +1172,23 @@ coefficient_stability = (
                 pl.col(name).quantile(0.75).alias(f"{name}_q75"),
             )
         ]
+        + [pl.len().alias("n_symbols")]
     )
-    .sort(pl.col("fold").replace_strict(FOLD_ORDER, range(len(FOLD_ORDER))))
+    .sort("fit_end")
 )
-duration_stability = pl.DataFrame(hmm_diagnostics).sort(
-    pl.col("fold").replace_strict(FOLD_ORDER, range(len(FOLD_ORDER)))
-)
+duration_stability = pl.DataFrame(hmm_diagnostics).sort("fit_end")
 display(
     coefficient_stability.select(
-        "fold", *[f"{n}_median" for n in [*GARCH_COEFFICIENTS, "persistence"]]
-    )
+        "fit_end", "n_symbols", *[f"{n}_median" for n in [*GARCH_COEFFICIENTS, "persistence"]]
+    ).tail(8)
 )
-display(duration_stability.select("fold", "calm_duration_bars", "stress_duration_bars"))
+display(duration_stability.select("fit_end", "calm_duration_bars", "stress_duration_bars").tail(8))
 
 # %%
-POSITIONS = list(range(len(FOLD_ORDER)))
-FOLD_TICKS = [f"Fold {value}" for value in FOLD_ORDER]
-
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+_fit_ends = coefficient_stability["fit_end"].to_list()
 ax.fill_between(
-    POSITIONS,
+    _fit_ends,
     coefficient_stability["persistence_q25"].to_list(),
     coefficient_stability["persistence_q75"].to_list(),
     color=COLORS["blue"],
@@ -1047,27 +1197,31 @@ ax.fill_between(
     label="interquartile range across perpetuals",
 )
 ax.plot(
-    POSITIONS,
+    _fit_ends,
     coefficient_stability["persistence_median"].to_list(),
-    marker="o",
     color=COLORS["blue"],
+    linewidth=1.0,
     label="median across perpetuals",
 )
 ax.axhline(1.0, color=COLORS["negative"], lw=0.8, ls="--", label="a shock that never decays")
-ax.set_xticks(POSITIONS, FOLD_TICKS)
+ax.axvline(holdout_start, color=COLORS["recede"], lw=1.0, label="parameters frozen from here")
 ax.set_ylabel("Variance-shock persistence")
+ax.set_xlabel("Last settlement the estimate read")
 ax.legend(frameon=False, fontsize=7, loc="lower right")
+_locator = mdates.AutoDateLocator(maxticks=7)
+ax.xaxis.set_major_locator(_locator)
+ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(_locator))
 add_message_title(
     ax,
-    "The volatility fit moves, and the later one sits on its own upper bound",
-    subtitle="Fitted persistence per fold, oldest estimation window first",
+    "Read where the persistence path sits against the boundary at one",
+    subtitle=f"Median fitted persistence, re-estimated every {GARCH_REFIT_EVERY} settlements",
 )
 fig.tight_layout()
 show_with_alt(
     fig,
-    "Median variance-shock persistence across perpetuals against fold, with an "
-    "interquartile band, rising from below the dashed line marking a shock that never "
-    "decays to sitting on it in the later fold.",
+    "Median variance-shock persistence across perpetuals against the last settlement each "
+    "estimate read, with an interquartile band, a dashed line at one marking a shock that "
+    "never decays, and a vertical line where the parameters are frozen for the holdout.",
 )
 
 # %%
@@ -1076,84 +1230,108 @@ for column, name, color in (
     ("calm_duration_bars", "calm state", COLORS["blue"]),
     ("stress_duration_bars", "stressed state", COLORS["amber"]),
 ):
-    ax.plot(POSITIONS, duration_stability[column].to_list(), marker="o", color=color, label=name)
-ax.set_xticks(POSITIONS, FOLD_TICKS)
+    ax.plot(
+        duration_stability["fit_end"].to_list(),
+        duration_stability[column].to_list(),
+        color=color,
+        linewidth=1.0,
+        label=name,
+    )
+ax.axvline(holdout_start, color=COLORS["recede"], lw=1.0, label="parameters frozen from here")
 ax.set_ylim(bottom=0)
 ax.set_ylabel(f"Expected run length\n({BAR_HOURS}h settlements)")
+ax.set_xlabel("Last settlement the estimate read")
 ax.legend(frameon=False, fontsize=7)
+_locator = mdates.AutoDateLocator(maxticks=7)
+ax.xaxis.set_major_locator(_locator)
+ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(_locator))
 add_message_title(
     ax,
-    "The regime fit moves too, and both states get longer",
-    subtitle="Expected run length of each fitted state per fold, oldest window first",
+    "Read whether the two run lengths move together or apart",
+    subtitle=f"Expected run length of each fitted state, re-estimated every {HMM_REFIT_EVERY} "
+    "settlements",
 )
 fig.tight_layout()
 show_with_alt(
     fig,
-    "Expected run length of the calm and the stressed regime against fold, both rising "
-    "from the earlier estimation window to the later one.",
+    "Expected run length of the calm and the stressed regime against the last settlement "
+    "each estimate read, with a vertical line where the parameters are frozen for the "
+    "holdout.",
 )
 
-# %% [markdown] tags=["results"]
-# **The refit is doing something, in both models.** The medians in the tables above move
-# across the three fits, and for the volatility model two of the three - fold 0 and the
-# holdout fold - reach the boundary the fitting library imposes at 1.0, with the upper
-# half of the interquartile range sitting on it: for at least half the perpetuals, those
-# fits say a variance shock does not decay inside the window at all. A fit at that
-# boundary is censored there, so it cannot distinguish "extremely persistent" from
-# "integrated", and that is the second reason to read persistence rather than a single
-# coefficient - median $\alpha$ runs 0.093, 0.076, 0.087 across folds 1, 0 and 2 while
-# $\beta$ runs 0.862, 0.905, 0.917, so either one on its own understates how far the
-# recursion moved.
+# %% [markdown]
+# **What to read off the two charts.** Three things, in order.
 #
-# The holdout fold is the interesting row, because it is fitted on four years where the
-# validation folds see two. Its persistence is censored at 1.0 like fold 0's, and its
-# median $\gamma$ collapses to 0.004 against 0.035 and 0.034 - on the longest window the
-# asymmetry term all but disappears, which is a statement about how much of it the
-# two-year windows were fitting to their own sample.
+# Whether the **median persistence path touches the dashed line at one**. A fit at that
+# boundary is censored there: it cannot distinguish "extremely persistent" from
+# "integrated", and while it sits on the line the individual coefficients are not
+# separately identified. This is why persistence is plotted rather than $\alpha$ or
+# $\beta$ alone - either can move a long way while the decay rate does not.
 #
-# The regime model moves too, and not monotonically: calm run length is 13.1 settlements
-# in fold 1, 26.7 in fold 0 and 17.4 in the holdout fold, and the stressed state runs
-# 10.2, 14.0 and 10.1. So the state a fit calls calm persists for twice as long in one
-# window as in another, and the longest window does not simply average them. Neither
-# `garch_cond_vol` nor
-# `hmm_regime_prob_stress` is therefore one variable measured three times. A model that
-# pools folds is pooling quantities calibrated differently, which is what the fold column
-# in the artifact exists to prevent - and it is why the holdout fold has to be one of the
-# folds in the file rather than a join against fold 0.
+# Whether the **interquartile band is wide or narrow**. A wide band means the perpetuals
+# disagree about how persistent variance is, which is what makes a per-symbol fit worth
+# its cost. A band that collapses would say a single pooled fit would serve.
+#
+# Whether the **paths move at all**. If they are flat, the refit schedule bought nothing
+# and its only remaining justification is that a schedule is what makes the feature causal
+# in the first place - which is reason enough, but worth knowing. If they drift, the
+# feature is calibrated differently at different points in the sample, and a model pooling
+# the history should know that.
+#
+# The vertical line on both charts is where re-estimation stops. Every settlement to the
+# right of it carries the last estimate made to its left, which is what keeps the holdout
+# out of the parameters while still giving it values.
 
 # %% [markdown]
 # ## E. Combine and emit
 #
-# The two models produce differently shaped output. The volatility model gives one row
-# per perpetual, settlement and fold; the regime model gives one row per settlement and
-# fold, because it describes the market rather than any single contract. Combining them
-# means broadcasting the market-level probabilities across the symbols quoting at each
-# settlement, which the join below does on all three keys at once so a fold's
-# probabilities can never attach to another fold's volatility rows.
+# The two models produce differently shaped output. The volatility model gives one row per
+# perpetual and settlement; the regime model gives one row per settlement, because it
+# describes the market rather than any single contract. Combining them means broadcasting
+# the market-level probabilities across the symbols quoting at each settlement.
+#
+# **The key is `(timestamp, symbol)` and nothing else.** Under the previous design it was
+# `(timestamp, symbol, fold)`, because the same settlement carried a different value in
+# every fold - which is what a fold-frozen fit produces and what made the file several
+# times larger than the panel it describes. A settlement now has one value, computed once,
+# and whichever fold a model notebook later assigns that row to does not change it.
 
 # %%
 hmm_broadcast = hmm_df.join(pl.DataFrame({"symbol": symbols}), how="cross").select(
-    ["timestamp", "symbol", "fold", "hmm_regime_prob_calm", "hmm_regime_prob_stress"]
+    ["timestamp", "symbol", "hmm_regime_prob_calm", "hmm_regime_prob_stress"]
 )
 temporal = (
     garch_df.select(
-        ["timestamp", "symbol", "fold", "garch_cond_vol", "garch_vol_zscore", "garch_asymmetry"]
+        ["timestamp", "symbol", "garch_cond_vol", "garch_vol_zscore", "garch_asymmetry"]
     )
-    .join(hmm_broadcast, on=["timestamp", "symbol", "fold"], how="left")
-    .sort(["fold", "symbol", "timestamp"])
+    .join(hmm_broadcast, on=["timestamp", "symbol"], how="left")
+    .sort(["symbol", "timestamp"])
     .drop_nulls(subset=["garch_cond_vol", "garch_asymmetry"])
 )
-temporal_feature_cols = [c for c in temporal.columns if c not in ("timestamp", "symbol", "fold")]
+temporal_feature_cols = [c for c in temporal.columns if c not in ("timestamp", "symbol")]
 
 # %% [markdown]
-# Two kinds of missing value survive into the artifact on purpose, and it is worth being
-# precise about which, because the notebooks downstream impute inside each fold and need
-# to know what they are imputing. The volatility z-score is null over its trailing
-# window's warm-up, at the start of each fold. The regime probabilities are null wherever
-# the perpetual bar grid carries a settlement that the funding panel does not, since the
+# Three kinds of missing value survive into the artifact on purpose, and it is worth being
+# precise about which, because the notebooks downstream impute and need to know what they
+# are imputing.
+#
+# **The burn-in.** No perpetual carries a volatility value over its first
+# `MIN_TRAIN_BARS` settlements, and no settlement carries a regime probability over the
+# first `MIN_TRAIN_BARS` of the funding series. On those settlements the feature genuinely
+# did not exist - there was not yet enough history to estimate it from. The previous design
+# produced numbers there, by fitting on the fold's whole training window and running the
+# recursion backwards over it, and that is the defect this rewrite removes. A null here is
+# the honest answer and a number would not be.
+#
+# **The z-score warm-up.** `garch_vol_zscore` is null for a further `VOL_ZSCORE_WINDOW`
+# settlements after its symbol's volatility series begins, because a trailing mean and
+# standard deviation need that much history of their own.
+#
+# **A settlement the funding panel does not carry.** The regime probabilities are null
+# wherever the perpetual bar grid has a settlement the funding panel does not, since the
 # regime model is fitted on funding and cannot speak about a settlement it never saw. A
-# probability that was never inferred is left as absent rather than filled with a number
-# that would read as a confident answer.
+# probability that was never inferred is left absent rather than filled with a number that
+# would read as a confident answer.
 
 # %%
 display(
@@ -1175,9 +1353,9 @@ print(f"Period: {temporal['timestamp'].min()} to {temporal['timestamp'].max()}")
 # Three guards run before the write, because a feature artifact is read by every model
 # notebook and a defect in it is cheapest to catch here. The schema is frozen against
 # the five names this stage contracts to produce, so a renamed or extra column fails
-# rather than propagating. No `(timestamp, symbol, fold)` key may appear twice, since a
-# duplicate would silently multiply rows in every join downstream. And nothing may reach
-# the holdout.
+# rather than propagating. No `(timestamp, symbol)` key may appear twice, since a
+# duplicate would silently multiply rows in every join downstream. And the holdout window
+# has to be covered, with values whose parameters stopped at its boundary.
 #
 # Beside the parquet goes a **digest sidecar**, a small JSON file recording what was
 # written: a hash taken over the values themselves, the row count, the key columns, and
@@ -1199,62 +1377,58 @@ EXPECTED_TEMPORAL = {
     "hmm_regime_prob_stress",
 }
 assert set(temporal_feature_cols) == EXPECTED_TEMPORAL, "the emitted schema is not the contract"
-assert temporal.select("timestamp", "symbol", "fold").is_duplicated().sum() == 0
+assert temporal.select("timestamp", "symbol").is_duplicated().sum() == 0
 
-# Containment, checked in both directions and per fold class. A one-directional check - "no row
-# reaches the holdout" over the whole frame - can only catch an estimate leaking into a period it
-# should not describe. It cannot catch the opposite failure, which is a holdout window containing
-# nothing at all, and that is the failure this notebook actually had: it passed for months while
-# the artifact carried no holdout-dated row of any kind.
-_validation_rows = temporal.filter(pl.col("fold").is_in(VALIDATION_FOLD_IDS))
-assert _validation_rows["timestamp"].max() < holdout_start, (
-    "a validation fold emitted a holdout-dated row"
+# Coverage of the holdout, checked in both directions. "No row reaches the holdout" would only
+# catch an estimate leaking into a period it should not describe. It cannot catch the opposite
+# failure, which is a holdout window containing nothing at all, and that is the failure this
+# notebook actually had: it passed for months while the artifact carried no holdout-dated row
+# of any kind. Both directions still matter with the fold column gone - what changed is that
+# the containment is now a property of where PARAMETERS came from, which the seals in section C
+# assert, rather than of which rows carry which fold id.
+assert temporal["timestamp"].max() <= holdout_end, (
+    "a row was emitted past the end of the holdout window"
 )
-_holdout_rows = temporal.filter(pl.col("fold") == HOLDOUT_FOLD_ID)
-assert _holdout_rows["timestamp"].max() <= holdout_fold["test_end"], (
-    "the holdout fold emitted a row past the end of the holdout window"
-)
-_inside = _holdout_rows.filter(pl.col("timestamp") >= holdout_start)
+_inside = temporal.filter(pl.col("timestamp") >= holdout_start)
 assert _inside.height > 0, (
-    "the holdout fold wrote no holdout-dated row, which is the vintage it exists to produce"
+    "no holdout-dated row was written, and the holdout is what the final notebook scores on"
 )
 for column in sorted(EXPECTED_TEMPORAL):
     non_null = _inside.get_column(column).drop_nulls().len()
     assert non_null > 0, (
-        f"{column} is null on every holdout-dated row, so the fold is present and the feature "
+        f"{column} is null on every holdout-dated row, so the row is present and the feature "
         "is not - a fit that produced nothing reads exactly like one that was never asked"
     )
 print(
-    f"Holdout fold {HOLDOUT_FOLD_ID}: {_inside.height:,} rows inside the holdout window, "
-    f"{_inside['symbol'].n_unique()} symbols, "
-    f"{_inside['timestamp'].min()} to {_inside['timestamp'].max()}"
+    f"Holdout window: {_inside.height:,} rows, {_inside['symbol'].n_unique()} symbols, "
+    f"{_inside['timestamp'].min()} to {_inside['timestamp'].max()}. Every value in it was "
+    "produced by parameters estimated before the window opened."
 )
 
 record = write_artifact(
     temporal,
     FEATURES_DIR / "model_based.parquet",
-    keys=["symbol", "timestamp", "fold"],
+    keys=["symbol", "timestamp"],
     written_by=f"case_studies/{CASE_STUDY_ID}/04_model_based_features.py",
     inputs={
         "financial": FINANCIAL_DIGEST,
         "load_crypto_perps": value_digest(prices),
     },
-    # The fold set, stated rather than left to be inferred. A reader that finds no
-    # `fold_geometry` here regenerates the folds by calling `generate_cv_splits`, which returns
-    # the cross-validation folds alone - so the holdout fold would be in the parquet and
-    # invisible to every consumer of it. The frame says which fold ids exist and never says what
-    # their boundaries were.
+    # The estimation schedule, stated rather than left to be inferred. This replaces the
+    # `fold_geometry` block the artifact used to carry, and it answers the same question:
+    # what bounded the parameters behind a value. A reader that wants to know why a row is
+    # null needs the burn-in; a reader that wants to know whether a value could have been
+    # computed on the day it is dated needs the refit cadence and the freeze point.
     metadata={
-        "fold_geometry": [
-            {
-                "fold": fold["fold"],
-                "train_start": str(fold["train_start"]),
-                "train_end": str(fold["train_end"]),
-                "val_start": str(fold["test_start"]),
-                "val_end": str(fold["test_end"]),
-            }
-            for fold in active_folds
-        ]
+        "estimation_schedule": {
+            "burnin_bars": MIN_TRAIN_BARS,
+            "garch_refit_every_bars": GARCH_REFIT_EVERY,
+            "hmm_refit_every_bars": HMM_REFIT_EVERY,
+            "expanding_window": True,
+            "parameters_frozen_from": str(holdout_start),
+            "garch_refits": int(sum(r["n_refits"] for r in garch_provenance)),
+            "hmm_refits": len(hmm_diagnostics),
+        }
     },
 )
 print(f"Wrote features/model_based.parquet, {record['n_rows']:,} rows, digest {record['digest']}")
@@ -1262,16 +1436,23 @@ print(f"Wrote features/model_based.parquet, {record['n_rows']:,} rows, digest {r
 # %% [markdown]
 # Reloading through the shared modeling path is what makes the next cell a check rather
 # than a claim. `load_modeling_dataset` is the route every model notebook takes; it
-# re-derives the fold boundaries from the label file and refuses an artifact whose folds
-# do not cover them. Running it here, against the file just written, is the earliest
-# point at which a mismatch can be caught.
+# re-derives the fold boundaries from the label file, and until this rewrite it also
+# refused an artifact whose folds did not cover them. There are no folds in the artifact
+# any more, so what it does instead is join these five columns onto the panel by
+# `(timestamp, symbol)` - the path `nasdaq100_microstructure` already takes. Running it
+# here, against the file just written, is the earliest point at which a mismatch can be
+# caught.
 
 # %%
 assembled = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, symbols=symbols)
 assert set(assembled.temporal_feature_names) == EXPECTED_TEMPORAL
-assert sorted(
-    temporal_fold_index(assembled.temporal_by_fold, assembled.date_col)["fold"].unique().to_list()
-) == sorted(fold["fold"] for fold in active_folds)
+# The artifact carries no fold column, so the loader takes its single-feature-set path and
+# joins these columns straight onto the panel. `temporal_by_fold` is therefore absent, and
+# asserting that is the check: a non-None value here would mean a fold column survived the
+# rewrite and every consumer would be back to substituting values per fold.
+assert assembled.temporal_by_fold is None, (
+    "the loader found a fold-keyed temporal artifact, so the fold column was not dropped"
+)
 assert assembled.label_col == label_col
 assert len(assembled.feature_names) == len(financial_feature_cols) + len(EXPECTED_TEMPORAL)
 
@@ -1283,7 +1464,7 @@ assert reassembled_frame.equals(training_frame), (
 )
 print(
     f"Training assembly: {len(financial_feature_cols)} price and funding features plus "
-    f"{len(EXPECTED_TEMPORAL)} fold-specific model-based features"
+    f"{len(EXPECTED_TEMPORAL)} model-based features, joined on (timestamp, symbol)"
 )
 
 # %% [markdown]
@@ -1497,9 +1678,11 @@ show_with_alt(
 # within a settlement, the more agitated perpetuals tend to be the weaker performers
 # over the next 8 hours. Its own trailing z-score and the fitted asymmetry coefficient
 # do not clear it, and the asymmetry is worth reading carefully - it is one number per
-# symbol per fold, so its information coefficient asks whether perpetuals with a
-# stronger leverage effect are persistently ranked, and over two folds there is little
-# for that to move against.
+# symbol per refit, so its information coefficient asks whether perpetuals with a stronger
+# leverage effect are persistently ranked. Under the previous design it moved twice across
+# the whole sample, once per fold, which left almost nothing for a rank correlation to
+# read; on the schedule it moves every `GARCH_REFIT_EVERY` settlements, so the measurement
+# below is against a feature that actually varies.
 #
 # The dot row is what keeps this from being read as more than it is. The conditional
 # volatility bar sits at the negative edge of the existing features rather than beyond
@@ -1519,44 +1702,48 @@ show_with_alt(
 # %% [markdown]
 # ## Key takeaways
 #
-# - **A model-based feature carries its estimation window, and nothing in the output
-#   says so.** Two files of conditional volatilities can be identical in shape and
-#   plausibility while one of them was fitted across the whole sample. The only defence
-#   is structural: fit inside the fold, freeze, run forward, and assert the fitted
-#   window in code that fails.
+# - **Two channels, not one.** A fitted feature can look ahead through what it is
+#   *computed from* and through what its parameters were *estimated from*, and closing the
+#   first does nothing about the second. This notebook closed the first for a long time
+#   while leaving the second open, and every assertion it ran checked the channel that was
+#   already clean.
 # - **Filtered, not smoothed.** Any state-space model will happily report a state
 #   probability conditioned on the entire series, and that is the better estimate of
 #   history and an unusable feature. Ask what a live system could have computed at the
 #   decision, and emit that.
-# - **Refit per fold, then check that the refit mattered.** Plotting the fitted
-#   parameters against fold turns an assumption into evidence, and tells the notebooks
-#   downstream whether a feature means the same thing in every fold before they pool
-#   them.
-# - **Carry the fold identity into the artifact.** A per-fold feature written without
-#   the fold that produced it is indistinguishable from a full-sample one, and the loader
-#   that assembles the training frame cannot restore what was not written.
+# - **A schedule bounds an estimate; a fold selects rows.** Fitting per fold puts the
+#   validation window on the right side of the parameters and leaves the training window
+#   on the wrong side, because the recursion is then run forward from the start of the
+#   window the parameters were fitted on. Burn in, fit, emit, refit is the shape that makes
+#   the guarantee hold for every row rather than half of them.
+# - **The test is whether deleting the future moves the past.** Re-run the walk on a
+#   truncated series and every surviving value has to be unchanged. That is a check a
+#   fold-frozen fit fails, and it is the only one of these claims that cannot be satisfied
+#   by prose.
+# - **A burn-in is the honest answer where there is no history.** The first
+#   `MIN_TRAIN_BARS` settlements of a series carry no value because the feature did not
+#   exist yet. Producing a number there requires borrowing the future.
 # - **Correct the significance for the number of features screened.** Five features are
 #   five chances at a false positive, and a per-feature p-value read as if it were one
 #   is the cheapest way to promote noise.
 #
 # **Known limitations of what is built here.**
 #
-# - Two folds is what this case study's history supports, so the stability panel in
-#   section D compares two estimates and cannot distinguish a trend from a single move.
-# - The volatility model is refitted only at fold boundaries and never updated between
-#   them, so a fold's later bars are filtered with parameters that are by then a year
-#   old. Whether an online update earns its cost is untested here.
+# - The refit cadence is a choice and not a derived quantity. `GARCH_REFIT_EVERY` and
+#   `HMM_REFIT_EVERY` were set to be frequent enough that a parameter is never badly stale
+#   and infrequent enough that the notebook finishes; refitting before every settlement is
+#   the limit these approximate, and how much the approximation costs is untested here.
+# - The estimation window expands rather than rolls, so an estimate late in the sample is
+#   influenced by settlements several years old. A rolling window would forget them. Which
+#   is right depends on whether the parameters are believed to be stable, and the stability
+#   panel in section D is the evidence for that question rather than an answer to it.
 # - The regime model reads funding alone. Price, volume and open interest carry regime
 #   information too, and a richer observation would very likely separate states the
 #   two-dimensional fit merges.
-# - The fold identity in the artifact is the one the primary label's buffer implies.
-#   Where a variant label configures a different buffer, its own fold boundaries differ
-#   slightly from these, and the features it reads were fitted for this geometry.
-# - Within a fold, the parameters that produce a training row's feature were estimated
-#   from the whole training window, so an earlier training row carries a value fitted
-#   partly on returns that came after it. Validation rows do not: their parameters end
-#   before the validation window opens, which is why the evaluation above is sound. The
-#   alternative is to refit before every training row, which this notebook does not do.
+# - Parameters are frozen from the holdout boundary onward, so a value dated late in the
+#   holdout is produced by an estimate that is by then as old as the holdout is long. That
+#   is the price of not estimating on the holdout, and it is the same price
+#   `cme_futures` pays for its ARIMA feature.
 # - The holdout fold's features exist and its geometry is in the sidecar, but a consumer that
 #   regenerates the fold set from `generate_cv_splits` instead of reading `fold_geometry` sees
 #   the validation folds only - so the holdout rows are in the parquet and invisible to it.
