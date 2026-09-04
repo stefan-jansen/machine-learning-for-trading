@@ -1,7 +1,8 @@
 """Regression tests for coherent case-study prediction fixtures."""
 
 import sqlite3
-from datetime import date
+import warnings
+from datetime import date, datetime, timedelta
 
 import polars as pl
 import pytest
@@ -308,14 +309,72 @@ def test_a_hash_with_no_artifact_is_still_seeded(tmp_path):
     assert pl.read_parquet(seeded).height
 
 
-def test_a_leader_with_no_artifact_is_named_not_silently_synthesized(tmp_path):
-    """Nothing here can reconstruct the artifact, so the gap is reported by hash at
-    regeneration time rather than left to surface as a correlation failure several
-    notebooks downstream."""
+def test_a_leader_with_no_artifact_takes_its_group_panel(tmp_path):
+    """A leader with no artifact is seeded onto a real panel where its group has one.
+
+    That panel carries the entities, timestamps and realized target the pinning notebook
+    checks, so there is nothing to report.
+    """
     cs_dir = tmp_path / "crypto_perps_funding"
     run_log = cs_dir / "run_log"
     _crypto_registry(run_log, _COHORT_DDL)
-    _write_carrier(run_log, "hash_other", "STALE")
+    _write_carrier(run_log, "hash_other", "REALPANEL")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _backfill_all_prediction_parquets(cs_dir, "crypto_perps_funding")
+
+    assert not [w for w in caught if "cohort-leader" in str(w.message)]
+    leader = pl.read_parquet(run_log / "predictions" / LEADER_PRED / "predictions.parquet")
+    assert leader["symbol"].unique().to_list() == ["REALPANEL"]
+
+
+def test_a_leader_with_no_artifact_takes_the_fixture_label_panel(tmp_path):
+    """With nothing in the group, the fixture's own label artifact is the panel.
+
+    `sample_registry_for_tests` copies no prediction artifacts, so this is the ordinary
+    case in seven of the nine fixtures: the group is empty and the label parquet is the
+    only real source of keys and of the realized value the pinning notebook checks.
+    """
+    cs_dir = tmp_path / "crypto_perps_funding"
+    run_log = cs_dir / "run_log"
+    _crypto_registry(run_log, _COHORT_DDL)
+    labels_dir = cs_dir / "labels"
+    labels_dir.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": ["BTC", "ETH"] * 30,
+            # Inside the default validation window (holdout_start 2024-01-01).
+            "timestamp": [date(2022, 3, 1) + timedelta(days=i) for i in range(30) for _ in (0, 1)],
+            "funding_next_8h": [i / 1000 for i in range(60)],
+        }
+    ).write_parquet(labels_dir / "funding_next_8h.parquet")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _backfill_all_prediction_parquets(cs_dir, "crypto_perps_funding")
+
+    assert not [w for w in caught if "cohort-leader" in str(w.message)]
+    leader = pl.read_parquet(run_log / "predictions" / LEADER_PRED / "predictions.parquet")
+    assert sorted(leader["symbol"].unique().to_list()) == ["BTC", "ETH"]
+    # The realized value is the label's own, not a drawn one.
+    truth = pl.read_parquet(labels_dir / "funding_next_8h.parquet")
+    joined = leader.join(
+        truth.rename({"funding_next_8h": "truth"}), on=["symbol", "timestamp"], how="inner"
+    )
+    assert joined.height == leader.height
+    assert (joined["actual"] - joined["truth"]).abs().max() == 0.0
+
+
+def test_a_leader_with_no_panel_at_all_is_named(tmp_path):
+    """Nothing left to seed onto: no group artifact, no label parquet. Report it by hash.
+
+    The gap surfaces here at regeneration time rather than as a correlation failure
+    several notebooks downstream.
+    """
+    cs_dir = tmp_path / "crypto_perps_funding"
+    run_log = cs_dir / "run_log"
+    _crypto_registry(run_log, _COHORT_DDL)
 
     with pytest.warns(RuntimeWarning, match=LEADER_PRED):
         _backfill_all_prediction_parquets(cs_dir, "crypto_perps_funding")
@@ -344,3 +403,40 @@ def test_a_registry_without_cohort_metrics_still_seeds(tmp_path):
 
     for prediction_hash in (LEADER_PRED, "hash_other"):
         assert (run_log / "predictions" / prediction_hash / "predictions.parquet").is_file()
+
+
+def test_a_sub_daily_label_keeps_the_fabricated_grid(tmp_path):
+    """`_subsampled_panel` keeps a contiguous run at native spacing below a day.
+
+    It has to: a stride hands an 8H label decisions ten days apart and 13_backtest rejects
+    them against its horizon. On a minute-bar label that run is sixty consecutive minutes.
+    Measured on nasdaq100_microstructure, every seeded set collapsed to one hour of a
+    one-year window, every configuration in the sweep scored the same Sharpe, and
+    14_backtest failed at `hist(..., bins=30)` with "Too many bins for data range". The
+    fabricated grid spans the window, which is what an intraday case study is better
+    served by, so the label panel declines below a day.
+    """
+    cs_dir = tmp_path / "crypto_perps_funding"
+    run_log = cs_dir / "run_log"
+    _crypto_registry(run_log, _COHORT_DDL)
+    labels_dir = cs_dir / "labels"
+    labels_dir.mkdir(parents=True)
+    minutes = [datetime(2022, 3, 1) + timedelta(minutes=i) for i in range(600)]
+    pl.DataFrame(
+        {
+            "symbol": ["BTC", "ETH"] * 600,
+            "timestamp": [m for m in minutes for _ in (0, 1)],
+            "funding_next_8h": [i / 1000 for i in range(1200)],
+        }
+    ).write_parquet(labels_dir / "funding_next_8h.parquet")
+
+    with pytest.warns(RuntimeWarning, match=LEADER_PRED):
+        _backfill_all_prediction_parquets(cs_dir, "crypto_perps_funding")
+
+    leader = pl.read_parquet(run_log / "predictions" / LEADER_PRED / "predictions.parquet")
+    # The fabricated weekday grid, not the label's ten hours: the warning above already
+    # says the label panel declined, and the spacing is what the notebook depends on.
+    stamps = leader["timestamp"].unique().sort()
+    assert stamps.len() > 1
+    assert stamps.diff().drop_nulls().min() >= timedelta(days=1)
+    assert stamps.max() - stamps.min() > timedelta(days=30)

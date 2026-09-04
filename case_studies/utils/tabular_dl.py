@@ -3032,15 +3032,27 @@ def run_tabm_cv(
                 )
                 checkpoint_metrics[int(epoch)]["n_invalid"] = _n_invalid_scores(epoch_predictions)
         elif fold_checkpoint_ics:
-            checkpoint_metrics = {
-                int(epoch): {
-                    "ic_mean": float(np.nanmean(values)),
-                    "ic_std": float(np.nanstd(values)) if len(values) > 1 else 0.0,
-                    "ic_n_days": 0,
-                    "n_invalid": 0,
-                }
-                for epoch, values in fold_checkpoint_ics.items()
-            }
+            # This used to fall back to `np.nanmean(fold_checkpoint_ics[epoch])`, the mean of
+            # the per-fold ICs. That violates the standing rule that IC is computed per
+            # decision time and then averaged: folds holding unequal numbers of decision times
+            # get equal weight, so a three-day fold counts as much as a thirty-day one and
+            # `best_epoch` can land on a different checkpoint than the primary path chooses.
+            # It reported a different epoch than the registry would, under the same name.
+            #
+            # It is also unreachable on the path it was written for. `incr_dir` is None exactly
+            # when `save_dir` is None, and both fold loops append the fold's frame to
+            # `state["prediction_frames"]` in that case, so `cfg_all_preds` is populated and
+            # the decision-time path runs. What is left is a config that reported itself
+            # available while its flushed predictions did not come back off disk, and there is
+            # no checkpoint metric to compute there - only per-fold ICs that would answer a
+            # different question. A check that cannot run must not read as a pass.
+            raise RuntimeError(
+                f"{artifact_name}: {len(fold_checkpoint_ics)} checkpoints have per-fold ICs but "
+                f"no predictions to score. Checkpoint selection is best mean IC across decision "
+                f"times, which cannot be computed from fold ICs, and averaging those instead "
+                f"would weight a short fold like a long one. Incremental predictions were "
+                f"expected under {incr_dir!s} and none were read back."
+            )
 
         if checkpoint_metrics:
             positive_days = [

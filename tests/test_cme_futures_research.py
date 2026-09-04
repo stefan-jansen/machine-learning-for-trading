@@ -800,6 +800,27 @@ def test_selection_catalog_rejects_a_candidate_the_catalog_does_not_describe(
         research_workflow.selection_catalog(study, members)
 
 
+def _pca_catalog() -> pl.DataFrame:
+    """The one declared configuration the wrapper tests below execute."""
+    return pl.DataFrame(
+        {"family": ["latent_factors"], "label": ["fwd_ret_5d"], "config_name": ["pca"]}
+    )
+
+
+def _pca_request():
+    return cast(
+        "object",
+        SimpleNamespace(
+            family="latent_factors",
+            spec={
+                "execution_tier": "canonical",
+                "label": "fwd_ret_5d",
+                "config_name": "pca",
+            },
+        ),
+    )
+
+
 def test_official_model_catalog_forwards_the_population_it_supersedes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -818,7 +839,14 @@ def test_official_model_catalog_forwards_the_population_it_supersedes(
     resolved = (
         cast(
             "object",
-            SimpleNamespace(spec={"execution_tier": "canonical"}),
+            SimpleNamespace(
+                family="latent_factors",
+                spec={
+                    "execution_tier": "canonical",
+                    "label": "fwd_ret_5d",
+                    "config_name": "pca",
+                },
+            ),
         ),
     )
     monkeypatch.setattr(research_workflow, "OfficialPopulation", SimpleNamespace(create=_create))
@@ -833,7 +861,7 @@ def test_official_model_catalog_forwards_the_population_it_supersedes(
 
     research_workflow.run_official_model_catalog(
         cast("object", SimpleNamespace()),
-        pl.DataFrame(),
+        _pca_catalog(),
         population_name="cme_futures-pca-validation-v1",
         resolved_requests=resolved,
         supersedes="2d252634bffb",
@@ -864,12 +892,44 @@ def test_official_model_catalog_defaults_to_superseding_nothing(
 
     research_workflow.run_official_model_catalog(
         cast("object", SimpleNamespace()),
-        pl.DataFrame(),
+        _pca_catalog(),
         population_name="cme_futures-pca-validation-v1",
-        resolved_requests=(SimpleNamespace(spec={"execution_tier": "canonical"}),),
+        resolved_requests=(_pca_request(),),
     )
 
     assert seen["supersedes"] is None
+
+
+def test_a_partial_resolved_set_cannot_snapshot_the_catalog_population(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`resolved_requests` avoids resolving twice; it does not narrow the population.
+
+    `require_complete` cannot catch a partial set: it measures the population against the
+    members it just declared. So a resolved set covering half the catalog snapshotted under
+    the catalog's name, reported complete, and removed every omitted configuration from the
+    comparison the population exists to define.
+    """
+    monkeypatch.setattr(
+        research_workflow,
+        "OfficialPopulation",
+        SimpleNamespace(create=lambda *a, **k: pytest.fail("a partial set reached the snapshot")),
+    )
+    catalog = pl.DataFrame(
+        {
+            "family": ["latent_factors", "latent_factors"],
+            "label": ["fwd_ret_5d", "fwd_ret_21d"],
+            "config_name": ["pca", "pca"],
+        }
+    )
+
+    with pytest.raises(ValueError, match="do not match the declared catalog"):
+        research_workflow.run_official_model_catalog(
+            cast("object", SimpleNamespace()),
+            catalog,
+            population_name="cme_futures-pca-validation-v1",
+            resolved_requests=(_pca_request(),),
+        )
 
 
 def _multifold_frames(n_days: int = 60) -> tuple[pl.DataFrame, pl.DataFrame]:
