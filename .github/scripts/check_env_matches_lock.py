@@ -175,7 +175,10 @@ def main() -> int:
         print(f"held to pyproject's override instead of the lock: {requirement} ({state})")
 
     if not mismatched:
-        print("every installed distribution the lock pins is at its locked version")
+        print(
+            "every installed distribution is at its locked version, or at one its "
+            "declared override allows"
+        )
         return 0
 
     print(f"\n{len(mismatched)} installed distributions do not match what is declared:")
