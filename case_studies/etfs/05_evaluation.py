@@ -212,7 +212,7 @@ print(
     f"financial.parquet:   {features.height:,} rows, {len(financial_cols)} features, "
     f"{features[DATE_COL].min()} to {features[DATE_COL].max()}\n"
     f"model_based.parquet: {model_based_artifact.height:,} rows, {len(model_based_cols)} features, "
-    f"one row per date, ETF and fold\n"
+    f"{'one row per date, ETF and fold' if 'fold' in model_based_artifact.columns else 'one row per date and ETF'}\n"
     f"{PRIMARY_LABEL}.parquet:  {label_df.height:,} rows, label column {label_col!r}"
 )
 
@@ -293,12 +293,12 @@ for split in splits:
     )
 
 # %% [markdown]
-# ### Resolving the fold dimension, and sealing the holdout
+# ### Restricting to validation, and sealing the holdout
 #
-# Two filters build the panel. The first keeps each model-based row only inside the
-# validation range of its own fold and drops the appended holdout fold, which leaves one
-# value per date and ETF; the assertion below is what proves it, since two overlapping
-# ranges would silently give a feature two values on one date.
+# Two filters build the panel. The first keeps a model-based row only where some fold
+# validates on its date, which leaves one value per date and ETF; the assertion below is
+# what proves it, since two overlapping ranges would silently give a feature two values on
+# one date.
 #
 # The second is the seal. The holdout must not inform which features look predictive, and
 # the date a decision is taken is the wrong place to cut: a date a week before the
@@ -312,18 +312,29 @@ val_windows = {int(s["fold"]): (_as_date(s["val_start"]), _as_date(s["val_end"])
 IN_VALIDATION = pl.any_horizontal(
     [(pl.col(DATE_COL) >= start) & (pl.col(DATE_COL) <= end) for start, end in val_windows.values()]
 )
-model_based = (
-    model_based_artifact.filter(pl.col("fold").is_in(list(val_windows)))
-    .filter(
-        pl.col("fold").replace_strict({f: s for f, (s, _) in val_windows.items()}, default=None)
-        <= pl.col(DATE_COL)
+if "fold" in model_based_artifact.columns:
+    # A fold-keyed artifact carries the same date once per fold, each copy produced by that
+    # fold's own parameters, so the date filter alone would leave several values on a date.
+    # Each row is kept only inside the validation range of the fold that produced it, which
+    # also drops the appended holdout fold. `04` now writes one row per date and ETF under a
+    # refit schedule, and this branch goes when the intermediates in the test-data repo have
+    # been regenerated from it.
+    model_based = (
+        model_based_artifact.filter(pl.col("fold").is_in(list(val_windows)))
+        .filter(
+            pl.col("fold").replace_strict({f: s for f, (s, _) in val_windows.items()}, default=None)
+            <= pl.col(DATE_COL)
+        )
+        .filter(
+            pl.col(DATE_COL)
+            <= pl.col("fold").replace_strict(
+                {f: e for f, (_, e) in val_windows.items()}, default=None
+            )
+        )
+        .drop("fold")
     )
-    .filter(
-        pl.col(DATE_COL)
-        <= pl.col("fold").replace_strict({f: e for f, (_, e) in val_windows.items()}, default=None)
-    )
-    .drop("fold")
-)
+else:
+    model_based = model_based_artifact.filter(IN_VALIDATION)
 assert model_based.select(JOIN_COLS).is_duplicated().sum() == 0, (
     "validation windows overlap; a fitted feature would take two values on one date"
 )
@@ -380,7 +391,8 @@ print(
 # every fold's training range, back to the start of the panel, so a broken value outside
 # the validation ranges reaches them whether or not it is screened here. This check
 # therefore reads the whole span up to the seal, and the model-based matrix as it was
-# written, one row per date, ETF and fold. It stops at the seal like everything else, and
+# written rather than as the validation filter above leaves it. It stops at the seal like
+# everything else, and
 # it raises rather than warns, because a broken input makes the rest of the notebook
 # meaningless.
 

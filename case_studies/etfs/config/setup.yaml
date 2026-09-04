@@ -512,8 +512,13 @@ model_based:
     # Three years. A two-state chain has to see both states switch several times
     # before its transition matrix means anything, and the market series is one
     # series rather than a panel, so this is paid once for the whole notebook.
-    # The panel starts 2007-01-03 and the earliest fold trains from 2013-01-17,
-    # so the burn-in is spent 1,521 sessions before any fold needs a value.
+    # The folds roll a ten-year training window back one year at a time, so the
+    # oldest of them begins on the second session of the panel and no burn-in
+    # fits before it: this one costs the earliest folds training rows. What it
+    # must not touch is a scored session, and it does not - it ends 2009-02-04,
+    # 1,736 sessions before the earliest validation session any configured label
+    # is scored on, 2015-12-28. 04_model_based_features asserts that and prints
+    # the training rows each fold loses.
     burnin: 756
     # How often the chain is re-estimated. A quarter. Regime parameters are the
     # slowest-moving thing this notebook fits, and each estimate costs

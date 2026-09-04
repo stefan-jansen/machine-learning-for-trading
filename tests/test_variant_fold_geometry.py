@@ -465,6 +465,12 @@ def test_corpus_temporal_fold_geometry_covers_resolved_validation_windows(
     import polars as pl
 
     artifact = _available_corpus_artifact(case_study)
+    if "fold" not in pl.scan_parquet(artifact).collect_schema().names():
+        # A case study whose stage 04 estimates on a refit schedule writes one row per key and
+        # no fold column: a value is the same number whichever fold reads it, so there is no
+        # per-fold geometry to cover a validation window. The property this test exists for
+        # cannot be violated there. It goes when the last case study has converted.
+        pytest.skip(f"{case_study} writes a fold-free model-based artifact")
     primary_label = cv_window.configured_labels(case_study)[0]
     resolved = cv_window.temporal_artifact_fold_boundaries(
         case_study,
