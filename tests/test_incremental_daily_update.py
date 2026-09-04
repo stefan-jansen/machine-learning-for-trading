@@ -146,17 +146,30 @@ def test_a_bar_the_vendor_revised_replaces_the_stored_one() -> None:
     assert revised["close"].item() == 222.0
 
 
-def test_the_written_metadata_carries_the_new_end_date() -> None:
+def test_the_written_metadata_describes_the_merged_panel_not_the_load() -> None:
+    """Every field that says when or what, not just the bounds.
+
+    `preserve_metadata=True` keeps the load's block, so a field left out here still
+    describes the initial load. `18_data_management` prints `last_updated`, and a
+    `data_range` that disagrees with `end_date` is worse than neither.
+    """
     storage = FakeStorage({"equities/daily/AAPL": _bars(["2026-08-20"])})
     manager = FakeManager(_bars(["2026-08-24"]))
+    before = dt.datetime.now(UTC)
 
     update_through_last_complete_bar(
         manager, storage, "AAPL", provider="yahoo", through=dt.date(2026, 8, 25)
     )
 
     (_, metadata) = storage.writes[0]
-    assert metadata["end_date"].startswith("2026-08-24")
     assert metadata["start_date"].startswith("2026-08-20")
+    assert metadata["end_date"].startswith("2026-08-24")
+    assert metadata["data_range"]["start"].startswith("2026-08-20")
+    assert metadata["data_range"]["end"].startswith("2026-08-24")
+    for field in ("last_updated", "download_utc_timestamp"):
+        assert dt.datetime.fromisoformat(metadata[field]) >= before, (
+            f"{field} still describes the initial load"
+        )
 
 
 def test_a_store_already_past_the_bound_fetches_nothing() -> None:

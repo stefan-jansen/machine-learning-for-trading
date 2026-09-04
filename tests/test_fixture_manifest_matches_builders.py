@@ -36,7 +36,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tests.create_test_data import (  # noqa: E402
+    CRYPTO_PERPS,
+    CRYPTO_PERPS_END,
     DATASETS,
+    ETF_UNIVERSE,
+    ETF_UNIVERSE_UNADJUSTED,
+    FX_4H,
+    FX_DAILY,
     SUPERSEDED_SUBSETS,
     declared_subsets,
 )
@@ -206,4 +212,52 @@ def test_a_built_fixture_carries_the_universe_its_builder_declares(
     assert observed == count, (
         f"{name}'s builder declares {count} distinct {column} in {rel} and the fixture "
         f"carries {observed}. Regenerate the dataset, or correct the builder."
+    )
+
+
+# --- what a builder does to the time axis ------------------------------------
+#
+# An entity count cannot see any of this, and the time axis is the whole reason
+# three of these builders are more than a filter. `etfs` casts a Datetime at
+# midnight down to a Date; `fx` casts a Date and a naive millisecond Datetime up to
+# UTC-aware microseconds, and `case_studies/fx_pairs` joins the two frequencies, so
+# one representation is not optional. A cast dropped from a builder leaves the row
+# counts and the entity counts exactly as they are.
+
+TIMESTAMP_CONTRACT = [
+    (ETF_UNIVERSE, pl.Date),
+    (ETF_UNIVERSE_UNADJUSTED, pl.Date),
+    (FX_4H, pl.Datetime("us", "UTC")),
+    (FX_DAILY, pl.Datetime("us", "UTC")),
+]
+
+
+@pytest.mark.parametrize(
+    ("rel", "dtype"), [(rel.as_posix(), dtype) for rel, dtype in TIMESTAMP_CONTRACT]
+)
+def test_a_built_fixture_stores_its_timestamps_the_way_its_builder_says(
+    rel: str, dtype: pl.DataType, fixture_root: Path
+) -> None:
+    path = fixture_root / rel
+    if not path.exists():
+        pytest.skip(f"{rel} is not in this checkout")
+    observed = pl.scan_parquet(path).collect_schema()["timestamp"]
+    assert observed == dtype, (
+        f"{rel} stores timestamp as {observed} and its builder writes {dtype}. "
+        "A Datetime at midnight compares unequal to the Date it prints as."
+    )
+
+
+def test_the_crypto_bars_stop_where_the_builder_bounds_them(fixture_root: Path) -> None:
+    """The bound exists so the bars do not outrun the intermediates built on them.
+
+    Removing it would add rows at the end that no label, feature or fold covers -
+    which is what agent-workspace#970 was, in the cme_futures fixture.
+    """
+    path = fixture_root / CRYPTO_PERPS
+    if not path.exists():
+        pytest.skip(f"{CRYPTO_PERPS} is not in this checkout")
+    last = pl.scan_parquet(path).select(pl.col("timestamp").max()).collect().item()
+    assert last == CRYPTO_PERPS_END, (
+        f"{CRYPTO_PERPS} ends at {last} and the builder bounds it at {CRYPTO_PERPS_END}"
     )

@@ -785,14 +785,38 @@ def build_etfs(source: Path, output: Path) -> list[Path]:
         written.append(output / rel)
         print(f"    {rel.name}: {panel.height:,} rows, {panel['symbol'].n_unique()} symbols")
 
-    metadata = json.loads((source / ETF_METADATA).read_text())
-    metadata["categories"] = {
-        category: [t for t in tickers if t in set(keep)]
-        for category, tickers in metadata.get("categories", {}).items()
+    # Written from the fixture, not edited down from production's copy. Production's
+    # carries a `name` that counts a different universe and a `dictionary_file`
+    # pointing at an absolute path outside the fixture, and both survive an edit that
+    # only narrows `categories`.
+    source_categories = json.loads((source / ETF_METADATA).read_text()).get("categories", {})
+    categories = {
+        category: [ticker for ticker in tickers if ticker in set(keep)]
+        for category, tickers in source_categories.items()
     }
-    metadata["categories"] = {c: t for c, t in metadata["categories"].items() if t}
-    metadata["total_tickers"] = len(keep)
-    (output / ETF_METADATA).write_text(json.dumps(metadata, indent=2) + "\n")
+    uncategorized = sorted(set(keep) - {t for tickers in categories.values() for t in tickers})
+    (output / ETF_METADATA).write_text(
+        json.dumps(
+            {
+                "name": f"ML4T {len(keep)}-ETF CI fixture",
+                "version": "1.0",
+                "description": (
+                    "The ETF universe the test-data repository ships, written by "
+                    "tests/create_test_data.py from the production panel."
+                ),
+                "total_tickers": len(keep),
+                "range": {
+                    "start": str(panel["timestamp"].min()),
+                    "end": str(panel["timestamp"].max()),
+                    "frequency": "daily",
+                },
+                "categories": {c: tickers for c, tickers in categories.items() if tickers},
+                "uncategorized": uncategorized,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
     written.append(output / ETF_METADATA)
     return written
 

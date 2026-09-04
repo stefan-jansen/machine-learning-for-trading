@@ -449,12 +449,22 @@ def update_through_last_complete_bar(
         .unique(subset=["timestamp"], keep="last")
         .sort("timestamp")
     )
+    first, last = merged["timestamp"].min(), merged["timestamp"].max()
+    now = dt.datetime.now(dt.UTC)
+    # Every field that describes *when* and *what* was fetched, not just the bounds.
+    # `preserve_metadata=True` keeps the rest of the load's block, so a field left out
+    # here still describes the initial load: notebook 18 prints `last_updated`, and a
+    # staleness check reading `data_range` while `end_date` says otherwise is worse
+    # than one reading neither.
     storage.write(
         merged,
         key,
         metadata={
-            "start_date": merged["timestamp"].min().isoformat(),
-            "end_date": merged["timestamp"].max().isoformat(),
+            "start_date": first.isoformat(),
+            "end_date": last.isoformat(),
+            "data_range": {"start": str(first), "end": str(last)},
+            "last_updated": str(now),
+            "download_utc_timestamp": str(now),
         },
         preserve_metadata=True,
     )
