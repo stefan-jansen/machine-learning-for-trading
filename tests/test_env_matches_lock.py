@@ -108,6 +108,46 @@ def test_every_carve_out_records_why_it_is_one() -> None:
     assert all(reason.strip() for reason in check.DECLARED_OFF_LOCK.values())
 
 
+# --- what pyproject overrides ------------------------------------------------
+
+
+def test_an_override_is_read_out_of_pyproject() -> None:
+    """The repository's own override, so the parsing is checked against real text."""
+    overridden = check.overridden_dependencies(REPO_ROOT / "pyproject.toml")
+    assert "protobuf" in overridden
+    assert "protobuf>=5.0" in overridden["protobuf"]
+
+
+def test_an_overridden_distribution_is_not_drift() -> None:
+    """uv asserts the version by fiat and pip has no equivalent.
+
+    protobuf is overridden to >=5.0 because 4.x has a C-extension metaclass bug on
+    Python 3.14; the lock then resolves 7.35.0 while opentelemetry-proto requires
+    <7.0, so a pip install into the image resolves 6.33.6 and is right to.
+    """
+    locked = {"protobuf": "7.35.0"}
+    installed = {"protobuf": "6.33.6"}
+    assert check.drift(locked, installed) == [("protobuf", "7.35.0", "6.33.6")]
+    assert check.drift(locked, installed, {"protobuf": "overridden to protobuf>=5.0"}) == []
+
+
+def test_an_override_specifier_is_parsed_down_to_the_name() -> None:
+    written = {
+        "tool": {"uv": {"override-dependencies": ["Some_Pkg[extra]>=1.2", "other!=3"]}},
+    }
+    import tempfile
+    import tomllib as _tomllib  # noqa: F401
+
+    path = Path(tempfile.mkdtemp()) / "pyproject.toml"
+    path.write_text('[tool.uv]\noverride-dependencies = ["Some_Pkg[extra]>=1.2", "other!=3"]\n')
+    assert set(check.overridden_dependencies(path)) == {"some-pkg", "other"}
+    assert written  # the literal above documents the shape being parsed
+
+
+def test_a_missing_pyproject_overrides_nothing() -> None:
+    assert check.overridden_dependencies(Path("/nonexistent/pyproject.toml")) == {}
+
+
 # --- the lock is read, not assumed -------------------------------------------
 
 
