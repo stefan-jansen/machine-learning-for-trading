@@ -143,15 +143,15 @@ def test_a_panel_with_no_entity_column_is_refused() -> None:
         walk_forward_conformal_coverage(panel, embargo_steps=1, levels=(0.80,))
 
 
-def test_a_negative_embargo_is_refused() -> None:
-    with pytest.raises(ValueError, match="not a label horizon"):
-        walk_forward_conformal_coverage(_panel(TWO_SCALES), embargo_steps=-1)
+def test_a_lag_below_one_step_is_refused() -> None:
+    """The figure measures the sizing estimator, so it takes that estimator's floor.
 
-
-def test_a_zero_embargo_is_admitted_for_a_zero_horizon_label() -> None:
-    """`HOLDOUT_CONFORMAL_EMBARGO_STEPS` records 0 for `us_firm_characteristics`' labels: the
-    row is dated by the month the return was earned, so the outcome is realised at the
-    observation and no residual reaches forward.
+    A width calibrated on the residual of the decision it sizes would report coverage that no
+    allocator could achieve, and `compute_conformal_widths` refuses to produce one. Zero is
+    refused here for the same reason and not because the horizon table says zero is impossible -
+    it says zero for `us_firm_characteristics`, and `sizing_conformal_lag` is what turns that
+    into the one step a decision actually needs.
     """
-    row = walk_forward_conformal_coverage(_panel(TWO_SCALES), embargo_steps=0, levels=(0.80,))[0]
-    assert row["n_test"] > 0
+    for lag in (-1, 0):
+        with pytest.raises(ValueError, match="the decision it sizes"):
+            walk_forward_conformal_coverage(_panel(TWO_SCALES), embargo_steps=lag)

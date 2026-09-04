@@ -36,7 +36,7 @@ from case_studies.utils.analytics import (
 )
 from case_studies.utils.conformal import (
     DEFAULT_MIN_CALIBRATION_N,
-    holdout_conformal_embargo_steps,
+    sizing_conformal_lag,
     walk_forward_conformal_coverage,
 )
 from case_studies.utils.notebook_contracts import (
@@ -747,7 +747,8 @@ def conformal_coverage_diagnostic(
     ``config_name`` columns, and says nothing about which configuration the funnel went on to
     select.
 
-    ``embargo_steps`` defaults to the reviewed label horizon for this case study and label.
+    ``embargo_steps`` defaults to :func:`~case_studies.utils.conformal.sizing_conformal_lag`
+    for this case study and label, which is the reviewed horizon floored at one step.
 
     Returns columns:
         family, config_name, nominal_level,
@@ -798,7 +799,7 @@ def conformal_coverage_diagnostic(
     # Resolved here rather than at the top: a registry with no validation rows yet returns the
     # empty frame above, and a case study reaches that state before it has a reviewed horizon.
     if embargo_steps is None:
-        embargo_steps = holdout_conformal_embargo_steps(case_study, label)
+        embargo_steps = sizing_conformal_lag(case_study, label)
 
     pred_dir = db.parent / "predictions"
     out_rows: list[dict] = []

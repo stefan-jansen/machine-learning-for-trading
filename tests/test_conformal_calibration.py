@@ -130,34 +130,45 @@ def test_conformal_widths_require_the_label_horizon(
         )
 
 
-def test_a_zero_horizon_label_calibrates_on_the_residual_at_its_own_step(
+def test_a_decision_is_never_sized_on_its_own_residual(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Zero is a reviewed value, not a missing one.
+    """One step is the floor, and zero is refused however the horizon reads.
 
-    `HOLDOUT_CONFORMAL_EMBARGO_STEPS` records 0 for `us_firm_characteristics`' three labels,
-    whose `labels.horizons` is `0D`: the row is dated by the month the return was earned, so the
-    residual is realized at the observation and reaches nothing forward. Refusing it here left
-    that case study unable to compute the widths its own reviewed horizon calls for, while the
-    coverage printed beside them measured an estimator at the same zero.
+    `HOLDOUT_CONFORMAL_EMBARGO_STEPS` answers how far a residual reaches forward, and records 0
+    for `us_firm_characteristics`' labels because their horizon is `0D`. A width that sizes a
+    position answers a different question - what was known when the position was chosen - and
+    the position earning month `t`'s return was selected at the end of `t-1`. Admitting the
+    table's zero here put the residual of the decision into the width that sized it.
     """
     case_dir = tmp_path / "case_studies" / "demo"
     _write_predictions(case_dir, _panel_rows())
     monkeypatch.setattr(conformal, "get_case_study_dir", lambda _: case_dir)
 
+    with pytest.raises(ValueError, match="not yet realized"):
+        conformal.compute_conformal_widths(
+            "demo", "candidate", embargo_steps=0, min_calibration_n=3, write=False
+        )
+
+
+def test_the_sizing_lag_floors_a_zero_horizon_label_at_one_step() -> None:
+    """The two tables disagree only where a label's horizon is zero, and the lag says which.
+
+    Everywhere else the reviewed horizon already exceeds the one step a decision needs, so the
+    holdout embargo and the sizing lag are the same number - which is why one table served both
+    until a zero-horizon label was declared.
+    """
     assert conformal.holdout_conformal_embargo_steps("us_firm_characteristics", "fwd_ret_1m") == 0
+    assert conformal.sizing_conformal_lag("us_firm_characteristics", "fwd_ret_1m") == 1
 
-    widths = conformal.compute_conformal_widths(
-        "demo", "candidate", embargo_steps=0, min_calibration_n=3, write=False
-    )
-    assert not widths.is_empty()
-
-    # A step's own residual is eligible at zero and not at one, so the earliest decision a
-    # width exists for moves by exactly one step between them.
-    one = conformal.compute_conformal_widths(
-        "demo", "candidate", embargo_steps=1, min_calibration_n=3, write=False
-    )
-    assert widths["timestamp"].min() < one["timestamp"].min()
+    for case_study, label in (
+        ("etfs", "fwd_ret_21d"),
+        ("fx_pairs", "fwd_ret_1d"),
+        ("sp500_options", "ret_to_expiry"),
+    ):
+        horizon = conformal.holdout_conformal_embargo_steps(case_study, label)
+        assert horizon >= 1
+        assert conformal.sizing_conformal_lag(case_study, label) == horizon
 
 
 def test_conformal_allocation_rejects_missing_selected_widths() -> None:

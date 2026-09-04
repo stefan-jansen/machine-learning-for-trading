@@ -1357,9 +1357,17 @@ if conformal_df.height > 0:
 # Empirical coverage against nominal is the calibration check. A width advertised
 # at a given confidence level should contain the realised residual about that often
 # across the decisions it sized. Coverage materially below nominal means the model is
-# confident more often than it is right, and any position size derived from its
-# width is too large. Coverage materially above nominal means the widths
-# are wider than they need to be, which is safe but wasteful.
+# confident more often than it is right; above nominal means the widths are wider
+# than they need to be.
+#
+# **What that does and does not say about position sizes.** `conformal_weighted`
+# normalises `1/width` within each side at each timestamp, so a width scale that is
+# uniformly too small leaves every weight unchanged - the error divides out. Coverage
+# is a statement about the scale of the residuals, and only the *differences* between
+# symbols' widths reach the portfolio. A systematic shortfall therefore says the
+# uncertainty estimate is optimistic, not that any particular position was too large,
+# and nothing in this table tests whether the widths rank one symbol's risk against
+# another correctly. Read it as a residual-scale diagnostic.
 #
 # Width per standard deviation says what that coverage cost. An interval that
 # reaches nominal coverage only by spanning several standard deviations of the
@@ -1369,9 +1377,10 @@ if conformal_df.height > 0:
 #
 # A family can rank well and fail this badly. Ranking depends only on the order
 # of the predictions; coverage depends on the scale of a symbol's past residuals
-# carrying forward to the decision they size. When they diverge, the model needs
-# recalibration before any width-aware sizing, even though its ordering is
-# unaffected.
+# carrying forward to the decision they size. When they diverge, what the shortfall
+# has established is that the residual scale is not stable out of time - which is a
+# reason to look at the widths' cross-section before trusting them to size, not a
+# result about the ordering, which is unaffected.
 
 # %% [markdown]
 # ## 8. Pre-Backtest Judgment and Handoff

@@ -1651,11 +1651,15 @@ if conformal_df.height > 0:
 # measured against are not exchangeable, which is what a conformal quantile assumes and what a
 # regime change breaks.
 #
-# **This is the section that matters for position sizing**, because this is the estimator that
-# sizes it: `conformal_weighted` normalizes `1/width` across the basket, so a width that
-# under-covers understates the risk that name is carrying relative to the others. Where the
-# shortfall is systematic, the online-updating extensions in Chapter 12, Section 12.6 are the
-# next step before any of these widths is used to size anything.
+# **What a systematic shortfall does and does not establish.** `conformal_weighted` normalizes
+# `1/width` within each side at each timestamp, so a width scale that is uniformly too small
+# divides out and leaves every weight unchanged. Only the *differences* between symbols' widths
+# reach the portfolio, and this table does not measure those: it measures the scale of the
+# residuals against the widths, pooled over the decisions. So a shortfall says the uncertainty
+# estimate is optimistic and is a reason to look at the cross-section of widths before trusting
+# them to size - it is not, on its own, a finding that any position was too large. Where the
+# shortfall is systematic, the online-updating extensions in Chapter 12, Section 12.6 are what
+# to reach for.
 
 # %% [markdown]
 # ## 8. Pre-Backtest Judgment and Handoff
@@ -1777,10 +1781,12 @@ credible.select(
 # **The causal estimate is a separate framing and does not compete in this ranking.** It is a
 # conditional treatment effect for one declared treatment, not a cross-sectional ranking signal.
 #
-# **The calibration result in §7 constrains every tier.** Where the widths under-cover out of
-# time, no candidate should be sized on its conformal width without the online-updating
-# correction, whatever its IC - and §7 measures the widths `conformal_weighted` would use, so
-# that constraint is about this allocator rather than about intervals in general.
+# **The calibration result in §7 qualifies every tier.** §7 measures the widths
+# `conformal_weighted` would use, so it is about this allocator rather than about intervals in
+# general - but it measures their scale and not their cross-section, and the allocator consumes
+# only the cross-section. Where the widths under-cover out of time, that is a reason to check
+# the online-updating correction before sizing on them, not a disqualification of any candidate
+# on its own.
 #
 # ### Forecast Representation
 #

@@ -46,7 +46,7 @@ import utils.style  # noqa: F401
 from case_studies.research import CausalResult, Result, open_study, superseded_members
 from case_studies.research.results import PredictionResult
 from case_studies.utils.conformal import (
-    holdout_conformal_embargo_steps,
+    sizing_conformal_lag,
     walk_forward_conformal_coverage,
 )
 from utils.modeling import load_configs
@@ -398,7 +398,7 @@ conformal_rows = []
 for keys, frame in representative_predictions.group_by(
     "label", "family", "config_name", "checkpoint_value", "prediction_hash"
 ):
-    embargo_steps = holdout_conformal_embargo_steps("fx_pairs", keys[0])
+    embargo_steps = sizing_conformal_lag("fx_pairs", keys[0])
     for row in walk_forward_conformal_coverage(frame, embargo_steps=embargo_steps):
         conformal_rows.append(
             {

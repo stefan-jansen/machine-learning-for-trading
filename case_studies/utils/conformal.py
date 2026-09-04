@@ -133,10 +133,9 @@ def walk_forward_conformal_coverage(
     so only the cross-sectional dispersion of the per-entity widths reaches the portfolio -
     the axis pooling removes.
 
-    ``embargo_steps`` is the label horizon in prediction data steps, from
-    :data:`HOLDOUT_CONFORMAL_EMBARGO_STEPS`. Zero is admitted because the table records zero
-    for a zero-horizon label, where the outcome is realised at the observation and no residual
-    reaches forward at all.
+    ``embargo_steps`` is the calibration lag in prediction data steps, and it is
+    :func:`sizing_conformal_lag`'s answer rather than the holdout table's - the two ask
+    different questions and disagree on a zero-horizon label.
 
     **This is a diagnostic of residual dispersion, not a guarantee.** Split conformal's
     finite-sample coverage requires the calibration and test scores to be exchangeable, and
@@ -148,8 +147,11 @@ def walk_forward_conformal_coverage(
     cleared no warm-up, which are the ones the allocator sizes from a pooled width or not at
     all, and which no coverage figure describes.
     """
-    if embargo_steps < 0:
-        raise ValueError(f"embargo_steps={embargo_steps} is not a label horizon")
+    if embargo_steps < 1:
+        raise ValueError(
+            f"embargo_steps={embargo_steps} would measure a width calibrated on the residual "
+            "of the decision it sizes; see sizing_conformal_lag"
+        )
 
     renames = {
         legacy: canonical
@@ -226,6 +228,29 @@ def holdout_conformal_embargo_steps(case_study: str, label: str) -> int:
         raise KeyError(
             f"No conformal holdout embargo is defined for {key}; add a reviewed data-step value"
         ) from error
+
+
+def sizing_conformal_lag(case_study: str, label: str) -> int:
+    """The calibration lag a width used to size a position must carry, in data steps.
+
+    Not the same question :data:`HOLDOUT_CONFORMAL_EMBARGO_STEPS` answers, and reading one off
+    the other is what put a decision's own residual into its width.
+
+    The table records how far a residual reaches **forward**: a residual at ``t'`` resolves over
+    ``(t', t'+h]``, so at the validation/holdout boundary a residual with ``t' + h > t`` carries
+    information from after ``t``. For a zero-horizon label nothing reaches forward and the
+    reviewed entry is 0 - `us_firm_characteristics` dates each row by the month the return was
+    earned, and ``labels.horizons`` declares ``0D`` for all three of its labels.
+
+    A sizing lag asks what was **known** when the position was chosen, which is a different
+    thing. The position that earns month ``t``'s return was selected at the end of ``t-1``, and
+    the backtest applies its weights to ``y_true`` at ``t``; the residual at ``t`` is therefore
+    not available to size it, whatever the horizon. So the lag is at least one step even where
+    the holdout embargo is zero, and equals the horizon everywhere else - the two coincide for
+    every label with a horizon of one step or more, which is why one table served both until a
+    zero-horizon label was declared.
+    """
+    return max(1, holdout_conformal_embargo_steps(case_study, label))
 
 
 def ensure_conformal_calibration_identity(
@@ -557,15 +582,12 @@ def compute_conformal_widths(
     at other alphas; rows at this ``alpha`` are replaced.
 
     Raises ``ValueError`` when neither ``embargo_steps`` nor a ``label`` with a
-    reviewed embargo is given, when ``embargo_steps`` is negative, or when no
+    reviewed embargo is given, when ``embargo_steps`` is below one, or when no
     (timestamp, entity) pair clears the warm-up.
 
-    Zero is admitted because :data:`HOLDOUT_CONFORMAL_EMBARGO_STEPS` records zero for
-    ``us_firm_characteristics``' three labels, whose ``labels.horizons`` is ``0D``: the row is
-    dated by the month the return was earned, so the residual is realized at the observation and
-    reaches nothing forward. Refusing it here left that case study's `conformal_weighted`
-    allocation unable to compute the widths its own reviewed horizon calls for, and the
-    coverage a notebook prints beside it describing widths that could not be produced.
+    One step is the floor and it is not the same quantity
+    :data:`HOLDOUT_CONFORMAL_EMBARGO_STEPS` records - see :func:`sizing_conformal_lag`. Pass
+    that function's answer rather than the table's where the two can differ.
     """
     pred_dir = _predictions_dir(case_study, prediction_hash, case_dir=case_dir)
     pred_path = pred_dir / "predictions.parquet"
@@ -579,8 +601,10 @@ def compute_conformal_widths(
                 "horizon as an embargo - pass embargo_steps, or label to look up the "
                 "reviewed value"
             )
-        embargo_steps = holdout_conformal_embargo_steps(case_study, label)
-    if embargo_steps < 0:
+        # The sizing lag, not the holdout table: they differ on a zero-horizon label and this
+        # is the estimator that sizes a position.
+        embargo_steps = sizing_conformal_lag(case_study, label)
+    if embargo_steps < 1:
         raise ValueError(
             f"{case_study}/{prediction_hash}: embargo_steps={embargo_steps} would calibrate "
             "on a residual that is not yet realized at the decision it sizes"

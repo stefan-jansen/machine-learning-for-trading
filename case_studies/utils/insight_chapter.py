@@ -45,7 +45,7 @@ import torch  # noqa: F401
 
 from case_studies.utils.analytics import PRIMARY_LABELS, SHORT_NAMES
 from case_studies.utils.conformal import (
-    holdout_conformal_embargo_steps,
+    sizing_conformal_lag,
     walk_forward_conformal_coverage,
 )
 from case_studies.utils.registry.specs import declared_fold_count
@@ -349,7 +349,8 @@ def conformal_coverage_for_selected_prediction(
     :func:`~case_studies.utils.conformal.walk_forward_conformal_coverage`, which also states
     why the figure is a diagnostic of residual dispersion rather than a guarantee.
 
-    ``embargo_steps`` defaults to the reviewed horizon for this row's case study and label.
+    ``embargo_steps`` defaults to :func:`~case_studies.utils.conformal.sizing_conformal_lag`
+    for this row's case study and label.
     The label is taken from the selected row where it carries one and from the training spec
     otherwise - `us_equities_panel/15_model_analysis` attaches it to the returned frame rather
     than to the row it passes, and both know the same label.
@@ -415,7 +416,7 @@ def conformal_coverage_for_selected_prediction(
                 "row nor its training spec names a label, so no reviewed conformal embargo "
                 "can be resolved"
             )
-        embargo_steps = holdout_conformal_embargo_steps(selected["case_study"], label)
+        embargo_steps = sizing_conformal_lag(selected["case_study"], label)
     try:
         coverage_rows = walk_forward_conformal_coverage(
             predictions, levels=levels, embargo_steps=embargo_steps
