@@ -256,7 +256,15 @@ def build_features_and_matrix(
     latest_rows = equity.filter(pl.col("report_date") == latest_report_date)
     if latest_rows.is_empty():
         raise ValueError("The latest 13F report date has no positive long-equity positions.")
-    latest_timestamp = latest_rows["filing_date"].max()
+    # Availability is taken over every disclosure for the selected quarter, not only the
+    # long-equity ones the graph is built from. A manager that files later with options
+    # only makes the quarter complete - `_complete_report_dates` counts any disclosed row
+    # as evidence it filed - without advancing a timestamp read off `latest_rows`, so the
+    # graph would claim to have been available before that filing was public. That is
+    # lookahead: the quarter was not usable until the last of its filings landed.
+    latest_timestamp = holdings_df.filter(pl.col("report_date") == latest_report_date)[
+        "filing_date"
+    ].max()
     issuer_names = (
         latest_rows.group_by(["cusip", "issuer"])
         .agg(pl.col("value_thousands").sum().alias("issuer_value"))

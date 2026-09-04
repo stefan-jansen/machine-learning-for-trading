@@ -39,6 +39,13 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 
+# The same root without following symlinks. A `--case-study` worktree wires its
+# heavy state (`run_log/`, `features/`, `labels/`) in by symlink, so a path that
+# lives inside the repo through one of those links resolves to the canonical
+# artifact store outside it. Relativizing has to be tried against the path as
+# written before anything is resolved.
+_REPO_ROOT_AS_WRITTEN = Path(os.path.abspath(Path(__file__).parent.parent))
+
 # =============================================================================
 # Chapter Registry (Single Source of Truth)
 # =============================================================================
@@ -125,24 +132,36 @@ def display_path(path: Path | str) -> str:
 
     Use in `print(...)` statements inside notebooks so the committed cell
     output never bakes in machine-specific absolute paths (e.g. `/home/<user>/...`).
-    """
-    p = Path(path).resolve()
-    try:
-        return str(p.relative_to(REPO_ROOT))
-    except ValueError:
-        pass
 
-    if p.is_absolute():
-        for variable in ("ML4T_CHAPTER_OUTPUT_DIR", "ML4T_OUTPUT_DIR", "ML4T_DATA_PATH"):
-            configured_root = os.environ.get(variable)
-            if not configured_root:
-                continue
+    A path inside the repository stays relative even when it is reached through a
+    symlink, which is the normal state of a `new-worktree.sh --case-study`
+    worktree: `run_log/`, `features/` and `labels/` are links into
+    `~/ml4t/artifacts/`, so resolving first would relativize against the wrong
+    root and print the absolute store path.
+    """
+    as_written = Path(os.path.abspath(path))
+    resolved = as_written.resolve()
+
+    for candidate in (as_written, resolved):
+        for root in (_REPO_ROOT_AS_WRITTEN, REPO_ROOT):
             try:
-                relative = p.relative_to(Path(configured_root).expanduser().resolve())
+                return str(candidate.relative_to(root))
             except ValueError:
                 continue
-            return str(Path(f"<{variable}>") / relative)
-    return str(p)
+
+    for variable in ("ML4T_CHAPTER_OUTPUT_DIR", "ML4T_OUTPUT_DIR", "ML4T_DATA_PATH"):
+        configured_root = os.environ.get(variable)
+        if not configured_root:
+            continue
+        configured = Path(configured_root).expanduser()
+        for candidate in (as_written, resolved):
+            for root in (Path(os.path.abspath(configured)), configured.resolve()):
+                try:
+                    relative = candidate.relative_to(root)
+                except ValueError:
+                    continue
+                return str(Path(f"<{variable}>") / relative)
+    return str(resolved)
 
 
 def get_chapter_dir(chapter: int | str) -> Path:

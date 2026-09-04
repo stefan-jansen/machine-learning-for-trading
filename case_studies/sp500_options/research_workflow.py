@@ -25,6 +25,7 @@ from case_studies.research import (
     Result,
     Study,
     plan_backtests,
+    require_resolved_requests_cover_the_catalog,
     run_models,
 )
 from case_studies.research.execution import ModelExecution
@@ -226,30 +227,6 @@ def expected_prediction_hashes(
     return tuple(hashes)
 
 
-def _require_resolved_requests_cover_the_catalog(
-    request_catalog: pl.DataFrame,
-    resolved: tuple[ResolvedModelRequest, ...],
-) -> None:
-    """Refuse a snapshot built from a resolved set that is not the declared catalog.
-
-    Supplying ``resolved_requests`` is how a caller avoids resolving twice, not a way to narrow
-    what the population contains. Without this check, a stale or partial set snapshots under the
-    catalog's name and reports complete, and every configuration it omitted silently leaves the
-    comparison the population exists to define.
-    """
-    declared = set(request_catalog.select("family", "label", "config_name").unique().iter_rows())
-    submitted = {
-        (request.family, request.spec["label"], request.spec.get("config_name"))
-        for request in resolved
-    }
-    if submitted != declared:
-        missing = sorted(declared - submitted)
-        extra = sorted(submitted - declared)
-        raise ValueError(
-            f"resolved requests do not match the declared catalog: missing={missing}, extra={extra}"
-        )
-
-
 def run_official_model_catalog(
     study: Study,
     request_catalog: pl.DataFrame,
@@ -300,7 +277,7 @@ def snapshot_official_model_catalog(
         resolved = resolve_model_requests(study, request_catalog, execution_tier="canonical")
     if any(request.spec["execution_tier"] != "canonical" for request in resolved):
         raise ValueError("official model populations require canonical requests")
-    _require_resolved_requests_cover_the_catalog(request_catalog, resolved)
+    require_resolved_requests_cover_the_catalog(request_catalog, resolved)
     expected = expected_prediction_hashes(resolved)
     return OfficialPopulation.create(
         study,

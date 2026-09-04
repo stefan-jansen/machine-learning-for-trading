@@ -1944,12 +1944,44 @@ def _run_vectorized(
     if weights_thinned["timestamp"].dtype != thinned_sel["timestamp"].dtype:
         thinned_sel = thinned_sel.cast({"timestamp": weights_thinned["timestamp"].dtype})
 
-    # Join weights with forward returns
+    # Join weights with forward returns.
+    #
+    # Left, not inner, and then a refusal. An inner join discarded a selected position whose
+    # outcome row is missing, and three things followed. Weights are never renormalized after
+    # the join, so `gross_ret` summed the survivors' contributions against the original
+    # weights - the dropped name was marked at exactly zero return, which is an assertion
+    # about a position nobody could price rather than an exclusion. `n_positions` counted the
+    # survivors, so the one diagnostic that would show the loss reported the reduced count as
+    # though it were intended. And turnover is computed from `weights_thinned` below, which
+    # still holds the dropped name, so the position paid its cost and returned nothing.
+    #
+    # Renormalizing instead would be a filter applied to a chosen position using data from
+    # after the choice: "the selection step is unbiased" and "the realized result is
+    # unbiased" are different claims, and that fails the second while passing the first. So
+    # the run stops. A zero weight is exempt because it is not a position: its outcome
+    # cannot change any number here.
     bt = weights_thinned.join(
         thinned_sel,
         on=["timestamp", "symbol"],
-        how="inner",
+        how="left",
     )
+    unpriceable = bt.filter(
+        (pl.col("weight") != 0.0) & (pl.col("y_true").is_null() | ~pl.col("y_true").is_finite())
+    )
+    if not unpriceable.is_empty():
+        sample = unpriceable.sort("timestamp", "symbol").head(5)
+        named = ", ".join(
+            f"{row['symbol']}@{row['timestamp']}" for row in sample.iter_rows(named=True)
+        )
+        raise ValueError(
+            f"{case_study}/{label}: {unpriceable.height} of {bt.height} selected positions have "
+            f"no usable outcome, across {unpriceable['timestamp'].n_unique()} rebalance dates "
+            f"(first: {named}). Marking them at zero return asserts a result for a position "
+            "nobody could price, and they would still pay turnover. Supply the missing outcome "
+            "rows, or exclude these names before the weights are computed so the selection and "
+            "the realized result are drawn from the same set."
+        )
+    bt = bt.filter(pl.col("y_true").is_not_null())
 
     # Portfolio returns per period
     port_ret = (

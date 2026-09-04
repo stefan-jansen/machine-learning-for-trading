@@ -1004,6 +1004,72 @@ def _save_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=2, default=str))
 
 
+_PREDICTION_TIME_COLUMNS = ("timestamp", "date", "datetime", "ts")
+
+
+def _timestamps_as_utc(predictions):
+    """Give a naive decision-time column an explicit UTC zone before it is written.
+
+    `gbm`, `linear` and `tabular_dl` write `Datetime(_, 'UTC')`; `deep_learning` reaches
+    this through `flush_fold_predictions`, whose dates come from a numpy `datetime64`
+    array and are therefore naive. Measured on crypto_perps_funding: 578 artifacts UTC-
+    aware and 100 naive, same label, same folds, same 19 symbols, same 2,189 decision
+    times, identical instants. A tz-aware value never equals a naive one, so an exact join
+    on (timestamp, symbol) between the two families returned nothing, and any code
+    assuming one dtype across a case study's artifacts dropped rows instead of failing.
+
+    Naive is read as UTC here, which is what it already meant: every producer derives
+    these timestamps from the label artifact's own axis, and the naive values are the same
+    instants the aware ones carry. This relabels; it never converts a wall time.
+
+    `value_digest` ignores the zone (it is time-unit sensitive and zone-insensitive), so
+    an artifact rewritten through here keeps its digest and no immutable-artifact check
+    moves. The time unit is deliberately left alone for the same reason.
+    """
+    if predictions is None:
+        return predictions
+    try:
+        import polars as pl
+    except ImportError:  # pragma: no cover
+        return predictions
+
+    if isinstance(predictions, pl.DataFrame):
+        naive = [
+            column
+            for column in _PREDICTION_TIME_COLUMNS
+            if column in predictions.columns
+            and isinstance(predictions.schema[column], pl.Datetime)
+            and predictions.schema[column].time_zone is None
+        ]
+        if not naive:
+            return predictions
+        return predictions.with_columns(
+            pl.col(column).dt.replace_time_zone("UTC") for column in naive
+        )
+
+    # pandas is handled in place rather than converted. Both the legacy registration branch
+    # and the pandas side of the versioned one hand the caller's own frame to the writer,
+    # and `pl.from_pandas` on an arbitrary frame is a wider change than this needs. A naive
+    # pandas column localizes to UTC the same way; an already-aware one is left alone.
+    import pandas as pd
+
+    if not isinstance(predictions, pd.DataFrame):
+        return predictions
+    naive = [
+        column
+        for column in _PREDICTION_TIME_COLUMNS
+        if column in predictions.columns
+        and pd.api.types.is_datetime64_any_dtype(predictions[column])
+        and getattr(predictions[column].dtype, "tz", None) is None
+    ]
+    if not naive:
+        return predictions
+    localized = predictions.copy()
+    for column in naive:
+        localized[column] = localized[column].dt.tz_localize("UTC")
+    return localized
+
+
 def _save_parquet(path: Path, frame) -> None:
     """Write a DataFrame to parquet, handling pl.Object columns safely.
 

@@ -36,9 +36,14 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tests.create_test_data import (  # noqa: E402
+    CRYPTO_PERPS,
+    CRYPTO_PERPS_END,
     DATASETS,
+    ETF_UNIVERSE,
+    ETF_UNIVERSE_UNADJUSTED,
+    FX_4H,
+    FX_DAILY,
     SUPERSEDED_SUBSETS,
-    UNBUILT_FIXTURES,
     declared_subsets,
 )
 
@@ -66,25 +71,19 @@ def manifest(fixture_root: Path) -> dict:
 # --- the declarations themselves, no data needed -----------------------------
 
 
-def test_every_fixture_is_declared_exactly_once() -> None:
-    """A dataset with a builder and a declaration of having none is a contradiction."""
-    registered = {dataset.name for dataset in DATASETS}
-    unbuilt = {fixture.name for fixture in UNBUILT_FIXTURES}
-    assert not registered & unbuilt
-    assert not (registered | unbuilt) & set(SUPERSEDED_SUBSETS)
+def test_no_superseded_entry_names_a_registered_dataset() -> None:
+    """A superseded manifest key describes a fixture some other dataset owns.
+
+    A name that is both a `Dataset` and a superseded key would be dropped from the
+    manifest and written back into it by the same run.
+    """
+    assert not {dataset.name for dataset in DATASETS} & set(SUPERSEDED_SUBSETS)
 
 
 def test_every_superseded_entry_names_the_dataset_that_owns_it() -> None:
     registered = {dataset.name for dataset in DATASETS}
     for name, owner in SUPERSEDED_SUBSETS.items():
         assert owner in registered, f"{name} is superseded by {owner}, which has no builder"
-
-
-def test_every_unbuilt_fixture_records_why_it_has_none() -> None:
-    """Without the reason the entry is a shrug, which is what it replaced."""
-    for fixture in UNBUILT_FIXTURES:
-        assert fixture.reason.strip(), f"{fixture.name} declares no reason"
-        assert fixture.entities, f"{fixture.name} declares nothing a test can measure"
 
 
 def test_every_reducing_builder_declares_something_measurable() -> None:
@@ -137,14 +136,26 @@ def test_every_file_the_manifest_lists_is_on_disk(fixture_root: Path, manifest: 
 
 
 def _distinct(path: Path, column: str) -> int:
-    source = path / "**" / "*.parquet" if path.is_dir() else path
-    return pl.scan_parquet(source).select(pl.col(column).n_unique()).collect().item()
+    """Distinct values of ``column``, reading a hive directory the way its loader does.
+
+    The CME hourly bars keep `product` in the path (`product=ES/year=2011/...`) and
+    not in the parquet, so a non-hive scan of that tree cannot see the entity axis
+    at all. `hive_partitioning=True` is a no-op on a tree whose files carry the
+    column inline, which is the nasdaq100 minute-bar layout.
+    """
+    if not path.is_dir():
+        return pl.scan_parquet(path).select(pl.col(column).n_unique()).collect().item()
+    return (
+        pl.scan_parquet(path / "**" / "*.parquet", hive_partitioning=True)
+        .select(pl.col(column).n_unique())
+        .collect()
+        .item()
+    )
 
 
 def _declared_files(root: Path) -> dict[str, list[str]]:
     """{dataset name: the files on disk under the paths it declares}."""
     declared = {dataset.name: dataset.owns for dataset in DATASETS}
-    declared.update({fixture.name: fixture.covers for fixture in UNBUILT_FIXTURES})
     found = {}
     for name, paths in declared.items():
         files = []
@@ -158,9 +169,7 @@ def _declared_files(root: Path) -> dict[str, list[str]]:
     return found
 
 
-@pytest.mark.parametrize(
-    "name", sorted({d.name for d in DATASETS} | {f.name for f in UNBUILT_FIXTURES})
-)
+@pytest.mark.parametrize("name", sorted(d.name for d in DATASETS))
 def test_every_file_a_dataset_owns_is_listed_in_the_manifest(
     name: str, fixture_root: Path, manifest: dict
 ) -> None:
@@ -206,28 +215,103 @@ def test_a_built_fixture_carries_the_universe_its_builder_declares(
     )
 
 
-@pytest.mark.parametrize(
-    ("name", "rel", "column", "count"),
-    [
-        (fixture.name, rel, column, count)
-        for fixture in UNBUILT_FIXTURES
-        for rel, (column, count) in fixture.entities.items()
-    ],
-)
-def test_an_unbuilt_fixture_carries_the_universe_it_declares(
-    name: str, rel: str, column: str, count: int, fixture_root: Path
-) -> None:
-    """These cannot drift against a builder, so they are measured against the data.
+# --- what a builder does to the time axis ------------------------------------
+#
+# An entity count cannot see any of this, and the time axis is the whole reason
+# three of these builders are more than a filter. `etfs` casts a Datetime at
+# midnight down to a Date; `fx` casts a Date and a naive millisecond Datetime up to
+# UTC-aware microseconds, and `case_studies/fx_pairs` joins the two frequencies, so
+# one representation is not optional. A cast dropped from a builder leaves the row
+# counts and the entity counts exactly as they are.
 
-    Every one of them declared a budget the fixture did not satisfy before this -
-    "15 most liquid ETFs" over 56 symbols, "8 major/cross FX pairs" over 20, "50
-    most liquid US equities" over 56, "8 most liquid CME products" over a 30-product
-    daily panel.
-    """
+TIMESTAMP_CONTRACT = [
+    (ETF_UNIVERSE, pl.Date),
+    (ETF_UNIVERSE_UNADJUSTED, pl.Date),
+    (FX_4H, pl.Datetime("us", "UTC")),
+    (FX_DAILY, pl.Datetime("us", "UTC")),
+]
+
+
+@pytest.mark.parametrize(
+    ("rel", "dtype"), [(rel.as_posix(), dtype) for rel, dtype in TIMESTAMP_CONTRACT]
+)
+def test_a_built_fixture_stores_its_timestamps_the_way_its_builder_says(
+    rel: str, dtype: pl.DataType, fixture_root: Path
+) -> None:
     path = fixture_root / rel
     if not path.exists():
-        pytest.skip(f"{name}: {rel} is not in this checkout")
-    observed = _distinct(path, column)
-    assert observed == count, (
-        f"{name} declares {count} distinct {column} in {rel} and the fixture carries {observed}"
+        pytest.skip(f"{rel} is not in this checkout")
+    observed = pl.scan_parquet(path).collect_schema()["timestamp"]
+    assert observed == dtype, (
+        f"{rel} stores timestamp as {observed} and its builder writes {dtype}. "
+        "A Datetime at midnight compares unequal to the Date it prints as."
+    )
+
+
+def test_the_crypto_bars_stop_where_the_builder_bounds_them(fixture_root: Path) -> None:
+    """The bound exists so the bars do not outrun the intermediates built on them.
+
+    Removing it would add rows at the end that no label, feature or fold covers -
+    which is what ml4t/agent-workspace#970 was, in the cme_futures fixture.
+    """
+    path = fixture_root / CRYPTO_PERPS
+    if not path.exists():
+        pytest.skip(f"{CRYPTO_PERPS} is not in this checkout")
+    last = pl.scan_parquet(path).select(pl.col("timestamp").max()).collect().item()
+    assert last == CRYPTO_PERPS_END, (
+        f"{CRYPTO_PERPS} ends at {last} and the builder bounds it at {CRYPTO_PERPS_END}"
+    )
+
+
+# --- what a builder does to the date range -----------------------------------
+#
+# None of the checks above can see a truncated fixture: a panel cut at either end
+# keeps its entity count, its manifest entry and its timestamp type. Five of these
+# builders promise the whole production history for the entities they keep, and
+# `crypto` promises a declared bound instead, so both are stated as dates and both
+# are read off the fixture.
+#
+# The bounds are the fixture's, measured 2026-09-04, and a production refresh that
+# extends a panel is expected to move them. That is the point: the value here has
+# to be updated deliberately, by whoever regenerates the fixture.
+
+DATE_RANGE_CONTRACT = [
+    ("etfs/market/etf_universe.parquet", "timestamp", "2006-01-03", "2025-12-31"),
+    ("etfs/market/etf_universe_unadjusted.parquet", "timestamp", "2006-01-03", "2025-12-31"),
+    ("fx/market/4h.parquet", "timestamp", "2011-01-02 14:00:00+00:00", "2025-12-31 18:00:00+00:00"),
+    (
+        "fx/market/daily.parquet",
+        "timestamp",
+        "2011-01-03 00:00:00+00:00",
+        "2025-12-31 00:00:00+00:00",
+    ),
+    (
+        "crypto/market/perps_1h.parquet",
+        "timestamp",
+        "2020-01-01 00:00:00+00:00",
+        "2025-12-29 23:00:00+00:00",
+    ),
+    ("equities/market/us_equities/us_equities.parquet", "date", "1962-01-02", "2018-03-27"),
+    (
+        "futures/market/continuous/daily/continuous_daily.parquet",
+        "session_date",
+        "2011-01-03",
+        "2025-12-31",
+    ),
+]
+
+
+@pytest.mark.parametrize(("rel", "column", "first", "last"), DATE_RANGE_CONTRACT)
+def test_a_built_fixture_spans_the_dates_its_builder_promises(
+    rel: str, column: str, first: str, last: str, fixture_root: Path
+) -> None:
+    path = fixture_root / rel
+    if not path.exists():
+        pytest.skip(f"{rel} is not in this checkout")
+    frame = pl.scan_parquet(path)
+    observed_first = str(frame.select(pl.col(column).min()).collect().item())
+    observed_last = str(frame.select(pl.col(column).max()).collect().item())
+    assert (observed_first[: len(first)], observed_last[: len(last)]) == (first, last), (
+        f"{rel} spans {observed_first} to {observed_last}, and its builder writes "
+        f"{first} to {last}. A truncated panel keeps its entity count and its dtype."
     )

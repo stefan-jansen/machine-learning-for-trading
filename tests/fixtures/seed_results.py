@@ -1009,6 +1009,91 @@ def _subsampled_panel(frame, entity: str, _pl):
     return panel.select(columns)
 
 
+def _label_artifact_panel(cs_dir: Path, label: str, window, n_folds: int, _pl):
+    """A key/target panel taken from the fixture's own label artifact.
+
+    The last resort before the fabricated grid, and the one that matters for a cohort
+    leader. `sample_registry_for_tests` samples registry rows and copies no prediction
+    artifacts, so a label whose group has no artifact on disk had nothing to take a panel
+    from and fell to `_weekday_grid` over placeholder symbols with a random `actual`. A
+    replay notebook that pins the leader by hash then failed a >0.99 correlation gate
+    against real prices several stages downstream, nowhere near here.
+
+    The label artifact is the right source and it is already in the fixture: its
+    (entity, timestamp) keys are the ones every notebook joins on, and its label column is
+    the realized value those notebooks check - computed by stage 02 from the fixture's own
+    prices, so the gate is satisfied by construction. That is what the comment on the
+    missing-leader warning asks for, and it is not a copy of the production artifact,
+    which would be stale the moment anything upstream is regenerated.
+
+    Returns None when the artifact is absent, carries no usable key, or holds nothing
+    inside the split window - the fabricated grid still covers those.
+    """
+    from datetime import timedelta
+
+    path = cs_dir / "labels" / f"{label}.parquet"
+    if not path.is_file():
+        return None
+    try:
+        frame = _pl.read_parquet(path)
+    except Exception:  # noqa: BLE001 - an unreadable label is not ours to fix here
+        return None
+    entity = next((c for c in ENTITY_COLUMN_CANDIDATES if c in frame.columns), None)
+    if entity is None or "timestamp" not in frame.columns or label not in frame.columns:
+        return None
+
+    start, end = window
+    as_date = _pl.col("timestamp")
+    if frame.schema["timestamp"] != _pl.Date:
+        as_date = as_date.cast(_pl.Date)
+    frame = frame.filter((as_date >= start) & (as_date <= end)).drop_nulls([label])
+    if frame.is_empty():
+        return None
+
+    # Daily or coarser only. `_subsampled_panel` keeps a contiguous run at native spacing
+    # for a sub-daily panel - it has to, because a stride hands an 8H label decisions ten
+    # days apart and `13_backtest` rejects them against its horizon. On a minute-bar label
+    # that run is sixty consecutive minutes: measured on nasdaq100_microstructure, every
+    # seeded set collapsed to 2021-06-15 14:44 through 15:43, one hour of a one-year
+    # window, and every configuration in the sweep then scored the same Sharpe -
+    # `14_backtest` failed at `hist(..., bins=30)` with "Too many bins for data range".
+    # The fabricated grid spans the window instead, which is what an intraday case study
+    # is better served by until this can subsample a sub-daily label without breaking its
+    # spacing.
+    stamps = frame.get_column("timestamp").unique().sort()
+    if stamps.len() > 1:
+        gaps = stamps.diff().drop_nulls()
+        if gaps.len() and gaps.min() < timedelta(days=1):
+            return None
+    # `actual` is the label's own realized value, so nothing is redrawn: this is the
+    # target the pinning notebook expects to find, not a stand-in for it.
+    frame = frame.select(
+        _pl.col(entity),
+        _pl.col("timestamp"),
+        _pl.col(label).alias("actual"),
+    ).sort("timestamp", entity)
+    panel = _subsampled_panel(frame, entity, _pl)
+    # `_subsampled_panel` defaults a frame with no fold column to two folds. The registry
+    # row says how many the run declared, and an artifact carrying fewer fails the same
+    # check a wrong fold count does, so the assignment is redone here on the dates that
+    # survived - contiguous blocks, one per fold, floored with the last absorbing the
+    # remainder, exactly as the fabricated grid does it.
+    kept = panel["timestamp"].unique()
+    block = max(1, kept.len() // max(1, n_folds))
+    # Ranked rather than mapped through a dict: a Python datetime round-trips as
+    # microsecond-precision and `replace_strict` refuses to match it against a
+    # millisecond column, which is what every intraday case study stores.
+    return panel.with_columns(
+        _pl.col("timestamp")
+        .rank("dense")
+        .sub(1)
+        .floordiv(block)
+        .clip(upper_bound=n_folds - 1)
+        .cast(_pl.Int64)
+        .alias("fold")
+    )
+
+
 def _normalize_prediction_timestamp_zone(cs_dir: Path) -> None:
     """Put one case study's prediction artifacts in the timezone its labels use.
 
@@ -1462,33 +1547,6 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         for p_hash in cohort_leader_hashes
         if not (cs_dir / "run_log" / "predictions" / p_hash / "predictions.parquet").is_file()
     )
-    if missing_leaders:
-        # The exemption above can only preserve an artifact that exists. A leader with
-        # none still falls through to the synthetic write, and the notebook that pins
-        # its hash then fails a >0.99 correlation gate against real prices several
-        # stages downstream, nowhere near this function. The gap is reported by hash
-        # at regeneration time rather than left to surface there. Not fatal: seven of
-        # the nine fixtures are missing at least one leader artifact today, so raising
-        # would stop every regeneration on a pre-existing gap this function did not
-        # introduce.
-        #
-        # Do NOT close the gap by copying the production artifact in. A copied fixture
-        # is stale the moment anything upstream is regenerated, and every case study is
-        # being retrained end to end. What the correlation gate needs is a panel whose
-        # entities and timestamps are the ones the fixture's own labels carry, and whose
-        # historical target is derived from the same synthetic series the scores come
-        # from, so the check is satisfied by construction. That is what the branch below
-        # already does wherever a reference panel exists; a leader with no artifact of
-        # its own is the case that still falls back to a fabricated grid.
-        warnings.warn(
-            f"{cs_id}: no predictions.parquet on disk for cohort-leader prediction(s) "
-            f"{', '.join(missing_leaders)}; each gets synthetic scores on a fabricated "
-            "entity grid that a replay notebook's historical-target check will reject. "
-            "Generate the artifact against the fixture's own labels, deriving its "
-            "target from the series the scores come from; never copy the production one.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
 
     def _survives(p_hash: str) -> bool:
         """True when the loop below leaves this artifact exactly as it is.
@@ -1525,6 +1583,21 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
     # one that survives, and otherwise using one that will be rewritten onto its
     # own keys. Only a group with no artifact at all keeps the fabricated grid.
     reference_panels = _reference_panels(cs_dir, hash_rows, _survives, _pl)
+    label_panels: dict = {}
+    fabricated_leaders: list = []
+
+    def _label_panel(split, label, n_folds):
+        """The fixture's own label artifact as a panel, computed once per key.
+
+        Keyed on the fold count as well, the way `_template_for` is: two runs of one
+        label can declare different fold counts and each artifact has to carry its own.
+        """
+        key = (split, label, n_folds)
+        if key not in label_panels:
+            label_panels[key] = _label_artifact_panel(
+                cs_dir, label, _window_for(split, label), n_folds, _pl
+            )
+        return label_panels[key]
 
     for p_hash, split, label in hash_rows:
         pred_dir = cs_dir / "run_log" / "predictions" / p_hash
@@ -1547,6 +1620,12 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
             # a direction label's target is a class, not a return.
             reference = _intraday_split_skeleton(reference_panels, split, _pl)
             borrowed = reference is not None
+        if reference is None:
+            # Nothing in this group and nothing to borrow: build the panel from the
+            # fixture's own label artifact rather than fabricating one. `borrowed` stays
+            # False - the target here IS this label's realized value, so it must not be
+            # redrawn below.
+            reference = _label_panel(split, label, declared_folds.get(p_hash, 2))
         if reference is not None:
             template, n = reference, reference.height
         else:
@@ -1582,6 +1661,39 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
             # seeded onto may be a classification artifact that does.
             frame = frame.drop("eval_actual")
         frame.write_parquet(str(pred_file))
+        if p_hash in missing_leaders and reference is None:
+            fabricated_leaders.append(p_hash)
+
+    if fabricated_leaders:
+        # The exemption above can only preserve an artifact that exists, so a cohort
+        # leader with none falls through to this loop. Where it lands on a real panel -
+        # another artifact of its group, a borrowed intraday skeleton, or the fixture's
+        # own label artifact - it carries the keys and the realized target a replay
+        # notebook pins it for, and there is nothing to report. This is what is left:
+        # a leader seeded onto a fabricated entity grid with a drawn target, whose
+        # >0.99 correlation gate against real prices fails several stages downstream,
+        # nowhere near this function.
+        #
+        # Reported rather than raised: a fixture that genuinely has no label artifact for
+        # the group cannot be fixed from here, and raising would stop every regeneration
+        # on a gap this function did not introduce.
+        #
+        # Do NOT close it by copying the production artifact in. A copied fixture is
+        # stale the moment anything upstream is regenerated, and every case study is
+        # being retrained end to end. What the gate needs is a panel whose entities and
+        # timestamps are the fixture's own and whose target is the one its labels carry,
+        # which is what `_label_artifact_panel` builds.
+        warnings.warn(
+            f"{cs_id}: cohort-leader prediction(s) "
+            f"{', '.join(sorted(fabricated_leaders))} have no artifact on disk and no "
+            "panel to seed onto - not from their own group, not borrowed, and not from "
+            "the fixture's own label artifact - so each gets synthetic scores on a "
+            "fabricated entity grid that a replay notebook's historical-target check "
+            "will reject. Add the label artifact this case study is missing; never copy "
+            "the production prediction.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
 
 def _seed_causal_json(results_dir: Path, cs_id: str, label: str) -> None:

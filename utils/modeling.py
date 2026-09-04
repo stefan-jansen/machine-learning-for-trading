@@ -42,6 +42,7 @@ from utils.artifact_specs import (
     load_feature_spec,
     load_label_spec,
     resolve_label_buffer,
+    resolve_label_buffer_unit,
     resolve_label_horizon,
     resolve_market_semantics,
     resolve_storage_path,
@@ -281,7 +282,24 @@ class ModelingDataset:
 
 
 def _sha256_file(path: Path) -> str:
-    """Return a stable digest for an identity-defining input artifact."""
+    """Digest an identity-defining input artifact's bytes.
+
+    Stable across repeated writes, not across encodings. Two parquet files holding
+    identical data hash differently if they were written with a different compression
+    codec or row-group size, and this digest is inside `computation.feature_artifacts` and
+    `computation.input_data_spec.artifacts`, which are inside the hashed `computation`
+    block - so a codec change forks the `training_hash` of every run reading that artifact.
+
+    Two things hold that shut. `artifact_digest._PARQUET_WRITE_SETTINGS` states the
+    encoding these artifacts are written under rather than inheriting a library default,
+    and `tests/test_artifact_digest_encoding.py` records the bytes a fixed frame produces
+    under it, so a change arrives as a failing test rather than as a registry that has
+    grown two identities for one piece of work.
+
+    `artifact_digest.value_digest` digests column *values* and is what a new identity
+    version should use here; changing it now would re-key all 1,305 registered training
+    runs across the nine live registries, which is a re-derivation rather than a fix.
+    """
     digest = hashlib.sha256()
     with path.open("rb") as src:
         for chunk in iter(lambda: src.read(1024 * 1024), b""):
@@ -910,6 +928,10 @@ def load_modeling_dataset(
     # CV splits — read buffer from setup.yaml (explicit, handles non-standard labels)
     setup = yaml.safe_load((case_dir / "config" / "setup.yaml").read_text())
     label_buffer = resolve_label_buffer(case_study_id, primary_label, setup)
+    # Whether that duration counts sessions or calendar time is the label's to declare,
+    # not each consumer's to guess: `35D` to option expiry is calendar, `21D` on a daily
+    # equity panel is 21 sessions, and the duration alone cannot tell them apart.
+    buffer_unit = resolve_label_buffer_unit(case_study_id, primary_label, setup)
     if not label_buffer:
         raise ValueError(
             f"No explicit label buffer found for '{primary_label}' in "
@@ -925,6 +947,7 @@ def load_modeling_dataset(
         label_buffer=label_buffer,
         outcome_horizon=resolve_label_horizon(case_study_id, primary_label, setup),
         date_col=date_col,
+        buffer_unit=buffer_unit,
     )
     temporal_artifact_splits: list[dict[str, Any]] = []
     if temporal_by_fold_pd is not None:
@@ -968,7 +991,12 @@ def load_modeling_dataset(
     if wf_horizon and wf_horizon.endswith("M") and wf_horizon[:-1].isdigit():
         wf_horizon = f"{int(wf_horizon[:-1]) * 30}D"
     try:
-        cv_config = make_wf_config(case_study_id, label_horizon=wf_horizon, date_col=date_col)
+        cv_config = make_wf_config(
+            case_study_id,
+            label_horizon=wf_horizon,
+            date_col=date_col,
+            buffer_unit=buffer_unit,
+        )
     except Exception as exc:
         warnings.warn(f"WalkForwardConfig creation failed for {case_study_id}: {exc}", stacklevel=2)
         cv_config = None

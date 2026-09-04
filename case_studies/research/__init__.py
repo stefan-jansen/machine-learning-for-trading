@@ -28,6 +28,7 @@ from .execution import (
     PlannedBacktest,
     expected_prediction_hashes,
     plan_backtests,
+    require_resolved_requests_cover_the_catalog,
     run_backtests,
     run_model_population,
     run_models,
@@ -170,6 +171,7 @@ __all__ = [
     "superseded_members_at",
     "run_models",
     "run_official_model_subset",
+    "require_resolved_requests_cover_the_catalog",
     "run_official_models",
     "snapshot_official_models",
 ]
