@@ -52,7 +52,6 @@
 # %%
 """S&P 500 Options: Holdout Predictions."""
 
-import shutil
 import sqlite3
 import warnings
 
@@ -64,6 +63,7 @@ from case_studies.research import open_study
 from case_studies.research.holdout import build_holdout_training_spec
 from case_studies.research.models import reconstruct_locked_model_request
 from case_studies.utils.registry import training_hash_from_spec
+from case_studies.utils.registry.maintenance import delete_prediction_generation
 from case_studies.utils.strategy_analysis import (
     resolve_solvent_carrier,
     training_run_fitted_for_the_holdout,
@@ -88,24 +88,6 @@ study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKS
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 
 
-# Every table that keys a row to a prediction set or to a backtest run, and therefore every
-# table a delete has to reach. Deleting the two parent rows alone leaves the rest addressable
-# by a hash nothing resolves any more, which is worse than leaving the generation in place: the
-# parent is gone, so nothing reports the orphan, and a later query that joins from the child
-# side still finds it. The first pass of this function did exactly that and left four rows -
-# one prediction_coverage, one prediction_metrics, two fold_metrics - behind in the live
-# registry.
-_PREDICTION_CHILD_TABLES = (
-    "prediction_coverage",
-    "prediction_metrics",
-    "fold_metrics",
-)
-_BACKTEST_CHILD_TABLES = (
-    "backtest_metrics",
-    "backtest_fold_metrics",
-)
-
-
 def _delete_holdout_generation(case_dir, prediction_hash):
     """Remove one holdout prediction set and everything registered against it.
 
@@ -113,56 +95,14 @@ def _delete_holdout_generation(case_dir, prediction_hash):
     than being marked, because a superseded holdout evaluation that is still readable is still
     a number someone can quote, and the point of replacing it is that it should not be one.
 
-    "Everything" is the whole subtree, not the two rows that name the generation: the child
-    metrics, the holdout evaluation and staging records that point at it, and the artifact
-    directories on disk. An artifact directory left behind is not inert - an unregistered
-    backtest directory blocks its own re-run, because the writer refuses to overwrite a
-    directory whose identity it cannot account for.
-
-    Foreign keys are enabled on this connection. SQLite leaves them off per connection, so the
-    schema's REFERENCES clauses enforce nothing by default, and a delete that misses a child
-    table succeeds silently instead of raising.
+    The cascade lives in `case_studies/utils/registry/maintenance.py` and derives the child
+    tables from the schema, because the version of this that listed them by hand missed
+    `cohort_metrics.leader_hash` - which with foreign keys enabled aborts the delete rather
+    than orphaning a row.
     """
-    db_path = case_dir / "run_log" / "registry.db"
-    with sqlite3.connect(str(db_path)) as conn:
-        conn.execute("PRAGMA foreign_keys = ON")
-        tables = {
-            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        }
-        backtests = [
-            row[0]
-            for row in conn.execute(
-                "SELECT backtest_hash FROM backtest_runs WHERE prediction_hash = ?",
-                (prediction_hash,),
-            )
-        ]
-        for backtest_hash in backtests:
-            if "backtest_paired_metrics" in tables:
-                conn.execute(
-                    "DELETE FROM backtest_paired_metrics WHERE challenger_hash = ? "
-                    "OR benchmark_hash = ?",
-                    (backtest_hash, backtest_hash),
-                )
-            for table in _BACKTEST_CHILD_TABLES:
-                if table in tables:
-                    conn.execute(f"DELETE FROM {table} WHERE backtest_hash = ?", (backtest_hash,))
-            conn.execute("DELETE FROM backtest_runs WHERE backtest_hash = ?", (backtest_hash,))
-        for table in ("holdout_evaluations", "holdout_staging"):
-            if table in tables:
-                conn.execute(
-                    f"DELETE FROM {table} WHERE holdout_prediction_hash = ?", (prediction_hash,)
-                )
-        for table in _PREDICTION_CHILD_TABLES:
-            if table in tables:
-                conn.execute(f"DELETE FROM {table} WHERE prediction_hash = ?", (prediction_hash,))
-        conn.execute("DELETE FROM prediction_sets WHERE prediction_hash = ?", (prediction_hash,))
-
-    run_log = case_dir / "run_log"
-    for directory in [run_log / "predictions" / prediction_hash] + [
-        run_log / "backtest" / backtest_hash for backtest_hash in backtests
-    ]:
-        if directory.is_dir():
-            shutil.rmtree(directory)
+    deleted = delete_prediction_generation(case_dir / "run_log" / "registry.db", prediction_hash)
+    for table, n in sorted(deleted.items()):
+        print(f"  deleted {n:>3} from {table}")
 
 
 def _registered_holdout_generations(case_dir):
