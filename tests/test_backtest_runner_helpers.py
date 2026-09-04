@@ -448,14 +448,14 @@ def test_the_continuous_return_label_is_read_from_the_isolated_output_root(
     assert out["y_true"].to_list() == [0.011, 0.031]
 
 
-class TestARunThatBookedNoOrderIsRefused:
-    """A backtest that never opened a position is an absence, not a Sharpe of 0.0.
+class TestAnAllocationThatProducedNoTargetIsRefused:
+    """A run with no target weight at any rebalance is an absence, not a Sharpe of 0.0.
 
-    `_refuse_a_backtest_that_never_traded` runs immediately before `register_backtest_run`,
-    so the row never reaches the registry. It matters because nothing downstream filters it
-    out of the trial count: `cohort_metrics` takes K and the maximum-Sharpe distribution
-    straight from `backtest_runs`, so a config that traded nothing deflates every real
-    candidate beside it (ml4t/agent-workspace#1004).
+    `_refuse_an_allocation_that_produced_no_target` runs immediately before
+    `register_backtest_run`, so the row never reaches the registry. It matters because nothing
+    downstream filters it out of the trial count: `cohort_metrics` lists cohort members straight
+    from `backtest_runs` with no zero-trade clause, so an absence is counted as a trial against
+    every real candidate beside it (ml4t/agent-workspace#1004).
     """
 
     @staticmethod
@@ -467,37 +467,58 @@ class TestARunThatBookedNoOrderIsRefused:
             }
         )
 
-    def test_zero_trades_over_a_non_empty_window_raises(self) -> None:
-        from case_studies.utils.backtest_runner import _refuse_a_backtest_that_never_traded
-
-        spec = {
-            "strategy": {
-                "signal": {"method": "equal_weight_top_k", "top_k": 2},
-                "allocation": {"method": "mvo_ledoit_wolf", "lookback": 63},
-                "rebalance": {"cadence": "daily_ny_close", "min_weight_change": 0.005},
-            }
-        }
-        with pytest.raises(ValueError, match="booked no orders"):
-            _refuse_a_backtest_that_never_traded(
-                {"num_trades": 0.0, "sharpe": 0.0}, self._returns(2063), spec
-            )
-
-    def test_a_traded_run_passes(self) -> None:
-        from case_studies.utils.backtest_runner import _refuse_a_backtest_that_never_traded
-
-        _refuse_a_backtest_that_never_traded(
-            {"num_trades": 1.0, "sharpe": -1.4}, self._returns(2063), {"strategy": {}}
+    @staticmethod
+    def _weights(n: int) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "timestamp": [datetime(2023, 1, 1) + timedelta(days=i) for i in range(n)],
+                "symbol": ["EUR_USD"] * n,
+                "weight": [1.0] * n,
+            },
+            schema={"timestamp": pl.Datetime, "symbol": pl.String, "weight": pl.Float64},
         )
 
-    def test_an_absent_count_is_not_a_zero_one(self) -> None:
-        # The vectorized path books no orders by construction and records no `num_trades`.
-        # `BacktestExplorer` reads that as `num_trades IS NULL OR num_trades > 0`, and the
-        # refusal has to agree with it or every vectorized run stops here.
-        from case_studies.utils.backtest_runner import _refuse_a_backtest_that_never_traded
+    SPEC = {
+        "strategy": {
+            "signal": {"method": "equal_weight_top_k", "top_k": 2},
+            "allocation": {"method": "mvo_ledoit_wolf", "lookback": 63},
+            "rebalance": {"cadence": "daily_ny_close", "min_weight_change": 0.005},
+        }
+    }
 
-        _refuse_a_backtest_that_never_traded({"sharpe": 0.4}, self._returns(2063), {})
+    def test_an_empty_weight_frame_over_a_real_window_raises(self) -> None:
+        from case_studies.utils.backtest_runner import (
+            _refuse_an_allocation_that_produced_no_target,
+        )
+
+        with pytest.raises(ValueError, match="no target weight at any rebalance"):
+            _refuse_an_allocation_that_produced_no_target(
+                self._weights(0), self._returns(2063), self.SPEC
+            )
+
+    def test_a_run_with_targets_passes(self) -> None:
+        from case_studies.utils.backtest_runner import (
+            _refuse_an_allocation_that_produced_no_target,
+        )
+
+        _refuse_an_allocation_that_produced_no_target(
+            self._weights(2063), self._returns(2063), self.SPEC
+        )
+
+    def test_a_short_fixture_panel_that_books_no_order_passes(self) -> None:
+        # A one-bar CI fixture has a target and no later bar to fill it on under `next_bar`
+        # execution, so it books zero orders legitimately. An earlier form of this guard tested
+        # `num_trades == 0` and stopped eleven such fixture backtests across
+        # `test_research_contract_execution` and `test_cme_futures_research`.
+        from case_studies.utils.backtest_runner import (
+            _refuse_an_allocation_that_produced_no_target,
+        )
+
+        _refuse_an_allocation_that_produced_no_target(self._weights(1), self._returns(1), self.SPEC)
 
     def test_an_empty_return_series_is_left_to_its_own_diagnosis(self) -> None:
-        from case_studies.utils.backtest_runner import _refuse_a_backtest_that_never_traded
+        from case_studies.utils.backtest_runner import (
+            _refuse_an_allocation_that_produced_no_target,
+        )
 
-        _refuse_a_backtest_that_never_traded({"num_trades": 0.0}, self._returns(0), {})
+        _refuse_an_allocation_that_produced_no_target(self._weights(0), self._returns(0), {})
