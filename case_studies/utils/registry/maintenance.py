@@ -535,11 +535,12 @@ def _referencing_tables(
 # table added later that declares its key, this covers the ones that deliberately do not, and
 # `test_delete_prediction_generation` pins both against `REGISTRY_SCHEMA_SQL` so a new
 # unenforced reference fails rather than being silently missed.
-_UNENFORCED_BACKTEST_REFERENCES = (
-    ("backtest_paired_metrics", "benchmark_hash"),
-    ("holdout_evaluations", "holdout_backtest_hash"),
-    ("holdout_staging", "holdout_backtest_hash"),
-)
+_UNENFORCED_BACKTEST_REFERENCES = (("backtest_paired_metrics", "benchmark_hash"),)
+# One entry per legacy table, on the prediction hash. Both of these rows name a whole
+# generation - training, prediction and backtest hashes together - so listing the backtest
+# column as well deletes the same row twice, and the two entries then mask each other: a typo in
+# either passes because the other still removes the row. A declaration a test cannot fail on is
+# not a safety net.
 _UNENFORCED_PREDICTION_REFERENCES = (
     ("holdout_evaluations", "holdout_prediction_hash"),
     ("holdout_staging", "holdout_prediction_hash"),

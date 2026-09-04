@@ -279,3 +279,97 @@ def test_the_derived_tables_match_the_production_schema(
         db.executescript(REGISTRY_SCHEMA_SQL)
         found = {table for table, _ in _referencing_tables(db, parent, key)}
     assert found == expected
+
+
+# The three tables a retired holdout-lock mechanism left behind. No production code writes them
+# and `REGISTRY_SCHEMA_SQL` no longer creates them, but they are still present with rows in
+# registries that predate the change - sp500_options' among them - which is why the cascade
+# declares them. Their DDL is copied from a live registry, so the declared table and column
+# names are checked against the shape they actually have rather than against a restatement.
+LEGACY_HOLDOUT_SCHEMA = """
+CREATE TABLE research_locks (
+    lock_hash  TEXT PRIMARY KEY,
+    lock_json  TEXT NOT NULL,
+    state      TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE holdout_evaluations (
+    lock_hash               TEXT PRIMARY KEY REFERENCES research_locks(lock_hash),
+    holdout_training_hash   TEXT NOT NULL,
+    holdout_prediction_hash TEXT NOT NULL,
+    holdout_backtest_hash   TEXT NOT NULL,
+    fitted_state_digest     TEXT,
+    evaluated_at            TEXT NOT NULL
+);
+CREATE TABLE holdout_staging (
+    lock_hash               TEXT PRIMARY KEY REFERENCES research_locks(lock_hash),
+    holdout_training_hash   TEXT NOT NULL,
+    holdout_prediction_hash TEXT NOT NULL,
+    holdout_backtest_hash   TEXT NOT NULL,
+    fitted_state_digest     TEXT,
+    lineage_digest          TEXT NOT NULL,
+    staged_at               TEXT NOT NULL
+);
+"""
+
+
+def _legacy_registry(tmp_path: Path) -> Path:
+    db_path = _registry(tmp_path)
+    with sqlite3.connect(db_path) as db:
+        db.executescript(LEGACY_HOLDOUT_SCHEMA)
+        db.execute("INSERT INTO research_locks VALUES ('lock1', '{}', 'evaluated', ?)", (TS,))
+        db.execute(
+            "INSERT INTO holdout_evaluations VALUES ('lock1', 't1', 'doomed', 'bt_doomed', "
+            "'digest', ?)",
+            (TS,),
+        )
+        db.execute(
+            "INSERT INTO holdout_staging VALUES ('lock1', 't1', 'doomed', 'bt_doomed', "
+            "'digest', 'lineage', ?)",
+            (TS,),
+        )
+        db.commit()
+    return db_path
+
+
+def test_a_legacy_registrys_holdout_tables_are_cleaned_too(tmp_path: Path) -> None:
+    """Without this the two declared legacy entries are unverifiable.
+
+    Neither table is in `REGISTRY_SCHEMA_SQL` any more, so every other test here skips them by
+    table presence, and a typo in either the table or the column name would pass while a
+    retained registry kept the rows.
+    """
+    db_path = _legacy_registry(tmp_path)
+
+    deleted = delete_prediction_generation(db_path, "doomed")
+
+    with sqlite3.connect(db_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM holdout_evaluations").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM holdout_staging").fetchone()[0] == 0
+    assert deleted["holdout_evaluations"] == 1
+    assert deleted["holdout_staging"] == 1
+
+
+def test_the_legacy_tables_are_reached_by_the_declared_list_not_the_pragma(
+    tmp_path: Path,
+) -> None:
+    """They carry no foreign key to either parent, so nothing derives them."""
+    db_path = _legacy_registry(tmp_path)
+
+    with sqlite3.connect(db_path) as db:
+        derived = {table for table, _ in _referencing_tables(db, "backtest_runs", "backtest_hash")}
+        derived |= {
+            table for table, _ in _referencing_tables(db, "prediction_sets", "prediction_hash")
+        }
+    assert "holdout_evaluations" not in derived
+    assert "holdout_staging" not in derived
+
+
+def test_a_registry_without_the_legacy_tables_is_unaffected(tmp_path: Path) -> None:
+    """The declared entries are guarded by table presence, not assumed to exist."""
+    db_path = _registry(tmp_path)
+
+    deleted = delete_prediction_generation(db_path, "doomed")
+
+    assert "holdout_evaluations" not in deleted
+    assert "holdout_staging" not in deleted
