@@ -1,6 +1,8 @@
 import importlib
+import json
 import xml.etree.ElementTree as ET
 from datetime import date
+from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -355,3 +357,53 @@ def test_availability_is_the_last_filing_when_every_manager_holds_equity() -> No
     )
 
     assert features["timestamp"].unique().to_list() == [date(2024, 11, 10)]
+
+
+def _thirteen_f_artifact_present() -> bool:
+    from utils.config import ML4T_DATA_PATH
+
+    return (
+        Path(ML4T_DATA_PATH) / "equities" / "positioning" / "13f" / "institutional_holdings.parquet"
+    ).is_file()
+
+
+@pytest.mark.skipif(
+    not _thirteen_f_artifact_present(),
+    reason="needs the production 13F artifact; CI checks out no such data",
+)
+def test_a_narrowed_display_horizon_still_matches_the_producer(tmp_path) -> None:
+    """`NUM_QUARTERS` narrows what the notebook shows, not what the producer compared.
+
+    Truncating `positions_df` before the ownership-change table was built left
+    `NUM_QUARTERS=1` over a multi-quarter artifact with nothing to compare, so the
+    no-comparison branch emitted 0.0 and null while the producer - which never sees this
+    parameter - compared the artifact's last two complete quarters, and the notebook's own
+    parity assertion failed. Momentum is built from every complete quarter now.
+
+    Executed rather than reimplemented: the assertion under test is the notebook's own, and
+    a test that recomputed the comparison here would be checking a second implementation.
+    """
+    import papermill
+
+    notebook = Path(__file__).resolve().parents[1] / "22_rag_financial_research"
+    notebook = notebook / "07_institutional_holdings_graph.ipynb"
+    executed = tmp_path / "num_quarters_1.ipynb"
+
+    papermill.execute_notebook(
+        str(notebook),
+        str(executed),
+        parameters={"NUM_QUARTERS": 1},
+        cwd=str(Path(__file__).resolve().parents[1]),
+        progress_bar=False,
+    )
+
+    printed = "\n".join(
+        "".join(output.get("text", []))
+        for cell in json.loads(executed.read_text())["cells"]
+        for output in cell.get("outputs", [])
+    )
+    assert "artifact parity: PASS" in printed
+    # The momentum table came from the untruncated panel: one displayed quarter cannot
+    # produce a comparison, so this line is what distinguishes the fix from the defect.
+    assert "Added momentum features" in printed
+    assert "across 1 reporting quarters" in printed
