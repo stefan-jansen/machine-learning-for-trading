@@ -42,7 +42,7 @@ from pathlib import Path
 
 import polars as pl
 
-from case_studies.utils.notebook_contracts import _ENTITY_ALIASES, _first_present
+from case_studies.utils.notebook_contracts import _first_present
 
 __all__ = [
     "CoverageError",
@@ -442,7 +442,9 @@ def _coverage(
                     )
                 )
 
-    # (2) Every session inside a declared fold carries at least one row.
+    # (2) Every session inside a declared fold carries at least one row. On the prediction
+    #     path `check_prediction_coverage` has already dropped rows with no score, so a row
+    #     there is a prediction; a backtest input frame is not required to carry one.
     expected_total = 0
     for fold, sessions in expected.items():
         expected_total += len(sessions)
@@ -534,6 +536,30 @@ def _sessions_between(
     return axis.filter(keep).to_list()
 
 
+def _scored_rows(frame: pl.DataFrame, *, case_study: str, label: str, split: str) -> pl.DataFrame:
+    """Restrict a prediction frame to the rows that actually carry a score.
+
+    ``_coverage`` counts a session as observed when a row exists for it. On the
+    prediction path that is not what the module promises: a frame with no score column
+    at all, or one whose scores are all null, described a complete set of decisions
+    that were never made.
+    """
+    score_col = _first_present(frame.columns, _SCORE_ALIASES)
+    if score_col is None:
+        raise CoverageError(
+            f"{case_study}/{label}/{split} predictions: no prediction column among "
+            f"{_SCORE_ALIASES} in columns {sorted(frame.columns)}. A frame with no score "
+            "is not a prediction set, and a check that cannot run must not read as a pass."
+        )
+    scored = frame.filter(pl.col(score_col).is_not_null())
+    if scored.is_empty():
+        raise CoverageError(
+            f"{case_study}/{label}/{split} predictions: every value in {score_col!r} is "
+            f"null across {frame.height} rows; the frame carries sessions but no predictions."
+        )
+    return scored
+
+
 def check_prediction_coverage(
     predictions: pl.DataFrame,
     case_study: str,
@@ -550,9 +576,18 @@ def check_prediction_coverage(
     Call this where the predictions are produced, before anything downstream reads
     them. ``raise_on_gap=False`` returns the report for a notebook that wants to
     display it before failing.
+
+    Condition (2) is read here as the module docstring states it - a session carries a
+    **prediction**, not merely a row. The score column is required and rows with a null
+    score are dropped before the geometry is measured, so a frame carrying a timestamp
+    for every declared session and no usable score reports the gap rather than
+    ``complete``. The requirement sits here and not in ``_coverage`` because
+    ``check_backtest_input_coverage`` shares that helper and a backtest input frame is
+    not required to carry a score column.
     """
+    scored = _scored_rows(predictions, case_study=case_study, label=label, split=split)
     report = _coverage(
-        predictions,
+        scored,
         case_study=case_study,
         label=label,
         split=split,
