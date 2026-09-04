@@ -1691,14 +1691,54 @@ case_studies/etfs/11_latent_factors:
   gpu: true
   timeout: 900
 case_studies/etfs/11c_conditional_autoencoder:
-  skip: true
-  skip_reason: 'TEMPORARY: DL training (CAE) 300s timeout under trimmed test-data'
+  # Un-skipped when 11e moved onto the research boundary (ml4t/agent-workspace#991).
+  # The skip_reason these three carried - "TEMPORARY: DL training 300s timeout under
+  # trimmed test-data" - was never what failed them, and a TEMPORARY skip whose stated
+  # cost is runtime never gets revisited because the notebook getting faster cannot help.
+  # What fails them is ml4t/agent-workspace#926: features/model_based.parquet carries ONE
+  # fold geometry, the primary label's, and a variant label's fold-0 validation window
+  # runs 16 sessions past the artifact's last fold-0 date. validate_temporal_alignment
+  # then measures 231/247 = 93.5% against a 0.95 floor and raises.
+  #
+  # LABELS pins each run to the primary label, whose geometry IS the artifact's, so the
+  # notebook is exercised here instead of not at all. It is a scheduling restriction and
+  # not a fix: when #926 lands and the artifact carries per-label geometry, delete the
+  # LABELS line and these fit both declared labels in CI. POPULATION_NAME travels with it
+  # because a narrowed run declares a different member set and cannot publish the
+  # canonical population. DEVICE is cpu because config/setup.yaml declares this family on
+  # cuda and the library refuses to substitute; the device is inside the training identity,
+  # so the CPU fit publishes under its own name. n_epochs stays out - preset_patches.py
+  # already reduces these presets and declaring it here would replace that patch.
+  parameters:
+    DEVICE: cpu
+    LABELS: ['fwd_ret_21d']
+    POPULATION_NAME: etfs-cae-preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+  timeout: 900
 case_studies/etfs/11d_stochastic_discount_factor:
+  # Still skipped, but not for the reason it used to claim. The old skip_reason said
+  # "TEMPORARY: DL training (SDF) 300s timeout under trimmed test-data"; the timeout is not
+  # what fails it. It is the only latent member that loads the initial-release macro panel
+  # config/setup.yaml declares (modeling.latent_factors.macro_context.source:
+  # alfred_initial_release), and that fixture does not exist in the test-data repo:
+  # data/macro/ ships fred_macro{,_raw,_dictionary,_raw_dictionary,_metadata}.parquet and no
+  # fred_macro_initial_release.parquet. Not gitignored - never built. So this cannot be
+  # un-skipped by any parameter choice until that fixture is built; filed as ml4t/agent-workspace#1035.
+  #
+  # 11c and 11e above ARE un-skipped: they do not read the macro panel, and their own
+  # blocker (#926) is worked around by pinning them to the primary label.
   skip: true
-  skip_reason: 'TEMPORARY: DL training (SDF) 300s timeout under trimmed test-data'
+  skip_reason: 'no fred_macro_initial_release.parquet in the test-data repo; SDF is the one latent member that reads the declared initial-release macro panel (ml4t/agent-workspace#1035)'
 case_studies/etfs/11e_supervised_autoencoder:
-  skip: true
-  skip_reason: 'TEMPORARY: DL training (SAE) 300s timeout under trimmed test-data'
+  # Same restriction and the same reason as 11c above.
+  parameters:
+    DEVICE: cpu
+    LABELS: ['fwd_ret_21d']
+    POPULATION_NAME: etfs-sae-preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+  timeout: 900
 case_studies/etfs/12_causal_dml:
   parameters:
     CV_FOLDS: 2
