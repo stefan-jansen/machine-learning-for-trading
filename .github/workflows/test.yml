@@ -936,9 +936,22 @@ jobs:
           # CI job, which is a real gap and is stated in that file's docstring.
           # The other three tests in the same file assert relations that hold on any
           # extract - they collect as six cases - and are what this job gates.
+          # The two deselects below are not quarantine entries: the quarantine file
+          # describes what test-unit does not run, and both of these are inside a
+          # file this job DOES run. They need the stage 01-05 artifacts of
+          # us_equities_panel and nasdaq100_microstructure, the two case studies
+          # whose rebuild has not produced them, so they fail on any checkout -
+          # here and on a workstation alike. Take them out when those two rebuild.
           .venv/bin/python -m pytest \
             tests/test_eoa_universe_roster.py \
             tests/test_fixture_registry_identity.py \
+            tests/test_artifact_specs.py \
+            tests/test_backtest_presets.py \
+            tests/test_etf_baseline_parity.py \
+            tests/test_sp500_options_research.py::test_official_population_is_snapshotted_before_option_execution \
+            tests/test_us_firm_research_workflow.py::test_open_study_writes_canonical_results_to_output_dir \
+            --deselect tests/test_artifact_specs.py::test_us_equities_pilot_helpers_preserve_current_outputs \
+            --deselect tests/test_artifact_specs.py::test_microstructure_pilot_helpers_preserve_current_outputs \
             -m "not production_extract" \
             -v --tb=short -rs --junitxml=unit-data.xml
       # A skip here is a failure: these tests run in this job and nowhere else,

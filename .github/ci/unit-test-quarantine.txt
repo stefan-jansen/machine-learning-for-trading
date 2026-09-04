@@ -154,8 +154,19 @@ tests/test_notebook_sync.py::test_stamped_notebooks_are_current_and_production
 tests/test_external_drift.py
 
 # ---------------------------------------------------------------------------
-# Needs a dataset. This job checks out no test-data and points ML4T_DATA_PATH
-# at the repo's own `data/`, which holds loaders and no market data.
+# Needs a dataset - run by test-unit-data, which checks out the test-data
+# repository. This job checks out no test-data and points ML4T_DATA_PATH at the
+# repo's own `data/`, which holds loaders and no market data.
+#
+# These sat here from 2026-08-24 to 2026-09-03 excluded from this job and named
+# by no other, so the three files ran in no CI job at all - the defect the
+# subtraction above exists to prevent, reappearing one level down because
+# test-unit-data enumerates its files by hand. Measured against the test-data
+# checkout: 35 passed, 0 skipped, up from 14.
+# test_the_data_job_runs_exactly_what_is_quarantined_for_it in
+# tests/test_quarantine_list.py is what keeps this section and that job in step,
+# the same way the modelling-environment section is kept in step with
+# test-unit-image.
 # ---------------------------------------------------------------------------
 tests/test_artifact_specs.py
 tests/test_backtest_presets.py
