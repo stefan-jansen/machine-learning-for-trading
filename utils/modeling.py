@@ -1064,25 +1064,22 @@ def reduce_to_top_entities(
 ) -> pl.DataFrame:
     """Keep the ``max_symbols`` entities with the most rows, ties broken by name.
 
-    Row counts tie readily on these panels, and a tie broken by frame order is
-    not stable across runs or across callers. The entity name is the secondary
-    key so that every caller reducing the same dataset to the same size gets the
-    same universe. Without it a reduced stage-04 run and the reduced model
-    notebooks downstream of it can choose different equal-history symbols, and
-    the ones only a single side chose carry null temporal features - a wrong
-    answer that runs clean rather than a failure.
+    The modelling-side entry point to :func:`utils.data_quality.top_entities`, which
+    is the one rule; the loaders reach the same one through ``apply_max_symbols``.
+    Two callers reducing the same dataset to the same size have to get the same
+    universe, or the ones only a single side chose carry null temporal features - a
+    wrong answer that runs clean rather than a failure.
 
     Production runs set ``max_symbols=0`` and never reach this.
     """
-    top = (
-        dataset.group_by(primary_entity)
-        .len()
-        .sort(["len", primary_entity], descending=[True, False])
-        .head(max_symbols)
-    )
+    from utils.data_quality import top_entities
+
+    selected = top_entities(dataset, max_symbols, primary_entity)
     # implode: is_in against a bare Series of the same dtype is deprecated in
     # polars as ambiguous, and membership in the value set is what is meant.
-    return dataset.filter(pl.col(primary_entity).is_in(top[primary_entity].implode()))
+    return dataset.filter(
+        pl.col(primary_entity).is_in(pl.Series(primary_entity, selected).implode())
+    )
 
 
 def _inclusive_end_of(boundary: str) -> pd.Timestamp:
