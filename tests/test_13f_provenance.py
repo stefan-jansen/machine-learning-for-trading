@@ -315,3 +315,43 @@ def test_holdings_loader_parses_both_sec_dates(tmp_path, monkeypatch) -> None:
     assert result.schema["report_date"] == pl.Date
     assert result.schema["filing_date"] == pl.Date
     assert result["put_call"].to_list() == [None]
+
+
+def test_availability_waits_for_the_last_filing_of_the_quarter() -> None:
+    """A late options-only filing completes the quarter and must move the timestamp.
+
+    `_complete_report_dates` counts any disclosed row as evidence a manager filed, so an
+    options-only filing makes the newest quarter complete. Reading `timestamp` off the
+    long-equity rows alone left the graph claiming to have been available before that
+    filing was public, which is lookahead: the quarter was not usable until the last of
+    its filings landed.
+    """
+    holdings = _two_manager_holdings(date(2024, 9, 30)).with_columns(
+        pl.when(pl.col("accession_no") == "c")
+        .then(pl.lit("PUT"))
+        .otherwise(pl.col("put_call"))
+        .alias("put_call"),
+        pl.when(pl.col("accession_no") == "c")
+        .then(pl.lit(date(2024, 11, 14)))
+        .otherwise(pl.col("filing_date"))
+        .alias("filing_date"),
+    )
+
+    features, _edges, _matrix, _stocks = downloader.build_features_and_matrix(
+        holdings, expected_ciks=["1", "2"]
+    )
+
+    # Manager 1's long-equity filing landed 2024-11-10; manager 2's options-only filing,
+    # which is what made the quarter complete, landed 2024-11-14.
+    assert features["timestamp"].unique().to_list() == [date(2024, 11, 14)]
+
+
+def test_availability_is_the_last_filing_when_every_manager_holds_equity() -> None:
+    """The ordinary case is unchanged: all rows are long equity, so both readings agree."""
+    holdings = _two_manager_holdings(date(2024, 9, 30))
+
+    features, _edges, _matrix, _stocks = downloader.build_features_and_matrix(
+        holdings, expected_ciks=["1", "2"]
+    )
+
+    assert features["timestamp"].unique().to_list() == [date(2024, 11, 10)]
