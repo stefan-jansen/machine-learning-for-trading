@@ -508,18 +508,21 @@ def update_through_last_complete_bar(
     # A date bound is not proof that a shorter window carries a bar. Storage ending
     # on a Friday and a bad row on the Monday leaves Sunday as a candidate end that
     # is later than the last stored date and still returns nothing past Friday, so
-    # the walk would step over the bad row and write metadata saying so. What the
-    # window returned is the only thing that settles it.
-    if fresh.is_empty() or fresh["timestamp"].max() <= latest_stored:
-        if refusal is not None:
-            raise refusal
-        return stored.height
+    # the walk would step over the bad row and report success. What the window
+    # returned is the only thing that settles it, and only for a window that was
+    # reached by retreating: with nothing refused, a fetch that carries no new
+    # timestamp may still carry a revision of one already stored.
+    extends = not fresh.is_empty() and fresh["timestamp"].max() > latest_stored
+    if refusal is not None and not extends:
+        raise refusal
 
     merged = (
         pl.concat([stored, fresh.select(stored.columns)], how="vertical")
         .unique(subset=["timestamp"], keep="last")
         .sort("timestamp")
     )
+    if merged.equals(stored.sort("timestamp")):
+        return stored.height
     first, last = merged["timestamp"].min(), merged["timestamp"].max()
     updated_at = dt.datetime.now(dt.UTC)
     # The block ml4t-data's own `update_manager._write_updated` writes, field for

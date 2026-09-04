@@ -378,8 +378,8 @@ def test_a_retreat_that_returns_no_newer_bar_raises_rather_than_writing() -> Non
     assert storage.writes == []
 
 
-def test_a_vendor_with_nothing_new_and_no_refusal_writes_nothing() -> None:
-    """A quiet weekend is not a failure; it is an update with no bars to add."""
+def test_a_vendor_with_nothing_changed_and_no_refusal_writes_nothing() -> None:
+    """A quiet weekend is not a failure; it is an update with nothing to apply."""
     storage = FakeStorage({"equities/daily/AAPL": _bars(["2026-08-27", "2026-08-28"])})
     manager = FakeManager(_bars(["2026-08-27", "2026-08-28"]))
 
@@ -389,3 +389,22 @@ def test_a_vendor_with_nothing_new_and_no_refusal_writes_nothing() -> None:
 
     assert rows == 2
     assert storage.writes == []
+
+
+def test_a_revision_with_no_newer_bar_is_still_merged() -> None:
+    """The lookback overlap exists for exactly this, and no refusal is in the way.
+
+    A weekend fetch that carries a corrected Friday close and nothing newer is a
+    revision, not an empty window.
+    """
+    storage = FakeStorage({"equities/daily/AAPL": _bars(["2026-08-27", "2026-08-28"], close=100.0)})
+    manager = FakeManager(_bars(["2026-08-27", "2026-08-28"], close=222.0))
+
+    rows = update_through_last_complete_bar(
+        manager, storage, "AAPL", provider="yahoo", through=dt.date(2026, 8, 30)
+    )
+
+    stored = storage.frames["equities/daily/AAPL"]
+    assert rows == 2
+    assert stored["close"].to_list() == [222.0, 222.0]
+    assert len(storage.writes) == 1
