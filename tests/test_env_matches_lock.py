@@ -131,17 +131,12 @@ def test_an_overridden_distribution_is_not_drift() -> None:
     assert check.drift(locked, installed, {"protobuf": "overridden to protobuf>=5.0"}) == []
 
 
-def test_an_override_specifier_is_parsed_down_to_the_name() -> None:
-    written = {
-        "tool": {"uv": {"override-dependencies": ["Some_Pkg[extra]>=1.2", "other!=3"]}},
-    }
-    import tempfile
-    import tomllib as _tomllib  # noqa: F401
-
-    path = Path(tempfile.mkdtemp()) / "pyproject.toml"
+def test_an_override_specifier_is_parsed_down_to_the_name(tmp_path: Path) -> None:
+    """An override carries extras and a specifier; the comparison needs the name."""
+    path = tmp_path / "pyproject.toml"
     path.write_text('[tool.uv]\noverride-dependencies = ["Some_Pkg[extra]>=1.2", "other!=3"]\n')
+
     assert set(check.overridden_dependencies(path)) == {"some-pkg", "other"}
-    assert written  # the literal above documents the shape being parsed
 
 
 def test_a_missing_pyproject_overrides_nothing() -> None:
