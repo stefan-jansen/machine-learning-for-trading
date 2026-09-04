@@ -234,11 +234,16 @@ print(
 # common strike and expiration, their combined price, and the gap between the combined bid and the
 # combined ask.
 #
-# Three properties are checked before anything is computed. The combined price is above zero,
-# because every ratio below divides by it. The panel holds at most one straddle per stock and
-# session, since a second one would double that stock's weight in every average taken across the
-# panel. And the combined price and the combined spread are each the sum of the two legs, which is
-# the arithmetic every cost figure in Section B.3 rests on.
+# Four properties are checked before anything is computed. The two legs share a strike and an
+# expiration, which is what makes the pair a straddle rather than two unrelated contracts. The
+# combined price is above zero, because every ratio below divides by it. The panel holds at most
+# one straddle per stock and session, since a second one would double that stock's weight in every
+# average taken across the panel. And the combined price and the combined spread are each the sum
+# of the two legs, which is the arithmetic every cost figure in Section B.3 rests on.
+#
+# The last of those does not imply the first: a sum stays a sum when the legs are mispaired, so
+# only the strike and expiration check distinguishes a straddle from a call and a put that happen
+# to have been added together.
 
 # %%
 straddles = load_sp500_options_straddles(start_date=START_DATE, end_date=END_DATE)
@@ -255,6 +260,10 @@ legs = research.select(
     .alias("spread"),
 )
 
+unpaired = research.filter(
+    (pl.col("put_strike") != pl.col("strike")) | (pl.col("put_expiration") != pl.col("expiration"))
+)
+assert len(unpaired) == 0, "a straddle's legs do not share a strike and an expiration"
 assert research["instr_mid"].min() > 0, "a straddle mid is not a usable denominator"
 assert not research.select(pl.struct("symbol", "timestamp").is_duplicated().any()).item(), (
     "a stock carries more than one straddle on a session"
