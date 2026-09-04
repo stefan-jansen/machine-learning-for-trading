@@ -216,27 +216,6 @@ def _hashable_strategy_spec(strategy_spec: dict) -> dict:
             direction = str(signal.get("direction", "long_only")).strip().lower()
             if direction == "long_only":
                 signal.pop("direction", None)
-        rebalance = strategy.get("rebalance")
-        if isinstance(rebalance, dict) and "step" in rebalance:
-            # A step of 1 is the absence of a step. Both execution paths apply it as
-            # `gather_every(step)` over the resolved schedule, and `gather_every(1)` returns
-            # the schedule unchanged, so a spec carrying `step: 1` and a spec carrying no
-            # step describe the same set of traded decisions. Same normalization, and same
-            # reason, as `long_only` above: the parameter became explicit after rows had
-            # already been written without it, and only the explicit default is dropped.
-            #
-            # Every other value stays in the hash, which is the whole point of
-            # ml4t/agent-workspace#1005: a step that changes what is traded must change the
-            # identity, or a corrected run hashes to the rows it was meant to replace and is
-            # skipped. Popping the step unconditionally - or popping it whenever it equals
-            # whatever `setup.yaml` currently declares - would restore that defect in full,
-            # because the declaration is exactly what a correction moves.
-            try:
-                step = int(rebalance["step"])
-            except (TypeError, ValueError):
-                step = None
-            if step == 1:
-                rebalance.pop("step", None)
     backtest_config = spec.get("backtest_config")
     if isinstance(backtest_config, dict):
         metadata = backtest_config.get("metadata")

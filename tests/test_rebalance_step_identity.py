@@ -119,41 +119,54 @@ def _spec(step: int | None) -> dict:
     }
 
 
-class TestAUnitStepIsTheAbsenceOfAStep:
-    """`gather_every(1)` returns the schedule unchanged, so `step: 1` describes no thinning.
+class TestAUnitStepIsNotNormalizedAway:
+    """`step: 1` stays in the identity, and this records the measurement that says it must.
 
-    The step became an explicit hash input in public `83141459`, after 21,995 backtests had
-    been registered without it. Every one of those specs resolved to a different hash than the
-    next run would compute, so a sweep re-run in any completed case study raised `a changed
-    population named '<name>' must explicitly supersedes <hash>` and recomputed every member
-    (ml4t/agent-workspace#1028).
+    Public `83141459` made `strategy.rebalance.step` a hash input after 21,995 backtests had
+    been registered without it, so every one of those rows resolves to a different hash than
+    the next run computes and a sweep re-run in any completed case study stops on `a changed
+    population named '<name>' must explicitly supersedes <hash>` (ml4t/agent-workspace#1028).
 
-    Normalizing the explicit default is the same move `signal.direction == "long_only"`
-    already gets in `_hashable_strategy_spec`, and it recovers every row whose declared step is
-    1: measured 16,423 of 21,995 across the seven live registries, invalidating none, because
-    no registered spec anywhere carries `step: 1`.
+    The obvious repair is to drop `step: 1` before hashing, the way `signal.direction ==
+    "long_only"` is dropped just above: `gather_every(1)` returns the schedule unchanged, so
+    `step: 1` and no step describe the same traded decisions, and it recovers 16,423 of the
+    21,995 rows while invalidating none.
+
+    **It is unsound, and the reason is not obvious enough to leave unwritten.** A legacy spec
+    carries no step but did not execute at step 1 - it executed at whatever `setup.yaml`
+    declared when it ran, which for `cme_futures/fwd_ret_21d` is 3, for `sp500_options` 5 and
+    for `fx_pairs/fwd_ret_21d` 21. Drop the explicit default and a *future* spec at step 1
+    hashes to those rows, is served from the registry as already registered, and reports
+    step-3 numbers under a step-1 request. That is ml4t/agent-workspace#1005 exactly, arrived
+    at from the other side, and it is silent.
+
+    5,572 rows across `cme_futures`, `crypto_perps_funding`, `fx_pairs` and `sp500_options`
+    are in that ambiguous state. The sound repair is to record each legacy row's executed step
+    in its spec and rehash - which is what `preset_path` did - but 5,570 of those rows are
+    members of 848 official populations whose own identity is the hash of their member list,
+    so it cannot be done without rewriting that lineage. #1028 carries the disposition.
     """
 
-    def test_a_unit_step_hashes_as_though_it_were_absent(self) -> None:
+    def test_a_unit_step_is_part_of_the_identity(self) -> None:
+        """Not normalized away: a legacy spec with no step may have traded at any step."""
         from case_studies.utils.registry.specs import backtest_hash_from_parts
 
-        assert backtest_hash_from_parts("pred123", _spec(1)) == backtest_hash_from_parts(
+        assert backtest_hash_from_parts("pred123", _spec(1)) != backtest_hash_from_parts(
             "pred123", _spec(None)
         )
 
-    def test_a_non_unit_step_does_not(self) -> None:
+    def test_a_non_unit_step_is_too(self) -> None:
         from case_studies.utils.registry.specs import backtest_hash_from_parts
 
-        absent = backtest_hash_from_parts("pred123", _spec(None))
-        assert backtest_hash_from_parts("pred123", _spec(3)) != absent
+        assert backtest_hash_from_parts("pred123", _spec(3)) != backtest_hash_from_parts(
+            "pred123", _spec(None)
+        )
 
     def test_two_non_unit_steps_stay_distinct(self) -> None:
-        """The half of #1005 that must survive: a corrected step still moves the identity.
+        """The half of #1005 that any repair here has to preserve.
 
-        Normalizing the step against whatever `setup.yaml` currently declares - rather than
-        against 1 - would fail here, because the declaration is exactly what a correction
-        moves. That reading restores #1005 in full: the corrected run would hash to the rows
-        it was written to replace and be skipped as already registered.
+        A corrected step must move the identity, or the corrected run hashes to the rows it
+        was written to replace and is skipped as already registered.
         """
         from case_studies.utils.registry.specs import backtest_hash_from_parts
 
@@ -162,26 +175,4 @@ class TestAUnitStepIsTheAbsenceOfAStep:
         )
         assert backtest_hash_from_parts("pred123", _spec(3)) != backtest_hash_from_parts(
             "pred123", _spec(1)
-        )
-
-    def test_the_stored_spec_is_not_touched(self) -> None:
-        """Normalization is for the hash only; `spec_json` keeps what the run declared.
-
-        Same contract as `preset_path`, which is stripped from the hash and retained in the
-        stored spec so provenance survives.
-        """
-        from case_studies.utils.registry.specs import backtest_hash_from_parts
-
-        spec = _spec(1)
-        backtest_hash_from_parts("pred123", spec)
-        assert spec["strategy"]["rebalance"]["step"] == 1
-
-    def test_a_string_step_is_normalized_on_its_value(self) -> None:
-        """YAML and papermill both hand numbers over as strings often enough to matter."""
-        from case_studies.utils.registry.specs import backtest_hash_from_parts
-
-        spec = _spec(None)
-        spec["strategy"]["rebalance"]["step"] = "1"
-        assert backtest_hash_from_parts("pred123", spec) == backtest_hash_from_parts(
-            "pred123", _spec(None)
         )
