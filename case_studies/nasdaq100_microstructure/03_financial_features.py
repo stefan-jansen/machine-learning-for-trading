@@ -939,10 +939,27 @@ agreement.filter(pl.col("column").is_in(["kyle_lambda", f"{PRIMARY_SIGNAL}_xs", 
 # defined as, and the assertion below records that it carries nothing here rather than
 # leaving a reader to find that out from a model.
 
+# %% [markdown]
+# The emitted features are Float32, not Float64. A minute panel of 16.9 million rows and 66
+# feature columns is 8.9 GB of Float64 and 4.5 GB of Float32, and every consumer holds the
+# whole thing in memory before it fits anything. Float32 carries about seven decimal digits,
+# which is more than any quantity here is determined to: these are ratios, rank-normalized
+# cross-sections and rolling moments of prices quoted to the cent. The precision that is
+# actually load-bearing is spent earlier, inside the rolling sums the features are built
+# from, and those still run in Float64 - only the emitted result is narrowed. Estimators that
+# need Float64 upcast on their own, once, instead of every consumer paying for it on disk and
+# in the panel.
+
 # %%
 WARMUP_GATE = ["r1m", f"rv_{W['slow']}m", "kyle_lambda"]
-features = built.select([*PANEL_KEY, *feature_cols]).drop_nulls(subset=WARMUP_GATE).sort(PANEL_KEY)
+features = (
+    built.select([*PANEL_KEY, *feature_cols])
+    .drop_nulls(subset=WARMUP_GATE)
+    .sort(PANEL_KEY)
+    .with_columns(pl.col(feature_cols).cast(pl.Float32))
+)
 assert features.select(PANEL_KEY).is_duplicated().sum() == 0, "duplicate panel key"
+assert {features.schema[c] for c in feature_cols} == {pl.Float32}, "features must emit Float32"
 
 # %% [markdown]
 # No emitted feature may be constant without the notebook saying why. A column with one value

@@ -7,7 +7,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -302,41 +302,41 @@ temporal = _normalize_symbol_column(temporal.filter(before_holdout).collect())
 label_df = _normalize_symbol_column(label_df.filter(before_holdout).collect())
 
 # %% [markdown]
-# **Resolving the fold dimension.** `model_based.parquet` carries one value per
-# `(timestamp, symbol, fold)`, because each fold refits the estimators that produce
-# it, while the panel this notebook screens needs exactly one value per bar and
-# symbol. A refitted value is out of sample only inside the validation window of the
-# fold that produced it, so each fold contributes the rows inside its own validation
-# window and nothing else. The retraining fold `04_model_based_features` appends for
-# the final test is not among the folds `generate_cv_splits` returns, so it is left
-# behind by the same filter.
+# **Restricting to the validation windows.** `model_based.parquet` carries one row per
+# `(timestamp, symbol)` and no fold column, because the estimators behind it are refitted
+# at every bar rather than once per fold - `04_model_based_features` Section A argues that
+# and Section E writes the artifact accordingly. So there is no fold dimension to resolve
+# and no risk of one bar taking two values.
 #
-# The windows do not overlap, so this selects exactly one value per bar and symbol.
-# The assertion is what establishes that rather than assuming it: had two windows
-# overlapped, a feature would take two values on one bar and every cross-section
-# below would double-count it.
+# What still has to happen is the restriction. This notebook screens features against an
+# outcome, and a screen run over the training spans would report how well a feature fits
+# history it was selected on. So the panel is cut to the union of the walk-forward
+# validation windows. The retraining fold that covers the holdout is not among the folds
+# `generate_cv_splits` returns, so the holdout stays out by the same cut, on top of the
+# `before_holdout` filter already applied above.
+#
+# The assertion below is kept and its job has changed: it used to establish that two
+# validation windows did not overlap, because an overlap would have made one bar take two
+# refitted values. There is now one value per bar by construction, so what it checks is
+# that the artifact is keyed the way this notebook believes it is - a duplicate here means
+# the writer changed and this cell did not.
 
 # %%
-val_windows = {int(s["fold"]): (s["val_start"], s["val_end"]) for s in splits}
-_ts_dtype = temporal.schema[DATE_COL]
-temporal = (
-    temporal.filter(pl.col("fold").is_in(list(val_windows)))
-    .filter(
-        pl.col("fold")
-        .replace_strict({f: s for f, (s, _) in val_windows.items()}, default=None)
-        .cast(_ts_dtype)
-        <= pl.col(DATE_COL)
-    )
-    .filter(
-        pl.col(DATE_COL)
-        <= pl.col("fold")
-        .replace_strict({f: e for f, (_, e) in val_windows.items()}, default=None)
-        .cast(_ts_dtype)
-    )
-    .drop("fold")
+assert "fold" not in temporal.columns, (
+    "model_based.parquet carries a fold column; this notebook reads the fold-free artifact "
+    "04_model_based_features writes and would double-count every bar"
 )
+_ts_dtype = temporal.schema[DATE_COL]
+IN_VALIDATION = pl.any_horizontal(
+    [
+        (pl.col(DATE_COL) >= pl.lit(s["val_start"]).cast(_ts_dtype))
+        & (pl.col(DATE_COL) <= pl.lit(s["val_end"]).cast(_ts_dtype))
+        for s in splits
+    ]
+)
+temporal = temporal.filter(IN_VALIDATION)
 assert temporal.select(JOIN_COLS).is_duplicated().sum() == 0, (
-    "validation windows overlap; a refitted feature would take two values on one bar"
+    "model_based.parquet is not one row per (timestamp, symbol)"
 )
 
 label_col = [c for c in label_df.columns if c not in ("timestamp", "symbol")][0]
@@ -358,23 +358,16 @@ assert eval_panel.select(label_endpoint.max()).item() < HOLDOUT_START
 assert eval_panel.select(pl.struct(JOIN_COLS).n_unique()).item() == len(eval_panel)
 
 # %% [markdown]
-# **Every candidate is screened on the bars where it can exist.** The features from
-# `04_model_based_features` are refitted per fold and carry a value only inside a
-# validation window, while the features from `03_financial_features` are defined on
-# every bar. Measured over the whole period before the reserved one, the first group
-# would look as though it were missing wherever no window reaches, and the coverage
-# screen below would read a property of the design as a broken feature. Narrowing the
-# panel to the union of the validation windows puts both groups on the same bars,
-# which is also what makes their two rank correlations comparable.
+# **Every candidate is screened on the same bars.** The features from
+# `03_financial_features` are defined on every bar, and the model-based block was cut to
+# the union of the validation windows above so that this screen is not run over the spans
+# a model trains on. Measured across the whole period before the reserved one, the second
+# group would look as though it were missing wherever no window reaches, and the coverage
+# screen below would read a deliberate restriction as a broken feature. `IN_VALIDATION` is
+# the same predicate used above, applied here to the joined panel so both groups end on
+# the same rows - which is what makes their two rank correlations comparable.
 
 # %%
-IN_VALIDATION = pl.any_horizontal(
-    [
-        (pl.col(DATE_COL) >= pl.lit(start).cast(_ts_dtype))
-        & (pl.col(DATE_COL) <= pl.lit(end).cast(_ts_dtype))
-        for start, end in val_windows.values()
-    ]
-)
 n_before_windows = len(eval_panel)
 eval_panel = eval_panel.filter(IN_VALIDATION)
 print(
