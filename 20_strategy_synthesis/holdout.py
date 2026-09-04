@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import gc
 import json
+import shutil
 import sqlite3
 import time
 from datetime import date as dt_date
@@ -628,10 +629,19 @@ def _referencing_columns(
 
 
 def delete_holdout_predictions(cs_id: str) -> int:
-    """Delete all existing holdout predictions and their backtests.
+    """Delete all existing holdout predictions and their backtests, rows and artifacts.
 
     Deletion order respects FK constraints: child tables first, then parents. Which tables
     those are is read from the schema - see :func:`_referencing_columns`.
+
+    The artifact directories go with the rows. A prediction artifact is immutable per hash:
+    `register_prediction_set` refuses a hash whose `predictions.parquet` is already on disk
+    with a different digest, and the row it would have compared against is gone. Leaving the
+    directories behind therefore turns a regenerated holdout that lands on the same hash and
+    different content into an "immutable prediction artifact conflict" with nothing left in
+    the registry to explain it - which is exactly the state `force=True` exists to clear.
+    The directories are removed after the transaction commits, so a failed delete leaves both
+    halves intact rather than the rows behind their files.
     """
     case_dir = get_case_study_dir(cs_id)
     db_path = case_dir / "run_log" / "registry.db"
@@ -646,12 +656,15 @@ def delete_holdout_predictions(cs_id: str) -> int:
         "SELECT prediction_hash FROM prediction_sets WHERE split = 'holdout'"
     ).fetchall()
     deleted = 0
+    stale_dirs: list[Path] = []
     try:
         for (ph,) in rows:
+            stale_dirs.append(case_dir / "run_log" / "predictions" / ph)
             bts = db.execute(
                 "SELECT backtest_hash FROM backtest_runs WHERE prediction_hash=?", (ph,)
             ).fetchall()
             for (bh,) in bts:
+                stale_dirs.append(case_dir / "run_log" / "backtest" / bh)
                 for table, column in backtest_children:
                     if table == "backtest_runs":
                         continue
@@ -672,6 +685,9 @@ def delete_holdout_predictions(cs_id: str) -> int:
         raise
     finally:
         db.close()
+
+    for stale in stale_dirs:
+        shutil.rmtree(stale, ignore_errors=True)
     return deleted
 
 

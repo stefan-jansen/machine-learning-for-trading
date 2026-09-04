@@ -63,3 +63,48 @@ def test_a_frame_with_no_time_column_passes_through() -> None:
     frame = pl.DataFrame({"symbol": ["BTC"], "y_score": [0.1]})
 
     assert _timestamps_as_utc(frame).equals(frame)
+
+
+def test_a_pandas_frame_is_localized_in_place_rather_than_skipped() -> None:
+    """The legacy branch and the pandas side of the versioned one never convert.
+
+    Normalizing only Polars frames left those paths writing naive timestamps and recording
+    a naive `schema_json`, which is the mismatch this exists to remove.
+    """
+    import pandas as pd
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-01 08:00", "2024-01-01 16:00"]),
+            "symbol": ["BTC", "ETH"],
+            "prediction": [0.1, 0.2],
+        }
+    )
+
+    localized = _timestamps_as_utc(frame)
+
+    assert str(localized["timestamp"].dtype) == "datetime64[ns, UTC]"
+    assert pl.from_pandas(localized).schema["timestamp"].time_zone == "UTC"
+    # In place, not converted: the caller's frame type survives.
+    assert isinstance(localized, pd.DataFrame)
+    # And the instants are unchanged.
+    assert localized["timestamp"].dt.tz_localize(None).tolist() == frame["timestamp"].tolist()
+
+
+def test_an_already_aware_pandas_frame_is_left_alone() -> None:
+    import pandas as pd
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-01 08:00"]).tz_localize("UTC"),
+            "symbol": ["BTC"],
+            "prediction": [0.1],
+        }
+    )
+
+    assert _timestamps_as_utc(frame) is frame
+
+
+def test_none_passes_through() -> None:
+    """`register_prediction_set` accepts predictions=None on the legacy path."""
+    assert _timestamps_as_utc(None) is None

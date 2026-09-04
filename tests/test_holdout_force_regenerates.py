@@ -167,3 +167,28 @@ def test_deleting_a_holdout_clears_every_row_the_schema_points_at(tmp_path, monk
     # Both the challenger row and the benchmark row referencing the holdout backtest.
     assert counts["backtest_paired_metrics"] == 0
     assert counts["cohort_metrics"] == 0
+
+
+def test_deleting_a_holdout_removes_its_artifact_directories(tmp_path, monkeypatch) -> None:
+    """A prediction artifact is immutable per hash, so a stale file blocks its own replacement.
+
+    `register_prediction_set` refuses a hash whose `predictions.parquet` is on disk with a
+    different digest. Leaving the directory behind after deleting the row turns a
+    regenerated holdout into an "immutable prediction artifact conflict" with nothing in
+    the registry left to explain it - the state `force=True` exists to clear.
+    """
+    case_dir = _registry_with_a_holdout(tmp_path)
+    run_log = case_dir / "run_log"
+    stale_pred = run_log / "predictions" / "p_hold"
+    stale_bt = run_log / "backtest" / "b_hold"
+    kept_pred = run_log / "predictions" / "p_val"
+    for directory in (stale_pred, stale_bt, kept_pred):
+        directory.mkdir(parents=True)
+        (directory / "predictions.parquet").write_bytes(b"stale")
+    monkeypatch.setattr(_HOLDOUT, "get_case_study_dir", lambda cs_id, **kwargs: case_dir)
+
+    assert _HOLDOUT.delete_holdout_predictions("cs") == 1
+
+    assert not stale_pred.exists()
+    assert not stale_bt.exists()
+    assert kept_pred.exists()

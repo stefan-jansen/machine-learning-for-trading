@@ -1026,22 +1026,48 @@ def _timestamps_as_utc(predictions):
     an artifact rewritten through here keeps its digest and no immutable-artifact check
     moves. The time unit is deliberately left alone for the same reason.
     """
+    if predictions is None:
+        return predictions
     try:
         import polars as pl
     except ImportError:  # pragma: no cover
         return predictions
-    if not isinstance(predictions, pl.DataFrame):
+
+    if isinstance(predictions, pl.DataFrame):
+        naive = [
+            column
+            for column in _PREDICTION_TIME_COLUMNS
+            if column in predictions.columns
+            and isinstance(predictions.schema[column], pl.Datetime)
+            and predictions.schema[column].time_zone is None
+        ]
+        if not naive:
+            return predictions
+        return predictions.with_columns(
+            pl.col(column).dt.replace_time_zone("UTC") for column in naive
+        )
+
+    # pandas is handled in place rather than converted. Both the legacy registration branch
+    # and the pandas side of the versioned one hand the caller's own frame to the writer,
+    # and `pl.from_pandas` on an arbitrary frame is a wider change than this needs. A naive
+    # pandas column localizes to UTC the same way; an already-aware one is left alone.
+    import pandas as pd
+
+    if not isinstance(predictions, pd.DataFrame):
         return predictions
     naive = [
         column
         for column in _PREDICTION_TIME_COLUMNS
         if column in predictions.columns
-        and isinstance(predictions.schema[column], pl.Datetime)
-        and predictions.schema[column].time_zone is None
+        and pd.api.types.is_datetime64_any_dtype(predictions[column])
+        and getattr(predictions[column].dtype, "tz", None) is None
     ]
     if not naive:
         return predictions
-    return predictions.with_columns(pl.col(column).dt.replace_time_zone("UTC") for column in naive)
+    localized = predictions.copy()
+    for column in naive:
+        localized[column] = localized[column].dt.tz_localize("UTC")
+    return localized
 
 
 def _save_parquet(path: Path, frame) -> None:
