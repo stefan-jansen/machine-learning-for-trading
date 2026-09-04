@@ -31,17 +31,18 @@ def test_crypto_prediction_hashes_share_keys_and_targets(tmp_path):
             [("hash_a", "train_a", "validation"), ("hash_b", "train_a", "validation")],
         )
 
-    stale_dir = run_log / "predictions" / "hash_a"
-    stale_dir.mkdir(parents=True)
-    pl.DataFrame(
+    reference_dir = run_log / "predictions" / "hash_a"
+    reference_dir.mkdir(parents=True)
+    reference = pl.DataFrame(
         {
-            "symbol": ["STALE"],
-            "timestamp": [date(2000, 1, 1)],
-            "fold": [0],
-            "prediction": [0.0],
-            "actual": [1.0],
+            "symbol": ["ETHUSDT", "ETHUSDT", "BTCUSDT", "BTCUSDT"],
+            "timestamp": [date(2020, 1, 1), date(2020, 1, 2)] * 2,
+            "fold": [0, 0, 0, 0],
+            "prediction": [0.0, 0.1, 0.2, 0.3],
+            "actual": [1.0, 1.1, 1.2, 1.3],
         }
-    ).write_parquet(stale_dir / "predictions.parquet")
+    )
+    reference.write_parquet(reference_dir / "predictions.parquet")
 
     _backfill_all_prediction_parquets(cs_dir, "crypto_perps_funding")
 
@@ -55,7 +56,9 @@ def test_crypto_prediction_hashes_share_keys_and_targets(tmp_path):
         .equals(frames[1].select("timestamp", "symbol", "actual"))
     )
     assert not frames[0]["prediction"].equals(frames[1]["prediction"])
-    assert frames[0].height > 1
+    # The group is seeded onto the panel the fixture already carries, rather than the
+    # artifact being replaced by a fabricated one: hash_a comes back untouched.
+    assert frames[0].equals(reference)
 
 
 def test_a_seeded_hash_joins_the_copied_artifact_it_shares_a_label_with(tmp_path):
@@ -193,11 +196,12 @@ def test_an_underivable_window_still_respects_the_split_boundary(tmp_path):
 # --- Cohort-leader handling -------------------------------------------------
 #
 # A label's cohort leader is the frozen carrier a strategy-analysis/portfolio/cost/
-# risk notebook resolves by hash and checks against real historical values, so it is
-# the one prediction the synthetic rewrite must not touch. All three tests use
-# crypto_perps_funding because it is the only case study with rewrite_existing set;
-# everywhere else an existing artifact is already left alone and the exemption is
-# unobservable.
+# risk notebook resolves by hash and checks against real historical values. It is one
+# case of the general rule these tests pin: an artifact the fixture already carries is
+# the one its registry row describes, so the seeder never replaces it. These use
+# crypto_perps_funding because it was the one case study exempted from that rule, by a
+# line with no recorded rationale; a leader with no artifact at all is the remaining
+# case, and it is reported rather than silently synthesized.
 
 LEADER_PRED = "hash_leader"
 LEADER_BT = "bt_leader_signal"
@@ -264,25 +268,44 @@ def _write_carrier(run_log, prediction_hash, marker):
     return frame
 
 
-def test_the_real_carrier_artifact_survives_the_crypto_rewrite(tmp_path):
-    """crypto normalizes every prediction onto one key/target panel. The carrier is
-    exempt: a notebook pins it by hash and correlates its target against real raw
-    prices, which synthetic noise cannot pass."""
+def test_no_artifact_the_fixture_already_carries_is_replaced(tmp_path):
+    """The registry row describes the artifact on disk, and it has to keep doing so.
+
+    Replacing one leaves the row reporting the coverage and IC of a prediction set that
+    is no longer there, which is a contradiction the fixture itself creates: a notebook
+    obeying C9 - validate that the artifact you read is the one the registry describes -
+    then cannot pass under CI, and `16_strategy_simulation/08_signal_method_comparison`
+    had to weaken its check because of it.
+
+    Both artifacts are checked, the cohort leader and the ordinary one, because
+    crypto_perps_funding used to exempt itself from this for everything but the leader.
+    """
     cs_dir = tmp_path / "crypto_perps_funding"
     run_log = cs_dir / "run_log"
     _crypto_registry(run_log, _COHORT_DDL)
     leader_before = _write_carrier(run_log, LEADER_PRED, "REALCARRIER")
-    other_before = _write_carrier(run_log, "hash_other", "STALE")
+    other_before = _write_carrier(run_log, "hash_other", "ORDINARY")
 
     _backfill_all_prediction_parquets(cs_dir, "crypto_perps_funding")
 
     leader_after = pl.read_parquet(run_log / "predictions" / LEADER_PRED / "predictions.parquet")
     other_after = pl.read_parquet(run_log / "predictions" / "hash_other" / "predictions.parquet")
     assert leader_after.equals(leader_before), "the cohort leader's real artifact was overwritten"
-    assert not other_after.equals(other_before), (
-        "hash_other was left alone, so the rewrite this exemption carves out of did not run "
-        "and the assertion above passes for the wrong reason"
-    )
+    assert other_after.equals(other_before), "an ordinary shipped artifact was overwritten"
+
+
+def test_a_hash_with_no_artifact_is_still_seeded(tmp_path):
+    """The control on the test above: leaving artifacts alone is not doing nothing."""
+    cs_dir = tmp_path / "crypto_perps_funding"
+    run_log = cs_dir / "run_log"
+    _crypto_registry(run_log, _COHORT_DDL)
+    _write_carrier(run_log, LEADER_PRED, "REALCARRIER")
+
+    _backfill_all_prediction_parquets(cs_dir, "crypto_perps_funding")
+
+    seeded = run_log / "predictions" / "hash_other" / "predictions.parquet"
+    assert seeded.is_file(), "the hash with no artifact of its own was not seeded"
+    assert pl.read_parquet(seeded).height
 
 
 def test_a_leader_with_no_artifact_is_named_not_silently_synthesized(tmp_path):
