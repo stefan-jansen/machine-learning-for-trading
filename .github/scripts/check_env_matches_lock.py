@@ -26,18 +26,24 @@ installed as a floating `>=4.6`, which drifted to a version that could not build
 It is deliberately NOT exempt here - the Dockerfile now pins it to the lock's exact
 version, and this check is what holds that.
 
+A distribution `[tool.uv] override-dependencies` names is held to that override's
+specifier rather than to the lock, because an override is uv asserting a version
+against what the dependency graph asks for and a pip install cannot reproduce it.
+
 Usage:
-    python .github/scripts/check_env_matches_lock.py [--lock uv.lock]
+    python .github/scripts/check_env_matches_lock.py [--lock uv.lock] [--pyproject pyproject.toml]
 """
 
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 import tomllib
 from importlib.metadata import distributions
 from pathlib import Path
+
+from packaging.requirements import Requirement
+from packaging.version import Version
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -57,24 +63,25 @@ DECLARED_OFF_LOCK = {
 DECLARED_OFF_LOCK_PREFIXES = ("nvidia-",)
 
 
-def overridden_dependencies(pyproject_path: Path) -> dict[str, str]:
+def overridden_dependencies(pyproject_path: Path) -> dict[str, Requirement]:
     """Distributions `[tool.uv] override-dependencies` forces the lock to resolve.
 
     An override is uv asserting a version against what the dependency graph asks
     for, and pip has no equivalent: `protobuf>=5.0` is overridden here because
     protobuf 4.x has a C-extension metaclass bug on Python 3.14, and the lock then
     resolves protobuf 7.35.0 while `opentelemetry-proto` requires `<7.0`. A pip
-    install into the image resolves 6.33.6 and is right to. Comparing an overridden
-    distribution against the lock therefore reports the override, not drift.
+    install into the image resolves 6.33.6 and is right to.
+
+    So an overridden distribution is held to the override rather than to the lock.
+    It is not exempt from checking: exempting it outright would let protobuf 4.x
+    through, which is the version the override exists to keep out.
     """
     if not pyproject_path.is_file():
         return {}
     project = tomllib.loads(pyproject_path.read_text())
     overrides = (project.get("tool", {}).get("uv", {}) or {}).get("override-dependencies", [])
-    return {
-        canonical(re.split(r"[<>=!~ \[]", spec, maxsplit=1)[0]): f"overridden to {spec}"
-        for spec in overrides
-    }
+    parsed = [Requirement(spec) for spec in overrides]
+    return {canonical(requirement.name): requirement for requirement in parsed}
 
 
 def canonical(name: str) -> str:
@@ -102,7 +109,8 @@ def installed_versions() -> dict[str, str]:
     return found
 
 
-def is_declared_off_lock(name: str, overridden: dict[str, str] | None = None) -> bool:
+def is_declared_off_lock(name: str, overridden: dict[str, Requirement] | None = None) -> bool:
+    """Whether this distribution is compared against something other than the lock."""
     return (
         name in DECLARED_OFF_LOCK
         or name in (overridden or {})
@@ -113,21 +121,33 @@ def is_declared_off_lock(name: str, overridden: dict[str, str] | None = None) ->
 def drift(
     locked: dict[str, str],
     installed: dict[str, str],
-    overridden: dict[str, str] | None = None,
+    overridden: dict[str, Requirement] | None = None,
 ) -> list[tuple[str, str, str]]:
-    """(name, locked version, installed version) for every distribution that disagrees.
+    """(name, what is required, installed version) for every distribution that disagrees.
 
-    Only distributions that are both locked and installed are compared. The lock
+    Only distributions that are both required and installed are compared. The lock
     resolves platform- and extra-specific packages this environment is not meant to
     carry, and an image that deliberately installs less than the lock is a size
-    decision rather than drift; installing a *different version* of something the
-    lock pins is what makes a CI result unattributable.
+    decision rather than drift; installing a *different version* of something that
+    is pinned is what makes a CI result unattributable.
+
+    An overridden distribution is compared against the override's specifier instead
+    of the lock's version, because that is what the repository actually declares
+    for it - see :func:`overridden_dependencies`.
     """
-    return sorted(
+    overridden = overridden or {}
+    mismatched = [
         (name, locked[name], version)
         for name, version in installed.items()
         if name in locked and not is_declared_off_lock(name, overridden) and locked[name] != version
-    )
+    ]
+    mismatched += [
+        (name, str(requirement.specifier), installed[name])
+        for name, requirement in overridden.items()
+        if name in installed
+        and not requirement.specifier.contains(Version(installed[name]), prereleases=True)
+    ]
+    return sorted(mismatched)
 
 
 def main() -> int:
@@ -149,18 +169,18 @@ def main() -> int:
     )
 
     print(f"{args.lock} resolves {len(locked)} packages; {len(installed)} are installed here")
-    print(
-        f"compared {compared}, off-lock by declaration {len(DECLARED_OFF_LOCK)} + nvidia-*"
-        f"{f', overridden in pyproject: {", ".join(sorted(overridden))}' if overridden else ''}"
-    )
+    print(f"compared {compared}, off-lock by declaration {len(DECLARED_OFF_LOCK)} + nvidia-*")
+    for name, requirement in sorted(overridden.items()):
+        state = installed.get(name, "not installed")
+        print(f"held to pyproject's override instead of the lock: {requirement} ({state})")
 
     if not mismatched:
         print("every installed distribution the lock pins is at its locked version")
         return 0
 
-    print(f"\n{len(mismatched)} installed distributions do not match {args.lock}:")
+    print(f"\n{len(mismatched)} installed distributions do not match what is declared:")
     for name, want, have in mismatched:
-        print(f"  {name}: lock says {want}, installed {have}")
+        print(f"  {name}: {want} required, installed {have}")
     print(
         "\nThis environment is not the one the repository declares, so a result "
         "measured in it is not evidence about this commit. Rebuild the image, or "

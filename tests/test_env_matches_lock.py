@@ -114,21 +114,37 @@ def test_every_carve_out_records_why_it_is_one() -> None:
 def test_an_override_is_read_out_of_pyproject() -> None:
     """The repository's own override, so the parsing is checked against real text."""
     overridden = check.overridden_dependencies(REPO_ROOT / "pyproject.toml")
-    assert "protobuf" in overridden
-    assert "protobuf>=5.0" in overridden["protobuf"]
+    assert str(overridden["protobuf"]) == "protobuf>=5.0"
 
 
-def test_an_overridden_distribution_is_not_drift() -> None:
+def test_an_overridden_distribution_is_held_to_the_override_not_the_lock() -> None:
     """uv asserts the version by fiat and pip has no equivalent.
 
     protobuf is overridden to >=5.0 because 4.x has a C-extension metaclass bug on
     Python 3.14; the lock then resolves 7.35.0 while opentelemetry-proto requires
     <7.0, so a pip install into the image resolves 6.33.6 and is right to.
     """
+    override = {"protobuf": Requirement("protobuf>=5.0")}
     locked = {"protobuf": "7.35.0"}
-    installed = {"protobuf": "6.33.6"}
-    assert check.drift(locked, installed) == [("protobuf", "7.35.0", "6.33.6")]
-    assert check.drift(locked, installed, {"protobuf": "overridden to protobuf>=5.0"}) == []
+
+    assert check.drift(locked, {"protobuf": "6.33.6"}) == [("protobuf", "7.35.0", "6.33.6")]
+    assert check.drift(locked, {"protobuf": "6.33.6"}, override) == []
+
+
+def test_an_override_that_the_environment_violates_is_still_drift() -> None:
+    """Exempting an overridden name outright lets through what the override excludes.
+
+    protobuf 4.x is the version the override was written against: it has a C
+    extension metaclass bug on Python 3.14.
+    """
+    override = {"protobuf": Requirement("protobuf>=5.0")}
+    assert check.drift({"protobuf": "7.35.0"}, {"protobuf": "4.25.8"}, override) == [
+        ("protobuf", ">=5.0", "4.25.8")
+    ]
+
+
+def test_an_override_for_something_not_installed_reports_nothing() -> None:
+    assert check.drift({}, {}, {"protobuf": Requirement("protobuf>=5.0")}) == []
 
 
 def test_an_override_specifier_is_parsed_down_to_the_name(tmp_path: Path) -> None:
