@@ -830,7 +830,7 @@ def build_etfs(source: Path, output: Path) -> list[Path]:
 # where the fixture was cut, and the bound is declared rather than removed because
 # `intermediates/crypto_perps_funding` was generated against these bars: extending
 # them without regenerating it puts rows in the input that no label, feature or
-# fold covers, which is the shape of agent-workspace#970. The premium index and
+# fold covers, which is the shape of ml4t/agent-workspace#970. The premium index and
 # the funding rate run to production's own last row, and the tail past the last bar
 # joins to nothing.
 

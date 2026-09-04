@@ -252,7 +252,7 @@ def test_the_crypto_bars_stop_where_the_builder_bounds_them(fixture_root: Path) 
     """The bound exists so the bars do not outrun the intermediates built on them.
 
     Removing it would add rows at the end that no label, feature or fold covers -
-    which is what agent-workspace#970 was, in the cme_futures fixture.
+    which is what ml4t/agent-workspace#970 was, in the cme_futures fixture.
     """
     path = fixture_root / CRYPTO_PERPS
     if not path.exists():
