@@ -87,3 +87,26 @@ def test_the_settings_map_names_only_parameters_the_writer_accepts() -> None:
 
     accepted = set(inspect.signature(pl.DataFrame.write_parquet).parameters)
     assert set(_PARQUET_WRITE_SETTINGS) <= accepted
+
+
+def test_the_chunk_layout_a_frame_arrives_in_does_not_move_the_bytes(tmp_path: Path) -> None:
+    """`row_group_size` is left at the library's own default, so this is measured not assumed.
+
+    Setting a concrete value would change what the writer emits today and re-key every
+    training run that reads one of these artifacts - the exact harm the pin exists to
+    prevent - so the question is whether the default is layout-sensitive. It is not: a
+    frame assembled from three chunks writes the same bytes as its rechunked self. Recorded
+    here so that if a future polars makes the layout matter, it arrives as a failing test
+    rather than as two identities for one piece of work.
+    """
+    frame = _frame()
+    chunked = pl.concat([frame[:100], frame[100:200], frame[200:]], rechunk=False)
+    assert chunked.n_chunks() > 1 and frame.rechunk().n_chunks() == 1
+
+    single = tmp_path / "single.parquet"
+    multi = tmp_path / "multi.parquet"
+    write_artifact(frame.rechunk(), single, keys=("symbol", "timestamp"), written_by="test")
+    write_artifact(chunked, multi, keys=("symbol", "timestamp"), written_by="test")
+
+    assert single.read_bytes() == multi.read_bytes()
+    assert hashlib.sha256(multi.read_bytes()).hexdigest() == PINNED_SHA256

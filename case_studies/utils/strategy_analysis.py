@@ -261,6 +261,9 @@ def is_refit_of(holdout_spec_json: str | None, validation_spec_json: str | None)
 def resolve_holdout_self_backtest(
     case_study: str,
     val_backtest_hash: str,
+    *,
+    labels: Sequence[str] | None = None,
+    admitted: frozenset[str] | None = None,
 ) -> HoldoutSelfBacktest:
     """Find the holdout replay of a validation run's strategy, or say why there is none.
 
@@ -268,10 +271,18 @@ def resolve_holdout_self_backtest(
     goes through :func:`_refuse_a_selection_disagreement` first, so a caller that selected
     a different carrier than the holdout notebooks ran is told that rather than being told
     the holdout has not been produced.
+
+    ``labels`` and ``admitted`` are the caller's own selection scope, and they are carried
+    into that diagnosis rather than dropped. A carrier chosen from a preview's label subset
+    or from a frozen candidate set is a correct answer within its scope, and comparing it
+    against an unrestricted resolution would reject it for disagreeing with a question it
+    was never asked.
     """
     found = _resolve_holdout_self_backtest(case_study, val_backtest_hash)
     if found.backtest_hash is None:
-        _refuse_a_selection_disagreement(case_study, val_backtest_hash)
+        _refuse_a_selection_disagreement(
+            case_study, val_backtest_hash, labels=labels, admitted=admitted
+        )
     return found
 
 
@@ -428,7 +439,13 @@ def _resolve_holdout_self_backtest(
     return HoldoutSelfBacktest(matched[0])
 
 
-def _refuse_a_selection_disagreement(case_study: str, val_backtest_hash: str) -> None:
+def _refuse_a_selection_disagreement(
+    case_study: str,
+    val_backtest_hash: str,
+    *,
+    labels: Sequence[str] | None = None,
+    admitted: frozenset[str] | None = None,
+) -> None:
     """Raise when a *different* carrier has the holdout the caller could not find.
 
     A strategy-analysis notebook that ranks its pool's Sharpe column directly can select a
@@ -475,7 +492,7 @@ def _refuse_a_selection_disagreement(case_study: str, val_backtest_hash: str) ->
         return
 
     try:
-        canonical = resolve_canonical_rank1_lineage(case_study)
+        canonical = resolve_canonical_rank1_lineage(case_study, admitted=admitted, labels=labels)
     except Exception:  # noqa: BLE001 - this diagnoses; it must never replace the real answer
         return
     canonical_hash = canonical.get("val_backtest_hash")
@@ -499,13 +516,18 @@ def _refuse_a_selection_disagreement(case_study: str, val_backtest_hash: str) ->
 def select_holdout_self_backtest(
     case_study: str,
     val_backtest_hash: str,
+    *,
+    labels: Sequence[str] | None = None,
+    admitted: frozenset[str] | None = None,
 ) -> str | None:
     """The holdout replay's hash, or ``None`` when there is not exactly one.
 
     Kept for callers that only need the hash. A notebook that has to tell its reader
     what is missing wants ``resolve_holdout_self_backtest``, which carries the reason.
     """
-    return resolve_holdout_self_backtest(case_study, val_backtest_hash).backtest_hash
+    return resolve_holdout_self_backtest(
+        case_study, val_backtest_hash, labels=labels, admitted=admitted
+    ).backtest_hash
 
 
 def resolve_canonical_rank1_lineage(
@@ -740,7 +762,13 @@ def resolve_canonical_rank1_lineage(
     # Match holdout by strategy spec to the val rank-1 backtest, so an
     # experimental side-channel allocator (e.g., conformal_weighted) on
     # the same holdout pred set does not displace the canonical lineage.
-    ho_bh = select_holdout_self_backtest(case_study, val_bh)
+    # The raw lookup, not the diagnosing wrapper. `_refuse_a_selection_disagreement` asks
+    # this function for the canonical carrier, so going through the wrapper here would
+    # re-enter it: every call would resolve the whole ranking again, one level deeper,
+    # until the recursion limit - and the diagnosis would swallow the RecursionError after
+    # hundreds of registry reads. There is nothing to diagnose on this path anyway: this
+    # function IS the canonical selection, so it can never disagree with itself.
+    ho_bh = _resolve_holdout_self_backtest(case_study, val_bh).backtest_hash
     ho_ph: str | None = None
     ho_sharpe: float | None = None
     if ho_bh is not None:

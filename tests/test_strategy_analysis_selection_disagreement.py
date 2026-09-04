@@ -162,3 +162,65 @@ def test_a_hash_the_run_log_has_never_seen_keeps_its_own_answer(registry, monkey
 
     assert answer.backtest_hash is None
     assert "not registered" in answer.reason
+
+
+def test_the_canonical_resolver_does_not_re_enter_the_diagnosis(monkeypatch, tmp_path) -> None:
+    """Unmocked, on a registry with no holdout - the shape that used to recurse.
+
+    `resolve_canonical_rank1_lineage` looks the holdout up for its own rank-1, and the
+    diagnosis asks that resolver for the canonical carrier. Going through the diagnosing
+    wrapper there re-entered it: each call resolved the whole ranking again one level
+    deeper until the recursion limit, and the diagnosis swallowed the RecursionError after
+    hundreds of registry reads. The resolver takes the raw lookup now - it IS the canonical
+    selection, so it can never disagree with itself.
+    """
+    import sqlite3
+
+    case_dir = tmp_path / "cs"
+    (case_dir / "run_log").mkdir(parents=True)
+    db = sqlite3.connect(case_dir / "run_log" / "registry.db")
+    db.executescript(
+        """
+        CREATE TABLE training_runs (
+            training_hash TEXT PRIMARY KEY, family TEXT, config_name TEXT, label TEXT,
+            spec_json TEXT);
+        CREATE TABLE prediction_sets (
+            prediction_hash TEXT PRIMARY KEY, training_hash TEXT, split TEXT,
+            checkpoint_value INTEGER, checkpoint_kind TEXT);
+        CREATE TABLE backtest_runs (
+            backtest_hash TEXT PRIMARY KEY, prediction_hash TEXT, stage TEXT,
+            spec_json TEXT);
+        CREATE TABLE backtest_metrics (backtest_hash TEXT PRIMARY KEY, sharpe REAL);
+        CREATE TABLE fold_metrics (
+            prediction_hash TEXT, fold INTEGER, ic REAL, n_days INTEGER);
+        CREATE TABLE prediction_metrics (prediction_hash TEXT PRIMARY KEY, ic_mean REAL);
+        CREATE TABLE prediction_coverage (prediction_hash TEXT PRIMARY KEY, status TEXT);
+
+        INSERT INTO training_runs VALUES ('t1', 'gbm', 'leaves_31_mse', 'fwd_ret_5d', '{}');
+        INSERT INTO prediction_sets VALUES ('p1', 't1', 'validation', 100, 'iteration');
+        INSERT INTO backtest_runs VALUES ('b1', 'p1', 'signal', '{"strategy": {"a": 1}}');
+        INSERT INTO backtest_metrics VALUES ('b1', 1.2);
+        """
+    )
+    db.commit()
+    db.close()
+    monkeypatch.setattr(sa, "get_case_study_dir", lambda cs, **kw: case_dir, raising=False)
+    import utils.paths
+
+    monkeypatch.setattr(utils.paths, "get_case_study_dir", lambda cs, **kw: case_dir)
+
+    calls = {"n": 0}
+    real = sa.resolve_canonical_rank1_lineage
+
+    def _counted(case_study, **kwargs):
+        calls["n"] += 1
+        assert calls["n"] < 5, "the canonical resolver re-entered the diagnosis"
+        return real(case_study, **kwargs)
+
+    monkeypatch.setattr(sa, "resolve_canonical_rank1_lineage", _counted)
+
+    lineage = _counted("cs")
+
+    assert lineage["val_backtest_hash"] == "b1"
+    assert lineage["holdout_backtest_hash"] is None
+    assert calls["n"] == 1
