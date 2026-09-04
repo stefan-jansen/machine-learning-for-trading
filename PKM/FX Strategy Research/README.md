@@ -3,10 +3,25 @@
 Research workspace for FX strategy work against MetaTrader 5
 (via `mt5_client` / Wine bridge on Linux).
 
+## Repo / branch
+
+| Item | Value |
+|------|--------|
+| Path | `PKM/FX Strategy Research/` (inside ML4T monorepo) |
+| Branch | `fx-research` (base `c2c7b6ca`, FX commit only — no TabM) |
+| Tip | `4aa21442` — `chore(fx-research): init FX Strategy Research workspace` |
+| Remote | `fork` → `git@github.com:Rezzaa13/machine-learning-for-trading.git` |
+| Tracking | `fork/fx-research` (pushed 2026-09-04) |
+
+```bash
+git switch fx-research
+git push fork fx-research
+```
+
 ## Setup
 
 - Project root: this folder
-- Requires `mt5_client.py` in the same directory
+- Files: `mt5_client.py`, `test_connection.py`, `.gitignore`, `README.md`
 - Linux Python needs `mt5linux` (do **not** use system `/usr/bin/python` 3.14)
 - Reuse the existing MQL-PYTHON venv (Python 3.12 + `mt5linux==1.0.11`):
 
@@ -16,8 +31,9 @@ MQL_PY="/run/media/me2/shared-data/vaults/PKM/02 - Projects/MQL-PYTHON/.venv/bin
 
 - Linux run order:
   1. Start MT5 terminal: `mt5`
-  2. Start Wine bridge: `"/run/media/me2/shared-data/vaults/PKM/02 - Projects/MQL-PYTHON/scripts/start-mt5-bridge.sh"`
-  3. Run the smoke test below
+  2. Start Wine bridge (keep that terminal open):  
+     `"/run/media/me2/shared-data/vaults/PKM/02 - Projects/MQL-PYTHON/scripts/start-mt5-bridge.sh"`
+  3. Run scripts in a **separate** shell with `"$MQL_PY"`
 
 ## Progress log
 
@@ -28,6 +44,7 @@ MQL_PY="/run/media/me2/shared-data/vaults/PKM/02 - Projects/MQL-PYTHON/.venv/bin
 **Files:**
 - `mt5_client.py` — cross-platform MT5 accessor (`get_mt5`)
 - `test_connection.py` — initialize, print `version()` + `account_info()`, shutdown
+- `.gitignore` — exclude `data/`, parquet/csv, venv, caches
 
 **How to run:**
 
@@ -47,10 +64,8 @@ cd "/run/media/me2/shared-data/vaults/PKM/02 - Projects/machine-learning-for-tra
 | 2026-09-04 | MQL-PYTHON `.venv` (3.12) | `FAIL: [Errno 111] Connection refused` (bridge down) |
 | 2026-09-04 | MQL-PYTHON `.venv` (3.12) + bridge up | `OK: connected` — version `(500, 6140, '21 Aug 2026')`, account logged in |
 
-**Status:** Stage 0 complete — connection smoke test passed
-
-**Note:** keep the bridge terminal open while working; run the test in a *separate* shell.
+**Status:** Stage 0 complete — committed on `fx-research`, pushed to `fork`
 
 ### Next (planned)
 
-- Pull price / bar data
+- Stage 1: pull price / bar data into `data/` (gitignored)
