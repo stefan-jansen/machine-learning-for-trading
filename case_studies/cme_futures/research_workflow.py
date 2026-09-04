@@ -27,6 +27,7 @@ from case_studies.research import (
     StateTransitionPolicy,
     Study,
     plan_backtests,
+    require_resolved_requests_cover_the_catalog,
     run_backtests,
     run_models,
 )
@@ -300,6 +301,7 @@ def run_official_model_catalog(
         resolved = resolve_model_requests(study, request_catalog, execution_tier="canonical")
     if any(request.spec["execution_tier"] != "canonical" for request in resolved):
         raise ValueError("official model populations require canonical requests")
+    require_resolved_requests_cover_the_catalog(request_catalog, resolved)
     expected = expected_prediction_hashes(resolved)
     population = OfficialPopulation.create(
         study,

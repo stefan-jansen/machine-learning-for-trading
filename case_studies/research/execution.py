@@ -466,6 +466,43 @@ def expected_prediction_hashes(
     return prediction_hashes_from_specs(request.spec for request in resolved_requests)
 
 
+def require_resolved_requests_cover_the_catalog(
+    request_catalog: pl.DataFrame,
+    resolved: Iterable[ResolvedModelRequest],
+) -> None:
+    """Refuse a snapshot built from a resolved set that is not the declared catalog.
+
+    Supplying ``resolved_requests`` beside a ``request_catalog`` is how a caller avoids
+    resolving twice - resolving a data-dependent penalty prepares every fold, so a large
+    panel cannot afford to do it once for the plan and again for the run. It is not a way
+    to narrow what the population contains, and nothing else distinguishes the two uses:
+    the population is declared from the resolved set, so a partial one snapshots under the
+    catalog's name and reports complete.
+
+    ``require_complete`` cannot catch that. It measures the population against the members
+    it just declared, which a partial set satisfies exactly. A population is the definition
+    of a comparison - selection is best validation backtest Sharpe across it - so every
+    configuration the resolved set omitted is not merely unreported, it is removed from the
+    competition, and the winner is chosen from the survivors. The result is internally
+    consistent, complete, correctly hashed, and the answer to a smaller question than its
+    name claims.
+
+    Both ``family``/``label``/``config_name`` triples are compared, not counts: a catalog of
+    the same size drawn from different labels is a different comparison.
+    """
+    declared = set(request_catalog.select("family", "label", "config_name").unique().iter_rows())
+    submitted = {
+        (request.family, request.spec["label"], request.spec.get("config_name"))
+        for request in resolved
+    }
+    if submitted != declared:
+        missing = sorted(declared - submitted)
+        extra = sorted(submitted - declared)
+        raise ValueError(
+            f"resolved requests do not match the declared catalog: missing={missing}, extra={extra}"
+        )
+
+
 def snapshot_official_models(
     study: Study,
     resolved_requests: Iterable[ResolvedModelRequest],
@@ -566,6 +603,12 @@ def run_official_models(
     A notebook that already built a :class:`ModelPlan` to show what it is about to fit passes the
     plan itself. Passing its requests instead would plan a second time, and planning a large panel
     is not free: resolving a data-dependent penalty prepares every fold to do it.
+
+    Both paths declare the population from ``requests`` and from nothing else, so neither can tell
+    a complete submission from a partial one - there is no second statement here of what the name
+    is supposed to contain. A caller that holds one, because it loaded a declared catalog and
+    passes a separately resolved set beside it, checks the two against each other with
+    :func:`require_resolved_requests_cover_the_catalog` before the snapshot is written.
     """
     if isinstance(requests, ModelPlan):
         if requests.study != study:
