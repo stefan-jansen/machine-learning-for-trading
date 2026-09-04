@@ -805,6 +805,7 @@ def run_official_backtest_requests(
     requests: pl.DataFrame,
     *,
     population_name: str | None,
+    supersedes: str | None = None,
 ) -> FuturesBacktestExecution:
     """Resolve, snapshot, and execute visible futures strategy requests.
 
@@ -813,6 +814,13 @@ def run_official_backtest_requests(
     results are refused entry to an official population, and the workspace holding them is
     discarded afterwards. Everything else - the expected-identity snapshot before the engine
     runs, the order check, the per-request completeness - applies to both tiers.
+
+    ``supersedes`` names the generation of ``population_name`` this run retires. Anything that
+    moves a backtest identity - a corrected label, a changed accounting field, a re-run after a
+    registry reset - produces a different member list under the same name, and
+    ``OfficialPopulation.create`` refuses to write it without being told which snapshot it
+    replaces. The notebooks declare it as a parameter, so the sweep can be re-run without
+    editing this module.
     """
     required = {"request_name", "prediction_hash", "label", "signal"}
     missing = required - set(requests.columns)
@@ -884,6 +892,7 @@ def run_official_backtest_requests(
             name=population_name,
             member_kind="backtest",
             members=expected,
+            supersedes=supersedes,
         )
         if population_name is not None
         else None
