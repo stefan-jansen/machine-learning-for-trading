@@ -550,12 +550,15 @@ by_fold[panel_labels[0]]
 # objective, which no configuration in `case_studies/config/` currently declares.
 #
 # **The two labels behave differently, and the curve is where that shows.** On the primary label
-# the ten checkpoints rise from -0.000 at five epochs to +0.029 at fifty and have not turned over,
-# so the schedule stops while the network is still improving on the validation folds. On the
-# five-day label the highest checkpoint is +0.007 at ten epochs and every checkpoint from fifteen
-# on is negative, ending at -0.002. That is one model still learning and one that had little to
-# learn, under one declared schedule, which is why the schedule is declared per estimator rather
-# than per label and why both are published rather than summarised.
+# the ten checkpoints run from -0.000 at five epochs to +0.029 at fifty, and the highest of them is
+# the last. That is the observed maximum and not evidence of continued learning: the curve falls
+# from ten epochs to fifteen and again from forty to forty-five, and epoch 50 sits 0.0003 above
+# epoch 40 against a fold-to-fold standard deviation of 0.089. Nothing here establishes an optimal
+# stopping point or that another fifty epochs would add anything. On the five-day label the highest
+# checkpoint is +0.007 at ten epochs and every checkpoint from fifteen on is negative, ending at
+# -0.002. One label produced a positive average and one did not, under one declared schedule, which
+# is why the schedule is declared per estimator rather than per label and why both are published
+# rather than summarised.
 #
 # **The checkpoint curve is not evidence for an epoch.** On the primary label the ten checkpoints
 # span 0.029 of IC end to end. The eight fold ICs behind the last of them - -0.045, -0.060, +0.128,
@@ -576,8 +579,9 @@ by_fold[panel_labels[0]]
 # **Known limitations.** The architecture, the bottleneck width and the schedule are declared in
 # `case_studies/config/sae/sae.yaml` and the runner's own defaults rather than searched, so nothing
 # here says this network is the right one - only what this one did. Fifty epochs is where training
-# stops, not where anything established it should stop, and on the primary label the curve was
-# still rising there. The fold-to-fold dispersion is 0.089 against a mean of 0.029, so the
+# stops, not where anything established it should stop, and the primary label's checkpoint curve
+# is non-monotonic rather than a schedule cut short. The fold-to-fold dispersion is 0.089 against
+# a mean of 0.029, so the
 # primary-label result is in the average rather than in how much any single fold can be relied on.
 # The panel narrows from 96 funds in the first fold to 90 in the last. The published result is a
 # CUDA result, and a reader who refits on CPU gets a different identity registered beside it rather
