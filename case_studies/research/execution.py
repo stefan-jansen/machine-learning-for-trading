@@ -593,13 +593,20 @@ def run_official_models(
 
     Unresolved requests are planned rather than resolved, and then handed to the batch runner
     still unresolved. What that is worth on a large panel is narrower than it was. Resolving
-    every request up front no longer repeats the shared work or holds a copy of it per
-    configuration: `_load_inputs` holds the panel for the label being resolved
-    (`case_studies/utils/linear.py`) and `prepare_standardized_folds` holds the prepared fold set
-    (`case_studies/utils/folds.py`), so a grid of configurations over one label reads the panel
-    once, builds each fold once, and every resolved request references the same arrays. Measured
-    on `fx_pairs/fwd_ret_5d` with a cold cache: one dataset load and eight folds built, flat at
-    one, two and six configurations, and the same fold objects behind all of them.
+    every request up front repeats neither the shared work nor a copy of it per configuration
+    **while the fold set fits the memo budget**: `_load_inputs` holds the panel for the label
+    being resolved (`case_studies/utils/linear.py`) and `prepare_standardized_folds` holds the
+    prepared fold set (`case_studies/utils/folds.py`), so a grid of configurations over one
+    label reads the panel once, builds each fold once, and every resolved request references
+    the same arrays. Measured on `fx_pairs/fwd_ret_5d` with a cold cache: one dataset load and
+    eight folds built, flat at one, two and six configurations, and the same fold objects
+    behind all of them.
+
+    The budget is the qualification that matters at production width. `holds_in_memory` admits
+    a fold set only up to `memo_budget_bytes` (8 GB by default), so a panel whose prepared folds
+    exceed it is rebuilt per configuration and each copy stays alive as long as the resolved
+    request holding it. On such a panel the per-request path is the multiplier the batch runner
+    exists to avoid, and the plan path is not a preference.
 
     What remains is when the folds are built and how long they stay alive: planning computes the
     identities from placeholder folds and leaves preparation to the runner, which walks folds on

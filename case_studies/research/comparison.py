@@ -4,7 +4,7 @@ import json
 import sqlite3
 from collections.abc import Iterable
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
@@ -51,12 +51,16 @@ def name_bindings(db: sqlite3.Connection, name: str) -> list[tuple[str, str | No
     ).fetchall()
 
 
+def _live_heads(bindings: list[tuple[str, str | None]]) -> list[tuple[str, str | None]]:
+    """The generations of one name that no later generation replaces."""
+    replaced = {supersedes for _, supersedes in bindings if supersedes is not None}
+    return [binding for binding in bindings if binding[0] not in replaced]
+
+
 def _unsuperseded_hash(db: sqlite3.Connection, name: str) -> str | None:
     """The one generation of ``name`` that no later generation replaces, if it is unique."""
-    rows = name_bindings(db, name)
-    replaced = {row[1] for row in rows if row[1] is not None}
-    heads = [row[0] for row in rows if row[0] not in replaced]
-    return heads[0] if len(heads) == 1 else None
+    heads = _live_heads(name_bindings(db, name))
+    return heads[0][0] if len(heads) == 1 else None
 
 
 def candidate_set_supersedes(study: Study, *, name: str, declared: str | None) -> str | None:
@@ -268,16 +272,23 @@ class CandidateSet:
         the other.
         """
         with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
-            head = _unsuperseded_hash(db, name)
-            if head is None:
-                # Bindings, not identity rows: a name can point at a set first written under a
-                # different one, and counting `candidate_sets.name` would answer 0 for it and
-                # say the name was never written when two live generations are the problem.
-                count = len(name_bindings(db, name))
+            bindings = name_bindings(db, name)
+            heads = _live_heads(bindings)
+            if len(heads) != 1:
+                # Heads rather than rows. Every generation of a name is a binding, so counting
+                # them reports a retired one as a live identity and tells a reader the name is
+                # ambiguous when it resolves. Bindings rather than `candidate_sets` rows for
+                # the mirror reason: a name pointing at a set first written under another name
+                # has no identity row of its own and would count zero.
                 raise ValueError(
-                    f"candidate set name {name!r} resolved to {count} unsuperseded identities"
+                    f"candidate set name {name!r} resolved to {len(heads)} unsuperseded identities"
                 )
-        return cls.open(study, head)
+            head, supersedes = heads[0]
+        identity = cls.open(study, head)
+        # The binding the caller asked for, not the one the identity was first written under.
+        # `open` answers by hash and has no way to know which of a set's names was meant, so a
+        # union that shares its members with an input would come back named for the input.
+        return replace(identity, name=name, supersedes=supersedes)
 
     @classmethod
     def open(cls, study: Study, set_hash: str) -> CandidateSet:

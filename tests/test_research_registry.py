@@ -642,8 +642,15 @@ def test_a_set_requested_under_a_second_name_is_bound_to_that_name(tmp_path: Pat
 
     assert pre_overlay.hash == signal.hash
     assert pre_overlay.name == "pre-overlay"
-    assert CandidateSet.one(study, name="pre-overlay").hash == signal.hash
-    assert CandidateSet.one(study, name="signal").hash == signal.hash
+
+    # Resolution answers with the binding that was asked for. `open` reads by hash and has no
+    # way to know which of a set's names was meant, so returning its answer unaltered handed
+    # the caller a `pre-overlay` set named `signal` - which is the disagreement between object
+    # and registry this whole change exists to remove, moved one method along.
+    resolved = CandidateSet.one(study, name="pre-overlay")
+    assert resolved.hash == signal.hash
+    assert resolved.name == "pre-overlay"
+    assert CandidateSet.one(study, name="signal").name == "signal"
 
 
 def test_a_second_name_supersedes_nothing_and_retires_no_other_name(tmp_path: Path) -> None:
@@ -662,8 +669,13 @@ def test_a_second_name_supersedes_nothing_and_retires_no_other_name(tmp_path: Pa
 
     # Lineage is per name: replacing `signal` leaves the set `pre-overlay` names in force.
     replacement = CandidateSet.create(study, "signal", [first, second], supersedes=signal.hash)
-    assert CandidateSet.one(study, name="signal").hash == replacement.hash
-    assert CandidateSet.one(study, name="pre-overlay").hash == signal.hash
+    live = CandidateSet.one(study, name="signal")
+    assert live.hash == replacement.hash
+    # The lineage the resolved binding reports is that name's, not the identity row's.
+    assert live.supersedes == signal.hash
+    still = CandidateSet.one(study, name="pre-overlay")
+    assert still.hash == signal.hash
+    assert still.supersedes is None
 
 
 def test_a_changed_set_under_a_bound_second_name_still_has_to_supersede(tmp_path: Path) -> None:
@@ -702,6 +714,10 @@ def test_re_creating_a_bound_name_is_the_re_run_and_writes_nothing(tmp_path: Pat
             "SELECT count(*) FROM candidate_set_names WHERE name = 'pool'"
         ).fetchone()[0]
     assert bindings == 2
+
+    # Two generations, one live. The ambiguity message counts heads rather than rows, so a
+    # retired generation is not reported as a second live identity.
+    assert CandidateSet.one(study, name="pool").hash == replacement.hash
 
 
 def test_a_registry_written_before_the_binding_table_still_resolves_its_names(

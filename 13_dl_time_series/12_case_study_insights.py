@@ -544,7 +544,9 @@ display(
 #
 # The width measured here is the one the `conformal_weighted` allocator sizes
 # positions with: calibrated per symbol on every residual known at `t - h`,
-# where `h` is that label's horizon in data steps, falling back to a quantile
+# where `h` is the sizing lag in data steps - `max(1, label horizon)`, one step
+# even where the horizon is zero, because the position was chosen before the row
+# that records its outcome - falling back to a quantile
 # pooled over every symbol where one has too few residuals of its own. A
 # decision is covered when its absolute residual falls inside that half-width.
 # A well-calibrated DL signal sits near the diagonal (empirical coverage =

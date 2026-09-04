@@ -213,12 +213,18 @@ def test_resolving_and_planning_agree_on_every_training_identity(tmp_path, monke
     them from prepared ones. When those were two implementations of fold preparation they
     disagreed at 1e-11 in the standardised design matrix, which moved every data-derived alpha
     and gave one declared configuration two training hashes depending on which path ran it.
+
+    Only a data-derived penalty can show that. A fixed `alpha` is resolved from the
+    configuration by `_fixed_effective_params` without reading a fold at all, so identities
+    over fixed penalties agree between the paths whatever the arrays hold.
     """
     study = _linear_study(tmp_path, monkeypatch)
-    names = ("ridge_a1", "ridge_a2", "ridge_a3")
-    # The fixture's preset ignores the configuration name, so three names would be one identity
-    # three times and the plan would refuse them as duplicates. Vary the penalty instead, which
-    # is what distinguishes a real menu's entries.
+    names = ("ridge_f1", "ridge_f2", "ridge_f3")
+    # `alpha_frac` rather than a fixed `alpha`, and that is the whole point. A fixed penalty
+    # takes `_fixed_effective_params`, which resolves from the configuration alone and never
+    # reads a fold - so an identity comparison over fixed penalties cannot see the divergence
+    # this test is about. A fraction is resolved from the prepared design matrix, which is
+    # exactly where the two paths compute from different arrays.
     monkeypatch.setattr(
         linear,
         "_load_preset",
@@ -227,7 +233,7 @@ def test_resolving_and_planning_agree_on_every_training_identity(tmp_path, monke
             "family": "linear",
             "library": "sklearn",
             "model_class": "Ridge",
-            "params": {"alpha": float(config_name[-1])},
+            "params": {"alpha_frac": float(config_name[-1]) / 10.0},
         },
     )
 
@@ -236,12 +242,18 @@ def test_resolving_and_planning_agree_on_every_training_identity(tmp_path, monke
             study.model(family="linear", label="fwd_ret_1d", config_name=name) for name in names
         ]
 
+    # The penalty has to actually be data-derived, or the comparison below is vacuous.
+    assert linear._fixed_effective_params(linear._load_preset(names[0]), {}, (0, 1)) is None, (
+        "a fixed penalty resolves without reading a fold and cannot show the divergence"
+    )
+
     resolved = tuple(request.resolve() for request in requests())
     plan = plan_models(study, requests=requests())
 
     assert tuple(request.identity for request in resolved) == tuple(
         member.training_hash for member in plan.members
     )
+    assert len({request.identity for request in resolved}) == len(names)
 
 
 def test_tabm_public_batch_materializes_and_prepares_compatible_panel_once(
