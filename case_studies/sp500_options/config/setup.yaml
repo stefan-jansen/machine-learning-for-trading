@@ -188,6 +188,20 @@ evaluation:
 labels:
   primary: ret_to_expiry
   buffer: 35D
+  # `ret_to_expiry` is the return of a straddle held to the expiration of its own
+  # contracts, so its horizon is calendar time and the 35D buffer is 35 calendar days.
+  # Without this declaration the buffer defaults to `sessions`
+  # (`utils.artifact_specs.resolve_label_buffer_unit`), and a purge of 35 sessions is
+  # about seven weeks where five is what the label reaches - the analysis frame ends
+  # earlier than the outcome does, and the rows in between are discarded. Data loss, not
+  # leakage: reading a calendar buffer as sessions trims more than it needs to, and the
+  # error runs the other way only for a session-gridded label.
+  #
+  # This is the only calendar-anchored label declared anywhere in the nine case studies.
+  # The four diagnostic variants below are fixed-horizon forward returns on the session
+  # grid and correctly keep the default; they are not in `variants`, so the holdout
+  # seal's one-unit-per-case-study rule does not see them.
+  buffer_unit: calendar
   # Legacy 5d/10d/dh_5d/dh_10d variants were dropped from the sweep
   # 2026-05-17; the label-computation notebook (`02_labels.py`) still
   # demonstrates how they are constructed, but they no longer drive
