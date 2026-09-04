@@ -10,12 +10,15 @@ current fold's own elapsed history are both eligible. An entity with fewer than
 eligible residuals, so allocation never changes the selected basket by silently dropping an
 uncalibrated entity.
 
-``h`` is load-bearing in both directions. Without it, a residual at ``t'`` whose forward
-return realizes over ``(t', t'+h]`` carries information from after the decision it sizes -
-which the prior-fold-only rule this replaces did at every fold boundary, not just at the
-holdout. With it, the earliest fold no longer has to abstain: it calibrates on its own
-elapsed history after a warm-up rather than sitting out entirely, which on a two-fold split
-is the difference between forfeiting half the evaluation period and forfeiting a warm-up.
+``h`` is load-bearing in both directions. Writing the label's own horizon as ``k``, a
+residual at ``t'`` realizes over ``(t', t'+k]``, so without a lag one with ``t' + k > t``
+carries information from after the decision it sizes - which the prior-fold-only rule this
+replaces did at every fold boundary, not just at the holdout. With a lag, the earliest fold
+no longer has to abstain: it calibrates on its own elapsed history after a warm-up rather
+than sitting out entirely, which on a two-fold split is the difference between forfeiting
+half the evaluation period and forfeiting a warm-up. ``h`` is ``max(1, k)``: the ``k`` term
+keeps an unrealized residual out, and the floor keeps out the residual of the decision
+itself, which no horizon makes available.
 
 **The lag is not the holdout embargo, and the two tables answer different questions.**
 :data:`HOLDOUT_CONFORMAL_EMBARGO_STEPS` records how far a residual reaches forward, which is

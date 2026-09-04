@@ -1469,10 +1469,12 @@ print(synthesis)
 # ranking. With two folds, the per-fold columns are weak evidence about stability
 # and are there to expose a sign change rather than to measure consistency.
 #
-# The calibration columns are the ones most likely to disqualify a family that
-# looks fine on score alone. A model whose intervals do not hold their nominal
-# coverage can still be traded on its ordering, but not sized from its intervals
-# without recalibration first.
+# The calibration columns qualify a family that looks fine on score alone rather
+# than disqualifying it. A model whose widths do not hold their nominal coverage
+# can still be traded on its ordering; whether it can be sized on those widths is
+# a question the coverage columns do not answer, because `conformal_weighted`
+# consumes the cross-section of widths and coverage measures their scale. Measure
+# the cross-section before sizing on it.
 #
 # Causal rows are reported separately and are never inserted into this table.
 # They estimate the effect of a feature rather than forecast a return.

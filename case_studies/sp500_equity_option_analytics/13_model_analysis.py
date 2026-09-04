@@ -1823,10 +1823,14 @@ credible.select(
 #
 # ### What This Analysis Does Not Tell Us
 #
-# - **Conformal-corrected sizing**: the §7 under-coverage gaps across
-#   all five families mean that static interval widths understate later-fold
-#   uncertainty; ACI-based online updates (Ch12 §12.6) would replace
-#   the frozen calibration quantile before sizing.
+# - **Conformal-corrected sizing**: the §7 under-coverage gaps across all five
+#   families say the widths understate residual scale out of time. The widths are
+#   already expanding rather than fixed - each recalibrates on every residual known
+#   at the decision it sizes - so what is open is not whether to unfreeze them but
+#   whether an adaptive rule that targets coverage directly (ACI, Ch12 §12.6) does
+#   better. And §7 measures scale, while `conformal_weighted` consumes only the
+#   cross-section of widths, so this is a reason to measure that cross-section
+#   before sizing on it rather than a finding about any candidate.
 # - **Transaction costs under weekly rebalancing**: decile spreads
 #   are small in absolute terms and must survive round-trip costs of
 #   6–20 bps for liquid S&P 500 names; with weekly rebalancing,
