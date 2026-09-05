@@ -24,8 +24,8 @@
   "engine_commit": "7034236519cc0a99df6ef34a21d07ec2a81fc87c",
   "engine_source_sha256": "8011ecdaf90807b4fe4fb5ada518a237311774b32891179bf1fad0a0baad8a58",
   "evidence": {
-    "correctness": "https://github.com/ml4t/backtest/blob/602db92275ac1b35eb7ac18f23854a051a442172/validation/REAL_STRATEGY_RESULTS.json",
-    "performance": "https://github.com/ml4t/backtest/blob/602db92275ac1b35eb7ac18f23854a051a442172/validation/REAL_STRATEGY_PERFORMANCE.json",
+    "correctness": "https://github.com/ml4t/backtest/blob/0c3de46b1881ce6cb9fd72b672a1dba38ebc383b/validation/REAL_STRATEGY_RESULTS.json",
+    "performance": "https://github.com/ml4t/backtest/blob/0c3de46b1881ce6cb9fd72b672a1dba38ebc383b/validation/REAL_STRATEGY_PERFORMANCE.json",
     "source_artifacts": [
       {
         "path": "validation/REAL_STRATEGY_RESULTS.json",
@@ -40,7 +40,7 @@
         "sha256": "fb3a06a7c485bfb131dfef286ff743af18fa4ba673f5f1075245d7a9123cb3f5"
       }
     ],
-    "synthetic_stress": "https://github.com/ml4t/backtest/blob/602db92275ac1b35eb7ac18f23854a051a442172/validation/LARGE_SCALE_RESULTS.json"
+    "synthetic_stress": "https://github.com/ml4t/backtest/blob/0c3de46b1881ce6cb9fd72b672a1dba38ebc383b/validation/LARGE_SCALE_RESULTS.json"
   },
   "frameworks": {
     "backtrader": {
@@ -135,7 +135,7 @@
       "version": "3.1.1"
     }
   },
-  "library_commit": "602db92275ac1b35eb7ac18f23854a051a442172",
+  "library_commit": "0c3de46b1881ce6cb9fd72b672a1dba38ebc383b",
   "performance_policy": {
     "boundary": "engine call only",
     "excluded": [
