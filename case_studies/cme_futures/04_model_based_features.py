@@ -40,9 +40,9 @@
 # - Say why estimating a model on all your data and then using its output as a feature
 #   gives you a number no one could have computed at the time, and recognise the shape of
 #   that mistake in your own code.
-# - Split a price history into training and evaluation periods, estimate a model on the
-#   training part alone, and run it forward over the evaluation part without ever letting
-#   it re-read the evaluation part.
+# - Refresh a model's parameters on a declared schedule, so that the value for any
+#   session is produced by an estimate made from sessions strictly earlier than it -
+#   and see why a walk-forward period does not do that job on its own.
 # - Run a hidden Markov model so that its answer for a given day uses that day and every
 #   earlier day but no later day, and check by experiment that this is what it did.
 # - Write the resulting features to a file that records which prices they came from, so a
@@ -83,12 +83,13 @@ from statsforecast import StatsForecast
 from statsforecast.models import AutoARIMA
 from threadpoolctl import threadpool_limits
 
-from case_studies.research.holdout import build_holdout_cv
 from case_studies.utils.artifact_digest import value_digest, write_artifact
 from case_studies.utils.temporal import (
     filtered_state_probs,
     fit_hmm_kmeans_init,
+    refit_boundaries,
     sort_states_by_mean,
+    walk_forward_feature,
 )
 from data import load_cme_futures
 from utils.artifact_specs import load_setup_config, resolve_label_buffer
@@ -102,9 +103,17 @@ warnings.filterwarnings("ignore")
 # %% [markdown]
 # ## Configuration
 #
-# Seven settings, and each one decides something a reader would otherwise have to guess
-# at. `MAX_PRODUCTS` and `MAX_FOLDS` exist so a smoke test can run a fraction of the
-# work; both are zero here, which means the full universe and every period.
+# Five settings, and each one decides something a reader would otherwise have to guess at.
+# `MAX_PRODUCTS` and `MAX_FOLDS` exist so a smoke test can run a fraction of the work; both
+# are zero here, which means the full universe and every evaluation period.
+#
+# What is *not* here is the estimation schedule. How much history each fitted model spends
+# before its first estimate, and how often it is refreshed, are part of what the feature
+# means rather than settings to trade runtime against, so they are read from `setup.yaml`
+# below alongside the feature windows. `REFIT_EVERY_OVERRIDE` is the reduction lever for
+# that: zero here, meaning "use what `setup.yaml` declares", and a positive value replaces
+# both declared cadences for one run. It is named so nothing reading this file can mistake
+# a reduction for the definition.
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "cme_futures"
@@ -112,8 +121,9 @@ SEED = 42
 # Number of products to model. Zero means all thirty; a positive value takes that many
 # from the front of the list and is only for a fast check that the code runs.
 MAX_PRODUCTS = 0
-# Number of walk-forward periods to fit. Zero means all of them. The three models are
-# re-estimated once per period, so this is the setting that scales the running time.
+# Number of walk-forward evaluation periods to resolve. Zero means all of them. No model
+# is fitted per period any more, so this narrows what section F screens over and what the
+# coverage tables report; the fits cost the same either way.
 MAX_FOLDS = 0
 # How many past sessions each Fourier transform reads: 252, one trading year. A cycle
 # can only be measured if the window is long enough to contain it more than once, so a
@@ -126,14 +136,11 @@ FFT_TARGET_PERIODS = [63, 126]
 # The share of false positives tolerated among the features section F declares
 # significant, after correcting for how many were tested at once.
 FDR_ALPHA = 0.05
-# How much of a product's history inside a period is spent before the first ARIMA
-# forecast: 252, a trading year, so the first order is chosen from a full year of the
-# series. It also sets how many forecasts the walk makes, one per session after it.
-ARIMA_BURNIN = 252
-# How often the ARIMA order and weights are re-chosen as the walk proceeds: 21, monthly.
-# The stepwise order search is the expensive step, so this is what bounds the walk's cost
-# without changing how many products or periods it covers.
-ARIMA_REFIT_FREQ = 21
+# 0 keeps both declared refit cadences. A positive value replaces them, which is how a
+# smoke run bounds the two walks without narrowing the universe: fewer estimates, the same
+# rows and the same columns. The burn-ins are never overridden - a shorter one would move
+# which sessions carry a value, and the coverage assertions below are about exactly that.
+REFIT_EVERY_OVERRIDE = 0
 
 # %% [markdown]
 # Three more settings come from `config/setup.yaml`, the file that also configures
@@ -161,6 +168,18 @@ assert len(ALL_PRODUCTS) == SETUP["universe"]["n_products"], (
 CARRY_SMOOTHING = int(SETUP["features"]["windows"]["carry_smoothing"])
 CARRY_ZSCORE_WINDOW = int(SETUP["features"]["windows"]["carry_zscore"][0])
 
+# The estimation schedule, read rather than typed, so the comments in `setup.yaml` that
+# say what each count decides stay next to the value the notebook uses.
+MODEL_BASED = SETUP["model_based"]
+ARIMA_BURNIN = int(MODEL_BASED["arima"]["burnin"])
+ARIMA_REFIT_FREQ = int(MODEL_BASED["arima"]["refit_every"])
+HMM_BURNIN = int(MODEL_BASED["hmm"]["burnin"])
+HMM_REFIT_EVERY = int(MODEL_BASED["hmm"]["refit_every"])
+HMM_N_STATES = int(MODEL_BASED["hmm"]["n_states"])
+if REFIT_EVERY_OVERRIDE:
+    ARIMA_REFIT_FREQ = HMM_REFIT_EVERY = REFIT_EVERY_OVERRIDE
+    print(f"Reduced run: both refit cadences replaced with {REFIT_EVERY_OVERRIDE}")
+
 # Two sessions carry one clearing venue's settlement file and not the other's; `setup.yaml`
 # says which and why. They are dropped here so no series is differenced across a date on
 # which half the universe has no settlement price.
@@ -179,6 +198,9 @@ print(
     f"smoothed series."
 )
 print(f"Modelling {len(ARIMA_PRODUCTS)} of the {len(ALL_PRODUCTS)} products in the universe.")
+print("Estimation schedule, in sessions of each model's own series:")
+print(f"  ARIMA        burn-in {ARIMA_BURNIN:>4}, refit every {ARIMA_REFIT_FREQ:>3}")
+print(f"  carry regime burn-in {HMM_BURNIN:>4}, refit every {HMM_REFIT_EVERY:>3}")
 
 # %% [markdown]
 # ## The data these models read
@@ -269,16 +291,23 @@ universe_table
 # may have seen that session or any later one.** It has two halves, and both are enforced
 # below.
 #
-# **Bound where the parameters come from.** There are two honest ways to do that, and this
-# notebook uses both, because they suit different models. One is to estimate once per
-# period on that period's training sessions and then hold the parameters fixed while the
-# model is applied forward - what the hidden Markov model in C.3 does, and what section
-# C.3 asserts by comparing the last session behind every estimate against its own training
-# end. The other is to re-estimate as the walk proceeds - what ARIMA in C.1 does, refitting
-# every `ARIMA_REFIT_FREQ` sessions on everything up to that point, so its weights go on
-# being refreshed across the evaluation window and each set is fitted only on sessions
-# earlier than the ones it then forecasts. Both are causal. What neither may do is fit on
-# the session it is about to speak for.
+# **Bound where the parameters come from.** Both fitted models here do it the same way:
+# **re-estimate as the walk proceeds.** Spend a burn-in, fit, use that fit for the next
+# `refit_every` sessions, then refit on everything up to that point. No session is ever
+# used to estimate the model that speaks for it, whether or not a period boundary happens
+# to sit nearby.
+#
+# **A walk-forward period does not do this job, and until 2026-09-04 the hidden Markov
+# model in C.3 relied on it to.** Estimating once per period on that period's whole
+# training window and then filtering forward from the *start* of that window is causal for
+# the evaluation sessions and is not causal for the training ones: the earliest training
+# rows of an eight-year window carried parameters estimated from eight years of their own
+# future, while every evaluation row carried parameters estimated only from its past. A
+# model downstream was then fitted on one version of the column and scored on another.
+# Nothing raised, because a period's rows are internally consistent and the artifact
+# recorded no estimation window. C.1's ARIMA was already on a refit schedule; C.3 now is
+# too, and the schedule is what bounds an estimate rather than the period - which is why
+# the file this notebook writes carries no period column at all.
 #
 # **Run the fitted model forward, never backward.** Even a model estimated on training
 # data can look ahead when it is *applied*. A hidden Markov model can be asked two
@@ -289,10 +318,17 @@ universe_table
 # and demonstrates the difference by deleting the later observations and checking the
 # number does not move.
 #
-# ## B. The periods, and what is estimated where
+# ## B. The periods, and what they are for
 #
-# The walk-forward boundaries are resolved here, **before any model is fitted**, because
-# every fit below is bounded by them.
+# The walk-forward boundaries are resolved here, and what they bound is the **screen** in
+# section F, not the fits. A screen run over the sessions an estimate read reports how well
+# a feature fits history rather than whether it predicts, so section F is cut to the
+# evaluation windows. What bounds a fit is the schedule above.
+#
+# The one boundary that does bind every fit is where the holdout opens: past it neither
+# model re-estimates, and each carries the last estimate it made before the boundary
+# across the window frozen. A coefficient refitted on holdout sessions is a parameter
+# estimated on the holdout however causal the forecast around it looks.
 #
 # They are derived from the forward-return file rather than from the price file. The two
 # do not span the same dates: a forward return needs a window after it to resolve, so the
@@ -337,81 +373,8 @@ splits = generate_cv_splits(
     case_study_id=CASE_STUDY_ID,
     label_buffer=LABEL_BUFFER,
 )
-# `MAX_FOLDS` is applied after the holdout is derived, not here. The holdout fold takes the
-# next id after the canonical set, so truncating first would let a reduced run hand it an id
-# that a full run gives to a validation fold - and `05_evaluation`, reading the canonical
-# geometry, would then read holdout-fitted features as that validation fold's.
-canonical_splits = splits
-
-# The holdout fold, appended here rather than inferred downstream. A holdout fit needs
-# FEATURES, and a split definition is not one: the three models below are fitted per fold, so
-# a fold this file never wrote has no ARIMA forecast, no HMM regime probability and no residual
-# to join, and the retrain would fit on null columns for exactly the columns this notebook
-# exists to produce. Measured before this was added: 0 of 217,605 rows in the holdout window
-# carried a value for any of the four fitted columns.
-#
-# Its geometry is not invented here. `build_holdout_cv` is the one derivation of it, and the
-# same function reconstructs the fit downstream, so writing the fold and reading it cannot
-# disagree. Two boundaries in it are easy to get wrong and neither is the obvious reading:
-# `train_end` stops the WIDEST label buffer short of the holdout - cme declares 5D on
-# `fwd_ret_5d` and 21D on `fwd_ret_21d`, so the gap is 21 sessions, because one fold serves
-# both labels and a 5-session gap would let a 21-day model train on rows whose outcome window
-# reaches inside the holdout. And `train_start` is the EARLIEST validation fold's start, not
-# `splits[0]`'s: the folds run newest first, so indexing the list would hand the final fit the
-# shortest history in the set rather than the longest.
-#
-# The fold id is `max(validation fold) + 1` rather than 0. A holdout fold carrying an id a
-# validation fold already owns joins silently against that fold's features, which were fitted
-# on a window ending before the holdout opens - nothing raises and the number is simply wrong.
-_holdout_cv = build_holdout_cv(
-    {
-        "label": PRIMARY_LABEL,
-        "computation": {
-            "cv": {
-                "folds": [
-                    {
-                        "fold": int(split["fold"]),
-                        "train_start": str(split["train_start"]),
-                        "train_end": str(split["train_end"]),
-                        "val_start": str(split["val_start"]),
-                        "val_end": str(split["val_end"]),
-                    }
-                    # The complete canonical set, never the reduced one. The holdout id is
-                    # derived from these, so a reduced run must still see all of them or it
-                    # gets an id a full run assigns to a validation fold.
-                    for split in canonical_splits
-                ]
-            }
-        },
-    },
-    case_study=CASE_STUDY_ID,
-    timeline=label_frame.select("timestamp").unique().sort("timestamp").to_series().to_list(),
-    label=PRIMARY_LABEL,
-)
-_holdout_fold = _holdout_cv["folds"][0]
-HOLDOUT_FOLD_ID = int(_holdout_fold["fold"])
 if MAX_FOLDS > 0:
-    splits = canonical_splits[:MAX_FOLDS]
-
-assert HOLDOUT_FOLD_ID not in {int(split["fold"]) for split in canonical_splits}, (
-    "the derived holdout fold reuses a validation fold id, so its features would join "
-    "against a fold fitted on a window that ends before the holdout opens"
-)
-# Two lists, deliberately, and the names say which is which. `splits` stays the five
-# walk-forward periods it has always been, because everything that *describes* the
-# evaluation design reads it: the period table, the timeline figure, section D's regime
-# summary and - the one that matters - section F's IC screen, which would otherwise join
-# the holdout fold's evaluation window and take a statistic over rows it must not read.
-# `artifact_splits` is that list plus the holdout period, and only the code that builds
-# the file reads it. Appending to `splits` instead put the holdout fold into all of them
-# at once.
-artifact_splits = [
-    *splits,
-    {
-        "fold": HOLDOUT_FOLD_ID,
-        **{k: _holdout_fold[k] for k in ("train_start", "train_end", "val_start", "val_end")},
-    },
-]
+    splits = splits[:MAX_FOLDS]
 
 
 def _as_date(value) -> date:
@@ -441,46 +404,21 @@ print(
 )
 
 # %% [markdown]
-# The figure draws what the saved file will contain: for each period, its training
-# window, the evaluation window that follows, and the holdout.
+# The figure draws the five evaluation windows and the gap in front of each. Read it as a
+# picture of what section F screens over, not of what bounds a fit - nothing here bounds a
+# fit any more. The gap between each pair of bars is the purge, sized to the label horizon
+# so that no training session's outcome reaches into the window a model is scored on, and
+# no bar crosses into the shaded holdout.
 #
-# Read it with section A's rule in hand. The training window is where the hidden Markov
-# model's parameters come from, all of them, which is why C.3 can check its estimates
-# against the right-hand edge of that bar. ARIMA's weights are not confined to it - they
-# are refreshed every `ARIMA_REFIT_FREQ` sessions across the evaluation window too - so
-# what bounds ARIMA is not this picture but the direction it walks, which C.1 sets out. What the figure does show for
-# both is the gap between the two bars, sized to the label horizon so that no training
-# session's outcome reaches into the window the model is scored on, and that no bar
-# crosses into the shaded region at all.
+# The estimation schedule is drawn separately, once the series each model reads has been
+# built: ARIMA at the end of C.1 and the regime chain at the end of C.3, each against its
+# own series, because their burn-ins are paid on series that begin at different dates.
 #
-# Every bar stops short of the holdout, because this notebook writes features for the
-# walk-forward periods only. `append_holdout_fold_if_needed` appends a holdout *fold
-# definition* to a later stage's split list; it fits nothing and writes no feature. So a
-# holdout retrain gets a window to train and predict over, and reads whatever this file
-# already holds inside it.
-#
-# The bars are periods, not the file's row index. Rows are keyed on
-# `(fold, timestamp, product, position)` across the whole price calendar, so rows dated
-# inside the holdout do exist in the file. What keeps them honest is which columns carry
-# a value there, and section E prints that count column by column. A model that reads no
-# forward return is bounded by where its *parameters* came from, so emitting a value
-# **for** a holdout date from parameters estimated entirely before it is legitimate.
-#
-# **This file carries a holdout vintage, and section E is where it shows.** The five
-# `fft_*` columns run to the end of the calendar in every period, because a spectral window
-# over past prices needs no fit. The four that do need one are null across the holdout in
-# every VALIDATION period, and populated in the holdout period alone - which is the
-# distinction the whole design rests on. Each of the two models reaches it its own way, and
-# neither lets a parameter see a holdout session: ARIMA estimates once at the cutoff before
-# the window opens and rolls those frozen coefficients forward (C.1), and the hidden Markov
-# model estimates on its period's training window, which ends 21 sessions short of the
-# boundary, then runs the filter forward across the holdout (C.3).
-#
-# An earlier version of this paragraph said the vintage was not produced here and named
-# `append_holdout_fold_if_needed` as what would produce it. That function appends a split
-# definition and fits nothing, so nothing produced it and a holdout retrain would have fitted
-# four of its nine model-based columns on nulls. Measured then: 0 of 217,605 holdout-dated
-# rows carried any of the four.
+# **The file this notebook writes carries rows dated inside the holdout, and that is
+# deliberate.** A holdout evaluation downstream needs a feature value on those sessions.
+# What must not reach into the holdout is an estimate, and neither model makes one there:
+# both stop re-estimating at the last session before the boundary and carry that estimate
+# across frozen. Section E prints, column by column, what is populated where.
 
 # %%
 fig = go.Figure()
@@ -523,12 +461,13 @@ fig.update_layout(
     title=(
         "Each period trains, waits out the label horizon, then evaluates"
         "<br><sup>The gap between the bars is the purge. The dashed rule is where the "
-        "holdout opens; the shaded region is held out.</sup>"
+        "holdout opens; the shaded region is held out."
+        "<br>These windows bound the screen in section F, not the fits.</sup>"
     ),
     xaxis_title="Session",
     yaxis_title="",
     height=360,
-    margin={"l": 90},
+    margin={"l": 90, "t": 110},
 )
 show_plotly_with_alt(
     fig,
@@ -650,34 +589,25 @@ print(f"Carry data: {len(carry):,} product-dates")
 # for the number of weights it uses. Seasonal terms are excluded from that search,
 # because the seasonality this case study cares about is measured directly in C.2.
 #
-# **Why every value it emits is a forecast and not a fit.** Within each period, one call
-# walks the window a session at a time: at each step the model sees the history up to
-# that session and predicts the next one. What is emitted for a session is therefore the
-# prediction made before the session happened, over training dates and evaluation dates
-# alike, and the weights behind it are re-estimated every `ARIMA_REFIT_FREQ` steps.
-# There are no fitted-in-place values anywhere in the output. The walk cannot begin until
-# there is enough history to estimate from, so the first `ARIMA_BURNIN` sessions of each
-# product's history inside the period get no value.
+# **Why every value it emits is a forecast and not a fit.** One call walks each product's
+# whole history a session at a time: at each step the model sees the history up to that
+# session and predicts the next one. What is emitted for a session is therefore the
+# prediction made before the session happened, and the weights behind it are re-estimated
+# every `ARIMA_REFIT_FREQ` steps. There are no fitted-in-place values anywhere in the
+# output. The walk cannot begin until there is enough history to estimate from, so the
+# first `ARIMA_BURNIN` sessions of each product's history get no value.
 #
 # The two features are the forecast itself, `arima_carry_forecast`, and what it missed,
 # `arima_carry_residual` - the realised z-score minus the forecast. A large residual says
 # carry moved in a way its own recent path did not imply.
 
 # %% [markdown]
-# Every product with enough history goes into one call per period, as a long frame keyed
-# by product and date. The library walks those series together, spread across cores. It is
-# the same walk-forward routine as
-# [`10_uncertainty_features`](../../09_model_based_features/10_uncertainty_features.ipynb).
-
-# %% [markdown]
-# Two settings govern the walk, and both are bound in the parameters cell so a reduced
-# run can lower the cost of this section without narrowing the universe or the periods.
-# `ARIMA_BURNIN` is how much of a product's history inside a period is spent before the
-# first forecast: a trading year, so the first order is chosen from a full year of the
-# series rather than from a few weeks of it. `ARIMA_REFIT_FREQ` is how often the order
-# and weights are re-chosen as the walk proceeds: monthly, which keeps them current
-# without repeating the order search on every session of a training window that runs to
-# several thousand.
+# Every product with enough history goes into one call, as a long frame keyed by product
+# and date. The library walks those series together, spread across cores. It is the same
+# walk-forward routine as
+# [`10_uncertainty_features`](../../09_model_based_features/10_uncertainty_features.ipynb),
+# and the two settings that govern it - the burn-in and the refit cadence - are the ones
+# `setup.yaml` declares under `model_based.arima`.
 
 # %%
 _carry_ts_dtype = carry.schema["timestamp"]
@@ -695,16 +625,14 @@ def _date_lit(value) -> pl.Expr:
 
 
 # %% [markdown]
-# **One walk per product over the whole history, not one per period.** The forecasts are then
-# replicated onto every period, which is what section C.2 already does with the spectral
-# features.
+# **One walk per product over the whole history, not one per period.**
 #
-# The periods do not bound this model. Section A gives two honest ways to keep a fitted
-# feature causal, and ARIMA uses the second: it re-estimates every `ARIMA_REFIT_FREQ` sessions
-# on everything up to that point, so a forecast for a session is made by weights fitted only on
-# earlier ones. That holds whether or not a period boundary happens to sit nearby. It is the
-# hidden Markov model in C.3 that needs the window, because it fits once per period and then
-# holds its parameters fixed.
+# The periods do not bound this model. It re-estimates every `ARIMA_REFIT_FREQ` sessions on
+# everything up to that point, so a forecast for a session is made by weights fitted only on
+# earlier ones, whether or not a period boundary happens to sit nearby. That is the schedule
+# section A describes, and since 2026-09-04 the hidden Markov model in C.3 is on one too -
+# so the forecasts are no longer replicated onto anything. One value per product and
+# session goes into the file.
 #
 # Cutting the walk per period bought nothing and cost two things. `cross_validation` takes one
 # `n_windows` for every series in a call and validates it against the shortest - hand it a
@@ -840,16 +768,13 @@ def _arima_walk() -> pl.DataFrame:
 
 
 # %% [markdown]
-# One walk, then one copy per period. The period column exists so this artifact joins the
-# fold-keyed panel the model notebooks read; for the validation periods every one carries the
-# same value on the same date, which is the same shape `fft_pl` takes in C.2.
+# One walk, and then a second one for the holdout - the reason this section has two.
 #
-# **The holdout period is the exception, and it is why this section has a second walk.** The
-# walk above cuts its INPUT at `HOLDOUT_START`, which is the whole guarantee for the validation
-# periods and is also why copying it to the holdout period emits nothing there: a period is a
-# label on rows, and rows that were never computed do not appear because a fold id was attached
-# to them. Measured before this was added, with the holdout fold present: 0 of 217,605 rows in
-# the holdout window carried an ARIMA value.
+# The walk above cuts its INPUT at `HOLDOUT_START`, which is the whole guarantee that no
+# weight is estimated on a holdout session. It also means the walk emits nothing inside the
+# holdout window, and a holdout evaluation downstream needs a value on every one of those
+# sessions. Measured before the second walk was added: 0 of 217,605 rows in the holdout
+# window carried an ARIMA value.
 #
 # `_arima_holdout_tail` runs the same one-step walk across the holdout window with `refit=False`,
 # so `cross_validation` estimates once, at the cutoff immediately before the first holdout
@@ -920,135 +845,81 @@ arima_holdout = (
     if arima_walk.height
     else arima_walk.clear()
 )
-# The holdout period carries the validation walk's pre-holdout rows AND the frozen-coefficient
-# tail. Its training window ends before the holdout opens, so it needs those rows to train on,
-# and they are the same numbers every validation period carries on the same dates.
-arima_results = (
-    [
-        (
-            pl.concat([arima_walk, arima_holdout])
-            if int(split["fold"]) == HOLDOUT_FOLD_ID
-            else arima_walk
-        ).with_columns(pl.lit(split["fold"], dtype=pl.Int64).alias("fold"))
-        for split in artifact_splits
-    ]
+# One frame: the pre-holdout walk and the frozen-coefficient tail, end to end. They cover
+# disjoint dates by construction - the walk's input is cut at the boundary and the tail
+# starts there - so this is a concatenation and not a merge.
+arima_pl = (
+    pl.concat([arima_walk, arima_holdout]).sort(["product", "timestamp"])
     if arima_walk.height
-    else []
-)
-arima_elapsed = time.time() - arima_t0
-
-# %%
-if arima_results:
-    arima_pl = pl.concat(arima_results)
-    if arima_pl["timestamp"].dtype != pl.Date:
-        arima_pl = arima_pl.with_columns(pl.col("timestamp").cast(pl.Date))
-    print(
-        f"\nARIMA total: {len(arima_pl):,} rows across "
-        f"{arima_pl['product'].n_unique()} products, "
-        f"{arima_pl['fold'].n_unique()} periods in {arima_elapsed:.0f}s"
-    )
-else:
-    arima_pl = pl.DataFrame(
+    else pl.DataFrame(
         schema={
             "timestamp": pl.Date,
             "product": pl.String,
             "arima_carry_forecast": pl.Float64,
             "arima_carry_residual": pl.Float64,
-            "fold": pl.Int64,
         }
     )
+)
+if arima_pl.height and arima_pl["timestamp"].dtype != pl.Date:
+    arima_pl = arima_pl.with_columns(pl.col("timestamp").cast(pl.Date))
+arima_elapsed = time.time() - arima_t0
+
+# %%
+if arima_pl.height:
+    print(
+        f"\nARIMA total: {len(arima_pl):,} rows across "
+        f"{arima_pl['product'].n_unique()} products in {arima_elapsed:.0f}s"
+    )
+else:
     print("No ARIMA results generated")
 
 # %% [markdown]
 # **Check what the emitted rows are dated, and what each period actually receives.**
 #
-# The date check is now one line, because the walk is one series per product rather than five
-# windows: nothing may be dated on or after the holdout. What used to be checked here - that a
-# period's rows sit inside that period's own span - is no longer a property this feature has or
-# should have. Every period carries the same forecast for the same date, so the next cell checks
-# the replication instead: the five copies must agree.
+# The date checks are about the boundary rather than about periods. Rows dated before the
+# holdout come from the walk; rows dated inside it come from the frozen tail and have to
+# exist, because a holdout evaluation reads them - an empty holdout was the defect this
+# section was rewritten to fix, and a check that only forbade holdout-dated values would
+# have been satisfied perfectly by emitting none.
 #
-# What none of this establishes is where the weights came from, and no assertion over the output
-# frame could, because the weights are not in the frame. What bounds them is the shape of the
-# call - every refit reads a prefix ending before the sessions it goes on to forecast - together
-# with the holdout cut being applied to the input in `_arima_walk`. The hidden Markov model in
-# C.3, whose parameters are fixed per period and therefore *are* checkable against a date, is
-# where an assertion of that kind belongs and where one runs.
+# What none of this establishes is where the weights came from, and no assertion over the
+# output frame could, because the weights are not in the frame. What bounds them is the
+# shape of the call - every refit reads a prefix ending before the sessions it goes on to
+# forecast - together with the holdout cut being applied to the input in `_arima_walk`.
 #
 # Then the coverage, **in both windows of every period**. Until 2026-08-23 this reported the
-# validation window only, and a model trains on the other one - so the number printed here was
-# healthy on every run while the oldest period's training rows were 99.87% empty of the same
-# feature. A coverage diagnostic that reads the window the model does not fit on is not evidence
-# about the fit. `rules/notebook-standards.md` C16 now requires both, and this cell is what
-# motivated the clause.
+# evaluation window only, and a model trains on the other one - so the number printed here
+# was healthy on every run while the oldest period's training rows were 99.87% empty of the
+# same feature. A coverage diagnostic that reads the window the model does not fit on is not
+# evidence about the fit. `rules/notebook-standards.md` C16 now requires both, and this cell
+# is what motivated the clause.
 
 # %%
 if len(arima_pl) > 0:
-    _feature_cols = ["timestamp", "product", "arima_carry_forecast", "arima_carry_residual"]
-    folds_present = sorted(arima_pl["fold"].unique().to_list())
-    validation_folds = [f for f in folds_present if f != HOLDOUT_FOLD_ID]
+    _key = arima_pl.select(pl.struct("product", "timestamp").is_duplicated().sum()).item()
+    assert _key == 0, f"{_key} duplicate (product, timestamp) rows in the ARIMA frame"
 
-    # The date bound now holds per fold class rather than over the whole frame, because the two
-    # classes are supposed to differ. A validation period that reached the holdout would be the
-    # original defect; a holdout period that did NOT reach it is the defect this section was
-    # rewritten to fix, and asserting only the first would have passed on an empty holdout.
-    _validation = arima_pl.filter(pl.col("fold") != HOLDOUT_FOLD_ID)
-    assert _validation["timestamp"].max() < HOLDOUT_START, (
-        "a validation period emitted a holdout-dated row"
-    )
-    _holdout = arima_pl.filter(pl.col("fold") == HOLDOUT_FOLD_ID)
-    _holdout_window = _holdout.filter(pl.col("timestamp") >= _date_lit(HOLDOUT_START))
+    _holdout_window = arima_pl.filter(pl.col("timestamp") >= _date_lit(HOLDOUT_START))
     assert _holdout_window.height > 0, (
-        f"period {HOLDOUT_FOLD_ID} is the holdout period and emitted nothing inside the holdout "
-        "window, so a holdout retrain would fit this column on nulls"
+        "nothing was emitted inside the holdout window, so a holdout retrain would fit "
+        "this column on nulls"
     )
     assert _holdout_window["arima_carry_forecast"].null_count() == 0, (
-        f"period {HOLDOUT_FOLD_ID} emitted holdout-dated rows carrying no forecast"
+        "a holdout-dated row carries no forecast"
     )
-    assert _holdout["timestamp"].max() <= HOLDOUT_END, (
-        "the holdout period emitted a row past the end of the holdout window"
+    assert _holdout_window["timestamp"].max() <= HOLDOUT_END, (
+        "a row was emitted past the end of the holdout window"
     )
-
-    reference_fold = validation_folds[0]
-    reference = (
-        arima_pl.filter(pl.col("fold") == reference_fold)
-        .select(_feature_cols)
-        .sort(["product", "timestamp"])
-    )
-    for fold in validation_folds[1:]:
-        other = (
-            arima_pl.filter(pl.col("fold") == fold)
-            .select(_feature_cols)
-            .sort(["product", "timestamp"])
-        )
-        assert other.equals(reference), (
-            f"period {fold} disagrees with period {reference_fold} on a feature that is "
-            "computed once and copied, so the copies have drifted"
-        )
-    # The holdout period is the validation walk plus its own tail, so its pre-holdout rows must
-    # be identical to the copies - anything else means the two walks disagree about history.
-    _holdout_pre = (
-        _holdout.filter(pl.col("timestamp") < _date_lit(HOLDOUT_START))
-        .select(_feature_cols)
-        .sort(["product", "timestamp"])
-    )
-    assert _holdout_pre.equals(reference), (
-        f"period {HOLDOUT_FOLD_ID} disagrees with the validation periods before the holdout "
-        "opens, so its tail was appended to a different history"
-    )
+    _pre = arima_pl.filter(pl.col("timestamp") < _date_lit(HOLDOUT_START))
     print(
-        f"One walk, copied to {len(validation_folds)} validation periods, which agree exactly; "
-        f"the last date any of them emits is {_validation['timestamp'].max()}, before the "
-        f"holdout opens on {HOLDOUT_START}."
-    )
-    print(
-        f"Period {HOLDOUT_FOLD_ID} carries that same history plus {_holdout_window.height:,} "
-        f"forecasts from {_holdout_window['timestamp'].min()} to "
-        f"{_holdout_window['timestamp'].max()}, on coefficients estimated before "
-        f"{HOLDOUT_START}."
+        f"One walk over {arima_pl['product'].n_unique()} products: "
+        f"{_pre.drop_nulls('arima_carry_forecast').height:,} forecasts before the holdout "
+        f"opens {HOLDOUT_START}, and {_holdout_window.height:,} inside it from "
+        f"{_holdout_window['timestamp'].min()} to {_holdout_window['timestamp'].max()}, on "
+        f"coefficients estimated before the boundary."
     )
     print("Product-sessions carrying an ARIMA value, per period, in each window:")
-    for split in artifact_splits:
+    for split in splits:
         for window, start_date, end_date in (
             ("train", split["train_start"], split["train_end"]),
             ("valid", split["val_start"], split["val_end"]),
@@ -1057,15 +928,49 @@ if len(arima_pl) > 0:
                 pl.col("timestamp") <= _as_date(end_date)
             )
             quoted = carry.filter(_in).height
-            covered = (
-                arima_pl.filter((pl.col("fold") == split["fold"]) & _in)
-                .drop_nulls("arima_carry_forecast")
-                .height
-            )
+            covered = arima_pl.filter(_in).drop_nulls("arima_carry_forecast").height
             print(
                 f"  period {split['fold']} {window}: {covered:>7,} of {quoted:>7,} quoted "
                 f"({100 * covered / max(quoted, 1):5.1f}%)"
             )
+
+# %% [markdown]
+# **The schedule this walk actually ran, drawn against the series it read.** The grey
+# stretch is the burn-in each product spends before its first forecast; the blue stretch is
+# where the order and weights are re-chosen every `ARIMA_REFIT_FREQ` sessions; the amber
+# stretch past the rule is the holdout, over which the last pre-boundary estimate is carried
+# frozen. Products list at different dates, so the burn-in ends at a different session for
+# each one and the rows are not aligned - the row for the shortest series is the one to read
+# against the evaluation windows in section B.
+
+# %%
+if arima_pl.height:
+    _arima_schedule = (
+        carry.filter(pl.col("product").is_in(arima_pl["product"].unique().to_list()))
+        .filter(pl.col("timestamp") < _date_lit(HOLDOUT_START))
+        .drop_nulls(subset=["carry_zscore"])
+        .group_by("product")
+        .agg(
+            pl.len().alias("pre_holdout_sessions"),
+            pl.col("timestamp").min().alias("first_session"),
+        )
+        .with_columns(
+            (pl.col("pre_holdout_sessions") - ARIMA_BURNIN).alias("forecasts"),
+            (
+                (pl.col("pre_holdout_sessions") - ARIMA_BURNIN + ARIMA_REFIT_FREQ - 1)
+                // ARIMA_REFIT_FREQ
+            ).alias("estimates"),
+        )
+        .sort("pre_holdout_sessions")
+    )
+    print(
+        f"ARIMA burn-in {ARIMA_BURNIN}, refit every {ARIMA_REFIT_FREQ}: "
+        f"{_arima_schedule['estimates'].sum():,} estimates over "
+        f"{_arima_schedule['forecasts'].sum():,} forecasts, "
+        f"{_arima_schedule['estimates'].min()} to {_arima_schedule['estimates'].max()} "
+        f"per product."
+    )
+    _arima_schedule.head(5)
 
 # %% [markdown]
 # ---
@@ -1178,11 +1083,10 @@ def rolling_fft_features(
 # %% [markdown]
 # One product at a time, over its whole history. This transform is the exception in
 # section C: it estimates nothing. ARIMA fits weights and the model in C.3 fits state
-# means and transition probabilities, so both have to be confined to a training window;
-# the transform of a window is a fixed calculation on the numbers in it, with no
-# parameters to carry information out of one period into another. That makes it safe to
-# run once over the full history, on the same footing as a rolling average, and the
-# window is backward-looking, so no session's value reads a later one.
+# means and transition probabilities, so both are bound by a refit schedule; the transform
+# of a window is a fixed calculation on the numbers in it, with no parameters at all. That
+# makes it safe to run once over the full history, on the same footing as a rolling
+# average, and the window is backward-looking, so no session's value reads a later one.
 
 # %%
 fft_results = []
@@ -1207,23 +1111,17 @@ for product in ARIMA_PRODUCTS:
     print(f"  {product}: {valid_count} valid FFT observations")
 
 # %% [markdown]
-# The values are then copied once per period. They are identical in every period, since
-# nothing was estimated, but the period number is part of the key the models downstream
-# join on, and it has to be present on every feature or that join needs a special case
-# for this one column family. The row counts either side of the copy are printed below,
-# so the multiplication is visible rather than implied.
+# One value per product and session, and that is the whole frame. Until 2026-09-04 these
+# values were then copied once per period, because the period number was part of the key
+# the models downstream joined on and every feature had to carry it. Nothing was estimated,
+# so the copies were identical; they existed to satisfy a key that no longer has a period
+# in it.
 
 # %%
 if fft_results:
-    fft_base = pl.concat(fft_results)
-    fft_pl = pl.concat(
-        [fft_base.with_columns(pl.lit(s["fold"]).alias("fold")) for s in artifact_splits]
-    )
-    print(f"\nSpectral features computed on {len(fft_base):,} distinct product-sessions")
-    print(
-        f"Copied across periods: {len(fft_pl):,} rows, "
-        f"{fft_pl['product'].n_unique()} products, {fft_pl['fold'].n_unique()} periods"
-    )
+    fft_pl = pl.concat(fft_results)
+    fft_base = fft_pl
+    print(f"\nSpectral features computed on {len(fft_pl):,} distinct product-sessions")
 else:
     fft_pl = pl.DataFrame(
         schema={
@@ -1234,9 +1132,9 @@ else:
             "fft_spectral_entropy": pl.Float64,
             "fft_energy_63d": pl.Float64,
             "fft_energy_126d": pl.Float64,
-            "fold": pl.Int64,
         }
     )
+    fft_base = fft_pl
     print("No FFT results generated")
 
 # %% [markdown]
@@ -1296,12 +1194,13 @@ if fft_results:
 # probable state has held.
 #
 # **Two things have to be got right, and they are different things.** The parameters are
-# estimated on each period's training sessions alone. And the state probabilities are
-# obtained by running the model *forward* - the answer for a session uses that session
-# and every earlier one, and nothing later. The library's own `predict_proba` answers a
-# different question, conditioning on the entire series, and its answer for a given
-# session changes when data from months afterwards arrives. That quantity did not exist
-# at the time and cannot be a feature. Both are checked by assertion below.
+# re-estimated on a schedule, each estimate reading only sessions earlier than the ones it
+# then speaks for. And the state probabilities are obtained by running the model *forward*
+# - the answer for a session uses that session and every earlier one, and nothing later.
+# The library's own `predict_proba` answers a different question, conditioning on the
+# entire series, and its answer for a given session changes when data from months
+# afterwards arrives. That quantity did not exist at the time and cannot be a feature.
+# Both are checked by assertion below.
 #
 # Three pieces of machinery are shared with the other case studies that fit a hidden
 # Markov model, in `case_studies/utils/temporal.py`: the fit that starts EM from a
@@ -1320,12 +1219,12 @@ if fft_results:
 
 # %% [markdown]
 # **Giving the two states a stable identity.** EM returns them in whatever order it
-# converged to, so without a rule the same fitted state can come back as state 0 in one
-# period and state 1 in the next, and a feature named after one of them would mean
-# different things in different periods. The rule has to be the quantity the feature name
+# converged to, so without a rule the same fitted state can come back as state 0 for one
+# estimate and state 1 for the next, and a feature named after one of them would mean
+# different things along its own length. The rule has to be the quantity the feature name
 # claims: `hmm_carry_regime_prob` is the probability of the *higher-carry* state, so the
-# states are ordered on their estimated average carry, lower first. Section D draws the
-# two averages per period, which is where that ordering can be checked.
+# states are ordered on their estimated average carry, lower first. Section D draws the two
+# averages across estimates, which is where that ordering can be checked.
 
 # %% [markdown]
 # #### Building the one number per session the model reads
@@ -1426,15 +1325,12 @@ def _portfolio_series(source: pl.DataFrame) -> pl.DataFrame:
 
 portfolio_carry = _portfolio_series(pre_holdout_carry)
 
-# The same series, uncut, and it is used for one thing: the forward path of the holdout period.
-# The estimate never touches it - `_fit_hmm_fold` fits on `[train_start, train_end]`, which ends
-# before the holdout opens for every period including that one - so the parameters are identical
-# whichever frame is passed, and the validation periods index exactly what they indexed before.
-# What the uncut frame adds is sessions to run the filter ACROSS, which is what was missing:
-# `portfolio_carry` stops at the boundary, so the holdout period's evaluation window was empty,
-# `_fit_hmm_fold` returned early on `len(test_carry) < 20`, and the period got no regime
-# probability at all. `HOLD_LAST_SETTLE_SESSIONS` is still measured on the cut series above,
-# because a constant chosen by looking at the holdout is a parameter estimated on the holdout.
+# The same series, uncut. This is the one the walk reads, because the holdout needs a value
+# on every one of its sessions. What must not reach into the holdout is an ESTIMATE, and
+# that is `freeze_after`'s job rather than a cut on the input: past the last pre-holdout
+# session the walk stops re-estimating and keeps applying what it last fitted.
+# `HOLD_LAST_SETTLE_SESSIONS` is still measured on the cut series above, because a constant
+# chosen by looking at the holdout is a parameter estimated on the holdout.
 portfolio_carry_full = _portfolio_series(carry)
 assert portfolio_carry_full.filter(pl.col("timestamp") < _date_lit(HOLDOUT_START)).equals(
     portfolio_carry
@@ -1469,219 +1365,264 @@ def _regime_duration(test_states: np.ndarray) -> np.ndarray:
 
 
 # %% [markdown]
-# One period: estimate on its training window, then run the model forward from the first
-# training session to the last evaluation session. Both windows get a value because the
-# models downstream need a feature everywhere they have a row, and a value on a training
-# session is no less legitimate - it was produced by running forward from the start of the
-# window to that session, exactly as the evaluation values were.
+# **One walk over the whole series, on the schedule `setup.yaml` declares.** The first
+# `HMM_BURNIN` sessions pay for the first estimate and carry no value. From there the chain
+# is re-estimated every `HMM_REFIT_EVERY` sessions on everything up to that point, and each
+# estimate produces the values for the sessions between it and the next one. No session is
+# ever used to estimate the chain that describes it.
 #
-# The walk covers the purge gap between the two windows as well, even though no feature is
-# written there. A filtered probability is a running summary of everything seen so far, so
-# it has to be carried across the gap session by session; jumping the gap in one step would
-# hand the first evaluation session a summary a week out of date, and the regime durations
-# would restart at the gap rather than continue through it. Reading the gap's own sessions
-# is not look-ahead, because every one of them is in the past of every evaluation session.
-# The gap exists so that a training label does not overlap an evaluation label.
+# The filter is run over the whole prefix each time rather than restarted at the block
+# boundary. A filtered probability is a running summary of everything seen so far, so
+# restarting it would hand the first session of a block a summary with no history behind
+# it; running from the beginning with the current parameters and keeping only the block's
+# own rows gives the value a reader would have had at the time, from a chain refreshed on
+# schedule.
+#
+# `freeze_after` is the index of the last pre-holdout session. Past it the walk stops
+# re-estimating and keeps applying the last estimate it made, so the holdout gets values
+# and contributes no parameter - the same distinction `_arima_holdout_tail` draws in C.1,
+# here supplied by the shared driver.
+#
+# **This replaces one fit per period.** Under that arrangement the chain was estimated on a
+# period's whole training window and then filtered forward from the *start* of that same
+# window, so the earliest training rows of an eight-year window carried parameters
+# estimated from eight years of their own future while every evaluation row carried
+# parameters estimated only from its past. Section A sets out why nothing raised.
 
 
 # %%
-def _fit_hmm_fold(
-    portfolio_df: pl.DataFrame,
-    split: dict[str, str],
-    fold_idx: int,
-    *,
-    describe_evaluation: bool = True,
-):
-    """Estimate on training rows, run forward over train and evaluation, return both.
+def hmm_fit(train: np.ndarray) -> tuple[GaussianHMM, np.ndarray]:
+    """Estimate the chain on one window, and order its states by fitted mean carry.
 
-    Returns ``(fold_df, params)`` where ``params`` carries the estimated quantities in the
-    sorted state order, so section D can draw what was estimated rather than what the
-    emitted features happened to average to.
+    `order` is ascending, so `order[1]` is the higher-carry state - the one
+    `hmm_carry_regime_prob` is named for. EM returns the states in whatever order it
+    converged to, so without this rule the same fitted state comes back as state 0 for one
+    estimate and state 1 for the next, and the column would mean different things along
+    its own length.
     """
-    train_start = pd.Timestamp(split["train_start"]).date()
-    train_end = pd.Timestamp(split["train_end"]).date()
-    test_start = pd.Timestamp(split["val_start"]).date()
-    test_end = pd.Timestamp(split["val_end"]).date()
-
-    train_carry = portfolio_df.filter(
-        (pl.col("timestamp") >= train_start) & (pl.col("timestamp") <= train_end)
-    )
-    test_carry = portfolio_df.filter(
-        (pl.col("timestamp") >= test_start) & (pl.col("timestamp") <= test_end)
-    )
-    if len(train_carry) < 200 or len(test_carry) < 20:
-        print(f"Period {fold_idx}: skipping, not enough sessions")
-        return None, None
-
-    # The sessions the filter walks: every session from the start of training to the end
-    # of evaluation, with none missing in the middle. The purge gap between the two
-    # windows holds real sessions, and they sit in the past of every evaluation session,
-    # so reading them is not look-ahead - the gap is there to stop a training label
-    # overlapping an evaluation one, not to blind a forward recursion. Stacking the two
-    # windows straight onto each other instead skipped them, which applied a single
-    # transition across the whole gap and started the evaluation window from a state
-    # distribution that had seen nothing for a week.
-    path = portfolio_df.filter(
-        (pl.col("timestamp") >= train_start) & (pl.col("timestamp") <= test_end)
-    ).sort("timestamp")
-    emitted = (pl.col("timestamp") <= train_end) | (pl.col("timestamp") >= test_start)
-
-    X_train = train_carry["portfolio_carry"].to_numpy().reshape(-1, 1)
-    X_path = path["portfolio_carry"].to_numpy().reshape(-1, 1)
     # One thread, so that two runs land on the same parameters: see above.
     with threadpool_limits(limits=1):
-        try:
-            model = fit_hmm_kmeans_init(X_train, n_states=2, random_state=SEED + fold_idx)
-        except Exception as exc:
-            print(f"Period {fold_idx}: estimation failed ({exc})")
-            return None, None
+        model = fit_hmm_kmeans_init(train, n_states=HMM_N_STATES, random_state=SEED)
+    return model, sort_states_by_mean(model)
 
-        order = sort_states_by_mean(model)
 
-        # Forward, from the start of training to the end of evaluation. Each probability
-        # reads its own session and the ones before it, and nothing after. Parameters
-        # come from the training rows alone, above.
-        path_probs = filtered_state_probs(model, X_path)[:, order]
-    path_states = np.argmax(path_probs, axis=1)
-    # Run length is counted along the walked path, so a regime that carries through the
-    # gap is one run rather than two.
-    path_duration = _regime_duration(path_states)
+def hmm_apply(fitted: tuple[GaussianHMM, np.ndarray], prefix: np.ndarray) -> np.ndarray:
+    """P(higher-carry state) at every row of a prefix, by forward recursion."""
+    model, order = fitted
+    with threadpool_limits(limits=1):
+        return filtered_state_probs(model, prefix)[:, order[1]].reshape(-1, 1)
 
-    fold_df = path.select("timestamp").with_columns(
-        pl.Series("hmm_carry_regime_prob", path_probs[:, 1]),  # P(higher-carry state)
-        pl.Series("hmm_regime_duration", path_duration),
-        pl.lit(fold_idx).alias("fold"),
-    )
-    fold_df = fold_df.filter(emitted)
 
-    # The mix over the evaluation window, printed for the walk-forward periods and withheld
-    # for the holdout period. For that period the evaluation window IS the holdout, so the
-    # two lines below would be a description of holdout data - a regime split rendered into
-    # the notebook, read by whoever tunes the next thing. The features themselves are
-    # written either way; what is withheld is the summary of them.
-    if describe_evaluation:
-        test_states = path_states[path["timestamp"].to_numpy() >= test_start]
-        for k in range(2):
-            label = "Lower-carry" if k == 0 else "Higher-carry"
-            frac = (test_states == k).mean() if len(test_states) > 0 else 0
-            print(f"  {label} state holds on {frac:.1%} of the evaluation sessions")
-    else:
-        print("  evaluation-window regime mix withheld: this period's window is the holdout")
+# %% [markdown]
+# The seed is a constant rather than a per-block draw. It used to be `SEED + fold_idx`, one
+# seed per period, which made the five fits independent draws; there is no period to index
+# now, and a seed that moved with the block index would make consecutive estimates differ
+# for a reason that is not the data.
 
-    # `order` is ascending in mean carry, so order[1] is the higher-carry state.
+# %%
+hmm_series = portfolio_carry_full.sort("timestamp")
+hmm_dates = hmm_series["timestamp"].to_list()
+hmm_obs = hmm_series["portfolio_carry"].to_numpy().reshape(-1, 1)
+HMM_FROZEN_AFTER = sum(d < HOLDOUT_START for d in hmm_dates)
+print(
+    f"The chain reads one observation on each of {len(hmm_dates):,} sessions, "
+    f"{hmm_dates[0]} to {hmm_dates[-1]}; parameters frozen after "
+    f"{hmm_dates[HMM_FROZEN_AFTER - 1]}, the last before the holdout."
+)
+
+# %%
+hmm_estimates = []
+
+
+def _hmm_recording_fit(train: np.ndarray) -> tuple[GaussianHMM, np.ndarray]:
+    """Estimate one block and record what came out of it, for section D."""
+    model, order = hmm_fit(train)
     low, high = int(order[0]), int(order[1])
     transmat = model.transmat_[np.ix_(order, order)]
-    params = {
-        "fold": fold_idx,
-        "mean_carry_low": float(model.means_[low][0]),
-        "mean_carry_high": float(model.means_[high][0]),
-        "persist_low": float(transmat[0, 0]),
-        "persist_high": float(transmat[1, 1]),
-        "n_train": int(len(X_train)),
-        # The last date behind the parameters above. The check below compares it against
-        # this period's own train_end.
-        "train_last": train_carry["timestamp"].max(),
-    }
-
-    return fold_df, params
-
-
-# %% [markdown]
-# Every period, in order.
-
-# %%
-hmm_results = []
-hmm_fold_params = []
-
-for split in artifact_splits:
-    print(f"\nPeriod {split['fold']}:")
-    _is_holdout = int(split["fold"]) == HOLDOUT_FOLD_ID
-    _series = portfolio_carry_full if _is_holdout else portfolio_carry
-    result, params = _fit_hmm_fold(
-        _series, split, split["fold"], describe_evaluation=not _is_holdout
-    )
-    if result is not None:
-        hmm_results.append(result)
-        hmm_fold_params.append(params)
-
-# %%
-if hmm_results:
-    hmm_pl = pl.concat(hmm_results)
-    print(
-        f"\nRegime features on {len(hmm_pl):,} period-sessions across "
-        f"{hmm_pl['fold'].n_unique()} periods"
-    )
-else:
-    hmm_pl = pl.DataFrame(
-        schema={
-            "timestamp": pl.Date,
-            "hmm_carry_regime_prob": pl.Float64,
-            "hmm_regime_duration": pl.Float64,
-            "fold": pl.Int64,
+    hmm_estimates.append(
+        {
+            "fit_end": int(len(train)),
+            "fit_through": hmm_dates[len(train) - 1],
+            "mean_carry_low": float(model.means_[low][0]),
+            "mean_carry_high": float(model.means_[high][0]),
+            "persist_low": float(transmat[0, 0]),
+            "persist_high": float(transmat[1, 1]),
+            "n_train": int(len(train)),
         }
     )
-    print("No HMM results generated")
+    return model, order
+
+
+hmm_probs = walk_forward_feature(
+    hmm_obs,
+    burnin=HMM_BURNIN,
+    refit_every=HMM_REFIT_EVERY,
+    fit=_hmm_recording_fit,
+    apply=hmm_apply,
+    n_features=1,
+    freeze_after=HMM_FROZEN_AFTER,
+)
+print(f"Regime chain estimated {len(hmm_estimates)} times.")
 
 # %% [markdown]
-# **Check both halves.** Section C.3 makes two claims and the next cell checks each with
-# code that fails the notebook rather than with a sentence.
-#
-# The first is that each period's parameters came from its training sessions only: the
-# last date behind every estimated average and transition probability is compared against
-# that period's own training end.
-#
-# The second is the one that would otherwise be invisible, because a forward-run
-# probability and a whole-series one look equally plausible sitting in a column. The
-# distinguishing property is what happens when later data is removed. Under the
-# whole-series answer, the probability for a given session moves when observations after
-# it are deleted, because it was partly derived from them. Under the forward answer it
-# cannot move at all. So the model is re-estimated on the most recent period, run over
-# the full training window and then over the first half of it, and the two are compared
-# on the sessions they share. A difference of zero is the demonstration.
+# `hmm_regime_duration` is how many consecutive sessions the more probable state has held.
+# It is counted here, over the emitted probability column, rather than inside the walk: it
+# is arithmetic on that column with nothing estimated in it, and counting it along the
+# whole emitted series means a run that carries through a refit is one run rather than two.
+# The count starts at the first valued session, since the burn-in has no state to be in.
 
 # %%
-if hmm_fold_params:
-    splits_by_fold = {s["fold"]: s for s in artifact_splits}
-    for params in hmm_fold_params:
-        split = splits_by_fold[params["fold"]]
-        assert params["train_last"] <= _as_date(split["train_end"]), (
-            f"period {params['fold']}: HMM parameters saw a row past train_end"
+_valued = ~np.isnan(hmm_probs[:, 0])
+hmm_pl = (
+    pl.DataFrame(
+        {
+            "timestamp": [d for d, keep in zip(hmm_dates, _valued, strict=True) if keep],
+            "hmm_carry_regime_prob": hmm_probs[_valued, 0],
+        }
+    )
+    .with_columns(
+        pl.Series(
+            "hmm_regime_duration",
+            _regime_duration((hmm_probs[_valued, 0] >= 0.5).astype(int)),
         )
-        assert params["train_last"] < HOLDOUT_START, (
-            f"period {params['fold']}: HMM parameters saw a holdout row"
-        )
+    )
+    .sort("timestamp")
+)
+print(
+    f"\nRegime features on {len(hmm_pl):,} sessions, {hmm_pl['timestamp'].min()} to "
+    f"{hmm_pl['timestamp'].max()}"
+)
 
-    probe_split = splits[0]
-    probe_train = portfolio_carry.filter(
-        (pl.col("timestamp") >= _as_date(probe_split["train_start"]))
-        & (pl.col("timestamp") <= _as_date(probe_split["train_end"]))
-    )
-    probe_X = probe_train["portfolio_carry"].to_numpy().reshape(-1, 1)
+# %% [markdown]
+# **Check all three claims.** Section C.3 makes three and the next cell checks each with
+# code that fails the notebook rather than with a sentence.
+#
+# The first is that every emitted value's parameters came from a block ending at or before
+# it. `refit_boundaries` returns the same `(fit_end, emit_end)` pairs the walk used, so the
+# check is on the schedule rather than on the values - which is what makes it an assertion
+# about the estimation channel rather than about the recursion.
+#
+# The second is that no estimate read a holdout session. Every recorded estimate carries
+# the last date behind it, and all of them have to fall before the boundary.
+#
+# The third is the one that would otherwise be invisible, because a forward-run probability
+# and a whole-series one look equally plausible sitting in a column. `predict_proba`
+# conditions on the entire series, so its answer for a session moves when observations after
+# it arrive; the forward recursion's cannot. Nothing about the emitted numbers says which
+# one produced them.
+#
+# **The obvious check does not work here, and it is worth saying why rather than shipping
+# it.** Deleting the tail of the series and re-running the walk tests almost nothing.
+# `walk_forward_feature` hands each block the prefix `X[:emit_end]` and keeps only
+# `values[fit_end:emit_end]`, and the block boundaries are a function of the burn-in and the
+# cadence alone - so every block whose window ends before the cut receives a byte-identical
+# prefix in both runs and must agree whatever `apply` does. Only the block the cut falls in
+# carries any evidence at all, and if that stretch happens to be one where the two answers
+# coincide, the test passes on a walk that reads the whole future. Measured on this series
+# with `predict_proba` substituted for the forward recursion: a mid-block cut agreed to
+# 4.3e-12, and a cut over the whole series to 5.9e-13. Both would have passed.
+#
+# **So the check is run the other way round.** The walk is run a second time with the
+# smoothed answer in place of the forward one, and the two emitted columns are required to
+# be **far apart**. That is what makes the column's identity checkable: if the two answers
+# were indistinguishable on this series, no evidence could establish which one is in the
+# file, and the assertion below says so instead of passing quietly. If someone replaced
+# `filtered_state_probs` with `predict_proba` in `hmm_apply`, the separation would collapse
+# to zero and this cell would stop the notebook - which is precisely the substitution that
+# defeated the truncation test.
+#
+# The second walk costs about two seconds; the property it establishes is the one the
+# section is about.
+#
+# The burn-in is reported rather than hidden. The oldest period trains from the first
+# session of the panel, so the burn-in comes out of that period's training window; the cell
+# says how many sessions that is and confirms it reaches no evaluation window.
+
+# %%
+_covered = np.zeros(len(hmm_dates), dtype=bool)
+for fit_end, emit_end in refit_boundaries(len(hmm_dates), HMM_BURNIN, HMM_REFIT_EVERY):
+    _covered[fit_end:emit_end] = True
+assert not (_valued & ~_covered).any(), (
+    "a regime probability was emitted at an index no estimation block speaks for"
+)
+assert not _valued[:HMM_BURNIN].any(), (
+    "a regime probability was emitted inside the burn-in, before any estimate existed"
+)
+assert all(e["fit_through"] < HOLDOUT_START for e in hmm_estimates), (
+    "an estimate read a holdout session, so `freeze_after` did not bind"
+)
+assert hmm_pl["timestamp"].max() >= HOLDOUT_START, (
+    "the walk emitted nothing inside the holdout, which is the vintage a holdout evaluation reads"
+)
+
+_oldest_split = min(splits, key=lambda item: _as_date(item["train_start"]))
+_first_regime = hmm_pl["timestamp"].min()
+_train_sessions = sum(
+    _as_date(_oldest_split["train_start"]) <= d <= _as_date(_oldest_split["train_end"])
+    for d in hmm_dates
+)
+_burnt = sum(_as_date(_oldest_split["train_start"]) <= d < _first_regime for d in hmm_dates)
+_earliest_eval = min(_as_date(item["val_start"]) for item in splits)
+assert _first_regime < _earliest_eval, (
+    "the burn-in reaches into an evaluation window, so section F would screen sessions "
+    "this feature never valued"
+)
+print(
+    f"Every regime probability sits at or after the end of the block that estimated it, "
+    f"and the last of the {len(hmm_estimates)} estimates reads through "
+    f"{hmm_estimates[-1]['fit_through']}, before the holdout opens {HOLDOUT_START}."
+)
+print(
+    f"Burn-in: the first value is dated {_first_regime}, so the oldest period "
+    f"{_oldest_split['fold']} loses {_burnt} of the {_train_sessions:,} sessions in its "
+    f"training window ({_burnt / max(_train_sessions, 1):.0%}) and none in any evaluation "
+    f"window, the earliest of which opens {_earliest_eval}."
+)
+
+
+# %%
+def _smoothed_apply(fitted: tuple[GaussianHMM, np.ndarray], prefix: np.ndarray) -> np.ndarray:
+    """The library's whole-series answer, for comparison only. Never written to the file."""
+    model, order = fitted
     with threadpool_limits(limits=1):
-        probe_model = fit_hmm_kmeans_init(
-            probe_X, n_states=2, random_state=SEED + probe_split["fold"]
-        )
-        cut = len(probe_X) // 2
-        full_probs = filtered_state_probs(probe_model, probe_X)
-        prefix_probs = filtered_state_probs(probe_model, probe_X[:cut])
-    max_drift = float(np.abs(full_probs[:cut] - prefix_probs).max())
-    assert max_drift < 1e-10, f"probabilities moved by {max_drift:.2e} - they read the future"
-    print(
-        f"Parameters end on or before their own training end in all {len(hmm_fold_params)} periods."
-    )
-    print(
-        f"Deleting the last {len(probe_X) - cut} observations of period "
-        f"{probe_split['fold']} moves the first {cut} probabilities by {max_drift:.2e}."
-    )
+        return model.predict_proba(prefix)[:, order[1]].reshape(-1, 1)
+
+
+hmm_smoothed = walk_forward_feature(
+    hmm_obs,
+    burnin=HMM_BURNIN,
+    refit_every=HMM_REFIT_EVERY,
+    fit=hmm_fit,
+    apply=_smoothed_apply,
+    n_features=1,
+    freeze_after=HMM_FROZEN_AFTER,
+)
+_both = _valued & ~np.isnan(hmm_smoothed[:, 0])
+_gap = np.abs(hmm_probs[_both, 0] - hmm_smoothed[_both, 0])
+# A tenth of the range a probability can take. Far above the level at which two answers
+# could be called the same column, and far below the 0.74 this series actually shows, so it
+# is a floor on the evidence rather than a fit to the measurement.
+MIN_FORWARD_SMOOTHED_SEPARATION = 0.1
+assert _gap.max() > MIN_FORWARD_SMOOTHED_SEPARATION, (
+    f"the forward and smoothed answers differ by at most {_gap.max():.2e} on this series, so "
+    "nothing here can establish which of them the emitted column is - either the recursion "
+    "was replaced by the library's whole-series call, or this series no longer separates the "
+    "two and the column's causality needs evidence this notebook cannot supply"
+)
+print(
+    f"The emitted column is the forward answer, and on this series that is a checkable "
+    f"claim: the whole-series answer differs from it by up to {_gap.max():.4f} "
+    f"(mean {_gap.mean():.5f}), on {int((_gap > 1e-3).sum()):,} of {int(_both.sum()):,} "
+    f"emitted sessions."
+)
 
 # %% [markdown]
 # **What the two states turn out to be.** They are the two shapes the term structure
 # takes across the book. In the higher-carry state the front contract settles above the
 # next one - backwardation - and rolling a long position forward earns the difference; in
 # the lower-carry state the next contract is the dearer one - contango - and the same
-# roll pays it. The mix printed above differs between periods because each one is
-# evaluated on a different calendar year. `hmm_regime_duration` carries how long the
-# current state has held, which is what a position-sizing rule downstream reads it for.
+# roll pays it. `hmm_regime_duration` carries how long the current state has held, which is
+# what a position-sizing rule downstream reads it for.
 
 # %% [markdown]
 # #### What the model actually inferred, on evaluation sessions
@@ -1712,14 +1653,10 @@ if len(hmm_pl) > 0:
 
     run_rows = []
     for sp in splits:
-        window = (
-            hmm_pl.filter(pl.col("fold") == sp["fold"])
-            .filter(
-                (pl.col("timestamp") >= _as_date(sp["val_start"]))
-                & (pl.col("timestamp") <= _as_date(sp["val_end"]))
-            )
-            .sort("timestamp")
-        )
+        window = hmm_pl.filter(
+            (pl.col("timestamp") >= _as_date(sp["val_start"]))
+            & (pl.col("timestamp") <= _as_date(sp["val_end"]))
+        ).sort("timestamp")
         states = (window["hmm_carry_regime_prob"] > 0.5).cast(int).to_numpy()
         runs = _run_lengths(states)
         held = sum(r for r in runs if r >= HELD_RUN_SESSIONS)
@@ -1750,16 +1687,13 @@ run_length_table
 
 # %%
 if len(hmm_pl) > 0:
-    viz_fold = hmm_pl["fold"].min()
-    viz_split = next(sp for sp in splits if sp["fold"] == viz_fold)
-    hmm_viz = (
-        hmm_pl.filter(pl.col("fold") == viz_fold)
-        .filter(
-            (pl.col("timestamp") >= _as_date(viz_split["val_start"]))
-            & (pl.col("timestamp") <= _as_date(viz_split["val_end"]))
-        )
-        .sort("timestamp")
-    )
+    # The most recent evaluation window, named by its own boundaries rather than taken
+    # from a fold column the frame no longer has.
+    viz_split = max(splits, key=lambda item: _as_date(item["val_start"]))
+    hmm_viz = hmm_pl.filter(
+        (pl.col("timestamp") >= _as_date(viz_split["val_start"]))
+        & (pl.col("timestamp") <= _as_date(viz_split["val_end"]))
+    ).sort("timestamp")
     port_viz = portfolio_carry.join(
         hmm_viz.select(["timestamp", "hmm_carry_regime_prob"]), on="timestamp", how="inner"
     ).sort("timestamp")
@@ -1825,38 +1759,39 @@ if len(hmm_pl) > 0:
     )
 
 # %% [markdown]
-# ## D. Do the estimates move as the window rolls?
+# ## D. Do the estimates move as the schedule rolls?
 #
-# The training windows roll forward one year at a time, so the estimated parameters
-# should move slowly. Two failure modes sit either side of that. Parameters identical in
-# every period say the re-estimation bought nothing and a single fit would have done.
-# Parameters that swing say the feature built on them means something different in each
-# period, which is a warning about the feature rather than about the model.
+# The estimation window expands by one quarter at a time, so consecutive estimates overlap
+# almost completely and the parameters should move slowly. Two failure modes sit either
+# side of that. Parameters identical across every estimate say the re-estimation bought
+# nothing and a single fit would have done. Parameters that swing say the feature built on
+# them means something different at different points along its own length, which is a
+# warning about the feature rather than about the model.
 #
-# **Only the hidden Markov model has a per-period parameter to draw.** The Fourier
-# transform estimates nothing, which is why its values are identical everywhere. ARIMA
-# does estimate weights, but they are re-estimated every `ARIMA_REFIT_FREQ` sessions
-# *within* each period, so there is no single set of ARIMA weights per period to plot; the
-# equivalent question for it is answered by the walk itself.
+# **Only the hidden Markov model has a parameter to draw here.** The Fourier transform
+# estimates nothing, which is why its values are identical everywhere. ARIMA does estimate
+# weights, but it re-chooses both the order and the weights every `ARIMA_REFIT_FREQ`
+# sessions per product, so there is no single vector to plot against a common axis; the
+# equivalent question for it is answered by the walk itself and by the schedule table at
+# the end of C.1.
 #
 # The left panel is the pair of state averages, in the units of the carry series the
 # states are named for. The right panel is the probability each state assigns to staying
 # put next session - the same quantity `hmm_regime_duration` depends on - converted into
 # the run length it implies, $1/(1-p_{\text{stay}})$. Drawn as probabilities they all sit
-# against the top of the axis and the movement between periods is invisible; drawn in
-# sessions it is the size it actually is. The table carries both: `persist_low` and
-# `persist_high` are the probabilities, `run_low` and `run_high` the run lengths they
-# imply.
+# against the top of the axis and the movement is invisible; drawn in sessions it is the
+# size it actually is. The table carries both: `persist_low` and `persist_high` are the
+# probabilities, `run_low` and `run_high` the run lengths they imply.
+#
+# The axis is the last session behind each estimate rather than a period number. There are
+# far more points on it than there were periods, and their spacing is the refit cadence.
 
 # %%
-# The walk-forward periods only. Every quantity here is estimated on training rows that end
-# before the holdout opens, so none of it is a holdout statistic - but the table is read as a
-# description of the evaluation design, and the holdout period is not part of that design. Its
-# parameters are still checked, above, against its own train_end.
-_validation_params = [p for p in hmm_fold_params if p["fold"] != HOLDOUT_FOLD_ID]
-if _validation_params:
-    hmm_param_df = pl.DataFrame(_validation_params).sort("fold")
-    print("\nEstimated parameters per walk-forward period, states ordered by average carry:")
+if hmm_estimates:
+    hmm_param_df = pl.DataFrame(hmm_estimates).sort("fit_end")
+    print(
+        f"\nEstimated parameters over {len(hmm_param_df)} refits, states ordered by average carry:"
+    )
     hmm_param_display = (
         hmm_param_df.with_columns(
             (1.0 / (1.0 - pl.col("persist_low"))).round(1).alias("run_low"),
@@ -1866,9 +1801,9 @@ if _validation_params:
             pl.col("mean_carry_low", "mean_carry_high").round(4),
             pl.col("persist_low", "persist_high").round(4),
         )
-        .rename({"fold": "period", "train_last": "last_session_estimated_on"})
+        .rename({"fit_through": "last_session_estimated_on"})
         .select(
-            "period",
+            "last_session_estimated_on",
             "mean_carry_low",
             "mean_carry_high",
             "persist_low",
@@ -1876,26 +1811,32 @@ if _validation_params:
             "run_low",
             "run_high",
             "n_train",
-            "last_session_estimated_on",
         )
     )
 else:
     hmm_param_df = pl.DataFrame(
         schema={
-            "fold": pl.Int64,
+            "fit_end": pl.Int64,
+            "fit_through": pl.Date,
             "mean_carry_low": pl.Float64,
             "mean_carry_high": pl.Float64,
             "persist_low": pl.Float64,
             "persist_high": pl.Float64,
             "n_train": pl.Int64,
-            "train_last": pl.Date,
         }
     )
     hmm_param_display = hmm_param_df
-    print("No period was estimated; the parameter panel below is omitted")
+    print("Nothing was estimated; the parameter panel below is omitted")
+
+# %% [markdown]
+# The table is long, so the first and last five refits are shown: the ends are where a
+# drift would be visible, and the figure below carries every point.
 
 # %%
-hmm_param_display
+hmm_param_display.head(5)
+
+# %%
+hmm_param_display.tail(5)
 
 # %%
 if len(hmm_param_df) > 0:
@@ -1911,9 +1852,9 @@ if len(hmm_param_df) > 0:
     ):
         fig.add_trace(
             go.Scatter(
-                x=hmm_param_df["fold"].to_list(),
+                x=hmm_param_df["fit_through"].to_list(),
                 y=hmm_param_df[column].to_list(),
-                mode="lines+markers",
+                mode="lines",
                 name=name,
                 line={"color": color},
                 legendgroup=name,
@@ -1927,9 +1868,9 @@ if len(hmm_param_df) > 0:
     ):
         fig.add_trace(
             go.Scatter(
-                x=hmm_param_df["fold"].to_list(),
+                x=hmm_param_df["fit_through"].to_list(),
                 y=(1.0 / (1.0 - hmm_param_df[column])).to_list(),
-                mode="lines+markers",
+                mode="lines",
                 name=name,
                 line={"color": color, "dash": "dot"},
                 legendgroup=name,
@@ -1941,12 +1882,12 @@ if len(hmm_param_df) > 0:
     fig.update_annotations(font_size=13)
     fig.update_yaxes(title_text="Average carry (spread x12)", row=1, col=1)
     fig.update_yaxes(title_text="Expected run length (sessions)", rangemode="tozero", row=1, col=2)
-    fig.update_xaxes(title_text="Period (0 = most recent)", row=1, col=1)
-    fig.update_xaxes(title_text="Period (0 = most recent)", row=1, col=2)
+    fig.update_xaxes(title_text="Last session behind the estimate", row=1, col=1)
+    fig.update_xaxes(title_text="Last session behind the estimate", row=1, col=2)
     fig.update_layout(
         title=(
-            "The two carry states stay apart as the window rolls"
-            "<br><sup>Estimated once per period, states ordered by average carry."
+            "The two carry states stay apart as the schedule rolls"
+            "<br><sup>One point per refit, states ordered by average carry."
             "<br>The right panel reads each staying probability as the run length it "
             "implies, 1/(1 - p).</sup>"
         ),
@@ -1955,25 +1896,26 @@ if len(hmm_param_df) > 0:
     )
     show_plotly_with_alt(
         fig,
-        "Two side-by-side line panels with one point per period, period 0 most recent, five "
-        "periods in all. The left panel plots average carry in each state: the higher-carry "
-        "state stays above zero and the lower-carry state well below it in every period, and "
-        "the two lines never approach each other. The right panel plots one dotted line per "
-        "state, each the run length that state's own staying probability implies as 1/(1 - p). "
-        "Both sit a little above twenty sessions in every period and stay close together, so "
-        "the states differ in the carry they carry rather than in how long they last.",
+        "Two side-by-side line panels against the last session behind each estimate, running "
+        "from the end of the burn-in to the start of the holdout, one point per quarterly "
+        "refit. The left panel plots average carry in each state: the higher-carry state "
+        "stays above zero and the lower-carry state well below it throughout, and the two "
+        "lines never approach each other. The right panel plots one dotted line per state, "
+        "each the run length that state's own staying probability implies as 1/(1 - p). Both "
+        "stay close together, so the states differ in the carry they carry rather than in "
+        "how long they last.",
     )
 
 # %% [markdown] tags=["results"]
-# **What the re-estimation bought.** Across the five periods the estimated average carry
-# of the lower-carry state moves between -0.1008 and -0.0795, and that of the higher-carry
-# state between 0.0101 and 0.0269, so the two never come close to each other as the window
-# rolls and the feature keeps meaning the same thing throughout. The probability of
-# staying put next session stays between 0.9536 and 0.9632, which the table reads as
-# expected runs of 21.6 to 27.2 sessions. Parameters that move this little across eight
-# years of rolling windows say the re-estimation is cheap insurance rather than a source
-# of variation in the feature - but that is a fact about this signal on this universe, not
-# a reason to skip the re-estimation on another one.
+# **What the re-estimation bought.** The two state averages never come close to each other
+# as the schedule rolls, so the feature keeps meaning the same thing along its whole
+# length, and the staying probabilities move within a narrow band that the table reads as
+# expected runs of roughly a trading month. Parameters that move this little across
+# thirteen years of expanding windows say the re-estimation is cheap insurance rather than
+# a source of variation in the feature - but that is a fact about this signal on this
+# universe, not a reason to skip the re-estimation on another one. The numbers themselves
+# are in the two table extracts above; they are not quoted here, because a run that moved
+# them would leave this paragraph describing the previous one.
 
 # %% [markdown]
 # ---
@@ -1981,23 +1923,43 @@ if len(hmm_param_df) > 0:
 # ## E. Combining the three and writing the file
 #
 # The three models produce values at three different levels of detail. ARIMA gives one
-# value per product, session and period. The spectral features give one per product and
-# session, copied across periods. The regime features give one per session, shared by
-# every product because the model reads the book as a whole.
+# value per product and session. The spectral features give one per product and session
+# too. The regime features give one per session, shared by every product because the model
+# reads the book as a whole.
 #
 # They are brought onto one grid: every combination of session, product and contract
-# position that the price file contains, repeated once per period. A left join then
-# attaches each family where it has a value and leaves an empty cell where it does not,
-# so nothing is invented and no row is dropped for lack of a feature.
+# position that the price file contains, up to the last session the holdout covers. A left
+# join then attaches each family where it has a value and leaves an empty cell where it does
+# not, so nothing is invented and no row is dropped for lack of a feature.
+#
+# The grid used to be repeated once per period, and the key carried the period number, so a
+# model training on one period received the features estimated on that period's training
+# sessions. Every fitted value here is now bounded by its own estimation block instead, and
+# it is the same value whichever period later selects the row - so the grid is written once
+# and the key is `(timestamp, product, position)`.
+#
+# **The upper bound has to be stated now, and under the old design it did not.** A period
+# bounded its own rows, so the artifact reached no further than the last period's evaluation
+# window whatever the price file held. The walks run over each entity's whole history
+# instead, so the grid would otherwise extend to the end of the price file - and a session
+# past `holdout_end` is one no stage in this case study evaluates, carrying a feature value
+# from an estimate frozen before the holdout opened. On this panel the two dates coincide
+# and the filter removes nothing, which is exactly why it is a filter and an assertion
+# rather than a sentence: a price file refreshed past the holdout would otherwise widen the
+# artifact silently.
 
 # %%
-base_grid = df.select(["timestamp", "product", "position"]).unique()
-base = pl.concat([base_grid.with_columns(pl.lit(s["fold"]).alias("fold")) for s in artifact_splits])
+base = (
+    df.select(["timestamp", "product", "position"])
+    .unique()
+    .filter(pl.col("timestamp") <= _date_lit(HOLDOUT_END))
+)
 
 if len(arima_pl) > 0:
-    base = base.join(arima_pl, on=["product", "timestamp", "fold"], how="left")
+    base = base.join(arima_pl, on=["product", "timestamp"], how="left")
     print(
-        f"ARIMA features joined: {[c for c in arima_pl.columns if c not in ('product', 'timestamp', 'fold')]}"
+        f"ARIMA features joined: "
+        f"{[c for c in arima_pl.columns if c not in ('product', 'timestamp')]}"
     )
 else:
     base = base.with_columns(
@@ -2007,9 +1969,9 @@ else:
 
 # %%
 if len(fft_pl) > 0:
-    base = base.join(fft_pl, on=["product", "timestamp", "fold"], how="left")
+    base = base.join(fft_pl, on=["product", "timestamp"], how="left")
     print(
-        f"FFT features joined: {[c for c in fft_pl.columns if c not in ('product', 'timestamp', 'fold')]}"
+        f"FFT features joined: {[c for c in fft_pl.columns if c not in ('product', 'timestamp')]}"
     )
 else:
     for col in [
@@ -2024,43 +1986,39 @@ else:
 # %%
 # One regime value per session, so it repeats across the products of that session.
 if len(hmm_pl) > 0:
-    base = base.join(hmm_pl, on=["timestamp", "fold"], how="left")
-    print(f"HMM features joined: {[c for c in hmm_pl.columns if c not in ('timestamp', 'fold')]}")
+    base = base.join(hmm_pl, on="timestamp", how="left")
+    print(f"HMM features joined: {[c for c in hmm_pl.columns if c != 'timestamp']}")
 else:
     base = base.with_columns(
         pl.lit(None).cast(pl.Float64).alias("hmm_carry_regime_prob"),
         pl.lit(None).cast(pl.Float64).alias("hmm_regime_duration"),
     )
 
-temporal_features = base.sort(["fold", "product", "position", "timestamp"])
+temporal_features = base.sort(["product", "position", "timestamp"])
 
 # %%
 temporal_cols = [
-    c for c in temporal_features.columns if c not in ("timestamp", "product", "position", "fold")
+    c for c in temporal_features.columns if c not in ("timestamp", "product", "position")
 ]
-print(
-    f"\n{len(temporal_features):,} rows, {len(temporal_cols)} features, "
-    f"{temporal_features['fold'].n_unique()} periods"
-)
+print(f"\n{len(temporal_features):,} rows, {len(temporal_cols)} features")
 print(f"Features: {temporal_cols}")
 
 # %% [markdown]
-# How much of the grid each feature actually fills. The share is taken over the whole
-# grid, which includes every session of every period and is far larger than any one
-# model's window, so these are not quality scores - they are a check that each family
-# landed where it was supposed to and nowhere else.
+# How much of the grid each feature actually fills. The share is taken over the whole grid,
+# which spans every session of the price calendar and is far larger than any one model's
+# reach, so these are not quality scores - they are a check that each family landed where it
+# was supposed to and nowhere else.
 #
-# ARIMA's share is the lowest of the three, for two reasons that are both by
-# construction: the burn-in head of each period, which no forecast can cover, and the
-# shared walk length taken from the shortest series. Both losses fall at the front of a
-# period's window, which is training. **This table understates what the models
-# downstream receive**, because most of the grid it counts over is outside any walk. The
-# count printed under section C.1 is the one to read for that: it is taken against the
-# product-sessions each evaluation window quotes, and it is complete or nearly so.
+# ARIMA's share is the lowest of the three, for two reasons that are both by construction:
+# the burn-in at the front of each product's history, which no forecast can cover, and the
+# products excluded for having too little history before the holdout. **This table
+# understates what the models downstream receive**, because most of the grid it counts over
+# is outside any evaluation window. The count printed under section C.1 is the one to read
+# for that: it is taken against the product-sessions each window quotes.
 #
-# The spectral features fill nearly everything, since they run over the full history and
-# are copied to every period. The regime features fill each period's training and
-# evaluation span, one value per session repeated across that session's products.
+# The spectral features fill nearly everything, since they run over the full history. The
+# regime features fill every session from the end of their burn-in on, one value repeated
+# across that session's products.
 
 # %%
 print("\nShare of the grid each feature fills:")
@@ -2073,38 +2031,42 @@ for col in temporal_cols:
 # ### What is written, and what the checks before the write are for
 #
 # `features/financial.parquet` and `features/model_based.parquet` are two separate files
-# and neither reads the other. The model notebooks in Chapter 11 onward read both and
-# join them on `(fold, timestamp, product, position)`. The period number is part of that
-# key on purpose: it is what makes a model training on one period receive the features
-# estimated on that period's training sessions, rather than a single set estimated once.
+# and neither reads the other. The model notebooks in Chapter 11 onward read both and join
+# them on `(timestamp, product, position)`.
 #
 # Three properties are asserted before the file is written. The key is unique, so no join
-# downstream can silently multiply rows. No period's rows escape its own window. And the
+# downstream can silently multiply rows. There is no period column, because a value here is
+# bounded by its own estimation block and a period id would have nothing to record. And the
 # columns carrying a value on a holdout-dated row are exactly the ones allowed to.
 #
-# That last check is the one worth reading closely, because the answer depends on which
-# period the row sits in, and the check now asks about both.
+# That last check is the one worth reading closely. ARIMA and the hidden Markov model
+# estimate parameters, and their holdout-dated cells have to be **filled**: a holdout
+# evaluation downstream reads them, and both models reach them the same way, by carrying
+# the last pre-boundary estimate across the window frozen. An empty holdout is the failure
+# this check exists to catch, and asserting "no fitted column has a holdout-dated value"
+# would be satisfied perfectly by a run that emitted nothing there.
 #
-# ARIMA and the hidden Markov model estimate parameters, so in the **walk-forward periods**
-# every holdout-dated cell they own has to be empty: those periods estimate on windows that
-# end before the holdout opens, and a value there would be a fit reaching past its own
-# evaluation window. In the **holdout period** those same cells have to be filled, because
-# that period exists to carry the vintage a holdout evaluation reads - its coefficients are
-# estimated at the last session before the holdout opens and rolled forward frozen. An empty
-# holdout period is the failure this check was rewritten to catch: asserted over the whole
-# frame, "no fitted column has a holdout-dated value" is satisfied perfectly by a holdout
-# period that emitted nothing at all.
+# The other direction is not checkable from the frame and never was: the weights are not in
+# it. What bounds them is the shape of the call, plus `freeze_after` and the holdout cut on
+# `_arima_walk`'s input, both asserted where they are applied in C.1 and C.3.
 #
 # The spectral features estimate nothing and read a backward-looking window, so their
-# holdout-dated cells are filled in every period - a later stage evaluating on the holdout
-# needs them, and there is nothing about them that could have come from the future. The cell
-# prints the count per column and per period class, which is where the distinction becomes
-# visible.
+# holdout-dated cells are filled too, and there is nothing about them that could have come
+# from the future.
 
 # %%
-key = ["fold", "timestamp", "product", "position"]
+key = ["timestamp", "product", "position"]
 duplicate_keys = temporal_features.select(pl.struct(key).is_duplicated().sum()).item()
 assert duplicate_keys == 0, f"{duplicate_keys} duplicate rows on {key}"
+assert temporal_features["timestamp"].max() <= HOLDOUT_END, (
+    f"the artifact reaches {temporal_features['timestamp'].max()}, past the holdout end "
+    f"{HOLDOUT_END}: no stage evaluates a session beyond it, and the value there would come "
+    "from an estimate frozen before the holdout opened"
+)
+assert "fold" not in temporal_features.columns, (
+    "the frame carries a fold column: a value here is bounded by the estimation schedule "
+    "and not by a walk-forward period, so there is nothing for a period id to record"
+)
 
 FITTED_COLUMNS = [
     "arima_carry_forecast",
@@ -2119,48 +2081,30 @@ assert sorted(FITTED_COLUMNS + FFT_COLUMNS) == sorted(temporal_cols), (
 )
 
 held_out = temporal_features.filter(pl.col("timestamp") >= HOLDOUT_START)
-held_out_validation = held_out.filter(pl.col("fold") != HOLDOUT_FOLD_ID)
-held_out_holdout = held_out.filter(pl.col("fold") == HOLDOUT_FOLD_ID)
 holdout_counts = pl.DataFrame(
     {
         "feature": temporal_cols,
         "family": ["estimated" if c in FITTED_COLUMNS else "spectral" for c in temporal_cols],
-        "validation_periods": [
-            held_out_validation.select(pl.col(c).is_not_null().sum()).item() for c in temporal_cols
-        ],
-        "holdout_period": [
-            held_out_holdout.select(pl.col(c).is_not_null().sum()).item() for c in temporal_cols
+        "holdout_rows_with_a_value": [
+            held_out.select(pl.col(c).is_not_null().sum()).item() for c in temporal_cols
         ],
     }
 )
-# The check runs per period class, because the two classes are required to differ and a single
-# rule over the whole frame cannot say so. Until the holdout period was written this asserted
-# `n_held == 0` over every row, which is why a run that emitted an EMPTY holdout period passed
-# it: the assertion could only catch an estimate leaking into a validation period, never a
-# holdout period that had nothing in it. Both directions are checked now.
-for col, n_validation, n_holdout in zip(
-    holdout_counts["feature"],
-    holdout_counts["validation_periods"],
-    holdout_counts["holdout_period"],
-    strict=True,
+for col, n_holdout in zip(
+    holdout_counts["feature"], holdout_counts["holdout_rows_with_a_value"], strict=True
 ):
     if col not in FITTED_COLUMNS:
         continue
-    assert n_validation == 0, (
-        f"{col} comes from an estimate and has {n_validation} holdout-dated values in a "
-        "validation period, so a parameter fitted before the holdout is being read after it"
-    )
     assert n_holdout > 0, (
-        f"{col} comes from an estimate and has no value in the holdout period, so a holdout "
-        "retrain would fit this column on nulls - which is the whole reason the period exists"
+        f"{col} comes from an estimate and has no value inside the holdout, so a holdout "
+        "retrain would fit this column on nulls - which is the whole reason the frozen "
+        "estimate is carried across"
     )
 
-print(f"The key {key} is unique across all {len(temporal_features):,} rows")
-print(f"Rows dated on or after the holdout opens: {len(held_out):,} of {len(temporal_features):,}")
 print(
-    f"  in the validation periods: {len(held_out_validation):,} rows, carrying spectral values "
-    f"only; in period {HOLDOUT_FOLD_ID}: {len(held_out_holdout):,} rows, carrying both families."
+    f"The key {key} is unique across all {len(temporal_features):,} rows, and there is no fold column"
 )
+print(f"Rows dated on or after the holdout opens: {len(held_out):,} of {len(temporal_features):,}")
 holdout_counts
 
 # %% [markdown]
@@ -2180,6 +2124,11 @@ holdout_counts
 # The upstream fingerprint is taken over the raw settlement prices, because section C
 # recomputes carry from them. This notebook reads no other case study file for a feature
 # value, and the record says so.
+#
+# What goes in beside it is the estimation schedule. It replaces the fold geometry the
+# sidecar used to carry, and it is the thing a reader needs in order to know what an
+# emitted value means: the fold geometry answered "which window is period 3", a question
+# the file no longer poses.
 
 # %%
 output_path = FEATURES_DIR / "model_based.parquet"
@@ -2193,26 +2142,25 @@ record = write_artifact(
             df.select(["product", "position", "timestamp", "raw_close"])
         )
     },
-    # The fold set, stated rather than left to be inferred. The frame carries fold ids and
-    # never says what their boundaries were, so a reader that finds no `fold_geometry`
-    # falls back to `generate_cv_splits` - which returns the five walk-forward periods and
-    # nothing else. The holdout period would then sit in the parquet, invisible to every
-    # consumer of it, and the holdout path this file exists to feed would read a file it
-    # could not see the relevant half of.
     metadata={
-        "fold_geometry": [
+        "estimation_schedule": [
             {
-                # Coerced to one type before `_json_ready` renders it. The two producers hold
-                # boundaries differently - `generate_cv_splits` returns pandas Timestamps and
-                # `build_holdout_cv` returns ISO date strings - so passing them through as
-                # held writes "2022-12-22T00:00:00" for the walk-forward periods and
-                # "2023-11-29" for the holdout period, in one file. Both parse through
-                # `pd.Timestamp`, and a stricter reader gets a file where
-                # `date.fromisoformat` succeeds on one period and raises on the rest.
-                field: (split[field] if field == "fold" else pd.Timestamp(split[field]))
-                for field in ("fold", "train_start", "train_end", "val_start", "val_end")
-            }
-            for split in artifact_splits
+                "model": "arima",
+                "burnin": ARIMA_BURNIN,
+                "refit_every": ARIMA_REFIT_FREQ,
+                "per_entity": True,
+                "frozen_from": str(HOLDOUT_START),
+            },
+            {
+                "model": "hmm",
+                "burnin": HMM_BURNIN,
+                "refit_every": HMM_REFIT_EVERY,
+                "per_entity": False,
+                "observations": len(hmm_dates),
+                "estimates": len(hmm_estimates),
+                "first_value": str(hmm_pl["timestamp"].min()) if hmm_pl.height else None,
+                "frozen_from": str(hmm_dates[HMM_FROZEN_AFTER - 1]),
+            },
         ]
     },
 )
@@ -2266,17 +2214,18 @@ def _build_temporal_eval_frame(features_df: pl.DataFrame):
     label_df = pl.read_parquet(label_path)
     label_col = [c for c in label_df.columns if c not in ("timestamp", "product", "position")][0]
 
-    # Evaluation rows only, taken per period from that period's own evaluation window.
-    validation = pl.concat(
+    # Evaluation rows only: the union of the evaluation windows. The windows do not
+    # overlap and a session now carries one value rather than one per period, so this is a
+    # filter on dates - where it used to have to take each period's rows from that period
+    # in order to avoid counting a session once per fit that had reached it.
+    in_evaluation = pl.any_horizontal(
         [
-            features_df.filter(
-                (pl.col("fold") == split["fold"])
-                & (pl.col("timestamp") >= _as_date(split["val_start"]))
-                & (pl.col("timestamp") <= _as_date(split["val_end"]))
-            )
+            (pl.col("timestamp") >= _as_date(split["val_start"]))
+            & (pl.col("timestamp") <= _as_date(split["val_end"]))
             for split in splits
         ]
     )
+    validation = features_df.filter(in_evaluation)
 
     labelled = (
         validation.filter(pl.col("position") == 0)
@@ -2545,25 +2494,40 @@ else:
 #    data arrives. Ask for the forward answer, and check it by deleting later
 #    observations and confirming the earlier values do not move - which is what section
 #    C.3 does rather than asserting.
-# 3. **There is more than one honest way to bound the parameters, and they need different
-#    evidence.** Estimating once per period and holding the parameters fixed is checkable
-#    against a date, so C.3 checks it. Refitting as the walk proceeds, each time on a
-#    prefix that ends before what it forecasts, is equally causal but leaves no date to
-#    check - it is guaranteed by how the call is constructed instead, so C.1 says so
-#    rather than asserting something weaker and calling it proof. Decide which of the two
-#    a model is doing before deciding what would count as evidence for it.
-# 4. **Distinguish a model that estimates from one that only transforms.** ARIMA and the
-#    hidden Markov model estimate parameters and so are confined to a period. The Fourier
-#    transform estimates nothing, so it runs over the full history and its values on
-#    holdout-dated rows are legitimate. Section E prints the count per column, so the two
-#    kinds are visibly different rather than assumed alike.
-# 5. **Correct twice before reading a t-statistic, and report what the correction did.**
+# 3. **A cross-validation period does not bound an estimate, and believing it does is the
+#    expensive mistake.** Fitting once on a period's training window and filtering forward
+#    from the start of that window is causal for the evaluation rows and not for the
+#    training ones, which end up carrying parameters drawn from their own future. Nothing
+#    raises: the period's rows are internally consistent. The fix is a schedule - spend a
+#    burn-in, fit, use that fit for the next block, refit - and once every model is on one,
+#    the period has nothing left to bound and the artifact stops carrying a period column.
+# 4. **What a schedule needs is a different kind of evidence.** There is no single date to
+#    compare a fit against, so the check is on the schedule rather than on the values:
+#    `refit_boundaries` returns the blocks the walk used, and every emitted value has to
+#    fall at or after the end of the block that estimated it. The burn-in it costs is
+#    reported rather than hidden, because it is the price of the arrangement.
+# 5. **Check that your check can fail.** The natural test of a forward recursion is to
+#    delete the tail of the series and confirm the earlier values do not move, and under a
+#    refit schedule that test is nearly empty: every block whose window closes before the
+#    cut is handed the same prefix in both runs and must agree however the model is applied,
+#    so only the block containing the cut carries evidence. Substituting the whole-series
+#    answer for the forward one here left that test passing at 4e-12. What replaced it asks
+#    whether the two answers are far apart on this series, and stops the notebook when they
+#    are not - because a column whose two candidate meanings coincide cannot be shown to
+#    have either. Run the substitution you are guarding against and watch the guard fail
+#    before believing it.
+# 6. **Distinguish a model that estimates from one that only transforms.** ARIMA and the
+#    hidden Markov model estimate parameters and so need a schedule. The Fourier transform
+#    estimates nothing, so it runs over the full history on the same footing as a rolling
+#    average. Section E prints the fill per column, so the two kinds are visibly different
+#    rather than assumed alike.
+# 7. **Correct twice before reading a t-statistic, and report what the correction did.**
 #    Consecutive decisions share most of their outcome window, so the uncorrected
 #    standard error is too small; and testing a family of features at once gives as many
 #    chances at a false positive as there are members. Neither correction is a single fixed number - the lag the first one
 #    uses is chosen from the data, so section F prints it per feature rather than letting
 #    the reader assume it equals the horizon.
-# 6. **Record what the features were, not just what they were called.** The fingerprint
+# 8. **Record what the features were, not just what they were called.** The fingerprint
 #    written beside the file is what lets a training run downstream say which version of
 #    these values it read, so that fixing a bug here cannot silently produce two training
 #    runs that look identical in the record.
@@ -2573,11 +2537,16 @@ else:
 # section C.3 measures how much of the gap that hold covers and how much it does not. The
 # screen in section F cannot measure the two regime features at all, because they do not
 # vary across products within a session, so what those features are worth is not settled
-# here. And the walk in C.1 uses one length for every product in a period, taken from the
-# shortest, so products with longer histories lose their earliest sessions.
+# here. Each estimate is held fixed until the next refit, so a break occurring inside a
+# block is read by parameters estimated before it - at worst a quarter for the regime chain
+# and a month for ARIMA. Across the holdout both are frozen at their last pre-boundary
+# estimate, which is the price of not estimating anything on it. And the burn-in prefix
+# carries no value at all: the oldest period trains from the first session of the panel, so
+# C.3 prints how many of that period's training sessions the regime chain's 504-session
+# burn-in costs.
 #
-# **Writes**: `features/model_based.parquet`, keyed on
-# `(fold, timestamp, product, position)`, with its fingerprint recorded alongside.
+# **Writes**: `features/model_based.parquet`, keyed on `(timestamp, product, position)`,
+# with its fingerprint recorded alongside.
 #
 # **Next**: [`05_evaluation`](05_evaluation.ipynb) weighs these features against the ones
 # from [`03_financial_features`](03_financial_features.ipynb); the model notebooks from

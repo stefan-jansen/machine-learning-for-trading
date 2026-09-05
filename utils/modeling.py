@@ -900,7 +900,17 @@ def load_modeling_dataset(
             # Kept lazy. Materialising it here is what made a run hold every fold at once.
             temporal_by_fold_pd = temporal
         else:
-            # Legacy: single feature set, join directly
+            # Fold-free: one value per key, joined straight on. A refit schedule produces this
+            # shape, and so does any stage that fits nothing per fold.
+            #
+            # The names are recorded here for the same reason the fold branch records them:
+            # they say which of the panel's columns came from the model-based artifact. They
+            # were not recorded before, so a fold-free artifact reported no model-based
+            # features at all while its columns sat in `dataset` regardless - the features
+            # were used, and nothing that asks which ones they are could answer. Every
+            # consumer of this list also requires `temporal_by_fold`, which stays None here,
+            # so filling it in changes no fold substitution.
+            _temporal_feature_names = [c for c in temporal_columns if c not in set(_temporal_keys)]
             temporal_dedup = temporal.unique(subset=_temporal_keys, keep="last").collect()
             dataset = features.join(temporal_dedup, on=_temporal_keys, how="left", suffix="_t")
             del temporal_dedup
