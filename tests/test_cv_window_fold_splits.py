@@ -183,7 +183,7 @@ def test_fold_splits_uses_outcome_horizon_for_holdout_boundary(
 def test_modeling_fold_boundaries_match_consumer_order(
     isolated_case_study: Path,
 ) -> None:
-    """Feature producers must receive the same backward fold IDs as model consumers."""
+    """Feature producers must receive the same fold IDs as model consumers."""
     from case_studies.utils.cv_window import modeling_fold_boundaries
 
     cs = "test_cs_producer_consumer_folds"
@@ -201,7 +201,7 @@ def test_modeling_fold_boundaries_match_consumer_order(
 
     assert producer is not None
     assert [split["fold"] for split in producer] == [0, 1]
-    assert producer[0]["val_start"] > producer[1]["val_start"]
+    assert producer[0]["val_start"] < producer[1]["val_start"]
     assert producer[0]["train_end"] < producer[0]["val_start"]
     assert producer[1]["train_end"] < producer[1]["val_start"]
 
