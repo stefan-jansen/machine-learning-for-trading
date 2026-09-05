@@ -68,7 +68,6 @@ from ml4t.diagnostic.evaluation.portfolio_analysis import (
     max_drawdown,
     omega_ratio,
     stability_of_timeseries,
-    up_down_capture,
     value_at_risk,
 )
 from ml4t.diagnostic.metrics import sharpe_ratio, sortino_ratio
@@ -635,11 +634,20 @@ else:
 # the same strategy scores differently at daily and monthly frequency, because a month in which
 # the benchmark ends up while falling for three weeks counts as an up period at one and as a mix
 # at the other.
+#
+# The ratio is taken between the two *average* returns over those periods. `ml4t.diagnostic`
+# exposes an `up_down_capture` that instead divides the two compounded wealth factors, and for
+# down periods that inverts the reading: a strategy losing 5% in each month the benchmark loses
+# 10% has captured half the downside, and the compounded form reports 111%, because both products
+# are below one and the larger numerator makes the ratio exceed it. Down capture above 100% is
+# supposed to mean the strategy fell harder than the market. Take the ratio of the means.
 
 # %%
 strat_monthly = strategy_returns.resample("ME").apply(lambda x: (1 + x).prod() - 1)
 bench_monthly = spy_returns.resample("ME").apply(lambda x: (1 + x).prod() - 1)
-up_capture, down_capture = up_down_capture(strat_monthly.values, bench_monthly.values)
+up_months, down_months = bench_monthly > 0, bench_monthly < 0
+up_capture = strat_monthly[up_months].mean() / bench_monthly[up_months].mean()
+down_capture = strat_monthly[down_months].mean() / bench_monthly[down_months].mean()
 
 print("Capture ratios, on monthly periods:")
 print(f"  Up Capture:   {up_capture * 100:.1f}%")
