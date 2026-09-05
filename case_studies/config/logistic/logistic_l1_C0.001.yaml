@@ -1,6 +1,37 @@
+# L1 logistic regression. The solver is `saga` rather than `liblinear`, and the tolerance
+# is set explicitly rather than left at scikit-learn's 1e-4 default.
+#
+# Two reasons, and the first one is not optional. These labels are three-class (-1, 0, 1),
+# and scikit-learn 1.8 makes multiclass `liblinear` a hard error; #740 already moved our
+# floor to 1.7. `OneVsRestClassifier(liblinear)` would reproduce the current objective
+# exactly - liblinear multiclass IS one-vs-rest - and would keep the problem below.
+#
+# The second is that `liblinear` does not finish. It is single-threaded coordinate descent
+# and scales about N^1.4 here. Measured on nasdaq100_microstructure's `fwd_dir_15m` panel:
+#
+#     rows      liblinear 1000/1e-4     saga 200/1e-2
+#     400,000     144.4s  converged      11.0s  converged
+#   1,200,000     716.9s  converged      44.8s  converged
+#
+# which extrapolates to roughly eight hours per configuration at the full 16.9M rows against
+# about twenty minutes. That is not a projection: `06_linear` ran 7h23m at 100% of one core
+# on 2026-09-05 and was killed with two of thirteen configurations still unfinished, both of
+# them these L1 ones.
+#
+# `tol: 0.01` is what makes saga converge. At 1e-3 it hits the iteration cap without
+# converging at either size; at 1e-2 it converges in 22 to 29 iterations, which is the same
+# count liblinear needs at 1e-4. On a 20% out-of-sample split at 1.2M rows the looser
+# tolerance costs nothing measurable and is slightly better: log loss 1.0275 against 1.0294,
+# accuracy 0.4183 against 0.4106.
+#
+# One property to know rather than to be surprised by: the two solvers reach different
+# points in coefficient space (correlation 0.77) while predicting almost identically. At
+# C >= 10 the penalty leaves 195 of 198 coefficients non-zero, so it is barely binding and
+# the solution is weakly identified - that is a property of the configuration, not of saga.
 model_class: LogisticRegression
 params:
   C: 0.001
-  max_iter: 1000
+  max_iter: 200
   penalty: l1
-  solver: liblinear
+  solver: saga
+  tol: 0.01

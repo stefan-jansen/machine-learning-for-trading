@@ -4,6 +4,7 @@ import json
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -561,7 +562,25 @@ class ResultsCatalog:
         *,
         execution_tier: str | ExecutionTier = ExecutionTier.CANONICAL,
         runtime_provenance: dict[str, Any] | None = None,
+        started_at: str | None = None,
     ) -> TrainingResult:
+        """Register a training identity. ``started_at`` records when work on it began.
+
+        A training run is registered before it is fitted, because the identity has to exist
+        before anything can be written under it, and ``elapsed_s`` is filled in afterwards by
+        :func:`record_training_cost`. Between those two moments - which for one nasdaq
+        configuration has now been more than seven hours - the row says nothing about
+        whether the fit is running, finished or wedged.
+
+        ``started_at`` closes that. With it, a row whose ``elapsed_s`` is still NULL is
+        legible: a wall clock says how long this configuration has been going, and how that
+        compares to its siblings. Without it the only recoverable timing is
+        ``created_at - started_at`` after the fact, which is what
+        ml4t/agent-workspace#1026 found the whole corpus reduced to.
+
+        Like ``entry_point``, it is a **table column and not part of ``spec``**, so recording
+        it moves no training hash. Nothing here may touch ``computation``.
+        """
         self.study.require_writable()
         tier = ExecutionTier(execution_tier)
         resolved = dict(spec)
@@ -593,6 +612,10 @@ class ResultsCatalog:
             # (`case_studies.utils.linear`); this one names the notebook.
             entry_point=self.study.entry_point,
             runtime_provenance=runtime_provenance,
+            # Defaulted here rather than at every call site: a caller that forgets it should
+            # still leave a legible row, and "when the identity was registered" is within
+            # seconds of "when work on it began" on every path that registers before fitting.
+            started_at=started_at or datetime.now(UTC).isoformat(),
         )
         result = Result.open(
             self.study,
