@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass
+from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -99,9 +100,20 @@ def returns() -> np.ndarray:
     return np.concatenate([rng.normal(0.0005, 0.008, 1200), rng.normal(-0.001, 0.02, 800)])
 
 
+def _sessions(n: int) -> list:
+    """One strictly increasing session per row.
+
+    `walk_forward_feature` requires this and will not take the array's word for it: a
+    bare `(n_obs, n_features)` block cannot tell a sorted frame from an unsorted one,
+    nor one entity's series from two concatenated.
+    """
+    return [date(2015, 1, 1) + timedelta(days=i) for i in range(n)]
+
+
 def _regime_walk(functions: dict, series: np.ndarray, freeze_after: int) -> np.ndarray:
     return walk_forward_feature(
         series.reshape(-1, 1),
+        timestamps=_sessions(len(series)),
         burnin=REGIME["burnin"],
         refit_every=REGIME["refit_every"],
         fit=functions["fit_regime_centroids"],
@@ -145,8 +157,8 @@ def test_volatility_values_do_not_move_when_later_sessions_arrive(notebook_funct
     walk = notebook_functions["garch_walk"]
     percent = returns * 100
 
-    _, full, fits = walk(("TEST", percent, len(returns)))
-    _, short, _ = walk(("TEST", percent[:1500], 1500))
+    _, full, fits = walk(("TEST", percent, len(returns), _sessions(len(percent))))
+    _, short, _ = walk(("TEST", percent[:1500], 1500, _sessions(1500)))
 
     emitted = ~np.isnan(short)
     assert emitted.sum() > 0, "the shorter walk emitted no volatility to compare"
@@ -166,8 +178,8 @@ def test_freezing_stops_estimation_without_stopping_emission(notebook_functions,
     walk = notebook_functions["garch_walk"]
     percent = returns * 100
 
-    _, unfrozen, all_fits = walk(("TEST", percent, len(returns)))
-    _, frozen, frozen_fits = walk(("TEST", percent, 1500))
+    _, unfrozen, all_fits = walk(("TEST", percent, len(returns), _sessions(len(percent))))
+    _, frozen, frozen_fits = walk(("TEST", percent, 1500, _sessions(len(percent))))
 
     assert len(frozen_fits) < len(all_fits), "freezing stopped no estimation"
     assert max(fit["fit_end"] for fit in frozen_fits) <= 1500, (
@@ -228,7 +240,9 @@ def test_a_fit_the_optimizer_did_not_converge_on_is_not_an_estimate(returns):
             return _Unconverged()
 
     functions = _load(_ArchModel)
-    _, values, fits = functions["garch_walk"](("TEST", returns * 100, len(returns)))
+    _, values, fits = functions["garch_walk"](
+        ("TEST", returns * 100, len(returns), _sessions(len(returns)))
+    )
 
     assert fits == [], "a non-converged fit was recorded as an estimation"
     assert np.all(np.isnan(values)), "a non-converged fit produced a feature value"

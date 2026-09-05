@@ -821,6 +821,7 @@ def _fit_and_record(train: FloatArray) -> FloatArray:
 regime_freeze_after = int(sum(1 for d in dates if d < holdout_start))
 regime_values = walk_forward_feature(
     market_ret.reshape(-1, 1),
+    timestamps=dates,
     burnin=REGIME_BURNIN,
     refit_every=REGIME_REFIT_EVERY,
     fit=_fit_and_record,
@@ -1205,7 +1206,9 @@ print(f"FFD features: {len(ffd_df):,} rows, {ffd_df['symbol'].n_unique()} symbol
 GARCH_KW = dict(mean="Constant", vol="GARCH", p=1, q=1, dist="Normal")
 
 
-def garch_walk(payload: tuple[str, FloatArray, int]) -> tuple[str, FloatArray, list[dict]]:
+def garch_walk(
+    payload: tuple[str, FloatArray, int, list],
+) -> tuple[str, FloatArray, list[dict]]:
     """One walk-forward GARCH per series: refit on schedule, filter forward, freeze at the
     holdout.
 
@@ -1213,7 +1216,7 @@ def garch_walk(payload: tuple[str, FloatArray, int]) -> tuple[str, FloatArray, l
     over the burn-in and over any block whose fit did not converge, and one record per
     estimation so Section 4b can measure what re-estimating moved.
     """
-    symbol, returns_pct, freeze_after = payload
+    symbol, returns_pct, freeze_after, sessions = payload
     fits: list[dict] = []
 
     def fit(X_train: FloatArray) -> dict[str, float]:
@@ -1257,6 +1260,7 @@ def garch_walk(payload: tuple[str, FloatArray, int]) -> tuple[str, FloatArray, l
 
     values = walk_forward_feature(
         returns_pct.reshape(-1, 1),
+        timestamps=sessions,
         burnin=GARCH_BURNIN,
         refit_every=GARCH_REFIT_EVERY,
         fit=fit,
@@ -1304,7 +1308,7 @@ for symbol in garch_symbols:
         n_too_short += 1
         continue
     freeze_after = sum(1 for d in sessions if d < holdout_start)
-    payloads.append((symbol, symbol_returns[symbol], freeze_after))
+    payloads.append((symbol, symbol_returns[symbol], freeze_after, sessions))
 
 print(
     f"{len(payloads):,} of {len(garch_symbols):,} stocks carry more than the "
@@ -1372,7 +1376,7 @@ print(f"  every fit ended before {holdout_start}")
 
 # %%
 _market_freeze_after = int(sum(1 for d in dates if d < holdout_start))
-_, mkt_values, mkt_fits = garch_walk(("__market__", market_ret * 100, _market_freeze_after))
+_, mkt_values, mkt_fits = garch_walk(("__market__", market_ret * 100, _market_freeze_after, dates))
 mkt_garch_df = (
     pl.DataFrame({"timestamp": dates, "mkt_garch_vol": mkt_values})
     .with_columns(pl.col("mkt_garch_vol").fill_nan(None))
