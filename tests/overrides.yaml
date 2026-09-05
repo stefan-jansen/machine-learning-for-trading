@@ -1206,18 +1206,24 @@ case_studies/cme_futures/04_model_based_features:
   # ten products carry the feature, so a fixture covering three of the thirty leaves the
   # temporal features under the coverage gate and scores nothing.
   #
-  # ARIMA_REFIT_FREQ is what bounds this notebook in CI. Neither of the other two levers
-  # is available: MAX_PRODUCTS is held at 0 by the coverage gate above, and MAX_FOLDS
-  # slices `splits` so a reduced artifact fails 06-09 and 11 at "artifact fold is
-  # missing". The job timed out here at the 1800s cell limit on 2026-08-10 (run
-  # 31353597681), in the walk-forward cell and not in the FFT one - FFT_WINDOW bounds the
-  # spectral features and never bounded this. Re-selecting the ARIMA order annually
-  # rather than monthly cuts the stepwise searches twelvefold and leaves the number of
-  # forecasts, and so the row count every downstream gate reads, exactly as it was.
+  # The refit cadence is what bounds this notebook in CI, and since the schedule moved to
+  # config/setup.yaml the lever is REFIT_EVERY_OVERRIDE rather than ARIMA_REFIT_FREQ. It
+  # replaces both declared cadences with 252: annual ARIMA order selection instead of
+  # monthly, and an annual rather than quarterly regime refit. Neither leaves the emitted
+  # rows or columns any different, which is the point of overriding a cadence rather than
+  # a burn-in.
+  #
+  # Neither of the other two levers is available: MAX_PRODUCTS is held at 0 by the coverage
+  # gate above, and MAX_FOLDS narrows only what section F screens over. The job timed out
+  # here at the 1800s cell limit on 2026-08-10 (run 31353597681), in the walk-forward cell
+  # and not in the FFT one - FFT_WINDOW bounds the spectral features and never bounded
+  # this. Re-selecting the ARIMA order annually rather than monthly cuts the stepwise
+  # searches twelvefold and leaves the number of forecasts, and so the row count every
+  # downstream gate reads, exactly as it was.
   parameters:
     FFT_WINDOW: 126
     MAX_PRODUCTS: 0
-    ARIMA_REFIT_FREQ: 252
+    REFIT_EVERY_OVERRIDE: 252
   timeout: 1800
 case_studies/cme_futures/05_evaluation:
   # No MAX_SYMBOLS. The cross-sectional IC in Section 4 keeps a date only when at least
@@ -1516,9 +1522,14 @@ case_studies/etfs/04_model_based_features:
   # whole cross-section, the basket never changed, and 12 of 12 backtests recorded
   # num_trades=0. Four notebooks (14, 15, 17, 18) were blocked on that as
   # ml4t/agent-workspace#989. The selection has to have something to reject.
+  #
+  # The estimation schedule is NOT reduced. The fixture carries the full 2006-2025 session
+  # history, so every declared burn-in is payable and every refit boundary falls where it
+  # falls in production - which is the code path worth exercising, since the schedule is what
+  # this stage now is. Only the restart count comes down: it multiplies the regime model's
+  # fits by ten and changes which local optimum is kept, not whether the walk is causal.
   parameters:
-    GARCH_MIN_OBS: 50
-    N_RESTARTS: 1
+    HMM_RESTARTS: 1
   timeout: 900
 case_studies/etfs/05_evaluation:
   # Same reason as 04 above: this stage feeds the same predictions, so reducing it
@@ -2490,6 +2501,16 @@ case_studies/sp500_options/04_model_based_features:
   parameters:
     SV_N_PARTICLES: 100
     SV_POOL_SIZE: 2
+    # sigma_eta is now estimated on a refit schedule rather than once per fold, and the
+    # number of sampler runs is what that changed: at the production cadence of 63 sessions
+    # this fixture's calendar gives about eleven refits before the holdout where the per-fold
+    # design gave three. The pool and particle reductions above do not touch that term. 252
+    # puts the count back to three, so the budget below still describes the job.
+    #
+    # The GARCH cadence is deliberately NOT reduced: it is maximum likelihood on a few
+    # thousand observations, so CI exercises the production schedule for the model whose
+    # schedule this change is really about.
+    SV_REFIT_EVERY_OVERRIDE: 252
   # Budget raised from 1800 on a CI measurement, not on another notebook's number.
   # Slowest of 5 green `cs-sp500_options` runs of .github/workflows/test.yml sampled 2026-09-04:
   # 903.5s, 50% of the old budget. A budget a green run already fills is one

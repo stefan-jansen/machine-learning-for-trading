@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import polars as pl
 import pytest
 from hmmlearn.hmm import GaussianHMM
@@ -25,6 +26,7 @@ from threadpoolctl import threadpool_limits
 from case_studies.utils.temporal import (
     filtered_state_probs,
     fit_hmm_kmeans_init,
+    garch11_conditional_volatility,
     refit_boundaries,
     relabel_states,
     sort_states_by_mean,
@@ -369,6 +371,222 @@ def test_write_model_based_writes_nothing_when_a_guard_fires(tmp_path: Path) -> 
     with pytest.raises(ValueError):
         write_model_based(_emit_frame(folds=(0, 9)), out, expected_folds=[0, 1], **WRITE_KW)
     assert not out.exists()
+
+
+# --- the fold-free artifact a refit schedule produces ------------------------------------
+
+
+def _fold_free_frame() -> pl.DataFrame:
+    return _emit_frame(folds=(0,)).drop("fold")
+
+
+def test_write_model_based_writes_a_frame_that_carries_no_fold_column(tmp_path: Path) -> None:
+    out = tmp_path / "model_based.parquet"
+    record = write_model_based(_fold_free_frame(), out, fold_column=None, **WRITE_KW)
+    assert "fold" not in pl.read_parquet(out).columns
+    assert record["n_rows"] == 18
+    # One geometry record per feature, not per fold and feature.
+    assert {(g["fold"], g["feature"]) for g in record["fold_feature_geometry"]} == {
+        (None, "vol_state"),
+        (None, "garch_sigma"),
+    }
+
+
+def test_the_keys_alone_identify_a_row_when_there_is_no_fold(tmp_path: Path) -> None:
+    frame = _fold_free_frame()
+    frame = pl.concat([frame, frame.head(1)])
+    with pytest.raises(ValueError, match="duplicate rows"):
+        write_model_based(frame, tmp_path / "m.parquet", fold_column=None, **WRITE_KW)
+
+
+def test_expected_folds_is_refused_rather_than_ignored_without_a_fold_column(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "m.parquet"
+    with pytest.raises(ValueError, match="expected_folds"):
+        write_model_based(_fold_free_frame(), out, fold_column=None, expected_folds=[0], **WRITE_KW)
+    assert not out.exists()
+
+
+def test_an_all_null_feature_is_still_refused_without_a_fold_column(tmp_path: Path) -> None:
+    frame = _fold_free_frame().with_columns(pl.lit(None, dtype=pl.Float64).alias("garch_sigma"))
+    with pytest.raises(ValueError, match="no value at all"):
+        write_model_based(frame, tmp_path / "m.parquet", fold_column=None, **WRITE_KW)
+
+
+# ---------------------------------------------------------------------------
+# The GARCH(1,1) recursion.
+#
+# The property is the same one the schedule exists for, one level down: a value must not move
+# when observations after it are appended. `arch`'s own result object fails it, which is why
+# there is a recursion here at all.
+# ---------------------------------------------------------------------------
+
+GARCH_PARAMS = dict(mu=0.05, omega=0.02, alpha=0.08, beta=0.90, backcast=1.5)
+GJR_PARAMS = dict(mu=0.05, omega=0.02, alpha=0.04, beta=0.90, gamma=0.07, backcast=1.5)
+
+
+def _garch_returns(n: int = 800, seed: int = 3) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    return np.concatenate(
+        [rng.normal(0.0, 0.6, size=n // 2), rng.normal(0.0, 2.2, size=n - n // 2)]
+    )
+
+
+def test_the_garch_recursion_does_not_move_when_later_returns_arrive() -> None:
+    returns = _garch_returns()
+    short = garch11_conditional_volatility(returns[:500], **GARCH_PARAMS)
+    full = garch11_conditional_volatility(returns, **GARCH_PARAMS)
+    np.testing.assert_array_equal(short, full[:500])
+
+
+def test_the_gjr_recursion_does_not_move_when_later_returns_arrive() -> None:
+    # Same property with the asymmetry term on, because gamma enters through the sign of the
+    # PREVIOUS residual and a prefix ends one observation earlier.
+    returns = _garch_returns()
+    short = garch11_conditional_volatility(returns[:500], **GJR_PARAMS)
+    full = garch11_conditional_volatility(returns, **GJR_PARAMS)
+    np.testing.assert_array_equal(short, full[:500])
+
+
+def test_arch_moves_earlier_values_when_the_sample_is_extended() -> None:
+    """The negative control: the property above is not vacuous.
+
+    A prefix-stability assertion passes trivially against any implementation that happens to
+    process observations in order, so on its own it is evidence about nothing. This runs the
+    identical assertion against `arch`'s own fixed-parameter result object - the thing the
+    helper replaces - and requires it to FAIL. If `arch` ever becomes prefix-stable this test
+    goes red, and the helper's reason for existing has to be re-established rather than assumed.
+    """
+    arch_model = pytest.importorskip("arch").arch_model
+    returns = _garch_returns(n=2000)
+    params = pd.Series(
+        {
+            "mu": GARCH_PARAMS["mu"],
+            "omega": GARCH_PARAMS["omega"],
+            "alpha[1]": GARCH_PARAMS["alpha"],
+            "beta[1]": GARCH_PARAMS["beta"],
+        }
+    )
+
+    def arch_path(sample: np.ndarray) -> np.ndarray:
+        spec = arch_model(sample, mean="Constant", vol="GARCH", p=1, q=1, dist="Normal")
+        return np.asarray(spec.fix(params).conditional_volatility, dtype=float)
+
+    short = arch_path(returns[:1500])
+    full = arch_path(returns)[:1500]
+
+    assert not np.array_equal(short, full), (
+        "arch's fixed-parameter path is prefix-stable, which contradicts the measurement this "
+        "helper was written for. Re-derive the reason before deleting the helper."
+    )
+    # The disagreement is real but small and decays: it is a seeding and bounds effect, not a
+    # different model. Pinning the shape keeps the negative control from passing for the wrong
+    # reason - a crash or an all-nan path would also satisfy `not array_equal`.
+    relative = np.abs(short - full) / np.maximum(np.abs(full), 1e-12)
+    assert np.isfinite(relative).all()
+    assert relative.max() > 1e-6
+    assert relative[0] > relative[-1]
+
+
+def test_the_garch_recursion_reproduces_its_own_definition() -> None:
+    returns = _garch_returns(n=60)
+    got = garch11_conditional_volatility(returns, **GARCH_PARAMS)
+    mu, omega = GARCH_PARAMS["mu"], GARCH_PARAMS["omega"]
+    alpha, beta = GARCH_PARAMS["alpha"], GARCH_PARAMS["beta"]
+    resid = returns - mu
+    want = np.empty(len(returns))
+    want[0] = omega + (alpha + beta) * GARCH_PARAMS["backcast"]
+    for t in range(1, len(returns)):
+        want[t] = omega + alpha * resid[t - 1] ** 2 + beta * want[t - 1]
+    np.testing.assert_allclose(got, np.sqrt(want), rtol=1e-12)
+
+
+def test_the_gjr_recursion_reproduces_its_own_definition() -> None:
+    returns = _garch_returns(n=60)
+    got = garch11_conditional_volatility(returns, **GJR_PARAMS)
+    mu, omega = GJR_PARAMS["mu"], GJR_PARAMS["omega"]
+    alpha, beta, gamma = GJR_PARAMS["alpha"], GJR_PARAMS["beta"], GJR_PARAMS["gamma"]
+    resid = returns - mu
+    want = np.empty(len(returns))
+    want[0] = omega + (alpha + 0.5 * gamma + beta) * GJR_PARAMS["backcast"]
+    for t in range(1, len(returns)):
+        shock = alpha + gamma * (resid[t - 1] < 0.0)
+        want[t] = omega + shock * resid[t - 1] ** 2 + beta * want[t - 1]
+    np.testing.assert_allclose(got, np.sqrt(want), rtol=1e-12)
+
+
+def test_a_zero_gamma_is_the_symmetric_model() -> None:
+    returns = _garch_returns(n=200)
+    np.testing.assert_array_equal(
+        garch11_conditional_volatility(returns, **GARCH_PARAMS),
+        garch11_conditional_volatility(returns, gamma=0.0, **GARCH_PARAMS),
+    )
+
+
+def test_the_asymmetry_raises_variance_only_after_a_negative_return() -> None:
+    # gamma has to attach to the sign of the residual it multiplies, not to the current row.
+    # A sign error here is invisible to every aggregate and to the definition test above if
+    # that test repeats the same mistake, so it is stated directly against constructed input.
+    returns = np.array([0.05, 0.05 - 1.0, 0.05 + 1.0, 0.05, 0.05])
+    sym = garch11_conditional_volatility(returns, **GARCH_PARAMS)
+    asym = garch11_conditional_volatility(returns, **{**GARCH_PARAMS, "gamma": 0.07})
+    # Row 2 follows the -1.0 residual and must be lifted; row 3 follows the +1.0 and must not.
+    assert asym[2] > sym[2]
+    assert asym[3] == pytest.approx(
+        sym[3] + GARCH_PARAMS["beta"] * (asym[2] ** 2 - sym[2] ** 2) / (asym[3] + sym[3]), rel=1e-6
+    )
+
+
+def test_a_degenerate_fit_raises_rather_than_emitting_nan() -> None:
+    """arch returns alpha + gamma < 0 without complaint, and sqrt of it is nan.
+
+    A nan is not a feature value. Measured on sp500_equity_option_analytics: 19% of first
+    blocks come back with a negative net shock coefficient, and the old path emitted them.
+    """
+    with pytest.raises(ValueError, match=r"alpha \+ gamma"):
+        garch11_conditional_volatility(
+            _garch_returns(n=400),
+            mu=0.0,
+            omega=1e-8,
+            alpha=0.02,
+            beta=0.90,
+            gamma=-0.30,
+            backcast=1.0,
+        )
+
+
+def test_bounds_clip_the_recursion_instead_of_raising() -> None:
+    out = garch11_conditional_volatility(
+        _garch_returns(n=400),
+        mu=0.0,
+        omega=1e-8,
+        alpha=0.02,
+        beta=0.90,
+        gamma=-0.30,
+        backcast=1.0,
+        bounds=(1e-6, 1e4),
+    )
+    assert np.isfinite(out).all()
+    assert (out >= np.sqrt(1e-6) - 1e-12).all()
+
+
+def test_an_integrated_fit_no_longer_seeds_from_the_parameters() -> None:
+    """Persistence 1.0 has no long-run variance; the seed comes from the data instead.
+
+    Two of 25 sampled sp500_equity_option_analytics securities fitted to persistence 1.0000,
+    where omega/(1 - persistence) is infinite, any clamp makes it omega x 1e6, and beta = 1
+    means that seed never decays. The backcast bounds the seed whatever the optimizer returns.
+    """
+    out = garch11_conditional_volatility(
+        _garch_returns(n=300), mu=0.0, omega=0.02, alpha=0.10, beta=0.90, backcast=1.5
+    )
+    assert np.isfinite(out).all()
+    assert out[0] == pytest.approx(np.sqrt(0.02 + 1.0 * 1.5))
+
+
+def test_an_empty_return_series_gives_an_empty_recursion() -> None:
+    assert garch11_conditional_volatility(np.empty(0), **GARCH_PARAMS).shape == (0,)
 
 
 # ---------------------------------------------------------------------------

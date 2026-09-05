@@ -373,6 +373,45 @@ features:
       representation: indicator
       failure_mode: a control that does predict is evidence the panel is contaminated, not evidence of a signal
 
+model_based:
+  # `04_model_based_features` fits two volatility models. Both were previously fitted
+  # once per cross-validation fold and then run forward from the START of that fold's
+  # training window, so a training row carried parameters estimated from its own future
+  # while a validation row carried parameters estimated only from its past. The model was
+  # fitted on one version of the column and scored on another.
+  #
+  # The schedule below replaces the fold as the thing that bounds an estimate. A value at
+  # session t is produced by parameters estimated from sessions ending at or before t, so
+  # there is one value per (symbol, session) whichever fold later selects the row - which
+  # is why `model_based.parquet` no longer carries a `fold` column.
+  garch:
+    # Sessions a segment spends before its first fit. They carry no GARCH value at all.
+    # 252 rather than the 504 used where histories are long: this panel has 1,238
+    # sessions but the median symbol only 373 of them, and the tenth percentile 71, so
+    # every session added to the burn-in is taken off a large part of the cross-section.
+    # 04 reports how many symbols clear it and what fraction of rows carry a value.
+    burnin: 252
+    # Sessions between refits. One month. Each refit re-estimates on everything from the
+    # segment's first return through the refit session, expanding rather than rolling,
+    # and the parameters then speak for the following month and no earlier session.
+    refit_every: 21
+  stochastic_volatility:
+    # The same burn-in as GARCH, so the two columns start on the same session and the
+    # variance risk premium built from each covers the same rows.
+    burnin: 252
+    # One quarter, not one month. `sigma_eta` is a property of how equity volatility
+    # behaves rather than of any one company: it is estimated once per refit from a pool
+    # of symbols and shared by every segment, and each estimate costs a four-chain MCMC
+    # run per pool symbol. A monthly cadence would price this notebook at roughly three
+    # times a quarterly one for a parameter that is not a per-symbol quantity and is not
+    # expected to move monthly.
+    refit_every: 63
+    # Sessions of each pool symbol's returns the sampler reads, taken as the trailing
+    # window ending at the refit. This one rolls where GARCH expands, and deliberately:
+    # the sampler carries one latent state per observation, so an expanding window makes
+    # the last refit five times the cost of the first for a single scalar parameter.
+    calibration_window: 252
+
 modeling:
   gbm:
     libraries: [lightgbm]

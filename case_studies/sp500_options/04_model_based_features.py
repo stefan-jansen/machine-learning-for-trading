@@ -21,8 +21,12 @@
 # what a *fitted* volatility model says the next day's volatility will be, and two are the gap
 # between that forecast and the volatility the option market is charging for the same day.
 #
-# Two models produce the forecasts, and both are estimated once per training window and then held
-# fixed while they run forward:
+# Two models produce the forecasts, and both are estimated on a refit schedule: fitted on the
+# history available at a given session, held fixed for the month or quarter that follows, then
+# refitted on the history available then. No value is produced by parameters that had already seen
+# the session it describes.
+#
+# The two models are:
 #
 # 1. **GJR-GARCH**, a variance recursion in which each day's variance is a weighted sum of
 #    yesterday's variance and yesterday's squared return, with an extra weight on the squared
@@ -34,16 +38,15 @@
 #
 # **Learning objectives**. After working through this notebook you will be able to:
 #
-# - Estimate a volatility model on one stretch of a price history and then run it forward over
-#   later dates without re-estimating it, so that no value it produces on those later dates was
-#   informed by them.
+# - Fit a volatility model on the history available at a point in time, run it forward over the
+#   dates that follow without re-estimating, and refit on a schedule - so that no value it produces
+#   was informed by the date it describes, on training dates as well as later ones.
 # - Recover a daily estimate of a quantity a model never observes, by carrying a population of
 #   candidate values forward one day at a time and reweighting them against each day's return.
 # - Write the difference between a model's volatility forecast and the option market's implied
 #   volatility as a feature, and say what a positive value of it would mean.
-# - Check whether the same calendar day is given a different value by two passes of the same model
-#   estimated on different windows, and read off that comparison how often the models need
-#   re-estimating.
+# - Measure how far a fitted feature moves at the moment its parameters are replaced, and read off
+#   that comparison whether the refit cadence is buying anything.
 # - Test whether a feature ranks a cross-section against the outcome that was actually traded,
 #   correcting the test for the fact that consecutive positions overlap in time.
 #
@@ -53,8 +56,9 @@
 # against in section F; and the primary label from [`02_labels`](02_labels.ipynb), read only by
 # section F.
 #
-# **Writes**: `features/model_based.parquet`, one row per date, symbol and fold, and the small
-# JSON file recorded beside it.
+# **Writes**: `features/model_based.parquet`, one row per date and symbol, and the small JSON file
+# recorded beside it. There is no `fold` column: what a value was fitted on is decided by the refit
+# schedule in `setup.yaml`, not by which fold reads it.
 #
 # **Book reference**: Chapter 9, Section 9.3 (Volatility Models)
 #
@@ -83,6 +87,7 @@ from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_ser
 
 from case_studies.sp500_options._underlying_returns import reconcile_underlying_log_returns
 from case_studies.utils.artifact_digest import read_digest, value_digest, write_artifact
+from case_studies.utils.temporal import refit_boundaries, walk_forward_feature
 from data import load_sp500_daily_bars, load_sp500_options_straddles
 from utils.artifact_specs import resolve_label_buffer_unit
 from utils.cv_splits import generate_cv_splits, load_evaluation_config
@@ -102,7 +107,7 @@ logging.getLogger("pymc").setLevel(logging.ERROR)
 # The Markov chain Monte Carlo step estimates one market-wide parameter, so it does not have to run
 # on every symbol: it runs on a pool of the ten symbols with the most quoted option dates inside the
 # training window, and the ten estimates are averaged. The pool size is what the step's cost is
-# linear in - ten fits per pass takes minutes, and every symbol would take days - and averaging over
+# linear in - ten fits per refit takes minutes, and every symbol would take days - and averaging over
 # ten stops any single company's volatility deciding the parameter. Each fit discards its first two
 # thousand draws while the sampler settles and keeps the next two thousand, on four chains started
 # from different points, because the only reliable evidence that a sampler has converged is that
@@ -121,7 +126,7 @@ logging.getLogger("pymc").setLevel(logging.ERROR)
 
 # %% tags=["parameters"]
 SEED = 42
-SV_POOL_SIZE = 10  # symbols the vol-of-vol parameter is estimated on, per fold
+SV_POOL_SIZE = 10  # symbols the vol-of-vol parameter is estimated on, per refit
 SV_N_PARTICLES = 1000  # candidate volatility states the particle filter carries
 SV_DRAWS = 2000  # posterior draws kept per symbol
 SV_TUNE = 2000  # draws discarded while the sampler adapts
@@ -129,6 +134,13 @@ SV_CHAINS = 4  # independently started chains
 SV_TARGET_ACCEPT = 0.99  # step size target; higher means smaller, safer steps
 SV_RETRY_DRAWS = 4000  # second attempt, for a symbol that fails the convergence checks
 SV_RETRY_TUNE = 4000
+# How often sigma_eta is re-estimated, in sessions. `None` means "use setup.yaml", which is
+# what a production run does; the sibling knobs above reduce how expensive one sampler run is
+# and this one reduces how many there are, which is the term that actually grew when this
+# notebook moved from three per-fold passes to a schedule. A run that sets it is not a
+# production run - it is not in `notebook_provenance.PRODUCTION_SAFE_PARAMETERS` - so a
+# reduced render cannot be stamped as one.
+SV_REFIT_EVERY_OVERRIDE = None
 
 # %%
 CASE_DIR = get_case_study_dir("sp500_options")
@@ -185,6 +197,15 @@ label_buffer = str(_setup["labels"]["buffer"])
 label_buffer_unit = resolve_label_buffer_unit(STRATEGY_ID, str(_setup["labels"]["primary"]), _setup)
 LABEL_HORIZON_TRADING_DAYS = int(_setup["features"]["hold_sessions"])
 PERIODS_PER_YEAR = int(_eval["periods_per_year"])
+# The refit schedule. It is declared in setup.yaml rather than here because it is part of what
+# the artifact is - two runs on different schedules produce different columns under the same
+# name - and because `05_evaluation` onwards read the same file to say what they were given.
+_schedule = _setup["model_based"]
+GARCH_BURNIN = int(_schedule["garch"]["burnin"])
+GARCH_REFIT_EVERY = int(_schedule["garch"]["refit_every"])
+SV_BURNIN = int(_schedule["stochastic_volatility"]["burnin"])
+SV_REFIT_EVERY = int(SV_REFIT_EVERY_OVERRIDE or _schedule["stochastic_volatility"]["refit_every"])
+SV_CALIBRATION_WINDOW = int(_schedule["stochastic_volatility"]["calibration_window"])
 cv_folds = generate_cv_splits(
     features.select("timestamp"),
     case_study_id=STRATEGY_ID,
@@ -192,24 +213,26 @@ cv_folds = generate_cv_splits(
     buffer_unit=label_buffer_unit,
 )
 data_start = features["timestamp"].min()
-# The pass fitted on everything before the holdout is written as one more fold, numbered after the
-# last cross-validation fold. `utils/modeling.py::append_holdout_fold_if_needed` gives the holdout
-# fold that same number, and `validate_temporal_fold_coverage` looks the artifact up by it.
-HOLDOUT_FOLD = len(cv_folds)
 holdout_train_end = (date.fromisoformat(holdout_start) - timedelta(days=1)).isoformat()
 
+# The folds are read here for one purpose only: section F scores the new columns over the
+# validation windows, which is where a fold still means something. Nothing in sections C to E
+# uses them - what a value is fitted on is decided by the refit schedule, not by a fold - and
+# `model_based.parquet` carries no fold column for the same reason.
 print(f"Label buffer between training and validation: {label_buffer} ({label_buffer_unit})")
 print(f"Holding period: {LABEL_HORIZON_TRADING_DAYS} NYSE sessions")
-print(f"\nCross-validation folds: {len(cv_folds)}")
+print(f"\nGARCH: {GARCH_BURNIN}-session burn-in, refit every {GARCH_REFIT_EVERY}")
+print(
+    f"SV:    {SV_BURNIN}-session burn-in, refit every {SV_REFIT_EVERY}, "
+    f"calibrated on the trailing {SV_CALIBRATION_WINDOW}"
+)
+print(f"\nCross-validation folds, used by section F only: {len(cv_folds)}")
 for fold in cv_folds:
     print(
         f"  Fold {fold['fold']}: train {fold['train_start'].date()}..{fold['train_end'].date()}, "
         f"validation {fold['val_start'].date()}..{fold['val_end'].date()}"
     )
-print(
-    f"  Fold {HOLDOUT_FOLD}: train {data_start}..{holdout_train_end}, "
-    f"holdout {holdout_start}..{holdout_end}"
-)
+print(f"  Holdout: {holdout_start}..{holdout_end}, no parameter estimated inside it")
 
 # %% [markdown]
 # One consequence of writing values across the holdout is easy to miss. Every summary this notebook
@@ -278,92 +301,132 @@ coverage_by_year
 # else. Whatever else is in the file cannot reach it.
 #
 # A feature here is a function of past prices *and* of parameters that were themselves estimated
-# from prices. The estimation window is therefore part of the feature's information set, and it is
-# an easy one to get wrong, because it is invisible in the value. A conditional volatility for
+# from prices. Two channels therefore carry data into the value, and both have to end at or before
+# the session it describes: the **conditioning set**, which observations the value is computed from,
+# and the **parameters**, which observations theta was estimated from. A conditional volatility for
 # 3 March computed from parameters fitted on 2017-2021 looks exactly like one computed from
 # parameters fitted on 2017-2019. The first has read four years of the future; the second has not.
 #
-# The discipline that removes it is to **estimate once, then run forward without re-estimating**.
-# Parameters are fitted on a training window and held fixed while the variance recursion or the
-# particle filter walks through later dates one at a time. Re-fitting on a longer window and then
-# recomputing the whole series - the obvious thing to do, and what a plain call to a volatility
-# library does - would make every value in the series depend on every date in it.
+# The recursion below closes the first channel, and this notebook always closed it. The second is
+# the one that was open. Parameters were estimated once per cross-validation fold on that fold's
+# whole training window, and the model was then run forward **from the start of that same window**.
+# A training row therefore carried parameters estimated from its own future - for the earliest rows
+# of a fold, years of it - while every validation row carried parameters estimated only from its
+# past. The model was fitted on one version of the column and scored on another. Nothing raised and
+# nothing could: a fold's rows are internally consistent, and the artifact recorded no estimation
+# window.
 #
-# ## B. The fold contract
+# ## B. The refit schedule
 #
-# Below is what each pass fits on and what it produces, one row per pass. Read it left to right:
-# the dark bar is the window whose returns the parameters were estimated from, and the amber bar is
-# the window over which the values those parameters produce could not have been informed by the
-# dates they describe. No dark bar extends into its own amber bar, which is the property the whole
-# section exists to establish.
+# What replaces the fold is a schedule. A segment spends a burn-in during which it has no value at
+# all, is fitted on everything up to that point, and the parameters then speak for the next month
+# and no earlier session. At the next refit the fit is repeated on everything available then. So the
+# value at session $t$ is produced by parameters estimated from sessions ending at or before $t$,
+# for every $t$, with no exception for training rows.
 #
-# Values are also written for the dark span. A model training on a fold needs a volatility column
-# for its own training dates, and those values are legitimate for that purpose even though the
-# parameters that produced them were estimated from the same window - the model is not being scored
-# there. Only the amber span may be scored, which is why the two are drawn differently.
+# The consequence for the file is that there are no passes. A session gets **one** conditional
+# volatility, not one per fold, and `model_based.parquet` carries one row per symbol and session
+# with no `fold` column. A fold selecting that session later reads the same value whichever fold it
+# is, which is what makes a column mean the same thing to a model trained across folds.
 #
-# The last row is the pass whose parameters come from every date before the holdout and which then
-# runs forward through it. That is deliberate: a later stage has to be able to score a model over
-# the holdout, and it cannot do that if the volatility columns are undefined there. It is safe for
-# the same reason every other row is safe - nothing to the right of the red rule entered the fit.
+# The schedule is declared in `setup.yaml` under `model_based:` and read at the top of this
+# notebook, because it is part of what the artifact *is*: two runs on different schedules produce
+# different columns under the same name.
+#
+# The figure below is the whole claim in one line. For every session on the calendar, how recent
+# were the parameters that produced its value - drawn as the last session those parameters saw,
+# against the session itself. The staircase steps up at each refit and is flat in between, and it
+# stays below the diagonal everywhere, which is the property: no value was produced by a fit that
+# had seen it. The flat run at the right is the holdout, where the walk stops re-estimating and
+# keeps applying the last parameters fitted before the seal.
 
 # %%
-fig, ax = plt.subplots(figsize=(11, 3.2))
-rows = [
-    (
-        f"fold {fold['fold']}",
-        fold["train_start"],
-        fold["train_end"],
-        fold["val_start"],
-        fold["val_end"],
-    )
-    for fold in cv_folds
-]
-rows.append(
-    (f"fold {HOLDOUT_FOLD} (holdout)", data_start, holdout_train_end, holdout_start, holdout_end)
+_calendar = sorted(features["timestamp"].unique().to_list())
+# `freeze_after` is the largest **exclusive** fit end the walk may use, so it is the COUNT of
+# sessions before the holdout and not the index of the last one. Passing the index would forbid
+# the one fit that sees every pre-holdout session and nothing else - the best estimate available
+# at the seal - and freeze on the refit before it instead, throwing away up to a month of
+# perfectly usable history for no gain.
+FREEZE_AFTER = next(
+    (i for i, session in enumerate(_calendar) if session >= HOLDOUT_START), len(_calendar)
 )
-for row, (_label, tr_start, tr_end, ap_start, ap_end) in enumerate(rows):
-    tr_start, tr_end = pd.Timestamp(tr_start), pd.Timestamp(tr_end)
-    ap_start, ap_end = pd.Timestamp(ap_start), pd.Timestamp(ap_end)
-    ax.barh(
-        row,
-        tr_end - tr_start,
-        left=tr_start,
-        height=0.55,
-        color=COLORS["blue"],
-        label="parameters estimated from" if row == 0 else None,
-    )
-    ax.barh(
-        row,
-        ap_end - ap_start,
-        left=ap_start,
-        height=0.55,
-        color=COLORS["amber"],
-        label="may be scored over" if row == 0 else None,
-    )
-ax.axvline(pd.Timestamp(holdout_start), color=COLORS["negative"], linestyle="--", linewidth=1.2)
-ax.set_yticks(range(len(rows)))
-ax.set_yticklabels([r[0] for r in rows])
-ax.invert_yaxis()
-ax.legend(loc="lower left", bbox_to_anchor=(0, -0.32), ncol=2, frameon=False, fontsize=8)
+
+_blocks = refit_boundaries(len(_calendar), GARCH_BURNIN, GARCH_REFIT_EVERY)
+_steps = []
+# The first session of each block that carries NEW parameters. Not every emitted session,
+# and not the first session of a frozen block either: a frozen block re-applies the estimate
+# the block before it used, so nothing changes at its boundary and counting it as a refit
+# would dilute the measurement in section D with sessions where no parameter moved.
+_refit_sessions: list = []
+_frozen_fit_end = None
+for _fit_end, _emit_end in _blocks:
+    if _fit_end > FREEZE_AFTER:
+        if _frozen_fit_end is None:
+            continue
+        _effective = _frozen_fit_end
+    else:
+        _effective = _fit_end
+        _frozen_fit_end = _fit_end
+        _refit_sessions.append(_calendar[_fit_end])
+    for _i in range(_fit_end, _emit_end):
+        _steps.append((_calendar[_i], _calendar[_effective - 1]))
+
+# The property, asserted rather than described: the last session a value's parameters saw is
+# never later than the session the value is for.
+assert _steps, "the refit schedule emits no session at all"
+assert all(fit_end < session for session, fit_end in _steps), (
+    "a session is described by parameters that had already seen it"
+)
+print(f"Calendar sessions: {len(_calendar):,}")
+print(f"  Burn-in, no value on any segment: {GARCH_BURNIN}")
+print(f"  Last session any parameter is fitted on: {_calendar[FREEZE_AFTER - 1]}")
+print(f"  Refits before the holdout: {sum(1 for f, _ in _blocks if f <= (FREEZE_AFTER or 0))}")
+print(f"  Sessions emitted: {len(_steps):,}")
+# On the calendar. A segment refits on its OWN observations, so a segment that lists later
+# than the panel starts reaches its first refit on a different date than this; the figure
+# above draws the calendar schedule, and section D classifies per segment.
+print(f"  Refits on the full calendar: {len(_refit_sessions):,}")
+
+# %%
+fig, ax = plt.subplots(figsize=(11, 3.6))
+_x = [session for session, _ in _steps]
+_y = [fit_end for _, fit_end in _steps]
+ax.plot(_x, _x, color=COLORS["neutral"], linestyle=":", linewidth=1.0, label="the session itself")
+ax.step(
+    _x,
+    _y,
+    where="post",
+    color=COLORS["blue"],
+    linewidth=1.2,
+    label="last session the parameters saw",
+)
+ax.axvline(HOLDOUT_START, color=COLORS["negative"], linestyle="--", linewidth=1.2)
+ax.set(xlabel="Session the value is for", ylabel="Last session its parameters saw")
+ax.legend(loc="upper left", frameon=False, fontsize=8)
 add_message_title(
     ax,
-    "No pass is scored on a date its parameters could have seen",
+    "Every value's parameters stop before the session it describes",
     subtitle=(
-        "Estimation window and scorable window per pass; values are written across both. "
-        f"The red rule marks the start of the holdout at {holdout_start}"
+        f"GARCH schedule: {GARCH_BURNIN}-session burn-in, refit every {GARCH_REFIT_EVERY}. "
+        f"The red rule marks the holdout at {holdout_start}, past which the walk stops refitting"
     ),
 )
 show_with_alt(
     fig,
-    "Horizontal timeline with one row per pass, each row drawn as the window its parameters "
-    "are estimated from followed by the window it may be scored over. Fold 0 estimates across "
-    "2018 to late 2019 and is scorable through 2020; fold 1 starts earlier, estimating to late "
-    "2018 and scorable through 2019 into 2020; the holdout pass estimates across everything up "
-    "to 2021 and is scorable only after it. A dashed red vertical rule marks the start of the "
-    f"holdout at {holdout_start}, and no pass's scorable window begins before its own "
-    "estimation window ends.",
+    "Line chart whose horizontal axis is the session a feature value is for and whose vertical "
+    "axis is the last session the parameters behind that value were estimated from. A dotted "
+    "diagonal marks where the two would be equal. A blue staircase runs below that diagonal for "
+    "the whole sample, stepping up at each monthly refit and flat in between, so the vertical "
+    "gap between the two lines is the age of the parameters and is never negative. A dashed red "
+    "vertical rule marks the start of the holdout, after which the staircase stops rising and "
+    "runs flat to the end, showing that no parameter is re-estimated once the holdout opens.",
 )
+
+# %% [markdown]
+# Values are written across the holdout, and that is deliberate: a later stage has to be able to
+# score a model over the holdout, and it cannot do that if the volatility columns are undefined
+# there. What makes it safe is the flat run in the figure - the parameters producing those values
+# were fitted before the seal, and nothing to the right of the red rule entered a fit.
 
 # %% [markdown]
 # ### The returns both models read
@@ -424,15 +487,17 @@ print(
 # rise of the same size does - the asymmetry equity index options are priced around, and the reason
 # a symmetric GARCH understates volatility exactly when a short-volatility position is losing.
 #
-# Four parameters plus a constant mean are estimated by maximum likelihood on the training window.
-# The recursion is then run forward over the segment's whole history with those parameters held
-# fixed, one day at a time, each day reading only the previous day's variance and squared return.
+# Four parameters plus a constant mean are estimated by maximum likelihood on the returns available
+# at a refit. The recursion is then run forward with those parameters held fixed, one day at a time,
+# each day reading only the previous day's variance and squared return, until the next refit
+# replaces them. A segment is fitted once every twenty-one sessions on everything it has by then,
+# never on a window that reaches past the sessions the fit will speak for.
 #
 # The recursion is written out below rather than taken from the fitting library, and the reason is
 # worth stating because it is the kind of leak a code review does not catch. Handing a fitted result
 # back to `arch` and asking it to filter a longer series makes it recompute the bounds it clips the
 # variance path to, and it computes them from the residuals of the series it was handed - which now
-# includes the validation dates. The clipping envelope would then depend on the future. Everything
+# includes the later dates. The clipping envelope would then depend on the future. Everything
 # the recursion below needs - the scale, the value it starts from, the clipping bounds - is derived
 # from the training returns alone and passed in.
 
@@ -573,37 +638,67 @@ def failed_garch_diagnostic(train_returns: pd.Series, retried: bool, exc: Except
 
 
 # %% [markdown]
-# The four above assemble into one call: take a segment's returns and a fold's window, fit, and run
-# the recursion forward. It returns the volatility series and a record of how the fit went, and it
-# returns the record even when the fit failed, so that a segment which dropped out can be counted
-# rather than silently disappearing from the denominator. The annualization at the end undoes the
-# scaling by a hundred and converts a daily volatility to a yearly one.
+# The four above assemble into one walk. `walk_forward_feature` spends the burn-in, fits on
+# everything up to the first refit session, emits over the month that follows, refits on everything
+# up to the next one, and carries on to the end of the segment. `fit` is handed the training prefix
+# and returns the five parameters plus the three quantities the recursion needs that are not
+# parameters; `apply` is handed the fitted object and a prefix of returns and filters over it, of
+# which only the current block's rows are kept.
+#
+# Two things about it are worth stating because they are what make the walk causal rather than
+# merely walk-shaped. The estimation window expands, so a fit's last observation is at index
+# `len(train) - 1` of the segment - which is what the diagnostic record below writes down as
+# `fit_end`, and what section B asserts is never later than the session it speaks for. And
+# `freeze_after` stops the re-estimation at the last session before the holdout: the holdout still
+# receives values, produced by the last parameters fitted before it opened, because a coefficient
+# refitted on holdout sessions is a parameter estimated on the holdout however causal the recursion
+# around it looks.
+#
+# A block whose optimizer does not converge is left empty rather than filled with the previous
+# month's parameters, and it is counted. The record is written before the rejection is raised, so a
+# segment that drops out of a block stays in the denominator.
 
 
 # %%
-def fit_gjr_garch_symbol(
-    ret_series: pd.Series,
-    train_start: date,
-    train_end: date,
-    filter_end: date,
-) -> tuple[pd.Series | None, dict | None]:
-    """Fit one eligible security segment and filter causally through ``filter_end``."""
-    train_returns = ret_series[
-        (ret_series.index >= pd.Timestamp(train_start))
-        & (ret_series.index <= pd.Timestamp(train_end))
-    ]
-    filter_returns = ret_series[ret_series.index <= pd.Timestamp(filter_end)]
-    if len(train_returns) < 252:
-        return None, None
+class GarchBlockRejected(RuntimeError):
+    """Raised for an optimizer result that must not be used to emit a block."""
 
-    retried = False
-    try:
-        result, retried = fit_garch_with_retry(train_returns)
-        diagnostics = summarize_garch_fit(result, train_returns, retried)
-        if not diagnostics["converged"]:
-            return None, diagnostics
+
+def garch_walk_segment(
+    ret_series: pd.Series,
+    burnin: int,
+    refit_every: int,
+    freeze_after: int | None,
+) -> tuple[pd.Series, list[dict]]:
+    """Filter one segment on the refit schedule, returning values and one record per fit."""
+    diagnostics: list[dict] = []
+    observations = ret_series.to_numpy(dtype=float).reshape(-1, 1)
+
+    def fit(train: np.ndarray) -> dict:
+        # The walk expands, so the training prefix always starts at the segment's first
+        # return and its length is the index one past the last session the fit could see.
+        train_returns = ret_series.iloc[: len(train)]
+        try:
+            result, retried = fit_garch_with_retry(train_returns)
+        except Exception as exc:
+            # Recorded before it is re-raised, so a block whose optimizer errored stays in
+            # the denominator instead of disappearing from it. `walk_forward_feature` will
+            # leave the block null and refit at the next boundary.
+            failure = failed_garch_diagnostic(train_returns, False, exc)
+            failure["emit_start"] = ret_series.index[len(train)]
+            diagnostics.append(failure)
+            raise
+        record = summarize_garch_fit(result, train_returns, retried)
+        # The first session this fit speaks for. The walk schedules on the segment's own
+        # observations, so it is not `calendar[fit_end]`: a segment that starts later, or
+        # that is missing sessions the calendar has, refits on different dates than its
+        # neighbours. Section D classifies moves by this, per segment, for that reason.
+        record["emit_start"] = ret_series.index[len(train)]
+        if not record["converged"]:
+            diagnostics.append(record)
+            raise GarchBlockRejected(f"optimizer flag {record['convergence_flag']}")
         fit_scale, backcast, static_bounds = training_garch_filter_state(result, train_returns)
-        diagnostics.update(
+        record.update(
             {
                 "fit_scale": fit_scale,
                 "backcast": backcast,
@@ -611,119 +706,93 @@ def fit_gjr_garch_symbol(
                 "variance_upper_bound": static_bounds[1],
             }
         )
+        diagnostics.append(record)
+        return {
+            "params": result.params,
+            "scale": fit_scale,
+            "backcast": backcast,
+            "bounds": static_bounds,
+        }
+
+    def apply(model: dict, prefix: np.ndarray) -> np.ndarray:
         filtered = causal_gjr_garch_filter(
-            filter_returns, result.params, fit_scale, backcast, static_bounds
+            pd.Series(prefix[:, 0], index=ret_series.index[: len(prefix)]),
+            model["params"],
+            model["scale"],
+            model["backcast"],
+            model["bounds"],
         )
-        return filtered / 100 * np.sqrt(PERIODS_PER_YEAR), diagnostics
-    except Exception as exc:
-        return None, failed_garch_diagnostic(train_returns, retried, exc)
+        return (filtered.to_numpy() / 100 * np.sqrt(PERIODS_PER_YEAR)).reshape(-1, 1)
+
+    values = walk_forward_feature(
+        observations,
+        burnin=burnin,
+        refit_every=refit_every,
+        fit=fit,
+        apply=apply,
+        n_features=1,
+        window=None,
+        freeze_after=freeze_after,
+        on_fit_error="skip",
+    )
+    return pd.Series(values[:, 0], index=ret_series.index), diagnostics
 
 
 # %% [markdown]
-# Each fold's pass estimates parameters on that fold's training window and writes a conditional
-# volatility for every date from the training start through the validation end. A segment with
-# fewer than a year of training returns is skipped for that fold rather than fitted on a short
-# window, and a segment whose optimizer does not converge is skipped too; both are counted, so the
-# panel's coverage can be read rather than assumed.
+# The walk runs once per segment over that segment's whole history. There are no passes any more:
+# a session gets one conditional volatility, from the last parameters fitted before it, and a fold
+# selecting that session later reads the same value whichever fold it is.
+#
+# A segment shorter than the burn-in produces nothing and is counted. That is a statement about the
+# segment rather than an error - a symbol listed eighteen months before the panel ends cannot
+# support a fitted volatility model over most of its life - and the coverage report below is where
+# it is read.
 
 
 # %%
-def run_garch_fold(fold: dict, segment_returns: dict) -> tuple[list, list, int]:
-    """Fit and collect every eligible security segment for one CV fold."""
-    fold_idx = fold["fold"]
-    train_start, train_end, val_end = fold["train_start"], fold["train_end"], fold["val_end"]
-    fold_results, fold_diagnostics = [], []
-    skipped = 0
-    for (symbol, sec_id), ret_series in segment_returns.items():
-        cond_vol, diag = fit_gjr_garch_symbol(
-            ret_series, train_start=train_start, train_end=train_end, filter_end=val_end
-        )
-        if diag:
-            fold_diagnostics.append({"fold": fold_idx, "symbol": symbol, "sec_id": sec_id, **diag})
-        if cond_vol is None:
-            skipped += 1
-            continue
-        mask = (cond_vol.index >= pd.Timestamp(train_start)) & (
-            cond_vol.index <= pd.Timestamp(val_end)
-        )
-        fold_vol = cond_vol[mask]
-        if fold_vol.empty:
-            skipped += 1
-            continue
-        fold_results.append(
-            pl.DataFrame(
-                {
-                    "timestamp": fold_vol.index.values,
-                    "symbol": symbol,
-                    "sec_id": sec_id,
-                    "garch_cond_vol": fold_vol.values,
-                    "fold": fold_idx,
-                }
-            )
-        )
-    return fold_results, fold_diagnostics, skipped
+def count_before(index: pd.Index, boundary: pd.Timestamp) -> int:
+    """How many entries fall strictly before *boundary*.
+
+    This is what ``walk_forward_feature`` wants for ``freeze_after``: the largest exclusive
+    fit end it may use, so that the last estimate before the seal is fitted on every session
+    before it and on no session after.
+    """
+    return int(index.searchsorted(boundary, side="left"))
 
 
 # %%
 garch_results = []
 garch_diagnostics = []
+garch_short = 0
 
-for fold in cv_folds:
-    print(
-        f"\n--- GARCH fold {fold['fold']}: estimated on "
-        f"{fold['train_start'].date()}..{fold['train_end'].date()}, "
-        f"written through {fold['val_end'].date()} ---"
-    )
-    fold_results, fold_diagnostics, fold_skip = run_garch_fold(fold, segment_returns)
-    garch_results.extend(fold_results)
-    garch_diagnostics.extend(fold_diagnostics)
-
-    print(f"  Fitted: {len(fold_results)} segments, skipped: {fold_skip}")
-
-# %% [markdown]
-# #### The holdout pass
-#
-# One more pass, estimated on every date before the holdout begins and written forward through the
-# end of it. Its rows before 2021 are values a model may train on; its rows inside the holdout are
-# the ones a later stage needs in order to score anything there at all.
-
-# %%
-print(f"\n--- GARCH fold {HOLDOUT_FOLD}: estimated on {data_start}..{holdout_train_end} ---")
-holdout_count = 0
 for (symbol, sec_id), ret_series in segment_returns.items():
-    cond_vol, diag = fit_gjr_garch_symbol(
+    freeze_after = count_before(ret_series.index, pd.Timestamp(HOLDOUT_START))
+    cond_vol, segment_diagnostics = garch_walk_segment(
         ret_series,
-        train_start=data_start,
-        train_end=date.fromisoformat(holdout_train_end),
-        filter_end=date.fromisoformat(holdout_end),
+        burnin=GARCH_BURNIN,
+        refit_every=GARCH_REFIT_EVERY,
+        freeze_after=freeze_after,
     )
-    if diag:
-        garch_diagnostics.append({"fold": HOLDOUT_FOLD, "symbol": symbol, "sec_id": sec_id, **diag})
-    if cond_vol is None:
+    for record in segment_diagnostics:
+        garch_diagnostics.append({"symbol": symbol, "sec_id": sec_id, **record})
+    emitted = cond_vol.dropna()
+    if emitted.empty:
+        garch_short += 1
         continue
-
-    date_from = pd.Timestamp(data_start)
-    date_to = pd.Timestamp(holdout_end)
-    mask = (cond_vol.index >= date_from) & (cond_vol.index <= date_to)
-    fold_vol = cond_vol[mask]
-
-    if len(fold_vol) == 0:
-        continue
-
-    holdout_count += 1
     garch_results.append(
         pl.DataFrame(
             {
-                "timestamp": fold_vol.index.values,
+                "timestamp": emitted.index.values,
                 "symbol": symbol,
                 "sec_id": sec_id,
-                "garch_cond_vol": fold_vol.values,
-                "fold": HOLDOUT_FOLD,
+                "garch_cond_vol": emitted.values,
             }
         )
     )
 
-print(f"  Fitted: {holdout_count} segments")
+print(f"Segments emitting a GARCH value: {len(garch_results)} of {len(segment_returns)}")
+print(f"  Segments that never clear the {GARCH_BURNIN}-session burn-in: {garch_short}")
+print(f"  Fits attempted across every segment and refit: {len(garch_diagnostics):,}")
 
 
 # %%
@@ -732,7 +801,7 @@ def validate_segment_feature_panel(frame: pl.DataFrame, value_col: str) -> None:
     if frame.is_empty():
         raise RuntimeError(f"No {value_col} features were generated")
 
-    key_cols = ["timestamp", "symbol", "fold"]
+    key_cols = ["timestamp", "symbol"]
     duplicate_keys = int(frame.select(key_cols).is_duplicated().sum())
     if duplicate_keys:
         raise RuntimeError(f"{value_col} contains {duplicate_keys} duplicate output keys")
@@ -770,68 +839,103 @@ print(
 )
 
 # %% [markdown]
-# ### Figure F2. What the model inferred, and how much the window it was fitted on mattered
+# #### What the burn-in costs this panel
 #
-# The panel is not one series per symbol. Each pass writes its own row, so a date covered by two
-# passes carries two conditional volatilities for the same symbol on the same day - the same
-# returns read through two different parameter sets. That is what the file hands downstream, and it
-# is what the figure draws: one line per pass for the symbol with the longest history. The dotted
-# rules mark where each fold's validation window starts and the red rule marks the holdout.
+# The burn-in is not free and on this case study it is not cheap. The calendar runs to 1,238
+# sessions but a symbol only appears on it while a straddle near the target maturity was quoted on
+# its underlying, so the median segment is far shorter than the calendar and the shortest are
+# shorter than the burn-in itself. A segment that never reaches 252 returns produces no GARCH value
+# at all, and one that reaches it late produces values only for the part of its life after that.
 #
-# Sorting all the rows by date and drawing one line would splice the passes together and turn the
-# vertical distance between them into what looks like day-to-day movement. That distance is the
-# point of the figure, so the passes stay separate. Section D puts a number on it.
+# The two numbers below are the ones to read before using this column: how many segments clear the
+# burn-in, and what share of the sessions on which the underlying actually traded carry a value.
+# Both are taken before the holdout, like every other measurement here. A low second number is a
+# statement about what a fitted per-symbol volatility model can do on a panel of this shape, not a
+# parameter to tune until it looks better - 252 is already the shortest burn-in that leaves a GJR
+# recursion's leverage term anything to estimate from.
+
+# %%
+_eligible = before_holdout(returns_df).select(["timestamp", "symbol", "sec_id"])
+_covered = before_holdout(garch_df).select(["timestamp", "symbol", "sec_id"])
+_segment_lengths = (
+    _eligible.group_by(["symbol", "sec_id"]).agg(pl.len().alias("n")).sort("n", descending=True)
+)
+coverage = {
+    "segments_eligible": _segment_lengths.height,
+    "segments_with_a_value": _covered.select(["symbol", "sec_id"]).unique().height,
+    "rows_eligible": _eligible.height,
+    "rows_with_a_value": _covered.height,
+    "median_segment_sessions": int(_segment_lengths["n"].median()),
+    "p10_segment_sessions": int(_segment_lengths["n"].quantile(0.10)),
+}
+print(
+    f"Segments clearing the {GARCH_BURNIN}-session burn-in: "
+    f"{coverage['segments_with_a_value']} of {coverage['segments_eligible']} "
+    f"({coverage['segments_with_a_value'] / coverage['segments_eligible']:.1%})"
+)
+print(
+    f"Sessions carrying a GARCH value: {coverage['rows_with_a_value']:,} of "
+    f"{coverage['rows_eligible']:,} ({coverage['rows_with_a_value'] / coverage['rows_eligible']:.1%})"
+)
+print(
+    f"Segment length before the holdout: median {coverage['median_segment_sessions']} sessions, "
+    f"tenth percentile {coverage['p10_segment_sessions']}"
+)
+
+# %% [markdown]
+# ### Figure F2. One series per symbol, and where it starts
+#
+# Under the old design this figure drew one line per fold, because a date covered by two folds
+# carried two conditional volatilities for the same symbol - the same returns read through two
+# different parameter sets, and the vertical distance between the lines was the size of the problem
+# this notebook now does not have. There is one line now, because there is one value.
+#
+# What is worth drawing instead is where the line begins. The symbol with the longest history is
+# drawn against the one at the median length, on the same axes: the first starts shortly after the
+# burn-in and runs the width of the sample, the second starts far later and is the shape most of
+# the cross-section has. The dotted rule marks the first session any segment can carry a value.
 #
 # The lines stop at the holdout. Values are written past it, and no summary in this notebook reads
 # them.
 
 # %%
 _drawn = before_holdout(garch_df)
-_symbol = _drawn.group_by("symbol").len().sort(["len", "symbol"], descending=[True, False])
-_symbol = _symbol["symbol"][0]
+_lengths = _drawn.group_by("symbol").len().sort(["len", "symbol"], descending=[True, False])
+_longest = _lengths["symbol"][0]
+_median = _lengths["symbol"][_lengths.height // 2]
 fig, ax = plt.subplots(figsize=(11, 3.6))
-_pass_color = [COLORS["copper"], COLORS["amber"], COLORS["blue"]]
-for _fold_id in sorted(_drawn["fold"].unique().to_list()):
-    _path = _drawn.filter((pl.col("symbol") == _symbol) & (pl.col("fold") == _fold_id)).sort(
-        "timestamp"
-    )
+for _symbol, _color in ((_longest, COLORS["blue"]), (_median, COLORS["copper"])):
+    _path = _drawn.filter(pl.col("symbol") == _symbol).sort("timestamp")
     ax.plot(
         _path["timestamp"].to_list(),
         _path["garch_cond_vol"].to_list(),
-        color=_pass_color[_fold_id % len(_pass_color)],
+        color=_color,
         linewidth=1.0,
-        label=f"fold {_fold_id}" + (" (holdout)" if _fold_id == HOLDOUT_FOLD else ""),
+        label=f"{_symbol} ({_path.height} sessions)",
     )
-for fold in cv_folds:
-    ax.axvline(
-        pd.Timestamp(fold["val_start"]).date(),
-        color=COLORS["neutral"],
-        linestyle=":",
-        linewidth=0.9,
-    )
-ax.axvline(
-    pd.Timestamp(holdout_start).date(), color=COLORS["negative"], linestyle="--", linewidth=1.2
-)
+ax.axvline(_calendar[GARCH_BURNIN], color=COLORS["neutral"], linestyle=":", linewidth=0.9)
+ax.axvline(HOLDOUT_START, color=COLORS["negative"], linestyle="--", linewidth=1.2)
 ax.set(xlabel="Date", ylabel="Annualized conditional volatility")
-ax.legend(loc="upper left", frameon=False, fontsize=8, ncol=3)
+ax.legend(loc="upper left", frameon=False, fontsize=8)
 add_message_title(
     ax,
-    "Each pass assigns the same day its own volatility",
+    "One value per session, and most symbols get one for only part of the sample",
     subtitle=(
-        f"One symbol ({_symbol}), one line per pass, up to the holdout. Dotted rules mark each "
-        "fold's validation start"
+        "The longest segment against the median one. The dotted rule is the earliest session any "
+        f"segment can carry a value; the red rule marks the holdout at {holdout_start}"
     ),
 )
 show_with_alt(
     fig,
-    f"Line chart of annualized conditional volatility for one symbol ({_symbol}) from early "
-    "2017 to the start of 2021, with one line per pass drawn over the same dates. The series "
-    "is spiky, sitting near 0.2 for long stretches and rising above 1.0 on three dates - May "
-    "2018, May 2019 and March 2020 - the largest being May 2019 at about 1.16. The March 2020 "
-    "one sits inside a sustained cluster of high readings that runs from late February into "
-    "June. Where two passes cover the same day their lines sit close but not on top of each "
-    "other, so each pass assigns the day its own value. Dotted vertical rules mark each fold's "
-    "validation start and a dashed red rule marks the holdout, which no line crosses.",
+    "Line chart of annualized conditional volatility against date for two symbols, the one with "
+    "the longest history and the one at the median length. Each symbol is drawn as a single "
+    "continuous line rather than one line per fold, because every session now carries exactly "
+    "one value. The longer series begins shortly after a dotted vertical rule marking the end of "
+    "the burn-in and runs the width of the chart; the median-length series begins much later and "
+    "covers only the right-hand part of it, which is the shape most of the cross-section has. "
+    "Both are spiky, sitting near 0.2 for long stretches with sharp excursions above 1.0, the "
+    "largest clustered around March 2020. A dashed red rule marks the holdout, which neither "
+    "line crosses.",
 )
 
 # %% [markdown]
@@ -856,15 +960,16 @@ show_with_alt(
 # against each day's return.
 #
 # The split follows the same discipline as GARCH. $\sigma_\eta$ is a property of how equity
-# volatility behaves rather than of any one company, so it is estimated once per training window on
-# a small pool of symbols and then held fixed while every segment is filtered.
+# volatility behaves rather than of any one company, so it is estimated once per refit on a small
+# pool of symbols and then held fixed while every segment is filtered over the sessions that refit
+# speaks for.
 #
 # #### Which symbols the parameter is estimated on
 #
-# The pool is chosen by option coverage *inside the training window* - the symbols with the most
-# dates carrying a straddle quote there - and not by coverage over the whole sample. Choosing on
-# whole-sample coverage would be a mild but real leak: which symbols stayed liquid through the
-# validation period is information from the validation period.
+# The pool is chosen by option coverage *inside the calibration window* - the symbols with the most
+# dates carrying a straddle quote in the year ending at the refit - and not by coverage over the
+# whole sample. Choosing on whole-sample coverage would be a leak of exactly the kind this notebook
+# is about: which symbols stayed liquid afterwards is information from afterwards.
 
 
 # %%
@@ -950,7 +1055,7 @@ def stable_segment_seed(base_seed: int, namespace: str, symbol: str, sec_id: int
 # %% [markdown]
 # #### Estimating the parameter
 #
-# Each pool symbol contributes the last year of returns inside the training window, and the
+# Each pool symbol contributes the calibration window's returns, and the
 # sampler returns a posterior distribution for $\sigma_\eta$ rather than a point. The estimate the
 # filter uses is the mean of each symbol's posterior mean, weighted equally, so that a symbol whose
 # second, longer attempt produced more draws does not count for more than one that converged first
@@ -1098,13 +1203,16 @@ def sv_training_window(
     segment_key: tuple[str, int],
     train_start: pd.Timestamp,
     train_end: pd.Timestamp,
+    calibration_window: int,
 ) -> pd.Series:
-    """Return one segment's trailing 252 observations inside the fit window."""
+    """Return one segment's trailing calibration window inside the fit window."""
     if segment_key not in segment_returns:
         raise RuntimeError(f"Missing returns for SV calibration segment {segment_key}")
     returns = segment_returns[segment_key]
-    train_data = returns[(returns.index >= train_start) & (returns.index <= train_end)].tail(252)
-    if len(train_data) < 252:
+    train_data = returns[(returns.index >= train_start) & (returns.index <= train_end)].tail(
+        calibration_window
+    )
+    if len(train_data) < calibration_window:
         raise RuntimeError(
             f"SV calibration segment {segment_key} has only {len(train_data)} training observations"
         )
@@ -1137,8 +1245,9 @@ def sv_calibration_diagnostic(
 
 # %% [markdown]
 # Both ends of the estimation window are passed in by the caller. A default that took everything up
-# to a cut-off would quietly turn the rolling window the folds define into an expanding one, and the
-# difference would not show up in any value.
+# to a cut-off would quietly turn the rolling calibration window into an expanding one - a change
+# in what the parameter is estimated from, and in what the refit costs, that would not show up in
+# any value.
 
 
 # %%
@@ -1147,6 +1256,7 @@ def calibrate_sigma_eta(
     segment_returns: dict[tuple[str, int], pd.Series],
     train_start: date,
     train_end: date,
+    calibration_window: int,
     n_draws: int = 500,
     n_tune: int = 300,
     n_chains: int = 2,
@@ -1158,7 +1268,9 @@ def calibrate_sigma_eta(
     calibration_namespace = f"calibration:{train_start_ts.date()}:{train_end_ts.date()}"
     for symbol, sec_id in pool_segments:
         segment_key = (symbol, sec_id)
-        train_data = sv_training_window(segment_returns, segment_key, train_start_ts, train_end_ts)
+        train_data = sv_training_window(
+            segment_returns, segment_key, train_start_ts, train_end_ts, calibration_window
+        )
         seed = stable_segment_seed(SEED, calibration_namespace, symbol, sec_id)
         pool, diag, attempts = accepted_sv_calibration(
             symbol, train_data, n_draws, n_tune, n_chains, seed
@@ -1229,116 +1341,159 @@ def particle_filter_sv(
 
 
 # %% [markdown]
-# #### The same passes as GARCH
+# #### The same schedule as GARCH, at a quarter of the cadence
 #
-# One estimate of $\sigma_\eta$ per pass, then every segment filtered under it. The filter is
-# started at each segment's first available return rather than at the pass's start date, because a
-# particle population needs a run of observations before it concentrates anywhere useful; the
-# values from that run-in are discarded and only the pass's own window is kept.
+# $\sigma_\eta$ is not a per-symbol quantity, so it is not walked per segment. It is estimated once
+# per refit on the master session calendar, from the pool of symbols with the most quoted option
+# dates up to that refit, and every segment is then filtered under the estimate that was current on
+# each of its sessions.
+#
+# The cadence is one quarter where GARCH's is one month, and the reason is cost rather than
+# statistics. Each refit is a four-chain sampler run per pool symbol, and the sampler carries one
+# latent state per observation; a monthly cadence would triple that for a single scalar parameter
+# that describes how equity volatility behaves rather than how one company's does. The calibration
+# window is the trailing year, which is what the sampler read before and is the one place in this
+# notebook where an estimation window rolls rather than expanding - an expanding window would make
+# the last refit five times the cost of the first, again for one scalar.
+#
+# `refit_boundaries` is the same schedule arithmetic `walk_forward_feature` runs internally for
+# GARCH, called directly here because the thing being fitted is not one of the series it is applied
+# to.
 
 
 # %%
-def filter_sv_segments(
-    segment_returns: dict[tuple[str, int], pd.Series],
-    sigma_eta: float,
-    filter_end: date | str,
-    output_start: date | str,
-    output_end: date | str,
-    namespace: str,
-    fold: int,
-) -> list[pl.DataFrame]:
-    """Particle-filter every segment and retain the requested output window."""
-    features = []
-    output_start_ts, output_end_ts = map(pd.Timestamp, (output_start, output_end))
-    for (symbol, sec_id), returns in segment_returns.items():
-        filter_returns = returns[returns.index <= pd.Timestamp(filter_end)]
-        path = particle_filter_sv(
-            filter_returns.values,
-            sigma_eta,
-            SV_N_PARTICLES,
-            seed=stable_segment_seed(SEED, namespace, symbol, sec_id),
-        )
-        volatility = pd.Series(path, index=filter_returns.index)
-        selected = volatility[
-            (volatility.index >= output_start_ts) & (volatility.index <= output_end_ts)
-        ]
-        if selected.empty:
-            continue
-        features.append(
-            pl.DataFrame(
+def sigma_eta_schedule(
+    calendar: list[date],
+    burnin: int,
+    refit_every: int,
+    calibration_window: int,
+    freeze_after: int | None,
+) -> list[dict]:
+    """Estimate sigma_eta at each refit, and say which sessions each estimate speaks for."""
+    schedule: list[dict] = []
+    frozen: float | None = None
+    frozen_from: date | None = None
+    for fit_end, emit_end in refit_boundaries(len(calendar), burnin, refit_every):
+        fit_end_date = calendar[fit_end - 1]
+        if freeze_after is not None and fit_end > freeze_after:
+            if frozen is None:
+                continue
+            schedule.append(
                 {
-                    "timestamp": selected.index.values,
-                    "symbol": symbol,
-                    "sec_id": sec_id,
-                    "sv_vol": selected.values,
-                    "fold": fold,
+                    "fit_end": frozen_from,
+                    "emit_start": calendar[fit_end],
+                    "emit_end": calendar[emit_end - 1],
+                    "sigma_eta": frozen,
+                    "pool_symbols": None,
+                    "retried": None,
+                    "frozen": True,
                 }
             )
+            continue
+        window_start = calendar[max(0, fit_end - calibration_window)]
+        pool = select_sv_pool(
+            prices, reconciled_returns, returns_df, window_start, fit_end_date, SV_POOL_SIZE
         )
-    return features
+        print(f"\n--- sigma_eta through {fit_end_date}: {len(pool)} pool symbols ---")
+        estimate, records = calibrate_sigma_eta(
+            pool,
+            segment_returns,
+            window_start,
+            fit_end_date,
+            calibration_window=calibration_window,
+            n_draws=SV_DRAWS,
+            n_tune=SV_TUNE,
+            n_chains=SV_CHAINS,
+        )
+        frozen, frozen_from = estimate, fit_end_date
+        schedule.append(
+            {
+                "fit_end": fit_end_date,
+                "emit_start": calendar[fit_end],
+                "emit_end": calendar[emit_end - 1],
+                "sigma_eta": estimate,
+                "pool_symbols": len(pool),
+                "retried": sum(record["retried"] for record in records),
+                "frozen": False,
+            }
+        )
+    return schedule
 
+
+# %% [markdown]
+# With the schedule in hand every segment is filtered block by block. The filter is started at the
+# segment's first available return rather than at the block's start, because a particle population
+# needs a run of observations before it concentrates anywhere useful; only the block's own sessions
+# are kept from each block, and the run-in is discarded.
+#
+# Rerunning the filter from the segment's first return on every block is what keeps the value at a
+# session a function of that session's own past under one $\sigma_\eta$, rather than a path spliced
+# together across parameter changes. The seed is derived from the segment identity, so the shared
+# prefix is identical from block to block and only the tail moves.
+
+
+# %%
+def filter_sv_segment(
+    ret_series: pd.Series,
+    schedule: list[dict],
+    symbol: str,
+    sec_id: int,
+) -> pd.Series:
+    """Particle-filter one segment, each block under the sigma_eta current on its sessions."""
+    values = pd.Series(np.nan, index=ret_series.index, dtype=float)
+    for block in schedule:
+        emit_start, emit_end = pd.Timestamp(block["emit_start"]), pd.Timestamp(block["emit_end"])
+        prefix = ret_series[ret_series.index <= emit_end]
+        if prefix.empty:
+            continue
+        path = particle_filter_sv(
+            prefix.to_numpy(dtype=float),
+            block["sigma_eta"],
+            SV_N_PARTICLES,
+            seed=stable_segment_seed(SEED, "sv-walk", symbol, sec_id),
+        )
+        block_rows = (prefix.index >= emit_start) & (prefix.index <= emit_end)
+        values.loc[prefix.index[block_rows]] = path[block_rows]
+    return values
+
+
+# %%
+sv_schedule = sigma_eta_schedule(
+    _calendar,
+    burnin=SV_BURNIN,
+    refit_every=SV_REFIT_EVERY,
+    calibration_window=SV_CALIBRATION_WINDOW,
+    freeze_after=FREEZE_AFTER,
+)
+sv_calibration = pl.DataFrame(sv_schedule)
+assert all(block["fit_end"] < block["emit_start"] for block in sv_schedule), (
+    "a sigma_eta estimate speaks for a session it was fitted on"
+)
+print(
+    f"\nsigma_eta refits: {sum(not b['frozen'] for b in sv_schedule)} estimated, "
+    f"{sum(b['frozen'] for b in sv_schedule)} carried across the holdout"
+)
 
 # %%
 sv_results = []
-sv_calibration = []
-_sv_passes = [
-    (
-        fold["fold"],
-        fold["train_start"],
-        fold["train_end"],
-        fold["train_start"],
-        fold["val_end"],
-        f"cv-fold:{fold['fold']}",
+sv_short = 0
+for (symbol, sec_id), ret_series in segment_returns.items():
+    filtered = filter_sv_segment(ret_series, sv_schedule, symbol, sec_id).dropna()
+    if filtered.empty:
+        sv_short += 1
+        continue
+    sv_results.append(
+        pl.DataFrame(
+            {
+                "timestamp": filtered.index.values,
+                "symbol": symbol,
+                "sec_id": sec_id,
+                "sv_vol": filtered.values,
+            }
+        )
     )
-    for fold in cv_folds
-] + [
-    (
-        HOLDOUT_FOLD,
-        pd.Timestamp(data_start),
-        pd.Timestamp(holdout_train_end),
-        pd.Timestamp(data_start),
-        pd.Timestamp(holdout_end),
-        "holdout",
-    )
-]
-
-for fold_idx, train_start, train_end, output_start, output_end, namespace in _sv_passes:
-    sv_pool = select_sv_pool(
-        prices, reconciled_returns, returns_df, train_start, train_end, SV_POOL_SIZE
-    )
-    print(
-        f"\n--- SV fold {fold_idx}: {len(sv_pool)} symbols, estimated on "
-        f"{train_start.date()}..{train_end.date()} ---"
-    )
-    sigma_eta_est, sigma_eta_diagnostics = calibrate_sigma_eta(
-        sv_pool,
-        segment_returns,
-        train_start,
-        train_end,
-        n_draws=SV_DRAWS,
-        n_tune=SV_TUNE,
-        n_chains=SV_CHAINS,
-    )
-    sv_calibration.append(
-        {
-            "fold": fold_idx,
-            "sigma_eta": sigma_eta_est,
-            "pool_symbols": len(sv_pool),
-            "retried": sum(record["retried"] for record in sigma_eta_diagnostics),
-        }
-    )
-    print(f"  Filtering {len(segment_returns)} segments")
-    fold_results = filter_sv_segments(
-        segment_returns,
-        sigma_eta_est,
-        output_end,
-        output_start,
-        output_end,
-        namespace,
-        fold_idx,
-    )
-    sv_results.extend(fold_results)
-    print(f"  Filtered: {len(fold_results)} segments")
+print(f"Segments emitting an SV value: {len(sv_results)} of {len(segment_returns)}")
+print(f"  Segments no block reaches: {sv_short}")
 
 # %%
 if not sv_results:
@@ -1351,139 +1506,187 @@ print(
 )
 
 # %% [markdown]
-# ## D. Fit stability across folds
+# ## D. Fit stability across refits
 #
-# Re-estimating the models at every fold boundary is only worth its cost if the estimates move. It
-# is also a risk: parameters that swing from one window to the next make the feature they produce a
-# different quantity in each fold, and a model trained across folds then sees one column meaning
-# several things.
+# Refitting every month is only worth its cost if the estimates move, and it is also a risk: if
+# they swing from one refit to the next, the column changes meaning inside a single fold rather
+# than between folds, which is worse than what the old design did and harder to see.
 #
-# Three readings, in order of how directly they bear on that. Whether the optimizer converged at
-# all, which bounds how much of the panel any of this describes. Whether the fitted parameters
-# themselves moved. And whether the values the parameters produce moved, which is the question that
-# actually matters and is not answered by the second.
+# Three readings, in order of how directly they bear on that. How often the optimizer converged at
+# all, which bounds how much of the panel any of this describes. Whether the fitted parameters move
+# from one refit to the next. And whether the values move at the moment the parameters change,
+# which is the question that matters and is not answered by the second.
 
 # %%
-garch_fits = pl.DataFrame(garch_diagnostics)
+garch_fits = pl.DataFrame(garch_diagnostics).with_columns(
+    pl.col("fit_end").cast(pl.Date), pl.col("emit_start").cast(pl.Date)
+)
 fit_summary = (
-    garch_fits.group_by("fold")
+    garch_fits.group_by(pl.col("fit_end").dt.year().alias("year"))
     .agg(
-        pl.len().alias("garch_attempted"),
-        pl.col("converged").sum().alias("garch_converged"),
+        pl.len().alias("fits_attempted"),
+        pl.col("converged").sum().alias("converged"),
+        pl.col("retried").sum().alias("retried"),
         pl.col("persistence").median().alias("median_persistence"),
+        pl.col("n_fit").median().cast(pl.Int64).alias("median_window_sessions"),
     )
-    .sort("fold")
+    .sort("year")
 )
-sv_summary = pl.DataFrame(sv_calibration).sort("fold")
-fit_summary.join(
-    sv_summary.select(
-        "fold",
-        pl.col("pool_symbols").alias("mcmc_symbols"),
-        pl.col("retried").alias("mcmc_retried"),
-        "sigma_eta",
-    ),
-    on="fold",
-)
+fit_summary
 
 # %% [markdown]
-# ### Figure F3. Do the fitted parameters move as the window rolls?
+# ### Figure F3. Do the fitted parameters move as the window grows?
 #
 # The GARCH parameter worth watching is **persistence**, $\alpha + \gamma/2 + \beta$: the share of
 # today's variance that carries into tomorrow. The lower it is, the faster a volatility shock
 # decays. As it approaches one the shock never decays at all, and at one the long-run variance the
 # model implies stops existing. The dashed line marks that boundary.
 #
-# One box per pass, over the persistences fitted for every converged segment in it. Two things
-# separate the passes, and the figure cannot tell them apart: the windows sit at different points in
-# the sample, and the holdout pass's window is roughly twice as long as either fold's. A longer
-# window contains more distinct volatility regimes, and a single set of GARCH parameters can only
-# absorb that by raising persistence - which is what makes the last box the highest and the
-# tightest, not anything about the period it happens to cover.
-#
-# Note also what a box plot cannot show. Two passes whose distributions coincided would still be
-# consistent with every individual symbol's parameters moving, as long as they moved in both
-# directions. Figure F2 asked the per-symbol question directly, on the filtered values rather than
-# on the parameters, and the measurement below closes it.
+# One box per calendar year of refits, over the persistences fitted for every converged segment in
+# it. The estimation window expands, so a refit late in the sample reads a longer history than one
+# early in it, and a longer window contains more distinct volatility regimes that a single
+# parameter set can only absorb by raising persistence. That is a property of the schedule and not
+# of the years themselves, which is why the median window length is in the table above beside the
+# median persistence.
 
 # %%
 _persist = garch_fits.filter(pl.col("converged") & pl.col("persistence").is_not_null())
+_years = sorted(_persist.filter(pl.col("fit_end") < HOLDOUT_START)["fit_end"].dt.year().unique())
+_samples = [
+    _persist.filter(pl.col("fit_end").dt.year() == y)["persistence"].to_list() for y in _years
+]
 fig, ax = plt.subplots(figsize=(7, 3.6))
-_fold_ids = sorted(_persist["fold"].unique().to_list())
-_samples = [_persist.filter(pl.col("fold") == f)["persistence"].to_list() for f in _fold_ids]
-ax.boxplot(_samples, tick_labels=[f"fold {f}" for f in _fold_ids], showfliers=False)
+ax.boxplot(_samples, tick_labels=[str(y) for y in _years], showfliers=False)
 ax.axhline(1.0, color=COLORS["negative"], linestyle="--", linewidth=1)
-ax.set(xlabel="Pass", ylabel=r"Persistence $\alpha + \gamma/2 + \beta$")
+ax.set(xlabel="Year the refit was made in", ylabel=r"Persistence $\alpha + \gamma/2 + \beta$")
 add_message_title(
     ax,
     "A longer estimation window raises persistence and narrows its spread",
     subtitle=(
-        "Fitted GARCH persistence per converged segment, one box per pass. Above the dashed line "
-        "a shock would never decay"
+        "Fitted GARCH persistence per converged segment, one box per year of refits, before the "
+        "holdout. Above the dashed line a shock would never decay"
     ),
 )
 show_with_alt(
     fig,
-    "Box plot of fitted GARCH persistence, alpha plus gamma over two plus beta, with one box "
-    "per pass. Fold 0 is the widest, its whiskers running from about 0.20 to 1.00 with a "
-    "median near 0.87; fold 1 is narrower, from about 0.34 upward with a median near 0.91; "
-    "fold 2 is tightest, from about 0.84 upward with a median near 0.97. A dashed red line at "
-    "1.0 marks where a shock would never decay, and all three upper whiskers reach it. So a "
-    "longer estimation window both raises the central persistence and narrows its spread, "
-    "without moving the top of the range.",
+    "Box plot of fitted GARCH persistence, alpha plus gamma over two plus beta, with one box per "
+    "calendar year in which refits were made, covering the years before the holdout. The boxes "
+    "sit high on the scale with medians in the upper eighties to upper nineties, and the spread "
+    "narrows from the earliest year to the latest as the expanding estimation window lengthens. "
+    "A dashed red line at 1.0 marks where a volatility shock would never decay; the upper "
+    "whiskers reach it in every year.",
 )
 
 # %% [markdown]
-# The comparison figure F2 drew for one symbol is worth putting a number on across all of them.
-# For every symbol and date covered by more than one pass, the spread between the values those
-# passes assign, against the size of an ordinary one-day move within a single pass. Both are read
-# before the holdout. If refitting moved nothing, the first would be far smaller than the second.
+# The question the old design could ask by comparing two folds' values for the same day has to be
+# asked differently now, because a day has only one value. The equivalent is the size of the jump
+# at a refit boundary: the change in a segment's conditional volatility across the session where
+# its parameters were replaced, against the size of an ordinary one-day move inside a block. If
+# refitting moved nothing, the first would be no larger than the second.
+#
+# This is the sharper form of the question. Under the old design the two values being differenced
+# were for the same day under different parameters, so the comparison had to be read as an upper
+# bound on how much the fold identity mattered. Here the difference is one the file actually
+# contains: a reader of this column sees exactly this jump, on this session.
 
 # %%
-_shared = (
-    before_holdout(garch_df)
-    .group_by(["symbol", "timestamp"])
-    .agg(
-        (pl.col("garch_cond_vol").max() - pl.col("garch_cond_vol").min()).alias("spread"),
-        pl.len().alias("n_passes"),
+# Per segment, not per calendar session. `garch_walk_segment` schedules on each segment's own
+# observations, so a segment that lists later or is missing sessions refits on different dates
+# than its neighbours; classifying by a shared calendar would call ordinary moves refits and
+# refits ordinary. Only converged fits are marked, because a rejected block emits nothing and
+# so contributes no move to classify.
+_refit_marks = (
+    garch_fits.filter(pl.col("converged"))
+    .select(
+        "symbol",
+        "sec_id",
+        pl.col("emit_start").cast(pl.Date).alias("timestamp"),
+        pl.lit(True).alias("is_refit_session"),
     )
-    .filter(pl.col("n_passes") > 1)
+    .unique()
 )
-_daily_move = (
-    before_holdout(garch_df)
-    .sort(["fold", "symbol", "timestamp"])
-    .with_columns(pl.col("garch_cond_vol").diff().abs().over(["fold", "symbol"]).alias("move"))
-    .drop_nulls("move")
+
+
+# A move is only a one-session move if the two rows ARE consecutive sessions for that
+# segment. `garch_df` holds only emitted rows, so a rejected block leaves a gap of up to
+# `refit_every` sessions, and a plain `diff()` would bridge it: the first value after the gap
+# would be compared against one 22 sessions earlier and counted as a refit jump, folding a
+# month of accumulated movement into the numerator. The segment's own session number comes
+# from the return panel the walk was scheduled on, so the check is against the sessions the
+# segment has rather than against the calendar.
+def one_session_moves(
+    panel: pl.DataFrame,
+    session_numbers: pl.DataFrame,
+    refit_marks: pl.DataFrame,
+) -> pl.DataFrame:
+    """Absolute one-session changes in the emitted volatility, labelled by refit or not.
+
+    Only rows whose predecessor is the segment's immediately preceding session survive, which
+    is what keeps a rejected block's hole out of the comparison.
+    """
+    return (
+        panel.join(session_numbers, on=["timestamp", "symbol", "sec_id"], how="left")
+        .sort(["symbol", "sec_id", "timestamp"])
+        .with_columns(
+            pl.col("garch_cond_vol").diff().abs().over(["symbol", "sec_id"]).alias("move"),
+            pl.col("session_no").diff().over(["symbol", "sec_id"]).alias("session_gap"),
+        )
+        .join(refit_marks, on=["symbol", "sec_id", "timestamp"], how="left")
+        .with_columns(pl.col("is_refit_session").fill_null(False))
+        .drop_nulls("move")
+        .filter(pl.col("session_gap") == 1)
+    )
+
+
+_session_numbers = returns_df.select(
+    "timestamp",
+    "symbol",
+    "sec_id",
+    pl.col("timestamp").rank("ordinal").over(["symbol", "sec_id"]).alias("session_no"),
 )
-pass_spread = float(_shared["spread"].median())
-daily_move = float(_daily_move["move"].median())
+_moves = one_session_moves(before_holdout(garch_df), _session_numbers, _refit_marks)
+# About one session in twenty-one carries new parameters, so a ratio computed over a set that
+# had swallowed the other twenty would compare a population against itself and report about
+# 1.0 whatever the refits did. Assert the split rather than trusting the construction above.
+assert 0 < _moves["is_refit_session"].sum() < _moves.height, (
+    "the refit sessions are not a proper subset of the sessions carrying a value"
+)
+_at_refit = _moves.filter(pl.col("is_refit_session"))["move"]
+_within = _moves.filter(~pl.col("is_refit_session"))["move"]
+refit_jump = float(_at_refit.median())
+ordinary_move = float(_within.median())
 persistence_iqr = float(
     np.median(
         [np.subtract(*np.percentile(sample, [75, 25])) for sample in _samples if len(sample) > 1]
     )
 )
-print(f"Median disagreement between passes on a shared day: {pass_spread:.4f}")
-print(f"Median absolute one-day move within a pass:         {daily_move:.4f}")
-print(f"Ratio: {pass_spread / daily_move:.1f}x")
-print(f"\nMedian GARCH persistence by pass: {fit_summary['median_persistence'].round(3).to_list()}")
-print(f"Typical within-pass interquartile range: {persistence_iqr:.3f}")
-print(f"Estimated sigma_eta by pass:      {sv_summary['sigma_eta'].round(4).to_list()}")
+print(f"Median move across a refit session:      {refit_jump:.4f} ({_at_refit.len():,} sessions)")
+print(f"Median move on any other session:        {ordinary_move:.4f} ({_within.len():,} sessions)")
+print(f"Ratio: {refit_jump / ordinary_move:.2f}x")
+print(f"\nTypical within-year interquartile range of persistence: {persistence_iqr:.3f}")
+print(f"Estimated sigma_eta by refit: {sv_calibration['sigma_eta'].round(4).to_list()}")
 
 # %% [markdown] tags=["results"]
-# Almost every fit converges: **495 of 496** segments in fold 0, **497 of 500** in fold 1 and
-# **561 of 563** in the holdout pass, and no calibration needed its longer second attempt. So the
-# panel below rests on the whole eligible universe rather than on the subset the optimizer happened
-# to like.
+# Three readings, in the order the cells above produce them.
 #
-# Refitting moves the feature. Median GARCH persistence runs **0.869**, **0.909**, **0.965** across
-# the three passes, against a typical within-pass interquartile range of **0.258** - so symbols
-# still differ from each other more than the windows differ. But on the values, where it counts, two
-# passes disagree about the same symbol on the same day by a median **0.0319** in annualized
-# volatility, which is **4.7** times the median one-day move of **0.0067** within a single pass. The
-# vol-of-vol parameter moves the same way, **0.2023** to **0.2815**.
+# **Coverage is the binding constraint on this column, not convergence.** The optimizer converges
+# on almost every block it is given; what limits the panel is how many segments are long enough to
+# be given one. The two percentages under "What the burn-in costs this panel" are the ones to carry
+# forward, and the second - the share of eligible sessions carrying a value - is the one that
+# decides how much of the cross-section a model reading `garch_cond_vol` actually sees.
 #
-# Read together: a model trained on one fold and scored on another would be reading a column that
-# does not mean the same thing in both, which is exactly why the fold identifier is written beside
-# the values and why every downstream join carries it.
+# **The parameters move, and in a direction the schedule explains.** Median persistence rises and
+# its spread narrows as the refits move through the sample, because the estimation window expands
+# and a longer window holds more regimes than one parameter set can separate. The median window
+# length beside it in the table above is what makes that readable as a property of the schedule
+# rather than of the years.
+#
+# **The values move at the refits, and the file now contains that move.** The ratio printed above
+# compares the jump across a refit session against an ordinary one-day move within a block. Under
+# the previous design the same disagreement existed and was larger, but it was spread across folds
+# rather than across sessions: two folds assigned one day two different values, and which one a
+# model saw depended on which fold selected the row. A reader of the current column sees one value
+# per session and one jump per refit, both of which are in front of them.
 
 # %% [markdown]
 # ## E. Combine and emit
@@ -1495,18 +1698,23 @@ print(f"Estimated sigma_eta by pass:      {sv_summary['sigma_eta'].round(4).to_l
 # A positive value is what a seller of that straddle is being paid for; whether it is enough to
 # cover what selling it costs is the question the rest of the case study asks.
 #
-# The join back to the quote panel is on symbol and date only, because implied volatility is a
-# property of the quote rather than of the pass, and the same quote is therefore differenced
-# against each pass's forecast. A symbol and date the models covered but the option panel did not
-# quote leaves both premium columns null rather than dropping the row: the volatility columns are
-# still defined there and a later stage may want them.
+# The two volatility columns are joined on the segment and session, and the quote panel on symbol
+# and date. A symbol and date the models covered but the option panel did not quote leaves both
+# premium columns null rather than dropping the row: the volatility columns are still defined there
+# and a later stage may want them.
+#
+# The GARCH and SV columns do not start on the same session for every segment. GARCH needs its
+# burn-in to have passed on that segment; SV needs a refit block to have opened, which happens on
+# the calendar rather than per segment. The join keeps every row either model produced, so a
+# session can carry one column and not the other.
 
 # %%
 temporal = (
     garch_df.join(
-        sv_df.select(["timestamp", "symbol", "sec_id", "fold", "sv_vol"]),
-        on=["timestamp", "symbol", "sec_id", "fold"],
-        how="left",
+        sv_df.select(["timestamp", "symbol", "sec_id", "sv_vol"]),
+        on=["timestamp", "symbol", "sec_id"],
+        how="full",
+        coalesce=True,
     )
     .join(prices.select(["timestamp", "symbol", "iv_atm"]), on=["timestamp", "symbol"], how="left")
     .with_columns(
@@ -1514,7 +1722,17 @@ temporal = (
         (pl.col("iv_atm") - pl.col("sv_vol")).alias("sv_vrp"),
     )
     .drop(["iv_atm", "sec_id"])
-    .with_columns(pl.col("fold").cast(pl.Int32))
+    # Bounded at the holdout's last session. The walk runs over each segment's whole return
+    # history, which the underlying bar panel carries past the end of the evaluation window;
+    # the fold-keyed design was bounded by the fold windows and so never had to say this.
+    # Rows past the holdout describe sessions no stage of this case study evaluates, and a
+    # feature artifact wider than the period it is read over is a difference every consumer
+    # has to reconcile for itself.
+    .filter(pl.col("timestamp") <= pl.lit(date.fromisoformat(holdout_end)))
+    .sort(["timestamp", "symbol"])
+)
+assert temporal["timestamp"].max() <= date.fromisoformat(holdout_end), (
+    "the artifact reaches past the last session the holdout covers"
 )
 
 # %% [markdown]
@@ -1528,7 +1746,6 @@ MODEL_BASED_SCHEMA = {
     "timestamp": pl.Date,
     "symbol": pl.String,
     "garch_cond_vol": pl.Float64,
-    "fold": pl.Int32,
     "sv_vol": pl.Float64,
     "garch_vrp": pl.Float64,
     "sv_vrp": pl.Float64,
@@ -1541,7 +1758,7 @@ def validate_public_temporal_schema(frame: pl.DataFrame) -> None:
         raise RuntimeError(f"Unexpected model_based columns: {frame.columns}")
     if dict(frame.schema) != MODEL_BASED_SCHEMA:
         raise RuntimeError(f"Unexpected model_based schema: {frame.schema}")
-    duplicate_keys = int(frame.select(["timestamp", "symbol", "fold"]).is_duplicated().sum())
+    duplicate_keys = int(frame.select(["timestamp", "symbol"]).is_duplicated().sum())
     if duplicate_keys:
         raise RuntimeError(f"Combined temporal panel contains {duplicate_keys} duplicate keys")
 
@@ -1549,36 +1766,45 @@ def validate_public_temporal_schema(frame: pl.DataFrame) -> None:
 # %%
 validate_public_temporal_schema(temporal)
 
-feature_cols = [c for c in temporal.columns if c not in ("timestamp", "symbol", "fold")]
+feature_cols = [c for c in temporal.columns if c not in ("timestamp", "symbol")]
 print(f"Columns written: {feature_cols}")
 
-per_pass = (
-    temporal.group_by("fold")
+per_year = (
+    temporal.group_by(pl.col("timestamp").dt.year().alias("year"))
     .agg(
         pl.len().alias("rows"),
-        pl.col("timestamp").min().alias("first_date"),
-        pl.col("timestamp").max().alias("last_date"),
         pl.col("symbol").n_unique().alias("symbols"),
     )
     .join(
         # How often a column has no value is a measurement of the data rather than a fact about
         # the file's shape, so it is counted before the holdout like every other measurement here.
         before_holdout(temporal)
-        .group_by("fold")
-        .agg(*[pl.col(c).null_count().alias(f"null_{c}") for c in ("sv_vol", "garch_vrp")]),
-        on="fold",
+        .group_by(pl.col("timestamp").dt.year().alias("year"))
+        .agg(
+            *[
+                pl.col(c).null_count().alias(f"null_{c}")
+                for c in ("garch_cond_vol", "sv_vol", "garch_vrp")
+            ]
+        ),
+        on="year",
+        how="left",
     )
-    .sort("fold")
+    .sort("year")
 )
-per_pass
+per_year
 
 # %% [markdown]
-# The first four columns are the shape of what was written, which is fixed by the fold windows in
-# `setup.yaml`. The two null counts are a measurement and so are taken before the holdout: they
-# count where the premium columns have no value, which happens wherever the straddle panel carried
-# no quote on a date the underlying traded. The volatility columns are never null - both models
-# write a value for every date in their pass, and the check before the write would have stopped the
-# notebook otherwise.
+# Rows and symbols per year are the shape of what was written. The three null counts are
+# measurements and so are taken before the holdout.
+#
+# `null_garch_vrp` counts where the premium column has no value, which happens wherever the
+# straddle panel carried no quote on a date the underlying traded. The two volatility columns can
+# also be null now, and that is the change this notebook makes visible rather than a defect: a
+# segment carries no GARCH value until its own burn-in has passed, and none at all if it never
+# reaches it. Under the per-fold design every row of a pass carried a value, because the pass began
+# where the fold began and the parameters had already read the window - the column was complete
+# because it was fitted on its own future. A model reading these columns has to handle a null, and
+# how it does so is a choice this stage does not make for it.
 #
 # ### E.1 Writing the file
 #
@@ -1597,7 +1823,7 @@ per_pass
 record = write_artifact(
     temporal,
     FEATURES_DIR / "model_based.parquet",
-    keys=["timestamp", "symbol", "fold"],
+    keys=["timestamp", "symbol"],
     written_by="case_studies/sp500_options/04_model_based_features.py",
     inputs={
         "features/financial.parquet": read_digest(FEATURES_DIR / "financial.parquet")["digest"],
@@ -1605,6 +1831,26 @@ record = write_artifact(
             prices.select(["timestamp", "symbol", "iv_atm"])
         ),
         "load_sp500_daily_bars": value_digest(returns_df),
+    },
+    # The schedule goes in the sidecar because it is what the values mean. Two runs that differ
+    # only in `refit_every` produce different columns under the same name, and without this the
+    # only trace of which one is on disk would be the git history of setup.yaml.
+    metadata={
+        "refit_schedule": {
+            "garch": {
+                "burnin": GARCH_BURNIN,
+                "refit_every": GARCH_REFIT_EVERY,
+                "window": "expanding",
+            },
+            "stochastic_volatility": {
+                "burnin": SV_BURNIN,
+                "refit_every": SV_REFIT_EVERY,
+                "calibration_window": SV_CALIBRATION_WINDOW,
+                "window": "rolling",
+            },
+            "frozen_from": str(_calendar[FREEZE_AFTER - 1]) if FREEZE_AFTER else None,
+        },
+        "garch_burnin_coverage": coverage,
     },
 )
 print(f"Wrote model_based.parquet: {temporal.height:,} rows, digest {record['digest']}")
@@ -1660,20 +1906,23 @@ def seal_incremental_label_endpoints(
 
 
 # %% [markdown]
-# Each fold contributes only its own validation window, taken from its own pass. The holdout pass
-# contributes nothing.
+# Each fold contributes its own validation window. There is nothing to select a pass by any more -
+# a session has one value - so this is a filter to the union of those windows rather than a
+# concatenation of per-fold slices. Where two folds' validation windows overlap, the sessions in
+# the overlap are scored once rather than twice, which the per-fold version could not do.
+#
+# The holdout contributes nothing.
 
 # %%
-temporal_eval = pl.concat(
-    [
-        temporal.filter(
-            (pl.col("fold") == _fold["fold"])
-            & (pl.col("timestamp") >= _fold["val_start"].date())
-            & (pl.col("timestamp") <= _fold["val_end"].date())
-        )
-        for _fold in cv_folds
-    ]
-).drop("fold")
+_validation_windows = [(_fold["val_start"].date(), _fold["val_end"].date()) for _fold in cv_folds]
+temporal_eval = temporal.filter(
+    pl.any_horizontal(
+        [
+            pl.col("timestamp").is_between(_start, _end, closed="both")
+            for _start, _end in _validation_windows
+        ]
+    )
+)
 
 eval_data = temporal_eval.join(
     primary_label_df.select(["timestamp", "symbol", label_col, "dte_calendar"]),
@@ -1933,28 +2182,36 @@ show_with_alt(
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. **Estimate on one window, then run forward without re-estimating.** This is what separates a
-#    model-based feature from a rule-based one, and it is invisible in the values: two series that
-#    differ only in whether the parameters behind them read the future look identical. The fold
-#    contract in section B is what makes the difference checkable, and drawing it is cheaper than
-#    auditing the code that produced it.
+# 1. **A fitted feature has two channels to close, not one.** The conditioning set decides which
+#    observations a value is computed from; the parameters decide which observations theta was
+#    estimated from. Closing the first and leaving the second open produces a column that is
+#    causal on validation rows and not on training rows, and the two are indistinguishable in the
+#    values. The schedule in section B closes the second, and the staircase figure is how you check
+#    it - cheaper than auditing the code that produced it.
 #
-# 2. **Derive everything the forward pass needs from the training window, including the parts a
+# 2. **Prefer a refit schedule to a fold as the thing that bounds an estimate.** A fold bounds the
+#    estimate for the rows it is scored on and not for the rows it is trained on, and it makes the
+#    same session mean different things to different folds. A schedule bounds every row the same
+#    way, which is what lets the artifact carry one value per session and no fold column at all.
+#
+# 3. **Derive everything the forward pass needs from the training window, including the parts a
 #    library computes for you.** Handing a fitted result back to a volatility library and asking it
 #    to filter a longer series will silently recompute initialization and clipping bounds from the
 #    longer series. Writing out the recursion is worth the twenty lines when the alternative is a
 #    leak with no symptom.
 #
-# 3. **A parameter that is a property of the market, not of the asset, is estimated once per
-#    window and shared.** That is what makes a sampler that costs minutes per symbol affordable at
-#    all, and it is a modelling decision to state rather than a shortcut to hide.
+# 4. **A parameter that is a property of the market, not of the asset, is estimated once per
+#    refit and shared.** That is what makes a sampler costing minutes per symbol affordable at all,
+#    and it is also why it is refitted quarterly where the per-symbol model is refitted monthly -
+#    a cadence chosen from what the parameter describes and what it costs, stated in `setup.yaml`
+#    rather than buried in a loop.
 #
-# 4. **Check that a sampler converged before using what it returned.** Draws from a chain that
+# 5. **Check that a sampler converged before using what it returned.** Draws from a chain that
 #    never mixed look exactly like draws from one that did. R-hat, effective sample size in bulk
 #    and tail, and the divergence count are the four that decide it here, and failing them stops
 #    the run rather than lowering the bar.
 #
-# 5. **Test a feature on the outcome that was actually traded, and correct the test for how the
+# 6. **Test a feature on the outcome that was actually traded, and correct the test for how the
 #    positions overlap.** Consecutive positions in this strategy share most of their holding
 #    period, so an uncorrected standard error is too small by a wide margin - and where several
 #    features are screened at once, the family correction, not the individual p-value, decides what
@@ -1970,6 +2227,11 @@ show_with_alt(
 #   respond to a change in what the market is charging until the underlying moves - which is
 #   exactly the lag the two premium columns are constructed to measure, and also a reason they are
 #   slow.
-# - The volatility columns are defined for every date in a pass, but the premium columns need a
-#   straddle quote on that date and are null where there was none. A model reading them has to
+# - A segment carries no volatility value until its own burn-in has passed, and none at all if it
+#   never reaches 252 returns. On this panel that is not a rare edge: the median segment is far
+#   shorter than the calendar, and the coverage report in section C.1 is the measurement of what
+#   the column actually spans. The previous design had no such gap only because it fitted each
+#   fold's parameters on the whole window and then emitted backwards over it.
+# - The premium columns additionally need a straddle quote on the date and are null where there was
+#   none. A model reading them has to
 #   handle that, and how it does so is a choice this stage does not make for it.
