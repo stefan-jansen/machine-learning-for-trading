@@ -83,7 +83,14 @@ _SEQUENCE_PREVIEW_FIELDS = {
 }
 
 SEQUENCE_RUNNER_VERSION = 1
-SEQUENCE_PREPARATION_VERSION = 1
+# 2: #767 (174154ad) changed what a sequence family is fitted on. `np.nan_to_num(..., nan=0.0)`
+# used to run in `_build_symbol_arrays` BEFORE `_compute_feature_stats`, so a missing feature
+# became a raw zero, entered the mean and the standard deviation, and was then standardized like
+# a real observation - on seoa's `garch_cond_vol` landing at -1.64 sd, below anything observed,
+# and skewing every other symbol's normalization on the way. It is now imputed at the training
+# mean. That is a different design matrix, not a rename, so a version-1 run and a run under the
+# corrected fill must not share a training identity.
+SEQUENCE_PREPARATION_VERSION = 2
 SEQUENCE_STATE_VERSION = 1
 SEQUENCE_BACKEND_VERSIONS = {"darts": 1, "pytorch": 1}
 SEQUENCE_ARCHITECTURE_VERSIONS = {
@@ -1965,6 +1972,12 @@ def sequence_identity_params(
 
     params = dict(identity_params or {})
     params["device"] = torch.device(str(device).lower().replace("gpu", "cuda")).type
+    # The preparation version belongs on every sequence identity, not only on the ones assembled
+    # through the runner's own spec. `us_equities_panel/12_dl_weekly.py` registers through this
+    # function directly, so without it that notebook keeps a version-1 identity for a fit whose
+    # design matrix changed under #767 - and it is the notebook Table 13.5 cites, so the stale
+    # identity would be read as a result.
+    params["sequence_preparation"] = SEQUENCE_PREPARATION_VERSION
     if input_data_spec is not None:
         if uses_darts_backend([config]):
             if case_study is None:
