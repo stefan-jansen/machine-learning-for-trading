@@ -1,6 +1,6 @@
 {
   "case_study": "crypto_perps_funding",
-  "label": "fwd_ret_8h",
+  "label": "fwd_dir_8h_3c",
   "method": "daily_cross_sectional_mean_close_pct_change",
   "periods_per_year": 365,
   "n_symbols_declared": 19,
