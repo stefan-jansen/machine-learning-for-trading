@@ -214,7 +214,17 @@ def _build_symbol_arrays(
         n_rows = len(sym_df)
         if n_rows < lookback + 1:
             continue
-        feats = np.nan_to_num(sym_df[feature_names].to_numpy(dtype=np.float32), nan=0.0)
+        feats = sym_df[feature_names].to_numpy(dtype=np.float32, copy=True)
+        # Keep missing values missing until after normalization. Filling here
+        # would put a raw 0.0 into _compute_feature_stats, which is not the
+        # feature's mean on its own scale - for a strictly positive feature
+        # like a conditional volatility it sits below the observed minimum, so
+        # a symbol with no model-based estimate is presented to the model as
+        # the calmest name in the panel rather than a neutral one. Infinities
+        # are treated as missing for the same reason: np.nan_to_num leaves
+        # posinf on its default, the float32 maximum, which would destroy the
+        # feature's mean and standard deviation for every other symbol.
+        feats[~np.isfinite(feats)] = np.nan
         targets = sym_df[label_col].to_numpy(dtype=np.float32)
         # Cast to datetime64[ns] explicitly so concat/np.asarray downstream
         # never falls back to object dtype.
@@ -252,17 +262,23 @@ def _compute_feature_stats(features_list: list[np.ndarray]) -> tuple[np.ndarray,
     n_features = features_list[0].shape[1]
     sum_x = np.zeros(n_features, dtype=np.float64)
     sum_x2 = np.zeros(n_features, dtype=np.float64)
-    n_rows = 0
+    n_rows = np.zeros(n_features, dtype=np.int64)
 
     for feats in features_list:
-        sum_x += feats.sum(axis=0, dtype=np.float64)
-        sum_x2 += np.square(feats, dtype=np.float64).sum(axis=0, dtype=np.float64)
-        n_rows += feats.shape[0]
+        observed = np.isfinite(feats)
+        values = np.where(observed, feats, 0.0).astype(np.float64)
+        sum_x += values.sum(axis=0, dtype=np.float64)
+        sum_x2 += np.square(values).sum(axis=0, dtype=np.float64)
+        n_rows += observed.sum(axis=0, dtype=np.int64)
 
-    means = sum_x / max(n_rows, 1)
-    variances = np.maximum(sum_x2 / max(n_rows, 1) - np.square(means), 0.0)
+    denominator = np.maximum(n_rows, 1)
+    means = sum_x / denominator
+    variances = np.maximum(sum_x2 / denominator - np.square(means), 0.0)
     stds = np.sqrt(variances)
     stds[stds == 0] = 1.0
+    # A feature observed nowhere in training normalizes to zero everywhere,
+    # which is what the post-normalization fill would give it anyway.
+    means[n_rows == 0] = 0.0
     return means.astype(np.float32), stds.astype(np.float32)
 
 
@@ -276,6 +292,10 @@ def _normalize_feature_arrays(
     for feats in features_list:
         feats -= means
         feats /= stds
+        # Now that the arrays are on the training scale, 0.0 is the training
+        # mean, so this is the same imputation the linear and tabular families
+        # get from SimpleImputer(strategy="median") followed by StandardScaler.
+        np.nan_to_num(feats, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def _build_sequence_index(
