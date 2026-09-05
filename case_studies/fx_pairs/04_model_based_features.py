@@ -105,7 +105,10 @@ logging.getLogger("hmmlearn.base").setLevel(logging.ERROR)
 # What is *not* here is the estimation schedule. How much history each model spends before
 # its first fit and how often it is re-estimated are part of what the feature means, not
 # settings to trade runtime against, so they are read from `setup.yaml` in the cell below
-# alongside the feature windows.
+# alongside the feature windows. The three `*_OVERRIDE` settings are the reduction levers
+# for that: each is zero here, meaning "use what `setup.yaml` declares", and a positive
+# value replaces the declaration for one run. They are named so that nothing reading this
+# file can mistake a reduction for the definition.
 #
 # `START_DATE` is the earliest session to load. 2011 is where the OANDA four-hour history
 # begins, so it is the whole file rather than a choice about how much of it to use.
@@ -116,6 +119,16 @@ CASE_STUDY_ID = "fx_pairs"
 MAX_SYMBOLS = 0
 MAX_FOLDS = 0
 START_DATE = "2011-01-01"
+# 0 keeps every model's declared refit cadence. A positive value replaces all three with
+# it, which is how a smoke run bounds the walks without narrowing the universe: fewer
+# estimates, the same rows and the same columns. The burn-ins are never overridden - a
+# shorter one would move which sessions carry a value, and the coverage assertions below
+# are about exactly that.
+REFIT_EVERY_OVERRIDE = 0
+# 0 keeps the declared search effort for the two models that search. Both bound how hard a
+# single estimate looks for its optimum, not what window it reads.
+KALMAN_MAXITER_OVERRIDE = 0
+N_HMM_RESTARTS_OVERRIDE = 0
 
 # %% [markdown] tags=[]
 # The session calendar is read from `setup.yaml` rather than named here. It is the
@@ -182,6 +195,14 @@ HMM_STABILITY_REL_TOL = float(MODEL_BASED["hmm"]["stability_rel_tol"])
 ARIMA_BURNIN = int(MODEL_BASED["arima"]["burnin"])
 ARIMA_REFIT_EVERY = int(MODEL_BASED["arima"]["refit_every"])
 ARIMA_ORDER = tuple(int(term) for term in MODEL_BASED["arima"]["order"])
+
+if REFIT_EVERY_OVERRIDE:
+    KALMAN_REFIT_EVERY = ARIMA_REFIT_EVERY = HMM_REFIT_EVERY = REFIT_EVERY_OVERRIDE
+    print(f"Reduced run: every refit cadence replaced with {REFIT_EVERY_OVERRIDE}")
+if KALMAN_MAXITER_OVERRIDE:
+    KALMAN_MAXITER = KALMAN_MAXITER_OVERRIDE
+if N_HMM_RESTARTS_OVERRIDE:
+    N_HMM_RESTARTS = N_HMM_RESTARTS_OVERRIDE
 
 print("Estimation schedule, in sessions of each model's own series:")
 print(f"  state-space  burn-in {KALMAN_BURNIN:>4}, refit every {KALMAN_REFIT_EVERY:>3}")
