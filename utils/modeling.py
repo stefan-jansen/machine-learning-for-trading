@@ -805,15 +805,17 @@ def load_modeling_dataset(
     # fits in single precision never materialises the double-precision form on the way.
     storage_dtype = feature_storage_dtype(case_study_id)
 
-    def _read(path: Path) -> pl.DataFrame:
-        frame = pl.scan_parquet(path)
+    def _narrow(frame: pl.LazyFrame) -> pl.LazyFrame:
         if storage_dtype != pl.Float64:
             narrow = [n for n, t in frame.collect_schema().items() if t == pl.Float64]
             if narrow:
                 frame = frame.with_columns([pl.col(c).cast(storage_dtype) for c in narrow])
-        return frame.collect()
+        return frame
 
-    features = _read(features_path)
+    # Scanned, not read. A reduced run has to narrow the entity axis *before* the panel is
+    # materialised, and it cannot choose which entities to keep until the join keys are known,
+    # so the collect waits until both are settled - see "Universe reduction" below.
+    features_lazy = _narrow(pl.scan_parquet(features_path))
 
     temporal_path = resolve_storage_path(
         case_study_id, temporal_spec, "features/model_based.parquet"
@@ -831,38 +833,94 @@ def load_modeling_dataset(
     # Labels are deliberately not narrowed. ``features.storage_dtype`` covers the design
     # matrix; the label is the target IC and every metric are measured against, and
     # ``gbm_fold`` states that it stays float64 whatever the design matrix is cast to.
-    labels = pl.read_parquet(label_path)
+    labels_lazy = pl.scan_parquet(label_path)
+
+    label_columns = labels_lazy.collect_schema().names()
+    feature_columns = features_lazy.collect_schema().names()
 
     # Auto-detect label column (the non-ID column in the label file)
-    label_col = [c for c in labels.columns if c not in ID_COLS][0]
+    label_col = [c for c in label_columns if c not in ID_COLS][0]
 
     # Detect date column from features
-    feature_keys = sorted(set(features.columns) & ID_COLS)
+    feature_keys = sorted(set(feature_columns) & ID_COLS)
     date_col = "timestamp" if "timestamp" in feature_keys else "date"
     alt_date = "timestamp" if date_col == "date" else "date"
 
     # Normalize date column names across DataFrames
-    if alt_date in labels.columns and date_col not in labels.columns:
-        labels = labels.rename({alt_date: date_col})
+    if alt_date in label_columns and date_col not in label_columns:
+        labels_lazy = labels_lazy.rename({alt_date: date_col})
+        label_columns = [date_col if c == alt_date else c for c in label_columns]
     if temporal is not None and alt_date in temporal_columns and date_col not in temporal_columns:
         temporal = temporal.rename({alt_date: date_col})
         temporal_columns = [date_col if c == alt_date else c for c in temporal_columns]
 
     # Detect join columns
-    label_keys = sorted(set(labels.columns) & ID_COLS)
+    label_keys = sorted(set(label_columns) & ID_COLS)
     join_cols = sorted(set(feature_keys) & set(label_keys))
     entity_cols = [c for c in join_cols if c != date_col]
+
+    # One pass for both uses below. The sort used to call ``n_unique`` from its key function,
+    # which re-counts the column on every comparison.
+    cardinality: dict[str, int] = {}
+    if entity_cols:
+        cardinality = (
+            features_lazy.select([pl.col(c).n_unique().alias(c) for c in entity_cols])
+            .collect()
+            .row(0, named=True)
+        )
 
     # Filter out constant entity columns (e.g. instrument_id='straddle_30d_atm')
     # that break cross-sectional IC computation by collapsing all entities into one group.
     # NOTE: join_cols retains ALL shared ID columns for data integrity during joins;
     # entity_cols is filtered separately for IC computation only.
-    entity_cols = [c for c in entity_cols if features[c].n_unique() > 1]
+    entity_cols = [c for c in entity_cols if cardinality[c] > 1]
 
     # Sort by cardinality descending so the primary entity (most unique values)
     # comes first. Important when downstream code uses entity_cols[0] for IC
     # (e.g., CME futures: 'product' has 30 values vs 'position' has 3).
-    entity_cols = sorted(entity_cols, key=lambda c: features[c].n_unique(), reverse=True)
+    entity_cols = sorted(entity_cols, key=lambda c: cardinality[c], reverse=True)
+
+    # Universe reduction, pushed into the SCANS instead of applied to the finished panel.
+    #
+    # It used to run at the bottom of this function, after features and labels had both been
+    # read whole and joined, which left a reduction with almost nothing to save: five of
+    # nasdaq100_microstructure's 115 symbols - 4.3% of the universe - still peaked at 39.98 GB
+    # against the full run's 51.5 GB. A preview that costs 78% of production is not a preview,
+    # and it is what stopped the smoke-then-full loop from running on the two largest case
+    # studies at all.
+    #
+    # The universe it selects is unchanged. ``top_entities`` ranks entities by their row count
+    # in the finished panel, so the count is taken here on the key-only inner join of the two
+    # scans, which carries exactly the rows the panel carries: the temporal join is a left join
+    # against a frame made unique on its keys, and neither it nor the META_LEAK drop moves a row.
+    #
+    # Production runs pass ``max_symbols=0`` and no ``symbols``, so neither branch fires.
+    if entity_cols:
+        primary_entity = entity_cols[0]
+        keep: list | None = None
+        if symbols:
+            keep = list(symbols)
+        elif max_symbols > 0:
+            from utils.data_quality import top_entities
+
+            keep = top_entities(
+                features_lazy.select(join_cols).join(
+                    labels_lazy.select(join_cols), on=join_cols, how="inner"
+                ),
+                max_symbols,
+                primary_entity,
+            )
+        if keep is not None:
+            # implode: is_in against a bare Series of the same dtype is deprecated in polars
+            # as ambiguous, and membership in the value set is what is meant.
+            keep_values = pl.Series(primary_entity, keep).implode()
+            features_lazy = features_lazy.filter(pl.col(primary_entity).is_in(keep_values))
+            labels_lazy = labels_lazy.filter(pl.col(primary_entity).is_in(keep_values))
+            if temporal is not None and primary_entity in temporal_columns:
+                temporal = temporal.filter(pl.col(primary_entity).is_in(keep_values))
+
+    features = features_lazy.collect()
+    labels = labels_lazy.collect()
 
     # Join features + temporal (left join to keep all feature rows)
     temporal_by_fold_pd = None
@@ -924,13 +982,6 @@ def load_modeling_dataset(
     drop_cols = [c for c in dataset.columns if c in META_LEAK]
     if drop_cols:
         dataset = dataset.drop(drop_cols)
-
-    # Optional universe reduction
-    if symbols and entity_cols:
-        primary_entity = entity_cols[0]
-        dataset = dataset.filter(pl.col(primary_entity).is_in(list(symbols)))
-    elif max_symbols > 0 and entity_cols:
-        dataset = reduce_to_top_entities(dataset, entity_cols[0], max_symbols)
 
     # Feature columns = everything except IDs and label
     feature_names = [c for c in dataset.columns if c not in ID_COLS and c != label_col]
