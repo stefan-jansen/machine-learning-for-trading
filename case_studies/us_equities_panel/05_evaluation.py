@@ -175,8 +175,8 @@ temporal_scan = pl.scan_parquet(CASE_DIR / "features" / "model_based.parquet")
 temporal_names = temporal_scan.collect_schema().names()
 temporal_cols = [c for c in temporal_names if c not in JOIN_COLS]
 assert "fold" not in temporal_names, (
-    "model_based.parquet carries a fold column, so it was written by a stage 04 that fitted "
-    "per fold rather than on a refit schedule"
+    "model_based.parquet carries a fold column, which this stage has no key to read it by: "
+    "a stock-session is expected to carry one value"
 )
 sessions = temporal_scan.select(DATE_COL).unique().sort(DATE_COL).collect()[DATE_COL].to_list()
 print(f"{len(sessions):,} trading sessions, {sessions[0]} to {sessions[-1]}")

@@ -419,8 +419,6 @@ show_with_alt(
 # %% [markdown]
 # ## 1b. What bounds an estimate, and what selects a row
 #
-# These are two different things and they used to be one.
-#
 # **A schedule bounds an estimate.** Each model below spends a burn-in, is fitted on the
 # sessions before the block it is about to speak for, emits values over that block, and is
 # re-estimated on everything up to the start of the next one. No session is ever used to fit
@@ -513,8 +511,8 @@ def in_validation_windows(column: str = "timestamp") -> pl.Expr:
 # roll back one year at a time and no open bar crosses the rule, so every column Section 7
 # scores is scored on development sessions.
 #
-# What the figure no longer shows is an estimation window, because a fold no longer carries
-# one. Section 4b draws the schedule that does.
+# There is no estimation window on this figure, because a fold does not carry one. Section
+# 4b draws the schedule that bounds the estimates.
 
 # %%
 fig, ax = plt.subplots(figsize=FIGSIZE["single_wide"])
@@ -886,16 +884,16 @@ print(
 # below it is the monthly share of sessions assigned to the low-return centroid. Nothing in
 # the fitting procedure required those sessions to be the market's stressed ones.
 #
-# **The lower panel is why the state number is the weaker of the two outputs.** State zero is
-# whichever centroid has the lower mean *in the history that fit read*. That fixes the
-# arbitrariness of k-means labelling within a fit; it does not make the number mean the same
-# thing from one fit to the next. A clustering estimated through the 2008 decline and one
-# estimated a decade later put their lower-return centroid in quite different places, so
-# state zero before and after describes different markets under one number. The visible
-# consequence is that the share in state zero drains away over the later years while the line
-# above it goes on doing what it always did. `wass_dist_ratio` does not have this problem: it
-# is a distance, it is comparable against the fit that produced it, and reading it needs no
-# knowledge of which centroid won.
+# **The lower panel is still the weaker of the two outputs, and it is worth saying why.**
+# State zero is whichever centroid has the lower mean *in the history that fit read*. That
+# fixes the arbitrariness of k-means labelling within a fit; it does not make the number mean
+# the same thing from one fit to the next, because a clustering estimated through the 2008
+# decline and one estimated a decade later put their lower-return centroid in different
+# places. What the panel shows is that the assignment nonetheless lands where a reader would
+# expect it to: nearly every session of 2008 and 2002 is in the lower state and fewer than a
+# tenth of 1995's are. `wass_dist_ratio` carries the same information without the comparability
+# problem - it is a distance, it is read against the fit that produced it, and reading it needs
+# no knowledge of which centroid won.
 #
 # The assignment is aggregated to a monthly share rather than drawn as a daily strip. Sixteen
 # years of daily flags give each session a fraction of a pixel, isolated days vanish, and the
@@ -937,17 +935,18 @@ ax2.set_ylabel("Share in the\nlower state", fontsize=7)
 ax2.set_xlabel("Date")
 add_message_title(
     ax1,
-    "The lower-return state drains away while the series does not change",
+    "The lower-return state fills the years the market was falling",
     subtitle="Scored sessions only. Below: monthly share assigned to that state",
 )
 show_with_alt(
     fig,
     "Two stacked panels sharing a date axis over the scored sessions. The upper panel is a "
     "noisy trailing median return oscillating around zero, with its largest excursions in "
-    "2008 and 2009 and no visible change in character before or after. The lower panel is a "
-    "bar chart of the monthly share of sessions assigned to the lower-return state; the bars "
-    "are frequent and often reach the top of the panel in the earlier years, become sparse "
-    "after 2010, and stop entirely for the last few years.",
+    "2008 and 2009. The lower panel is a filled area of the monthly share of sessions "
+    "assigned to the lower-return state. It swings between the top and the bottom of the "
+    "panel rather than trending: it is near the ceiling through 2000 to 2003 and again "
+    "across 2008 and 2009, and close to the floor in the middle of the 1990s and again from "
+    "2012 to 2014.",
 )
 
 _shaded = _smoothed.filter(pl.col("wass_cluster") == 0)
@@ -1315,7 +1314,11 @@ _scheduled_blocks = sum(
 )
 print(f"  {_scheduled_blocks:,} blocks on the schedule", flush=True)
 
-workers = max(1, min(len(payloads), (os.cpu_count() or 2) - 1))
+# `process_cpu_count` rather than `cpu_count`: it reports the cores this process may
+# actually run on, so an affinity mask or a cgroup quota on a shared machine reduces the
+# pool instead of being ignored. `cpu_count` reports the hardware and would take every
+# core whatever the run was given.
+workers = max(1, min(len(payloads), (os.process_cpu_count() or 2) - 1))
 print(f"  fitting across {workers} processes", flush=True)
 with ProcessPoolExecutor(
     max_workers=workers, mp_context=multiprocessing.get_context("fork")
@@ -1389,7 +1392,9 @@ print(
 # A parameter path that is flat says the cadence bought nothing beyond making the feature
 # causal, and one fit would have served for the values; a path that swings says the transform
 # is chasing a moving target, and the reader should carry that into how much weight the
-# feature deserves.
+# feature deserves. The two answers differ here, which is the point of measuring rather than
+# assuming: the volatility persistence returns to nearly the same value at almost every
+# estimate, while the gap between the two regime centroids spans close to a factor of four.
 #
 # **Both paths are drawn for one series each** - the market-level volatility model and the
 # market-level clustering - so that what moves is the parameter and not the composition of
@@ -1439,20 +1444,18 @@ for ax, burnin_end in (
     ax.axvline(holdout_start, color=COLORS["copper"], ls="--", lw=1.2)
 add_message_title(
     ax1,
-    "The volatility fit repeats as the schedule advances; the regime fit does not",
+    "The volatility model re-estimates to nearly the same persistence; the regime model does not",
     subtitle="One marker per re-estimation. Shaded: burn-in. Dashed: re-estimation stops",
 )
 show_with_alt(
     fig,
     "Two stacked panels against the date of each re-estimation, sharing a date axis. The "
     "upper panel plots the market volatility model's fitted persistence: a dense line of "
-    "markers that stays inside a narrow band near the top of the axis across the whole "
-    "sample, with brief excursions around the crisis years. The lower panel plots the "
-    "distance between the two regime centroids, which declines over the sequence, steeply at "
-    "first and then gradually, stepping up at a few points in the second half before "
-    "resuming, and ends at a small fraction of where it started. A shaded band at the left "
-    "of each panel marks the burn-in and a dashed vertical line marks where re-estimation "
-    "stops.",
+    "markers sitting close to the top of the axis for almost the whole sample, with a few "
+    "sharp dips away from it. The lower panel plots the distance between the two regime "
+    "centroids, which moves over a range of about four to one, rising into the early 2000s "
+    "and again around 2009 and falling back between. A shaded band at the left of each panel "
+    "marks the burn-in and a dashed vertical line marks where re-estimation stops.",
 )
 
 # %% [markdown] tags=["results"]
@@ -1542,11 +1545,11 @@ print(
 # ### What the assembled panel holds
 #
 # A fitted feature legitimately starts after the estimation window that produced it, so the
-# leading gap is reported rather than asserted away. It is reported because it used to be
-# invisible: `sequence_dataset` turns a null feature into `0.0`, which after normalization is
-# the feature's mean, so rows missing a feature were fitted as average observations and
-# nothing raised. The same geometry goes into the digest sidecar, so a later stage can
-# compare against it instead of measuring it again by hand.
+# leading gap is reported rather than asserted away. It is worth reporting because it is
+# otherwise invisible downstream: `sequence_dataset` turns a null feature into `0.0`, which
+# after normalization is the feature's mean, so a row missing a feature is fitted as an
+# average observation and nothing raises. The same geometry goes into the digest sidecar, so
+# a later stage can compare against it instead of measuring it again by hand.
 #
 # `first value`, `rows with a value` and `coverage` count every emitted row, holdout sessions
 # included: the model stages read those rows to score the holdout once, so a column with no
@@ -1787,9 +1790,9 @@ print(f"A date is scored when at least {_min_obs:,} stocks are ranked on it")
 # %% [markdown]
 # Which columns vary across a cross-section is measured, not declared. A feature whose
 # median date carries a single distinct value is market-level and is set aside; the count
-# for each is printed, so a column that is *nearly* constant - one value for the stocks a
-# model was fitted on and a broadcast for the rest - is visible as the partial thing it is
-# rather than passing as cross-sectional.
+# for each is printed, so a column that is *nearly* constant - a handful of distinct values
+# across a cross-section of hundreds - is visible as the partial thing it is rather than
+# passing as cross-sectional.
 
 # %%
 _variation = (
@@ -1904,13 +1907,13 @@ add_message_title(
 )
 show_with_alt(
     fig,
-    "One horizontal bar per temporal feature, giving its mean information coefficient "
-    "against the one-day forward return over validation rows, with a whisker of two "
-    "Newey-West standard errors and a vertical line at zero. The two fractionally "
-    "differenced columns extend well clear of zero in opposite directions and are filled "
-    "solid, marking them as surviving the false-discovery correction. The conditional "
-    "volatility column sits just left of zero, is drawn unfilled, and its whisker crosses "
-    "the zero line.",
+    "One horizontal bar per scored feature, giving its mean information coefficient against "
+    "the one-day forward return over the scored sessions, with a whisker of two Newey-West "
+    "standard errors and a vertical line at zero. Three bars appear: the fractionally "
+    "differenced volume extends to the right of zero and the fractionally differenced price "
+    "and the conditional volatility extend to the left by a similar distance. All three are "
+    "filled solid, marking them as surviving the false-discovery correction, and no whisker "
+    "crosses the zero line.",
 )
 
 # %% [markdown]

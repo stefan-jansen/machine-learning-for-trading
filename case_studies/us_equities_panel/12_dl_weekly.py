@@ -118,15 +118,16 @@ print(f"  Weekly model-based features: {mb.shape[0]:,} rows, {mb.shape[1]} cols"
 # None, which is what `load_modeling_dataset` passes on this shape too.
 #
 # The key's uniqueness is asserted rather than assumed. A repeat would fan every weekly
-# observation out to one row per duplicate, leave duplicate timestamps per symbol, and produce
-# zero usable sequences - which is the "No valid folds created" this notebook used to die on.
+# observation out to one row per duplicate, leave duplicate timestamps per symbol, and give
+# the sequence builder no fold it could form - which surfaces as "No valid folds created"
+# several cells later, a long way from the join that caused it.
 assert mb.select("symbol", "timestamp").is_duplicated().sum() == 0, (
     "model_based.parquet repeats a symbol and timestamp; the sequence builder would see "
     "duplicate dates per symbol and create no folds"
 )
 assert "fold" not in mb.columns, (
-    "model_based.parquet carries a fold column, so it was written by a stage 04 that fitted "
-    "per fold rather than on a refit schedule"
+    "model_based.parquet carries a fold column, which this stage has no key to read it by: "
+    "a stock-session is expected to carry one value"
 )
 
 feat_cols = [c for c in feat.columns if c not in ("symbol", "timestamp")]
@@ -183,11 +184,10 @@ collect()
 # the earliest and the most recent, because this notebook fits four sequence models on a weekly
 # grid and the full sixteen would cost four times what the comparison needs.
 #
-# They are resolved rather than written out. Hand-written windows are what put this notebook's
-# last two folds inside the holdout: it trained through 2017-01 and scored 2017-02 to 2018-01,
-# both of which are held-out sessions, so two of the four numbers the comparison rested on had
-# read the reserved history. A window derived from the label file cannot do that, and the
-# assertion below is what says so rather than the prose.
+# They are resolved rather than written out. A window typed into this notebook is a second
+# declaration of the fold design, free to disagree with the one every other stage reads and
+# free to reach past the holdout without anything noticing. A window derived from the label
+# file cannot, and the assertion below is what establishes it rather than the prose.
 
 # %%
 SETUP = load_setup_config(CASE_STUDY_ID)
