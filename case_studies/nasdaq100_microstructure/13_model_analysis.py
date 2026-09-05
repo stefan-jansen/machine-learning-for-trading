@@ -1525,7 +1525,7 @@ print(synthesis)
 #
 # **Next**: `14_backtest.py` for strategy simulation,
 # `15_portfolio_management.py` for position sizing, and
-# `18_strategy_analysis.py` for end-to-end results.
+# `20_strategy_analysis.py` for end-to-end results.
 
 # %% [markdown] tags=["results"]
 # ### What the comparison found on this run

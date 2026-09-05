@@ -2216,7 +2216,7 @@ case_studies/nasdaq100_microstructure/16_risk_management:
   timeout: 600
 case_studies/nasdaq100_microstructure/17_costs:
   timeout: 600
-case_studies/nasdaq100_microstructure/18_strategy_analysis:
+case_studies/nasdaq100_microstructure/20_strategy_analysis:
   skip: true
   skip_reason: "Analyzes the cost-feasible ensemble carrier, which is registered out-of-band (session_6/7 drivers) and is not reproduced by the in-notebook test sweep, so an isolated test registry has no carrier rows. Runs clean in production."
   timeout: 180
