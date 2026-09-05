@@ -273,12 +273,23 @@ features:
 # feature windows above are. Every count is in 8-hour settlement bars, the unit
 # `features.bar_hours` sets and `features.windows` already uses.
 model_based:
-  # Trailing returns a symbol needs inside a fold's training window before either
-  # model is fitted for it. 500 settlements is about five and a half months; below
-  # that the leverage term of a GJR recursion and the transition matrix of a
-  # two-state chain are estimated off too few regime switches to mean anything.
+  # Trailing settlements a series needs before either model is fitted on it. 500
+  # settlements is about five and a half months; below that the leverage term of a
+  # GJR recursion and the transition matrix of a two-state chain are estimated off
+  # too few regime switches to mean anything.
+  #
+  # This is a burn-in, not a fold-entry condition. Both models below are fitted on a
+  # schedule that runs over the whole history: the first 500 settlements carry no
+  # value, and from there the parameters are re-estimated on the cadence each model
+  # declares, always on settlements strictly earlier than the ones they then speak
+  # for. Nothing about a cross-validation fold enters the fit, so the artifact
+  # carries no fold column and a settlement has one value whichever fold selects it.
   min_train_bars: 500
   garch:
+    # How often the variance model is re-estimated. 21 settlements is a week. A
+    # variance model tracks a level that moves, which is the property the feature
+    # exists to report, so it is refreshed faster than the regime model below.
+    refit_every: 21
     # The conditional-volatility z-score compares a symbol's current forecast
     # against its own recent level: 90 bars is 30 days.
     vol_zscore_window: 90
@@ -288,6 +299,10 @@ model_based:
   hmm:
     # Calm funding and stressed funding.
     n_states: 2
+    # How often the chain is re-estimated. 63 settlements is three weeks. Regime
+    # parameters are the slowest-moving thing this notebook fits, and each estimate
+    # costs `n_restarts` expectation-maximization searches over the whole history.
+    refit_every: 63
     # Expectation-maximization reaches a local optimum, so the fit is repeated
     # from this many starting points and the highest training likelihood is kept.
     n_restarts: 10
