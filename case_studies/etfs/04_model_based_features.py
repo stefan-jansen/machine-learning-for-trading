@@ -1126,10 +1126,11 @@ print(
 #
 # Both walks are done, so this draws what they did rather than what they were configured to do.
 # For each model the pale bar is the burn-in it paid before emitting anything and the dark bar is
-# where it emitted; the ticks on the regime row are the sessions its parameters were estimated
-# through, one per estimate that converged. The volatility row is a band rather than a line
-# because each ETF pays its own burn-in, so the pale part spans the earliest and latest session
-# any of them started emitting on.
+# where every entity it covers is emitting; the ticks on the regime row are the sessions its
+# parameters were estimated through, one per estimate that converged. The volatility model is
+# fitted per ETF and each ETF pays its own burn-in, so its row has a third segment between the
+# earliest and the latest first emission, where some ETFs are emitting and others are still in
+# their burn-in.
 #
 # The dashed line is the holdout boundary. No tick falls to the right of it, which is the freeze:
 # the holdout is emitted from the last estimate made before it. The thin amber bars underneath
@@ -1145,24 +1146,34 @@ _panel_end = pd.Timestamp(prices["timestamp"].max())
 _regime_start = pd.Timestamp(
     hmm_features.filter(pl.col("regime_prob_stress").is_not_null())["timestamp"].min()
 )
+# Each row is a list of (start, end, colour) segments read left to right, so the per-ETF row can
+# say "none emitting", "some emitting" and "all emitting" instead of collapsing the middle into
+# the burn-in it is not.
+_vol_first = pd.Timestamp(_first_value["first_value"].min())
+_vol_last = pd.Timestamp(_first_value["first_value"].max())
 _rows = [
     (
         "Regime model",
-        _panel_start,
-        _regime_start,
+        [
+            (_panel_start, _regime_start, COLORS["silver_muted"]),
+            (_regime_start, _panel_end, COLORS["blue"]),
+        ],
         [pd.Timestamp(d) for d in hmm_fit_df["fit_end_session"].to_list()],
     ),
     (
         "Volatility model, per ETF",
-        pd.Timestamp(_first_value["first_value"].min()),
-        pd.Timestamp(_first_value["first_value"].max()),
+        [
+            (_panel_start, _vol_first, COLORS["silver_muted"]),
+            (_vol_first, _vol_last, COLORS["recede"]),
+            (_vol_last, _panel_end, COLORS["blue"]),
+        ],
         [],
     ),
 ]
-for i, (name, burn_start, emit_start, ticks) in enumerate(_rows):
+for i, (name, segments, ticks) in enumerate(_rows):
     y = -1.6 - 1.1 * i
-    ax.barh(y, emit_start - burn_start, left=burn_start, height=0.6, color=COLORS["silver_muted"])
-    ax.barh(y, _panel_end - emit_start, left=emit_start, height=0.6, color=COLORS["blue"])
+    for seg_start, seg_end, color in segments:
+        ax.barh(y, seg_end - seg_start, left=seg_start, height=0.6, color=color)
     for tick in ticks:
         ax.plot([tick, tick], [y - 0.3, y + 0.3], color=COLORS["amber"], linewidth=0.6)
     ax.text(_panel_start, y + 0.55, name, fontsize=8, color=COLORS["blue"], va="bottom")
@@ -1184,17 +1195,23 @@ ax.invert_yaxis()
 ax.set_xlabel("Date")
 handles = [
     plt.Rectangle((0, 0), 1, 1, color=COLORS["silver_muted"]),
+    plt.Rectangle((0, 0), 1, 1, color=COLORS["recede"]),
     plt.Rectangle((0, 0), 1, 1, color=COLORS["blue"]),
     plt.Rectangle((0, 0), 1, 1, color=COLORS["amber"]),
 ]
 ax.legend(
     handles,
-    ["Burn-in, no value emitted", "Emitting, re-estimated at each tick", "Fold validation window"],
+    [
+        "Burn-in, no value emitted",
+        "Some ETFs emitting, the rest still in burn-in",
+        "Emitting, re-estimated at each tick",
+        "Fold validation window",
+    ],
     frameon=False,
     fontsize=8,
     loc="upper left",
     bbox_to_anchor=(0.0, -0.12),
-    ncol=3,
+    ncol=2,
 )
 assert max(pd.Timestamp(d) for d in hmm_fit_df["fit_end_session"].to_list()) < _holdout, (
     "a regime estimate is dated inside the holdout, so the figure would draw a tick there"

@@ -372,6 +372,47 @@ def test_write_model_based_writes_nothing_when_a_guard_fires(tmp_path: Path) -> 
     assert not out.exists()
 
 
+# --- the fold-free artifact a refit schedule produces ------------------------------------
+
+
+def _fold_free_frame() -> pl.DataFrame:
+    return _emit_frame(folds=(0,)).drop("fold")
+
+
+def test_write_model_based_writes_a_frame_that_carries_no_fold_column(tmp_path: Path) -> None:
+    out = tmp_path / "model_based.parquet"
+    record = write_model_based(_fold_free_frame(), out, fold_column=None, **WRITE_KW)
+    assert "fold" not in pl.read_parquet(out).columns
+    assert record["n_rows"] == 18
+    # One geometry record per feature, not per fold and feature.
+    assert {(g["fold"], g["feature"]) for g in record["fold_feature_geometry"]} == {
+        (None, "vol_state"),
+        (None, "garch_sigma"),
+    }
+
+
+def test_the_keys_alone_identify_a_row_when_there_is_no_fold(tmp_path: Path) -> None:
+    frame = _fold_free_frame()
+    frame = pl.concat([frame, frame.head(1)])
+    with pytest.raises(ValueError, match="duplicate rows"):
+        write_model_based(frame, tmp_path / "m.parquet", fold_column=None, **WRITE_KW)
+
+
+def test_expected_folds_is_refused_rather_than_ignored_without_a_fold_column(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "m.parquet"
+    with pytest.raises(ValueError, match="expected_folds"):
+        write_model_based(_fold_free_frame(), out, fold_column=None, expected_folds=[0], **WRITE_KW)
+    assert not out.exists()
+
+
+def test_an_all_null_feature_is_still_refused_without_a_fold_column(tmp_path: Path) -> None:
+    frame = _fold_free_frame().with_columns(pl.lit(None, dtype=pl.Float64).alias("garch_sigma"))
+    with pytest.raises(ValueError, match="no value at all"):
+        write_model_based(frame, tmp_path / "m.parquet", fold_column=None, **WRITE_KW)
+
+
 # ---------------------------------------------------------------------------
 # The GARCH(1,1) recursion.
 #

@@ -278,7 +278,7 @@ def fold_feature_geometry(
     *,
     feature_columns: Sequence[str],
     time_column: str,
-    fold_column: str = "fold",
+    fold_column: str | None = "fold",
 ) -> list[dict]:
     """Per fold and feature, where the values actually start and stop.
 
@@ -296,7 +296,18 @@ def fold_feature_geometry(
     variant's start against the primary's instead of discovering it by hand.
     """
     records: list[dict] = []
-    for (fold_id,), part in frame.group_by([fold_column], maintain_order=True):
+    # A fold-free artifact carries one estimation schedule for the whole panel, so its
+    # geometry is one record per feature with ``fold`` reported as None. The rest of the
+    # record means exactly what it means per fold.
+    parts: list[tuple[int | None, pl.DataFrame]] = (
+        [(None, frame)]
+        if fold_column is None
+        else [
+            (fold_id, part)
+            for (fold_id,), part in frame.group_by([fold_column], maintain_order=True)
+        ]
+    )
+    for fold_id, part in parts:
         for col in feature_columns:
             present = part.filter(pl.col(col).is_not_null())
             records.append(
@@ -320,7 +331,7 @@ def write_model_based(
     feature_columns: Sequence[str],
     time_column: str,
     written_by: str,
-    fold_column: str = "fold",
+    fold_column: str | None = "fold",
     expected_folds: Sequence[int] | None = None,
     inputs: Mapping[str, str] | None = None,
     metadata: Mapping[str, Any] | None = None,
@@ -340,6 +351,10 @@ def write_model_based(
     * every declared feature column is present and not entirely null within any fold
     * the fold ids are exactly ``expected_folds`` when given
 
+    Pass ``fold_column=None`` for the fold-free artifact a refit schedule produces: the
+    identity becomes the keys alone, the geometry is one record per feature, and
+    ``expected_folds`` is then refused rather than ignored.
+
     The per-fold feature geometry from :func:`fold_feature_geometry` goes into the sidecar
     metadata under ``fold_feature_geometry``. It is recorded rather than asserted on for the
     reason given there: this frame cannot tell a legitimate estimation warm-up from an
@@ -347,15 +362,22 @@ def write_model_based(
     where the gap is correct.
     """
     frame_keys = list(keys)
-    missing = [c for c in [*frame_keys, fold_column, *feature_columns] if c not in frame.columns]
+    # ``fold_column=None`` is the fold-free artifact: one estimation schedule for the whole
+    # panel, so a row is identified by its keys alone and there is no fold to check. Every
+    # other guard below applies unchanged.
+    fold_cols = [] if fold_column is None else [fold_column]
+    if fold_column is None and expected_folds is not None:
+        raise ValueError("expected_folds was given for a frame written without a fold column")
+
+    missing = [c for c in [*frame_keys, *fold_cols, *feature_columns] if c not in frame.columns]
     if missing:
         raise ValueError(f"model_based frame is missing declared columns: {missing}")
 
-    null_keys = [c for c in [*frame_keys, fold_column] if frame[c].null_count()]
+    null_keys = [c for c in [*frame_keys, *fold_cols] if frame[c].null_count()]
     if null_keys:
         raise ValueError(f"null values in key or fold columns: {null_keys}")
 
-    identity = [*frame_keys, fold_column]
+    identity = [*frame_keys, *fold_cols]
     n_dup = int(frame.select(identity).is_duplicated().sum())
     if n_dup:
         raise ValueError(f"{n_dup:,} duplicate rows on {identity}")
