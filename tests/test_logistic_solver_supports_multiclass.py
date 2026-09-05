@@ -28,10 +28,25 @@ import pytest
 import yaml
 
 PRESETS = Path(__file__).resolve().parents[1] / "case_studies" / "config" / "logistic"
-# `saga` needs a looser tolerance than coordinate descent to converge here: at 1e-3 it hits
-# the iteration cap at both sizes measured; at 1e-2 it converges in 22 to 29 iterations,
-# which is the count liblinear needs at 1e-4.
-REQUIRED_TOL = 0.01
+# The tolerance is split by where the penalty binds, and both halves are measured.
+#
+# Weakly penalised (C >= 1): saga needs a LOOSER tolerance than coordinate descent to
+# converge at all. At 1e-4 and 1e-3 it hits the iteration cap at every size tried; at 1e-2 it
+# converges in 22 to 29 iterations, the count liblinear needs at 1e-4.
+#
+# Strongly penalised (C <= 0.1): 1e-2 converges but leaves coefficients stranded NEAR zero
+# rather than AT zero, and `coef_ != 0` counts those as live. At C=0.01 that is 24 exact
+# zeros against 52 below 1e-8, where liblinear has 40 of each. At 1e-3 the two counts agree
+# and saga is more sparse than liblinear at every C measured. Sparsity is the entire point of
+# the small-C end of this sweep, so it gets the tighter tolerance.
+LOOSE_TOL = 0.01
+TIGHT_TOL = 0.001
+# Where the penalty starts binding hard enough for the stranding to matter.
+TIGHT_TOL_MAX_C = 0.1
+
+
+def _c_of(preset: Path) -> float:
+    return float(yaml.safe_load(preset.read_text())["params"]["C"])
 
 
 def _presets() -> list[Path]:
@@ -61,10 +76,12 @@ def test_no_l1_preset_pins_liblinear(preset: Path) -> None:
 def test_each_l1_preset_sets_the_tolerance_saga_needs(preset: Path) -> None:
     """Left at the 1e-4 default, saga does not converge within any iteration cap tried."""
     params = yaml.safe_load(preset.read_text())["params"]
-    assert params.get("tol") == REQUIRED_TOL, (
-        f"{preset.name} does not set tol={REQUIRED_TOL}. At the scikit-learn default of "
-        "1e-4, and at 1e-3, saga hit the iteration cap without converging at both 400k and "
-        "1.2M rows."
+    expected = TIGHT_TOL if _c_of(preset) <= TIGHT_TOL_MAX_C else LOOSE_TOL
+    assert params.get("tol") == expected, (
+        f"{preset.name} sets tol={params.get('tol')}, expected {expected}. At C<=0.1 the "
+        "penalty binds and 1e-2 strands coefficients near zero rather than at zero, which "
+        "blunts the sparsity the sweep exists to show; at C>=1 saga does not converge at "
+        "any tolerance tighter than 1e-2."
     )
     assert params.get("max_iter", 0) >= 200, (
         f"{preset.name} caps iterations below the 22-29 saga needed plus headroom"

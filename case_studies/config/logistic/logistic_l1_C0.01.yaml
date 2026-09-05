@@ -18,20 +18,33 @@
 # on 2026-09-05 and was killed with two of thirteen configurations still unfinished, both of
 # them these L1 ones.
 #
-# `tol: 0.01` is what makes saga converge. At 1e-3 it hits the iteration cap without
-# converging at either size; at 1e-2 it converges in 22 to 29 iterations, which is the same
-# count liblinear needs at 1e-4. On a 20% out-of-sample split at 1.2M rows the looser
-# tolerance costs nothing measurable and is slightly better: log loss 1.0275 against 1.0294,
-# accuracy 0.4183 against 0.4106.
+# saga is also better out of sample at every C measured here: log loss 1.0273-1.0276 against
+# liblinear's 1.0293-1.0294, and accuracy 0.415-0.420 against 0.404-0.410.
 #
-# One property to know rather than to be surprised by: the two solvers reach different
-# points in coefficient space (correlation 0.77) while predicting almost identically. At
-# C >= 10 the penalty leaves 195 of 198 coefficients non-zero, so it is barely binding and
-# the solution is weakly identified - that is a property of the configuration, not of saga.
+# `tol: 0.001` here rather than the 0.01 the weakly-penalised configurations use, because
+# this is where the penalty binds and exact sparsity is the point of the sweep. At 1e-2 saga
+# leaves coefficients stranded NEAR zero instead of AT zero, which `coef_ != 0` then counts
+# as live. Measured on the same panel, exact zeros against coefficients below 1e-8, out of
+# 198:
+#
+#     C        liblinear 1e-4     saga 1e-2        saga 1e-3
+#     0.001      128 / 128         148 / 149        157 / 157
+#     0.01        40 /  40          24 /  52         87 /  87
+#     0.1          8 /   8           3 /   4         24 /  26
+#
+# The 24-against-52 at C=0.01 is the defect: twenty-eight coefficients below 1e-8 that are
+# not zero. At 1e-3 the two counts agree and saga is *more* sparse than liblinear at every C
+# here, so the tighter tolerance is not a concession - it is what makes the L1 solution an
+# L1 solution.
+#
+# Cost at 1.2M rows: 226s, 352s and 287s for C=0.001, 0.01 and 0.1 against liblinear's 30s,
+# 202s and 499s. **The full-panel cost of this arm is not established** - the 16.9M-row
+# extrapolation is uncertain because it rests on a single scaling estimate taken from the
+# tol=1e-2 timings. Watch it on the first run rather than assuming it is small.
 model_class: LogisticRegression
 params:
   C: 0.01
   max_iter: 200
   penalty: l1
   solver: saga
-  tol: 0.01
+  tol: 0.001
