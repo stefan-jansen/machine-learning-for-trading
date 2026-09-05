@@ -488,5 +488,5 @@ fig.show()
 # - The shortlist uses validation backtest Sharpe within each label and distinct model
 #   configuration.
 # - The population snapshot preserves every planned allocator result across failure and restart.
-# - These comparisons remain validation evidence; costs, risk controls, and the locked holdout are
+# - These comparisons remain validation evidence; costs, risk controls, and the holdout replay are
 #   evaluated separately.

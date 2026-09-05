@@ -508,7 +508,9 @@ compatible_sets
 # `20_strategy_analysis.py` reopens one of these per-label sets -
 # `us-equities-<label>-validation-strategies-v1` - and applies the one official rule: highest
 # validation backtest Sharpe with the backtest hash as deterministic tie-break, within that label.
-# Research-lock creation and the single holdout execution wait for the frozen holdout producer.
+# The holdout follows from that selection with nothing in between: retrain the selected
+# configuration on everything up to the holdout start, predict the holdout window, and run the
+# same backtest configuration on those predictions.
 
 # %% [markdown]
 # ## Key takeaways and limitations
@@ -517,4 +519,4 @@ compatible_sets
 # - The official population contains every complete equal-weight, allocation, and risk-overlay
 #   validation result.
 # - Validation Sharpe and the backtest hash define deterministic selection from that population.
-# - The locked holdout is used once after selection and may disconfirm the validation evidence.
+# - The holdout is used once after selection and may disconfirm the validation evidence.

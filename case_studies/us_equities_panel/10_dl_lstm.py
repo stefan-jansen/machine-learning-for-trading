@@ -368,4 +368,4 @@ compatible_sets
 # - Every epoch checkpoint has separate fitted-state and prediction provenance.
 # - The fixed lookback and hidden-state size constrain the temporal relationships the model can
 #   represent.
-# - Validation predictions remain separate from the locked holdout assessment.
+# - Validation predictions remain separate from the holdout assessment.

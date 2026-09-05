@@ -736,5 +736,5 @@ set_table.filter(pl.col("role") == "strategy handoff")
 # Canonical execution covers every declared prediction result. Preview execution is explicitly
 # bounded and cannot publish a candidate set or official population. Shape-based diagnostics use a
 # separate subset because loading every large prediction artifact together is unnecessary. All
-# evidence in this notebook comes from validation data; the holdout remains reserved for the locked
-# strategy evaluation.
+# evidence in this notebook comes from validation data; the holdout is reserved for the replay of
+# whichever configuration validation selects.

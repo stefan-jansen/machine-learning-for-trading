@@ -449,5 +449,5 @@ show_with_alt(
 #   narrowing the cohort.
 # - Validation Sharpe becomes the downstream strategy-selection metric; predictive IC remains
 #   descriptive.
-# - Equal weighting is the common signal baseline. Allocation, costs, risk controls, and the locked
-#   holdout are evaluated through separate requests.
+# - Equal weighting is the common signal baseline. Allocation, costs, risk controls, and the
+#   holdout replay are evaluated through separate requests.
