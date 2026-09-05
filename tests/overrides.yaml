@@ -1206,18 +1206,24 @@ case_studies/cme_futures/04_model_based_features:
   # ten products carry the feature, so a fixture covering three of the thirty leaves the
   # temporal features under the coverage gate and scores nothing.
   #
-  # ARIMA_REFIT_FREQ is what bounds this notebook in CI. Neither of the other two levers
-  # is available: MAX_PRODUCTS is held at 0 by the coverage gate above, and MAX_FOLDS
-  # slices `splits` so a reduced artifact fails 06-09 and 11 at "artifact fold is
-  # missing". The job timed out here at the 1800s cell limit on 2026-08-10 (run
-  # 31353597681), in the walk-forward cell and not in the FFT one - FFT_WINDOW bounds the
-  # spectral features and never bounded this. Re-selecting the ARIMA order annually
-  # rather than monthly cuts the stepwise searches twelvefold and leaves the number of
-  # forecasts, and so the row count every downstream gate reads, exactly as it was.
+  # The refit cadence is what bounds this notebook in CI, and since the schedule moved to
+  # config/setup.yaml the lever is REFIT_EVERY_OVERRIDE rather than ARIMA_REFIT_FREQ. It
+  # replaces both declared cadences with 252: annual ARIMA order selection instead of
+  # monthly, and an annual rather than quarterly regime refit. Neither leaves the emitted
+  # rows or columns any different, which is the point of overriding a cadence rather than
+  # a burn-in.
+  #
+  # Neither of the other two levers is available: MAX_PRODUCTS is held at 0 by the coverage
+  # gate above, and MAX_FOLDS narrows only what section F screens over. The job timed out
+  # here at the 1800s cell limit on 2026-08-10 (run 31353597681), in the walk-forward cell
+  # and not in the FFT one - FFT_WINDOW bounds the spectral features and never bounded
+  # this. Re-selecting the ARIMA order annually rather than monthly cuts the stepwise
+  # searches twelvefold and leaves the number of forecasts, and so the row count every
+  # downstream gate reads, exactly as it was.
   parameters:
     FFT_WINDOW: 126
     MAX_PRODUCTS: 0
-    ARIMA_REFIT_FREQ: 252
+    REFIT_EVERY_OVERRIDE: 252
   timeout: 1800
 case_studies/cme_futures/05_evaluation:
   # No MAX_SYMBOLS. The cross-sectional IC in Section 4 keeps a date only when at least
