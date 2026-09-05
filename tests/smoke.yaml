@@ -1,0 +1,435 @@
+# The smoke configuration for every stage-06-and-later case-study notebook.
+#
+# A smoke run executes the whole notebook on a reduced problem, into a throwaway workspace, and
+# registers real rows. It is what makes "the notebook works" a thing you can see before paying for
+# a run that costs hours. Stefan set the standard on 2026-09-04, after a weekend disappeared into
+# an eight-hour run nobody could tell was progressing.
+#
+# This file is the DECLARATION. The machinery it drives already exists and is not duplicated here:
+#
+#   scripts/nb-run.sh (agents repo)   executes one notebook under the slot semaphore, records its
+#                                     elapsed time and peak memory in notebook-runtimes.tsv, and
+#                                     routes a parameterized run to a scratch copy so the committed
+#                                     notebook is untouched
+#   scripts/nb-queue.sh (agents repo) dispatches a chain of them in stage order
+#   open_study(execution_tier=...)    reads canonical features and labels in place, redirects every
+#                                     write to the workspace
+#
+# `parameters` are passed to papermill exactly as written. Reading them back is what
+# tests/test_smoke_configs.py does, so a value here that no longer reaches its notebook is a test
+# failure rather than a run that quietly does something else.
+#
+# `measured_s` is the elapsed time of a real run, from notebook-runtimes.tsv. It is a record, not a
+# budget: criteria 5 and 6 of the stage-06 spec ask for under five minutes each and a median under
+# two, and a figure here above that is a notebook to reduce further, not a number to edit.
+#
+# `writes` names the registry tables the smoke run must land at least one row in. It deliberately
+# omits `official_populations` and `official_population_members` for every entry: a preview run
+# cannot create an official population, and it is
+# `case_studies/research/population.py::_refuse_preview_activation` that stops it, on the grounds
+# that a population is canonical by definition and a reduced run must not be able to publish one.
+#
+# `exempt` marks a notebook that cannot be run under the preview tier at all, with the reason. An
+# exemption names the code that refuses, so it can be checked rather than believed.
+
+case_studies/cme_futures/06_linear:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_5d"]
+    # Narrowing to one label makes this less than the declared catalog, and the notebook then
+    # refuses to publish under the canonical population name. Giving the smoke run its own name
+    # is the sanctioned way through; it is not a workaround.
+    POPULATION_NAME: smoke-linear
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 56
+
+case_studies/cme_futures/07_gbm:
+  parameters:
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 153
+
+case_studies/cme_futures/08_tabular_dl:
+  parameters:
+    EXECUTION_TIER: preview
+    # TabM takes n_epochs, not train_sample_frac. Each family declares its own reduction
+    # vocabulary and refuses anything outside it - _TABM_PREVIEW_FIELDS in utils/tabular_dl.py.
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_epochs: 2}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 23
+
+case_studies/cme_futures/09_dl_lstm:
+  parameters:
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, max_train_sequences: 2000}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 52
+
+case_studies/cme_futures/10_latent_factors:
+  # An index notebook: it prints the declared latent-factor request population and launches
+  # neither computation, so there is nothing to reduce and no registry row to check.
+  parameters: {}
+  writes: []
+  measured_s: 14
+  note: >-
+    Running it through nb-run.sh with no parameters executes the COMMITTED notebook in place,
+    because that is nb-run.sh's production path. A smoke run must not modify the repo, so this
+    entry needs EXECUTION_TIER and WORKSPACE declared before it can be queued like the others.
+
+case_studies/cme_futures/10a_pca:
+  parameters:
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_factors: 2}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 12
+
+case_studies/cme_futures/10b_stochastic_discount_factor:
+  parameters:
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS:
+      {folds: [0], max_symbols: 5, n_epochs_cond: 1, n_epochs_moment: 1, n_epochs_unc: 1}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  # At the floor of every reduction the family accepts - five symbols, one epoch per phase - and
+  # still five minutes. SDF's cost is its three-phase structure rather than its panel, which is
+  # the same finding GATES.tsv recorded on 2026-08-23 ("SDF is ~7x cae at equal reduction - phase
+  # structure, not panel"). It cannot be brought under the budget by reducing it further.
+  measured_s: 292
+
+case_studies/cme_futures/11_causal_dml:
+  parameters:
+    EXECUTION_TIER: preview
+    # n_placebo must clear MIN_PLACEBO_DRAWS (10) in utils/causal.py. Below it the permutation
+    # test is not computed at all, refutation_p registers NULL, and the row is then REGISTERED
+    # AND INCOMPLETE - which blocks its own re-run until someone deletes it. The recorded
+    # reduction in work/2026-08-21-stocktake/.../preview-model-analysis.sh asks for 5 and hits
+    # exactly that. All four fields are required: causal.py refuses a partial declaration.
+    PREVIEW_REDUCTIONS: {max_samples: 20000, max_symbols: 12, n_folds: 2, n_placebo: 12}
+  writes: [causal_runs]
+  measured_s: 17
+
+case_studies/cme_futures/12_model_analysis:
+  parameters:
+    EXECUTION_TIER: preview
+  writes: []
+  measured_s: 6
+
+case_studies/cme_futures/13_backtest:
+  parameters:
+    EXECUTION_TIER: preview
+    PREVIEW_LABELS: ["fwd_ret_5d"]
+    PREVIEW_MAX_PREDICTIONS: 3
+  writes: [backtest_runs, backtest_metrics, backtest_fold_metrics]
+  measured_s: 27
+
+case_studies/cme_futures/14_portfolio_management:
+  parameters:
+    EXECUTION_TIER: preview
+    PREVIEW_LABELS: ["fwd_ret_5d"]
+    # One, not six: shortlist_signal_configurations wants exactly this many DISTINCT
+    # (family, config_name) pairs and raises when the pool holds fewer. A smoke chain that
+    # backtests three predictions of one configuration has one. Asking for more here does not
+    # produce more, it fails the run.
+    PREVIEW_MAX_BASELINE_ROWS: 1
+  writes: [backtest_runs, backtest_metrics, candidate_sets, candidate_set_members]
+  measured_s: 28
+
+case_studies/cme_futures/15_risk_management:
+  parameters:
+    EXECUTION_TIER: preview
+    PREVIEW_LABELS: ["fwd_ret_5d"]
+  writes: [backtest_runs, backtest_metrics]
+  measured_s: 58
+
+case_studies/cme_futures/16_costs:
+  parameters:
+    EXECUTION_TIER: preview
+    PREVIEW_LABELS: ["fwd_ret_5d"]
+  writes: [backtest_runs, backtest_metrics]
+  measured_s: 47
+
+case_studies/cme_futures/17_holdout_predictions:
+  exempt: true
+  exempt_reason: >-
+    The holdout stage refits the selected configuration from its immutable canonical training
+    spec, and research/models.py::reconstruct_locked_model_request refuses any spec whose
+    execution_tier is not canonical. That refusal is the point of the stage: a holdout number
+    computed under a reduced configuration would not be the holdout. Reached at cell 9 under
+    EXECUTION_TIER=preview on 2026-09-05, after the earlier cells had been made to work.
+
+case_studies/cme_futures/18_holdout_backtest:
+  exempt: true
+  exempt_reason: >-
+    Reads the holdout prediction set 17_holdout_predictions produces, which for the same reason
+    cannot exist in a preview workspace. Fails at cell 6 with "No holdout prediction set for
+    training <hash>".
+
+case_studies/cme_futures/19_strategy_analysis:
+  parameters:
+    EXECUTION_TIER: preview
+    PREVIEW_LABELS: ["fwd_ret_5d"]
+  writes: []
+  measured_s: 18
+
+# --- crypto_perps_funding -------------------------------------------------------------------
+#
+# The downstream stages here take LABELS rather than PREVIEW_LABELS, and a POPULATION_SUFFIX that
+# keeps the smoke chain's populations from colliding with the canonical names. Its primary label
+# is fwd_ret_8h; the deep-learning stages declare REGRESSION_LABELS, so a single-label reduction
+# has to name one they accept.
+
+case_studies/crypto_perps_funding/06_linear:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_8h"]
+    POPULATION_NAME: smoke-linear
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 25
+
+
+case_studies/crypto_perps_funding/08_tabular_dl:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_8h"]
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_epochs: 2}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 12
+
+case_studies/crypto_perps_funding/09_dl_lstm:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_8h"]
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, max_train_sequences: 2000}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 34
+
+case_studies/crypto_perps_funding/10_dl_tcn:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_8h"]
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, max_train_sequences: 2000}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 24
+
+case_studies/crypto_perps_funding/11_causal_dml:
+  parameters:
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS: {max_samples: 20000, max_symbols: 12, n_folds: 2, n_placebo: 12}
+  writes: [causal_runs]
+  measured_s: 10
+
+case_studies/crypto_perps_funding/12_model_analysis:
+  parameters:
+    EXECUTION_TIER: preview
+  writes: []
+  measured_s: 8
+
+
+
+
+
+case_studies/crypto_perps_funding/17_holdout_predictions:
+  exempt: true
+  exempt_reason: >-
+    The holdout stage refits from an immutable canonical training spec, and
+    research/models.py::reconstruct_locked_model_request refuses a spec whose execution_tier is
+    not canonical. Structural, and shared by every case study's holdout pair.
+
+case_studies/crypto_perps_funding/18_holdout_backtest:
+  exempt: true
+  exempt_reason: >-
+    Reads the holdout prediction set 17_holdout_predictions produces, which cannot exist in a
+    preview workspace for the reason recorded on that entry.
+
+
+# --- crypto_perps_funding and etfs: what is not declared yet, and why -------------------------
+#
+# crypto's 07_gbm reads its label through study.labels.get(), which resolves the artifact against
+# the ACTIVE OUTPUT ROOT rather than the study root - so a preview looks for
+# <workspace>/crypto_perps_funding/labels/fwd_ret_8h.parquet and finds nothing, while the label
+# sits behind the worktree's symlink where open_study says inputs are read in place. Seven
+# notebooks call that accessor. cme's 07_gbm passes, so the two case studies reach it differently
+# and the difference has to be understood before the resolver is touched.
+#
+# crypto's 13_backtest refuses the reduced panel on a real invariant: at eight symbols and one
+# fold the decisions advance 1 or 22 settlements against the 1 its 8H horizon declares, from
+# calendar gaps of 8h and 7d8h. That is the reduction being wrong for an intraday cadence, not
+# the check being wrong. 14, 15 and 16 then correctly refuse for want of a signal backtest in the
+# workspace, and 19 needs a SUPERSEDES for its candidate set.
+
+# --- etfs -----------------------------------------------------------------------------------
+#
+# Primary label fwd_ret_21d. The downstream stages take LABEL singular and reduce with
+# MAX_SYMBOLS and a TOP_N_* cap rather than a PREVIEW_* pair, and 12_causal_dml spells its
+# reduction as four separate parameters instead of a dict - the placebo floor is the same either
+# way. 11_latent_factors is an index over the five 11x notebooks, like cme's 10_latent_factors.
+
+case_studies/etfs/06_linear:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_21d"]
+    POPULATION_NAME: smoke-linear
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+
+case_studies/etfs/07_gbm:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_21d"]
+    POPULATION_NAME: smoke-gbm
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+
+case_studies/etfs/08_tabular_dl:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_21d"]
+    POPULATION_NAME: smoke-tabm
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_epochs: 2}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+
+case_studies/etfs/09_dl_lstm:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_21d"]
+    POPULATION_NAME: smoke-lstm
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, max_train_sequences: 2000}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+
+case_studies/etfs/10_dl_tsmixer:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_21d"]
+    POPULATION_NAME: smoke-tsmixer
+    # max_symbols is 8 rather than 5 deliberately. Darts TSMixer diverged at a per-fold
+    # dispersion ratio of 286 when it fitted five symbols against a temporal artifact covering
+    # twenty-four, and the registration guard refused it; the cause was a stale reduction, not
+    # the model. Keeping this above the temporal-coverage floor is what stops that recurring.
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, max_train_sequences: 2000}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+
+case_studies/etfs/10a_dl_nlinear:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_21d"]
+    POPULATION_NAME: smoke-nlinear
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, max_train_sequences: 2000}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+
+case_studies/etfs/11_latent_factors:
+  parameters:
+    EXECUTION_TIER: preview
+  writes: []
+
+case_studies/etfs/11a_pca:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_21d"]
+    POPULATION_NAME: smoke-pca
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_factors: 2}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+
+case_studies/etfs/11b_ipca:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_21d"]
+    POPULATION_NAME: smoke-ipca
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_factors: 2, max_iter: 200}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+
+case_studies/etfs/11c_conditional_autoencoder:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_21d"]
+    POPULATION_NAME: smoke-cae
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_factors: 2, n_epochs: 2}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+
+case_studies/etfs/11d_stochastic_discount_factor:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_21d"]
+    POPULATION_NAME: smoke-sdf
+    PREVIEW_REDUCTIONS:
+      {folds: [0], max_symbols: 5, n_epochs_cond: 1, n_epochs_moment: 1, n_epochs_unc: 1}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+
+case_studies/etfs/11e_supervised_autoencoder:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_21d"]
+    POPULATION_NAME: smoke-sae
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_epochs: 2}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+
+case_studies/etfs/12_causal_dml:
+  parameters:
+    EXECUTION_TIER: preview
+    LABEL: fwd_ret_21d
+    MAX_SYMBOLS: 12
+    CV_FOLDS: 2
+    MAX_SAMPLES: 20000
+    N_PLACEBO: 12
+  writes: [causal_runs]
+
+case_studies/etfs/13_model_analysis:
+  parameters:
+    EXECUTION_TIER: preview
+  writes: []
+
+case_studies/etfs/14_backtest:
+  parameters:
+    EXECUTION_TIER: preview
+    LABEL: fwd_ret_21d
+    MAX_SYMBOLS: 8
+    TOP_N_PREDICTIONS: 3
+  writes: [backtest_runs, backtest_metrics, backtest_fold_metrics]
+
+case_studies/etfs/15_portfolio_management:
+  parameters:
+    EXECUTION_TIER: preview
+    LABEL: fwd_ret_21d
+    MAX_SYMBOLS: 8
+    TOP_N_PREDICTIONS: 3
+  writes: [backtest_runs, backtest_metrics, candidate_sets, candidate_set_members]
+
+case_studies/etfs/16_risk_management:
+  parameters:
+    EXECUTION_TIER: preview
+    LABEL: fwd_ret_21d
+    MAX_SYMBOLS: 8
+    MAX_RISK_VARIANTS: 2
+    TOP_N_COMBOS: 3
+  writes: [backtest_runs, backtest_metrics]
+
+case_studies/etfs/17_costs:
+  parameters:
+    EXECUTION_TIER: preview
+    LABEL: fwd_ret_21d
+    MAX_SYMBOLS: 8
+    TOP_N_COMBOS: 3
+  writes: [backtest_runs, backtest_metrics]
+
+case_studies/etfs/18_holdout_predictions:
+  exempt: true
+  exempt_reason: >-
+    The holdout stage refits from an immutable canonical training spec, and
+    research/models.py::reconstruct_locked_model_request refuses a spec whose execution_tier is
+    not canonical. Structural, and shared by every case study's holdout pair.
+
+case_studies/etfs/19_holdout_backtest:
+  exempt: true
+  exempt_reason: >-
+    Reads the holdout prediction set 18_holdout_predictions produces, which cannot exist in a
+    preview workspace for the reason recorded on that entry.
+
+case_studies/etfs/20_strategy_analysis:
+  parameters:
+    EXECUTION_TIER: preview
+  # MAX_SYMBOLS is declared in this notebook's parameters cell and nothing below it reads the
+  # value, so passing one would be a reduction that does not reduce. Declaring it here would
+  # make the smoke run report a cap it never applied. The dead parameter is the notebook's to
+  # fix; the smoke configuration is not the place to paper over it.
+  writes: []
