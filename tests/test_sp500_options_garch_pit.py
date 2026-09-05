@@ -909,9 +909,16 @@ def test_the_filter_is_prefix_stable_where_handing_the_fit_back_to_arch_is_not()
     # check ends up decorative.
     arch_short, arch_full = through_arch(short), through_arch(full)
     arch_drift = np.abs(arch_short - arch_full[:short]) / np.abs(arch_short)
+    # 1e-5 is a floor on the evidence, not a fit to the measurement: the separation here is
+    # 9.0e-04, about ninety times it. Two readings if this fires, and a reader should not
+    # assume the first - either `arch` has become prefix-stable and this control is obsolete,
+    # or this series and extension are a stretch where its prefix dependence does not bite,
+    # in which case the number to report is the separation below and not the row count.
     assert arch_drift.max() > 1e-5, (
-        "handing the fit back to arch produced a prefix-stable series, so this series and "
-        "this extension cannot demonstrate the defect and the assertion below proves nothing"
+        f"the prefix-dependent emission separated the two prefixes by only "
+        f"{arch_drift.max():.2e}, under the 1e-5 floor. Either arch no longer re-derives its "
+        "initialization from the sample it is handed, or this series stopped separating the "
+        "two answers - the assertion below proves nothing until that is settled"
     )
 
     namespace = _load_garch_walk({"arch_model": arch_model})
