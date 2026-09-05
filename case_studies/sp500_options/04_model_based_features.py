@@ -353,6 +353,11 @@ FREEZE_AFTER = next(
 
 _blocks = refit_boundaries(len(_calendar), GARCH_BURNIN, GARCH_REFIT_EVERY)
 _steps = []
+# The first session of each block that carries NEW parameters. Not every emitted session,
+# and not the first session of a frozen block either: a frozen block re-applies the estimate
+# the block before it used, so nothing changes at its boundary and counting it as a refit
+# would dilute the measurement in section D with sessions where no parameter moved.
+_refit_sessions: list = []
 _frozen_fit_end = None
 for _fit_end, _emit_end in _blocks:
     if _fit_end > FREEZE_AFTER:
@@ -362,6 +367,7 @@ for _fit_end, _emit_end in _blocks:
     else:
         _effective = _fit_end
         _frozen_fit_end = _fit_end
+        _refit_sessions.append(_calendar[_fit_end])
     for _i in range(_fit_end, _emit_end):
         _steps.append((_calendar[_i], _calendar[_effective - 1]))
 
@@ -376,6 +382,7 @@ print(f"  Burn-in, no value on any segment: {GARCH_BURNIN}")
 print(f"  Last session any parameter is fitted on: {_calendar[FREEZE_AFTER - 1]}")
 print(f"  Refits before the holdout: {sum(1 for f, _ in _blocks if f <= (FREEZE_AFTER or 0))}")
 print(f"  Sessions emitted: {len(_steps):,}")
+print(f"  Sessions on which the parameters change: {len(_refit_sessions):,}")
 
 # %%
 fig, ax = plt.subplots(figsize=(11, 3.6))
@@ -1571,12 +1578,17 @@ show_with_alt(
 # contains: a reader of this column sees exactly this jump, on this session.
 
 # %%
-_boundary_sessions = {session for session, _ in _steps}
 _ordered = before_holdout(garch_df).sort(["symbol", "sec_id", "timestamp"])
 _moves = _ordered.with_columns(
     pl.col("garch_cond_vol").diff().abs().over(["symbol", "sec_id"]).alias("move"),
-    pl.col("timestamp").is_in(sorted({s for s in _boundary_sessions})).alias("is_refit_session"),
+    pl.col("timestamp").is_in(_refit_sessions).alias("is_refit_session"),
 ).drop_nulls("move")
+# One refit session in twenty-one, so a ratio computed over a set that had swallowed the
+# other twenty would compare a population against itself and report about 1.0 whatever the
+# refits did. Assert the split rather than trusting the construction above.
+assert 0 < _moves["is_refit_session"].sum() < _moves.height, (
+    "the refit sessions are not a proper subset of the sessions carrying a value"
+)
 _at_refit = _moves.filter(pl.col("is_refit_session"))["move"]
 _within = _moves.filter(~pl.col("is_refit_session"))["move"]
 refit_jump = float(_at_refit.median())
