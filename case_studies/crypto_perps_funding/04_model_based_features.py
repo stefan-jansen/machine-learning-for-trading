@@ -95,6 +95,7 @@ from case_studies.research.holdout import build_holdout_cv
 from case_studies.utils.artifact_digest import value_digest, write_artifact
 from case_studies.utils.temporal import (
     filtered_state_probs,
+    garch11_conditional_volatility,
     refit_boundaries,
     sort_states_by_variance,
     walk_forward_feature,
@@ -649,9 +650,19 @@ def fit_gjr_garch(returns: pd.Series) -> dict | None:
         result = model.fit(disp="off", show_warning=False)
     except Exception:
         return None
+    # The seed and the clipping bounds are taken HERE, from the training residuals, and
+    # travel with the coefficients. `arch` derives both from whatever sample it is handed,
+    # and the sample the filter below is handed reaches the end of the block being emitted,
+    # so deriving them there would read the block's own settlements. `variance_bounds` is
+    # one pair per observation; the training window's widest pair is the fixed pair that
+    # holds for the whole walk.
+    residuals = np.asarray(result.resid, dtype=float)
+    bounds = result.model.volatility.variance_bounds(residuals)
     return {
         "params": result.params,
         "gamma": result.params.get("gamma[1]", 0),
+        "backcast": float(result.model.volatility.backcast(residuals)),
+        "bounds": (float(np.min(bounds[:, 0])), float(np.max(bounds[:, 1]))),
         "coefficients": {
             name: float(result.params.get(f"{name}[1]", float("nan")))
             for name in ("alpha", "gamma", "beta")
@@ -688,16 +699,31 @@ def frozen_garch_path(fitted: dict, returns_prefix: np.ndarray) -> np.ndarray:
     flowing through them change.
     """
     params = fitted["params"]
-    fixed = arch_model(
-        returns_prefix * 100, mean="Zero", vol="GARCH", p=1, o=1, q=1, dist="StudentsT"
-    ).fix(params)
     omega, alpha, gamma, beta = (
         float(params[name]) for name in ("omega", "alpha[1]", "gamma[1]", "beta[1]")
     )
-    shock = returns_prefix * 100
-    # `arch` returns whatever container it was handed, so this is an ndarray here and was a
-    # Series when the caller passed one. `np.asarray` covers both.
-    variance = np.asarray(fixed.conditional_volatility) ** 2
+    shock = np.asarray(returns_prefix, dtype=float) * 100
+    # `garch11_conditional_volatility` rather than `arch_model(...).fix(params)`. The two
+    # run the same recursion, but `arch` re-derives the residuals, the backcast that seeds
+    # h_0 and the variance bounds from the array it is given - and the array here reaches
+    # the end of the block being emitted, so every one of those three reads settlements
+    # after the value they shape. Measured on arch==8.0.0: extending the sample from 1,500
+    # observations to 2,000 moves the 1,500 they share by up to 0.19%. Small, and a
+    # dependence on the future in exactly the channel this walk exists to close. The seed
+    # and the bounds come from `fit`, computed on training settlements alone.
+    variance = (
+        garch11_conditional_volatility(
+            shock,
+            mu=0.0,
+            omega=omega,
+            alpha=alpha,
+            beta=beta,
+            gamma=gamma,
+            backcast=fitted["backcast"],
+            bounds=fitted["bounds"],
+        )
+        ** 2
+    )
     forecast = omega + (alpha + gamma * (shock < 0)) * shock**2 + beta * variance
     return np.column_stack(
         [np.sqrt(forecast) / 100, np.full(len(returns_prefix), float(fitted["gamma"]))]
