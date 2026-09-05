@@ -15,7 +15,10 @@ from case_studies.utils.latent_factors import adapter as latent_adapter
 from case_studies.utils.registry import training_hash_from_spec
 
 PINNED_SEQUENCE_RUNNER = 1
-PINNED_SEQUENCE_PREPARATION = 1
+# 2 since #767 (174154ad) corrected where the sequence path fills a missing feature. The pin
+# moves with the version deliberately: it exists to make a bump a decision someone writes down,
+# not to prevent one.
+PINNED_SEQUENCE_PREPARATION = 2
 PINNED_SEQUENCE_STATE = 1
 PINNED_TABM_RUNNER = 1
 PINNED_TABM_STATE = 1
@@ -53,7 +56,7 @@ def test_sequence_identity_is_declared_and_architecture_scoped() -> None:
 
     assert nlinear == {
         "sequence_runner": 1,
-        "sequence_preparation": 1,
+        "sequence_preparation": 2,
         "sequence_state": 1,
         "backend": "pytorch/v1",
         "architecture": "nlinear/v1",
