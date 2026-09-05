@@ -164,16 +164,24 @@ print(f"Checkpoint: {CHECKPOINT_KIND}={CHECKPOINT_VALUE}")
 # cannot disagree.
 #
 # The training interval is everything available before that window, bounded above by a label
-# buffer. **The buffer is small in wall-clock terms here and doing exactly as much work as a
-# long one.** The primary label is a fifteen-minute forward return, so a row stamped `t` records
-# an outcome not known until `t + 15min`, and `labels.buffer` is declared as `16min` - the
-# horizon plus one bar, because the horizon alone does not describe the width of the window the
-# outcome resolves over. Sixteen minutes against a window opening on 2021-07-01 looks like
-# nothing beside the ETF study's twenty-one sessions, and it is the same leak if it is dropped:
-# a training set running to the first bar of the window would be fitted on labels that resolve
-# inside it. The derivation refuses to default it, and each variant declares its own -
-# `fwd_ret_5m: 6min`, `fwd_ret_60m: 61min`, `fwd_dir_15m: 16min` - rather than inheriting the
-# primary's.
+# buffer - and **the buffer is not the selected label's.** `build_holdout_cv` takes the widest
+# buffer any of this case study's labels declares, which here is `61min` from `fwd_ret_60m`, not
+# the primary `fwd_ret_15m`'s `16min`. The reason is that the holdout fold is one fold: a
+# fold-scoped temporal artifact carries a single set of boundaries, every label's holdout model
+# is fitted on features carrying them, so the geometry has to be label-independent and the
+# widest is the only choice that leaks for no label. A fold built on the sixteen-minute buffer
+# and handed to the sixty-minute model would give it training rows whose features saw
+# forty-five minutes past its own `train_end` - the leak the buffer exists to prevent, arriving
+# through the feature rather than the label.
+#
+# **The width is minutes and it is doing the same work a long one does.** Sixty-one minutes
+# against a window opening on 2021-07-01 looks like nothing beside the ETF study's twenty-one
+# sessions, and it is the same leak if dropped: a training set running to the first bar of the
+# window would be fitted on labels that resolve inside it. Each label declares its own
+# (`fwd_ret_5m: 6min`, `fwd_ret_15m` and `fwd_dir_15m: 16min`, `fwd_ret_60m: 61min`) rather than
+# inheriting the primary's, and each is a horizon plus one bar because the horizon alone does
+# not describe the width of the window the outcome resolves over. The derivation refuses to
+# default any of them.
 #
 # Everything else about the configuration is carried across unchanged, and the fields that
 # cannot be - the eligibility manifest, and any parameter this family resolves from a fold's

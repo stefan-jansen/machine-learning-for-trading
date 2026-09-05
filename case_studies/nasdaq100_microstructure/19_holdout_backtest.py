@@ -158,12 +158,14 @@ print(f"Holdout prediction: {HOLDOUT_PREDICTION_HASH}")
 # window.
 #
 # The embargo matters for this case study's label and would not for every one. A residual
-# observed at `t` measures a return realising over `(t, t+15min]`, so the last residuals of the
+# observed at `t` measures a return realising over `(t, t + h]` where `h` is the horizon of
+# whichever label the carrier fits - 5, 15 or 60 minutes here - so the last residuals of the
 # validation span reach into the holdout window, and calibrating on them would size holdout
-# positions with holdout price information. The reach is minutes rather than the ETF study's
-# three weeks, and it is the same defect at any width: the residuals that cross the boundary are
-# the ones nearest it, which are also the ones a calibration weights most. The step count comes
-# from the reviewed table in `conformal.py`, which records the label horizon.
+# positions with holdout price information. The horizon is read from the reviewed table in
+# `conformal.py` rather than assumed from the primary label, because the carrier is resolved
+# across every declared label and is not always the primary's. The reach is minutes rather than
+# the ETF study's three weeks, and it is the same defect at any width: the residuals that cross
+# the boundary are the ones nearest it, which are the ones a calibration weights most.
 #
 # The branch is here rather than assumed away because the carrier can change. It does not fire
 # for the one this case study currently reports, which sizes by inverse volatility over a
