@@ -132,7 +132,12 @@ def _format_dsr_result(
     return {
         "dsr": probability,
         "z_score": z_score,
-        "p_value": 1.0 - probability,
+        # `sf` rather than `1 - cdf`: the DSR is the cdf and is wanted as such, but the
+        # p-value is its tail, and subtracting a probability near one from one keeps only the
+        # digits that survive the cancellation. Measured: at z = 8 the subtraction gives
+        # 6.66e-16 against a true 6.22e-16, and from z = 9 it returns exactly 0 where the
+        # tail is 1.13e-19. A p-value of 0 is the one value a reader cannot interpret.
+        "p_value": float(stats.norm.sf(z_score)),
         "expected_max_sharpe": expected_max_annual,
         "adjusted_sharpe": observed_sharpe - expected_max_annual,
         "is_significant": probability >= confidence_level,
