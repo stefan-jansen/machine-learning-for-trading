@@ -451,7 +451,9 @@ folds.append(
     {
         "fold": n_cv_folds,
         "is_holdout": True,
-        "train_start": folds[-1]["train_start"],
+        # Everything available before the holdout, which is the minimum training
+        # start across the CV folds and never one fold's own start.
+        "train_start": min(f["train_start"] for f in folds),
         "train_end": max(d for d in SESSIONS if d < holdout_start),
         "test_start": holdout_start,
         "test_end": holdout_end,
