@@ -81,9 +81,9 @@ from scipy.cluster import hierarchy
 from scipy.spatial.distance import squareform
 from scipy.stats import spearmanr
 
+from case_studies.utils.cv_window import modeling_fold_boundaries
 from case_studies.utils.feature_engineering import quantile_profile
 from utils.artifact_specs import load_setup_config, resolve_label_buffer, resolve_label_horizon
-from utils.cv_splits import generate_cv_splits
 from utils.data_quality import validate_modeling_inputs
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
@@ -116,8 +116,10 @@ SEED = 42
 # sessions overlaps the next one and makes consecutive daily correlations dependent.
 #
 # The **walk-forward design** - how many folds, how long each trains for, how long each is
-# then scored over - is the same one `04_model_based_features` fitted its features against,
-# and Section A checks that the two agree rather than assuming it.
+# then scored over - decides which sessions a feature is scored over here and which sessions
+# a model is validated on later. Section A resolves it from the label file, which is where
+# [`04_model_based_features`](04_model_based_features.ipynb) and the model stages resolve it
+# from, so all of them mean the same window by fold *k*.
 #
 # The **smallest cross-section** worth correlating is derived from what the strategy this
 # case study builds would have to fill. `setup.yaml` sweeps a long-short book of up to
@@ -159,90 +161,53 @@ print(f"                 book holding {TOP_K_PER_SIDE} long and {TOP_K_PER_SIDE}
 # ### The sessions the folds are cut from
 #
 # A walk-forward fold is a training window followed by a later window the trained thing is
-# scored over, and the folds step backwards from the holdout so that the most recent one
-# ends as close to it as the label allows. `generate_cv_splits` cuts them by position on a
-# list of trading sessions, so which list it is given decides where every boundary falls.
+# scored over, and the folds step through the sample so that the last one ends as close to
+# the holdout as the label allows. The boundaries are cut by position on a list of trading
+# sessions, so which list they are cut on decides where every boundary falls.
 #
-# `04_model_based_features` gave it the sessions of the eligible price panel, and its
-# output carries one row per session, symbol and fold. Reading the session list back off
-# that file is what makes fold 3 here the same window as fold 3 there.
+# They are taken from the label file, through `modeling_fold_boundaries`, which is the call
+# [`04_model_based_features`](04_model_based_features.ipynb) resolves its folds with and the
+# call `load_modeling_dataset` resolves them with on the other side of the join. All three
+# therefore mean the same window by fold *k* by construction rather than by agreement.
 
 # %%
 temporal_scan = pl.scan_parquet(CASE_DIR / "features" / "model_based.parquet")
-temporal_cols = [c for c in temporal_scan.collect_schema().names() if c not in (*JOIN_COLS, "fold")]
+temporal_names = temporal_scan.collect_schema().names()
+temporal_cols = [c for c in temporal_names if c not in JOIN_COLS]
+assert "fold" not in temporal_names, (
+    "model_based.parquet carries a fold column, so it was written by a stage 04 that fitted "
+    "per fold rather than on a refit schedule"
+)
 sessions = temporal_scan.select(DATE_COL).unique().sort(DATE_COL).collect()[DATE_COL].to_list()
 print(f"{len(sessions):,} trading sessions, {sessions[0]} to {sessions[-1]}")
 
-splits = [
-    {k: (v.date() if hasattr(v, "date") else v) for k, v in split.items()}
-    for split in generate_cv_splits(
-        pl.DataFrame({DATE_COL: sessions}),
-        case_study_id=CASE_STUDY_ID,
-        label_buffer=LABEL_BUFFER,
-        outcome_horizon=f"{LABEL_HORIZON}D",
-    )
-]
+splits = modeling_fold_boundaries(CASE_STUDY_ID, PRIMARY_LABEL)
 for split in splits:
     print(f"  Fold {split['fold']:>2}: scored over {split['val_start']} to {split['val_end']}")
 
 # %% [markdown]
-# ### Checking that these are the folds the features were fitted on
-#
-# The claim above is that fold *k* means the same window in both notebooks, and it is worth
-# checking rather than stating. `04_model_based_features` writes every row it fitted or
-# emitted for a fold, so the earliest session carrying fold *k* in the file is that fold's
-# training start, and the latest is the last session it was scored over. The training start
-# is asserted: if fold *k* began somewhere else there, the join below would attach a value
-# fitted for one window to dates in another.
-#
-# The scoring end is taken from the file rather than asserted against it, because these are
-# the values being read: a fold is scored over the sessions it actually emitted, and never
-# past the boundary the split derived here allows.
-
-# %%
-fold_span = (
-    temporal_scan.group_by("fold")
-    .agg(pl.col(DATE_COL).min().alias("first"), pl.col(DATE_COL).max().alias("last"))
-    .collect()
-)
-spans = {int(r["fold"]): (r["first"], r["last"]) for r in fold_span.iter_rows(named=True)}
-for split in splits:
-    first, _ = spans[int(split["fold"])]
-    assert first == split["train_start"], (
-        f"fold {split['fold']} begins {first} in model_based.parquet but "
-        f"{split['train_start']} here"
-    )
-val_windows = {
-    int(s["fold"]): (s["val_start"], min(s["val_end"], spans[int(s["fold"])][1])) for s in splits
-}
-print(f"all {len(splits)} folds begin on the same session in both notebooks")
-
-# %% [markdown]
 # ### One value per session and symbol
 #
-# A model-based feature has a different value for each fold, because each fold refitted it
-# on its own training window. A feature is out of sample only over the window its own fold
-# was scored on, so keeping each fold's rows inside that window - and dropping the extra
-# fold that exists only to produce features for the holdout - leaves exactly one value per
-# session and symbol. That is asserted, because a session falling inside two scoring windows
-# would take two values and quietly double the rows underneath every statistic below.
+# A model-based feature has one value per session and symbol, because what bounds every
+# estimate behind it is a refit schedule rather than a fold: the parameters that produced a
+# value were fitted on sessions strictly earlier than it, whichever fold later selects the
+# row. So there is no fold to filter on and no substitution to make - the file is read as it
+# stands and the uniqueness of the two-column key is asserted, because a repeat would
+# quietly double the rows underneath every statistic below.
 #
-# The step also fixes the span of everything that follows. The Chapter 8 features exist on
-# every session, but restricting them to the same union of scoring windows puts both sets of
-# features on the same dates, which is what makes their correlations comparable. A session
-# no fold was scored over carries no model-based value and drops out here; the count is
-# printed rather than left to the join.
+# What restricting to the union of the scoring windows still does is fix the span of
+# everything that follows. The Chapter 8 features exist on every session, and putting both
+# sets on the same dates is what makes their correlations comparable. A session no fold is
+# scored over drops out here; the count is printed rather than left to the join.
 
 # %%
-in_own_window = pl.any_horizontal(
-    [
-        (pl.col("fold") == fold) & pl.col(DATE_COL).is_between(start, end)
-        for fold, (start, end) in val_windows.items()
-    ]
+val_windows = {int(s["fold"]): (s["val_start"], s["val_end"]) for s in splits}
+in_a_scoring_window = pl.any_horizontal(
+    [pl.col(DATE_COL).is_between(start, end) for start, end in val_windows.values()]
 )
-temporal = temporal_scan.filter(in_own_window).drop("fold").collect()
+temporal = temporal_scan.filter(in_a_scoring_window).collect()
 assert temporal.select(JOIN_COLS).is_duplicated().sum() == 0, (
-    "scoring windows overlap; a fitted feature would take two values on one session"
+    "the model-based artifact repeats a session and symbol; a downstream join would multiply rows"
 )
 
 covered = temporal[DATE_COL].unique().sort().to_list()
@@ -250,6 +215,29 @@ EVAL_START, EVAL_END = covered[0], covered[-1]
 uncovered = sum(1 for d in sessions if EVAL_START <= d <= EVAL_END and d not in set(covered))
 print(f"Evaluation window {EVAL_START} to {EVAL_END}, {len(temporal):,} rows")
 print(f"{len(covered):,} sessions scored, {uncovered} inside the window scored by no fold")
+
+# %% [markdown]
+# ### Where each model-based column starts
+#
+# A fitted column starts after the estimation window that produced it, so it is normal for
+# one to carry no value over the first years of the panel and a defect for it to carry none
+# over the window being scored. The two are indistinguishable downstream - the sequence
+# loaders turn a null feature into zero, which after normalization is the feature's mean -
+# so the coverage over the scored window is printed here rather than discovered later.
+
+# %%
+display(
+    pl.DataFrame(
+        [
+            {
+                "feature": c,
+                "first value": temporal.filter(pl.col(c).is_not_null())[DATE_COL].min(),
+                "coverage over the scored window": temporal[c].drop_nulls().len() / temporal.height,
+            }
+            for c in temporal_cols
+        ]
+    )
+)
 
 # %% [markdown]
 # ### The panel

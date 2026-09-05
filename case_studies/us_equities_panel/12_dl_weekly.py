@@ -108,32 +108,35 @@ mb = (
 )
 print(f"  Weekly model-based features: {mb.shape[0]:,} rows, {mb.shape[1]} cols")
 
-# model_based.parquet is keyed on (symbol, timestamp, fold), not (symbol, timestamp): its three
-# columns are refitted inside each of the seventeen folds so that a fold sees only its own
-# training window. Joining it on (symbol, timestamp) alone did three things at once. It fanned
-# every weekly observation out to one row per fold, which left duplicate timestamps per symbol and
-# produced zero usable sequences - the "No valid folds created" this notebook died on. It put
-# every other fold's fitted values onto each row, so a fold's inputs carried a garch conditional
-# volatility estimated on windows that fold is not allowed to see. And because `fold` itself was
-# not excluded, the fold index went into the model as a feature.
+# model_based.parquet is keyed on (symbol, timestamp): every estimate behind it is bounded by a
+# refit schedule rather than by a fold, so a symbol-session carries one value whichever fold reads
+# it and the join is a plain left join that multiplies nothing. `temporal_by_fold` is therefore
+# None, which is what `load_modeling_dataset` passes on this shape too.
 #
-# The runner already takes this artifact per fold: `temporal_by_fold` is selected one fold at a
-# time by `fold_temporal_frame` (utils/modeling.py:1454), which filters on `fold`, drops it, and
-# deduplicates on the join keys. Pass it there instead of pre-joining it here.
+# The key's uniqueness is asserted rather than assumed. A repeat would fan every weekly
+# observation out to one row per duplicate, leave duplicate timestamps per symbol, and produce
+# zero usable sequences - which is the "No valid folds created" this notebook used to die on.
+assert mb.select("symbol", "timestamp").is_duplicated().sum() == 0, (
+    "model_based.parquet repeats a symbol and timestamp; the sequence builder would see "
+    "duplicate dates per symbol and create no folds"
+)
+assert "fold" not in mb.columns, (
+    "model_based.parquet carries a fold column, so it was written by a stage 04 that fitted "
+    "per fold rather than on a refit schedule"
+)
+
 feat_cols = [c for c in feat.columns if c not in ("symbol", "timestamp")]
-temporal_feature_names = [c for c in mb.columns if c not in ("symbol", "timestamp", "fold")]
-temporal_by_fold = mb
-features = feat
-# The temporal names belong in feature_names even though their values arrive per fold rather than
-# in `dataset`. prepare_fold_sequence_stores builds `use_cols` from feature_names and applies it
-# AFTER replace_temporal_columns has merged the fold's rows in (sequence_dataset.py:546,568), so a
-# temporal column absent from this list is merged and then immediately dropped - the model would
-# train on the financial features alone and report nothing about it. load_modeling_dataset carries
-# its temporal names in feature_names for the same reason.
+temporal_feature_names = [c for c in mb.columns if c not in ("symbol", "timestamp")]
+temporal_by_fold = None
+features = feat.join(mb, on=["symbol", "timestamp"], how="left")
+# prepare_fold_sequence_stores builds `use_cols` from feature_names, so a temporal column absent
+# from this list is joined and then immediately dropped - the model would train on the financial
+# features alone and report nothing about it. load_modeling_dataset carries its temporal names in
+# feature_names for the same reason.
 feature_names = feat_cols + temporal_feature_names
 print(
     f"  Base features: {features.shape[0]:,} rows, {len(feat_cols)} financial "
-    f"+ {len(temporal_feature_names)} temporal joined per fold = {len(feature_names)} features"
+    f"+ {len(temporal_feature_names)} temporal = {len(feature_names)} features"
 )
 
 labels = (
@@ -144,7 +147,7 @@ labels = (
 print(f"  Weekly labels: {labels.shape[0]:,} rows")
 
 dataset = features.join(labels, on=["symbol", "timestamp"], how="inner")
-del feat, features, labels
+del feat, mb, features, labels
 collect()
 
 # Subsample to symbol filter if needed. Selecting by name takes whichever symbols sort first,

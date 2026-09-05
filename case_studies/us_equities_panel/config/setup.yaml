@@ -167,6 +167,40 @@ labels:
     fwd_ret_5d: 5
     fwd_ret_21d: 21
 
+model_based:
+  regime:
+    # Calm months and falling ones. Two states is the coarsest split that separates the
+    # calm, mildly positive months from the falling, turbulent ones, which is the
+    # distinction the momentum-crash literature works in.
+    n_clusters: 2
+    # Sessions per clustered window, and how many sessions two consecutive windows share.
+    # A month of sessions per window, overlapping by a week, so a shift in the return
+    # distribution is seen by more than one window before it is clustered.
+    window: 21
+    overlap: 5
+    # Sessions of market history spent before the first clustering is fitted. Three years.
+    # At the 16-session step the window and overlap imply, that is 46 windows to cluster,
+    # which is the fewest that separates two centroids from the noise in a single window.
+    # The clustered series is one market-level series rather than a panel, so this is paid
+    # once for the whole notebook. It matches etfs, whose regime model reads a daily
+    # market-level series of the same shape.
+    burnin: 756
+    # How often the centroids are re-estimated. A quarter. Regime parameters are the
+    # slowest-moving thing this notebook fits and each estimate is n_init k-means searches
+    # over the whole history so far.
+    refit_every: 63
+  garch:
+    # Sessions of a stock's own returns before its variance model is fitted. Two years.
+    # Below that a maximum-likelihood fit of three parameters returns estimates whose
+    # standard errors swamp them, and the persistence term - the one the feature is most
+    # sensitive to - is estimated from too few volatility cycles.
+    burnin: 504
+    # How often the variance model is re-estimated. A quarter, which on this panel is
+    # 3,178 series re-estimated about 110 times each. Section 4b measures what the cadence
+    # buys: the fitted persistence of a US equity moves slowly, so a faster cadence would
+    # multiply the fits without moving the emitted volatility.
+    refit_every: 63
+
 modeling:
   gbm:
     libraries: [lightgbm]
