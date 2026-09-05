@@ -92,9 +92,25 @@ HOLDOUT_CONFORMAL_EMBARGO_STEPS: dict[str, int] = {
     "crypto_perps_funding/fwd_ret_8h": 1,
     "crypto_perps_funding/fwd_dir_8h": 1,
     "crypto_perps_funding/fwd_dir_8h_3c": 1,
-    "nasdaq100_microstructure/fwd_ret_15m": 1,
-    "nasdaq100_microstructure/fwd_ret_60m": 4,
-    "nasdaq100_microstructure/fwd_ret_5m": 1,
+    # Counted in minutes, because that is this panel's step. The three entries used to be
+    # the label horizon divided by a 15-minute decision cadence (1, 4, 1). The prediction
+    # panel does not sit on that cadence: measured over the registered prediction sets,
+    # the modal gap between adjacent prediction timestamps is 0:01:00 for all four labels
+    # (fwd_ret_15m 78,829 of 79,082 gaps; fwd_ret_5m 81,359 of 81,612; fwd_ret_60m 67,444
+    # of 67,697; the remainder are overnight and weekend). `compute_conformal_widths`
+    # documents `h` as a lag "in prediction data steps" and builds its index from that
+    # artifact, so a value of 1 embargoed one MINUTE where the label reaches 16.
+    #
+    # Each value is `labels.buffer` for the label, which this case study sets to the
+    # horizon PLUS ONE BAR: the entry leg is the VWAP of the bar after the decision, so a
+    # label at t consumes a quote at t+H+1. Taking the horizon alone would leave the last
+    # bar of every calibration residual unresolved at the moment the width is used.
+    "nasdaq100_microstructure/fwd_ret_15m": 16,
+    "nasdaq100_microstructure/fwd_ret_60m": 61,
+    "nasdaq100_microstructure/fwd_ret_5m": 6,
+    # Declared in labels.variants with variant_buffers.fwd_dir_15m = 16min, and carried
+    # 18 registered training runs while absent from this table entirely.
+    "nasdaq100_microstructure/fwd_dir_15m": 16,
     "sp500_equity_option_analytics/fwd_ret_5d": 5,
     "sp500_equity_option_analytics/fwd_ret_risk_adj_5d": 5,
     # The three below joined the table when this case study declared the conformal_weighted
