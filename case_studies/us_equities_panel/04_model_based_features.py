@@ -1216,6 +1216,15 @@ def garch_walk(payload: tuple[str, FloatArray, int]) -> tuple[str, FloatArray, l
 
     def fit(X_train: FloatArray) -> dict[str, float]:
         result = arch_model(X_train[:, 0], **GARCH_KW).fit(disp="off", show_warning=False)
+        # `arch` returns a result whatever the optimizer did and only warns, which
+        # `show_warning=False` then swallows. A parameter vector the search never converged
+        # on is not an estimate, so it is rejected here and `on_fit_error="skip"` leaves the
+        # block empty - the coverage table in Section 5 is where that cost shows up.
+        if result.convergence_flag != 0:
+            raise RuntimeError(
+                f"the variance model did not converge on {symbol}: scipy flag "
+                f"{result.convergence_flag}"
+            )
         coefficients = {
             "mu": float(result.params["mu"]),
             "omega": float(result.params["omega"]),

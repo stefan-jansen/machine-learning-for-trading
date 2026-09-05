@@ -34,12 +34,16 @@ from pathlib import Path
 
 warnings.filterwarnings("ignore")
 
+import numpy as np
 import pandas as pd
 import polars as pl
 import torch
 
+from case_studies.utils.cv_window import modeling_fold_boundaries
+from utils.artifact_specs import load_setup_config, resolve_label_buffer
 from utils.modeling import (
     RANDOM_SEED,
+    build_modeling_input_lineage,
     load_configs,
     reduce_to_top_entities,
     seed_everything,
@@ -172,53 +176,94 @@ collect()
 # %% [markdown]
 # ## Create Walk-Forward CV Splits
 #
-# We use 4 evenly-spaced folds from the full date range, each with
-# ~8-10 years of training and ~1 year of validation.
+# The folds are the case study's own, resolved from the label file through
+# `modeling_fold_boundaries` - the call [`04_model_based_features`](04_model_based_features.ipynb)
+# and `load_modeling_dataset` both resolve them with, so fold *k* here is fold *k* everywhere
+# else. `MAX_FOLDS` of them are taken, evenly spaced across the sequence and always including
+# the earliest and the most recent, because this notebook fits four sequence models on a weekly
+# grid and the full sixteen would cost four times what the comparison needs.
+#
+# They are resolved rather than written out. Hand-written windows are what put this notebook's
+# last two folds inside the holdout: it trained through 2017-01 and scored 2017-02 to 2018-01,
+# both of which are held-out sessions, so two of the four numbers the comparison rested on had
+# read the reserved history. A window derived from the label file cannot do that, and the
+# assertion below is what says so rather than the prose.
 
 # %%
-# Build 4 manual splits spanning 2000-2018
-fold_specs = [
+SETUP = load_setup_config(CASE_STUDY_ID)
+LABEL_BUFFER = resolve_label_buffer(CASE_STUDY_ID, PRIMARY_LABEL, SETUP)
+HOLDOUT_START = pd.Timestamp(str(SETUP["evaluation"]["holdout_start"]))
+
+canonical = sorted(
+    modeling_fold_boundaries(CASE_STUDY_ID, PRIMARY_LABEL), key=lambda f: f["val_start"]
+)
+chosen = sorted(
+    {round(i) for i in np.linspace(0, len(canonical) - 1, min(MAX_FOLDS, len(canonical)))}
+)
+splits = [
     {
-        "fold": 0,
-        "train_start": "2000-01-01",
-        "train_end": "2010-01-01",
-        "val_start": "2010-02-01",
-        "val_end": "2011-01-01",
-    },
-    {
-        "fold": 1,
-        "train_start": "2002-01-01",
-        "train_end": "2012-01-01",
-        "val_start": "2012-02-01",
-        "val_end": "2013-01-01",
-    },
-    {
-        "fold": 2,
-        "train_start": "2005-01-01",
-        "train_end": "2015-01-01",
-        "val_start": "2015-02-01",
-        "val_end": "2016-01-01",
-    },
-    {
-        "fold": 3,
-        "train_start": "2007-01-01",
-        "train_end": "2017-01-01",
-        "val_start": "2017-02-01",
-        "val_end": "2018-01-01",
-    },
+        "fold": canonical[i]["fold"],
+        "train_start": pd.Timestamp(canonical[i]["train_start"]),
+        "train_end": pd.Timestamp(canonical[i]["train_end"]),
+        "val_start": pd.Timestamp(canonical[i]["val_start"]),
+        "val_end": pd.Timestamp(canonical[i]["val_end"]),
+    }
+    for i in chosen
 ]
 
-# Limit folds if requested
-splits = fold_specs[:MAX_FOLDS]
-print(f"CV splits: {len(splits)} folds")
+for split in splits:
+    assert split["val_end"] < HOLDOUT_START, (
+        f"fold {split['fold']} is scored through {split['val_end'].date()}, inside the holdout "
+        f"opening {HOLDOUT_START.date()}"
+    )
+
+print(f"CV splits: {len(splits)} of the case study's {len(canonical)} folds, evenly spaced")
 for s in splits:
     n_train = dataset_pd[
-        (dataset_pd["timestamp"] >= s["train_start"]) & (dataset_pd["timestamp"] < s["train_end"])
+        (dataset_pd["timestamp"] >= s["train_start"]) & (dataset_pd["timestamp"] <= s["train_end"])
     ].shape[0]
     n_val = dataset_pd[
-        (dataset_pd["timestamp"] >= s["val_start"]) & (dataset_pd["timestamp"] < s["val_end"])
+        (dataset_pd["timestamp"] >= s["val_start"]) & (dataset_pd["timestamp"] <= s["val_end"])
     ].shape[0]
-    print(f"  Fold {s['fold']}: train={n_train:,}, val={n_val:,}")
+    print(
+        f"  Fold {s['fold']}: trained on {s['train_start'].date()} to {s['train_end'].date()} "
+        f"({n_train:,} weekly rows), scored over {s['val_start'].date()} to "
+        f"{s['val_end'].date()} ({n_val:,})"
+    )
+
+# %% [markdown]
+# ## The identity these runs register under
+#
+# `run_dl_cv` skips a configuration whose training hash is already complete, so whatever the
+# hash is built from is what a re-run is able to notice. Without an input lineage the hash
+# covers the family, the configuration, the label, the fold count, the epochs and the feature
+# *names* - and a stage-04 artifact regenerated under a different estimation schedule keeps
+# every one of its column names. The corrected values would then never reach a model, and the
+# notebook would report the previous run's numbers under them, which a clean registry hides
+# because everything retrains.
+#
+# `build_modeling_input_lineage` is the same payload `load_modeling_dataset` builds for the
+# sibling notebooks. It digests the three parquet files this one reads and the fold windows it
+# runs, so a changed artifact or a changed window is a changed identity.
+
+# %%
+INPUT_LINEAGE = build_modeling_input_lineage(
+    artifacts={
+        "financial": CASE_DIR / "features" / "financial.parquet",
+        "model_based": CASE_DIR / "features" / "model_based.parquet",
+        "label": CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet",
+    },
+    feature_names=feature_names,
+    splits=splits,
+    label_buffer=LABEL_BUFFER,
+    task_type="regression",
+    eval_label_col=None,
+    max_symbols=MAX_SYMBOLS,
+    symbols=None,
+)
+print(f"Input lineage fingerprint {INPUT_LINEAGE['fingerprint'][:12]} over")
+for name, record in INPUT_LINEAGE["artifacts"].items():
+    print(f"  {name}: {record['sha256'][:12]}, {record['size'] / 1e9:.2f} GB")
 
 # %% [markdown]
 # ## Run Direct Regression Models (LSTM, NLinear)
@@ -281,12 +326,8 @@ pytorch_result = run_dl_cv(
     # FORCE_RETRAIN False the pre-filter at :1765-1782 then finds the previous run complete and
     # skips it, and the notebook reports the old model's numbers under the new feature set. A
     # clean registry retrains and looks correct, which is why this is invisible locally.
-    #
-    # This still does not capture the input artifact digests the way the shared path does through
-    # input_data_spec; 12 reads the parquet files directly rather than through
-    # load_modeling_dataset, so its identity remains weaker than its siblings' until it moves onto
-    # that path.
     identity_params={"feature_names": feature_names},
+    input_data_spec=INPUT_LINEAGE,
     case_study=CASE_STUDY_ID,
     notebook=NOTEBOOK,
 )
@@ -366,12 +407,8 @@ darts_result = run_dl_cv(
     # FORCE_RETRAIN False the pre-filter at :1765-1782 then finds the previous run complete and
     # skips it, and the notebook reports the old model's numbers under the new feature set. A
     # clean registry retrains and looks correct, which is why this is invisible locally.
-    #
-    # This still does not capture the input artifact digests the way the shared path does through
-    # input_data_spec; 12 reads the parquet files directly rather than through
-    # load_modeling_dataset, so its identity remains weaker than its siblings' until it moves onto
-    # that path.
     identity_params={"feature_names": feature_names},
+    input_data_spec=INPUT_LINEAGE,
     case_study=CASE_STUDY_ID,
     notebook=NOTEBOOK,
     prediction_split=PREDICTION_SPLIT,

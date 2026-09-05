@@ -52,10 +52,8 @@ DEFINITIONS = (
 )
 
 
-@pytest.fixture(scope="module")
-def notebook_functions() -> dict:
+def _load(arch_model) -> dict:
     """The notebook's transform definitions, executed against a stub of its globals."""
-    arch_model = pytest.importorskip("arch").arch_model
     body = [
         node
         for node in ast.parse(NOTEBOOK.read_text()).body
@@ -82,6 +80,11 @@ def notebook_functions() -> dict:
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(NOTEBOOK), "exec"), namespace)
     return namespace
+
+
+@pytest.fixture(scope="module")
+def notebook_functions() -> dict:
+    return _load(pytest.importorskip("arch").arch_model)
 
 
 @pytest.fixture(scope="module")
@@ -173,3 +176,31 @@ def test_freezing_stops_estimation_without_stopping_emission(notebook_functions,
     assert not np.isnan(frozen[-1]), (
         "freezing stopped emission as well as estimation; the holdout would carry no value"
     )
+
+
+def test_a_fit_the_optimizer_did_not_converge_on_is_not_an_estimate(returns):
+    """`arch` returns a result whatever the search did, and only warns.
+
+    `show_warning=False` swallows the warning, so without an explicit check a parameter
+    vector the optimizer never converged on would be filtered forward and written to the
+    artifact as a feature value. What must happen instead is that the block is left empty.
+    """
+
+    class _Unconverged:
+        convergence_flag = 1
+
+        def __getattr__(self, name):  # pragma: no cover - reaching it is the failure
+            raise AssertionError(f"a non-converged result was read for {name!r}")
+
+    class _Model:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def fit(self, **kwargs):
+            return _Unconverged()
+
+    functions = _load(_Model)
+    _, values, fits = functions["garch_walk"](("TEST", returns * 100, len(returns)))
+
+    assert fits == [], "a non-converged fit was recorded as an estimation"
+    assert np.all(np.isnan(values)), "a non-converged fit produced a feature value"
