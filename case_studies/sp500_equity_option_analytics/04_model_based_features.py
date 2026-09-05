@@ -84,7 +84,11 @@ from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_ser
 
 from case_studies.utils.artifact_digest import read_digest, value_digest, write_artifact
 from case_studies.utils.cv_window import fold_boundary_date, modeling_fold_boundaries
-from case_studies.utils.temporal import refit_boundaries, walk_forward_feature
+from case_studies.utils.temporal import (
+    garch11_conditional_volatility,
+    refit_boundaries,
+    walk_forward_feature,
+)
 from data import load_sp500_daily_bars, load_sp500_options_surface
 from utils.artifact_specs import load_setup_config, resolve_label_horizon
 from utils.cv_splits import load_evaluation_config
@@ -204,15 +208,6 @@ print(f"Everything from {HOLDOUT_START} to {HOLDOUT_END} is the holdout.")
 # emitted value comes from the last estimate made strictly before it. There is no estimation
 # window per fold and no fold column on the artifact: a session gets one conditional volatility,
 # and whichever fold selects that session later reads the same number.
-#
-# **What this replaces, and why.** Until this revision the notebook fitted once per fold on that
-# fold's whole training window and then ran the recursion forward from the *start* of that same
-# window. The conditioning set was causal - `causal_gjr_filter` reads only earlier returns - but
-# the parameters were not: a training row dated early in the window carried an estimate made from
-# up to two years of its own future, while every validation row carried an estimate made only
-# from its past. The model was fitted on one version of the column and scored on another, and
-# nothing raised, because a fold's rows are internally consistent and the artifact recorded no
-# estimation window to check against.
 #
 # **The burn-in is paid out of the run-up, not out of training data.** seoa's panel opens
 # 2017-01-03 and the oldest fold's training window opens 2018-01-04, so about 250 sessions
@@ -360,10 +355,11 @@ show_plotly_with_alt(
 # together, it derives both from all of it - so a variance at a date inside the estimation window
 # depends on returns that came after it, through the clipping range.
 #
-# So the recursion below is explicit, and the three things it needs beyond the parameters - the
-# scaling, the starting variance and the bounds - are all derived from the estimation window
-# alone, using `arch`'s own functions for each. The recursion itself reads only $r_{t-1}$ and
-# $\sigma^2_{t-1}$, so once it has started it never reads forward.
+# So the recursion is run by `garch11_conditional_volatility`, the shared helper every case
+# study that fits a volatility model here calls, and the three things it needs beyond the
+# parameters - the scaling, the starting variance and the bounds - are all derived from the
+# estimation window alone, using `arch`'s own functions for each. The recursion itself reads
+# only $r_{t-1}$ and $\sigma^2_{t-1}$, so once it has started it never reads forward.
 #
 # **Every emitted value is now the same kind of quantity, and that is the change.** Under the
 # refit schedule the parameters, the starting variance and the bounds behind a value all come
@@ -392,32 +388,10 @@ def training_filter_state(result, train_returns: pd.Series) -> tuple[float, floa
     return scale, backcast, (float(bounds[:, 0].min()), float(bounds[:, 1].max()))
 
 
-def causal_gjr_filter(
-    returns: pd.Series, params: pd.Series, scale: float, backcast: float, bounds: tuple
-) -> pd.Series:
-    """Run the fixed GJR-GARCH recursion forward, reading only earlier rows."""
-    mu = float(params.get("mu", params.get("Const", 0.0)))
-    omega, alpha = float(params["omega"]), float(params["alpha[1]"])
-    gamma, beta = float(params["gamma[1]"]), float(params["beta[1]"])
-    low, high = bounds
-
-    residuals = returns.to_numpy(dtype=float) * scale - mu
-    variance = np.empty(len(residuals), dtype=float)
-    variance[0] = np.clip(omega + (alpha + 0.5 * gamma + beta) * backcast, low, high)
-    for t in range(1, len(residuals)):
-        shock = residuals[t - 1] ** 2
-        variance[t] = np.clip(
-            omega + alpha * shock + gamma * shock * (residuals[t - 1] < 0) + beta * variance[t - 1],
-            low,
-            high,
-        )
-    return pd.Series(np.sqrt(variance) / scale, index=returns.index)
-
-
 # %% [markdown]
 # One walk per security over that security's whole return history. `walk_forward_feature` spends
 # the burn-in, fits on everything before the block it is about to emit, hands those parameters to
-# `causal_gjr_filter`, and keeps only the block's own rows. `freeze_after` is the count of
+# `garch11_conditional_volatility`, and keeps only the block's own rows. `freeze_after` is the count of
 # sessions strictly before the holdout, so the last estimate made is fitted on every pre-holdout
 # session and on no holdout session.
 #
@@ -468,17 +442,36 @@ def garch_walk(returns: pd.Series, freeze_after: int | None) -> tuple[pd.Series,
                 "degenerate": alpha + gamma < 0,
             }
         )
-        return {"params": result.params, "scale": scale, "backcast": backcast, "bounds": bounds}
+        return {
+            "mu": float(result.params.get("mu", result.params.get("Const", 0.0))),
+            "omega": float(result.params["omega"]),
+            "alpha": alpha,
+            "gamma": gamma,
+            "beta": beta,
+            "scale": scale,
+            "backcast": backcast,
+            "bounds": bounds,
+        }
 
     def apply(model: dict, prefix: np.ndarray) -> np.ndarray:
-        filtered = causal_gjr_filter(
-            pd.Series(prefix[:, 0], index=returns.index[: len(prefix)]),
-            model["params"],
-            model["scale"],
-            model["backcast"],
-            model["bounds"],
+        # `arch` estimates on returns it has scaled, so mu, omega and the bounds are all in the
+        # scaled units and the recursion has to run there too. The volatility comes back divided
+        # by the same factor, which returns it to percent, and the annualization follows.
+        scale = model["scale"]
+        sigma = (
+            garch11_conditional_volatility(
+                prefix[:, 0] * scale,
+                mu=model["mu"],
+                omega=model["omega"],
+                alpha=model["alpha"],
+                gamma=model["gamma"],
+                beta=model["beta"],
+                backcast=model["backcast"],
+                bounds=model["bounds"],
+            )
+            / scale
         )
-        return (filtered.to_numpy() * ANNUALIZE / 100.0).reshape(-1, 1)
+        return (sigma * ANNUALIZE / 100.0).reshape(-1, 1)
 
     values = walk_forward_feature(
         observations,
@@ -655,17 +648,17 @@ else:
     print("No security in the sample was long enough to truncate mid-block.")
 
 # %% [markdown]
-# The property this establishes is the one the old design could not state: an emitted value does
-# not move when observations after it are deleted. It is asserted rather than described, and the
-# cut is taken inside a block rather than at a refit boundary, because a boundary cut leaves every
-# retained block with exactly the prefix it had and would agree no matter what the recursion did.
+# The property is asserted rather than described: an emitted value does not move when
+# observations after it are deleted. The cut is taken inside a block rather than at a refit
+# boundary, because a boundary cut leaves every retained block with exactly the prefix it had and
+# would agree no matter what the recursion did.
 #
-# The old notebook measured what the convenience method cost instead, and the number is worth
-# keeping in view: handing `arch`'s `fix` the estimation window and the inference span together
-# moved the volatility it reported on a *shared* session by up to **0.9%** of that security's own
-# largest value, across 38 securities. That is what `causal_gjr_filter` exists to avoid, and it is
-# why the backcast and the clipping range are derived from the estimation prefix and passed in
-# rather than left for the library to infer from whatever series it is handed.
+# What the convenience method would cost is worth keeping in view beside it: handing `arch`'s
+# `fix` the estimation window and the inference span together moves the volatility it reports on
+# a *shared* session by up to **0.9%** of that security's own largest value, measured across 38
+# securities here. That is what `garch11_conditional_volatility` exists to avoid, and it is why
+# the backcast and the clipping range are derived from the estimation prefix and passed in rather
+# than left for the library to infer from whatever series it is handed.
 
 # %%
 filtered_parts: list[pl.DataFrame] = []
