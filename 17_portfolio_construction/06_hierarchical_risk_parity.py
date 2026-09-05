@@ -26,8 +26,8 @@
 # - Understand why classical MVO can be fragile in practice (the "Markowitz Curse")
 # - Implement the three steps of HRP: clustering, quasi-diagonalization, recursive bisection
 # - Visualize the asset hierarchy with dendrograms
-# - Run walk-forward backtests comparing HRP to shrinkage MVO and heuristic allocators, and
-#   read the outcome when HRP ranks last
+# - Run walk-forward backtests comparing HRP to shrinkage MVO and to heuristic allocators, and
+#   read the ranking against the assets-to-observations ratio that decides when HRP helps
 #
 # **Book Reference**: Chapter 17, Section 17.6 (Hierarchical Risk Parity)
 #
@@ -94,7 +94,8 @@ fallback_count: dict[str, int] = {}
 #
 # HRP is one response - never invert. Shrinkage is another - keep inverting, but pull the
 # estimate toward a well-conditioned target first. This notebook runs both, and section 12
-# reports which one won here and why the answer depends on $N/T$. See §17.6.
+# reads the comparison against the ratio $N/T$ that decides which response the problem calls
+# for. See §17.6.
 
 # %% [markdown]
 # ## 3. Data Acquisition
@@ -217,7 +218,8 @@ def get_quasi_diagonal_order(link: np.ndarray) -> list[int]:
 
 
 # %% [markdown]
-# #### Cluster Risk Helper
+# The variance of a sub-portfolio held at inverse-variance weights, which is the number each
+# split compares its two halves on.
 
 
 # %%
@@ -277,7 +279,7 @@ def recursive_bisection(
 
 
 # %% [markdown]
-# ### HRP Weight Computation Wrapper
+# The three steps in order, from a covariance matrix to a weight vector.
 
 
 # %%
@@ -329,11 +331,10 @@ add_message_title(
     "ETF correlations separate defensive assets from the equity cluster",
     subtitle="Ward linkage on correlation distance, fixed 15-ETF teaching universe",
 )
-plt.tight_layout()
 plt.show()
 
 # %% [markdown]
-# ### Interactive Dendrogram
+# ### The hierarchy the algorithm builds
 
 
 # %%
@@ -377,7 +378,6 @@ def plotly_dendrogram(link, labels, title="Asset Hierarchy"):
 
 
 # %% [markdown]
-# Build and render the interactive dendrogram for the ETF universe.
 
 # %%
 labels = [ETF_UNIVERSE.get(s, s) for s in returns.columns]
@@ -533,7 +533,7 @@ print(f"Weight in the single largest holding: {weights_df['HRP Weight'].max():.1
 print(f"Weight in the three largest: {weights_df['HRP Weight'].nlargest(3).sum():.1%}")
 
 # %% [markdown]
-# The low-variance half wins both splits by a wide margin, and the shares multiply. Bonds and gold
+# The low-variance half takes most of the capital at both splits, and the shares multiply. Bonds and gold
 # end up holding most of the portfolio, and within them the lowest-volatility holding takes most
 # of what is left.
 #
@@ -777,7 +777,7 @@ def select_top_assets(
 
 
 # %% [markdown]
-# ### Allocation Mapping Helper
+# ### Guarding against a covariance the allocator cannot use
 #
 # Validate each allocator's long-only weights before mapping them to the full universe. A singular
 # covariance or invalid weight vector triggers a visible equal-weight fallback and increments the
@@ -985,7 +985,6 @@ for name in portfolio_returns.columns:
     )
 
 # %% [markdown]
-# Assemble the comparison table and display.
 
 # %%
 metrics_df = pd.DataFrame(metrics_list)
@@ -1037,7 +1036,7 @@ class ScheduledWeightStrategy(Strategy):
 
 
 # %% [markdown]
-# ### Build Engine Inputs
+# ### Restating the schedule in the form the engine reads
 #
 # Convert the wide monthly target schedule into the long-form price and target tables required by
 # the execution engine. Zero targets remain present so liquidations are explicit.
@@ -1164,20 +1163,12 @@ fig.update_layout(
 fig.show()
 
 # %% [markdown]
-# ## 10. Tear Sheet: `ml4t-diagnostic`
+# ## 10. The HRP series on its own terms
 #
-# `ml4t-diagnostic` exposes two delivery modes for the same analysis surface:
-#
-# - **Inline**: `create_portfolio_dashboard(analysis).show()` renders the
-#   metrics block plus each Plotly figure (cumulative returns, drawdown
-#   underwater, rolling Sharpe, monthly heatmap, returns distribution, etc.) as
-#   normal notebook cell outputs.
-# - **HTML**: `tear_sheet.save_html(path)` writes a self-contained file that
-#   embeds the same content for sharing or archival.
-#
-# We build the analysis on the HRP walk-forward returns versus SPY (the same
-# benchmark the chapter prose uses). The tear sheet metrics are computed from
-# the strategy series, so they will track the table above to within rounding.
+# The table above compares allocators to each other. The dashboard below looks at one of them -
+# HRP - the way an investor would: cumulative growth against SPY, the underwater curve, rolling
+# Sharpe, and the monthly return grid. Its metrics come from the same return series as the table,
+# so the two agree to rounding; what it adds is the path behind the summary statistics.
 
 # %%
 hrp_returns_series = portfolio_returns["HRP"].dropna()
@@ -1281,7 +1272,7 @@ print()
 print(f"HRP rank by Sharpe: {int(ranked.index[ranked['Method'] == 'HRP'][0]) + 1} of {len(ranked)}")
 print(f"Assets: {n_assets}   estimation window: 252 days   assets selected each month: 5")
 
-# %% [markdown]
+# %% [markdown] tags=["results"]
 # HRP ranks last. That is the result, and the reason for it is specific.
 #
 # The argument for HRP is that inverting a noisy covariance matrix amplifies estimation error.
@@ -1303,7 +1294,7 @@ print(f"Assets: {n_assets}   estimation window: 252 days   assets selected each 
 #
 # ### What is true regardless of the ranking
 #
-# These are properties of the algorithm, and they hold whether or not it wins a given sample:
+# These are properties of the algorithm, and they hold wherever it lands in a given sample:
 #
 # - It never inverts a covariance matrix, so it returns weights for any $N$ and $T$, including
 #   $N > T$ where minimum-variance optimization has no unique solution at all.
@@ -1320,7 +1311,7 @@ print(f"Assets: {n_assets}   estimation window: 252 days   assets selected each 
 
 
 # %% [markdown]
-# ### Allocator Fallback Summary
+# ### How often an allocator had to fall back
 #
 # When the allocation function raises (e.g., singular covariance), the
 # walk-forward backtest falls back to equal weights and increments a counter.
