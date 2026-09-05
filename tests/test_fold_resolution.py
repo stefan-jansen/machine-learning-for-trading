@@ -132,15 +132,41 @@ def _feature_list_assignments(tree: ast.Module) -> list[tuple[str, ast.ListComp]
     return out
 
 
+def _names_the_columns_of_a_frame(comparator: ast.expr, definitions: dict[str, str]) -> bool:
+    """True when this expression is a frame's column list.
+
+    Three spellings reach the same list and all three are the refusal this looks for.
+    ``frame.columns`` is the eager one. A ``LazyFrame`` has no ``.columns``, so the lazy
+    reader spells it ``scan.collect_schema().names()``, and a notebook that reads the
+    artifact lazily - which the large panels have to - can only write it that way. The
+    third is either of those bound to a name first, which is what a notebook does when the
+    list is also used for something else.
+    """
+    if isinstance(comparator, ast.Attribute) and comparator.attr == "columns":
+        return True
+    if (
+        isinstance(comparator, ast.Call)
+        and isinstance(comparator.func, ast.Attribute)
+        and comparator.func.attr == "names"
+    ):
+        return True
+    if isinstance(comparator, ast.Name):
+        bound = definitions.get(comparator.id, "")
+        return ".columns" in bound or "collect_schema" in bound
+    return False
+
+
 def _refuses_a_fold_column(source: str) -> bool:
     """True when the notebook stops rather than read an artifact carrying ``fold``.
 
     Matched on the AST rather than on the text, so a sentence in a markdown cell that
     happens to mention the column cannot satisfy it. What counts is a comparison of the
-    literal ``"fold"`` against a ``.columns`` attribute, which is the shape both
+    literal ``"fold"`` against a frame's column list, which is the shape both
     ``assert "fold" not in frame.columns`` and ``if "fold" in frame.columns: raise`` take.
     """
-    for node in ast.walk(ast.parse(source)):
+    tree = ast.parse(source)
+    definitions = _name_definitions(source, tree)
+    for node in ast.walk(tree):
         if not isinstance(node, ast.Compare) or not isinstance(node.left, ast.Constant):
             continue
         if node.left.value != "fold":
@@ -148,7 +174,7 @@ def _refuses_a_fold_column(source: str) -> bool:
         if not any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops):
             continue
         for comparator in node.comparators:
-            if isinstance(comparator, ast.Attribute) and comparator.attr == "columns":
+            if _names_the_columns_of_a_frame(comparator, definitions):
                 return True
     return False
 

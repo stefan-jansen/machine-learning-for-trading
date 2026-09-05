@@ -86,6 +86,7 @@
 
 import plotly.graph_objects as go
 import polars as pl
+from IPython.display import display
 from plotly.subplots import make_subplots
 
 from case_studies.research import (
@@ -107,6 +108,7 @@ EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
+DIAGNOSTIC_CONFIG_NAMES = ["default_mse"]
 POPULATION_NAME = ""
 SUPERSEDES_POPULATION: str = ""
 
@@ -132,12 +134,30 @@ declared_labels(study, "gbm")
 # Each name resolves to a preset in `case_studies/config/lgb/` holding the complete LightGBM
 # parameter set. The grid is a product of two axes:
 #
-# - **Five capacity profiles.** `default` uses the library's own leaf count; the rest fix it at 7,
-#   15, 31 and 63.
+# - **A capacity ladder** at 7, 15, 31 and 63 leaves, plus a `default` profile.
 # - **Three objectives**, as described above.
 #
-# Every configuration runs the same number of boosting iterations at the same learning rate, so
-# the grid isolates capacity and loss rather than confounding them with training length.
+# **`default` is not a fifth rung, and the grid does not isolate capacity.** The `params` block of
+# each `default_*` preset holds only `objective` and `seed`. `default_huber` also declares a
+# top-level `huber_alpha_scale: 0.5`, but every `leaves_*_huber` declares the same value, so it
+# separates the objectives from each other and not `default` from the ladder. Everything else in a
+# `default_*` fit is whatever LightGBM supplies: `num_leaves` 31 - which is the `leaves_31` rung,
+# not a value outside the ladder - a `learning_rate` of 0.1 against the 0.05 the twelve `leaves_*`
+# presets declare, and none of the `bagging_fraction` 0.8, `bagging_freq` 1, `feature_fraction` 0.7,
+# `lambda_l1` 0.5, `lambda_l2` 5.0 or `min_child_samples` 50 that all four ladder profiles carry.
+# Measured on LightGBM 4.6.0, those omissions resolve to `lambda_l1` and `lambda_l2` at 0,
+# subsampling disabled outright because `bagging_freq` defaults to 0, and `min_child_samples` at 20
+# rather than the ladder's 50. So `default` and `leaves_31` share a leaf limit, not a capacity: the
+# same `num_leaves` reached under a leaf-size constraint less than half as strict, with no penalty
+# term, no subsampling and double the learning rate - seven declared parameters apart rather than
+# none.
+#
+# Read the gap between them as capacity and you will be reading the wrong axis: at 500 iterations
+# `default_mse` reaches an IC of 0.0243 and `leaves_31_mse` 0.0222, at identical leaf counts.
+#
+# What the grid does hold fixed is training length - every configuration declares
+# `max_iterations: 500` and `checkpoint_interval: 50` - so the checkpoint comparison below is
+# sound even where the capacity comparison is not.
 
 # %%
 configs = load_model_configs(
@@ -160,6 +180,24 @@ if narrows_declared_catalog(study, "gbm", configs) and not POPULATION_NAME:
         f"this run fits {configs.height} of the declared configurations, so it cannot publish "
         "the canonical population; pass POPULATION_NAME to give it its own"
     )
+
+# The diagnostic set is published by an unnarrowed canonical run and by nothing else, so the
+# requirement that its configurations be among the ones fitted applies to that run and to
+# nothing else. Asked unconditionally, it refused a perfectly valid narrowed or preview run
+# for leaving out a configuration that run was never going to publish, and the only way past
+# it was to override a parameter irrelevant to what was being fitted.
+is_published_population = (
+    EXECUTION_TIER == "canonical" and not POPULATION_NAME and not PREVIEW_REDUCTIONS
+)
+if is_published_population:
+    unknown_diagnostics = sorted(
+        set(DIAGNOSTIC_CONFIG_NAMES) - set(configs.get_column("config_name").unique().to_list())
+    )
+    if not DIAGNOSTIC_CONFIG_NAMES or unknown_diagnostics:
+        raise ValueError(
+            "an unnarrowed canonical run publishes the diagnostic set, so its configurations "
+            f"have to be among the ones fitted: {unknown_diagnostics}"
+        )
 
 # %% [markdown]
 # ## 2. Binding the declarations to the data
@@ -300,6 +338,32 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # longer forward window runs out earlier and one global maximum would mark a whole label
 # incomplete for a reason unrelated to any model.
 
+# %% [markdown]
+# ## What the run produced, and the sets it publishes
+#
+# The cell below reports both, because they are one statement: the population is one immutable
+# list covering every label this run fitted, and the candidate sets are the names the later
+# notebooks open it by.
+#
+# `15_model_analysis` and `16_backtest` do not open populations directly - they open
+# *candidate sets*, named per
+# `(label, family)`, because a comparison is only meaningful within one label's protocol. Freezing
+# is what creates those names.
+#
+# Without this the two downstream notebooks name four sets that nothing produces, and they fail
+# differently: `15` raises when `CandidateSet.one` cannot find the name, while `16` would simply
+# backtest whatever subset of names does resolve. A missing name is a silently narrower strategy
+# chain, which is the failure the named-set design exists to prevent.
+#
+# The diagnostic subset is bounded on purpose. `15` holds every diagnostic member's prediction
+# frame in memory at once and correlates them pairwise, so the cost is quadratic in members - and
+# the full set here is one row per configuration *per checkpoint*, which is larger again than the
+# linear grid. `default_mse` is the untuned starting point the leaf and objective sweeps vary from.
+#
+# Only an unnarrowed canonical run publishes. The guard on `narrows_declared_catalog` above already
+# refuses to publish the canonical *population* from a narrowed run; the same condition governs the
+# canonical set names, for the same reason - a name must not mean two different member sets.
+
 # %% tags=["results"]
 catalog = execution.catalog_rows.select(
     "config_name",
@@ -331,15 +395,58 @@ panel_labels = [label for label in [primary] if label in present] + [
 order_label = panel_labels[0]
 print(f"{catalog.height} candidate models: {catalog.n_unique('config_name')} configurations")
 print(f"at {catalog.n_unique('checkpoint_value')} checkpoints each, on {len(panel_labels)} labels")
-catalog.select(
-    "label",
-    "config_name",
-    "checkpoint_value",
-    "ic_mean",
-    "ic_std",
-    "ic_n_days",
-    "full_coverage",
-).head(15)
+# `display` rather than a bare expression: a cell renders only its last value, and this cell
+# ends with the frozen-set table. Without it the model results table would be computed and
+# never shown.
+display(
+    catalog.select(
+        "label",
+        "config_name",
+        "checkpoint_value",
+        "ic_mean",
+        "ic_std",
+        "ic_n_days",
+        "full_coverage",
+    ).head(15)
+)
+
+set_rows = []
+if is_published_population:
+    for label_value in panel_labels:
+        label_name = label_value.replace("_", "-")
+        label_rows = execution.catalog_rows.filter(pl.col("label") == label_value)
+        full_set = study.predictions.freeze(
+            label_rows,
+            name=f"us-equities-{label_name}-gbm-v1",
+        )
+        diagnostic_rows = label_rows.filter(pl.col("config_name").is_in(DIAGNOSTIC_CONFIG_NAMES))
+        if diagnostic_rows.height == 0:
+            raise ValueError(
+                f"no {label_value} rows for diagnostic configurations {DIAGNOSTIC_CONFIG_NAMES}"
+            )
+        diagnostic_set = study.predictions.freeze(
+            diagnostic_rows,
+            name=f"us-equities-{label_name}-gbm-diagnostics-v1",
+        )
+        set_rows.extend(
+            [
+                {
+                    "role": "backtest population",
+                    "set_name": full_set.name,
+                    "members": len(full_set.members),
+                },
+                {
+                    "role": "bounded diagnostics",
+                    "set_name": diagnostic_set.name,
+                    "members": len(diagnostic_set.members),
+                },
+            ]
+        )
+compatible_sets = pl.DataFrame(
+    set_rows,
+    schema={"role": pl.String, "set_name": pl.String, "members": pl.Int64},
+)
+compatible_sets
 
 # %% [markdown]
 # ### What more trees do
@@ -482,19 +589,25 @@ trees_effect
 # should separate more as trees are added, since each additional tree is fitted to the residuals
 # the previous ones left.
 #
-# The chart below drops the checkpoint dimension by taking each configuration's final state, so
-# every configuration is compared at the same amount of training. That is the comparison that does
-# not require choosing anything after the fact. The configurations are held in one order across
+# The chart below drops the checkpoint dimension by taking each configuration's own final state -
+# the comparison that does not require choosing anything after the fact. Every preset here
+# declares the same `max_iterations`, so that is also a comparison at equal training length, and
+# the line printed under the frame says so rather than assuming it. The configurations are held in one order across
 # the panels - their ranking on the primary label - so a panel that does not descend is a horizon
 # that orders the grid differently.
 
 # %%
+# Each configuration's own last checkpoint, not the label's. They are the same number while every
+# preset declares the same `max_iterations`, and taking the label-wide maximum would silently drop
+# a configuration with a shorter schedule instead of comparing it at the state it reached.
 final = (
-    catalog.filter(pl.col("checkpoint_value") == pl.col("checkpoint_value").max().over("label"))
+    catalog.filter(
+        pl.col("checkpoint_value") == pl.col("checkpoint_value").max().over("label", "config_name")
+    )
     .filter("full_coverage")
     .sort(["label", "ic_mean"], descending=[False, True])
 )
-final_iteration = int(final.get_column("checkpoint_value").max())
+final_iterations = sorted(set(final.get_column("checkpoint_value").to_list()))
 config_order = (
     final.filter(pl.col("label") == order_label)
     .sort("ic_mean", descending=True)
@@ -584,7 +697,12 @@ agreement = (
     )
     .sort("label")
 )
-print(f"compared at {final_iteration} boosting iterations")
+if len(final_iterations) == 1:
+    print(f"compared at {final_iterations[0]} boosting iterations")
+else:
+    # Say so rather than printing one of them: the panel is then a comparison of final states at
+    # different training lengths, which is a weaker claim than the text above makes.
+    print(f"compared at each configuration's own final iteration, which differ: {final_iterations}")
 agreement
 
 # %% [markdown]
@@ -623,8 +741,11 @@ agreement
 #
 # **Known limitations.** The IC here is an average of per-date rank correlations with no
 # adjustment for the serial dependence that overlapping forward returns create, so it is a ranking
-# diagnostic rather than a test. The grid varies capacity and loss at a fixed learning rate and
-# fixed features, so it says nothing about interactions with either. Every number is measured on
+# diagnostic rather than a test. The grid varies capacity and loss at fixed features and fixed
+# training length, but not at a fixed learning rate - the `default` profile runs at 0.1 and the
+# four ladder profiles at 0.05 - so the `default` rows are not comparable with the rest on
+# capacity alone, and nothing here separates a learning-rate effect from a regularization one.
+# Every number is measured on
 # the validation folds, which have been read many times over by the time a case study reaches this
 # notebook.
 #

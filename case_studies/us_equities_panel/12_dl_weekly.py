@@ -34,12 +34,16 @@ from pathlib import Path
 
 warnings.filterwarnings("ignore")
 
+import numpy as np
 import pandas as pd
 import polars as pl
 import torch
 
+from case_studies.utils.cv_window import modeling_fold_boundaries
+from utils.artifact_specs import load_setup_config, resolve_label_buffer
 from utils.modeling import (
     RANDOM_SEED,
+    build_modeling_input_lineage,
     load_configs,
     reduce_to_top_entities,
     seed_everything,
@@ -108,32 +112,36 @@ mb = (
 )
 print(f"  Weekly model-based features: {mb.shape[0]:,} rows, {mb.shape[1]} cols")
 
-# model_based.parquet is keyed on (symbol, timestamp, fold), not (symbol, timestamp): its three
-# columns are refitted inside each of the seventeen folds so that a fold sees only its own
-# training window. Joining it on (symbol, timestamp) alone did three things at once. It fanned
-# every weekly observation out to one row per fold, which left duplicate timestamps per symbol and
-# produced zero usable sequences - the "No valid folds created" this notebook died on. It put
-# every other fold's fitted values onto each row, so a fold's inputs carried a garch conditional
-# volatility estimated on windows that fold is not allowed to see. And because `fold` itself was
-# not excluded, the fold index went into the model as a feature.
+# model_based.parquet is keyed on (symbol, timestamp): every estimate behind it is bounded by a
+# refit schedule rather than by a fold, so a symbol-session carries one value whichever fold reads
+# it and the join is a plain left join that multiplies nothing. `temporal_by_fold` is therefore
+# None, which is what `load_modeling_dataset` passes on this shape too.
 #
-# The runner already takes this artifact per fold: `temporal_by_fold` is selected one fold at a
-# time by `fold_temporal_frame` (utils/modeling.py:1454), which filters on `fold`, drops it, and
-# deduplicates on the join keys. Pass it there instead of pre-joining it here.
+# The key's uniqueness is asserted rather than assumed. A repeat would fan every weekly
+# observation out to one row per duplicate, leave duplicate timestamps per symbol, and give
+# the sequence builder no fold it could form - which surfaces as "No valid folds created"
+# several cells later, a long way from the join that caused it.
+assert mb.select("symbol", "timestamp").is_duplicated().sum() == 0, (
+    "model_based.parquet repeats a symbol and timestamp; the sequence builder would see "
+    "duplicate dates per symbol and create no folds"
+)
+assert "fold" not in mb.columns, (
+    "model_based.parquet carries a fold column, which this stage has no key to read it by: "
+    "a stock-session is expected to carry one value"
+)
+
 feat_cols = [c for c in feat.columns if c not in ("symbol", "timestamp")]
-temporal_feature_names = [c for c in mb.columns if c not in ("symbol", "timestamp", "fold")]
-temporal_by_fold = mb
-features = feat
-# The temporal names belong in feature_names even though their values arrive per fold rather than
-# in `dataset`. prepare_fold_sequence_stores builds `use_cols` from feature_names and applies it
-# AFTER replace_temporal_columns has merged the fold's rows in (sequence_dataset.py:546,568), so a
-# temporal column absent from this list is merged and then immediately dropped - the model would
-# train on the financial features alone and report nothing about it. load_modeling_dataset carries
-# its temporal names in feature_names for the same reason.
+temporal_feature_names = [c for c in mb.columns if c not in ("symbol", "timestamp")]
+temporal_by_fold = None
+features = feat.join(mb, on=["symbol", "timestamp"], how="left")
+# prepare_fold_sequence_stores builds `use_cols` from feature_names, so a temporal column absent
+# from this list is joined and then immediately dropped - the model would train on the financial
+# features alone and report nothing about it. load_modeling_dataset carries its temporal names in
+# feature_names for the same reason.
 feature_names = feat_cols + temporal_feature_names
 print(
     f"  Base features: {features.shape[0]:,} rows, {len(feat_cols)} financial "
-    f"+ {len(temporal_feature_names)} temporal joined per fold = {len(feature_names)} features"
+    f"+ {len(temporal_feature_names)} temporal = {len(feature_names)} features"
 )
 
 labels = (
@@ -144,7 +152,7 @@ labels = (
 print(f"  Weekly labels: {labels.shape[0]:,} rows")
 
 dataset = features.join(labels, on=["symbol", "timestamp"], how="inner")
-del feat, features, labels
+del feat, mb, features, labels
 collect()
 
 # Subsample to symbol filter if needed. Selecting by name takes whichever symbols sort first,
@@ -169,53 +177,93 @@ collect()
 # %% [markdown]
 # ## Create Walk-Forward CV Splits
 #
-# We use 4 evenly-spaced folds from the full date range, each with
-# ~8-10 years of training and ~1 year of validation.
+# The folds are the case study's own, resolved from the label file through
+# `modeling_fold_boundaries` - the call [`04_model_based_features`](04_model_based_features.ipynb)
+# and `load_modeling_dataset` both resolve them with, so fold *k* here is fold *k* everywhere
+# else. `MAX_FOLDS` of them are taken, evenly spaced across the sequence and always including
+# the earliest and the most recent, because this notebook fits four sequence models on a weekly
+# grid and the full sixteen would cost four times what the comparison needs.
+#
+# They are resolved rather than written out. A window typed into this notebook is a second
+# declaration of the fold design, free to disagree with the one every other stage reads and
+# free to reach past the holdout without anything noticing. A window derived from the label
+# file cannot, and the assertion below is what establishes it rather than the prose.
 
 # %%
-# Build 4 manual splits spanning 2000-2018
-fold_specs = [
+SETUP = load_setup_config(CASE_STUDY_ID)
+LABEL_BUFFER = resolve_label_buffer(CASE_STUDY_ID, PRIMARY_LABEL, SETUP)
+HOLDOUT_START = pd.Timestamp(str(SETUP["evaluation"]["holdout_start"]))
+
+canonical = sorted(
+    modeling_fold_boundaries(CASE_STUDY_ID, PRIMARY_LABEL), key=lambda f: f["val_start"]
+)
+chosen = sorted(
+    {round(i) for i in np.linspace(0, len(canonical) - 1, min(MAX_FOLDS, len(canonical)))}
+)
+splits = [
     {
-        "fold": 0,
-        "train_start": "2000-01-01",
-        "train_end": "2010-01-01",
-        "val_start": "2010-02-01",
-        "val_end": "2011-01-01",
-    },
-    {
-        "fold": 1,
-        "train_start": "2002-01-01",
-        "train_end": "2012-01-01",
-        "val_start": "2012-02-01",
-        "val_end": "2013-01-01",
-    },
-    {
-        "fold": 2,
-        "train_start": "2005-01-01",
-        "train_end": "2015-01-01",
-        "val_start": "2015-02-01",
-        "val_end": "2016-01-01",
-    },
-    {
-        "fold": 3,
-        "train_start": "2007-01-01",
-        "train_end": "2017-01-01",
-        "val_start": "2017-02-01",
-        "val_end": "2018-01-01",
-    },
+        "fold": canonical[i]["fold"],
+        "train_start": pd.Timestamp(canonical[i]["train_start"]),
+        "train_end": pd.Timestamp(canonical[i]["train_end"]),
+        "val_start": pd.Timestamp(canonical[i]["val_start"]),
+        "val_end": pd.Timestamp(canonical[i]["val_end"]),
+    }
+    for i in chosen
 ]
 
-# Limit folds if requested
-splits = fold_specs[:MAX_FOLDS]
-print(f"CV splits: {len(splits)} folds")
+for split in splits:
+    assert split["val_end"] < HOLDOUT_START, (
+        f"fold {split['fold']} is scored through {split['val_end'].date()}, inside the holdout "
+        f"opening {HOLDOUT_START.date()}"
+    )
+
+print(f"CV splits: {len(splits)} of the case study's {len(canonical)} folds, evenly spaced")
 for s in splits:
     n_train = dataset_pd[
-        (dataset_pd["timestamp"] >= s["train_start"]) & (dataset_pd["timestamp"] < s["train_end"])
+        (dataset_pd["timestamp"] >= s["train_start"]) & (dataset_pd["timestamp"] <= s["train_end"])
     ].shape[0]
     n_val = dataset_pd[
-        (dataset_pd["timestamp"] >= s["val_start"]) & (dataset_pd["timestamp"] < s["val_end"])
+        (dataset_pd["timestamp"] >= s["val_start"]) & (dataset_pd["timestamp"] <= s["val_end"])
     ].shape[0]
-    print(f"  Fold {s['fold']}: train={n_train:,}, val={n_val:,}")
+    print(
+        f"  Fold {s['fold']}: trained on {s['train_start'].date()} to {s['train_end'].date()} "
+        f"({n_train:,} weekly rows), scored over {s['val_start'].date()} to "
+        f"{s['val_end'].date()} ({n_val:,})"
+    )
+
+# %% [markdown]
+# ## The identity these runs register under
+#
+# `run_dl_cv` skips a configuration whose training hash is already complete, so whatever the
+# hash is built from is what a re-run is able to notice. Without an input lineage the hash
+# covers the family, the configuration, the label, the fold count, the epochs and the feature
+# *names* - and a stage-04 artifact regenerated under a different estimation schedule keeps
+# every one of its column names. The corrected values would then never reach a model, and the
+# notebook would report the previous run's numbers under them, which a clean registry hides
+# because everything retrains.
+#
+# `build_modeling_input_lineage` is the same payload `load_modeling_dataset` builds for the
+# sibling notebooks. It digests the three parquet files this one reads and the fold windows it
+# runs, so a changed artifact or a changed window is a changed identity.
+
+# %%
+INPUT_LINEAGE = build_modeling_input_lineage(
+    artifacts={
+        "financial": CASE_DIR / "features" / "financial.parquet",
+        "model_based": CASE_DIR / "features" / "model_based.parquet",
+        "label": CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet",
+    },
+    feature_names=feature_names,
+    splits=splits,
+    label_buffer=LABEL_BUFFER,
+    task_type="regression",
+    eval_label_col=None,
+    max_symbols=MAX_SYMBOLS,
+    symbols=None,
+)
+print(f"Input lineage fingerprint {INPUT_LINEAGE['fingerprint'][:12]} over")
+for name, record in INPUT_LINEAGE["artifacts"].items():
+    print(f"  {name}: {record['sha256'][:12]}, {record['size'] / 1e9:.2f} GB")
 
 # %% [markdown]
 # ## Run Direct Regression Models (LSTM, NLinear)
@@ -278,12 +326,8 @@ pytorch_result = run_dl_cv(
     # FORCE_RETRAIN False the pre-filter at :1765-1782 then finds the previous run complete and
     # skips it, and the notebook reports the old model's numbers under the new feature set. A
     # clean registry retrains and looks correct, which is why this is invisible locally.
-    #
-    # This still does not capture the input artifact digests the way the shared path does through
-    # input_data_spec; 12 reads the parquet files directly rather than through
-    # load_modeling_dataset, so its identity remains weaker than its siblings' until it moves onto
-    # that path.
     identity_params={"feature_names": feature_names},
+    input_data_spec=INPUT_LINEAGE,
     case_study=CASE_STUDY_ID,
     notebook=NOTEBOOK,
 )
@@ -363,12 +407,8 @@ darts_result = run_dl_cv(
     # FORCE_RETRAIN False the pre-filter at :1765-1782 then finds the previous run complete and
     # skips it, and the notebook reports the old model's numbers under the new feature set. A
     # clean registry retrains and looks correct, which is why this is invisible locally.
-    #
-    # This still does not capture the input artifact digests the way the shared path does through
-    # input_data_spec; 12 reads the parquet files directly rather than through
-    # load_modeling_dataset, so its identity remains weaker than its siblings' until it moves onto
-    # that path.
     identity_params={"feature_names": feature_names},
+    input_data_spec=INPUT_LINEAGE,
     case_study=CASE_STUDY_ID,
     notebook=NOTEBOOK,
     prediction_split=PREDICTION_SPLIT,
