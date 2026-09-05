@@ -617,7 +617,7 @@ def calculate_sharpe_stats(returns, periods_per_year=12):
 
     ci_lower = sharpe - 1.96 * se_sharpe
     ci_upper = sharpe + 1.96 * se_sharpe
-    p_value = 2 * stats.norm.sf(abs(sharpe_tstat))
+    p_value = 2 * (1 - stats.norm.cdf(abs(sharpe_tstat)))
     mean_stats = calculate_mean_return_tstat(returns, periods_per_year)
     rho1 = autocorrs[0] if autocorrs else 0.0
 
