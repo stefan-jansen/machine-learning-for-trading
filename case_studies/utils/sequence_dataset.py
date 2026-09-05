@@ -293,8 +293,12 @@ def _normalize_feature_arrays(
         feats -= means
         feats /= stds
         # Now that the arrays are on the training scale, 0.0 is the training
-        # mean, so this is the same imputation the linear and tabular families
-        # get from SimpleImputer(strategy="median") followed by StandardScaler.
+        # mean of the observed rows, so a row with no observation reads as
+        # average rather than as an extreme. The linear and tabular families
+        # reach the same place by a different route - SimpleImputer fills the
+        # training median and StandardScaler is then fitted on the filled
+        # data - so the normalized values differ; what is shared is that the
+        # fill is a central value of the feature rather than a raw zero.
         np.nan_to_num(feats, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
 
 
