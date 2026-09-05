@@ -110,7 +110,10 @@ warnings.filterwarnings("ignore")
 # What is *not* here is the estimation schedule. How much history each fitted model spends
 # before its first estimate, and how often it is refreshed, are part of what the feature
 # means rather than settings to trade runtime against, so they are read from `setup.yaml`
-# below alongside the feature windows.
+# below alongside the feature windows. `REFIT_EVERY_OVERRIDE` is the reduction lever for
+# that: zero here, meaning "use what `setup.yaml` declares", and a positive value replaces
+# both declared cadences for one run. It is named so nothing reading this file can mistake
+# a reduction for the definition.
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "cme_futures"
@@ -133,6 +136,11 @@ FFT_TARGET_PERIODS = [63, 126]
 # The share of false positives tolerated among the features section F declares
 # significant, after correcting for how many were tested at once.
 FDR_ALPHA = 0.05
+# 0 keeps both declared refit cadences. A positive value replaces them, which is how a
+# smoke run bounds the two walks without narrowing the universe: fewer estimates, the same
+# rows and the same columns. The burn-ins are never overridden - a shorter one would move
+# which sessions carry a value, and the coverage assertions below are about exactly that.
+REFIT_EVERY_OVERRIDE = 0
 
 # %% [markdown]
 # Three more settings come from `config/setup.yaml`, the file that also configures
@@ -168,6 +176,9 @@ ARIMA_REFIT_FREQ = int(MODEL_BASED["arima"]["refit_every"])
 HMM_BURNIN = int(MODEL_BASED["hmm"]["burnin"])
 HMM_REFIT_EVERY = int(MODEL_BASED["hmm"]["refit_every"])
 HMM_N_STATES = int(MODEL_BASED["hmm"]["n_states"])
+if REFIT_EVERY_OVERRIDE:
+    ARIMA_REFIT_FREQ = HMM_REFIT_EVERY = REFIT_EVERY_OVERRIDE
+    print(f"Reduced run: both refit cadences replaced with {REFIT_EVERY_OVERRIDE}")
 
 # Two sessions carry one clearing venue's settlement file and not the other's; `setup.yaml`
 # says which and why. They are dropped here so no series is differenced across a date on
