@@ -424,7 +424,22 @@ jobs:
         # stays a ~1-minute gate.
         run: |
           uv venv --python 3.14
-          uv pip install jupytext==1.19.3 pytest nbformat
+          # Pin every one of these to uv.lock. The list is a set of NAMES, and
+          # letting uv resolve their versions freely makes an external release
+          # decide what a required check measures. ml4t-diagnostic 0.1.4 shipped on
+          # 2026-09-05 with WalkForwardCV returning folds oldest-first;
+          # `"ml4t-diagnostic>=0.1.2"` picked it up on the next run and turned
+          # test-unit red on `main` and on every branch cut from it, with no commit
+          # in the repository having changed. The lock said 0.1.2 the whole time.
+          #
+          # Same derivation as envs/ml4t/Dockerfile: export the lock as a
+          # fully-pinned requirements file and hand it to uv as a constraint, so
+          # this stays a fast minimal venv and still cannot drift off what the
+          # repository declares.
+          uv export --frozen --extra live --extra dev --no-emit-project --no-hashes \
+            --format requirements-txt \
+            | grep -iE '^[a-z0-9._-]+==' > /tmp/locked-constraints.txt
+          uv pip install --constraint /tmp/locked-constraints.txt jupytext pytest nbformat
       - name: Notebook pairs open in JupyterLab (#372 regression gate)
         run: |
           source .venv/bin/activate
@@ -546,9 +561,25 @@ jobs:
         # inspection: the helper-level tests never reach the conversion and passed.
         run: |
           uv venv --python 3.14
-          uv pip install pytest pytest-timeout numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
+          # Pin every one of these to uv.lock. The list is a set of NAMES, and
+          # letting uv resolve their versions freely makes an external release
+          # decide what a required check measures. ml4t-diagnostic 0.1.4 shipped on
+          # 2026-09-05 with WalkForwardCV returning folds oldest-first;
+          # `"ml4t-diagnostic>=0.1.2"` picked it up on the next run and turned
+          # test-unit red on `main` and on every branch cut from it, with no commit
+          # in the repository having changed. The lock said 0.1.2 the whole time.
+          #
+          # Same derivation as envs/ml4t/Dockerfile: export the lock as a
+          # fully-pinned requirements file and hand it to uv as a constraint, so
+          # this stays a fast minimal venv and still cannot drift off what the
+          # repository declares.
+          uv export --frozen --extra live --extra dev --no-emit-project --no-hashes \
+            --format requirements-txt \
+            | grep -iE '^[a-z0-9._-]+==' > /tmp/locked-constraints.txt
+          uv pip install --constraint /tmp/locked-constraints.txt \
+            pytest pytest-timeout numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
             scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow nest-asyncio \
-            "ml4t-diagnostic>=0.1.2" jupytext==1.19.3 papermill==2.7.0 ml4t-backtest ml4t-data ml4t-engineer databento
+            ml4t-diagnostic jupytext papermill ml4t-backtest ml4t-data ml4t-engineer databento
       - name: Run download-logic unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -900,9 +931,25 @@ jobs:
           # (case_studies/utils/backtest_loaders.py:169 imports ml4t.backtest), and
           # without the package four of its tests raise rather than skip. Measured in a
           # venv holding exactly this list: 4 failed without it, 37 passed with it.
-          uv pip install pytest numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
+          # Pin every one of these to uv.lock. The list is a set of NAMES, and
+          # letting uv resolve their versions freely makes an external release
+          # decide what a required check measures. ml4t-diagnostic 0.1.4 shipped on
+          # 2026-09-05 with WalkForwardCV returning folds oldest-first;
+          # `"ml4t-diagnostic>=0.1.2"` picked it up on the next run and turned
+          # test-unit red on `main` and on every branch cut from it, with no commit
+          # in the repository having changed. The lock said 0.1.2 the whole time.
+          #
+          # Same derivation as envs/ml4t/Dockerfile: export the lock as a
+          # fully-pinned requirements file and hand it to uv as a constraint, so
+          # this stays a fast minimal venv and still cannot drift off what the
+          # repository declares.
+          uv export --frozen --extra live --extra dev --no-emit-project --no-hashes \
+            --format requirements-txt \
+            | grep -iE '^[a-z0-9._-]+==' > /tmp/locked-constraints.txt
+          uv pip install --constraint /tmp/locked-constraints.txt \
+            pytest numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
             scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow ml4t-backtest \
-            "ml4t-diagnostic>=0.1.2" jupytext==1.19.3
+            ml4t-diagnostic jupytext
       # The precondition is the load-bearing half, the same shape as the
       # data-root anchoring step above. Every test in this job skips politely
       # when the data is absent, so a checkout that silently produced an empty
