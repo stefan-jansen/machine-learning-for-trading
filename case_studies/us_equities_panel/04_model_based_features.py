@@ -891,9 +891,12 @@ print(
 # decline and one estimated a decade later put their lower-return centroid in different
 # places. What the panel shows is that the assignment nonetheless lands where a reader would
 # expect it to: nearly every session of 2008 and 2002 is in the lower state and fewer than a
-# tenth of 1995's are. `wass_dist_ratio` carries the same information without the comparability
-# problem - it is a distance, it is read against the fit that produced it, and reading it needs
-# no knowledge of which centroid won.
+# tenth of 1995's are. `wass_dist_ratio` does not have the comparability problem, because it
+# is a ratio of distances read against the fit that produced it. It answers a different
+# question, though, and the difference matters: it says how firmly the window matches
+# whichever centroid is nearest and discards which one that was, so a window sitting squarely
+# in the calm state and one sitting squarely in the stressed state both drive it toward zero.
+# A model that needs the direction still has to read the assignment.
 #
 # The assignment is aggregated to a monthly share rather than drawn as a daily strip. Sixteen
 # years of daily flags give each session a fraction of a pixel, isolated days vanish, and the
