@@ -295,18 +295,6 @@ if temporal_oos.select(JOIN_COLS).n_unique() != len(temporal_oos):
     msg = "model_based.parquet is not one row per (timestamp, symbol)"
     raise ValueError(msg)
 
-# A security that never cleared its burn-in carries no model-based value. Those rows are
-# dropped and counted rather than raised on: keeping them would score the financial features
-# on rows where the model-based ones do not exist, and this section compares the two.
-_before = len(temporal_oos)
-temporal_oos = temporal_oos.drop_nulls(subset=temporal_cols)
-_dropped = _before - len(temporal_oos)
-if _dropped:
-    print(
-        f"Dropped {_dropped:,} of {_before:,} rows ({_dropped / _before:.2%}) whose security had "
-        "not cleared its GARCH burn-in, so no model-based value exists for them."
-    )
-
 # The window the GARCH columns can be screened on. Outside it they are absent by
 # construction rather than missing, and section 1 divides by this rather than by
 # the whole development panel.
@@ -321,7 +309,7 @@ for f in producer_folds:
         f"kept {f['val_start']} to {f['val_end']}"
     )
 print(
-    f"Model-based rows: {len(temporal):,} across all folds -> {len(temporal_oos):,} taken "
+    f"Model-based rows: {len(temporal):,} in the artifact -> {len(temporal_oos):,} taken "
     f"from validation windows only ({TEMPORAL_WINDOW[0]} to {TEMPORAL_WINDOW[1]})"
 )
 
@@ -333,6 +321,23 @@ if len(eval_panel) != len(features):
     msg = f"Model-based join changed the panel row count: {len(features):,} -> {len(eval_panel):,}"
     raise ValueError(msg)
 eval_panel = eval_panel.join(label_df, on=JOIN_COLS, how="inner")
+
+# Inside the screening window a null GARCH column means the security had not cleared its
+# burn-in, not that the schedule declined to emit there. Those rows are dropped, and the drop
+# has to happen HERE rather than on `temporal_oos`: the join above is a left join, so removing
+# them from the right side only puts them back as nulls. Dropping after the join is what
+# actually gives section 1 one sample for both feature families - which is the comparison it
+# exists to make. Outside the window the columns are absent by construction and the rows stay.
+_in_window = (pl.col(DATE_COL) >= TEMPORAL_WINDOW[0]) & (pl.col(DATE_COL) <= TEMPORAL_WINDOW[1])
+_window_rows = eval_panel.filter(_in_window).height
+eval_panel = eval_panel.filter(~_in_window | pl.all_horizontal(pl.col(temporal_cols).is_not_null()))
+_dropped = _window_rows - eval_panel.filter(_in_window).height
+if _dropped:
+    print(
+        f"Dropped {_dropped:,} of {_window_rows:,} rows in the screening window "
+        f"({_dropped / _window_rows:.2%}) whose security had not cleared its GARCH burn-in, so "
+        "both feature families are now measured on the same rows."
+    )
 
 all_feature_cols = financial_cols + temporal_cols
 
