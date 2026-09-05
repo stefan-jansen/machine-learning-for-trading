@@ -988,3 +988,54 @@ def test_a_rejected_block_leaves_a_gap_rather_than_a_bridged_move() -> None:
         "a rejected block did not leave a hole in the emitted series, so a plain diff over "
         "emitted rows could not bridge one and the guard in section D would be unnecessary"
     )
+
+    # And the exclusion: the section-D classifier must drop the move that spans the hole.
+    classify = _load_move_classifier()
+    panel = pl.DataFrame(
+        {
+            "timestamp": [d.date() for d in emitted.index],
+            "symbol": ["AAA"] * len(emitted),
+            "sec_id": [1] * len(emitted),
+            "garch_cond_vol": emitted.to_numpy(),
+        }
+    )
+    session_numbers = pl.DataFrame(
+        {
+            "timestamp": [d.date() for d in returns.index],
+            "symbol": ["AAA"] * len(returns),
+            "sec_id": [1] * len(returns),
+            "session_no": list(range(1, len(returns) + 1)),
+        }
+    )
+    no_refits = pl.DataFrame(
+        schema={
+            "symbol": pl.String,
+            "sec_id": pl.Int64,
+            "timestamp": pl.Date,
+            "is_refit_session": pl.Boolean,
+        }
+    )
+
+    moves = classify(panel, session_numbers, no_refits)
+
+    # One row per emitted session bar the first, minus the ones whose predecessor is missing.
+    bridged = int((np.diff(positions) > 1).sum())
+    assert moves.height == len(emitted) - 1 - bridged, (
+        "the classifier kept a move whose predecessor is not the previous session"
+    )
+    assert (moves["session_gap"] == 1).all()
+
+
+def _load_move_classifier():
+    tree = ast.parse(NOTEBOOK_SOURCE.read_text())
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "one_session_moves"
+    )
+    namespace = {"pl": pl}
+    exec(
+        compile(ast.Module(body=[function], type_ignores=[]), str(NOTEBOOK_SOURCE), "exec"),
+        namespace,
+    )
+    return namespace["one_session_moves"]

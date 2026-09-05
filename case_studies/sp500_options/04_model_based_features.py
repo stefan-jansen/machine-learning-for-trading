@@ -1605,6 +1605,8 @@ _refit_marks = (
     )
     .unique()
 )
+
+
 # A move is only a one-session move if the two rows ARE consecutive sessions for that
 # segment. `garch_df` holds only emitted rows, so a rejected block leaves a gap of up to
 # `refit_every` sessions, and a plain `diff()` would bridge it: the first value after the gap
@@ -1612,27 +1614,37 @@ _refit_marks = (
 # month of accumulated movement into the numerator. The segment's own session number comes
 # from the return panel the walk was scheduled on, so the check is against the sessions the
 # segment has rather than against the calendar.
+def one_session_moves(
+    panel: pl.DataFrame,
+    session_numbers: pl.DataFrame,
+    refit_marks: pl.DataFrame,
+) -> pl.DataFrame:
+    """Absolute one-session changes in the emitted volatility, labelled by refit or not.
+
+    Only rows whose predecessor is the segment's immediately preceding session survive, which
+    is what keeps a rejected block's hole out of the comparison.
+    """
+    return (
+        panel.join(session_numbers, on=["timestamp", "symbol", "sec_id"], how="left")
+        .sort(["symbol", "sec_id", "timestamp"])
+        .with_columns(
+            pl.col("garch_cond_vol").diff().abs().over(["symbol", "sec_id"]).alias("move"),
+            pl.col("session_no").diff().over(["symbol", "sec_id"]).alias("session_gap"),
+        )
+        .join(refit_marks, on=["symbol", "sec_id", "timestamp"], how="left")
+        .with_columns(pl.col("is_refit_session").fill_null(False))
+        .drop_nulls("move")
+        .filter(pl.col("session_gap") == 1)
+    )
+
+
 _session_numbers = returns_df.select(
     "timestamp",
     "symbol",
     "sec_id",
     pl.col("timestamp").rank("ordinal").over(["symbol", "sec_id"]).alias("session_no"),
 )
-_ordered = (
-    before_holdout(garch_df)
-    .join(_session_numbers, on=["timestamp", "symbol", "sec_id"], how="left")
-    .sort(["symbol", "sec_id", "timestamp"])
-)
-_moves = (
-    _ordered.with_columns(
-        pl.col("garch_cond_vol").diff().abs().over(["symbol", "sec_id"]).alias("move"),
-        pl.col("session_no").diff().over(["symbol", "sec_id"]).alias("session_gap"),
-    )
-    .join(_refit_marks, on=["symbol", "sec_id", "timestamp"], how="left")
-    .with_columns(pl.col("is_refit_session").fill_null(False))
-    .drop_nulls("move")
-    .filter(pl.col("session_gap") == 1)
-)
+_moves = one_session_moves(before_holdout(garch_df), _session_numbers, _refit_marks)
 # About one session in twenty-one carries new parameters, so a ratio computed over a set that
 # had swallowed the other twenty would compare a population against itself and report about
 # 1.0 whatever the refits did. Assert the split rather than trusting the construction above.
