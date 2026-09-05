@@ -2216,6 +2216,28 @@ case_studies/nasdaq100_microstructure/16_risk_management:
   timeout: 600
 case_studies/nasdaq100_microstructure/17_costs:
   timeout: 600
+case_studies/nasdaq100_microstructure/18_holdout_predictions:
+  # Canonical, not preview. `reconstruct_locked_model_request` refuses any spec whose
+  # execution_tier is not canonical, and the harness injects EXECUTION_TIER="preview" for any
+  # notebook that declares it - so the default routing fails this notebook on its first fit.
+  # 19 and 20 follow it, because a holdout resolved in one tier and read in another is two
+  # registries. Kept although all three are skipped, so that whenever the fixture can support
+  # them they run as one tier rather than being wired up again from scratch.
+  research_preview: false
+  # Refits the selected configuration over the holdout fold - one training run, no sweep. The
+  # budget is one fit over the full minute panel before 2021-07-01, which is the expensive part
+  # here rather than the number of configurations.
+  timeout: 900
+  skip: true
+  skip_reason: "The seeded fixture carries no resolved training specification, so the holdout fold cannot be derived. `tests/fixtures/seed_results.py:578` writes each training run's spec as {family, config_name, label} with no `computation` block, and `build_holdout_training_spec` re-keys the validation CV onto the holdout fold by reading `computation.cv` - so it refuses with 'holdout CV derivation requires a current resolved training specification'. That refusal is correct and the notebook is correct: a holdout refit is defined by the CV interval it covers, and a spec that records none cannot produce one. Identical to the etfs 18/19 skip, because the limitation is the shared fixture rather than anything about this case study. Remove this skip when the fixture seeds a resolved computation, not before - a fabricated CV block would let the job report a holdout derived from fold boundaries no model was ever fitted on."
+case_studies/nasdaq100_microstructure/19_holdout_backtest:
+  research_preview: false
+  # One backtest over the six-month holdout window. The engine runs on the minute grid and
+  # aggregates to daily before it computes anything, so the budget tracks the window's bars
+  # rather than its sessions.
+  timeout: 600
+  skip: true
+  skip_reason: "Reads the holdout prediction set 18_holdout_predictions registers, and derives which one through the same `build_holdout_training_spec` call - so it refuses for the same reason and one step earlier than 18 does. The seeded fixture carries no resolved training specification, so the holdout fold cannot be derived. Remove this skip when the fixture seeds a resolved computation, not before."
 case_studies/nasdaq100_microstructure/20_strategy_analysis:
   skip: true
   skip_reason: "Analyzes the cost-feasible ensemble carrier, which is registered out-of-band (session_6/7 drivers) and is not reproduced by the in-notebook test sweep, so an isolated test registry has no carrier rows. Runs clean in production."

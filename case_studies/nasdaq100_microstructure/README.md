@@ -35,6 +35,8 @@ This case study uses AlgoSeek TAQ-derived 15-minute bars for 114 NASDAQ-100 cons
 | Portfolio | [`15_portfolio_management`](15_portfolio_management.ipynb) | Ch17 | Allocation methods under dollar-neutral intraday constraints | One backtest run per allocation method, same artifact layout |
 | Risk | [`16_risk_management`](16_risk_management.ipynb) | Ch19 | Intraday risk controls and position-level exit rules | One backtest run per overlay variant, same artifact layout |
 | Costs | [`17_costs`](17_costs.ipynb) | Ch18 | Flagship cost analysis: spread, impact, and commission decomposition, over the leading run at any pre-cost stage | One backtest run per cost level, same artifact layout |
+| Holdout Predictions | [`18_holdout_predictions`](18_holdout_predictions.ipynb) | Ch20 | Refits the selected configuration on history ending a label buffer before 2021-07-01 and writes its predictions over the holdout window | One training run, one prediction set at `split='holdout'` |
+| Holdout Backtest | [`19_holdout_backtest`](19_holdout_backtest.ipynb) | Ch20 | Trades those predictions once, with the sizing and overlay the case study settled on | One backtest run at `stage='holdout'` |
 | Strategy Analysis | [`20_strategy_analysis`](20_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with IC, Sharpe, and cost analysis | `results/strategy_assessment.json`, `20_strategy_synthesis/output/nasdaq100_microstructure/nasdaq100_microstructure_tearsheet.html` |
 
 ## Key Results
