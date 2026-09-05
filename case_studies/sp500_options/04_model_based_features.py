@@ -382,7 +382,10 @@ print(f"  Burn-in, no value on any segment: {GARCH_BURNIN}")
 print(f"  Last session any parameter is fitted on: {_calendar[FREEZE_AFTER - 1]}")
 print(f"  Refits before the holdout: {sum(1 for f, _ in _blocks if f <= (FREEZE_AFTER or 0))}")
 print(f"  Sessions emitted: {len(_steps):,}")
-print(f"  Sessions on which the parameters change: {len(_refit_sessions):,}")
+# On the calendar. A segment refits on its OWN observations, so a segment that lists later
+# than the panel starts reaches its first refit on a different date than this; the figure
+# above draws the calendar schedule, and section D classifies per segment.
+print(f"  Refits on the full calendar: {len(_refit_sessions):,}")
 
 # %%
 fig, ax = plt.subplots(figsize=(11, 3.6))
@@ -681,9 +684,16 @@ def garch_walk_segment(
             # Recorded before it is re-raised, so a block whose optimizer errored stays in
             # the denominator instead of disappearing from it. `walk_forward_feature` will
             # leave the block null and refit at the next boundary.
-            diagnostics.append(failed_garch_diagnostic(train_returns, False, exc))
+            failure = failed_garch_diagnostic(train_returns, False, exc)
+            failure["emit_start"] = ret_series.index[len(train)]
+            diagnostics.append(failure)
             raise
         record = summarize_garch_fit(result, train_returns, retried)
+        # The first session this fit speaks for. The walk schedules on the segment's own
+        # observations, so it is not `calendar[fit_end]`: a segment that starts later, or
+        # that is missing sessions the calendar has, refits on different dates than its
+        # neighbours. Section D classifies moves by this, per segment, for that reason.
+        record["emit_start"] = ret_series.index[len(train)]
         if not record["converged"]:
             diagnostics.append(record)
             raise GarchBlockRejected(f"optimizer flag {record['convergence_flag']}")
@@ -1508,7 +1518,9 @@ print(
 # which is the question that matters and is not answered by the second.
 
 # %%
-garch_fits = pl.DataFrame(garch_diagnostics).with_columns(pl.col("fit_end").cast(pl.Date))
+garch_fits = pl.DataFrame(garch_diagnostics).with_columns(
+    pl.col("fit_end").cast(pl.Date), pl.col("emit_start").cast(pl.Date)
+)
 fit_summary = (
     garch_fits.group_by(pl.col("fit_end").dt.year().alias("year"))
     .agg(
@@ -1578,14 +1590,33 @@ show_with_alt(
 # contains: a reader of this column sees exactly this jump, on this session.
 
 # %%
+# Per segment, not per calendar session. `garch_walk_segment` schedules on each segment's own
+# observations, so a segment that lists later or is missing sessions refits on different dates
+# than its neighbours; classifying by a shared calendar would call ordinary moves refits and
+# refits ordinary. Only converged fits are marked, because a rejected block emits nothing and
+# so contributes no move to classify.
+_refit_marks = (
+    garch_fits.filter(pl.col("converged"))
+    .select(
+        "symbol",
+        "sec_id",
+        pl.col("emit_start").cast(pl.Date).alias("timestamp"),
+        pl.lit(True).alias("is_refit_session"),
+    )
+    .unique()
+)
 _ordered = before_holdout(garch_df).sort(["symbol", "sec_id", "timestamp"])
-_moves = _ordered.with_columns(
-    pl.col("garch_cond_vol").diff().abs().over(["symbol", "sec_id"]).alias("move"),
-    pl.col("timestamp").is_in(_refit_sessions).alias("is_refit_session"),
-).drop_nulls("move")
-# One refit session in twenty-one, so a ratio computed over a set that had swallowed the
-# other twenty would compare a population against itself and report about 1.0 whatever the
-# refits did. Assert the split rather than trusting the construction above.
+_moves = (
+    _ordered.with_columns(
+        pl.col("garch_cond_vol").diff().abs().over(["symbol", "sec_id"]).alias("move")
+    )
+    .join(_refit_marks, on=["symbol", "sec_id", "timestamp"], how="left")
+    .with_columns(pl.col("is_refit_session").fill_null(False))
+    .drop_nulls("move")
+)
+# About one session in twenty-one carries new parameters, so a ratio computed over a set that
+# had swallowed the other twenty would compare a population against itself and report about
+# 1.0 whatever the refits did. Assert the split rather than trusting the construction above.
 assert 0 < _moves["is_refit_session"].sum() < _moves.height, (
     "the refit sessions are not a proper subset of the sessions carrying a value"
 )

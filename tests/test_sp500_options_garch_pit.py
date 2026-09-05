@@ -784,3 +784,59 @@ def test_count_before_is_the_number_of_sessions_not_the_last_index() -> None:
     # estimate", and one after everything leaves the walk unfrozen.
     assert namespace["count_before"](index, pd.Timestamp("2019-01-01")) == 0
     assert namespace["count_before"](index, pd.Timestamp("2021-01-01")) == 10
+
+
+def test_a_later_starting_segment_refits_on_its_own_observations() -> None:
+    """The walk schedules on the segment's returns, not on the panel's calendar.
+
+    Section D classifies a move as a refit jump or an ordinary one, and the two populations
+    it compares are only meaningful if the marks land on the right dates. A segment that
+    lists after the panel starts, or that is missing sessions its neighbours have, reaches
+    its first refit on a different date than they do - so a shared calendar would mark
+    ordinary moves as refits and miss the real ones, while any subset check still passed.
+    """
+    marks = []
+
+    class FakeResult:
+        convergence_flag = 0
+        params = pd.Series(
+            {"mu": 0.0, "omega": 0.05, "alpha[1]": 0.05, "gamma[1]": 0.05, "beta[1]": 0.85}
+        )
+        loglikelihood = -100.0
+        scale = 1.0
+
+        def __init__(self):
+            self.model = self
+            self.volatility = _FakeVolatility()
+
+    class FakeModel:
+        def __init__(self, train, **kwargs):
+            pass
+
+        def fit(self, **kwargs):
+            return FakeResult()
+
+    namespace = _load_garch_walk({"arch_model": FakeModel})
+    walk = namespace["garch_walk_segment"]
+
+    early = pd.Series(
+        np.linspace(-1, 1, 320), index=pd.date_range("2018-01-01", periods=320, freq="D")
+    )
+    # Same length, same schedule in observation terms, but it starts a hundred days later.
+    late = pd.Series(
+        np.linspace(-1, 1, 320), index=pd.date_range("2018-04-11", periods=320, freq="D")
+    )
+
+    for series in (early, late):
+        _, diagnostics = walk(series, burnin=252, refit_every=21, freeze_after=None)
+        marks.append([record["emit_start"] for record in diagnostics])
+
+    assert marks[0] and marks[1]
+    assert marks[0][0] == early.index[252]
+    assert marks[1][0] == late.index[252]
+    assert marks[0][0] != marks[1][0], (
+        "two segments refit on the same date despite different starts"
+    )
+    # Every mark is a session the segment actually has.
+    assert set(marks[0]).issubset(set(early.index))
+    assert set(marks[1]).issubset(set(late.index))
