@@ -1318,6 +1318,14 @@ temporal = (
     .join(hmm_broadcast, on=["timestamp", "symbol"], how="left")
     .sort(["symbol", "timestamp"])
     .drop_nulls(subset=["garch_cond_vol", "garch_asymmetry"])
+    # The walk runs over each perpetual's whole return history, which can extend past the
+    # end of the holdout window; the fold-keyed design was bounded by the fold windows and
+    # never had to say so. A settlement past `holdout_end` belongs to no training,
+    # validation or holdout window, so no stage reads it. Emitting it anyway would put rows
+    # in the artifact that describe a period the case study does not evaluate, and would
+    # make the coverage guard below unable to distinguish that from an estimate leaking
+    # into a period it should not describe.
+    .filter(pl.col("timestamp") <= holdout_end)
 )
 temporal_feature_cols = [c for c in temporal.columns if c not in ("timestamp", "symbol")]
 
@@ -1456,7 +1464,10 @@ print(f"Wrote features/model_based.parquet, {record['n_rows']:,} rows, digest {r
 
 # %%
 assembled = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, symbols=symbols)
-assert set(assembled.temporal_feature_names) == EXPECTED_TEMPORAL
+assert set(assembled.temporal_feature_names) == EXPECTED_TEMPORAL, (
+    f"the loader reports {sorted(assembled.temporal_feature_names)}, not the five this "
+    "stage contracts to produce"
+)
 # The artifact carries no fold column, so the loader takes its single-feature-set path and
 # joins these columns straight onto the panel. `temporal_by_fold` is therefore absent, and
 # asserting that is the check: a non-None value here would mean a fold column survived the
@@ -1464,8 +1475,14 @@ assert set(assembled.temporal_feature_names) == EXPECTED_TEMPORAL
 assert assembled.temporal_by_fold is None, (
     "the loader found a fold-keyed temporal artifact, so the fold column was not dropped"
 )
-assert assembled.label_col == label_col
-assert len(assembled.feature_names) == len(financial_feature_cols) + len(EXPECTED_TEMPORAL)
+assert assembled.label_col == label_col, (
+    f"the loader assembled label {assembled.label_col}, not {label_col}"
+)
+assert len(assembled.feature_names) == len(financial_feature_cols) + len(EXPECTED_TEMPORAL), (
+    f"the loader assembled {len(assembled.feature_names)} features, not the "
+    f"{len(financial_feature_cols)} price and funding features plus "
+    f"{len(EXPECTED_TEMPORAL)} model-based ones"
+)
 
 reassembled_frame = assembled.dataset.select(
     ["timestamp", "symbol", *financial_feature_cols, label_col]
