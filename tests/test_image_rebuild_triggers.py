@@ -19,11 +19,18 @@ builds run on a push to `main`. That list is the thing that goes stale next: a
 Dockerfile that starts reading a new dependency manifest, with nothing added to
 the filter, reintroduces the same outage in a form no one is looking for.
 
-So this derives the answer from the Dockerfiles rather than restating the
-workflow. Every path a Dockerfile copies out of the build context to decide what
-gets installed - a lock or a dependency manifest - must appear in that image's
-filter, along with the Dockerfile itself. It fails on the edit that adds the
-manifest, not on the release that discovers it.
+Rebuilding after merge is only half of it, and on its own it is the wrong half.
+A pull request that changes the lock cannot pass the guard either: the published
+image can only be built from a lock that has landed, and the lock cannot land
+without the check that needs the rebuild. So `test.yml` builds a candidate image
+from the commit under test whenever those same inputs move, and `test-unit-image`
+measures in that instead of in `latest`.
+
+Both halves read the same list, and this derives it from the Dockerfiles rather
+than restating either workflow. Every path a Dockerfile copies out of the build
+context to decide what gets installed - a lock or a dependency manifest - must
+appear in that image's filter, along with the Dockerfile itself. It fails on the
+edit that adds the manifest, not on the release that discovers it.
 """
 
 from __future__ import annotations
@@ -37,6 +44,7 @@ yaml = pytest.importorskip("yaml")
 
 REPO_ROOT = Path(__file__).parent.parent
 WORKFLOW = REPO_ROOT / ".github/workflows/docker-publish.yml"
+TEST_WORKFLOW = REPO_ROOT / ".github/workflows/test.yml"
 
 # Filter name in the `changes` job -> the Dockerfile it builds. The names are the
 # workflow's own outputs, so a renamed job output fails here rather than silently
@@ -74,8 +82,8 @@ def _context_dependency_paths(dockerfile: Path) -> set[str]:
     return found
 
 
-def _filters() -> dict[str, list[str]]:
-    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+def _filters(workflow_path: Path = WORKFLOW) -> dict[str, list[str]]:
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
     step = next(
         s
         for s in workflow["jobs"]["changes"]["steps"]
@@ -142,4 +150,65 @@ def test_the_tag_trigger_is_not_path_filtered():
         assert "github.ref_type == 'tag'" in str(spec.get("if", "")), (
             f"{job} does not exempt a tag push from the `changes` filter, so a "
             "release tag would build nothing"
+        )
+
+
+def test_a_lock_change_measures_test_unit_image_in_a_candidate():
+    """The pre-merge half, and the reason a lock bump is mergeable at all.
+
+    `test-unit-image` is required and refuses to measure in an image that does not
+    match `uv.lock`. Rebuilding after merge does not help a pull request that
+    changes the lock: the published image can only be built from a lock that has
+    landed, and the lock cannot land without the check that needs the rebuild. So
+    the same inputs that stale `ml4t/ml4t:latest` must also make this workflow
+    build a candidate from the commit under test.
+    """
+    required = _context_dependency_paths(REPO_ROOT / IMAGES["ml4t"]) | {IMAGES["ml4t"].as_posix()}
+    declared = set(_filters(TEST_WORKFLOW).get("image-inputs", []))
+    missing = sorted(required - declared)
+
+    assert not missing, (
+        f"a change to {missing} moves what the image installs, but test.yml would still "
+        "measure test-unit-image in the published `latest`. Add "
+        f"{'them' if len(missing) > 1 else 'it'} to the `image-inputs` filter, or that "
+        "pull request cannot pass a required check and cannot merge."
+    )
+
+
+def test_the_candidate_build_never_publishes():
+    """A pull request's image must not be able to move a published tag.
+
+    The candidate exists to be measured, not to ship: anyone can open a pull
+    request, and a build step that pushed would let one replace the image every
+    other job in the repository trusts.
+    """
+    workflow = yaml.safe_load(TEST_WORKFLOW.read_text(encoding="utf-8"))
+    build = workflow["jobs"]["build-image-candidate"]
+
+    for step in build["steps"]:
+        with_ = step.get("with") or {}
+        assert not with_.get("push"), f"{step.get('name')} pushes the candidate image"
+        assert "push=true" not in str(with_.get("outputs", "")), (
+            f"{step.get('name')} pushes the candidate image by digest"
+        )
+        assert not str(step.get("uses", "")).startswith("docker/login-action"), (
+            "the candidate build authenticates to a registry, so it can publish"
+        )
+
+
+def test_a_failed_candidate_does_not_fall_back_to_latest():
+    """The failure mode that would make the whole thing decorative.
+
+    `test-unit-image` runs under `always()` so a skipped candidate still lets it
+    measure in `latest`, which is correct for the commits that change nothing. A
+    candidate that failed is different: falling through to `latest` there would
+    green a lock bump against the environment it is replacing.
+    """
+    workflow = yaml.safe_load(TEST_WORKFLOW.read_text(encoding="utf-8"))
+    condition = str(workflow["jobs"]["test-unit-image"]["if"])
+
+    for result in ("failure", "cancelled"):
+        assert f"needs.build-image-candidate.result != '{result}'" in condition, (
+            f"test-unit-image runs after a {result} candidate build, and would measure "
+            "the lock bump in the image it is meant to replace"
         )
