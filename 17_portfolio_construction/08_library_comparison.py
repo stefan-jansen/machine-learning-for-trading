@@ -416,7 +416,9 @@ def common_empirical_prior() -> EmpiricalPrior:
 
 # %% [markdown]
 # The three libraries disagree about units: PyPortfolioOpt expects annualized moments, while
-# Riskfolio-Lib and skfolio take the daily observations and annualize internally. Estimating once
+# Riskfolio-Lib and skfolio are given the daily moments and a daily hurdle and optimize in daily
+# units - the annualization of frontier statistics and evaluation metrics is done separately below,
+# by this notebook, not inside them. Estimating once
 # in daily units and converting at each boundary is what makes the comparison one problem rather
 # than three - otherwise a difference in results could be a difference in what was estimated.
 
@@ -991,7 +993,7 @@ skfolio_summary
 # but with very different practical behavior.
 
 # %% [markdown]
-# ## Part 4: The thirteen allocations on the test window
+# ## Part 4: The fourteen allocations and the equal-weight benchmark on the test window
 #
 # Every allocation above was fitted on the training panel and is now frozen. Scoring them all
 # on the same later returns is what separates a difference in objective from a difference in
@@ -1202,7 +1204,7 @@ print(f"  Vectorized MaxDD={vec_stats.max_drawdown:.2%}, Engine MaxDD={eng_stats
 # ### Growth paths of the comparable implementations
 #
 # The growth chart focuses on the comparable Max-Sharpe implementations and an equal-weight
-# benchmark. Showing four lines preserves the cross-library comparison without a thirteen-line
+# benchmark. Showing four lines preserves the cross-library comparison without a fifteen-line
 # legend obscuring the evidence.
 
 # %%
@@ -1243,7 +1245,7 @@ fig.show()
 
 # %% [markdown]
 # The risk-return map retains every configuration but uses color only for library identity.
-# Hover labels carry the optimizer name, avoiding a thirteen-color legend.
+# Hover labels carry the optimizer name, avoiding a fifteen-color legend.
 
 # %%
 eval_pd = eval_df.to_pandas()
@@ -1554,14 +1556,18 @@ print(
 )
 
 # %% [markdown] tags=["results"]
-# The first pair is the one the notebook is built to produce. Two libraries given the same
-# moments, the same hurdle and the same long-only budget constraint land on the same test Sharpe
-# ratio to six decimal places, so the API is not the method: where two of these libraries differ
-# on a problem, it is because a default differs, not because the mathematics does.
+# The first pair is the one the notebook is built to produce. Two libraries given the same moments,
+# the same hurdle and the same long-only budget constraint land within 0.000011 of each other on the
+# test Sharpe ratio - -0.076186 against -0.076197, printed three lines above - which is agreement to
+# solver tolerance rather than to the digit. That is the point: the API is not the method, and where
+# two of these libraries differ materially on a problem, it is because a default differs, not because
+# the mathematics does.
 #
 # The other three are about what the comparison leaves out. Routing one allocation through an
-# execution engine moves its Sharpe ratio, and the move is entirely the declared commission and
-# slippage on the same bars. The turnover penalty cuts trading distance, and the L2 penalty
+# execution engine moves its Sharpe ratio, and the move is execution timing, fills and costs
+# together: the engine fills on the next bar, so matching the scored dates does not make its
+# exposures identical to the vectorized calculation. Isolating the declared commission and slippage
+# would take two otherwise identical engine runs, one at zero cost. The turnover penalty cuts trading distance, and the L2 penalty
 # widens the number of positions held - both are objective terms, so both are choices a reader
 # makes rather than properties of a library.
 #
@@ -1578,7 +1584,7 @@ print(
 #    regularization change the answer, and a library that exposes them makes an explicit choice
 #    out of what would otherwise be an implicit one.
 # 4. **Concentration needs a number.** The Herfindahl index turns "this looks concentrated" into
-#    something comparable across thirteen allocations and against an equal-weight reference.
+#    something comparable across fourteen allocations and against an equal-weight reference.
 # 5. **A ranking on one test window is a description of that window.** Every allocation here is
 #    frozen and scored once; nothing was re-tuned against the result, and nothing here estimates
 #    how the ordering would change on a different split.
@@ -1586,13 +1592,15 @@ print(
 # ### Known limitations
 #
 # - One training window, one test window, one fixed universe assembled from funds that exist
-#   today. A different split date would refit all thirteen allocations.
+#   today. A different split date would refit all fourteen allocations.
 # - The library versions are the ones pinned in the `ml4t` image. Breadth and defaults change
 #   between releases, and the workflow comparison is the part of this that ages best.
-# - Only one of the thirteen allocations is put through the execution engine. The others are
+# - Only one of the fourteen allocations is put through the execution engine. The others are
 #   compared gross of costs, so the table ranks paper portfolios.
 # - The walk-forward cross-validation runs inside the training window as a stability
-#   demonstration. It is not a second test, and its folds are not held out from anything.
+#   demonstration. Each fold's validation observations are held out from that fold's own fit, but
+#   they are not an additional independent test set: every one of them sits inside the training
+#   window, and the test window below was never touched by it.
 #
 # **Next**: [`09_allocator_comparison`](09_allocator_comparison.ipynb) extends the comparison
 # with explicit estimation-risk controls.

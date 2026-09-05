@@ -119,9 +119,10 @@ set_global_seeds(SEED)
 # %% [markdown]
 # ## 1. Data Acquisition
 #
-# Eleven exchange-traded funds, one per broad exposure: US large, mid and small caps, developed
-# and emerging markets outside the US, aggregate and long-dated Treasuries, high-yield credit,
-# gold, property and commodities. Each is already a diversified basket, so allocating across them
+# Eleven exchange-traded funds, one per broad exposure, as `ETF_UNIVERSE` below declares them: the
+# S&P 500, the Nasdaq-100 and the Russell 2000 in US equity; developed and emerging markets outside
+# the US; the US aggregate bond index, long-dated Treasuries and high-yield corporates in fixed
+# income; and gold, property and commodities. Each is already a diversified basket, so allocating across them
 # is an asset-allocation decision and the estimation problem shows up without the separate problem
 # of picking individual securities. The narrower universe is deliberate: eleven assets need 55
 # covariances estimated where the previous notebook's thirty need 435.
@@ -824,12 +825,15 @@ fig.show()
 # %% [markdown]
 # ## 9. Risk Contribution Analysis
 #
-# An asset's **risk contribution** is its weight times its marginal effect on portfolio variance,
-# divided by the total: the share of the portfolio's variance that asset is responsible for. Risk
-# parity is defined by making those shares equal, so the chart below is that definition evaluated.
-# The other allocations carry no such constraint, and where their capital concentrates their risk
-# concentrates further - variance is quadratic in the weights, so doubling a weight roughly
-# quadruples what it contributes.
+# An asset's **risk contribution** is $w_i(\Sigma w)_i / (w^\top \Sigma w)$: its weight times its
+# covariance with the portfolio, over portfolio variance. Written that way the shares sum to one,
+# which is what makes them readable as shares. The looser phrasing - weight times the derivative of
+# variance, over variance - does not, because that derivative carries a factor of two and the shares
+# would sum to two. Risk parity is defined by making these shares equal, so the chart below is that
+# definition evaluated. The other allocations carry no such constraint, and where their capital
+# concentrates their risk tends to concentrate further. How much further is not a fixed multiple:
+# raising one weight changes that asset's covariance with the portfolio and the portfolio's total
+# variance at the same time, and the two move the share in opposite directions.
 
 
 # %%

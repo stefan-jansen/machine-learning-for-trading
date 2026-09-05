@@ -880,8 +880,12 @@ _ = fig.add_scatter(
 )
 
 # %% [markdown]
-# The three heuristics estimate less than the two optimized solutions, so they cannot land on
-# the frontier by construction. How far inside it they fall is the price of not holding a view.
+# The three heuristics estimate less than the two optimized solutions, and none of them targets
+# mean-variance efficiency, so nothing about their construction places them on the frontier. That
+# is weaker than saying they cannot reach it: under estimates where the assets look alike - equal
+# expected returns and a covariance proportional to the identity - equal weight, inverse volatility
+# and equal risk contribution all coincide with minimum variance and sit on it exactly. What the
+# distance below shows is what these estimates imply here, not a property that holds everywhere.
 
 # %%
 # Portfolio markers
@@ -1506,10 +1510,16 @@ fig.show()
 # five sets of weights fixed on data through the training cut-off and scored on the years after it,
 # with no allocator chosen from the test result.
 #
-# Read the two together. The gap between where max-Sharpe sits on the in-sample frontier and where
-# it lands in the test table is the estimation error the notebook exists to show, and the position
-# counts printed above it say what produced that gap: the optimizer holds a handful of the thirty
-# funds, and the three heuristics that estimate no expected returns hold all of them.
+# Read the two as separate analyses, not as two measurements of one portfolio. They do not share a
+# set of weights: the frontier's portfolios are estimated on every observation, and the test table's
+# are fixed at the training cut-off, so differencing them compares one allocation with another
+# rather than showing what a single frozen allocation lost out of sample. Estimation error for a
+# frozen portfolio is the gap between what the training estimates predicted for the training-derived
+# weights and what those same weights went on to realize - a comparison neither table makes here.
+# The position counts printed above describe the full-sample portfolios for the same reason, so they
+# characterize how concentrated each method is under these estimates and do not establish what
+# caused the test result: the optimizer holds a handful of the thirty funds, and the three
+# heuristics that estimate no expected returns hold all of them.
 #
 # The execution bridge is a separate reading. Its three rows differ only in what they model, so the
 # vectorized-to-zero-cost gap is timing and the zero-cost-to-cost-aware gap is fees.

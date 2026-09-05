@@ -93,9 +93,12 @@ fallback_count: dict[str, int] = {}
 # and poorly conditioned well before that.
 #
 # HRP is one response - never invert. Shrinkage is another - keep inverting, but pull the
-# estimate toward a well-conditioned target first. This notebook runs both, and section 12
-# reads the comparison against the ratio $N/T$ that decides which response the problem calls
-# for. See §17.6.
+# estimate toward a well-conditioned target first. This notebook runs both, and section 12 reads
+# the comparison against the ratio $N/T$. That ratio is one contributor to how hard the estimate
+# is, not the thing that decides which response to use: conditioning also depends on how the assets
+# co-move, and a low $N/T$ over highly correlated assets can be worse conditioned than a higher one
+# over independent ones. A single window over one universe cannot establish when either allocator
+# helps in general; what section 12 shows is which did better here. See §17.6.
 
 # %% [markdown]
 # ## 3. Data Acquisition

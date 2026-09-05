@@ -787,7 +787,8 @@ portfolio_gross["Equal Weight"] = float(np.abs(equal_weights).sum())
 
 # %% [markdown]
 # **Gross exposure** is the sum of the absolute position sizes: a book 300% long and 200% short
-# has five times the account at risk and is flat on net. Its reciprocal is the move that would end
+# has five times the account at risk and is 100% net long - the same gross as a 250/250 book, which
+# is the one that is flat on net. Its reciprocal is the move that would end
 # the account, and that is a worst case rather than a market move - it needs every long to fall
 # and every short to rise by that percentage on the same day. Net exposure is far smaller than
 # gross, so a uniform market decline of that size does not do it. What the number establishes is
@@ -899,9 +900,13 @@ fig.show()
 # %% [markdown]
 # ## Part 4: What the derivation assumed
 #
-# Every step from the coin toss to the multi-asset solution is exact, and each one assumed
-# something the market does not supply. Naming them in order separates the parts of the result
-# that survive contact with data from the parts that do not.
+# Two different kinds of result sit in this notebook, and only the first is exact. The binary bet's
+# $f^* = (bp - q)/b$ is an exact maximizer of expected log wealth for that gamble. The
+# mean-over-variance form used for assets is not: it comes from expanding $\log(1 + x)$ and keeping
+# terms to the square, so it is an approximation whose accuracy depends on how large the leveraged
+# returns entering that logarithm are - not on whether the returns are close to normal. Each result
+# also assumed something the market does not supply. Naming those in order separates the parts that
+# survive contact with data from the parts that do not.
 #
 # **The odds are known.** In the binary case $p$ and $b$ are given. In the market case both are
 # estimated, the solution divides by the estimated variance and scales with the estimated mean,
@@ -913,9 +918,11 @@ fig.show()
 # toss, because a fraction of a positive number stays positive. That property is lost the moment
 # leverage exceeds one, since a position larger than the account can lose more than the account.
 #
-# **Returns are close enough to normal for the second-order expansion to hold.** The
-# mean-over-variance form drops every term past the square. Real returns have fatter tails than
-# normal, and a leveraged position is killed by exactly the observations that expansion discards.
+# **The leveraged returns are small enough for the second-order expansion to hold.** The
+# mean-over-variance form drops every term past the square, and what those dropped terms are worth
+# grows with the size of the returns fed into the logarithm - which leverage is precisely what
+# magnifies. Near-normality does not rescue it: fat tails make the discarded terms matter more, but
+# even a well-behaved distribution breaks the approximation once positions are large enough.
 #
 # **Borrowing is free and unlimited.** There is no funding rate in the objective, no cap on gross
 # exposure and no liquidation rule. Part 3 computes what that assumption is worth in this sample.
