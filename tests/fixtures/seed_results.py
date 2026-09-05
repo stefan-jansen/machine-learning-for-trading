@@ -1985,69 +1985,6 @@ def _seed_news_features(output_dir: Path) -> None:
     df.write_parquet(str(path))
 
 
-def _seed_ch16_parity_json() -> None:
-    """Seed cached parity JSON artifacts for Ch16 notebooks 15-18.
-
-    These notebooks read from get_chapter_dir(16) / "resources" / "<name>.json".
-    That path is NOT redirected by ML4T_OUTPUT_DIR — it's a real code-repo path.
-    """
-    resources_dir = REPO_ROOT / "16_strategy_simulation" / "resources"
-    resources_dir.mkdir(parents=True, exist_ok=True)
-
-    # NB15: lean_parity_results.json
-    _write_if_missing(
-        resources_dir / "lean_parity_results.json",
-        {
-            "artifact_source": "fixture",
-            "scenario_id": "multi_250_20yr",
-            "scenario_label": "250 assets, 20 years daily",
-            "data_source": "fixture",
-            "cached": True,
-            "limitations": ["Fixture data for CI testing"],
-            "results": [
-                {
-                    "framework_id": "ml4t-lean",
-                    "label": "ml4t-backtest (LEAN profile)",
-                    "num_trades": 428459,
-                    "final_value": 1234567.89,
-                    "runtime_sec": 12.5,
-                    "data_points": 1250000,
-                },
-                {
-                    "framework_id": "lean",
-                    "label": "QuantConnect LEAN CLI",
-                    "num_trades": 428459,
-                    "final_value": 1234566.34,
-                    "runtime_sec": 95.3,
-                    "data_points": 1250000,
-                },
-            ],
-            "comparison": {
-                "trade_gap": 0,
-                "trade_gap_pct": 0.0,
-                "final_value_gap": 1.55,
-                "final_value_gap_pct": 1.255e-06,
-                "runtime_speedup": 7.62,
-                "remaining_gap_driver": "price_precision",
-                "notes": [
-                    "next-bar open execution is aligned",
-                    "margin-enabled LEAN account semantics are aligned",
-                    "decoded fill chronology matches exactly at event identity and 4-decimal price",
-                ],
-            },
-        },
-    )
-
-    # NB16 (case_study_lean_parity_results.json), NB17
-    # (backtrader_zipline_parity_results.json), and NB18
-    # (vectorbt_parity_results.json) are intentionally NOT seeded here.
-    # Their artifacts hold genuine engine-parity numbers and are committed under
-    # 16_strategy_simulation/resources/ (version-controlled, always present on
-    # checkout), so the fabricated CI fallbacks were removed. NB16 is reproducible
-    # via ml4t.backtest._validation.case_study_lean; NB17 and NB18 via
-    # validation/benchmark_suite.py.
-
-
 def _write_if_missing(path: Path, data: dict) -> None:
     """Write JSON file only if it doesn't already exist."""
     if path.exists():
@@ -2136,4 +2073,3 @@ def seed_results(output_dir: Path, case_study_ids: list[str]) -> None:
 
     # --- Non-case-study chapter fixtures ---
     _seed_news_features(output_dir)
-    _seed_ch16_parity_json()
