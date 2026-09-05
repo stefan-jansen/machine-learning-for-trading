@@ -189,6 +189,15 @@ case_studies/crypto_perps_funding/06_linear:
   measured_s: 25
 
 
+case_studies/crypto_perps_funding/07_gbm:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_8h"]
+    POPULATION_NAME: smoke-gbm
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 136
+
 case_studies/crypto_perps_funding/08_tabular_dl:
   parameters:
     EXECUTION_TIER: preview
@@ -246,12 +255,10 @@ case_studies/crypto_perps_funding/18_holdout_backtest:
 
 # --- crypto_perps_funding and etfs: what is not declared yet, and why -------------------------
 #
-# crypto's 07_gbm reads its label through study.labels.get(), which resolves the artifact against
-# the ACTIVE OUTPUT ROOT rather than the study root - so a preview looks for
-# <workspace>/crypto_perps_funding/labels/fwd_ret_8h.parquet and finds nothing, while the label
-# sits behind the worktree's symlink where open_study says inputs are read in place. Seven
-# notebooks call that accessor. cme's 07_gbm passes, so the two case studies reach it differently
-# and the difference has to be understood before the resolver is touched.
+# crypto's and fx's 07_gbm both died at the label read until LabelCatalog.get stopped defaulting
+# its execution_tier to canonical. Fixed; both measured green afterwards. Left here because the
+# shape recurs: a bare accessor call that re-activates the study at a tier the caller did not ask
+# for looks exactly like a missing artifact.
 #
 # crypto's 13_backtest refuses the reduced panel on a real invariant: at eight symbols and one
 # fold the decisions advance 1 or 22 settlements against the 1 its 8H horizon declares, from
@@ -432,4 +439,135 @@ case_studies/etfs/20_strategy_analysis:
   # value, so passing one would be a reduction that does not reduce. Declaring it here would
   # make the smoke run report a cap it never applied. The dead parameter is the notebook's to
   # fix; the smoke configuration is not the place to paper over it.
+  writes: []
+
+# --- fx_pairs ---------------------------------------------------------------------------------
+#
+# Primary label fwd_ret_1d. Only 06 and 07 take a PREVIEW_REDUCTIONS dict here; the four
+# deep-learning notebooks and the causal one spell the same reductions as separate parameters
+# (MAX_SYMBOLS, MAX_FOLDS, N_EPOCHS, LOOKBACK, N_PLACEBO), and the downstream stages reduce with
+# TOP_K and a TOP_N_* cap. Every one of those is a parameter the notebook already reads.
+
+case_studies/fx_pairs/06_linear:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_1d"]
+    POPULATION_NAME: smoke-linear
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+
+case_studies/fx_pairs/07_gbm:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_1d"]
+    POPULATION_NAME: smoke-gbm
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+
+case_studies/fx_pairs/08_tabular_dl:
+  parameters:
+    EXECUTION_TIER: preview
+    PRIMARY_LABEL: fwd_ret_1d
+    MAX_SYMBOLS: 8
+    MAX_FOLDS: 1
+    N_EPOCHS: 2
+    POPULATION_NAME: smoke-tabm
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+
+case_studies/fx_pairs/09_dl_tcn:
+  parameters:
+    EXECUTION_TIER: preview
+    PRIMARY_LABEL: fwd_ret_1d
+    MAX_SYMBOLS: 8
+    MAX_FOLDS: 1
+    N_EPOCHS: 2
+    POPULATION_NAME: smoke-tcn
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+
+case_studies/fx_pairs/10_dl_nlinear:
+  parameters:
+    EXECUTION_TIER: preview
+    PRIMARY_LABEL: fwd_ret_1d
+    MAX_SYMBOLS: 8
+    MAX_FOLDS: 1
+    N_EPOCHS: 2
+    POPULATION_NAME: smoke-nlinear
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+
+case_studies/fx_pairs/10a_dl_lstm:
+  parameters:
+    EXECUTION_TIER: preview
+    PRIMARY_LABEL: fwd_ret_1d
+    MAX_SYMBOLS: 8
+    MAX_FOLDS: 1
+    N_EPOCHS: 2
+    POPULATION_NAME: smoke-lstm
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+
+case_studies/fx_pairs/11_causal_dml:
+  parameters:
+    EXECUTION_TIER: preview
+    PRIMARY_LABEL: fwd_ret_1d
+    MAX_SYMBOLS: 12
+    CV_FOLDS: 2
+    MAX_SAMPLES: 20000
+    N_PLACEBO: 12
+  writes: [causal_runs]
+
+case_studies/fx_pairs/12_model_analysis:
+  parameters:
+    EXECUTION_TIER: preview
+  writes: []
+
+case_studies/fx_pairs/13_backtest:
+  parameters:
+    EXECUTION_TIER: preview
+    LABEL: fwd_ret_1d
+    TOP_N_PREDICTIONS: 3
+    POPULATION_NAME: smoke-signal
+  writes: [backtest_runs, backtest_metrics, backtest_fold_metrics]
+
+case_studies/fx_pairs/14_portfolio_management:
+  parameters:
+    EXECUTION_TIER: preview
+    LABEL: fwd_ret_1d
+    TOP_N_CONFIGS: 1
+    TOP_N_PREDICTIONS: 3
+    POPULATION_NAME: smoke-allocation
+  writes: [backtest_runs, backtest_metrics, candidate_sets, candidate_set_members]
+
+case_studies/fx_pairs/15_risk_management:
+  parameters:
+    EXECUTION_TIER: preview
+    LABEL: fwd_ret_1d
+    TOP_N_PREDICTIONS: 3
+    MAX_RISK_VARIANTS: 2
+    POPULATION_NAME: smoke-risk
+  writes: [backtest_runs, backtest_metrics]
+
+case_studies/fx_pairs/16_costs:
+  parameters:
+    EXECUTION_TIER: preview
+    LABEL: fwd_ret_1d
+    TOP_N_PREDICTIONS: 3
+    MAX_COST_POINTS: 2
+    POPULATION_NAME: smoke-costs
+  writes: [backtest_runs, backtest_metrics]
+
+case_studies/fx_pairs/17_holdout_predictions:
+  exempt: true
+  exempt_reason: >-
+    The holdout stage refits from an immutable canonical training spec, and
+    research/models.py::reconstruct_locked_model_request refuses a spec whose execution_tier is
+    not canonical. Structural, and shared by every case study's holdout pair.
+
+case_studies/fx_pairs/18_holdout_backtest:
+  exempt: true
+  exempt_reason: >-
+    Reads the holdout prediction set 17_holdout_predictions produces, which cannot exist in a
+    preview workspace for the reason recorded on that entry.
+
+case_studies/fx_pairs/19_strategy_analysis:
+  parameters:
+    EXECUTION_TIER: preview
   writes: []

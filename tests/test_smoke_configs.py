@@ -41,11 +41,11 @@ DECLARED_PREFIXES = (
     "case_studies/cme_futures/",
     "case_studies/crypto_perps_funding/",
     "case_studies/etfs/",
+    "case_studies/fx_pairs/",
 )
 UNDECLARED = {key for key in _smoke_notebooks() if not key.startswith(DECLARED_PREFIXES)} | {
     # Declared prefixes with a notebook still open. Each is a measured refusal, recorded against
     # its entry's position in smoke.yaml rather than left as an absence someone has to rediscover.
-    "case_studies/crypto_perps_funding/07_gbm",
     "case_studies/crypto_perps_funding/13_backtest",
     "case_studies/crypto_perps_funding/14_portfolio_management",
     "case_studies/crypto_perps_funding/15_risk_management",
