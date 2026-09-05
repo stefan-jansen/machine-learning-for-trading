@@ -281,6 +281,56 @@ def seed_case_study_intermediates(src: Path, dst: Path) -> None:
             shutil.copy2(item, dst / item.name)
 
 
+GENERATED_CASE_DIRS = ("features", "labels", "run_log")
+
+
+def _checkout_shaped_release_root(output_dir: Path) -> Path:
+    """A released tree shaped like a clean checkout, for the harness to read canonical from.
+
+    `open_study` resolves its canonical reads against a release root, and the default was
+    `REPO_ROOT`. In a maintainer worktree `case_studies/<cs>/run_log` there is a symlink
+    into `~/ml4t/artifacts`, so a harness run overlaid the machine's published catalog
+    onto its isolated workspace - measured on a freshly seeded fx_pairs fixture as 749
+    catalog rows where the workspace held 23 - while a CI runner, which has no such
+    symlink, read the seeded 23 and nothing else. The same code took different rows in
+    the two places, so a local pass was not evidence of a CI pass and a local failure was
+    not evidence of a CI failure. The reads that produced it are real: a backtest selected
+    two published predictions the fixture did not have, registered their identities, and
+    the next stage failed on a `predictions.parquet` the workspace has no copy of.
+
+    So the harness gives it a release root of its own, carrying what a checkout carries -
+    `config/` and the tracked top-level files - and, exactly like a checkout, no
+    `run_log`. Nothing else is read through the release root: the catalogs read
+    `<release case dir>/run_log`, `create_experiment` reads `config/`, and everything a
+    notebook loads goes through `get_case_study_dir()`, which follows ML4T_OUTPUT_DIR.
+
+    Symlinks rather than copies, so this costs nothing per session and cannot drift from
+    the tree it mirrors.
+    """
+    release = output_dir / ".release"
+    cases = release / "case_studies"
+    cases.mkdir(parents=True, exist_ok=True)
+    source_root = REPO_ROOT / "case_studies"
+    shared = cases / "config"
+    if not shared.exists() and (source_root / "config").is_dir():
+        shared.symlink_to(source_root / "config", target_is_directory=True)
+    for cs_id in CASE_STUDY_IDS:
+        source = source_root / cs_id
+        if not source.is_dir():
+            continue
+        target = cases / cs_id
+        target.mkdir(exist_ok=True)
+        for entry in source.iterdir():
+            if entry.name in GENERATED_CASE_DIRS or entry.name.startswith("."):
+                continue
+            if entry.is_dir() and entry.name != "config":
+                continue
+            link = target / entry.name
+            if not link.exists() and not link.is_symlink():
+                link.symlink_to(entry, target_is_directory=entry.is_dir())
+    return release
+
+
 @pytest.fixture(scope="session")
 def seeded_output_dir(tmp_path_factory):
     """Session-scoped output dir seeded with case study config files.
@@ -308,6 +358,11 @@ def seeded_output_dir(tmp_path_factory):
     global _SESSION_OUTPUT_DIR
     os.environ["ML4T_OUTPUT_DIR"] = str(output_dir)
     _SESSION_OUTPUT_DIR = str(output_dir)
+
+    # And a release root that is not REPO_ROOT, so a study opened here reads the same
+    # canonical rows a CI runner reads. See _checkout_shaped_release_root.
+    output_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["ML4T_RELEASE_ROOT"] = str(_checkout_shaped_release_root(output_dir))
 
     cs_root = REPO_ROOT / "case_studies"
 
@@ -375,6 +430,19 @@ def seeded_output_dir(tmp_path_factory):
     from tests.fixtures.seed_results import seed_results
 
     seed_results(output_dir, CASE_STUDY_IDS)
+
+    # The preview root is deliberately NOT seeded. `Study.activate()` links only `labels` and
+    # `features` into the preview case directory and opens an empty registry there, and it was
+    # tempting to seed that root too so a read-only downstream notebook would find a candidate
+    # index. Measured on etfs, that does more harm than the gap it fills: the seeded rows land
+    # in the same `(split, family, label)` coverage group as the predictions the preview run
+    # actually fits, and they cannot win it - a seeded artifact carries 60 dates against a
+    # fitted 447-483 - so `full_coverage_prediction_sql` admits neither and `14_backtest`
+    # refuses to rank anything. With the preview root left empty, `13_model_analysis` passes
+    # anyway and that refusal does not arise.
+    #
+    # A notebook that genuinely has nothing to read under preview should say so, which is what
+    # the refusals in 14 through 18 already do.
 
     # The reader-facing crypto workflow opens the seeded case directory as a Study workspace.
     # Mark that existing fixture root explicitly so Study.open does not confuse it with an
@@ -555,6 +623,41 @@ def pytest_runtest_logreport(report):
     with open(_RESULTS_PATH, "a") as f:
         f.write(json.dumps(record) + "\n")
         f.flush()
+
+
+@pytest.fixture(autouse=True)
+def _restore_output_root():
+    """Put back the process-global output root a test may have redirected.
+
+    ``Study.open``/``Study.activate`` set ``ML4T_OUTPUT_DIR`` and
+    ``workspace._ACTIVE_OUTPUT_ROOT``, and a test that leaves either pointing into its own
+    tmp_path makes ``get_case_study_dir`` resolve there for every later test in the worker.
+
+    Restored rather than deleted: ``seeded_output_dir`` is session-scoped and writes the
+    per-worker path exactly once, so a teardown that removes the variable removes it for the
+    rest of the worker, and every later module resolving through ``get_case_study_dir`` then
+    reads the committed ``case_studies/`` tree instead of the seeded output dir. This lives here
+    rather than in each module because thirteen copies of it drifted apart once already.
+    """
+    previous = os.environ.get("ML4T_OUTPUT_DIR")
+    yield
+    if previous is None:
+        os.environ.pop("ML4T_OUTPUT_DIR", None)
+    else:
+        os.environ["ML4T_OUTPUT_DIR"] = previous
+    # Read out of sys.modules rather than importing. The module holds the only state this
+    # resets, so a test that never imported it left nothing to reset - and importing it here
+    # would make every test in the run pay for the import. `case_studies.research` pulls in
+    # `utils.config`, which raises FileNotFoundError at import when ML4T_DATA_PATH names a
+    # directory that is not there. The `test-unit` job is exactly that environment: it checks
+    # out no test-data, and its Chapter 21 step does not override the workflow-level path. An
+    # autouse fixture that imports turns that into a teardown error on every test in the step -
+    # 70 passed, 70 errors - against tests that read nothing from disk.
+    workspace = sys.modules.get("case_studies.research.workspace")
+    if workspace is None:
+        return
+    workspace._ACTIVE_OUTPUT_ROOT = None
+    workspace._clear_root_sensitive_caches()
 
 
 @pytest.fixture

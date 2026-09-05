@@ -1,3 +1,13 @@
+# `max_samples` reaches a canonical causal run nowhere. `resolve_causal_request` ignores it
+# deliberately (`case_studies/utils/causal.py:1313-1318`); a cap arrives only as a declared
+# preview reduction, and a canonical request refuses those outright. So the key below is read
+# by the two notebooks that still build their own specification and apply it by hand -
+# nasdaq100_microstructure and sp500_options - and by nothing else.
+#
+# It is not dead until those two convert, so it stays. Expect their estimates to move when
+# they do, and not only in magnitude: sp500_equity_option_analytics was fitting 37,240 of the
+# 376,871 rows its estimand admits, and taking the cap off flipped the sign of the point
+# estimate. Do not reintroduce the hand-application to keep an old number.
 max_samples: 50000
 n_folds: 5
 n_placebo: 100

@@ -69,6 +69,7 @@ import plotly.graph_objects as go
 import polars as pl
 
 from case_studies.research import PredictionCatalog, configured_model_menu, open_study
+from case_studies.utils.notebook_contracts import declared_population_members
 from utils.paths import REPO_ROOT
 from utils.style import COLORS, show_plotly_with_alt
 
@@ -132,6 +133,25 @@ pl.DataFrame(
 # addition, the states its library captured by reading the validation split - which is why its count
 # is the odd one and why [`11d`](11d_stochastic_discount_factor.ipynb) separates the two kinds.
 
+# %% [markdown]
+# **The catalog holds every generation, so this view has to say which one it means.** A
+# population is immutable: refitting the same configurations under a corrected estimator
+# publishes a new snapshot that supersedes the old one, and both stay readable. Nothing in
+# `PredictionCatalog.table()` filters on that - it returns retired members beside current ones -
+# so aggregating the family straight out of the catalog double-counts every configuration that
+# has been refitted, and `all_complete` passes because a superseded set is complete too.
+#
+# The five names resolve to the snapshot in force for each: the one member of the chain that
+# nothing supersedes, refusing rather than guessing if the chain has forked. Those members are
+# what this notebook reports on. A name is used rather than a hash so that a refit is picked up
+# here without an edit.
+#
+# **Filtering the catalog to the members is not the same as checking the members are there.** A
+# population is created before its members finish fitting, so an interrupted run leaves a member
+# absent from the catalog rather than incomplete in it, and `all_complete` below is computed over
+# the rows that did arrive - it passes. The difference taken below is the other direction: the
+# catalog names no member the populations do not.
+
 # %% tags=["results"]
 catalog = (
     PredictionCatalog(study)
@@ -142,6 +162,44 @@ if catalog.is_empty():
     raise RuntimeError(
         "no latent-factor validation rows are registered; run the five sibling notebooks first"
     )
+
+# The five names, resolved against the registry this study is reading. A preview run and a clean
+# clone publish no population at all - `activate()` creates the preview registry empty - and that
+# is a different state from a declared name that will not resolve, which is a broken lineage.
+# `declared_population_members` tells the two apart; the first is reported and the view then rests
+# on the catalog alone, the second refuses once the family has registered rows.
+declared, population_notes = declared_population_members(
+    study,
+    study.root,
+    {model: f"{CASE_STUDY_ID}-{model}-validation-v1" for model in sorted(declared_models)},
+    produced={model: catalog.height for model in declared_models},
+)
+for note in population_notes:
+    print(note)
+
+if declared:
+    current_members: set[str] = set().union(*declared.values())
+    absent = sorted(current_members - set(catalog["prediction_hash"].to_list()))
+    if absent:
+        raise RuntimeError(
+            f"{len(absent)} member(s) of the populations in force are not in the catalog: "
+            f"{', '.join(absent[:5])}. A population is published before its members finish "
+            "fitting, so an interrupted run leaves the summary below short without saying so."
+        )
+    retired = (
+        catalog.height - catalog.filter(pl.col("prediction_hash").is_in(current_members)).height
+    )
+    catalog = catalog.filter(pl.col("prediction_hash").is_in(current_members))
+    print(
+        f"{catalog.height} prediction sets in the five populations in force; "
+        f"{retired} superseded rows in the catalog are excluded"
+    )
+    if catalog.is_empty():
+        raise RuntimeError(
+            "the current latent-factor populations name no prediction set in the catalog"
+        )
+else:
+    print(f"{catalog.height} registered latent-factor prediction sets, none of them declared")
 
 coverage = (
     catalog.group_by("config_name")
@@ -170,6 +228,18 @@ coverage
 # What the figure is for is the shape: whether conditioning the exposures on the option surface
 # moves the family at all, and whether any of it clears zero on any target. Both are answerable by
 # looking; neither is answered by ranking.
+#
+# **`peak_ic` here is the maximum of `ic_mean`, which for this family is a mean over folds rather
+# than over days.** `case_studies/utils/registry/metrics.py:52-53` states the convention and says
+# which statistic is inferential: "The fold-based `ic_t` is a diagnostic: the inferential statistic
+# is `ic_t_hac`, computed below on the daily IC". The two readings can disagree here specifically -
+# `cme_futures/12_model_analysis` records a case in this same family where ranking on `ic_mean`
+# selects an SDF checkpoint whose daily-pooled HAC interval straddles zero.
+#
+# `PredictionCatalog` does not carry `ic_mean_daily` or `ic_t_hac`, so this chart cannot switch to
+# them without widening that interface. Read it as a comparison of families on one convention, not
+# as a selection: nothing downstream selects on it, and `14_backtest` chooses on validation
+# backtest Sharpe.
 
 # %% tags=["results"]
 peaks = (

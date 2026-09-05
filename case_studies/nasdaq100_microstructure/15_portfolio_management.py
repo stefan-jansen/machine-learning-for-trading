@@ -199,6 +199,7 @@ def run_alloc_backtest(pred_hash, source, top_k, alloc, predictions, state):
         prediction_hash=pred_hash,
         initial_cash=bt_config.initial_cash,
         chapter="ch17",
+        label=LABEL,
         signal={"method": "equal_weight_top_k", "top_k": top_k, "long_short": bt_config.long_short},
         allocation={**alloc, "top_k": top_k, "long_short": bt_config.long_short},
     )

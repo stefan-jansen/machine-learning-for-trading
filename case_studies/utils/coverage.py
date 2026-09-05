@@ -42,7 +42,7 @@ from pathlib import Path
 
 import polars as pl
 
-from case_studies.utils.notebook_contracts import _ENTITY_ALIASES, _first_present
+from case_studies.utils.notebook_contracts import _first_present, _is_finite
 
 __all__ = [
     "CoverageError",
@@ -280,6 +280,7 @@ def declared_sessions(
     *,
     split: str = "validation",
     case_dir: Path | None = None,
+    decision_axis: pl.Series | None = None,
 ) -> dict[int | None, list]:
     """Sessions each declared fold contains, keyed by fold id (``None`` for holdout).
 
@@ -288,6 +289,19 @@ def declared_sessions(
     trades, rather than from a synthetic calendar, is what makes this work unchanged for
     daily equities, 8-hourly perpetuals and minute-bar microstructure.
 
+    ``decision_axis`` narrows that to the moments a model could actually have decided at,
+    and a caller with a feature panel narrower than its label file has to pass it. The two
+    differ whenever an input feed has an outage: a forward return is computed from prices
+    alone and survives it, while every feature built on the missing feed does not, so the
+    label artifact declares sessions no model was ever in a position to predict.
+    ``crypto_perps_funding`` has two - the premium-index feed is out for 57 days from
+    2021-08-27, and the reduced CI panel loses a further 31 days from 2022-11-02 that the
+    full universe covers from another contract. Without this the gate reports a model
+    incomplete for not predicting where it was blind.
+
+    It narrows and never widens: a timestamp absent from the label artifact is not made a
+    session by appearing in the panel.
+
     For ``split='validation'`` the axis is sealed against the holdout first, so the last
     fold is not expected to predict a session whose outcome lands inside it.
     """
@@ -295,6 +309,14 @@ def declared_sessions(
     axis = _session_axis(case_study, label, case_dir)
     if split != "holdout":
         axis = _sealed(case_study, label, axis)
+    if decision_axis is not None:
+        observable = _normalize_time(decision_axis.unique())
+        axis = axis.filter(axis.is_in(observable.implode()))
+        if axis.is_empty():
+            raise CoverageError(
+                f"{case_study}/{label}: the decision axis and the label artifact share no "
+                "timestamp, so no session could be declared"
+            )
 
     axis_dates = axis.dt.date() if axis.dtype != pl.Date else axis
     frame = pl.DataFrame({"session": axis, "on": axis_dates})
@@ -306,6 +328,39 @@ def declared_sessions(
     return sessions
 
 
+def _reject_label_mismatch(
+    frame: pl.DataFrame, *, case_study: str, label: str, split: str, source: str
+) -> None:
+    """Refuse to check a frame against a label it was not produced under.
+
+    The declared axis is sized by the label's own outcome horizon, so passing the
+    case study's primary label while handing in a variant's predictions produces a
+    small, plausible, entirely spurious gap. Measured in ``crypto_perps_funding``:
+    the 8-hour label declares 2,189 validation sessions and the 24-hour label 2,187,
+    because a decision at 2023-12-31 00:00 realizes inside the holdout under a
+    24-hour horizon and is purged. Checking a 24-hour artifact against the 8-hour
+    label therefore reports exactly two missing sessions and nothing is wrong.
+
+    The mismatch is only visible in one direction from the timestamps themselves - a
+    shorter declared horizon makes the observed frame a strict subset, which no
+    condition here can distinguish from a genuine gap. So it is caught from the
+    frame's own ``label`` column where one exists, and the check is silently skipped
+    where it does not rather than being asserted on absent evidence.
+    """
+    if "label" not in frame.columns:
+        return
+    present = frame.get_column("label").unique().drop_nulls().to_list()
+    if not present or present == [label]:
+        return
+    raise CoverageError(
+        f"{case_study}/{label}/{split} {source}: the frame carries label(s) "
+        f"{sorted(str(v) for v in present)}, not {label!r}. The declared session axis "
+        "is sized by the label's outcome horizon, so checking one label's predictions "
+        "against another's declaration reports a gap that is not there. Pass the label "
+        "the frame was produced under."
+    )
+
+
 def _coverage(
     frame: pl.DataFrame,
     *,
@@ -315,6 +370,7 @@ def _coverage(
     source: str,
     case_dir: Path | None,
     fold_column: tuple[str, ...] | str | None,
+    decision_axis: pl.Series | None = None,
 ) -> CoverageReport:
     if frame.is_empty():
         raise CoverageError(
@@ -322,9 +378,13 @@ def _coverage(
             "run must not read as a pass"
         )
 
+    _reject_label_mismatch(frame, case_study=case_study, label=label, split=split, source=source)
+
     time_col = _time_column(frame.columns)
     windows = _declared_windows(case_study, label, split)
-    expected = declared_sessions(case_study, label, split=split, case_dir=case_dir)
+    expected = declared_sessions(
+        case_study, label, split=split, case_dir=case_dir, decision_axis=decision_axis
+    )
 
     observed = _normalize_time(frame.select(pl.col(time_col)).unique().get_column(time_col))
     observed_set = set(observed.to_list())
@@ -382,7 +442,9 @@ def _coverage(
                     )
                 )
 
-    # (2) Every session inside a declared fold carries at least one row.
+    # (2) Every session inside a declared fold carries at least one row. On the prediction
+    #     path `check_prediction_coverage` has already dropped rows with no score, so a row
+    #     there is a prediction; a backtest input frame is not required to carry one.
     expected_total = 0
     for fold, sessions in expected.items():
         expected_total += len(sessions)
@@ -404,7 +466,10 @@ def _coverage(
             if next_start <= end:
                 continue
             unaccounted = [
-                s for s in _sessions_between(case_study, label, end, next_start, case_dir)
+                s
+                for s in _sessions_between(
+                    case_study, label, end, next_start, case_dir, decision_axis
+                )
             ]
             if unaccounted:
                 gaps.append(
@@ -448,13 +513,56 @@ def _coverage(
 
 
 def _sessions_between(
-    case_study: str, label: str, after: date, before: date, case_dir: Path | None
+    case_study: str,
+    label: str,
+    after: date,
+    before: date,
+    case_dir: Path | None,
+    decision_axis: pl.Series | None = None,
 ) -> list:
-    """Sessions strictly between two dates, from the label artifact's own axis."""
+    """Sessions strictly between two dates, from the label artifact's own axis.
+
+    ``decision_axis`` narrows it the same way it narrows the per-fold expectation, and for the
+    same reason: a feed outage between two folds leaves the label artifact carrying sessions no
+    model could have decided at, and reporting them as unaccounted for is the gate answering a
+    question about the feed as though it were about the folds.
+    """
     axis = _sealed(case_study, label, _session_axis(case_study, label, case_dir))
+    if decision_axis is not None:
+        observable = _normalize_time(decision_axis.unique())
+        axis = axis.filter(axis.is_in(observable.implode()))
     as_dates = axis.dt.date() if axis.dtype != pl.Date else axis
     keep = (as_dates > after) & (as_dates < before)
     return axis.filter(keep).to_list()
+
+
+def _scored_rows(frame: pl.DataFrame, *, case_study: str, label: str, split: str) -> pl.DataFrame:
+    """Restrict a prediction frame to the rows that actually carry a score.
+
+    ``_coverage`` counts a session as observed when a row exists for it. On the
+    prediction path that is not what the module promises: a frame with no score column
+    at all, or one whose scores are all null, described a complete set of decisions
+    that were never made.
+
+    Null is not the whole of it. NaN and infinity are non-null and rank against nothing,
+    so a session holding only those is as empty of decisions as one holding only nulls -
+    ``_is_finite`` is the same reading the IC series already applies, and on a non-float
+    column being non-null is the whole of the condition.
+    """
+    score_col = _first_present(frame.columns, _SCORE_ALIASES)
+    if score_col is None:
+        raise CoverageError(
+            f"{case_study}/{label}/{split} predictions: no prediction column among "
+            f"{_SCORE_ALIASES} in columns {sorted(frame.columns)}. A frame with no score "
+            "is not a prediction set, and a check that cannot run must not read as a pass."
+        )
+    scored = frame.filter(_is_finite(frame.schema[score_col], score_col))
+    if scored.is_empty():
+        raise CoverageError(
+            f"{case_study}/{label}/{split} predictions: no finite value in {score_col!r} across "
+            f"{frame.height} rows; the frame carries sessions but no predictions."
+        )
+    return scored
 
 
 def check_prediction_coverage(
@@ -466,21 +574,32 @@ def check_prediction_coverage(
     case_dir: Path | None = None,
     fold_column: tuple[str, ...] | str | None = _FOLD_ALIASES,
     raise_on_gap: bool = True,
+    decision_axis: pl.Series | None = None,
 ) -> CoverageReport:
     """Assert a prediction set covers the declared validation geometry.
 
     Call this where the predictions are produced, before anything downstream reads
     them. ``raise_on_gap=False`` returns the report for a notebook that wants to
     display it before failing.
+
+    Condition (2) is read here as the module docstring states it - a session carries a
+    **prediction**, not merely a row. The score column is required and rows with a null
+    score are dropped before the geometry is measured, so a frame carrying a timestamp
+    for every declared session and no usable score reports the gap rather than
+    ``complete``. The requirement sits here and not in ``_coverage`` because
+    ``check_backtest_input_coverage`` shares that helper and a backtest input frame is
+    not required to carry a score column.
     """
+    scored = _scored_rows(predictions, case_study=case_study, label=label, split=split)
     report = _coverage(
-        predictions,
+        scored,
         case_study=case_study,
         label=label,
         split=split,
         source="predictions",
         case_dir=case_dir,
         fold_column=fold_column,
+        decision_axis=decision_axis,
     )
     if raise_on_gap:
         report.raise_if_incomplete()
@@ -496,6 +615,7 @@ def check_backtest_input_coverage(
     case_dir: Path | None = None,
     fold_column: tuple[str, ...] | str | None = _FOLD_ALIASES,
     raise_on_gap: bool = True,
+    decision_axis: pl.Series | None = None,
 ) -> CoverageReport:
     """Assert the frame a backtest is about to consume still covers the declaration.
 
@@ -515,6 +635,7 @@ def check_backtest_input_coverage(
         source="backtest input",
         case_dir=case_dir,
         fold_column=fold_column,
+        decision_axis=decision_axis,
     )
     if raise_on_gap:
         report.raise_if_incomplete()

@@ -14,56 +14,61 @@
 # ---
 
 # %% [markdown]
-# # Model Analysis: ETF Cross-Asset Exposures
+# # ETF models compared: which of these signals is real
 #
-# This notebook evaluates all predictive models trained on the ETF case study
-# and answers a single question: **which learned signals are real, stable,
-# and worth taking into a backtest?**
+# Seven notebooks have fitted models to this panel, across five families and two label horizons.
+# Each reported its own results against its own declared menu. **None of them could say how it
+# compares to the others**, because none of them had the others in front of it.
 #
-# The ETF universe spans 100 instruments across equities, fixed income,
-# commodities, currencies, and real estate — a multi-asset cross-section
-# where the prediction problem is fundamentally different from single-stock
-# selection. Here the signal comes from relative macro exposures, not
-# firm-specific alpha. Momentum, carry, and volatility features dominate,
-# and the monthly rebalancing cadence (21-day forward return) means that
-# short-lived microstructure effects are irrelevant.
+# That is what this notebook is for. It reads every registered prediction set for this case study,
+# puts the families on one axis with their uncertainty, and asks three questions of them: how
+# strong is the signal, how consistent is it across the walk-forward folds, and are the families
+# finding the same thing or different things.
 #
-# With 8 rolling-window folds (a fixed 10-year training window and a
-# 1-year validation window each) spanning 2016–2023 in validation, plus a
-# 2024–2025 holdout, this is one of the
-# most statistically complete case studies in the book. The challenge is
-# not sample size but signal strength: cross-sectional IC in diversified
-# ETFs is inherently modest because these instruments are already
-# diversified — there is less idiosyncratic variation to exploit.
+# **This is a cross-asset panel, and that changes what a signal means here.** The universe mixes
+# sector equity funds with country funds, bond funds, commodity funds and currency funds, so the
+# thing a model has to rank is not which company is mispriced but which macro exposure is currently
+# being rewarded. The instruments are already diversified, which is why cross-sectional information
+# coefficients on this panel are small by the standards of a single-stock cross-section - there is
+# less idiosyncratic variation left in them to find.
 #
-# **Learning Objectives**:
-# - Apply a structured model evaluation workflow to a real dataset
-# - Distinguish mean performance from fold-level stability
-# - Diagnose whether models learn different or redundant signals
-# - Use regime conditioning to understand when models work
-# - Make explicit, evidence-based decisions about which models to backtest
+# **It selects nothing.** Selection is best validation backtest Sharpe and it happens in
+# [`14_backtest`](14_backtest.ipynb), over the population this notebook describes. Every number
+# here is measured on validation folds that have been read repeatedly by the time a case study
+# reaches this point; the holdout is opened once, in
+# [`20_strategy_analysis`](20_strategy_analysis.ipynb).
 #
-# **Prerequisites**: Model training notebooks Ch11–15 must have run for this
-# case study. Linear and GBM results come from the registry; TabM, DL, and
-# latent factor results come from the training pipeline.
+# **Learning objectives**
 #
-# **Book Reference**: This notebook bridges Part III (Models, Ch11–15) and
-# Part IV (Strategy Implementation, Ch16–20). The chapter insights notebooks
-# in Ch11–15 compare each model family *across* case studies; here we compare
-# all families *within* a single dataset.
+# - Read a family comparison from its confidence intervals rather than from its ordering.
+# - Separate a mean information coefficient from the fold-level consistency behind it.
+# - Say whether two model families are finding the same signal or different ones, and what follows.
+# - Say why structural and causal evidence are read apart from a predictive ranking.
+#
+# **Book reference**: this notebook bridges Part III (models, chapters 11 to 15) and Part IV
+# (strategy implementation, chapters 16 to 20). The chapter-insight notebooks compare one family
+# across case studies; this compares every family within one.
+#
+# **Prerequisites**: [`06_linear`](06_linear.ipynb) through
+# [`12_causal_dml`](12_causal_dml.ipynb), whose registered results are what this reads, and
+# [`05_evaluation`](05_evaluation.ipynb) for the walk-forward folds every number is measured on.
+#
+# **What it writes**: nothing. It fits no model, registers no run and opens no holdout.
 
 # %%
-"""Model Analysis: ETFs — comparative evaluation across all model families."""
+"""Compare every registered ETF model family on one panel, without selecting among them."""
 
 import warnings
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import polars as pl
 import yaml
+from plotly.subplots import make_subplots
 
+from case_studies.research import CausalResult, open_study, split_unpublished_members
 from case_studies.utils.latent_factors import load_fold_extras
 from case_studies.utils.model_analysis import (
     best_model_per_family_fast,
@@ -93,8 +98,9 @@ from case_studies.utils.notebook_render import (
     holdout_decay_table,
     selection_adjusted_leader_table,
 )
+from case_studies.utils.registry import load_prediction_index
 from utils.paths import get_case_study_dir
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt, show_with_alt
 
 warnings.filterwarnings("ignore")
 
@@ -106,8 +112,21 @@ ENTITY_COL = "symbol"
 N_BUCKETS = 10
 TOP_N_FEATURES = 15
 REGIME_WINDOW = 63
+# Both names stay bound here although nothing below reads them: that is what makes the harness
+# force preview and supply a workspace (`tests/pm_helpers.py:954`). Without them the canonical
+# branch regenerates in place, which needs symlinks a CI checkout does not have.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
+
+# %% [markdown]
+# The study is opened before anything resolves a path or reads the registry. Under the preview
+# tier, opening it activates a workspace and rewrites `ML4T_OUTPUT_DIR` process-wide, and every
+# later `get_case_study_dir` call resolves against that. A `CASE_DIR` or a metrics table built
+# first would point at the released registry while everything after it reads the preview one.
 
 # %%
+study = open_study(CASE_STUDY, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
+
 CASE_DIR = get_case_study_dir(CASE_STUDY)
 
 with open(CASE_DIR / "config" / "setup.yaml") as f:
@@ -121,13 +140,9 @@ n_assets = setup["universe"]["n_assets"]
 costs = setup["costs"]
 per_share_usd = costs["per_share"]
 default_half_spread_usd = costs["default_half_spread_usd"]
-
-# ETFs use per_share + half-spread (not bps). Provide a representative bps
-# range for the bucket-monotonicity overlay so readers can compare
-# bucket-spread magnitudes against typical ETF round-trip frictions.
-# 5 bps anchors mega-cap liquid ETFs (SPY/QQQ/IWM); 15 bps anchors sector
-# and country funds. See setup.yaml.costs for per-asset half-spreads.
-cost_range = [5, 15]
+# The bucket-monotonicity overlay wants a basis-point band, and this case study prices in cents
+# per share; these two anchor the liquid and the sector ends of the universe.
+COST_RANGE_BPS = [5, 15]
 
 print(f"Case Study: {CASE_STUDY}")
 print(f"  Universe: {n_assets} ETFs (equities, bonds, commodities, FX, sectors)")
@@ -140,39 +155,75 @@ print(
 )
 
 # %% [markdown]
-# ## 1. What Is the Prediction Problem?
+# ## 1. The prediction problem, and the shape of the evidence
 #
-# **Primary target tuple**: `fwd_ret_21d` | regression | IC | monthly rebalancing
+# **The target is `fwd_ret_21d`**: the total return over the 21 trading days after the decision
+# date, predicted for every fund, then ranked cross-sectionally at each rebalance. The strategy the
+# backtest will build holds the top of that ranking and rebalances monthly, so what a model has to
+# get right is the ordering within a date rather than the level of any one forecast. The metric is
+# therefore an information coefficient - the rank correlation between the predicted and the
+# realized cross-section, averaged over dates.
 #
-# We predict the 21-trading-day forward return for each of 100 ETFs,
-# ranking them cross-sectionally at each month-end to identify the
-# highest-expected-return instruments. The strategy buys the top-ranked
-# ETFs and rebalances monthly.
+# The panel's proportions are unusual for this book. There are many more dates than funds, which is
+# the opposite of a single-stock cross-section, and it is what makes latent-factor methods
+# available here: a small number of common movements can plausibly explain a hundred funds whose
+# categories - equity sectors, bonds, commodities, currencies - are themselves an economically
+# meaningful low-rank structure.
 #
-# **Panel shape**: $T \approx 5{,}000$ daily observations (2006–2025),
-# $N = 100$ ETFs, evaluated at the monthly rebalancing cadence (so
-# $T_{\text{month}} \approx 240$). The cross-section is sparse relative
-# to the time dimension, but well-suited to latent factor methods because
-# the asset categories (equity sectors, bonds, commodities, currencies)
-# provide an economically meaningful low-rank prior. ETFs is one of the
-# five case studies in scope for the Ch14 latent-factor pipeline.
+# The features are entirely price-derived. Momentum at horizons from a week to a year, momentum
+# adjusted for its own volatility, volatility itself, technical indicators and the yield-curve
+# slope. There is no fundamental or alternative data, so anything a model finds here is a statement
+# about price history and nothing else.
 #
-# The feature set (57 features) emphasizes momentum at multiple horizons
-# (5d to 252d), risk-adjusted momentum (Sharpe ratios), volatility
-# regimes, technical indicators, and macro signals (yield curve slope).
-# There are no fundamental or alternative data features — the signal
-# is purely price-derived.
+# The counts printed above come from `config/setup.yaml` and the artifacts, so they describe the
+# run rather than restating a number that was true when this was written.
+
+# %% [markdown]
+# **Which generation of each family is being described.** `prediction_metrics` is a catalog, and a
+# catalog carries no lineage: when a model notebook refits, it publishes a second generation under
+# the same population name and the generation it replaced stays behind, complete and current under
+# a schema version that has not moved. Reading the catalog alone therefore lists a family twice -
+# once as it is published and once as it was - and the representative chosen to stand for the
+# family in every comparison below can be the retired one.
 #
-# The universe mixes asset classes deliberately: sector equity ETFs
-# (XLK, XLE), country ETFs (EWJ, EWZ), bond ETFs (TLT, HYG),
-# commodity ETFs (GLD, USO), and currency ETFs (FXE, UUP). This
-# cross-asset structure means the model must learn which macro
-# exposures are currently rewarded, not which individual stocks
-# are mispriced.
+# `split_unpublished_members` asks the population lineage instead, and the excluded side is
+# printed rather than dropped silently, so the count is auditable against the registry.
+#
+# It asks **membership** and not retirement, which is the stronger of the two questions and the
+# one [`14_backtest`](14_backtest.ipynb) already scopes its sweep with. The two differ by the
+# identities no population ever listed: a row written before its notebook declared a population
+# is retired by nobody, so a retirement split admits it, and it can then stand for its family in
+# every comparison below while being invisible to the selection rule. Measured on this registry:
+# 60 such rows, all of them written by notebooks that have since moved onto the research
+# boundary and republished under a real identity.
+
+# %% [markdown]
+# **Present in the metrics is not the same as eligible for selection.** This section reads
+# `prediction_metrics`, which lists every prediction set that was scored.
+# [`14_backtest`](14_backtest.ipynb) sweeps `load_prediction_index`, which drops rows for reasons
+# a metrics table cannot show: a superseded identity generation, a fold whose predictions
+# collapsed to a constant, a missing artifact. A family that appears in the first and not the
+# second is reported here and never traded - so the comparison a reader takes from this notebook
+# would be over more families than the selection rule ever ran on. Both sets are printed below,
+# and the difference is named rather than left to be inferred from two lists.
 
 # %%
 # Phase 1: Load pre-computed metrics for ALL labels (coverage + multi-label analysis)
 all_labels_metrics = load_all_metrics(CASE_STUDY, label=None).filter(pl.col("label").is_not_null())
+
+_generations = split_unpublished_members(study, all_labels_metrics)
+all_labels_metrics = _generations.live
+print(f"Registered metric rows: {_generations.live.height + _generations.retired.height:,}")
+if _generations.retired.is_empty():
+    print("Not published by any current population: none")
+else:
+    print(f"Not published by any current population: {_generations.retired.height:,}")
+    print(
+        _generations.retired.group_by("family", "config_name")
+        .agg(n=pl.len())
+        .sort("n", descending=True)
+    )
+
 all_metrics = all_labels_metrics.filter(pl.col("label") == PRIMARY_LABEL)
 
 if all_metrics.height == 0:
@@ -191,17 +242,35 @@ for fam in families_present:
         f"  {fam:20s}  {configs:3d} configs  {checkpoints:3d} checkpoints  best IC={best_ic_text}"
     )
 
-# Coverage completeness check
-EXPECTED_FAMILIES = {"linear", "gbm", "tabular_dl", "deep_learning", "latent_factors", "causal_dml"}
+# Coverage completeness check. `causal_dml` is not in this set: it writes to `causal_runs` and
+# never to `prediction_metrics`, for the reason the Causal DML section below gives, so listing it
+# here would report a shortfall on every run that no amount of fitting could close.
+EXPECTED_FAMILIES = {"linear", "gbm", "tabular_dl", "deep_learning", "latent_factors"}
 missing = EXPECTED_FAMILIES - set(families_present)
+# Scored is not the same as eligible for selection. A family the candidate index cannot reach is
+# reported here and never traded.
+SELECTABLE_FAMILIES = set(
+    load_prediction_index(CASE_STUDY, label=PRIMARY_LABEL, split="validation")["family"]
+    .unique()
+    .to_list()
+)
+reported_only = sorted(set(families_present) - SELECTABLE_FAMILIES)
+
 if missing:
-    n_present = len(families_present)
     print(
-        f"\nCOVERAGE: {n_present}/6 model families present. Missing: {', '.join(sorted(missing))}"
+        f"\nSCORED: {len(families_present)}/{len(EXPECTED_FAMILIES)} forecasting families. "
+        f"Missing: {', '.join(sorted(missing))}"
     )
     print("  Recommendations below may change when missing families are added.")
 else:
-    print("\nFull coverage: all 6 model families present.")
+    print(f"\nAll {len(EXPECTED_FAMILIES)} forecasting families are scored below.")
+print(f"Selectable by the backtest stages: {', '.join(sorted(SELECTABLE_FAMILIES))}")
+if reported_only:
+    print(
+        f"SCORED BUT NOT SELECTABLE: {', '.join(reported_only)}. Registered, scored, and "
+        "unreachable from every backtest stage, so the traded comparison is over "
+        f"{len(SELECTABLE_FAMILIES)} families rather than {len(families_present)}."
+    )
 
 # %%
 # Best model per family
@@ -219,8 +288,11 @@ for row in best_per_family.filter(pl.col("family") != "causal_dml").iter_rows(na
     config = row["config_name"]
     checkpoint = row.get("checkpoint_value")
 
+    # By hash, not by attributes: family, config and checkpoint do not identify a generation,
+    # so a refit's retired rows share all three with the live ones and would concatenate here.
     preds = load_predictions(
         CASE_STUDY,
+        prediction_hash=row["prediction_hash"],
         family=family,
         label=PRIMARY_LABEL,
         config_name=config,
@@ -281,10 +353,9 @@ if best_preds.height > 0 and fold_ranges.height > 0:
 #
 # Before comparing results, we map what is actually comparable. Not all
 # model families were trained on all labels, and the five modeling
-# chapters contribute different kinds of evidence: Ch11–13 produce
-# predictive forecasts; Ch14 extracts latent structure; Ch15 estimates
-# causal effects. Forcing all of these into a single ranking would be
-# misleading.
+# chapters contribute different kinds of evidence: chapters 11 to 13 produce predictive
+# forecasts, chapter 14 extracts latent structure, and chapter 15 estimates causal effects. One
+# ranking over all three would be a ranking over three different questions.
 
 # %%
 # Coverage map: family × label × evidence type
@@ -340,34 +411,31 @@ print(f"  Causal families: {causal_families or 'none'}")
 print(f"\nAll labels trained: {all_labels}")
 
 # %% [markdown]
-# The ETF case study has five predictive/structural model families on the
-# primary label (`fwd_ret_21d`), spanning four of the five modeling chapters
-# (Ch11–14); causal DML (Ch15) is evaluated separately as causal evidence in
-# Section 7, not as a predictive family here.
-# Notably, latent factor models (Ch14) were trained despite the
-# relatively narrow 100-ETF cross-section. The validation daily-pooled
-# IC ordering (highest-IC full-coverage config per family) places latent
-# factors first via SDF at IC +0.099, deep learning second via NLinear
-# at +0.062, GBM third via the 7-leaf MAE tree at +0.044, linear fourth
-# via ridge ($\alpha=10^6$) at +0.042, and tabular DL fifth via TabM-L
-# at +0.034. Within latent factors, the highest-IC estimator is SDF, at
-# IC +0.099 ($t_{HAC}=5.7$) — the strongest single signal in the whole
-# comparison; SAE follows at +0.064 ($t_{HAC}=3.3$) and CAE at +0.046
-# ($t_{HAC}=2.1$) also clears zero, while PCA and IPCA do not — three of
-# the five LF estimators show credible signal on this panel.
+# The coverage map is the first result, before any comparison. It says which families were fitted
+# on which label, and it is read rather than asserted because a family that was never fitted and a
+# family that was fitted and did nothing look identical in a table of results.
 #
-# Two labels were explored: the primary `fwd_ret_21d` (monthly) and
-# `fwd_ret_5d` (weekly). The shorter horizon has narrower family
-# coverage; all cross-family comparisons in this notebook use the
-# primary label unless stated otherwise.
+# The three evidence types are not three grades of the same thing. **Predictive** families forecast
+# the return from the feature row and are compared on how well they order the cross-section.
+# **Structural** ones estimate a low-dimensional factor structure and produce a forecast as a
+# consequence; they are compared with the predictive families on IC because that is the quantity a
+# strategy uses, but the object they estimate is different. **Causal** evidence answers a question
+# about the world rather than about a ranking and is reported in section 7, outside the comparison.
+# One ranking over all three would be a ranking over three different questions.
+#
+# Two labels are declared - `fwd_ret_21d` at the monthly rebalancing horizon and `fwd_ret_5d` at
+# the weekly one - and the coverage above shows they are not equally covered. Every cross-family
+# comparison in this notebook uses the primary label unless it says otherwise; section 6 is where
+# the two horizons are read against each other.
 
 # %% [markdown]
-# ## 3. Headline Comparative View
+# ## 3. What each family's leading configuration achieved
 #
-# Before comparing model families, we establish a baseline. If the
-# simplest possible model — OLS linear regression on 57 momentum and
-# volatility features — produces zero or negative IC, the prediction
-# problem is fundamentally too hard for this cross-section.
+# The comparison starts from a baseline rather than from the leader. If ordinary least squares on
+# the feature matrix - the simplest thing anyone would try, with no regularization and no
+# non-linearity - produces no information coefficient at all, then the elaborate models are being
+# compared on a problem that has nothing in it, and the right conclusion is about the panel rather
+# than about them.
 
 # %%
 # Linear baseline
@@ -386,14 +454,12 @@ if linear_metrics.height > 0:
                 print(f"  t-stat:   {t_stat:.1f} (across {n_splits} folds)")
             break
 
+# %% [markdown]
+# Only full-coverage configurations are shown. One that degenerates to a constant prediction on
+# some folds has an undefined daily IC there and a short `ic_n_days`, so its average is taken over
+# fewer folds than the others and is not the same quantity.
+
 # %%
-# Headline forest — per-family highest daily-pooled IC config with HAC 95% CI,
-# drawn from the already-loaded validation metrics (ic_mean_daily, ic_ci_lo,
-# ic_ci_hi, ic_t_hac). Restrict to full-coverage configs: a config that
-# degenerates to constant predictions on some folds (e.g. a high-L1 ElasticNet
-# whose coefficients all shrink to zero) has undefined daily IC on those folds
-# and a partial ic_n_days, and must not be shown as a family's leader on a
-# subset-of-folds IC. This matches best_per_family below.
 _full_days = all_metrics["ic_n_days"].max()
 forest_df = (
     all_metrics.filter(
@@ -435,60 +501,48 @@ forest_fig = headline_forest_plot(
     ci_hi_col="ic_ci_hi",
     label_col="config_name",
     family_col="family",
-    title=f"ETFs / {PRIMARY_LABEL} — daily-pooled IC ± HAC 95% CI",
+    title=f"ETFs / {PRIMARY_LABEL}: daily-pooled IC with HAC 95% intervals",
 )
-forest_fig.show()
+_ic = forest_df["ic_mean_daily"]
+show_with_alt(
+    forest_fig,
+    "Forest plot of each model family's highest daily-pooled information coefficient with its "
+    "HAC 95% confidence interval, one row per family. Counted from the frame: "
+    f"{forest_df.height} families, IC from {_ic.min():+.4f} to {_ic.max():+.4f}, "
+    f"{int((forest_df['ic_ci_lo'] > 0).sum())} with an interval entirely above zero.",
+)
 
 # %% [markdown]
-# **Signal present but uncertainty matters.** Reading the forest plot rather
-# than a point-estimate ranking changes the story. Per-family highest-IC CIs
-# overlap heavily, and the HAC-corrected confidence intervals are wide
-# enough that small IC differences are not statistically separable. The
-# numbers cited below come from the validation block printed above.
+# **The interval is the result; the point estimate is a summary of it.** Each row above is one
+# family's highest-IC configuration with a Driscoll-Kraay ninety-five percent interval around it,
+# taken that way because these ICs are daily correlations on an overlapping label, so consecutive
+# days are dependent and an ordinary standard error would be far too small.
 #
-# What the figure does support:
+# Three things to read off it, in order:
 #
-# - The clear leader is the latent-factor family via SDF at IC $\approx$
-#   0.099, with a HAC CI whose lower bound clears zero by a wide margin
-#   (lower bound $\approx$ 0.065; $t_{HAC} \approx 5.7$). It is the only
-#   family that separates cleanly from the pack rather than overlapping
-#   with its neighbors — the strongest single piece of evidence for
-#   cross-sectional predictability on the panel.
-# - Deep learning (NLinear) is the runner-up at IC $\approx$ 0.062 with a
-#   CI lower bound $\approx$ 0.022 ($t_{HAC} \approx 3.0$) — the strongest
-#   non-latent signal, credibly nonzero but well below SDF.
-# - GBM (7-leaf MAE tree) at IC $\approx$ 0.044 has a CI whose lower bound
-#   just clears zero ($\approx$ 0.006; $t_{HAC} \approx 2.3$) — marginal
-#   but credibly positive.
-# - The high-regularization linear leader (ridge with $\alpha=10^6$) at
-#   IC $\approx$ 0.042 has a CI that straddles zero
-#   ($\approx [-0.003, 0.087]$; $t_{HAC} \approx 1.8$): directionally
-#   positive but not statistically distinguishable from no signal at the
-#   95% level. Even the strongest linear configuration does not clear the
-#   HAC bar on this panel.
-# - Tabular DL (TabM-L) at IC $\approx$ 0.034 sits at the bottom with a CI
-#   lower bound essentially at zero ($\approx -0.000$; $t_{HAC} \approx
-#   1.9$) — a borderline signal.
-# - The OLS baseline (no regularization) anchors the comparison at IC
-#   $\approx$ 0.027 (CI straddles zero, $t_{HAC} \approx 1.4$): signal is
-#   directionally present but weak, and regularization lifts the linear
-#   family only modestly above it.
+# - **Which intervals exclude zero.** Those are the families this panel supports a claim about.
+#   A family whose interval crosses zero is directionally positive and not distinguishable from
+#   having no signal, whatever its rank in the table.
+# - **Which intervals overlap each other.** Where two overlap heavily, the ordering between them is
+#   not something the data decided, and reading a table sorted by point estimate as a ranking puts
+#   a claim on that ordering the interval does not support.
+# - **Whether any family stands clear of the others.** One that does is the panel's strongest
+#   single piece of evidence and is worth asking what it does differently. Section 7 is where the
+#   latent-factor members are separated by exactly that question.
 #
-# Reading the plot, the substantive ordering is "one dominant (SDF), one
-# clear (NLinear), one marginal (GBM), two borderline (linear, tabular)."
-# SDF aside, the remaining families sit on a continuum of uncertainty with
-# heavily overlapping CIs, so distinctions *below* the leader should not be
-# over-read. The next sections examine fold-level stability (Section 4),
-# what the models learn (Section 5), and the cost of having tried many
-# configs before declaring a highest-IC config (Section 8).
+# **Only full-coverage configurations appear.** A configuration that degenerates to a constant
+# prediction on some folds - a heavily L1-penalised linear model whose coefficients all reach zero
+# is the usual case - has an undefined daily IC on those folds, so its average is taken over fewer
+# of them. Ranking it against one measured on all of them compares two different quantities, so it
+# is excluded rather than shown with a footnote.
 
 # %% [markdown]
-# ### Which Model Families Extract the Most Signal?
+# ### Fold by fold, not on average
 #
-# The primary comparison uses the best configuration from each family,
-# evaluated not just by mean IC but by consistency across 8 folds.
-# A model with the highest average IC is not the most credible choice
-# if that average is carried by one or two exceptional windows.
+# The comparison below takes each family's leading configuration and looks at what it did in every
+# fold rather than at the average over them. A configuration whose highest average IC comes from
+# one or two exceptional windows is not the more credible choice, and the average alone cannot say
+# which case it is.
 
 # %%
 # Build fold × family IC matrix from raw predictions
@@ -499,22 +553,25 @@ fold_ic = (
 )
 
 # %% [markdown]
-# ### Figure 2: Fold-by-Model Performance Heatmap
+# ### Fold by family, with the uncertain cells muted
 #
-# Cells where the within-fold IC is not credibly nonzero (two-sided
-# normal-approx $p > 0.05$ from $|\text{IC}| / (\text{ic\_std}/\sqrt{N})$)
-# are rendered in muted gray. The signal that survives this gate is
-# concentrated in folds and families where IC is large relative to
-# its within-fold dispersion — not just folds where the *mean* IC
-# happens to be high.
+# A cell is muted where the within-fold information coefficient is not credibly different from zero
+# - a two-sided normal approximation on the fold's own IC against its within-fold dispersion, at
+# the five percent level. What is left in colour is where the IC is large relative to how much it
+# varied inside that fold, which is not the same set of cells as where the mean IC was highest.
 
 # %%
 fold_heatmap_fig = fold_heatmap_with_ci(
     CASE_STUDY,
     label=PRIMARY_LABEL,
-    title=f"ETFs / {PRIMARY_LABEL} — fold IC × family (gray = not significant)",
+    title=f"ETFs / {PRIMARY_LABEL}: fold IC by family, muted where not credibly nonzero",
 )
-fold_heatmap_fig.show()
+show_with_alt(
+    fold_heatmap_fig,
+    "Heatmap of the within-fold information coefficient, one row per model family and one column "
+    "per walk-forward fold, with cells muted to grey where the within-fold IC is not credibly "
+    "different from zero at the five percent level.",
+)
 
 # %%
 # Summary statistics per family
@@ -536,68 +593,43 @@ if fold_ic.height > 0:
     print(family_stats)
 
 # %% [markdown]
-# The heatmap reveals several patterns specific to the ETF cross-section:
+# **The heatmap answers a question the average cannot.** A family's mean IC is compatible with two
+# very different pictures: a modest positive result repeated in every fold, or a large one in two
+# folds and nothing in the rest. The first is a property of the panel; the second is a property of
+# two years. Reading across a row tells you which.
 #
-# - **Latent factors (SDF)** leads decisively with IC +0.099 and the
-#   strongest HAC t-statistic in the whole comparison ($t_{HAC} \approx
-#   5.7$). SAE follows within the same family at IC +0.064
-#   ($t_{HAC} \approx 3.3$) — SDF's pricing-kernel objective is the
-#   clearest evidence of factor structure on this panel.
-# - **Deep learning (NLinear)** is the runner-up at IC +0.062
-#   ($t_{HAC} \approx 3.0$), the strongest non-latent signal. The compact
-#   NLinear architecture matches the cross-sectional ranking task without
-#   the temporal-overfitting risk that the LSTM-class configurations show
-#   on a 100-ETF panel.
-# - **GBM** (7-leaf MAE tree) comes third at IC +0.044 with a CI whose
-#   lower bound just clears zero ($t_{HAC} \approx 2.3$) — the tree
-#   ensemble extracts a marginal but credible signal here.
-# - **Linear (ridge, $\alpha=10^6$)** is fourth at IC +0.042 with a CI
-#   that straddles zero ($t_{HAC} \approx 1.8$). Heavy shrinkage near the
-#   prior captures the bulk of the linear-in-features signal, and
-#   lower-$\alpha$ ridge configurations cluster within $\approx$ 0.005 IC
-#   of each other (see the per-config table in Section 3) — but even the
-#   best linear config is not statistically separable from zero.
-# - **TabM-L** achieves IC +0.034, positive in most folds though with a
-#   notable negative fold — likely a period where momentum reversal
-#   dominated (e.g., the post-COVID rotation). Its CI lower bound sits
-#   essentially at zero.
-# - **Among latent-factor estimators**, SDF, SAE, and (marginally) CAE
-#   deliver credibly nonzero IC at their highest config ($t_{HAC}$ of 5.7,
-#   3.3, and 2.1); PCA and IPCA have CIs that straddle zero. PCA in
-#   particular ($t_{HAC} \approx 0.4$) does not serve as the trustworthy
-#   linear-LF baseline some of the other case studies provide.
+# The muting is what keeps that reading honest. A cell is greyed when its within-fold IC is not
+# credibly different from zero given the dispersion inside that fold, so a row that looks warm on
+# average but is mostly grey is a row whose average is carried by the few cells that are not.
+#
+# The per-family table beneath it puts numbers on the same thing: `pct_positive` is how often the
+# family was on the right side, `worst_fold` is what it did in its worst year, and the gap between
+# `mean_ic` and `median_ic` says whether the average is being pulled by one fold.
 
 # %% [markdown]
-# ## 4. Stability Over Time
+# ## 4. Stability over time
 #
-# Mean IC can be misleading when carried by a few strong folds.
-# For a monthly rebalancing strategy running over years, the
-# consistency of signal matters more than peak performance.
-# A model that delivers IC = 0.03 in every fold is a better
-# foundation than one that delivers IC = 0.10 in two folds
-# and IC = −0.05 in six.
+# A mean IC carried by two exceptional windows and a mean IC repeated in every window are the same
+# number describing two different things. For a strategy that runs for years and cannot choose
+# which regime it meets, the second is what can be sized and the first is a bet on the calendar.
+# This section separates them.
 
 # %% [markdown]
-# ### Figure 3: Fold Performance Distribution by Model Family
+# ### The spread of each family's fold results
 
 # %%
 plot_fold_boxplot(fold_ic)
 
 # %% [markdown]
-# The box plots show that SDF is both the highest and the *steadiest*
-# family: it is positive in all 8 folds (worst fold +0.009) and carries the
-# highest median IC. Among the others, ridge regression is the *safest* —
-# its interquartile range is the tightest (fold std $\approx$ 0.04) and its
-# worst fold is only slightly negative — though its mean is modest. GBM
-# shows the widest tails (fold std $\approx$ 0.07, worst fold $\approx
-# -0.055$): a high-variance family whose average is carried by its strong
-# folds. NLinear is positive in 7 of 8 folds but with a wide spread — the
-# temporal inductive bias of sequence models helps when it aligns with the
-# cross-sectional ranking and hurts when it does not.
+# The box plots put each family's eight fold ICs on one axis. The box is the interquartile range,
+# so a narrow one is a family that says roughly the same thing in every window, and the lower
+# whisker is the year that would have been hardest to hold through.
 #
-# For a reader designing a live strategy, the practical lesson is clear:
-# **a model's worst fold matters more than its best fold**, because you
-# will inevitably deploy through unfavorable regimes.
+# **For a strategy that has to be deployed before its regime is known, the lower whisker is the
+# number that decides.** A family with a high average and a bad worst fold is offering a bet on
+# which years arrive. A family with a modest average and a tight box is offering the same thing
+# every year, which is the thing that can actually be sized. Neither is better in the abstract, and
+# the reason to look at both is that the mean IC alone hides the distinction completely.
 
 # %% [markdown]
 # ## 5. What Are the Models Learning?
@@ -640,7 +672,7 @@ plot_bucket_monotonicity(
     N_BUCKETS,
     unconditional_mean=best_preds["y_true"].mean() if best_preds.height > 0 else None,
     label_name="21-Day Return",
-    cost_range=cost_range,
+    cost_range=COST_RANGE_BPS,
 )
 
 # %% [markdown]
@@ -648,7 +680,7 @@ plot_bucket_monotonicity(
 # families. The top-bottom bucket spreads and edge-to-cost ratios are
 # computed above for each family. The practical implication: a top-N
 # selection strategy with this signal needs to favor the liquid end
-# of the ETF universe — large-cap ETFs (SPY, QQQ, IWM) have costs
+# of the ETF universe: the largest funds have costs
 # of 2–5 bps per leg, while thematic and country ETFs cost 10–20 bps.
 # Trading costs will consume the edge unless the portfolio tilts
 # toward the more liquid instruments.
@@ -668,17 +700,15 @@ corr_matrix, corr_labels = (
 plot_correlation_matrix(corr_matrix, corr_labels)
 
 # %% [markdown]
-# The prediction correlation matrix reveals how much independent
-# information each family contributes. Pairs with correlation below 0.5
-# produce meaningfully different rankings and are candidates for
-# ensembling in Ch20. Pairs above 0.8 are essentially redundant —
-# the more complex model adds little over the simpler one.
+# **A correlation matrix over predictions answers whether the families are doing different work.**
+# Two models that produce nearly the same ranking are one model with two implementations, whatever
+# their architectures: combining them adds nothing and the simpler of the two is the one to keep.
+# Two that produce weakly related rankings are disagreeing about something, and a combination of
+# them can be better than either.
 #
-# Average pairwise correlation across the five families is 0.23
-# (range: −0.01 to 0.63). This relatively low average suggests that
-# most family pairs produce meaningfully different rankings. Families
-# with correlation below 0.5 are ensemble candidates in Ch20; pairs
-# above 0.8 are essentially redundant.
+# The matrix is the input to that decision rather than the decision. Ensembling happens in the
+# synthesis chapter, over families that also survive the signal-stage backtest, and a pair that
+# disagrees usefully here may still be a pair where one member has nothing.
 
 # %% [markdown]
 # ### How Much Does Additional Model Complexity Help?
@@ -708,39 +738,29 @@ print(f"Families with checkpoint data: {cp_families}")
 plot_learning_curves(cp_data, cp_families)
 
 # %% [markdown]
-# The learning curves (shown for the three families with multi-checkpoint
-# sweeps — deep learning, latent factors, tabular DL) reveal different
-# optimization dynamics:
+# **A checkpoint is part of a configuration's identity, not a detail of how it was trained.** Each
+# point on these curves is a separately registered prediction set with its own hash, so choosing a
+# checkpoint is choosing a model, and it happens on the same evidence and under the same selection
+# rule as choosing between architectures.
 #
-# - **Latent factors**: SDF (green) is the standout — its mean IC stays
-#   clearly positive across a long checkpoint range, peaking early
-#   ($\approx$ 0.095) and settling around 0.05–0.065, while the autoencoder
-#   and PCA/IPCA variants cluster at low checkpoints near zero. The long,
-#   stable positive band is the visual signature of the panel's strongest
-#   signal.
-# - **Deep learning**: the LSTM curve is non-monotonic — it dips then
-#   recovers to its best around checkpoint 25 — while TSMixer decays toward
-#   zero by its late checkpoints. The wide confidence bands echo the
-#   instability visible in the fold analysis, and are a reason the compact
-#   NLinear (a single well-chosen checkpoint) is the family's most reliable
-#   member.
-# - **Tabular DL**: only the larger TabM-L configuration climbs with
-#   training, plateauing around checkpoint 125; the smaller TabM-S/M
-#   variants stay near zero throughout, so capacity, not training length,
-#   is the binding constraint.
+# What the curves are for is the shape. A curve that climbs and then plateaus says the extra
+# training reached diminishing returns and the choice within the plateau matters little. One that
+# climbs and then falls says the model started fitting the training window rather than the
+# structure, and where it turns is the useful reading. One that never leaves zero says the
+# configuration has nothing, regardless of how long it was trained.
 #
-# The practical takeaway: more training is not reliably better — each
-# family's best checkpoint is well short of its last, and the confidence
-# bands are wide enough that checkpoint choice within the plateau matters
-# little.
+# The confidence bands are the reason not to read a peak as a choice: where they are wide relative
+# to the differences along the curve, the highest checkpoint and its neighbours are not
+# distinguishable, and picking the argmax is picking noise.
 
 # %% [markdown]
-# ### Which Features Drive the Forecasts?
+# ### Which features the forecasts rest on
 #
-# Feature importance from a single model fit is anecdotal. Recurring
-# importance across 8 walk-forward folds is evidence. We examine which
-# of the 57 momentum, volatility, and technical features consistently
-# drive the best model's predictions.
+# Feature importance from one fit is an anecdote about one fit. Importance that recurs across every
+# walk-forward fold is evidence about the panel, and importance that appears in one fold and not
+# the others is the model finding something local to that window. The heatmap below is arranged to
+# show the difference: a feature is credible when its row is consistently dark, not when it is
+# dark somewhere.
 
 # %%
 # Try GBM booster-based importance first, fall back to feature-prediction correlation
@@ -758,11 +778,8 @@ if gbm_importance is None:
         # Join best linear model predictions with features
         linear_preds = best_preds.filter(pl.col("family") == "linear")
         if linear_preds.height > 0:
-            # The prediction frame's timestamp is the one to match, so the feature column is
-            # cast to whatever that is rather than to a unit named here. Naming one was the
-            # defect: features stored as a date were cast to millisecond datetime while the
-            # predictions carried microseconds, and Polars refuses a join across two datetime
-            # units rather than widening one of them.
+            # Cast to the prediction frame's own timestamp type rather than to a named unit:
+            # Polars refuses a join across two datetime units instead of widening one.
             timestamp_dtype = linear_preds.schema[DATE_COL]
             if features_df.schema[DATE_COL] == pl.String:
                 features_df = features_df.with_columns(pl.col(DATE_COL).str.to_datetime())
@@ -831,10 +848,11 @@ plot_feature_importance_heatmap(gbm_importance, TOP_N_FEATURES)
 # top 5 across 6+ of 8 folds are credible signal sources; those appearing
 # only once or twice likely capture regime-specific noise.
 #
-# The 57 features span momentum (5d–252d), risk-adjusted momentum (Sharpe
-# ratios), volatility, technical indicators, and macro signals (yield curve
-# slope). The correlation-based importance reflects how strongly each
-# feature aligns with the linear model's predictions per fold.
+# The features span momentum at horizons from a week to a year, momentum adjusted for its own
+# volatility, volatility itself, technical indicators and the yield-curve slope. Where the
+# fallback method is used, what it measures is how strongly each feature aligns with the linear
+# model's predictions in that fold, which is not the same as how much the model relied on it -
+# a feature correlated with one the model uses will score highly without being used at all.
 
 # %% [markdown]
 # ## 6. Heterogeneity: Labels, Horizons, and Regimes
@@ -844,15 +862,17 @@ plot_feature_importance_heatmap(gbm_importance, TOP_N_FEATURES)
 # market regime? Both matter for strategy design.
 
 # %% [markdown]
-# ### Multi-Label Comparison
+# ### The same families at a shorter horizon
 #
-# Two horizons were trained: the primary `fwd_ret_21d` (monthly) and the
-# alternate `fwd_ret_5d` (weekly). The forest below renders the highest-IC
-# config per family for each horizon as a point estimate with the HAC 95%
-# CI. Tiles labeled "no run" mean a family was not trained on that label.
-# Comparing across the two panels diagnoses whether the cross-sectional
-# signal strengthens or weakens with horizon, and whether family ranking
-# is horizon-stable.
+# Two label horizons are declared: `fwd_ret_21d` at the monthly rebalancing cadence and
+# `fwd_ret_5d` at the weekly one. The panels below put each family's highest-IC configuration for
+# each horizon side by side with its HAC interval, and a tile marked "no run" is a family that was
+# never fitted at that horizon rather than one that was fitted and produced nothing.
+#
+# Two questions come out of the comparison: whether the cross-sectional signal is stronger at one
+# horizon than the other, and whether the ordering among families is the same at both. A family
+# that leads at one horizon and not at the other is a family whose advantage is about the horizon
+# rather than about the model.
 
 # %%
 multi_rows = []
@@ -895,27 +915,21 @@ plot_label_horizon_forest(
         "fwd_ret_21d": "fwd_ret_21d (monthly)",
         "fwd_ret_5d": "fwd_ret_5d (weekly)",
     },
-    title="ETFs — highest IC per family × horizon (HAC 95% CI)",
+    title="ETFs: highest IC per family and horizon, with HAC intervals",
 )
 
 # %% [markdown]
-# Coverage is itself the first observation: the 21-day horizon has
-# runs for five families (linear, GBM, tabular_dl, deep_learning, latent
-# factors), while only three (linear, GBM, latent factors via IPCA) were
-# trained at the weekly horizon. Within the families that span both
-# panels, the absolute IC magnitudes are modest and the credibility
-# pattern is horizon-dependent. Linear (ridge $\alpha=10^6$) is actually
-# *more* credible at the weekly horizon (+0.030, CI excludes zero,
-# $t_{HAC}\approx 2.2$) than at the monthly horizon (+0.042, CI straddles
-# zero, $t_{HAC}\approx 1.8$) — the wider daily sample at 5 days tightens
-# the interval. GBM is credibly nonzero at *both* horizons (+0.044
-# monthly, +0.030 weekly, both CIs excluding zero), the only predictive
-# family that clears the bar at 5 days as well as 21 days. The IPCA
-# estimator is the only LF run at 5 days and is below credibility (+0.010,
-# CI brackets zero) there. The qualitative reading is that the monthly
-# window carries the strongest single signal (SDF, latent factors), while
-# the shorter weekly window is where the simpler linear and tree models
-# find their most *reliable*, if smaller, edge.
+# **Coverage is the first thing the panel above says, before any comparison.** A family with no
+# tile at a horizon was never fitted there, which is a fact about what was run rather than a result
+# about the horizon - and reading an absence as a weak result is the mistake this layout exists to
+# prevent.
+#
+# Where a family spans both horizons, the comparison is worth making carefully, because the two
+# panels do not have the same amount of evidence behind them. A five-day label produces more
+# scoreable validation dates than a twenty-one-day one over the same window, so its intervals are
+# tighter for reasons that have nothing to do with signal. A family that looks more credible at the
+# shorter horizon may simply have been measured more times there, and the point estimates are what
+# to compare on strength while the intervals are what to compare on confidence.
 
 # %% [markdown]
 # ### Regime Conditioning
@@ -924,7 +938,7 @@ plot_label_horizon_forest(
 # is driven by macro regimes: risk-on/risk-off rotations, volatility spikes,
 # and trend reversals can all shift which model family extracts signal. We
 # condition performance on a volatility regime derived from cross-sectional
-# return dispersion — a natural proxy for macro uncertainty.
+# return dispersion, which is a usable proxy for macro uncertainty.
 
 # %%
 # Compute regime-conditional IC
@@ -959,8 +973,8 @@ plot_regime_bars(regime_df)
 # %% [markdown]
 # Regime sensitivity is critical for ETF rotation strategies because the
 # universe itself is a macro instrument. During high-volatility periods
-# (risk-off), the cross-section separates more sharply — bonds rally
-# while commodities and emerging markets sell off — creating larger
+# (risk-off), the cross-section separates more sharply, with bonds rallying
+# while commodities and emerging markets sell off, creating larger
 # cross-sectional spreads for models to exploit. During low-volatility
 # periods (risk-on), ETF returns converge, and cross-sectional
 # dispersion shrinks, making ranking harder.
@@ -981,16 +995,39 @@ plot_regime_bars(regime_df)
 # ### Latent Factors (Ch14)
 #
 # ETFs is one of the five case studies in scope for the latent-factor
-# pipeline. Five latent factor models were trained on the 100-ETF
-# cross-section: PCA, IPCA,
-# CAE, SDF, and SAE. The diagnostics below examine the internal
-# structure of these models using persisted fold extras.
+# pipeline. Five estimators were fitted on this cross-section: principal components, instrumented
+# PCA, the conditional autoencoder, the stochastic discount factor and the supervised
+# autoencoder. [`11_latent_factors`](11_latent_factors.ipynb) sets out what separates them. The
+# diagnostics below read each one's persisted fold extras to look inside the fit rather than at
+# its score.
+
+# %% [markdown]
+# The per-fold diagnostics are stored under the **training hash** of the run that produced them -
+# `run_log/training/<training_hash>/fold_extras.json` - so the configuration name from the metrics
+# table has to be resolved to that hash first. Passing the name straight through returns `None` for
+# every estimator, and because the loader answers `None` for "no file" rather than raising, the
+# figures below silently render nothing while the prose beside them describes what they show. The
+# estimators that wrote no extras are named rather than left out, so an empty panel is
+# distinguishable from a panel that was never asked for.
 
 # %%
-# Load latent factor diagnostics
-lf_models = ["pca", "ipca", "cae", "sdf", "sae"]
-lf_extras = {m: load_fold_extras(CASE_STUDY, m) for m in lf_models}
-lf_extras = {m: e for m, e in lf_extras.items() if e is not None}
+lf_runs = (
+    all_labels_metrics.filter(
+        pl.col("family") == "latent_factors", pl.col("label") == PRIMARY_LABEL
+    )
+    .sort("ic_mean_daily", descending=True, nulls_last=True)
+    .group_by("config_name", maintain_order=True)
+    .first()
+    .select("config_name", "training_hash", "ic_mean_daily")
+)
+lf_extras = {}
+for _row in lf_runs.iter_rows(named=True):
+    _extras = load_fold_extras(CASE_STUDY, _row["training_hash"])
+    if _extras:
+        lf_extras[_row["config_name"]] = _extras
+_missing_extras = sorted(set(lf_runs["config_name"]) - set(lf_extras))
+if _missing_extras:
+    print(f"no fold_extras.json written by: {', '.join(_missing_extras)}")
 
 # Print IC summary from registry
 lf_metrics = all_labels_metrics.filter(
@@ -1010,195 +1047,234 @@ if lf_metrics.height > 0:
 print(f"\nFold extras available: {list(lf_extras.keys())}")
 
 # %% [markdown]
-# #### PCA Variance Decomposition
+# #### How concentrated is the return panel's variance?
 #
-# The scree plot shows how much variance the first $K$ components capture.
-# A steep dropoff after 1-2 components indicates dominant market factors;
-# a flat profile suggests diffuse structure harder to exploit.
+# PCA's loadings come from the covariance of the training returns, so how much of that covariance
+# the leading components carry decides how much structure there is to load on. A steep drop after
+# one or two components means the panel is dominated by a few common movements; a flat profile
+# means the variance is spread thinly and a low-rank model has little to work with.
+#
+# Both panels average over the folds, because each fold refits the decomposition on its own
+# training window and a single fold's profile is one draw of it.
 
 # %%
-if "pca" in lf_extras:
-    var_ratios = [e["explained_variance_ratio"] for e in lf_extras["pca"]]
-    mean_var = np.mean(var_ratios, axis=0)
-
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-    axes[0].bar(range(1, len(mean_var) + 1), mean_var, color=COLORS["blue"])
-    axes[0].set_xlabel("Component")
-    axes[0].set_ylabel("Variance Explained")
-    axes[0].set_title("PCA Scree Plot (Mean Across Folds)")
-
-    axes[1].plot(range(1, len(mean_var) + 1), np.cumsum(mean_var), marker="o", color=COLORS["blue"])
-    axes[1].set_xlabel("Components")
-    axes[1].set_ylabel("Cumulative Variance")
-    axes[1].set_title(f"Top {len(mean_var)} Explain {sum(mean_var):.1%}")
-    axes[1].axhline(0.5, ls="--", color="gray", alpha=0.5)
-    fig.tight_layout()
-    fig.show()
+if "pca" not in lf_extras:
+    print("PCA fold extras are not available, so the decomposition cannot be read back")
 else:
-    print("PCA fold extras not available")
+    var_ratios = [e["explained_variance_ratio"] for e in lf_extras["pca"]]
+    mean_var = np.asarray(np.mean(var_ratios, axis=0))
+    components = list(range(1, len(mean_var) + 1))
+    cumulative = np.cumsum(mean_var)
+
+    scree = make_subplots(
+        rows=1,
+        cols=2,
+        subplot_titles=("Variance per component", "Cumulative variance"),
+    )
+    scree.add_trace(
+        go.Bar(x=components, y=mean_var.tolist(), marker_color=COLORS["blue"], showlegend=False),
+        row=1,
+        col=1,
+    )
+    scree.add_trace(
+        go.Scatter(
+            x=components,
+            y=cumulative.tolist(),
+            mode="lines+markers",
+            line=dict(color=COLORS["blue"]),
+            showlegend=False,
+        ),
+        row=1,
+        col=2,
+    )
+    scree.add_hline(
+        y=0.5, line_width=1, line_dash="dash", line_color=COLORS["neutral"], row=1, col=2
+    )
+    scree.update_xaxes(title_text="Component", row=1, col=1)
+    scree.update_xaxes(title_text="Components retained", row=1, col=2)
+    scree.update_yaxes(title_text="Share of training variance", row=1, col=1)
+    scree.update_yaxes(title_text="Cumulative share", row=1, col=2)
+    scree.update_layout(
+        title="Where the ETF return panel's variance sits",
+        height=400,
+        width=920,
+        margin=dict(t=110),
+    )
+    show_plotly_with_alt(
+        scree,
+        "Two side-by-side charts of the ETF return panel's principal-component variance, averaged "
+        "across walk-forward folds: a bar chart of the share each component carries, and a line "
+        "chart of the cumulative share with a dashed line at half. Counted from the array: "
+        f"{len(mean_var)} components, the leading one carrying {mean_var[0]:.1%}, "
+        f"the whole set {cumulative[-1]:.1%}.",
+    )
 
 # %% [markdown]
-# **Interpretation**: The scree plot characterizes the linear factor
-# decomposition of the ETF cross-section. Reading the latent-factor
-# highest-IC table from the registry, the ordering on the validation
-# panel is SDF +0.099 ($t_{HAC}=5.7$), SAE +0.064 ($t_{HAC}=3.3$),
-# CAE +0.046 ($t_{HAC}=2.1$, CI just clears zero), PCA +0.010
-# (CI straddles zero, $t_{HAC}\approx 0.4$), IPCA −0.013. The estimators
-# that produce credibly nonzero IC are SDF (pricing-kernel objective),
-# SAE (supervised autoencoder, which uses return labels during latent
-# extraction), and marginally CAE. The unsupervised *linear* methods
-# (PCA, IPCA) do not separate from zero on this panel — the 100-ETF
-# cross-section appears too small or too homogeneous for them to
-# identify stable, tradeable loadings, whereas the objective-driven
-# estimators (SDF, SAE) extract a clear signal.
-
-# %% [markdown]
-# #### CAE / SAE Training Convergence
+# **What the decomposition does and does not settle.** A concentrated variance profile says the
+# funds move together, which is what makes a factor model the right shape for this panel. It says
+# nothing about whether those factors carry a **premium** - whether loading on them is rewarded.
+# That is a separate question, and it is the one the latent-factor IC table above answers.
 #
-# Epoch loss curves reveal training dynamics: rapid initial descent
-# followed by a plateau indicates the model has converged. Divergent
-# curves across folds suggest instability.
+# The estimators in that table differ in exactly one thing: how much the fit is allowed to know
+# about returns. PCA reads the return panel alone; IPCA lets the features set the exposures; the
+# conditional autoencoder does the same with a network in place of a linear map; the stochastic
+# discount factor and the supervised autoencoder each drop the two-stage split, one by pricing the
+# cross-section directly and one by predicting the return directly. Where the ordering in the table
+# sorts them by that axis rather than by model complexity, the panel is telling you that what
+# helps is supervision, not capacity. [`11_latent_factors`](11_latent_factors.ipynb) sets out the
+# family, and each member's own notebook reports its fit.
+
+# %% [markdown]
+# #### Did the autoencoders converge, and did they converge to the same place?
+#
+# One line per fold, per model. What matters is not the level - the loss scales with the fold's own
+# training window - but the shape: a curve that descends and flattens has converged, and a set of
+# curves that flatten at similar rates is a model finding reproducible structure. Curves that
+# diverge from each other say the representation is a property of the fold rather than of the
+# panel, which is a reason to distrust it downstream whatever its IC.
 
 # %%
-for model_name in ["cae", "sae"]:
+for model_name in ("cae", "sae"):
     if model_name not in lf_extras:
+        print(f"{model_name.upper()} fold extras are not available")
         continue
-    fig, ax = plt.subplots(figsize=(8, 4))
-    plotted = False
-    for i, fold in enumerate(lf_extras[model_name]):
+    curves = []
+    for fold_index, fold in enumerate(lf_extras[model_name]):
         history = [h for h in fold.get("train_history", []) if "train_loss" in h]
         if history:
-            epochs = [h["epoch"] for h in history]
-            vals = [h["train_loss"] for h in history]
-            ax.plot(
-                epochs,
-                vals,
-                alpha=0.4,
-                color=COLORS["blue"],
-                label="Individual folds" if not plotted else None,
+            curves.append(
+                (fold_index, [h["epoch"] for h in history], [h["train_loss"] for h in history])
             )
-            plotted = True
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Training Loss")
-    ax.set_title(f"{model_name.upper()} Training Loss Across Folds")
-    if plotted:
-        ax.legend(loc="upper right")
-    fig.tight_layout()
-    fig.show()
+    if not curves:
+        print(f"{model_name.upper()} fold extras carry no training history")
+        continue
 
-# %% [markdown]
-# **Interpretation**: The convergence curves above show whether CAE and
-# SAE training stabilized. Consistent convergence across folds indicates
-# the autoencoder captures reproducible structure; divergent curves
-# suggest the latent representation is fold-dependent and less reliable
-# for downstream prediction.
-
-# %% [markdown]
-# #### SDF Sharpe Ratios
-#
-# The SDF model's internal sharpe ratio measures the pricing kernel's
-# ability to span the space of tradeable portfolios. Higher sharpe
-# indicates stronger no-arbitrage constraints.
-
-# %%
-if "sdf" in lf_extras:
-    sharpes = [e.get("sdf_sharpe", None) for e in lf_extras["sdf"]]
-    sharpes = [s for s in sharpes if s is not None]
-    if sharpes:
-        print(f"SDF Sharpe across folds: mean={np.mean(sharpes):.3f}, std={np.std(sharpes):.3f}")
-        print(f"  Range: [{min(sharpes):.3f}, {max(sharpes):.3f}]")
-else:
-    print("SDF fold extras not available")
-
-# %% [markdown]
-# **Interpretation**: SDF achieves daily-pooled validation IC
-# $\approx$ +0.099 with the strongest HAC t-statistic not just in the
-# latent-factor family but across all families ($t_{HAC} \approx 5.7$).
-# The internal Sharpe values reported above (mean $\approx$ 0.59 across
-# folds) describe the pricing kernel's ability to span tradeable
-# portfolios; combined with the leading IC, SDF is the strongest signal
-# on the 100-ETF panel, ahead of SAE and the predictive families.
+    loss_fig = go.Figure()
+    for fold_index, epochs, losses in curves:
+        loss_fig.add_trace(
+            go.Scatter(
+                x=epochs,
+                y=losses,
+                mode="lines",
+                name=f"fold {fold_index}",
+                line=dict(color=COLORS["blue"], width=1.5),
+                opacity=0.5,
+            )
+        )
+    loss_fig.update_xaxes(title_text="Epoch")
+    loss_fig.update_yaxes(title_text="Training loss")
+    loss_fig.update_layout(
+        title=f"{model_name.upper()} training loss, one line per fold",
+        height=380,
+        width=800,
+        margin=dict(t=90),
+    )
+    _finals = [losses[-1] for _, _, losses in curves]
+    show_plotly_with_alt(
+        loss_fig,
+        f"Line chart of the {model_name.upper()} autoencoder's training loss against epoch, one "
+        "line per walk-forward fold. Counted from the histories: "
+        f"{len(curves)} folds over up to {max(len(e) for _, e, _ in curves)} epochs, "
+        f"final loss from {min(_finals):.4g} to {max(_finals):.4g}.",
+    )
 
 # %% [markdown]
 # ### Causal DML (Ch15)
+#
+# [`12_causal_dml`](12_causal_dml.ipynb) writes to `causal_runs` rather than to
+# `prediction_metrics`, because what it registers is not a forecast. It answers what would happen
+# to a fund's next return if its momentum were different, holding the declared confounders fixed -
+# a question about the world, not about a ranking. It has no prediction set, enters no population,
+# and is not a candidate for [`14_backtest`](14_backtest.ipynb).
+#
+# The row is resolved by label rather than read out of the table by position. A label resolves to
+# exactly one **current** causal identity, and a registry holding two undeclared ones raises rather
+# than picking the first - which is the difference between reading a result and reading a row that
+# happens to be there.
+#
+# The refutation p-value is nullable by contract: fewer than ten successful placebo draws leaves it
+# NULL, and the classification derived from it None, because a p-value from that few draws cannot
+# reject at any threshold. The cell prints "not run" rather than formatting a missing number, which would
+# fail after half the block had already printed.
 
-# %%
-# Load causal DML evidence. Ch15 writes to the ``causal_runs`` registry table
-# (double-ML treatment-effect estimates), not to ``prediction_metrics``, so it is
-# queried separately from the predictive families above.
-import sqlite3
+# %% tags=["results"]
+causal_study = study
+try:
+    causal = CausalResult.one(causal_study, label=PRIMARY_LABEL)
+except ValueError as error:
+    causal = None
+    print(f"No resolvable causal result for {PRIMARY_LABEL}: {error}")
 
-from case_studies.utils.analytics import _registry_path
-
-_cdb = _registry_path(CASE_STUDY)
-with sqlite3.connect(str(_cdb)) as _cconn:
-    _cconn.row_factory = sqlite3.Row
-    _crows = [
-        dict(r)
-        for r in _cconn.execute(
-            "SELECT treatment, dml_effect, dml_se_hac, p_value_hac, naive_effect, "
-            "confounding_bias_pct, refutation_p FROM causal_runs WHERE label = ?",
-            (PRIMARY_LABEL,),
-        ).fetchall()
-    ]
-
-if _crows:
-    cr = _crows[0]
-    print(f"Causal DML on {PRIMARY_LABEL} (treatment = {cr['treatment']}):")
+if causal is not None:
+    estimand = causal.spec["computation"]["estimand"]
+    metrics = causal.metrics
+    interval = 1.96 * metrics["dml_se_hac"]
+    print(f"Causal DML on {PRIMARY_LABEL}, identity {causal.hash}")
+    print(f"  Treatment:        {estimand['treatment']}")
+    print(f"  Confounders:      {', '.join(estimand['confounders'])}")
+    print(f"  Observations:     {metrics['n_obs']:,}")
     print(
-        f"  DML effect (ATE): {cr['dml_effect']:+.4f}  "
-        f"(HAC SE {cr['dml_se_hac']:.4f}, p = {cr['p_value_hac']:.1e})"
+        f"  Adjusted effect:  {metrics['dml_effect']:+.4f} "
+        f"(Driscoll-Kraay SE {metrics['dml_se_hac']:.4f}, "
+        f"95% interval {metrics['dml_effect'] - interval:+.4f} to "
+        f"{metrics['dml_effect'] + interval:+.4f}, p {metrics['p_value_hac']:.4f})"
     )
+    print(f"  Unadjusted (OLS): {metrics['naive_effect']:+.4f}")
+    # NULL when fewer than ten placebo draws succeed; see the note above the cell.
+    refutation_p = metrics["refutation_p"]
     print(
-        f"  Naive (unadjusted) effect: {cr['naive_effect']:+.4f}  ->  "
-        f"confounding bias {cr['confounding_bias_pct']:+.0f}%"
+        f"  Refutation:       {metrics['refutation_class'] or 'not run'}"
+        + ("" if refutation_p is None else f" (p {refutation_p:.4f})")
     )
-    print(f"  Refutation p-value (placebo treatment): {cr['refutation_p']:.2f}")
-    print("  Note: the ATE is the causal effect of the momentum treatment on forward")
-    print("        returns; cross-sectional ranking ability is a separate question,")
-    print("        documented by the predictive families above and in 12_causal_dml.")
-else:
-    print("No causal DML results available for this case study")
 
 # %% [markdown]
-# Causal DML estimates the effect of the momentum treatment
-# (`skip_recent_6_1`) on forward returns after orthogonalizing
-# confounders (volatility, regime, yield-curve slope). The result is
-# nuanced: the **ATE is −0.058** (highly significant, p ≈ 0), meaning
-# higher momentum causes *lower* forward returns after controlling for
-# confounders — a mean-reversion effect, not momentum continuation.
-# Controlling for confounders *strengthens* the negative effect relative
-# to the naive estimate (−0.039), a confounding bias of roughly +33%, and
-# the effect survives a placebo-treatment refutation test.
+# **The causal estimate and the predictive IC answer different questions, and neither settles the
+# other.** A positive information coefficient says the model orders the cross-section usefully. The
+# causal estimate says how much of the momentum-return association is left once volatility, regime
+# and the yield-curve slope are accounted for. A strategy that goes long the top of a ranking and
+# short the bottom needs the first and does not need the second, which is why nothing here feeds
+# selection.
 #
-# This directional finding sits alongside the positive cross-sectional
-# ranking IC the predictive families deliver above: the supervised models
-# (ridge, GBM, TabM) exploit momentum as a *ranking* feature, not as a
-# directional bet. The causal evidence says the directional relationship
-# is contrarian (mean-reversion), while cross-sectional ranking ability is
-# positive. For a long-short strategy that cares only about relative
-# ranking, positive IC is what matters — but the negative ATE warns
-# against interpreting the momentum signal as "momentum continuation";
-# the mechanism is more likely mean-reversion in overbought/oversold ETFs.
+# What the causal row does carry is a warning about **interpretation**. If the adjusted effect
+# above is small relative to its standard error, or sits on the opposite side of zero from the
+# unadjusted one, then the momentum feature is not a directional bet the data support - whatever
+# the predictive families are extracting from it, "high momentum causes high returns" is not the
+# mechanism, and describing the strategy that way would be describing something the estimate does
+# not show. [`12_causal_dml`](12_causal_dml.ipynb) sets out why the Driscoll-Kraay interval and the
+# block-permutation p-value can disagree, and which one to believe when they do.
 
 # %% [markdown]
 # ### Calibration: Are Prediction Intervals Honest?
 #
 # Point IC tells us whether the ranking is correct on average; it says
-# nothing about whether the model's *uncertainty* is well calibrated.
-# Inductive split-conformal prediction (Vovk et al., 2005; Lei et al.,
-# 2018) gives a distribution-free check: using fold-0 absolute residuals
-# as a calibration set, the symmetric quantile $\hat{q}_{1-\alpha}$
-# defines an interval $[\hat{y} - \hat{q}, \hat{y} + \hat{q}]$ that
-# should cover the true label at rate $1-\alpha$ on the remaining folds.
-# Empirical coverage materially below the nominal level signals
-# overconfident residual scaling — the model is more wrong, more often,
-# than its training-time spread suggests. Width is reported as a
-# fraction of the actuals' standard deviation so families with different
-# return scales are comparable; smaller width at matched coverage means
-# tighter, more useful intervals. See Ch12 §12.6 / `11_conformal_gbm`
-# for the full conformal toolkit (CQR, ACI). What we report here is the
-# minimal residual-calibration diagnostic.
+# nothing about whether the model's *uncertainty* is well calibrated. The
+# width measured here is the one the `conformal_weighted` allocator sizes
+# positions with: calibrated per symbol on every absolute residual known at
+# `t - h`, where `h` is this label's horizon in data steps, falling back to a
+# quantile pooled over every symbol where one has too few residuals of its
+# own. A decision is covered when its absolute residual falls inside that
+# half-width, and `n_uncalibrated` counts the decisions that cleared no
+# warm-up and that no coverage figure describes.
+#
+# Empirical coverage materially below the nominal level signals overconfident
+# residual scaling - the model is more wrong, more often, than its
+# training-time spread suggests. Width is reported as a fraction of the
+# standard deviation of the outcomes it was measured against, so families with
+# different return scales are comparable; smaller width at matched coverage
+# means tighter, more useful intervals.
+#
+# Read it as a diagnostic of residual dispersion rather than a guarantee.
+# Split conformal's finite-sample coverage (Vovk et al., 2005; Lei et al.,
+# 2018) requires the calibration and evaluation scores to be exchangeable and
+# return residuals are not, and nothing in the allocation path reads an
+# interval or a coverage level - the width stands in for a volatility
+# estimate. See Ch12 §12.6 / `11_conformal_gbm` for the full conformal toolkit
+# (CQR, ACI).
+#
+# Each row is the family's highest-IC configuration for the primary label.
+# That is a model-level ranking and not the funnel's - every selection stage
+# ranks on validation backtest Sharpe - and it is used here because this
+# diagnostic runs before any backtest exists to rank.
 
 # %%
 conformal_etfs = conformal_coverage_diagnostic(
@@ -1222,28 +1298,30 @@ if conformal_etfs.height > 0:
 # closely across families, with most highest-IC configs landing within a few
 # percentage points of nominal. Departures are informative: under-coverage
 # (empirical < nominal) signals residuals heavier-tailed than the
-# calibration window suggests — a known concern for daily ETF returns
+# calibration window suggests, which is a known concern for daily ETF returns
 # with episodic volatility shocks; over-coverage means intervals are
 # wider than needed. Width-per-std is the more useful axis for
 # distinguishing models: at matched coverage, a family whose intervals
 # are narrower in std-units is producing tighter forecasts of the
 # residual distribution. This calibration diagnostic feeds Ch19 risk
-# management — wider intervals naturally scale down position size, and
+# management, where wider intervals scale down position size, and
 # ACI extensions (Ch12 §12.6) update interval width online to track
 # regime shifts in residual variance.
 
 # %% [markdown]
-# ## 8. Pre-Backtest Judgment and Handoff
+# ## 8. What this analysis can and cannot settle
 #
-# This section assembles the empirical record this analysis can speak to,
-# and names what it cannot. The Ch16 selection workflow then picks the
-# top candidate from the signal-stage backtest and retrains it on the
-# holdout window — the val→holdout decay is the most honest generalization
-# evidence we have.
+# Two tables close the notebook. The first is the validation record above, restated in one place.
+# The second is what happens to that record once the number of configurations tried is taken into
+# account - and it depends on the signal-stage backtest, which runs in
+# [`14_backtest`](14_backtest.ipynb) and therefore may not exist yet.
+#
+# **This notebook does not select anything.** Selection is best validation backtest Sharpe, which
+# is a quantity no cell here computes. What this notebook produces is the description of the
+# population that selection will then be made over.
 
-# %%
-# Validation IC summary (per-family highest-IC config, daily-pooled with HAC CI)
-print("Validation IC summary — daily-pooled with HAC 95% CI:")
+# %% tags=["results"]
+print("Validation IC per family, daily-pooled with HAC 95% intervals:")
 print(
     forest_df.select(
         "family",
@@ -1255,168 +1333,155 @@ print(
     )
 )
 
-# %%
-# Selection-adjusted leader table at the signal stage. Pulls DSR /
-# expected-max-Sharpe / Reality-Check p-value / PBO / k_variants from
-# the ``cohort_metrics`` table — these encode the cost of having tried
-# many configs before declaring a top candidate. ``dsr`` is the
-# effective-rank (ER) deflated Sharpe (the library default); the row
-# also exposes ``dsr_mp`` and ``dsr_raw`` for sensitivity.
-sel_adj = selection_adjusted_leader_table(CASE_STUDY, stage="signal")
-print("\nSelection-adjusted signal-stage leader per family:")
-print(
-    sel_adj.select(
-        "family",
-        "config_name",
-        pl.col("sharpe").round(3),
-        pl.col("sharpe_ci95_lo").round(3).alias("sh_lo"),
-        pl.col("sharpe_ci95_hi").round(3).alias("sh_hi"),
-        pl.col("dsr").round(3),
-        pl.col("expected_max_sharpe").round(3).alias("exp_max"),
-        pl.col("reality_check_pvalue").round(3).alias("rc_p"),
-        pl.col("pbo").round(2),
-        pl.col("k_variants").cast(pl.Int64).alias("k"),
-    )
-)
+# %% [markdown]
+# ### The cost of having searched
+#
+# A leader chosen from many configurations is partly a leader because many were tried. The
+# selection-adjusted table below carries the deflated Sharpe, the Sharpe the leader of
+# `k_variants` zero-skill configurations would be expected to reach, the reality-check p-value and the
+# probability of backtest overfitting - all computed at the signal stage, over the configurations
+# actually swept.
+#
+# It reads `cohort_metrics`, which is computed once the whole pipeline exists and written by
+# [`20_strategy_analysis`](20_strategy_analysis.ipynb) - the notebook that has every stage in front
+# of it. So on a first pass this table is empty, and it is empty for a reason worth stating: the
+# cost of a search cannot be priced until the search has happened. The notebook says so rather than
+# failing, and filling in on a second pass is the normal course rather than a repair.
 
-# %%
-# Holdout decay for the top candidate. By design (Ch16 selection
-# workflow) only the signal-stage top family is retrained on the
-# holdout window — other families show null on the holdout side
-# because they were never selected for retraining.
-decay = holdout_decay_table(CASE_STUDY, label=PRIMARY_LABEL)
-print("\nHoldout decay (top family only — others were not selected for retrain):")
-print(
-    decay.select(
-        "family",
-        "config_name",
-        pl.col("val_ic").round(4),
-        pl.col("val_ci_lo").round(4).alias("val_lo"),
-        pl.col("val_ci_hi").round(4).alias("val_hi"),
-        pl.col("ho_ic").round(4),
-        pl.col("ho_ci_lo").round(4).alias("ho_lo"),
-        pl.col("ho_ci_hi").round(4).alias("ho_hi"),
-        pl.col("decay_pp").round(4).alias("decay"),
+# %% tags=["results"]
+sel_adj = selection_adjusted_leader_table(CASE_STUDY, stage="signal")
+if sel_adj.is_empty():
+    print(
+        "No signal-stage cohort metrics are registered, so the selection-adjusted view is empty. "
+        "Run 14_backtest and re-run this notebook to fill it."
     )
-)
+else:
+    print("Selection-adjusted signal-stage leader per family:")
+    print(
+        sel_adj.select(
+            "family",
+            "config_name",
+            pl.col("sharpe").round(3),
+            pl.col("sharpe_ci95_lo").round(3).alias("sh_lo"),
+            pl.col("sharpe_ci95_hi").round(3).alias("sh_hi"),
+            pl.col("dsr").round(3),
+            pl.col("expected_max_sharpe").round(3).alias("exp_max"),
+            pl.col("reality_check_pvalue").round(3).alias("rc_p"),
+            pl.col("pbo").round(2),
+            pl.col("k_variants").cast(pl.Int64).alias("k"),
+        )
+    )
+
+# %% [markdown]
+# ### Validation against holdout, for whatever has been retrained
+#
+# The holdout is opened once, for the candidate the selection workflow names, and
+# [`20_strategy_analysis`](20_strategy_analysis.ipynb) is where that happens. Until it does, the
+# holdout side of this table is empty by design rather than by omission - a family showing no
+# holdout figure was never retrained on it, which is not the same as a family that was retrained
+# and did badly.
+#
+# The gap between the two sides, where both exist, is the quantity worth reading: a validation
+# figure is measured on folds that have been looked at many times by the time a case study reaches
+# this notebook, and a holdout figure has been looked at once.
+
+# %% tags=["results"]
+decay = holdout_decay_table(CASE_STUDY, label=PRIMARY_LABEL)
+if decay.is_empty():
+    print("No holdout evaluations are registered for this label.")
+else:
+    print(
+        decay.select(
+            "family",
+            "config_name",
+            pl.col("val_ic").round(4),
+            pl.col("val_ci_lo").round(4).alias("val_lo"),
+            pl.col("val_ci_hi").round(4).alias("val_hi"),
+            pl.col("ho_ic").round(4),
+            pl.col("ho_ci_lo").round(4).alias("ho_lo"),
+            pl.col("ho_ci_hi").round(4).alias("ho_hi"),
+            pl.col("decay_pp").round(4).alias("decay"),
+        )
+    )
+    retrained = decay.drop_nulls("ho_ic").height
+    print(f"{retrained} of {decay.height} families carry a holdout figure")
 
 # %% [markdown]
 # ### What the empirical record says
 #
-# **The validation top cluster.** SDF leads clearly at IC $\approx$ 0.099
-# with a HAC 95% CI that excludes zero by a wide margin ($t_{HAC} \approx
-# 5.7$), NLinear follows at $\approx$ 0.062 ($t_{HAC} \approx 3.0$), and
-# GBM at $\approx$ 0.044 has a CI whose lower bound just clears zero
-# ($t_{HAC} \approx 2.3$). The linear leader (ridge $\alpha=10^6$) at
-# $\approx$ 0.042 and TabM-L at $\approx$ 0.034 have CIs that straddle
-# zero ($t_{HAC} \approx 1.8$ and 1.9). The collective claim the
-# validation set supports is that cross-sectional predictability at the
-# 21-day horizon is real on this panel for the post-2010 era, carried
-# mainly by SDF with progressively weaker evidence as the table descends.
+# **Read the intervals, not the ordering.** The forest plot in section 3 puts every family's
+# leading configuration on one axis with its HAC interval. Where those intervals overlap, the
+# families are not separated by the data, and a table sorted by point estimate will still put one
+# above another - which is the ordering's problem, not the data's. The families whose intervals
+# clear zero are the ones this panel supports a claim about; the rest are directionally positive
+# and statistically indistinguishable from nothing.
 #
-# **Below the leader, the cluster is wide.** SDF aside, the CI overlap
-# across the remaining families is heavy — NLinear, GBM, ridge, and
-# TabM-L are not statistically separated from one another. This is a
-# signal about the case study, not about the models: below the SDF
-# signal, the ETF cross-section at this horizon is bounded in how much
-# daily-pooled IC any reasonable predictor can extract.
+# **Where an ordering is real, ask what the leading family shares with the one below it.** The five families
+# differ along more than one axis - the shape of the function they may write down, whether they
+# read the features at all, whether the fit knows the labels. A leader that shares the same axis
+# position with the second-placed family is telling you about that axis; a leader that stands
+# alone on it is telling you about itself. Section 7's latent-factor comparison is arranged for
+# exactly this reading.
 #
-# **The selection-adjusted leader is not the validation IC leader.**
-# Validation IC ranks SDF first; the signal-stage backtest's selection-
-# adjusted Sharpe ranks a PCA configuration first within latent factors
-# (Sharpe $\approx$ 0.92) and an LSTM configuration a close second within
-# deep learning (Sharpe $\approx$ 0.89), with linear (Sharpe $\approx$
-# 0.77), TabM-L ($\approx$ 0.75), and GBM ($\approx$ 0.74) behind. The IC
-# ordering and the Sharpe ordering disagree because IC is a rank-
-# correlation metric while Sharpe encodes execution costs, turnover, and
-# the discrete portfolio construction the backtest applies. Whichever
-# family the signal-stage backtest names as the leader has already paid
-# the multiple-comparisons penalty implicitly via the selection process;
-# the table above makes the penalty (DSR, expected-max-Sharpe, PBO)
-# visible.
+# **The IC ordering and the Sharpe ordering do not have to agree, and neither is wrong when they
+# disagree.** An information coefficient is a rank correlation over the whole cross-section. A
+# Sharpe ratio is what a top-k rule earned after costs and turnover. A model can order the middle
+# of the cross-section well and the head of it badly, and only the head is traded.
+# [`14_backtest`](14_backtest.ipynb) is where the second ordering is computed, and the selection
+# rule is the second one.
 #
-# **Holdout evidence is partial — and sobering.** Only the signal-stage
-# top candidate is retrained on the holdout window (the Ch16 / Ch20
-# selection workflow), so the decay table populates a single row. For the
-# ETFs case study the holdout retrain ran for the LSTM top candidate: its
-# validation daily-pooled IC of +0.052 decays to a *negative* holdout IC
-# of −0.032 (a −0.084 swing, with the holdout-side HAC CI spanning zero).
-# One year of monthly holdout is a small sample, so this is a wide
-# estimate, but the sign flip is a genuine caution — the signal that
-# looked strongest through selection does not carry cleanly into
-# 2024–2025. The cleanest generalization evidence comes from the
-# strategy-side notebook (`18_strategy_analysis.py`) and the Ch20 holdout
-# summary.
+# **A leader found among many is partly a leader for having been found.** The selection-adjusted
+# table above is where that is priced. The deflated Sharpe, the expected maximum Sharpe over
+# `k_variants` zero-skill configurations, and the probability of backtest overfitting are three
+# ways of asking the same question, and a leader that does not survive them is a leader of the
+# search rather than of the universe.
 #
-# ### Forecast representation downstream
+# **The holdout has been looked at once, or not at all.** Every figure in this notebook comes from
+# validation folds that have been read repeatedly by the time a case study reaches here. The
+# holdout table above is the only out-of-sample evidence, it covers only whatever was retrained,
+# and it is small. [`20_strategy_analysis`](20_strategy_analysis.ipynb) is where it is opened and
+# where the comparison that matters is made.
 #
-# For backtesting, predictions are used as:
+# ### How the predictions are used downstream
 #
-# - **Rank-based selection**: sort by `y_score`, select top-N ETFs
-# - **Score weighting**: use `y_score` magnitudes for position sizing
-# - **Ensemble**: pairwise correlation $< 0.7$ is the threshold for
-#   ensembling, applied in Ch20 across families that survive the
-#   signal-stage backtest
+# - **Rank-based selection**: sort by `y_score`, hold the top-k funds.
+# - **Score weighting**: use the magnitude of `y_score` for position sizing.
+# - **Ensembling**: pairs of families whose predictions correlate weakly are candidates to combine,
+#   because they are disagreeing about something. Section 5's correlation matrix is where to find
+#   them; pairs that correlate strongly add little to each other.
 #
-# ### What this analysis does NOT tell us
+# ### What this analysis does not tell you
 #
-# - **Net-of-cost edge**: bucket spreads must survive round-trip
-#   costs of 10–30 bps. The signal-stage backtest in `14_backtest.py`
-#   tests this directly; this notebook only speaks to gross IC.
-# - **Survivorship**: the 100-ETF universe was selected
-#   backward-looking (see `setup.yaml` eligibility note). A
-#   forward-living universe may degrade further than the holdout
-#   decay suggests.
-# - **Regime stationarity**: 2024-onwards holdout covers $\approx$
-#   one year of monthly rebalancing — the decay number is itself
-#   an estimate with non-trivial standard error.
-# - **Inter-family ranking outside this CV split**: the validation
-#   leader was determined on this specific 8-fold rolling-window
-#   protocol. Re-running with different fold boundaries would shift
-#   the leader within the top cluster.
-#
-# **Next**: `14_backtest.py` for strategy simulation,
-# `15_portfolio_management.py` for position sizing,
-# `18_strategy_analysis.py` for the strategy-side counterpart of
-# this analysis, and `20_synthesis.py` for end-to-end results.
+# - **Whether any of this is left after costs.** Every IC here is gross. Bucket spreads have to
+#   clear a round trip, and [`14_backtest`](14_backtest.ipynb) is where that is charged.
+# - **Whether the universe was knowable in advance.** The ETF list was selected looking backward
+#   (see the eligibility note in `setup.yaml`), so a forward-living universe would contain funds
+#   that failed and would not contain some that are here.
+# - **Whether the ranking holds under different fold boundaries.** The comparison is measured on
+#   one walk-forward protocol, and nothing here varies it. Within a cluster the intervals show is
+#   not separated, which family leads is not a property this protocol pins down.
+# - **Anything about the causal question.** Section 7's causal row answers whether the momentum
+#   feature moves returns, which is not what any of the predictive families are measured on.
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **One clear signal, then a modest tail**: SDF leads at IC $\approx$
-#    0.099 with a HAC CI that clears zero decisively ($t_{HAC} \approx
-#    5.7$) — the strongest signal on the panel. NLinear ($\approx$ 0.062)
-#    and GBM ($\approx$ 0.044) also clear zero; the linear and tabular
-#    leaders do not. This is weak by single-stock standards but, for SDF,
-#    persistent across a multi-asset cross-section over the post-2010 era.
-# 2. **Below SDF, CI overlap is the central caveat**: NLinear, GBM,
-#    ridge, and TabM-L overlap heavily in their 95% HAC CIs. Treating any
-#    of them as separable from the others on validation IC alone
-#    overstates what the data supports — only SDF stands clearly apart.
-# 3. **Selection-adjusted statistics shift the choice**: validation IC
-#    ranks SDF first, but the signal-stage backtest's selection-adjusted
-#    Sharpe ranks a PCA configuration first (with an LSTM config a close
-#    second). IC measures rank correlation; Sharpe encodes execution
-#    costs, turnover, and discrete portfolio construction. The two leaders
-#    need not coincide, and `expected_max_sharpe` / DSR / PBO make the
-#    multiple-comparisons penalty explicit.
-# 4. **Latent-factor methods, fine-grained reading**: SDF and SAE produce
-#    credibly nonzero IC on this panel ($t_{HAC}$ of 5.7 and 3.3), and CAE
-#    marginally clears zero ($t_{HAC} \approx 2.1$); PCA and IPCA have CIs
-#    that straddle zero. ETFs qualifies as a latent-factor case study by
-#    panel dimensionality, and the objective-driven estimators (SDF, SAE)
-#    are where its signal concentrates.
-# 5. **Causal DML adds nuance, not a directional bet**: the ATE is
-#    contrarian (mean-reversion, $\approx -0.058$, p ≈ 0) while the
-#    predictive families' ranking IC is positive, underlining that ranking
-#    ability and directional causation are different questions here.
-# 6. **Holdout evidence is partial and sobering**: the val→holdout decay
-#    row populates only the retrained LSTM winner, whose validation IC of
-#    +0.052 flips to a *negative* holdout IC of −0.032 (−0.084 swing) on
-#    the one-year 2024–2025 window. The sample is small, but the sign flip
-#    tempers the in-sample ranking. The cleanest out-of-sample signal
-#    comes from the strategy-side notebook (`18_strategy_analysis.py`) and
-#    the Ch20 holdout summary, which operate on the actual retrained
-#    predictions.
+# 1. **Read the confidence intervals before the ranking.** The forest plot and the fold heatmap in
+#    sections 3 and 4 are the notebook's central evidence, and the honest summary of a family whose
+#    interval crosses zero is that this panel does not establish it has signal - not that it came
+#    fifth.
+# 2. **Fold-level consistency is a different question from mean IC**, and for a strategy that has
+#    to be held through whatever regime arrives, the worse fold matters more than the better one.
+#    Section 4 is where the two come apart.
+# 3. **The latent-factor family separates by supervision, not by capacity.** Its five members
+#    differ in how much the fit is allowed to know about returns, and section 7 orders them on that
+#    axis rather than by how elaborate they are.
+# 4. **Causal evidence and ranking ability are different claims.** Section 7 keeps the causal row
+#    out of the predictive comparison for that reason, and a strategy description that reads the
+#    causal sign into the ranking would be describing something neither number shows.
+# 5. **Nothing here is selected.** This notebook describes the population;
+#    [`14_backtest`](14_backtest.ipynb) backtests all of it and selection happens on validation
+#    backtest Sharpe.
 #
-# **Next**: `14_backtest.py` applies these predictions to simulated trading.
+# **Next**: [`14_backtest`](14_backtest.ipynb) turns every registered prediction into a strategy
+# and asks which of these rankings is worth trading.

@@ -3,39 +3,40 @@
   "label": "fwd_ret_60m",
   "method": "daily_cross_sectional_mean_close_pct_change",
   "periods_per_year": 252,
-  "n_symbols_in_universe": 111,
-  "sharpe": 0.35416,
-  "cagr": 0.012699,
-  "vol": 0.037632,
-  "n_periods": 6557,
-  "ts_min": "2020-06-30 14:45:00",
-  "ts_max": "2021-12-30 15:45:00",
+  "n_symbols_declared": 115,
+  "n_symbols_in_universe": 113,
+  "sharpe": 1.956409,
+  "cagr": 0.432397,
+  "vol": 0.193347,
+  "n_periods": 253,
+  "ts_min": "2020-06-30",
+  "ts_max": "2021-12-31",
   "by_period": {
     "overall": {
-      "sharpe": 0.295867,
-      "cagr": 0.009602,
-      "vol": 0.034287,
-      "n_periods": 9859
+      "sharpe": 1.663587,
+      "cagr": 0.321157,
+      "vol": 0.176905,
+      "n_periods": 381
     },
     "validation": {
-      "sharpe": 0.35416,
-      "cagr": 0.012699,
-      "vol": 0.037632,
-      "n_periods": 6557
+      "sharpe": 1.956409,
+      "cagr": 0.432397,
+      "vol": 0.193347,
+      "n_periods": 253
     },
     "holdout": {
-      "sharpe": 0.144699,
-      "cagr": 0.00348,
-      "vol": 0.026416,
-      "n_periods": 3302
+      "sharpe": 0.923802,
+      "cagr": 0.126053,
+      "vol": 0.138911,
+      "n_periods": 128
     },
     "validation_window": [
-      "2020-06-30 14:45:00",
-      "2021-06-30 15:45:00"
+      "2020-06-30",
+      "2021-06-30"
     ],
     "holdout_window": [
-      "2021-07-01 09:30:00",
-      "2021-12-30 15:45:00"
+      "2021-07-01",
+      "2021-12-31"
     ]
   }
 }

@@ -138,13 +138,20 @@ backtest:
     # ``execution.allocator_lookback`` on the underlying SPX series; option
     # contracts cycling in/out of the per-expiry universe are part of the
     # observed concentration profile, not hidden behind a method filter.
+    # The six alternatives the shared menu declares. equal_weight is deliberately
+    # not here: it is the signal stage's own weighting, so listing it would enter
+    # the baseline into the comparison as a competitor against itself.
+    # conformal_weighted sizes by the width of each prediction's conformal
+    # interval, so it is the only entry that reads the model's own uncertainty;
+    # widths are generated on demand from the prediction set, with no separate
+    # bootstrap step.
     allocators:
-      - {name: equal_weight,    method: equal_weight}
-      - {name: score_weighted,  method: score_weighted}
-      - {name: inverse_vol,     method: inverse_vol}
-      - {name: risk_parity,     method: risk_parity}
-      - {name: mvo_ledoit_wolf, method: mvo_ledoit_wolf}
-      - {name: hrp,             method: hrp}
+      - {name: score_weighted,     method: score_weighted}
+      - {name: inverse_vol,        method: inverse_vol}
+      - {name: risk_parity,        method: risk_parity}
+      - {name: mvo_ledoit_wolf,    method: mvo_ledoit_wolf}
+      - {name: hrp,                method: hrp}
+      - {name: conformal_weighted, method: conformal_weighted}
     # Ch18 cost analysis is the three-rung hold-to-maturity cascade
     # (O'Donovan & Yu 2024, anchored to Muravyev & Pearson 2020). The
     # standard cost_grid_bps regime does not apply: HTM avoids the
@@ -181,6 +188,20 @@ evaluation:
 labels:
   primary: ret_to_expiry
   buffer: 35D
+  # `ret_to_expiry` is the return of a straddle held to the expiration of its own
+  # contracts, so its horizon is calendar time and the 35D buffer is 35 calendar days.
+  # Without this declaration the buffer defaults to `sessions`
+  # (`utils.artifact_specs.resolve_label_buffer_unit`), and a purge of 35 sessions is
+  # about seven weeks where five is what the label reaches - the analysis frame ends
+  # earlier than the outcome does, and the rows in between are discarded. Data loss, not
+  # leakage: reading a calendar buffer as sessions trims more than it needs to, and the
+  # error runs the other way only for a session-gridded label.
+  #
+  # This is the only calendar-anchored label declared anywhere in the nine case studies.
+  # The four diagnostic variants below are fixed-horizon forward returns on the session
+  # grid and correctly keep the default; they are not in `variants`, so the holdout
+  # seal's one-unit-per-case-study rule does not see them.
+  buffer_unit: calendar
   # Legacy 5d/10d/dh_5d/dh_10d variants were dropped from the sweep
   # 2026-05-17; the label-computation notebook (`02_labels.py`) still
   # demonstrates how they are constructed, but they no longer drive
@@ -352,6 +373,45 @@ features:
       representation: indicator
       failure_mode: a control that does predict is evidence the panel is contaminated, not evidence of a signal
 
+model_based:
+  # `04_model_based_features` fits two volatility models. Both were previously fitted
+  # once per cross-validation fold and then run forward from the START of that fold's
+  # training window, so a training row carried parameters estimated from its own future
+  # while a validation row carried parameters estimated only from its past. The model was
+  # fitted on one version of the column and scored on another.
+  #
+  # The schedule below replaces the fold as the thing that bounds an estimate. A value at
+  # session t is produced by parameters estimated from sessions ending at or before t, so
+  # there is one value per (symbol, session) whichever fold later selects the row - which
+  # is why `model_based.parquet` no longer carries a `fold` column.
+  garch:
+    # Sessions a segment spends before its first fit. They carry no GARCH value at all.
+    # 252 rather than the 504 used where histories are long: this panel has 1,238
+    # sessions but the median symbol only 373 of them, and the tenth percentile 71, so
+    # every session added to the burn-in is taken off a large part of the cross-section.
+    # 04 reports how many symbols clear it and what fraction of rows carry a value.
+    burnin: 252
+    # Sessions between refits. One month. Each refit re-estimates on everything from the
+    # segment's first return through the refit session, expanding rather than rolling,
+    # and the parameters then speak for the following month and no earlier session.
+    refit_every: 21
+  stochastic_volatility:
+    # The same burn-in as GARCH, so the two columns start on the same session and the
+    # variance risk premium built from each covers the same rows.
+    burnin: 252
+    # One quarter, not one month. `sigma_eta` is a property of how equity volatility
+    # behaves rather than of any one company: it is estimated once per refit from a pool
+    # of symbols and shared by every segment, and each estimate costs a four-chain MCMC
+    # run per pool symbol. A monthly cadence would price this notebook at roughly three
+    # times a quarterly one for a parameter that is not a per-symbol quantity and is not
+    # expected to move monthly.
+    refit_every: 63
+    # Sessions of each pool symbol's returns the sampler reads, taken as the trailing
+    # window ending at the refit. This one rolls where GARCH expands, and deliberately:
+    # the sampler carries one latent state per observation, so an expanding window makes
+    # the last refit five times the cost of the first for a single scalar parameter.
+    calibration_window: 252
+
 modeling:
   gbm:
     libraries: [lightgbm]
@@ -363,6 +423,16 @@ modeling:
     # faster and lose split points; the reader running this on a CPU gets what the
     # documentation describes.
     max_bin: 255
+  dl:
+    # The device every deep-learning fit in this case study is registered under, read by
+    # `research_workflow.declared_dl_device`. It is not a runtime convenience: the device
+    # enters the training identity through `sequence_identity_params`, so one configuration
+    # fitted on a GPU and the same configuration fitted on a CPU are two different runs
+    # rather than one run on two machines. `cuda` is what the published `tabular_dl` and
+    # sequence populations were fitted on. A reader with no NVIDIA card passes DEVICE="cpu"
+    # together with a POPULATION_NAME, which records the change with the run instead of
+    # substituting a different fit under the published population's name.
+    device: cuda
 
 causal:
   treatment: vrp_21d

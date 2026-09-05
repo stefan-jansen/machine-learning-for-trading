@@ -116,6 +116,7 @@ def _derive_modeling_splits(case_study: str, label: str) -> list[dict] | None:
     from utils.artifact_specs import (
         load_label_spec,
         resolve_label_buffer,
+        resolve_label_buffer_unit,
         resolve_label_horizon,
         resolve_storage_path,
     )
@@ -170,6 +171,10 @@ def _derive_modeling_splits(case_study: str, label: str) -> list[dict] | None:
         label_buffer=label_buffer,
         outcome_horizon=resolve_label_horizon(case_study, label, setup),
         date_col=date_col,
+        # The declared boundaries have to be derived the same way the fitted ones are, or
+        # `utils/modeling.py` and this resolver disagree about what the buffer counts and
+        # the register describes folds no model was fitted on.
+        buffer_unit=resolve_label_buffer_unit(case_study, label, setup),
     )
     return splits or None
 
@@ -232,6 +237,7 @@ def temporal_artifact_fold_boundaries(
         load_feature_spec,
         load_label_spec,
         resolve_label_buffer,
+        resolve_label_buffer_unit,
         resolve_label_horizon,
     )
     from utils.cv_splits import generate_cv_splits
@@ -280,6 +286,7 @@ def temporal_artifact_fold_boundaries(
         "case_study_id": case_study,
         "label_buffer": label_buffer,
         "date_col": date_col,
+        "buffer_unit": resolve_label_buffer_unit(case_study, primary_label, setup),
     }
     if include_outcome_horizon:
         split_kwargs["outcome_horizon"] = resolve_label_horizon(case_study, primary_label, setup)

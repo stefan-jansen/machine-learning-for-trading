@@ -132,7 +132,10 @@ FRICTION_FLOOR_BPS = float(SETUP["costs"]["friction_floor_bps"])
 COST_FEASIBLE = SETUP["universe"]["cost_feasible"]["validation"]
 CADENCE = f"{SETUP['decision']['bar_frequency'].split('_')[0]}m"
 LABEL_BUFFER = SETUP["labels"]["buffer"]
-HORIZONS = sorted({int(b.rstrip("min")) for b in SETUP["labels"]["variant_buffers"].values()})
+# The outcome horizons, not the purge buffers. They differ by one bar here - the label
+# reads a quote one bar past the horizon it names - and reading the buffers would put
+# 6, 16 and 61 minutes on this figure's axis under labels called 5, 15 and 60.
+HORIZONS = sorted({int(h.rstrip("min")) for h in SETUP["labels"]["horizons"].values()})
 WINDOW = {
     "start_date": START_DATE,
     "end_date": HOLDOUT_START,

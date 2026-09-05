@@ -1,0 +1,364 @@
+# ---
+# jupyter:
+#   jupytext:
+#     cell_metadata_filter: tags,-all
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.19.3
+#   kernelspec:
+#     display_name: Python 3 (ipykernel)
+#     language: python
+#     name: python3
+# ---
+
+# %% [markdown]
+# # CME Futures: Holdout Predictions
+#
+# **Chapter 20 - Out-of-sample evaluation**
+#
+# Every number in this case study so far was measured on the validation periods, and every
+# choice was made by looking at them: which model family, which configuration, how the
+# positions are sized, whether a risk overlay earns its place. A result selected that way
+# cannot also be evidence that the selection was sound - the ranking and the evidence would
+# be the same measurement.
+#
+# The holdout is the window nothing has been selected on: 2024-01-01 to 2025-12-31. This
+# notebook fits the selected configuration on the history available before that window
+# opens and writes its predictions over it.
+# [`18_holdout_backtest`](18_holdout_backtest.ipynb) turns those predictions into a return
+# series with the sizing this case study settled on, and
+# [`19_strategy_analysis`](19_strategy_analysis.ipynb) reads both back.
+#
+# **What this notebook is careful about**
+#
+# A holdout prediction is not the validation model scored on a later window. Those two
+# differ in what the model saw while fitting, and only the first is out of sample. Section
+# 3 fits again, and the new training identity is what makes the refit visible rather than
+# asserted - a run that came back carrying the validation training hash would mean no refit
+# happened.
+#
+# There is a second thing this case study had to fix before the refit could mean anything.
+# `04_model_based_features` fits ARIMA and a hidden Markov model per period, so a period
+# the file never wrote carries no forecast and no regime probability. The holdout period
+# was being appended to the fold spec without those features being generated for it, which
+# left a model reading two of nine features over the window it is judged on. The artifact
+# now carries a holdout vintage: coefficients estimated at the last session before the
+# window opens, rolled forward across it frozen.
+#
+# **Prerequisites:** [`16_costs`](16_costs.ipynb), which fixes the configuration the
+# holdout runs.
+#
+# **Scope:** one training run and one prediction set. No backtest, no selection, no
+# comparison - those are 18 and 19.
+
+# %%
+"""CME Futures: Holdout Predictions."""
+
+import sqlite3
+import warnings
+
+import polars as pl
+
+warnings.filterwarnings("ignore")
+
+from case_studies.research import open_study
+from case_studies.research.holdout import build_holdout_training_spec
+from case_studies.research.models import reconstruct_locked_model_request
+from case_studies.utils.registry import training_hash_from_spec
+from case_studies.utils.strategy_analysis import (
+    resolve_solvent_carrier,
+    training_run_fitted_for_the_holdout,
+)
+from utils.paths import get_case_study_dir
+
+# %% tags=["parameters"]
+CASE_STUDY_ID = "cme_futures"
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
+# Whether a holdout generation for a DIFFERENT configuration may be superseded by this run.
+# Off by default: see section 3.
+#
+# The flag exists because the holdout is not a one-shot resource, which is a ruling and not
+# an oversight. What the rule against consulting the holdout forbids is SELECTING on it: the
+# configuration evaluated here is chosen by validation backtest Sharpe, and no holdout number
+# feeds back into that choice. It says nothing about how many times the evaluation may be
+# computed, and a wrong result is deleted and re-run rather than left standing because it was
+# observed. Reading the rule as a physical constraint is what produced a lock layer around
+# this window, and it is being removed. The guard here is against something narrower and real:
+# two generations readable at once, so nobody downstream has to choose between them and nobody
+# can quote whichever number they prefer.
+
+# %%
+study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
+CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
+
+
+def _registered_holdout_generations(case_dir):
+    """Every holdout prediction set in the registry, and whether its model was refitted.
+
+    `refitted` is read from the training run's own CV rather than from the prediction
+    set's split: the split says where the predictions land, and a model fitted on the
+    validation folds can publish predictions over the holdout window. That is the defect
+    the generation below replaces, and it is why this is the same predicate the canonical
+    lineage resolver applies.
+    """
+    with sqlite3.connect(str(case_dir / "run_log" / "registry.db")) as conn:
+        rows = conn.execute(
+            """
+            SELECT p.prediction_hash, p.training_hash, p.checkpoint_kind, p.checkpoint_value,
+                   t.config_name, t.spec_json
+            FROM prediction_sets p
+            JOIN training_runs t ON t.training_hash = p.training_hash
+            WHERE p.split = 'holdout'
+            ORDER BY p.prediction_hash
+            """
+        ).fetchall()
+    return [
+        {
+            "prediction_hash": prediction_hash,
+            "training_hash": training_hash,
+            # The checkpoint is part of the configuration, not a detail of it: one training
+            # run publishes one prediction set per declared checkpoint, and moving the
+            # selection from one checkpoint to another is a different configuration
+            # evaluated on the same window. Identity on the training hash alone would see
+            # that as the same generation and let both stand.
+            "checkpoint": (checkpoint_kind, checkpoint_value),
+            "config_name": config_name,
+            "refitted": training_run_fitted_for_the_holdout(training_spec_json),
+        }
+        for (
+            prediction_hash,
+            training_hash,
+            checkpoint_kind,
+            checkpoint_value,
+            config_name,
+            training_spec_json,
+        ) in rows
+    ]
+
+
+# %% [markdown]
+# ## 1. Which configuration the holdout runs
+#
+# The holdout runs the configuration the case study reports, resolved through the same
+# `resolve_solvent_carrier` [`16_costs`](16_costs.ipynb) uses. Resolving it again here
+# rather than passing it along is deliberate: the two notebooks must agree by construction,
+# and a hash written down in one and read in the other agrees only until the sweep is
+# rebuilt.
+#
+# Nothing about the holdout enters this choice. The carrier is the validation rank-1, and
+# it was fixed before this notebook ran.
+
+# %%
+carrier = resolve_solvent_carrier(CASE_STUDY_ID)
+print(
+    f"Carrier: {carrier['val_backtest_hash']}  stage={carrier['val_stage']}  "
+    f"family={carrier['family']}  config={carrier['config_name']}  "
+    f"label={carrier['label']}"
+)
+print(
+    f"  validation Sharpe {carrier['val_sharpe']:.3f}, max drawdown {carrier['max_drawdown']:.3f}"
+)
+print(f"  fitted by training run {carrier['training_hash']}")
+
+# %% [markdown]
+# The checkpoint is part of the configuration, and it is read from the carrier's own
+# prediction set rather than assumed. Every family this case study fits publishes at the
+# end of training, so the value here is `final` and carries no iteration - but reading it
+# is what keeps that true rather than asserted: a family that later publishes on a
+# schedule would name one of its checkpoints here, and refitting without it would produce
+# the model at the end of training instead of the one that was ranked.
+
+# %%
+validation_prediction = study.results.open(carrier["val_prediction_hash"])
+prediction_record = validation_prediction.registry_record()
+CHECKPOINT_KIND = prediction_record["checkpoint_kind"]
+CHECKPOINT_VALUE = prediction_record["checkpoint_value"]
+print(f"Checkpoint: {CHECKPOINT_KIND}={CHECKPOINT_VALUE}")
+
+# %% [markdown]
+# ## 2. The window, and the model that is allowed to see it
+#
+# The holdout window is not a choice made here. It is `evaluation.holdout_start` and
+# `evaluation.holdout_end` from the case study's own `setup.yaml`, read through the same
+# `canonical_window` the fold derivation and the backtest slice both go through, so the
+# three cannot disagree.
+#
+# The training interval is everything available before that window, bounded above by a
+# label buffer. The buffer is what stops the last training label's outcome from resolving
+# inside the holdout: this case study dates each row by the session the decision is taken
+# on and the label looks forward from there, so a row dated inside a horizon's reach of
+# 2024-01-01 has its outcome realised in the holdout. The buffer is therefore a horizon's
+# worth of sessions - 5 for `fwd_ret_5d`, 21 for `fwd_ret_21d` - and the derivation seals
+# on the widest of the declared labels rather than on the one being fitted, so no label
+# can reach past its own boundary. A zero gap would be a leak, not a conservative choice,
+# so the derivation refuses to default it.
+#
+# Everything else about the configuration is carried across unchanged, and the fields that
+# cannot be - the eligibility manifest, and any parameter this family resolves from a
+# fold's own training rows - are recomputed against the holdout fold. Carrying those
+# forward would fit a model keyed to the validation folds and call it a retrain.
+
+# %%
+observation_timeline = (
+    pl.read_parquet(study.root / "labels" / f"{carrier['label']}.parquet")
+    .get_column("timestamp")
+    .unique()
+    .sort()
+    .to_list()
+)
+validation_spec = study.results.open(carrier["training_hash"]).spec()
+holdout_spec = build_holdout_training_spec(
+    study,
+    validation_spec,
+    timeline=observation_timeline,
+    case_study=CASE_STUDY_ID,
+)
+
+fold = holdout_spec["computation"]["cv"]["folds"][0]
+print(f"Holdout fold {fold['fold']}")
+print(f"  trains  {fold['train_start']} -> {fold['train_end']}")
+print(f"  predicts {fold['val_start']} -> {fold['val_end']}")
+print(f"  label buffer: {holdout_spec['computation']['cv']['request']['label_buffer']}")
+
+# The validation folds are what the buffer is measured against, and the last of them ends
+# before the holdout opens. Printing both is what lets a reader check the gap rather than
+# take it on the derivation's word.
+validation_folds = validation_spec["computation"]["cv"]["folds"]
+latest_validation_end = max(str(entry["val_end"]) for entry in validation_folds)
+print(f"Validation folds: {len(validation_folds)}, latest evaluation end {latest_validation_end}")
+print(f"Holdout training ends {fold['train_end']}, holdout opens {fold['val_start']}")
+
+# %% [markdown]
+# ## 3. Fit, and register the predictions
+#
+# `reconstruct_locked_model_request` builds the request from the spec above. Its name
+# comes from the locked holdout path this case study no longer uses; it takes a training
+# specification and a checkpoint, not a lock, and it is used here because it is the one
+# call that refuses a request that is not exactly the spec it was handed - the training
+# identity, the checkpoint schedule, the feature lineage and the runtime parameters are
+# all checked before anything is fitted.
+#
+# The training identity below is new. It has to be: it covers the CV interval, and the
+# holdout fold is not one of the validation folds. A run that came back with the
+# validation training hash would mean the refit did not happen.
+#
+# **The window carries one configuration at a time.** The holdout is re-runnable, and that
+# is not the same as free: every configuration evaluated on it is another look at a period
+# the case study reports as unseen, and two evaluated quietly would make that report false.
+#
+# So the check below is on the carrier rather than on the notebook, and it has exactly two
+# outcomes. With the carrier unchanged this is an idempotent replay: the derivation is
+# deterministic and the training identity covers it, so the same identity comes back and
+# the fit is served from the registry. With the carrier changed it refuses, names both
+# configurations, and stops.
+#
+# It refuses rather than offering a replacement switch, and the reason is that a replacement
+# would not be one. Deleting the earlier generation's rows does not undo having observed its
+# result: the selection that produced the new carrier may have been informed by the old
+# holdout number, and no deletion reaches that. A switch here would let the case study take a
+# second look at the window while leaving a registry that shows only one, which is the
+# specific thing that would make the out-of-sample claim false rather than merely weak.
+
+# %%
+holdout_training_hash = training_hash_from_spec(holdout_spec)
+this_generation = (holdout_training_hash, (CHECKPOINT_KIND, CHECKPOINT_VALUE))
+superseded = [
+    row
+    for row in _registered_holdout_generations(CASE_DIR)
+    if row["refitted"] and (row["training_hash"], row["checkpoint"]) != this_generation
+]
+if superseded:
+    raise RuntimeError(
+        "the holdout window already carries a refit of a different configuration: "
+        + ", ".join(
+            f"{row['prediction_hash']} ({row['config_name']}, training {row['training_hash']})"
+            for row in superseded
+        )
+        + f". This run would evaluate {carrier['config_name']} (training "
+        f"{holdout_training_hash}, checkpoint {CHECKPOINT_KIND}={CHECKPOINT_VALUE}) on the "
+        "same window, which would be a second configuration measured on a period this case "
+        "study reports as unseen. This notebook has no way past that: deleting the earlier "
+        "generation would not undo having observed it, and the selection bias it introduces "
+        "is not removed by removing the rows. Either leave the selection where it was, or "
+        "retire the earlier evaluation through the registry's own lifecycle, which records "
+        "that a second look was taken."
+    )
+
+# %% tags=["results"]
+request = reconstruct_locked_model_request(
+    study,
+    holdout_spec,
+    checkpoint_kind=CHECKPOINT_KIND,
+    checkpoint_value=CHECKPOINT_VALUE,
+)
+model_run = request.run()
+holdout_prediction = model_run.predictions[0]
+
+if model_run.training.hash == carrier["training_hash"]:
+    raise RuntimeError(
+        "the holdout refit produced the validation training identity "
+        f"{carrier['training_hash']}, which means it did not refit"
+    )
+print(f"Holdout training run:  {model_run.training.hash}")
+print(f"Holdout prediction set: {holdout_prediction.hash}")
+
+# %% [markdown]
+# What the prediction set covers, read back from the registry rather than from the
+# request. The two agree only if the fit published what it declared, and the count is the
+# one number a reader can check the window against: the holdout spans two years of
+# sessions, the strategy decides weekly, and the number of rows is those decision dates
+# times the products eligible on each.
+
+# %% tags=["results"]
+record = holdout_prediction.registry_record()
+predictions = holdout_prediction.load()
+# `13_backtest` records that reader-facing rows use `product` and the shared boundary
+# converts to the engine's `symbol` key, so a prediction set can arrive carrying either.
+# Named from the frame rather than assumed, so this line cannot quietly report nothing.
+_ENTITY_COL = next(c for c in ("product", "symbol") if c in predictions.columns)
+print(
+    f"split={record['split']}  checkpoint={record['checkpoint_kind']}={record['checkpoint_value']}"
+)
+print(f"rows={predictions.height:,}  dates={predictions['timestamp'].n_unique()}")
+print(
+    f"  {predictions['timestamp'].min()} -> {predictions['timestamp'].max()}, "
+    f"{predictions[_ENTITY_COL].n_unique():,} {_ENTITY_COL}s"
+)
+
+# %% [markdown]
+# The registry now holds more than one holdout prediction set for this case study, and
+# only one of them was fitted on data that ends before the window. The other is the
+# defective generation this notebook replaces: it carries the validation training identity,
+# which is how it was found. Both are listed rather than one silently preferred, because
+# the registry is immutable and a reader looking at it later will see both.
+
+# %% tags=["results"]
+for row in _registered_holdout_generations(CASE_DIR):
+    note = (
+        "refitted for the holdout" if row["refitted"] else "VALIDATION-FITTED - not out of sample"
+    )
+    print(
+        f"  {row['prediction_hash']}  training={row['training_hash']}  {row['config_name']}  {note}"
+    )
+
+# %% [markdown]
+# ## What this notebook establishes, and what it does not
+#
+# It establishes one thing: a prediction set over the holdout window, produced by the
+# configuration this case study selected, fitted on data that ends before the window
+# opens. That is a precondition for an out-of-sample claim, not the claim itself. Nothing
+# here says whether the predictions are any good - they have not been scored, sized or
+# traded.
+#
+# It does not make the holdout a fresh test in the strict sense. The configuration reached
+# this notebook through a selection made on the validation folds, and this window is being
+# used once per configuration that gets here. What it does remove is the specific
+# circularity of scoring a validation-fitted model on the period meant to judge it.
+#
+# The holdout is re-runnable. If a later pass finds the selection was wrong, the answer is
+# to delete this generation and produce another, not to treat the first as spent.
+#
+# **Next:** [`18_holdout_backtest`](18_holdout_backtest.ipynb).

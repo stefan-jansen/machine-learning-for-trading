@@ -8,6 +8,7 @@ import polars as pl
 import yaml
 
 from case_studies.utils.backtest_loaders import BacktestConfig as CaseStudyBacktestConfig
+from case_studies.utils.backtest_loaders import declared_rebalance_step
 from utils.paths import get_case_study_dir
 
 try:
@@ -357,6 +358,8 @@ def ensure_backtest_spec(
             else getattr(case_config, "min_trade_value", 100.0)
         ),
     }
+    if "step" in execution:
+        rebalance["step"] = int(execution["step"])
     strategy = {
         "signal": deepcopy(strategy_spec.get("signal", {})),
         "rebalance": rebalance,
@@ -438,7 +441,19 @@ def build_backtest_spec(
     execution_mode: str | None = None,
     min_weight_change: float | None = None,
     min_trade_value: float | None = None,
+    label: str | None = None,
 ) -> dict[str, Any]:
+    # A case study that declares per-label cadences must be told which label it is building for.
+    # Defaulting to the case-study cadence here would put the spec on the wrong grid and register
+    # it as if it were right, which is the failure this parameter exists to prevent - so it is a
+    # refusal, not a fallback. Case studies that declare no override are unaffected.
+    if getattr(case_config, "cadence_by_label", None) and not label:
+        raise ValueError(
+            f"{case_study} declares decision.cadence_by_label "
+            f"({sorted(case_config.cadence_by_label)}) so build_backtest_spec needs a non-empty "
+            "label=; "
+            "pass the label this spec is being built for."
+        )
     resolved_signal = deepcopy(signal)
     if case_study == "sp500_options":
         resolved_signal.setdefault("schedule_contract", SP500_OPTIONS_SCHEDULE_CONTRACT)
@@ -454,7 +469,20 @@ def build_backtest_spec(
                 else "engine"
             ),
             "engine_preset": "realistic",
-            "cadence": case_config.cadence,
+            # Per-label when the case study declares one. `cadence_for` returns the case-study
+            # default for an unlabelled caller and for a label with no override, so a case study
+            # that declares nothing produces byte-identical specs to before this parameter existed.
+            "cadence": case_config.cadence_for(label),
+            # The step composes with the cadence to decide which slots are traded, so it
+            # belongs to the identity beside it (ml4t/agent-workspace#1005). Emitted only
+            # when the case study declares one, so a case study that declares nothing
+            # produces byte-identical specs to before this key existed - the same rule
+            # `cadence_for` follows above.
+            **(
+                {"step": _step}
+                if (_step := declared_rebalance_step(case_study, label)) is not None
+                else {}
+            ),
             "fill_timing": case_config.execution_delay.upper().replace(" ", "_"),
             "min_weight_change": (
                 min_weight_change

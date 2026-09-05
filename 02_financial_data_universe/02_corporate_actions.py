@@ -96,14 +96,21 @@ aapl = raw_wiki.filter(pl.col("symbol") == "AAPL").sort("timestamp")
 print(f"AAPL records: {len(aapl):,}  ({aapl['timestamp'].min()} to {aapl['timestamp'].max()})")
 
 # %% [markdown]
-# Stock splits in the AAPL history.
+# Stock splits in the AAPL history. `close` is the price as it traded that
+# day; `adj_close` is that same price carried back through every split and
+# dividend that came after it. The series is therefore anchored at the last
+# observation, 2018-03-27, where the two are equal, and gets smaller the
+# further back you look: the 1987 close of \$41.50 divided by the
+# $2 \times 2 \times 7 = 28$ of the three later splits is \$1.48, and the
+# dividends paid since bring it to \$1.22.
 
 # %%
 splits = aapl.filter(pl.col("split_ratio") != 1.0)
 splits.select(["timestamp", "close", "split_ratio", "adj_close"])
 
 # %% [markdown]
-# First ten of 54 cash dividends.
+# First ten of 54 cash dividends. The dividend is in the dollars of its own
+# ex-date, so it is not comparable to `adj_close` on the same row.
 
 # %%
 dividends = aapl.filter(pl.col(dividend_col) > 0)

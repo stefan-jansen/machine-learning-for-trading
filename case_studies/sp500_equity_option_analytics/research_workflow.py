@@ -51,13 +51,12 @@ def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> S
     """Open canonical regeneration or an isolated preview workspace."""
     tier = ExecutionTier(execution_tier)
     if tier is ExecutionTier.CANONICAL:
-        return Study.regenerate(CASE_STUDY, release_root=REPO_ROOT)
+        return Study.regenerate(CASE_STUDY)
     if workspace is None:
         raise ValueError("preview execution requires an explicit workspace")
     return Study.open(
         CASE_STUDY,
         workspace=Path(workspace).expanduser().resolve(),
-        release_root=REPO_ROOT,
     )
 
 
@@ -258,8 +257,15 @@ def run_model_population(
     requests: Iterable[ResolvedModelRequest],
     *,
     population_name: str,
+    supersedes: str | None = None,
 ) -> tuple[ModelExecution, OfficialPopulation | None]:
-    """Snapshot a canonical population before fitting, then require exact completion."""
+    """Snapshot a canonical population before fitting, then require exact completion.
+
+    ``supersedes`` names the generation of ``population_name`` this run retires. A population is
+    the set of prediction identities, so anything that moves a training identity produces a
+    different member list under the same name, and ``OfficialPopulation.create`` refuses to write
+    it without being told which snapshot it replaces. Canonical tier only.
+    """
     resolved = tuple(requests)
     if not resolved:
         raise ValueError("model population requires at least one resolved request")
@@ -275,6 +281,7 @@ def run_model_population(
             name=population_name,
             member_kind="prediction",
             members=expected,
+            supersedes=supersedes,
         )
 
     execution = run_models(study, requests=resolved)

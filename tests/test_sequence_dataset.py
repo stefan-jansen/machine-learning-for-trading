@@ -496,3 +496,104 @@ def test_priming_includes_label_buffer_gap_rows():
         )
         assert last_context == expected_context
         assert last_context > train_end
+
+
+def _strictly_positive_fold_df(
+    *,
+    missing_symbol: str = "S0",
+    n_symbols: int = 3,
+) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Timestamp]:
+    """A panel whose `feat0` is strictly positive and missing for one symbol.
+
+    This is the shape a model-based feature has: `garch_cond_vol` is a
+    conditional volatility, so zero is below every value it can take, and a
+    symbol the walk skipped has no estimate at all.
+    """
+    df, train_mask, val_mask, val_start_ts, _ = _synthetic_fold_df(n_symbols=n_symbols)
+    df = df.assign(feat0=df["feat0"].abs() + 1.0)
+    df.loc[df["symbol"] == missing_symbol, "feat0"] = np.nan
+    return df, train_mask, val_mask, val_start_ts
+
+
+def test_missing_feature_is_imputed_at_the_training_mean_not_below_the_minimum():
+    """A symbol with no estimate must read as average, not as the extreme.
+
+    Filling the raw array before the scaler is fitted puts a 0.0 into a
+    strictly positive feature, which lands below its observed minimum once
+    standardized - the skipped symbol is then presented to the model as the
+    calmest name in the panel for its whole history.
+    """
+    df, train_mask, val_mask, val_start_ts = _strictly_positive_fold_df()
+
+    train_store, _, _ = prepare_fold_sequence_stores(
+        df,
+        train_mask=train_mask,
+        val_mask=val_mask,
+        feature_names=["feat0", "feat1"],
+        label_col="y",
+        date_col="timestamp",
+        entity_col="symbol",
+        lookback=20,
+        val_start=val_start_ts,
+    )
+
+    missing_idx = train_store.entities.index("S0")
+    missing_column = train_store.features[missing_idx][:, 0]
+    assert np.all(missing_column == 0.0), (
+        "the skipped symbol's normalized feature is not the training mean; "
+        f"it ranges {missing_column.min()} to {missing_column.max()} standard deviations"
+    )
+
+
+def test_training_statistics_ignore_rows_with_no_observation():
+    """The mean and scale describe the observed rows, not the filled ones."""
+    df, train_mask, val_mask, val_start_ts = _strictly_positive_fold_df()
+
+    train_store, _, _ = prepare_fold_sequence_stores(
+        df,
+        train_mask=train_mask,
+        val_mask=val_mask,
+        feature_names=["feat0", "feat1"],
+        label_col="y",
+        date_col="timestamp",
+        entity_col="symbol",
+        lookback=20,
+        val_start=val_start_ts,
+    )
+
+    observed = df.loc[train_mask & df["feat0"].notna(), "feat0"].to_numpy(dtype=np.float64)
+    assert train_store.feature_mean is not None
+    assert train_store.feature_scale is not None
+    np.testing.assert_allclose(train_store.feature_mean[0], observed.mean(), rtol=1e-4)
+    np.testing.assert_allclose(train_store.feature_scale[0], observed.std(), rtol=1e-4)
+
+
+def test_an_infinity_does_not_reach_the_training_statistics():
+    """`np.nan_to_num` maps posinf to the float32 maximum by default.
+
+    One such value in a training fold would set that feature's mean and scale
+    for every symbol, so an infinity has to be treated as a missing
+    observation rather than as a very large one.
+    """
+    df, train_mask, val_mask, val_start_ts = _strictly_positive_fold_df(missing_symbol="S0")
+    finite_rows = df.index[(df["symbol"] == "S1") & train_mask]
+    df.loc[finite_rows[0], "feat0"] = np.inf
+
+    train_store, _, _ = prepare_fold_sequence_stores(
+        df,
+        train_mask=train_mask,
+        val_mask=val_mask,
+        feature_names=["feat0", "feat1"],
+        label_col="y",
+        date_col="timestamp",
+        entity_col="symbol",
+        lookback=20,
+        val_start=val_start_ts,
+    )
+
+    assert train_store.feature_mean is not None
+    assert train_store.feature_mean[0] < 10.0, (
+        f"an infinity reached the training mean: {train_store.feature_mean[0]}"
+    )
+    for feats in train_store.features:
+        assert np.all(np.isfinite(feats)), "a non-finite value survived normalization"

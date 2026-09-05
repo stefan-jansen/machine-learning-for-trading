@@ -214,7 +214,17 @@ def _build_symbol_arrays(
         n_rows = len(sym_df)
         if n_rows < lookback + 1:
             continue
-        feats = np.nan_to_num(sym_df[feature_names].to_numpy(dtype=np.float32), nan=0.0)
+        feats = sym_df[feature_names].to_numpy(dtype=np.float32, copy=True)
+        # Keep missing values missing until after normalization. Filling here
+        # would put a raw 0.0 into _compute_feature_stats, which is not the
+        # feature's mean on its own scale - for a strictly positive feature
+        # like a conditional volatility it sits below the observed minimum, so
+        # a symbol with no model-based estimate is presented to the model as
+        # the calmest name in the panel rather than a neutral one. Infinities
+        # are treated as missing for the same reason: np.nan_to_num leaves
+        # posinf on its default, the float32 maximum, which would destroy the
+        # feature's mean and standard deviation for every other symbol.
+        feats[~np.isfinite(feats)] = np.nan
         targets = sym_df[label_col].to_numpy(dtype=np.float32)
         # Cast to datetime64[ns] explicitly so concat/np.asarray downstream
         # never falls back to object dtype.
@@ -252,17 +262,23 @@ def _compute_feature_stats(features_list: list[np.ndarray]) -> tuple[np.ndarray,
     n_features = features_list[0].shape[1]
     sum_x = np.zeros(n_features, dtype=np.float64)
     sum_x2 = np.zeros(n_features, dtype=np.float64)
-    n_rows = 0
+    n_rows = np.zeros(n_features, dtype=np.int64)
 
     for feats in features_list:
-        sum_x += feats.sum(axis=0, dtype=np.float64)
-        sum_x2 += np.square(feats, dtype=np.float64).sum(axis=0, dtype=np.float64)
-        n_rows += feats.shape[0]
+        observed = np.isfinite(feats)
+        values = np.where(observed, feats, 0.0).astype(np.float64)
+        sum_x += values.sum(axis=0, dtype=np.float64)
+        sum_x2 += np.square(values).sum(axis=0, dtype=np.float64)
+        n_rows += observed.sum(axis=0, dtype=np.int64)
 
-    means = sum_x / max(n_rows, 1)
-    variances = np.maximum(sum_x2 / max(n_rows, 1) - np.square(means), 0.0)
+    denominator = np.maximum(n_rows, 1)
+    means = sum_x / denominator
+    variances = np.maximum(sum_x2 / denominator - np.square(means), 0.0)
     stds = np.sqrt(variances)
     stds[stds == 0] = 1.0
+    # A feature observed nowhere in training normalizes to zero everywhere,
+    # which is what the post-normalization fill would give it anyway.
+    means[n_rows == 0] = 0.0
     return means.astype(np.float32), stds.astype(np.float32)
 
 
@@ -276,6 +292,14 @@ def _normalize_feature_arrays(
     for feats in features_list:
         feats -= means
         feats /= stds
+        # Now that the arrays are on the training scale, 0.0 is the training
+        # mean of the observed rows, so a row with no observation reads as
+        # average rather than as an extreme. The linear and tabular families
+        # reach the same place by a different route - SimpleImputer fills the
+        # training median and StandardScaler is then fitted on the filled
+        # data - so the normalized values differ; what is shared is that the
+        # fill is a central value of the feature rather than a raw zero.
+        np.nan_to_num(feats, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def _build_sequence_index(
@@ -465,8 +489,16 @@ def sequence_validation_keys(
     entity_col: str,
     lookback: int,
     calendar_id: str | None = None,
+    max_predict_sequences: int = 0,
 ) -> pl.DataFrame:
-    """Return exact validation keys eligible for gap-free sequence prediction."""
+    """Return exact validation keys eligible for gap-free sequence prediction.
+
+    ``max_predict_sequences`` caps the windows drawn per fold, using the same
+    even-spacing rule and full-symbol-coverage guarantee that
+    ``max_train_sequences`` applies to training. It must match what
+    :func:`prepare_fold_sequence_stores` is given for the same fold, because these
+    keys are the contract the published predictions are checked against.
+    """
     _ensure_sequence_periods(dataset_pd, date_col=date_col, calendar_id=calendar_id)
     use_cols = [date_col, entity_col, label_col, _SEQUENCE_PERIOD_COL]
     frames: list[pl.DataFrame] = []
@@ -490,6 +522,10 @@ def sequence_validation_keys(
             entity_col=entity_col,
             lookback=lookback,
         )
+        sampled = _sample_sequence_positions(
+            np.asarray([len(positions) for positions in valid_positions], dtype=np.int64),
+            max_predict_sequences,
+        )
         rows = [
             {
                 "symbol": entities[symbol_id],
@@ -497,7 +533,9 @@ def sequence_validation_keys(
                 "fold": int(split["fold"]),
             }
             for symbol_id, positions in enumerate(valid_positions)
-            for position in positions
+            for position in (
+                positions if sampled[symbol_id] is None else positions[sampled[symbol_id]]
+            )
         ]
         if rows:
             frames.append(pl.from_dicts(rows))
@@ -522,6 +560,7 @@ def prepare_fold_sequence_stores(
     entity_col: str,
     lookback: int,
     max_train_sequences: int = 0,
+    max_predict_sequences: int = 0,
     temporal_by_fold=None,
     temporal_keys: list[str] | None = None,
     temporal_feature_names: list[str] | None = None,
@@ -650,7 +689,9 @@ def prepare_fold_sequence_stores(
     train_symbol_idx, train_end_idx = _build_sequence_index(
         train_positions, train_entities, max_train_sequences
     )
-    val_symbol_idx, val_end_idx = _build_sequence_index(val_positions, val_entities, 0)
+    val_symbol_idx, val_end_idx = _build_sequence_index(
+        val_positions, val_entities, max_predict_sequences
+    )
 
     train_store = SequenceStore(
         features=train_features,

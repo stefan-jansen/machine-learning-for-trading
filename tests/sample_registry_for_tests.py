@@ -48,7 +48,14 @@ CASE_STUDY_IDS = [
     "us_equities_panel",
 ]
 
-# Keep top N backtests per (family, stage) by absolute Sharpe
+# Keep top N backtests per (label, family, stage) by absolute Sharpe.
+#
+# The label is in the partition because the notebooks range over every declared label, not over
+# the primary. A case study declares five, and the top three of a family's |Sharpe| bucket at a
+# stage can all belong to one of them - so `fwd_dir_5d` reached the fixture with fifteen
+# training runs, fifteen prediction sets and not one backtest, and every notebook that requires
+# each declared label to have a baseline failed against a fixture where one never could. A
+# sample that drops a label entirely is not a smaller registry, it is a differently shaped one.
 TOP_N_PER_GROUP = 3
 
 # Prediction hashes a shipped notebook names as a literal, per case study. These
@@ -118,6 +125,20 @@ SYMBOL_COLUMN_CANDIDATES = ("ticker", "symbol")
 PREDICTION_TARGET_COLUMN = "actual"
 
 
+def _has_table(connection, table: str) -> bool:
+    """Whether the registry carries this table at all.
+
+    The stub registries the unit tests build carry only the tables the case under
+    test needs, and a canonical registry predating a table has the same shape.
+    """
+    return (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        is not None
+    )
+
+
 def _copy_rows(src, dst, table: str, rows: list) -> int:
     """Insert rows into dst table with proper column quoting."""
     if not rows:
@@ -185,6 +206,7 @@ def sample_registry(cs_id: str, intermediates_dir: Path = DEFAULT_INTERMEDIATES_
     # previous generation's directories behind alongside the new ones.
     dst_db.unlink(missing_ok=True)
     shutil.rmtree(dst_dir / "backtest", ignore_errors=True)
+    shutil.rmtree(dst_dir / "training", ignore_errors=True)
 
     src = sqlite3.connect(str(src_db))
     try:
@@ -201,6 +223,9 @@ def sample_registry(cs_id: str, intermediates_dir: Path = DEFAULT_INTERMEDIATES_
     stats["backtest_artifact_dirs"] = artifacts["copied"]
     stats["backtest_artifacts_missing_dir"] = artifacts["missing_dir"]
     stats["backtest_artifacts_missing_returns"] = artifacts["missing_returns"]
+    training = _copy_training_artifacts(src_db.parent, dst_dir, stats.pop("training_hashes", set()))
+    stats["training_artifact_dirs"] = training["copied"]
+    stats["training_artifacts_missing_dir"] = training["missing_dir"]
     return stats
 
 
@@ -223,8 +248,34 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
         with contextlib.suppress(sqlite3.OperationalError):
             dst.execute(row[0])
 
-    # 2. Copy model-side tables in full
-    for table in ["training_runs", "prediction_sets", "prediction_metrics", "fold_metrics"]:
+    # 2. Copy model-side tables in full.
+    #
+    # `prediction_coverage` belongs here and was missing, which nothing noticed while
+    # completeness was only asked after a field had been built. `PredictionResult.completeness`
+    # returns "no prediction_coverage row" without one, `BacktestResult.completeness` chains to
+    # it, and every backtest in the fixture therefore read as incomplete - so a caller that
+    # filters on completeness before tallying coverage found no rankable row for any label and
+    # reported the sweep unfinished. Production carries 1405 rows for
+    # `sp500_equity_option_analytics` alone.
+    #
+    # A table the source does not have is skipped rather than raising. Every canonical
+    # registry carries all five, but the stub registries the unit tests build carry only the
+    # tables the case under test needs, and requiring `prediction_coverage` there turned
+    # seven of them red. `test_prediction_coverage_rows_match_prediction_sets` asserts one
+    # coverage row per prediction on the SHIPPED fixture, which is where a real registry
+    # missing the table would have to be caught.
+    for table in [
+        "training_runs",
+        "prediction_sets",
+        "prediction_metrics",
+        "prediction_coverage",
+        "fold_metrics",
+    ]:
+        if not src.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone():
+            stats[table] = 0
+            continue
         rows = src.execute(f"SELECT * FROM {table}").fetchall()
         n = _copy_rows(src, dst, table, rows)
         stats[table] = n
@@ -233,16 +284,17 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
     # First, get sampled backtest hashes
     sampled_bt_hashes = set()
 
-    # 3a. Top N per family × stage (validation backtests)
+    # 3a. Top N per label × family × stage (validation backtests)
     top_n_sql = """
         WITH ranked AS (
             SELECT
                 b.backtest_hash,
                 b.stage,
                 t.family,
+                t.label,
                 bm.sharpe,
                 ROW_NUMBER() OVER (
-                    PARTITION BY b.stage, t.family
+                    PARTITION BY b.stage, t.family, t.label
                     ORDER BY ABS(bm.sharpe) DESC
                 ) AS rn
             FROM backtest_runs b
@@ -336,6 +388,12 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
 
     stats["backtest_runs_sampled"] = len(sampled_bt_hashes)
     stats["sampled_hashes"] = sampled_bt_hashes
+    # Every training run whose rows this fixture carries, not only those behind a sampled
+    # backtest: step 2 copies `training_runs` in full, and a reader selecting rank-1 by IC
+    # reaches a training run that never entered a backtest at all.
+    stats["training_hashes"] = {
+        row[0] for row in src.execute("SELECT DISTINCT training_hash FROM training_runs")
+    }
 
     # 3d. Copy sampled backtest data (runs, metrics, fold_metrics)
     if sampled_bt_hashes:
@@ -362,14 +420,8 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
         # backtest_runs sample is. Filtering by leader_hash membership in the sample
         # is sufficient and correct: a row whose leader was not sampled would fail the
         # same JOIN downstream anyway, so it is dropped exactly like an FK would.
-        has_cohort_metrics = (
-            src.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cohort_metrics'"
-            ).fetchone()
-            is not None
-        )
         count = 0
-        if has_cohort_metrics:
+        if _has_table(src, "cohort_metrics"):
             for i in range(0, len(hash_list), batch_size):
                 batch = hash_list[i : i + batch_size]
                 placeholders = ",".join(["?"] * len(batch))
@@ -379,6 +431,46 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
                 ).fetchall()
                 count += _copy_rows(src, dst, "cohort_metrics", rows)
         stats["cohort_metrics"] = count
+
+        # 3f. Copy backtest_paired_metrics for pairs both of whose sides survived.
+        # A challenger-versus-benchmark row is only readable when both backtests are
+        # in the fixture: challenger_hash carries an FK to backtest_runs and
+        # benchmark_hash is resolved the same way by every reader. The table got its
+        # schema and none of its rows, so a strategy-analysis notebook comparing a
+        # candidate against its benchmark found nothing and could not distinguish
+        # "not computed" from "not sampled".
+        count = 0
+        if _has_table(src, "backtest_paired_metrics"):
+            # benchmark_hash carries no FK, so the pair is filtered here rather than
+            # by SQLite: a row pointing at a benchmark the sample dropped reads as a
+            # comparison against a backtest that is not there.
+            benchmark_index = [
+                column[0]
+                for column in src.execute(
+                    "SELECT * FROM backtest_paired_metrics LIMIT 0"
+                ).description
+            ].index("benchmark_hash")
+            for i in range(0, len(hash_list), batch_size):
+                batch = hash_list[i : i + batch_size]
+                placeholders = ",".join(["?"] * len(batch))
+                rows = src.execute(
+                    "SELECT * FROM backtest_paired_metrics "
+                    f"WHERE challenger_hash IN ({placeholders})",
+                    batch,
+                ).fetchall()
+                rows = [row for row in rows if row[benchmark_index] in sampled_bt_hashes]
+                count += _copy_rows(src, dst, "backtest_paired_metrics", rows)
+        stats["backtest_paired_metrics"] = count
+
+    # 4. Copy causal_runs in full. Its rows are keyed by causal_hash and depend on no
+    # sampled backtest or prediction, so there is nothing to filter them by; the table
+    # had schema and no rows, and 15_causal_estimation reads it. One row per causal
+    # notebook run, so full is also small.
+    count = 0
+    if _has_table(src, "causal_runs"):
+        rows = src.execute("SELECT * FROM causal_runs").fetchall()
+        count = _copy_rows(src, dst, "causal_runs", rows)
+    stats["causal_runs"] = count
 
     dst.commit()
 
@@ -428,6 +520,47 @@ def _copy_backtest_artifacts(src_run_log: Path, dst_run_log: Path, hashes: set) 
                 missing_returns += 1
         copied += 1
     return {"copied": copied, "missing_dir": missing_dir, "missing_returns": missing_returns}
+
+
+#: The small, notebook-read files inside a training dir. `models/` is deliberately absent:
+#: it holds fitted weights, which no reader in this repo opens and which would put gigabytes
+#: into a fixture repo.
+_TRAINING_ARTIFACTS = ("learning_curves.parquet", "fold_metrics.parquet", "spec.json")
+
+
+def _copy_training_artifacts(src_run_log: Path, dst_run_log: Path, hashes: set) -> dict:
+    """Copy each retained training run's small artifacts next to its rows.
+
+    Same failure as the backtest dirs one layer up, and it went unnoticed longer because
+    nothing placed these either: `training_runs` is copied in full, so selection reaches a
+    hash whose `run_log/training/<hash>/` was never written, and the read fails far from the
+    cause. `12_gradient_boosting/12_case_study_insights` raised `missing learning curve for
+    036284a71530` the first time the fixture gave it a `sp500_equity_option_analytics` row -
+    the row was there, the directory was not.
+
+    A hash with no source dir is counted rather than raised: `training_runs` holds rows from
+    preview and superseded generations whose artifacts were never kept, and refusing to build
+    a fixture over those would refuse every real registry.
+    """
+    src_tr = src_run_log / "training"
+    if not src_tr.is_dir():
+        return {"copied": 0, "missing_dir": len(hashes)}
+    dst_tr = dst_run_log / "training"
+    copied = 0
+    missing_dir = 0
+    for training_hash in hashes:
+        src_dir = src_tr / training_hash
+        if not src_dir.is_dir():
+            missing_dir += 1
+            continue
+        dst_dir = dst_tr / training_hash
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        for name in _TRAINING_ARTIFACTS:
+            src_file = src_dir / name
+            if src_file.is_file():
+                shutil.copy2(src_file, dst_dir / name)
+        copied += 1
+    return {"copied": copied, "missing_dir": missing_dir}
 
 
 def _copy_rows_onto_existing_schema(src, dst, table: str, where_col: str, value) -> int:
@@ -767,6 +900,9 @@ def preflight_pinned_predictions(cs_id: str, intermediates_dir: Path) -> None:
 
 
 def main() -> int:
+    # Rebound from --source below. Every reader of the source root takes it as a module
+    # global, and the alternative - threading it through nine call sites - buys nothing here.
+    global CODE_CS_DIR
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--output",
@@ -777,8 +913,36 @@ def main() -> int:
             "intermediates/ directory). Default: ~/ml4t/test-data/intermediates"
         ),
     )
+    parser.add_argument(
+        "--source",
+        type=Path,
+        default=CODE_CS_DIR,
+        help=(
+            "Root holding each case study's run_log to sample FROM. Default: this repo's "
+            "case_studies/, which in a --case-study worktree is a symlink to the canonical "
+            "store. Pass ~/ml4t/artifacts/case_studies to read the canonical store directly. "
+            "A plain worktree can hold a real run_log left behind by an earlier layout, and "
+            "it shadows the canonical one silently: on 2026-09-01 ~/ml4t/public/case_studies/"
+            "etfs/run_log was a 2026-07-24 snapshot with 759 backtests against the store's "
+            "3313, so every fixture sampled from that checkout carried a six-week-old etfs."
+        ),
+    )
+    parser.add_argument(
+        "--case-study",
+        action="append",
+        choices=CASE_STUDY_IDS,
+        dest="case_studies",
+        help=(
+            "Sample only this case study; repeatable. Default: all of them. A worktree "
+            "symlinks the run_log of the case study it is working and no other, so the "
+            "whole-repo default is not reachable from one, and a case study whose sweeps "
+            "just re-ran is the unit that needs refreshing anyway."
+        ),
+    )
     args = parser.parse_args()
+    CODE_CS_DIR = args.source.expanduser().resolve()
     intermediates_dir = args.output.expanduser().resolve()
+    case_study_ids = args.case_studies or CASE_STUDY_IDS
 
     if reason := rejected_output_root(intermediates_dir):
         parser.error(
@@ -794,7 +958,7 @@ def main() -> int:
     # production identities, and the artifacts.
     missing = [
         cs_id
-        for cs_id in CASE_STUDY_IDS
+        for cs_id in case_study_ids
         if not (CODE_CS_DIR / cs_id / "run_log" / "registry.db").exists()
     ]
     if missing:
@@ -803,19 +967,25 @@ def main() -> int:
             f"Sampling the rest would refresh those fixtures and leave these at the previous "
             f"vintage, which is the mixed state the run is meant to avoid."
         )
-    for cs_id in CASE_STUDY_IDS:
+    for cs_id in case_study_ids:
         try:
             preflight_pinned_predictions(cs_id, intermediates_dir)
         except (ValueError, FileNotFoundError, RuntimeError) as exc:
             parser.error(str(exc))
 
     print(f"Sampling registries from {CODE_CS_DIR}")
+    # Printed per case study and fully resolved, because the shadowing this guards against is
+    # invisible from the root alone: a symlinked run_log and a real one left behind by an
+    # earlier layout look identical here and resolve to different registries.
+    for cs_id in case_study_ids:
+        src = (CODE_CS_DIR / cs_id / "run_log" / "registry.db").resolve()
+        print(f"  {cs_id:32s} {src}")
     print(f"Writing to {intermediates_dir}")
-    print(f"Top {TOP_N_PER_GROUP} backtests per (family × stage) + all holdout\n")
+    print(f"Top {TOP_N_PER_GROUP} backtests per (label × family × stage) + all holdout\n")
 
     total_size = 0
     not_refreshed: list[str] = []
-    for cs_id in CASE_STUDY_IDS:
+    for cs_id in case_study_ids:
         print(f"--- {cs_id} ---")
         stats = sample_registry(cs_id, intermediates_dir)
         if stats["status"] != "OK":
@@ -843,6 +1013,8 @@ def main() -> int:
             "backtest_metrics",
             "backtest_fold_metrics",
             "cohort_metrics",
+            "backtest_paired_metrics",
+            "causal_runs",
         ]:
             print(f"  {table:30s} {stats.get(table, 0):>6}")
         print(f"  {'backtest artifact dirs':30s} {stats.get('backtest_artifact_dirs', 0):>6}")
@@ -864,7 +1036,7 @@ def main() -> int:
         # held, so exiting 0 here reports a refresh that did not happen and the
         # replay-only notebooks then read the previous vintage.
         print(
-            f"\nERROR: {len(not_refreshed)} of {len(CASE_STUDY_IDS)} registries were not "
+            f"\nERROR: {len(not_refreshed)} of {len(case_study_ids)} registries were not "
             f"refreshed: {', '.join(not_refreshed)}. Their production registry.db is missing "
             f"under {CODE_CS_DIR}; the fixture keeps whatever it held before this run."
         )

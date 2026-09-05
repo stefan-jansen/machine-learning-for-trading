@@ -15,19 +15,73 @@ NOTEBOOK = Path(__file__).parents[1] / "case_studies" / "sp500_options" / "02_la
 
 
 def _assignment_nodes(*targets: str) -> list[ast.stmt]:
+    """The top-level assignments to ``targets``, in source order."""
     tree = ast.parse(NOTEBOOK.read_text())
-    selected = []
-    for node in tree.body:
-        if not isinstance(node, ast.Assign):
+    return [
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and {target.id for target in node.targets if isinstance(target, ast.Name)}.intersection(
+            targets
+        )
+    ]
+
+
+def _bindings_by_name() -> tuple[dict[str, list[ast.stmt]], dict[int, int]]:
+    """Every top-level statement that binds a name, indexed by that name and by source order.
+
+    Imports as well as assignments: the notebook imports the split-guard thresholds its regime
+    logic compares against, so a slice that resolved assignments only still left them unbound.
+    """
+    tree = ast.parse(NOTEBOOK.read_text())
+    by_name: dict[str, list[ast.stmt]] = {}
+    order: dict[int, int] = {}
+    for position, node in enumerate(tree.body):
+        if isinstance(node, ast.Assign):
+            bound = [target.id for target in node.targets if isinstance(target, ast.Name)]
+        elif isinstance(node, ast.Import | ast.ImportFrom):
+            bound = [alias.asname or alias.name.split(".")[0] for alias in node.names]
+        else:
             continue
-        names = {target.id for target in node.targets if isinstance(target, ast.Name)}
-        if names.intersection(targets):
-            selected.append(node)
-    return selected
+        order[id(node)] = position
+        for name in bound:
+            by_name.setdefault(name, []).append(node)
+    return by_name, order
 
 
 def _run_assignments(targets: tuple[str, ...], namespace: dict[str, object]) -> None:
-    module = ast.Module(body=_assignment_nodes(*targets), type_ignores=[])
+    """Execute the notebook statements that produce ``targets``, and the ones they read.
+
+    Naming only the outputs was how this was written, and it broke every time the notebook grew
+    something between them: a guard against corporate actions added ``regime`` and an import of
+    two thresholds between ``settlement`` and ``panel``, and the sliced ``panel`` then referred
+    to names nothing had bound. The dependency is the notebook's, so the slice follows it rather
+    than being restated at each call site and going stale there.
+
+    A name the caller already bound is left alone. That is how a test substitutes a fixture
+    frame for what the notebook loads - the point of slicing rather than executing - so
+    resolving those from the notebook too would overwrite the inputs under test.
+    """
+    by_name, order = _bindings_by_name()
+    selected: dict[int, ast.stmt] = {}
+    resolved: set[str] = set()
+    pending = [(name, True) for name in targets]
+    while pending:
+        name, requested = pending.pop()
+        if name in resolved or name not in by_name or (not requested and name in namespace):
+            continue
+        resolved.add(name)
+        for node in by_name[name]:
+            selected[order[id(node)]] = node
+            value = getattr(node, "value", None)
+            if value is None:
+                continue
+            pending.extend(
+                (ref.id, False)
+                for ref in ast.walk(value)
+                if isinstance(ref, ast.Name) and isinstance(ref.ctx, ast.Load)
+            )
+    module = ast.Module(body=[selected[position] for position in sorted(selected)], type_ignores=[])
     ast.fix_missing_locations(module)
     exec(compile(module, NOTEBOOK, "exec"), namespace)
 
@@ -125,6 +179,11 @@ def test_expiry_intrinsic_value_keeps_historical_close_basis() -> None:
             "symbol": ["SPLT"],
             "close": [52.0],
             "adj_factor": [4.0],
+            # The cumulative factor is 4 because a split happened at some point, which is what
+            # this test is about. The per-session factor is what the regime guard reads, and it
+            # is 1 because no corporate action falls inside this contract's window - a label
+            # spanning one would be nulled rather than priced.
+            "adjustment_factor": [1.0],
         }
     )
     contract_returns = pl.DataFrame(

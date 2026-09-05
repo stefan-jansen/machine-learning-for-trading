@@ -98,9 +98,11 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, symbols):
 
 
 # %% tags=["parameters"]
-MAX_FOLDS = 0  # 0 = all folds
+# 0 = all folds
+MAX_FOLDS = 0
 TABM_EPOCHS = 200
-MAX_SYMBOLS = 0  # 0 = all symbols
+# 0 = all symbols
+MAX_SYMBOLS = 0
 SEED = 42
 
 

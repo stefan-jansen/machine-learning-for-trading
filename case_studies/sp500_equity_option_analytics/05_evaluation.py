@@ -91,7 +91,7 @@ from scipy.stats import spearmanr
 from scipy.stats import t as student_t
 
 import utils.style as style
-from case_studies.utils.cv_window import modeling_fold_boundaries
+from case_studies.utils.cv_window import fold_boundary_date, modeling_fold_boundaries
 from case_studies.utils.feature_engineering import (
     assign_families,
     families_from_config,
@@ -221,33 +221,28 @@ print(
 # prices and surfaces, one row per `(timestamp, symbol)`, and they join straight
 # on.
 #
-# **The model-based artifact does not.** A **walk-forward fold** is one
-# training window followed by the validation window immediately after it, and the
-# scheme steps both windows forward to make the next fold. `04_model_based_features`
-# refits its GJR-GARCH model inside each fold's training window, so
-# `model_based.parquet` carries one row per `(timestamp, symbol, fold)` - the same
-# date and name once per fold, with a different set of fitted parameters each
-# time. Each fold's rows span its training window as well as its validation
-# window, and only the validation half is out of sample: inside the training
-# window, the fitted value at a date was estimated from a span that includes that
-# date and everything after it up to the training end. The extra fold that trains
-# on the whole development window is the sharpest case - its rows dated 2019 carry
-# parameters estimated from data through 2020.
+# **The model-based artifact now joins the same way, and it did not use to.**
+# `04_model_based_features` refits its GJR-GARCH on a schedule over each security's
+# own history rather than once inside each fold's training window, so
+# `model_based.parquet` carries one row per `(timestamp, symbol)` and no `fold`
+# column. Every value comes from the last parameters estimated strictly before the
+# session it is stamped with, on a training row exactly as much as on a validation
+# row, so there is no in-sample half to cut away and no fold provenance to mix.
 #
-# Joining that frame on `(timestamp, symbol)` alone would do two things at once.
-# It would **duplicate panel rows**, because the key is not unique on the right
-# side, so a name would appear once per fold in the same cross-section and be
-# counted that many times by every statistic below - including the staleness
-# screen, which would see the duplicates as adjacent identical rows and read them
-# as a column that does not move. And it would **mix fold provenance**, because
-# whichever of those rows a later cell read might be an in-sample fitted value.
+# What that removes from this notebook is the whole apparatus that used to stand
+# here: the per-fold filter, the uniqueness check that caught overlapping
+# validation windows, and the restricted screening window that followed from
+# keeping only validated rows. The GARCH columns are now defined wherever the
+# schedule emitted them, which is every session after a security's own burn-in.
 #
-# So the model-based frame is cut down to each fold's validation window before it
-# is joined, and the result is checked for one row per key rather than assumed to
-# have it. The consequence is that the GARCH columns exist only where a fold
-# validated them, which is the later part of the development window and not all of
-# it - and the screens in section 1 measure them on that window rather than
-# against a denominator they cannot reach.
+# **What it adds is nulls on short names.** A refit schedule emits nothing for a
+# security until that security has cleared its burn-in, and a name that lists late
+# in the panel may never clear it. The old design never produced those: it fitted
+# on each fold's whole training window and emitted backwards across it, so the
+# column was complete precisely because it was fitted on its own future. Those
+# rows are dropped below and counted, rather than raised on. Keeping them would
+# score the financial features on rows where the model-based ones do not exist,
+# and this section exists to compare the two on the same rows.
 
 # %%
 features = pl.read_parquet(CASE_DIR / "features" / "financial.parquet")
@@ -278,19 +273,26 @@ producer_folds = modeling_fold_boundaries(CASE_STUDY_ID, PRIMARY_LABEL)
 if not producer_folds:
     msg = f"No canonical modeling folds for {CASE_STUDY_ID}/{PRIMARY_LABEL}"
     raise RuntimeError(msg)
+# That generator indexes the label timeline with a pandas `DatetimeIndex`, so a boundary
+# comes back as a `Timestamp` whatever dtype the label parquet holds. Section 3 compares a
+# fold's end against `holdout_start_date`, which the configuration states as a calendar
+# date, and a `Timestamp` raises against a `date` rather than answering. Converting once
+# here is what lets every span below be compared and filtered without a second parse.
+_SPAN_FIELDS = ("train_start", "train_end", "val_start", "val_end")
+producer_folds = [
+    {**f, **{field: fold_boundary_date(f[field]) for field in _SPAN_FIELDS}} for f in producer_folds
+]
 
-temporal_oos = pl.concat(
-    [
-        temporal.filter(
-            (pl.col("fold") == f["fold"])
-            & (pl.col(DATE_COL) >= f["val_start"])
-            & (pl.col(DATE_COL) <= f["val_end"])
-        )
-        for f in producer_folds
-    ]
-).drop("fold")
+# The artifact is already one row per key and every row is out of sample in the sense that
+# matters: its parameters were fitted strictly before it. What is still cut here is the span,
+# so the screens below are measured over the same validation windows the downstream models are
+# scored on rather than over the whole panel.
+temporal_oos = temporal.filter(
+    (pl.col(DATE_COL) >= min(f["val_start"] for f in producer_folds))
+    & (pl.col(DATE_COL) <= max(f["val_end"] for f in producer_folds))
+)
 if temporal_oos.select(JOIN_COLS).n_unique() != len(temporal_oos):
-    msg = "Fold validation windows overlap: the out-of-sample frame is not one row per key"
+    msg = "model_based.parquet is not one row per (timestamp, symbol)"
     raise ValueError(msg)
 
 # The window the GARCH columns can be screened on. Outside it they are absent by
@@ -307,7 +309,7 @@ for f in producer_folds:
         f"kept {f['val_start']} to {f['val_end']}"
     )
 print(
-    f"Model-based rows: {len(temporal):,} across all folds -> {len(temporal_oos):,} taken "
+    f"Model-based rows: {len(temporal):,} in the artifact -> {len(temporal_oos):,} taken "
     f"from validation windows only ({TEMPORAL_WINDOW[0]} to {TEMPORAL_WINDOW[1]})"
 )
 
@@ -319,6 +321,23 @@ if len(eval_panel) != len(features):
     msg = f"Model-based join changed the panel row count: {len(features):,} -> {len(eval_panel):,}"
     raise ValueError(msg)
 eval_panel = eval_panel.join(label_df, on=JOIN_COLS, how="inner")
+
+# Inside the screening window a null GARCH column means the security had not cleared its
+# burn-in, not that the schedule declined to emit there. Those rows are dropped, and the drop
+# has to happen HERE rather than on `temporal_oos`: the join above is a left join, so removing
+# them from the right side only puts them back as nulls. Dropping after the join is what
+# actually gives section 1 one sample for both feature families - which is the comparison it
+# exists to make. Outside the window the columns are absent by construction and the rows stay.
+_in_window = (pl.col(DATE_COL) >= TEMPORAL_WINDOW[0]) & (pl.col(DATE_COL) <= TEMPORAL_WINDOW[1])
+_window_rows = eval_panel.filter(_in_window).height
+eval_panel = eval_panel.filter(~_in_window | pl.all_horizontal(pl.col(temporal_cols).is_not_null()))
+_dropped = _window_rows - eval_panel.filter(_in_window).height
+if _dropped:
+    print(
+        f"Dropped {_dropped:,} of {_window_rows:,} rows in the screening window "
+        f"({_dropped / _window_rows:.2%}) whose security had not cleared its GARCH burn-in, so "
+        "both feature families are now measured on the same rows."
+    )
 
 all_feature_cols = financial_cols + temporal_cols
 
@@ -869,13 +888,13 @@ if leader:
 # otherwise.
 
 # %%
-fold_boundaries = [(f["val_start"], f["val_end"]) for f in producer_folds]
+fold_windows = [(f["val_start"], f["val_end"]) for f in producer_folds]
 for f in producer_folds:
     print(
         f"fold {f['fold']}: fitted {f['train_start']} to {f['train_end']}, "
         f"validated {f['val_start']} to {f['val_end']}"
     )
-if max(end for _, end in fold_boundaries) >= holdout_start_date:
+if max(end for _, end in fold_windows) >= holdout_start_date:
     msg = "A validation fold ends at or after the holdout boundary"
     raise ValueError(msg)
 
@@ -883,7 +902,7 @@ fold_stats = {}
 for feat in ic_results:
     fold_ics = []
     ts = ic_timeseries[feat]
-    for fold_start, fold_end in fold_boundaries:
+    for fold_start, fold_end in fold_windows:
         fold_ic = ts.filter((pl.col(DATE_COL) >= fold_start) & (pl.col(DATE_COL) <= fold_end))
         if len(fold_ic) >= 5:
             fold_ics.append(float(fold_ic["ic"].mean()))

@@ -298,13 +298,19 @@ def label_horizon(label: str) -> int:
 
 # %%
 def selected_predictions(case_study: str, row: dict, score_name: str) -> pl.DataFrame:
-    """Load one selected validation prediction set with a common entity key."""
+    """Load one selected validation prediction set with a common entity key.
+
+    Addressed by `prediction_hash`, which is the identity, rather than by the four
+    attributes that describe it. They are not a key: refitting a configuration under a
+    changed estimator parameter writes a second prediction set with the same family, label,
+    configuration and checkpoint, and `sp500_equity_option_analytics` has four generations
+    of every `latent_factors/sae` checkpoint. Selecting on the attributes returned all four,
+    so every (timestamp, entity) pair appeared four times and the guard below fired - which
+    is what it is for, but the fix is to ask for the row that was selected.
+    """
     frame = load_predictions(
         case_study,
-        family=row["family"],
-        label=row["label"],
-        config_name=row["config_name"],
-        checkpoint_value=row["checkpoint_value"],
+        prediction_hash=row["prediction_hash"],
         split="validation",
     )
     entity = "product" if "product" in frame.columns else "symbol"
@@ -333,8 +339,25 @@ def paired_daily_ic(latent: pl.DataFrame, supervised: pl.DataFrame) -> pl.DataFr
     target_gap = joined.select(
         (pl.col("latent_target") - pl.col("supervised_target")).abs().max()
     ).item()
-    if target_gap is None or target_gap > 1e-10:
-        raise ValueError(f"Aligned targets disagree: maximum gap {target_gap}")
+    # Two recordings of the same label agree only to float32 resolution at the target's own
+    # scale: a prediction artifact can be written through a float32 stage and its partner not.
+    # The bound is therefore relative, not the absolute 1e-10 that used to stand here - that
+    # one passed wherever targets were small and failed on us_firm_characteristics, whose
+    # monthly returns reach 7.0, at a gap of 2.1e-07. Measured across the four pairs this
+    # notebook forms: relative gaps of 0, 1.8e-08, 3.0e-08 and 4.2e-08 against a float32 eps
+    # of 1.19e-07. It still separates float noise from the thing this guard exists to catch,
+    # two different labels joined on the same keys, which disagree by 1.4 to 6.0.
+    magnitude = joined.select(
+        pl.max_horizontal(
+            pl.col("latent_target").abs().max(), pl.col("supervised_target").abs().max()
+        )
+    ).item()
+    tolerance = float(np.finfo(np.float32).eps) * max(1.0, abs(magnitude or 0.0))
+    if target_gap is None or target_gap > tolerance:
+        raise ValueError(
+            f"Aligned targets disagree: maximum gap {target_gap} exceeds {tolerance:.3g} "
+            f"at a target magnitude of {magnitude}"
+        )
     ranked = joined.with_columns(
         pl.col("latent_score").rank(method="average").over("timestamp").alias("latent_rank"),
         pl.col("supervised_score")

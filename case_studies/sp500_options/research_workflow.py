@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import polars as pl
+import yaml
 
 from case_studies.research import (
     BacktestResult,
@@ -24,16 +25,18 @@ from case_studies.research import (
     Result,
     Study,
     plan_backtests,
+    require_resolved_requests_cover_the_catalog,
     run_models,
 )
 from case_studies.research.execution import ModelExecution
 from case_studies.research.strategy import strategy_warmup_periods
 from case_studies.sp500_options._htm_backtest import (
     _apply_cohort_allocator,
-    _load_option_lifecycle,
     _select_cohorts,
     option_contract_source_identity,
     option_data_paths,
+    option_source_identity,
+    prime_option_lifecycle,
 )
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.backtest_loaders import load_backtest_prices_for
@@ -57,10 +60,56 @@ class OptionBacktestExecution:
     population: OfficialPopulation | None
 
 
+def _dl_config() -> dict[str, Any]:
+    setup = yaml.safe_load(
+        (REPO_ROOT / "case_studies" / CASE_STUDY / "config" / "setup.yaml").read_text()
+    )
+    return (setup.get("modeling") or {}).get("dl") or {}
+
+
+def published_dl_device() -> str:
+    """The device the published deep-learning populations were fitted on.
+
+    Read from `modeling.dl.device` without checking whether that device is present, because
+    this answers what the population holds rather than what this machine can run. The two
+    differ exactly when a reader on a CPU refits, which is the case the population-name guard
+    in 08, 09, 09a and 09b exists to catch.
+    """
+    declared = _dl_config().get("device")
+    if not declared:
+        raise ValueError(
+            f"case_studies/{CASE_STUDY}/config/setup.yaml declares no modeling.dl.device, "
+            "so there is no published device for the fitted populations to be checked against"
+        )
+    device = str(declared).lower()
+    return "cuda" if device == "gpu" else device
+
+
+def declared_dl_device(requested: str | None = None) -> str:
+    """The device this run fits on, resolved through the shared sequence contract.
+
+    Reads `modeling.dl.device` rather than letting each notebook carry its own constant: 08,
+    09, 09a and 09b fit into one identity space, and four transcriptions of one device are
+    four chances for them to disagree. `requested` is the notebook's DEVICE parameter, empty
+    meaning "use what the case study declared".
+
+    `resolve_dl_device` refuses an undeclared device and refuses a GPU that is not present
+    rather than falling back to CPU: the device is inside the training identity, so a silent
+    fallback registers a fit under an identity it does not have.
+    """
+    # Imported here rather than at module scope: `case_studies.utils.deep_learning` imports
+    # torch, and this module is imported by the torch-free `test-unit` job, which excludes
+    # torch deliberately so a required per-commit gate does not cost gigabytes. Only the
+    # deep-learning notebooks call this, and they have torch.
+    from case_studies.utils.deep_learning import resolve_dl_device
+
+    return resolve_dl_device(_dl_config(), requested)
+
+
 def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> Study:
     """Open canonical regeneration or an isolated reader preview."""
     if execution_tier == "canonical":
-        return Study.regenerate(CASE_STUDY, release_root=REPO_ROOT)
+        return Study.regenerate(CASE_STUDY)
     if execution_tier != "preview":
         raise ValueError("execution_tier must be canonical or preview")
     if workspace is None:
@@ -93,7 +142,7 @@ def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> S
         )
         study.activate(execution_tier)
         return study
-    return Study.open(CASE_STUDY, workspace=workspace, release_root=REPO_ROOT)
+    return Study.open(CASE_STUDY, workspace=workspace)
 
 
 def model_request_catalog(
@@ -104,6 +153,11 @@ def model_request_catalog(
 ) -> pl.DataFrame:
     """Return the declared model population as visible Polars rows."""
     selected = set(config_names) if config_names is not None else None
+    if selected is not None and not selected:
+        # An empty selection is the caller's, so say so. Falling through left every row filtered
+        # out and the function reported "no declared requests for <family>", blaming the family's
+        # menu for a list the caller passed empty.
+        raise ValueError("config_names is empty; omit it to request every declared configuration")
     rows = []
     for label in labels:
         for config in load_configs(CASE_STUDY, label, family):
@@ -123,7 +177,18 @@ def resolve_model_requests(
     overrides: dict[str, Any] | None = None,
     preview_reductions: dict[str, Any] | None = None,
 ) -> tuple[ResolvedModelRequest, ...]:
-    """Resolve visible catalog rows through the shared family boundary."""
+    """Resolve visible catalog rows through the shared family boundary.
+
+    Its three callers - `09_deep_learning`, `09a_lstm`, `09b_patchtst` - are all family
+    `deep_learning`, and `case_studies/utils/deep_learning.py` defines neither
+    `run_model_requests` nor `plan_model_requests`. So `run_models` and `plan_models` both fall
+    through to the same per-request `resolve()` this does, and there is no batch runner for a
+    caller here to reach or to miss. Handing the results to `run_resolved_model_requests` is not
+    the batch bypass it looks like from the shape of the call.
+
+    The three notebooks that do reach a batch runner - `06_linear`, `07_gbm`, `08_tabular_dl` -
+    resolve inline and call the shared `run_model_population` rather than going through here.
+    """
     required = {"family", "label", "config_name"}
     missing = required - set(request_catalog.columns)
     if missing:
@@ -184,8 +249,17 @@ def run_official_model_catalog(
     *,
     population_name: str,
     resolved_requests: Iterable[ResolvedModelRequest] | None = None,
+    supersedes: str | None = None,
 ) -> tuple[ModelExecution, OfficialPopulation]:
-    """Snapshot and execute one complete canonical model population."""
+    """Snapshot and execute one complete canonical model population.
+
+    ``supersedes`` names the population hash this run replaces, and it is a value a person sets
+    after reading the registry rather than one the notebook can derive. It belongs in the
+    snapshot, so passing it changes the population identity: a re-run that supplies it registers
+    a new population recording what it replaced, not the old one again. Where a population
+    already exists under this name and the membership has changed, ``OfficialPopulation.create``
+    refuses without it and names the hash required.
+    """
     resolved = tuple(resolved_requests or ())
     if not resolved:
         resolved = resolve_model_requests(study, request_catalog, execution_tier="canonical")
@@ -194,6 +268,7 @@ def run_official_model_catalog(
         request_catalog,
         population_name=population_name,
         resolved_requests=resolved,
+        supersedes=supersedes,
     )
     execution, population = run_official_model_subset(
         study,
@@ -210,6 +285,7 @@ def snapshot_official_model_catalog(
     *,
     population_name: str,
     resolved_requests: Iterable[ResolvedModelRequest] | None = None,
+    supersedes: str | None = None,
 ) -> OfficialPopulation:
     """Snapshot every expected canonical prediction before any member executes."""
     resolved = tuple(resolved_requests or ())
@@ -217,12 +293,14 @@ def snapshot_official_model_catalog(
         resolved = resolve_model_requests(study, request_catalog, execution_tier="canonical")
     if any(request.spec["execution_tier"] != "canonical" for request in resolved):
         raise ValueError("official model populations require canonical requests")
+    require_resolved_requests_cover_the_catalog(request_catalog, resolved)
     expected = expected_prediction_hashes(resolved)
     return OfficialPopulation.create(
         study,
         name=population_name,
         member_kind="prediction",
         members=expected,
+        supersedes=supersedes,
     )
 
 
@@ -316,6 +394,248 @@ def official_prediction_catalog(
     )
 
 
+def preview_prediction_candidates(
+    study: Study,
+    *,
+    labels: Iterable[str],
+    limit: int,
+) -> pl.DataFrame:
+    """The preview validation predictions to backtest, capped per label.
+
+    A canonical run resolves named populations, which a preview cannot: preview results
+    never enter one. It used to name its prediction sets as literal hashes instead, and
+    that is why `12_backtest` could not run anywhere but on the workstation that had just
+    produced them - a hash is a property of the run, so nothing could declare one ahead
+    of time and the notebook was skipped in CI rather than executed.
+
+    The selection is declarative instead: the label, and how many configurations of it to
+    trade. The cap is applied per label rather than to the whole frame, so a later label
+    is not left short by whichever one sorts first; sp500_options declares a single label
+    today and the grouping is what keeps that true if it declares another.
+
+    This lives here rather than inline in the notebook so the notebook and its test call
+    the same code.
+    """
+    labels = list(labels)
+    if not labels:
+        raise ValueError("preview prediction selection requires at least one label")
+    if limit < 1:
+        raise ValueError("preview prediction selection requires a positive limit")
+    candidates = (
+        study.predictions.table(include_preview=True)
+        .filter(
+            (pl.col("execution_tier") == "preview")
+            & (pl.col("split") == "validation")
+            & pl.col("complete")
+            & pl.col("label").is_in(labels)
+        )
+        .sort("label", "family", "config_name", "checkpoint_kind", "checkpoint_value")
+        .group_by("label", maintain_order=True)
+        .head(limit)
+    )
+    starved = [label for label in labels if candidates.filter(pl.col("label") == label).is_empty()]
+    if starved:
+        raise RuntimeError(
+            f"preview execution found no complete validation predictions for {starved}"
+        )
+    return candidates
+
+
+def preview_baseline_candidates(
+    study: Study,
+    *,
+    labels: Iterable[str],
+    limit: int,
+) -> pl.DataFrame:
+    """The preview baseline backtests a downstream stage builds on, capped per label.
+
+    The counterpart of :func:`preview_prediction_candidates` one stage on. A canonical run
+    reads the named baseline population; a preview reads what the preview baseline stage
+    just registered in the same workspace, selected by label rather than by hash for the
+    same reason.
+
+    The cap counts model configurations, not backtest rows: the baseline stage registers
+    one row per concentration and per saved checkpoint, so a limit applied to rows would
+    spend the whole budget on the first configuration's grid and hand the next stage a
+    shortlist with one model in it. Every row of each selected configuration is returned,
+    because a downstream stage ranks within a configuration before it ranks across them.
+    """
+    labels = list(labels)
+    if not labels:
+        raise ValueError("preview baseline selection requires at least one label")
+    if limit < 1:
+        raise ValueError("preview baseline selection requires a positive limit")
+    baselines = (
+        study.backtests.table(include_preview=True)
+        .filter(
+            (pl.col("execution_tier") == "preview")
+            & (pl.col("stage") == "signal")
+            & pl.col("complete")
+            & pl.col("label").is_in(labels)
+        )
+        .sort("label", "family", "config_name", "backtest_hash")
+    )
+    selected = []
+    for label in labels:
+        rows = baselines.filter(pl.col("label") == label)
+        if rows.is_empty():
+            raise RuntimeError(
+                f"preview execution found no complete baseline backtests for {label!r}"
+            )
+        keep = rows.select("family", "config_name").unique(maintain_order=True).head(limit)
+        selected.append(rows.join(keep, on=["family", "config_name"], how="semi"))
+    return pl.concat(selected)
+
+
+def option_decision_dates(
+    study: Study,
+    prediction_hashes: Iterable[str],
+    *,
+    prices: pl.DataFrame,
+    signal: dict[str, Any],
+) -> pl.Series:
+    """Return the weekly decision dates the engine will enter on, over these predictions.
+
+    The engine resolves its schedule from the prediction frame it is handed, not from the
+    contract artifact: ``weekly_friday`` means the last session present in each ISO week of
+    *those* timestamps. A prediction set missing a Friday therefore rebalances on that
+    week's Thursday, and a schedule read off the complete artifact would name a session the
+    engine cannot trade.
+
+    ``prices`` and ``signal`` are the ones the requests carry, because the frame the engine
+    ranks is the filtered one: ``resolve_short_straddle_decisions`` applies the declared
+    universe filter before ranking, and that filter is a semi-join against price rows, so it
+    can empty a decision date and move that week's last session earlier.
+
+    Prediction sets do not share one schedule. A sequence model needs its lookback window
+    before it scores anything, so its first weeks are absent and its schedule starts later.
+    The union is returned: every date on which some prediction set in the request enters.
+    """
+    from case_studies.utils.backtest_loaders import resolve_rebalance_timestamps
+
+    schedules: list[pl.Series] = []
+    for prediction_hash in prediction_hashes:
+        result = Result.open(study, str(prediction_hash), include_preview=True)
+        if not isinstance(result, PredictionResult):
+            raise TypeError(f"{prediction_hash} is not a prediction result")
+        predictions = apply_universe_filter(
+            normalize_prediction_columns(result.load()),
+            prices,
+            CASE_STUDY,
+            signal,
+            prediction_hash=result.hash,
+        )
+        timestamps = predictions.get_column("timestamp").cast(pl.Date).unique().sort()
+        schedules.append(resolve_rebalance_timestamps(timestamps, "weekly_friday"))
+    if not schedules:
+        raise ValueError("no prediction set was given to resolve a decision schedule from")
+    return pl.concat(schedules).unique().sort()
+
+
+def option_trade_calendar(decision_dates: pl.Series) -> pl.DataFrame:
+    """Return the decision, entry and expiration date of every candidate straddle.
+
+    One row per ``(decision date, symbol)`` in the option artifact the strategy chooses
+    from, before any ranking. The three dates are what a reader needs to check that the
+    interval traded is the interval the label measures: the decision uses information up
+    to its own session close, the position opens at the next session close, and it is held
+    until the contracts expire.
+
+    ``decision_dates`` is the schedule the engine resolved from the predictions it trades,
+    from :func:`option_decision_dates`. The artifact carries a candidate for every session,
+    and the intervals from the sessions the engine never enters on are not intervals
+    anything can hold.
+    """
+    labels_dir, _raw_options_dir = option_data_paths()
+    calendar = pl.read_parquet(labels_dir / "contract_returns.parquet").select(
+        pl.col("feature_date").alias("decision_date"),
+        "symbol",
+        "entry_date",
+        "expiration",
+    )
+    calendar = calendar.filter(
+        pl.col("decision_date").is_in(decision_dates.cast(pl.Date).implode())
+    )
+    if calendar.is_empty():
+        raise ValueError("no option candidate falls on a decision date the engine enters on")
+    if calendar.n_unique(["decision_date", "symbol"]) != calendar.height:
+        raise ValueError("option candidates are not unique by decision date and symbol")
+    if calendar.filter(pl.col("entry_date") <= pl.col("decision_date")).height:
+        raise ValueError("an option entry does not follow its own decision session")
+    if calendar.filter(pl.col("expiration") < pl.col("entry_date")).height:
+        raise ValueError("an option expires before it is entered")
+    return calendar.sort("decision_date", "symbol")
+
+
+def paired_sharpe_on_common_support(
+    study: Study,
+    pairs: pl.DataFrame,
+    *,
+    include_preview: bool = False,
+) -> pl.DataFrame:
+    """Recompute each pair's two Sharpe ratios over the dates both backtests actually traded.
+
+    ``pairs`` carries ``baseline_hash`` and ``backtest_hash``. An allocator that needs a
+    prior-only calibration window has no weight for the entry dates before its first one, so
+    its return series starts later than the baseline it is built from. The registered Sharpe
+    of each is computed over its own series, so comparing the two registered numbers mixes
+    the allocator with the period. Both sides are recomputed here over the intersection of
+    their dates, and ``n_periods`` says how much of the baseline the comparison kept.
+
+    ``include_preview`` reaches the preview namespace, where a preview run's backtests live.
+    """
+    from case_studies.utils.backtest_runner import compute_portfolio_metrics
+
+    def _returns(backtest_hash: str) -> pl.DataFrame:
+        result = Result.open(study, backtest_hash, include_preview=include_preview)
+        if not isinstance(result, BacktestResult):
+            raise TypeError(f"{backtest_hash} is not a backtest result")
+        frame = pl.read_parquet(
+            result.root / "run_log" / "backtest" / backtest_hash / "daily_returns.parquet"
+        )
+        value = next(
+            column for column in ("daily_return", "ret", "return") if column in frame.columns
+        )
+        return frame.select(
+            pl.col("timestamp").cast(pl.Date).alias("timestamp"),
+            pl.col(value).cast(pl.Float64).alias("ret"),
+        ).unique(subset="timestamp", keep="first")
+
+    cache: dict[str, pl.DataFrame] = {}
+    rows = []
+    for pair in pairs.iter_rows(named=True):
+        baseline_hash, variant_hash = str(pair["baseline_hash"]), str(pair["backtest_hash"])
+        for candidate in (baseline_hash, variant_hash):
+            if candidate not in cache:
+                cache[candidate] = _returns(candidate)
+        common = cache[baseline_hash].join(
+            cache[variant_hash], on="timestamp", how="inner", suffix="_variant"
+        )
+        if common.height < 2:
+            raise ValueError(
+                f"backtests {baseline_hash} and {variant_hash} share fewer than two dates"
+            )
+        rows.append(
+            {
+                "backtest_hash": variant_hash,
+                "baseline_hash": baseline_hash,
+                "baseline_sharpe": compute_portfolio_metrics(
+                    common.get_column("ret").to_numpy(),
+                    periods_per_year=252,
+                    uncertainty=False,
+                )["sharpe"],
+                "allocation_sharpe": compute_portfolio_metrics(
+                    common.get_column("ret_variant").to_numpy(),
+                    periods_per_year=252,
+                    uncertainty=False,
+                )["sharpe"],
+                "n_periods": common.height,
+                "baseline_periods": cache[baseline_hash].height,
+            }
+        )
+    return pl.DataFrame(rows)
+
+
 def selected_prediction(study: Study, catalog_row: dict[str, Any]) -> PredictionResult:
     """Resolve one complete selected prediction row."""
     result = Result.open(
@@ -334,8 +654,24 @@ def resolve_short_straddle_decisions(
     prices: pl.DataFrame,
     signal: dict[str, Any],
     allocation: dict[str, Any] | None = None,
+    label: str | None = None,
+    data_paths: tuple[Path, Path] | None = None,
+    option_contract_returns: dict[str, Any] | None = None,
+    option_sources: dict[str, Any] | None = None,
 ) -> pl.DataFrame:
-    """Resolve ranked predictions to exact option contracts and cohort weights."""
+    """Resolve ranked predictions to exact option contracts and cohort weights.
+
+    ``data_paths`` binds the resolved ``(labels_dir, raw_options_dir)`` explicitly so a clean
+    replay reproduces the parent's decisions from the parent's inputs rather than whatever the
+    child process would resolve on its own.
+
+    ``option_contract_returns`` and ``option_sources`` are the option-artifact identities recorded
+    in the decision artifact's ``declared_inputs``. ``research.holdout`` injects every declared
+    input back into this function when it replays a locked decision on the holdout prediction, so
+    they must be accepted here. They are checked rather than consumed: the option artifacts are
+    immutable, so a holdout replay that resolves a different digest than the lock recorded is
+    reading different data and must fail instead of silently producing a second population.
+    """
     if prediction.lineage()["training_spec"]["label"] != PRIMARY_LABEL:
         raise ValueError("short-straddle decisions require ret_to_expiry predictions")
     predictions = normalize_prediction_columns(prediction.load())
@@ -346,7 +682,19 @@ def resolve_short_straddle_decisions(
         signal,
         prediction_hash=prediction.hash,
     )
-    labels_dir, raw_options_dir = option_data_paths()
+    labels_dir, raw_options_dir = option_data_paths() if data_paths is None else data_paths
+    if (
+        option_contract_returns is not None
+        and option_contract_source_identity(labels_dir) != option_contract_returns
+    ):
+        raise ValueError(
+            "locked option contract-return identity does not match the resolved artifact"
+        )
+    if (
+        option_sources is not None
+        and option_source_identity(labels_dir, raw_options_dir) != option_sources
+    ):
+        raise ValueError("locked option source identity does not match the resolved artifacts")
     contract_returns = pl.read_parquet(labels_dir / "contract_returns.parquet")
     decisions = _select_cohorts(
         predictions,
@@ -354,9 +702,19 @@ def resolve_short_straddle_decisions(
         method=str(signal.get("method", "equal_weight_top_k")),
         top_k=int(signal.get("top_k", 20)),
         percentile=float(signal.get("percentile", 90.0)),
+        raw_options_dir=raw_options_dir,
     )
     if allocation:
-        decisions = _apply_cohort_allocator(decisions, raw_options_dir, allocation)
+        # The label goes with the allocation. A conformal allocator needs widths, and
+        # generating them where none exist needs an embargo the label supplies. Without it the
+        # first conformal request on a prediction set refuses instead of calibrating.
+        decisions = _apply_cohort_allocator(
+            decisions,
+            raw_options_dir,
+            allocation,
+            prediction_hash=prediction.hash,
+            label=label,
+        )
     fold_columns = [column for column in ("fold", "fold_id") if column in predictions.columns]
     if len(fold_columns) != 1:
         raise ValueError("option predictions require exactly one fold column")
@@ -383,6 +741,7 @@ def publish_short_straddle_decisions(
     prices: pl.DataFrame,
     signal: dict[str, Any],
     allocation: dict[str, Any] | None = None,
+    label: str | None = None,
     canonical: bool = False,
     clean_replay_digest: str | None = None,
 ) -> DecisionArtifact:
@@ -394,6 +753,7 @@ def publish_short_straddle_decisions(
         prices=prices,
         signal=signal,
         allocation=allocation,
+        label=label,
     )
     return _publish_resolved_short_straddle_decisions(
         prediction,
@@ -418,7 +778,7 @@ def _publish_resolved_short_straddle_decisions(
 ) -> DecisionArtifact:
     if canonical and clean_replay_digest is None:
         raise ValueError("canonical option decisions require a clean-process replay digest")
-    labels_dir, _ = option_data_paths()
+    labels_dir, raw_options_dir = option_data_paths()
     contract_identity = option_contract_source_identity(labels_dir)
     source_identity: dict[str, Any] | None = None
     if canonical:
@@ -435,6 +795,7 @@ def _publish_resolved_short_straddle_decisions(
                 "prediction_hashes": [prediction.hash],
                 "prices": value_digest(prices),
                 "option_contract_returns": contract_identity,
+                "option_sources": option_source_identity(labels_dir, raw_options_dir),
                 "signal": signal,
                 "allocation": allocation,
             },
@@ -463,12 +824,22 @@ def _publish_resolved_short_straddle_decisions(
 def _clean_replay_digests(
     study: Study,
     requests: list[dict[str, Any]],
+    *,
+    split: str,
 ) -> dict[str, str]:
-    """Replay a complete decision request set in a fresh interpreter."""
+    """Replay a complete decision request set in a fresh interpreter.
+
+    ``split`` names the price window the decisions are resolved over and has to reach the
+    replay, because the digest it returns is compared against the one this process computed.
+    A replay that always loaded the validation window would disagree with every holdout run
+    and report it as a dirty replay.
+    """
     tiers = {str(request["execution_tier"]) for request in requests}
     if len(tiers) != 1:
         raise ValueError("clean option decision replay cannot mix execution tiers")
+    labels_dir, raw_options_dir = option_data_paths()
     payload = {
+        "data_paths": {"labels": str(labels_dir), "raw_options": str(raw_options_dir)},
         "study": {
             "case_study": study.case_study,
             "root": str(study.root),
@@ -477,6 +848,7 @@ def _clean_replay_digests(
             "manifest": study.manifest,
         },
         "execution_tier": tiers.pop(),
+        "split": split,
         "requests": requests,
     }
     completed = subprocess.run(
@@ -517,8 +889,26 @@ def run_official_backtest_requests(
     requests: pl.DataFrame,
     *,
     population_name: str | None,
+    supersedes: str | None = None,
+    split: str = "validation",
 ) -> OptionBacktestExecution:
-    """Resolve and execute typed option requests, snapshotting canonical populations."""
+    """Resolve and execute typed option requests, snapshotting canonical populations.
+
+    ``split`` is the price window the decisions and the backtest run over. Every sweep in
+    this case study runs on the validation window, so that is the default; the holdout
+    notebook passes ``"holdout"`` and is the only caller that does. It is a parameter rather
+    than a second code path because the entry schedule, the hedge rule and the settlement are
+    the same in both windows - only the prices differ - and a copy of this function for the
+    holdout would be a copy that can drift from the one every validation number came from.
+
+    ``supersedes`` names the generation of ``population_name`` this run replaces, and is
+    threaded here for the same reason ``run_backtests`` takes it: a name that already exists
+    with a different member list is refused unless the caller says which generation it is
+    replacing. This path did not take it, so anything that moved a backtest identity - a
+    corrected label, a changed accounting field - raised a refusal the notebook had no way to
+    answer, and re-running the baseline sweep was impossible. Passing it for an unchanged
+    member list is a no-op; passing it for a name that does not exist yet is refused.
+    """
     required = {"request_name", "prediction_hash", "label", "signal"}
     missing = required - set(requests.columns)
     if missing:
@@ -562,7 +952,7 @@ def run_official_backtest_requests(
             price_cache[cache_key] = load_backtest_prices_for(
                 CASE_STUDY,
                 str(row["label"]),
-                split="validation",
+                split=split,
                 warmup_periods=warmup,
             )
         prices = price_cache[cache_key]
@@ -571,6 +961,7 @@ def run_official_backtest_requests(
             prices=prices,
             signal=row["signal"],
             allocation=allocation,
+            label=row["label"],
         )
         resolved.append((row, prediction, prices, decisions))
         replay_requests.append(
@@ -590,7 +981,7 @@ def run_official_backtest_requests(
         raise ValueError("canonical option execution requires an official population name")
     if execution_tier == "preview" and population_name is not None:
         raise ValueError("preview option execution cannot create an official population")
-    replay_digests = _clean_replay_digests(study, replay_requests)
+    replay_digests = _clean_replay_digests(study, replay_requests, split=split)
     local_digests = {
         row["request_name"]: value_digest(decisions)
         for row, _prediction, _prices, decisions in resolved
@@ -619,7 +1010,12 @@ def run_official_backtest_requests(
             study,
             predictions=prediction_row,
             signal=row["signal"],
-            prices=prices,
+            # `Strategy` refuses reader-supplied prices on the holdout split and loads the
+            # canonical window itself, which is the guard that stops a holdout result being
+            # produced from a frame the notebook assembled. The decisions above are resolved
+            # against the same window - same split, same warmup - so what is withheld here is
+            # the frame, not the window.
+            prices=None if split == "holdout" else prices,
             allocation=allocation,
             risk=row.get("risk"),
             costs=row.get("costs"),
@@ -640,13 +1036,36 @@ def run_official_backtest_requests(
             name=population_name,
             member_kind="backtest",
             members=expected,
+            supersedes=supersedes,
         )
         if population_name is not None
         else None
     )
-    labels_dir, raw_options_dir = option_data_paths()
-    del labels_dir
-    lifecycle = _load_option_lifecycle(pl.concat(all_decisions), raw_options_dir)
+    _, raw_options_dir = option_data_paths()
+    # Read the option chain once for the whole run. `prime_option_lifecycle` stores what it
+    # built under the digest of the files it read, and each request below looks up its own
+    # declared digest, so the sharing costs nothing in trust: no frame crosses the boundary.
+    #
+    # Only the columns the loader reads are carried over, and the concat is relaxed. Decisions
+    # published by different model families do not agree on the width of their `fold` column -
+    # Int32 from one producer, Int64 from another - and a strict concat over the full frames
+    # fails on that, having nothing to do with the contracts being unioned here.
+    lifecycle_columns = [
+        "timestamp",
+        "symbol",
+        "strike",
+        "expiration",
+        "entry_date",
+        "entry_call_mid",
+        "entry_put_mid",
+    ]
+    prime_option_lifecycle(
+        pl.concat(
+            [decisions.select(lifecycle_columns) for decisions in all_decisions],
+            how="vertical_relaxed",
+        ),
+        raw_options_dir,
+    )
     results = []
     rows = []
     for row, prediction, prices, decision, expected_hash in prepared:
@@ -659,7 +1078,7 @@ def run_official_backtest_requests(
             chapter=row.get("chapter"),
             decision=decision,
         )
-        result = strategy.run(prices=prices, option_lifecycle=lifecycle)
+        result = strategy.run(prices=None if split == "holdout" else prices)
         if result.hash != expected_hash:
             raise RuntimeError(f"backtest identity changed: {expected_hash} -> {result.hash}")
         results.append(result)
@@ -694,7 +1113,12 @@ def _replay_from_stdin() -> None:
         manifest=descriptor["manifest"],
     )
     study.activate(payload["execution_tier"])
+    data_paths = (
+        Path(payload["data_paths"]["labels"]),
+        Path(payload["data_paths"]["raw_options"]),
+    )
     catalog = study.predictions.table(include_preview=True)
+    split = str(payload["split"])
     price_cache: dict[tuple[str, int], pl.DataFrame] = {}
     replayed = []
     for row in payload["requests"]:
@@ -709,7 +1133,7 @@ def _replay_from_stdin() -> None:
             price_cache[cache_key] = load_backtest_prices_for(
                 CASE_STUDY,
                 str(row["label"]),
-                split="validation",
+                split=split,
                 warmup_periods=warmup,
             )
         decisions = resolve_short_straddle_decisions(
@@ -717,6 +1141,8 @@ def _replay_from_stdin() -> None:
             prices=price_cache[cache_key],
             signal=row["signal"],
             allocation=allocation,
+            label=row["label"],
+            data_paths=data_paths,
         )
         replayed.append(
             {"request_name": row["request_name"], "decision_digest": value_digest(decisions)}

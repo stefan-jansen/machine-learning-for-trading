@@ -24,6 +24,15 @@ from tests.pm_helpers import get_overrides
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 NASDAQ_DL_NOTEBOOKS = ("08_dl_nlinear", "09_dl_lstm", "10_dl_tcn", "11_dl_patchtst")
+SP500_OPTIONS_DL_NOTEBOOKS = ("08_tabular_dl", "09_deep_learning", "09a_lstm", "09b_patchtst")
+DL_NOTEBOOKS = tuple(
+    (case_study, notebook)
+    for case_study, notebooks in (
+        ("nasdaq100_microstructure", NASDAQ_DL_NOTEBOOKS),
+        ("sp500_options", SP500_OPTIONS_DL_NOTEBOOKS),
+    )
+    for notebook in notebooks
+)
 
 
 @pytest.fixture
@@ -78,9 +87,23 @@ def test_nasdaq_declares_the_gpu_its_production_runs_use(
     assert resolve_dl_device(_declared_dl_config("nasdaq100_microstructure")) == "cuda"
 
 
-@pytest.mark.parametrize("notebook", NASDAQ_DL_NOTEBOOKS)
-def test_every_nasdaq_dl_notebook_runs_as_the_ci_harness_configures_it(
-    notebook: str, no_cuda: None
+def test_sp500_options_declares_the_gpu_its_production_runs_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The four sp500_options DL notebooks read one declaration instead of four constants.
+
+    Each of them carried its own ``PUBLISHED_DEVICE = "cuda"``. Four transcriptions of one
+    device agree until one of them moves, and the disagreement would not show up as an
+    error: it would show up as `09a_lstm` fitting into a population `09_deep_learning`
+    opened on another device, under identities the population does not hold.
+    """
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert resolve_dl_device(_declared_dl_config("sp500_options")) == "cuda"
+
+
+@pytest.mark.parametrize(("case_study", "notebook"), DL_NOTEBOOKS, ids=lambda value: str(value))
+def test_every_dl_notebook_runs_as_the_ci_harness_configures_it(
+    case_study: str, notebook: str, no_cuda: None
 ) -> None:
     """On a CPU runner each notebook either resolves to CPU or declares it needs a GPU.
 
@@ -88,8 +111,8 @@ def test_every_nasdaq_dl_notebook_runs_as_the_ci_harness_configures_it(
     that is the other admissible answer. What is not admissible is a notebook the harness
     runs on a CPU runner that then refuses the device it was never told to want.
     """
-    overrides = get_overrides(f"case_studies/nasdaq100_microstructure/{notebook}")
-    declared = _declared_dl_config("nasdaq100_microstructure")
+    overrides = get_overrides(f"case_studies/{case_study}/{notebook}")
+    declared = _declared_dl_config(case_study)
     requested = (overrides.get("parameters") or {}).get("DEVICE", "")
 
     if overrides.get("gpu"):

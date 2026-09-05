@@ -18,7 +18,12 @@ from utils.paths import REPO_ROOT
 CASE_STUDY = "us_firm_characteristics"
 PREVIEW_DIR_NAME = ".preview"
 PREDICTIVE_FAMILIES = ("linear", "gbm", "tabular_dl", "latent_factors")
-_MODEL_OVERRIDES = {
+# Runtime a model needs and its family's declaration does not give it. `setup.yaml` puts the
+# latent-factor family on CUDA, which is right for the three neural members; IPCA is alternating
+# least squares over the panel and has no GPU implementation, so it runs on bounded CPU workers.
+# Both keys are inside the hashed computation rather than provenance beside it, so this decides
+# what the result is. `08a_ipca` reads the same mapping - one home for the declaration.
+MODEL_RUNTIME_OVERRIDES = {
     ("latent_factors", "ipca"): {"device": "cpu", "fold_workers": 4},
 }
 
@@ -42,7 +47,7 @@ def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> S
     # in the same kernel would otherwise nest one preview root inside another.
     if resolved_root.name == PREVIEW_DIR_NAME:
         resolved_root = resolved_root.parent
-    study = Study.open(CASE_STUDY, workspace=resolved_root, release_root=REPO_ROOT)
+    study = Study.open(CASE_STUDY, workspace=resolved_root)
     study.activate(execution_tier)
     return study
 
@@ -157,7 +162,7 @@ def model_requests(
             **row,
             execution_tier=execution_tier,
             overrides={
-                **_MODEL_OVERRIDES.get((row["family"], row["config_name"]), {}),
+                **MODEL_RUNTIME_OVERRIDES.get((row["family"], row["config_name"]), {}),
                 **dict(overrides or {}),
             },
             preview_reductions=dict(preview_reductions or {}),
@@ -212,8 +217,16 @@ def expected_prediction_hashes(requests: Iterable[Any]) -> tuple[str, ...]:
     return tuple(hashes)
 
 
-def snapshot_model_population(study: Study, *, name: str) -> OfficialPopulation:
-    """Freeze the complete canonical prediction population before model execution."""
+def snapshot_model_population(
+    study: Study, *, name: str, supersedes: str | None = None
+) -> OfficialPopulation:
+    """Freeze the complete canonical prediction population before model execution.
+
+    ``supersedes`` names the generation of ``name`` this run retires. A population is the set of
+    prediction identities, so anything that moves a training identity produces a different member
+    list under the same name, and ``OfficialPopulation.create`` refuses to write it without being
+    told which snapshot it replaces.
+    """
     requests = tuple(
         request
         for family in PREDICTIVE_FAMILIES
@@ -228,6 +241,7 @@ def snapshot_model_population(study: Study, *, name: str) -> OfficialPopulation:
         name=name,
         member_kind="prediction",
         members=expected_prediction_hashes(requests),
+        supersedes=supersedes,
     )
 
 

@@ -91,7 +91,8 @@ from utils.style import COLORS, add_message_title, format_pct_axis
 RUN_LIVE = False
 PINNED_TRACE = "04_research_agent_20260609T141730Z_b694ab4d0453.json"
 
-LLM_PROVIDER = ""  # empty = auto-detect; "mock" for CI (live path only)
+# empty = auto-detect; "mock" for CI (live path only)
+LLM_PROVIDER = ""
 MAX_STEPS = 5
 MAX_SEARCH_RESULTS = 5
 

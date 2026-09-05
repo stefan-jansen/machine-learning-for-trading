@@ -19,7 +19,15 @@ CATALOG_VERSION = 1
 _METRIC_COLUMNS = (
     "ic_mean",
     "ic_std",
+    # Two different statistics, and the difference is the difference between ten numbers and a
+    # hundred. `ic_t` is computed over the fold-level mean ICs - ten of them for a ten-fold run -
+    # and `registry/metrics.py` calls it a diagnostic in terms. `ic_t_hac` is the inferential one:
+    # Newey-West on the per-date IC series, which is what a reader means by a t-statistic on an IC.
+    # `auc_t_hac` was already carried and its IC counterpart was not, so a notebook wanting the
+    # inferential statistic had only the diagnostic to reach for, and reaching for it while calling
+    # it Newey-West is a mistake this column exists to stop.
     "ic_t",
+    "ic_t_hac",
     # Validation dates that produced a defined cross-sectional IC. A configuration whose
     # predictions collapse to near-constant on some folds yields no IC on those dates, so its
     # ic_mean is measured over fewer of them and is not comparable to a full-coverage one.
@@ -59,6 +67,7 @@ RESERVED_COLUMNS: dict[str, Any] = {
     "execution_tier": pl.String,
     "approval": pl.String,
     "complete": pl.Boolean,
+    "decision_key_digest": pl.String,
     "created_at": pl.String,
     "metrics_computed_at": pl.String,
     "artifact_available": pl.Boolean,
@@ -91,6 +100,12 @@ _BACKTEST_METRIC_COLUMNS = (
     "total_commission",
     "total_slippage",
     "avg_turnover",
+    # The block-bootstrap Sharpe interval is registered on every backtest by
+    # ``compute_backtest_uncertainty``. Without it here, a catalog reader can
+    # only report point estimates and has to drop to raw SQL to say whether a
+    # Sharpe clears zero.
+    "sharpe_ci95_lo",
+    "sharpe_ci95_hi",
 )
 BACKTEST_RESERVED_COLUMNS: dict[str, Any] = {
     "catalog_version": pl.Int64,
@@ -215,6 +230,7 @@ def _registry_rows(root: Path, origin: str, *, immutable: bool = False) -> list[
             _select("created_at", prediction_columns, "p"),
             _select("status", coverage_columns, "c"),
             _select("n_folds_expected", coverage_columns, "c"),
+            _select("actual_key_digest", coverage_columns, "c"),
             _select("prediction_hash", metric_columns, "m"),
             _select("computed_at", metric_columns, "m"),
             _select("task_type", metric_columns, "m"),
@@ -340,6 +356,7 @@ def _registry_rows(root: Path, origin: str, *, immutable: bool = False) -> list[
             "execution_tier": record["t_execution_tier"] or "canonical",
             "approval": "unapproved",
             "complete": complete,
+            "decision_key_digest": record["c_actual_key_digest"],
             "created_at": record["p_created_at"],
             "metrics_computed_at": record["m_computed_at"],
             "artifact_available": artifact.is_file(),
@@ -581,7 +598,11 @@ def _backtest_registry_rows(
             "artifact_available": returns_artifact.is_file(),
             "signal_method": signal.get("method"),
             "allocation_method": allocation.get("method"),
-            "risk_method": risk.get("method"),
+            # `name`, not `method`: a risk control is declared under `strategy.risk.name`,
+            # unlike signal and allocation which spell theirs `method`. Reading `method`
+            # here left the column NULL for every backtest ever registered, so a risk
+            # overlay was indistinguishable from an unprotected book in any catalog read.
+            "risk_method": risk.get("name"),
             "decision_artifact_hash": decision.get("hash"),
             **{metric: record[f"bm_{metric}"] for metric in _BACKTEST_METRIC_COLUMNS},
             "metrics_json": canonical_json(metrics),
@@ -739,6 +760,7 @@ class PredictionCatalog:
         *,
         name: str,
         comparison_contract: dict[str, Any] | None = None,
+        supersedes: str | None = None,
     ) -> CandidateSet:
         """Freeze exact authoritative prediction members selected with Polars."""
         from .comparison import CandidateSet
@@ -753,6 +775,7 @@ class PredictionCatalog:
             name,
             members,
             comparison_contract=comparison_contract,
+            supersedes=supersedes,
         )
 
 
@@ -819,6 +842,7 @@ class BacktestCatalog:
         *,
         name: str,
         comparison_contract: dict[str, Any] | None = None,
+        supersedes: str | None = None,
     ) -> CandidateSet:
         """Freeze exact authoritative backtest members selected with Polars."""
         from .comparison import CandidateSet
@@ -833,4 +857,5 @@ class BacktestCatalog:
             name,
             members,
             comparison_contract=comparison_contract,
+            supersedes=supersedes,
         )

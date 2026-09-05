@@ -21,11 +21,10 @@
 # to a model: taken on its own, does a column say anything about where the pair's price
 # goes next?
 #
-# Each column is tested alone, against the next session's return, on the same
-# walk-forward folds the feature stages fitted their models on - a walk-forward fold is
-# a training window followed by the stretch of later sessions that window did not see.
-# Only those later stretches are read here, so no column is judged on data its own
-# estimator was fitted on. The last two years of the sample, from 2024 on, are the
+# Each column is tested alone, against the next session's return, over the walk-forward
+# validation windows - a walk-forward fold is a training window followed by the stretch of
+# later sessions that window did not see. Only those later stretches are read here, so no
+# column is judged on sessions the estimates behind it were fitted on. The last two years of the sample, from 2024 on, are the
 # holdout. The files loaded below run through it, and the panel every statistic here is
 # computed on stops before it, with a further gap so that no label settling inside the
 # holdout is read either. Nothing in this notebook measures anything on those sessions,
@@ -184,33 +183,45 @@ print(
 # Three files are joined on pair and session: the price-derived columns, the
 # model-derived columns, and the label the columns are tested against.
 #
-# The model-derived file needs care. Its estimators are refitted once per fold, so it
-# carries a row for the same pair and session under every fold whose training window
-# reaches that session - the same date appears several times with different numbers
-# behind it. Keeping any one of those rows at random would attach a parameter fitted on
-# later data to an earlier date. What is kept instead is, for each fold, only the
-# sessions in that fold's own validation stretch: the window its estimator was not
-# fitted on. The `fold` column is carried through the rest of the notebook so every
-# statistic can still be traced back to the fit that produced its inputs.
+# The model-derived file carries one row per pair and session and no fold column. Its
+# estimators are refitted on the schedule `setup.yaml` declares - `04_model_based_features`
+# section 2 sets out why a cross-validation fold does not bound a fitted feature - so a
+# session takes one value whichever window later selects it, and there is no vintage to
+# choose between.
+#
+# What still has to happen is the restriction. This notebook screens columns against an
+# outcome, and a screen run over the sessions the estimates behind a column read would
+# report how well it fits history rather than whether it predicts. So the panel is cut to
+# the union of the walk-forward validation windows.
+#
+# A `fold` column is then **stamped on** rather than read off, because the sections below
+# ask how steady a column is from one window to the next and need to know which window each
+# row fell in. It records that and nothing more: under the old artifact the same column
+# also named the fit that produced the row, and it no longer does.
 
 # %%
 financial = pl.read_parquet(CASE_DIR / "features" / "financial.parquet")
 model_based = pl.read_parquet(CASE_DIR / "features" / "model_based.parquet")
 labels = pl.read_parquet(CASE_DIR / "labels" / f"{LABEL_COL}.parquet")
 
-required_temporal = {*JOIN_COLS, "fold"}
-missing_temporal = required_temporal.difference(model_based.columns)
+missing_temporal = set(JOIN_COLS).difference(model_based.columns)
 if missing_temporal:
-    raise ValueError(f"Model-based artifact lacks fold provenance: {sorted(missing_temporal)}")
+    raise ValueError(f"Model-based artifact lacks its key columns: {sorted(missing_temporal)}")
+if "fold" in model_based.columns:
+    raise ValueError(
+        "model_based.parquet carries a fold column; this notebook reads the fold-free "
+        "artifact 04_model_based_features writes and would double-count every session"
+    )
+if model_based.select(pl.struct(JOIN_COLS).is_duplicated().sum()).item():
+    raise ValueError("model_based.parquet is not one row per (timestamp, symbol)")
 
 # %% [markdown]
 # ### Derive the Fold Boundaries, and Close the Gap in Front of the Holdout
 #
 # `generate_cv_splits` reads the label calendar and the walk-forward window declared in
-# `setup.yaml`. That is the same call `04_model_based_features` made when it stamped the
-# `fold` column this notebook joins on, so deriving the boundaries again here - rather
-# than replaying a stored array of splits - is what keeps a fold id naming the same
-# window on both sides of the join.
+# `setup.yaml`. That is the same call `04_model_based_features` makes to resolve the
+# windows it screens over, so the two notebooks cut the same eight windows out of the same
+# calendar.
 #
 # The `outcome_horizon` argument closes the gap in front of the holdout. A one-session
 # label taken on the last development session settles on the first holdout session, so
@@ -236,35 +247,30 @@ def fold_windows(outcome_horizon: str) -> list[dict]:
 
 
 def validation_rows(splits: list[dict]) -> pl.DataFrame:
-    """Each fold's own validation sessions, taken from the fold it was fitted out of.
+    """The sessions inside each walk-forward validation window, stamped with its id.
 
-    A fold id that names one window in the artifact and another here would silently
-    pair a fit with the wrong sessions, so an id whose stamped rows fall outside the
-    window this configuration validates it over raises rather than returning nothing.
+    The windows do not overlap, so a session belongs to at most one of them and the stamp
+    is unambiguous. A window that selects no row raises rather than being dropped: the
+    artifact is supposed to cover every validation session, and a silent gap here would
+    thin a statistic without changing its shape.
     """
-    stamped = set(model_based["fold"].unique().to_list())
     frames = []
     for split in splits:
         fold = int(split["fold"])
-        if fold not in stamped:
-            continue
         val_start = pd.Timestamp(split["val_start"]).date()
         val_end = pd.Timestamp(split["val_end"]).date()
         rows = model_based.filter(
-            (pl.col("fold") == fold)
-            & pl.col(DATE_COL).is_between(val_start, val_end, closed="both")
-        )
+            pl.col(DATE_COL).is_between(val_start, val_end, closed="both")
+        ).with_columns(pl.lit(fold, dtype=pl.Int64).alias("fold"))
         if not len(rows):
-            span = model_based.filter(pl.col("fold") == fold)
             raise ValueError(
-                f"Fold {fold} is stamped on rows spanning {span[DATE_COL].min()}.."
-                f"{span[DATE_COL].max()} but this configuration validates it over "
-                f"{val_start}..{val_end}, so the fold id names a different window on "
-                f"each side of the join"
+                f"Window {fold} validates over {val_start}..{val_end} and the model-based "
+                f"artifact, which spans {model_based[DATE_COL].min()}.."
+                f"{model_based[DATE_COL].max()}, carries no row in it"
             )
         frames.append(rows)
     if not frames:
-        raise ValueError(f"No fold in {sorted(stamped)} appears in the configured splits")
+        raise ValueError("No walk-forward window was configured")
     return pl.concat(frames).sort([DATE_COL, "symbol"])
 
 
@@ -273,11 +279,11 @@ splits = fold_windows(LABEL_BUFFER)
 validation_temporal = validation_rows(splits)
 duplicate_keys = validation_temporal.group_by(JOIN_COLS).len().filter(pl.col("len") > 1)
 if len(duplicate_keys):
-    raise ValueError("The folds' validation windows overlap on timestamp and symbol")
+    raise ValueError("The validation windows overlap on timestamp and symbol")
 
 for fold in sorted(validation_temporal["fold"].unique().to_list()):
     window = validation_temporal.filter(pl.col("fold") == fold)
-    print(f"  Fold {fold}: validation {window[DATE_COL].min()}..{window[DATE_COL].max()}")
+    print(f"  Window {fold}: validation {window[DATE_COL].min()}..{window[DATE_COL].max()}")
 
 # %%
 eval_panel = (
@@ -298,7 +304,7 @@ if MAX_SYMBOLS > 0:
     eval_panel = eval_panel.filter(pl.col("symbol").is_in(selected_symbols))
 
 financial_cols = [column for column in financial.columns if column not in JOIN_COLS]
-temporal_cols = [column for column in model_based.columns if column not in {*JOIN_COLS, "fold"}]
+temporal_cols = [column for column in model_based.columns if column not in JOIN_COLS]
 all_feature_cols = financial_cols + temporal_cols
 
 # %% [markdown]
@@ -326,7 +332,7 @@ n_dates = eval_panel[DATE_COL].n_unique()
 MIN_PERIODS = max(3, n_symbols // 4)
 print(
     f"Panel: {n_rows:,} rows over {n_dates:,} sessions and {n_symbols} pairs, "
-    f"drawn from the validation stretches of {eval_panel['fold'].n_unique()} folds"
+    f"drawn from the validation stretches of {eval_panel['fold'].n_unique()} windows"
 )
 print(f"Sessions run {eval_panel[DATE_COL].min()} to {eval_panel[DATE_COL].max()}")
 print(

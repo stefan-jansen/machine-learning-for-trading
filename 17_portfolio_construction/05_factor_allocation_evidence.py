@@ -617,7 +617,7 @@ def calculate_sharpe_stats(returns, periods_per_year=12):
 
     ci_lower = sharpe - 1.96 * se_sharpe
     ci_upper = sharpe + 1.96 * se_sharpe
-    p_value = 2 * (1 - stats.norm.cdf(abs(sharpe_tstat)))
+    p_value = 2 * stats.norm.sf(abs(sharpe_tstat))
     mean_stats = calculate_mean_return_tstat(returns, periods_per_year)
     rho1 = autocorrs[0] if autocorrs else 0.0
 
@@ -736,13 +736,11 @@ fig.add_hline(y=0, line_color=COLORS["neutral"], line_width=1)
 
 fig.update_layout(
     title=(
-        f"Raising the bar from {CONVENTIONAL_T_THRESHOLD:.0f} to "
-        f"{DISCOVERY_T_THRESHOLD:.0f} disqualifies "
-        f"{int(stats_df['significant_conventional'].sum() - stats_df['significant_harvey'].sum())}"
-        " of these factors"
-        "<br><sup>Newey-West t-statistics on mean monthly returns; the dotted line is the "
-        "conventional threshold and the dashed line the multiple-testing one; the factors between "
-        "them are what raising the bar disqualifies; histories differ by factor</sup>"
+        "Two thresholds, and the factors that fall between them"
+        f"<br><sup>Newey-West t-statistics on mean monthly returns. Dotted line: the conventional "
+        f"threshold of {CONVENTIONAL_T_THRESHOLD:.0f}. Dashed line: Harvey's discovery threshold "
+        f"of {DISCOVERY_T_THRESHOLD:.0f}. Bars between them clear the first and not the second. "
+        "Histories differ by factor.</sup>"
     ),
     xaxis_title="Published factor portfolio",
     yaxis_title="Mean-return t-statistic (Newey-West)",
@@ -1343,6 +1341,19 @@ print(
 )
 print(f"Crisis windows in which trend following was positive: {tsmom_positive} of {tsmom_observed}")
 
+# %% [markdown] tags=["results"]
+# ### What this run produced
+#
+# Three counts, all printed above the chart that produced them. The first is how many of the
+# measured factors clear the conventional t-statistic of 2 on their autocorrelation-adjusted mean
+# monthly return; the second is how many clear Harvey's discovery threshold of 3; the difference
+# between them is what raising the bar for multiple testing costs on this set. The third is the
+# number of hand-picked crisis windows in which trend following returned a positive number.
+#
+# None of the three is a test of anything prospective. Every series is a published research
+# portfolio selected into the literature for having cleared a bar, and the crisis windows were
+# chosen because they were crises.
+
 # %% [markdown]
 # ---
 #
@@ -1355,11 +1366,10 @@ print(f"Crisis windows in which trend following was positive: {tsmom_positive} o
 #    hold outside the sample it was measured on.
 # 2. **The bar for believing a published factor is higher than the bar for publishing one.**
 #    Hundreds of candidates have been tested and the surviving ones were selected for clearing a
-#    threshold, so judging them against the threshold they were selected on is circular. Of the
-#    eight measured here, seven clear the conventional bar of 2.0 and five clear Harvey's 3.0, so
-#    raising it disqualifies two - a smaller effect than the literature-wide claim, and expected,
-#    because these eight are the most-replicated factors in the field rather than a random draw
-#    from what has been published. The counts are printed above the chart.
+#    threshold, so judging them against the threshold they were selected on is circular. Raising
+#    the bar to Harvey's discovery threshold is what tests that, and it disqualifies fewer of
+#    these than of the literature at large - which is expected, because this set is the
+#    most-replicated factors in the field rather than a random draw from what has been published.
 # 3. **A long history is not the same as strong evidence.** Every series here is current-vintage
 #    published research, revisable and backfillable by its provider, and none of it is net of
 #    financing, turnover or the capacity limits a real allocation would meet.

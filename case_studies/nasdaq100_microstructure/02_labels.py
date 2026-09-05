@@ -214,7 +214,7 @@ padded = (
         symbols=UNIVERSE,
         lazy=True,
     )
-    .select(["timestamp", "symbol", "close_bid_price", "close_ask_price"])
+    .select(["timestamp", "symbol", "close_bid_price", "close_ask_price", "vwap"])
     .filter((_clock >= _widest[0]) & (_clock < _widest[1]))
     .with_columns(
         ((_bid + _ask) / 2).alias("mid_close"),
@@ -256,6 +256,11 @@ spacing = quoted.select(_gap.drop_nulls().unique().alias("gap"))["gap"].to_list(
 assert len(spacing) == 1, f"the intraday grid is not uniform: spacings {sorted(spacing)}"
 BAR = spacing[0]
 HORIZON_BARS = {name: horizon // BAR for name, horizon in HORIZONS.items()}
+# The bar the exit leg is read from: the horizon, plus the one bar the entry already spent.
+# Named rather than written as `+ 1` wherever an endpoint is needed, because the `+ 1` is
+# exactly what a later reader who trusts the label's name would drop - and because a purge
+# taken from the horizon alone leaves the last training bar inside the first held-out label.
+LABEL_HORIZON_END_BARS = {name: bars + 1 for name, bars in HORIZON_BARS.items()}
 for name, horizon in HORIZONS.items():
     assert horizon % BAR == timedelta(0), f"{name}: {horizon} is not a whole number of {BAR} bars"
     assert HORIZON_BARS[name] >= 2, (
@@ -270,27 +275,55 @@ print(f"Bar spacing {BAR}, uniform within every session; horizons in bars {HORIZ
 #
 # One execution convention, written once and applied at all three horizons:
 #
-# $$r^{(H)}_{s,t} = \frac{M_{s,t+H}}{M_{s,t+B}} - 1$$
+# $$r^{(H)}_{s,t} = \frac{V_{s,t+B+H}}{V_{s,t+B}} - 1$$
 #
-# where $M$ is symbol $s$'s quote midpoint, $B$ is one bar and $H$ is the declared horizon.
-# The decision is taken on the bar closing at $t$, so the earliest bar that can be acted on
-# is the one after it, and the position is held until $H$ after the decision. Both ends are
-# quote midpoints observed inside the session, so what the formula measures is how far the
-# market moved over the holding period; a trade capturing that move pays half the spread at
-# each end, one full spread over the round trip, which Section E prices separately.
+# where $V$ is symbol $s$'s volume-weighted traded price over a bar, $B$ is one bar and $H$ is
+# the declared horizon. The decision is taken on the bar closing at $t$, the earliest bar that
+# can be acted on is the one after it, and the position is held for $H$ from that fill to the
+# next one - so the span from entry to exit is exactly $H$, and the exit of one decision is
+# the entry of the next.
+#
+# **Both ends are prices something actually traded at, and that is the change.** An earlier
+# version of this notebook used the quote midpoint at each end, which measures how far the
+# market moved rather than what a trade would have realised, and paired it with a backtest
+# filling on a fifteen-minute clock - so the interval the label predicted and the interval the
+# strategy held did not overlap at all. That is ml4t/agent-workspace#187, and the reason it
+# survived review is that both intervals were fifteen minutes long and nothing printed
+# distinguished them.
+#
+# A VWAP is not a price any single order is guaranteed, and it is not free of the spread: it
+# is where the minute's volume actually transacted, which sits inside the quoted spread on
+# average and reflects which side was pressing. What it is not is a midpoint, so the spread is
+# no longer an unpriced extra sitting outside the label - part of it is already inside these
+# two prices. The cost stage charges execution explicitly under two regimes, a flat basis-point
+# assumption and the half spread quoted at the time, and reports the difference rather than
+# picking one. Section G below still draws the median round trip against the label
+# distribution, and under this convention it reads as how the realised move compares with the
+# spread a round trip crosses, rather than as a cost the label ignores.
+#
+# **A minute in which nothing traded has no VWAP, and therefore no fill and no label.** That is
+# not a gap to be filled: at the close of bar $t$ nothing knows whether $t+B$ will print, so
+# substituting a midpoint or carrying the last trade would put information into the label that
+# the decision could not have had. The rows drop out on both legs instead. Within the session
+# this costs 0.0211% of otherwise usable bars on the fixture and 0.2384% on production - the
+# rate is an order of magnitude higher outside regular hours, which this notebook already
+# excludes.
 #
 # All four labels are computed on the **minute** grid the data arrives on, and what differs
 # between them is the horizon: five, fifteen and sixty minutes, plus a direction label cut
 # from the fifteen-minute return. $B$ is therefore one minute, and a horizon of $H$ minutes
 # is a shift of $H$ rows only where the minute grid is complete, which is what the section
 # above measures and Section D asserts. Chapter 16 rebalances this case study on a coarser
-# schedule than the one the labels are built on; reconciling the two is that chapter's
-# problem and no claim is made here about how the two line up.
+# schedule than the one the labels are built on. Chapter 16 now decides every fifteen minutes
+# and fills on the minute after the decision, which is the same convention as this one; that
+# the two agree is the point of ml4t/agent-workspace#187 and is asserted there rather than
+# assumed here.
 #
-# The entry price is the next bar's midpoint, which the uniform grid asserted above makes
-# exactly one bar of wall-clock time later; the last bar of a session has no next bar, so it
-# carries no entry and no label. The exit is resolved by **time**, not by counting rows: the
-# library looks for a bar at exactly $H - B$ past the entry, and a bar that is missing
+# The entry price is the next bar's VWAP, which the uniform grid asserted above makes exactly
+# one bar of wall-clock time later. Two things carry no entry and therefore no label: the last
+# bar of a session, which has no next bar, and a bar whose successor did not trade, which has
+# no volume-weighted price to fill at. The exit is resolved by **time**, not by counting rows:
+# the library looks for a bar at exactly $H$ past the entry, and a bar that is missing
 # resolves to nothing and nulls the label instead of letting a shift reach past the hole and
 # return a longer window under a shorter name. Materialising the entry price as its own
 # column is what lets the library express this convention - it divides by the price at $t$,
@@ -298,23 +331,29 @@ print(f"Bar spacing {BAR}, uniform within every session; horizons in bars {HORIZ
 
 # %%
 priced = quoted.with_columns(
-    pl.col("mid_close").shift(-1).over(GROUP_COLS).alias("entry_mid")
-).drop_nulls("entry_mid")
+    pl.col("vwap").shift(-1).over(GROUP_COLS).alias("entry_vwap")
+).drop_nulls("entry_vwap")
 
 # %%
 for name in RETURN_LABELS:
-    held = f"{(HORIZONS[name] - BAR) // timedelta(minutes=1)}m"
+    # The declared horizon, not the horizon minus a bar. The subtraction the previous version
+    # carried existed only because the library divides by the price at t, so materialising the
+    # entry one bar forward had already spent a bar of the span - and it made a fourteen-minute
+    # label read as fifteen to anyone who saw `HORIZONS - BAR` and rounded it in their head.
+    # That is how ml4t/agent-workspace#187 stayed invisible for months. Under this convention
+    # the span from entry fill to exit fill *is* the horizon, so it is written as one.
+    held = f"{HORIZONS[name] // timedelta(minutes=1)}m"
     priced = fixed_time_horizon_labels(
         priced,
         horizon=held,
         method="returns",
-        price_col="entry_mid",
+        price_col="entry_vwap",
         group_col=GROUP_COLS,
         timestamp_col="timestamp",
         tolerance="0s",
     ).rename({f"label_return_{held}": name})
 
-print(f"Constructed {', '.join(RETURN_LABELS)} on {priced.height:,} bars with a tradable entry")
+print(f"Constructed {', '.join(RETURN_LABELS)} on {priced.height:,} bars with a fillable entry")
 
 # %% [markdown]
 # The direction label is the primary return discretised into a band around zero: a move
@@ -343,8 +382,10 @@ labels_df = (
     .with_columns(
         (pl.len().over(GROUP_COLS) - 1 - _position).alias("from_end"),
         _position.alias("bar_in_session"),
+        # t+H+1, not t+H: the label reads a quote its own horizon does not name, and every
+        # gap taken from this column has to cover it.
         pl.col("timestamp")
-        .shift(-HORIZON_BARS[PRIMARY_LABEL])
+        .shift(-LABEL_HORIZON_END_BARS[PRIMARY_LABEL])
         .over(GROUP_COLS)
         .alias("_label_end"),
     )
@@ -366,27 +407,49 @@ print(f"market_data digest: {MARKET_DATA_DIGEST}")
 # bar count that happens to agree - so a grid that was ever coarser or gappier than it looks
 # would raise here rather than ship a longer return under a shorter name.
 #
-# The third catches a short label masked by a longer one's null set. Each session has to be
-# short by exactly its own horizon and no more, so `fwd_ret_5m` carries ten more rows per
-# session than `fwd_ret_15m`; an equal count means one label was gated by the other's nulls.
+# The third catches a short label masked by a longer one's null set. A session's tail is
+# short by its own horizon **plus one** - the extra bar is the entry, since the last bar of a
+# session has no bar after it to fill at - and every other missing label has to name its own
+# reason. Under the previous midpoint construction there were no other reasons: a midpoint
+# exists on every bar, so an exact count was the whole check. A VWAP does not. A minute that
+# did not trade has no volume-weighted price, so it drops the label of the bar that would
+# enter on it and the label of the bar that would exit on it, anywhere in the session.
+#
+# So the check is that every unlabelled row outside the tail has a null leg, rather than that
+# there are none. That is the stronger statement: an exact count would pass on a label gated
+# by another's nulls if the totals happened to agree, and this cannot - it asks each row why.
 
 # %%
 for name, h_bars in ((n, HORIZON_BARS[n]) for n in RETURN_LABELS):
     span = pl.col("timestamp").shift(-h_bars).over(GROUP_COLS) - pl.col("timestamp")
     checked = labels_df.with_columns(span.alias("_span"))
-    tail = checked.filter(pl.col("from_end") < h_bars)
+    tail = checked.filter(pl.col("from_end") <= h_bars)
     labelled = checked.drop_nulls(name)
     # 1. An incomplete forward window is null, never a value.
     assert tail[name].null_count() == tail.height, name
     # 2. Every labelled window spans exactly the declared horizon in wall-clock time.
     assert labelled.filter(pl.col("_span") != HORIZONS[name]).height == 0, name
-    # 3. Each session labels its first n - h bars, so no label crosses a session boundary and
-    #    none is gated by another label's null set.
-    counted = checked.group_by(GROUP_COLS).agg(
-        (pl.len() - pl.col(name).is_not_null().sum() - h_bars).alias("excess")
+    # 3. Outside that tail, a row is unlabelled only when one of its two legs did not
+    #    trade. No label crosses a session boundary, and none is gated by another's nulls.
+    exit_vwap = pl.col("vwap").shift(-LABEL_HORIZON_END_BARS[name]).over(GROUP_COLS)
+    unexplained = (
+        checked.with_columns(pl.col("vwap").shift(-1).over(GROUP_COLS).alias("_entry"))
+        .with_columns(exit_vwap.alias("_exit"))
+        .filter(
+            pl.col("from_end").gt(h_bars)
+            & pl.col(name).is_null()
+            & pl.col("_entry").is_not_null()
+            & pl.col("_exit").is_not_null()
+        )
     )
-    assert counted.filter(pl.col("excess") != 0).height == 0, name
-    print(f"{name}: {labelled.height:,} labelled, every window exactly {HORIZONS[name]}")
+    assert unexplained.height == 0, (
+        f"{name}: {unexplained.height:,} rows carry no label with both legs quoted"
+    )
+    untraded = checked.filter(pl.col("from_end").gt(h_bars) & pl.col(name).is_null()).height
+    print(
+        f"{name}: {labelled.height:,} labelled, every window exactly {HORIZONS[name]}; "
+        f"{untraded:,} in-session bars dropped for an untraded leg"
+    )
 
 # %%
 # 4. No discrete label is derived from a null return.
@@ -414,7 +477,7 @@ profile = (
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 for name, colour in PALETTE.items():
     ax.plot(profile["from_end"], profile[name], ds="steps-mid", lw=1.8, c=colour, label=name)
-    ax.axvline(HORIZON_BARS[name] - 0.5, color=colour, linestyle=":", lw=1)
+    ax.axvline(HORIZON_BARS[name] + 0.5, color=colour, linestyle=":", lw=1)
 ax.set_xlabel("Bars from the end of the session")
 ax.set_ylabel("Share of bars carrying a label")
 sub = "Dotted lines mark each horizon; curves lying on top of each other mean one masked another"
@@ -443,7 +506,10 @@ show_with_alt(fig, "Non-null label rate by bar position from the end of each tra
 _entity = (pl.col("symbol") + "|" + pl.col("session_date").cast(pl.Utf8)).alias("entity")
 dev = {
     name: labels_df.with_columns(
-        pl.col("timestamp").shift(-HORIZON_BARS[name]).over(GROUP_COLS).alias("_label_end"),
+        pl.col("timestamp")
+        .shift(-LABEL_HORIZON_END_BARS[name])
+        .over(GROUP_COLS)
+        .alias("_label_end"),
         _entity,
     )
     .filter(pl.col("_label_end") < HOLDOUT_TS)
@@ -590,14 +656,12 @@ for key, tag in classes.items():
 # horizon was converted into, and both treat the symbol-session as the entity, because a
 # window cannot be concurrent with one on the other side of an overnight gap.
 #
-# What a label consumes is return intervals, and it consumes one fewer than its horizon in
-# bars: entering a bar after the decision and leaving at the horizon spans the moves between
-# those two prices, not the move into the entry. Consecutive rows share all but one of those
-# intervals, so the decay reads as a straight line falling by one interval per lag. Two rows
-# `lag` bars apart share `H - 1 - lag` of them, which runs out one bar short of the horizon:
-# the last lag that still shares an interval is `H - 2`, and the first that shares none is
-# `H - 1`. That is where the dotted lines sit, and marking the horizon instead would put them
-# a lag past the thing the section is about.
+# What a label consumes is return intervals, and it consumes exactly its horizon in bars:
+# entering a bar after the decision and leaving H bars after that spans the H moves between
+# those two prices. Consecutive rows share all but one of them, so the decay reads as a
+# straight line falling by one interval per lag. Two rows `lag` bars apart share `H - lag` of
+# them, so the last lag that still shares an interval is `H - 1` and the first that shares
+# none is `H`. That is where the dotted lines sit.
 # The longest label does not stop at zero when it gets there but keeps going negative, and
 # that is a property of the session rather than of the label - a one-hour window is a fifth of
 # a trading day, so each session holds few independent windows, and subtracting the session's
@@ -617,7 +681,7 @@ fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 lags = np.arange(1, max_lag + 1)
 for name, colour in PALETTE.items():
     ax.plot(lags, acf[name], lw=1.8, color=colour, label=name)
-    ax.axvline(HORIZON_BARS[name] - 1, color=colour, linestyle=":", lw=1.2)
+    ax.axvline(HORIZON_BARS[name], color=colour, linestyle=":", lw=1.2)
 ax.axhline(0, color=COLORS["neutral"], lw=0.8)
 ax.set_xlabel("Lag in bars")
 ax.set_ylabel("Panel autocorrelation")
@@ -628,7 +692,7 @@ show_with_alt(fig, "Panel autocorrelation of each forward-return label against l
 
 # %%
 for name in RETURN_LABELS:
-    spans = HORIZON_BARS[name] - 1
+    spans = HORIZON_BARS[name]
     n_rows, n_eff = effective_sample_size(
         dev[name], horizon=spans, bar_col="bar_in_session", entity_col="entity"
     )

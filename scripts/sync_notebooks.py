@@ -101,6 +101,61 @@ def py_code_cells(py: Path) -> list[str]:
     return [c for c in cells if c]
 
 
+def ipynb_markdown_cells(ipynb: Path) -> list[str]:
+    nb = json.loads(ipynb.read_text(encoding="utf-8"))
+    return [
+        "".join(c.get("source", []))
+        for c in nb.get("cells", [])
+        if c.get("cell_type") == "markdown"
+    ]
+
+
+def py_markdown_cells(py: Path) -> list[str]:
+    """Markdown-cell bodies from a Jupytext percent `.py`, with the comment prefix removed.
+
+    Jupytext writes a markdown cell as a `# %% [markdown]` marker followed by lines each
+    prefixed `# ` (a blank line in the prose is a bare `#`). Stripping that prefix is what
+    makes the text comparable to the `.ipynb`'s own markdown source.
+    """
+    cells: list[str] = []
+    current: list[str] = []
+    in_markdown = False
+    for raw in py.read_text(encoding="utf-8").splitlines():
+        if raw.startswith("# %%"):
+            if in_markdown and current:
+                cells.append("\n".join(current))
+            current = []
+            in_markdown = "[markdown]" in raw
+            continue
+        if in_markdown:
+            current.append(raw[2:] if raw.startswith("# ") else raw.lstrip("#"))
+    if in_markdown and current:
+        cells.append("\n".join(current))
+    return cells
+
+
+def _normalized(cells: list[str]) -> list[str]:
+    """Drop only the cell-terminating newline, and skip cells that are empty after that.
+
+    Not `strip()`: leading indentation makes a code block, and two trailing spaces make a
+    markdown hard break, so trimming either hides a change that alters what the reader
+    sees. Jupytext's `# ` prefix and the `.ipynb`'s source list disagree about the final
+    newline and about nothing else, so that is all this removes.
+    """
+    return [t for c in cells if (t := c.rstrip("\r\n"))]
+
+
+def prose_drift(py: Path, ipynb: Path) -> bool:
+    """True if the pair's markdown cells disagree.
+
+    `code_drift` compares code cells only, so a change confined to prose was invisible:
+    the tool printed `Nothing to sync` and the `.ipynb` kept the old text. The `doc_only`
+    category below was written for exactly this case and nothing could reach it, because
+    `classify` returned `None` whenever the code matched.
+    """
+    return _normalized(py_markdown_cells(py)) != _normalized(ipynb_markdown_cells(ipynb))
+
+
 def code_drift(py: Path, ipynb: Path) -> bool:
     """True if the .py's code cells don't match the .ipynb's embedded code cells.
 
@@ -145,7 +200,7 @@ def classify(py: Path, ipynb: Path) -> Drift | None:
     mtime ordering. When code differs, mtime becomes a hint for direction.
     """
     cd = code_drift(py, ipynb)
-    if not cd:
+    if not cd and not prose_drift(py, ipynb):
         return None
 
     py_mt = py.stat().st_mtime

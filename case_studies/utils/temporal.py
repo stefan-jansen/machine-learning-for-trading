@@ -17,17 +17,30 @@ and asserting the results are identical.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
 import numpy as np
+import polars as pl
 from hmmlearn.hmm import GaussianHMM
+from scipy.signal import lfilter
 from sklearn.cluster import KMeans
 from threadpoolctl import threadpool_limits
+
+from case_studies.utils.artifact_digest import write_artifact
 
 __all__ = [
     "filtered_state_probs",
     "fit_hmm_kmeans_init",
+    "fold_feature_geometry",
+    "garch11_conditional_volatility",
+    "refit_boundaries",
     "relabel_states",
     "sort_states_by_mean",
     "sort_states_by_variance",
+    "walk_forward_feature",
+    "write_model_based",
 ]
 
 # Guards the log of a zero transition or start probability. Small enough not to move a
@@ -87,6 +100,131 @@ def filtered_state_probs(model: GaussianHMM, X: np.ndarray) -> np.ndarray:
 
     log_normalizer = np.logaddexp.reduce(fwdlattice, axis=1, keepdims=True)
     return np.exp(fwdlattice - log_normalizer)
+
+
+def garch11_conditional_volatility(
+    returns: np.ndarray,
+    *,
+    mu: float,
+    omega: float,
+    alpha: float,
+    beta: float,
+    backcast: float,
+    gamma: float = 0.0,
+    bounds: tuple[float, float] | None = None,
+) -> np.ndarray:
+    r"""GARCH(1,1) or GJR-GARCH(1,1,1) conditional standard deviation, computed so a value
+    cannot move later.
+
+    :math:`\sigma^2_t = \omega + (\alpha + \gamma \mathbb{1}[\epsilon_{t-1} < 0])
+    \epsilon_{t-1}^2 + \beta \sigma^2_{t-1}`, with :math:`\epsilon_t = r_t - \mu`. One value
+    per input observation, in the units of *returns*. ``gamma=0`` is the symmetric model; the
+    asymmetry term is what ``arch`` fits under ``o=1``, and three of the four case studies that
+    fit a volatility model here fit it.
+
+    **Why this exists rather than ``arch_model(...).fix(params)``.** Under a walk-forward refit
+    schedule the recursion is run over a prefix of the series that ends at the end of the block
+    being emitted, and only the block's own rows are kept. That is causal only if a value at
+    :math:`t` is a function of observations up to :math:`t` and of nothing else in the array it
+    was handed. ``arch``'s result object is not, and the reason is one line of ``ARCHModel.fix``:
+
+    .. code-block:: python
+
+        resids = self.resids(self.starting_values())   # NOT the parameters you fixed
+        backcast = v.backcast(resids)
+        var_bounds = v.variance_bounds(resids)
+
+    The seed and the bounds are derived from residuals taken at the **estimated** mean of
+    whatever array was handed in, so under ``mean="Constant"`` extending the sample moves that
+    mean, moves the backcast, and moves every value the seed still reaches. Read against
+    ``arch==8.0.0``; measured here on 2,000 observations with a variance break, one fixed
+    parameter vector, prefix of 1,500 against the full sample:
+
+    ================================  ==========================================================
+    ``mean="Constant"``               sample mean 0.03496 -> 0.03007, backcast 0.57714 ->
+                                      0.57637. **128 of the 1,500 shared rows move**, by up to
+                                      0.064%, largest at the start and decaying to zero.
+    ``mean="Zero"``                   nothing is estimated, so the residuals are the returns and
+                                      the seed does not move: **bit-identical**.
+    ================================  ==========================================================
+
+    ``mean="Zero"`` is not therefore safe. ``variance_bounds`` clamps every row with two
+    whole-sample quantities - ``np.var(resids) / 1e8`` below and ``1e7 * (1 + max(resids**2))``
+    above - and those move whatever the mean specification is. They are six orders of magnitude
+    apart, so they change an emitted value only when the variance actually reaches one, which is
+    what a degenerate fit does. With :math:`\omega=10^{-8}, \alpha=0.02, \gamma=-0.30,
+    \beta=0.90` - a shape ``arch`` returns without complaint, where a down day *reduces* the
+    variance - the recursion sits on the lower clamp and **1,498 of the 1,500 shared rows move,
+    by up to 64%**, because a shock 500 observations later raised ``np.var(resids)`` and with it
+    the clamp under every earlier row.
+
+    So the dependence on the future is unconditional under an estimated mean, and under a zero
+    mean it opens exactly on the fits that were also being silently clipped. This function takes
+    the seed and the bounds from the caller instead, and raises on the degenerate case rather
+    than emitting a clipped number for it.
+
+    **Every argument must come from before the block.** *backcast* seeds the recursion as
+    :math:`\omega + (\alpha + \gamma/2 + \beta) \cdot \mathrm{backcast}`, where the halved
+    :math:`\gamma` is the asymmetry's contribution under symmetric shocks; pass the mean squared
+    residual of the estimation window, or ``arch``'s own
+    ``result.model.volatility.backcast(training_residuals)``. *bounds*, when given, clips
+    :math:`\sigma^2` at every step as ``arch`` does internally; derive it from
+    ``result.model.volatility.variance_bounds`` over the training residuals. Neither is checked
+    here, because the array handed in reaches the end of the block and nothing computed from it
+    could tell a legitimate seed from one that read the block's own rows.
+
+    **Why there is no parameter-implied seed.** :math:`\omega/(1-\alpha-\gamma/2-\beta)` is
+    the long-run variance the coefficients imply, is a function of no observation at all, and was
+    the seed here until it was measured. Fitting GJR-GARCH on 25 sampled
+    ``sp500_equity_option_analytics`` securities broke it twice, in ways a single guard does not
+    cover. Two fits came out integrated at persistence 1.0000, where the ratio is infinite, any
+    clamp makes it :math:`\omega \times 10^6`, and :math:`\beta=1` means the seed's influence
+    never decays - 56x errors at emitted rows. A third was numerically stationary at persistence
+    0.9953 but had :math:`\omega = 1.6 \times 10^{-8}`, so the implied seed was
+    :math:`3.4 \times 10^{-6}` against a data-supported 2.283, and the recursion reached negative
+    variance 495 observations in. The second case is invisible to any threshold on persistence.
+    A seed bounded by the estimation window cannot do either, whatever the optimizer returns.
+
+    Without *bounds* the recurrence is linear in :math:`\sigma^2` and is evaluated with
+    ``scipy.signal.lfilter`` rather than a Python loop: this runs once per block per entity, tens
+    of thousands of times per notebook, over series of thousands of observations. Clipping makes
+    it nonlinear, so *bounds* costs a Python loop.
+
+    :raises ValueError: if the recursion leaves the positive reals. ``arch`` will return
+        :math:`\alpha + \gamma < 0`, a negative shock coefficient on down days, without
+        complaint; the variance then falls through zero and ``sqrt`` yields ``nan``. A ``nan`` is
+        not a feature value and must not reach an artifact. Passing *bounds* prevents it.
+    """
+    resid = np.asarray(returns, dtype=float) - mu
+    if resid.size == 0:
+        return np.empty(0, dtype=float)
+
+    persistence = alpha + 0.5 * gamma + beta
+    driver = np.empty(resid.size, dtype=float)
+    driver[0] = omega + persistence * float(backcast)
+    driver[1:] = omega + (alpha + gamma * (resid[:-1] < 0.0)) * resid[:-1] ** 2
+
+    if bounds is None:
+        # y[0] = driver[0]; y[t] = driver[t] + beta * y[t-1] - the recursion above, in C. The
+        # sign indicator is already in the driver, so the recursion in sigma^2 is still linear
+        # with constant coefficients.
+        variance = lfilter([1.0], [1.0, -beta], driver)
+        if not np.all(np.isfinite(variance)) or np.any(variance <= 0.0):
+            first = int(np.argmax(~(np.isfinite(variance) & (variance > 0.0))))
+            raise ValueError(
+                f"the variance recursion left the positive reals at observation {first} of "
+                f"{variance.size}: alpha + gamma is {alpha + gamma:.6g}, so a negative return "
+                "reduces the variance rather than raising it. Pass bounds= to clip, or reject "
+                "the fit."
+            )
+    else:
+        low, high = float(bounds[0]), float(bounds[1])
+        variance = np.empty(resid.size, dtype=float)
+        variance[0] = min(max(driver[0], low), high)
+        for t in range(1, resid.size):
+            variance[t] = min(max(driver[t] + beta * variance[t - 1], low), high)
+
+    return np.sqrt(variance)
 
 
 def sort_states_by_variance(model: GaussianHMM) -> np.ndarray:
@@ -210,3 +348,264 @@ def _cluster_covariance(cluster: np.ndarray, pooled: np.ndarray) -> np.ndarray:
     if cluster.shape[0] < 2:
         return pooled.copy()
     return np.atleast_2d(np.cov(cluster.T))
+
+
+def fold_feature_geometry(
+    frame: pl.DataFrame,
+    *,
+    feature_columns: Sequence[str],
+    time_column: str,
+    fold_column: str | None = "fold",
+) -> list[dict]:
+    """Per fold and feature, where the values actually start and stop.
+
+    Returns one record per (fold, feature) with the first and last timestamp carrying a
+    non-null value and the null count. This is descriptive, not a check: a fitted feature
+    legitimately begins after its estimation window, so a leading gap is only a defect
+    relative to the other features and labels on the same fold, which this frame cannot
+    see on its own.
+
+    It exists because that comparison was impossible after the fact. A model-based feature
+    that started late left no trace in the artifact, the registry or any metric:
+    ``sequence_dataset`` turns a null feature into ``0.0``, which after normalization is the
+    feature's mean, so the affected rows were fitted as average observations and nothing
+    raised. Recording the geometry at write time is what lets a later stage compare a
+    variant's start against the primary's instead of discovering it by hand.
+    """
+    records: list[dict] = []
+    # A fold-free artifact carries one estimation schedule for the whole panel, so its
+    # geometry is one record per feature with ``fold`` reported as None. The rest of the
+    # record means exactly what it means per fold.
+    parts: list[tuple[int | None, pl.DataFrame]] = (
+        [(None, frame)]
+        if fold_column is None
+        else [
+            (fold_id, part)
+            for (fold_id,), part in frame.group_by([fold_column], maintain_order=True)
+        ]
+    )
+    for fold_id, part in parts:
+        for col in feature_columns:
+            present = part.filter(pl.col(col).is_not_null())
+            records.append(
+                {
+                    "fold": fold_id,
+                    "feature": col,
+                    "n_rows": part.height,
+                    "n_null": part.height - present.height,
+                    "first_valid": None if present.is_empty() else present[time_column].min(),
+                    "last_valid": None if present.is_empty() else present[time_column].max(),
+                }
+            )
+    return records
+
+
+def write_model_based(
+    frame: pl.DataFrame,
+    path: Path | str,
+    *,
+    keys: Sequence[str],
+    feature_columns: Sequence[str],
+    time_column: str,
+    written_by: str,
+    fold_column: str | None = "fold",
+    expected_folds: Sequence[int] | None = None,
+    inputs: Mapping[str, str] | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> dict:
+    """Write the stage-04 artifact with the guards that were spread across eight notebooks.
+
+    Replaces the ad-hoc write block each ``04_model_based_features`` notebook carried. Those
+    blocks agreed on calling :func:`~case_studies.utils.artifact_digest.write_artifact` and
+    on nothing else: the duplicate-key assertion was in six of eight, the fold-id check in
+    none, and the schema was frozen in none, so a notebook could emit a column of the wrong
+    dtype or a fold that did not exist and the artifact would still be written and digested.
+
+    Guards, in order, each raising before anything reaches disk:
+
+    * every key and the fold column is present, and no key value is null
+    * ``keys + [fold_column]`` is unique, so a fold cannot carry a row twice
+    * every declared feature column is present and not entirely null within any fold
+    * the fold ids are exactly ``expected_folds`` when given
+
+    Pass ``fold_column=None`` for the fold-free artifact a refit schedule produces: the
+    identity becomes the keys alone, the geometry is one record per feature, and
+    ``expected_folds`` is then refused rather than ignored.
+
+    The per-fold feature geometry from :func:`fold_feature_geometry` goes into the sidecar
+    metadata under ``fold_feature_geometry``. It is recorded rather than asserted on for the
+    reason given there: this frame cannot tell a legitimate estimation warm-up from an
+    excess one, and a guard that refused every leading gap would reject the case studies
+    where the gap is correct.
+    """
+    frame_keys = list(keys)
+    # ``fold_column=None`` is the fold-free artifact: one estimation schedule for the whole
+    # panel, so a row is identified by its keys alone and there is no fold to check. Every
+    # other guard below applies unchanged.
+    fold_cols = [] if fold_column is None else [fold_column]
+    if fold_column is None and expected_folds is not None:
+        raise ValueError("expected_folds was given for a frame written without a fold column")
+
+    missing = [c for c in [*frame_keys, *fold_cols, *feature_columns] if c not in frame.columns]
+    if missing:
+        raise ValueError(f"model_based frame is missing declared columns: {missing}")
+
+    null_keys = [c for c in [*frame_keys, *fold_cols] if frame[c].null_count()]
+    if null_keys:
+        raise ValueError(f"null values in key or fold columns: {null_keys}")
+
+    identity = [*frame_keys, *fold_cols]
+    n_dup = int(frame.select(identity).is_duplicated().sum())
+    if n_dup:
+        raise ValueError(f"{n_dup:,} duplicate rows on {identity}")
+
+    geometry = fold_feature_geometry(
+        frame,
+        feature_columns=feature_columns,
+        time_column=time_column,
+        fold_column=fold_column,
+    )
+    empty_in_fold = [
+        (rec["fold"], rec["feature"]) for rec in geometry if rec["n_null"] == rec["n_rows"]
+    ]
+    if empty_in_fold:
+        raise ValueError(
+            "feature columns with no value at all in a fold, which means the fit did not "
+            f"run or its output was not joined back: {empty_in_fold}"
+        )
+
+    if expected_folds is not None:
+        got = sorted({int(f) for f in frame[fold_column].unique()})
+        want = sorted(int(f) for f in expected_folds)
+        if got != want:
+            raise ValueError(f"fold ids {got} do not match the resolved folds {want}")
+
+    merged = dict(metadata or {})
+    merged["fold_feature_geometry"] = [
+        {
+            **rec,
+            "first_valid": None if rec["first_valid"] is None else str(rec["first_valid"]),
+            "last_valid": None if rec["last_valid"] is None else str(rec["last_valid"]),
+        }
+        for rec in geometry
+    ]
+    return write_artifact(
+        frame,
+        path,
+        keys=frame_keys,
+        written_by=written_by,
+        inputs=inputs,
+        metadata=merged,
+        fold_column=fold_column,
+    )
+
+
+# ---------------------------------------------------------------------------
+# The walk-forward refit schedule
+# ---------------------------------------------------------------------------
+#
+# Two channels carry data into a fitted feature value at time t: the CONDITIONING set (which
+# observations the value is computed from) and the PARAMETERS (which observations theta was
+# estimated from). A causal feature needs both to end at or before t. The forward-filtering
+# helpers above close the first channel. This closes the second.
+#
+# The design these replace fitted theta once per fold on the fold's whole training window and
+# then ran the model forward from the START of that same window. Every training row therefore
+# carried parameters estimated from its own future - for etfs' fold 0, the earliest rows carried
+# 9.8 years of it - while every validation row carried parameters estimated only from its past.
+# The model was then fitted on one version of the column and scored on another. Nothing raised,
+# because a fold's own rows are internally consistent and the artifact records no estimation
+# window.
+#
+# `walk_forward_feature` is the design cme_futures' ARIMA already used and this generalizes:
+# spend a burn-in, fit, emit until the next refit, refit on everything up to that point, carry
+# on. The schedule replaces the fold as the thing that bounds an estimate, so the artifact
+# stops needing a fold column at all - one value per (entity, timestamp), the same value
+# whichever fold later selects the row.
+
+
+def refit_boundaries(n_obs: int, burnin: int, refit_every: int) -> list[tuple[int, int]]:
+    """``(fit_end, emit_end)`` index pairs for one walk over ``n_obs`` observations.
+
+    ``fit_end`` is exclusive, so a block's parameters are estimated from ``obs[:fit_end]`` and
+    then speak for ``obs[fit_end:emit_end]`` - no observation is ever used to fit the model that
+    describes it. The first ``burnin`` observations are in no block: they pay for the first
+    estimate and carry no feature value.
+
+    Returns an empty list when there is not enough history to fit even once, which is a
+    statement about the series and not an error. The caller emits nulls for the whole of it.
+    """
+    if burnin < 1:
+        raise ValueError(f"burnin must be at least 1, got {burnin}")
+    if refit_every < 1:
+        raise ValueError(f"refit_every must be at least 1, got {refit_every}")
+    if n_obs <= burnin:
+        return []
+    return [
+        (fit_end, min(fit_end + refit_every, n_obs))
+        for fit_end in range(burnin, n_obs, refit_every)
+    ]
+
+
+def walk_forward_feature(
+    X: np.ndarray,
+    *,
+    burnin: int,
+    refit_every: int,
+    fit: Callable[[np.ndarray], Any],
+    apply: Callable[[Any, np.ndarray], np.ndarray],
+    n_features: int,
+    window: int | None = None,
+    freeze_after: int | None = None,
+    on_fit_error: str = "raise",
+) -> np.ndarray:
+    """Emit a fitted feature over one series, refitting on a schedule instead of per fold.
+
+    ``fit(X_train)`` returns whatever object ``apply`` needs. ``apply(model, X_prefix)`` runs the
+    fitted model forward over ``X_prefix`` and returns one row per input row; only the rows of
+    the current block are kept, so ``apply`` may condition on everything up to each row and must
+    not read past the end of what it is handed.
+
+    ``window`` is ``None`` for an expanding estimation window - every refit sees the whole
+    history, which is what cme_futures' ARIMA does - or an integer for a rolling one of that many
+    observations, for a model whose parameters are expected to drift.
+
+    ``freeze_after`` is the index past which the walk stops re-estimating and keeps applying the
+    last parameters it fitted. It exists for the holdout: a coefficient refitted on holdout
+    sessions is a parameter estimated on the holdout however causal the recursion around it
+    looks, so the last estimate before the holdout opens is the one that speaks for all of it.
+    cme_futures' ARIMA already draws this distinction with a second ``refit=False`` walk.
+
+    ``on_fit_error="skip"`` leaves a block null and carries on with the previous parameters where
+    a single estimate fails to converge; the default raises, because a model that cannot be
+    fitted on most of its blocks is not a feature.
+
+    Returns ``(len(X), n_features)`` with ``np.nan`` wherever no parameters were available: the
+    burn-in prefix always, and any skipped block.
+    """
+    if on_fit_error not in ("raise", "skip"):
+        raise ValueError(f"on_fit_error must be 'raise' or 'skip', got {on_fit_error!r}")
+    out = np.full((len(X), n_features), np.nan, dtype=float)
+    frozen: Any = None
+    for fit_end, emit_end in refit_boundaries(len(X), burnin, refit_every):
+        if freeze_after is not None and fit_end > freeze_after:
+            if frozen is None:
+                continue
+            model = frozen
+        else:
+            fit_start = 0 if window is None else max(0, fit_end - window)
+            try:
+                model = fit(X[fit_start:fit_end])
+            except Exception:
+                if on_fit_error == "raise":
+                    raise
+                continue
+            frozen = model
+        values = np.asarray(apply(model, X[:emit_end]), dtype=float)
+        if len(values) != emit_end:
+            raise ValueError(
+                f"apply returned {len(values)} rows for a {emit_end}-row prefix; it must return "
+                "one row per input row so the block slice below lines up"
+            )
+        out[fit_end:emit_end] = values[fit_end:emit_end].reshape(emit_end - fit_end, n_features)
+    return out

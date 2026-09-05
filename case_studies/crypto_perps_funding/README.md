@@ -36,9 +36,9 @@ costs, and uncertainty from only two validation folds.
 | Model analysis | [`12_model_analysis`](12_model_analysis.ipynb) | Ch12-15 | Compares four current family leaders on one physical validation panel. | Nothing - it reads the registry |
 | Backtest | [`13_backtest`](13_backtest.ipynb) | Ch16 | Replays a frozen carrier with completed-bar prices and official funding. | Nothing - it replays a frozen carrier with `register=False` |
 | Portfolio | [`14_portfolio_management`](14_portfolio_management.ipynb) | Ch17 | Compares corrected point-in-time allocation methods on that carrier. | Nothing - it replays a frozen carrier with `register=False` |
-| Costs | [`15_costs`](15_costs.ipynb) | Ch18 | Measures cost sensitivity and price-only versus funding-inclusive breakevens. | Nothing - it replays a frozen carrier with `register=False` |
-| Risk | [`16_risk_management`](16_risk_management.ipynb) | Ch19 | Evaluates fixed and pre-validation-calibrated position-risk rules. | Nothing - it replays a frozen carrier with `register=False` |
-| Synthesis | [`17_strategy_analysis`](17_strategy_analysis.ipynb) | Ch20 | Keeps current model evidence separate from frozen carrier diagnostics. | Nothing - it reads the registry |
+| Risk | [`15_risk_management`](15_risk_management.ipynb) | Ch19 | Evaluates fixed and pre-validation-calibrated position-risk rules. | Nothing - it replays a frozen carrier with `register=False` |
+| Costs | [`16_costs`](16_costs.ipynb) | Ch18 | Measures cost sensitivity and price-only versus funding-inclusive breakevens, on the configuration risk management selected. | Nothing - it replays a frozen carrier with `register=False` |
+| Synthesis | [`19_strategy_analysis`](19_strategy_analysis.ipynb) | Ch20 | Keeps current model evidence separate from frozen carrier diagnostics. | Nothing - it reads the registry |
 
 ## Running
 

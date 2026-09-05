@@ -74,7 +74,8 @@ from utils.paths import get_case_study_dir
 CASE_STUDY_ID = "nasdaq100_microstructure"
 LABEL = ""
 SPLIT = "validation"
-TOP_K = 0  # 0 = use smallest top_k from setup.yaml backtest.sweep.top_k_grid
+# Zero means the smallest top_k from setup.yaml backtest.sweep.top_k_grid.
+TOP_K = 0
 MAX_SYMBOLS = 0
 FORCE_REBACKTEST = False  # Set True to re-backtest even if a complete backtest_hash exists
 TOP_N_PREDICTIONS = None
@@ -143,6 +144,9 @@ strategy_spec = build_backtest_spec(
     prediction_hash="plumbing_test",
     initial_cash=bt_config.initial_cash,
     chapter="ch16",
+    # The cadence is per-label here (setup.yaml::decision.cadence_by_label), so a spec
+    # built without one would be built against a default no run uses.
+    label=LABEL,
     signal={
         "method": "score_weighted_top_k",
         "top_k": TOP_K,
@@ -346,6 +350,7 @@ for i, pred_row in enumerate(pred_index.iter_rows(named=True)):
             prediction_hash=pred_hash,
             initial_cash=bt_config.initial_cash,
             chapter="ch16",
+            label=LABEL,
             signal=signal,
         )
         backtest_hash = backtest_hash_from_parts(pred_hash, serializable_backtest_spec(spec))

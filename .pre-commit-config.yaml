@@ -59,8 +59,13 @@ repos:
       # on every commit, so one notebook another session had left dirty blocked every
       # unrelated commit in that worktree - three worktrees were stuck that way in a
       # single day, and the cme_futures one could not commit anything for six days.
-      # Nothing unstaged can reach main, so the narrower scan gives up no protection,
-      # and CI still calls `check` with no arguments and scans everything.
+      # Nothing unstaged can reach main, so the narrower scan gives up no protection.
+      # This hook gates the commit; the merge is gated separately, by the `guards` job
+      # in .github/workflows/test.yml running
+      #   notebook_provenance.py check --since <base>
+      # over the notebooks the pull request touches, and against the previous tip on a
+      # push to main. A stale render only reaches a reader through a merge, and until
+      # that job existed no merge was covered at all.
       - id: notebook-sync
         name: notebook provenance sync gate
         language: system

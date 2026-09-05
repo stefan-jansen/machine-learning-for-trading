@@ -110,11 +110,22 @@ ENTITY_COL = "symbol"
 N_BUCKETS = 10
 TOP_N_FEATURES = 15
 REGIME_WINDOW = 252
-# The populations 06_linear and 07_gbm publish. Named rather than hashed: a name resolves to the
-# generation in force, so a refit that supersedes its predecessor is picked up without editing
-# this notebook, while every superseded snapshot stays readable by hash.
+# The populations the execution notebooks publish. Named rather than hashed: a name resolves to
+# the generation in force, so a refit that supersedes its predecessor is picked up without
+# editing this notebook, while every superseded snapshot stays readable by hash.
+#
+# The four sequence architectures publish four populations rather than one, because each has its
+# own notebook and a population is what one run declares before it fits. So a population key is
+# not always a family: `linear` and `gbm` name a whole family, and the four sequence names each
+# name one slice of `deep_learning`. `POPULATION_SLICES` carries that distinction, because the
+# membership check below has to compare each declared population against the rows that belong to
+# it rather than against everything its family registered.
 LINEAR_POPULATION = "nasdaq100_microstructure-linear-validation-v1"
 GBM_POPULATION = "nasdaq100_microstructure-gbm-validation-v1"
+NLINEAR_POPULATION = "nasdaq100_microstructure-nlinear-validation-v1"
+LSTM_POPULATION = "nasdaq100_microstructure-lstm_h64-validation-v1"
+TCN_POPULATION = "nasdaq100_microstructure-tcn-validation-v1"
+PATCHTST_POPULATION = "nasdaq100_microstructure-patchtst-validation-v1"
 
 # %% [markdown]
 # This notebook reads; it registers nothing. That decides how it opens the registry, and the
@@ -289,13 +300,47 @@ else:
 # than an exception handler, is stated at `declared_population_members`. In short: a registry
 # that publishes no population is not broken, and `OfficialPopulation.one` reports that state
 # and a broken lineage in the same words.
+# Population key -> (family, the config names it covers, or None for the whole family).
+POPULATION_SLICES = {
+    "linear": ("linear", None),
+    "gbm": ("gbm", None),
+    "nlinear": ("deep_learning", ("nlinear",)),
+    "lstm_h64": ("deep_learning", ("lstm_h64",)),
+    "tcn": ("deep_learning", ("tcn",)),
+    "patchtst": ("deep_learning", ("patchtst",)),
+}
+POPULATIONS = {
+    "linear": LINEAR_POPULATION,
+    "gbm": GBM_POPULATION,
+    "nlinear": NLINEAR_POPULATION,
+    "lstm_h64": LSTM_POPULATION,
+    "tcn": TCN_POPULATION,
+    "patchtst": PATCHTST_POPULATION,
+}
+
+
+def _slice_rows(frame: pl.DataFrame, key: str) -> pl.DataFrame:
+    """The rows belonging to one declared population."""
+    family, config_names = POPULATION_SLICES[key]
+    rows = frame.filter(pl.col("family") == family)
+    if config_names is not None:
+        rows = rows.filter(pl.col("config_name").is_in(list(config_names)))
+    return rows
+
+
+# `produced` is per family rather than per population, because which registered row belongs to
+# which of a family's populations is what the population itself declares. A family with rows and
+# an unresolvable declared name is the refusing case whichever of its names failed.
+_family_produced = {
+    _family: _catalog.filter(pl.col("family") == _family).height
+    for _family in {_family for _family, _ in POPULATION_SLICES.values()}
+}
 _population_members, _population_notes = declared_population_members(
     study,
     CASE_DIR,
-    {"linear": LINEAR_POPULATION, "gbm": GBM_POPULATION},
+    POPULATIONS,
     produced={
-        _family: _catalog.filter(pl.col("family") == _family).height
-        for _family in ("linear", "gbm")
+        _key: _family_produced.get(_family, 0) for _key, (_family, _) in POPULATION_SLICES.items()
     },
 )
 for _note in _population_notes:
@@ -310,9 +355,10 @@ _degenerate = degenerate_prediction_hashes(study.root)
 _registered = set(_catalog.get_column("prediction_hash"))
 
 for _family, _members in _population_members.items():
-    _have = set(
-        all_labels_metrics.filter(pl.col("family") == _family).get_column("prediction_hash")
-    )
+    # Scoped to the population's own slice, not to its whole family. Four sequence populations
+    # share the `deep_learning` family, so filtering on family alone would report every one of
+    # them as holding three undeclared rows for every one it declares.
+    _have = set(_slice_rows(all_labels_metrics, _family).get_column("prediction_hash"))
     _dropped = _members & _degenerate
     _missing, _extra = _members - _degenerate - _have, _have - _members
     # Both halves of the sentence this prints have to be true before it is printed. "None of
@@ -1261,21 +1307,34 @@ print(causal_df)
 # ### Calibration: Are Prediction Intervals Honest?
 #
 # Point IC tells us whether the ranking is correct on average; it says
-# nothing about whether the model's *uncertainty* is well calibrated.
-# Inductive split-conformal prediction (Vovk et al., 2005; Lei et al.,
-# 2018) gives a distribution-free check: using fold-0 absolute residuals
-# as a calibration set, the symmetric quantile $\hat{q}_{1-\alpha}$
-# defines an interval $[\hat{y} - \hat{q}, \hat{y} + \hat{q}]$ that
-# should cover the true label at rate $1-\alpha$ on the remaining folds.
-# Empirical coverage materially below the nominal level signals
-# overconfident residual scaling - the model is more wrong, more often,
-# than its training-time spread suggests. Width is reported as a
-# fraction of the actuals' standard deviation so families with different
-# return scales are comparable; smaller width at matched coverage means
-# tighter, more useful intervals. See Ch12 §12.6 / `11_conformal_gbm`
-# for the full conformal toolkit (CQR, ACI). What we report here is the
-# minimal residual-calibration diagnostic on the highest-IC config per
-# family for the primary label.
+# nothing about whether the model's *uncertainty* is well calibrated. The
+# width measured here is the one the `conformal_weighted` allocator sizes
+# positions with: calibrated per symbol on every absolute residual known at
+# `t - h`, where `h` is this label's horizon in data steps, falling back to a
+# quantile pooled over every symbol where one has too few residuals of its
+# own. A decision is covered when its absolute residual falls inside that
+# half-width, and `n_uncalibrated` counts the decisions that cleared no
+# warm-up and that no coverage figure describes.
+#
+# Empirical coverage materially below the nominal level signals overconfident
+# residual scaling - the model is more wrong, more often, than its
+# training-time spread suggests. Width is reported as a fraction of the
+# standard deviation of the outcomes it was measured against, so families with
+# different return scales are comparable; smaller width at matched coverage
+# means tighter, more useful intervals.
+#
+# Read it as a diagnostic of residual dispersion rather than a guarantee.
+# Split conformal's finite-sample coverage (Vovk et al., 2005; Lei et al.,
+# 2018) requires the calibration and evaluation scores to be exchangeable and
+# return residuals are not, and nothing in the allocation path reads an
+# interval or a coverage level - the width stands in for a volatility
+# estimate. See Ch12 §12.6 / `11_conformal_gbm` for the full conformal toolkit
+# (CQR, ACI).
+#
+# Each row is the family's highest-IC configuration for the primary label.
+# That is a model-level ranking and not the funnel's - every selection stage
+# ranks on validation backtest Sharpe - and it is used here because this
+# diagnostic runs before any backtest exists to rank.
 
 # %%
 conformal_df = conformal_coverage_diagnostic(CASE_STUDY, label=PRIMARY_LABEL)
@@ -1295,24 +1354,36 @@ if conformal_df.height > 0:
 # **How to read the coverage table.** Two columns matter, and they fail
 # independently.
 #
-# Empirical coverage against nominal is the calibration check. An interval
-# advertised at a given confidence level should contain the realised value about
-# that often on the later folds. Coverage materially below nominal means the model is
-# confident more often than it is right, and any position size derived from its
-# interval is too large. Coverage materially above nominal means the intervals
-# are wider than they need to be, which is safe but wasteful.
+# Empirical coverage against nominal is the calibration check. A width advertised
+# at a given confidence level should contain the realised residual about that often
+# across the decisions it sized. Coverage materially below nominal means the model is
+# confident more often than it is right; above nominal means the widths are wider
+# than they need to be.
 #
-# Width per standard deviation says what that coverage cost. An interval that
-# reaches nominal coverage only by spanning several standard deviations of the
-# return distribution is honest and nearly useless for sizing. Read the two
-# together: a model is usable for interval-aware sizing only when it holds its
-# coverage at a width that still distinguishes one prediction from another.
+# **What that does and does not say about position sizes.** `conformal_weighted`
+# normalises `1/width` within each side at each timestamp, so a width scale that is
+# uniformly too small leaves every weight unchanged - the error divides out. Coverage
+# is a statement about the scale of the residuals, and only the *differences* between
+# symbols' widths reach the portfolio. A systematic shortfall therefore says the
+# uncertainty estimate is optimistic, not that any particular position was too large,
+# and nothing in this table tests whether the widths rank one symbol's risk against
+# another correctly. Read it as a residual-scale diagnostic.
+#
+# Width per standard deviation says what that coverage cost. A width that reaches
+# nominal coverage only by spanning several standard deviations of the return
+# distribution is honest and says little. Read the two together as a description
+# of the residual scale: covered at what width. Neither column measures how the
+# widths differ across symbols, which is the only thing the allocator reads, so
+# neither settles whether a family can be sized on them.
 #
 # A family can rank well and fail this badly. Ranking depends only on the order
-# of the predictions; coverage depends on the scale of the residuals carrying
-# from the calibration window to a later one. When they diverge, the model needs
-# recalibration before any interval-aware sizing, even though its ordering is
-# unaffected.
+# of the predictions; coverage depends on the scale of a symbol's past residuals
+# carrying forward to the decision they size. A shortfall is consistent with
+# residual scale that does not hold out of time, and also with finite-sample
+# variation, with residuals that are not independent, and with symbols sized from
+# the pooled fallback rather than their own history - this table does not separate
+# them. It is a reason to look at the widths' cross-section before trusting them to
+# size, and it says nothing about the ordering, which is unaffected.
 
 # %% [markdown]
 # ## 8. Pre-Backtest Judgment and Handoff
@@ -1399,10 +1470,12 @@ print(synthesis)
 # ranking. With two folds, the per-fold columns are weak evidence about stability
 # and are there to expose a sign change rather than to measure consistency.
 #
-# The calibration columns are the ones most likely to disqualify a family that
-# looks fine on score alone. A model whose intervals do not hold their nominal
-# coverage can still be traded on its ordering, but not sized from its intervals
-# without recalibration first.
+# The calibration columns qualify a family that looks fine on score alone rather
+# than disqualifying it. A model whose widths do not hold their nominal coverage
+# can still be traded on its ordering; whether it can be sized on those widths is
+# a question the coverage columns do not answer, because `conformal_weighted`
+# consumes the cross-section of widths and coverage measures their scale. Measure
+# the cross-section before sizing on it.
 #
 # Causal rows are reported separately and are never inserted into this table.
 # They estimate the effect of a feature rather than forecast a return.
@@ -1452,7 +1525,7 @@ print(synthesis)
 #
 # **Next**: `14_backtest.py` for strategy simulation,
 # `15_portfolio_management.py` for position sizing, and
-# `18_strategy_analysis.py` for end-to-end results.
+# `20_strategy_analysis.py` for end-to-end results.
 
 # %% [markdown] tags=["results"]
 # ### What the comparison found on this run

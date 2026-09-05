@@ -68,6 +68,7 @@
 # %%
 """Compare model families for the S&P 500 equity and option case study."""
 
+import sqlite3
 import warnings
 
 import matplotlib.pyplot as plt
@@ -76,6 +77,7 @@ import polars as pl
 import torch  # cudart preload - required before ml4t.diagnostic imports # noqa: F401
 import yaml
 
+from case_studies.research import CausalResult, Study
 from case_studies.utils.latent_factors import load_fold_extras
 from case_studies.utils.model_analysis import (
     best_model_per_family_fast,
@@ -99,6 +101,11 @@ from case_studies.utils.model_viz import (
     plot_learning_curves,
     plot_regime_bars,
 )
+from case_studies.utils.notebook_contracts import (
+    declared_population_members,
+    degenerate_prediction_hashes,
+    incompletely_registered_predictions,
+)
 from case_studies.utils.notebook_render import conformal_coverage_diagnostic
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE
@@ -113,9 +120,43 @@ ENTITY_COL = "symbol"
 N_BUCKETS = 10
 TOP_N_FEATURES = 15
 REGIME_WINDOW = 63
+# The populations 06 through 11e publish, keyed by the name each notebook builds from. Named
+# rather than hashed: a name resolves to the generation in force, so a refit that supersedes its
+# predecessor is picked up here without an edit, while every superseded snapshot stays readable
+# by hash. Five metric families are spread across nine of them - `deep_learning` over two
+# sequence notebooks, `latent_factors` over the five `11*` models - so the family each belongs
+# to is carried alongside, for the counts below.
+POPULATION_FAMILY = {
+    "linear": "linear",
+    "gbm": "gbm",
+    "tabular_dl": "tabular_dl",
+    "sequence": "deep_learning",
+    "patchtst": "deep_learning",
+    "pca": "latent_factors",
+    "ipca": "latent_factors",
+    "cae": "latent_factors",
+    "sdf": "latent_factors",
+    "sae": "latent_factors",
+}
+POPULATIONS = {model: f"{CASE_STUDY}-{model}-validation-v1" for model in POPULATION_FAMILY}
+
+# %% [markdown]
+# This notebook reads; it registers nothing, and that decides how it opens the registry. Every
+# route through `open_study` ends in `Study.activate()`, which rewrites `ML4T_OUTPUT_DIR` for the
+# rest of the process and clears the caches keyed on it, so every later `get_case_study_dir`
+# answers for a different directory than the one resolved here. On the canonical tier with no
+# workspace that route is `Study.regenerate`, which refuses outright unless `features`, `labels`
+# and `run_log` are symlinks - true in a maintainer worktree, false in every clean clone and
+# every CI run. On the preview tier it repoints the notebook at `.preview/<case>`, whose registry
+# `activate()` creates empty, and the comparison below then reports on nothing while reporting
+# success.
+#
+# `Study.at` is the read-only form: one root, no activation. `CASE_DIR` is that root, and every
+# question this notebook asks is answered from it.
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY)
+study = Study.at(CASE_DIR, case_study=CASE_STUDY, entry_point="13_model_analysis")
 
 with open(CASE_DIR / "config" / "setup.yaml") as f:
     setup = yaml.safe_load(f)
@@ -168,9 +209,91 @@ print(f"  Trading costs: {cost_range[0]}–{cost_range[1]} bps per leg")
 # limited fold count is a significant constraint: all fold-level
 # conclusions carry a caveat about small-sample stability.
 
+# %% [markdown]
+# **A population is immutable and the registry keeps every generation, so a candidate set built
+# straight from it counts retired members beside current ones.** Refitting a configuration under a
+# corrected estimator publishes a new snapshot that supersedes the old one; both stay readable, and
+# nothing in the registry read path filters on that - `case_studies/utils/registry/queries.py`
+# contains no occurrence of `supersed`. Without the filter both generations of a refitted
+# configuration enter the ranking as separate candidates, with near-identical scores, and the
+# published leaders are then fewer distinct strategies than they appear to be.
+#
+# The filter is what the nine names in `POPULATIONS` resolve to. `OfficialPopulation.one` returns
+# the one generation in a name's chain that nothing supersedes, and refuses rather than guessing
+# if the chain has forked, so a retired generation cannot arrive through the name that retired it.
+#
+# A registry that publishes no population at all is a different state, and it is not a broken one:
+# a fixture, or a clean clone whose cohorts have not run. `declared_population_members` separates
+# it from a declared name that will not resolve, which is a broken lineage and refuses when the
+# family has registered rows. Where nothing is declared, the comparison below runs on every
+# registered prediction set and says so - that is a weaker claim than a declared population, but a
+# statable one, and it is not the same as filtering everything away.
+
 # %%
 # Phase 1: Load pre-computed metrics (fast - no raw prediction loading)
 raw_metrics = load_all_metrics(CASE_STUDY, label=None).filter(pl.col("label").is_not_null())
+
+# %%
+# `produced` is per family rather than per population, because which registered row belongs to
+# which of a family's populations is what the population itself declares. A family with rows and
+# an unresolvable declared name is the refusing case whichever of its names failed.
+_family_produced = dict(
+    raw_metrics.group_by("family").len().iter_rows()  # (family, count)
+)
+_declared, _population_notes = declared_population_members(
+    study,
+    CASE_DIR,
+    POPULATIONS,
+    produced={
+        model: _family_produced.get(family, 0) for model, family in POPULATION_FAMILY.items()
+    },
+)
+for _note in _population_notes:
+    print(_note)
+
+if _declared:
+    CURRENT_MEMBERS = frozenset().union(*_declared.values())
+    # Filtering to the members is not the same as checking the members arrived. A population is
+    # published before its members finish fitting, so an interrupted run leaves a member absent
+    # from the registry rather than incomplete in it - the filter then silently returns a
+    # shorter leaderboard, and every recommendation below is made over whatever did arrive.
+    # `load_all_metrics` drops a prediction set with a constant-prediction fold, because its
+    # pooled IC is computed over the surviving folds only and is not a model result; those are
+    # declared members that correctly never reach a leaderboard, so they are counted rather than
+    # reported as missing.
+    _degenerate = degenerate_prediction_hashes(CASE_DIR)
+    _arrived = set(raw_metrics.get_column("prediction_hash").unique().to_list())
+    _dropped = CURRENT_MEMBERS & _degenerate
+    _missing = sorted(CURRENT_MEMBERS - _degenerate - _arrived)
+    if _missing:
+        raise RuntimeError(
+            f"{len(_missing)} declared member(s) never reached the registry: "
+            f"{', '.join(_missing[:5])}. The populations were published before their members "
+            "finished fitting, so the comparison below would be short without saying so."
+        )
+    # Present is not the same as finished either. Coverage, the headline metrics, the per-fold
+    # metrics and the predictions parquet are separate writes, so a run interrupted between them
+    # leaves a member this leaderboard ranks off whatever did land - a score over the folds it
+    # managed, where a shorter window is an easier window, or a rank on a set whose predictions
+    # nothing downstream can read. Each member is reported with which of those it is.
+    _short = incompletely_registered_predictions(CASE_DIR, CURRENT_MEMBERS)
+    if _short:
+        _named = ", ".join(f"{h}: {why}" for h, why in sorted(_short.items())[:5])
+        raise RuntimeError(
+            f"{len(_short)} declared member(s) are registered but unfinished: {_named}. "
+            "Ranking them would compare a partial run against complete ones."
+        )
+    print(
+        f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force"
+        + (f"; {len(_dropped):,} excluded as degenerate" if _dropped else "")
+    )
+    raw_metrics = raw_metrics.filter(pl.col("prediction_hash").is_in(CURRENT_MEMBERS))
+else:
+    CURRENT_MEMBERS = frozenset(raw_metrics.get_column("prediction_hash").unique().to_list())
+    print(
+        f"no populations declared here; comparing all {len(CURRENT_MEMBERS):,} registered "
+        "prediction sets"
+    )
 all_labels_metrics = (
     raw_metrics.with_columns(
         pl.col("ic_n_days").max().over(["family", "label"]).alias("_family_label_days")
@@ -368,15 +491,29 @@ predictive_families = primary_coverage.filter(pl.col("evidence") == "predictive"
 structural_families = primary_coverage.filter(pl.col("evidence") == "structural")[
     "family"
 ].to_list()
+# Counted over the rows that resolve, not over every row the table holds. A registration a
+# reader cannot resolve is not coverage, and listing `causal_dml` as a family on the strength
+# of one would put a family in the map whose evidence Section 7 then declines to show.
 _causal_db = CASE_DIR / "run_log" / "registry.db"
 if _causal_db.exists():
     import sqlite3
 
-    with sqlite3.connect(_causal_db) as _coverage_con:
-        _causal_primary_count = _coverage_con.execute(
-            "SELECT COUNT(*) FROM causal_runs WHERE label = ?", (PRIMARY_LABEL,)
-        ).fetchone()[0]
+    from case_studies.utils.registry.store import current_causal_identities
+
+    # Resolved once, here, through the reader's own path, and reused by Section 7 below.
+    # Two checks were drifting apart otherwise: this one counted identities while the
+    # evidence block tested a single metric, so a row could be coverage here and withheld
+    # there. `CausalResult.one` refuses an ambiguous label rather than choosing between two
+    # current identities, and `.complete` is the contract for whether the row holds what its
+    # run was asked to produce - including the refutation, when one was asked for.
+    try:
+        CAUSAL_RESULT = CausalResult.one(study, label=PRIMARY_LABEL)
+        CAUSAL_REFUSAL = "" if CAUSAL_RESULT.complete else f"{CAUSAL_RESULT.hash} is incomplete"
+    except ValueError as _causal_err:
+        CAUSAL_RESULT, CAUSAL_REFUSAL = None, str(_causal_err)
+    _causal_primary_count = 0 if CAUSAL_REFUSAL else 1
 else:
+    CAUSAL_RESULT, CAUSAL_REFUSAL = None, "no registry"
     _causal_primary_count = 0
 causal_families = ["causal_dml"] if _causal_primary_count else []
 all_labels = sorted(coverage["label"].unique().to_list())
@@ -607,9 +744,10 @@ if fold_ic.height > 0:
 # With two folds, and the highest-IC point estimates compressed close to zero (§3),
 # the box plots are minimally informative -
 # each "distribution" is two dots, and the inter-family overlap is
-# almost complete. The four positive highest-IC configurations
-# (`tabm_s`, SDF, NLinear, and `default_huber`) cluster together; the
-# ridge_a100.0 baseline sits below them. None of the families has
+# almost complete. Four of the five family leaders are positive and cluster
+# together (`tabm_m` at 0.0155, `pca` at 0.0099, `lstm_h64` at 0.0066 and
+# `leaves_7_mse` at 0.0050); the linear leader `enet_f0.08` sits below them
+# at -0.0022. None of the families has
 # established time-series robustness in the formal sense on this
 # label, and the daily-pooled HAC CIs (§3) - which use the full
 # panel rather than the 2 fold-aggregates - are the binding
@@ -660,9 +798,11 @@ if bucket_results:
 
 # %% [markdown]
 # The decile plot is read alongside the 6-20 bps round-trip cost range.
-# TabM produces a 44 bps top-minus-bottom spread. NLinear and linear reach
-# 11 and 8 bps, while SDF and GBM are approximately flat at -3 and -1 bps
-# despite positive mean IC. With only two validation
+# TabM produces a 27 bps top-minus-bottom spread. The LSTM and PCA reach
+# 21 and 14 bps, linear 8, and GBM is approximately flat at -2 bps despite
+# a positive mean IC. Ordering by spread is not the ordering by IC: the
+# LSTM ranks third on IC and second here, which is what a decile spread
+# measures that a rank correlation does not. With only two validation
 # folds, these gross spreads are diagnostics rather than trading claims.
 # They reinforce the Section 3 result that the primary-label evidence is
 # weak and sensitive to the representation used.
@@ -897,15 +1037,18 @@ if gbm_importance is not None and gbm_importance.height > 0:
     print(f"Equity features in top {TOP_N_FEATURES}: {len(eq_in_top)} - {eq_in_top}")
 
 # %% [markdown]
-# **Equity features outnumber option-derived features.** Five of the top
-# 15 are option-derived: the near-ATM term slope plus four IV
-# level or momentum features. The remaining ten include price momentum,
-# realized volatility, Garman-Klass volatility, and realized skew.
+# **Equity features hold a narrow majority of the top slots.** Eight of the top
+# 15 are equity-side and seven are option-derived: five IV levels across the
+# 7, 30 and 90-day tenors and the 25-delta put and call wings, the 252-day
+# z-score of 30-day ATM IV, and the ATM term ratio. The eight equity features
+# are realized volatility at 20 and 63 days, Garman-Klass volatility, and
+# momentum at 63, 126 and 252 days plus its risk-adjusted and skip-recent
+# variants.
 #
-# The dominant equity-side features include **rv_63** (63-day realized
-# volatility), `gk_vol_21` (Garman-Klass volatility), and realized skew.
-# The near- and far-ATM term slopes and momentum at 21, 63, and 126 days
-# also appear.
+# Only two features hold a top-5 slot in at least three quarters of folds:
+# `iv_30_put_25d` and `rv_63`. With two folds that is a weak statement about
+# persistence, and it is the reason the ranking below is read as breadth
+# rather than as a stable ordering.
 #
 # The feature importance pattern tells a nuanced story:
 #
@@ -913,21 +1056,22 @@ if gbm_importance is not None and gbm_importance.height > 0:
 #    volatility (equity) and implied volatility (option) are the
 #    strongest individual predictors. The signal is fundamentally
 #    about volatility regime positioning.
-# 2. **Option features add breadth**: five of 15 slots show that the
+# 2. **Option features add breadth**: seven of 15 slots show that the
 #    option surface participates in the forecast, but this importance
 #    ranking is not an ablation and does not isolate incremental value.
 # 3. **The IV-RV spread is absent**: ivrv_spread does not rank in the
 #    top 15, despite being the theoretically most interesting option
 #    feature. This may reflect high noise at the individual stock level.
-# 4. **Momentum features are secondary**: mom_21d and mom_skip_recent
-#    appear but do not dominate, suggesting that pure price momentum
+# 4. **Momentum features are secondary**: momentum at 63, 126 and 252 days
+#    and `mom_skip_recent` all appear but none reaches the top of the
+#    ranking, suggesting that pure price momentum
 #    is less important than volatility regime for weekly stock selection
 #    in S&P 500.
 #
 # The feature-level view shows why joint equity-option structure remains
 # worth testing. It does not explain family superiority on the primary
-# label: SDF is the latent-factor leader there, and all family-leader CIs
-# still include zero.
+# label: PCA is the latent-factor leader there, and every family-leader CI
+# on this label still includes zero.
 
 # %% [markdown]
 # ## 6. Heterogeneity: Labels, Horizons, and Regimes
@@ -1081,10 +1225,50 @@ if regime_df.height > 0:
 # vol-normalized horizons (Section 6: PCA on both labels).
 
 # %%
-# Load latent factor diagnostics
+# `load_fold_extras` reads `run_log/training/<training_hash>/fold_extras.json`, so it takes a
+# training hash and not an estimator name. Passing the name resolved to a directory that never
+# exists, every lookup returned None, the filter emptied the dict, and each `if "<model>" in
+# lf_extras` block below silently printed nothing while the prose beside it described the
+# figures. Nothing raised, because a missing extras file is a legitimate answer for a model
+# that stores none.
+#
+# The hash has to come from the published member rather than from any run of the estimator: 44
+# latent-factor training runs are registered here and all of them wrote fold extras, so picking
+# by estimator alone would show a superseded fit's diagnostics beside the current fit's score.
+# `_declared` is the population in force per model, which is the same set the leaderboard above
+# is ranked over, and the member taken is the one whose IC the summary prints.
 lf_models = ["pca", "ipca", "cae", "sdf", "sae"]
-lf_extras = {m: load_fold_extras(CASE_STUDY, m) for m in lf_models}
+
+
+def _published_training_hash(model: str) -> str | None:
+    """The training run behind the best-scoring published member of ``model``."""
+    members = _declared.get(model) if _declared else None
+    if not members:
+        return None
+    scored = raw_metrics.filter(
+        pl.col("prediction_hash").is_in(list(members)), pl.col("label") == PRIMARY_LABEL
+    ).sort("ic_mean_daily", descending=True, nulls_last=True)
+    if scored.height == 0:
+        return None
+    best = scored.row(0, named=True)["prediction_hash"]
+    with sqlite3.connect(CASE_DIR / "run_log" / "registry.db") as _db:
+        found = _db.execute(
+            "SELECT training_hash FROM prediction_sets WHERE prediction_hash = ?", (best,)
+        ).fetchone()
+    return found[0] if found else None
+
+
+lf_training = {m: _published_training_hash(m) for m in lf_models}
+lf_extras = {m: load_fold_extras(CASE_STUDY, h) for m, h in lf_training.items() if h}
 lf_extras = {m: e for m, e in lf_extras.items() if e is not None}
+_lf_silent = sorted(m for m in lf_models if m not in lf_extras)
+if _lf_silent:
+    # Named rather than left to an empty figure. A model whose extras cannot be read has no
+    # diagnostic below it, and the reader is told which one and why instead of seeing a gap.
+    print(
+        "No fold extras for: "
+        + ", ".join(f"{m} (training {lf_training[m] or 'unresolved'})" for m in _lf_silent)
+    )
 
 # Print IC summary from registry
 lf_metrics = all_labels_metrics.filter(
@@ -1273,23 +1457,97 @@ if "sdf" in lf_extras:
 
 # %%
 # Load primary-label causal DML evidence from the dedicated registry table.
+#
+# `causal_runs` is keyed on `causal_hash`, and the identity covers the fold and placebo
+# geometry, the seed, the horizon, the row cap and the development cutoff. Re-running the
+# causal notebook under any different design writes a *second* row for the same label rather
+# than replacing the first, so selecting on `label` alone can list two estimates with nothing
+# to tell them apart and count a superseded run into a gate the declared run does not clear.
+# `current_causal_identities` is the reader's own rule for which rows resolve - current
+# identity version, matching tier, not superseded - and it is what this block filters to.
+#
+# A row that resolves to nothing is reported rather than dropped in silence. A registration
+# written through `register_causal_run` carries no `identity_version`, so it lands in the
+# table and answers no reader; showing it here as the case study's causal evidence would
+# present as findable something the resolver does not return.
 import json as _json
 import sqlite3
 
+from case_studies.utils.registry.store import IDENTITY_VERSION as CAUSAL_IDENTITY_VERSION
+from case_studies.utils.registry.store import current_causal_identities
+
 _db_path = CASE_DIR / "run_log" / "registry.db"
 causal_rows = []
+causal_unresolvable = []
 if _db_path.exists():
     with sqlite3.connect(_db_path) as _con:
+        _resolvable = set(current_causal_identities(_con, label=PRIMARY_LABEL))
         _cur = _con.execute(
-            "SELECT label, treatment, dml_effect, dml_se_hac, p_value_hac, "
+            "SELECT causal_hash, label, treatment, dml_effect, dml_se_hac, p_value_hac, "
             "naive_effect, confounding_bias_pct, refutation_p, n_obs, embargo, "
-            "confounders_json FROM causal_runs WHERE label = ? ORDER BY label",
+            "confounders_json, spec_json, supersedes_hash "
+            "FROM causal_runs WHERE label = ? ORDER BY causal_hash",
             (PRIMARY_LABEL,),
         )
-        for row in _cur.fetchall():
-            d = dict(zip([c[0] for c in _cur.description], row))
+        _fetched = _cur.fetchall()
+        _cols = [c[0] for c in _cur.description]
+        # Which hash each superseding row retires, so a retired row can be named as retired
+        # rather than as unstamped.
+        _retired_by = {
+            dict(zip(_cols, row))["supersedes_hash"]: dict(zip(_cols, row))["causal_hash"]
+            for row in _fetched
+            if dict(zip(_cols, row))["supersedes_hash"]
+        }
+        for row in _fetched:
+            d = dict(zip(_cols, row))
+            _spec_json, _supersedes = d.pop("spec_json"), d.pop("supersedes_hash")
             d["confounders"] = _json.loads(d.pop("confounders_json"))
-            causal_rows.append(d)
+            if d["causal_hash"] in _resolvable:
+                causal_rows.append(d)
+            else:
+                causal_unresolvable.append((d["causal_hash"], _spec_json, _supersedes))
+
+# Membership in `current_causal_identities` is necessary and not sufficient. `CausalResult.one`
+# is what a reader actually calls, and it resolves only when exactly ONE current identity
+# exists for the label - it refuses on an ambiguous registry rather than picking - and the
+# result it hands back carries a `complete` contract of its own. Two current identities would
+# have put two estimates in the table below with nothing distinguishing them, and gate counts
+# computed out of two; an incomplete one would have counted as causal coverage. Neither is
+# something the membership check can see, so the reader's own resolution is run here too.
+# The same resolution the coverage map above was computed from, so the two cannot disagree.
+if CAUSAL_REFUSAL or CAUSAL_RESULT is None:
+    causal_rows = []
+else:
+    causal_rows = [row for row in causal_rows if row["causal_hash"] == CAUSAL_RESULT.hash]
+if CAUSAL_REFUSAL:
+    print(f"No causal evidence is reported: {CAUSAL_REFUSAL}")
+
+if causal_unresolvable:
+    # Why each one is excluded, rather than one explanation applied to all of them.
+    # `current_causal_identities` drops a row for any of three reasons and they call for
+    # different repairs: a stale identity version needs the notebook converted to the
+    # resolver, a preview row is correctly invisible to a canonical read and needs nothing,
+    # and a superseded row is retired evidence that a later run deliberately replaced. One
+    # message covering all three sends a reader to fix something that is not broken.
+    _why = []
+    for _hash, _spec_json, _supersedes in causal_unresolvable:
+        _spec = _json.loads(_spec_json or "{}")
+        if _hash in _retired_by:
+            _why.append(f"{_hash}: superseded by {_retired_by[_hash]}")
+        elif _spec.get("identity_version") != CAUSAL_IDENTITY_VERSION:
+            _why.append(
+                f"{_hash}: identity version {_spec.get('identity_version') or 'absent'}, "
+                f"not {CAUSAL_IDENTITY_VERSION} - registered through `register_causal_run`, "
+                "which cannot stamp one"
+            )
+        elif str(_spec.get("execution_tier", "canonical")) != "canonical":
+            _why.append(f"{_hash}: {_spec.get('execution_tier')} tier, not canonical")
+        else:
+            _why.append(f"{_hash}: excluded by the resolver for a reason not classified here")
+    print(
+        f"{len(causal_unresolvable)} causal row(s) for {PRIMARY_LABEL} do not resolve and are "
+        "not reported below. " + "; ".join(_why) + "."
+    )
 
 
 def _fmt(val, spec):
@@ -1337,22 +1595,34 @@ else:
 # ### Calibration: Do Prediction Intervals Reach Their Nominal Coverage?
 #
 # Point IC tells us whether the ranking is correct on average; it says
-# nothing about whether the model's *uncertainty* is well calibrated.
-# Inductive split-conformal prediction (Vovk et al., 2005; Lei et al.,
-# 2018) gives a distribution-free check: using the earliest validation
-# fold's absolute residuals as a calibration set, the symmetric quantile
-# $\hat{q}_{1-\alpha}$ defines an interval
-# $[\hat{y} - \hat{q}, \hat{y} + \hat{q}]$ that should cover the true
-# label at rate $1-\alpha$ on later folds.
-# Empirical coverage materially below the nominal level signals
-# overconfident residual scaling: the model misses more often
-# than its training-time spread suggests. Width is reported as a
-# fraction of the actuals' standard deviation so families with different
-# return scales are comparable; smaller width at matched coverage means
-# tighter, more useful intervals. See Ch12 §12.6 / `11_conformal_gbm`
-# for the full conformal toolkit (CQR, ACI). What we report here is the
-# minimal residual-calibration diagnostic on the highest-IC config per
-# family for the primary label.
+# nothing about whether the model's *uncertainty* is well calibrated. The
+# width measured here is the one the `conformal_weighted` allocator sizes
+# positions with: calibrated per symbol on every absolute residual known at
+# `t - h`, where `h` is this label's horizon in data steps, falling back to a
+# quantile pooled over every symbol where one has too few residuals of its
+# own. A decision is covered when its absolute residual falls inside that
+# half-width, and `n_uncalibrated` counts the decisions that cleared no
+# warm-up and that no coverage figure describes.
+#
+# Empirical coverage materially below the nominal level signals overconfident
+# residual scaling - the model is more wrong, more often, than its
+# training-time spread suggests. Width is reported as a fraction of the
+# standard deviation of the outcomes it was measured against, so families with
+# different return scales are comparable; smaller width at matched coverage
+# means tighter, more useful intervals.
+#
+# Read it as a diagnostic of residual dispersion rather than a guarantee.
+# Split conformal's finite-sample coverage (Vovk et al., 2005; Lei et al.,
+# 2018) requires the calibration and evaluation scores to be exchangeable and
+# return residuals are not, and nothing in the allocation path reads an
+# interval or a coverage level - the width stands in for a volatility
+# estimate. See Ch12 §12.6 / `11_conformal_gbm` for the full conformal toolkit
+# (CQR, ACI).
+#
+# Each row is the family's highest-IC configuration for the primary label.
+# That is a model-level ranking and not the funnel's - every selection stage
+# ranks on validation backtest Sharpe - and it is used here because this
+# diagnostic runs before any backtest exists to rank.
 
 # %%
 conformal_df = conformal_coverage_diagnostic(CASE_STUDY, label=PRIMARY_LABEL)
@@ -1370,21 +1640,26 @@ if conformal_df.height > 0:
 
 # %% [markdown]
 # **Read each family's empirical coverage against the nominal level in the same column, and the
-# width beside it.** Coverage below nominal means the interval is too narrow out of time:
-# residuals in the later fold are wider than the earliest fold's calibration set implied. Width
-# is in units of the actuals' standard deviation, so a family can only claim tighter intervals
-# if it reaches comparable coverage while showing a smaller width.
+# width beside it.** Coverage below nominal means the width is too narrow out of time: the
+# residuals a decision met are wider than everything known before it implied. Width is in units
+# of the standard deviation of the outcomes it was measured against, so a family can only claim
+# tighter intervals if it reaches comparable coverage while showing a smaller width.
 #
 # The shortfall to watch for is a systematic one - every family below nominal at every level -
 # rather than one family missing. A systematic shortfall is a statement about the sample, not
-# about the models: it says the calibration fold and the evaluation folds are not exchangeable,
-# which is what a split-conformal interval assumes and what a regime change breaks.
+# about the models: it says the residuals a width was calibrated on and the residuals it was
+# measured against are not exchangeable, which is what a conformal quantile assumes and what a
+# regime change breaks.
 #
-# **This is the section that matters for position sizing.** An interval that under-covers out of
-# time understates residual uncertainty, and a sleeve that froze the earliest fold's quantile
-# would sit larger than the risk it believed it was taking. Where the shortfall is systematic,
-# the online-updating extensions in Chapter 12, Section 12.6 are the next step before any of
-# these intervals is used to size anything.
+# **What a systematic shortfall does and does not establish.** `conformal_weighted` normalizes
+# `1/width` within each side at each timestamp, so a width scale that is uniformly too small
+# divides out and leaves every weight unchanged. Only the *differences* between symbols' widths
+# reach the portfolio, and this table does not measure those: it measures the scale of the
+# residuals against the widths, pooled over the decisions. So a shortfall says the uncertainty
+# estimate is optimistic and is a reason to look at the cross-section of widths before trusting
+# them to size - it is not, on its own, a finding that any position was too large. Where the
+# shortfall is systematic, the online-updating extensions in Chapter 12, Section 12.6 are what
+# to reach for.
 
 # %% [markdown]
 # ## 8. Pre-Backtest Judgment and Handoff
@@ -1506,9 +1781,12 @@ credible.select(
 # **The causal estimate is a separate framing and does not compete in this ranking.** It is a
 # conditional treatment effect for one declared treatment, not a cross-sectional ranking signal.
 #
-# **The calibration result in §7 constrains every tier.** Where intervals under-cover out of
-# time, no candidate should have its interval used for position sizing without the
-# online-updating correction, whatever its IC.
+# **The calibration result in §7 qualifies every tier.** §7 measures the widths
+# `conformal_weighted` would use, so it is about this allocator rather than about intervals in
+# general - but it measures their scale and not their cross-section, and the allocator consumes
+# only the cross-section. Where the widths under-cover out of time, that is a reason to check
+# the online-updating correction before sizing on them, not a disqualification of any candidate
+# on its own.
 #
 # ### Forecast Representation
 #
@@ -1520,8 +1798,8 @@ credible.select(
 #   above, rather than routing every family to the primary label.
 # - **Ensemble**: the pairwise rank correlations in §5 decide whether averaging helps. Low
 #   correlation among families whose intervals all cover zero is diversity among weak signals,
-#   and averaging weak signals does not produce a strong one. Weight by how tight an interval
-#   is rather than by how large a point estimate is.
+#   and averaging weak signals does not produce a strong one. Weight by how tight a conformal
+#   width is rather than by how large a point estimate is.
 
 # %% [markdown]
 # ### The Option Feature Question
@@ -1545,10 +1823,14 @@ credible.select(
 #
 # ### What This Analysis Does Not Tell Us
 #
-# - **Conformal-corrected sizing**: the §7 under-coverage gaps across
-#   all five families mean that static interval widths understate later-fold
-#   uncertainty; ACI-based online updates (Ch12 §12.6) would replace
-#   the frozen calibration quantile before sizing.
+# - **Conformal-corrected sizing**: the §7 under-coverage gaps across all five
+#   families say the widths understate residual scale out of time. The widths are
+#   already expanding rather than fixed - each recalibrates on every residual known
+#   at the decision it sizes - so what is open is not whether to unfreeze them but
+#   whether an adaptive rule that targets coverage directly (ACI, Ch12 §12.6) does
+#   better. And §7 measures scale, while `conformal_weighted` consumes only the
+#   cross-section of widths, so this is a reason to measure that cross-section
+#   before sizing on it rather than a finding about any candidate.
 # - **Transaction costs under weekly rebalancing**: decile spreads
 #   are small in absolute terms and must survive round-trip costs of
 #   6–20 bps for liquid S&P 500 names; with weekly rebalancing,
@@ -1567,7 +1849,7 @@ credible.select(
 #
 # **Next**: [`14_backtest`](14_backtest.ipynb) for strategy simulation,
 # [`15_portfolio_management`](15_portfolio_management.ipynb) for position sizing, and
-# `18_strategy_analysis.py` for end-to-end results.
+# [`20_strategy_analysis`](20_strategy_analysis.ipynb) for end-to-end results.
 
 # %% [markdown]
 # ## Key Takeaways

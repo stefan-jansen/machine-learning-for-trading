@@ -170,6 +170,23 @@ def _load_setup(case_study: str) -> dict:
     return yaml.safe_load(_setup_path(case_study).read_text())
 
 
+def get_declared_long_short(case_study: str) -> bool:
+    """Whether a case study's declared selection mode is cross-sectional long-short.
+
+    Delegates to ``get_backtest_config``, which reads it off
+    ``mapping.position_state_space``. That is the selection mode, not
+    ``account.allow_short_selling``: the account flag is an execution permission, and
+    the two come apart. ``sp500_options`` sets the permission because it sells
+    straddles, but its state space is ``short_straddle_hedged`` - a one-sided short
+    that builds no cross-sectional short sleeve, and its backtest passes
+    ``long_short: False`` accordingly. Sizing its concentration grid off the account
+    flag would halve a ceiling that nothing halves at run time.
+    """
+    from case_studies.utils.backtest_loaders import get_backtest_config
+
+    return bool(get_backtest_config(case_study).long_short)
+
+
 def get_execution_defaults(case_study: str) -> dict:
     """Return the ``execution:`` block from setup.yaml.
 
@@ -612,7 +629,13 @@ def get_signal_nasdaq100_schemes_for(
             for direction in directions:
                 ls = direction == "long_short"
                 for top_k in top_k_grid:
-                    if top_k >= n_assets:
+                    # Same ceiling as `get_top_k_values_for`, and it has to be
+                    # applied here too: this branch sets `long_short` off its own
+                    # `direction` axis, so a `k` in `(n_assets // 2, n_assets)`
+                    # would register as `ewtopk_ls_k<k>` and run at the clamped
+                    # half. `direction` is per-scheme, so use it rather than the
+                    # case study's declared mode.
+                    if top_k >= n_assets or (ls and 2 * top_k > n_assets):
                         continue
                     dtag = "ls" if ls else direction[0]
                     schemes.append(
@@ -649,12 +672,39 @@ def get_top_k_values_for(
     case_study: str,
     label: str,
     n_assets: int,
+    *,
+    long_short: bool | None = None,
 ) -> list[int]:
     """Return the top-K grid for ``(case_study, label)`` used by Ch17.
 
     Filters out k >= n_assets (holding everything is the equal-weight
     benchmark, not a prediction-based portfolio). Raises ``KeyError`` if
-    ``backtest.sweep.top_k_grid[label]`` is not declared.
+    ``backtest.sweep.top_k_grid[label]`` is not declared, and ``ValueError``
+    when the filter empties the grid.
+
+    A long-short strategy takes ``k`` names on each side, so its ceiling is half
+    the universe, not all of it. ``signals.py`` clamps ``eff_k`` to
+    ``n_assets // 2`` when ``long_short`` is set, and ``top_k`` is identity-bearing
+    through ``plan_backtests(signal=...)`` - so a ``k`` in the half-open interval
+    ``(n_assets // 2, n_assets)`` passes this filter, registers under the declared
+    ``k``, and runs at the clamped one. Two such values register distinct identities
+    over a byte-identical weight series. ``get_entry_schemes_for`` has excluded that
+    interval since it took a ``long_short`` argument; this function is the other half
+    of the same grid and has to agree with it.
+
+    ``long_short`` defaults to the case study's declared selection mode - the same
+    ``mapping.position_state_space`` that ``get_backtest_config`` reads, which is what
+    every caller already passes to ``get_entry_schemes_for`` as ``bt_config.long_short``.
+    Not ``account.allow_short_selling``: that is an execution permission, and
+    ``sp500_options`` holds it while selecting long-only. Pass it explicitly to override.
+
+    An empty grid is never a legitimate result: the caller multiplies it into
+    a sweep size, so zero concentrations means zero backtests, and the sweep
+    loop then completes without registering anything while still reporting
+    itself done. The downstream risk-overlay notebook is the only thing that
+    notices, and it blames the operator for not having run this stage. Raise
+    here instead, where the cause - a universe cap smaller than the smallest
+    declared k - is still visible.
     """
     sweep = load_sweep(case_study)
     grid = (sweep.get("top_k_grid") or {}).get(label)
@@ -663,7 +713,33 @@ def get_top_k_values_for(
             f"backtest.sweep.top_k_grid[{label!r}] not declared in "
             f"case_studies/{case_study}/config/setup.yaml"
         )
-    return [int(k) for k in grid if int(k) < n_assets]
+    if long_short is None:
+        long_short = get_declared_long_short(case_study)
+    ceiling = n_assets // 2 if long_short else n_assets
+    values = [
+        int(k) for k in grid if int(k) < n_assets and not (long_short and 2 * int(k) > n_assets)
+    ]
+    if not values:
+        smallest = min(int(k) for k in grid)
+        # What the universe has to hold, which is not the same number in the two
+        # cases. Long-short takes `k` names on each side, so it needs `2k`, and
+        # saying "raise MAX_SYMBOLS above k" there sends the reader to a cap that
+        # cannot fix it - or worse, to a cap the fixture cannot reach at all.
+        needed = (
+            f"at least {2 * smallest} names for the smallest declared k of {smallest} "
+            f"({smallest} long and {smallest} short)"
+            if long_short
+            else f"more than {smallest} names for the smallest declared k"
+        )
+        side = f"long-short ceiling ({ceiling})" if long_short else "universe"
+        raise ValueError(
+            f"top_k_grid[{label!r}] = {list(grid)} is empty after filtering against "
+            f"n_assets={n_assets} for case_studies/{case_study}: every declared k holds "
+            f"the whole {side}. A cross-sectional sweep here needs {needed}. Raise the "
+            f"universe cap (MAX_SYMBOLS) if the panel has them, widen the panel if it "
+            f"does not, or declare a smaller k."
+        )
+    return values
 
 
 _MOMENT_ALLOCATORS = {"inverse_vol", "risk_parity", "hrp", "mvo_ledoit_wolf", "mvo"}
@@ -766,7 +842,7 @@ def get_universe_filters_for(case_study: str) -> list[str | None]:
     ``signal.universe_filter`` in their spec) remain hash-stable.
 
     Note: ``backtest.sweep.htm_cost_cascade.universes`` is a separate
-    Ch18-only block consumed directly by ``14_costs.py`` via
+    Ch18-only block consumed directly by ``15_costs.py`` via
     ``get_htm_cost_cascade``; it is the cost-comparison axis (full vs
     liquid) and does NOT participate in the canonical rank-1 sweep.
     """

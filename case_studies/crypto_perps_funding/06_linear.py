@@ -84,6 +84,7 @@ from case_studies.research import (
     declared_labels,
     load_model_configs,
     model_requests,
+    narrows_declared_catalog,
     open_study,
     primary_label,
     resolved_model_plan,
@@ -98,6 +99,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
+SUPERSEDES_POPULATION: str = ""
 
 # %%
 study = open_study(
@@ -172,10 +174,11 @@ configs
 # either knob, and says so here rather than several cells later in a message about hashes.
 
 # %%
-if configs.height < load_model_configs(study, "linear").height and not POPULATION_NAME:
+if narrows_declared_catalog(study, "linear", configs) and not POPULATION_NAME:
     raise ValueError(
-        f"this run fits {configs.height} of the declared configurations, so it cannot publish "
-        "the canonical population; pass POPULATION_NAME to give it its own"
+        f"this run declares {configs.height} label-configuration pairs, which is not the "
+        "complete declared catalog, so it cannot publish the canonical population; pass "
+        "POPULATION_NAME to give it its own"
     )
 
 # %% [markdown]
@@ -266,10 +269,24 @@ plan.select(
 # publish the first label and be refused for the second, which is what happened before this
 # notebook fitted them together. Everything that finished stays registered, and re-running fits
 # only what is missing.
+#
+# `SUPERSEDES_POPULATION` names the population hash this run replaces. A changed estimator
+# parameter moves every training identity as surely as a changed menu does, so the refit is a
+# different population under the same name, and `OfficialPopulation.create` refuses to write it
+# without being told which snapshot it supersedes (`research/population.py:246`). The refusal comes
+# before the first fit, not at the end: `run_official_models` snapshots the population and only
+# then executes it (`research/execution.py:584,596`), so a run that cannot name its predecessor
+# fails immediately rather than after the sweep. Reproducing an identical member list is a no-op
+# whatever the caller declares, so this parameter matters only when the list genuinely differs.
 
 # %%
 population_name = POPULATION_NAME or "crypto_perps_funding-linear-validation-v1"
-execution, population = run_model_population(study, resolved, population_name=population_name)
+execution, population = run_model_population(
+    study,
+    resolved,
+    population_name=population_name,
+    supersedes=SUPERSEDES_POPULATION or None,
+)
 
 fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
 reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)

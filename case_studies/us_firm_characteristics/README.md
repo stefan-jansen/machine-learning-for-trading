@@ -38,9 +38,11 @@ The teaching arc threads four claims that must be evaluated jointly: regression-
 | Model Analysis | [`10_model_analysis`](10_model_analysis.ipynb) | n/a | Cross-family IC comparison, conformal coverage, fold-stability diagnostics | Nothing - it reads the registry |
 | Backtest | [`11_backtest`](11_backtest.ipynb) | Ch16 | Long-short decile strategy simulation across the prediction-signal sweep | One backtest run per prediction set and entry scheme; `daily_returns.parquet`, `weights.parquet`, and `spec.json` under `run_log/backtest/{hash}/` (the vectorized path produces no trade or fill ledger) |
 | Portfolio | [`12_portfolio_management`](12_portfolio_management.ipynb) | Ch17 | Allocator and concentration sweep on the deep cross-section | One backtest run per allocation method, same artifact layout |
-| Costs | [`13_costs`](13_costs.ipynb) | Ch18 | Era-dependent cost grid spanning pre- and post-decimalization | One backtest run per cost level, same artifact layout |
-| Risk | [`14_risk_management`](14_risk_management.ipynb) | Ch19 | Position-level and portfolio-level risk overlays on the monthly cadence | Nothing - the position-control loop is gated off on the vectorized path and the portfolio-control list is asserted empty, so no overlay variant is registered |
-| Strategy Analysis | [`15_strategy_analysis`](15_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with uncertainty-aware metrics | Nothing - the tear sheet needs a `trades.parquet` the vectorized backtester never emits, so the stage takes its no-trades branch |
+| Risk | [`13_risk_management`](13_risk_management.ipynb) | Ch19 | Position-level and portfolio-level risk overlays on the monthly cadence | Nothing - the position-control loop is gated off on the vectorized path and the portfolio-control list is asserted empty, so no overlay variant is registered |
+| Costs | [`14_costs`](14_costs.ipynb) | Ch18 | Era-dependent cost grid spanning pre- and post-decimalization | One backtest run per cost level, same artifact layout |
+| Holdout Predictions | [`15_holdout_predictions`](15_holdout_predictions.ipynb) | Ch20 | Refits the selected configuration on the history before the holdout window | One training run and one prediction set, both keyed to the derived holdout fold |
+| Holdout Backtest | [`16_holdout_backtest`](16_holdout_backtest.ipynb) | Ch20 | Trades the holdout predictions with the sizing and cost assumption the case study settled on | One backtest run at `stage='holdout'` |
+| Strategy Analysis | [`17_strategy_analysis`](17_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with uncertainty-aware metrics | Nothing - the tear sheet needs a `trades.parquet` the vectorized backtester never emits, so the stage takes its no-trades branch |
 
 ## Key Results
 
@@ -74,9 +76,11 @@ uv run python case_studies/us_firm_characteristics/09_causal_dml.py
 uv run python case_studies/us_firm_characteristics/10_model_analysis.py
 uv run python case_studies/us_firm_characteristics/11_backtest.py
 uv run python case_studies/us_firm_characteristics/12_portfolio_management.py
-uv run python case_studies/us_firm_characteristics/13_costs.py
-uv run python case_studies/us_firm_characteristics/14_risk_management.py
-uv run python case_studies/us_firm_characteristics/15_strategy_analysis.py
+uv run python case_studies/us_firm_characteristics/13_risk_management.py
+uv run python case_studies/us_firm_characteristics/14_costs.py
+uv run python case_studies/us_firm_characteristics/15_holdout_predictions.py
+uv run python case_studies/us_firm_characteristics/16_holdout_backtest.py
+uv run python case_studies/us_firm_characteristics/17_strategy_analysis.py
 ```
 
 ## Run Log

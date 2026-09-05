@@ -60,7 +60,8 @@ from IPython.display import Markdown, display
 RUN_LIVE = False
 PINNED_TRACE = "01_react_reasoning_20260615T191047Z_04eb6e7c603d.json"
 
-LLM_PROVIDER = ""  # empty = auto-detect; "mock" for CI (live path only)
+# empty = auto-detect; "mock" for CI (live path only)
+LLM_PROVIDER = ""
 MAX_STEPS = 5
 
 # %% [markdown]

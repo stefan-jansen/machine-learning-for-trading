@@ -584,6 +584,44 @@ def _deferred_readers(tree: ast.Module) -> tuple[dict[str, set[str]], set[str]]:
     return readers, opaque
 
 
+def _papermill_visible(py_path: Path) -> set[str] | None:
+    """The parameter names papermill itself can find, or None when it cannot be asked.
+
+    Papermill does not read the parameters cell with `ast`. It scans the cell line by line
+    and splits each on `=`, so two declarations that are valid Python and obviously
+    parameters to a reader are invisible to it:
+
+    - a PEP 604 union annotation, `TOP_N_COMBOS: int | None = None`, whose `|` it cannot
+      parse (`Optional[int]` and a bare `int` are both fine);
+    - a trailing comment containing `=`, as in `TOP_K = 0  # 0 = smallest feasible k`,
+      which it splits in the wrong place.
+
+    Either one drops the override silently: papermill logs "Passed unknown parameter" and
+    the notebook runs its own default, so a CI entry that says it reduces a workload does
+    not, and the job goes on passing while measuring something else. Measured 2026-08-30:
+    ten notebooks across six case studies were in that state.
+
+    Asked of papermill rather than restated here, so this cannot go on enforcing a rule
+    papermill has stopped applying - the same reason `test_every_declared_parameter_
+    reaches_its_notebook` drives this helper instead of copying its predicate.
+    """
+    ipynb = py_path.with_suffix(".ipynb")
+    if not ipynb.exists():
+        return None
+    # Deliberately not guarded with a try/import/return-None. papermill is a declared dependency
+    # (`pyproject.toml`), and every job that runs this installs it. Swallowing its absence would
+    # turn the corpus sweep into a check that passes because it asked nobody, which is the exact
+    # shape of failure this helper exists to catch - `test-unit` did not install papermill when
+    # this was written, and a tolerant import would have hidden that instead of surfacing it.
+    from papermill import inspect_notebook
+
+    try:
+        return set(inspect_notebook(str(ipynb)))
+    except Exception:
+        # An unreadable or unpaired notebook is a different failure with its own guard.
+        return None
+
+
 def unusable_parameters(py_path: Path, names: Iterable[str]) -> dict[str, str]:
     """Map each declared parameter name that cannot reach the notebook to why.
 
@@ -683,12 +721,24 @@ def unusable_parameters(py_path: Path, names: Iterable[str]) -> dict[str, str]:
         here, there = branch.get(bind_line, ()), branch.get(read_line, ())
         return here == there[: len(here)]
 
+    visible = _papermill_visible(py_path)
+
     problems = {}
     for name in names:
         # A translated name is analysed through the mapping it is folded into, and any problem is
         # reported against that mapping, because that is where the override actually has to land.
         analysed = TRANSLATION_TARGET if name in translated else name
         via = f" (it reaches the notebook as {TRANSLATION_TARGET})" if analysed != name else ""
+        if visible is not None and analysed not in visible:
+            # Asked first, because it decides whether the value is injected at all. The reads and
+            # rebinds below all ask what happens to an injected value, and none of them is
+            # meaningful for a name papermill never injects.
+            problems[name] = (
+                f"papermill cannot see it in {where}, so the value is never injected and the "
+                f"notebook keeps its own default; check the declaration for a `|` union "
+                f"annotation or an `=` inside a trailing comment{via}"
+            )
+            continue
         reads = [
             (seq, line)
             for seq, (kind, bound, line) in enumerate(events)
@@ -1003,10 +1053,17 @@ def resolved_registry_path(
 # reported unreachable on MAX_FOLDS and MAX_SYMBOLS, which do reach them.
 TRANSLATION_TARGET = "PREVIEW_REDUCTIONS"
 
-PREVIEW_TRANSLATED_PARAMETERS: dict[str, tuple[str, Callable[[Any], Any]]] = {
-    "MAX_FOLDS": ("folds", lambda value: list(range(int(value)))),
-    "MAX_SYMBOLS": ("max_symbols", int),
-    "TRAIN_SAMPLE_FRAC": ("train_sample_frac", float),
+# The third element is every reduction name that states the same quantity. A translated default
+# is dropped when the notebook's own mapping already carries one of them, because two consumers
+# read this mapping and they do not spell the fold count the same way: the model families take
+# `folds`, an explicit list, and the DML resolver takes `n_folds`, a count, and rejects any key
+# outside its four (`case_studies/utils/causal.py:_DML_PREVIEW_FIELDS`). Without the aliases the
+# `MAX_FOLDS` in `_QUICK_PARAMS` reached a complete causal mapping as a fifth key and
+# `resolve_causal_request` refused the request before any fit.
+PREVIEW_TRANSLATED_PARAMETERS: dict[str, tuple[str, Callable[[Any], Any], tuple[str, ...]]] = {
+    "MAX_FOLDS": ("folds", lambda value: list(range(int(value))), ("folds", "n_folds")),
+    "MAX_SYMBOLS": ("max_symbols", int, ("max_symbols",)),
+    "TRAIN_SAMPLE_FRAC": ("train_sample_frac", float, ("train_sample_frac",)),
 }
 
 
@@ -1021,10 +1078,11 @@ def _collect_preview_reductions(parameters: dict) -> dict:
     """
     resolved = dict(parameters)
     reductions = dict(resolved.get("PREVIEW_REDUCTIONS") or {})
-    for name, (key, cast) in PREVIEW_TRANSLATED_PARAMETERS.items():
+    for name, (key, cast, aliases) in PREVIEW_TRANSLATED_PARAMETERS.items():
         value = resolved.pop(name, None)
-        if value is not None:
-            reductions.setdefault(key, cast(value))
+        if value is None or any(alias in reductions for alias in aliases):
+            continue
+        reductions[key] = cast(value)
     # A preview run that reduces nothing is a canonical run wearing the wrong tier, and the
     # request builder rejects it. Reducing the universe is the reduction that always applies.
     if not reductions:

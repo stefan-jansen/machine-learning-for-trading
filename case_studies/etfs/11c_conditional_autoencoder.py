@@ -260,15 +260,15 @@ print(f"{len(requested_pairs)} label-configuration pairs")
 # whole call rather than publishing a population one member short.
 #
 # `SUPERSEDES_POPULATION` names the population hash this run replaces. A population is the set of
-# prediction identities, so anything that moves a training identity - a changed epoch schedule as much as a changed label menu -
-# produces a different set under the same name, and the registry refuses to write it without being
-# told which snapshot it supersedes. It is empty here because this notebook, run as it stands,
-# reproduces the members already published under that name rather than changing them, and
-# reproducing a published list is not a replacement. Fill it in when you have changed something
-# that moves an identity and want the new set to take the name; the error raised on the attempt
-# tells you which hash to name. A reduced-scale run passes it empty whatever the default is: a
-# population produced under a reduction is thrown away with the workspace it was written to, so it
-# has no lineage to extend.
+# prediction identities, so anything that moves a training identity - a changed epoch schedule as
+# much as a changed label menu - produces a different set under the same name, and the registry
+# refuses to write it without being told which snapshot it supersedes. It is empty here because
+# this notebook, run as it stands, reproduces the members already published under that name rather
+# than changing them, and reproducing a published list is not a replacement. Fill it in when you
+# have changed something that moves an identity and want the new set to take the name; the error
+# raised on the attempt tells you which hash to name. A reduced-scale run passes it empty whatever
+# the default is: a population produced under a reduction is thrown away with the workspace it was
+# written to, so it has no lineage to extend.
 
 # %%
 population_name = POPULATION_NAME or f"etfs-{MODEL_NAME}-validation-v1"
@@ -537,5 +537,8 @@ by_fold[panel_labels[0]]
 # **Next**: [`11d_stochastic_discount_factor`](11d_stochastic_discount_factor.ipynb) leaves the
 # two-stage shape behind entirely - it prices the cross-section rather than splitting the problem
 # into exposures and factor returns - and
-# [`11e_supervised_autoencoder`](11e_supervised_autoencoder.ipynb) keeps this notebook's network
-# and bottleneck while dropping the factor interpretation, which makes it the family's own control.
+# [`11e_supervised_autoencoder`](11e_supervised_autoencoder.ipynb) drops the factor
+# interpretation altogether and predicts the return from its bottleneck directly, which makes it
+# the one member fitted without the family's central assumption. Its network is not this one's -
+# it is deeper and wider, at a tenth of this learning rate - so the pair is not a controlled
+# comparison and that notebook does not read it as one.

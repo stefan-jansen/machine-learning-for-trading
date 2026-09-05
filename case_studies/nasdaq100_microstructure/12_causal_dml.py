@@ -16,469 +16,398 @@
 # %% [markdown]
 # # NASDAQ-100 Microstructure - Order Flow: Causal DML Estimation
 #
-# Does signed volume share *cause* future 15-minute returns, or is the observed
-# price impact already accounted for by spread and volatility? This notebook
-# applies double machine learning (DML) to `signed_vol_share` across NASDAQ-100
-# stocks on a one-minute observation grid.
+# Does signed volume share *cause* future 15-minute returns, or is the observed price impact
+# already accounted for by spread and volatility? This notebook applies double machine
+# learning (DML) to `signed_vol_share` across NASDAQ-100 stocks on a one-minute observation
+# grid.
 #
-# DML separates a treatment effect from confounding in two stages. The first
-# stage predicts the outcome from the confounders, and separately predicts the
-# treatment from the same confounders, using cross-fitting so no observation
-# helps predict itself. The second stage regresses the outcome residual on the
-# treatment residual, which measures the part of the treatment the confounders
-# do not explain. That remainder is the quantity a causal claim needs.
+# DML separates a treatment effect from confounding in two stages. The first stage predicts
+# the outcome from the confounders, and separately predicts the treatment from the same
+# confounders, using cross-fitting so no observation helps predict itself. The second stage
+# regresses the outcome residual on the treatment residual, which measures the part of the
+# treatment the confounders do not explain. That remainder is the quantity a causal claim
+# needs.
 #
-# **The treatment** is signed volume share: the fraction of a bar's traded
-# volume classified as buyer-initiated by the Lee-Ready rule, which assigns a
-# trade to the buyer when it prints above the prevailing quote midpoint. **The
-# confounders** are the relative bid-ask spread at the close of the bar, which
-# stands for how costly the name is to trade; five-minute realized volatility,
-# which stands for how noisy it currently is; and the trailing one-month
+# **The treatment** is signed volume share: the fraction of a bar's traded volume classified
+# as buyer-initiated by the Lee-Ready rule, which assigns a trade to the buyer when it prints
+# above the prevailing quote midpoint. **The confounders** are the relative bid-ask spread at
+# the close of the bar, which stands for how costly the name is to trade; five-minute
+# realized volatility, which stands for how noisy it currently is; and the trailing one-month
 # cumulative return, which stands for slower drift the bar inherits.
 #
-# **Learning Objectives**:
-# - Estimate a treatment effect on a panel where the label horizon is longer
-#   than the observation grid, so consecutive labels overlap
-# - Set the cross-fitting gap and the permutation block length from that label
-#   horizon rather than from the bar size
-# - Read a permutation refutation test alongside a parametric standard error,
-#   and say what each one can and cannot establish
+# **Learning objectives**
 #
-# **Book Reference**: Chapter 15, Section 15.6 (Cross-Dataset Causal Evidence)
+# - Say what a causal estimand adds to a specification that a predictive one does not carry.
+# - Read the analysis population, the temporal geometry and the refutation design out of the
+#   resolved identity before anything is fitted.
+# - Explain why an embargo and a permutation block on this panel are sized from the label
+#   horizon rather than from the bar, and what a wrong reading of "period" costs.
+# - Read a permutation refutation against a parametric standard error, and say which to
+#   believe when they disagree.
+# - Say why a causal row is registered separately from every prediction set and selects
+#   nothing.
 #
-# **Prerequisites**: [`03_financial_features`](03_financial_features.ipynb),
-# [`04_model_based_features`](04_model_based_features.ipynb)
+# **Book reference**: Chapter 15, Section 15.6 (cross-dataset causal evidence).
+#
+# **Prerequisites**: [`03_financial_features`](03_financial_features.ipynb) for the treatment
+# and the confounders, [`04_model_based_features`](04_model_based_features.ipynb) for the rest
+# of the panel, and [`05_evaluation`](05_evaluation.ipynb) for the holdout boundary this
+# analysis stays behind.
+#
+# **What it writes**: one row in `causal_runs`, for the primary label, carrying the estimate,
+# its Newey-West standard error, the naive comparison and the refutation p-value, under a
+# hashed identity derived from the estimand, the analysis population and the refutation
+# design. [`13_model_analysis`](13_model_analysis.ipynb) reads that row as causal evidence and
+# keeps it out of the predictive comparison. **It selects nothing**: selection is validation
+# backtest Sharpe in [`14_backtest`](14_backtest.ipynb), and a causal estimate is not a
+# candidate.
 
 # %% [markdown]
-# ## Identifying Assumptions
+# ## Identifying assumptions
 #
-# DML estimates a causal effect under three assumptions:
-# 1. **Conditional ignorability**: No unobserved confounders — all backdoor paths
-#    between treatment and outcome are blocked by the observed confounders.
-# 2. **Overlap (positivity)**: Every unit has a nonzero probability of receiving
-#    any treatment level, conditional on confounders.
-# 3. **SUTVA**: One unit's treatment doesn't affect another's outcome.
+# DML estimates a causal effect under three assumptions, and none of them is tested here:
 #
-# These are untestable. The refutation test below provides indirect evidence
-# but cannot prove the assumptions hold.
+# 1. **Conditional ignorability**: every backdoor path between treatment and outcome is
+#    blocked by the declared confounders. There is no unobserved third thing driving both.
+# 2. **Overlap**: every name could have carried any level of the treatment, given its
+#    confounders.
+# 3. **SUTVA**: one stock's order flow does not change another stock's return.
+#
+# The refutation test in section 3 is indirect evidence about the estimator, not about these.
+# It asks whether the estimate stands once the treatment's timing is destroyed, which a
+# spurious estimate often does not - but standing there is not the same as the assumptions
+# holding.
 
 # %%
-"""Causal DML - walk-forward estimation with refutation tests."""
+"""Resolve, estimate and register the NASDAQ-100 microstructure causal DML specification."""
 
-import warnings
-from datetime import timedelta
-
-import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
+import plotly.graph_objects as go
 import polars as pl
-import yaml
 
-from case_studies.utils.causal import (
-    classify_refutation,
-    format_dml_summary,
-    register_causal_run,
-    run_dml_analysis,
-)
-from utils.artifact_specs import resolve_label_horizon
-from utils.modeling import load_configs, load_modeling_dataset
-from utils.paths import get_case_study_dir
+from case_studies.research import ExecutionTier, causal_supersedes, open_study, primary_label
 from utils.reproducibility import set_global_seeds
-
-warnings.filterwarnings("ignore")
-
-# %% [markdown]
-# ### Settings
-#
-# `MAX_SAMPLES` decides what population the effect is a statement about. Zero
-# estimates on the whole pre-holdout sample. A positive value keeps only that
-# many of the most recent rows, which narrows the claim to that window: on a
-# one-minute panel of about 115 names, 50,000 rows is a little over one trading
-# day. Either way the value is recorded with the run, so a capped estimate and a
-# full one are never confused for each other.
-#
-# `CV_FOLDS` sets how many expanding train-and-predict blocks the cross-fitting
-# uses, and `N_PLACEBO` how many shuffled replications the refutation test draws.
-# The permutation p-value cannot resolve finer than one part in `N_PLACEBO`.
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "nasdaq100_microstructure"
-PRIMARY_LABEL = ""
-MAX_SYMBOLS = 0
+LABEL = ""
 RANDOM_SEED = 42
-CV_FOLDS = 5
+MAX_SYMBOLS = 0
+CV_FOLDS = 0
 MAX_SAMPLES = 0
-N_PLACEBO = 100
+N_PLACEBO = 0
+# Declared rather than inferred from whether a reduction happens to be set. Inferring the tier
+# left a reduced run writing into the case study's own artifacts, which is the production
+# path. WORKSPACE is the other half: a preview has nowhere else to write.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
+# The causal identity this run retires, if any. A label resolves to exactly one current
+# identity, so a refit under changed code produces a second and the registry refuses it until
+# it is told which one it replaces. This case study has registered no causal run yet, so there
+# is nothing to retire and the declaration is empty; the error raised on the first refit names
+# the hash to put here. `causal_supersedes` resolves it against the registry in hand and
+# withholds it where there is nothing to retire, so one declaration is right for a reader
+# whose gitignored `run_log/` holds no causal rows at all.
+SUPERSEDES_CAUSAL: str = ""
+
+# %% [markdown]
+# ## 1. Declaring the request
+#
+# Nothing about the estimand is written here. The treatment, the confounders and the method
+# come from `config/setup.yaml`; the fold count, the placebo count and the seed come from the
+# shared `causal_dml` configuration. What this cell declares is which label to estimate the
+# effect on and under which execution tier.
+#
+# A nonzero fold, sample, symbol or placebo limit is a **preview**: a reduced run that writes
+# to a throwaway workspace and is excluded from canonical evidence. A canonical run cannot
+# carry one, and a preview must declare every one of them - a preview missing `max_samples`
+# would otherwise resolve the full population, which is the opposite of what the tier is for.
+#
+# **A canonical run is uncapped, and on this panel that is the whole difference.** Until this
+# notebook was converted it built its own specification and applied `max_samples: 50000` from
+# `case_studies/config/dml/dml.yaml` by hand - about one trading day of a one-minute panel
+# across roughly 115 names. `resolve_causal_request` ignores that key deliberately, so the
+# canonical estimate below is taken over every admissible row instead. Expect the number to
+# differ from any earlier hand-capped one by more than a rounding: on
+# `sp500_equity_option_analytics` the same removal took the fit from 37,240 rows to 376,871
+# and flipped the sign of the point estimate.
 
 # %%
 set_global_seeds(RANDOM_SEED)
-CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 
-# Resolve label from setup.yaml if not overridden
-setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
-if not PRIMARY_LABEL:
-    PRIMARY_LABEL = setup["labels"]["primary"]
+tier = ExecutionTier(EXECUTION_TIER)
+study = open_study(CASE_STUDY_ID, execution_tier=tier, workspace=WORKSPACE or None)
+label = LABEL or primary_label(study)
 
-# Load DML config and apply Papermill overrides
-causal_configs = load_configs(CASE_STUDY_ID, PRIMARY_LABEL, "causal_dml")
-dml_cfg = causal_configs[0]
+REDUCTION_PARAMETERS = {
+    "max_symbols": MAX_SYMBOLS or None,
+    "n_folds": CV_FOLDS or None,
+    "max_samples": MAX_SAMPLES or None,
+    "n_placebo": N_PLACEBO or None,
+}
+reductions = {key: value for key, value in REDUCTION_PARAMETERS.items() if value is not None}
+if tier is ExecutionTier.PREVIEW and not reductions:
+    raise ValueError("preview execution must declare its reductions")
+if tier is ExecutionTier.CANONICAL and reductions:
+    raise ValueError(f"canonical execution cannot carry reductions: {sorted(reductions)}")
 
-for key, val in [
-    ("n_folds", CV_FOLDS),
-    ("n_placebo", N_PLACEBO),
-    ("max_samples", MAX_SAMPLES),
-    ("seed", RANDOM_SEED),
-]:
-    if dml_cfg.get(key, val) != val:
-        dml_cfg[key] = val
-
-CV_FOLDS = dml_cfg.get("n_folds", 5)
-N_PLACEBO = dml_cfg.get("n_placebo", 100)
-MAX_SAMPLES = dml_cfg.get("max_samples", 50000)
-RANDOM_SEED = dml_cfg.get("seed", 42)
-
-print(f"DML config: {dml_cfg['config_name']}")
-
-# Read causal config from setup.yaml
-causal_cfg = setup.get("causal", {})
-TREATMENT_COL = causal_cfg.get("treatment", "")
-CONFOUNDER_COLS = causal_cfg.get("confounders", [])
-DML_METHOD = causal_cfg.get("method", "walk_forward_dml")
-
-if not TREATMENT_COL:
-    raise ValueError(
-        f"No causal.treatment in {CASE_STUDY_ID}/setup.yaml. "
-        "Add a 'causal:' section with treatment and confounders."
-    )
-
-np.random.seed(RANDOM_SEED)
-
-print("Causal DML Configuration:")
-print(f"  Case study: {CASE_STUDY_ID}")
-print(f"  Treatment: {TREATMENT_COL}")
-print(f"  Outcome: {PRIMARY_LABEL}")
-print(f"  Confounders: {CONFOUNDER_COLS}")
-print(f"  CV folds: {CV_FOLDS}")
-print(f"  Placebo reps: {N_PLACEBO}")
-
-# %% [markdown]
-# ## 1. Load Artifacts
-#
-# Load pre-computed features, temporal features, and labels using the
-# shared modeling infrastructure.
-
-# %%
-mds = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, max_symbols=MAX_SYMBOLS)
-
-dataset = mds.dataset
-feature_names = mds.feature_names
-label_col = mds.label_col
-date_col = mds.date_col
-entity_cols = mds.entity_cols
-
-# The estimand is defined by the treatment and the full confounder set. Estimating
-# without one of them answers a different question, so a missing column stops the
-# run rather than quietly shrinking the adjustment set.
-analysis_cols = list(dict.fromkeys([date_col, *entity_cols, TREATMENT_COL, label_col]))
-analysis_cols += [c for c in CONFOUNDER_COLS if c not in analysis_cols]
-
-missing = sorted(set(analysis_cols) - set(dataset.columns))
-if missing:
-    raise ValueError(
-        f"{CASE_STUDY_ID} declares causal columns that the finalized feature "
-        f"artifact does not contain: {missing}. Reconcile config/setup.yaml with "
-        f"03_financial_features before estimating."
-    )
-
-print(f"\nDataset: {len(dataset):,} rows x {len(feature_names)} features")
-print(f"Label: {label_col} | Date: {date_col} | Entities: {entity_cols}")
-
-# %% [markdown]
-# ## 2. Size the temporal geometry from the label horizon
-#
-# The label looks forward 15 minutes while the panel is observed once a minute,
-# so a row's outcome overlaps the next fourteen rows' outcomes. Two settings have
-# to be sized against that overlap rather than against the bar:
-#
-# - The **embargo** is the gap left between a training block and the validation
-#   block that follows it. If it is shorter than the label horizon, the last
-#   training rows resolve inside the validation window and the fit has seen part
-#   of what it is scored on.
-# - The **permutation block length** is how many consecutive decision times move
-#   together when the refutation test shuffles the treatment. Blocks shorter than
-#   the overlap leave the dependence in place and the test reports a narrower
-#   placebo distribution than the data supports.
-#
-# Both are counted in observation periods, so the notebook measures the grid step
-# from the data rather than assuming it. The measurement is not a formality here:
-# `decision.bar_frequency` in `setup.yaml` says fifteen minutes, and that is how
-# often the strategy acts, not how far apart the observations are. Dividing the
-# label horizon by it would give one period instead of fifteen, and the result
-# would look entirely normal.
-
-# %%
-grid = dataset.select(pl.col(date_col).unique().sort().alias("t"))
-step_counts = grid.select(pl.col("t").diff().alias("d")).drop_nulls().group_by("d").len()
-GRID_STEP = step_counts.sort("len", descending=True)["d"][0]
-
-LABEL_HORIZON = pd.Timedelta(resolve_label_horizon(CASE_STUDY_ID, PRIMARY_LABEL, setup))
-HORIZON_PERIODS = int(LABEL_HORIZON // pd.Timedelta(GRID_STEP))
-if HORIZON_PERIODS < 1:
-    raise ValueError(
-        f"Label horizon {LABEL_HORIZON} is shorter than the {GRID_STEP} observation grid"
-    )
-
-EMBARGO_PERIODS = HORIZON_PERIODS
-BLOCK_SIZE = HORIZON_PERIODS
-
-print(f"Observation grid: {GRID_STEP} | label horizon: {LABEL_HORIZON}")
-print(f"Horizon in periods: {HORIZON_PERIODS}")
-print(f"Embargo: {EMBARGO_PERIODS} periods | permutation block: {BLOCK_SIZE} periods")
-
-# %% [markdown]
-# ## 3. Seal the holdout and keep whole decision panels
-#
-# Estimation reads only dates before `evaluation.holdout_start`, and stops one
-# label horizon earlier still: a bar timestamped just before the boundary
-# resolves after it, so keeping it would let the held-out period influence the
-# estimate through the label.
-#
-# The sample cap then takes the most recent complete decision times that fit in
-# the row budget, so each decision time is either kept whole or dropped whole.
-# That keeps every statistic grouped by decision time computed on a full
-# cross-section.
-
-# %%
-HOLDOUT_START = pd.Timestamp(setup["evaluation"]["holdout_start"])
-ESTIMATION_END = HOLDOUT_START - LABEL_HORIZON
-
-
-def whole_panel_tail(frame: pl.DataFrame, timestamp: str, max_rows: int) -> pl.DataFrame:
-    """Most recent complete decision panels that fit inside ``max_rows``."""
-    if max_rows <= 0 or frame.height <= max_rows:
-        return frame
-    counts = frame.group_by(timestamp).len().sort(timestamp)
-    counts = counts.with_columns(pl.col("len").reverse().cum_sum().reverse().alias("suffix_n"))
-    keep = counts.filter(pl.col("suffix_n") <= max_rows).select(timestamp)
-    if keep.is_empty():
-        raise ValueError(
-            f"MAX_SAMPLES={max_rows} is smaller than one decision panel; raise it "
-            f"above the {counts['len'].max()} symbols quoting at a single timestamp"
-        )
-    return frame.join(keep, on=timestamp, how="semi")
-
-
-analysis = (
-    dataset.select(analysis_cols)
-    .drop_nulls()
-    .filter(pl.col(date_col) < pl.lit(ESTIMATION_END))
-    .sort([date_col, entity_cols[0]])
+request = study.causal(
+    method="dml",
+    label=label,
+    config_name="dml",
+    execution_tier=tier,
+    preview_reductions=reductions,
+    overrides={},
+    supersedes=causal_supersedes(
+        study, SUPERSEDES_CAUSAL, label, labels=[label], execution_tier=tier.value
+    ),
 )
-analysis = whole_panel_tail(analysis, date_col, MAX_SAMPLES)
-
-observed_end = analysis[date_col].max()
-if observed_end is None or pd.Timestamp(observed_end) + LABEL_HORIZON > HOLDOUT_START:
-    raise AssertionError(
-        f"A DML label endpoint reaches the holdout: last decision time "
-        f"{observed_end} resolves at or after {HOLDOUT_START}"
-    )
-
-merged_clean = analysis.to_pandas()
-
-# %%
-panel_sizes = analysis.group_by(date_col).len()["len"]
-print(f"Analysis data: {len(merged_clean):,} rows over {analysis[date_col].n_unique():,} times")
-print(f"Date range: {merged_clean[date_col].min()} to {merged_clean[date_col].max()}")
-print(f"Holdout opens {HOLDOUT_START.date()}; estimation stops by {ESTIMATION_END}")
-print(f"Panel size: {panel_sizes.min()}-{panel_sizes.max()} symbols per decision time")
+print(f"{CASE_STUDY_ID}: causal DML on {label}, tier {tier.value}")
 
 # %% [markdown]
-# ## 4. Run DML Analysis
+# ## 2. What resolving the request settles
 #
-# Three steps run together: a naive ordinary least squares baseline that ignores
-# confounding, the cross-fitted DML estimate with the embargo above, and the
-# block permutation refutation test.
+# **Resolving** goes and finds everything the declaration left open: it loads the label and
+# feature artifacts, checks the treatment and every confounder is present, computes the fold
+# boundaries and the embargo from the panel's own observed cadence, and works out the exact
+# set of symbol-timestamp pairs the estimate is taken over. It fits nothing, so all of it can
+# be read before any cost is paid.
 #
-# The second stage reports a Newey-West standard error, which widens the interval
-# to account for observations whose errors are correlated in time. Passing the
-# label horizon sets how many lags it accounts for. Left to infer, it falls back
-# to a rule based only on sample size, which under-lags an overlapping label and
-# reports a t-statistic that is too large.
+# Three things worth reading in it, and on this panel the first two are the notebook's whole
+# subject.
+#
+# - **The cadence, measured rather than declared.** `observation_cadence` comes from the
+#   spacing the data actually has, which here is one minute. `decision.bar_frequency` in
+#   `setup.yaml` says fifteen minutes, and that is how often the strategy *acts*, not how far
+#   apart the observations are. An embargo and a block length derived from the decision
+#   frequency would come out as one period instead of fifteen, and one period is a number that
+#   looks entirely normal in a printed table.
+# - **The temporal controls, sized from the label horizon.** The label looks forward fifteen
+#   minutes while the panel is observed once a minute, so a row's outcome overlaps the next
+#   fourteen rows' outcomes. `embargo_periods` is the gap left between a training block and
+#   the validation block after it: shorter than the horizon and the last training rows resolve
+#   inside the validation window, so the fit has seen part of what it is scored on.
+#   `holdout_endpoint_cutoff` is the same argument at the holdout boundary - the last admitted
+#   decision time is one horizon before it, because a bar timestamped just inside would
+#   resolve outside.
+# - **The refutation design.** `block_size` is how many consecutive decision times move
+#   together when the placebo shuffles the treatment, and `block_size_basis` names what set
+#   it: the label buffer or the treatment's own construction window, whichever is longer.
+#   Blocks shorter than the overlap leave the serial dependence in place, and the placebo
+#   distribution then comes out narrower than the data supports - a p-value that reads like a
+#   refutation without being one.
+#
+# All of it goes into the hashed identity, so an estimate made under a different population, a
+# different embargo or a different placebo design registers beside this one rather than over
+# it.
 
 # %%
-results = run_dml_analysis(
-    merged_clean,
-    treatment_col=TREATMENT_COL,
-    outcome_col=label_col,
-    confounder_cols=CONFOUNDER_COLS,
-    n_folds=CV_FOLDS,
-    embargo=EMBARGO_PERIODS,
-    n_placebo=N_PLACEBO,
-    block_size=BLOCK_SIZE,
-    seed=RANDOM_SEED,
-    horizon=HORIZON_PERIODS,
-    time_col=date_col,
-    entity_col=entity_cols[0],
+resolved = request.resolve()
+computation = resolved.spec["computation"]
+estimand = computation["estimand"]
+
+print(f"Outcome:     {estimand['outcome']} over {estimand['outcome_horizon']}")
+print(f"Treatment:   {estimand['treatment']}")
+print(f"Confounders: {', '.join(estimand['confounders'])}")
+print(f"Last admissible decision time: {estimand['holdout_endpoint_cutoff']}")
+print(f"Identity:    {resolved.identity}")
+
+# %% tags=["results"]
+_settled = pl.DataFrame(
+    {
+        "setting": [
+            "observation cadence",
+            "label horizon",
+            "embargo",
+            "cross-fitting folds",
+            "fold unit",
+            "placebo method",
+            "placebo block",
+            "block basis",
+            "placebo draws",
+            "analysis rows",
+            "decision times",
+            "nuisance model",
+        ],
+        "value": [
+            str(computation["refutation"]["observation_cadence"]),
+            str(estimand["outcome_horizon"]),
+            f"{computation['cv']['embargo_periods']} periods",
+            str(computation["cv"]["n_folds"]),
+            str(computation["cv"]["fold_unit"]),
+            str(computation["refutation"]["method"]),
+            f"{computation['refutation']['block_size']} periods",
+            str(computation["refutation"]["block_size_basis"]),
+            str(computation["refutation"]["n_placebo"]),
+            f"{computation['analysis_population']['n_rows']:,}",
+            f"{computation['analysis_population']['n_timestamps']:,}",
+            str(computation["model"]["class"]),
+        ],
+    }
 )
-
-print(format_dml_summary(results))
-
-# %% [markdown]
-# ## 5. Statistical Assessment
-#
-# Two quantities describe how far adjustment moved the answer and how much of the
-# remaining effect could be an artifact of the panel's time structure.
-#
-# Confounding bias compares the unadjusted slope with the adjusted one, scaled by
-# the adjusted effect so it reads as a percentage:
-#
-# $$\text{Bias \%} = \frac{\hat{\theta}_{\text{naive}} - \hat{\theta}_{\text{DML}}}{|\hat{\theta}_{\text{DML}}|} \times 100$$
-#
-# A positive value means the raw association overstates the effect and the
-# confounders were carrying part of it. A value near zero means the treatment was
-# already close to orthogonal to them, which is common at intraday frequency
-# where spread and volatility move on their own schedule.
-#
-# The two significance readings answer different questions and can disagree. The
-# Newey-West p-value asks whether the effect is distinguishable from zero under a
-# parametric model of the errors. The permutation p-value asks how often the same
-# estimator recovers an effect this large from data whose treatment has been
-# shuffled in blocks, which keeps the panel's shape but destroys the treatment's
-# alignment with the outcome. When the permutation test does not corroborate the
-# parametric one, the parametric standard error is the reading to distrust: it
-# rests on an assumption about the errors that the shuffle does not need.
-
-# %%
-dml_result = results["dml_result"]
-naive_effect = results["naive_effect"]
-dml_effect = dml_result["theta"]
-se_hac = dml_result["se_hac"]
-bias_pct = results["confounding_bias_pct"]
-
-# p-value computed in run_dml_analysis (no duplication)
-p_value = results["p_value_hac"]
-
-ref = results.get("refutation", {})
-p_value_perm = ref.get("empirical_p", 1.0)
-ref_class = ref.get("refutation_class", classify_refutation(p_value_perm))
-
-print("Statistical significance:")
-print(f"  p-value (HAC): {p_value:.4f}")
-print(f"  Significant at 5%: {'Yes' if p_value < 0.05 else 'No'}")
-if ref:
-    print(f"  Refutation: {ref_class} (p={p_value_perm:.4f})")
+_settled
 
 # %% [markdown]
-# > **When should you be suspicious of large DML corrections?** A naive-to-DML
-# > amplification exceeding 5x warrants scrutiny. Possible causes:
-# > (1) nuisance models overfitting and stripping outcome-relevant variation,
-# > (2) weak instrument-like behavior where the treatment residual has low variance,
-# > (3) genuine massive confounding that naive OLS entirely misses.
-# > The refutation test helps distinguish (3) from (1-2): if placebos also show
-# > inflated effects, the DML correction may be unreliable.
+# The embargo and the block are both fifteen periods on a one-minute cadence, which is the
+# label horizon and not a coincidence: both answer the same overlap. `block_size_basis` says
+# which of the two candidates set the block - `label_buffer` here, because the treatment's own
+# construction window is one bar and the label's is fifteen, so the label's is what the
+# placebo has to preserve.
 
 # %% [markdown]
-# ### Permutation Distribution
+# ## 3. Estimating and registering
 #
-# The observed DML effect (red line) against the distribution of placebo
-# effects under block permutation of the treatment.
+# `run()` fits the two nuisance models with cross-fitting and the embargo above, estimates the
+# effect from the residuals, runs the placebo draws, and registers one row - **only after** the
+# fit returns a finite effect and a finite standard error. A missing treatment, a missing
+# confounder or an empty analysis population fails before anything is written.
+#
+# The registration goes through the resolver's own path rather than a convenience wrapper, and
+# that is not a stylistic choice. A row written by `register_causal_run` carries no
+# `identity_version`, and `current_causal_identities` - the set `CausalResult.one` resolves and
+# the ambiguity check is computed from - skips exactly those rows. Such a row is written, sits
+# in the table, and answers nothing; `13_model_analysis` would show no causal evidence at all
+# while `causal_runs` held a row. This notebook was the last one in the corpus on that path.
+#
+# **A second run of this notebook fits nothing.** The identity is re-derived from the inputs,
+# the registry already holds the matching row, and the cache answers. That is why everything
+# reported below is read back from the registered row rather than from the return value of a
+# fit: a reader re-running this notebook has to see the same numbers, and a cached run has no
+# placebo draws to show.
 
-# %%
-placebo_arr = np.array(ref.get("placebo_effects", []))
-if len(placebo_arr) > 0:
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.hist(placebo_arr, bins=30, alpha=0.7, label="Placebo effects")
-    ax.axvline(dml_effect, color="red", linewidth=2, label="Observed effect")
-    ax.set_xlabel("Treatment effect")
-    ax.set_ylabel("Placebo replications")
-    ax.set_title("Observed effect against its block-permutation placebos")
-    ax.legend()
+# %% tags=["results"]
+result = resolved.run()
+if not result.complete:
+    raise RuntimeError(f"the registered causal result for {label} is incomplete")
+# The identity-bearing computation, not the whole spec. `provenance` records the commit of the
+# run that registered the row, so comparing whole specs would assert that nothing had been
+# committed since - which is not a property of the estimate.
+if result.spec["computation"] != resolved.spec["computation"]:
+    raise RuntimeError(f"the registered causal computation for {label} differs from the resolved")
+if request.resolve().run().hash != result.hash:
+    raise RuntimeError("re-resolving the same request changed its identity")
+
+metrics = result.metrics
+print(f"Registered causal identity: {result.hash}")
 
 # %% [markdown]
-# ## 6. Register the run
+# ## 4. What came out
 #
-# Cross-fitting leaves one treatment residual and one outcome residual per row,
-# both carrying the entity and decision time they were computed for. The
-# registered run records the estimate together with the settings that produced
-# it, so a later reader can tell two runs apart by their configuration rather
-# than by when they happened.
+# Every number below is read back from the registered row.
 #
-# Cross-fitting returns one treatment residual and one outcome residual per
-# analysis row, in that frame's order, with training-only rows left empty. The
-# check below requires that correspondence to hold exactly: a mismatch means the
-# residuals and the rows describe different observations, and pairing them by
-# position would bury that rather than surface it.
+# `naive_effect` is the coefficient on the treatment with the confounders entered linearly and
+# nothing orthogonalized. `dml_effect` is the same quantity after both the outcome and the
+# treatment have had the confounders' flexible predictions removed. The distance between them
+# is what adjustment moved, and `confounding_bias_pct` normalizes it - by the DML estimate, so
+# when that estimate is near zero the percentage is unstable and can run past the whole of it
+# with both raw effects tiny. Read the raw effects.
+#
+# `dml_se_hac` is a Newey-West standard error with the lag count set from the label horizon
+# rather than inferred. Left to infer, it falls back to a rule based only on sample size,
+# which under-lags an overlapping label and reports a t-statistic that is too large.
+#
+# The refutation p-value is a permutation p-value and reads `not run` when fewer than the
+# minimum placebo draws returned a finite effect. That is a missing measurement, not a
+# p-value of 1: the registry stores NULL for it and this table says so rather than printing a
+# number for a test that did not happen.
 
-# %%
-T_res = dml_result["T_res"]
-Y_res = dml_result["Y_res"]
-if len(T_res) != len(merged_clean) or len(Y_res) != len(merged_clean):
-    raise AssertionError(
-        f"DML returned {len(T_res)} treatment and {len(Y_res)} outcome residuals "
-        f"for {len(merged_clean)} analysis rows; the residuals are not keyed to "
-        f"the estimation frame"
-    )
-
-register_causal_run(
-    case_study_id=CASE_STUDY_ID,
-    label=PRIMARY_LABEL,
-    results=results,
-    treatment_col=TREATMENT_COL,
-    confounder_cols=CONFOUNDER_COLS,
-    n_folds=CV_FOLDS,
-    embargo=EMBARGO_PERIODS,
-    time_col=date_col,
-    block_size=BLOCK_SIZE,
-    n_placebo=N_PLACEBO,
-    seed=RANDOM_SEED,
-    horizon=HORIZON_PERIODS,
-    max_samples=MAX_SAMPLES,
-    development_end=str(ESTIMATION_END),
-    notebook="12_causal_dml",
+# %% tags=["results"]
+summary = pl.DataFrame(
+    {
+        "quantity": [
+            "observations",
+            "naive effect",
+            "DML effect",
+            "Newey-West SE",
+            "t statistic",
+            "p-value (Newey-West)",
+            "confounding bias %",
+            "refutation p (block permutation)",
+            "successful placebo draws",
+            "refutation class",
+        ],
+        "value": [
+            f"{metrics['n_obs']:,}",
+            f"{metrics['naive_effect']:+.3e}",
+            f"{metrics['dml_effect']:+.3e}",
+            f"{metrics['dml_se_hac']:.3e}",
+            f"{metrics['dml_effect'] / metrics['dml_se_hac']:+.2f}",
+            f"{metrics['p_value_hac']:.4f}",
+            f"{metrics['confounding_bias_pct']:+.1f}",
+            "not run" if metrics["refutation_p"] is None else f"{metrics['refutation_p']:.4f}",
+            str(metrics["refutation_n_successful"]),
+            str(metrics["refutation_class"]),
+        ],
+    }
 )
-
-# %% [markdown] tags=["results"]
-# ### What this run estimated
-
-# %%
-print(f"Treatment: {TREATMENT_COL} -> {label_col}")
-print(f"Confounders: {', '.join(CONFOUNDER_COLS)}")
-print(f"Observations entering the second stage: {dml_result['n_obs']:,}")
-print(f"Naive slope: {naive_effect:+.3e}")
-print(f"Adjusted (DML) slope: {dml_effect:+.3e}  (Newey-West SE {se_hac:.3e})")
-print(f"Confounding bias: {bias_pct:+.1f}%")
-print(f"Newey-West p-value: {p_value:.4f}  (lags {results.get('hac_maxlags', 0)})")
-print(f"Permutation p-value: {p_value_perm:.4f}  ({ref_class})")
+summary
 
 # %% [markdown]
-# ## Key Takeaways
+# ### The observed effect against its placebos
 #
-# 1. **Size the embargo from the label horizon, not the bar.** On a one-minute
-#    grid a 15-minute label overlaps the next fourteen observations. An embargo
-#    counted in bars rather than in horizons leaves most of that overlap inside
-#    the training block, and the effect it produces is partly the model reading
-#    its own training window.
+# The permutation test asks how often the same estimator recovers an effect this large from
+# data whose treatment has been shuffled in blocks - which keeps the panel's shape but
+# destroys the treatment's alignment with the outcome. The two significance readings answer
+# different questions and can disagree. The Newey-West p-value asks whether the effect is
+# distinguishable from zero under a parametric model of the errors; the permutation p-value
+# needs no such model, but can only reject in proportion to the draws run. When the
+# permutation test does not corroborate the parametric one, the parametric standard error is
+# the reading to distrust: it rests on an assumption about the errors that the shuffle does
+# not need.
+
+# %%
+placebo = np.asarray(metrics.get("placebo_effects") or [], dtype=float)
+if placebo.size:
+    fig = go.Figure()
+    fig.add_histogram(x=placebo, nbinsx=30, name="Placebo effects", marker_color=COLORS["blue"])
+    fig.add_vline(
+        x=float(metrics["dml_effect"]),
+        line_color=COLORS["amber"],
+        line_width=2,
+        annotation_text="observed",
+    )
+    fig.update_layout(
+        title="Observed effect against its block-permutation placebos",
+        xaxis_title="Treatment effect",
+        yaxis_title="Placebo replications",
+    )
+    show_plotly_with_alt(
+        fig,
+        "Histogram of block-permutation placebo treatment effects with the observed DML "
+        "effect marked, showing where the estimate falls in the null distribution.",
+    )
+else:
+    print("No placebo draws are stored on this row, so there is no null distribution to show.")
+
+# %% [markdown]
+# ## Key takeaways
 #
-# 2. **Seal the holdout one horizon early.** Filtering on the holdout date alone
-#    is not enough when the label looks forward: the last admitted bar resolves
-#    after the boundary. Subtracting the horizon before filtering is what makes
-#    the estimate independent of the held-out period.
+# 1. **Size the embargo from the label horizon, not the bar.** On a one-minute grid a
+#    15-minute label overlaps the next fourteen observations. An embargo counted in bars
+#    rather than in horizons leaves most of that overlap inside the training block, and the
+#    effect it produces is partly the model reading its own training window. The resolver
+#    measures the cadence from the data for this reason, rather than trusting the declared
+#    decision frequency.
 #
-# 3. **Cap the sample by whole decision times.** Taking the most recent N rows of
-#    a panel cuts through a cross-section and leaves a partial final timestamp.
-#    Trimming to complete panels keeps every decision time either wholly in or
-#    wholly out.
+# 2. **Seal the holdout one horizon early.** Filtering on the holdout date alone is not enough
+#    when the label looks forward: the last admitted bar resolves after the boundary.
+#    `holdout_endpoint_cutoff` is that subtraction, computed rather than typed.
 #
-# 4. **The two significance readings are not interchangeable.** A parametric
-#    standard error assumes a model for the errors; the permutation test does
-#    not, but it can only reject in proportion to the replications run. Report
-#    both, and treat disagreement as a reason to distrust the parametric one
-#    rather than a result to average away.
+# 3. **A reduction is declared, not applied by hand.** The cap this notebook used to apply
+#    itself is now a preview reduction that a canonical run refuses, and the tier is stated
+#    rather than inferred from whether a limit happens to be set. A capped estimate and a full
+#    one then cannot be confused for each other, because they are different tiers writing to
+#    different places under different identities.
 #
-# **Known limitations**: The identifying assumptions on the previous section
-# cannot be tested from this data; the permutation test is indirect evidence
-# about them, not a proof. A positive `MAX_SAMPLES` narrows the estimate to the
-# most recent complete panels before the holdout, so it then describes that
-# window rather than the whole sample. The effect is measured per unit of
-# `signed_vol_share`; converting it into anything tradable needs that unit's
-# dispersion, which `16_costs` supplies.
+# 4. **The two significance readings are not interchangeable.** A parametric standard error
+#    assumes a model for the errors; the permutation test does not, but it can only reject in
+#    proportion to the replications run. Report both, and treat disagreement as a reason to
+#    distrust the parametric one rather than a result to average away.
+#
+# **Known limitations.** The three identifying assumptions above are untestable from this data
+# and the refutation is indirect evidence about the estimator rather than about them. The
+# effect is measured per unit of `signed_vol_share`; converting it into anything tradable
+# needs that unit's dispersion, which [`17_costs`](17_costs.ipynb) supplies. And the estimate
+# is a statement about the pre-holdout panel this case study admits, not about NASDAQ-100
+# order flow in general.

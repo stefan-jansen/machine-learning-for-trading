@@ -36,6 +36,7 @@ from case_studies.research import (
     open_study,
     population_supersedes,
 )
+from case_studies.research.contracts import ExecutionTier
 from case_studies.utils.registry.store import _open_registry
 from tests.test_research_contract_catalog import _resolved_spec
 from tests.test_research_registry import _training_spec
@@ -592,6 +593,21 @@ def test_visible_requests_snapshot_complete_canonical_backtests(
     assert shortlist[0].hash in set(candidate_sets["fwd_ret_21d"].members)
 
 
+def test_an_empty_config_selection_is_blamed_on_the_caller_not_the_family() -> None:
+    """`config_names=[]` filters every row out, and the family's menu is not why.
+
+    The caller passes `config_names` in code, never from a parameters cell, so an empty list
+    cannot be the empty-means-all idiom `labels` uses; it is a mistake, and reporting it as "no
+    declared requests for 'linear'" sends a reader to the training menu to look for a row that
+    is there.
+    """
+    complete = research_workflow.model_request_catalog("linear")
+    assert complete.height > 0
+
+    with pytest.raises(ValueError, match="config_names is empty"):
+        research_workflow.model_request_catalog("linear", config_names=[])
+
+
 def test_candidate_set_stage_outside_the_funnel_is_refused() -> None:
     """A stage the funnel does not define never reaches the registry as a new namespace."""
     for stage in research_workflow.CANDIDATE_SET_STAGES:
@@ -751,6 +767,46 @@ def _labelled_execution(study: Study, monkeypatch: pytest.MonkeyPatch) -> dict[s
     }
 
 
+def test_a_union_that_adds_nothing_still_resolves_under_the_union_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The funnel's union names have to resolve on every registry, not only on wide ones.
+
+    `pre-overlay` is the union of `signal` and `allocation`. Where the allocation stage
+    registered nothing the signal stage had not, the union has the same members as `signal` and
+    therefore the same identity - a candidate set is its members. Both names still name a step
+    of the funnel, and `stage_backtest_results(stage="pre-overlay")` reads the union by name, so
+    a union that binds no name takes the whole funnel down at the stage after it.
+    """
+    from case_studies.research import CandidateSet, Result
+
+    study = _study(tmp_path)
+    by_label = _labelled_execution(study, monkeypatch)
+    label = research_workflow.ALL_LABELS[0]
+    members = [Result.open(study, value) for value in by_label[label]]
+
+    signal = research_workflow._create_comparable_set(
+        study, research_workflow.candidate_set_name("signal", label), members
+    )
+    allocation = research_workflow._create_comparable_set(
+        study, research_workflow.candidate_set_name("allocation", label), members
+    )
+    assert allocation.hash == signal.hash
+
+    pre_overlay = research_workflow.pre_overlay_candidate_set(study, label=label)
+    assert pre_overlay.hash == signal.hash
+    assert set(pre_overlay.members) == set(by_label[label])
+
+    for stage in ("signal", "allocation", "pre-overlay"):
+        name = research_workflow.candidate_set_name(stage, label)
+        assert CandidateSet.one(study, name=name).hash == signal.hash
+
+    results = research_workflow.stage_backtest_results(
+        study, stage="pre-overlay", label=label, execution_tier="canonical"
+    )
+    assert {result.hash for result in results} == set(by_label[label])
+
+
 def test_final_selection_pool_spans_both_return_horizons(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -799,50 +855,25 @@ def test_selection_catalog_rejects_a_candidate_the_catalog_does_not_describe(
         research_workflow.selection_catalog(study, members)
 
 
-def test_holdout_evidence_is_empty_until_the_lifecycle_is_locked(tmp_path: Path) -> None:
-    study = _study(tmp_path)
+def _pca_catalog() -> pl.DataFrame:
+    """The one declared configuration the wrapper tests below execute."""
+    return pl.DataFrame(
+        {"family": ["latent_factors"], "label": ["fwd_ret_5d"], "config_name": ["pca"]}
+    )
 
-    assert research_workflow.holdout_evidence(study).is_empty()
 
-
-def test_holdout_evidence_reports_the_lock_and_its_single_evaluation(tmp_path: Path) -> None:
-    study = _study(tmp_path)
-    lock_record = {
-        "candidate_set_hash": "set-1",
-        "label": "fwd_ret_5d",
-        "checkpoint_kind": "epoch",
-        "checkpoint_value": 20,
-        "validation_backtest_hash": "bt-validation",
-    }
-    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
-        db.execute(
-            "INSERT INTO research_locks (lock_hash, lock_json, state, created_at) VALUES (?,?,?,?)",
-            ("lock-1", json.dumps(lock_record), "LOCKED", "2026-08-15T00:00:00Z"),
-        )
-
-    pending = research_workflow.holdout_evidence(study)
-    assert pending.height == 1
-    assert pending.item(0, "state") == "LOCKED"
-    assert pending.item(0, "label") == "fwd_ret_5d"
-    assert pending.item(0, "checkpoint_value") == 20
-    assert pending.item(0, "holdout_backtest_hash") is None
-
-    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
-        db.execute(
-            "INSERT INTO holdout_evaluations (lock_hash, holdout_training_hash, "
-            "holdout_prediction_hash, holdout_backtest_hash, evaluated_at) VALUES (?,?,?,?,?)",
-            ("lock-1", "tr-holdout", "pr-holdout", "bt-holdout", "2026-08-15T01:00:00Z"),
-        )
-        db.execute(
-            "UPDATE research_locks SET state = ? WHERE lock_hash = ?",
-            ("HOLDOUT_EVALUATED", "lock-1"),
-        )
-
-    evaluated = research_workflow.holdout_evidence(study)
-    assert evaluated.height == 1
-    assert evaluated.item(0, "state") == "HOLDOUT_EVALUATED"
-    assert evaluated.item(0, "holdout_backtest_hash") == "bt-holdout"
-    assert evaluated.item(0, "evaluated_at") == "2026-08-15T01:00:00Z"
+def _pca_request():
+    return cast(
+        "object",
+        SimpleNamespace(
+            family="latent_factors",
+            spec={
+                "execution_tier": "canonical",
+                "label": "fwd_ret_5d",
+                "config_name": "pca",
+            },
+        ),
+    )
 
 
 def test_official_model_catalog_forwards_the_population_it_supersedes(
@@ -863,7 +894,14 @@ def test_official_model_catalog_forwards_the_population_it_supersedes(
     resolved = (
         cast(
             "object",
-            SimpleNamespace(spec={"execution_tier": "canonical"}),
+            SimpleNamespace(
+                family="latent_factors",
+                spec={
+                    "execution_tier": "canonical",
+                    "label": "fwd_ret_5d",
+                    "config_name": "pca",
+                },
+            ),
         ),
     )
     monkeypatch.setattr(research_workflow, "OfficialPopulation", SimpleNamespace(create=_create))
@@ -878,7 +916,7 @@ def test_official_model_catalog_forwards_the_population_it_supersedes(
 
     research_workflow.run_official_model_catalog(
         cast("object", SimpleNamespace()),
-        pl.DataFrame(),
+        _pca_catalog(),
         population_name="cme_futures-pca-validation-v1",
         resolved_requests=resolved,
         supersedes="2d252634bffb",
@@ -909,12 +947,44 @@ def test_official_model_catalog_defaults_to_superseding_nothing(
 
     research_workflow.run_official_model_catalog(
         cast("object", SimpleNamespace()),
-        pl.DataFrame(),
+        _pca_catalog(),
         population_name="cme_futures-pca-validation-v1",
-        resolved_requests=(SimpleNamespace(spec={"execution_tier": "canonical"}),),
+        resolved_requests=(_pca_request(),),
     )
 
     assert seen["supersedes"] is None
+
+
+def test_a_partial_resolved_set_cannot_snapshot_the_catalog_population(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`resolved_requests` avoids resolving twice; it does not narrow the population.
+
+    `require_complete` cannot catch a partial set: it measures the population against the
+    members it just declared. So a resolved set covering half the catalog snapshotted under
+    the catalog's name, reported complete, and removed every omitted configuration from the
+    comparison the population exists to define.
+    """
+    monkeypatch.setattr(
+        research_workflow,
+        "OfficialPopulation",
+        SimpleNamespace(create=lambda *a, **k: pytest.fail("a partial set reached the snapshot")),
+    )
+    catalog = pl.DataFrame(
+        {
+            "family": ["latent_factors", "latent_factors"],
+            "label": ["fwd_ret_5d", "fwd_ret_21d"],
+            "config_name": ["pca", "pca"],
+        }
+    )
+
+    with pytest.raises(ValueError, match="do not match the declared catalog"):
+        research_workflow.run_official_model_catalog(
+            cast("object", SimpleNamespace()),
+            catalog,
+            population_name="cme_futures-pca-validation-v1",
+            resolved_requests=(_pca_request(),),
+        )
 
 
 def _multifold_frames(n_days: int = 60) -> tuple[pl.DataFrame, pl.DataFrame]:
@@ -1511,3 +1581,58 @@ def test_preview_prediction_selection_refuses_a_label_it_found_nothing_for(
         research_workflow.preview_prediction_candidates(
             study, labels=("fwd_ret_21d", "fwd_ret_5d"), limit=2
         )
+
+
+def test_wrapper_stamps_the_tier_it_was_opened_for_and_the_notebook_that_opened_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The case study's own `open_study` must stamp what the library `open_study` stamps.
+
+    `research_workflow.open_study` restates the library's construction rather than calling it,
+    and a restatement drifts. It had dropped two fields the library sets at every one of its
+    construction sites.
+
+    `execution_tier` is the one that can publish something wrong. `OfficialPopulation.create`
+    refuses a preview member by reading exactly that field (`research/population.py:90`), and a
+    study built without it reports `canonical` whatever it was opened for - so a preview through
+    this wrapper was refused by nothing. `entry_point` is the column that answers which notebook
+    wrote a training run, and with it dropped every one of cme's 186 rows is NULL (#930).
+
+    Both tiers are asserted because the wrapper constructs them on separate paths, and a fix to
+    one says nothing about the other.
+    """
+    from case_studies.cme_futures import research_workflow
+
+    released = _study(tmp_path / "released")
+
+    release_root = tmp_path / "worktree"
+    case_dir = release_root / "case_studies" / "cme_futures"
+    case_dir.mkdir(parents=True)
+    (release_root / "case_studies" / "config").symlink_to(
+        REPO_ROOT / "case_studies" / "config", target_is_directory=True
+    )
+    (case_dir / "config").symlink_to(
+        REPO_ROOT / "case_studies" / "cme_futures" / "config", target_is_directory=True
+    )
+    for generated in ("features", "labels", "run_log"):
+        target = released.root / generated
+        target.mkdir(exist_ok=True)
+        (case_dir / generated).symlink_to(target, target_is_directory=True)
+
+    monkeypatch.setattr(research_workflow, "REPO_ROOT", release_root)
+
+    preview = research_workflow.open_study(
+        execution_tier="preview",
+        workspace=tmp_path / "preview-workspace",
+        entry_point="09_dl_lstm",
+    )
+    assert preview.execution_tier is ExecutionTier.PREVIEW
+    assert preview.entry_point == "09_dl_lstm"
+
+    canonical = research_workflow.open_study(
+        execution_tier="canonical",
+        workspace=tmp_path / "canonical-workspace",
+        entry_point="08_tabular_dl",
+    )
+    assert canonical.execution_tier is ExecutionTier.CANONICAL
+    assert canonical.entry_point == "08_tabular_dl"

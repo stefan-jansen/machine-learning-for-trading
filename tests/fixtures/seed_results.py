@@ -771,13 +771,68 @@ def _backfill_all_backtest_artifacts(cs_dir: Path) -> None:
         artifact_dir = bt_root / b_hash
         artifact_dir.mkdir(parents=True, exist_ok=True)
         path = artifact_dir / "daily_returns.parquet"
-        if path.exists():
-            continue
-        returns = rng.normal(loc=0.0005, scale=0.012, size=n_days).astype("float64")
-        df = _pl.DataFrame({"timestamp": day_list, "daily_return": returns}).with_columns(
-            _pl.col("timestamp").cast(_pl.Date)
-        )
-        df.write_parquet(path)
+        if not path.exists():
+            returns = rng.normal(loc=0.0005, scale=0.012, size=n_days).astype("float64")
+            df = _pl.DataFrame({"timestamp": day_list, "daily_return": returns}).with_columns(
+                _pl.col("timestamp").cast(_pl.Date)
+            )
+            df.write_parquet(path)
+
+    _redescribe_backtest_digests(db_path, bt_root)
+
+
+def _redescribe_backtest_digests(db_path: Path, bt_root: Path) -> None:
+    """Make every backtest_runs row's digest map describe the artifacts on disk.
+
+    The rows sampled from production carry the digest map production wrote - six
+    files, `equity.parquet` and `weights.parquet` among them - and the fixture holds
+    one of them, synthesized, so its content does not hash to the recorded value
+    either. `BacktestResult.completeness` walks that map and reports the first file
+    it cannot find, which makes every sampled backtest incomplete.
+
+    Nothing surfaces that until a notebook asks for completeness. `_complete_only`
+    then drops the whole field, and `resolve_field_members` reports it as declared
+    labels having no rankable validation backtest - the run reads as unfinished when
+    what is actually wrong is that the fixture row describes artifacts the fixture
+    never had. sp500_equity_option_analytics' 17_costs and 20_strategy_analysis fail
+    that way.
+
+    So the map is rewritten from what is on disk, digested the same way the checker
+    digests it. That keeps the digest-verification branch exercised in CI rather than
+    routing every fixture row down the legacy NULL fallback, and it holds the rule
+    the rest of this seeder holds: a fixture row describes what the fixture has.
+    """
+    try:
+        import polars as _pl
+
+        from case_studies.research.results import _verified_digest
+    except ImportError:
+        return
+
+    from functools import partial
+
+    db = sqlite3.connect(str(db_path))
+    try:
+        hashes = [row[0] for row in db.execute("SELECT backtest_hash FROM backtest_runs")]
+        for b_hash in hashes:
+            present = sorted(
+                path for path in (bt_root / b_hash).glob("*.parquet") if path.is_file()
+            )
+            if not present:
+                continue
+            digests = {
+                path.name: _verified_digest(path, partial(_pl.read_parquet, path))
+                for path in present
+            }
+            db.execute(
+                "UPDATE backtest_runs SET artifact_digests_json = ? WHERE backtest_hash = ?",
+                (json.dumps(digests, sort_keys=True), b_hash),
+            )
+        db.commit()
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        db.close()
 
 
 # The identifier a prediction artifact names its assets with. `symbol` everywhere
@@ -791,7 +846,7 @@ ENTITY_COLUMN_CANDIDATES = ("symbol", "product", "entity", "ticker")
 SEEDED_DATE_BUDGET = 60
 
 
-def _reference_panels(cs_dir: Path, hash_rows: list, survives, entity_col: str, _pl) -> dict:
+def _reference_panels(cs_dir: Path, hash_rows: list, survives, _pl) -> dict:
     """One key/target panel per (split, label), taken from an artifact left in place.
 
     Which artifact: the panel that the most untouched artifacts in the group already
@@ -800,10 +855,17 @@ def _reference_panels(cs_dir: Path, hash_rows: list, survives, entity_col: str, 
     agrees on is what makes the seeded sets joinable with the copied ones rather
     than only with each other.
 
-    Only artifacts this function will not rewrite are eligible, so the panel is one
-    that survives seeding. The dates are subsampled to ``SEEDED_DATE_BUDGET``; they
-    are a subset of the reference's own dates, which the registry places inside the
-    split window, so the split boundary the fabricated grid enforces still holds.
+    A real panel matters, not just any panel. When a group had none, its whole label
+    fell to ``_weekday_grid``, which emits about sixty *dates* across the window,
+    roughly eight weekdays apart. An 8H label cannot live on that grid, and
+    13_backtest rejected it in CI with "decision intervals [9 days, 10 days, 12 days]
+    do not match horizon 8H" while four real artifacts on the correct 8-hour grid sat
+    in the same case study unused. Every artifact on disk now survives seeding, so a
+    group with any artifact of its own has a real panel to be seeded onto.
+
+    The dates are subsampled to ``SEEDED_DATE_BUDGET``; they are a subset of the
+    reference's own dates, which the registry places inside the split window, so the
+    split boundary the fabricated grid enforces still holds.
     """
     groups: dict = {}
     for p_hash, split, label in hash_rows:
@@ -835,26 +897,88 @@ def _reference_panels(cs_dir: Path, hash_rows: list, survives, entity_col: str, 
             key=lambda item: (-len(item[1]), -item[0][0], item[1][0][0]),
         )
         _, frame, entity = entries[0]
-        panels[key] = _subsampled_panel(frame, entity, entity_col, _pl)
+        panels[key] = _subsampled_panel(frame, entity, _pl)
     return panels
 
 
-def _subsampled_panel(frame, entity: str, entity_col: str, _pl):
+def _intraday_split_skeleton(panels: dict, split, _pl):
+    """A reference panel from another label of the same split, keys and folds only.
+
+    Returned only when the panels this case study has are evenly spaced below a
+    day. On a daily case study the fabricated weekday grid is a reasonable
+    stand-in and labels can legitimately differ; on an intraday one it is not a
+    stand-in at all, and the decision times are a property of the case study
+    rather than of the label.
+    """
+    from datetime import timedelta
+
+    candidates = []
+    for (panel_split, panel_label), panel in sorted(
+        panels.items(), key=lambda item: (str(item[0][0]), str(item[0][1]))
+    ):
+        if panel_split != split or panel_label is None:
+            continue
+        dates = panel["timestamp"].unique().sort()
+        if dates.len() < 2:
+            continue
+        if dates.diff().drop_nulls().min() < timedelta(days=1):
+            candidates.append(panel)
+    return candidates[0] if candidates else None
+
+
+def _subsampled_panel(frame, entity: str, _pl):
     """A reference artifact reduced to the canonical seeded columns and date budget.
 
     Keeps the reference's own timestamp and identifier dtypes: a seeded artifact has
     to meet the reference on an exact join, and a cast on either side of that key
-    would silently drop every row. The identifier is still renamed to the case
-    study's declared ``entity_col`` - cme_futures registers ``product`` while its
-    copied artifacts carry ``symbol``, and the notebooks resolve that column per
-    frame, so following the reference's name here would change what every seeded
-    cme artifact is called to fix a join that already works on values.
+    would silently drop every row. The identifier keeps the reference's name too.
+    This used to rename it to a per-case-study ``entity_col`` on the belief that
+    "cme_futures registers ``product``". It does not: every prediction artifact in
+    all nine canonical registries is keyed ``symbol``, cme_futures included, where
+    that column holds the product roots its labels store under ``product``. The
+    rename made the fixture and `07_conformal_position_sizing` agree with each
+    other and with no registry.
     """
     dates = frame["timestamp"].unique().sort()
-    step = max(1, dates.len() // SEEDED_DATE_BUDGET)
-    kept = dates.gather(range(0, dates.len(), step))
-    if kept[-1] != dates[-1]:
-        kept = kept.append(dates[-1:])
+    # A stride is fine on a daily reference, whose own gaps are already uneven
+    # across weekends, and it keeps the seeded panel spanning the whole window.
+    # It is wrong on an evenly spaced INTRADAY reference: crypto_perps_funding
+    # decides every 8 hours, 1956 times, so a stride of 1956 // 60 hands the
+    # seeded sets decisions 10 days 16 hours apart and 13_backtest rejects them
+    # against a horizon of 8H. Nothing about the panel is recoverable after that
+    # - the spacing IS the thing being checked - so a sub-daily reference keeps a
+    # contiguous run at its native spacing instead. Ending at the reference's own
+    # last decision is what the stride already aimed at, and the run stays inside
+    # the split window because every date in it is the reference's own.
+    from datetime import timedelta
+
+    # The SMALLEST gap, not the only gap: a panel already sliced per fold carries a
+    # jump between folds, and requiring a single distinct gap would reject exactly
+    # the intraday panels this exists to recognise.
+    gaps = dates.diff().drop_nulls() if dates.len() > 1 else None
+    evenly_spaced_intraday = gaps is not None and gaps.min() < timedelta(days=1)
+    if evenly_spaced_intraday:
+        # Per fold, not across the panel. A flat tail lands entirely inside the
+        # last fold and the seeded set comes back with n_folds=1, which
+        # expanding-window conformal calibration refuses outright.
+        fold_col = next((c for c in ("fold", "fold_id") if c in frame.columns), None)
+        if fold_col is None:
+            kept = dates.tail(SEEDED_DATE_BUDGET)
+        else:
+            folds = frame[fold_col].unique().sort()
+            per_fold = max(2, SEEDED_DATE_BUDGET // max(1, folds.len()))
+            kept = (
+                frame.group_by(fold_col)
+                .agg(_pl.col("timestamp").unique().sort().tail(per_fold))
+                .explode("timestamp")["timestamp"]
+                .unique()
+                .sort()
+            )
+    else:
+        step = max(1, dates.len() // SEEDED_DATE_BUDGET)
+        kept = dates.gather(range(0, dates.len(), step))
+        if kept[-1] != dates[-1]:
+            kept = kept.append(dates[-1:])
     panel = frame.filter(_pl.col("timestamp").is_in(kept.implode()))
     if "fold" in panel.columns:
         fold = _pl.col("fold")
@@ -869,12 +993,208 @@ def _subsampled_panel(frame, entity: str, entity_col: str, _pl):
             .mod(2)
             .alias("fold")
         )
-    return panel.select(
-        _pl.col(entity).alias(entity_col),
+    columns = [
+        _pl.col(entity).alias("symbol"),
         _pl.col("timestamp"),
         fold.alias("fold"),
         _pl.col("actual"),
+    ]
+    # A reference artifact of a classification label carries the continuous
+    # evaluation target beside the class one. Dropping it here would leave the
+    # seeded sets of that group to invent a replacement for a column the group
+    # already has, and two members of one group would then disagree about what the
+    # realized return was.
+    if "eval_actual" in panel.columns:
+        columns.append(_pl.col("eval_actual"))
+    return panel.select(columns)
+
+
+def _label_artifact_panel(cs_dir: Path, label: str, window, n_folds: int, _pl):
+    """A key/target panel taken from the fixture's own label artifact.
+
+    The last resort before the fabricated grid, and the one that matters for a cohort
+    leader. `sample_registry_for_tests` samples registry rows and copies no prediction
+    artifacts, so a label whose group has no artifact on disk had nothing to take a panel
+    from and fell to `_weekday_grid` over placeholder symbols with a random `actual`. A
+    replay notebook that pins the leader by hash then failed a >0.99 correlation gate
+    against real prices several stages downstream, nowhere near here.
+
+    The label artifact is the right source and it is already in the fixture: its
+    (entity, timestamp) keys are the ones every notebook joins on, and its label column is
+    the realized value those notebooks check - computed by stage 02 from the fixture's own
+    prices, so the gate is satisfied by construction. That is what the comment on the
+    missing-leader warning asks for, and it is not a copy of the production artifact,
+    which would be stale the moment anything upstream is regenerated.
+
+    Returns None when the artifact is absent, carries no usable key, or holds nothing
+    inside the split window - the fabricated grid still covers those.
+    """
+    from datetime import timedelta
+
+    path = cs_dir / "labels" / f"{label}.parquet"
+    if not path.is_file():
+        return None
+    try:
+        frame = _pl.read_parquet(path)
+    except Exception:  # noqa: BLE001 - an unreadable label is not ours to fix here
+        return None
+    entity = next((c for c in ENTITY_COLUMN_CANDIDATES if c in frame.columns), None)
+    if entity is None or "timestamp" not in frame.columns or label not in frame.columns:
+        return None
+
+    start, end = window
+    as_date = _pl.col("timestamp")
+    if frame.schema["timestamp"] != _pl.Date:
+        as_date = as_date.cast(_pl.Date)
+    frame = frame.filter((as_date >= start) & (as_date <= end)).drop_nulls([label])
+    if frame.is_empty():
+        return None
+
+    # Daily or coarser only. `_subsampled_panel` keeps a contiguous run at native spacing
+    # for a sub-daily panel - it has to, because a stride hands an 8H label decisions ten
+    # days apart and `13_backtest` rejects them against its horizon. On a minute-bar label
+    # that run is sixty consecutive minutes: measured on nasdaq100_microstructure, every
+    # seeded set collapsed to 2021-06-15 14:44 through 15:43, one hour of a one-year
+    # window, and every configuration in the sweep then scored the same Sharpe -
+    # `14_backtest` failed at `hist(..., bins=30)` with "Too many bins for data range".
+    # The fabricated grid spans the window instead, which is what an intraday case study
+    # is better served by until this can subsample a sub-daily label without breaking its
+    # spacing.
+    stamps = frame.get_column("timestamp").unique().sort()
+    if stamps.len() > 1:
+        gaps = stamps.diff().drop_nulls()
+        if gaps.len() and gaps.min() < timedelta(days=1):
+            return None
+    # `actual` is the label's own realized value, so nothing is redrawn: this is the
+    # target the pinning notebook expects to find, not a stand-in for it.
+    frame = frame.select(
+        _pl.col(entity),
+        _pl.col("timestamp"),
+        _pl.col(label).alias("actual"),
+    ).sort("timestamp", entity)
+    panel = _subsampled_panel(frame, entity, _pl)
+    # `_subsampled_panel` defaults a frame with no fold column to two folds. The registry
+    # row says how many the run declared, and an artifact carrying fewer fails the same
+    # check a wrong fold count does, so the assignment is redone here on the dates that
+    # survived - contiguous blocks, one per fold, floored with the last absorbing the
+    # remainder, exactly as the fabricated grid does it.
+    kept = panel["timestamp"].unique()
+    block = max(1, kept.len() // max(1, n_folds))
+    # Ranked rather than mapped through a dict: a Python datetime round-trips as
+    # microsecond-precision and `replace_strict` refuses to match it against a
+    # millisecond column, which is what every intraday case study stores.
+    return panel.with_columns(
+        _pl.col("timestamp")
+        .rank("dense")
+        .sub(1)
+        .floordiv(block)
+        .clip(upper_bound=n_folds - 1)
+        .cast(_pl.Int64)
+        .alias("fold")
     )
+
+
+def _normalize_prediction_timestamp_zone(cs_dir: Path) -> None:
+    """Put one case study's prediction artifacts in the timezone its labels use.
+
+    `_subsampled_panel` preserves each reference artifact's own dtype, and says
+    why: a seeded set has to meet its reference on an exact join, and a cast on
+    either side of that key silently drops every row. That is right *within* a
+    (split, label) group and says nothing across groups, so when the fixture's own
+    artifacts disagree a notebook that reads two labels together fails:
+
+        SchemaError: failed to determine supertype of datetime[us] and
+                     datetime[us, UTC]
+
+    crypto_perps_funding ships nine artifacts in three dtypes: four `ms, UTC`,
+    four `ms` naive, one `us` naive. Stripping the zone collapses all eight
+    validation artifacts onto one identical grid and the holdout artifact onto its
+    own, so the three are the same instants written three ways.
+
+    The zone comes from the case study's OWN labels rather than from a majority
+    vote or a default, because the labels are what a prediction is ultimately
+    joined against - crypto's are `ms, UTC` throughout, and normalizing the
+    predictions to naive instead traded one collision for another:
+
+        datatypes of join keys don't match - `timestamp`: datetime[ms] on left
+        does not match `timestamp`: datetime[ms, UTC] on right
+
+    Only the zone is touched. The time unit is left alone: the fixture already
+    mixes `ms` and `us` across labels and features without trouble, so unifying it
+    would rewrite artifacts to fix nothing. Values are untouched either way, so
+    the historical-target checks a replay notebook runs against a cohort leader
+    are unaffected - which is what makes it safe to rewrite an artifact that
+    otherwise survives seeding.
+
+    A case study whose artifacts already agree with its labels is not touched.
+    """
+    predictions = cs_dir / "run_log" / "predictions"
+    if not predictions.is_dir():
+        return
+    try:
+        import polars as _pl
+    except ImportError:
+        return
+
+    zone = None
+    for label_file in sorted((cs_dir / "labels").glob("*.parquet")):
+        try:
+            dtype = _pl.read_parquet_schema(label_file).get("timestamp")
+        except Exception:  # noqa: BLE001 - an unreadable label is not ours to fix here
+            continue
+        if isinstance(dtype, _pl.Datetime):
+            zone = dtype.time_zone
+            break
+    if zone is None:
+        return
+
+    for path in sorted(predictions.glob("*/predictions.parquet")):
+        try:
+            dtype = _pl.read_parquet_schema(path).get("timestamp")
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(dtype, _pl.Datetime) or dtype.time_zone == zone:
+            continue
+        frame = _pl.read_parquet(path)
+        column = _pl.col("timestamp")
+        # A naive column carries the same wall clock the zoned ones do, so it is
+        # stamped rather than shifted; a genuinely different zone is converted.
+        if dtype.time_zone is None:
+            frame = frame.with_columns(column.dt.replace_time_zone(zone))
+        else:
+            frame = frame.with_columns(column.dt.convert_time_zone(zone))
+        frame.write_parquet(path)
+
+
+def _drop_stale_conformal_widths(cs_dir: Path) -> None:
+    """Remove a widths artifact that no longer matches the predictions beside it.
+
+    ``load_conformal_widths`` regenerates a missing ``conformal_widths.parquet``,
+    and refuses one that predates the ``calibration_version`` column rather than
+    silently mis-reading it. The fixture ships exactly such a legacy file for
+    crypto_perps_funding/4d279db5157d, which took 14_portfolio_management down at
+    its thirteenth cell.
+
+    A widths file is also stale whenever the predictions next to it were just
+    rewritten - the calibration residuals came from scores that no longer exist -
+    so both are dropped and left to regenerate on demand. Deleting is the whole
+    fix: nothing here has to know how to compute widths.
+    """
+    predictions = cs_dir / "run_log" / "predictions"
+    if not predictions.is_dir():
+        return
+    try:
+        import polars as _pl
+    except ImportError:
+        return
+    for widths in predictions.glob("*/conformal_widths.parquet"):
+        try:
+            columns = _pl.read_parquet_schema(widths).keys()
+        except Exception:  # noqa: BLE001 - an unreadable artifact is a stale one
+            widths.unlink(missing_ok=True)
+            continue
+        if "calibration_version" not in columns:
+            widths.unlink(missing_ok=True)
 
 
 def _record_prediction_artifact_digests(cs_dir: Path) -> None:
@@ -896,6 +1216,14 @@ def _record_prediction_artifact_digests(cs_dir: Path) -> None:
 
     Runs after `_backfill_all_prediction_parquets`, because the digest cannot be computed
     before the file it describes exists.
+
+    Every row with an artifact is (re)recorded, not only the ones left empty. The seeder
+    rewrites artifacts after they are sampled - `_backfill_all_prediction_parquets` writes
+    synthetic scores over most of them, `_normalize_prediction_timestamp_zone` rewrites the
+    timestamp column of the rest - so a digest carried over from production describes a file
+    that no longer exists. While the sampler copied no `prediction_coverage`, every row
+    reached here empty and the distinction did not arise; once it copies the table, a stale
+    production digest survives and every reader of that prediction reads it as incomplete.
     """
     db_path = cs_dir / "run_log" / "registry.db"
     if not db_path.exists():
@@ -906,10 +1234,9 @@ def _record_prediction_artifact_digests(cs_dir: Path) -> None:
 
     with sqlite3.connect(str(db_path)) as db:
         rows = db.execute(
-            "SELECT prediction_hash FROM prediction_coverage "
-            "WHERE artifact_digest IS NULL OR artifact_digest = ''"
+            "SELECT prediction_hash, artifact_digest FROM prediction_coverage"
         ).fetchall()
-        for (p_hash,) in rows:
+        for p_hash, recorded in rows:
             artifact = cs_dir / "run_log" / "predictions" / p_hash / "predictions.parquet"
             if not artifact.is_file():
                 continue
@@ -917,11 +1244,84 @@ def _record_prediction_artifact_digests(cs_dir: Path) -> None:
                 digest = value_digest(pl.read_parquet(artifact))
             except Exception:
                 continue
+            if digest == recorded:
+                continue
             db.execute(
                 "UPDATE prediction_coverage SET artifact_digest = ? WHERE prediction_hash = ?",
                 (digest, p_hash),
             )
         db.commit()
+
+
+def _declared_long_short(cs_id: str) -> bool:
+    """The case study's declared selection mode, or long-only if it cannot be read.
+
+    `get_declared_long_short` goes through `get_backtest_config`, which resolves more of the
+    case study's configuration than a fixture needs. Falling back to long-only on failure keeps
+    the seeder's old behaviour for a case study whose backtest block does not load, rather than
+    failing every fixture in the repo over one of them.
+    """
+    try:
+        from case_studies.utils.sweep_config import get_declared_long_short
+
+        return get_declared_long_short(cs_id)
+    except Exception:
+        return False
+
+
+def _seeded_panel_width(setup: dict, *, long_short: bool) -> int:
+    """How many entities a fabricated prediction panel has to carry.
+
+    Ten was a speed cap, and it silently decided what CI measures about concentration.
+    `get_top_k_values_for` drops every k at or above the traded universe, because holding
+    everything is the equal-weight benchmark rather than a prediction-based portfolio - so
+    a ten-name panel deletes `top_k` 10 and 20 from the declared grid instead of running
+    them degenerately. Six of the nine case studies declare a k of 20 or more, and none of
+    those arms has ever executed in CI.
+
+    The width is therefore whatever the widest declared concentration needs in order to be
+    a restriction, floored at the old ten so a case study that declares nothing wide is
+    unaffected, and capped by what the case study's own label carries at the call site.
+
+    What "a restriction" needs is not one number. A long-only arm at ``k`` needs ``k + 1``
+    names: the arm then selects a strict subset, which is the property the filter checks for.
+    A long-short arm takes ``k`` names on each side, so ``get_top_k_values_for`` drops every
+    ``k`` with ``2k > n_assets`` and it needs ``2k + 1``. Sizing every case study as if it were
+    long-only left the widest arms of the seven that declare a cross-sectional short sleeve
+    filtered out exactly as before, which is the defect this function exists to fix.
+
+    The selection mode comes from ``mapping.position_state_space``, read through the same
+    ``get_declared_long_short`` the sweep itself calls - not from ``account.allow_short_selling``,
+    which is an execution permission that ``sp500_options`` holds while selecting long-only.
+    """
+    sweep = ((setup.get("backtest") or {}).get("sweep")) or {}
+    declared: set[int] = set()
+    for values in (sweep.get("top_k_grid") or {}).values():
+        declared.update(values if isinstance(values, list) else [values])
+    cascade_k = (sweep.get("htm_cost_cascade") or {}).get("top_k")
+    if cascade_k:
+        declared.add(cascade_k)
+    numeric = {int(k) for k in declared if isinstance(k, int | float)}
+    if not numeric:
+        return 10
+    sides = 2 if long_short else 1
+    return max(10, sides * max(numeric) + 1)
+
+
+def _label_files_primary_first(cs_dir: Path, primary_label: str | None) -> list[Path]:
+    """The case study's label parquets, its primary label first.
+
+    The rest keep their alphabetical order, so a case study whose primary label has no
+    parquet - or whose parquet lacks the key columns - falls back to exactly the file it
+    used before.
+    """
+    files = sorted((cs_dir / "labels").glob("*.parquet"))
+    if not primary_label:
+        return files
+    primary = cs_dir / "labels" / f"{primary_label}.parquet"
+    if primary not in files:
+        return files
+    return [primary, *(path for path in files if path != primary)]
 
 
 def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
@@ -979,6 +1379,34 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
             (r[0], None, None)
             for r in db.execute("SELECT prediction_hash FROM prediction_sets").fetchall()
         ]
+    # How many folds each prediction's own training run declares. A fabricated panel that
+    # carries a different number is not a weaker fixture, it is a rejected one:
+    # `insight_chapter.load_selected_predictions` reads the declared count off the training
+    # spec and refuses an artifact whose fold column does not enumerate exactly
+    # `range(n_folds)`. Two was hard-coded here, so every notebook reaching that check saw
+    # `expected fold IDs [0..7], observed [0, 1]` for any hash the sampler happened to make
+    # selectable - which is how widening the sample took ch13 down on etfs/77ca2284b27b.
+    declared_folds: dict[str, int] = {}
+    try:
+        from case_studies.utils.registry.specs import declared_fold_count
+
+        for _p_hash, _spec_json in db.execute(
+            """
+            SELECT ps.prediction_hash, t.spec_json
+            FROM prediction_sets ps
+            JOIN training_runs t ON ps.training_hash = t.training_hash
+            """
+        ).fetchall():
+            if not _spec_json:
+                continue
+            try:
+                count = declared_fold_count(json.loads(_spec_json))
+            except (ValueError, TypeError):
+                continue
+            if count > 0:
+                declared_folds[_p_hash] = count
+    except (sqlite3.OperationalError, ImportError):
+        pass
     # Cohort-leader predictions - the frozen carrier a strategy-analysis/portfolio/
     # cost/risk notebook resolves via cohort_metrics(cohort_type='stagelabel',
     # stage='signal') and pins by hash. Those notebooks check the carrier's real
@@ -1016,15 +1444,34 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
     setup_path = CS_ROOT / cs_id / "config" / "setup.yaml"
     symbols = ["SYM0", "SYM1", "SYM2", "SYM3", "SYM4"]
     holdout_start = "2024-01-01"
-    entity_col = "symbol"
+    # The name the case study's LABELS use for the entity. Prediction artifacts do not
+    # follow it - they are keyed `symbol` in every registry - so this is only how the
+    # fabricated grid finds the dtype and the values to borrow.
+    label_entity_col = "symbol"
+    # Labels whose predictions carry a continuous evaluation target beside the class
+    # one. `labels.classification_eval_label` in setup.yaml is where production
+    # decides this: utils.modeling.load_modeling_dataset reads it for a
+    # classification label, and every writer then persists the column as
+    # `eval_actual` (registry/store.py). The mapping holds exactly - across all nine
+    # canonical registries, every artifact of a label named here carries the column
+    # and no other artifact does - so it is also what tells this function which
+    # synthetic artifacts need it.
+    # The label whose universe the seeded panel is keyed on, and how wide that panel
+    # has to be. Both come from the case study's own configuration.
+    primary_label: str | None = None
+    panel_width = 10
+    eval_target_labels: set = set()
     if setup_path.exists():
         setup = yaml.safe_load(setup_path.read_text())
+        eval_target_labels = set((setup.get("labels") or {}).get("classification_eval_label") or {})
+        primary_label = (setup.get("labels") or {}).get("primary")
+        panel_width = _seeded_panel_width(setup, long_short=_declared_long_short(cs_id))
         universe = setup.get("universe", {})
         assets = universe.get("assets", [])
         if assets:
-            symbols = assets[:10]  # Cap at 10 for test speed
+            symbols = assets[:panel_width]
         if cs_id == "cme_futures":
-            entity_col = "product"
+            label_entity_col = "product"
         eval_cfg = setup.get("evaluation", {})
         if eval_cfg.get("holdout_start"):
             holdout_start = eval_cfg["holdout_start"]
@@ -1085,13 +1532,59 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         # global one used to be reached here and crossed it.
         return window if _weekday_grid(*window) else fallback
 
+    # The keys a fabricated panel has to meet. Production writes a prediction on the same
+    # (entity, timestamp) types its labels carry, and a notebook joins the two; a panel keyed
+    # on strings and dates when the labels carry UInt32 and Datetime does not fail here, it
+    # fails several stages downstream on a polars join:
+    #
+    #   symbol: str on left does not match symbol: u32 on right      (us_firm_characteristics)
+    #   timestamp: date on left does not match timestamp: datetime[us]  (nasdaq100_microstructure)
+    #
+    # So both the entity values and the two key dtypes come from the case study's own labels
+    # where it has them, and fall back to setup.yaml's symbol list otherwise. Only the fabricated
+    # grid needs this: a panel borrowed from a copied artifact already carries production's types.
+    #
+    # Which label file, and not simply the first one on disk. The panel these artifacts
+    # are keyed on is what every downstream join meets the case study's labels and
+    # features on, so it has to be the label the predictions were fitted for. Taking the
+    # first parquet alphabetically was that label in eight case studies and was not in
+    # sp500_options, whose `fwd_ret_10d` is a diagnostic-only label carrying the full
+    # 621-name production universe while the modelled `ret_to_expiry` carries 22. Every
+    # seeded prediction there was keyed on the alphabetical head of the wrong universe -
+    # A, AAP, ABBV, ABC, ABMD, ABT, ACN, ADBE - of which two names, AAL and AAPL, are in
+    # the label the case study actually trades.
+    entity_dtype = None
+    timestamp_dtype = None
+    for label_file in _label_files_primary_first(cs_dir, primary_label):
+        try:
+            schema = _pl.read_parquet_schema(label_file)
+        except Exception:  # noqa: BLE001 - an unreadable label is not ours to fix here
+            continue
+        if label_entity_col not in schema or "timestamp" not in schema:
+            continue
+        entity_dtype = schema[label_entity_col]
+        timestamp_dtype = schema["timestamp"]
+        try:
+            entities = (
+                _pl.read_parquet(label_file, columns=[label_entity_col])[label_entity_col]
+                .unique()
+                .sort()
+                .head(panel_width)
+                .to_list()
+            )
+        except Exception:  # noqa: BLE001
+            entities = []
+        if entities:
+            symbols = entities
+        break
+
     n_symbols = len(symbols)
     target_rng = np.random.default_rng(42)
-    templates: dict[tuple[date, date], tuple[object, int]] = {}
+    templates: dict[tuple[tuple[date, date], int], tuple[object, int]] = {}
 
-    def _template_for(window: tuple[date, date]):
-        """One reusable frame per distinct window; scores are added per hash."""
-        cached = templates.get(window)
+    def _template_for(window: tuple[date, date], n_folds: int = 2):
+        """One reusable frame per (window, fold count); scores are added per hash."""
+        cached = templates.get((window, n_folds))
         if cached is not None:
             return cached
         dates = _weekday_grid(*window)
@@ -1108,61 +1601,62 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         # i % 2) silently partitions symbols across folds and breaks per-symbol
         # conformal calibration (each symbol ends up in one fold only). Partition by
         # date instead so all symbols share the same fold on each date.
-        n_folds = 2
+        # Contiguous date blocks, one per fold, so the grid mirrors walk-forward CV and
+        # every declared fold id appears. The block is floored and the last one absorbs the
+        # remainder: a ceiling would leave the highest folds empty whenever the grid holds
+        # only slightly more dates than folds, and an absent fold id fails the same check
+        # a wrong fold count does.
+        block = max(1, n_dates // max(1, n_folds))
         rows_fold = [
-            (_di // max(1, n_dates // n_folds + 1)) % n_folds
-            for _di in range(n_dates)
-            for _ in range(n_symbols)
+            min(_di // block, n_folds - 1) for _di in range(n_dates) for _ in range(n_symbols)
         ]
         frame = _pl.DataFrame(
             {
-                entity_col: rows_symbol,
-                "timestamp": _pl.Series(rows_date).cast(_pl.Date),
+                "symbol": _pl.Series(rows_symbol, dtype=entity_dtype)
+                if entity_dtype is not None
+                else _pl.Series(rows_symbol),
+                "timestamp": _pl.Series(rows_date).cast(timestamp_dtype or _pl.Date),
                 "fold": rows_fold,
                 "actual": target_rng.normal(0, 0.01, n).tolist(),
             }
         )
-        templates[window] = (frame, n)
-        return templates[window]
+        # This function drew `actual` itself and knows it is a continuous return, so
+        # a classification set on this panel can evaluate against it directly.
+        # Carried on every window rather than only the classification ones: it costs
+        # one column and keeps the panel a single object, so which labels need it is
+        # decided at write time.
+        frame = frame.with_columns(_pl.col("actual").alias("eval_actual"))
+        templates[(window, n_folds)] = (frame, n)
+        return templates[(window, n_folds)]
 
-    rewrite_existing = cs_id == "crypto_perps_funding"
     missing_leaders = sorted(
         p_hash
         for p_hash in cohort_leader_hashes
         if not (cs_dir / "run_log" / "predictions" / p_hash / "predictions.parquet").is_file()
     )
-    if missing_leaders:
-        # The exemption above can only preserve an artifact that exists. A leader with
-        # none still falls through to the synthetic write, and the notebook that pins
-        # its hash then fails a >0.99 correlation gate against real prices several
-        # stages downstream, nowhere near this function. The gap is reported by hash
-        # at regeneration time rather than left to surface there. Not fatal: seven of
-        # the nine fixtures are missing at least one leader artifact today, so raising
-        # would stop every regeneration on a pre-existing gap this function did not
-        # introduce.
-        #
-        # Do NOT close the gap by copying the production artifact in. A copied fixture
-        # is stale the moment anything upstream is regenerated, and every case study is
-        # being retrained end to end. What the correlation gate needs is a panel whose
-        # entities and timestamps are the ones the fixture's own labels carry, and whose
-        # historical target is derived from the same synthetic series the scores come
-        # from, so the check is satisfied by construction. That is what the branch below
-        # already does wherever a reference panel exists; a leader with no artifact of
-        # its own is the case that still falls back to a fabricated grid.
-        warnings.warn(
-            f"{cs_id}: no predictions.parquet on disk for cohort-leader prediction(s) "
-            f"{', '.join(missing_leaders)}; each gets synthetic scores on a fabricated "
-            "entity grid that a replay notebook's historical-target check will reject. "
-            "Generate the artifact against the fixture's own labels, deriving its "
-            "target from the series the scores come from; never copy the production one.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
 
     def _survives(p_hash: str) -> bool:
-        """True when the loop below leaves this artifact exactly as it is."""
+        """True when the loop below leaves this artifact exactly as it is.
+
+        An artifact the fixture already carries is the one its registry row
+        describes, so replacing it makes the fixture contradict itself: the row
+        keeps reporting the coverage and the IC of a prediction set that is no
+        longer on disk, and a notebook obeying `rules/notebook-standards.md` C9 -
+        validate that the artifact you read is the one the registry describes -
+        then cannot pass under CI. `16_strategy_simulation/08_signal_method_comparison`
+        hit exactly that and had to weaken its check.
+
+        crypto_perps_funding used to be exempt from this, via a
+        `rewrite_existing = cs_id == "crypto_perps_funding"` line that arrived in a
+        bulk release commit (70924077) with no isolated rationale and none recorded
+        anywhere since. Measured across the shipped fixture: it was the only thing
+        rewriting an artifact the fixture ships - five of them, all crypto - and it
+        redrew their scores while their registry rows went on describing the old
+        ones. The other eight case studies already behaved this way, so dropping it
+        makes crypto agree with them rather than introducing a new rule.
+        """
         pred_file = cs_dir / "run_log" / "predictions" / p_hash / "predictions.parquet"
-        return pred_file.is_file() and (p_hash in cohort_leader_hashes or not rewrite_existing)
+        return pred_file.is_file()
 
     # Two prediction sets of one (split, label) have to be joinable on
     # (timestamp, entity), or a notebook that pairs them measures nothing:
@@ -1171,11 +1665,26 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
     # maximum gap None" - max() over an empty join - because the latent set was a
     # fabricated weekday grid over SYM0..SYM4 and the supervised set was an artifact
     # copied from production. Placeholder symbols cannot meet real ones on any key,
-    # so where the fixture already carries an artifact this function will not
-    # rewrite, the seeded sets take its keys, folds and realized targets and
-    # synthesize only the score. Groups with no such artifact keep the fabricated
-    # grid, which is still the only option there.
-    reference_panels = _reference_panels(cs_dir, hash_rows, _survives, entity_col, _pl)
+    # so where the fixture already carries an artifact, the seeded sets take its
+    # keys, folds and realized targets and synthesize only the score - preferring
+    # one that survives, and otherwise using one that will be rewritten onto its
+    # own keys. Only a group with no artifact at all keeps the fabricated grid.
+    reference_panels = _reference_panels(cs_dir, hash_rows, _survives, _pl)
+    label_panels: dict = {}
+    fabricated_leaders: list = []
+
+    def _label_panel(split, label, n_folds):
+        """The fixture's own label artifact as a panel, computed once per key.
+
+        Keyed on the fold count as well, the way `_template_for` is: two runs of one
+        label can declare different fold counts and each artifact has to carry its own.
+        """
+        key = (split, label, n_folds)
+        if key not in label_panels:
+            label_panels[key] = _label_artifact_panel(
+                cs_dir, label, _window_for(split, label), n_folds, _pl
+            )
+        return label_panels[key]
 
     for p_hash, split, label in hash_rows:
         pred_dir = cs_dir / "run_log" / "predictions" / p_hash
@@ -1183,14 +1692,95 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         if _survives(p_hash):
             continue
         reference = reference_panels.get((split, label))
+        borrowed = False
+        if reference is None:
+            # A label with no artifact of its own borrows the decision grid of
+            # another label in the same split, but only where the panels this
+            # case study does have are evenly spaced and sub-daily - which is
+            # exactly where the fabricated weekday grid cannot represent the
+            # decisions at all. crypto_perps_funding decides every 8 hours for
+            # every label, and `fwd_dir_8h` is the direction cut of the same
+            # return as `fwd_ret_8h`, so its keys are that label's keys.
+            #
+            # Only the keys and folds are borrowed. `actual` is redrawn below,
+            # because the lending label's realized value is not this label's -
+            # a direction label's target is a class, not a return.
+            reference = _intraday_split_skeleton(reference_panels, split, _pl)
+            borrowed = reference is not None
+        if reference is None:
+            # Nothing in this group and nothing to borrow: build the panel from the
+            # fixture's own label artifact rather than fabricating one. `borrowed` stays
+            # False - the target here IS this label's realized value, so it must not be
+            # redrawn below.
+            reference = _label_panel(split, label, declared_folds.get(p_hash, 2))
         if reference is not None:
             template, n = reference, reference.height
         else:
-            template, n = _template_for(_window_for(split, label))
+            template, n = _template_for(_window_for(split, label), declared_folds.get(p_hash, 2))
         pred_dir.mkdir(parents=True, exist_ok=True)
         score_seed = int(hashlib.sha256(p_hash.encode()).hexdigest()[:16], 16)
         scores = np.random.default_rng(score_seed).normal(0, 0.01, n).tolist()
-        template.with_columns(_pl.Series("prediction", scores)).write_parquet(str(pred_file))
+        frame = template.with_columns(_pl.Series("prediction", scores))
+        if borrowed:
+            actual_seed = int(
+                hashlib.sha256(f"actual/{split}/{label}".encode()).hexdigest()[:16], 16
+            )
+            frame = frame.with_columns(
+                _pl.Series("actual", np.random.default_rng(actual_seed).normal(0, 0.01, n).tolist())
+            )
+        if label in eval_target_labels and "eval_actual" not in frame.columns:
+            # The panel is a copied artifact that does not carry the column. Its
+            # `actual` cannot stand in: on a classification set that is the class
+            # label, and a rank correlation against it measures class separation
+            # rather than a ranking against returns - the substitution
+            # 07_case_study_insights refuses to make. Draw a continuous target
+            # instead, per (split, label)
+            # so every set of the group agrees on what the realized return was.
+            group_seed = int(hashlib.sha256(f"{split}/{label}".encode()).hexdigest()[:16], 16)
+            frame = frame.with_columns(
+                _pl.Series(
+                    "eval_actual",
+                    np.random.default_rng(group_seed).normal(0, 0.01, frame.height),
+                )
+            )
+        if label not in eval_target_labels and "eval_actual" in frame.columns:
+            # A regression set never carries it in production, and the panel it was
+            # seeded onto may be a classification artifact that does.
+            frame = frame.drop("eval_actual")
+        frame.write_parquet(str(pred_file))
+        if p_hash in missing_leaders and reference is None:
+            fabricated_leaders.append(p_hash)
+
+    if fabricated_leaders:
+        # The exemption above can only preserve an artifact that exists, so a cohort
+        # leader with none falls through to this loop. Where it lands on a real panel -
+        # another artifact of its group, a borrowed intraday skeleton, or the fixture's
+        # own label artifact - it carries the keys and the realized target a replay
+        # notebook pins it for, and there is nothing to report. This is what is left:
+        # a leader seeded onto a fabricated entity grid with a drawn target, whose
+        # >0.99 correlation gate against real prices fails several stages downstream,
+        # nowhere near this function.
+        #
+        # Reported rather than raised: a fixture that genuinely has no label artifact for
+        # the group cannot be fixed from here, and raising would stop every regeneration
+        # on a gap this function did not introduce.
+        #
+        # Do NOT close it by copying the production artifact in. A copied fixture is
+        # stale the moment anything upstream is regenerated, and every case study is
+        # being retrained end to end. What the gate needs is a panel whose entities and
+        # timestamps are the fixture's own and whose target is the one its labels carry,
+        # which is what `_label_artifact_panel` builds.
+        warnings.warn(
+            f"{cs_id}: cohort-leader prediction(s) "
+            f"{', '.join(sorted(fabricated_leaders))} have no artifact on disk and no "
+            "panel to seed onto - not from their own group, not borrowed, and not from "
+            "the fixture's own label artifact - so each gets synthetic scores on a "
+            "fabricated entity grid that a replay notebook's historical-target check "
+            "will reject. Add the label artifact this case study is missing; never copy "
+            "the production prediction.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
 
 def _seed_causal_json(results_dir: Path, cs_id: str, label: str) -> None:
@@ -1258,6 +1848,33 @@ def _seed_temporal_json(results_dir: Path, cs_id: str) -> None:
             indent=2,
         )
     )
+
+
+def _drop_legacy_conformal_widths(cs_dir: Path) -> None:
+    """Remove seeded conformal widths that predate the `calibration_version` column.
+
+    `case_studies/utils/conformal.py` refuses a widths artifact without that column - the
+    calibration it records cannot be identified, so a sizing decision made from it cannot be
+    attributed to a version. It also regenerates the artifact when the file is absent, so
+    deleting a legacy one is exactly the "preserve and regenerate" the refusal asks for.
+
+    The fixture data ships some of these: ml4t/third-edition-test-data holds pre-column
+    widths written 2026-08-25, and the first notebook to size with `conformal_weighted`
+    fails on them rather than on anything it did. Dropping them here keeps that repo and
+    this one from having to move together for a column that the code can rebuild.
+    """
+    import polars as _pl
+
+    widths = cs_dir / "run_log" / "predictions"
+    if not widths.is_dir():
+        return
+    for path in widths.glob("*/conformal_widths.parquet"):
+        try:
+            columns = _pl.read_parquet(path).columns
+        except Exception:  # unreadable is handled downstream as "no prior widths"
+            continue
+        if "calibration_version" not in columns:
+            path.unlink()
 
 
 def _seed_demo_predictions(cs_dir: Path, cs_id: str, primary_label: str) -> None:
@@ -1495,7 +2112,10 @@ def seed_results(output_dir: Path, case_study_ids: list[str]) -> None:
         # Backfill prediction parquets for ALL hashes in registry
         # (must run AFTER _seed_registry_db, and also when registry was pre-seeded)
         _backfill_all_prediction_parquets(cs_dir, cs_id)
+        _drop_stale_conformal_widths(cs_dir)
+        _normalize_prediction_timestamp_zone(cs_dir)
         _record_prediction_artifact_digests(cs_dir)
+        _drop_legacy_conformal_widths(cs_dir)
 
         # Backfill daily_returns.parquet for ALL backtest hashes in registry
         # so downstream notebooks (e.g., 17/01_portfolio_metrics) that resolve a

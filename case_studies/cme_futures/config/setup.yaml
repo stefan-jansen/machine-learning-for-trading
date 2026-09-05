@@ -314,6 +314,52 @@ features:
       representation: mean of percentiles, their product, and a banded discretization
       failure_mode: hides which of the two components moved the score
 
+# What `04_model_based_features` decides, declared here for the same reason the
+# feature windows above are: an estimation window is part of a fitted feature's
+# definition, so it belongs where the definition lives rather than inside the
+# notebook that runs it. Every count is in trading sessions.
+#
+# A fitted feature is bounded by the schedule below and not by a walk-forward
+# period. The parameters behind a value are estimated from sessions strictly
+# before it, refreshed on the cadence given, and the same value comes out
+# whichever period later selects the row - so the artifact carries no fold column.
+#
+# The spectral features in section C.2 have no entry here. A Fourier transform of
+# a window estimates nothing, so it has no estimation window to declare; its
+# lookback is a lookback like the ones under `features.windows`.
+model_based:
+  arima:
+    # Sessions of a product's own carry z-score spent before the first forecast.
+    # A trading year, so the first order is chosen from a full year of the series
+    # rather than from a few weeks of it. The walk was already causal at this
+    # cadence before the schedule was declared here; what moved is where the two
+    # numbers live.
+    burnin: 252
+    # How often the order and the weights are re-chosen. Monthly. The stepwise
+    # order search is the expensive step, so this is what bounds the walk's cost
+    # without narrowing the universe.
+    refit_every: 21
+  hmm:
+    # Backwardation and contango.
+    n_states: 2
+    # Sessions of the book-wide carry average before the regime chain is fitted.
+    # Two years. A two-state chain has to see both states switch several times
+    # before its transition matrix means anything, and this is one market-level
+    # series rather than a panel, so the burn-in is paid once for the whole
+    # notebook rather than once per product.
+    #
+    # The average itself begins 2011-04-27, after the carry smoothing and z-score
+    # windows, and the oldest period trains from the first session of the panel -
+    # so this burn-in comes out of that period's training window rather than
+    # ahead of it. The first regime value lands 2013-04-09: 504 of the 1,978
+    # sessions in that period's training window, and no evaluation session, since
+    # the earliest evaluation window opens 2019-01-03. The walk makes 44
+    # estimates before the holdout freezes it.
+    burnin: 504
+    # How often the chain is re-estimated. A quarter, as in etfs and fx_pairs:
+    # regime parameters are the slowest-moving thing this notebook fits.
+    refit_every: 63
+
 evaluation:
   n_splits: 5
   train_size: 8Y

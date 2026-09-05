@@ -24,15 +24,19 @@ CAUSAL_NOTEBOOKS = [
     "case_studies/cme_futures/11_causal_dml.py",
     "case_studies/crypto_perps_funding/11_causal_dml.py",
     "case_studies/etfs/12_causal_dml.py",
+    "case_studies/nasdaq100_microstructure/12_causal_dml.py",
     "case_studies/fx_pairs/11_causal_dml.py",
+    "case_studies/sp500_options/10_causal_dml.py",
     "case_studies/us_equities_panel/14_causal_dml.py",
+    # Numbered one lower than the other eight: this case study has no stage-04
+    # notebook, so its causal notebook is 09 rather than 11.
+    "case_studies/us_firm_characteristics/09_causal_dml.py",
 ]
 
-# Four more notebooks open a causal request through register_causal_run and do not yet
-# declare the parameter, so they cannot answer the write-time refusal:
-# nasdaq100_microstructure/12, sp500_options/10, sp500_equity_option_analytics/12 and
-# us_firm_characteristics/09. Each is owned by an active branch and takes the same patch
-# from its own side; add the path here in the same commit that adds the parameter.
+# One notebook still opens a causal request without declaring the parameter and so cannot
+# answer the write-time refusal: sp500_equity_option_analytics/12. It is owned by an active
+# branch and takes the same patch from its own side; add the path above in the same commit
+# that adds the parameter. nasdaq100_microstructure/12 came off this note on 2026-09-02.
 
 
 class TestTheDeclarationParser:
@@ -75,32 +79,35 @@ def test_the_notebook_declares_the_parameter(path: str) -> None:
     assert "SUPERSEDES_CAUSAL" in source, f"{path} cannot answer the write-time refusal"
 
 
+# The two shapes a notebook can use to reach the write, and the keyword each takes.
+# `study.causal(supersedes=...)` is the request path; `register_causal_run(
+# supersedes_hash=...)` is the direct one, and it is the function that actually
+# performs the refusal - `_enforce_causal_supersedes` is called from inside it. A
+# notebook on the direct path answers the refusal just as completely, so requiring the
+# request path here would fail a notebook that is correct.
+_SUPERSEDES_CALLS = {"causal": "supersedes", "register_causal_run": "supersedes_hash"}
+
+
+def _call_name(node: ast.Call) -> str | None:
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    return None
+
+
 @pytest.mark.parametrize("path", CAUSAL_NOTEBOOKS)
 def test_the_parameter_reaches_the_request(path: str) -> None:
     """Declaring it and not passing it is the same as not declaring it."""
     source = (REPO / path).read_text()
     tree = ast.parse(source)
-    # Two shapes open a causal request and both perform the refusal. The resolver path is
-    # study.causal(supersedes=...); the direct path is register_causal_run(supersedes_hash=...),
-    # which reaches _enforce_causal_supersedes from inside the registering write. Recognizing
-    # only the first left every direct caller ungoverned by this file.
-    passed = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if isinstance(func, ast.Attribute) and func.attr == "causal":
-            wanted = "supersedes"
-        elif (
-            isinstance(func, ast.Name)
-            and func.id == "register_causal_run"
-            or isinstance(func, ast.Attribute)
-            and func.attr == "register_causal_run"
-        ):
-            wanted = "supersedes_hash"
-        else:
-            continue
-        passed.extend(k for k in node.keywords if k.arg == wanted)
+    passed = [
+        keyword
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _call_name(node) in _SUPERSEDES_CALLS
+        for keyword in node.keywords
+        if keyword.arg == _SUPERSEDES_CALLS[_call_name(node)]
+    ]
     assert passed, (
         f"{path} declares SUPERSEDES_CAUSAL but nothing takes it: no study.causal() call "
         "with supersedes= and no register_causal_run() call with supersedes_hash="

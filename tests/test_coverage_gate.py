@@ -98,6 +98,68 @@ def test_a_dropped_fold_is_caught(case_dir):
     assert "5 of 5 declared sessions absent" in message
 
 
+def test_a_frame_with_no_prediction_column_is_not_a_prediction_set(case_dir):
+    """`check_prediction_coverage` read a row as a prediction, so a bare session axis passed."""
+    frame = _frame().drop("prediction")
+    with pytest.raises(CoverageError) as excinfo:
+        check_prediction_coverage(frame, "cs", LABEL, case_dir=case_dir)
+    assert "no prediction column" in str(excinfo.value)
+
+
+def test_a_backtest_input_frame_still_needs_no_score_column(case_dir):
+    """The requirement sits on the prediction entry point; `_coverage` is shared."""
+    report = check_backtest_input_coverage(
+        _frame().drop("prediction"), "cs", LABEL, case_dir=case_dir
+    )
+    assert report.complete
+
+
+def test_all_null_predictions_do_not_read_as_coverage(case_dir):
+    frame = _frame().with_columns(pl.lit(None, dtype=pl.Float64).alias("prediction"))
+    with pytest.raises(CoverageError) as excinfo:
+        check_prediction_coverage(frame, "cs", LABEL, case_dir=case_dir)
+    assert "no predictions" in str(excinfo.value)
+
+
+def test_non_finite_predictions_do_not_read_as_coverage(case_dir):
+    """NaN and infinity are non-null and rank against nothing; they are not decisions."""
+    for value in (float("nan"), float("inf"), float("-inf")):
+        frame = _frame().with_columns(pl.lit(value, dtype=pl.Float64).alias("prediction"))
+        with pytest.raises(CoverageError) as excinfo:
+            check_prediction_coverage(frame, "cs", LABEL, case_dir=case_dir)
+        assert "no finite value" in str(excinfo.value)
+
+
+def test_a_session_whose_predictions_are_all_nan_counts_as_missing(case_dir):
+    frame = _frame().with_columns(
+        pl.when(pl.col("timestamp").dt.day() == 8)
+        .then(float("nan"))
+        .otherwise(pl.col("prediction"))
+        .alias("prediction")
+    )
+    with pytest.raises(CoverageError) as excinfo:
+        check_prediction_coverage(frame, "cs", LABEL, case_dir=case_dir)
+    assert "1 of 5 declared sessions absent" in str(excinfo.value)
+
+
+def test_an_integer_score_column_needs_only_to_be_non_null(case_dir):
+    """`is_finite` is undefined off a float column, so the condition there is non-null."""
+    frame = _frame().with_columns(pl.col("prediction").cast(pl.Int64).alias("prediction"))
+    assert check_prediction_coverage(frame, "cs", LABEL, case_dir=case_dir).complete
+
+
+def test_a_session_whose_predictions_are_all_null_counts_as_missing(case_dir):
+    frame = _frame().with_columns(
+        pl.when(pl.col("timestamp").dt.day() == 8)
+        .then(None)
+        .otherwise(pl.col("prediction"))
+        .alias("prediction")
+    )
+    with pytest.raises(CoverageError) as excinfo:
+        check_prediction_coverage(frame, "cs", LABEL, case_dir=case_dir)
+    assert "1 of 5 declared sessions absent" in str(excinfo.value)
+
+
 def test_a_single_missing_interior_session_is_caught(case_dir):
     survivors = [ts for ts in SESSIONS if ts.day != 8]
     with pytest.raises(CoverageError) as excinfo:
@@ -320,3 +382,114 @@ def test_sessions_outside_every_declared_window_are_a_gap(case_dir):
     )
     with pytest.raises(CoverageError, match="belong to no declared|outside the declared"):
         check_backtest_input_coverage(frame, "cs", LABEL, case_dir=case_dir)
+
+
+# A frame checked against the wrong label reports a gap that is not there. Measured in
+# `crypto_perps_funding`: the 8-hour label declares 2,189 validation sessions and the
+# 24-hour label 2,187, because a decision at 2023-12-31 00:00 realizes inside the
+# holdout under a 24-hour horizon and the seal purges it. Checking a 24-hour artifact
+# against the primary 8-hour label therefore reports exactly two missing sessions on a
+# correct result - and a gate that cries wolf on correct artifacts gets switched off.
+
+
+def test_a_frame_carrying_another_label_is_refused(case_dir):
+    frame = _frame().with_columns(pl.lit("fwd_ret_5d").alias("label"))
+    with pytest.raises(CoverageError, match="not 'fwd_ret_1d'"):
+        check_prediction_coverage(frame, "cs", LABEL, case_dir=case_dir)
+
+
+def test_a_frame_carrying_the_same_label_passes(case_dir):
+    frame = _frame().with_columns(pl.lit(LABEL).alias("label"))
+    report = check_prediction_coverage(frame, "cs", LABEL, case_dir=case_dir)
+    assert report.complete
+
+
+def test_a_frame_with_no_label_column_is_checked_as_before(case_dir):
+    # The cross-check is skipped rather than asserted on absent evidence.
+    report = check_prediction_coverage(_frame(), "cs", LABEL, case_dir=case_dir)
+    assert report.complete
+
+
+def test_a_frame_mixing_labels_is_refused(case_dir):
+    frame = _frame().with_columns(
+        pl.when(pl.col("timestamp").dt.day() <= 10)
+        .then(pl.lit(LABEL))
+        .otherwise(pl.lit("fwd_ret_5d"))
+        .alias("label")
+    )
+    with pytest.raises(CoverageError, match="fwd_ret_5d"):
+        check_prediction_coverage(frame, "cs", LABEL, case_dir=case_dir)
+
+
+# The panel a model actually reads. Two sessions of the label axis are missing from it,
+# standing in for an input feed that was out while the forward return - computed from
+# prices alone - carried on.
+PANEL = pl.Series("timestamp", [ts for ts in SESSIONS if ts.day not in (8, 15)])
+
+
+def test_a_model_is_not_asked_to_predict_where_the_panel_gave_it_nothing(case_dir):
+    """The label artifact declares sessions the feature panel does not have.
+
+    Without `decision_axis` the gate reports the model incomplete for not predicting on
+    days it was blind, which is a fact about the feed and not about the model.
+    """
+    predictions = _frame([ts for ts in SESSIONS if ts.day not in (8, 15)])
+
+    with pytest.raises(CoverageError, match="declared sessions absent"):
+        check_prediction_coverage(predictions, "cs", LABEL, case_dir=case_dir)
+
+    report = check_prediction_coverage(
+        predictions, "cs", LABEL, case_dir=case_dir, decision_axis=PANEL
+    )
+    assert report.expected_sessions == 8
+    assert report.observed_sessions == 8
+
+
+def test_the_decision_axis_narrows_the_declaration_and_never_widens_it(case_dir):
+    """A timestamp the panel holds and the label artifact does not is still not a session."""
+    intruder = dt.datetime(2020, 1, 11, 16, 0)
+    assert intruder not in SESSIONS
+    wider = pl.Series("timestamp", [*SESSIONS, intruder])
+
+    sessions = declared_sessions("cs", LABEL, case_dir=case_dir, decision_axis=wider)
+
+    assert sum(len(v) for v in sessions.values()) == len(SESSIONS)
+    assert all(intruder not in fold for fold in sessions.values())
+
+
+def test_a_decision_axis_disjoint_from_the_label_artifact_is_refused(case_dir):
+    """Not silently zero sessions: an axis that shares nothing is a wrong axis."""
+    elsewhere = pl.Series("timestamp", [dt.datetime(2021, 6, d, 16, 0) for d in (1, 2, 3)])
+
+    with pytest.raises(CoverageError, match="share no timestamp"):
+        declared_sessions("cs", LABEL, case_dir=case_dir, decision_axis=elsewhere)
+
+
+def test_the_gap_between_folds_is_read_on_the_decision_axis_too(case_dir, monkeypatch):
+    """An outage between two folds is not a fold that failed to account for its sessions.
+
+    The weekend between the two folds carries no sessions, so the between-fold check is silent
+    on this fixture. Declaring a session there and withholding it from the panel is what the
+    check has to see through: the label artifact has a row nothing could have decided at.
+    """
+    weekend = dt.datetime(2020, 1, 11, 16, 0)
+    labels = case_dir / "labels"
+    pl.DataFrame(
+        [
+            {"timestamp": ts, "symbol": sym, LABEL: 0.01 * i}
+            for i, ts in enumerate([*SESSIONS, weekend])
+            for sym in ("AAA", "BBB", "CCC")
+        ]
+    ).write_parquet(labels / f"{LABEL}.parquet")
+
+    with pytest.raises(CoverageError, match="belong to no declared fold"):
+        check_prediction_coverage(_frame(), "cs", LABEL, case_dir=case_dir)
+
+    report = check_prediction_coverage(
+        _frame(),
+        "cs",
+        LABEL,
+        case_dir=case_dir,
+        decision_axis=pl.Series("timestamp", SESSIONS),
+    )
+    assert report.expected_sessions == len(SESSIONS)

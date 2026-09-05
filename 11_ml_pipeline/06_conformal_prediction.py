@@ -49,6 +49,8 @@
 # %% tags=[]
 """Conformal Prediction for Uncertainty-Aware Trading — generate prediction intervals with coverage guarantees."""
 
+import hashlib
+import inspect
 import warnings
 
 import joblib
@@ -56,14 +58,22 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
+import sklearn
+from IPython.display import Markdown, display
 from sklearn.linear_model import QuantileRegressor, Ridge
 from sklearn.preprocessing import StandardScaler
 
 from data import load_macro
 from utils.cv_splits import generate_cv_splits
+from utils.modeling import (
+    array_sha256,
+    conformal_quantile,
+    file_sha256,
+    notebook_cache_signature,
+)
 from utils.paths import display_path, get_case_study_dir, get_chapter_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
 warnings.filterwarnings("ignore")
 
@@ -89,7 +99,6 @@ if is_reduced_run and not ARTIFACT_TAG:
     ARTIFACT_TAG = "_fast"
 
 RESULTS_PATH = MODELS_DIR / f"conformal_results{ARTIFACT_TAG}.joblib"
-NEED_TRAINING = RETRAIN or not RESULTS_PATH.exists()
 
 # %% [markdown] tags=[]
 # ## Load Features and Labels
@@ -238,8 +247,18 @@ else:
 #
 # For regression, the nonconformity score is the absolute residual:
 # $s_i = |y_i - \hat{y}_i|$. The prediction interval at coverage level
-# $1 - \alpha$ uses the $\lceil (n+1)(1-\alpha) \rceil / n$ quantile of
-# calibration scores.
+# $1 - \alpha$ uses the $\lceil (n+1)(1-\alpha) \rceil$-th smallest calibration
+# score.
+#
+# The ceiling is what earns the guarantee, and it has to be taken literally. The
+# interval must be the width of an actual calibration score, the one at that rank
+# in the sorted list. A quantile function that interpolates between two
+# neighbouring scores returns something slightly narrower, and that difference is
+# exactly the finite-sample margin the ceiling was there to provide. The calls
+# below therefore select the rank directly, through
+# `utils.modeling.conformal_quantile`, which also returns an unbounded interval
+# when the rank exceeds the calibration set - a set of 5 scores cannot certify
+# 90% coverage, and saying so is better than quoting its largest score.
 
 
 # %% tags=[]
@@ -269,9 +288,7 @@ def predict_split_conformal(state, X, coverage=TARGET_COVERAGE):
     X_scaled = state["scaler"].transform(X)
     y_pred = state["model"].predict(X_scaled)
 
-    n_cal = len(state["cal_scores"])
-    quantile_level = min(np.ceil((n_cal + 1) * coverage) / n_cal, 1.0)
-    q = np.quantile(state["cal_scores"], quantile_level)
+    q = conformal_quantile(state["cal_scores"], coverage)
 
     return y_pred, y_pred - q, y_pred + q
 
@@ -319,9 +336,7 @@ def fit_cqr(X_train, y_train, X_cal, y_cal, coverage=TARGET_COVERAGE):
     q_upper_cal = model_hi.predict(X_cal_scaled)
     scores = np.maximum(q_lower_cal - y_cal, y_cal - q_upper_cal)
 
-    n_cal = len(scores)
-    quantile_level = min(np.ceil((n_cal + 1) * coverage) / n_cal, 1.0)
-    cal_adj = np.quantile(scores, quantile_level)
+    cal_adj = conformal_quantile(scores, coverage)
 
     return {"model_lo": model_lo, "model_hi": model_hi, "scaler": scaler, "cal_adj": cal_adj}
 
@@ -412,14 +427,12 @@ def predict_aci_adaptive(
     decision_dates = np.unique(dates)
     rows_on_date = [np.where(dates == d)[0] for d in decision_dates]
 
-    n_cal = len(state["cal_scores"])
     alpha_t = target_alpha
     alpha_history = [alpha_t]
 
     for i, rows in enumerate(rows_on_date):
         # Price the whole cross-section from the current, pre-outcome alpha.
-        q_level = min(np.ceil((n_cal + 1) * (1 - alpha_t)) / n_cal, 1.0)
-        q = np.quantile(state["cal_scores"], q_level)
+        q = conformal_quantile(state["cal_scores"], 1 - alpha_t)
         lower[rows] = y_pred[rows] - q
         upper[rows] = y_pred[rows] + q
 
@@ -524,19 +537,79 @@ def run_conformal_evaluation(features, targets, cv_splits, dates, coverage=TARGE
     return results
 
 
+# %% [markdown] tags=[]
+# The fitted results are cached so a re-read of the notebook does not refit three
+# conformal methods across every fold. What the cache is keyed on decides whether
+# that is a convenience or a hazard. Keyed on the file existing, an edit to any of
+# the code below would leave the previous run's numbers on the page underneath the
+# new source, and nothing downstream would notice: the provenance stamp binds this
+# `.py` to its `.ipynb`, and after an edit and a re-run both of those are current.
+# So the cache carries a signature of the notebook's own source, the two input
+# files, the exact cleaned arrays and the settings that change a fit, and a run
+# that does not match it refits.
+
+
 # %% tags=[]
+CACHE_SIGNATURE = notebook_cache_signature(
+    get_chapter_dir(11) / "06_conformal_prediction.py",
+    inputs={
+        "features_file": file_sha256(FEATURES_PATH),
+        "labels_file": file_sha256(LABELS_PATH),
+        "features_array": array_sha256(features_array),
+        "target_array": array_sha256(target_array),
+        "dates": array_sha256(dates_np),
+        "cv_splits": array_sha256(
+            np.concatenate([np.concatenate([tr, [-1], te, [-2]]) for tr, te in cv_splits]).astype(
+                np.int64
+            )
+        ),
+    },
+    settings={
+        "seed": SEED,
+        "ridge_alpha": RIDGE_ALPHA,
+        "target_coverage": TARGET_COVERAGE,
+        "max_qr_samples": MAX_QR_SAMPLES,
+        # The source digest above covers this notebook and nothing it imports, so a
+        # change to the shared rank selection or to the estimators would otherwise
+        # leave the signature intact and the previous run's numbers on the page.
+        "conformal_quantile_source": hashlib.sha256(
+            inspect.getsource(conformal_quantile).encode()
+        ).hexdigest(),
+        "splitter_source": hashlib.sha256(
+            inspect.getsource(generate_cv_splits).encode()
+        ).hexdigest(),
+        "versions": {
+            "numpy": np.__version__,
+            "polars": pl.__version__,
+            "scikit_learn": sklearn.__version__,
+        },
+    },
+)
+
+
+# %% tags=[]
+def _cache_is_usable(cached: dict) -> tuple[bool, str]:
+    """Whether a loaded cache was produced by this code, on these inputs, at this scale."""
+    if cached.get("cache_signature") != CACHE_SIGNATURE:
+        return False, "the notebook source, its inputs or its settings changed"
+    if len(cached.get("fold_stats", [])) < len(cv_splits):
+        return False, "it holds fewer folds than this run evaluates"
+    return True, ""
+
+
+NEED_TRAINING = RETRAIN or not RESULTS_PATH.exists()
+if not NEED_TRAINING:
+    conformal_results = joblib.load(RESULTS_PATH)
+    usable, reason = _cache_is_usable(conformal_results)
+    if not usable:
+        print(f"Refitting: cached results at {display_path(RESULTS_PATH)} are stale - {reason}.")
+        NEED_TRAINING = True
+
 if NEED_TRAINING:
     conformal_results = run_conformal_evaluation(
         features_array, target_array, cv_splits, dates_np, coverage=TARGET_COVERAGE
     )
-else:
-    conformal_results = joblib.load(RESULTS_PATH)
-    if len(conformal_results.get("fold_stats", [])) < len(cv_splits):
-        print("Cached conformal results missing fold-level stats; recomputing.")
-        conformal_results = run_conformal_evaluation(
-            features_array, target_array, cv_splits, dates_np, coverage=TARGET_COVERAGE
-        )
-        NEED_TRAINING = True
+    conformal_results["cache_signature"] = CACHE_SIGNATURE
 
 # %% [markdown] tags=[]
 # ## Calibration Analysis
@@ -559,7 +632,9 @@ def compute_calibration_metrics(results: dict) -> pl.DataFrame:
             {
                 "method": {"sc": "Split-Conformal", "cqr": "CQR", "aci": "ACI"}[method],
                 "actual_coverage": actual,
-                "coverage_gap": actual - 0.9,
+                # Against the configured target, not a literal 0.9: a parameterized run
+                # at another coverage level would otherwise report its gap from 90%.
+                "coverage_gap": actual - TARGET_COVERAGE,
                 "mean_width": np.mean(data["widths"]),
                 "std_width": np.std(data["widths"]),
                 "fold_std": np.std(fold_coverages),
@@ -579,34 +654,69 @@ calibration_metrics = compute_calibration_metrics(conformal_results)
 calibration_metrics
 
 # %% [markdown] tags=[]
-# **Interpretation**: all three methods land within 2 pp of the 90% target, and
-# all three land *below* it — the direction exchangeability violations predict.
+# **How to read the table.** Four of its columns answer different questions, and
+# the methods do not rank the same way on all four.
 #
-# **CQR is strictly better than split-conformal on this panel**: 89.1% coverage at
-# mean width $\approx 0.153$, against 88.3% at $\approx 0.170$. Higher coverage
-# *and* tighter intervals, which is the payoff for letting width vary per
-# observation rather than fixing it per fold.
+# `coverage_gap` is the distance from the target. All three land below it, which
+# is the direction an exchangeability violation predicts: walk-forward evaluation
+# on non-stationary returns is exactly the assumption the marginal guarantee needs
+# and does not get.
 #
-# **ACI buys coverage with width.** It comes closest to target (89.5%) and has the
-# steadiest coverage across folds (fold-level $\sigma$ of $0.031$, against CQR's
-# $0.049$ and SC's $0.077$), but its mean width $\approx 0.176$ is the *widest* of
-# the three — wider than the static baseline it adapts on top of. Its $\alpha_t$
-# stays in $[0.094, 0.195]$ with mean $\approx 0.138$: persistently above the
-# $0.10$ target, which is the trajectory of a method holding intervals open
-# because it keeps getting missed. That is what honest adaptation to
-# non-stationarity costs. ACI is not a free improvement on split conformal; it
-# trades width for stability, and whether that trade is worth making depends on
-# whether fold-to-fold coverage swings or interval size hurt you more.
+# `mean_width` is what the coverage cost. Split conformal fixes one width per
+# fold, so every observation pays the same premium whether or not its own
+# uncertainty warrants it. CQR sets the width per observation, which is why it can
+# buy coverage more cheaply. ACI adjusts one width for the whole cross-section on
+# each decision date, in response to how the previous dates turned out.
 #
-# Note that ACI's feedback here is 21 sessions stale by construction (the label
-# horizon), so it can only track drift slower than the label resolves. A faster
-# $\gamma$ cannot fix that; the lag is a property of the trading problem.
+# `std_width` is how much a method lets the width move at all, and `fold_std` is
+# how steady its coverage is from one fold to the next. These two are the trade:
+# a method that holds width constant has nothing to absorb a regime change with,
+# and its coverage moves instead.
 #
-# **Trading implication**: for position sizing, CQR's per-sample adaptivity
-# translates into smaller positions when conditional uncertainty is genuinely
-# higher, and does so without paying for the safety in mean width. But read the
-# conditional-coverage table below before trusting any of these three marginal
-# numbers — they hide a failure that matters more than the differences here.
+# ACI's feedback is 21 sessions stale by construction, because that is when the
+# label resolves. It can only track drift slower than the label does, and no
+# choice of step size changes that; the lag is a property of the trading problem,
+# not of the method.
+#
+# Read the conditional-coverage table further down before trusting any of these
+# three marginal numbers. They hide a failure that matters more than the
+# differences between them.
+
+
+# %% tags=["results"]
+_cal = {row["method"]: row for row in calibration_metrics.iter_rows(named=True)}
+_closest = min(_cal.values(), key=lambda r: abs(r["coverage_gap"]))["method"]
+_steadiest = min(_cal.values(), key=lambda r: r["fold_std"])["method"]
+_widest = max(_cal.values(), key=lambda r: r["mean_width"])["method"]
+_cqr, _sc = _cal["CQR"], _cal["Split-Conformal"]
+_lines = [
+    f"- Closest to the {TARGET_COVERAGE:.0%} target on pooled coverage: **{_closest}**",
+    f"- Steadiest coverage from fold to fold: **{_steadiest}**",
+    f"- Widest intervals on average: **{_widest}**",
+]
+if _closest == _steadiest == _widest:
+    _lines.append(
+        f"- All three are **{_closest}**, which is the trade in one method: it holds "
+        "coverage nearest and steadiest by keeping its intervals open."
+    )
+_covers_more = _cqr["actual_coverage"] > _sc["actual_coverage"]
+_is_narrower = _cqr["mean_width"] < _sc["mean_width"]
+_verdict = {
+    (True, True): "Higher coverage and narrower intervals at once, which is what setting "
+    "the width per observation can buy.",
+    (True, False): "Higher coverage, but paid for in width, so on this run the per-"
+    "observation width is not free.",
+    (False, True): "Narrower intervals, but at lower coverage, so on this run the "
+    "adaptivity trades coverage away rather than buying it.",
+    (False, False): "Lower coverage and wider intervals, so on this run the per-"
+    "observation width bought nothing.",
+}[(_covers_more, _is_narrower)]
+_lines.append(
+    f"- CQR reaches {_cqr['actual_coverage']:.1%} coverage at mean width "
+    f"{_cqr['mean_width']:.3f}, against split conformal's {_sc['actual_coverage']:.1%} at "
+    f"{_sc['mean_width']:.3f}. {_verdict}"
+)
+display(Markdown("\n".join(_lines)))
 
 # %% [markdown] tags=[]
 # ## Calibration and Rolling Coverage Figure
@@ -665,9 +775,14 @@ ax.set_ylim(0.5, 1.0)
 ax.set_title("(b) Per-Fold Coverage")
 ax.legend(loc="lower right", fontsize=8)
 
-fig.suptitle("Conformal Prediction Calibration")
+fig.suptitle("All three methods land below the 90% target on average")
 fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Two panels. Left: pooled coverage as a bar per method against a dashed line at the "
+    "90% target. Right: coverage per walk-forward fold for the same three methods, "
+    "against the same target line.",
+)
 
 # %% [markdown] tags=[]
 # ## Multi-Level Calibration
@@ -718,22 +833,24 @@ ax.plot([0, 1], [0, 1], ls="--", color="grey", label="Perfect calibration")
 ax.plot(target_levels, mean_emp, "o-", markersize=6, lw=2, label="Split-Conformal")
 ax.set_xlabel("Target Coverage Level")
 ax.set_ylabel("Empirical Coverage")
-ax.set_title("Multi-Level Calibration (Split-Conformal)")
+ax.set_title("Empirical against target coverage, across nine levels")
 ax.legend()
 ax.set_xlim(0, 1)
 ax.set_ylim(0, 1)
 fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Empirical coverage against the requested target level for split conformal, over "
+    "nine levels, drawn against the diagonal of perfect calibration.",
+)
 
 # %% [markdown] tags=[]
-# **Interpretation**: Points above the diagonal indicate conservative coverage
-# (intervals slightly wider than necessary); points below indicate under-coverage.
-# Coverage lands close to target here, but split-conformal sits slightly *below*
-# the diagonal (88.3% vs the 90% target) rather than at or above it. That is
-# expected: the finite-sample validity guarantee assumes exchangeability, which
-# walk-forward evaluation on non-stationary returns breaks. The adaptive variants
-# (CQR, ACI) are the response to exactly this violation — ACI holds coverage
-# steadiest across folds, at the cost of the widest intervals of the three.
+# **What to read off it.** A point above the diagonal is conservative coverage,
+# intervals wider than the level required; a point below it is under-coverage. The
+# curve sits below the diagonal here rather than on or above it, and that is the
+# expected direction: the finite-sample guarantee assumes exchangeability, and
+# walk-forward evaluation on non-stationary returns breaks it. CQR and ACI are the
+# response to that violation, and the table above is where their cost shows up.
 
 # %% [markdown] tags=[]
 # ## ACI Adaptation Dynamics
@@ -755,10 +872,14 @@ if conformal_results["aci"]["alpha_histories"]:
     ax.axhline(y=0.1, color="gray", linestyle="--", label="Target alpha (0.1)")
     ax.set_xlabel("Decision date (index within fold)")
     ax.set_ylabel("Alpha (miscoverage rate)")
-    ax.set_title("ACI Alpha Adaptation (Most Recent Fold)")
+    ax.set_title("ACI moves alpha on coverage feedback 21 sessions stale")
     ax.legend()
     fig.tight_layout()
-    plt.show()
+    show_with_alt(
+        fig,
+        "The ACI miscoverage rate alpha over the decision dates of the most recent fold, "
+        "against a dashed line at its 0.1 target.",
+    )
 
     print(f"Alpha range: [{min(last_alpha):.4f}, {max(last_alpha):.4f}]")
     print(f"Mean alpha: {np.mean(last_alpha):.4f} (target: 0.1)")
@@ -786,12 +907,18 @@ for ax, (method, label, color) in zip(
     ax.hist(widths, bins=edges, color=color, alpha=0.7, edgecolor="white")
     ax.axvline(np.mean(widths), color="black", linestyle="--", linewidth=1)
     ax.set_xlabel("Interval Width")
-    ax.set_title(f"{label}\n(mean={np.mean(widths):.4f}, std={np.std(widths):.4f})")
+    # The mean and the spread are in the width table above and the dashed line below;
+    # a title that repeats them is a value the reader has to check against the chart.
+    ax.set_title(label)
 
 axes[0].set_ylabel("Frequency")
-fig.suptitle("Prediction Interval Width Distributions")
+fig.suptitle("CQR varies interval width the most, split conformal the least")
 fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Three histograms of prediction-interval width on a shared vertical scale, one per "
+    "method, each with a dashed line at its own mean width.",
+)
 
 # %% [markdown] tags=[]
 # ## Figure: Interval Width Dynamics with VIX Overlay
@@ -811,13 +938,19 @@ if fold_stats:
     cqr_width_bps = width_df["cqr_width_mean"].to_numpy() * 1e4
 
     fig, ax1 = plt.subplots(figsize=(11, 5))
-    ax1.plot(plot_dates, cqr_width_bps, "o-", color=COLORS["amber"], lw=2, label="CQR width (mean)")
-    ax1.axhline(
-        y=float(np.mean(sc_width_bps)),
+    # Both series per fold. Split conformal used to be one horizontal line at the grand
+    # mean of its folds, which is the shape the claim is about - so the chart could not
+    # show whether it held, and a reader had to take the caption's word for it.
+    ax1.plot(
+        plot_dates, cqr_width_bps, "o-", color=COLORS["amber"], lw=2, label="CQR width (fold mean)"
+    )
+    ax1.plot(
+        plot_dates,
+        sc_width_bps,
+        "s-",
         color=COLORS["blue"],
         lw=1.5,
-        ls="--",
-        label="Split-conformal width (mean)",
+        label="Split-conformal width (fold mean)",
     )
     ax1.set_xlabel("Fold End Date")
     ax1.set_ylabel("Interval Width (bps)")
@@ -865,13 +998,22 @@ if fold_stats:
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", frameon=False)
 
-    ax1.set_title("Conformal Interval Width Over Time")
-    plt.show()
+    ax1.set_title("Fold-to-fold interval width against the volatility overlay")
+    show_with_alt(
+        fig,
+        "Fold-mean interval width for CQR and for split conformal against fold end date "
+        "on the left axis, with a volatility series on a right axis and its top quartile "
+        "shaded.",
+    )
 
 # %% [markdown] tags=[]
-# **Interpretation**: CQR intervals have higher variance (wider during volatile
-# periods), which is desirable for risk-aware position sizing. Split-conformal
-# and ACI produce near-constant widths since they use the same base Ridge model.
+# **What to read off it.** CQR sets its width per observation, so its fold means can
+# move with the volatility overlay; split conformal fixes one width per fold from the
+# calibration residuals of the same Ridge model, so its line has far less to move
+# with. Whether the two lines separate in the direction that description predicts is
+# what the chart is for. A width that rises with volatility is the property that makes
+# an interval usable for position sizing, and a width that does not is why a marginal
+# coverage number can look fine while the interval fails when it matters.
 
 # %% [markdown] tags=[]
 # ## Conditional Coverage: Volatility Stratification
@@ -886,8 +1028,9 @@ if fold_stats:
 vol_arr = np.array(conformal_results["vol_proxy"])
 n_covered = len(conformal_results["sc"]["covered"])
 assert len(vol_arr) == n_covered, (
-    f"vol_proxy ({len(vol_arr):,}) and covered ({n_covered:,}) disagree — the cached "
-    f"results at {display_path(RESULTS_PATH)} do not match this run. Delete it and re-run."
+    f"vol_proxy ({len(vol_arr):,}) and covered ({n_covered:,}) disagree, so the two were "
+    "not recorded in the same pass over the folds. The cache signature above should have "
+    f"caught that; if this fires, delete {display_path(RESULTS_PATH)} and re-run."
 )
 
 # %% tags=[]
@@ -951,7 +1094,7 @@ tercile_table
 if NEED_TRAINING:
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     joblib.dump(conformal_results, RESULTS_PATH)
-    print(f"Saved results to {RESULTS_PATH}")
+    print(f"Saved results to {display_path(RESULTS_PATH)}")
 
 # %% [markdown] tags=[]
 # ## Bridge to Position Sizing
@@ -972,11 +1115,15 @@ fig, ax = plt.subplots(figsize=(8, 4))
 ax.scatter(cqr_widths * 1e4, position_weight, alpha=0.1, s=5)
 ax.set_xlabel("CQR Interval Width (bps)")
 ax.set_ylabel("Relative Position Weight")
-ax.set_title("Uncertainty-Scaled Position Sizing (CQR)")
+ax.set_title("Wider intervals map to smaller positions, capped at 3x median")
 ax.axhline(y=1.0, color="gray", linestyle="--", linewidth=1, label="Baseline weight")
 ax.legend()
 fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Scatter of relative position weight against CQR interval width in basis points, "
+    "with a dashed line at the baseline weight of one.",
+)
 
 # %% [markdown] tags=[]
 # Predictions with narrow intervals (high model confidence) receive larger
@@ -1004,14 +1151,14 @@ plt.show()
 #    same timestamp, and would consume outcomes three weeks before they exist. The
 #    resulting coverage would be a report on information the method never had.
 #
-# 4. All three methods land near the 90% target on the ETF dataset, and all three
-#    under-cover (88.3 / 89.1 / 89.5%) because walk-forward evaluation breaks the
-#    exchangeability the marginal guarantee assumes. **But the marginal number is
-#    the least interesting one here.** Stratified by volatility tercile, every
-#    method covers ~99% on quiet days and only 66-70% on volatile ones. A method
-#    can hit its marginal target and still fail, in the same direction, in the only
-#    regime where the interval was load-bearing. Always check stratified coverage;
-#    the fix is regime-conditional calibration, not a different conformal variant.
+# 4. All three methods land near the 90% target and all three under-cover, because
+#    walk-forward evaluation breaks the exchangeability the marginal guarantee
+#    assumes. **But the marginal number is the least interesting one here.**
+#    Stratified by volatility tercile, every method covers almost everything on
+#    quiet days and misses badly on volatile ones. A method can hit its marginal
+#    target and still fail, in the same direction, in the only regime where the
+#    interval was load-bearing. Always check stratified coverage; the fix is
+#    regime-conditional calibration, not a different conformal variant.
 #
 # 5. **Connection to portfolio construction**: Prediction intervals map directly
 #    to position sizes via an inverse-width rule. Wider intervals → smaller

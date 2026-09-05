@@ -48,7 +48,15 @@ jobs:
       issues: write
     steps:
       - name: Install git
-        run: apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null
+        run: |
+          # A transient apt mirror failure used to kill the whole job.
+          for attempt in 1 2 3; do
+            apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null && exit 0
+            echo "apt-get failed (attempt $attempt of 3); retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "::error::apt-get could not install git after three attempts"
+          exit 1
 
       - uses: actions/checkout@v6
 
@@ -196,7 +204,15 @@ jobs:
       issues: write
     steps:
       - name: Install git
-        run: apt-get update -qq && apt-get install -y -qq git >/dev/null
+        run: |
+          # A transient apt mirror failure used to kill the whole job.
+          for attempt in 1 2 3; do
+            apt-get update -qq && apt-get install -y -qq git >/dev/null && exit 0
+            echo "apt-get failed (attempt $attempt of 3); retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "::error::apt-get could not install git after three attempts"
+          exit 1
 
       - uses: actions/checkout@v6
 

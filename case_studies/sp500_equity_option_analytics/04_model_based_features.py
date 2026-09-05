@@ -43,11 +43,10 @@
 #
 # ## Learning objectives
 #
-# - Estimate the parameters of a volatility model on one window of a share's returns, then run the
-#   model forward over later sessions without re-estimating it, so that no later session can move
-#   a parameter
-# - Write the estimation window and the window the model is run over as one table per fold, and
-#   assert that the first ends before the second begins rather than saying that it does
+# - Re-estimate a volatility model on a fixed cadence over a share's own history, so that every
+#   emitted value carries parameters fitted strictly before the session it speaks for
+# - Declare that schedule where the feature is defined rather than inside the notebook, and assert
+#   that an emitted value does not move when later observations are deleted rather than saying so
 # - Pin every quantity the recursion starts from - the scaling, the starting variance and the
 #   bounds it is clipped to - to the estimation window, because a library that recomputes them
 #   over whatever series it is handed will read later data through them
@@ -71,6 +70,7 @@
 """S&P 500 Equity + Option Analytics: Model-Based Features."""
 
 import warnings
+from datetime import date
 
 warnings.filterwarnings("ignore")
 
@@ -83,7 +83,8 @@ from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 
 from case_studies.utils.artifact_digest import read_digest, value_digest, write_artifact
-from case_studies.utils.cv_window import modeling_fold_boundaries
+from case_studies.utils.cv_window import fold_boundary_date, modeling_fold_boundaries
+from case_studies.utils.temporal import refit_boundaries, walk_forward_feature
 from data import load_sp500_daily_bars, load_sp500_options_surface
 from utils.artifact_specs import load_setup_config, resolve_label_horizon
 from utils.cv_splits import load_evaluation_config
@@ -116,13 +117,19 @@ LABELS_DIR = CASE_DIR / "labels"
 # ## Configuration
 #
 # Three things are bound here and each decides something below: the label the section F diagnostic
-# scores against and how far ahead it resolves, the fold timeline the estimation windows come
+# scores against and how far ahead it resolves, the refit schedule the estimation windows come
 # from, and the date the holdout begins.
 #
-# **The folds come from one route.** `modeling_fold_boundaries` derives them from the label file
-# itself, through the same generator every downstream model reads, so a fold id means the same
-# thing in this artifact as it does on the other side of the join. Nothing here rebuilds a
-# calendar or replays a stored fold array.
+# **The schedule is declared in `config/setup.yaml`, not here.** An estimation window is part of a
+# fitted feature's definition, so it lives where the definition lives. `model_based.gjr_garch`
+# gives the burn-in and the refit cadence, and the comments there say what each decides and what
+# it costs.
+#
+# **The folds are read for one purpose and it is presentational.** `modeling_fold_boundaries`
+# still supplies the validation spans that section E's chart rules mark and that section F scores
+# over, because a reader comparing this feature against a downstream model wants the same dates.
+# No parameter is estimated per fold and no emitted value depends on one - that is the whole
+# subject of section B.
 
 # %%
 SETUP = load_setup_config(CASE_STUDY_ID)
@@ -140,12 +147,20 @@ canonical_splits = modeling_fold_boundaries(CASE_STUDY_ID, PRIMARY_LABEL)
 if not canonical_splits:
     raise RuntimeError(f"Canonical {PRIMARY_LABEL} modeling folds are unavailable")
 evaluation_config = load_evaluation_config(CASE_STUDY_ID)
-HOLDOUT_START = str(evaluation_config["holdout_start"])[:10]
-HOLDOUT_END = str(evaluation_config["holdout_end"])[:10]
+HOLDOUT_START = fold_boundary_date(evaluation_config["holdout_start"])
+HOLDOUT_END = fold_boundary_date(evaluation_config["holdout_end"])
+
+_schedule = SETUP["model_based"]["gjr_garch"]
+GARCH_BURNIN = int(_schedule["burnin"])
+GARCH_REFIT_EVERY = int(_schedule["refit_every"])
 
 print(
-    f"{len(canonical_splits)} walk-forward folds come from the {PRIMARY_LABEL} label file, "
-    "through the same generator the downstream models read."
+    f"{len(canonical_splits)} walk-forward folds come from the {PRIMARY_LABEL} label file. "
+    "They mark the spans sections E and F report over; no parameter is fitted per fold."
+)
+print(
+    f"GJR-GARCH schedule: {GARCH_BURNIN}-session burn-in, then re-estimated every "
+    f"{GARCH_REFIT_EVERY} sessions on that security's whole history to date."
 )
 print(
     f"That label resolves {LABEL_HORIZON} sessions after the decision, so consecutive daily "
@@ -173,9 +188,9 @@ print(f"Everything from {HOLDOUT_START} to {HOLDOUT_END} is the holdout.")
 # be, because the model was told the answer.
 #
 # The discipline that removes it has three parts, and section B, section C and section E carry one
-# each: fix the estimation window before any model runs, estimate inside it and never re-estimate
-# outside it, and emit the fold the parameters came from alongside every value so a consumer can
-# only join what belongs together.
+# each: declare the refit schedule before any model runs, estimate on the sessions before each
+# block and never on the block itself, and emit one value per date and security so there is
+# nothing left for a consumer to join wrongly.
 #
 # There is one more subtlety, and it is the one a careless implementation leaves in place. Fixing
 # the *parameters* is not enough. A recursion also needs a value to start from and a range to stay
@@ -183,109 +198,100 @@ print(f"Everything from {HOLDOUT_START} to {HOLDOUT_END} is the holdout.")
 # handed. Section C measures what that costs here.
 
 # %% [markdown]
-# ## B. The fold contract
+# ## B. The schedule contract
 #
-# Each row of the table below is one estimation window and the span the estimated model is then
-# run over. The parameters come from the left-hand span and nothing else; the model is then run
-# forward over both spans, which is what gives a downstream model a value for its own training
-# rows as well as its validation rows.
+# The parameters are re-estimated on a fixed cadence over each security's own history, and every
+# emitted value comes from the last estimate made strictly before it. There is no estimation
+# window per fold and no fold column on the artifact: a session gets one conditional volatility,
+# and whichever fold selects that session later reads the same number.
 #
-# **A third fold is added for the holdout, and it is a deliberate choice rather than an
-# oversight.** A downstream stage that scores the holdout needs this feature defined over holdout
-# dates, so a fold whose estimation window ends before the holdout begins is added and its
-# inference span covers the holdout. That is safe for the reason this stage's whole method rests
-# on: the model reads prices, not labels, so a parameter estimated wholly before the boundary
-# cannot carry anything from beyond it. The estimation span is the one `evaluation.train_size`
-# declares for every other fold, not a second number kept here.
+# **What this replaces, and why.** Until this revision the notebook fitted once per fold on that
+# fold's whole training window and then ran the recursion forward from the *start* of that same
+# window. The conditioning set was causal - `causal_gjr_filter` reads only earlier returns - but
+# the parameters were not: a training row dated early in the window carried an estimate made from
+# up to two years of its own future, while every validation row carried an estimate made only
+# from its past. The model was fitted on one version of the column and scored on another, and
+# nothing raised, because a fold's rows are internally consistent and the artifact recorded no
+# estimation window to check against.
 #
-# **The folds are the primary label's.** This case study configures five labels whose purge
-# buffers differ, so their folds are not identical, and building the feature five times over
-# would be five times the fitting for windows that differ by days. The assertion below is what
-# makes one set of folds sound: it checks that each estimation window used here ends strictly
-# before the corresponding validation span begins **for every configured label**, so whichever
-# label a downstream model is trained on, no parameter it receives was estimated on a session
-# inside its own validation window.
+# **The burn-in is paid out of the run-up, not out of training data.** seoa's panel opens
+# 2017-01-03 and the oldest fold's training window opens 2018-01-04, so about 250 sessions
+# precede the first fold. The declared burn-in of 252 is very nearly that, which is why it is
+# 252 and not the 504 the longer-history case studies get - `config/setup.yaml::model_based`
+# carries the measurement behind that choice.
+#
+# **The holdout is covered without being estimated on.** `freeze_after` stops re-estimation at
+# the last session before `HOLDOUT_START`, so holdout sessions receive values from parameters
+# fitted wholly before the seal. That is sound for the reason this stage rests on throughout:
+# the model reads prices, not labels.
+#
+# **One schedule serves all five labels.** The old arrangement needed an argument that the
+# primary label's folds were usable for the other four, because the estimation windows were the
+# folds. A cadence over a security's own history has no fold in it, so that argument is no
+# longer needed and the assertion that carried it is gone with the thing it protected.
 
 # %%
-splits = [
+# The block structure, on a security holding the full panel. `refit_boundaries` returns
+# (fit_end_exclusive, emit_end_exclusive) pairs: the first block spends the burn-in, and each
+# subsequent block is emitted from parameters fitted on everything before it.
+_full_history = 1259
+_blocks = refit_boundaries(_full_history, GARCH_BURNIN, GARCH_REFIT_EVERY)
+print(f"A security with the full {_full_history}-session panel is fitted {len(_blocks)} times.")
+print(f"  Burn-in, no value emitted: sessions 0 to {GARCH_BURNIN - 1}")
+print(f"  First emitted session: {GARCH_BURNIN}")
+print(f"  Sessions per block after the burn-in: {GARCH_REFIT_EVERY}")
+pl.DataFrame(
+    {
+        "block": list(range(len(_blocks))),
+        "fitted on sessions before": [b[0] for b in _blocks],
+        "emits through session": [b[1] for b in _blocks],
+    }
+).head(8)
+
+# %% [markdown]
+# The spans below are the primary label's validation windows. Nothing is estimated per fold any
+# more, so they decide no parameter; sections E and F report over them so that a reader can line
+# this feature up against the downstream models that are scored on the same dates.
+
+# %%
+REPORTING_SPANS = [
     {
         "fold": s["fold"],
-        "fit_start": str(s["train_start"]),
-        "fit_end": str(s["train_end"]),
-        "infer_start": str(s["val_start"]),
-        "infer_end": str(s["val_end"]),
-        "is_holdout": False,
+        "infer_start": fold_boundary_date(s["val_start"]),
+        "infer_end": fold_boundary_date(s["val_end"]),
     }
     for s in canonical_splits
 ]
-
-_train_size = str(evaluation_config["train_size"])
-if not _train_size.endswith("Y"):
-    raise ValueError(f"Expected an annual evaluation.train_size, found {_train_size!r}")
-_train_years = int(_train_size[:-1])
-splits.append(
-    {
-        "fold": len(splits),
-        "fit_start": f"{int(HOLDOUT_START[:4]) - _train_years}-01-01",
-        "fit_end": f"{int(HOLDOUT_START[:4]) - 1}-12-31",
-        "infer_start": HOLDOUT_START,
-        "infer_end": HOLDOUT_END,
-        "is_holdout": True,
-    }
+CHRONOLOGICAL = sorted(REPORTING_SPANS, key=lambda row: row["infer_start"])
+print(
+    f"{len(REPORTING_SPANS)} validation spans, {CHRONOLOGICAL[0]['infer_start']} to "
+    f"{CHRONOLOGICAL[-1]['infer_end']}, and the holdout runs {HOLDOUT_START} to {HOLDOUT_END}."
 )
-# The fold ids run newest window first, which is what the generator assigns and what every
-# downstream join expects. The table and the figure below are ordered oldest first so the reader
-# sees the walk forward in the direction time runs.
-CHRONOLOGICAL = sorted(splits, key=lambda row: row["fit_start"])
 pl.DataFrame(CHRONOLOGICAL)
 
 # %% [markdown]
-# The three assertions below are the fold contract, executed. The first is the seal: no
-# estimation window may reach into the holdout. The second is the ordering every fold depends on:
-# the parameters are estimated strictly before the span they are run over. The third is what makes
-# the primary label's folds usable for the other four.
-
-# %%
-for row in splits:
-    assert row["fit_end"] < HOLDOUT_START, f"fold {row['fold']} estimates on holdout sessions"
-    assert row["fit_end"] < row["infer_start"], f"fold {row['fold']} infers before it estimates"
-
-development_splits = [row for row in splits if not row["is_holdout"]]
-for label in LABEL_VARIANTS:
-    label_splits = modeling_fold_boundaries(CASE_STUDY_ID, label)
-    assert label_splits and len(label_splits) == len(development_splits), (
-        f"{label} resolves {len(label_splits or [])} folds against {len(development_splits)} here"
-    )
-    for row, own in zip(development_splits, label_splits, strict=True):
-        assert row["fit_end"] < str(own["val_start"]), (
-            f"fold {row['fold']}'s estimation window reaches into {label}'s validation span"
-        )
-print(
-    f"Each of the {len(development_splits)} development folds estimates entirely before the "
-    f"validation span begins, for all {len(LABEL_VARIANTS)} configured labels."
-)
-print(f"All {len(splits)} folds, the holdout one included, estimate before {HOLDOUT_START}.")
-
-# %% [markdown]
-# ### F1. The fold contract
+# ### F1. The schedule contract
 #
-# What the table states, the figure shows: every estimation bar sits entirely to the left of the
-# inference bar it feeds, and every estimation bar ends left of the holdout rule. The last row is
-# the added holdout fold, and it is the one to read carefully - its inference bar is the only one
-# that crosses the rule, and its estimation bar stops short of it.
+# One row per refit block, for the first several blocks of a security holding the full panel. The
+# dark bar is what the parameters were estimated on and the gold bar is the sessions those
+# parameters emit. Every dark bar ends exactly where its own gold bar begins and never reaches
+# past it, which is the property the whole revision is for. The dark bars grow because the walk
+# expands: each fit sees everything before it, not a fixed window.
 
 # %%
-fit_colour, infer_colour = ml4t_palette(2, categorical=True)
+fit_colour, emit_colour = ml4t_palette(2, categorical=True)
+_shown = _blocks[: min(8, len(_blocks))]
 fig = go.Figure()
-for row_index, row in enumerate(CHRONOLOGICAL):
-    label = f"fold {row['fold']}" + (" (holdout)" if row["is_holdout"] else "")
+for row_index, (fit_end, emit_end) in enumerate(_shown):
+    label = f"block {row_index}"
+    emit_start = GARCH_BURNIN if row_index == 0 else _shown[row_index - 1][1]
     for span, colour, name in (
-        (("fit_start", "fit_end"), fit_colour, "estimated on"),
-        (("infer_start", "infer_end"), infer_colour, "run over"),
+        ((0, fit_end), fit_colour, "estimated on"),
+        ((emit_start, emit_end), emit_colour, "emits"),
     ):
         fig.add_trace(
             go.Scatter(
-                x=[row[span[0]], row[span[1]]],
+                x=list(span),
                 y=[label, label],
                 mode="lines",
                 line=dict(color=colour, width=16),
@@ -293,22 +299,22 @@ for row_index, row in enumerate(CHRONOLOGICAL):
                 showlegend=row_index == 0,
             )
         )
-fig.add_vline(x=HOLDOUT_START, line_dash="dash", line_color=ml4t_palette(3)[2])
+fig.add_vline(x=GARCH_BURNIN, line_dash="dash", line_color=ml4t_palette(3)[2])
 fig.update_layout(
-    title="No parameter comes from the right of its own estimation bar",
-    xaxis_title=f"Estimation and inference spans per fold; the dashed rule marks {HOLDOUT_START}",
+    title="No parameter comes from the right of the sessions it speaks for",
+    xaxis_title=f"Session index within the security; the dashed rule marks the "
+    f"{GARCH_BURNIN}-session burn-in",
     height=340,
 )
 fig.update_yaxes(autorange="reversed")
 show_plotly_with_alt(
     fig,
-    "Timeline with one row per fold, earliest at the top. Each row carries a dark two-year "
-    "estimation bar and, immediately to its right, a gold inference bar. Fold 1 estimates from "
-    "January 2017 to December 2018 and runs over 2019; fold 0 estimates from January 2018 to "
-    "December 2019 and runs over 2020; the third row, labelled as the holdout fold, estimates "
-    "from January 2019 to December 2020 and runs over 2021. A dashed vertical rule marks the "
-    "start of 2021. Every dark bar ends to the left of both its own gold bar and the rule, and "
-    "the holdout fold's gold bar is the only one that crosses the rule.",
+    "Timeline with one row per refit block, earliest at the top, drawn against session index "
+    "within a single security rather than calendar dates. Each row carries a dark estimation bar "
+    "starting at session zero and a gold emission bar immediately to its right. The dark bars "
+    "lengthen row by row because the walk expands, while the gold bars stay the same short "
+    "length, one refit interval each. A dashed vertical rule marks the end of the burn-in, where "
+    "the first gold bar begins. No dark bar extends past the left edge of its own gold bar.",
 )
 
 # %% [markdown]
@@ -359,18 +365,20 @@ show_plotly_with_alt(
 # alone, using `arch`'s own functions for each. The recursion itself reads only $r_{t-1}$ and
 # $\sigma^2_{t-1}$, so once it has started it never reads forward.
 #
-# **What that does and does not make point-in-time is worth being exact about, because the two
-# halves of the emitted span are not the same kind of quantity.** A value on the inference span
-# was produced by parameters, a starting variance and bounds that all come from sessions strictly
-# before it, so it is a quantity that could have been computed on the day it is stamped with. A
-# value on the estimation window was not: the parameters were estimated from that whole window,
-# and the starting variance is an average over its first sessions, so an early estimation-window
-# value is a retrospective transform rather than a live one. Those values are emitted because a
-# downstream model needs a feature on its own training rows, and they carry the fold id that says
-# which window produced them. They are not evidence about what the model could have known.
+# **Every emitted value is now the same kind of quantity, and that is the change.** Under the
+# refit schedule the parameters, the starting variance and the bounds behind a value all come
+# from sessions strictly before the block that value sits in - on a training row exactly as much
+# as on a validation row. There is no longer a retrospective half: the old design emitted values
+# across the estimation window itself, and those carried parameters fitted from up to two years
+# of their own future, which is precisely what made a training row and a validation row
+# incomparable.
 #
-# C.2 measures what the convenience would have cost, rather than asserting that it costs
-# something, because a clipping range twelve orders of magnitude wide might never bind.
+# The burn-in is where that guarantee is paid for. A security's first `burnin` sessions carry no
+# value at all, because there is nothing to fit on yet, and section E reports how many securities
+# that silences.
+#
+# C.2 asserts the property rather than describing it, by deleting later observations and checking
+# that no retained value moves.
 
 
 # %%
@@ -407,48 +415,93 @@ def causal_gjr_filter(
 
 
 # %% [markdown]
-# One function per security and fold: estimate on the sessions inside the estimation window, then
-# run the recursion over the estimation window and the inference span together. It returns the
-# filtered path and the estimated parameters, so section D reads the parameters this loop already
-# produced rather than estimating a second set of its own.
+# One walk per security over that security's whole return history. `walk_forward_feature` spends
+# the burn-in, fits on everything before the block it is about to emit, hands those parameters to
+# `causal_gjr_filter`, and keeps only the block's own rows. `freeze_after` is the count of
+# sessions strictly before the holdout, so the last estimate made is fitted on every pre-holdout
+# session and on no holdout session.
+#
+# `fit` returns the four things the recursion needs and every one of them comes from the
+# estimation prefix alone: the parameters, `arch`'s scaling, the backcast that seeds the first
+# variance, and the clipping range. Deriving the last two from the emitted block instead is
+# exactly the leak section C measures, so they are taken here and passed through.
+#
+# **A degenerate fit is recorded, not silently dropped.** A GJR-GARCH estimated on a short window
+# can come back with `alpha + gamma < 0`, which says a larger down-shock *lowers* next session's
+# variance. That is not a volatility model, and on this universe it is not rare: 19.0% of
+# securities on their first block against 1.8% of fits across the whole walk, which section C.3
+# reports. The recursion still runs - the clipping range keeps it on the positive reals - and the
+# rate is published rather than hidden, because the burn-in that produces it is a declared
+# schedule choice a reader is entitled to weigh.
 
 
 # %%
 ANNUALIZE = SETUP["evaluation"]["periods_per_year"] ** 0.5
+GARCH_KW = dict(mean="Constant", vol="GARCH", p=1, o=1, q=1, dist="Normal")
 
 
-def fit_and_filter(returns: pd.Series, row: dict) -> tuple[pd.Series, dict] | None:
-    """Estimate on one fold's window, then filter the window and the span it feeds."""
-    fit_slice = returns[
-        (returns.index >= pd.Timestamp(row["fit_start"]))
-        & (returns.index <= pd.Timestamp(row["fit_end"]))
-    ]
-    if len(fit_slice) < MIN_OBS:
-        return None
-    run_slice = returns[
-        (returns.index >= pd.Timestamp(row["fit_start"]))
-        & (returns.index <= pd.Timestamp(row["infer_end"]))
-    ]
-    if run_slice.empty:
-        return None
-    try:
-        result = arch_model(
-            fit_slice, mean="Constant", vol="GARCH", p=1, o=1, q=1, dist="Normal"
-        ).fit(disp="off", show_warning=False)
-        scale, backcast, bounds = training_filter_state(result, fit_slice)
-        filtered = causal_gjr_filter(run_slice, result.params, scale, backcast, bounds)
-    except Exception:
-        return None
+def garch_walk(returns: pd.Series, freeze_after: int | None) -> tuple[pd.Series, list[dict]]:
+    """Filter one security on the refit schedule; return the path and one record per fit."""
+    diagnostics: list[dict] = []
+    observations = returns.to_numpy(dtype=float).reshape(-1, 1)
 
-    alpha = float(result.params.get("alpha[1]", 0.0))
-    gamma = float(result.params.get("gamma[1]", 0.0))
-    beta = float(result.params.get("beta[1]", 0.0))
-    return filtered * ANNUALIZE / 100.0, {
-        "alpha": alpha,
-        "gamma": gamma,
-        "beta": beta,
-        "persistence": alpha + gamma / 2 + beta,
-    }
+    def fit(train: np.ndarray) -> dict:
+        # The walk expands, so the prefix always starts at this security's first return and its
+        # length is the index one past the last session the fit is allowed to see.
+        train_returns = returns.iloc[: len(train)]
+        result = arch_model(train_returns, **GARCH_KW).fit(disp="off", show_warning=False)
+        scale, backcast, bounds = training_filter_state(result, train_returns)
+        alpha = float(result.params.get("alpha[1]", 0.0))
+        gamma = float(result.params.get("gamma[1]", 0.0))
+        beta = float(result.params.get("beta[1]", 0.0))
+        diagnostics.append(
+            {
+                # The first session these parameters speak for. The walk schedules on the
+                # security's own observations, so a security that lists late refits on different
+                # dates than its neighbours and this is the only honest key for section D.
+                "emit_start": returns.index[len(train)],
+                "n_train": len(train),
+                "alpha": alpha,
+                "gamma": gamma,
+                "beta": beta,
+                "persistence": alpha + gamma / 2 + beta,
+                "degenerate": alpha + gamma < 0,
+            }
+        )
+        return {"params": result.params, "scale": scale, "backcast": backcast, "bounds": bounds}
+
+    def apply(model: dict, prefix: np.ndarray) -> np.ndarray:
+        filtered = causal_gjr_filter(
+            pd.Series(prefix[:, 0], index=returns.index[: len(prefix)]),
+            model["params"],
+            model["scale"],
+            model["backcast"],
+            model["bounds"],
+        )
+        return (filtered.to_numpy() * ANNUALIZE / 100.0).reshape(-1, 1)
+
+    values = walk_forward_feature(
+        observations,
+        burnin=GARCH_BURNIN,
+        refit_every=GARCH_REFIT_EVERY,
+        fit=fit,
+        apply=apply,
+        n_features=1,
+        window=None,
+        freeze_after=freeze_after,
+        on_fit_error="skip",
+    )
+    return pd.Series(values[:, 0], index=returns.index), diagnostics
+
+
+def count_before(index: pd.Index, boundary: pd.Timestamp) -> int:
+    """How many entries fall strictly before *boundary*.
+
+    This is what ``walk_forward_feature`` wants for ``freeze_after``: the largest exclusive fit
+    end it may use, so the last estimate before the seal sees every session before it and none
+    after.
+    """
+    return int(index.searchsorted(boundary, side="left"))
 
 
 # %% [markdown]
@@ -561,103 +614,108 @@ print(
 # difference on the sessions the two calls share is what it did.
 
 # %%
-BOUNDS_SAMPLE = 40
-first_split = splits[0]
-bounds_effect = []
-for security in securities[:BOUNDS_SAMPLE]:
+TRUNCATION_SAMPLE = 40
+truncation_effect = []
+for security in securities[:TRUNCATION_SAMPLE]:
     returns = log_returns.get(security)
-    if returns is None:
+    if returns is None or len(returns) <= GARCH_BURNIN + GARCH_REFIT_EVERY:
         continue
-    fit_slice = returns[
-        (returns.index >= pd.Timestamp(first_split["fit_start"]))
-        & (returns.index <= pd.Timestamp(first_split["fit_end"]))
-    ]
-    run_slice = returns[
-        (returns.index >= pd.Timestamp(first_split["fit_start"]))
-        & (returns.index <= pd.Timestamp(first_split["infer_end"]))
-    ]
-    if len(fit_slice) < MIN_OBS:
+    blocks = refit_boundaries(len(returns), GARCH_BURNIN, GARCH_REFIT_EVERY)
+    if len(blocks) < 2:
         continue
-    try:
-        params = (
-            arch_model(fit_slice, mean="Constant", vol="GARCH", p=1, o=1, q=1, dist="Normal")
-            .fit(disp="off", show_warning=False)
-            .params
-        )
-        short = arch_model(
-            fit_slice, mean="Constant", vol="GARCH", p=1, o=1, q=1, dist="Normal"
-        ).fix(params)
-        long_ = arch_model(
-            run_slice, mean="Constant", vol="GARCH", p=1, o=1, q=1, dist="Normal"
-        ).fix(params)
-    except Exception:
+    # Cut INSIDE a block, never at a boundary. Truncating at a boundary leaves every retained
+    # block with exactly the prefix it already had, so the two walks agree whatever the recursion
+    # does inside a block and the check passes without testing anything. The cut below lands
+    # mid-block by construction, and the assertion after this loop is what holds it there.
+    boundaries = {end for _, end in blocks}
+    cut = blocks[-1][0] + GARCH_REFIT_EVERY // 2
+    cut = min(cut, len(returns) - 1)
+    assert cut not in boundaries, "the truncation point fell on a refit boundary and tests nothing"
+    full, _ = garch_walk(returns, None)
+    short, _ = garch_walk(returns.iloc[:cut], None)
+    shared = full.iloc[: len(short)].to_numpy()
+    both = np.isfinite(shared) & np.isfinite(short.to_numpy())
+    if not both.any():
         continue
-    shared = np.asarray(short.conditional_volatility, dtype=float)
-    overlap = np.asarray(long_.conditional_volatility, dtype=float)[: len(shared)]
-    bounds_effect.append(float(np.nanmax(np.abs(shared - overlap)) / np.nanmax(shared)))
+    denom = np.maximum(np.abs(shared[both]), 1e-12)
+    truncation_effect.append(float(np.max(np.abs(shared[both] - short.to_numpy()[both]) / denom)))
 
-if bounds_effect:
-    print(f"{len(bounds_effect)} securities compared on fold {first_split['fold']}")
+if truncation_effect:
+    print(f"{len(truncation_effect)} securities truncated mid-block and re-walked")
     print(
-        "largest change in the reported volatility on a shared session, as a share of that "
-        f"security's own largest value: {max(bounds_effect):.1%}"
+        "largest relative move in a retained value when every later observation is deleted: "
+        f"{max(truncation_effect):.3e}"
+    )
+    assert max(truncation_effect) < 1e-9, (
+        "deleting later observations moved an earlier emitted value, so something in the walk "
+        "reads past the row it is emitting"
     )
 else:
-    print("No security in the sample had an estimation window long enough to compare.")
+    print("No security in the sample was long enough to truncate mid-block.")
 
-# %% [markdown] tags=["results"]
-# The clipping range does bind. Across the **38** securities in the sample with a long enough
-# estimation window, extending the series handed to `fix` moves the volatility it reports on an
-# estimation-window session by up to **0.9%** of that security's own largest value. That is small,
-# and it is not zero, and what it is is a training-period value that depends on validation-period
-# returns - in a stage whose whole subject is which rows a quantity was allowed to see. Hence the
-# explicit recursion above.
+# %% [markdown]
+# The property this establishes is the one the old design could not state: an emitted value does
+# not move when observations after it are deleted. It is asserted rather than described, and the
+# cut is taken inside a block rather than at a refit boundary, because a boundary cut leaves every
+# retained block with exactly the prefix it had and would agree no matter what the recursion did.
+#
+# The old notebook measured what the convenience method cost instead, and the number is worth
+# keeping in view: handing `arch`'s `fix` the estimation window and the inference span together
+# moved the volatility it reported on a *shared* session by up to **0.9%** of that security's own
+# largest value, across 38 securities. That is what `causal_gjr_filter` exists to avoid, and it is
+# why the backcast and the clipping range are derived from the estimation prefix and passed in
+# rather than left for the library to infer from whatever series it is handed.
 
 # %%
 filtered_parts: list[pl.DataFrame] = []
 parameter_rows: list[dict] = []
-attempted = fitted = 0
+too_short = 0
 
-for row in splits:
-    for security in securities:
-        returns = log_returns.get(security)
-        if returns is None or returns.empty:
-            continue
-        attempted += 1
-        outcome = fit_and_filter(returns, row)
-        if outcome is None:
-            continue
-        fitted += 1
-        path, params = outcome
-        filtered_parts.append(
-            pl.DataFrame({"timestamp": path.index.values, "garch_cond_vol": path.to_numpy()})
-            .with_columns(pl.col("timestamp").cast(pl.Date))
-            .with_columns(pl.lit(security).alias(ENTITY), pl.lit(row["fold"]).alias("fold"))
-        )
-        parameter_rows.append({ENTITY: security, "fold": row["fold"], **params})
-    print(f"  fold {row['fold']}: {len(parameter_rows)} cumulative fits")
+for security in securities:
+    returns = log_returns.get(security)
+    if returns is None or len(returns) <= GARCH_BURNIN:
+        # A security listed too late to clear its own burn-in emits nothing. That is a statement
+        # about the security rather than a failure, and it is counted so the coverage report
+        # below can say how many rather than leaving a reader to infer it from a gap.
+        too_short += 1
+        continue
+    path, records = garch_walk(returns, count_before(returns.index, pd.Timestamp(HOLDOUT_START)))
+    emitted = path.dropna()
+    if emitted.empty:
+        too_short += 1
+        continue
+    filtered_parts.append(
+        pl.DataFrame({"timestamp": emitted.index.values, "garch_cond_vol": emitted.to_numpy()})
+        .with_columns(pl.col("timestamp").cast(pl.Date))
+        .with_columns(pl.lit(security).alias(ENTITY))
+    )
+    parameter_rows.extend({ENTITY: security, **record} for record in records)
 
 _filtered = pl.concat(filtered_parts)
 garch = _filtered.join(TICKER_OF, on=[ENTITY, "timestamp"], how="inner").select(
-    ["timestamp", "symbol", ENTITY, "fold", "garch_cond_vol"]
+    ["timestamp", "symbol", ENTITY, "garch_cond_vol"]
 )
 assert garch.height == _filtered.height, "a filtered value had no bar to name it"
 parameters = pl.DataFrame(parameter_rows)
-print(f"{fitted:,} of {attempted:,} security-folds produced a fit ({fitted / attempted:.1%})")
+print(f"{len(filtered_parts):,} of {len(securities):,} securities emitted a value")
+print(f"  never cleared the {GARCH_BURNIN}-session burn-in: {too_short}")
+print(f"  fits across every security and refit: {parameters.height:,}")
 print(
     f"{garch.height:,} filtered values over {garch[ENTITY].n_unique()} securities, "
     f"written under {garch['symbol'].n_unique()} tickers"
 )
 
 # %% [markdown]
-# ## D. Fit stability across folds
+# ## D. Fit stability across the schedule
 #
-# The whole method rests on re-estimating at every fold boundary, and that is only worth its cost
-# if the estimates actually move. If the same parameters come back fold after fold, the refit
-# bought nothing and one estimation would have done. If they swing, then the feature carries
-# whatever the estimation window happened to contain as much as it carries anything about the
-# share, and a reader should treat it accordingly - and a consumer must join on the fold, because
-# the same date and security carry a different value depending on which window produced it.
+# The method rests on re-estimating every `refit_every` sessions, and that is only worth its cost
+# if the estimates actually move. If the same parameters come back block after block, the cadence
+# bought nothing and one estimation would have done. If they swing, the feature carries whatever
+# the expanding window happened to contain as much as it carries anything about the share, and a
+# reader should treat it accordingly.
+#
+# What a consumer no longer has to do is join on a fold. Each session's value comes from the one
+# estimate that preceded it, so the date and the security are the whole key.
 #
 # Persistence is the summary to read, and it is the sum of the other three: $\alpha + \gamma/2 +
 # \beta$. A value near one means a shock to volatility decays slowly, so today's variance says
@@ -665,105 +723,112 @@ print(
 # forecasting at all. A value near zero would mean the model has nothing to carry forward and the
 # forecast is close to a constant.
 #
-# ### F3. Fit stability across folds
+# ### F3. Fit stability across the schedule
 #
-# One line per estimated parameter, the windows in the order they run. The point is drawn at the
-# median across securities and the bar spans the middle half of them, so a line that stays flat
-# says the securities as a group were estimated the same way in every window and a line that moves
-# says they were not. All four parameters are dimensionless and bounded the same way, so they
-# share an axis. Persistence is not one of the four inputs to the model; it is the sum of the
-# other three and is drawn beside them because it is the quantity that says how long a shock
-# lasts.
+# One line per estimated parameter against the date the estimate first speaks for, drawn at the
+# median across securities with a band spanning the middle half. The x-axis is calendar time
+# rather than a fold index because the blocks are calendar time: a security refits every
+# `refit_every` of its own sessions, so securities that list at different dates refit on different
+# dates and the median is taken over whoever is estimated at each. All four parameters are
+# dimensionless and bounded the same way, so they share an axis.
 
 # %%
-ordered_folds = sorted(splits, key=lambda row: row["fit_start"])
-axis_labels = [
-    f"fold {row['fold']}<br>{row['fit_start'][:7]} to {row['fit_end'][:7]}" for row in ordered_folds
-]
-# Each line carries its own dash pattern and marker as well as its colour, so the four stay
-# separable in a monochrome print and for a reader who cannot distinguish two of them.
 parameter_colours = ml4t_palette(4, categorical=True)
 styles = [
-    ("alpha", parameter_colours[0], "solid", "circle", 2),
-    ("gamma", parameter_colours[1], "solid", "square", 2),
-    ("beta", parameter_colours[2], "dash", "diamond", 2),
-    ("persistence", parameter_colours[3], "solid", "x", 3),
+    ("alpha", parameter_colours[0], "solid"),
+    ("gamma", parameter_colours[1], "solid"),
+    ("beta", parameter_colours[2], "dash"),
+    ("persistence", parameter_colours[3], "solid"),
 ]
+by_date = (
+    parameters.with_columns(pl.col("emit_start").cast(pl.Date))
+    .group_by("emit_start")
+    .agg(
+        pl.len().alias("securities"),
+        *[
+            expr
+            for name, _, _ in styles
+            for expr in (
+                pl.col(name).median().alias(f"{name}_med"),
+                pl.col(name).quantile(0.25).alias(f"{name}_lo"),
+                pl.col(name).quantile(0.75).alias(f"{name}_hi"),
+            )
+        ],
+    )
+    .sort("emit_start")
+)
+x = by_date["emit_start"].to_list()
 fig = go.Figure()
-for name, colour, dash, marker, width in styles:
-    medians, lower, upper = [], [], []
-    for row in ordered_folds:
-        column = parameters.filter(pl.col("fold") == row["fold"])[name]
-        medians.append(column.median())
-        lower.append(column.median() - column.quantile(0.25))
-        upper.append(column.quantile(0.75) - column.median())
+for name, colour, dash in styles:
     fig.add_scatter(
-        x=axis_labels,
-        y=medians,
-        error_y=dict(type="data", symmetric=False, array=upper, arrayminus=lower, thickness=1.2),
-        mode="lines+markers",
+        x=x + x[::-1],
+        y=by_date[f"{name}_hi"].to_list() + by_date[f"{name}_lo"].to_list()[::-1],
+        fill="toself",
+        fillcolor=colour,
+        opacity=0.15,
+        line=dict(width=0),
+        hoverinfo="skip",
+        showlegend=False,
+    )
+    fig.add_scatter(
+        x=x,
+        y=by_date[f"{name}_med"].to_list(),
+        mode="lines",
         name=name,
-        line=dict(color=colour, width=width, dash=dash),
-        marker=dict(size=9, symbol=marker),
+        line=dict(color=colour, width=2, dash=dash),
     )
 fig.update_layout(
-    title="Every parameter changes with the window, so every refit moves the feature",
-    xaxis_title="Estimation window; point is the median across securities, bar the middle half",
+    title="Every parameter moves with the window, so every refit moves the feature",
+    xaxis_title="Date the estimate first speaks for; line is the median across securities, "
+    "band the middle half",
     yaxis_title="Estimated parameter value",
     height=430,
 )
 show_plotly_with_alt(
     fig,
-    "Four series against the three estimation windows in the order they run, each drawn at the "
-    "median across securities with a bar spanning the middle half. Persistence is highest "
-    "throughout, near 0.94 on the first window, dipping to about 0.87 on the second and rising "
-    "to about 0.97 on the third. Beta tracks just below it and moves the same way, from about "
-    "0.85 down to 0.76 and back to 0.82. Gamma rises steadily across the three windows from "
-    "about 0.05 to about 0.14, and alpha sits near zero on the first two windows before rising "
-    "to about 0.06 on the third. The middle-half bars are widest on beta and persistence and "
-    "narrow on alpha and gamma. No series is flat across the three windows.",
+    "Four parameter series against calendar time, one per estimated GJR-GARCH coefficient plus "
+    "persistence, each drawn as a median line across securities with a shaded band spanning the "
+    "middle half of them. Persistence and beta run highest and track each other; gamma and alpha "
+    "run lower. The bands are widest early, when few securities have cleared the burn-in and the "
+    "estimation windows are shortest, and narrow as the expanding windows lengthen. No series is "
+    "flat, which is the point: the refit cadence changes the estimates it produces.",
 )
 
 # %%
 stability = (
-    parameters.group_by("fold")
+    parameters.with_columns(pl.col("emit_start").cast(pl.Date).dt.year().alias("year"))
+    .group_by("year")
     .agg(
-        pl.len().alias("securities"),
+        pl.len().alias("fits"),
+        pl.col(ENTITY).n_unique().alias("securities"),
         pl.col("alpha").median().round(4).alias("median alpha"),
         pl.col("gamma").median().round(4).alias("median gamma"),
         pl.col("beta").median().round(4).alias("median beta"),
         pl.col("persistence").median().round(4).alias("median persistence"),
+        (pl.col("degenerate").mean() * 100).round(1).alias("alpha+gamma < 0 %"),
     )
-    .join(
-        pl.DataFrame(
-            {
-                "fold": [row["fold"] for row in ordered_folds],
-                "estimated over": [
-                    f"{row['fit_start']} to {row['fit_end']}" for row in ordered_folds
-                ],
-            }
-        ),
-        on="fold",
-    )
-    .sort("estimated over")
-    .select(
-        ["fold", "estimated over", "securities"]
-        + [c for c in ["median alpha", "median gamma", "median beta", "median persistence"]]
-    )
+    .sort("year")
 )
 stability
 
 # %% [markdown] tags=["results"]
-# The parameters move, and they move enough that re-estimating at each boundary is doing real
-# work. Median persistence runs **0.941**, **0.874** and **0.967** across the three windows in the
-# order they run - a spread of **0.09** between windows that overlap by a year, and the highest
-# value on the window containing 2020. Its parts move more than the sum does: median $\alpha$ goes
-# **0.002**, **0.000**, **0.058** and median $\gamma$ **0.051**, **0.096**, **0.143**, so on the
-# earlier windows almost the whole response to a shock is carried by the asymmetric term and only
-# a *down* session raises the estimated variance, while on the window containing 2020 the
-# symmetric term takes a share of it too. A downstream model reading this feature is reading a
-# quantity whose generating parameters were re-estimated, not a fixed transform, and the size of
-# that movement is the reason the fold id has to travel with the value.
+# Read the table by year and the figure by shape. What the schedule buys is visible in whether
+# median persistence moves between refits: if it were flat, one estimation would have done and
+# the cadence would be waste. The parts are worth reading separately from the sum, because
+# $\alpha$ and $\gamma$ can trade against each other while persistence barely moves - a share of
+# the response to a shock shifting between the symmetric and asymmetric terms is a change in what
+# the model says about *down* sessions specifically, and persistence alone will not show it.
+#
+# The last column is the one to weigh against the schedule. It is the share of fits in each year
+# that came back with $\alpha + \gamma < 0$, which says a larger down-shock lowers next session's
+# variance. That is not a volatility model, and it is a burn-in artifact: measured across this
+# universe it runs about 19% on a security's first block against about 1.8% of fits over the
+# whole walk, falling as the expanding window lengthens. `config/setup.yaml::model_based` records
+# why the burn-in is 252 anyway.
+#
+# A downstream model reading this feature is reading a quantity whose generating parameters were
+# re-estimated on a schedule, not a fixed transform - but every session carries exactly one such
+# value, so the date and the symbol are the whole key.
 
 # %% [markdown]
 # ### F2. What the model inferred, over the sessions it was run over
@@ -786,18 +851,23 @@ stability
 financial = pl.read_parquet(FINANCIAL_PATH).select(
     [*PANEL_KEY, "iv_30_atm", "rv_20", "ivrv_spread"]
 )
-DEVELOPMENT_FOLDS = [row["fold"] for row in splits if not row["is_holdout"]]
-inference_only = pl.concat(
-    [
-        garch.filter(
-            (pl.col("fold") == row["fold"])
-            & (pl.col("timestamp") >= pl.lit(row["infer_start"]).str.to_date())
-            & (pl.col("timestamp") <= pl.lit(row["infer_end"]).str.to_date())
-        )
-        for row in splits
-        if not row["is_holdout"]
-    ]
-).sort(PANEL_KEY)
+# The validation spans of the development folds. Nothing about the feature depends on them now;
+# they are the dates the downstream models are scored on, so reporting over them is what lets a
+# reader line this chart up against those. The holdout is excluded, as it is everywhere in
+# development.
+inference_only = (
+    pl.concat(
+        [
+            garch.filter(
+                (pl.col("timestamp") >= pl.lit(row["infer_start"], dtype=pl.Date))
+                & (pl.col("timestamp") <= pl.lit(row["infer_end"], dtype=pl.Date))
+            )
+            for row in REPORTING_SPANS
+        ]
+    )
+    .unique(subset=[*PANEL_KEY])
+    .sort(PANEL_KEY)
+)
 
 daily_medians = (
     inference_only.join(financial, on=PANEL_KEY, how="left")
@@ -822,19 +892,19 @@ for column, name, colour in (
         name=name,
         line=dict(color=colour, width=1.6),
     )
-for row in splits:
-    if not row["is_holdout"]:
-        fig.add_vline(x=row["infer_start"], line_dash="dot", line_color=ml4t_palette(3)[2])
+for row in REPORTING_SPANS:
+    fig.add_vline(x=row["infer_start"].isoformat(), line_dash="dot", line_color=ml4t_palette(3)[2])
 fig.update_layout(
     title="The forecast turns within days of a shock where the average takes weeks",
-    xaxis_title="Median across securities, inference spans only; dotted rules mark fold starts",
+    xaxis_title="Median across securities, validation spans only; dotted rules mark span starts",
     yaxis_title="Annualized volatility",
     height=420,
 )
 show_plotly_with_alt(
     fig,
     "Two lines of median annualized volatility across securities over the two inference spans, "
-    "2019 and 2020, with dotted rules at each fold start. Through 2019 both run together between "
+    "2019 and 2020, with dotted rules at each validation span start. Through 2019 both run "
+    "together between "
     "roughly 0.18 and 0.30. In late February 2020 both climb steeply; the conditional volatility "
     "peaks first, near 1.0, and falls back below 0.4 within about six weeks, while the "
     "twenty-session realized volatility peaks higher, near 1.2, holds that level for several "
@@ -878,37 +948,47 @@ model_based = (
         (pl.col("iv_30_atm") - pl.col("garch_cond_vol")).alias("garch_ivrv_spread"),
     )
     .drop(["_ann_ret", "iv_30_atm", ENTITY])
-    .select([*PANEL_KEY, "fold", "garch_cond_vol", "garch_ivrv_spread", "garch_vol_surprise"])
-    .sort(["fold", *PANEL_KEY])
+    .select([*PANEL_KEY, "garch_cond_vol", "garch_ivrv_spread", "garch_vol_surprise"])
+    .filter(pl.col("timestamp") <= pl.lit(HOLDOUT_END, dtype=pl.Date))
+    .sort(PANEL_KEY)
 )
 FEATURE_COLS = ["garch_cond_vol", "garch_ivrv_spread", "garch_vol_surprise"]
-assert model_based.select(["fold", *PANEL_KEY]).is_duplicated().sum() == 0, "duplicate panel key"
-assert set(model_based["fold"].unique()) == {row["fold"] for row in splits}, "fold ids disagree"
+assert model_based.select(PANEL_KEY).is_duplicated().sum() == 0, "duplicate panel key"
+assert model_based["timestamp"].max() <= HOLDOUT_END, "a value was emitted past the holdout"
 
 # %% [markdown]
-# ### E.1 What each column covers, fold by fold
+# ### E.1 What each column covers
 #
-# The panel key is `timestamp` + `symbol` **and** `fold`, because the same date and security
-# appear once per fold with a different value each time - that is what per-fold estimation
-# means, and it is why a consumer has to join on all three. The coverage below is reported per
-# fold rather than pooled. The holdout fold is in this artifact because a later stage needs the
-# feature defined there, so its rows are counted here and read no further: the distribution
-# columns below are taken over the development folds alone, which keeps every number printed
-# during development to sessions development is allowed to see.
+# The panel key is `timestamp` + `symbol`, and that is the whole key. A date and security carry
+# one conditional volatility, from the last parameters estimated before that date, so there is
+# nothing for a consumer to disambiguate and no fold column to join on. That is the change this
+# revision makes and the assertion above is what holds it.
+#
+# The walk covers each security's whole history, which runs past the holdout's end for nothing's
+# benefit, so the artifact is bounded at `holdout_end` above. Coverage is reported over the
+# development spans and the holdout separately, which keeps every distribution printed during
+# development to sessions development is allowed to see.
 
 # %%
 coverage = (
-    model_based.group_by("fold")
+    model_based.with_columns(
+        pl.when(pl.col("timestamp") >= pl.lit(HOLDOUT_START, dtype=pl.Date))
+        .then(pl.lit("holdout"))
+        .otherwise(pl.lit("development"))
+        .alias("span")
+    )
+    .group_by("span")
     .agg(
         pl.len().alias("rows"),
+        pl.col("symbol").n_unique().alias("symbols"),
         *[(pl.col(c).is_not_null().mean() * 100).round(1).alias(f"{c} %") for c in FEATURE_COLS],
     )
-    .sort("fold")
+    .sort("span")
 )
 coverage
 
 # %%
-development = model_based.filter(pl.col("fold").is_in(DEVELOPMENT_FOLDS))
+development = model_based.filter(pl.col("timestamp") < pl.lit(HOLDOUT_START, dtype=pl.Date))
 pl.DataFrame(
     {
         "feature": FEATURE_COLS,
@@ -939,7 +1019,7 @@ pl.DataFrame(
 record = write_artifact(
     model_based,
     FEATURES_DIR / "model_based.parquet",
-    keys=["fold", *PANEL_KEY],
+    keys=PANEL_KEY,
     written_by=f"case_studies/{CASE_STUDY_ID}/04_model_based_features.py",
     inputs={
         # `sec_id` belongs in this digest: it decides which rows form one series, so a changed
@@ -965,29 +1045,38 @@ print(f"{record['n_rows']:,} rows on {record['keys']}, read through load_modelin
 # consecutive dates sharing outcome sessions, which is what the label horizon bound above is for.
 #
 # **This section selects nothing.** All three features were written to the artifact in E.2 before
-# it ran, and the holdout fold is excluded from every number below. `05_evaluation` is where
-# features are screened, and it runs that screen fold by fold over the whole matrix.
+# it ran, and the holdout is excluded from every number below. `05_evaluation` is where features
+# are screened, and it runs that screen over the whole matrix.
 
 # %%
 label = pl.read_parquet(LABELS_DIR / f"{PRIMARY_LABEL}.parquet").rename(
     {PRIMARY_LABEL: "forward_return"}
 )
 scored = (
-    model_based.join(
-        inference_only.select([*PANEL_KEY, "fold"]), on=[*PANEL_KEY, "fold"], how="semi"
-    )
+    model_based.join(inference_only.select(PANEL_KEY), on=PANEL_KEY, how="semi")
     .join(label.select([*PANEL_KEY, "forward_return"]), on=PANEL_KEY, how="inner")
     .sort(PANEL_KEY)
 )
-assert scored.filter(pl.col("timestamp") >= pl.lit(HOLDOUT_START).str.to_date()).is_empty(), (
+assert scored.filter(pl.col("timestamp") >= pl.lit(HOLDOUT_START, dtype=pl.Date)).is_empty(), (
     "the validation scoring frame reaches into the holdout"
 )
-assert set(scored["fold"].unique()) <= set(DEVELOPMENT_FOLDS), "a holdout fold reached section F"
 print(f"{scored.height:,} scored rows over {scored['timestamp'].n_unique():,} decision dates")
 
 
 # %%
-MIN_CROSS_SECTION = 10
+# Two floors, and they count different things. `MIN_CROSS_SECTION` is a number of securities on
+# one date, below which a rank correlation is noise rather than a measurement. `MIN_IC_DATES` is
+# a number of dates, below which the HAC standard error over those correlations means nothing.
+# One constant used to serve both, which read as deliberate and was not: the second comparison
+# was measuring a series length against a universe size.
+#
+# The cross-section floor is clamped to the universe this run actually loaded. At full width
+# `MAX_SYMBOLS` is None and the clamp does nothing, so production is unchanged; under a reduced
+# run it is what keeps this section measuring something. A fixed floor of ten against a five-name
+# reduction does not shrink the section, it empties it - every date falls short, every feature
+# reports no IC, and the run stays green over a measurement it never made.
+MIN_CROSS_SECTION = min(10, scored["symbol"].n_unique())
+MIN_IC_DATES = 10
 
 
 def ic_series(frame: pl.DataFrame, column: str) -> pl.DataFrame:
@@ -1012,10 +1101,11 @@ def ic_series(frame: pl.DataFrame, column: str) -> pl.DataFrame:
 ic_rows = []
 for column in FEATURE_COLS:
     series = ic_series(scored, column)
-    if len(series) <= MIN_CROSS_SECTION:
+    if len(series) < MIN_IC_DATES:
         print(
             f"{column}: only {len(series)} dates carry a cross-section of at least "
-            f"{MIN_CROSS_SECTION} securities, so no IC is reported for it"
+            f"{MIN_CROSS_SECTION} securities, and {MIN_IC_DATES} are needed for a standard "
+            "error, so no IC is reported for it"
         )
         continue
     stats = compute_ic_hac_stats(series, label_horizon=LABEL_HORIZON)
@@ -1124,7 +1214,7 @@ paired = (
 )
 # `compute_ic_hac_stats` reads row order as time order and a join does not promise one.
 assert paired["timestamp"].is_sorted(), "the paired series is not in date order"
-COMPARABLE = paired.height > MIN_CROSS_SECTION
+COMPARABLE = paired.height >= MIN_IC_DATES
 print(f"{paired_rows.height:,} rows carry both variants, over {paired.height:,} dates")
 if COMPARABLE:
     memory_stats = compute_ic_hac_stats(memory_series, label_horizon=LABEL_HORIZON)

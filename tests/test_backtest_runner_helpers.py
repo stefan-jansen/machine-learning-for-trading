@@ -12,7 +12,7 @@ Pins the P2.4 fixes from roborev jobs #2904, #2501, #2502, #2500:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from textwrap import dedent
 from types import SimpleNamespace
@@ -330,8 +330,10 @@ def test_substitute_continuous_return_dedupe_assertion(
     import case_studies.utils.backtest_runner as br
     import utils as _utils  # type: ignore
 
-    monkeypatch.setattr(_utils, "CASE_STUDIES_DIR", str(tmp_path), raising=False)
-    monkeypatch.setattr(br, "CASE_STUDIES_DIR", str(tmp_path), raising=False)
+    # A Path, not a str: `get_case_study_dir` joins this with `/`, which is how the labels
+    # artifact is now resolved so that output isolation reaches it.
+    monkeypatch.setattr(_utils, "CASE_STUDIES_DIR", Path(tmp_path), raising=False)
+    monkeypatch.setattr(br, "CASE_STUDIES_DIR", Path(tmp_path), raising=False)
 
     with pytest.raises(ValueError, match=r"duplicate \(timestamp, symbol\)"):
         substitute_continuous_return_for_classification(
@@ -374,8 +376,10 @@ def test_substitute_continuous_return_max_null_rate_param(
     import case_studies.utils.backtest_runner as br
     import utils as _utils  # type: ignore
 
-    monkeypatch.setattr(_utils, "CASE_STUDIES_DIR", str(tmp_path), raising=False)
-    monkeypatch.setattr(br, "CASE_STUDIES_DIR", str(tmp_path), raising=False)
+    # A Path, not a str: `get_case_study_dir` joins this with `/`, which is how the labels
+    # artifact is now resolved so that output isolation reaches it.
+    monkeypatch.setattr(_utils, "CASE_STUDIES_DIR", Path(tmp_path), raising=False)
+    monkeypatch.setattr(br, "CASE_STUDIES_DIR", Path(tmp_path), raising=False)
 
     # Default cap (10%) raises: 3/4 = 75% null rate.
     with pytest.raises(ValueError, match=r"exceeds max_null_rate"):
@@ -388,3 +392,185 @@ def test_substitute_continuous_return_max_null_rate_param(
     )
     assert out.height == 1
     assert out["y_true"].to_list() == [0.01]
+
+
+def test_the_continuous_return_label_is_read_from_the_isolated_output_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A label parquet is generated output, so ML4T_OUTPUT_DIR decides where it is read from.
+
+    The configuration stays in the checkout - it is source - and only the artifact moves. The
+    two directories are the same whenever artifacts sit beside the source, which is why reading
+    the checkout was never wrong in production and always wrong under isolation: measured in CI
+    on `crypto_perps_funding` 13_backtest, which raised FileNotFoundError for a label the same
+    run had just written.
+    """
+    cs = "isolated_cs"
+    source = tmp_path / "checkout"
+    (source / cs / "config").mkdir(parents=True)
+    (source / cs / "config" / "setup.yaml").write_text(
+        dedent(
+            """
+            labels:
+              classification_eval_label:
+                fwd_dir_1d: fwd_ret_1d
+            """
+        ).strip()
+    )
+    # Deliberately no labels/ in the checkout: the only copy is in the output root.
+    output = tmp_path / "output"
+    (output / cs / "labels").mkdir(parents=True)
+    d1 = datetime(2024, 1, 2)
+    pl.DataFrame(
+        {"timestamp": [d1, d1], "symbol": ["A", "B"], "fwd_ret_1d": [0.011, 0.031]}
+    ).write_parquet(output / cs / "labels" / "fwd_ret_1d.parquet")
+
+    predictions = pl.DataFrame(
+        {
+            "timestamp": [d1, d1],
+            "symbol": ["A", "B"],
+            "y_score": [0.1, 0.2],
+            "y_true": [1, 0],
+        }
+    )
+
+    import case_studies.utils.backtest_runner as br
+    import utils as _utils  # type: ignore
+
+    monkeypatch.setattr(_utils, "CASE_STUDIES_DIR", source, raising=False)
+    monkeypatch.setattr(br, "CASE_STUDIES_DIR", source, raising=False)
+    monkeypatch.setenv("ML4T_OUTPUT_DIR", str(output))
+
+    out = substitute_continuous_return_for_classification(
+        predictions, case_study=cs, label="fwd_dir_1d"
+    )
+
+    assert out["y_true"].to_list() == [0.011, 0.031]
+
+
+class TestAnAllocationThatProducedNoTargetIsRefused:
+    """A run with no target weight at any rebalance is an absence, not a Sharpe of 0.0.
+
+    `_refuse_an_allocation_that_produced_no_target` runs immediately before
+    `register_backtest_run`, so the row never reaches the registry. It matters because nothing
+    downstream filters it out of the trial count: `cohort_metrics` lists cohort members straight
+    from `backtest_runs` with no zero-trade clause, so an absence is counted as a trial against
+    every real candidate beside it (ml4t/agent-workspace#1004).
+    """
+
+    @staticmethod
+    def _returns(n: int) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "timestamp": [datetime(2023, 1, 1) + timedelta(days=i) for i in range(n)],
+                "daily_return": [0.0] * n,
+            }
+        )
+
+    @staticmethod
+    def _weights(n: int) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "timestamp": [datetime(2023, 1, 1) + timedelta(days=i) for i in range(n)],
+                "symbol": ["EUR_USD"] * n,
+                "weight": [1.0] * n,
+            },
+            schema={"timestamp": pl.Datetime, "symbol": pl.String, "weight": pl.Float64},
+        )
+
+    SPEC = {
+        "strategy": {
+            "signal": {"method": "equal_weight_top_k", "top_k": 2},
+            "allocation": {"method": "mvo_ledoit_wolf", "lookback": 63},
+            "rebalance": {"cadence": "daily_ny_close", "min_weight_change": 0.005},
+        }
+    }
+
+    def test_an_empty_weight_frame_over_a_real_window_raises(self) -> None:
+        from case_studies.utils.backtest_runner import (
+            _refuse_an_allocation_that_produced_no_target,
+        )
+
+        with pytest.raises(ValueError, match="no target weight at any rebalance"):
+            _refuse_an_allocation_that_produced_no_target(
+                self._weights(0), self._returns(2063), self.SPEC
+            )
+
+    def test_a_run_with_targets_passes(self) -> None:
+        from case_studies.utils.backtest_runner import (
+            _refuse_an_allocation_that_produced_no_target,
+        )
+
+        _refuse_an_allocation_that_produced_no_target(
+            self._weights(2063), self._returns(2063), self.SPEC
+        )
+
+    def test_a_short_fixture_panel_that_books_no_order_passes(self) -> None:
+        # A one-bar CI fixture has a target and no later bar to fill it on under `next_bar`
+        # execution, so it books zero orders legitimately. An earlier form of this guard tested
+        # `num_trades == 0` and stopped eleven such fixture backtests across
+        # `test_research_contract_execution` and `test_cme_futures_research`.
+        from case_studies.utils.backtest_runner import (
+            _refuse_an_allocation_that_produced_no_target,
+        )
+
+        _refuse_an_allocation_that_produced_no_target(self._weights(1), self._returns(1), self.SPEC)
+
+    def test_an_empty_return_series_is_left_to_its_own_diagnosis(self) -> None:
+        from case_studies.utils.backtest_runner import (
+            _refuse_an_allocation_that_produced_no_target,
+        )
+
+        _refuse_an_allocation_that_produced_no_target(self._weights(0), self._returns(0), {})
+
+
+def _vectorized_with_missing_outcome(missing_weight: float) -> dict:
+    """One rebalance date, two selected names, one of which has no forward return."""
+    from case_studies.utils.backtest_runner import _run_vectorized
+
+    dates = [datetime(2024, 1, i) for i in (2, 3, 4)]
+    weights = pl.DataFrame(
+        {
+            "timestamp": dates * 2,
+            "symbol": ["AAA"] * 3 + ["BBB"] * 3,
+            "weight": [0.5, 0.5, 0.5] + [missing_weight, 0.5, 0.5],
+        }
+    )
+    # BBB has no outcome row on the first date - the position the engine cannot price.
+    outcomes = pl.DataFrame(
+        {
+            "timestamp": dates + dates[1:],
+            "symbol": ["AAA"] * 3 + ["BBB"] * 2,
+            "y_true": [0.01, 0.02, -0.01, 0.03, 0.0],
+        }
+    ).with_columns(y_pred=pl.col("y_true"))
+    return _run_vectorized(
+        weights=weights,
+        predictions=outcomes,
+        prices=pl.DataFrame(
+            {"timestamp": dates * 2, "symbol": ["AAA"] * 3 + ["BBB"] * 3, "close": 100.0}
+        ),
+        cost_spec={"model": "percentage", "commission_bps": 0.0, "slippage_bps": 0.0},
+        cadence="daily",
+        label="fwd_ret_1d",
+        case_study="us_firm_characteristics",
+        initial_cash=1e6,
+        prediction_hash=None,
+        rebalance_step=1,
+    )
+
+
+def test_a_selected_position_with_no_outcome_row_stops_the_run() -> None:
+    """The inner join marked it at exactly zero return while it still paid turnover.
+
+    That is an assertion about a position nobody could price, not an exclusion, and
+    `n_positions` reported the reduced count as though it were intended.
+    """
+    with pytest.raises(ValueError, match="no usable outcome"):
+        _vectorized_with_missing_outcome(0.5)
+
+
+def test_a_zero_weight_needs_no_outcome() -> None:
+    """A zero weight is not a position: its outcome cannot move any number here."""
+    out = _vectorized_with_missing_outcome(0.0)
+    assert out["daily_returns"].height == 3

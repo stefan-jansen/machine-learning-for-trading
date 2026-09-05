@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+import sys
 from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,14 +16,21 @@ from case_studies.research import (
     Study,
 )
 from case_studies.sp500_options._htm_backtest import (
+    _apply_cohort_allocator,
     _compute_cohort_daily_pnl,
+    _defective_lifecycle_contracts,
     _load_option_lifecycle,
     _select_cohorts,
+    option_source_identity,
+    prime_option_lifecycle,
     run_htm_daily_mtm,
 )
 from case_studies.sp500_options.research_workflow import (
     model_request_catalog,
     open_study,
+    option_decision_dates,
+    option_trade_calendar,
+    paired_sharpe_on_common_support,
     publish_short_straddle_decisions,
     resolved_model_plan,
     run_official_backtest_requests,
@@ -62,6 +71,7 @@ def _prediction(
     *,
     execution_tier: str = "canonical",
     alpha: float = 1.0,
+    split: str = "validation",
 ):
     spec = _resolved_spec(alpha=alpha)
     spec["label"] = "ret_to_expiry"
@@ -83,10 +93,23 @@ def _prediction(
         training,
         checkpoint_kind="final",
         checkpoint_value=None,
-        split="validation",
+        split=split,
         predictions=frame,
         expected_keys=frame.select("symbol", "timestamp", "fold"),
     )
+
+
+def test_an_empty_config_selection_is_blamed_on_the_caller_not_the_family() -> None:
+    """`config_names=[]` filters every row out, and the family's menu is not why.
+
+    The caller passes `config_names` in code, never from a parameters cell, so an empty list
+    cannot be an empty-means-all idiom; it is a mistake, and reporting it as "no declared
+    requests for 'linear'" sends a reader to the training menu to look for a row that is there.
+    """
+    assert model_request_catalog("linear").height > 0
+
+    with pytest.raises(ValueError, match="config_names is empty"):
+        model_request_catalog("linear", config_names=[])
 
 
 def test_resolved_model_plan_accepts_flat_sequence_specs(tmp_path: Path) -> None:
@@ -124,12 +147,48 @@ def test_resolved_model_plan_accepts_flat_sequence_specs(tmp_path: Path) -> None
     ).row(0) == ("deep_learning", "nlinear", 2, 2, 1)
 
 
-def test_preview_study_activates_before_model_catalog_resolution(tmp_path: Path) -> None:
-    study = open_study(execution_tier="preview", workspace=tmp_path)
+def test_preview_study_activates_before_model_catalog_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The preview tier is activated inside `open_study`, before anything resolves config.
+
+    The branch under test only runs when the generated artifact directories are symlinks, which
+    is true of a working checkout and false of a clean clone, so the precondition is built here
+    rather than depending on the machine. What activation does is redirect `ML4T_OUTPUT_DIR` at
+    the workspace's `.preview`; asserting `study.output_root` instead would hold with the
+    activation removed, because the constructor sets it either way.
+    """
+    import os
+
+    from case_studies.sp500_options import research_workflow
+
+    repo_root = tmp_path / "repo"
+    case_dir = repo_root / "case_studies" / "sp500_options"
+    case_dir.mkdir(parents=True)
+    (repo_root / "case_studies" / "config").symlink_to(
+        REPO_ROOT / "case_studies" / "config", target_is_directory=True
+    )
+    generated = tmp_path / "generated"
+    for name in ("features", "labels", "run_log"):
+        (generated / name).mkdir(parents=True)
+        (case_dir / name).symlink_to(generated / name, target_is_directory=True)
+    (case_dir / "config").symlink_to(
+        REPO_ROOT / "case_studies" / "sp500_options" / "config", target_is_directory=True
+    )
+    monkeypatch.setattr(research_workflow, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(
+        research_workflow.subprocess, "check_output", lambda *_args, **_kwargs: "deadbeef\n"
+    )
+
+    workspace = tmp_path / "workspace"
+    study = open_study(execution_tier="preview", workspace=workspace)
 
     catalog = model_request_catalog("linear", config_names=["ridge_a1.0"])
 
-    assert study.output_root == tmp_path
+    assert os.environ["ML4T_OUTPUT_DIR"] == str(workspace / ".preview")
+    assert (workspace / ".preview" / "sp500_options" / "config").exists()
+    assert study.output_root == workspace
     assert catalog.to_dicts() == [
         {"family": "linear", "label": "ret_to_expiry", "config_name": "ridge_a1.0"}
     ]
@@ -220,29 +279,61 @@ def test_hold_to_expiry_selection_does_not_require_a_ten_day_exit_quote() -> Non
     )
 
 
-def test_real_prediction_subset_is_identity_covered_and_preview_only(tmp_path: Path) -> None:
-    study = _study(tmp_path)
-    source_hash = "released-source"
-    source_path = (
-        study.release_root
-        / "case_studies"
-        / "sp500_options"
-        / "run_log"
-        / "predictions"
-        / source_hash
-        / "predictions.parquet"
-    )
-    source_path.parent.mkdir(parents=True)
+def _release_prediction(study: Study, *, label: str = "ret_to_expiry") -> str:
+    """Register a complete canonical validation prediction in the release registry."""
+    from case_studies.utils.registry import register_prediction_set, register_training_run
+
+    case_dir = study.release_root / "case_studies" / "sp500_options"
+    spec = _resolved_spec(alpha=1.0)
+    spec["label"] = label
+    spec["execution_tier"] = "canonical"
+    training_hash = register_training_run("sp500_options", spec, case_dir=case_dir)
     timestamps = [datetime(2024, 1, day) for day in range(2, 7)]
-    pl.DataFrame(
+    frame = pl.DataFrame(
         {
-            "symbol": [symbol for timestamp in timestamps for symbol in ("A", "B", "C")],
+            "symbol": [symbol for _ in timestamps for symbol in ("A", "B", "C")],
             "timestamp": [timestamp for timestamp in timestamps for _ in range(3)],
             "fold": [0] * 15,
             "prediction": [float(index) / 100 for index in range(15)],
             "actual": [float(index) / 200 for index in range(15)],
         }
-    ).write_parquet(source_path)
+    )
+    return register_prediction_set(
+        "sp500_options",
+        training_hash,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=frame.select("symbol", "timestamp", "fold"),
+        case_dir=case_dir,
+    )
+
+
+def test_the_fixture_refuses_a_source_that_is_not_a_released_ret_to_expiry_prediction(
+    tmp_path: Path,
+) -> None:
+    """The fixture republishes its source as a complete `ret_to_expiry` validation prediction.
+
+    It used to read whatever parquet sat at the constructed path, so an artifact scored on
+    another label entered the registry under a `ret_to_expiry` identity with new lineage and
+    nothing said otherwise.
+    """
+    study = _study(tmp_path)
+    wrong_label_hash = _release_prediction(study, label="fwd_ret_5d")
+
+    with pytest.raises(ValueError, match="the fixture requires"):
+        _seed_real_preview_prediction(
+            study,
+            source_prediction_hash=wrong_label_hash,
+            max_symbols=2,
+            max_sessions=5,
+        )
+
+
+def test_real_prediction_subset_is_identity_covered_and_preview_only(tmp_path: Path) -> None:
+    study = _study(tmp_path)
+    source_hash = _release_prediction(study)
 
     prediction = _seed_real_preview_prediction(
         study,
@@ -311,6 +402,13 @@ def test_cash_settlement_and_stateful_delta_hedge(tmp_path: Path) -> None:
 
 
 def test_lifecycle_rejects_a_missing_contract_leg_date(tmp_path: Path) -> None:
+    """One quoted leg is a defect, not the end of the position.
+
+    A chain that quotes neither leg has stopped carrying the contract; a chain that quotes one
+    still carries it and has lost the other. Both fail to produce a paired row, so the lifecycle
+    has to tell them apart explicitly - otherwise a half-written session would end the position
+    early and book a liquidation against it.
+    """
     raw_dir = tmp_path / "raw"
     _write_raw_options(raw_dir)
     raw_path = raw_dir / "year=2024.parquet"
@@ -319,11 +417,170 @@ def test_lifecycle_rejects_a_missing_contract_leg_date(tmp_path: Path) -> None:
     ).write_parquet(raw_path)
     cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
 
-    with pytest.raises(ValueError, match="missing 1 lifecycle dates"):
+    with pytest.raises(ValueError, match="missing 1 contract-leg dates"):
         _load_option_lifecycle(cohorts, raw_dir)
 
 
-def test_supplied_lifecycle_cannot_drop_cash_settlement(tmp_path: Path) -> None:
+def test_the_option_allocator_asks_for_widths_with_its_label(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Where no widths artifact exists, generating one needs an embargo, and the label carries it.
+
+    `load_conformal_widths` generates the artifact when the file is absent, and the generation
+    refuses without an embargo unless it can look the reviewed value up from the label. The
+    option engine kept its own copy of this call and omitted the label, so the first conformal
+    request on any prediction set failed with "conformal calibration needs the label horizon as
+    an embargo" rather than calibrating - which is what stopped 13_portfolio_management on its
+    first canonical run. The generic runner has always passed it.
+    """
+    from case_studies.sp500_options import research_workflow
+    from case_studies.utils import conformal as conformal_module
+
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
+
+    seen: dict[str, object] = {}
+
+    class _Asked(Exception):
+        pass
+
+    def _record(*args: object, **kwargs: object) -> pl.DataFrame:
+        seen.update(kwargs)
+        raise _Asked
+
+    monkeypatch.setattr(conformal_module, "load_conformal_widths", _record)
+
+    with pytest.raises(_Asked):
+        _apply_cohort_allocator(
+            cohorts,
+            raw_dir,
+            {"method": "conformal_weighted"},
+            prediction_hash="abcdef123456",
+            label="ret_to_expiry",
+        )
+    assert seen["label"] == "ret_to_expiry"
+
+    # And through the resolver the workflow actually calls, which is where the canonical run
+    # entered - the engine-level parameter is no use if the layer above never fills it.
+    seen.clear()
+    labels_dir = tmp_path / "labels"
+    labels_dir.mkdir()
+    _contract_returns().write_parquet(labels_dir / "contract_returns.parquet")
+    study = _study(tmp_path)
+    prediction = _prediction(study)
+    prices = pl.DataFrame(
+        {
+            "symbol": ["A"],
+            "timestamp": [datetime(2024, 1, 5)],
+            "open": [100.0],
+            "high": [101.0],
+            "low": [99.0],
+            "close": [100.0],
+            "volume": [1000],
+        }
+    )
+    with pytest.raises(_Asked):
+        research_workflow.resolve_short_straddle_decisions(
+            prediction,
+            prices=prices,
+            signal={"method": "equal_weight_top_k", "top_k": 1},
+            allocation={"method": "conformal_weighted"},
+            label="ret_to_expiry",
+            data_paths=(labels_dir, raw_dir),
+        )
+    assert seen["label"] == "ret_to_expiry"
+
+
+def test_a_leg_with_no_market_is_an_unmarked_session_not_a_missing_leg(tmp_path: Path) -> None:
+    """A present row with no bid and no ask is a leg nobody would trade, not a leg the chain lost.
+
+    The far side of a straddle loses its market once the underlying has moved away from the
+    strike, and the vendor writes the row with a null bid, a null ask and no mid because it has
+    no two-sided quote to take the midpoint of. KEYS 67.5 expiring 2019-02-15 did exactly that
+    for one session - a call at 9.45 beside a put with nothing on either side and a delta of
+    zero - and quoted that put at 0.05 on the sessions either side.
+
+    Counting quoted legs rather than carried rows read that as a chain that had lost a leg and
+    halted a 1,923-decision run on it. Marking a straddle needs both legs, so the session is
+    one the position cannot be marked at; the position continues and is marked again when the
+    quote returns. A leg whose row is absent entirely is still a defect, which
+    `test_lifecycle_rejects_a_missing_contract_leg_date` pins.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    raw_path = raw_dir / "year=2024.parquet"
+    chain = pl.read_parquet(raw_path)
+    unmarketable = (pl.col("date") == date(2024, 1, 9)) & (pl.col("call_put") == "P")
+    chain.with_columns(
+        [
+            pl.when(unmarketable)
+            .then(pl.lit(None, dtype=chain.schema[column]))
+            .otherwise(pl.col(column))
+            .alias(column)
+            for column in ("mid_price", "bid", "ask")
+        ]
+    ).write_parquet(raw_path)
+    cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
+
+    # The screen does not reject the decision.
+    assert _defective_lifecycle_contracts(
+        cohorts.rename({"timestamp": "feature_date"}), raw_dir
+    ).is_empty()
+
+    # The position skips that session and settles at expiry, rather than ending on it.
+    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
+    assert lifecycle.get_column("date").to_list() == [date(2024, 1, 8), date(2024, 1, 10)]
+    assert lifecycle.filter(pl.col("liquidated")).is_empty()
+    assert lifecycle.filter(pl.col("cash_settled")).get_column("date").to_list() == [
+        date(2024, 1, 10)
+    ]
+
+
+def _cross_the_call_quote(raw_dir: Path, on: date) -> None:
+    """Make the call's bid exceed its ask on one session, as the vendor chain does."""
+    raw_path = raw_dir / "year=2024.parquet"
+    crossed = (pl.col("date") == on) & (pl.col("call_put") == "C")
+    pl.read_parquet(raw_path).with_columns(
+        bid=pl.when(crossed).then(pl.lit(0.02)).otherwise(pl.col("bid")),
+        ask=pl.when(crossed).then(pl.lit(0.01)).otherwise(pl.col("ask")),
+    ).write_parquet(raw_path)
+
+
+def test_a_crossed_quote_on_the_expiration_session_still_settles_at_intrinsic(
+    tmp_path: Path,
+) -> None:
+    """The expiry mids are discarded for cash settlement, so their order cannot matter.
+
+    COST 295 expiring 2020-01-03 closed its last session bid 0.02 / ask 0.01. Nothing
+    reads that quote - the straddle settles at max(underlying - strike, 0) + max(strike
+    - underlying, 0) - and rejecting it halted the whole backtest over one crossed row.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    _cross_the_call_quote(raw_dir, date(2024, 1, 10))
+    cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
+
+    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
+    settled = lifecycle.filter(pl.col("cash_settled"))
+    assert settled.height == 1
+    assert settled.get_column("date").item() == date(2024, 1, 10)
+    assert settled.get_column("instr_mid").item() == pytest.approx(1.0)
+
+
+def test_a_crossed_quote_before_expiration_is_still_rejected(tmp_path: Path) -> None:
+    """The exemption is the expiration session and nothing wider: 01-09 marks the position."""
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    _cross_the_call_quote(raw_dir, date(2024, 1, 9))
+    cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
+
+    with pytest.raises(ValueError, match="invalid quote rows"):
+        _load_option_lifecycle(cohorts, raw_dir)
+
+
+def test_supplied_lifecycle_cannot_drop_the_end_of_a_position(tmp_path: Path) -> None:
     raw_dir = tmp_path / "raw"
     _write_raw_options(raw_dir)
     cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
@@ -331,7 +588,7 @@ def test_supplied_lifecycle_cannot_drop_cash_settlement(tmp_path: Path) -> None:
         pl.col("date") < pl.col("expiration")
     )
 
-    with pytest.raises(ValueError, match="cash-settle every selected contract"):
+    with pytest.raises(ValueError, match="end every selected contract"):
         _compute_cohort_daily_pnl(
             cohorts,
             lifecycle,
@@ -341,6 +598,71 @@ def test_supplied_lifecycle_cannot_drop_cash_settlement(tmp_path: Path) -> None:
             option_commission_per_contract=0.0,
             delta_threshold=0.1,
         )
+
+
+def test_a_shared_option_lifecycle_is_reached_by_the_files_it_was_read_from(
+    tmp_path: Path,
+) -> None:
+    """A run that shares one loaded chain must not hand the frame to the requests.
+
+    Handing it over asks each request to trust a frame it did not produce, and nothing inside
+    the request closes that: a source dictionary the same caller supplies checks the label on
+    the box, and comparing against the decision catches an unrelated frame but not a stale one
+    whose entry quotes are unchanged and whose later quotes are not. The frame's own digest
+    cannot go into the identity either, because the identity is fixed when the request is
+    planned, before any frame exists.
+
+    So the frame is reached by the digest of the files it was read from - the same digest the
+    identity records. This pins that a request declaring any other digest, including the one
+    the same directory had before its files changed, gets nothing rather than the wrong frame.
+    """
+    from case_studies.research.strategy import Strategy
+    from case_studies.sp500_options._htm_backtest import (
+        primed_option_lifecycle,
+        raw_lifecycle_identity,
+    )
+    from case_studies.utils.registry import canonical_json, compute_hash
+
+    labels_dir = tmp_path / "labels"
+    labels_dir.mkdir()
+    _contract_returns().write_parquet(labels_dir / "contract_returns.parquet")
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
+
+    key = prime_option_lifecycle(cohorts, raw_dir)
+
+    # The key is exactly what `Strategy._build_spec` writes into the identity, so a request
+    # looks its own declared value up without any separate agreement about how it is formed.
+    assert key == compute_hash(
+        canonical_json(option_source_identity(labels_dir, raw_dir)["raw_lifecycle"])
+    )
+
+    primed = primed_option_lifecycle(key)
+    assert primed is not None
+    assert not primed.is_empty()
+
+    # Nothing is served for a digest these files do not have.
+    assert primed_option_lifecycle("0" * 12) is None
+    assert primed_option_lifecycle(None) is None
+
+    # Change the chain and the identity moves with it, so the frame built from the old files
+    # is unreachable under the new one. That is the stale-frame case, closed by construction
+    # rather than by a check a caller could satisfy with the wrong frame.
+    year_file = next(iter(sorted(raw_dir.glob("year=*.parquet"))))
+    year_file.write_bytes(year_file.read_bytes() + b"\0")
+    changed = raw_lifecycle_identity(raw_dir)
+    assert changed != key
+    assert primed_option_lifecycle(changed) is None
+
+    # Coverage is the one thing the digest does not establish: the frame is loaded for the
+    # union of a run's decisions, and a decision reaching outside that union must refuse
+    # rather than price the contracts it happens to cover.
+    checker = Strategy._require_lifecycle_covers_decision
+    holder = SimpleNamespace(decision=SimpleNamespace(load=lambda: cohorts))
+    checker(holder, primed)
+    with pytest.raises(ValueError, match="missing 1 of 1 contracts"):
+        checker(holder, primed.with_columns(strike=pl.col("strike") + 5.0))
 
 
 def test_typed_contract_rows_match_direct_option_selection(tmp_path: Path) -> None:
@@ -477,7 +799,10 @@ def test_reader_boundary_publishes_contracts_consumed_by_strategy(
     )
     declared_inputs = canonical.spec["source_identity"]["declared_inputs"]
     assert declared_inputs["option_contract_returns"]
-    assert "option_sources" not in declared_inputs
+    # The raw option chain is a declared input, not just the labels table: the decision
+    # reads strikes and quotes straight out of it, so a replay against a different chain
+    # is reading different data and must be refused rather than silently republished.
+    assert declared_inputs["option_sources"] == option_source_identity(labels_dir, raw_dir)
     assert canonical.spec["source_identity"]["holdout_replay"] == {
         "version": 1,
         "function": "resolve_short_straddle_decisions",
@@ -518,13 +843,10 @@ def test_typed_decision_runs_through_registered_option_backtest_path(
         prices=prices,
         signal=signal,
     )
-    lifecycle = _load_option_lifecycle(decision.load(), raw_dir)
+    prime_option_lifecycle(decision.load(), raw_dir)
 
-    result = study.strategy(
-        prediction=prediction,
-        signal=signal,
-        decision=decision,
-    ).run(prices=prices, option_lifecycle=lifecycle)
+    strategy = study.strategy(prediction=prediction, signal=signal, decision=decision)
+    result = strategy.run(prices=prices)
     spec = result.spec()
 
     assert result.complete
@@ -776,3 +1098,1077 @@ def test_official_population_is_snapshotted_before_option_execution(
     population = OfficialPopulation.one(study, name=population_name)
     with pytest.raises(ValueError, match="incomplete"):
         population.require_complete()
+
+
+def _equal_weight_cohorts() -> pl.DataFrame:
+    """Two symbols entered on one date at equal weight, with unequal scores."""
+    return pl.DataFrame(
+        {
+            "timestamp": [date(2024, 1, 5), date(2024, 1, 5)],
+            "symbol": ["A", "B"],
+            "y_score": [0.3, 0.1],
+            "weight": [0.5, 0.5],
+        }
+    )
+
+
+def test_score_weighted_allocation_reweights_an_equal_weight_entry(tmp_path: Path) -> None:
+    """The allocator sizes by score even when the signal selected at equal weight.
+
+    The allocator sweep pairs one baseline against several weighting rules and copies
+    the baseline's signal verbatim, so `score_weighted` has to compute its own weights.
+    Reading them off the signal made the run realize equal weight while being published
+    as score-weighted.
+    """
+    weighted = _apply_cohort_allocator(
+        _equal_weight_cohorts(),
+        tmp_path,
+        {"method": "score_weighted", "top_k": 2},
+    )
+
+    weights = dict(zip(weighted["symbol"], weighted["weight"], strict=True))
+    assert weights["A"] == pytest.approx(0.75)
+    assert weights["B"] == pytest.approx(0.25)
+
+
+def test_allocator_weights_do_not_depend_on_the_order_the_cohorts_arrive_in(
+    tmp_path: Path,
+) -> None:
+    """The same cohort, listed in two orders, has to size to the same numbers.
+
+    `score_weighted` divides each score by the sum of the scores on that date, and
+    floating-point addition is not associative, so a summation order that follows the
+    row order puts the difference in the weights. The rows reach the allocator through
+    a `unique`, which returns them in whatever order its hash pass produced. That made
+    one request resolve to two different decision sets on two runs, and the
+    clean-process replay in `run_official_backtest_requests` refuses exactly that.
+
+    The scores are spread far enough apart that one ULP of the sum is visible in the
+    weights, which is why this compares exactly rather than approximately.
+    """
+    cohorts = pl.DataFrame(
+        {
+            "timestamp": [date(2024, 1, 5)] * 4,
+            "symbol": ["D", "C", "B", "A"],
+            "y_score": [1e16, 1.0, 1.0, 1.0],
+            "weight": [0.25] * 4,
+        }
+    )
+    spec = {"method": "score_weighted", "top_k": 4}
+
+    forward = _apply_cohort_allocator(cohorts, tmp_path, spec)
+    reversed_rows = _apply_cohort_allocator(cohorts.reverse(), tmp_path, spec)
+
+    as_map = lambda frame: dict(zip(frame["symbol"], frame["weight"], strict=True))  # noqa: E731
+    assert as_map(forward) == as_map(reversed_rows)
+
+
+def test_equal_weight_allocation_leaves_the_signal_weights_alone(tmp_path: Path) -> None:
+    cohorts = _equal_weight_cohorts()
+    unchanged = _apply_cohort_allocator(cohorts, tmp_path, {"method": "equal_weight"})
+
+    assert unchanged.equals(cohorts)
+
+
+def test_conformal_weighted_allocation_is_dispatched_not_refused(tmp_path: Path) -> None:
+    """The declared allocator menu lists `conformal_weighted`, so the path must run it.
+
+    Without a prediction hash there are no calibrated widths to size by, and the
+    failure has to say that rather than report the method as unsupported.
+    """
+    with pytest.raises(ValueError, match="must pass prediction_hash"):
+        _apply_cohort_allocator(
+            _equal_weight_cohorts(),
+            tmp_path,
+            {"method": "conformal_weighted", "top_k": 2},
+        )
+
+
+def test_a_lifecycle_gap_does_not_shape_the_decision_universe(tmp_path: Path) -> None:
+    """A quote gap after the decision date must not decide what could be ranked on it.
+
+    The screen reads the paired chain from entry through expiration, so every date it looks at
+    is later than the decision it would filter. Two candidates make the difference visible: A
+    scores higher and has the gap, B scores lower and is complete. A screen that ran before the
+    ranking would drop A and hand the cohort to B; running it on the selection keeps A ranked
+    first and reports that its lifecycle cannot be accounted for.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    chain = pl.read_parquet(raw_dir / "year=2024.parquet")
+    runner_up = chain.with_columns(symbol=pl.lit("B"))
+    # Drop one leg of one session for A: the session still exists in the chain, so the gap is
+    # that contract's own rather than a hole in the calendar every contract shares.
+    gap = (pl.col("date") == date(2024, 1, 9)) & (pl.col("call_put") == "C")
+    pl.concat([chain.filter(~gap), runner_up]).write_parquet(raw_dir / "year=2024.parquet")
+
+    predictions = pl.concat(
+        [_predictions(), _predictions().with_columns(symbol=pl.lit("B"), y_score=pl.lit(0.1))]
+    )
+    contract_returns = pl.concat(
+        [_contract_returns(), _contract_returns().with_columns(symbol=pl.lit("B"))]
+    )
+
+    ranked = _select_cohorts(predictions, contract_returns, top_k=1)
+    assert ranked.get_column("symbol").to_list() == ["A"]
+
+    with pytest.raises(ValueError, match="complete paired lifecycle") as refusal:
+        _select_cohorts(predictions, contract_returns, top_k=1, raw_options_dir=raw_dir)
+    # The cohort the screen refused is A's, so the ranking was not handed to the runner-up.
+    assert "'symbol': 'A'" in str(refusal.value)
+
+
+def _chain_with_a_terminated_contract(raw_dir: Path) -> None:
+    """A is quoted on its entry session only; B is quoted throughout.
+
+    That is the shape a corporate action leaves in this chain: the contract is adjusted onto a
+    strike the slice does not carry, so its quotes stop and never resume. The calendar still
+    holds 2024-01-09 and the expiration session, because B is quoted on both.
+
+    A stops after 2024-01-08 rather than after 2024-01-09 so that the session the exit is booked
+    on, the first with no quote, falls strictly inside the holding period. Stopping a day later
+    would put it on the expiration session itself, where a liquidation and a cash settlement
+    would be indistinguishable by date and the test could not tell which rule had fired.
+    """
+    _write_raw_options(raw_dir)
+    chain = pl.read_parquet(raw_dir / "year=2024.parquet")
+    runner_up = chain.with_columns(symbol=pl.lit("B"))
+    ended = chain.filter(pl.col("date") < date(2024, 1, 9))
+    pl.concat([ended, runner_up]).write_parquet(raw_dir / "year=2024.parquet")
+
+
+def _two_names() -> tuple[pl.DataFrame, pl.DataFrame]:
+    predictions = pl.concat(
+        [_predictions(), _predictions().with_columns(symbol=pl.lit("B"), y_score=pl.lit(0.1))]
+    )
+    contract_returns = pl.concat(
+        [_contract_returns(), _contract_returns().with_columns(symbol=pl.lit("B"))]
+    )
+    return predictions, contract_returns
+
+
+def test_a_contract_ended_by_a_corporate_action_is_liquidated_not_settled(
+    tmp_path: Path,
+) -> None:
+    """The position is opened, then bought back where the quotes stop. It is not withheld.
+
+    A outscores B and its contract stops being quoted before expiration, which is what a
+    corporate action leaves in this chain: the position continues under an adjusted strike the
+    slice does not carry. Withholding the position would condition the realized portfolio on an
+    event nobody knew about at entry and would throw away the P&L it earned before that event.
+
+    What it is *not* is a cash settlement. Settlement happens at expiration, at intrinsic,
+    against no counterparty. This is a trade against the last mark the chain carried, and the
+    accounting has to charge it as one.
+
+    The exit is dated to the first session with no quote, not to the last session with one. On
+    the last quoted session the holder has no reason to act and no way to know it was the last;
+    they learn that the following morning. Dating it a day earlier picks the exit date with
+    hindsight, which is what the gate objected to.
+    """
+    raw_dir = tmp_path / "raw"
+    _chain_with_a_terminated_contract(raw_dir)
+    predictions, contract_returns = _two_names()
+
+    cohorts = _select_cohorts(predictions, contract_returns, top_k=1, raw_options_dir=raw_dir)
+    assert cohorts.get_column("symbol").to_list() == ["A"]
+
+    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
+    ended = lifecycle.filter(pl.col("liquidated"))
+    assert ended.get_column("date").to_list() == [date(2024, 1, 9)]
+    assert ended.get_column("date").item() < ended.get_column("expiration").item()
+    # The exit is booked against the mark the previous session carried, so the liquidation row
+    # repeats 2024-01-08's quote rather than inventing one for a session nothing was quoted on.
+    prior = lifecycle.filter(pl.col("date") == date(2024, 1, 8))
+    assert ended.get_column("call_mid").item() == prior.get_column("call_mid").item()
+    assert ended.get_column("call_ask").item() == prior.get_column("call_ask").item()
+    assert ended.get_column("put_mid").item() == prior.get_column("put_mid").item()
+    # A bought-back straddle carries no delta into the sessions that follow.
+    assert ended.get_column("instr_delta").item() == 0.0
+    # Nothing reached expiry, so nothing settled.
+    assert lifecycle.filter(pl.col("cash_settled")).is_empty()
+
+
+def test_a_liquidated_contract_pays_the_exit_spread(tmp_path: Path) -> None:
+    """A buy-to-close against the previous session's mark costs the spread, like any other exit.
+
+    Marking it out at the midpoint for free was the defect: it made a position the market
+    stopped quoting cheaper to leave than one the strategy chose to leave, which is backwards.
+    """
+    raw_dir = tmp_path / "raw"
+    _chain_with_a_terminated_contract(raw_dir)
+    predictions, contract_returns = _two_names()
+
+    cohorts = _select_cohorts(predictions, contract_returns, top_k=1, raw_options_dir=raw_dir)
+    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
+    daily = _compute_cohort_daily_pnl(
+        cohorts,
+        lifecycle,
+        delta_hedge=False,
+        hedge_spread_bps=0.0,
+        equity_commission_per_share=0.0,
+        option_commission_per_contract=0.0,
+        delta_threshold=0.1,
+    )
+    charged = daily.filter(pl.col("exit_cost_norm") > 0.0)
+    assert charged.get_column("date").to_list() == [date(2024, 1, 9)]
+    assert charged.get_column("liquidated").to_list() == [True]
+
+
+def test_a_fully_unquoted_row_is_a_termination_not_an_invalid_quote(tmp_path: Path) -> None:
+    """The vendor writes the row and nulls its prices; it does not delete the row.
+
+    That is the representation `_price_end_of_session_quotes` documents and deliberately leaves
+    alone - 1,705 such rows in the validation window. The other termination tests delete rows
+    instead, which reaches the same lifecycle logic by a different path and so cannot catch a
+    validation step that rejects nulls before that logic runs. This one uses the shape the
+    chain actually carries.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    chain = pl.read_parquet(raw_dir / "year=2024.parquet")
+    runner_up = chain.with_columns(symbol=pl.lit("B"))
+    stops = pl.col("symbol") == "A"
+    after_entry = pl.col("date") > date(2024, 1, 8)
+    nulled = chain.with_columns(
+        [
+            pl.when(stops & after_entry)
+            .then(pl.lit(None, dtype=chain.schema[column]))
+            .otherwise(pl.col(column))
+            .alias(column)
+            for column in ("mid_price", "bid", "ask", "delta", "underlying_price")
+        ]
+    )
+    pl.concat([nulled, runner_up]).write_parquet(raw_dir / "year=2024.parquet")
+    predictions, contract_returns = _two_names()
+
+    cohorts = _select_cohorts(predictions, contract_returns, top_k=1, raw_options_dir=raw_dir)
+    assert cohorts.get_column("symbol").to_list() == ["A"]
+
+    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
+    ended = lifecycle.filter(pl.col("liquidated"))
+    assert ended.get_column("date").to_list() == [date(2024, 1, 9)]
+    assert lifecycle.filter(pl.col("cash_settled")).is_empty()
+
+
+def test_a_liquidation_marks_the_hedge_at_that_sessions_own_close(tmp_path: Path) -> None:
+    """The option exits at the previous mark; the stock does not.
+
+    Rule 3 exits the straddle against the last mark the chain carried, because on the
+    liquidation session there is no option quote to trade against. The underlying has no such
+    problem - it is still trading, and the retained hedge is unwound into that day's close.
+    Carrying the previous close forward instead would silently zero the hedge's P&L on a
+    session the stock may well have moved, which is a real mis-accounting rather than a
+    convention.
+
+    The selected contract stops being quoted; a second contract on the same underlying, which
+    the strategy does not hold, keeps quoting for one more session. That is where the close
+    comes from, and it is how the chain is actually shaped - the underlying price is written
+    on every contract. The name leaves the chain before its expiration session, so no
+    settlement price exists there and the position ends at the liquidation instead.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    chain = pl.read_parquet(raw_dir / "year=2024.parquet")
+    # A contract on the same name at a strike the strategy never selects.
+    neighbour = chain.filter(
+        (pl.col("symbol") == "A") & (pl.col("date") < date(2024, 1, 10))
+    ).with_columns(strike=pl.lit(105.0))
+    runner_up = chain.with_columns(symbol=pl.lit("B"))
+    held = chain.filter(pl.col("date") < date(2024, 1, 9))
+    pl.concat([held, neighbour, runner_up]).write_parquet(raw_dir / "year=2024.parquet")
+    predictions, contract_returns = _two_names()
+
+    cohorts = _select_cohorts(predictions, contract_returns, top_k=1, raw_options_dir=raw_dir)
+    assert cohorts.get_column("symbol").to_list() == ["A"]
+
+    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
+    ended = lifecycle.filter(pl.col("liquidated"))
+    assert ended.get_column("date").to_list() == [date(2024, 1, 9)]
+    # 2024-01-09's close is 102.0; the previous session's was 100.0. The option legs still come
+    # from the previous session, because that is the mark the buy-to-close executes against.
+    assert ended.get_column("underlying_price").item() == pytest.approx(102.0)
+    assert ended.get_column("call_mid").item() == pytest.approx(6.0)
+    assert ended.get_column("put_mid").item() == pytest.approx(4.0)
+
+
+def test_an_unquoted_expiration_session_still_settles_against_the_underlying(
+    tmp_path: Path,
+) -> None:
+    """A straddle held to expiry settles at intrinsic whether or not its legs were quoted.
+
+    Intrinsic value is a function of the underlying close and the strike, so a vendor that
+    stopped quoting the contract before its expiration session withholds nothing the
+    settlement needs. Reading the settlement price only off a quoted leg sent the position to
+    the liquidation path instead, which books the exit at the previous session's option mark -
+    a mark taken before the move the position was held through, and one nobody could have
+    traded at.
+
+    The held contract goes unquoted on its expiration session; a contract on the same name at
+    a strike the strategy never selects still carries that session's underlying close.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    chain = pl.read_parquet(raw_dir / "year=2024.parquet")
+    neighbour = chain.filter(pl.col("symbol") == "A").with_columns(strike=pl.lit(105.0))
+    runner_up = chain.with_columns(symbol=pl.lit("B"))
+    held = chain.filter(pl.col("date") < date(2024, 1, 10))
+    pl.concat([held, neighbour, runner_up]).write_parquet(raw_dir / "year=2024.parquet")
+    predictions, contract_returns = _two_names()
+
+    cohorts = _select_cohorts(predictions, contract_returns, top_k=1, raw_options_dir=raw_dir)
+    assert cohorts.get_column("symbol").to_list() == ["A"]
+
+    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
+    assert lifecycle.filter(pl.col("liquidated")).is_empty()
+    settled = lifecycle.filter(pl.col("cash_settled"))
+    assert settled.get_column("date").to_list() == [date(2024, 1, 10)]
+    # The expiration close is 101.0 against a strike of 100.0, so the call settles at 1.0 and
+    # the put at nothing. The previous session's marks - 5.5 and 3.5 - are what the
+    # liquidation path would have booked.
+    assert settled.get_column("underlying_price").item() == pytest.approx(101.0)
+    assert settled.get_column("call_mid").item() == pytest.approx(1.0)
+    assert settled.get_column("put_mid").item() == pytest.approx(0.0)
+    assert settled.get_column("call_delta").item() == pytest.approx(0.0)
+    assert settled.get_column("put_delta").item() == pytest.approx(0.0)
+
+
+def test_a_position_survives_an_interior_session_nobody_quoted(tmp_path: Path) -> None:
+    """A gap in the middle of a life is an unmarked session, not the end of the position.
+
+    This is the end-to-end version deliberately: cohort selection already accepted a contract
+    with an interior gap, and the lifecycle then refused it, so the two disagreed about the same
+    data and a run could pass selection and die later. Stopping at `_select_cohorts` would not
+    have caught that. The test therefore loads the lifecycle and computes the daily P&L across
+    the gap.
+
+    Nothing is invented for the unquoted session. The position simply is not remarked, so the
+    move across the gap is recognised on the session quotes resume - which here is expiration,
+    where the straddle settles at intrinsic.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    chain = pl.read_parquet(raw_dir / "year=2024.parquet")
+    # B keeps the calendar intact; A loses both legs on the interior session only.
+    runner_up = chain.with_columns(symbol=pl.lit("B"))
+    gapped = chain.filter(pl.col("date") != date(2024, 1, 9))
+    pl.concat([gapped, runner_up]).write_parquet(raw_dir / "year=2024.parquet")
+    predictions, contract_returns = _two_names()
+
+    cohorts = _select_cohorts(predictions, contract_returns, top_k=1, raw_options_dir=raw_dir)
+    assert cohorts.get_column("symbol").to_list() == ["A"]
+
+    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
+    assert lifecycle.get_column("date").to_list() == [date(2024, 1, 8), date(2024, 1, 10)]
+    # It reached expiration, so it settled. A gap that closes is not a liquidation.
+    assert lifecycle.filter(pl.col("liquidated")).is_empty()
+    assert lifecycle.filter(pl.col("cash_settled")).get_column("date").to_list() == [
+        date(2024, 1, 10)
+    ]
+
+    daily = _compute_cohort_daily_pnl(
+        cohorts,
+        lifecycle,
+        delta_hedge=False,
+        hedge_spread_bps=0.0,
+        equity_commission_per_share=0.0,
+        option_commission_per_contract=0.0,
+        delta_threshold=0.1,
+    )
+    assert daily.height == 2
+    # Cash settlement is not a trade, so nothing is charged for leaving.
+    assert daily.get_column("exit_cost_norm").to_list() == pytest.approx([0.0, 0.0])
+    # Entry straddle is 6.0 + 4.0 = 10.0; settlement is max(101 - 100, 0) + 0 = 1.0. The short
+    # position gains the whole 9.0 decline, recognised on the session quotes resume.
+    assert daily.get_column("premium_pnl_norm").to_list() == pytest.approx([0.0, 0.9])
+
+
+def test_expiration_settles_from_whichever_leg_the_chain_still_quotes(tmp_path: Path) -> None:
+    """Intrinsic needs the underlying and the strike, and either leg carries the underlying.
+
+    Requiring a pair at expiration dropped the settlement row whenever the chain stopped
+    quoting the worthless leg, which is exactly when it tends to stop. The position then had no
+    end and the run either truncated it or refused it, for a leg whose price is not read.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    chain = pl.read_parquet(raw_dir / "year=2024.parquet")
+    single_leg = chain.filter(
+        ~((pl.col("date") == date(2024, 1, 10)) & (pl.col("call_put") == "P"))
+    )
+    single_leg.write_parquet(raw_dir / "year=2024.parquet")
+    cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
+
+    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
+    settled = lifecycle.filter(pl.col("cash_settled"))
+    assert settled.get_column("date").to_list() == [date(2024, 1, 10)]
+    # Settled at intrinsic from the underlying and the strike, not from the surviving quote.
+    assert settled.get_column("call_mid").item() == pytest.approx(1.0)
+    assert settled.get_column("put_mid").item() == pytest.approx(0.0)
+    assert lifecycle.filter(pl.col("liquidated")).is_empty()
+
+
+def test_a_position_that_can_be_neither_settled_nor_liquidated_stops_the_run(
+    tmp_path: Path,
+) -> None:
+    """Rule 4: refuse, rather than drop the position and report the rest.
+
+    Dropping it would publish a portfolio that silently excluded a position the strategy held,
+    which is the same defect as reweighting the survivors, arrived at by omission.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    chain = pl.read_parquet(raw_dir / "year=2024.parquet")
+    # The chain stops for every name before expiration, so there is no later session to book a
+    # liquidation on and no expiration session to settle at.
+    truncated = chain.filter(pl.col("date") < date(2024, 1, 10))
+    truncated.write_parquet(raw_dir / "year=2024.parquet")
+    cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
+
+    with pytest.raises(ValueError, match="neither settled at expiration nor liquidated"):
+        _load_option_lifecycle(cohorts, raw_dir)
+
+
+def test_a_corporate_action_does_not_reweight_the_names_beside_it(tmp_path: Path) -> None:
+    """The cohort's weights are the ones the decision date set, whatever happens afterwards.
+
+    Both names are selected at k=2 and A's contract is ended by a corporate action. Dropping A
+    and handing its half to B would size B on information that did not exist when the cohort
+    was formed, and would report a portfolio concentrated in the name that happened to survive.
+    Each still carries a half.
+    """
+    raw_dir = tmp_path / "raw"
+    _chain_with_a_terminated_contract(raw_dir)
+    predictions, contract_returns = _two_names()
+
+    cohorts = _select_cohorts(predictions, contract_returns, top_k=2, raw_options_dir=raw_dir)
+
+    assert sorted(cohorts.get_column("symbol").to_list()) == ["A", "B"]
+    assert cohorts.get_column("weight").to_list() == [0.5, 0.5]
+
+
+def test_a_session_the_contract_is_not_quoted_on_is_not_a_defect(tmp_path: Path) -> None:
+    """A corporate action can take a contract out of the chain for one session and give it back.
+
+    PFE is the live case: its contract is quoted from entry to expiration except on the day its
+    spinoff took effect. There is no quote to mark the position at on that session, but the
+    contract is intact and nothing about the chain is broken, so this must not raise the way a
+    chain that lost one leg of a session does.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    chain = pl.read_parquet(raw_dir / "year=2024.parquet")
+    runner_up = chain.with_columns(symbol=pl.lit("B"))
+    # Both legs of an interior session, so the contract is absent rather than half-quoted.
+    interior = chain.filter(pl.col("date") != date(2024, 1, 9))
+    pl.concat([interior, runner_up]).write_parquet(raw_dir / "year=2024.parquet")
+    predictions, contract_returns = _two_names()
+
+    cohorts = _select_cohorts(predictions, contract_returns, top_k=2, raw_options_dir=raw_dir)
+
+    assert sorted(cohorts.get_column("symbol").to_list()) == ["A", "B"]
+
+
+def test_a_missing_entry_quote_does_not_shape_the_decision_universe() -> None:
+    """The quote read on the session after the decision cannot decide what was rankable.
+
+    A outscores B and has no entry call quote. Dropping A before the ranking would hand the
+    cohort to B and say nothing; the selection must still be A's, and the refusal must name it.
+    """
+    predictions = pl.concat(
+        [_predictions(), _predictions().with_columns(symbol=pl.lit("B"), y_score=pl.lit(0.1))]
+    )
+    contract_returns = pl.concat(
+        [
+            _contract_returns().with_columns(entry_call_mid=pl.lit(None, dtype=pl.Float64)),
+            _contract_returns().with_columns(symbol=pl.lit("B")),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="no complete entry quote") as refusal:
+        _select_cohorts(predictions, contract_returns, top_k=1)
+    assert "'symbol': 'A'" in str(refusal.value)
+
+
+def _week_of_candidates(sessions: list[date]) -> pl.DataFrame:
+    """A contract-returns artifact with one candidate on each of the given decision dates."""
+    return pl.DataFrame(
+        {
+            "feature_date": sessions,
+            "symbol": ["A"] * len(sessions),
+            "strike": [100.0] * len(sessions),
+            "expiration": [date(2024, 1, 19)] * len(sessions),
+            "entry_date": [date(2024, 1, 16)] * len(sessions),
+            "entry_straddle_mid": [10.0] * len(sessions),
+        }
+    )
+
+
+def test_the_displayed_calendar_follows_the_schedule_the_predictions_resolve(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prediction set that stops short of Friday enters on Thursday, and the table says so.
+
+    The engine resolves ``weekly_friday`` from the prediction frame it is handed, so a week
+    whose Friday is absent from the predictions rebalances on the Thursday. Reading the
+    schedule off the complete contract artifact instead would display the Friday - a session
+    no backtest here enters on - and hide the Thursday it does.
+    """
+    from case_studies.sp500_options import research_workflow
+
+    study = _study(tmp_path)
+    spec = _resolved_spec(alpha=1.0)
+    spec["label"] = "ret_to_expiry"
+    training = study.results.register_training(spec)
+    thursday, friday = date(2024, 1, 11), date(2024, 1, 12)
+    frame = pl.DataFrame(
+        {
+            "symbol": ["A", "A"],
+            "timestamp": [datetime(2024, 1, 10), datetime(2024, 1, 11)],
+            "fold": [0, 0],
+            "actual": [0.01, 0.02],
+            "prediction": [0.02, 0.03],
+        }
+    )
+    prediction = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=frame.select("symbol", "timestamp", "fold"),
+    )
+
+    labels_dir = tmp_path / "labels"
+    labels_dir.mkdir()
+    # The artifact carries the Friday the predictions never reach.
+    _week_of_candidates([date(2024, 1, 10), thursday, friday]).write_parquet(
+        labels_dir / "contract_returns.parquet"
+    )
+    monkeypatch.setattr(
+        research_workflow, "option_data_paths", lambda: (labels_dir, tmp_path / "raw")
+    )
+
+    decision_dates = option_decision_dates(
+        study,
+        [prediction.hash],
+        prices=pl.DataFrame(
+            {
+                "symbol": ["A", "A"],
+                "timestamp": [datetime(2024, 1, 10), datetime(2024, 1, 11)],
+                "close": [100.0, 101.0],
+            }
+        ),
+        signal={"universe_filter": "full"},
+    )
+    calendar = option_trade_calendar(decision_dates)
+
+    assert decision_dates.to_list() == [thursday]
+    assert calendar.get_column("decision_date").to_list() == [thursday]
+
+
+def test_conformal_weighted_sizes_by_width_and_drops_uncalibrated_dates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The calibrated dates get inverse-width weights; the uncalibrated one is removed.
+
+    An entry date earlier than the first calibration window has no prior-only width, so it
+    cannot be sized this way. Filling it with equal weight would publish a run as
+    conformal-weighted while realizing the weighting the allocator exists to replace, so
+    those cohorts leave the result instead.
+    """
+    from case_studies.utils import conformal
+
+    prediction_hash = "conformalfixture01"
+    calibrated, uncalibrated = date(2024, 1, 12), date(2024, 1, 5)
+    widths_dir = tmp_path / "case" / "run_log" / "predictions" / prediction_hash
+    widths_dir.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "timestamp": [calibrated, calibrated],
+            "symbol": ["A", "B"],
+            # B's interval is three times as wide, so it takes a quarter of the cohort.
+            "width": [1.0, 3.0],
+            "alpha": [conformal.DEFAULT_ALPHA, conformal.DEFAULT_ALPHA],
+            "calibration_version": [conformal.CALIBRATION_VERSION] * 2,
+        }
+    ).write_parquet(widths_dir / "conformal_widths.parquet")
+    monkeypatch.setattr(conformal, "get_case_study_dir", lambda _case: tmp_path / "case")
+
+    cohorts = pl.DataFrame(
+        {
+            "timestamp": [uncalibrated, uncalibrated, calibrated, calibrated],
+            "symbol": ["A", "B", "A", "B"],
+            "y_score": [0.3, 0.1, 0.3, 0.1],
+            "weight": [0.5, 0.5, 0.5, 0.5],
+        }
+    )
+
+    sized = _apply_cohort_allocator(
+        cohorts,
+        tmp_path / "raw",
+        {"method": "conformal_weighted", "top_k": 2, "floor_quantile": 0.0},
+        prediction_hash=prediction_hash,
+    )
+
+    assert sized.get_column("timestamp").unique().to_list() == [calibrated]
+    weights = dict(zip(sized["symbol"], sized["weight"], strict=True))
+    assert weights["A"] == pytest.approx(0.75)
+    assert weights["B"] == pytest.approx(0.25)
+
+
+def test_a_pair_is_compared_on_the_dates_both_backtests_traded(tmp_path: Path) -> None:
+    """An allocator that starts trading later is not credited with the period it skipped.
+
+    `conformal_weighted` has no weight for an entry date with no prior-only calibration
+    window, so its series starts later than the baseline it is built from. Reading each
+    registered Sharpe compares two different stretches of market; both sides are recomputed
+    on the dates they share.
+    """
+    from case_studies.utils.registry.registration import register_backtest_run
+
+    study = _study(tmp_path)
+    prediction = _prediction(study)
+    sessions = [datetime(2024, 1, day) for day in range(2, 12)]
+    # The baseline loses money over the first half and makes it over the second. A comparison
+    # on its full series would read a different baseline than the one the variant competed with.
+    baseline_returns = [-0.05, -0.03, -0.06, -0.04, -0.05, 0.02, 0.03, 0.01, 0.04, 0.02]
+    baseline_hash = register_backtest_run(
+        "sp500_options",
+        prediction.hash,
+        {
+            "execution_tier": "canonical",
+            "strategy": {"signal": {"method": "equal_weight_top_k", "top_k": 1}},
+        },
+        stage="signal",
+        returns=pl.DataFrame({"timestamp": sessions, "return": baseline_returns}),
+        metrics={"sharpe": 0.1},
+        case_dir=study.root,
+    )
+    variant_hash = register_backtest_run(
+        "sp500_options",
+        prediction.hash,
+        {
+            "execution_tier": "canonical",
+            "strategy": {
+                "signal": {"method": "equal_weight_top_k", "top_k": 1},
+                "allocation": {"method": "conformal_weighted"},
+            },
+        },
+        stage="allocation",
+        returns=pl.DataFrame({"timestamp": sessions[5:], "return": [0.03, 0.05, 0.02, 0.06, 0.04]}),
+        metrics={"sharpe": 5.0},
+        case_dir=study.root,
+    )
+
+    paired = paired_sharpe_on_common_support(
+        study,
+        pl.DataFrame({"baseline_hash": [baseline_hash], "backtest_hash": [variant_hash]}),
+    )
+
+    row = paired.row(0, named=True)
+    assert row["n_periods"] == 5
+    assert row["baseline_periods"] == 10
+    # Neither side may be the registered metric: on its own ten sessions the baseline is the
+    # 0.1 it registered, and on the five it shares with the variant it is the winning half.
+    assert row["baseline_sharpe"] != pytest.approx(0.1)
+    assert row["baseline_sharpe"] > 0
+    assert row["allocation_sharpe"] != pytest.approx(5.0)
+
+
+def test_a_preview_pair_is_found_in_the_preview_namespace(tmp_path: Path) -> None:
+    """A preview run of the allocation notebook compares preview backtests.
+
+    Preview results live under `output_root/.preview/<case>`, which `Result.open` reaches only
+    when asked. Opening the pair without asking raised `KeyError` on the documented preview path
+    of `13_portfolio_management`, at the cell that used to read the catalog with the same flag.
+    """
+    from case_studies.utils.registry.registration import register_backtest_run
+
+    study = _study(tmp_path)
+    prediction = _prediction(study, execution_tier="preview")
+    preview_root = study.storage_root("preview")
+    sessions = [datetime(2024, 1, day) for day in range(2, 8)]
+    strategy = {
+        "execution_tier": "preview",
+        "strategy": {"signal": {"method": "equal_weight_top_k", "top_k": 1}},
+    }
+    baseline_hash = register_backtest_run(
+        "sp500_options",
+        prediction.hash,
+        strategy,
+        stage="signal",
+        returns=pl.DataFrame(
+            {"timestamp": sessions, "return": [0.01, -0.02, 0.03, -0.01, 0.02, 0.01]}
+        ),
+        metrics={"sharpe": 0.1},
+        case_dir=preview_root,
+    )
+    variant_hash = register_backtest_run(
+        "sp500_options",
+        prediction.hash,
+        {**strategy, "strategy": {**strategy["strategy"], "allocation": {"method": "hrp"}}},
+        stage="allocation",
+        returns=pl.DataFrame({"timestamp": sessions[2:], "return": [0.04, -0.01, 0.03, 0.02]}),
+        metrics={"sharpe": 1.0},
+        case_dir=preview_root,
+    )
+
+    paired = paired_sharpe_on_common_support(
+        study,
+        pl.DataFrame({"baseline_hash": [baseline_hash], "backtest_hash": [variant_hash]}),
+        include_preview=True,
+    )
+
+    assert paired.row(0, named=True)["n_periods"] == 4
+
+
+def test_a_partial_resolved_set_cannot_snapshot_the_catalog_population(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`resolved_requests` avoids resolving twice; it does not narrow the population.
+
+    A stale or partial set used to snapshot under the catalog's name and report complete, so
+    every configuration it omitted left the comparison the population exists to define without
+    anything saying so.
+    """
+    from case_studies.sp500_options import research_workflow
+
+    monkeypatch.setattr(
+        research_workflow,
+        "OfficialPopulation",
+        SimpleNamespace(create=lambda *a, **k: pytest.fail("a partial set reached the snapshot")),
+    )
+    catalog = pl.DataFrame(
+        {
+            "family": ["linear", "linear"],
+            "label": ["ret_to_expiry", "ret_to_expiry"],
+            "config_name": ["ridge_a1.0", "ridge_a10.0"],
+        }
+    )
+    partial = (
+        SimpleNamespace(
+            family="linear",
+            spec={
+                "execution_tier": "canonical",
+                "label": "ret_to_expiry",
+                "config_name": "ridge_a1.0",
+            },
+        ),
+    )
+
+    with pytest.raises(ValueError, match="do not match the declared catalog"):
+        research_workflow.snapshot_official_model_catalog(
+            SimpleNamespace(),
+            catalog,
+            population_name="sp500-options-linear-validation-v1",
+            resolved_requests=partial,
+        )
+
+
+def test_the_liquid_filter_moves_the_decision_to_an_earlier_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A week whose Friday the filter empties is entered on the Thursday.
+
+    `resolve_short_straddle_decisions` applies the declared universe filter before ranking, so
+    the frame the engine resolves `weekly_friday` from is the filtered one. Resolving the
+    displayed schedule from the unfiltered predictions names a Friday nothing enters on.
+    """
+    from case_studies.sp500_options import research_workflow
+
+    study = _study(tmp_path)
+    spec = _resolved_spec(alpha=1.0)
+    spec["label"] = "ret_to_expiry"
+    training = study.results.register_training(spec)
+    thursday, friday = date(2024, 1, 11), date(2024, 1, 12)
+    frame = pl.DataFrame(
+        {
+            "symbol": ["A", "A"],
+            "timestamp": [datetime(2024, 1, 11), datetime(2024, 1, 12)],
+            "fold": [0, 0],
+            "actual": [0.01, 0.02],
+            "prediction": [0.02, 0.03],
+        }
+    )
+    prediction = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=frame.select("symbol", "timestamp", "fold"),
+    )
+
+    # Five symbols each session, so the tightest one clears the 0.20 quantile on its own. A is
+    # tightest on Thursday and widest on Friday, which is the only difference between the days.
+    universe = ["A", "B", "C", "D", "E"]
+    prices = pl.DataFrame(
+        {
+            "symbol": universe * 2,
+            "timestamp": [datetime(2024, 1, 11)] * 5 + [datetime(2024, 1, 12)] * 5,
+            "close": [100.0] * 10,
+            "instr_rel_spread": [0.01, 0.02, 0.03, 0.04, 0.05, 0.09, 0.02, 0.03, 0.04, 0.05],
+        }
+    )
+
+    labels_dir = tmp_path / "labels"
+    labels_dir.mkdir()
+    _week_of_candidates([thursday, friday]).write_parquet(labels_dir / "contract_returns.parquet")
+    monkeypatch.setattr(
+        research_workflow, "option_data_paths", lambda: (labels_dir, tmp_path / "raw")
+    )
+
+    decision_dates = option_decision_dates(
+        study,
+        [prediction.hash],
+        prices=prices,
+        signal={"universe_filter": "liquid"},
+    )
+
+    assert decision_dates.to_list() == [thursday]
+    assert option_trade_calendar(decision_dates).get_column("decision_date").to_list() == [thursday]
+
+
+def test_a_lifecycle_short_of_the_decision_refuses_before_anything_registers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run that cannot price every held contract must refuse, not register what it can.
+
+    The primed lifecycle is loaded for the union of a run's decisions, so a request whose
+    decision reaches outside that union would price the contracts the frame covers and drop
+    the rest - a registered backtest whose returns are computed over a strict subset of the
+    positions the strategy held, with nothing in the artifact saying so. The refusal has to
+    come before `run_backtest`, which is what registers.
+    """
+    from case_studies.sp500_options import _htm_backtest, research_workflow
+    from case_studies.utils import cv_window
+
+    study = _study(tmp_path)
+    prediction = _prediction(study)
+    labels_dir = tmp_path / "labels"
+    raw_dir = tmp_path / "raw"
+    labels_dir.mkdir()
+    _contract_returns().write_parquet(labels_dir / "contract_returns.parquet")
+    _write_raw_options(raw_dir)
+    monkeypatch.setattr(research_workflow, "option_data_paths", lambda: (labels_dir, raw_dir))
+    monkeypatch.setattr(_htm_backtest, "option_data_paths", lambda: (labels_dir, raw_dir))
+    monkeypatch.setattr(cv_window, "canonical_window", lambda *args, **kwargs: None)
+    prices = pl.DataFrame(
+        {
+            "symbol": ["A"],
+            "timestamp": [datetime(2024, 1, 5)],
+            "open": [100.0],
+            "high": [101.0],
+            "low": [99.0],
+            "close": [100.0],
+            "volume": [1000],
+        }
+    )
+    signal = {"method": "equal_weight_top_k", "top_k": 1}
+    decision = publish_short_straddle_decisions(prediction, prices=prices, signal=signal)
+    lifecycle_key = prime_option_lifecycle(decision.load(), raw_dir)
+    strategy = study.strategy(prediction=prediction, signal=signal, decision=decision)
+
+    covering = _htm_backtest._PRIMED_LIFECYCLE[lifecycle_key]
+    _htm_backtest._PRIMED_LIFECYCLE[lifecycle_key] = covering.with_columns(
+        strike=pl.col("strike") + 5.0
+    )
+    try:
+        with pytest.raises(ValueError, match="contracts this decision holds"):
+            strategy.run(prices=prices)
+    finally:
+        _htm_backtest._PRIMED_LIFECYCLE[lifecycle_key] = covering
+
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        registered = db.execute("SELECT COUNT(*) FROM backtest_runs").fetchone()[0]
+    assert registered == 0
+
+    # The same request with the covering frame does register, so the refusal above was the
+    # coverage check rather than the run being unable to execute at all.
+    assert strategy.run(prices=prices).complete
+
+
+def test_the_research_workflow_imports_without_torch() -> None:
+    """The `test-unit` job installs no torch, and this module imports the workflow.
+
+    `case_studies/utils/deep_learning.py` imports torch at module scope, so a module-scope
+    import of anything from it puts torch on the critical path of a required per-commit gate
+    that excludes torch deliberately - 25 test files sit behind it and installing it would
+    cost gigabytes on every commit. The failure is a collection error naming this file, which
+    says nothing about which import added the edge, so the property is pinned here where the
+    edge would be introduced.
+    """
+    import builtins
+    import importlib
+
+    real_import = builtins.__import__
+
+    def without_torch(name, *args, **kwargs):
+        if name == "torch" or name.startswith("torch."):
+            raise ModuleNotFoundError("No module named 'torch'")
+        return real_import(name, *args, **kwargs)
+
+    module = "case_studies.sp500_options.research_workflow"
+    saved = {key: value for key, value in sys.modules.items() if key.startswith("torch")}
+    for key in saved:
+        del sys.modules[key]
+    del sys.modules[module]
+    builtins.__import__ = without_torch
+    try:
+        importlib.import_module(module)
+    finally:
+        builtins.__import__ = real_import
+        sys.modules.update(saved)
+
+
+def _exit_costs(raw_dir: Path, *, exit_at_max_days: int) -> list[float]:
+    cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
+    daily = _compute_cohort_daily_pnl(
+        cohorts,
+        _load_option_lifecycle(cohorts, raw_dir),
+        delta_hedge=False,
+        hedge_spread_bps=0.0,
+        equity_commission_per_share=0.0,
+        option_commission_per_contract=0.0,
+        delta_threshold=0.10,
+        option_spread_fraction=1.0,
+        exit_at_max_days=exit_at_max_days,
+    )
+    return daily.get_column("exit_cost_norm").to_list()
+
+
+def test_a_round_trip_that_reaches_expiration_pays_no_exit_spread(tmp_path: Path) -> None:
+    """Cash settlement is not a market exit, so there is no spread to cross.
+
+    The expiration quote is exempt from the crossed-quote check because nothing reads
+    it. Charging an ask-based exit cost there would read it, and on a crossed session
+    ask - mid is negative, which books the exit as a gain.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    _cross_the_call_quote(raw_dir, date(2024, 1, 10))
+
+    # The window covers the whole lifecycle, so the last held session is the expiry.
+    assert _exit_costs(raw_dir, exit_at_max_days=5) == pytest.approx([0.0, 0.0, 0.0])
+
+
+def test_a_round_trip_that_exits_before_expiration_still_pays_the_spread(
+    tmp_path: Path,
+) -> None:
+    """The exemption is the expiration session and nothing wider."""
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+
+    costs = _exit_costs(raw_dir, exit_at_max_days=1)
+
+    assert costs[-1] > 0.0
+    assert costs[:-1] == pytest.approx([0.0] * (len(costs) - 1))
+
+
+def _split_the_underlying(raw_dir: Path, *, on: date, ratio: float) -> None:
+    """Reprice the underlying by ``ratio`` from ``on``, and stop quoting the old strikes.
+
+    What the vendor chain does through a stock split: the underlying is restated on the split
+    session, the pre-split strikes are listed once more with no bid, ask or mid and then
+    disappear, and a fresh post-split strike ladder takes over under the same symbol.
+    """
+    raw_path = raw_dir / "year=2024.parquet"
+    chain = pl.read_parquet(raw_path)
+    after = pl.col("date") >= on
+    chain = chain.with_columns(
+        underlying_price=pl.when(after)
+        .then(pl.col("underlying_price") * ratio)
+        .otherwise(pl.col("underlying_price"))
+    ).with_columns(
+        [
+            pl.when(after)
+            .then(pl.lit(None, dtype=chain.schema[column]))
+            .otherwise(pl.col(column))
+            .alias(column)
+            for column in ("mid_price", "bid", "ask")
+        ]
+    )
+    post_split = chain.filter(pl.col("date") >= on).with_columns(
+        strike=pl.col("strike") * ratio,
+        mid_price=pl.lit(1.0),
+        bid=pl.lit(0.5),
+        ask=pl.lit(1.5),
+    )
+    pl.concat([chain, post_split]).write_parquet(raw_path)
+
+
+def test_a_split_does_not_settle_the_old_strike_against_the_new_underlying(
+    tmp_path: Path,
+) -> None:
+    """|S - K| across a corporate action prices a security nobody held.
+
+    ISRG split three-for-one on 2021-10-05. The chain restated the underlying from 970.75 to
+    330.23, listed the pre-split strikes that session with no quote, and dropped them. A
+    position at K=1080 then cash-settled against 328.44 for an intrinsic of 751.56, against a
+    last real straddle mark of 110.68 four sessions earlier - 180 of the 322 holdable contracts
+    reaching this path carried that shape.
+
+    The borrowed close has to come from the same quoting regime as the strike. Where it does
+    not, the position takes the liquidation path against the last mark the chain carried for
+    this contract, which is the only price observed for the security actually held.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    _split_the_underlying(raw_dir, on=date(2024, 1, 9), ratio=1 / 3)
+    cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
+
+    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
+    settled = lifecycle.filter(pl.col("cash_settled"))
+    assert settled.is_empty(), (
+        "the pre-split strike settled against the post-split underlying: "
+        f"{settled.select('date', 'strike', 'instr_mid').to_dicts()}"
+    )
+    liquidated = lifecycle.filter(pl.col("liquidated"))
+    assert liquidated.height == 1
+    # The last session the contract was really quoted, at 100.0 underlying: call 6.0 + put 4.0.
+    assert liquidated.get_column("instr_mid").item() == pytest.approx(10.0)
+
+
+def test_an_ordinary_move_still_settles_on_a_borrowed_close(tmp_path: Path) -> None:
+    """The guard separates a corporate action from a market move, and only that.
+
+    A position whose own quotes stop before expiry, on a name that keeps trading, still settles
+    at intrinsic - that is the interior-gap reading and it is unchanged. Widening the guard until
+    it caught ordinary moves would book exits at stale marks nobody could have traded.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    raw_path = raw_dir / "year=2024.parquet"
+    chain = pl.read_parquet(raw_path)
+    # Stop quoting the held contract after 01-09, and let a sibling strike carry the expiration
+    # close at an underlying 10% below the last mark - a market move, not a split.
+    held = (pl.col("date") == date(2024, 1, 10)) & (pl.col("strike") == 100.0)
+    chain = chain.with_columns(
+        [
+            pl.when(held)
+            .then(pl.lit(None, dtype=chain.schema[column]))
+            .otherwise(pl.col(column))
+            .alias(column)
+            for column in ("mid_price", "bid", "ask")
+        ]
+    ).with_columns(
+        underlying_price=pl.when(pl.col("date") == date(2024, 1, 10))
+        .then(pl.lit(91.8))
+        .otherwise(pl.col("underlying_price"))
+    )
+    sibling = chain.filter(pl.col("date") == date(2024, 1, 10)).with_columns(
+        strike=pl.lit(90.0), mid_price=pl.lit(2.0), bid=pl.lit(1.5), ask=pl.lit(2.5)
+    )
+    pl.concat([chain, sibling]).write_parquet(raw_path)
+    cohorts = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
+
+    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
+    settled = lifecycle.filter(pl.col("cash_settled"))
+    assert settled.height == 1
+    # |91.8 - 100| = 8.2, the intrinsic of the straddle actually held.
+    assert settled.get_column("instr_mid").item() == pytest.approx(8.2)

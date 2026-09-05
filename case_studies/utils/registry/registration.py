@@ -30,6 +30,7 @@ from .store import (
     _prediction_dir,
     _save_json,
     _save_parquet,
+    _timestamps_as_utc,
     _training_dir,
     _upsert_wide_metrics,
     _utc_now,
@@ -44,7 +45,7 @@ VALID_PREDICTION_SPLITS = frozenset({"validation", "holdout"})
 # Columns a schema migration added, which an immutable row may therefore be missing
 # through no change of its own. Nothing else is filled on NULL: see the comment at the
 # backfill itself for why a nullable column is not the same as a migrated one.
-MIGRATION_BACKFILLED_COLUMNS = frozenset({"refutation_n_successful"})
+MIGRATION_BACKFILLED_COLUMNS = frozenset({"refutation_n_successful", "refutation_placebo_json"})
 MAX_PREDICTION_STD_RATIO = 100.0
 
 
@@ -57,7 +58,34 @@ def _atomic_save_json(path: Path, data: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _validate_prediction_dispersion(predictions) -> None:
+def _sampling_reduced(spec_json: str | None) -> bool:
+    """Whether the parent training run declared a sampling reduction.
+
+    Every family records ``computation.sampling`` and each writes its own no-op
+    value into it: a count reads 0 and a fraction reads 1.0 when nothing was
+    reduced (``deep_learning.py``, ``gbm.py``, ``linear.py``, ``tabular_dl.py``
+    and ``latent_factors/adapter.py`` each build the dict, and each already
+    compares against exactly that shape before reconstructing a locked request).
+    Anything else means a preview drew less than the run declares.
+    """
+    if not spec_json:
+        return False
+    try:
+        computation = json.loads(spec_json).get("computation")
+    except (TypeError, ValueError):
+        return False
+    sampling = (computation or {}).get("sampling") if isinstance(computation, dict) else None
+    if not isinstance(sampling, dict):
+        return False
+    for key, value in sampling.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if value != (1.0 if key.endswith("_frac") else 0):
+            return True
+    return False
+
+
+def _validate_prediction_dispersion(predictions, *, refuse: bool = True) -> None:
     """Reject a prediction set with an implausible score scale on any fold.
 
     The bound is deliberately wide. Across 8,090 finite folds in the nine
@@ -65,6 +93,22 @@ def _validate_prediction_dispersion(predictions) -> None:
     72.72. The known divergent folds started at 187.41 and extended to
     9.22e39. Rank correlation cannot detect this failure because it is invariant
     to score scale.
+
+    ``refuse`` is false for a run that declared a sampling reduction or a preview
+    tier. The ratio compares the score scale to the label scale, and that says
+    something about the fit only once the fit has converged: before then the
+    numerator is set by weight initialization and the input scale, the
+    denominator by the label alone, so the quotient tracks the label's magnitude
+    rather than the model's behaviour. Under the CI fixture a sequence preset
+    draws one batch of 2,048 windows from a 2,000-window sample and takes two
+    optimizer steps, which is not a fit that can have diverged; the eight case
+    studies that pass there do so because their labels sit near 1e-2, not
+    because anything about them converged. The ratio is still computed and
+    logged on such a run, so the number stays visible; it does not refuse.
+
+    A non-finite score is refused either way. That failure does not depend on how
+    far a fit progressed, and a NaN score breaks every downstream read of the
+    prediction set whatever produced it.
     """
     import math
 
@@ -125,12 +169,20 @@ def _validate_prediction_dispersion(predictions) -> None:
                 f"(score std {score_std:.6g} / target std {actual_std:.6g})"
             )
 
-    if violations:
-        raise ValueError(
-            "Refusing to register predictions with a diverged fold; "
-            f"the maximum allowed per-fold dispersion ratio is "
-            f"{MAX_PREDICTION_STD_RATIO:g}: " + "; ".join(violations)
+    if not violations:
+        return
+    detail = (
+        f"the maximum allowed per-fold dispersion ratio is "
+        f"{MAX_PREDICTION_STD_RATIO:g}: " + "; ".join(violations)
+    )
+    if not refuse:
+        logger.warning(
+            "Prediction dispersion exceeds the bound on a run that declared a reduction, so "
+            "it is reported rather than refused; %s",
+            detail,
         )
+        return
+    raise ValueError("Refusing to register predictions with a diverged fold; " + detail)
 
 
 def clear_prediction_sets(
@@ -776,20 +828,35 @@ def register_prediction_set(
     if case_dir is None:
         case_dir = _case_dir(case_study)
 
-    if predictions is not None:
-        _validate_prediction_dispersion(predictions)
-
     db = _open_registry(case_dir)
     try:
         parent = db.execute(
-            "SELECT identity_version, execution_tier FROM training_runs WHERE training_hash = ?",
+            "SELECT identity_version, execution_tier, spec_json FROM training_runs "
+            "WHERE training_hash = ?",
             (training_hash,),
         ).fetchone()
     finally:
         db.close()
     if parent is None:
         raise ValueError(f"unknown training_hash {training_hash}")
-    identity_version, _execution_tier = parent
+    identity_version, execution_tier, parent_spec_json = parent
+
+    # After the parent lookup, not before it: the dispersion bound is a statement about a
+    # converged fit, and only the parent row says whether this run claims to be one. The
+    # reduction is read from what was registered rather than from what the caller asserts.
+    if predictions is not None:
+        _validate_prediction_dispersion(
+            predictions,
+            refuse=not (
+                str(execution_tier or "canonical") == "preview"
+                or _sampling_reduced(parent_spec_json)
+            ),
+        )
+    # Before coverage, not after. `schema_json` records the dtypes of the frame handed in
+    # and the immutability check compares one checkpoint's against another's, so
+    # normalizing later would store a naive schema beside a UTC-aware parquet and make two
+    # equivalent checkpoints disagree on nothing but the zone.
+    predictions = _timestamps_as_utc(predictions)
     coverage = None
     if identity_version in SUPPORTED_IDENTITY_VERSIONS:
         if predictions is None or expected_keys is None:
@@ -882,7 +949,7 @@ def register_prediction_set(
                     if orphaned_digest != prediction_artifact_digest:
                         raise ValueError(f"immutable prediction artifact conflict for {p_hash}")
                 else:
-                    _save_parquet(temporary, predictions)
+                    _save_parquet(temporary, normalized_predictions)
                 try:
                     db.execute(
                         """
@@ -1766,6 +1833,51 @@ def declare_causal_supersedes(
         db.close()
 
 
+def check_causal_supersedes(
+    case_study: str,
+    causal_hash: str,
+    *,
+    label: str,
+    tier: str,
+    supersedes_hash: str | None,
+    case_dir: Path | None = None,
+) -> None:
+    """Raise now what :func:`register_causal_run` would raise after the fit.
+
+    The refusal it wraps is correct and stays where it is; only its timing is the
+    problem. A causal identity moves whenever ``case_studies/utils/causal.py`` changes,
+    because the resolved spec carries a hash of that whole file, so an ordinary edit to
+    the shared resolver leaves every case study on it registering a second identity for
+    its label. The run then misses the cache, pays the full DML fit and every placebo
+    refit, and is refused at the write for naming no predecessor - which is an hour on
+    this panel to be told a hash the registry could have named before the first fold.
+
+    This calls the write-time rule itself rather than restating it. Two copies of this
+    condition would decide what may be written and what is worth starting, and a
+    disagreement between them either refuses a run that would have registered or starts
+    one that cannot. The one place they differ is unavoidable and harmless: another
+    writer can change the registry while the fit runs, so passing here is not a promise
+    that the write will succeed. ``register_causal_run`` remains the authority.
+    """
+    if case_dir is None:
+        case_dir = _case_dir(case_study)
+    db = _open_registry(case_dir)
+    try:
+        _enforce_causal_supersedes(
+            db,
+            causal_hash=causal_hash,
+            label=label,
+            tier=tier,
+            supersedes_hash=supersedes_hash,
+            is_repair=db.execute(
+                "SELECT 1 FROM causal_runs WHERE causal_hash = ?", (causal_hash,)
+            ).fetchone()
+            is not None,
+        )
+    finally:
+        db.close()
+
+
 def _enforce_causal_supersedes(
     db,
     *,
@@ -1881,6 +1993,7 @@ def register_causal_run(
     confounding_bias_pct: float | None,
     refutation_p: float | None,
     refutation_n_successful: int | None = None,
+    refutation_placebo_json: str | None = None,
     spec_json: str,
     notebook: str | None,
     started_at: str | None,
@@ -2027,10 +2140,10 @@ def register_causal_run(
                 causal_hash, label, treatment, confounders_json, embargo,
                 n_folds, n_obs, dml_effect, dml_se_hac, p_value_hac,
                 naive_effect, confounding_bias_pct, refutation_p,
-                refutation_n_successful,
+                refutation_n_successful, refutation_placebo_json,
                 spec_json, notebook, started_at, elapsed_s, git_commit,
                 supersedes_hash, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(causal_hash) DO UPDATE SET
                 label=excluded.label,
                 treatment=excluded.treatment,
@@ -2045,6 +2158,12 @@ def register_causal_run(
                 confounding_bias_pct=excluded.confounding_bias_pct,
                 refutation_p=excluded.refutation_p,
                 refutation_n_successful=excluded.refutation_n_successful,
+                -- Fill-once, like supersedes_hash. A row registered before this column
+                -- existed carries NULL, and a re-registration that recomputes the draws
+                -- should fill it; one that does not must not erase them.
+                refutation_placebo_json=COALESCE(
+                    excluded.refutation_placebo_json, causal_runs.refutation_placebo_json
+                ),
                 spec_json=excluded.spec_json,
                 notebook=excluded.notebook,
                 started_at=excluded.started_at,
@@ -2089,6 +2208,7 @@ def register_causal_run(
                 confounding_bias_pct,
                 refutation_p,
                 refutation_n_successful,
+                refutation_placebo_json,
                 spec_json,
                 notebook,
                 started_at,

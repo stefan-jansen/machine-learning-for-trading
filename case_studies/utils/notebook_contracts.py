@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable
 from contextlib import closing
 from pathlib import Path
 
@@ -117,6 +118,172 @@ def degenerate_prediction_hashes(case_dir: Path) -> set[str]:
         ).fetchone():
             return set()
         return {row[0] for row in db.execute(f"SELECT DISTINCT {_DEGENERATE_SUBQUERY[7:]}")}
+
+
+def incompletely_registered_predictions(case_dir: Path, hashes: Iterable[str]) -> dict[str, str]:
+    """Which of ``hashes`` are registered but not finished, and what is short in each.
+
+    A headline row in ``prediction_metrics`` is not evidence that a prediction set arrived.
+    Coverage, the headline metrics and the per-fold metrics are committed as separate writes,
+    so a run interrupted between them leaves a hash that every metrics query returns and that
+    `PredictionResult.complete` rejects. A leaderboard reading the headline alone then scores a
+    member over the folds it managed, and a short window is an easier window.
+
+    Checks coverage reporting ``complete``, one ``fold_metrics`` row per expected fold, and the
+    predictions parquet on disk. A member with no coverage row at all is not reported here -
+    see :func:`predictions_without_coverage`, which separates a gap in the evidence from a run
+    that stopped part way. The file is checked for existence and not read:
+    `PredictionResult.complete` re-digests it, which is minutes of I/O for a caller running this
+    over a thousand members on every execution, and the failure that catches is corruption after
+    registration rather than the interrupted registration at issue. A member whose artifact was
+    deleted or never written is a different matter - the registry still lists it, the leaderboard
+    still ranks it, and `load_predictions` then returns nothing for it without saying so.
+
+    Returns ``{hash: reason}`` for the members that fall short, empty when they all arrived or
+    when the registry has no coverage table to check them against.
+    """
+    run_log = Path(case_dir) / "run_log"
+    db_path = run_log / "registry.db"
+    predictions_dir = run_log / "predictions"
+    wanted = sorted(set(hashes))
+    if not wanted or not db_path.is_file():
+        return {}
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
+        tables = {
+            row[0]
+            for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        if not {"prediction_coverage", "fold_metrics"} <= tables:
+            return {}
+        coverage = {
+            row[0]: (row[1], row[2])
+            for row in db.execute(
+                "SELECT prediction_hash, status, n_folds_expected FROM prediction_coverage"
+            )
+        }
+        folds = dict(
+            db.execute("SELECT prediction_hash, COUNT(*) FROM fold_metrics GROUP BY 1").fetchall()
+        )
+    short: dict[str, str] = {}
+    for member in wanted:
+        if member not in coverage:
+            # Not reported. A member with no coverage row at all is not evidence of an
+            # interrupted run: coverage arrived as a later migration, so a registry written
+            # before it, or a producer that wrote metrics without it, leaves the row absent
+            # while the prediction set is whole. Measured on etfs, where all 40 such members
+            # had their `prediction_sets` row and their parquet. `predictions_without_coverage`
+            # reports them separately, as a gap in the evidence rather than a partial run.
+            continue
+        status, expected = coverage[member]
+        actual = folds.get(member, 0)
+        artifact = predictions_dir / member / "predictions.parquet"
+        if status != "complete":
+            short[member] = f"coverage {status}"
+        elif expected is not None and actual != expected:
+            short[member] = f"{actual} of {expected} folds scored"
+        elif not artifact.is_file():
+            short[member] = "no predictions.parquet"
+    return short
+
+
+def predictions_without_coverage(case_dir: Path, hashes: Iterable[str]) -> set[str]:
+    """Which of ``hashes`` the registry holds no ``prediction_coverage`` row for.
+
+    Separated from :func:`incompletely_registered_predictions` because the two look alike and
+    call for opposite responses. A coverage row that says something other than ``complete``, or
+    a fold count short of what that row declares expected, is a run that stopped part way and
+    must not be ranked. An absent row is a gap in the evidence: ``prediction_coverage`` arrived
+    as a later migration, so a registry written before it - or a producer that wrote metrics
+    without it - leaves the row missing while the prediction set itself is whole. Measured on
+    etfs, where all 40 such members had both their ``prediction_sets`` row and their parquet.
+
+    Report these; do not refuse on them. Returns an empty set where the registry or the table is
+    absent, since neither says anything about a particular member.
+    """
+    db_path = Path(case_dir) / "run_log" / "registry.db"
+    wanted = set(hashes)
+    if not wanted or not db_path.is_file():
+        return set()
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
+        if not db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='prediction_coverage'"
+        ).fetchone():
+            return set()
+        covered = {row[0] for row in db.execute("SELECT prediction_hash FROM prediction_coverage")}
+    return wanted - covered
+
+
+def prediction_members_in_force(study) -> tuple[frozenset[str] | None, list[str]]:
+    """Every prediction set the registry's populations currently publish, and the notes to print.
+
+    A downstream sweep does not name the families it draws from - it ranks whatever is
+    admissible - so the question here is not `declared_population_members`' "did these declared
+    names resolve" but "which members are in force at all". The answer takes two steps and
+    neither is enough alone.
+
+    A population is immutable and every generation stays readable, so a candidate pool built
+    straight from the registry counts a refitted configuration twice: nothing in the read path
+    filters on supersession (`case_studies/utils/registry/queries.py` contains no occurrence of
+    ``supersed``), and the published leaders are then fewer distinct strategies than they look.
+    Resolving each published name through `OfficialPopulation.one` takes the generation nothing
+    supersedes - it refuses rather than guesses if a chain has forked. Subtracting the retired
+    members is still needed after that, because a narrowed or preview run freezes its own
+    snapshot of whatever the catalog held that day and stays in force under its own name
+    forever, so the union alone hands a retired generation back through the frozen name that
+    still lists it.
+
+    Refuses if any member is registered but unfinished, by the rule
+    :func:`incompletely_registered_predictions` applies - a pool that is selected from cannot
+    carry a member scored over fewer folds than it was asked for.
+
+    Returns ``None`` and a note where the registry publishes no populations - a fixture or a
+    reader's clean clone, where there is no declaration to filter against. ``None`` rather than
+    an empty set because these callers pass the result straight to a ``prediction_hashes``
+    parameter that already reads ``None`` as unscoped, and because an empty set there would turn
+    "nothing to filter by" into "nothing is admissible" - a candidate pool of zero reported as
+    an ordinary result.
+    """
+    from case_studies.research import (
+        OfficialPopulation,
+        published_population_names_at,
+        superseded_members_at,
+    )
+
+    names = sorted(published_population_names_at(study.root))
+    if not names:
+        return None, [
+            f"{study.root} publishes no official populations, so no supersession filter is "
+            "applied: the candidate pool rests on catalog admissibility alone."
+        ]
+    published: set[str] = set()
+    for name in names:
+        published.update(OfficialPopulation.one(study, name=name).members)
+    members = frozenset(published - superseded_members_at(study.root))
+
+    # A population is written down before its members are fitted, so being in force is not
+    # evidence of having finished. Every caller here ranks what comes back and selects from the
+    # ranking, and an unfinished member is scored over the folds it managed - a shorter window
+    # is an easier window, so the error runs toward the top of the ranking. Refusing is the only
+    # safe answer: there is no way to rank around a member without saying the pool changed.
+    short = incompletely_registered_predictions(study.root, members)
+    if short:
+        named = ", ".join(f"{member}: {why}" for member, why in sorted(short.items())[:5])
+        raise RuntimeError(
+            f"{len(short)} member(s) of the populations in force are registered but "
+            f"unfinished: {named}. Selecting from this pool would compare a partial run "
+            "against complete ones."
+        )
+    uncovered = predictions_without_coverage(study.root, members)
+    notes = (
+        [
+            f"{len(uncovered):,} of {len(members):,} members carry no prediction_coverage row, "
+            "so their completeness is unevidenced rather than established. They are ranked; "
+            "the gap is in the registry, not in the run."
+        ]
+        if uncovered
+        else []
+    )
+    return members, notes
 
 
 def full_coverage_prediction_sql(

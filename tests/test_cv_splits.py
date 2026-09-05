@@ -518,12 +518,22 @@ def test_temporal_interior_gap_is_not_excused(warmup_temporal_fixture) -> None:
         validate_temporal_fold_coverage(dataset, _temporal_from(keep), splits, date_col="timestamp")
 
 
-def test_sp500_options_temporal_producer_uses_canonical_split_ids() -> None:
+def test_sp500_options_temporal_producer_takes_its_windows_from_generate_cv_splits() -> None:
+    """The notebook reads fold windows from the splitter, and writes no fold column.
+
+    It used to fit one parameter set per fold and stamp the fold id on every row, and this
+    test held it to using the splitter's ids rather than deriving them from a calendar year.
+    It now fits on a refit schedule instead, so there is one value per symbol and session and
+    no fold column at all - but section F still scores over the folds' validation windows, so
+    those windows still have to come from `generate_cv_splits` and not from a year.
+    """
     source = Path("case_studies/sp500_options/04_model_based_features.py").read_text()
 
     assert "generate_cv_splits(" in source
-    assert 'fold_idx = fold["fold"]' in source
+    assert '_fold["val_start"]' in source and '_fold["val_end"]' in source
     assert "first_test_year" not in source
+    # The artifact is fold-free. A `fold` key on the write is the per-fold design returning.
+    assert 'keys=["timestamp", "symbol"],' in source
 
 
 # -----------------------------------------------------------------------------

@@ -8,6 +8,7 @@ import json
 import sqlite3
 import subprocess
 from collections.abc import Iterable
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -26,9 +27,11 @@ from case_studies.research import (
     StateTransitionPolicy,
     Study,
     plan_backtests,
+    require_resolved_requests_cover_the_catalog,
     run_backtests,
     run_models,
 )
+from case_studies.research.contracts import ExecutionTier
 from case_studies.research.execution import ModelExecution
 from case_studies.research.strategy import strategy_warmup_periods
 from case_studies.utils.artifact_digest import value_digest
@@ -113,7 +116,12 @@ class FuturesBacktestExecution:
     population: OfficialPopulation | None
 
 
-def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> Study:
+def open_study(
+    *,
+    execution_tier: str,
+    workspace: str | Path | None = None,
+    entry_point: str | None = None,
+) -> Study:
     """Open canonical regeneration, canonical execution into a workspace, or a reader preview.
 
     Canonical with no workspace regenerates the case study's artifacts in place, which is the
@@ -122,12 +130,21 @@ def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> S
     which is the only form a checkout without those symlinks can run: CI seeds its fixture into
     ``ML4T_OUTPUT_DIR`` and has no `features`, `labels` or `run_log` symlink to regenerate over,
     so `Study.regenerate` refused there and took notebooks 13 through 17 red on every run.
+
+    ``execution_tier`` and ``entry_point`` are stamped on the returned study rather than left to
+    their defaults. Both were dropped here while the library set them, which is the hazard a
+    private wrapper carries: this one restates the library's construction and had drifted from it
+    on both fields. A study built with no tier reports ``canonical`` whatever it was opened for,
+    and `OfficialPopulation.create` refuses a preview member by reading exactly that field, so a
+    preview through this wrapper could publish a population the library would have refused.
     """
     if execution_tier == "canonical":
         if workspace is None:
-            return Study.regenerate(CASE_STUDY, release_root=REPO_ROOT)
+            return Study.regenerate(CASE_STUDY, entry_point=entry_point)
         return Study.open(
-            CASE_STUDY, workspace=Path(workspace).expanduser().resolve(), release_root=REPO_ROOT
+            CASE_STUDY,
+            workspace=Path(workspace).expanduser().resolve(),
+            entry_point=entry_point,
         )
     if execution_tier != "preview":
         raise ValueError("execution_tier must be canonical or preview")
@@ -135,7 +152,12 @@ def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> S
         raise ValueError("preview execution requires an explicit workspace")
     workspace = Path(workspace).expanduser().resolve()
     try:
-        return Study.open(CASE_STUDY, workspace=workspace, release_root=REPO_ROOT)
+        return Study.open(
+            CASE_STUDY,
+            workspace=workspace,
+            entry_point=entry_point,
+            execution_tier=ExecutionTier.PREVIEW,
+        )
     except ValueError as error:
         generated = tuple(
             REPO_ROOT / "case_studies" / CASE_STUDY / name
@@ -155,6 +177,8 @@ def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> S
             release_root=REPO_ROOT,
             output_root=workspace,
             read_only=False,
+            entry_point=entry_point,
+            execution_tier=ExecutionTier.PREVIEW,
             manifest={
                 "schema_version": 1,
                 "case_study": CASE_STUDY,
@@ -174,6 +198,11 @@ def model_request_catalog(
 ) -> pl.DataFrame:
     """Return the declared model population as visible Polars rows."""
     selected = set(config_names) if config_names is not None else None
+    if selected is not None and not selected:
+        # An empty selection is the caller's, so say so. Falling through left every row filtered
+        # out and the function reported "no declared requests for <family>", blaming the family's
+        # menu for a list the caller passed empty.
+        raise ValueError("config_names is empty; omit it to request every declared configuration")
     rows = []
     missing_by_label = {}
     for label in labels:
@@ -275,6 +304,7 @@ def run_official_model_catalog(
         resolved = resolve_model_requests(study, request_catalog, execution_tier="canonical")
     if any(request.spec["execution_tier"] != "canonical" for request in resolved):
         raise ValueError("official model populations require canonical requests")
+    require_resolved_requests_cover_the_catalog(request_catalog, resolved)
     expected = expected_prediction_hashes(resolved)
     population = OfficialPopulation.create(
         study,
@@ -780,6 +810,7 @@ def run_official_backtest_requests(
     requests: pl.DataFrame,
     *,
     population_name: str | None,
+    supersedes: str | None = None,
 ) -> FuturesBacktestExecution:
     """Resolve, snapshot, and execute visible futures strategy requests.
 
@@ -788,6 +819,13 @@ def run_official_backtest_requests(
     results are refused entry to an official population, and the workspace holding them is
     discarded afterwards. Everything else - the expected-identity snapshot before the engine
     runs, the order check, the per-request completeness - applies to both tiers.
+
+    ``supersedes`` names the generation of ``population_name`` this run retires. Anything that
+    moves a backtest identity - a corrected label, a changed accounting field, a re-run after a
+    registry reset - produces a different member list under the same name, and
+    ``OfficialPopulation.create`` refuses to write it without being told which snapshot it
+    replaces. The notebooks declare it as a parameter, so the sweep can be re-run without
+    editing this module.
     """
     required = {"request_name", "prediction_hash", "label", "signal"}
     missing = required - set(requests.columns)
@@ -859,6 +897,7 @@ def run_official_backtest_requests(
             name=population_name,
             member_kind="backtest",
             members=expected,
+            supersedes=supersedes,
         )
         if population_name is not None
         else None
@@ -1140,11 +1179,28 @@ def shortlist_signal_configurations(
     return tuple(selected)
 
 
+def _union_members(study: Study, *pools: Iterable[str]) -> list[Result]:
+    """The distinct results across several stage pools, in first-seen order.
+
+    A backtest is identified by its prediction and its strategy spec, and the funnel stage is
+    not part of either. So two stages register one row whenever the later stage changed nothing
+    about a configuration - an allocation that resolves to the same spec the signal stage
+    already ran is exactly that - and the stages' pools then overlap. `CandidateSet.create`
+    refuses a repeated member, so concatenating the pools produced a union that raised precisely
+    when two stages agreed, which is the case the union exists to describe.
+    """
+    seen: dict[str, None] = {}
+    for pool in pools:
+        for value in pool:
+            seen.setdefault(value, None)
+    return [Result.open(study, value) for value in seen]
+
+
 def pre_overlay_candidate_set(study: Study, *, label: str) -> CandidateSet:
     """Return the immutable union of signal and allocation validation results."""
     signal = CandidateSet.one(study, name=candidate_set_name("signal", label))
     allocation = CandidateSet.one(study, name=candidate_set_name("allocation", label))
-    members = [Result.open(study, value) for value in (*signal.members, *allocation.members)]
+    members = _union_members(study, signal.members, allocation.members)
     return _create_comparable_set(study, candidate_set_name("pre-overlay", label), members)
 
 
@@ -1152,7 +1208,7 @@ def final_validation_candidate_set(study: Study, *, label: str) -> CandidateSet:
     """Return the selection pool across signal, allocation, and risk-overlay stages."""
     pre_overlay = pre_overlay_candidate_set(study, label=label)
     risk = CandidateSet.one(study, name=candidate_set_name("risk", label))
-    members = [Result.open(study, value) for value in (*pre_overlay.members, *risk.members)]
+    members = _union_members(study, pre_overlay.members, risk.members)
     return _create_comparable_set(study, candidate_set_name("final-validation", label), members)
 
 
@@ -1212,48 +1268,3 @@ def selection_catalog(study: Study, members: Iterable[str]) -> pl.DataFrame:
         "prediction_hash",
         "backtest_hash",
     ).sort("sharpe", "backtest_hash", descending=[True, False])
-
-
-def holdout_evidence(study: Study) -> pl.DataFrame:
-    """Return the research lock and the one holdout evaluation it authorizes, if any.
-
-    The lock is what makes the holdout usable once: it records the candidate set, the
-    selected validation backtest and the retraining contract before any holdout artifact
-    exists. Reading it here is how the analysis shows which configuration the holdout ran
-    on without being able to choose a different one.
-    """
-    database = study.root / "run_log" / "registry.db"
-    if not database.is_file():
-        return pl.DataFrame()
-    with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as db:
-        names = {
-            row[0]
-            for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
-        }
-        if "research_locks" not in names:
-            return pl.DataFrame()
-        rows = db.execute(
-            "SELECT l.lock_hash, l.state, l.lock_json, e.holdout_training_hash, "
-            "e.holdout_prediction_hash, e.holdout_backtest_hash, e.evaluated_at "
-            "FROM research_locks l "
-            "LEFT JOIN holdout_evaluations e ON e.lock_hash = l.lock_hash"
-        ).fetchall()
-    records = []
-    for lock_hash, state, lock_json, training, prediction, backtest, evaluated_at in rows:
-        lock = json.loads(lock_json)
-        records.append(
-            {
-                "lock_hash": lock_hash,
-                "state": state,
-                "label": lock.get("label"),
-                "checkpoint_kind": lock.get("checkpoint_kind"),
-                "checkpoint_value": lock.get("checkpoint_value"),
-                "candidate_set_hash": lock.get("candidate_set_hash"),
-                "validation_backtest_hash": lock.get("validation_backtest_hash"),
-                "holdout_training_hash": training,
-                "holdout_prediction_hash": prediction,
-                "holdout_backtest_hash": backtest,
-                "evaluated_at": evaluated_at,
-            }
-        )
-    return pl.DataFrame(records)

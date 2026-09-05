@@ -95,4 +95,4 @@ Schemas (canonical):
 - **Ch12**: `01_funding_rate_alpha.py`.
 - **Ch16**: `04_single_asset_ml4t_backtest.py`, `09_performance_reporting.py`.
 - **`case_studies/crypto_perps_funding/`**: full funding-arbitrage pipeline
-  (`01_feasibility_analysis.py` → `17_strategy_analysis.py`).
+  (`01_feasibility_analysis.py` → `19_strategy_analysis.py`).

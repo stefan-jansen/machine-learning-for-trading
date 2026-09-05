@@ -22,6 +22,7 @@ from case_studies.research import (
     published_population_names_at,
     superseded_members,
     superseded_members_at,
+    supersedes_for_run,
 )
 from case_studies.research import population as population_module
 from case_studies.research.contracts import ExecutionTier
@@ -300,6 +301,50 @@ class TestWhatALaterGenerationRetires:
         shutil.copy(released_db, refitter.root / "run_log" / "registry.db")
         _publish(refitter, MEMBERS_TWO, supersedes=first.hash)
         assert superseded_members(refitter) == frozenset(MEMBERS_ONE)
+
+
+class TestTheModelExecutionEntryPoint:
+    """`supersedes_for_run` is what the model-execution notebooks call.
+
+    It adds the one thing the decision above cannot see - the tier the run was planned in -
+    and defers everything else, so a notebook never branches on `EXECUTION_TIER` itself and
+    there is one implementation of when a declared hash may be offered.
+    """
+
+    def test_a_preview_never_offers_the_hash(self, study: Study) -> None:
+        first = _publish(study, MEMBERS_ONE)
+        assert (
+            supersedes_for_run(
+                study,
+                population_name=first.name,
+                declared=first.hash,
+                execution_tier="preview",
+            )
+            is None
+        )
+
+    def test_a_canonical_run_gets_the_shared_decision(self, study: Study) -> None:
+        first = _publish(study, MEMBERS_ONE)
+        assert (
+            supersedes_for_run(
+                study,
+                population_name=first.name,
+                declared=first.hash,
+                execution_tier="canonical",
+            )
+            == first.hash
+        )
+        # The hash it does not hold is withheld here for the same reason it is withheld by
+        # `population_supersedes`: `create` refuses it and names the one it requires.
+        assert (
+            supersedes_for_run(
+                study,
+                population_name=first.name,
+                declared="feedfacefeed",
+                execution_tier="canonical",
+            )
+            is None
+        )
 
 
 def _symlinked_worktree(tmp_path: Path, published: Study) -> Path:

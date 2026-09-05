@@ -10,7 +10,7 @@ that corrupts is the one that only happens where the data already exists.
 
 from __future__ import annotations
 
-import re
+import ast
 from pathlib import Path
 
 import pytest
@@ -55,6 +55,14 @@ def test_a_scope_isolates_every_name_it_touches() -> None:
     assert all(name.startswith(f"{scope}:") for name in scoped)
 
 
+def _is_research_name(expr: ast.expr) -> bool:
+    return (
+        isinstance(expr, ast.Call)
+        and isinstance(expr.func, ast.Name)
+        and expr.func.id == "research_name"
+    )
+
+
 def test_every_population_name_in_the_fx_phase_two_chain_is_scoped() -> None:
     """The reader/writer agreement is only observable across notebooks, so this reads them.
 
@@ -62,27 +70,57 @@ def test_every_population_name_in_the_fx_phase_two_chain_is_scoped() -> None:
     and one of them was not calling it at all. What fails here against the previous code is
     `14_portfolio_management` resolving `f"{CASE_STUDY_ID}:equal-weight-baselines"` directly
     while `13_backtest` published a scoped name.
+
+    Read with `ast` rather than a regex. The regex this replaced required that no `)` appear
+    between the call's opening paren and `name=`, so `OfficialPopulation.one(open_study(...),
+    name=...)` produced no match at all and the violation list stayed empty - it passed on
+    exactly the code it exists to catch. A checker that finds nothing has to be
+    indistinguishable from a checker that finds nothing wrong, which is why the count below
+    is asserted as well as the violations.
     """
-    pattern = re.compile(r"(OfficialPopulation|CandidateSet)\.(one|create)\(([^)]*?)\bname=([^,]+)")
-    # A name may be bound to a local first. That is not a way around the rule - the binding
-    # still has to come from `research_name` - and it is how a notebook passes one name to
-    # both `create` and `population_supersedes` without writing the call twice, which is
-    # where two copies of a name would drift apart. Only a binding whose right-hand side is
-    # a `research_name(` call counts, so an f-string assigned to a variable still fails.
-    binding = re.compile(r"^[ \t]*(\w+) = (.+)$", re.MULTILINE)
+    receivers = {"OfficialPopulation", "CandidateSet"}
+    methods = {"one", "create"}
     unscoped: list[str] = []
-    for stem in ("13_backtest", "14_portfolio_management", "15_costs", "16_risk_management"):
-        source = (NOTEBOOKS / f"{stem}.py").read_text(encoding="utf-8")
+    checked = 0
+    for stem in ("13_backtest", "14_portfolio_management", "15_risk_management", "16_costs"):
+        tree = ast.parse((NOTEBOOKS / f"{stem}.py").read_text(encoding="utf-8"))
+        # A name may be bound to a local first. That is not a way around the rule - the binding
+        # still has to come from `research_name` - and it is how a notebook passes one name to
+        # both `create` and `population_supersedes` without writing the call twice, which is
+        # where two copies of a name would drift apart. Only a binding whose right-hand side is
+        # a `research_name(` call counts, so an f-string assigned to a variable still fails.
         from_research_name = {
-            m.group(1) for m in binding.finditer(source) if m.group(2).startswith("research_name(")
+            target.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign) and _is_research_name(node.value)
+            for target in node.targets
+            if isinstance(target, ast.Name)
         }
-        for match in pattern.finditer(source):
-            name_expr = match.group(4).strip()
-            if name_expr.startswith("research_name(") or name_expr in from_research_name:
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
                 continue
-            unscoped.append(f"{stem}: {match.group(1)}.{match.group(2)} name={name_expr}")
+            func = node.func
+            if not isinstance(func, ast.Attribute) or func.attr not in methods:
+                continue
+            if not (isinstance(func.value, ast.Name) and func.value.id in receivers):
+                continue
+            name_kw = next((k for k in node.keywords if k.arg == "name"), None)
+            if name_kw is None:
+                continue
+            checked += 1
+            expr = name_kw.value
+            scoped = _is_research_name(expr) or (
+                isinstance(expr, ast.Name) and expr.id in from_research_name
+            )
+            if not scoped:
+                unscoped.append(f"{stem}: {func.value.id}.{func.attr} name={ast.unparse(expr)}")
 
     assert not unscoped, (
         "a population name that does not go through research_name cannot be isolated, "
         "so a narrowed run reads or writes the canonical one: " + "; ".join(unscoped)
+    )
+    assert checked >= len(CANONICAL), (
+        f"only {checked} population name(s) found across the four notebooks, fewer than the "
+        f"{len(CANONICAL)} canonical names they publish and read. The scan is not reaching "
+        "the calls, so an unscoped name would not be reported either"
     )

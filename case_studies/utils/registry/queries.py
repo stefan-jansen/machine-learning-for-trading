@@ -26,6 +26,7 @@ from .store import (
     _registry_db_path,
     _run_log_dir,
     _stage_filter_clause,
+    _timestamps_as_utc,
     _training_dir,
 )
 
@@ -646,7 +647,10 @@ def read_predictions(
         renames["fold"] = "fold_id"
     if renames:
         df = df.rename(renames)
-    return df
+    # A naive decision-time column means the same instants as a UTC-aware one and is
+    # localized rather than converted, so the artifacts a case study wrote before
+    # `_timestamps_as_utc` reached the writer still join against the ones it wrote after.
+    return _timestamps_as_utc(df)
 
 
 # ---------------------------------------------------------------------------
@@ -845,6 +849,7 @@ def _resolve_best_predictions_canonical(
     case_dir: Path | None,
     checkpoints_per_config: int,
     prediction_hashes: set[str] | None,
+    backtest_hashes: set[str] | None = None,
 ):
     """``resolve_best_predictions(coverage_window="canonical")``.
 
@@ -870,7 +875,14 @@ def _resolve_best_predictions_canonical(
     degenerate_clause = degenerate_prediction_sql("p.prediction_hash")
 
     universe_clause = ""
-    params: list[str] = [label] + stage_params + exclude_params + [split]
+    backtest_cte = ""
+    backtest_clause = ""
+    params: list[str] = []
+    if backtest_hashes is not None:
+        backtest_cte = "WITH backtest_members(backtest_hash) AS (SELECT value FROM json_each(?))"
+        backtest_clause = "AND b.backtest_hash IN (SELECT backtest_hash FROM backtest_members)"
+        params.append(json.dumps(sorted(backtest_hashes)))
+    params += [label] + stage_params + exclude_params + [split]
     if universe_filter:
         universe_clause = "AND json_extract(b.spec_json, '$.strategy.signal.universe_filter') = ?"
         params.append(universe_filter)
@@ -878,6 +890,7 @@ def _resolve_best_predictions_canonical(
     # Same per_prediction shape as the raw path, minus full_coverage_prediction_sql —
     # that comparison is replaced below by canonical_coverage_days, computed in Python.
     query = f"""
+        {backtest_cte}
         SELECT
             p.prediction_hash,
             p.training_hash,
@@ -898,6 +911,7 @@ def _resolve_best_predictions_canonical(
           {degenerate_clause}
           AND p.split = ?
           {universe_clause}
+          {backtest_clause}
         GROUP BY p.prediction_hash
     """
     per_prediction = _query_table(case_dir, query, tuple(params))
@@ -978,6 +992,7 @@ def resolve_best_predictions(
     checkpoints_per_config: int = 1,
     coverage_window: str = "raw",
     prediction_hashes: set[str] | None = None,
+    backtest_hashes: set[str] | None = None,
 ):
     """Return top-N prediction hashes ranked by backtest Sharpe at a given stage.
 
@@ -1020,6 +1035,15 @@ def resolve_best_predictions(
     prediction_hashes : set[str], optional
         Restrict eligibility to these prediction identities before ranking
         configurations and checkpoints.
+    backtest_hashes : set[str], optional
+        Restrict the Sharpe each prediction is ranked on to these backtest
+        identities - the members of the candidate set the previous stage
+        published, normally. ``prediction_hashes`` cannot do this: the registry
+        is immutable, so a live prediction re-swept under a changed entry grid or
+        engine configuration keeps its retired backtests, and ``MAX(sharpe)``
+        over all of them ranks the configuration on a number no current result
+        carries. Restricting the predictions leaves that untouched, because the
+        stale rows belong to predictions that are themselves still current.
 
     Returns
     -------
@@ -1041,6 +1065,7 @@ def resolve_best_predictions(
             case_dir=case_dir,
             checkpoints_per_config=checkpoints_per_config,
             prediction_hashes=prediction_hashes,
+            backtest_hashes=backtest_hashes,
         )
 
     if case_dir is None:
@@ -1085,6 +1110,34 @@ def resolve_best_predictions(
             population_subquery="SELECT prediction_hash FROM population_members",
         )
         params.append(json.dumps(sorted(prediction_hashes)))
+    backtest_cte = ""
+    backtest_clause = ""
+    if backtest_hashes is not None:
+        # Second CTE, and its parameter is bound second because the CTEs are rendered in
+        # this order. A restriction on the BACKTEST side, not the prediction side: the two
+        # are different questions and only this one can drop a retired sweep of a
+        # still-current prediction.
+        backtest_cte = "backtest_members(backtest_hash) AS (SELECT value FROM json_each(?)),"
+        backtest_clause = "AND b.backtest_hash IN (SELECT backtest_hash FROM backtest_members)"
+        params.append(json.dumps(sorted(backtest_hashes)))
+        if prediction_hashes is None:
+            # The eligibility bar has to move with the restriction, or the restriction is worse
+            # than useless. `full_coverage_prediction_sql` keeps rows whose `ic_n_days` equals
+            # the maximum for their (split, family, label); computed over every historical
+            # identity, a retired prediction with wider stored coverage sets a bar no member of
+            # the named population can reach, and the call returns nothing. Scoped to the
+            # predictions behind the named backtests, the bar is the best any candidate actually
+            # offers. An explicit `prediction_hashes` is left to scope it, because that is the
+            # caller naming the population itself.
+            coverage_clause = full_coverage_prediction_sql(
+                "p",
+                "t",
+                "pm",
+                population_subquery=(
+                    "SELECT prediction_hash FROM backtest_runs "
+                    "WHERE backtest_hash IN (SELECT backtest_hash FROM backtest_members)"
+                ),
+            )
     params.extend([label, *stage_params, *exclude_params])
     if split:
         split_clause = "AND p.split = ?"
@@ -1097,7 +1150,7 @@ def resolve_best_predictions(
     params.append(str(max(1, int(checkpoints_per_config))))
 
     query = f"""
-        WITH {population_cte}
+        WITH {population_cte}{backtest_cte}
         per_prediction AS (
             -- Best backtest Sharpe per prediction_hash (a prediction may have
             -- been backtested with multiple signal methods)
@@ -1123,6 +1176,7 @@ def resolve_best_predictions(
               {split_clause}
               {universe_clause}
               {population_clause}
+              {backtest_clause}
             GROUP BY p.prediction_hash
         ),
         top_configs AS (

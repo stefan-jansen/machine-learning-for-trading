@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
+import time
 from contextlib import closing
 from datetime import date
 from pathlib import Path
@@ -20,16 +20,6 @@ from case_studies.utils.registry.completeness import evaluate_prediction_coverag
 from case_studies.utils.registry.registration import register_backtest_run
 from case_studies.utils.registry.store import _open_registry
 from tests.test_research_workspace import _seed_release
-
-
-@pytest.fixture(autouse=True)
-def _restore_output_root():
-    yield
-    os.environ.pop("ML4T_OUTPUT_DIR", None)
-    from case_studies.research import workspace
-
-    workspace._ACTIVE_OUTPUT_ROOT = None
-    workspace._clear_root_sensitive_caches()
 
 
 def _study(tmp_path: Path) -> Study:
@@ -262,7 +252,7 @@ def test_legacy_registry_schema_migrates_additively(tmp_path: Path) -> None:
         migrated.close()
 
     assert {"identity_version", "execution_tier"} <= columns
-    assert {"prediction_coverage", "candidate_sets", "research_locks"} <= tables
+    assert {"prediction_coverage", "candidate_sets"} <= tables
     assert row == ("legacy-training", None, None)
 
 
@@ -557,6 +547,262 @@ def test_candidate_sets_are_immutable_and_validate_protocols(tmp_path: Path) -> 
     assert set(extended_comparison.members) == {first.hash, incompatible.hash, third.hash}
 
 
+def test_a_changed_candidate_set_supersedes_the_one_it_replaces(tmp_path: Path) -> None:
+    """A re-run that changes membership must say what it replaces, and the name must resolve.
+
+    The stage that freezes a candidate set is re-run whenever anything upstream of it is
+    corrected, and the admitted membership moves with it. Without a recorded lineage the name
+    carries two live identities and every reader of it raises instead of resolving.
+    """
+    study = _study(tmp_path)
+    training = study.results.register_training(_training_spec())
+    frame = _predictions()
+    expected = frame.select("symbol", "timestamp", "fold_id")
+    first = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=expected,
+    )
+    second = study.results.publish_predictions(
+        training,
+        checkpoint_kind="epoch",
+        checkpoint_value=2,
+        split="validation",
+        predictions=frame.with_columns((pl.col("y_score") * 2).alias("y_score")),
+        expected_keys=expected,
+    )
+
+    original = CandidateSet.create(study, "pool", [first])
+    assert CandidateSet.one(study, name="pool").hash == original.hash
+    assert CandidateSet.create(study, "pool", [first]).hash == original.hash
+
+    with pytest.raises(ValueError, match="must explicitly supersedes"):
+        CandidateSet.create(study, "pool", [first, second])
+
+    with pytest.raises(ValueError, match="cannot supersede"):
+        CandidateSet.create(study, "fresh", [second], supersedes=original.hash)
+
+    replacement = CandidateSet.create(study, "pool", [first, second], supersedes=original.hash)
+    assert replacement.supersedes == original.hash
+    assert CandidateSet.one(study, name="pool").hash == replacement.hash
+    assert CandidateSet.open(study, original.hash).members == (first.hash,)
+
+    third = study.results.publish_predictions(
+        training,
+        checkpoint_kind="epoch",
+        checkpoint_value=3,
+        split="validation",
+        predictions=frame.with_columns((pl.col("y_score") * 3).alias("y_score")),
+        expected_keys=expected,
+    )
+    head = CandidateSet.create(study, "pool", [first, second, third], supersedes=replacement.hash)
+    assert CandidateSet.one(study, name="pool").hash == head.hash
+
+
+def _two_validation_predictions(study: Study):
+    """Two comparable validation predictions from one training run."""
+    training = study.results.register_training(_training_spec())
+    frame = _predictions()
+    expected = frame.select("symbol", "timestamp", "fold_id")
+    first = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=expected,
+    )
+    second = study.results.publish_predictions(
+        training,
+        checkpoint_kind="epoch",
+        checkpoint_value=2,
+        split="validation",
+        predictions=frame.with_columns((pl.col("y_score") * 2).alias("y_score")),
+        expected_keys=expected,
+    )
+    return first, second
+
+
+def test_a_set_requested_under_a_second_name_is_bound_to_that_name(tmp_path: Path) -> None:
+    """The case a union produces: a set whose members already have a name needs its own.
+
+    `cme_futures` freezes `signal`, then freezes `pre-overlay` as the union of `signal` and
+    `allocation`. An allocation stage that registered nothing new for a label makes the union
+    equal to `signal`, so the two names describe the same members. Identity is the members, so
+    one row is written; both names still have to resolve, and a caller that asked for
+    `pre-overlay` has to be able to read it back.
+    """
+    study = _study(tmp_path)
+    first, _ = _two_validation_predictions(study)
+
+    signal = CandidateSet.create(study, "signal", [first])
+    pre_overlay = CandidateSet.create(study, "pre-overlay", [first])
+
+    assert pre_overlay.hash == signal.hash
+    assert pre_overlay.name == "pre-overlay"
+
+    # Resolution answers with the binding that was asked for. `open` reads by hash and has no
+    # way to know which of a set's names was meant, so returning its answer unaltered handed
+    # the caller a `pre-overlay` set named `signal` - which is the disagreement between object
+    # and registry this whole change exists to remove, moved one method along.
+    resolved = CandidateSet.one(study, name="pre-overlay")
+    assert resolved.hash == signal.hash
+    assert resolved.name == "pre-overlay"
+    assert CandidateSet.one(study, name="signal").name == "signal"
+
+
+def test_a_second_name_supersedes_nothing_and_retires_no_other_name(tmp_path: Path) -> None:
+    """Binding a name is not a generation of any other name.
+
+    Naming an existing set is not a change to the comparison it already names, so it needs no
+    `supersedes` and must not be readable as one - otherwise freezing `pre-overlay` would put
+    `signal` out of force and every reader of `signal` would raise.
+    """
+    study = _study(tmp_path)
+    first, second = _two_validation_predictions(study)
+
+    signal = CandidateSet.create(study, "signal", [first])
+    CandidateSet.create(study, "pre-overlay", [first])
+    assert CandidateSet.one(study, name="signal").hash == signal.hash
+
+    # Lineage is per name: replacing `signal` leaves the set `pre-overlay` names in force.
+    replacement = CandidateSet.create(study, "signal", [first, second], supersedes=signal.hash)
+    live = CandidateSet.one(study, name="signal")
+    assert live.hash == replacement.hash
+    # The lineage the resolved binding reports is that name's, not the identity row's.
+    assert live.supersedes == signal.hash
+    still = CandidateSet.one(study, name="pre-overlay")
+    assert still.hash == signal.hash
+    assert still.supersedes is None
+
+
+def test_a_changed_set_under_a_bound_second_name_still_has_to_supersede(tmp_path: Path) -> None:
+    """The refusal the binding table must not weaken.
+
+    A name that resolves to a live set is a name a changed set cannot take silently, whether or
+    not that set was first written under a different name.
+    """
+    study = _study(tmp_path)
+    first, second = _two_validation_predictions(study)
+
+    CandidateSet.create(study, "signal", [first])
+    pre_overlay = CandidateSet.create(study, "pre-overlay", [first])
+
+    with pytest.raises(ValueError, match="must explicitly supersedes"):
+        CandidateSet.create(study, "pre-overlay", [first, second])
+
+    widened = CandidateSet.create(
+        study, "pre-overlay", [first, second], supersedes=pre_overlay.hash
+    )
+    assert CandidateSet.one(study, name="pre-overlay").hash == widened.hash
+
+
+def test_re_creating_a_bound_name_is_the_re_run_and_writes_nothing(tmp_path: Path) -> None:
+    study = _study(tmp_path)
+    first, second = _two_validation_predictions(study)
+
+    original = CandidateSet.create(study, "pool", [first])
+    replacement = CandidateSet.create(study, "pool", [first, second], supersedes=original.hash)
+
+    again = CandidateSet.create(study, "pool", [first, second], supersedes=original.hash)
+    assert again.hash == replacement.hash
+    assert again.supersedes == original.hash
+    with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
+        bindings = db.execute(
+            "SELECT count(*) FROM candidate_set_names WHERE name = 'pool'"
+        ).fetchone()[0]
+    assert bindings == 2
+
+    # Two generations, one live. The ambiguity message counts heads rather than rows, so a
+    # retired generation is not reported as a second live identity.
+    assert CandidateSet.one(study, name="pool").hash == replacement.hash
+
+
+def test_a_registry_written_before_the_binding_table_still_resolves_its_names(
+    tmp_path: Path,
+) -> None:
+    """The reader's clone: `candidate_sets.name` is the only binding such a registry has.
+
+    Resolution reads the binding table where there is one. A registry written by an earlier
+    version has none, and dropping it here is that registry exactly - one name per identity row,
+    in the column that used to carry it.
+    """
+    study = _study(tmp_path)
+    first, _ = _two_validation_predictions(study)
+    original = CandidateSet.create(study, "pool", [first])
+
+    with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
+        db.execute("DROP TABLE candidate_set_names")
+        db.commit()
+
+    assert CandidateSet.one(study, name="pool").hash == original.hash
+
+    # Opening it for writing restores the binding from the identity row, so the name resolves
+    # by the same path as one written today.
+    with closing(_open_registry(study.root)) as db:
+        assert db.execute(
+            "SELECT set_hash FROM candidate_set_names WHERE name = 'pool'"
+        ).fetchone() == (original.hash,)
+
+
+def _metrics_registry(tmp_path: Path, task_types: list) -> Path:
+    """A registry whose `prediction_metrics` rows carry the given `task_type` values."""
+    _open_registry(tmp_path).close()
+    db_path = tmp_path / "run_log" / "registry.db"
+    with closing(sqlite3.connect(db_path)) as db:
+        db.executemany(
+            "INSERT INTO prediction_metrics (prediction_hash, task_type, computed_at) "
+            "VALUES (?, ?, '2026-01-01T00:00:00Z')",
+            [(f"p{index}", value) for index, value in enumerate(task_types)],
+        )
+        db.commit()
+    return db_path
+
+
+def test_a_registry_holding_legacy_numeric_task_types_is_rewritten_on_open(
+    tmp_path: Path,
+) -> None:
+    """The conversion the migration exists for, which no test covered."""
+    db_path = _metrics_registry(tmp_path, [1.0, 0.0, "classification"])
+
+    _open_registry(tmp_path).close()
+
+    with closing(sqlite3.connect(db_path)) as db:
+        values = sorted(
+            row[0] for row in db.execute("SELECT task_type FROM prediction_metrics").fetchall()
+        )
+    assert values == ["classification", "classification", "regression"]
+
+
+def test_opening_a_migrated_registry_does_not_wait_for_the_write_lock(tmp_path: Path) -> None:
+    """The pass-through, which is the one every open after the first takes.
+
+    `_open_registry` is on every path that touches a registry, and an `UPDATE` asks for the
+    write lock whether or not a row matches. With `busy_timeout` at 60s that turns one open
+    contended by any other writer into a minute of waiting, for a rewrite that has had nothing
+    to do since the last legacy row was converted - nine of them is a notebook's whole cell
+    budget.
+
+    Timed against a held lock rather than counted, because the count cannot see this: an
+    `UPDATE` matching no row leaves `total_changes` at zero while still having asked.
+    """
+    db_path = _metrics_registry(tmp_path, ["classification", "regression"])
+
+    with closing(sqlite3.connect(db_path, timeout=1.0)) as holder:
+        holder.execute("BEGIN IMMEDIATE")
+        started = time.monotonic()
+        db = _open_registry(tmp_path)
+        elapsed = time.monotonic() - started
+        db.close()
+        holder.rollback()
+
+    # A request for the lock would block on `busy_timeout`, which `_open_registry` sets to 60s.
+    assert elapsed < 5.0, f"opening a migrated registry waited {elapsed:.1f}s for a write lock"
+
+
 def test_partial_and_preview_results_are_rejected_from_canonical_sets(tmp_path: Path) -> None:
     study = _study(tmp_path)
     canonical_training = study.results.register_training(_training_spec())
@@ -626,3 +872,139 @@ def test_fitted_states_come_back_in_fold_order_not_filename_order(tmp_path: Path
 
     assert isinstance(reopened, TrainingResult)
     assert [state["fold"] for state in reopened.fitted_states()] == list(range(12))
+
+
+def test_fold_metrics_come_back_in_fold_order_with_the_values_registered(tmp_path: Path) -> None:
+    """`ic_mean` is the equal-weight mean of these rows, so a notebook arguing from their spread -
+    how often the sign changes, how far the cross-section narrows - is reading them rather than the
+    average. That argument is only checkable if the rows come back complete and in fold order: a
+    lexicographic sort would put fold 10 before fold 2 and silently reorder the sequence the prose
+    walks through."""
+    study = _study(tmp_path)
+    registered = [
+        (0, -0.076172, 0.330584, 92.0),
+        (2, -0.003361, 0.175347, 88.0),
+        (10, 0.115767, 0.302743, 86.0),
+    ]
+    db = _open_registry(study.root)
+    try:
+        db.execute(
+            "INSERT INTO training_runs "
+            "(training_hash, family, label, spec_json, created_at) VALUES (?,?,?,?,?)",
+            ("folded-training", "latent_factors", "fwd_ret_21d", "{}", "2024-01-01"),
+        )
+        db.execute(
+            "INSERT INTO prediction_sets "
+            "(prediction_hash, training_hash, split, created_at) VALUES (?,?,?,?)",
+            ("folded-prediction", "folded-training", "validation", "2024-01-01"),
+        )
+        for fold_id, ic, ic_std, n_entities in reversed(registered):
+            db.execute(
+                "INSERT INTO fold_metrics "
+                "(prediction_hash, fold_id, computed_at, ic, ic_std, n_entities) "
+                "VALUES (?,?,?,?,?,?)",
+                ("folded-prediction", fold_id, "2024-01-01", ic, ic_std, n_entities),
+            )
+        db.commit()
+    finally:
+        db.close()
+
+    folds = Result.open(study, "folded-prediction").folds()
+
+    assert folds.columns == ["fold_id", "ic", "ic_std", "n_entities"]
+    assert [tuple(row) for row in folds.iter_rows()] == registered
+
+
+def test_a_prediction_set_with_no_registered_folds_returns_an_empty_frame(tmp_path: Path) -> None:
+    """Reading the folds of a result that has none must not raise. A legacy row carries no fold
+    metrics at all, and a caller that has to guard the call before making it will not make it."""
+    study = _study(tmp_path)
+    db = _open_registry(study.root)
+    try:
+        db.execute(
+            "INSERT INTO training_runs "
+            "(training_hash, family, label, spec_json, created_at) VALUES (?,?,?,?,?)",
+            ("foldless-training", "linear", "fwd_ret_21d", "{}", "2024-01-01"),
+        )
+        db.execute(
+            "INSERT INTO prediction_sets "
+            "(prediction_hash, training_hash, split, created_at) VALUES (?,?,?,?)",
+            ("foldless-prediction", "foldless-training", "validation", "2024-01-01"),
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    folds = Result.open(study, "foldless-prediction").folds()
+
+    assert folds.height == 0
+    assert folds.columns == ["fold_id", "ic", "ic_std", "n_entities"]
+
+
+def test_the_refusal_names_the_partial_member_and_the_sense_it_is_partial_in(
+    tmp_path: Path,
+) -> None:
+    """`partial results cannot enter a candidate set` used to name neither."""
+    study = _study(tmp_path)
+    training = study.results.register_training(_training_spec())
+    frame = _predictions()
+    partial = study.results.publish_predictions(
+        training,
+        checkpoint_kind="epoch",
+        checkpoint_value=1,
+        split="validation",
+        predictions=frame.head(1),
+        expected_keys=frame.select("symbol", "timestamp", "fold_id"),
+        allow_partial=True,
+    )
+    with pytest.raises(ValueError) as raised:
+        CandidateSet.create(study, "partial", [partial])
+    message = str(raised.value)
+    assert partial.hash in message, "the refusal must say which member"
+    assert "coverage" in message or "fold_metrics" in message, (
+        f"the refusal must say in which sense, got: {message}"
+    )
+
+
+def test_the_catalog_column_is_necessary_and_not_sufficient(tmp_path: Path) -> None:
+    """The registry column can say complete where the on-disk check says otherwise.
+
+    This is the disagreement that made a notebook's own guard pass at one cell and the
+    freeze refuse the same rows at another. The column reads the registry only; deleting
+    the artifact leaves every registry row it inspects untouched.
+    """
+    study = _study(tmp_path)
+    training = study.results.register_training(_training_spec())
+    frame = _predictions()
+    prediction = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=frame.select("symbol", "timestamp", "fold_id"),
+    )
+    assert prediction.complete
+    assert study.results.partial_members([prediction.hash]) == []
+
+    artifact = (
+        study.storage_root("canonical")
+        / "run_log"
+        / "predictions"
+        / prediction.hash
+        / "predictions.parquet"
+    )
+    assert artifact.is_file()
+    artifact.unlink()
+
+    reopened = Result.open(study, prediction.hash)
+    reason = reopened.completeness()
+    assert reason is not None, "an absent artifact is not a complete result"
+    assert str(artifact) in reason, f"the reason must name the file, got: {reason}"
+
+    partial = study.results.partial_members([prediction.hash])
+    assert [member_hash for member_hash, _ in partial] == [prediction.hash]
+
+    with pytest.raises(ValueError) as raised:
+        CandidateSet.create(study, "gone", [reopened])
+    assert prediction.hash in str(raised.value)

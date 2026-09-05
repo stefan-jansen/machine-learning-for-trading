@@ -111,11 +111,13 @@ study = open_study(
 # %% [markdown]
 # ## 1. Which labels, and what the configuration says
 #
-# Every label whose training menu declares `latent_factors:` is fitted, and three do: `fwd_ret_5d`,
-# the stock's total return over the five trading days after the decision date; `fwd_ret_10d`, the
-# same over ten; and `fwd_ret_risk_adj_5d`, the five-day return divided by a measure of its own
-# dispersion. The two `fwd_dir_*` classification labels declare linear and gradient boosting only,
-# so they are absent here rather than dropped.
+# Every label whose training menu declares `latent_factors:` is fitted, and the cell below reads
+# which those are rather than this sentence asserting a count that would go stale the moment a
+# sixth label declared the family. What the names mean is the part prose has to supply:
+# `fwd_ret_5d` is the stock's total return over the five trading days after the decision date,
+# `fwd_ret_10d` the same over ten, and `fwd_ret_risk_adj_5d` the five-day return divided by a
+# measure of its own dispersion. A `fwd_dir_*` classification label declaring only linear and
+# gradient boosting is absent here rather than dropped.
 
 # %%
 declared_labels(study, "latent_factors")
@@ -315,9 +317,14 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # %% [markdown]
 # ## 4. What came out
 #
-# One row per label. `ic_mean` is the **information coefficient**: on each validation date, rank the
-# stocks by the model's prediction, rank them by the return they went on to earn, correlate the two
-# rankings, and average that daily correlation over the validation period.
+# One row per label. The **information coefficient** is the rank correlation, on one validation
+# date, between the stocks ordered by the model's prediction and the stocks ordered by the return
+# they went on to earn.
+#
+# `ic_mean` aggregates that **over folds, not over days**: each fold's own mean IC is computed and
+# those are averaged with equal weight (`latent_factors/cv.py`, and
+# `registry/metrics.py` states the convention). With folds of unequal length the fold mean and the
+# pooled daily mean are different numbers, and this column is the first.
 #
 # `ic_n_days` is how many validation dates produced a defined correlation, and it decides which rows
 # are comparable with each other. `auc_scored_against` says what the AUC column was scored against:
@@ -377,16 +384,30 @@ catalog.select(
 )
 
 # %% [markdown]
-# ### One decomposition, three targets
+# ### Three decompositions, three targets
 #
-# The returns decomposed, the folds and the factor count are identical across these rows. What
-# changes is only which forward return the factor-implied forecast is scored against, which makes
-# this the cleanest comparison in the notebook: the model does not know what it is being scored on.
+# **These rows are not one decomposition scored three ways, and the section heading used to say
+# they were.** `prepare_panel_data` fills the return matrix from `label_col`
+# (`latent_factors/cv.py`), so the panel PCA decomposes *is* that member's own label: a five-day
+# forward return for one row, a ten-day return for the next, a risk-adjusted five-day return for
+# the third. Three different matrices, three different decompositions.
 #
-# `ic_t` is a Newey-West HAC statistic on the daily IC series. It is a diagnostic and not a
-# selection rule - the series is short, overlapping multi-day returns make successive days
-# dependent, and the folds have been read many times over by the time a case study reaches this
-# notebook.
+# They are not on a common sample either: the `scored_dates` column below differs across the rows,
+# because a ten-day forward window runs out earlier than a five-day one and takes its last
+# decision dates with it. Section 1 already says each label is a different set of rows; this
+# heading contradicted it.
+#
+# So the folds and the factor count are shared and nothing else is. Read the rows as three
+# label-specific decompositions, and read a difference between them as the labels differing rather
+# than as one model meeting three targets. Making it the controlled comparison the old heading
+# claimed would mean fitting once on a common realized-return panel and scoring that single
+# forecast against all three, which is a different notebook.
+#
+# `ic_t` is the t-statistic across those fold means, not a Newey-West statistic on the daily
+# series - the registry keeps the HAC-corrected version separately as `ic_t_hac`, and that is the
+# inferential one. Either way it is a diagnostic and not a selection rule: the series is short,
+# overlapping multi-day returns make successive days dependent, and the folds have been read many
+# times over by the time a case study reaches this notebook.
 
 # %% tags=["results"]
 by_label = catalog.select(
@@ -395,16 +416,24 @@ by_label = catalog.select(
     ic_mean=pl.col("ic_mean"),
     ic_t=pl.col("ic_t"),
     scored_dates=pl.col("ic_n_days"),
+    # `ic_n_days` counts the days behind `ic_mean_daily`, the pooled daily statistic - not the
+    # folds behind `ic_mean`, which is what the rows are ordered by. So this column is a
+    # comparability guarantee about one statistic attached to a ranking on another. It is kept
+    # because unequal day counts are still the thing that makes two rows incomparable, and
+    # flagged because the two are not the same measurement: `registry/metrics.py:203` averages
+    # folds for `ic_mean`, and `:234-250` computes the daily family together. Reading the
+    # ordering on `ic_mean_daily` would need `PredictionCatalog` to carry it.
     full_coverage=pl.col("ic_n_days") == pl.col("ic_n_days").max(),
 ).sort("ic_mean", descending=True)
 by_label
 
 # %% [markdown]
-# ### The same decomposition against each target
+# ### Three decompositions, one axis
 #
 # One bar per label, on one axis, with the primary target first. The bars are the quantity the
 # downstream comparison uses; the axis is shared so the distance between them is readable rather
-# than each panel filling itself.
+# than each panel filling itself. What the axis is shared *for* is comparison, not equivalence -
+# the section above says why these three are not one decomposition scored three ways.
 
 # %%
 panel = catalog.with_columns(
@@ -449,10 +478,15 @@ show_plotly_with_alt(
 # ## 5. What to notice
 #
 # **The estimator is the same and only the target moves, which is what makes these rows
-# comparable.** They share the return panel, the folds, the dates scored and the factor count.
-# `fwd_ret_10d` is the same construction over twice the horizon, and `fwd_ret_risk_adj_5d` is
-# `fwd_ret_5d` divided by a measure of its own dispersion - so a gap between those two rows is a
-# statement about scaling by width and nothing else.
+# comparable - but they are not measured on a common sample.** The folds and the factor count are
+# shared; the return panel is not, because `prepare_panel_data` fills it from each member's own
+# label, and neither are the dates scored, because a ten-day forward window runs out earlier than
+# a five-day one. `fwd_ret_10d` is the same construction over twice the horizon, and
+# `fwd_ret_risk_adj_5d` is `fwd_ret_5d` divided by a measure of its own dispersion. A gap between
+# two of these rows therefore carries the change of target and the change of sample together, and
+# nothing here separates them: scoring the same rows under both targets is what would, and this
+# notebook does not do it. Read the gaps as a ranking of what was fitted, not as a measurement of
+# what scaling by width costs.
 #
 # **PCA cannot see the features this case study is about, and that is what it is for.** No implied
 # volatility, no skew, no term structure, no variance risk premium reaches the decomposition. Read

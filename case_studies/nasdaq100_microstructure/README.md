@@ -33,9 +33,11 @@ This case study uses AlgoSeek TAQ-derived 15-minute bars for 114 NASDAQ-100 cons
 | Model Analysis | [`13_model_analysis`](13_model_analysis.ipynb) | -- | Cross-model IC comparison and fold stability diagnostics | Nothing - it reads the registry |
 | Backtest | [`14_backtest`](14_backtest.ipynb) | Ch16 | Strategy simulation designed to demonstrate cost-driven failure | One backtest run per prediction set and entry scheme; `daily_returns.parquet`, `weights.parquet`, `trades.parquet`, `fills.parquet`, `equity.parquet`, `portfolio_state.parquet`, and `spec.json` under `run_log/backtest/{hash}/` |
 | Portfolio | [`15_portfolio_management`](15_portfolio_management.ipynb) | Ch17 | Allocation methods under dollar-neutral intraday constraints | One backtest run per allocation method, same artifact layout |
-| Costs | [`16_costs`](16_costs.ipynb) | Ch18 | Flagship cost analysis: spread, impact, and commission decomposition | One backtest run per cost level, same artifact layout |
-| Risk | [`17_risk_management`](17_risk_management.ipynb) | Ch19 | Intraday risk controls and position-level exit rules | One backtest run per overlay variant, same artifact layout |
-| Strategy Analysis | [`18_strategy_analysis`](18_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with IC, Sharpe, and cost analysis | `results/strategy_assessment.json`, `20_strategy_synthesis/output/nasdaq100_microstructure/nasdaq100_microstructure_tearsheet.html` |
+| Risk | [`16_risk_management`](16_risk_management.ipynb) | Ch19 | Intraday risk controls and position-level exit rules | One backtest run per overlay variant, same artifact layout |
+| Costs | [`17_costs`](17_costs.ipynb) | Ch18 | Flagship cost analysis: spread, impact, and commission decomposition, over the leading run at any pre-cost stage | One backtest run per cost level, same artifact layout |
+| Holdout Predictions | [`18_holdout_predictions`](18_holdout_predictions.ipynb) | Ch20 | Refits the selected configuration on history ending a label buffer before 2021-07-01 and writes its predictions over the holdout window | One training run, one prediction set at `split='holdout'` |
+| Holdout Backtest | [`19_holdout_backtest`](19_holdout_backtest.ipynb) | Ch20 | Trades those predictions once, with the sizing and overlay the case study settled on | One backtest run at `stage='holdout'` |
+| Strategy Analysis | [`20_strategy_analysis`](20_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with IC, Sharpe, and cost analysis | `results/strategy_assessment.json`, `20_strategy_synthesis/output/nasdaq100_microstructure/nasdaq100_microstructure_tearsheet.html` |
 
 ## Key Results
 
@@ -51,7 +53,7 @@ The book's study in **cost and selection discipline**: a raw intraday cross-sect
 | 2. Cost-feasible universe | screen to the cheapest-to-trade names, frozen per split | **−0.21** | [−2.37, +3.64] |
 | 3. Ensemble selection | average the 12-model set instead of the single-best pick | **+0.53** | [−1.94, +3.07] |
 
-Adjustment 1 is the microstructure lesson: the cost-expensive tail of the 114-name panel consumes the intraday edge, so the full universe collapses out of sample while the cost-feasible subset does not (see `16_costs.py` for the full-vs-screened contrast). Adjustment 2 is the selection lesson: the per-model validation Sharpes have enormous, completely overlapping 95% CIs, so the single-best pick is noise — averaging the model set (an ensemble) is estimation under selection uncertainty. The ensemble is a **robustness device against selection noise, not a return booster**: it converts the single-best pick's out-of-sample loss (−0.21) into an honest modest positive rather than adding alpha. **Every holdout CI above is wide and straddles zero (n≈128 days); the recovery is a point-estimate rescue from clearly-negative to marginally-positive, not a significance result.** The naive-baseline row uses the direction label `fwd_dir_15m` while the screened steps use `fwd_ret_60m`; the ladder is directionally honest — the full universe is deeply negative regardless of label — but it is not one strategy tuned in place.
+Adjustment 1 is the microstructure lesson: the cost-expensive tail of the 114-name panel consumes the intraday edge, so the full universe collapses out of sample while the cost-feasible subset does not (see `17_costs.py` for the full-vs-screened contrast). Adjustment 2 is the selection lesson: the per-model validation Sharpes have enormous, completely overlapping 95% CIs, so the single-best pick is noise — averaging the model set (an ensemble) is estimation under selection uncertainty. The ensemble is a **robustness device against selection noise, not a return booster**: it converts the single-best pick's out-of-sample loss (−0.21) into an honest modest positive rather than adding alpha. **Every holdout CI above is wide and straddles zero (n≈128 days); the recovery is a point-estimate rescue from clearly-negative to marginally-positive, not a significance result.** The naive-baseline row uses the direction label `fwd_dir_15m` while the screened steps use `fwd_ret_60m`; the ladder is directionally honest — the full universe is deeply negative regardless of label — but it is not one strategy tuned in place.
 
 **Holdout closure (the ensemble carrier)**: The deployed configuration is the cost-feasible ensemble at holdout Sharpe **+0.53** [−1.94, +3.07] (n=128 trading days) — positive on the point estimate, where the naive full-universe baseline (−0.89) and the single-best cost-feasible pick (−0.21) are not. It remains **below a passive equal-weight buy-and-hold of the same screened basket** over the window: the recovery is to *viability*, not to out-performance — the active signal claws back to positive but does not beat simply holding the cost-feasible names. The strategy-vs-equal-weight paired-difference interval is not populated in the registry for this case study (`backtest_paired_metrics` has no producer here), so kill gate 2 reads **no data** rather than a spurious pass — the gate helpers treat the missing bootstrap as no-evidence, not as a green light. The honest headline: the ensemble recovers a positive point estimate, not statistical significance and not a market-beating edge; every interval above straddles zero.
 
@@ -76,9 +78,9 @@ uv run python case_studies/nasdaq100_microstructure/12_causal_dml.py
 uv run python case_studies/nasdaq100_microstructure/13_model_analysis.py
 uv run python case_studies/nasdaq100_microstructure/14_backtest.py
 uv run python case_studies/nasdaq100_microstructure/15_portfolio_management.py
-uv run python case_studies/nasdaq100_microstructure/16_costs.py
-uv run python case_studies/nasdaq100_microstructure/17_risk_management.py
-uv run python case_studies/nasdaq100_microstructure/18_strategy_analysis.py
+uv run python case_studies/nasdaq100_microstructure/16_risk_management.py
+uv run python case_studies/nasdaq100_microstructure/17_costs.py
+uv run python case_studies/nasdaq100_microstructure/20_strategy_analysis.py
 ```
 
 ## Run Log

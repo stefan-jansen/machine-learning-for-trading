@@ -9,7 +9,13 @@ from pathlib import Path
 
 import polars as pl
 
-from case_studies.research import OfficialPopulation, PredictionResult, ResolvedSpec, Study
+from case_studies.research import (
+    OfficialPopulation,
+    PredictionResult,
+    ResolvedSpec,
+    Result,
+    Study,
+)
 from case_studies.sp500_options._htm_backtest import (
     _load_option_lifecycle,
     option_data_paths,
@@ -41,6 +47,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _boundary(moment) -> str:
+    """One rendering for a reduction boundary, whatever zone the artifact carries."""
+    return str(moment.replace(tzinfo=None) if getattr(moment, "tzinfo", None) else moment)
+
+
 def _seed_real_preview_prediction(
     study: Study,
     *,
@@ -50,18 +61,27 @@ def _seed_real_preview_prediction(
 ) -> PredictionResult:
     if max_symbols < 2 or max_sessions < 5:
         raise ValueError("the real preview fixture requires at least two symbols and five sessions")
-    source_path = (
-        study.release_root
-        / "case_studies"
-        / "sp500_options"
-        / "run_log"
-        / "predictions"
-        / source_prediction_hash
-        / "predictions.parquet"
-    )
-    if not source_path.is_file():
-        raise FileNotFoundError(f"released source prediction is missing: {source_path}")
-    source = pl.read_parquet(source_path)
+    # Resolved through the registry, not read off a constructed path. The fixture republishes
+    # this frame as a complete `ret_to_expiry` validation prediction under a new identity, so a
+    # stale parquet, a partial one, or one scored on another label would enter the registry
+    # saying it is something it is not.
+    source_result = Result.open(study, source_prediction_hash)
+    if not isinstance(source_result, PredictionResult):
+        raise ValueError(f"{source_prediction_hash} is not a prediction result")
+    source_row = study.predictions.one(prediction_hash=source_prediction_hash)
+    expected = {
+        "label": "ret_to_expiry",
+        "split": "validation",
+        "execution_tier": "canonical",
+        "complete": True,
+    }
+    actual = {field: source_row[field] for field in expected}
+    if actual != expected:
+        raise ValueError(
+            f"released source prediction {source_prediction_hash} is {actual}, "
+            f"and the fixture requires {expected}"
+        )
+    source = source_result.load()
     required = {"symbol", "timestamp", "fold", "prediction", "actual"}
     missing = required - set(source.columns)
     if missing:
@@ -97,8 +117,13 @@ def _seed_real_preview_prediction(
         "folds": [fold],
         "max_symbols": max_symbols,
         "max_sessions": max_sessions,
-        "date_start": str(preview.get_column("timestamp").min()),
-        "date_end": str(preview.get_column("timestamp").max()),
+        # Rendered without the zone. These boundaries go into `preview_reductions`, which
+        # is part of the spec the identity is computed over, so rendering them off the
+        # artifact's own dtype would give one reduction two identities depending on
+        # whether the prediction it reduces was written before or after decision times
+        # were stored UTC-aware. The instants are the same either way.
+        "date_start": _boundary(preview.get_column("timestamp").min()),
+        "date_end": _boundary(preview.get_column("timestamp").max()),
     }
     spec = ResolvedSpec.create(
         family="options_interface_fixture",
@@ -173,6 +198,7 @@ def main() -> None:
         prediction,
         prices=prices,
         signal=signal,
+        label="ret_to_expiry",
     )
     local_decision_digest = value_digest(prepared_decisions)
     clean_replay = _clean_replay_digests(

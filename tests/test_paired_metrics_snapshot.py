@@ -99,8 +99,16 @@ class TestTheRebuildEntryPoint:
     @staticmethod
     def _explorer(rows: pl.DataFrame):
         class _Explorer:
-            def best(self, *, stage: str, top_n: int) -> pl.DataFrame:
-                return rows
+            def best(
+                self,
+                *,
+                stage: str,
+                top_n: int,
+                prediction_hashes: list[str] | None = None,
+            ) -> pl.DataFrame:
+                if prediction_hashes is None:
+                    return rows
+                return rows.filter(pl.col("prediction_hash").is_in(prediction_hashes))
 
             def champion_lineage(self, _prediction_hash: str) -> dict:
                 return {}
@@ -138,7 +146,9 @@ class TestTheRebuildEntryPoint:
             ),
         )
         monkeypatch.setattr(pm, "compute_paired_uncertainty", lambda *a, **k: {"sharpe_diff": 0.1})
-        monkeypatch.setattr(pm, "_val_rank1_full_spec", lambda *a, **k: {})
+        monkeypatch.setattr(
+            pm, "_val_rank1_carrier", lambda *a, **k: {"spec": {}, "prediction_hash": None}
+        )
         monkeypatch.setattr(pm, "_holdout_lineage_for", lambda *a, **k: None)
 
     def test_the_previous_selections_rows_are_gone_after_a_rebuild(

@@ -30,11 +30,14 @@
 # **Learning Objectives**:
 # - Split a currency pair's price into a slowly-moving level and the noise around it,
 #   by fitting a model that treats the level as hidden and each observed price as a
-#   noisy reading of it, on training sessions alone.
+#   noisy reading of it, from sessions strictly earlier than the ones it speaks for.
 # - Estimate, for each session, how likely the dollar is to be in its turbulent state,
 #   from a two-state model that is allowed to read only the sessions up to that day.
 # - Turn a one-step-ahead return forecast into a feature by keeping what the forecast
 #   missed, so the feature measures surprise rather than direction.
+# - Refresh each model's parameters on a declared schedule instead of once per
+#   cross-validation fold, so that no session's value carries parameters estimated
+#   from its own future.
 # - Show that a feature carries no look-ahead by re-running the same recursion on a
 #   series with its tail deleted and checking that the earlier values do not move.
 #
@@ -47,18 +50,22 @@
 # **Output Contract**:
 # - `features/model_based.parquet` -- ten columns, five from the state-space fit, two
 #   from the dollar-regime fit and three from the return model
-# - Keys: `timestamp`, `symbol`, `fold`; `fold` records which fit produced the row and
-#   is not itself a feature
-# - Every value is computed from observations up to and including its own session
-# - Each fold carries its training and validation sessions, so a downstream model reads
-#   the rows belonging to the fold it is training on
+# - Keys: `timestamp`, `symbol`. There is no `fold` column. A value is bounded by the
+#   refit schedule `setup.yaml` declares, not by a cross-validation window, so one row
+#   per pair and session serves every fold and every configured label
+# - Every value reads observations up to and including its own session, and carries
+#   parameters estimated from sessions strictly earlier than it
+# - The burn-in prefix each model spends before its first estimate carries no value
 
 # %% tags=[]
 """FX Pairs: Features Built From Fitted Models."""
 
 import logging
+import multiprocessing
+import os
 import re
 import warnings
+from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -75,8 +82,12 @@ from statsmodels.tsa.arima.model import ARIMA
 from threadpoolctl import threadpool_limits
 
 from case_studies.utils.artifact_digest import value_digest, write_artifact
-from case_studies.utils.cv_window import assert_variant_folds_are_out_of_sample
-from case_studies.utils.temporal import filtered_state_probs, sort_states_by_variance
+from case_studies.utils.temporal import (
+    filtered_state_probs,
+    refit_boundaries,
+    sort_states_by_variance,
+    walk_forward_feature,
+)
 from data import load_fx_pairs
 from utils.artifact_specs import load_setup_config, resolve_label_buffer
 from utils.cv_splits import generate_cv_splits, load_evaluation_config
@@ -87,11 +98,17 @@ warnings.filterwarnings("ignore")
 logging.getLogger("hmmlearn.base").setLevel(logging.ERROR)
 
 # %% [markdown] tags=[]
-# Everything in the next cell can be overridden without editing the file, which is how a
-# reader runs a smaller version of the notebook first. Each one trades runtime for scope:
-# how many pairs are fitted, how many walk-forward windows are covered, how hard the
-# search for the state-space noise parameters tries, and how many times the dollar-regime
-# model is refitted from a different starting point before one of them is kept.
+# The next cell holds what a reader may override to run a smaller version of the notebook
+# first: how many pairs are fitted and how many of the walk-forward windows the validation
+# screen at the end covers.
+#
+# What is *not* here is the estimation schedule. How much history each model spends before
+# its first fit and how often it is re-estimated are part of what the feature means, not
+# settings to trade runtime against, so they are read from `setup.yaml` in the cell below
+# alongside the feature windows. The three `*_OVERRIDE` settings are the reduction levers
+# for that: each is zero here, meaning "use what `setup.yaml` declares", and a positive
+# value replaces the declaration for one run. They are named so that nothing reading this
+# file can mistake a reduction for the definition.
 #
 # `START_DATE` is the earliest session to load. 2011 is where the OANDA four-hour history
 # begins, so it is the whole file rather than a choice about how much of it to use.
@@ -101,17 +118,17 @@ CASE_STUDY_ID = "fx_pairs"
 # 0 means every pair and every fold; a positive value keeps that many of each.
 MAX_SYMBOLS = 0
 MAX_FOLDS = 0
-# Iteration cap for the Nelder-Mead search over the three state-space noise parameters.
-KALMAN_MAXITER = 300
 START_DATE = "2011-01-01"
-# Expectation-maximisation reaches a local optimum, so the fit is repeated from this many
-# starting points and the highest-likelihood one is kept.
-N_HMM_RESTARTS = 10
-HMM_N_STATES = 2  # a calm dollar state and a turbulent one
-# A restart is rejected when its final EM step falls by more than this fraction of
-# the log-likelihood's own magnitude. Real divergence moves hundreds of nats; the
-# noise this has to tolerate is single digits against a likelihood of ~4.3e4.
-HMM_STABILITY_REL_TOL = 1e-3
+# 0 keeps every model's declared refit cadence. A positive value replaces all three with
+# it, which is how a smoke run bounds the walks without narrowing the universe: fewer
+# estimates, the same rows and the same columns. The burn-ins are never overridden - a
+# shorter one would move which sessions carry a value, and the coverage assertions below
+# are about exactly that.
+REFIT_EVERY_OVERRIDE = 0
+# 0 keeps the declared search effort for the two models that search. Both bound how hard a
+# single estimate looks for its optimum, not what window it reads.
+KALMAN_MAXITER_OVERRIDE = 0
+N_HMM_RESTARTS_OVERRIDE = 0
 
 # %% [markdown] tags=[]
 # The session calendar is read from `setup.yaml` rather than named here. It is the
@@ -125,7 +142,6 @@ CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 LABELS_DIR = CASE_DIR / "labels"
 FEATURES_DIR = CASE_DIR / "features"
 
-ARIMA_ORDER = (1, 0, 1)
 # A Spearman IC over fewer pairs than this is a rank correlation over a handful of
 # points; dates below the floor are dropped from the series rather than averaged in.
 MIN_PAIRS_PER_DATE = 8
@@ -149,6 +165,49 @@ KALMAN_TREND_WINDOW = int(sorted(SETUP["features"]["windows"]["moving_average"])
 # short enough to move when the market does.
 USD_VOL_WINDOW = int(min(SETUP["features"]["windows"]["close_to_close_volatility"]))
 USD_VOL_COL = f"usd_vol_{USD_VOL_WINDOW}d"
+
+# %% [markdown] tags=[]
+# ### The Estimation Schedule
+#
+# Three models are fitted below and each is given two numbers: a **burn-in**, the
+# observations spent before its first estimate, and a **refit cadence**, how many
+# observations pass before it is estimated again. Together they are what bounds every
+# parameter in this notebook, and `setup.yaml` declares them beside the feature windows
+# because an estimation window is part of a fitted feature's definition in the same way a
+# lookback is.
+#
+# They are read here rather than typed, so the comments in `setup.yaml` that say what each
+# count decides stay next to the value the notebook actually uses.
+
+# %% tags=[]
+MODEL_BASED = SETUP["model_based"]
+
+KALMAN_BURNIN = int(MODEL_BASED["kalman"]["burnin"])
+KALMAN_REFIT_EVERY = int(MODEL_BASED["kalman"]["refit_every"])
+KALMAN_MAXITER = int(MODEL_BASED["kalman"]["maxiter"])
+
+HMM_BURNIN = int(MODEL_BASED["hmm"]["burnin"])
+HMM_REFIT_EVERY = int(MODEL_BASED["hmm"]["refit_every"])
+HMM_N_STATES = int(MODEL_BASED["hmm"]["n_states"])
+N_HMM_RESTARTS = int(MODEL_BASED["hmm"]["n_restarts"])
+HMM_STABILITY_REL_TOL = float(MODEL_BASED["hmm"]["stability_rel_tol"])
+
+ARIMA_BURNIN = int(MODEL_BASED["arima"]["burnin"])
+ARIMA_REFIT_EVERY = int(MODEL_BASED["arima"]["refit_every"])
+ARIMA_ORDER = tuple(int(term) for term in MODEL_BASED["arima"]["order"])
+
+if REFIT_EVERY_OVERRIDE:
+    KALMAN_REFIT_EVERY = ARIMA_REFIT_EVERY = HMM_REFIT_EVERY = REFIT_EVERY_OVERRIDE
+    print(f"Reduced run: every refit cadence replaced with {REFIT_EVERY_OVERRIDE}")
+if KALMAN_MAXITER_OVERRIDE:
+    KALMAN_MAXITER = KALMAN_MAXITER_OVERRIDE
+if N_HMM_RESTARTS_OVERRIDE:
+    N_HMM_RESTARTS = N_HMM_RESTARTS_OVERRIDE
+
+print("Estimation schedule, in sessions of each model's own series:")
+print(f"  state-space  burn-in {KALMAN_BURNIN:>4}, refit every {KALMAN_REFIT_EVERY:>3}")
+print(f"  dollar regime burn-in {HMM_BURNIN:>3}, refit every {HMM_REFIT_EVERY:>3}")
+print(f"  return model  burn-in {ARIMA_BURNIN:>3}, refit every {ARIMA_REFIT_EVERY:>3}")
 
 # %% [markdown] tags=[]
 # ## 1. Load the Price History and the Universe
@@ -284,11 +343,14 @@ universe_table
 # numbers reveals this: a leaked fit and an honest one produce columns of the same shape,
 # the same range and the same plausibility.
 #
-# The discipline that removes it has two parts, and the rest of the notebook is those two
-# parts applied three times:
+# The rule that removes it is one sentence: **no parameter behind the value for a session
+# may have been estimated from that session or a later one.** It has two halves, and the
+# rest of the notebook is those two halves applied three times:
 #
-# 1. **Fit inside a window that ends before the sessions being scored.** Every parameter
-#    in this notebook is estimated on one fold's training sessions and then held fixed.
+# 1. **Refit on a schedule, and let each estimate speak only for what comes after it.**
+#    A model is fitted on the first `burn-in` observations, that fit produces the values
+#    for the next `refit_every` observations, and then it is re-estimated on everything up
+#    to that point. No observation is ever used to fit the model that describes it.
 # 2. **Run the model forward, never backward.** A fitted model can be asked two different
 #    questions about a past session: what do I believe about it given everything up to it,
 #    and what do I believe about it given everything including what came after. The second
@@ -297,6 +359,17 @@ universe_table
 #    ends with an executed check that deleting the tail of the series leaves the earlier
 #    values untouched - which is the only way to tell the two apart from the outside.
 #
+# **A cross-validation fold does not do the first job, and the arrangement this notebook
+# used to run is the reason to say so.** Fitting once per fold on the fold's whole training
+# window and then filtering forward from the *start* of that window closes the leak for the
+# validation sessions and leaves it open for every training session: the earliest training
+# rows of a five-year window carry parameters estimated from five years of their own
+# future, while the validation rows carry parameters estimated only from their past. The
+# model downstream is then fitted on one version of the column and scored on another.
+# Nothing raises, because a fold's rows are internally consistent and the artifact records
+# no estimation window. The schedule replaces the fold as the thing that bounds an
+# estimate, which is also why the file this notebook writes carries no fold column.
+#
 # Because these three models read prices and never read a label, the boundary they must
 # respect is the observation date alone: a fit may use any session it could have seen, and
 # the holdout is the one stretch it may not. The forward-looking part of the discipline -
@@ -304,28 +377,33 @@ universe_table
 # label enters for the first time.
 
 # %% [markdown] tags=[]
-# ## 3. Resolve the Walk-Forward Folds Before Anything Is Fitted
+# ## 3. Resolve the Boundaries Before Anything Is Fitted
 #
-# A walk-forward fold is a pair of date ranges: a training range the model may be fitted
-# on, and a later validation range it is scored over, separated by a gap wide enough that
-# the outcome of the last training decision has already resolved before the first
-# validation decision is taken. The boundaries come from `generate_cv_splits` reading the
-# label file and the window sizes in `setup.yaml`. This is the same route the downstream
-# loader takes, so a `fold` id in this artifact selects the same window there as it does
-# here. The `fold` id is only an id: nothing downstream re-checks that the window it
-# selects is the one the features were fitted on, so deriving both from the same call is
-# what keeps them the same window.
+# Two boundaries bind the sections below, and neither is a fold.
 #
-# The folds are laid out by stepping backward from the date the holdout opens, so **fold
-# 0 is the most recent window and the highest-numbered fold is the oldest**. That is worth
-# stating rather than inferring: code that treats a lower fold id as the earlier period
-# reads every one of these folds in the wrong order, and the dates below are the check.
+# The first is **where the holdout opens**. It is the one stretch of history no parameter
+# here may be estimated from. The recursions still have to produce values across it,
+# because a holdout evaluation downstream needs the feature on those sessions, so each
+# walk stops re-estimating at the last session before the boundary and carries that
+# estimate across the window frozen. A coefficient refitted on holdout sessions is a
+# parameter estimated on the holdout however careful the recursion around it looks.
+#
+# The second is **the walk-forward validation windows**. They bound nothing that is fitted
+# - the schedule does that - but section 10 screens the emitted columns against a forward
+# return, and a screen run over the sessions a model was fitted on reports how well it fits
+# history rather than whether it predicts. So the windows are resolved here and the screen
+# is cut to them.
+#
+# The windows come from `generate_cv_splits` reading the label file and the sizes in
+# `setup.yaml`, the same call `05_evaluation` makes. They are laid out by stepping backward
+# from the date the holdout opens, so **window 0 is the most recent and the
+# highest-numbered is the oldest**.
 
 # %% tags=[]
 all_dates = sorted(prices["timestamp"].unique().to_list())
 
 # The label is the case study's configured primary, not a name typed here: the same
-# key picks the label file, the buffer that spaces the folds, and the HAC lag below.
+# key picks the label file, the buffer that spaces the windows, and the HAC lag below.
 PRIMARY_LABEL = SETUP["labels"]["primary"]
 LABEL_BUFFER = resolve_label_buffer(CASE_STUDY_ID, PRIMARY_LABEL, SETUP)
 assert LABEL_BUFFER, f"No label buffer configured for {PRIMARY_LABEL}"
@@ -333,19 +411,19 @@ assert LABEL_BUFFER, f"No label buffer configured for {PRIMARY_LABEL}"
 # Newey-West lag has to cover. Read from the buffer rather than typed, so a case study
 # that moves to a longer label cannot leave a stale lag behind.
 LABEL_HORIZON_SESSIONS = int(re.match(r"^(\d+)", LABEL_BUFFER).group(1))
-# One holdout boundary, resolved once. The rule drawn on the fold figure below and the
-# assertion in section 11 have to be the same date, or the figure stops describing the
-# check.
-HOLDOUT_START = pd.Timestamp(load_evaluation_config(CASE_STUDY_ID)["holdout_start"]).date()
+# One holdout boundary, resolved once. It is where every walk stops re-estimating, the
+# rule drawn on the schedule figure below, and the bound asserted in section 11.
+_EVAL_CONFIG = load_evaluation_config(CASE_STUDY_ID)
+HOLDOUT_START = pd.Timestamp(_EVAL_CONFIG["holdout_start"]).date()
+HOLDOUT_END = pd.Timestamp(_EVAL_CONFIG["holdout_end"]).date()
 print(
     f"Primary label {PRIMARY_LABEL}, buffer {LABEL_BUFFER} -> HAC lag horizon "
-    f"{LABEL_HORIZON_SESSIONS}; holdout opens {HOLDOUT_START}"
+    f"{LABEL_HORIZON_SESSIONS}; holdout runs {HOLDOUT_START} to {HOLDOUT_END}"
 )
 
 # %% [markdown] tags=[]
-# Each split arrives as four dates. The session counts beside them are how many of this
-# notebook's own trading sessions fall inside each window, which is what the minimum
-# training length in section 4 is checked against.
+# Each window arrives as four dates. The session counts beside them are how many of this
+# notebook's own trading sessions fall inside each one.
 
 # %% tags=[]
 label_frame = pl.read_parquet(LABELS_DIR / f"{PRIMARY_LABEL}.parquet")
@@ -370,180 +448,172 @@ for split in raw_folds:
 if MAX_FOLDS:
     folds = folds[:MAX_FOLDS]
 
-print(f"Built {len(folds)} walk-forward folds:")
+print(f"Resolved {len(folds)} walk-forward windows for the screen in section 10:")
 for f in folds:
     print(
-        f"  Fold {f['fold']}: train {f['train_start']}..{f['train_end']} "
-        f"({f['n_train']} days), validation {f['val_start']}..{f['val_end']} "
-        f"({f['n_val']} days)"
+        f"  Window {f['fold']}: train {f['train_start']}..{f['train_end']} "
+        f"({f['n_train']} sessions), validation {f['val_start']}..{f['val_end']} "
+        f"({f['n_val']} sessions)"
     )
 
 # %% [markdown] tags=[]
-# ### One Artifact, Three Labels
+# ### One Artifact, Every Label
 #
-# The folds above were cut for the primary label. This case study also configures two
-# longer-horizon labels, and the gap between training and validation is sized to the label
-# being predicted, so each of the three has boundaries of its own. A downstream model
-# trained on a longer label resolves its own folds and then reads this one artifact by
-# `fold` id - which is safe only if the sessions this notebook emits for a fold cover the
-# sessions that label's version of the fold asks for. Where they do not, the model finds
-# no feature value for part of its window and fills the gap with an imputed one.
+# This case study configures two longer-horizon labels beside the primary one. Under the
+# arrangement this notebook used to run, that was a hazard needing its own checks: the
+# artifact carried one fold set cut for the primary label, a model trained on a longer
+# label resolved *its* boundaries and then read the artifact by `fold` id, and whether
+# that was safe depended on how the two geometries happened to line up.
 #
-# The checks below are the whole of what makes reading by `fold` id safe, so they are
-# executed rather than argued, and there are two of them because coverage is not the only
-# way the arrangement can fail.
+# It is no longer a question. A value here is bounded by the estimation schedule, which
+# reads no label at all, so there is one value per pair and session and every label's
+# model reads it by timestamp. There is nothing for two fold sets to disagree about.
 #
-# The first is coverage. A longer gap moves `train_end` earlier and leaves `train_start`
-# where it was, so each longer label's fold is contained in the one written here; the
-# assertion is what would catch a future label whose gap is shorter than the primary's,
-# for which the containment runs the other way and this artifact would be short of rows.
-#
-# The second is that the values a longer label's model is scored on were not fitted on the
-# sessions it is scoring. Every value this notebook writes for fold F was fitted on the
-# **primary** label's training window for fold F, and a model reading fold F by id gets
-# those values whatever its own boundaries are. Containment does not settle it: a variant
-# whose validation window opened inside the primary's training window would be contained
-# and would still be scoring on sessions its features had already seen, so the property
-# has to be stated directly: the variant's validation opens after the primary's training
-# closes. `assert_variant_folds_are_out_of_sample` is that check, shared with the loader
-# every downstream model calls, and it compares timestamps rather than dates - on a
-# minute-bar case study the two disagree, and a fit closing at 15:22 against a validation
-# opening at 15:38 reads as a violation on the calendar day alone.
-
-# %% tags=[]
-label_geometries = {}
-for _label in [PRIMARY_LABEL, *SETUP["labels"].get("variants", [])]:
-    _buffer = resolve_label_buffer(CASE_STUDY_ID, _label, SETUP)
-    _path = LABELS_DIR / f"{_label}.parquet"
-    if not _buffer or not _path.exists():
-        continue
-    label_geometries[_label] = {
-        int(s["fold"]): (
-            pd.Timestamp(s["train_start"]).date(),
-            pd.Timestamp(s["train_end"]).date(),
-            pd.Timestamp(s["val_start"]).date(),
-            pd.Timestamp(s["val_end"]).date(),
-        )
-        for s in generate_cv_splits(
-            pl.read_parquet(_path).select("timestamp").unique().sort("timestamp"),
-            case_study_id=CASE_STUDY_ID,
-            label_buffer=_buffer,
-        )
-    }
-
-emitted = {f["fold"]: f for f in folds}
-for _label, _geometry in label_geometries.items():
-    for _fold_id, (_ts, _te, _vs, _ve) in _geometry.items():
-        if _fold_id not in emitted:
-            continue
-        _own = emitted[_fold_id]
-        assert _ts >= _own["train_start"] and _ve <= _own["val_end"], (
-            f"{_label} fold {_fold_id} spans {_ts}..{_ve}, outside the "
-            f"{_own['train_start']}..{_own['val_end']} this notebook emits for that fold"
-        )
-    print(
-        f"  {_label:<14} buffer {resolve_label_buffer(CASE_STUDY_ID, _label, SETUP):<4} "
-        f"fold 0 train ends {_geometry[0][1]}, validates {_geometry[0][2]} to "
-        f"{_geometry[0][3]}"
-    )
-print(
-    f"All {len(label_geometries)} configured label geometries are covered by the "
-    f"{len(folds)} folds written here."
-)
+# The boundary that does bind is the observation date, and section 11 is where a label
+# first enters and where the outcome window is checked against the holdout.
 
 # %% [markdown] tags=[]
-# The gaps the second check measures, one row per variant label and fold. Every one is
-# positive, and the narrowest is the one to watch: it is the label whose validation opens
-# closest to the sessions its features were fitted on.
+# ### The Estimation Schedule, Drawn
+#
+# The figure shows what the three walks will do. Each row is one model on its own series.
+# The grey stretch at the left is its burn-in: observations spent on the first estimate and
+# carrying no feature value. The blue stretch is where it is refitted on the declared
+# cadence, each estimate reading everything up to its own start and speaking only for what
+# follows it. The amber stretch is the holdout, over which the last pre-boundary estimate
+# is carried frozen.
+#
+# The bottom row is the eight validation windows, drawn on the same axis. They are there to
+# be compared against the grey: every one of them opens years after the last burn-in ends,
+# so no window is screened on a session the schedule left empty.
 
 # %% tags=[]
-variant_gaps = pl.DataFrame(assert_variant_folds_are_out_of_sample(CASE_STUDY_ID, PRIMARY_LABEL))
-# The gap ties across labels and folds, so the label and fold break it: without them
-# the five rows shown are whichever five the tie happened to order first.
-display(variant_gaps.sort(["gap", "label", "fold"]).head(5))
-print(
-    f"Narrowest gap between a variant's validation opening and the {PRIMARY_LABEL} "
-    f"training window its features were fitted through: {variant_gaps['gap'].min()}."
-)
+SCHEDULE_ROWS = [
+    ("Return model", ARIMA_BURNIN, ARIMA_REFIT_EVERY, all_dates[1:]),
+    ("Dollar regime", HMM_BURNIN, HMM_REFIT_EVERY, None),  # series is built in section 5
+    ("State-space", KALMAN_BURNIN, KALMAN_REFIT_EVERY, all_dates),
+]
 
 # %% [markdown] tags=[]
-# ### The Fold Contract
-#
-# The figure draws what the saved artifact will contain: per fold, the window each
-# model's parameters are estimated on and the window they are then applied to out of
-# sample, with the holdout period shaded. The state-space noise parameters, the
-# dollar-regime model's emissions and transitions, and the return model's coefficients
-# are all estimated inside the blue bar of their own row and then held frozen while the
-# recursion runs forward across the amber one.
-#
-# `fx_pairs` writes features for the cross-validation folds only, so every bar stops
-# to the left of the rule; a downstream stage that needs a holdout vintage builds one
-# with `append_holdout_fold_if_needed` (`utils/modeling.py:688`).
-#
-# The gap printed above separates each training bar from its validation bar. At one
-# session against a fifteen-year axis it is narrower than a pixel here, so it is a number
-# to read rather than a gap to look for.
+# The dollar factor is built in section 5 from a rolling volatility window, so it starts
+# later than the price panel and its burn-in ends later than the session index alone would
+# say. The row is drawn from that series rather than from the panel, which means deriving
+# it here - the same two lines section 5 runs, and the assertion there is what keeps the
+# two identical.
+
+# %% tags=[]
+_usd_legs = [s for s in SYMBOLS if s.startswith("USD_") or s.endswith("_USD")]
+_usd_window = int(min(SETUP["features"]["windows"]["close_to_close_volatility"]))
+_usd_schedule_dates = (
+    prices.filter(pl.col("symbol").is_in(_usd_legs))
+    .with_columns((pl.col("close") / pl.col("close").shift(1).over("symbol") - 1).alias("ret"))
+    .drop_nulls("ret")
+    .group_by("timestamp")
+    .agg(pl.col("ret").mean().alias("usd_ret"))
+    .sort("timestamp")
+    .with_columns(pl.col("usd_ret").rolling_std(_usd_window).alias("_vol"))
+    .drop_nulls()["timestamp"]
+    .to_list()
+)
+SCHEDULE_ROWS[1] = ("Dollar regime", HMM_BURNIN, HMM_REFIT_EVERY, _usd_schedule_dates)
 
 # %% tags=[]
 fig = go.Figure()
-_style = {
-    "Parameters estimated here": COLORS["blue"],
-    "Applied out of sample here": COLORS["amber"],
+_phase_style = {
+    "Burn-in, no value emitted": COLORS["neutral"],
+    "Refitted on the declared cadence": COLORS["blue"],
+    "Last pre-holdout estimate, carried frozen": COLORS["amber"],
 }
 _seen: set[str] = set()
-for f in folds:
-    row = f"Fold {f['fold']}"
-    for kind, (start, end) in (
-        ("Parameters estimated here", (f["train_start"], f["train_end"])),
-        ("Applied out of sample here", (f["val_start"], f["val_end"])),
+schedule_summary = []
+for row, burnin, refit_every, series in SCHEDULE_ROWS:
+    frozen_at = sum(d < HOLDOUT_START for d in series)
+    blocks = refit_boundaries(len(series), burnin, refit_every)
+    live = [b for b in blocks if b[0] <= frozen_at]
+    schedule_summary.append(
+        {
+            "model": row,
+            "observations": len(series),
+            "burnin": burnin,
+            "refit_every": refit_every,
+            "estimates": len(live),
+            "first_value": series[burnin],
+            "frozen_from": series[min(frozen_at, len(series) - 1)],
+        }
+    )
+    for phase, (start, end) in (
+        ("Burn-in, no value emitted", (series[0], series[burnin])),
+        (
+            "Refitted on the declared cadence",
+            (series[burnin], series[min(frozen_at, len(series) - 1)]),
+        ),
+        (
+            "Last pre-holdout estimate, carried frozen",
+            (series[min(frozen_at, len(series) - 1)], series[-1]),
+        ),
     ):
         fig.add_trace(
             go.Scatter(
                 x=[start.isoformat(), end.isoformat()],
                 y=[row, row],
                 mode="lines",
-                line={"width": 14, "color": _style[kind]},
-                name=kind,
-                legendgroup=kind,
-                showlegend=kind not in _seen,
+                line={"width": 16, "color": _phase_style[phase]},
+                name=phase,
+                legendgroup=phase,
+                showlegend=phase not in _seen,
             )
         )
-        _seen.add(kind)
+        _seen.add(phase)
 
-# %% [markdown] tags=[]
-# The holdout is drawn on the same axis: shaded from the date it opens to the end of the
-# price file, with a rule at the boundary itself.
+for f in folds:
+    fig.add_trace(
+        go.Scatter(
+            x=[f["val_start"].isoformat(), f["val_end"].isoformat()],
+            y=["Validation windows", "Validation windows"],
+            mode="lines",
+            line={"width": 10, "color": COLORS["copper"]},
+            name="Validation window",
+            legendgroup="Validation window",
+            showlegend="Validation window" not in _seen,
+        )
+    )
+    _seen.add("Validation window")
 
 # %% tags=[]
-fig.add_vrect(
-    x0=HOLDOUT_START.isoformat(),
-    x1=max(all_dates).isoformat(),
-    fillcolor=COLORS["neutral"],
-    opacity=0.10,
-    line_width=0,
-    layer="below",
-)
 fig.add_vline(x=HOLDOUT_START.isoformat(), line_dash="dash", line_color=COLORS["negative"])
 fig.update_layout(
     title=(
-        "No fold's parameters come from the right of its own training bar"
-        "<br><sup>Dashed rule is where the holdout opens; the shaded region is held back."
-        "<br>No bar crosses it - this notebook writes cross-validation folds only.</sup>"
+        "No estimate reads the sessions it speaks for, and none reads the holdout"
+        "<br><sup>One row per fitted model, on that model's own series."
+        "<br>Dashed rule is where the holdout opens; past it the last estimate is carried"
+        " frozen.</sup>"
     ),
     xaxis_title="Session",
     yaxis_title="",
-    height=420,
-    margin={"l": 90},
+    height=380,
+    margin={"l": 140, "t": 120},
 )
 show_plotly_with_alt(
     fig,
-    "One horizontal bar per fold, split into the stretch each fold's models are "
-    "estimated on and the later stretch they are applied to out of sample. The bars step "
-    "up and to the right, fold zero covering the most recent window and the "
-    "highest-numbered fold the oldest. A dashed vertical rule marks where the holdout "
-    "opens, with the region beyond it shaded, and every bar ends to the left of it.",
+    "Four horizontal bars against a session axis running from 2011 to the end of 2025. "
+    "The top three are the return model, the dollar-regime model and the state-space "
+    "model. Each begins with a short grey burn-in stretch at the left, then a long blue "
+    "stretch over which it is refitted on its declared cadence, then a short amber "
+    "stretch past the dashed vertical rule where the holdout opens and the last estimate "
+    "is carried forward frozen. The grey stretches differ in length because the models "
+    "spend different burn-ins on series that begin at different dates. The bottom row "
+    "holds the eight validation windows as separate short segments stepping up to the "
+    "right, all of them well to the right of every grey stretch and all of them ending "
+    "before the rule.",
 )
 
+# %% [markdown] tags=[]
+# The same schedule as numbers. `estimates` is how many separate fits each walk makes
+# before the holdout freezes it - the count that replaces "one per fold" and the one that
+# prices the run.
+
+# %% tags=[]
+schedule_table = pl.DataFrame(schedule_summary)
+schedule_table
 
 # %% [markdown] tags=[]
 # ## 4. Where the Price Level Is, and How Fast It Is Moving
@@ -675,140 +745,225 @@ def fit_kalman_mle(train_prices: np.ndarray, maxiter: int = 300) -> tuple[float,
 
 
 # %% [markdown] tags=[]
-# ### Run It Fold by Fold
+# ### Walk It Forward, One Pair at a Time
 #
-# For each fold and each pair, the noise sizes are fitted on the training sessions and
-# the recursion is then run forward across training and validation together, without
-# re-estimating. Running it across both is what makes the validation values usable: a
-# recursion carries its state forward, so restarting it at the first validation session
-# would throw away everything the model had learned about where the level was.
+# For each pair, one walk over its whole history. The first `KALMAN_BURNIN` sessions pay
+# for the first estimate and carry no value. From there the three noise sizes are
+# re-estimated every `KALMAN_REFIT_EVERY` sessions on everything up to that point, and each
+# estimate produces the values for the sessions between it and the next one. No session is
+# ever used to fit the model that describes it.
+#
+# The recursion is run over the whole prefix each time rather than restarted at the block
+# boundary. A Kalman filter carries its state forward, so restarting it would throw away
+# everything the model had learned about where the level was; running from the beginning
+# with the current parameters and keeping only the block's own rows gives the value a
+# reader would have had at the time, from a model refreshed on schedule.
+#
+# `walk_forward_feature` in `case_studies/utils/temporal.py` is that loop, shared with the
+# other case studies that fit a feature. `freeze_after` is the index of the last
+# pre-holdout session: past it the walk stops re-estimating and keeps applying the last
+# estimate it made, so the holdout gets values without contributing a parameter.
 #
 # Five columns come out of it. `kalman_trend` is how far the fitted level sits above or
 # below a 63-session moving average of the price, `kalman_slope` is the drift rate the
-# model currently believes in, `kalman_slope_zscore` puts that drift on the scale of its
-# own training-window spread, `kalman_innovation` is the gap between the observed price
-# and what the model expected before seeing it, and `kalman_smoothness` is one over the
-# uncertainty the model attaches to its own level estimate.
+# model currently believes in, `kalman_slope_zscore` puts that drift on the scale of the
+# spread the *estimation* window showed, `kalman_innovation` is the gap between the
+# observed price and what the model expected before seeing it, and `kalman_smoothness` is
+# one over the uncertainty the model attaches to its own level estimate.
 #
-# The sessions falling in the gap between training and validation are walked through so
-# the state stays current, and are written to neither split. At session $t$ the update
-# has read observations through $t$ and no further.
-#
-# The path's first session is walked through and not emitted either, for a different
-# reason. A recursion has to start somewhere, and it starts at the first observed price
-# with a slope of zero, so on that one session the forecast equals the observation: the
-# forecast error is identically zero, the slope is the zero it was initialised to, and the
-# trend is the price minus itself. Those are not small values, they are the starting
-# assumption showing through, and nothing downstream could tell them apart from a session
-# on which the price happened to land exactly where the model expected.
+# The slope z-score is the one that needs its reference stated. Under the old arrangement
+# the mean and spread came from the fold's training window; here they come from the block's
+# own estimation window, computed inside the fit and carried with the parameters, so they
+# end where the parameters do.
 
 
 # %% tags=[]
-def extract_kalman_features(fold: dict, symbol: str) -> tuple[list[dict], dict | None]:
-    """Fit one training fold and filter its train-to-validation path.
+KALMAN_FEATURES = ["level", "slope", "slope_zscore", "innovation", "smoothness"]
 
-    Returns ``(rows, params)``. ``params`` carries the MLE noise estimates for this
-    fold and symbol so the fit-stability section can draw what was estimated rather
-    than what the emitted features happened to average to.
-    """
-    sym_data = prices.filter(pl.col("symbol") == symbol).sort("timestamp")
-    sym_dates = sym_data["timestamp"].to_list()
-    sym_log_prices = np.log(sym_data["close"].to_numpy())
-    train_mask = [fold["train_start"] <= d <= fold["train_end"] for d in sym_dates]
-    val_mask = [fold["val_start"] <= d <= fold["val_end"] for d in sym_dates]
-    path_mask = [fold["train_start"] <= d <= fold["val_end"] for d in sym_dates]
-    train_prices = sym_log_prices[train_mask]
-    path_prices = sym_log_prices[path_mask]
-    path_dates = [d for d, include in zip(sym_dates, path_mask, strict=True) if include]
-    # i > 0 drops the prior; see the note above.
-    emit_idx = [
-        i
-        for i, d in enumerate(path_dates)
-        if i > 0 and (d <= fold["train_end"] or d >= fold["val_start"])
-    ]
-    if len(train_prices) < 252 or sum(val_mask) < 10:
-        return [], None
-    opt_params = fit_kalman_mle(train_prices, maxiter=KALMAN_MAXITER)
-    filtered = kalman_local_linear(path_prices, *opt_params)
-    train_idx = np.array([d <= fold["train_end"] for d in path_dates])
-    slope_mean = np.mean(filtered["slope"][train_idx])
-    slope_std = np.std(filtered["slope"][train_idx]) + 1e-10
-    moving_average = (
-        pl.Series(path_prices).rolling_mean(KALMAN_TREND_WINDOW, min_samples=1).to_numpy()
-    )
-    params = {
-        "fold": fold["fold"],
-        "symbol": symbol,
-        "observation_noise": float(opt_params[0]),
-        "level_noise": float(opt_params[1]),
-        "slope_noise": float(opt_params[2]),
+
+def kalman_fit(train: np.ndarray) -> dict:
+    """Estimate the three noise sizes, and the slope scale, on one estimation window."""
+    train_prices = train[:, 0]
+    params = fit_kalman_mle(train_prices, maxiter=KALMAN_MAXITER)
+    filtered = kalman_local_linear(train_prices, *params)
+    return {
+        "params": params,
+        "slope_mean": float(np.mean(filtered["slope"])),
+        "slope_std": float(np.std(filtered["slope"])) + 1e-10,
+        "n_train": len(train_prices),
     }
-    rows = [
-        {
-            "timestamp": path_dates[i],
-            "symbol": symbol,
-            "fold": fold["fold"],
-            "kalman_trend": filtered["level"][i] - moving_average[i],
-            "kalman_slope": filtered["slope"][i],
-            "kalman_slope_zscore": (filtered["slope"][i] - slope_mean) / slope_std,
-            "kalman_innovation": filtered["innovation"][i],
-            "kalman_smoothness": 1.0 / (filtered["uncertainty"][i] + 1e-10),
-        }
-        for i in emit_idx
-    ]
-    return rows, params
 
 
-# %% tags=[]
-kalman_results = []
-kalman_params = []
-for fold in folds:
-    for symbol in SYMBOLS:
-        try:
-            rows, params = extract_kalman_features(fold, symbol)
-            kalman_results.extend(rows)
-            if params is not None:
-                kalman_params.append(params)
-        except Exception as exc:
-            raise RuntimeError(
-                f"Kalman MLE failed for fold {fold['fold']}, symbol {symbol}"
-            ) from exc
-    if fold["fold"] % 2 == 1 or fold["fold"] == folds[-1]["fold"]:
-        n_fold = sum(row["fold"] == fold["fold"] for row in kalman_results)
-        print(f"  Kalman fold {fold['fold']}: {n_fold:,} features")
+def kalman_apply(fitted: dict, prefix: np.ndarray) -> np.ndarray:
+    """Filter a prefix under one set of parameters, one row of features per input row."""
+    filtered = kalman_local_linear(prefix[:, 0], *fitted["params"])
+    return np.column_stack(
+        [
+            filtered["level"],
+            filtered["slope"],
+            (filtered["slope"] - fitted["slope_mean"]) / fitted["slope_std"],
+            filtered["innovation"],
+            1.0 / (filtered["uncertainty"] + 1e-10),
+        ]
+    )
 
-kalman_df = pl.DataFrame(kalman_results)
-print(f"\nKalman features: {len(kalman_df):,} rows, {n_symbols} pairs x {len(folds)} folds")
 
 # %% [markdown] tags=[]
-# **The two checks this section rests on, executed.** Each stops the notebook rather than
-# leaving plausible numbers behind.
-#
-# *Containment.* Every emitted row is dated inside its own fold's training or validation
-# window, and none reaches the holdout.
-#
-# *Forward only.* `kalman_local_linear` is a recursion, so the value it reports for
-# session `i` must not move when the observations after `i` are deleted. This is the
-# distinction section 2 named as the one that matters and the one that is invisible in the
-# emitted numbers: a backward pass would produce a column of the same shape and range.
-# Deleting the second half of one pair's history and re-running gives a direct answer.
-# The truncation runs on the pre-holdout series, the same boundary every other cell reads
-# its data through - a check that reads held-back sessions in order to prove they are held
-# back reports on a series no other cell is allowed to see.
+# One process per pair. The walk makes roughly one Nelder-Mead search per quarter of
+# history against the one per fold it replaces, and each search evaluates the filter over
+# the whole expanding prefix, so this is the notebook's dominant cost and the twenty pairs
+# are independent. A fork context is named rather than left to the default: Python 3.14
+# defaults to `forkserver`, which re-imports the parent module and cannot reach a function
+# defined in a notebook kernel.
+
 
 # %% tags=[]
-for fold in folds:
-    rows = kalman_df.filter(pl.col("fold") == fold["fold"])
-    if len(rows) == 0:
-        continue
-    assert rows["timestamp"].min() >= fold["train_start"], (
-        f"fold {fold['fold']}: Kalman row before its own train_start"
-    )
-    assert rows["timestamp"].max() <= fold["val_end"], (
-        f"fold {fold['fold']}: Kalman row after its own val_end"
-    )
-assert kalman_df["timestamp"].max() < HOLDOUT_START, "Kalman emitted a holdout-dated row"
+def _kalman_one_symbol(payload: tuple[str, np.ndarray, int]) -> tuple[str, np.ndarray, list[dict]]:
+    """Walk one pair. Returns its feature block and the parameters behind each estimate."""
+    symbol, log_prices, frozen_at = payload
+    estimates: list[dict] = []
 
+    def fit(train: np.ndarray) -> dict:
+        fitted = kalman_fit(train)
+        estimates.append(
+            {
+                "symbol": symbol,
+                "fit_end": int(len(train)),
+                "observation_noise": float(fitted["params"][0]),
+                "level_noise": float(fitted["params"][1]),
+                "slope_noise": float(fitted["params"][2]),
+            }
+        )
+        return fitted
+
+    values = walk_forward_feature(
+        log_prices.reshape(-1, 1),
+        burnin=KALMAN_BURNIN,
+        refit_every=KALMAN_REFIT_EVERY,
+        fit=fit,
+        apply=kalman_apply,
+        n_features=len(KALMAN_FEATURES),
+        freeze_after=frozen_at,
+    )
+    return symbol, values, estimates
+
+
+# %% tags=[]
+kalman_payloads = []
+kalman_dates: dict[str, list] = {}
+for symbol in SYMBOLS:
+    sym_data = prices.filter(pl.col("symbol") == symbol).sort("timestamp")
+    sym_dates = sym_data["timestamp"].to_list()
+    kalman_dates[symbol] = sym_dates
+    kalman_payloads.append(
+        (
+            symbol,
+            np.log(sym_data["close"].to_numpy()),
+            sum(d < HOLDOUT_START for d in sym_dates),
+        )
+    )
+
+_kalman_workers = max(1, min(len(kalman_payloads), (os.cpu_count() or 2) - 1))
+print(f"Filtering {len(kalman_payloads)} pairs across {_kalman_workers} processes", flush=True)
+with ProcessPoolExecutor(
+    max_workers=_kalman_workers, mp_context=multiprocessing.get_context("fork")
+) as pool:
+    kalman_walks = list(pool.map(_kalman_one_symbol, kalman_payloads))
+
+# %% [markdown] tags=[]
+# The moving average `kalman_trend` measures the level against is a fixed-weight backward
+# window with nothing estimated in it, so it is computed once over each pair's whole
+# history rather than inside the walk. Taking the same window `03_financial_features` gives
+# `price_to_ma_63d` means the two columns measure price against one reference.
+
+# %% tags=[]
+kalman_frames = []
+kalman_params = []
+for symbol, values, estimates in kalman_walks:
+    sym_dates = kalman_dates[symbol]
+    moving_average = (
+        pl.Series(np.log(prices.filter(pl.col("symbol") == symbol).sort("timestamp")["close"]))
+        .rolling_mean(KALMAN_TREND_WINDOW, min_samples=1)
+        .to_numpy()
+    )
+    kalman_params.extend(estimates)
+    kalman_frames.append(
+        pl.DataFrame(
+            {
+                "timestamp": sym_dates,
+                "symbol": symbol,
+                "kalman_trend": values[:, 0] - moving_average,
+                "kalman_slope": values[:, 1],
+                "kalman_slope_zscore": values[:, 2],
+                "kalman_innovation": values[:, 3],
+                "kalman_smoothness": values[:, 4],
+            }
+        )
+    )
+
+kalman_df = (
+    pl.concat(kalman_frames)
+    .filter(pl.col("kalman_slope").is_not_nan())
+    .sort(["symbol", "timestamp"])
+)
+print(
+    f"\nState-space features: {len(kalman_df):,} rows, {n_symbols} pairs, "
+    f"{len(kalman_params):,} estimates"
+)
+
+# %% [markdown] tags=[]
+# **The three checks this section rests on, executed.** Each stops the notebook rather than
+# leaving plausible numbers behind.
+#
+# *Every value's parameters end before it.* This is the property the section exists for and
+# the one the old fold-frozen arrangement broke. `refit_boundaries` returns the same
+# `(fit_end, emit_end)` pairs the walk used, and every emitted index has to fall at or after
+# the `fit_end` of the block it belongs to. Checking the schedule rather than the values is
+# what makes this an assertion about the estimation channel rather than about the recursion.
+#
+# *Burn-in coverage, reported rather than hidden.* Each pair's first `KALMAN_BURNIN`
+# sessions carry no value, and the cell says which sessions those are and what share of the
+# oldest window's training rows they cost.
+#
+# *Forward only.* `kalman_local_linear` is a recursion, so the value it reports for session
+# `i` must not move when the observations after `i` are deleted. This is the distinction
+# section 2 named as invisible in the emitted numbers: a backward pass would produce a
+# column of the same shape and range. The truncation runs on the pre-holdout series, the
+# same boundary every other cell reads its data through.
+
+# %% tags=[]
+for symbol, values, _ in kalman_walks:
+    n_obs = len(kalman_dates[symbol])
+    covered = np.zeros(n_obs, dtype=bool)
+    for fit_end, emit_end in refit_boundaries(n_obs, KALMAN_BURNIN, KALMAN_REFIT_EVERY):
+        covered[fit_end:emit_end] = True
+    emitted = ~np.isnan(values[:, 0])
+    assert not (emitted & ~covered).any(), (
+        f"{symbol}: a value was emitted at an index no estimation block speaks for"
+    )
+    assert not emitted[:KALMAN_BURNIN].any(), (
+        f"{symbol}: a value was emitted inside the burn-in, before any estimate existed"
+    )
+
+_first_valued = kalman_df["timestamp"].min()
+_oldest = folds[-1]
+_burnt = sum(_oldest["train_start"] <= d < _first_valued for d in all_dates)
+print(
+    f"Every state-space value sits at or after the end of the block that estimated it, "
+    f"across {len(SYMBOLS)} pairs."
+)
+print(
+    f"Burn-in: the first value is dated {_first_valued}, so the oldest window "
+    f"{_oldest['fold']} loses {_burnt} of its {_oldest['n_train']} training sessions "
+    f"({_burnt / _oldest['n_train']:.0%}) and none of its {_oldest['n_val']} validation "
+    f"sessions."
+)
+assert _first_valued < min(f["val_start"] for f in folds), (
+    "the burn-in reaches into a validation window, so the screen in section 10 would run "
+    "on sessions this feature never valued"
+)
+
+# %% tags=[]
 seal_prices = np.log(
     prices.filter((pl.col("symbol") == SYMBOLS[0]) & (pl.col("timestamp") < HOLDOUT_START))
     .sort("timestamp")["close"]
@@ -822,10 +977,8 @@ kalman_drift = max(
 )
 assert kalman_drift < 1e-10, f"Kalman state moved by {kalman_drift:.2e} - not a forward filter"
 print(
-    f"Level-model checks hold across {len(folds)} folds; last emitted date "
-    f"{kalman_df['timestamp'].max()} < holdout start {HOLDOUT_START}; deleting the last "
-    f"{len(seal_prices) - cut} observations of {SYMBOLS[0]} moves the first {cut} filtered "
-    f"states by {kalman_drift:.2e}"
+    f"Deleting the last {len(seal_prices) - cut} observations of {SYMBOLS[0]} moves the "
+    f"first {cut} filtered states by {kalman_drift:.2e}"
 )
 
 # %% [markdown] tags=[]
@@ -959,45 +1112,35 @@ def fit_best_hmm(X_train: np.ndarray) -> tuple[GaussianHMM, float, int]:
 
 
 # %% [markdown] tags=[]
-# Each fold emits training and validation sessions only; the sessions in the gap between
-# them advance the recursion and are written to neither split.
-#
 # Two columns come out. `hmm_regime_prob_high_vol` is the probability the session was in
 # the higher-variance state, and `hmm_regime_transition_5d` is how much that probability
 # has moved over the last five sessions, which turns a level into a measure of a regime
-# changing. The difference is null rather than zero for the first five sessions of a
-# fold's path: there is no session five back to difference against. The panel already
-# carries rows on which this difference is genuinely zero because the probability did not
-# move, and writing a zero here would make the two indistinguishable.
+# changing.
+#
+# Only the first is fitted. The five-session difference is arithmetic on the emitted
+# probability with nothing estimated in it, so it is taken once over the whole column
+# rather than inside the walk. It is null rather than zero where there is no session five
+# back to difference against: the panel already carries rows on which the difference is
+# genuinely zero because the probability did not move, and writing a zero would make the
+# two indistinguishable.
+#
+# A difference that straddles a refit is a difference between two parameter vintages. That
+# is not a defect - it is what a reader watching this feature in production would see on
+# the day the model was refreshed - but it is worth naming, because it is the one place a
+# jump in the column can come from something other than the market.
 
 
 # %% tags=[]
-def extract_hmm_features(fold: dict) -> tuple[list[dict], GaussianHMM, np.ndarray, float, int]:
-    """Fit one HMM fold and return its filtered feature rows."""
-    train_idx = [
-        i for i, d in enumerate(valid_dates) if fold["train_start"] <= d <= fold["train_end"]
-    ]
-    val_idx = [i for i, d in enumerate(valid_dates) if fold["val_start"] <= d <= fold["val_end"]]
-    path_idx = [i for i, d in enumerate(valid_dates) if fold["train_start"] <= d <= fold["val_end"]]
-    if len(train_idx) < 252 or len(val_idx) < 10:
-        raise ValueError(f"Insufficient HMM data for fold {fold['fold']}")
-    model, score, unstable = fit_best_hmm(usd_arr[train_idx])
-    order = sort_states_by_variance(model)
-    filtered = filtered_state_probs(model, usd_arr[path_idx])
-    path_dates = [valid_dates[i] for i in path_idx]
-    rows = [
-        {
-            "timestamp": hmm_date,
-            "fold": fold["fold"],
-            "hmm_regime_prob_high_vol": float(filtered[i, order[1]]),
-            "hmm_regime_transition_5d": (
-                float(filtered[i, order[1]] - filtered[i - 5, order[1]]) if i >= 5 else None
-            ),
-        }
-        for i, hmm_date in enumerate(path_dates)
-        if hmm_date <= fold["train_end"] or hmm_date >= fold["val_start"]
-    ]
-    return rows, model, order, score, unstable
+def hmm_fit(train: np.ndarray) -> tuple[GaussianHMM, np.ndarray, float, int]:
+    """Estimate the chain on one window, and order its states by fitted variance."""
+    model, score, unstable = fit_best_hmm(train)
+    return model, sort_states_by_variance(model), score, unstable
+
+
+def hmm_apply(fitted: tuple, prefix: np.ndarray) -> np.ndarray:
+    """P(higher-variance state) at every row of a prefix, by forward recursion."""
+    model, order, _, _ = fitted
+    return filtered_state_probs(model, prefix)[:, order[1]].reshape(-1, 1)
 
 
 # %% [markdown] tags=[]
@@ -1032,22 +1175,30 @@ HMM_MIN_COVAR = GaussianHMM().min_covar  # added to the initial covariance
 HMM_COVARS_PRIOR = GaussianHMM().covars_prior  # added at every fitting step
 
 # %% [markdown] tags=[]
-# The series is cut at the holdout boundary before anything reads it. Every fold's path
-# already ends to the left of that boundary, so this removes no session any model is
-# fitted on or run over. What it removes is the holdout's contribution to the variance
-# printed below - and that variance is the measurement the whole scaling argument rests
-# on, so it has to be measured on the same history the models are allowed to see.
+# The walk runs over the whole series, holdout sessions included, because the holdout needs
+# a value on every one of them. What must not reach into the holdout is an *estimate*, and
+# that is `freeze_after`'s job rather than a cut on the input: past the last pre-holdout
+# session the walk stops re-estimating and keeps applying what it last fitted.
+#
+# The variance printed below is measured on the pre-holdout part alone. It is the
+# measurement the whole scaling argument rests on, and a constant chosen by looking at the
+# holdout is a parameter estimated on the holdout whatever the code around it does.
 
 # %% tags=[]
-valid_usd = usd_daily.drop_nulls(subset=["usd_ret", USD_VOL_COL]).filter(
-    pl.col("timestamp") < HOLDOUT_START
+full_usd = usd_daily.drop_nulls(subset=["usd_ret", USD_VOL_COL])
+usd_dates = full_usd["timestamp"].to_list()
+usd_arr = full_usd.select(["usd_ret", USD_VOL_COL]).to_numpy() * HMM_SCALE
+HMM_FROZEN_AFTER = sum(d < HOLDOUT_START for d in usd_dates)
+_native = (
+    full_usd.filter(pl.col("timestamp") < HOLDOUT_START).select(["usd_ret", USD_VOL_COL]).to_numpy()
 )
-valid_dates = valid_usd["timestamp"].to_list()
-_native = valid_usd.select(["usd_ret", USD_VOL_COL]).to_numpy()
-usd_arr = _native * HMM_SCALE
+assert len(_native) == HMM_FROZEN_AFTER, (
+    "the pre-holdout prefix and the freeze index disagree, so the walk would re-estimate "
+    "on a session the scaling measurement excludes"
+)
 print(
-    f"USD series, cut at {HOLDOUT_START}: {len(valid_dates):,} sessions, "
-    f"{valid_dates[0]} to {valid_dates[-1]}"
+    f"USD series: {len(usd_dates):,} sessions, {usd_dates[0]} to {usd_dates[-1]}; "
+    f"parameters frozen after {usd_dates[HMM_FROZEN_AFTER - 1]}, the last before the holdout"
 )
 
 # %% [markdown] tags=[]
@@ -1058,7 +1209,7 @@ print(
 
 # %% tags=[]
 native_var = float(_native[:, 0].var())
-scaled_var = float(usd_arr[:, 0].var())
+scaled_var = float((_native[:, 0] * HMM_SCALE).var())
 obs_per_state = len(_native) / HMM_N_STATES
 prior_term = HMM_COVARS_PRIOR / obs_per_state
 
@@ -1076,42 +1227,65 @@ print(
 )
 
 # %% [markdown] tags=[]
-# Each fold is fitted on its own training window, and the loop keeps the restart count it
-# had to discard.
+# One walk over the whole series, and the loop keeps the restart count it had to discard
+# along with the transition matrix behind every estimate. There is one market-level series,
+# so this is one walk rather than one per pair.
 
 # %% tags=[]
-hmm_results = []
-hmm_params = []
+hmm_estimates = []
 unstable_hmm_fits = 0
-best_model = None
-for fold in folds:
-    rows, best_model, order, best_ll, unstable = extract_hmm_features(fold)
-    hmm_results.extend(rows)
+
+
+def _hmm_recording_fit(train: np.ndarray) -> tuple:
+    """Estimate one block and record what came out of it, for the stability panel."""
+    global unstable_hmm_fits
+    fitted = hmm_fit(train)
+    model, order, score, unstable = fitted
     unstable_hmm_fits += unstable
-    _trans = best_model.transmat_[np.ix_(order, order)]
-    hmm_params.append(
+    transition = model.transmat_[np.ix_(order, order)]
+    hmm_estimates.append(
         {
-            "fold": fold["fold"],
-            "persist_low_vol": float(_trans[0, 0]),
-            "persist_high_vol": float(_trans[1, 1]),
-            "log_likelihood": float(best_ll),
+            "fit_end": int(len(train)),
+            "fit_through": usd_dates[len(train) - 1],
+            "persist_low_vol": float(transition[0, 0]),
+            "persist_high_vol": float(transition[1, 1]),
+            "log_likelihood": float(score),
+            "model": model,
+            "order": order,
         }
     )
-    print(f"  HMM fold {fold['fold']}: {len(rows)} dates (train+validation), max LL={best_ll:.1f}")
-print(f"HMM unstable restarts excluded: {unstable_hmm_fits}")
+    return fitted
 
+
+hmm_values = walk_forward_feature(
+    usd_arr,
+    burnin=HMM_BURNIN,
+    refit_every=HMM_REFIT_EVERY,
+    fit=_hmm_recording_fit,
+    apply=hmm_apply,
+    n_features=1,
+    freeze_after=HMM_FROZEN_AFTER,
+)
+print(
+    f"Regime chain estimated {len(hmm_estimates)} times; unstable restarts excluded: {unstable_hmm_fits}"
+)
 
 # %% [markdown] tags=[]
-# The matrix below is from the last fold the loop fitted. Fold 0 covers the most recent
-# validation year, so the last fold is the fit made on the oldest training window, and the
-# number printed beside the table names it. Each row is the state the session starts in
-# and each column the probability of the next session's state, so the diagonal says how
-# often a state persists. A state that persists with probability $p$ lasts $1/(1-p)$
-# sessions on average, which is the last column and is easier to read than the probability
-# itself.
+# The matrix below is the **first** estimate the walk made - the one fitted on the burn-in
+# alone, and therefore on the oldest window in the run. It is named rather than taken from
+# wherever the loop stopped, because the last estimate is the one carried across the
+# holdout and describes the most recent history rather than the period the text discusses.
+#
+# Each row is the state the session starts in and each column the probability of the next
+# session's state, so the diagonal says how often a state persists. A state that persists
+# with probability $p$ lasts $1/(1-p)$ sessions on average, which is the last column and is
+# easier to read than the probability itself.
 
 # %% tags=[]
-trans = best_model.transmat_[np.ix_(order, order)]
+_first_estimate = hmm_estimates[0]
+trans = _first_estimate["model"].transmat_[
+    np.ix_(_first_estimate["order"], _first_estimate["order"])
+]
 transition_table = pl.DataFrame(
     {
         "from_state": ["low_vol", "high_vol"],
@@ -1120,38 +1294,79 @@ transition_table = pl.DataFrame(
         "expected_sessions": [1.0 / (1.0 - trans[0, 0]), 1.0 / (1.0 - trans[1, 1])],
     }
 )
-print(f"HMM transition matrix, fold {folds[-1]['fold']}, states ordered by variance:")
+print(
+    f"Transition matrix of the first estimate, fitted through "
+    f"{_first_estimate['fit_through']}, states ordered by variance:"
+)
 transition_table
 
+# %% [markdown] tags=[]
+# The five-session difference is taken here, over the emitted column, as the section text
+# said. `shift(5)` leaves the first five valued sessions null because there is nothing five
+# back to difference against, and the burn-in prefix stays null throughout.
+
 # %% tags=[]
-hmm_df = pl.DataFrame(hmm_results)
-print(f"HMM features: {len(hmm_df):,} rows")
+hmm_df = (
+    pl.DataFrame(
+        {
+            "timestamp": usd_dates,
+            "hmm_regime_prob_high_vol": hmm_values[:, 0],
+        }
+    )
+    .filter(pl.col("hmm_regime_prob_high_vol").is_not_nan())
+    .sort("timestamp")
+    .with_columns(
+        (pl.col("hmm_regime_prob_high_vol") - pl.col("hmm_regime_prob_high_vol").shift(5)).alias(
+            "hmm_regime_transition_5d"
+        )
+    )
+)
+print(f"Regime features: {len(hmm_df):,} sessions, {hmm_df['timestamp'].min()} onward")
 
 # %% [markdown] tags=[]
-# **The same two checks, against what this section emits.** Containment first, then the
-# truncation test. The forward recursion is written out rather than taken from a library
-# call, so the truncation test is the only thing standing between it and the probability
-# given the whole series - which would carry every validation session into each
-# training-date value.
+# **The three checks, against what this section emits.** The schedule check first, then the
+# burn-in report, then the truncation test. The forward recursion is written out rather
+# than taken from a library call, so the truncation test is the only thing standing between
+# it and the probability given the whole series - which would carry every later session
+# into each earlier value.
 
 # %% tags=[]
-for fold in folds:
-    rows = hmm_df.filter(pl.col("fold") == fold["fold"])
-    if len(rows) == 0:
-        continue
-    assert rows["timestamp"].min() >= fold["train_start"], (
-        f"fold {fold['fold']}: HMM row before its own train_start"
-    )
-    assert rows["timestamp"].max() <= fold["val_end"], (
-        f"fold {fold['fold']}: HMM row after its own val_end"
-    )
-assert hmm_df["timestamp"].max() < HOLDOUT_START, "HMM emitted a holdout-dated row"
+_covered = np.zeros(len(usd_dates), dtype=bool)
+for fit_end, emit_end in refit_boundaries(len(usd_dates), HMM_BURNIN, HMM_REFIT_EVERY):
+    _covered[fit_end:emit_end] = True
+_emitted = ~np.isnan(hmm_values[:, 0])
+assert not (_emitted & ~_covered).any(), (
+    "a regime probability was emitted at an index no estimation block speaks for"
+)
+assert not _emitted[:HMM_BURNIN].any(), (
+    "a regime probability was emitted inside the burn-in, before any estimate existed"
+)
+assert all(e["fit_through"] < HOLDOUT_START for e in hmm_estimates), (
+    "an estimate read a holdout session, so `freeze_after` did not bind"
+)
+assert hmm_df["timestamp"].max() >= HOLDOUT_START, (
+    "the walk emitted nothing inside the holdout, which is the vintage a holdout evaluation reads"
+)
 
-seal_train_idx = [
-    i for i, d in enumerate(valid_dates) if folds[0]["train_start"] <= d <= folds[0]["train_end"]
-]
-seal_model, _, _ = fit_best_hmm(usd_arr[seal_train_idx])
-seal_obs = usd_arr[seal_train_idx]
+_first_regime = hmm_df["timestamp"].min()
+_burnt_regime = sum(_oldest["train_start"] <= d < _first_regime for d in usd_dates)
+print(
+    f"Every regime probability sits at or after the end of the block that estimated it, "
+    f"and the last of the {len(hmm_estimates)} estimates reads through "
+    f"{hmm_estimates[-1]['fit_through']}, before the holdout opens {HOLDOUT_START}."
+)
+print(
+    f"Burn-in: the first value is dated {_first_regime}, so the oldest window "
+    f"{_oldest['fold']} loses {_burnt_regime} of the {sum(_oldest['train_start'] <= d <= _oldest['train_end'] for d in usd_dates)} "
+    f"dollar-factor sessions in its training window, and none in its validation window."
+)
+assert _first_regime < min(f["val_start"] for f in folds), (
+    "the regime burn-in reaches into a validation window"
+)
+
+# %% tags=[]
+seal_obs = usd_arr[:HMM_BURNIN]
+seal_model, _, _ = fit_best_hmm(seal_obs)
 cut = len(seal_obs) // 2
 hmm_drift = float(
     np.abs(
@@ -1161,10 +1376,8 @@ hmm_drift = float(
 )
 assert hmm_drift < 1e-10, f"filtered probabilities moved by {hmm_drift:.2e} - not filtered"
 print(
-    f"Regime checks hold across {len(folds)} folds; last emitted date "
-    f"{hmm_df['timestamp'].max()} < holdout start {HOLDOUT_START}; deleting the last "
-    f"{len(seal_obs) - cut} observations of fold {folds[0]['fold']} moves the first {cut} "
-    f"probabilities by {hmm_drift:.2e}"
+    f"Deleting the last {len(seal_obs) - cut} observations of the burn-in window moves the "
+    f"first {cut} probabilities by {hmm_drift:.2e}"
 )
 
 # %% [markdown] tags=[]
@@ -1180,151 +1393,167 @@ print(
 # past, which is a different quantity from a large return.
 #
 # Three columns come out: the forecast itself, the error, and that error divided by the
-# spread of the training-window errors so a quiet pair and a volatile one are comparable.
+# spread of the errors the *estimation window* showed, so a quiet pair and a volatile one
+# are comparable. That spread moves with the coefficients and is carried alongside them,
+# so it ends where they do.
 #
-# The fitted coefficients must not move when the recursion is extended past the training
-# window. `fit.apply(path_rets, refit=False)` is the call that guarantees it: the state
-# recursion advances with each new observation while the coefficients stay where the
-# training fit left them. That is a claim about a library, so the check below compares the
-# two parameter vectors element by element rather than trusting the argument name.
+# The fitted coefficients must not move when the recursion is extended past the window they
+# were estimated on. `fit.apply(rets, refit=False)` is the call that guarantees it: the
+# state recursion advances with each new observation while the coefficients stay where the
+# fit left them. That is a claim about a library, so the check below compares the two
+# parameter vectors element by element rather than trusting the argument name.
 
 
 # %% tags=[]
-def extract_arima_features(fold: dict, symbol: str) -> list[dict]:
-    """Fit one training fold and refilter its train-to-validation return path."""
+def arima_fit(train: np.ndarray) -> dict:
+    """Estimate the coefficients on one window, and the spread of its own errors."""
+    fitted = ARIMA(train[:, 0], order=ARIMA_ORDER).fit()
+    return {"fit": fitted, "resid_std": float(np.std(fitted.resid)) + 1e-10}
+
+
+def arima_apply(fitted: dict, prefix: np.ndarray) -> np.ndarray:
+    """One-step forecasts over a prefix, with the estimation window's error spread."""
+    extended = fitted["fit"].apply(prefix[:, 0], refit=False)
+    predicted = np.asarray(extended.predict(start=0, end=len(prefix) - 1), dtype=float)
+    return np.column_stack([predicted, np.full(len(prefix), fitted["resid_std"])])
+
+
+# %% [markdown] tags=[]
+# One walk per pair, over its whole return series. As with the state-space model the
+# recursion is run from the beginning of the series each block and only the block's own
+# rows are kept, because a state-space recursion has no meaningful restart point. The
+# ARIMA fits are cheap next to the Nelder-Mead searches in section 4, so these run in this
+# process rather than across a pool.
+
+
+# %% tags=[]
+arima_frames = []
+for symbol in SYMBOLS:
     sym_data = prices.filter(pl.col("symbol") == symbol).sort("timestamp")
     sym_dates = sym_data["timestamp"].to_list()
     sym_close = sym_data["close"].to_numpy()
+    # A return needs the session before it, so the return series is one shorter than the
+    # price series and starts one session later.
     sym_rets = np.diff(sym_close) / sym_close[:-1]
     ret_dates = sym_dates[1:]
-    train_mask = [fold["train_start"] <= d <= fold["train_end"] for d in ret_dates]
-    val_mask = [fold["val_start"] <= d <= fold["val_end"] for d in ret_dates]
-    path_mask = [fold["train_start"] <= d <= fold["val_end"] for d in ret_dates]
-    train_rets = sym_rets[train_mask]
-    path_rets = sym_rets[path_mask]
-    path_dates = [d for d, include in zip(ret_dates, path_mask, strict=True) if include]
-    if len(train_rets) < 252 or sum(val_mask) < 10:
-        return []
-    fit = ARIMA(train_rets, order=ARIMA_ORDER).fit()
-    train_resid_std = np.std(fit.resid) + 1e-10
-    extended = fit.apply(path_rets, refit=False)
-    predicted = extended.predict(start=0, end=len(path_rets) - 1)
-    return [
-        {
-            "timestamp": arima_date,
-            "symbol": symbol,
-            "fold": fold["fold"],
-            "arima_forecast": float(predicted[i]),
-            "arima_residual": float(path_rets[i] - predicted[i]),
-            "arima_residual_zscore": float((path_rets[i] - predicted[i]) / train_resid_std),
-        }
-        for i, arima_date in enumerate(path_dates)
-        if arima_date <= fold["train_end"] or arima_date >= fold["val_start"]
-    ]
+    try:
+        values = walk_forward_feature(
+            sym_rets.reshape(-1, 1),
+            burnin=ARIMA_BURNIN,
+            refit_every=ARIMA_REFIT_EVERY,
+            fit=arima_fit,
+            apply=arima_apply,
+            n_features=2,
+            freeze_after=sum(d < HOLDOUT_START for d in ret_dates),
+        )
+    except Exception as exc:
+        raise RuntimeError(f"ARIMA walk failed for {symbol}") from exc
+    residual = sym_rets - values[:, 0]
+    arima_frames.append(
+        pl.DataFrame(
+            {
+                "timestamp": ret_dates,
+                "symbol": symbol,
+                "arima_forecast": values[:, 0],
+                "arima_residual": residual,
+                "arima_residual_zscore": residual / values[:, 1],
+            }
+        )
+    )
 
-
-# %% tags=[]
-arima_results = []
-for fold in folds:
-    for symbol in SYMBOLS:
-        try:
-            arima_results.extend(extract_arima_features(fold, symbol))
-        except Exception as exc:
-            raise RuntimeError(
-                f"ARIMA fit failed for fold {fold['fold']}, symbol {symbol}"
-            ) from exc
-    if fold["fold"] % 2 == 0 or fold["fold"] == folds[-1]["fold"]:
-        n_fold = sum(row["fold"] == fold["fold"] for row in arima_results)
-        print(f"  ARIMA fold {fold['fold']}: {n_fold:,} features")
-
-arima_df = pl.DataFrame(arima_results)
-print(f"\nARIMA features: {len(arima_df):,} rows")
+arima_df = (
+    pl.concat(arima_frames)
+    .filter(pl.col("arima_forecast").is_not_nan())
+    .sort(["symbol", "timestamp"])
+)
+print(f"\nReturn-model features: {len(arima_df):,} rows across {n_symbols} pairs")
 
 # %% [markdown] tags=[]
-# **The same checks again, plus one this section needs on its own.** Containment first.
-# Then the truncation test the other two sections run, on the forecasts this one emits.
-# Between them sits the claim particular to this model: that `apply(..., refit=False)`
-# extends the recursion without re-estimating. Truncation alone would not catch a re-fit,
-# because a model re-estimated on the longer series is still a forward pass over it - so
-# the two parameter vectors are also compared element by element. Every series here stops
-# at the holdout boundary, like every other series in this notebook.
+# **The same three checks, plus one this section needs on its own.** Schedule, burn-in and
+# truncation as before. Between them sits the claim particular to this model: that
+# `apply(..., refit=False)` extends the recursion without re-estimating. Truncation alone
+# would not catch a re-fit, because a model re-estimated on the longer series is still a
+# forward pass over it - so the two parameter vectors are also compared element by element.
 
 # %% tags=[]
-for fold in folds:
-    rows = arima_df.filter(pl.col("fold") == fold["fold"])
-    if len(rows) == 0:
-        continue
-    assert rows["timestamp"].min() >= fold["train_start"], (
-        f"fold {fold['fold']}: ARIMA row before its own train_start"
-    )
-    assert rows["timestamp"].max() <= fold["val_end"], (
-        f"fold {fold['fold']}: ARIMA row after its own val_end"
-    )
-assert arima_df["timestamp"].max() < HOLDOUT_START, "ARIMA emitted a holdout-dated row"
+_arima_ret_dates = (
+    prices.filter(pl.col("symbol") == SYMBOLS[0]).sort("timestamp")["timestamp"].to_list()[1:]
+)
+_covered = np.zeros(len(_arima_ret_dates), dtype=bool)
+for fit_end, emit_end in refit_boundaries(len(_arima_ret_dates), ARIMA_BURNIN, ARIMA_REFIT_EVERY):
+    _covered[fit_end:emit_end] = True
+_valued_dates = set(arima_df.filter(pl.col("symbol") == SYMBOLS[0])["timestamp"].to_list())
+assert not any(
+    d in _valued_dates
+    for d, is_covered in zip(_arima_ret_dates, _covered, strict=True)
+    if not is_covered
+), f"{SYMBOLS[0]}: a forecast was emitted at a session no estimation block speaks for"
 
+_first_arima = arima_df["timestamp"].min()
+_burnt_arima = sum(_oldest["train_start"] <= d < _first_arima for d in all_dates)
+print(
+    f"Every forecast sits at or after the end of the block that estimated it. Burn-in: the "
+    f"first value is dated {_first_arima}, so the oldest window {_oldest['fold']} loses "
+    f"{_burnt_arima} of its {_oldest['n_train']} training sessions and none of its "
+    f"validation sessions."
+)
+assert _first_arima < min(f["val_start"] for f in folds), (
+    "the return-model burn-in reaches into a validation window"
+)
+
+# %% tags=[]
 seal_data = prices.filter(
     (pl.col("symbol") == SYMBOLS[0]) & (pl.col("timestamp") < HOLDOUT_START)
 ).sort("timestamp")
 seal_close = seal_data["close"].to_numpy()
 seal_rets = np.diff(seal_close) / seal_close[:-1]
-seal_ret_dates = seal_data["timestamp"].to_list()[1:]
-seal_fold = folds[0]
-seal_train = seal_rets[
-    [seal_fold["train_start"] <= d <= seal_fold["train_end"] for d in seal_ret_dates]
-]
-seal_path = seal_rets[
-    [seal_fold["train_start"] <= d <= seal_fold["val_end"] for d in seal_ret_dates]
-]
-seal_fit = ARIMA(seal_train, order=ARIMA_ORDER).fit()
-seal_applied = seal_fit.apply(seal_path, refit=False)
+seal_fit = ARIMA(seal_rets[:ARIMA_BURNIN], order=ARIMA_ORDER).fit()
+seal_applied = seal_fit.apply(seal_rets, refit=False)
 param_drift = float(np.abs(np.asarray(seal_fit.params) - np.asarray(seal_applied.params)).max())
 assert param_drift == 0.0, f"apply() re-estimated: parameters moved by {param_drift:.2e}"
 
-seal_cut = len(seal_path) // 2
-full_pred = np.asarray(seal_applied.predict(start=0, end=len(seal_path) - 1))
+seal_cut = len(seal_rets) // 2
+full_pred = np.asarray(seal_applied.predict(start=0, end=len(seal_rets) - 1))
 prefix_pred = np.asarray(
-    seal_fit.apply(seal_path[:seal_cut], refit=False).predict(start=0, end=seal_cut - 1)
+    seal_fit.apply(seal_rets[:seal_cut], refit=False).predict(start=0, end=seal_cut - 1)
 )
 arima_drift = float(np.abs(full_pred[:seal_cut] - prefix_pred).max())
 assert arima_drift < 1e-10, f"forecasts moved by {arima_drift:.2e} - not a forward pass"
 print(
-    f"Return-model checks hold across {len(folds)} folds; last emitted date "
-    f"{arima_df['timestamp'].max()} < holdout start {HOLDOUT_START}; extending "
-    f"{SYMBOLS[0]} fold {seal_fold['fold']} from {len(seal_train)} to {len(seal_path)} "
-    f"observations moves the fitted parameters by {param_drift:.2e}, and deleting the "
-    f"last {len(seal_path) - seal_cut} of them moves the first {seal_cut} forecasts by "
+    f"Extending {SYMBOLS[0]} from {ARIMA_BURNIN} to {len(seal_rets)} observations moves the "
+    f"fitted parameters by {param_drift:.2e}, and deleting the last "
+    f"{len(seal_rets) - seal_cut} of them moves the first {seal_cut} forecasts by "
     f"{arima_drift:.2e}"
 )
 
 # %% [markdown] tags=[]
-# ## 7. Do the Fitted Parameters Move as the Window Rolls?
+# ## 7. Do the Fitted Parameters Move as the Schedule Rolls?
 #
-# Refitting once per fold is a decision, and this is where it gets checked. The training
-# windows roll forward one year at a time and overlap by four of their five years, so the
-# fitted parameters should move slowly. Parameters that come back identical fold after fold
-# say the refitting bought nothing and one fit would have done; parameters that swing say
-# the feature depending on them means something different in each window, which is a
-# warning to carry into how it is used.
+# Refitting on a cadence is a decision, and this is where it gets checked. The estimation
+# windows expand by one quarter at a time for the state-space and regime models and by one
+# month for the return model, so consecutive estimates overlap almost completely and the
+# parameters should move slowly. Parameters that come back identical estimate after
+# estimate say the refitting bought nothing and one fit would have done; parameters that
+# swing say the feature depending on them means something different in each block, which is
+# a warning to carry into how it is used.
 #
 # The left panel is the three noise sizes from the state-space fit, taken as the median
-# across pairs so one badly behaved pair does not stand for the fold. The axis is
+# across pairs so one badly behaved pair does not stand for the block. The axis is
 # logarithmic because the three differ by orders of magnitude by construction: quoting
 # noise, level movement and slope movement are not comparable quantities.
 #
-# **Read the observation-noise line before the others.** In most folds it sits near the
-# level noise, which is the split the model exists to make. In the folds the cell below
-# names it falls instead, by the factor printed there, to a number that is zero for every
-# practical purpose. That is the search running the likelihood off the end of its own
-# parameter: with $R$ at zero the model believes each observed price exactly, so the level
-# it reports is the price and the uncertainty it attaches to that level goes to zero.
-# `kalman_smoothness` is one over that uncertainty, so in those folds it saturates at the
-# constant its denominator is floored with, and the range printed below is the spread that
-# produces. Within a fold the column still ranks pairs; across folds it is not one scale,
-# which is a property to know before pooling folds.
+# **Read the observation-noise line before the others.** Where it sits near the level noise
+# it is making the split the model exists to make. Where it falls instead to a number that
+# is zero for every practical purpose, the search has run the likelihood off the end of its
+# own parameter: with $R$ at zero the model believes each observed price exactly, so the
+# level it reports is the price and the uncertainty it attaches to that level goes to zero.
+# `kalman_smoothness` is one over that uncertainty, so in those blocks it saturates at the
+# constant its denominator is floored with. Within a block the column still ranks pairs;
+# across blocks it is not one scale, which is a property to know before pooling them.
 #
-# That is a limitation of the fit rather than a break in the fold discipline. Nothing about
-# it reaches across a fold boundary: the search that failed read that fold's training
-# sessions and no others.
+# That is a limitation of the fit rather than a break in the estimation discipline. Nothing
+# about it reaches forward: the search that failed read a prefix ending before the sessions
+# it then spoke for.
 #
 # The right panel is how long each of the two dollar states persists. Both self-transition
 # probabilities sit close enough to one that drawing them directly would put two traces
@@ -1333,27 +1562,36 @@ print(
 # anyway, and the one `hmm_regime_transition_5d` responds to.
 #
 # The return model is refitted per pair and its two coefficients have no market-level
-# counterpart to plot against a fold, so it has no line here.
+# counterpart to plot against a common axis, so it has no line here.
 
 # %% tags=[]
-kalman_param_df = pl.DataFrame(kalman_params)
+kalman_param_df = pl.DataFrame(kalman_params).with_columns(
+    pl.col("fit_end").alias("estimate_through_index")
+)
 kalman_param_summary = (
-    kalman_param_df.group_by("fold")
+    kalman_param_df.group_by("fit_end")
     .agg(
         pl.col("observation_noise").median().alias("observation_noise"),
         pl.col("level_noise").median().alias("level_noise"),
         pl.col("slope_noise").median().alias("slope_noise"),
         pl.len().alias("n_pairs"),
     )
-    .sort("fold")
+    .sort("fit_end")
+    .with_columns(
+        pl.col("fit_end")
+        .map_elements(lambda i: all_dates[min(int(i), len(all_dates)) - 1], return_dtype=pl.Date)
+        .alias("fit_through")
+    )
 )
-hmm_param_df = pl.DataFrame(hmm_params).sort("fold")
+hmm_param_df = pl.DataFrame(
+    [{k: v for k, v in e.items() if k not in ("model", "order")} for e in hmm_estimates]
+).sort("fit_end")
 
 # %% [markdown] tags=[]
 # How far the observation noise moves is a scalar, and an axis spanning twenty orders of
-# magnitude is not where a reader should have to estimate one. A fold counts as collapsed
-# when its median $R$ falls more than six orders below the largest fold's - far enough
-# below ordinary fold-to-fold movement that the two cannot be confused. The last line
+# magnitude is not where a reader should have to estimate one. A block counts as collapsed
+# when its median $R$ falls more than six orders below the largest block's - far enough
+# below ordinary block-to-block movement that the two cannot be confused. The last line
 # prices what the collapse does to the feature that variance feeds.
 
 # %% tags=[]
@@ -1361,29 +1599,24 @@ _r = kalman_param_summary["observation_noise"]
 _zero_threshold = float(_r.max()) * 1e-6
 _zeroed = kalman_param_summary.filter(pl.col("observation_noise") < _zero_threshold)
 _intact = kalman_param_summary.filter(pl.col("observation_noise") >= _zero_threshold)
-print("Observation noise R, median across pairs, by fold:")
+print(f"Observation noise R, median across pairs, over {len(kalman_param_summary)} estimates:")
 print(
-    f"  folds fitting normally  {sorted(_intact['fold'].to_list())}: "
+    f"  {len(_intact)} estimates fitting normally: "
     f"{_intact['observation_noise'].min():.2e} to {_intact['observation_noise'].max():.2e}"
 )
 if len(_zeroed):
     _drop = float(_intact["observation_noise"].min()) / float(_zeroed["observation_noise"].max())
     print(
-        f"  folds where it went to zero {sorted(_zeroed['fold'].to_list())}: "
-        f"{_zeroed['observation_noise'].min():.2e} to "
+        f"  {len(_zeroed)} estimates where it went to zero, first "
+        f"{_zeroed['fit_through'].min()}: {_zeroed['observation_noise'].min():.2e} to "
         f"{_zeroed['observation_noise'].max():.2e}"
     )
     print(f"  the fall is a factor of {_drop:.1e}, {np.log10(_drop):.1f} orders of magnitude")
 print(
     f"Level noise moves by a factor of "
     f"{float(kalman_param_summary['level_noise'].max() / kalman_param_summary['level_noise'].min()):.2f}"
-    f" across folds; slope noise by "
+    f" across estimates; slope noise by "
     f"{float(kalman_param_summary['slope_noise'].max() / kalman_param_summary['slope_noise'].min()):.1f}"
-)
-_smoothness = kalman_df.group_by("fold").agg(pl.col("kalman_smoothness").median()).sort("fold")
-print(
-    f"Median kalman_smoothness by fold spans {_smoothness['kalman_smoothness'].min():.2e} to "
-    f"{_smoothness['kalman_smoothness'].max():.2e}"
 )
 
 # %% tags=[]
@@ -1400,9 +1633,9 @@ for column, name, color in (
 ):
     fig.add_trace(
         go.Scatter(
-            x=kalman_param_summary["fold"].to_list(),
+            x=kalman_param_summary["fit_through"].to_list(),
             y=kalman_param_summary[column].to_list(),
-            mode="lines+markers",
+            mode="lines",
             name=name,
             line={"color": color},
         ),
@@ -1417,9 +1650,9 @@ for column, name, color in (
 ):
     fig.add_trace(
         go.Scatter(
-            x=hmm_param_df["fold"].to_list(),
+            x=hmm_param_df["fit_through"].to_list(),
             y=(1.0 / (1.0 - hmm_param_df[column])).to_list(),
-            mode="lines+markers",
+            mode="lines",
             name=name,
             line={"color": color, "dash": "dot"},
         ),
@@ -1442,64 +1675,59 @@ fig.update_yaxes(
     col=1,
 )
 fig.update_yaxes(title_text="Expected run length (sessions)", rangemode="tozero", row=1, col=2)
-fig.update_xaxes(title_text="Fold (0 = most recent)", row=1, col=1)
-fig.update_xaxes(title_text="Fold (0 = most recent)", row=1, col=2)
+fig.update_xaxes(title_text="Last session behind the estimate", row=1, col=1)
+fig.update_xaxes(title_text="Last session behind the estimate", row=1, col=2)
 fig.update_layout(
     title=(
-        "Every fitted parameter moves as the window rolls, one of them to zero"
+        "Every fitted parameter moves as the schedule rolls, one of them to zero"
         "<br><sup>Left: median across pairs of the three noise sizes, on a log axis."
-        "<br>Right: one market-level fit per fold, read as 1/(1 - p) sessions."
-        "<br>Both panels are per-fold parameters, not per-fold feature means.</sup>"
+        "<br>Right: one market-level estimate per refit, read as 1/(1 - p) sessions."
+        "<br>Both panels are estimated parameters, not feature means.</sup>"
     ),
     height=460,
     margin={"t": 150},
 )
 show_plotly_with_alt(
     fig,
-    "Two panels against fold number, with fold zero the most recent. On the left, the "
-    "three fitted state-space noise sizes on a logarithmic axis: the level noise is the "
-    "largest and holds a nearly flat line across folds, the slope noise sits many orders "
-    "below it and also holds, while the observation noise tracks near the level noise "
-    "for most folds and drops away by more than ten orders of magnitude on the few where "
-    "the search puts it at zero. On the right, the expected run length of each "
-    "dollar-regime state in sessions: the calm state starts far higher, falls steeply "
-    "over the first few folds, and by the oldest folds the two states have converged to "
-    "a similar length.",
+    "Two panels against the last session behind each estimate, running from 2012 to the "
+    "start of the holdout. On the left, the three fitted state-space noise sizes on a "
+    "logarithmic axis: the level noise is the largest and holds a nearly flat line, the "
+    "slope noise sits many orders below it and also holds, while the observation noise "
+    "tracks near the level noise for most estimates and drops away by more than ten orders "
+    "of magnitude on the ones where the search puts it at zero. On the right, the expected "
+    "run length of each dollar-regime state in sessions, one point per refit, the two "
+    "traces moving gradually as their estimation windows expand.",
 )
-
 
 # %% [markdown] tags=[]
 # ## 8. Bring the Three Sets Together
 #
 # The three models produce frames of different shapes. The state-space and return models
-# are fitted per pair, so their rows are keyed by pair, session and fold. The dollar-regime
-# model is fitted once per fold on one market-wide series, so its rows carry no pair at all
-# and the same two values attach to every pair on a session. Joining it therefore matches
-# many rows to one, and the two per-pair frames match one to one; each join declares which
-# it expects, so a shape that changed upstream stops the notebook here rather than
-# multiplying rows quietly.
+# are fitted per pair, so their rows are keyed by pair and session. The dollar-regime model
+# reads one market-wide series, so its rows carry no pair at all and the same two values
+# attach to every pair on a session. Joining it therefore matches many rows to one, and the
+# two per-pair frames match one to one; each join declares which it expects, so a shape that
+# changed upstream stops the notebook here rather than multiplying rows quietly.
 #
-# `fold` is carried through as a key. It is not a feature and no model should be trained on
-# it - it records which fit produced the row, so a downstream model can take the rows
-# belonging to the fold it is working on.
+# The key is `(timestamp, symbol)` and there is nothing else in it. Under the arrangement
+# this notebook used to run there was a third key column, `fold`, recording which fit
+# produced the row, and the same session carried a different value in each fold. A value is
+# now bounded by the estimation schedule rather than by a fold, so there is one of them per
+# pair and session and the fold column has nothing left to record.
 
 # %% tags=[]
-temporal_df = kalman_df.sort(["symbol", "timestamp", "fold"])
+temporal_df = kalman_df.sort(["symbol", "timestamp"])
 
 if len(hmm_df) > 0:
-    temporal_df = temporal_df.join(hmm_df, on=["timestamp", "fold"], how="left", validate="m:1")
+    temporal_df = temporal_df.join(hmm_df, on="timestamp", how="left", validate="m:1")
 
 if len(arima_df) > 0:
-    temporal_df = temporal_df.join(
-        arima_df, on=["symbol", "timestamp", "fold"], how="left", validate="1:1"
-    )
+    temporal_df = temporal_df.join(arima_df, on=["symbol", "timestamp"], how="left", validate="1:1")
 
-temporal_df = temporal_df.sort(["symbol", "timestamp", "fold"])
+temporal_df = temporal_df.sort(["symbol", "timestamp"])
 
-temporal_feature_cols = [c for c in temporal_df.columns if c not in {"timestamp", "symbol", "fold"}]
-duplicate_keys = temporal_df.select(
-    pl.struct("timestamp", "symbol", "fold").is_duplicated().sum()
-).item()
+temporal_feature_cols = [c for c in temporal_df.columns if c not in {"timestamp", "symbol"}]
+duplicate_keys = temporal_df.select(pl.struct("timestamp", "symbol").is_duplicated().sum()).item()
 assert duplicate_keys == 0, f"Duplicate temporal keys: {duplicate_keys}"
 
 print(f"\nMerged features: {len(temporal_df):,} rows, {len(temporal_feature_cols)} columns")
@@ -1514,25 +1742,24 @@ print(f"Features: {temporal_feature_cols}")
 # a measurement. The row count is the same either way, which is why this takes its own
 # check.
 #
-# One gap is expected here and its shape is known. The dollar-regime model needs a
-# 21-session window before it can report a volatility figure, so its series begins later
-# than the price file does, and the oldest fold opens before it. Those rows are counted and
-# reported rather than dropped, because the state-space and return columns on them are
-# present and usable.
+# Two gaps are expected here and both are the burn-ins. The regime model spends the longest
+# of the three - 504 sessions of a dollar factor that itself starts after a 21-session
+# volatility window - so the frame's earliest sessions carry state-space and return values
+# and no regime value. The return model's own burn-in is shorter than the state-space
+# model's by one session, because a return needs the session before it. Those rows are
+# counted and reported rather than dropped: the columns present on them are usable.
 #
-# What decides whether the gap matters is where it falls. A start-up gap reaches only into
-# the opening of a fold's training window, so every validation row must carry every value,
-# and that is what the check asserts. A null reaching a validation row would be a join key
-# that did not match, wearing the shape of a start-up gap - and it would sit inside exactly
-# the rows section 11 measures.
+# What decides whether a gap matters is where it falls. Every one of them sits at the front
+# of the panel, years before the earliest validation window opens, so every validation row
+# must carry every value - and that is what the check asserts. A null reaching a validation
+# row would be a join key that did not match, wearing the shape of a burn-in, and it would
+# sit inside exactly the rows section 11 measures.
 
 # %% tags=[]
-val_windows = pl.DataFrame(
-    [{"fold": f["fold"], "val_start": f["val_start"], "val_end": f["val_end"]} for f in folds]
+IN_ANY_VALIDATION = pl.any_horizontal(
+    [pl.col("timestamp").is_between(f["val_start"], f["val_end"], closed="both") for f in folds]
 )
-validation_rows = temporal_df.join(val_windows, on="fold", how="inner").filter(
-    pl.col("timestamp").is_between(pl.col("val_start"), pl.col("val_end"), closed="both")
-)
+validation_rows = temporal_df.filter(IN_ANY_VALIDATION)
 null_census = temporal_df.select(
     [pl.col(c).null_count().alias(c) for c in temporal_feature_cols]
 ).to_dicts()[0]
@@ -1547,8 +1774,7 @@ for column, n_null in null_census.items():
     print(
         f"  {column}: {n_null:,} null of {len(temporal_df):,} "
         f"({n_null / len(temporal_df):.3%}), {missing['timestamp'].n_unique()} sessions, "
-        f"folds {sorted(missing['fold'].unique().to_list())}, "
-        f"latest {missing['timestamp'].max()}"
+        f"{missing['timestamp'].min()} to {missing['timestamp'].max()}"
     )
 assert not any(val_nulls.values()), (
     f"a validation row is missing a feature value: { {c: n for c, n in val_nulls.items() if n} }"
@@ -1562,30 +1788,28 @@ print(
 # %% [markdown] tags=[]
 # ## 9. Write the Artifact
 #
-# Section 3 said in words that fold 0 is the most recent window and the highest-numbered
-# fold the oldest. Downstream that sentence is load-bearing: a reader that takes a lower
-# fold id for an earlier period joins every fold against the wrong end of the sample, and
-# because the row counts and the schema are unaffected, nothing about the result looks
-# wrong. A convention held only in prose is how that happens, so the last thing checked
-# before the file is written is the ordering of the file itself, read back off the frame
-# rather than off the split list it was built from.
+# Two properties are checked before the file is written, and both are about the key.
+#
+# The key is `(timestamp, symbol)` and it has to be unique, so no join downstream can
+# silently multiply rows. And there must be no `fold` column: a reader that found one would
+# select rows by a tag rather than by the boundaries of the label it is fitting, which is
+# the arrangement this notebook was converted away from. The assertion is here rather than
+# in the prose because a future edit that reintroduced the column would otherwise be
+# invisible until a downstream join doubled a panel.
 
 # %% tags=[]
-fold_spans = (
-    temporal_df.group_by("fold")
-    .agg(pl.col("timestamp").min().alias("first"), pl.col("timestamp").max().alias("last"))
-    .sort("fold")
+assert "fold" not in temporal_df.columns, (
+    "the frame carries a fold column: a value here is bounded by the estimation schedule "
+    "and not by a cross-validation window, so there is nothing for a fold id to record"
 )
-for _earlier, _later in zip(fold_spans.iter_rows(named=True), fold_spans[1:].iter_rows(named=True)):
-    assert _later["last"] < _earlier["last"], (
-        f"fold {_later['fold']} ends {_later['last']} and fold {_earlier['fold']} ends "
-        f"{_earlier['last']}: the fold ids in this artifact are not ordered newest first, "
-        f"so anything reading them positionally selects the wrong window"
-    )
+assert temporal_df.select(pl.struct("timestamp", "symbol").n_unique()).item() == len(temporal_df), (
+    "the artifact is not one row per (timestamp, symbol)"
+)
 print(
-    f"Fold ids run newest to oldest: fold {fold_spans['fold'][0]} covers "
-    f"{fold_spans['first'][0]} to {fold_spans['last'][0]}, fold {fold_spans['fold'][-1]} "
-    f"covers {fold_spans['first'][-1]} to {fold_spans['last'][-1]}."
+    f"Artifact: {len(temporal_df):,} rows on (timestamp, symbol), "
+    f"{temporal_df['symbol'].n_unique()} pairs, {temporal_df['timestamp'].n_unique():,} "
+    f"sessions from {temporal_df['timestamp'].min()} to {temporal_df['timestamp'].max()}, "
+    f"no fold column."
 )
 
 # %% [markdown] tags=[]
@@ -1596,11 +1820,13 @@ print(
 # feature values rather than over the raw file bytes, so re-running the notebook and
 # producing the same numbers leaves it where it was, while a changed fit moves it.
 #
-# The record also names what the values were built from, and it names two things rather
-# than one: the prices the models were fitted on and run over, and the label file section 3
-# cut the folds from. A label file rebuilt on refreshed data moves the fold boundaries and
-# therefore moves the features, so recording the price digest alone would leave half of
-# where these numbers came from unnamed.
+# The record names what the values were built from. That is now the price file alone. Under
+# the old arrangement it also named the label file, because the label file decided the fold
+# boundaries and the fold boundaries decided the fits; the schedule reads no label, so
+# naming one here would record a dependency that no longer exists.
+#
+# What goes in beside it is the schedule itself, which is the thing a reader needs in order
+# to know what an emitted value means and the thing the artifact could not previously say.
 
 # %% tags=[]
 output_path = FEATURES_DIR / "model_based.parquet"
@@ -1609,42 +1835,55 @@ FEATURES_DIR.mkdir(parents=True, exist_ok=True)
 record = write_artifact(
     temporal_df,
     output_path,
-    keys=["timestamp", "symbol", "fold"],
+    keys=["timestamp", "symbol"],
     written_by="case_studies/fx_pairs/04_model_based_features.py",
-    inputs={
-        "load_fx_pairs:4h": value_digest(prices),
-        f"labels:{PRIMARY_LABEL}": value_digest(label_frame),
+    inputs={"load_fx_pairs:4h": value_digest(prices)},
+    metadata={
+        "estimation_schedule": [
+            {
+                "model": row["model"],
+                "burnin": row["burnin"],
+                "refit_every": row["refit_every"],
+                "observations": row["observations"],
+                "estimates": row["estimates"],
+                "first_value": str(row["first_value"]),
+                "frozen_from": str(row["frozen_from"]),
+            }
+            for row in schedule_summary
+        ]
     },
 )
 print(f"Saved: {output_path.relative_to(CASE_DIR)}")
 print(f"  Shape: {temporal_df.shape}")
 print(f"  Digest: {record['digest']}")
+
 # %% [markdown] tags=[]
 # ## 10. Take the Validation Rows, and Look at Them
 #
-# Everything from here on is about rows no model in this notebook was fitted on. Each
-# fold's validation window is taken from that fold's own rows and the results stacked, so
-# a session appears once, carrying the values a model that had never seen it produced.
-# Training rows are a valid input to a downstream fit; they are not evidence about the
-# feature, because the feature was shaped by them.
+# Everything from here on is about rows no model in this notebook was fitted on. The eight
+# validation windows are contiguous - window 7's ends the session before window 6's begins
+# - so restricting to their union gives a continuous run of sessions with no session
+# counted twice, which the check below asserts rather than assumes.
 #
-# The validation windows are contiguous - fold 7's ends the session before fold 6's begins
-# - so stacking them gives a continuous run of sessions with no session counted twice,
-# which the check below asserts rather than assumes.
+# Training rows are a valid input to a downstream fit; they are not evidence about the
+# feature, because the estimates behind the later ones read them. The holdout is excluded by
+# the same cut, since no validation window reaches it.
+#
+# There is no fold to select on. Under the old arrangement this section had to take each
+# fold's own rows and stack them, because the same session carried a different value in
+# every fold and only one of those was out of sample. One value per session is out of sample
+# for exactly the windows that open after the estimate behind it, which the schedule already
+# guarantees, so the restriction is a filter on dates.
 
 # %% tags=[]
-validation_frames = [
-    temporal_df.filter(
-        (pl.col("fold") == fold["fold"])
-        & pl.col("timestamp").is_between(fold["val_start"], fold["val_end"], closed="both")
-    )
-    for fold in folds
-]
-eval_features = pl.concat(validation_frames).sort(["timestamp", "symbol"])
+eval_features = validation_rows.sort(["timestamp", "symbol"])
 eval_duplicates = eval_features.select(
     pl.struct("timestamp", "symbol").is_duplicated().sum()
 ).item()
 assert eval_duplicates == 0, f"Overlapping validation features: {eval_duplicates}"
+assert eval_features["timestamp"].max() < HOLDOUT_START, (
+    "a validation row is dated inside the holdout"
+)
 print(
     f"Validation rows: {len(eval_features):,} across {eval_features['timestamp'].n_unique():,} "
     f"sessions, {eval_features['timestamp'].min()} to {eval_features['timestamp'].max()}"
@@ -1660,10 +1899,12 @@ print(
 # not thresholding volatility, it is asking which of two states makes the pair of numbers
 # it saw most likely, given where it thought the market was yesterday.
 #
-# The dotted rules mark where one fold's model hands over to the next. Each stretch between
-# them was produced by a separate fit on that fold's own training window, so a jump exactly
-# at a rule is the two fits disagreeing rather than the market changing - which is the one
-# thing this figure can show and the fit-stability panel cannot.
+# The dotted rules mark where the walk refitted. Each stretch between them was produced by
+# a separate estimate on everything up to its own start, so a jump exactly at a rule is two
+# consecutive estimates disagreeing rather than the market changing - which is the one thing
+# this figure can show and the stability panel in section 7 cannot. There are far more rules
+# here than there were fold handovers, and that is the change: a handover used to happen
+# once a year and now happens once a quarter.
 
 # %% tags=[]
 if "hmm_regime_prob_high_vol" in eval_features.columns:
@@ -1709,10 +1950,14 @@ if "hmm_regime_prob_high_vol" in eval_features.columns:
         col=1,
     )
     fig.add_hline(y=0.5, line_dash="dash", line_color=COLORS["amber"], row=1, col=1)
-    for fold in folds[:-1]:
-        fig.add_vline(
-            x=fold["val_start"].isoformat(), line_dash="dot", line_color=COLORS["neutral"]
-        )
+    _shown = (hmm_validation["timestamp"].min(), hmm_validation["timestamp"].max())
+    for estimate in hmm_estimates:
+        if _shown[0] <= estimate["fit_through"] <= _shown[1]:
+            fig.add_vline(
+                x=estimate["fit_through"].isoformat(),
+                line_dash="dot",
+                line_color=COLORS["neutral"],
+            )
     fig.update_yaxes(title_text="P(turbulent)", range=[0, 1], row=1, col=1)
     fig.update_yaxes(
         title_text=f"Dollar volatility, {USD_VOL_WINDOW}d (%)",
@@ -1724,9 +1969,9 @@ if "hmm_regime_prob_high_vol" in eval_features.columns:
     fig.update_layout(
         title=(
             "The turbulent state switches on and off, tracking the volatility below"
-            "<br><sup>Validation sessions only, every fold, one continuous run."
-            "<br>Dotted rules are fold handovers: each stretch comes from a model fitted"
-            "<br>on that fold's training window alone.</sup>"
+            "<br><sup>Validation sessions only, one continuous run."
+            "<br>Dotted rules are refits: each stretch comes from a model fitted"
+            "<br>on everything up to that point.</sup>"
         ),
         height=560,
         margin={"t": 130},
@@ -1738,8 +1983,8 @@ if "hmm_regime_prob_high_vol" in eval_features.columns:
         "of its time pinned at zero or one and switches between them abruptly rather "
         "than drifting. The lower panel is the dollar volatility over the same "
         "sessions, and its sustained rises line up with the stretches the upper panel "
-        "holds at one. Dotted vertical rules mark the fold handovers, and the series "
-        "runs continuously across them.",
+        "holds at one. Dotted vertical rules mark where the model was refitted, roughly "
+        "one per quarter, and the series runs continuously across them.",
     )
 else:
     high_vol_share = float("nan")
@@ -1990,13 +2235,15 @@ else:
 #
 # The method, in the order a reader would apply it to their own data:
 #
-# 1. **Resolve the folds before fitting anything.** A model fitted first and assigned to a
-#    window afterwards cannot be checked, because the window was chosen knowing the fit.
-#    Deriving the boundaries from the same call the downstream consumer makes is what keeps
-#    a fold id meaning one window on both sides of the join.
-# 2. **Fit inside the training window, then hold the parameters still.** The recursion runs
-#    on through validation because it has to carry its state forward; what must not move is
-#    the parameters.
+# 1. **Declare the estimation schedule before fitting anything.** How much history a model
+#    spends before its first estimate, and how often it is refreshed, are part of what the
+#    feature means. Writing them where the feature windows live keeps a later reader from
+#    having to reconstruct them from the loop that ran.
+# 2. **Let each estimate speak only for what comes after it.** A cross-validation fold does
+#    not do this on its own: fitting once per fold and filtering from the start of the
+#    fold's training window gives every training row parameters drawn from its own future,
+#    while the validation rows get parameters drawn only from their past. The model is then
+#    fitted on one version of the column and scored on another, and nothing raises.
 # 3. **Take the forward answer, not the more accurate one.** Every library that fits a
 #    sequence model will happily report what it believes about a past session given the
 #    whole series. That answer is the sharper one and it could not have been had at the time.
@@ -2008,18 +2255,26 @@ else:
 #
 # **Known limitations**
 #
-# - Each model is re-estimated once per fold and then held fixed for the validation year
-#   that follows, so a break occurring inside a validation window is read by parameters
-#   estimated before it.
+# - Each estimate is held fixed until the next refit, so a break occurring inside a block
+#   is read by parameters estimated before it. The cadences here are a quarter for the
+#   state-space and regime models and a month for the return model; a break is at worst
+#   that far ahead of the estimate that reads it.
+# - The burn-in prefix carries no value at all. It falls years before the earliest
+#   validation window, so nothing screened here is affected, but a downstream model whose
+#   training window opens at the start of the panel fits those sessions on an imputed
+#   value rather than a measured one. Section 4 prints how many sessions that is.
+# - Parameters are frozen across the holdout at the last pre-holdout estimate, so the
+#   holdout is read by a model up to two years stale. That is the price of not estimating
+#   anything on it, and it is deliberate.
 # - The dollar-regime model is fitted on one market-wide series, so its two columns take
 #   the same value for every pair on a session and cannot order a cross-section.
 # - `kalman_smoothness` inverts the uncertainty the state-space model attaches to its own
 #   level estimate, and in a linear Gaussian model that quantity follows a recursion in the
-#   noise parameters and the session index alone - it never reads a price. Within a fold the
+#   noise parameters and the session index alone - it never reads a price. Within a block the
 #   column therefore ranks pairs by the noise their own fit estimated, not by anything that
-#   happened in the window being scored.
-# - The return model's order is fixed at $(1,0,1)$ for every pair and every fold rather than
-#   chosen per pair, so its error measures surprise relative to one assumed dynamic.
+#   happened in the sessions being scored.
+# - The return model's order is fixed at $(1,0,1)$ for every pair and every estimate rather
+#   than chosen per pair, so its error measures surprise relative to one assumed dynamic.
 # - Section 11 measures each column on its own. What the set contributes jointly, and what
 #   it adds over the Chapter 8 features, is `05_evaluation`.
 
@@ -2028,7 +2283,12 @@ else:
 
 # %% tags=[]
 print(f"Feature columns written:  {len(temporal_feature_cols)}")
-print(f"Walk-forward folds:       {len(folds)}")
+print(f"Rows written:             {len(temporal_df):,} on (timestamp, symbol)")
+for row in schedule_summary:
+    print(
+        f"  {row['model']:<14} {row['estimates']:>3} estimates, burn-in "
+        f"{row['burnin']}, refit every {row['refit_every']}, first value {row['first_value']}"
+    )
 if len(eval_summary):
     top_result = eval_summary.row(0, named=True)
     print(f"Columns rankable across pairs:            {len(feature_names)}")

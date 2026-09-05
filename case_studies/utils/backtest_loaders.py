@@ -31,6 +31,7 @@ import re
 import sqlite3
 import warnings
 from dataclasses import dataclass, field
+from datetime import timedelta
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -145,6 +146,22 @@ class BacktestConfig:
     min_trade_value: float = 100.0  # Engine rebalance threshold (skip < this $)
     initial_cash: float = 100_000.0  # SSOT — set from setup.yaml::execution.initial_cash
     share_type: str = "integer"  # SSOT — set from setup.yaml::execution.share_type
+    # Per-label decision cadence, from setup.yaml::decision.cadence_by_label. `cadence` above is
+    # the case study's default and remains what an unlabelled caller gets. A case study whose
+    # labels span horizons cannot trade them all on one grid: holding a 5-day forecast for 21
+    # sessions is not the strategy the label describes, and the label then measures something the
+    # backtest never traded.
+    cadence_by_label: dict[str, str] = field(default_factory=dict)
+
+    def cadence_for(self, label: str | None = None) -> str:
+        """Return the decision cadence for ``label``, falling back to the case-study default.
+
+        A label with no entry in ``cadence_by_label`` trades on ``cadence``, so declaring nothing
+        reproduces the previous single-cadence behaviour exactly.
+        """
+        if not label:
+            return self.cadence
+        return self.cadence_by_label.get(label, self.cadence)
 
 
 def load_contract_specs_from_yaml(yaml_path: Path | None = None):
@@ -844,7 +861,10 @@ def _load_via_canonical(
     if loader_name == "nasdaq100_bars":
         from data.equities.loader import load_nasdaq100_bars
 
-        freq = frequency or "15m"
+        # The bar this case study is sampled at. A caller that wants a coarser grid asks for
+        # one; the default must not silently resample, which is how a fifteen-minute backtest
+        # came to hold an interval the minute-level labels never predicted (#187).
+        freq = frequency or "1m"
         return load_nasdaq100_bars(
             frequency=freq,
             max_symbols=max_symbols,
@@ -1092,25 +1112,43 @@ _CADENCE_CALENDAR_DAYS_PER_PERIOD: dict[str, float] = {
     # Intraday equity microstructure: ~26 fifteen-minute bars per RTH
     # trading day; multiply by 1.4 to account for weekends.
     "15_minute": (1.0 / 26.0) * 1.4,
+    # Biweekly: every other ISO week, for labels whose horizon is ~10 sessions
+    "biweekly": 14.0,
+    "biweekly_friday_close": 14.0,
     # Monthly month-end
     "monthly_month_end": 31.0,
 }
 
 
-def _calendar_days_per_period(case_study_id: str) -> float:
-    """Calendar-day spacing per allocator-window bar for this case study.
+# Monday 1970-01-05, the first Monday at or after the Unix epoch, as a day number. The biweekly
+# schedule's parity is measured from here so it depends only on the calendar, never on which
+# window a caller happened to load.
+_BIWEEKLY_EPOCH_DAY = 4
+
+
+def _calendar_days_per_period(case_study_id: str, label: str | None = None) -> float:
+    """Calendar-day spacing per allocator-window bar for this case study and label.
 
     Reads ``decision.entry_cadence`` (or ``decision.cadence`` or
-    ``decision.bar_frequency``) and returns the calendar-day multiplier
-    used to walk the start_date back during a warmup-prefix load. Falls
-    back to the daily 1.5× heuristic when the cadence token isn't
-    recognized — old behavior for unknown CSes.
+    ``decision.bar_frequency``), overridden per label by
+    ``decision.entry_cadence_by_label`` / ``decision.cadence_by_label``, and returns
+    the calendar-day multiplier used to walk the start_date back during a
+    warmup-prefix load. Falls back to the daily 1.5× heuristic when the cadence
+    token isn't recognized — old behavior for unknown CSes.
+
+    The label matters because the warmup prefix has to cover the allocator's lookback
+    in *its* bars: a label trading biweekly needs twice the calendar span of the same
+    lookback traded weekly, and under-reading the prefix silently shortens the window
+    the allocator fits on.
     """
     setup = _load_case_setup_yaml(case_study_id)
     decision = setup.get("decision") or {}
     cadence = (
         decision.get("entry_cadence") or decision.get("cadence") or decision.get("bar_frequency")
     )
+    if label:
+        by_label = decision.get("entry_cadence_by_label") or decision.get("cadence_by_label") or {}
+        cadence = by_label.get(label, cadence)
     if cadence and cadence in _CADENCE_CALENDAR_DAYS_PER_PERIOD:
         return _CADENCE_CALENDAR_DAYS_PER_PERIOD[cadence]
     return 1.5
@@ -1178,7 +1216,7 @@ def load_backtest_prices_for(
             # parquet read covers at least a full calendar week even
             # when ``warmup_periods`` is tiny (e.g. monthly us_firm
             # with 12 periods).
-            cal_per_period = _calendar_days_per_period(case_study_id)
+            cal_per_period = _calendar_days_per_period(case_study_id, label)
             prefix_days = max(math.ceil(warmup_periods * cal_per_period), 7)
             kwargs.setdefault("start_date", (win[0] - timedelta(days=prefix_days)).isoformat())
     return load_backtest_prices(case_study_id, **kwargs)
@@ -1187,6 +1225,48 @@ def load_backtest_prices_for(
 # ---------------------------------------------------------------------------
 # Calendar-aware schedule resolution
 # ---------------------------------------------------------------------------
+
+
+_CADENCE_UNIT_SECONDS = {
+    "min": 60,
+    "minute": 60,
+    "hour": 3600,
+    "h": 3600,
+}
+
+
+def _intraday_cadence_interval(cadence: str) -> timedelta | None:
+    """The interval a cadence token names, or None when it names no intraday interval.
+
+    Tokens are `<n>_<unit>` possibly with a trailing qualifier: `15_minute`, `4_hour`,
+    `8_hour_funding_aligned`. Anything that does not parse - `daily_close`,
+    `monthly_month_end` - is not an intraday cadence and is left to the callers above.
+    """
+    parts = cadence.split("_")
+    if len(parts) < 2 or not parts[0].isdigit():
+        return None
+    seconds = _CADENCE_UNIT_SECONDS.get(parts[1])
+    if seconds is None:
+        return None
+    return timedelta(seconds=int(parts[0]) * seconds)
+
+
+def _on_the_clock(ts: pl.Series, interval: timedelta) -> pl.Series:
+    """The timestamps whose time of day is a whole number of ``interval`` past midnight."""
+    seconds = int(interval.total_seconds())
+    return (
+        pl.DataFrame({"ts": ts})
+        .filter(
+            (
+                pl.col("ts").dt.hour().cast(pl.Int64) * 3600
+                + pl.col("ts").dt.minute().cast(pl.Int64) * 60
+                + pl.col("ts").dt.second().cast(pl.Int64)
+            )
+            % seconds
+            == 0
+        )
+        .get_column("ts")
+    )
 
 
 def resolve_rebalance_timestamps(
@@ -1202,9 +1282,13 @@ def resolve_rebalance_timestamps(
     - ``monthly_month_end`` → last available timestamp in each calendar month
     - ``weekly_friday_close`` / ``weekly_friday`` → last available timestamp
       in each ISO week (typically Friday, or Thursday if Friday is a holiday)
-    - ``daily_*`` → every available timestamp
-    - ``8_hour_*`` / ``15_min`` → every available timestamp (fixed-interval
-      cadences where the data is already at the correct granularity)
+    - ``daily_*`` and coarser cadences naming no interval → every available timestamp
+    - ``8_hour_*`` / ``15_minute`` and every other fixed-interval cadence → the slots
+      on the clock at that interval, constructed rather than assumed. This line used
+      to say "every available timestamp ... already at the correct granularity",
+      which is the precondition nasdaq100_microstructure did not meet and
+      ml4t/agent-workspace#187 was filed about; the branch below has constructed the
+      schedule since public ``83141459`` and the description had not followed it.
 
     Parameters
     ----------
@@ -1249,8 +1333,62 @@ def resolve_rebalance_timestamps(
         )
         return week_ends["rebal_ts"]
 
-    # All other cadences: daily, 8_hour, 15_min, etc.
-    # The data is already at the correct granularity — every timestamp is valid.
+    if cadence in {"biweekly", "biweekly_friday_close"}:
+        # Last available session of every other ISO week.
+        #
+        # The parity is taken on elapsed calendar weeks, not on position in the resolved list and
+        # not on `iso_year * 53 + iso_week`. Position would interleave: a caller loading a window
+        # that starts one week later would rebalance on exactly the weeks the other skipped, so
+        # the same strategy would register two schedules depending on how much history was read.
+        # The `* 53` counter is worse than it looks - most ISO years have 52 weeks, so it jumps by
+        # two at those boundaries and silently produces a 7-day or 21-day gap there.
+        #
+        # Weeks since a fixed Monday is continuous by construction and independent of the window.
+        df = pl.DataFrame({"ts": ts}).with_columns(
+            iso_year=pl.col("ts").dt.iso_year(),
+            iso_week=pl.col("ts").dt.week(),
+        )
+        week_ends = (
+            df.group_by("iso_year", "iso_week")
+            .agg(pl.col("ts").max().alias("rebal_ts"))
+            .with_columns(
+                # Monday of that timestamp's ISO week, as whole weeks since the epoch Monday.
+                elapsed_weeks=(
+                    pl.col("rebal_ts").cast(pl.Date).cast(pl.Int32)
+                    - (pl.col("rebal_ts").dt.weekday() - 1)
+                    - _BIWEEKLY_EPOCH_DAY
+                )
+                // 7
+            )
+            .filter(pl.col("elapsed_weeks") % 2 == 0)
+            .sort("rebal_ts")
+        )
+        return week_ends["rebal_ts"]
+
+    interval = _intraday_cadence_interval(cadence)
+    if interval is not None:
+        # Construct the schedule rather than assume the panel already is one.
+        #
+        # This branch used to return `ts` unchanged for every intraday cadence, on the
+        # comment "the data is already at the correct granularity". That is a precondition
+        # nothing checked, and nasdaq100_microstructure did not meet it: its prediction panel
+        # carries every minute, so a declared fifteen-minute cadence resolved to a decision
+        # every minute and the backtest traded fifteen times more often than the config said
+        # (ml4t/agent-workspace#187). Constructing the schedule makes the declaration
+        # decisive and makes a panel at any resolution produce the same schedule - which is
+        # what the Ch18 cadence sweep needs, since its arms differ only in this token.
+        #
+        # Anchored on the clock, not on the session's first row. That is the grid
+        # `03_financial_features.py` already calls the decision grid (`minute % 15 == 0`),
+        # and it is the one a reader can name: a fifteen-minute cadence decides on the
+        # quarter hour, every session, whatever time the panel happens to start at and
+        # however early the session closes. Anchoring on the first available row instead
+        # would put the decisions of a panel that starts at 10:31 - which this one does,
+        # after the warmup hour the features pay - at 10:31, 10:46, 11:01, agreeing with no
+        # other statement of the grid in the case study.
+        return _on_the_clock(ts, interval)
+
+    # Daily and coarser cadences that name no interval: every timestamp is a valid slot.
     return ts
 
 
@@ -1311,6 +1449,68 @@ def get_rebalance_step(case_study: str, label: str) -> int:
     return step
 
 
+def resolved_rebalance_step(rebalance_spec: dict | None, case_study: str, label: str) -> int:
+    """The step this run executes, taken from the spec when the spec records one.
+
+    `setup.yaml` is mutable and the spec is not. Reading the step from setup.yaml at
+    execution time lets a run hash one step and trade another - edit the file between the
+    hash and the run and nothing says so. The spec is the record of what was run, so it is
+    what execution reads; setup.yaml is the fallback for a spec written before the step
+    became part of the identity (ml4t/agent-workspace#1005).
+    """
+    if rebalance_spec and "step" in rebalance_spec:
+        step = int(rebalance_spec["step"])
+        if step < 1:
+            raise ValueError(f"strategy.rebalance.step must be >= 1, got {step}")
+        return step
+    return get_rebalance_step(case_study, label)
+
+
+def resolve_decision_schedule(
+    available_timestamps: pl.Series,
+    cadence: str,
+    step: int = 1,
+    calendar: str = "NYSE",
+) -> pl.Series:
+    """The timestamps a strategy decides on: the cadence, advanced by ``step`` slots.
+
+    The pair is what fixes the schedule, so it is resolved as a pair. On an intraday cadence
+    a step is folded into the interval - eight hours stepped by three is resolved as one
+    twenty-four-hour grid - rather than applied as `gather_every` over the resolved slots.
+    The two agree on a complete panel and disagree on a real one: `gather_every` counts rows,
+    so a venue outage that removes one slot shifts every decision after it to a different
+    time of day, permanently, and a session shorter than the rest does the same. Which
+    funding time a 24-hour strategy trades on is then a property of the gaps in the data
+    rather than of the strategy.
+
+    Daily and coarser cadences keep the row-counting form. A slot there is a session, which
+    is the unit the step is meant to count, and folding a step into a monthly interval is not
+    a duration in the first place.
+    """
+    if step < 1:
+        raise ValueError(f"rebalance step must be >= 1, got {step}")
+    interval = _intraday_cadence_interval(cadence)
+    if interval is not None:
+        return _on_the_clock(available_timestamps.unique().sort(), interval * step)
+    schedule = resolve_rebalance_timestamps(available_timestamps, cadence, calendar)
+    return schedule.gather_every(step) if step > 1 else schedule
+
+
+def declared_rebalance_step(case_study: str, label: str) -> int | None:
+    """The declared step for ``(case_study, label)``, or None when none is declared.
+
+    :func:`get_rebalance_step` raises for an undeclared label, which is right at the
+    point of use: a run must not infer a step. Spec construction needs the softer
+    question, because a case study that declares no step for a label is not in error -
+    it trades every scheduled slot - and its spec must stay byte-identical to what it
+    produced before the step became part of the identity.
+    """
+    try:
+        return get_rebalance_step(case_study, label)
+    except (KeyError, FileNotFoundError):
+        return None
+
+
 def thin_to_rebalance_dates(
     predictions: pl.DataFrame,
     cadence: str = "",
@@ -1351,12 +1551,8 @@ def thin_to_rebalance_dates(
     if n_dates <= 1:
         return predictions
 
-    # Step 1: Calendar-aware schedule resolution
-    schedule_dates = resolve_rebalance_timestamps(all_dates, cadence)
-
-    # Step 2: Apply design-time non-overlapping step
-    if step > 1:
-        schedule_dates = schedule_dates.gather_every(step)
+    # The cadence and the step fix the schedule together, so they resolve together.
+    schedule_dates = resolve_decision_schedule(all_dates, cadence, step)
 
     # Semi-join to filter — avoids Polars is_in precision mismatch
     # (group_by().agg(max) can change Datetime precision)
@@ -1622,6 +1818,7 @@ def print_stage_dsr_summary(
     stages: tuple[str, ...] = ("signal", "allocation", "cost_sensitivity", "risk_overlay"),
     top_n: int = 20,
     head: int = 10,
+    prediction_hashes: tuple[str, ...] | list[str] | None = None,
 ) -> None:
     """Print per-stage DSR / PSR tables for a case-study explorer.
 
@@ -1634,7 +1831,9 @@ def print_stage_dsr_summary(
     for stage in stages:
         display_stage = "equal-weight baseline" if stage == "signal" else stage
         try:
-            table = explorer.deflated_sharpe(stage=stage, top_n=top_n)
+            table = explorer.deflated_sharpe(
+                stage=stage, top_n=top_n, prediction_hashes=prediction_hashes
+            )
         except ValueError as exc:
             if "zero variance" in str(exc).lower():
                 print(f"\n--- DSR @ {display_stage}: skipped ({exc}) ---")
@@ -1881,6 +2080,22 @@ def get_backtest_config(case_study_id: str) -> BacktestConfig:
     initial_cash = float(execution.get("initial_cash", 100_000.0))
     share_type = str(execution.get("share_type", "integer"))
 
+    # Per-label overrides. `entry_cadence_by_label` mirrors the `entry_cadence > cadence`
+    # precedence above; a label absent from both trades on the case-study default.
+    cadence_by_label = {
+        str(k): str(v)
+        for k, v in (
+            decision.get("entry_cadence_by_label") or decision.get("cadence_by_label") or {}
+        ).items()
+    }
+    _declared = set(labels.get("variants") or []) | {labels["primary"]}
+    _unknown = sorted(set(cadence_by_label) - _declared)
+    if _unknown:
+        raise ValueError(
+            f"decision.cadence_by_label names {_unknown} which are not declared in labels "
+            f"for {case_study_id}; known labels: {sorted(_declared)}"
+        )
+
     return BacktestConfig(
         case_study_id=case_study_id,
         primary_label=labels["primary"],
@@ -1900,6 +2115,7 @@ def get_backtest_config(case_study_id: str) -> BacktestConfig:
         min_trade_value=float(default_rebal.get("min_trade_value", 100.0)),
         initial_cash=initial_cash,
         share_type=share_type,
+        cadence_by_label=cadence_by_label,
     )
 
 

@@ -10,7 +10,7 @@ import subprocess
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -21,7 +21,10 @@ from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, LogisticRe
 from threadpoolctl import threadpool_limits
 
 from case_studies.research.contracts import ExecutionTier
-from case_studies.research.cv import require_fold_scoped_temporal_compatibility
+from case_studies.research.cv import (
+    require_fold_scoped_temporal_compatibility,
+    require_fold_scoped_temporal_holdout_coverage,
+)
 from case_studies.research.identity import ResolvedSpec
 from case_studies.research.models import ModelRun
 from case_studies.research.recovery import ExecutionAttempt, ExecutionLedger
@@ -159,7 +162,7 @@ def _runtime_identity() -> dict[str, str]:
     }
 
 
-def _runtime_provenance(study: Study) -> dict[str, Any]:
+def _runtime_provenance(study: Study, *, notebook: str | None = None) -> dict[str, Any]:
     try:
         commit = subprocess.check_output(
             ["git", "-C", str(study.release_root), "rev-parse", "HEAD"],
@@ -169,13 +172,22 @@ def _runtime_provenance(study: Study) -> dict[str, Any]:
         ).strip()
     except (OSError, subprocess.SubprocessError):
         commit = "unknown"
-    return {
+    record: dict[str, Any] = {
         "entry_point": "case_studies.utils.linear",
         "packages": _runtime_identity(),
         "platform": platform.platform(),
         "python": platform.python_version(),
         "source_commit": commit,
     }
+    # `notebook_path` says which notebook produced a row; `entry_point` says which module ran.
+    # Different questions, and the module is legitimately shared - several notebooks call this one,
+    # so `entry_point` cannot name a notebook and should not try. Both sit in
+    # `registry/specs.py:_V2_PROVENANCE_FIELDS`, so neither reaches the training identity. Absent
+    # when the caller names no notebook: a holdout reconstruction is not a notebook run, and a
+    # wrong notebook name would be worse than none.
+    if notebook:
+        record["notebook_path"] = notebook
+    return record
 
 
 def _normalize_folds(splits: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
@@ -556,7 +568,7 @@ def _load_batch_base(
         "splits": splits,
         "cv_record": cv_record,
         "expected": expected,
-        "runtime_provenance": _runtime_provenance(study),
+        "runtime_provenance": _runtime_provenance(study, notebook=request.get("notebook")),
     }
 
 
@@ -615,6 +627,138 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     )
 
 
+def _require_holdout_temporal_features(mds, split: dict[str, Any]) -> None:
+    """Refuse to re-key onto a holdout fold the fold-scoped temporal artifact does not cover.
+
+    Stage 04 writes model-based features per validation fold, and `locked_holdout_split` takes
+    the holdout fold's id from the spec's CV, defaulting to 0. Both ways of getting this wrong
+    are silent:
+
+    - a holdout id absent from the artifact joins no temporal rows, and the model fits on
+      all-null features rather than the ones it was selected with;
+    - a holdout id that collides with a validation id - id 0 is the default, and every case
+      study has a fold 0 - joins successfully against features fitted on that validation
+      fold's training window, which ends before the holdout interval begins. Nothing raises;
+      the holdout number is simply computed from the wrong feature vintage.
+
+    The question asked is COVERAGE, not fold-boundary compatibility, and this is the same branch
+    `gbm.py` and `latent_factors/adapter.py:603` take. Compatibility asks whether the artifact
+    declares a fold with this geometry; for a holdout it never does, because the fold is derived
+    after stage 04 ran and the artifact cannot be rebuilt to declare it without changing the
+    sha256 the selection was made under. Asking it here refused every holdout refit on a
+    linear-carried case study with fold-scoped model-based features. The features are joined by
+    (entity, date), so what the run needs is rows spanning the dates it trains and evaluates on.
+
+    `reconstruct_locked_request` runs the same check. Checking here as well means the refusal
+    happens while the holdout specification is still being built, rather than after it is
+    registered.
+    """
+    if mds.temporal_by_fold is None or not mds.temporal_keys or not mds.temporal_feature_names:
+        return
+    try:
+        require_fold_scoped_temporal_holdout_coverage(
+            split,
+            mds.temporal_by_fold,
+            source_timeline=mds.dataset.get_column(mds.date_col),
+            date_col=mds.date_col,
+        )
+    except ValueError as exc:
+        raise ValueError(
+            f"holdout fold {int(split['fold'])} "
+            f"({split['train_start']}..{split['train_end']} train, "
+            f"{split['val_start']}..{split['val_end']} evaluation) is not covered by the "
+            f"fold-scoped temporal artifact. The {len(mds.temporal_feature_names)} model-based "
+            "features would be joined from the wrong rows or from none at all, so the holdout "
+            "would not evaluate the configuration selection ranked. Check that stage 04 emitted "
+            "model-based feature rows spanning the holdout window; do NOT regenerate the "
+            "artifact to add a fold declaration, which moves a digest the selection was made "
+            "under and buys nothing this check reads."
+        ) from exc
+
+
+def rekey_holdout_spec(
+    study: Study,
+    spec: dict[str, Any],
+    *,
+    validation_spec: dict[str, Any],
+) -> None:
+    """Recompute the fold-derived fields against the holdout fold, in place, before a lock.
+
+    ``spec`` arrives with its CV already replaced by the single derived holdout fold, and with
+    ``expected_prediction_keys`` and ``effective_params_by_fold`` still describing the VALIDATION
+    folds. Both are checked after the lock by ``validate_locked_expected_keys`` and by
+    ``reconstruct_locked_request``, so carrying them forward produces a lock that fails at
+    execution and dropping them produces one that fails differently. They have to be recomputed.
+
+    Recomputing is not copying. A data-derived penalty - any ``alpha_frac`` configuration - is
+    resolved from the training rows of its own fold, so the holdout fold's alpha is a different
+    number from every validation fold's, and carrying one forward would lock a model that is not
+    the model selection chose. Measured on ``fx_pairs``: 48 of 84 linear specs vary their
+    parameters across folds, ``lasso_f0.85`` among them.
+
+    The rule that derives them lives in the preset, not in the spec, which records only the
+    resolved values. So the preset is loaded by ``config_name`` and **verified against a recorded
+    validation fold before it is trusted**: if replaying the rule does not reproduce the
+    parameters the spec already carries, the preset has changed since the validation run and
+    deriving the holdout parameters from it would silently lock a different configuration. One
+    fold is enough to establish that, and eight would cost eight fold preparations.
+    """
+    from case_studies.research.models import locked_holdout_split
+
+    computation = spec["computation"]
+    label_ref = study.labels.get(spec["label"], execution_tier=ExecutionTier.CANONICAL)
+    mds = load_modeling_dataset(study.case_study, label_ref.name, max_symbols=0)
+    if mds.date_col != "timestamp" or not mds.entity_cols:
+        raise ValueError("locked linear runner requires timestamp and an entity key")
+    entity_col = mds.entity_cols[0]
+
+    split = locked_holdout_split(spec, mds.dataset, mds.date_col, study.case_study)
+    _require_holdout_temporal_features(mds, split)
+    expected = _expected_keys_from_dataset(
+        mds.dataset,
+        [split],
+        entity_col=entity_col,
+        date_col=mds.date_col,
+        label_col=mds.label_col,
+    )
+    computation["expected_prediction_keys"] = {
+        "digest": value_digest(expected, ("symbol", "timestamp", "fold")),
+        "n_rows": expected.height,
+        "n_folds": expected.get_column("fold").n_unique(),
+    }
+
+    model = computation.get("model")
+    if not isinstance(model, dict) or "effective_params_by_fold" not in model:
+        return
+    recorded = model["effective_params_by_fold"]
+    if not isinstance(recorded, dict) or not recorded:
+        raise ValueError("locked linear spec records no effective parameters to re-key")
+
+    config = _load_preset(spec["config_name"])
+    validation_folds = _normalize_folds(validation_spec["computation"]["cv"]["folds"])
+    witness = next((fold for fold in validation_folds if str(int(fold["fold"])) in recorded), None)
+    if witness is None:
+        raise ValueError(
+            "locked linear spec records parameters for no fold the validation CV declares"
+        )
+    witness_id = str(int(witness["fold"]))
+    replayed = _effective_params(
+        config, {}, prepare_standardized_folds(mds, [dict(witness)], train_sample_frac=1.0)
+    )
+    if replayed.get(witness_id) != recorded[witness_id]:
+        raise ValueError(
+            f"preset {spec['config_name']!r} no longer reproduces the recorded parameters for "
+            f"validation fold {witness_id}: {replayed.get(witness_id)!r} != "
+            f"{recorded[witness_id]!r}. The holdout parameters are derived from this preset, so "
+            "locking now would evaluate a configuration other than the one selection ranked."
+        )
+
+    holdout_folds = prepare_standardized_folds(mds, [split], train_sample_frac=1.0)
+    if not holdout_folds:
+        raise ValueError("locked linear holdout fold could not be prepared")
+    model["effective_params_by_fold"] = _effective_params(config, {}, holdout_folds)
+
+
 def reconstruct_locked_request(
     study: Study,
     spec: dict[str, Any],
@@ -671,7 +815,19 @@ def reconstruct_locked_request(
 
     split = locked_holdout_split(spec, mds.dataset, mds.date_col, study.case_study)
     if mds.temporal_by_fold is not None and mds.temporal_keys and mds.temporal_feature_names:
-        require_fold_scoped_temporal_compatibility([split], mds.temporal_artifact_splits)
+        # Coverage, not fold-boundary compatibility - the branch `latent_factors/adapter.py:603`
+        # and `gbm.py` already take, for the same reason. Compatibility asks whether the stage-04
+        # artifact declares a fold with this geometry, and for a holdout that question has no good
+        # answer: the fold is derived after stage 04 ran, so the artifact does not declare it, and
+        # rebuilding it to declare it changes the sha256 the selection was made under. The
+        # features are joined by (entity, date), so what the run needs is rows spanning the dates
+        # it trains and evaluates on, not a fold labelled for it.
+        require_fold_scoped_temporal_holdout_coverage(
+            split,
+            mds.temporal_by_fold,
+            source_timeline=mds.dataset.get_column(mds.date_col),
+            date_col=mds.date_col,
+        )
     expected = _expected_keys_from_dataset(
         mds.dataset,
         [split],
@@ -1083,6 +1239,23 @@ def _fail_batch_candidate(candidate: _BatchCandidate, error: Exception) -> None:
         candidate.attempt = None
 
 
+def _progress(message: str) -> None:
+    """One timestamped line per unit of work, flushed.
+
+    Deliberately not a tqdm bar. This runner's output is read two ways and neither favours
+    one: papermill captures it into a notebook cell, and `nb-run.sh` tees it to a log that
+    someone greps hours later to ask whether the run is moving. A bar rewrites one line with
+    carriage returns, which a log file records as an unreadable single line and a captured
+    cell renders as the final frame only - so at 07:30 it says exactly as little as no output
+    at all.
+
+    Discrete lines carry the thing a bar cannot: when each unit finished. That is what makes
+    "no new line for four hours" a legible statement, which is the question this exists to
+    answer.
+    """
+    print(f"[{datetime.now(UTC).strftime('%H:%M:%S')}] {message}", flush=True)
+
+
 def _run_batch_candidate_fold(candidate: _BatchCandidate, fold: dict[str, Any]) -> None:
     if candidate.result is not None or candidate.error is not None:
         return
@@ -1106,6 +1279,11 @@ def _run_batch_candidate_fold(candidate: _BatchCandidate, fold: dict[str, Any]) 
         return
     candidate.frames.append(frame)
     candidate.fit_elapsed_s += elapsed
+    _progress(
+        f"  fold {fold_id} {'reused' if reused else 'fitted'} for "
+        f"{candidate.request.get('config_name', '?')} "
+        f"in {elapsed:6.1f}s (config total {candidate.fit_elapsed_s:7.1f}s)"
+    )
     (candidate.reused_folds if reused else candidate.fitted_folds).append(fold_id)
 
 
@@ -1214,6 +1392,10 @@ def _run_batch_group(
         candidate.result is None and candidate.error is None for candidate in candidates
     )
     if first_pass_needed:
+        _progress(
+            f"linear group {compatibility_key[:12]}: {len(candidates)} configurations x "
+            f"{len(fold_ids)} folds, fold-major"
+        )
         for split in base["splits"]:
             fold_id = int(split["fold"])
             fixed_pending = [
@@ -1232,6 +1414,11 @@ def _run_batch_group(
                     _fail_batch_candidate(candidate, exc)
                 break
             preparation_elapsed_s += time.perf_counter() - started
+            _progress(
+                f"fold {fold_id} of {len(fold_ids)} prepared in "
+                f"{time.perf_counter() - started:.1f}s; {len(fixed_pending)} configurations "
+                f"to fit on it"
+            )
             for candidate in dependent:
                 if candidate.error is not None:
                     continue

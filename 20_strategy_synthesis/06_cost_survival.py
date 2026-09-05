@@ -59,7 +59,8 @@ warnings.filterwarnings("ignore")
 pl.Config.set_tbl_rows(20)
 
 # %% tags=["parameters"]
-MAX_CASE_STUDIES = 0  # 0 = all
+# 0 = all
+MAX_CASE_STUDIES = 0
 
 # %%
 CS_LIST = CASE_STUDY_IDS[:MAX_CASE_STUDIES] if MAX_CASE_STUDIES else CASE_STUDY_IDS
@@ -589,6 +590,7 @@ if not summary.is_empty():
     )
 
 # %% [markdown]
+#
 # %% tags=["results"]
 _reg = regime.sort("turnover_mult", descending=True)
 display(

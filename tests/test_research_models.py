@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import gc
 import json
-import os
 import weakref
 from copy import deepcopy
 from types import SimpleNamespace
@@ -28,6 +27,7 @@ from case_studies.research import (
 from case_studies.research.results import ResultsCatalog
 from case_studies.utils import gbm as gbm_utils
 from case_studies.utils import linear, tabular_dl
+from case_studies.utils.folds import clear_memo, folds_built
 from case_studies.utils.latent_factors import adapter as latent_adapter
 from case_studies.utils.latent_factors import case_study as latent_case_study
 from case_studies.utils.latent_factors.cae import run_cae_fold
@@ -42,16 +42,6 @@ from case_studies.utils.latent_factors.sdf import run_sdf_fold
 from tests.test_research_registry import _predictions
 from tests.test_research_workspace import _seed_release
 from utils import modeling
-
-
-@pytest.fixture(autouse=True)
-def _restore_output_root():
-    yield
-    os.environ.pop("ML4T_OUTPUT_DIR", None)
-    from case_studies.research import workspace
-
-    workspace._ACTIVE_OUTPUT_ROOT = None
-    workspace._clear_root_sensitive_caches()
 
 
 def _linear_study(tmp_path, monkeypatch, *, n_symbols: int = 6):
@@ -159,6 +149,111 @@ def _tabm_study(tmp_path, monkeypatch):
     monkeypatch.setattr(modeling, "load_modeling_dataset", load_dataset)
     monkeypatch.setattr(modeling, "load_configs", lambda *args, **kwargs: configs)
     return study, modeling_dataset, loads
+
+
+def _counted_loads(monkeypatch) -> list[tuple]:
+    """Record every `load_modeling_dataset` the linear resolver issues."""
+    loads: list[tuple] = []
+    original = linear.load_modeling_dataset
+
+    def counted(case_study, label, *args, **kwargs):
+        loads.append((case_study, label, kwargs.get("max_symbols", 0)))
+        return original(case_study, label, *args, **kwargs)
+
+    monkeypatch.setattr(linear, "load_modeling_dataset", counted)
+    return loads
+
+
+def test_resolving_a_configuration_grid_reads_the_panel_and_builds_the_folds_once(
+    tmp_path, monkeypatch
+) -> None:
+    """Resolving per configuration must not repeat the work that does not depend on one.
+
+    Loading the panel and preparing a fold depend on the data and the split, not on the
+    estimator, so a grid of configurations over one label needs one of each however many
+    configurations it holds. Counting requests would answer the wrong question - what is pinned
+    here is the work done, by dataset loads and by folds actually built, against a grid that
+    triples.
+
+    A caller that hands `run_models` pre-resolved requests takes the per-request branch rather
+    than the family batch runner, and this is what makes that a choice about when folds are
+    built rather than a multiplier on how often.
+    """
+    study = _linear_study(tmp_path, monkeypatch)
+    loads = _counted_loads(monkeypatch)
+
+    def resolve(config_names):
+        clear_memo()
+        linear.clear_input_memo()
+        loads.clear()
+        before = folds_built()
+        resolved = [
+            study.model(family="linear", label="fwd_ret_1d", config_name=name).resolve()
+            for name in config_names
+        ]
+        return resolved, len(loads), folds_built() - before
+
+    _, one_load, one_built = resolve(("ridge_a",))
+    resolved, three_loads, three_built = resolve(("ridge_a", "ridge_b", "ridge_c"))
+
+    assert one_load == three_loads == 1
+    # Two declared folds, built once for the grid rather than once per configuration.
+    assert one_built == three_built == 2
+
+    # Not merely the same values: the same arrays. Every configuration of one label sees one
+    # prepared fold set, so resolving up front does not hold a copy per configuration either.
+    first, second, third = (request._context.folds for request in resolved)
+    assert first[0] is second[0] is third[0]
+
+
+def test_resolving_and_planning_agree_on_every_training_identity(tmp_path, monkeypatch) -> None:
+    """The two paths through `run_models` must not produce different models.
+
+    `plan_models` computes identities from placeholder folds and the per-request path computes
+    them from prepared ones. When those were two implementations of fold preparation they
+    disagreed at 1e-11 in the standardised design matrix, which moved every data-derived alpha
+    and gave one declared configuration two training hashes depending on which path ran it.
+
+    Only a data-derived penalty can show that. A fixed `alpha` is resolved from the
+    configuration by `_fixed_effective_params` without reading a fold at all, so identities
+    over fixed penalties agree between the paths whatever the arrays hold.
+    """
+    study = _linear_study(tmp_path, monkeypatch)
+    names = ("ridge_f1", "ridge_f2", "ridge_f3")
+    # `alpha_frac` rather than a fixed `alpha`, and that is the whole point. A fixed penalty
+    # takes `_fixed_effective_params`, which resolves from the configuration alone and never
+    # reads a fold - so an identity comparison over fixed penalties cannot see the divergence
+    # this test is about. A fraction is resolved from the prepared design matrix, which is
+    # exactly where the two paths compute from different arrays.
+    monkeypatch.setattr(
+        linear,
+        "_load_preset",
+        lambda config_name: {
+            "config_name": config_name,
+            "family": "linear",
+            "library": "sklearn",
+            "model_class": "Ridge",
+            "params": {"alpha_frac": float(config_name[-1]) / 10.0},
+        },
+    )
+
+    def requests():
+        return [
+            study.model(family="linear", label="fwd_ret_1d", config_name=name) for name in names
+        ]
+
+    # The penalty has to actually be data-derived, or the comparison below is vacuous.
+    assert linear._fixed_effective_params(linear._load_preset(names[0]), {}, (0, 1)) is None, (
+        "a fixed penalty resolves without reading a fold and cannot show the divergence"
+    )
+
+    resolved = tuple(request.resolve() for request in requests())
+    plan = plan_models(study, requests=requests())
+
+    assert tuple(request.identity for request in resolved) == tuple(
+        member.training_hash for member in plan.members
+    )
+    assert len({request.identity for request in resolved}) == len(names)
 
 
 def test_tabm_public_batch_materializes_and_prepares_compatible_panel_once(
@@ -627,7 +722,7 @@ def test_tabm_corrupt_diagnostics_are_rebuilt_from_completed_folds(tmp_path, mon
     assert prepared_folds == [0, 1]
     assert set(pl.read_parquet(training_log)["fold"]) == {0, 1}
 
-    selected_path = training_log.parent / "predictions.parquet"
+    selected_path = training_log.parent / "best_epoch_predictions.parquet"
     obsolete = (
         pl.read_parquet(selected_path)
         .drop("model_id")
@@ -736,12 +831,12 @@ def test_tabm_variants_from_one_named_preset_keep_separate_identities(
         diagnostics = run.training.root / "run_log" / "training" / run.training.hash / "diagnostics"
         assert {path.name for path in diagnostics.iterdir()} == {
             "all_predictions.parquet",
+            "best_epoch_predictions.parquet",
             "learning_curves.parquet",
-            "predictions.parquet",
             "result.json",
             "training_log.parquet",
         }
-        selected = pl.read_parquet(diagnostics / "predictions.parquet")
+        selected = pl.read_parquet(diagnostics / "best_epoch_predictions.parquet")
         assert "model_id" in selected.columns
         assert {"config", "epoch"}.isdisjoint(selected.columns)
 

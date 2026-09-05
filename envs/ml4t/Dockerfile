@@ -181,6 +181,44 @@ RUN /opt/ml4t/bin/pip install --no-cache-dir \
 # Force protobuf 5+ which uses the pure-Python descriptor pool.
 RUN /opt/ml4t/bin/pip install --no-cache-dir "protobuf>=5.0"
 
+# Chrome, so `fig.show()` emits the PNG in the reader's own run.
+#
+# kaleido 1.x renders through a Chrome it does not bundle, and `utils/__init__` asks for
+# the `+png` renderer half only when one is resolvable. With no Chrome here the reader
+# still gets an interactive figure, but every notebook re-executed in the image loses the
+# `image/png` that GitHub's notebook viewer needs - so the reader's run and the committed
+# artifact stopped telling the same story, and `tests/test_notebook_output_hygiene.py`
+# would catch the artifact rather than the cause.
+#
+# Chrome for Testing publishes a linux64 build only, so this is an amd64 step. On arm64
+# the renderer falls back to `plotly_mimetype`, which is still interactive in Jupyter.
+RUN if [ "$TARGETARCH" = "amd64" ]; then \
+      set -e && \
+      apt-get update && apt-get install -y --no-install-recommends \
+        fonts-liberation libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 \
+        libatspi2.0-0t64 libcairo2 libcups2t64 libdbus-1-3 libdrm2 libexpat1 \
+        libgbm1 libglib2.0-0t64 libnspr4 libnss3 libpango-1.0-0 libx11-6 \
+        libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 \
+        libxrandr2 && \
+      rm -rf /var/lib/apt/lists/* && \
+      /opt/ml4t/bin/kaleido_get_chrome --path /opt/chrome && \
+      ln -s "$(find /opt/chrome -type f -name chrome -perm -u+x | head -1)" \
+        /usr/local/bin/google-chrome && \
+      chmod -R a+rX /opt/chrome && \
+      /opt/ml4t/bin/python -c "import plotly.express as px; \
+assert len(px.line(x=[1, 2], y=[1, 2]).to_image(format='png')) > 1000; \
+print('kaleido PNG export: OK')"; \
+    fi
+
+# Chrome needs a writable HOME, and the container runs as the host's UID:GID
+# (docker-compose.yml). A host UID with no /etc/passwd entry gets HOME=/, where Chrome
+# exits immediately - which would turn today's silent loss of the PNG into a raised
+# BrowserFailedError for exactly those readers. Naming a writable HOME for every UID is
+# what makes installing Chrome above safe rather than a regression. Jupyter needs the
+# same thing for its runtime directory.
+RUN chmod 1777 /home/ml4t
+ENV HOME=/home/ml4t
+
 WORKDIR /app
 ENV PATH="/opt/ml4t/bin:$PATH"
 ENV PYTHONPATH="/app"

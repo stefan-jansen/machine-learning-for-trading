@@ -86,6 +86,7 @@ from case_studies.utils.feature_engineering import (
     quantile_profile,
 )
 from utils import style
+from utils.artifact_specs import resolve_label_buffer_unit
 from utils.cv_splits import generate_cv_splits, load_evaluation_config
 from utils.paths import get_case_study_dir
 from utils.style import (  # COLORS registers the ml4t Plotly template on import
@@ -95,7 +96,8 @@ from utils.style import (  # COLORS registers the ml4t Plotly template on import
 
 # %% tags=["parameters"]
 # Production defaults (Papermill overrides for testing)
-MAX_SYMBOLS = 0  # 0 = all symbols
+# Zero means all symbols.
+MAX_SYMBOLS = 0
 
 # %% [markdown]
 # ### The one-month holding period, read from the configuration
@@ -166,12 +168,16 @@ META_COLS = {
 # a price: `04_model_based_features` fits a GARCH model and a stochastic-volatility model
 # to each name's history and writes what each one says the name's volatility was. A model
 # fitted on a stretch of history that includes the day being scored has seen the answer,
-# so that notebook fits a separate estimator per **fold** - a training period, a gap wide
-# enough that no training outcome is still unresolved when the next period starts, and
-# then a **validation period** the estimator never saw. It writes one row per name, day
-# and fold. The value that is genuinely out of sample on a given day is the one the fold
-# whose validation period contains that day produced, and this section keeps exactly
-# those rows.
+# so that notebook estimates its parameters on a **refit schedule**: a burn-in, then a fit
+# on everything available at that point, which speaks for the following month and no
+# earlier day, then a refit. Every value is therefore produced by parameters that stopped
+# before the day it describes, on training days as well as validation days, and the file
+# carries one row per name and day rather than one per name, day and fold.
+#
+# What this section keeps is the days that fall inside some fold's **validation period** -
+# a period separated from that fold's training window by a gap wide enough that no training
+# outcome is still unresolved when it starts. It is the days that are selected here, not an
+# estimator: there is only one.
 #
 # The last year of the sample is a **holdout**: a stretch of data set aside untouched, so
 # that the assessment several chapters later is made on prices nothing in the research
@@ -196,18 +202,27 @@ def _as_date(value: date | datetime) -> date:
 
 
 # %% [markdown]
-# Which fold a row came from is part of what identifies it, because it is what says which
-# estimator produced the value. A missing or repeated key would leave that ambiguous, so
-# the check runs before any value enters the panel rather than after.
+# A row is identified by its date and its symbol, and by nothing else. It used to carry a
+# fold as well, because `04_model_based_features` fitted one estimator per fold and the fold
+# said which estimator produced the value; it now fits on a refit schedule, so a date and a
+# symbol have exactly one value whichever fold reads them. A missing or repeated key would
+# leave that ambiguous, so the check runs before any value enters the panel rather than after.
 
 
 # %%
 def _validate_temporal_keys(temporal: pl.DataFrame) -> None:
-    """Reject incomplete or ambiguous fold-specific temporal keys."""
-    required = {"timestamp", "symbol", "fold"}
+    """Reject incomplete or ambiguous temporal keys, and a fold column that came back."""
+    required = {"timestamp", "symbol"}
     missing = required.difference(temporal.columns)
     if missing:
         raise ValueError(f"Temporal artifact is missing required columns: {sorted(missing)}")
+
+    if "fold" in temporal.columns:
+        raise ValueError(
+            "Temporal artifact carries a `fold` column. It is written on a refit schedule, so "
+            "a date and symbol have one value; a fold column means it was produced by the "
+            "per-fold design, under which a training row's parameters had read its own future."
+        )
 
     null_keys = temporal.select(
         pl.any_horizontal([pl.col(key).is_null() for key in sorted(required)]).sum()
@@ -216,24 +231,25 @@ def _validate_temporal_keys(temporal: pl.DataFrame) -> None:
         raise ValueError(f"Temporal artifact has {null_keys} rows with null alignment keys")
 
     duplicate_keys = (
-        temporal.group_by(["timestamp", "symbol", "fold"]).len().filter(pl.col("len") > 1).height
+        temporal.group_by(["timestamp", "symbol"]).len().filter(pl.col("len") > 1).height
     )
     if duplicate_keys:
-        raise ValueError(f"Temporal artifact has {duplicate_keys} duplicate fold-specific keys")
+        raise ValueError(f"Temporal artifact has {duplicate_keys} duplicate date-symbol keys")
 
 
 # %% [markdown]
-# For each fold, keep only the rows that fold's estimator produced and that fall inside
-# its own validation period. `04_model_based_features` fits one estimator beyond the
-# folds, on everything up to the holdout; it exists to score the holdout, and it has seen
-# every validation date, so a value it produced is in sample here and must not enter.
+# Keep the rows that fall inside some fold's validation period. There is no longer a wrong
+# estimator to exclude: `04_model_based_features` produces one value per date and symbol,
+# from parameters fitted on sessions ending before that date, so a value on a validation date
+# is out of sample for every fold that scores it.
 #
-# The exclusion is structural: the loop below names the folds it wants and takes only
-# those, so a fold the notebook did not ask for cannot reach the panel whatever number it
-# carries. What the checks after the loop cover is the part that is not structural - a fold
-# with no rows in its own validation period, which would mean the artifact was built
-# against a different fold configuration, and a date-and-name key claimed by two folds at
-# once, which would mean their validation periods overlap.
+# What the old version had to do here, and no longer does, was exclude the pass fitted on
+# everything up to the holdout - an estimator that had seen every validation date and whose
+# values were therefore in sample. That pass does not exist under a refit schedule.
+#
+# The check that remains is the one that is not structural: a fold with no rows in its own
+# validation period, which would mean the artifact was built against a different fold
+# configuration.
 
 
 # %%
@@ -244,7 +260,7 @@ def build_validation_temporal_panel(
     """Select exactly the out-of-sample temporal estimate for each validation row."""
     _validate_temporal_keys(temporal)
 
-    selected = []
+    windows = []
     for split in cv_folds:
         fold_id = int(split["fold"])
         train_end = _as_date(split["train_end"])
@@ -253,24 +269,24 @@ def build_validation_temporal_panel(
         if train_end >= val_start:
             raise ValueError(f"Fold {fold_id} training ends inside its validation window")
 
-        fold_rows = temporal.filter(
-            (pl.col("fold") == fold_id)
-            & pl.col("timestamp").is_between(val_start, val_end, closed="both")
-        )
-        if fold_rows.is_empty():
+        if temporal.filter(
+            pl.col("timestamp").is_between(val_start, val_end, closed="both")
+        ).is_empty():
             raise ValueError(
                 f"Temporal artifact has no validation rows for fold {fold_id} "
                 f"({val_start} through {val_end})"
             )
-        selected.append(fold_rows)
+        windows.append((val_start, val_end))
 
-    validation = pl.concat(selected).rename({"fold": "validation_fold"})
-    duplicate_rows = validation.group_by(JOIN_COLS).len().filter(pl.col("len") > 1).height
-    if duplicate_rows:
-        raise ValueError(
-            f"Validation temporal panel has {duplicate_rows} multiply assigned date-symbol keys"
+    # A union, not a concatenation. Two folds' validation windows can overlap, and under the
+    # per-fold artifact the overlap produced two rows for one date and symbol - one per fold -
+    # which is why this function used to check for multiply assigned keys. There is one value
+    # now, so an overlapping date is scored once.
+    return temporal.filter(
+        pl.any_horizontal(
+            [pl.col("timestamp").is_between(start, end, closed="both") for start, end in windows]
         )
-    return validation
+    )
 
 
 # %% [markdown]
@@ -375,6 +391,11 @@ cv_folds = generate_cv_splits(
     features.select(DATE_COL),
     case_study_id=CASE_STUDY_ID,
     label_buffer=str(_setup["labels"]["buffer"]),
+    # `ret_to_expiry` resolves on an expiration date, so its buffer is calendar days and
+    # `setup.yaml` declares it. The splitter defaults to sessions, and a caller that does not
+    # pass the declaration derives boundaries that disagree with the ones the models were
+    # fitted on - the folds this notebook evaluates over have to be those folds.
+    buffer_unit=resolve_label_buffer_unit(CASE_STUDY_ID, str(_setup["labels"]["primary"]), _setup),
 )
 evaluation_config = load_evaluation_config(CASE_STUDY_ID)
 HOLDOUT_START = pl.Series([str(evaluation_config["holdout_start"])]).str.to_date().item()
@@ -386,12 +407,24 @@ primary_selection_df = keep_outcomes_resolved_before_holdout(primary_label_df, H
 #
 # The join is declared one-to-one in both directions, so a duplicated key raises here
 # rather than quietly multiplying a name's contribution to every statistic that follows.
-# Being an inner join, it also drops any feature row for which no out-of-sample model
-# output exists, which is what confines the frame to the validation periods.
+# Being an inner join, it also drops any feature row for which no model output exists,
+# which is what confines the frame to the validation periods.
+#
+# A row inside a validation period can now carry a null model-based value, and it is worth
+# being precise about why. `04_model_based_features` fits on a refit schedule, so a name has
+# no fitted volatility until its own burn-in has passed - and on this panel a name is only
+# quoted while a straddle near the target maturity exists, so many names are short and reach
+# that point late or never. Under the per-fold design the column was never null, because each
+# fold fitted on its whole training window and then emitted backwards across it: completeness
+# there was a symptom of the leak, not evidence against one.
+#
+# Those rows are dropped rather than kept, and counted rather than dropped quietly. Keeping
+# them would score the stage-03 features on rows where the model-based ones cannot be
+# evaluated, and this section exists to compare the two on the same rows.
 
 # %%
 financial_cols = [c for c in features.columns if c not in META_COLS]
-temporal_cols = [c for c in temporal.columns if c not in JOIN_COLS + ["validation_fold"]]
+temporal_cols = [c for c in temporal.columns if c not in JOIN_COLS]
 
 eval_panel = features.join(temporal, on=JOIN_COLS, how="inner", validate="1:1")
 eval_panel = eval_panel.join(
@@ -401,11 +434,19 @@ eval_panel = eval_panel.join(
     validate="1:1",
 )
 
-null_temporal = eval_panel.select(
-    pl.any_horizontal([pl.col(col).is_null() for col in temporal_cols]).sum()
-).item()
-if null_temporal:
-    raise ValueError(f"Evaluation panel has {null_temporal} rows with null temporal features")
+_before_burnin_drop = eval_panel.height
+eval_panel = eval_panel.filter(~pl.any_horizontal([pl.col(col).is_null() for col in temporal_cols]))
+_dropped = _before_burnin_drop - eval_panel.height
+print(
+    f"Rows dropped for carrying no model-based value: {_dropped:,} of "
+    f"{_before_burnin_drop:,} ({_dropped / _before_burnin_drop:.1%})"
+)
+if eval_panel.is_empty():
+    raise ValueError(
+        "No validation row carries a model-based value. Either the burn-in in "
+        "`setup.yaml::model_based` exceeds every segment's history, or "
+        "`04_model_based_features` did not write the columns this section screens."
+    )
 
 # The holdout boundary, asserted on the frame rather than trusted from the filter that
 # produced it: the day each straddle expires must fall before the holdout begins.
@@ -492,13 +533,13 @@ with pl.Config(fmt_str_lengths=400, tbl_width_chars=220):
     display(family_register)
 
 # %% [markdown]
-# ### Candidates that take one value per fold rather than one per day
+# ### Candidates that barely move within a fold's validation period
 #
-# An estimator fitted once per fold can hand back a quantity that barely moves inside its
-# own validation period while still differing between names - a fitted long-run
-# volatility level behaves that way. That is not the same thing as a feed that has gone
-# stale, and it does not stop the quantity from ranking names against each other, so it
-# is detected here and read differently by the staleness screen below.
+# An estimator refitted monthly can still hand back a quantity that barely moves inside a
+# fold's validation period while differing between names - a fitted long-run volatility
+# level behaves that way. That is not the same thing as a feed that has gone stale, and it
+# does not stop the quantity from ranking names against each other, so it is detected here
+# and read differently by the staleness screen below.
 
 # %%
 fold_constant_features = set()

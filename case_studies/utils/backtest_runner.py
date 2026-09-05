@@ -34,7 +34,11 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import polars as pl
 
-from case_studies.utils.backtest_loaders import BacktestConfig, get_backtest_config
+from case_studies.utils.backtest_loaders import (
+    BacktestConfig,
+    declared_rebalance_step,
+    get_backtest_config,
+)
 from case_studies.utils.backtest_presets import (
     apply_calendar_session_enforcement,
     ensure_backtest_spec,
@@ -467,6 +471,7 @@ def precompute_weights(
             case_study=case_study,
             prediction_hash=prediction_hash,
             conformal_widths=conformal_widths,
+            rebalance_step=rebal_spec.get("step"),
         )
     return weights
 
@@ -628,7 +633,17 @@ def substitute_continuous_return_for_classification(
         return predictions
 
     eval_label = str(mapping[label])
-    eval_path = _Path(CASE_STUDIES_DIR) / case_study / "labels" / f"{eval_label}.parquet"
+    # `get_case_study_dir`, not `CASE_STUDIES_DIR`. The setup file above is configuration and
+    # lives in the repository; a label parquet is generated output and lives wherever
+    # `ML4T_OUTPUT_DIR` puts it, which is what every other reader of one resolves. Reading it
+    # from the checkout meant this path could only work where the artifacts happened to sit
+    # beside the source: a run under output isolation raised FileNotFoundError for a label it
+    # had just written. Measured in CI on `crypto_perps_funding` 13_backtest, where the first
+    # classification label reached - `fwd_dir_8h` - looked for `fwd_ret_8h.parquet` under
+    # /app/case_studies/... while the labels were in the isolated output root.
+    from utils.paths import get_case_study_dir as _case_dir
+
+    eval_path = _case_dir(case_study) / "labels" / f"{eval_label}.parquet"
     if not eval_path.exists():
         raise FileNotFoundError(
             f"Continuous-return label {eval_label!r} expected at {eval_path} "
@@ -1021,6 +1036,16 @@ def run_backtest(
     # drawdown on bar 1 when the function-arg default ($1M) diverges from the
     # spec ($100K) — halting the strategy before any trade is placed.
     initial_cash = float(strategy_spec["backtest_config"]["cash"]["initial"])
+    # The step decides which slots are traded, so the spec has to record the one this run
+    # uses - otherwise two runs at different steps hash alike and the second is skipped
+    # (ml4t/agent-workspace#1005). Stamped here rather than only in build_backtest_spec
+    # because several notebooks build a spec without passing `label`, and this is the one
+    # place that always has both the case study and the label.
+    if label:
+        _declared = declared_rebalance_step(case_study, label)
+        if _declared is not None:
+            _rb = strategy_spec.setdefault("strategy", {}).setdefault("rebalance", {})
+            _rb.setdefault("step", _declared)
     strategy = strategy_view(strategy_spec)
     signal_config = strategy["signal"]
     allow_short = resolved_allow_short_selling(strategy_spec, precomputed_weights)
@@ -1135,6 +1160,7 @@ def run_backtest(
                 label=label,
                 case_study=case_study,
                 prediction_hash=prediction_hash,
+                rebalance_step=rebal_spec.get("step"),
             )
 
     # 2. Dispatch to engine or vectorized
@@ -1170,7 +1196,23 @@ def run_backtest(
         # weights × y_true vectorized path cannot express this strategy because
         # y_true is a single 30-day return, not a daily P&L series.
         if case_study == "sp500_options" and label == "ret_to_expiry":
+            from case_studies.sp500_options._htm_backtest import OPTION_DECISION_COLUMNS
+
+            # A short-straddle spec says the strategy's decisions are typed option contracts;
+            # it does not say this frame is one. Where `run_backtest` was handed a decision
+            # artifact as `precomputed_weights`, it is - the artifact carries the strike,
+            # expiration and both legs' quotes. Where `run_backtest` derived the weights from
+            # predictions itself, which is what the Ch20 holdout retrain does, the frame is
+            # `[timestamp, symbol, weight]` and carries none of them, and passing it on the
+            # strength of the declared kind alone made `run_htm_daily_mtm` reject the holdout
+            # for ten missing columns. Asking the frame is the same question that function asks,
+            # so the two cannot disagree, and `None` is the path it already has for this case:
+            # it selects the cohorts from `contract_returns.parquet` under the spec's own method
+            # and top_k, which is the same selection the artifact records.
             decision_kind = (strategy_spec.get("decision_artifact") or {}).get("kind")
+            typed_decisions = decision_kind == "short_straddles" and not (
+                OPTION_DECISION_COLUMNS - set(weights.columns)
+            )
             result = _run_htm_daily_mtm(
                 case_study=case_study,
                 predictions=predictions,
@@ -1180,7 +1222,7 @@ def run_backtest(
                 allocation_spec=strategy.get("allocation", {}),
                 label=label,
                 prediction_hash=prediction_hash,
-                option_decisions=weights if decision_kind == "short_straddles" else None,
+                option_decisions=weights if typed_decisions else None,
                 option_lifecycle=option_lifecycle,
                 option_accounting=strategy_spec.get("options_accounting"),
             )
@@ -1196,6 +1238,7 @@ def run_backtest(
                 initial_cash=initial_cash,
                 risk_spec=strategy.get("risk", {}),
                 prediction_hash=prediction_hash,
+                rebalance_step=rebal_spec.get("step"),
             )
     else:
         result = _run_engine(
@@ -1230,6 +1273,7 @@ def run_backtest(
     # 3. Register
     backtest_hash = None
     if register:
+        _refuse_an_allocation_that_produced_no_target(weights, daily_returns, strategy_spec)
         from case_studies.utils.registry import (
             compute_backtest_fold_metrics,
             register_backtest_fold_metrics,
@@ -1355,17 +1399,14 @@ def _run_engine(
     # ~step× too rarely. The on_data callback already gates on
     # ``timestamp in weight_dict``, so dates without weights are skipped.
     from case_studies.utils.backtest_loaders import (
-        get_rebalance_step,
-        resolve_rebalance_timestamps,
+        resolve_decision_schedule,
+        resolved_rebalance_step,
     )
 
     cadence = rebalance_spec.get("cadence", "monthly_month_end")
     all_pred_ts = pl.Series("ts", predictions["timestamp"].unique().sort().to_list())
-    schedule_dates = resolve_rebalance_timestamps(all_pred_ts, cadence, calendar)
-    if case_study and label:
-        step = get_rebalance_step(case_study, label)
-        if step > 1:
-            schedule_dates = schedule_dates.gather_every(step)
+    step = resolved_rebalance_step(rebalance_spec, case_study, label) if case_study and label else 1
+    schedule_dates = resolve_decision_schedule(all_pred_ts, cadence, step, calendar)
     rebalance_schedule = {
         _engine_timestamp(
             timestamp,
@@ -1704,9 +1745,14 @@ def _run_htm_daily_mtm(
     registry write path treats it identically to any other backtest.
     """
     from case_studies.sp500_options._htm_backtest import run_htm_daily_mtm
-    from utils import CASE_STUDIES_DIR, ML4T_DATA_PATH
+    from utils import ML4T_DATA_PATH
+    from utils.paths import get_case_study_dir
 
-    cs_dir = CASE_STUDIES_DIR / case_study
+    # The same reason the classification eval label above resolves this way: a label parquet is
+    # generated output, so it is read from wherever ML4T_OUTPUT_DIR puts it. The two paths are
+    # the same directory whenever the artifacts sit beside the source, which is why reading the
+    # checkout was never wrong in production and always wrong under isolation.
+    cs_dir = get_case_study_dir(case_study)
     labels_dir = cs_dir / "labels"
     raw_options_dir = ML4T_DATA_PATH / "equities" / "market" / "sp500" / "options_straddles_raw"
 
@@ -1753,6 +1799,8 @@ def _run_htm_daily_mtm(
         decisions=option_decisions,
         option_lifecycle=option_lifecycle,
         option_spread_fraction=float(option_accounting["option_spread_fraction"]),
+        prediction_hash=prediction_hash,
+        label=label,
     )
     port = result["daily_returns"]
     metrics = result["metrics"]
@@ -1854,6 +1902,7 @@ def _run_vectorized(
     initial_cash: float,
     risk_spec: dict | None = None,
     prediction_hash: str | None = None,
+    rebalance_step: int | None = None,
 ) -> dict:
     """Run vectorized backtest (weight × forward return - costs).
 
@@ -1876,9 +1925,9 @@ def _run_vectorized(
     """
     from case_studies.utils.backtest_loaders import get_rebalance_step, thin_to_rebalance_dates
 
-    # Thin predictions to non-overlapping periods. Step is declared per-label
-    # in the case study's setup.yaml under labels.rebalance_step.
-    step = get_rebalance_step(case_study, label)
+    # The step the spec recorded, so the run trades what its identity says. setup.yaml is
+    # the fallback for a spec written before the step entered the identity.
+    step = rebalance_step if rebalance_step is not None else get_rebalance_step(case_study, label)
     thinned = thin_to_rebalance_dates(predictions, cadence=cadence, step=step)
 
     # Re-compute weights on thinned predictions
@@ -1896,12 +1945,44 @@ def _run_vectorized(
     if weights_thinned["timestamp"].dtype != thinned_sel["timestamp"].dtype:
         thinned_sel = thinned_sel.cast({"timestamp": weights_thinned["timestamp"].dtype})
 
-    # Join weights with forward returns
+    # Join weights with forward returns.
+    #
+    # Left, not inner, and then a refusal. An inner join discarded a selected position whose
+    # outcome row is missing, and three things followed. Weights are never renormalized after
+    # the join, so `gross_ret` summed the survivors' contributions against the original
+    # weights - the dropped name was marked at exactly zero return, which is an assertion
+    # about a position nobody could price rather than an exclusion. `n_positions` counted the
+    # survivors, so the one diagnostic that would show the loss reported the reduced count as
+    # though it were intended. And turnover is computed from `weights_thinned` below, which
+    # still holds the dropped name, so the position paid its cost and returned nothing.
+    #
+    # Renormalizing instead would be a filter applied to a chosen position using data from
+    # after the choice: "the selection step is unbiased" and "the realized result is
+    # unbiased" are different claims, and that fails the second while passing the first. So
+    # the run stops. A zero weight is exempt because it is not a position: its outcome
+    # cannot change any number here.
     bt = weights_thinned.join(
         thinned_sel,
         on=["timestamp", "symbol"],
-        how="inner",
+        how="left",
     )
+    unpriceable = bt.filter(
+        (pl.col("weight") != 0.0) & (pl.col("y_true").is_null() | ~pl.col("y_true").is_finite())
+    )
+    if not unpriceable.is_empty():
+        sample = unpriceable.sort("timestamp", "symbol").head(5)
+        named = ", ".join(
+            f"{row['symbol']}@{row['timestamp']}" for row in sample.iter_rows(named=True)
+        )
+        raise ValueError(
+            f"{case_study}/{label}: {unpriceable.height} of {bt.height} selected positions have "
+            f"no usable outcome, across {unpriceable['timestamp'].n_unique()} rebalance dates "
+            f"(first: {named}). Marking them at zero return asserts a result for a position "
+            "nobody could price, and they would still pay turnover. Supply the missing outcome "
+            "rows, or exclude these names before the weights are computed so the selection and "
+            "the realized result are drawn from the same set."
+        )
+    bt = bt.filter(pl.col("y_true").is_not_null())
 
     # Portfolio returns per period
     port_ret = (
@@ -2126,6 +2207,7 @@ def _apply_allocation(
     case_study: str = "",
     prediction_hash: str | None = None,
     conformal_widths: pl.DataFrame | None = None,
+    rebalance_step: int | None = None,
 ) -> pl.DataFrame:
     """Post-process signal weights with an allocation method.
 
@@ -2190,7 +2272,8 @@ def _apply_allocation(
             "_apply_allocation requires both case_study and label to look up "
             "labels.rebalance_step from setup.yaml. Pass them from the caller."
         )
-    step = get_rebalance_step(case_study, label)
+    # The step the spec recorded; setup.yaml only when the spec predates the key.
+    step = rebalance_step if rebalance_step is not None else get_rebalance_step(case_study, label)
     rebal_preds = thin_to_rebalance_dates(filtered_preds, cadence=cadence, step=step)
 
     # Max weight cap — applied after all covariance-based allocators
@@ -2215,11 +2298,19 @@ def _apply_allocation(
                 "conformal_weighted allocation requires prediction_hash; "
                 "caller must pass it through _apply_allocation."
             )
-        from case_studies.utils.conformal import load_conformal_widths
+        from case_studies.utils.conformal import (
+            CALIBRATION_VERSION,
+            DEFAULT_ALPHA,
+            DEFAULT_MIN_CALIBRATION_N,
+            load_conformal_widths,
+        )
 
-        alpha = float(alloc_spec.get("alpha", 0.20))
-        min_calibration_n = int(alloc_spec.get("min_calibration_n", 30))
-        calibration_version = str(alloc_spec.get("calibration_version", "walk_forward_v2"))
+        alpha = float(alloc_spec.get("alpha", DEFAULT_ALPHA))
+        min_calibration_n = int(alloc_spec.get("min_calibration_n", DEFAULT_MIN_CALIBRATION_N))
+        # The default has to track the constant. Pinning the string here meant a version
+        # bump left this branch asking for widths that the writer no longer produces, and
+        # the failure surfaced as "no widths for calibration_version" on a fresh artifact.
+        calibration_version = str(alloc_spec.get("calibration_version", CALIBRATION_VERSION))
         widths = conformal_widths
         if widths is None:
             widths = load_conformal_widths(
@@ -2228,6 +2319,7 @@ def _apply_allocation(
                 alpha=alpha,
                 min_calibration_n=min_calibration_n,
                 calibration_version=calibration_version,
+                label=label or None,
             )
         # Conformal widths are keyed by the timestamps stored in predictions.parquet,
         # which keep their original time zone; `normalize_prediction_columns` has
@@ -2295,6 +2387,52 @@ def _apply_allocation(
 # ---------------------------------------------------------------------------
 # Risk rules (Ch19) — engine-level integration
 # ---------------------------------------------------------------------------
+
+
+def _refuse_an_allocation_that_produced_no_target(
+    weights: pl.DataFrame | None,
+    daily_returns: pl.DataFrame | None,
+    strategy_spec: dict,
+) -> None:
+    """Refuse to register a run whose strategy produced no target weight at any rebalance.
+
+    An empty weight frame over a non-empty evaluation window is not a strategy that traded
+    little. It is a strategy the engine was never given anything to trade towards, so it holds
+    a flat account for the whole window and every return-derived metric it records is the
+    metric of that flat account: `total_return` 0, `sharpe` 0.0. Written to the registry those
+    read as a configuration that was tried and lost nothing, and a 0.0 Sharpe then sits above
+    every candidate whose Sharpe is negative. Nothing downstream filters it out of the trial
+    count - `cohort_metrics` lists cohort members straight from `backtest_runs` with no
+    zero-trade clause - so an absence is counted as a trial against every real candidate
+    beside it.
+
+    `fx_pairs`' `mvo_ledoit_wolf` at `top_k=2` is the measured case
+    (ml4t/agent-workspace#1004): `compute_mvo_weights` skipped every one of 2,063 rebalances
+    for having a two-name cross-section and returned the empty schema-only frame.
+
+    **The test is the weight frame, not the trade count.** A run with `num_trades == 0` and a
+    non-empty weight frame is a different condition with different causes, and at least one of
+    them is legitimate: a CI fixture whose panel is one or four bars long has a target and no
+    later bar to fill it on under `next_bar` execution. Refusing on the trade count alone
+    stopped eleven such fixture backtests across `test_research_contract_execution` and
+    `test_cme_futures_research`, which is the wrong answer - nothing is wrong with them.
+
+    An empty return series is a different failure with its own diagnosis upstream and is left
+    to it.
+    """
+    if weights is None or weights.height > 0:
+        return
+    if daily_returns is None or daily_returns.height == 0:
+        return
+    strategy = strategy_spec.get("strategy", strategy_spec)
+    raise ValueError(
+        "the strategy produced no target weight at any rebalance, over "
+        f"{daily_returns.height} periods, so this run is refused rather than registered as a "
+        f"Sharpe of 0.0: signal={strategy.get('signal')} "
+        f"allocation={strategy.get('allocation')} rebalance={strategy.get('rebalance')}. "
+        "A run with no target never opened a position and measured nothing; fix the allocator "
+        "or the selection that emptied the weight frame."
+    )
 
 
 def _build_position_rules(risk_spec: dict):

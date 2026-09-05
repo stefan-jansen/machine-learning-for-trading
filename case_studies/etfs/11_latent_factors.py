@@ -45,9 +45,9 @@
 #
 # The first pair differs in the shape of one function, which is what makes those two worth reading
 # against each other. The second pair breaks the two-stage shape from opposite ends - one because
-# it prices, one because it predicts - and `11e` is the family's own control: it keeps the
-# low-dimensional bottleneck and drops the factor interpretation, so what it does not achieve is
-# what the structure is worth.
+# it prices, one because it predicts - and `11e` is the only member fitted without the family's
+# central assumption at all: it keeps a low-dimensional bottleneck and drops the factor
+# interpretation. It is not a controlled comparison with `11c`, whose network it does not share.
 #
 # **Learning objectives**
 #
@@ -65,9 +65,8 @@
 # [`05_evaluation`](05_evaluation.ipynb) for the walk-forward folds.
 #
 # **What it writes**: nothing. This notebook fits no model, registers no run and opens no holdout.
-# Of the five notebooks it points at, the four on the research boundary each publish their own
-# population; `11e_supervised_autoencoder` is still on the legacy runner and publishes none, which
-# section 3 reads out of the sources rather than asserting here.
+# All five notebooks it points at are on the research boundary and each publishes its own
+# population, which section 3 reads out of the sources rather than asserting here.
 # [`13_model_analysis`](13_model_analysis.ipynb) is where they are compared against the other
 # families.
 
@@ -194,39 +193,59 @@ labels = declared_labels(study, "latent_factors")
 notebook_for = dict(zip(claims.get_column("config_name"), claims.get_column("notebook")))
 
 
-def published_population(name: str) -> str:
+def publishes_population(tree: ast.Module) -> bool:
+    """Whether a notebook calls `run_model_population`, and so publishes a population.
+
+    Walked out of the parsed source for the same reason `claimed_model` above parses rather than
+    pattern-matches: four of these five notebooks carry the call inside the commented "Running
+    configurations of your own" block, so a substring test over the text answers yes for a
+    notebook that never executes it. That the classification is right today is an accident of
+    which notebook happens to lack that comment.
+    """
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "run_model_population"
+        for node in ast.walk(tree)
+    )
+
+
+def published_population(source: str, tree: ast.Module, name: str) -> str:
     """Return the population name a member's notebook publishes, read from that notebook.
 
     Assembling `etfs-{name}-validation-v1` here would name a population for every declared member,
     including one whose notebook publishes none - a name the reader would look for in the registry
     and not find. The default is read from the assignment that produces it instead.
     """
-    source = (NOTEBOOK_DIR / f"{notebook_for[name]}.py").read_text()
-    if "run_model_population(" not in source:
-        return "none - legacy runner"
+    if not publishes_population(tree):
+        return "none - publishes no population"
     default = re.search(r'population_name = POPULATION_NAME or f"([^"]+)"', source)
     if default is None:
         raise ValueError(f"{notebook_for[name]}.py publishes a population under no readable name")
     return default.group(1).replace("{MODEL_NAME}", name)
 
 
-def label_coverage(name: str) -> str:
+def label_coverage(tree: ast.Module) -> str:
     """How many of the declared labels the member's notebook fits.
 
     A migrated notebook resolves the declared menu and raises if a label it declared is missing, so
-    it fits all of them. The legacy runner takes one primary label and a variant cap instead, so
-    the count is not the menu's and is reported as what it is rather than as a number.
+    it fits all of them. A notebook that publishes no population is on a runner that takes one
+    primary label and a variant cap instead, so the count is not the menu's and is reported as
+    what it is rather than as a number. No member is on that path today; the branch stays because
+    the classification is read from the sources rather than declared here.
     """
-    source = (NOTEBOOK_DIR / f"{notebook_for[name]}.py").read_text()
-    return str(len(labels)) if "run_model_population(" in source else "primary only"
+    return str(len(labels)) if publishes_population(tree) else "primary only"
 
 
+members = sorted(declared_models)
+sources = {name: (NOTEBOOK_DIR / f"{notebook_for[name]}.py").read_text() for name in members}
+trees = {name: ast.parse(source) for name, source in sources.items()}
 pl.DataFrame(
     {
-        "config_name": sorted(declared_models),
-        "labels": [label_coverage(name) for name in sorted(declared_models)],
-        "schedule declared": [declared_schedule(name) for name in sorted(declared_models)],
-        "population": [published_population(name) for name in sorted(declared_models)],
+        "config_name": members,
+        "labels": [label_coverage(trees[name]) for name in members],
+        "schedule declared": [declared_schedule(name) for name in members],
+        "population": [published_population(sources[name], trees[name], name) for name in members],
     }
 )
 
@@ -248,10 +267,14 @@ pl.DataFrame(
 #
 # **The five members are not a ranking.** They are a baseline and two pairs, and the interesting
 # comparisons are within a pair - linear map against network map in the first, pricing against
-# predicting in the second - plus the cross-pair one between `11c` and `11e`, which share a network
-# and a bottleneck and differ only in whether the factor structure is imposed. Every one of those
-# is also read against `11a`, which conditions on nothing. A single ordering over all five would
-# hide all of it.
+# predicting in the second. Every one of those is also read against `11a`, which conditions on
+# nothing. A single ordering over all five would hide all of it.
+#
+# **`11c` and `11e` are not a third pair, although they look like one.** Both are networks and one
+# imposes the factor structure while the other does not, but they differ in depth, width,
+# regularisation and learning rate as well, so the difference between their results is not
+# attributable to the structure. Reading them as a controlled comparison is the mistake this
+# paragraph exists to prevent.
 #
 # **Nothing here compares results, and that is deliberate.** Reading the five populations against
 # each other, and against the linear, boosted and tabular families, is

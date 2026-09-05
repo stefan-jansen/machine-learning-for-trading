@@ -607,11 +607,18 @@ correlations = pl.DataFrame(correlation_rows).sort("left", "right")
 correlations
 
 # %% [markdown]
-# ## Chronological conformal coverage
+# ## Coverage of the widths that size positions
 #
-# Split-conformal intervals use the oldest validation observations for calibration and evaluate
-# coverage only on later observations. The finite-sample order statistic determines each interval
-# width. This preserves chronology even when fold identifiers are not chronological.
+# The width measured here is the one the `conformal_weighted` allocator sizes positions with:
+# calibrated per symbol on every absolute residual known at `t - h`, where `h` is that label's
+# horizon in data steps, falling back to a quantile pooled over every symbol where one has too
+# few residuals of its own. A decision is covered when its absolute residual falls inside that
+# half-width; the embargo is what keeps a residual that resolves after the decision out of the
+# calibration behind it, whatever order the fold identifiers are in.
+#
+# Read it as a diagnostic of residual dispersion, not a guarantee: split conformal's
+# finite-sample coverage needs exchangeable residuals, return residuals are not, and nothing in
+# the allocation path reads an interval or a coverage level.
 
 # %% tags=["results"]
 coverage_frames = []
