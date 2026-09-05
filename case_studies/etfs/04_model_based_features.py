@@ -1064,7 +1064,7 @@ GARCH_COLS = ["garch_cond_vol"]
 
 _blocks = sum(
     len(refit_boundaries(len(r), GARCH_BURNIN_SESSIONS, GARCH_REFIT_SESSIONS))
-    for _, r, _ in payloads
+    for _, r, _, _ in payloads
 )
 print(
     f"Conditional volatility: {garch_features.height:,} values across "
@@ -1077,12 +1077,12 @@ print(
 # inside the holdout, and every ETF's first emitted value falls after it had paid its burn-in.
 
 # %%
-_freeze_by_symbol = {symbol: freeze for symbol, _, freeze in payloads}
+_freeze_by_symbol = {symbol: freeze for symbol, _, _, freeze in payloads}
 _first_value = garch_features.group_by("symbol").agg(pl.col("timestamp").min().alias("first_value"))
 _burnin_session = pl.DataFrame(
     [
         {"symbol": symbol, "burnin_ends": symbol_sessions[symbol][GARCH_BURNIN_SESSIONS - 1]}
-        for symbol, _, _ in payloads
+        for symbol, _, _, _ in payloads
     ]
 )
 for symbol, group in garch_fit_df.group_by("symbol"):
@@ -1116,7 +1116,7 @@ print(
 # configuration of it holds, on real returns.
 
 # %%
-_check_symbol, _check_returns, _check_freeze = payloads[0]
+_check_symbol, _check_returns, _check_sessions, _check_freeze = payloads[0]
 _boundaries = refit_boundaries(len(_check_returns), GARCH_BURNIN_SESSIONS, GARCH_REFIT_SESSIONS)
 # The middle of the development history, offset off the boundary so the cut falls inside a block.
 _midpoint = GARCH_BURNIN_SESSIONS + (_check_freeze - GARCH_BURNIN_SESSIONS) // 2
@@ -1125,7 +1125,9 @@ _cut = max(fit_end for fit_end, _ in _boundaries if fit_end <= _midpoint) + (
 )
 assert _cut not in {fit_end for fit_end, _ in _boundaries}, "the cut landed on a refit boundary"
 _full = next(values for symbol, values, _ in walked if symbol == _check_symbol)
-_, _short, _ = garch_walk((_check_symbol, _check_returns[:_cut], _check_freeze))
+_, _short, _ = garch_walk(
+    (_check_symbol, _check_returns[:_cut], _check_sessions[:_cut], _check_freeze)
+)
 np.testing.assert_allclose(_short, _full[:_cut], rtol=1e-12, equal_nan=True)
 print(
     f"{_check_symbol}: deleting the {len(_check_returns) - _cut:,} sessions after "
