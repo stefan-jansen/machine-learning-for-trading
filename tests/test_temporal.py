@@ -496,30 +496,52 @@ def test_arch_moves_earlier_values_when_the_sample_is_extended() -> None:
     assert relative[0] > relative[-1]
 
 
-def test_the_arch_seed_is_taken_at_the_estimated_mean_not_the_fixed_one() -> None:
+def test_the_arch_seed_is_taken_at_the_estimated_mean_not_the_fixed_one(monkeypatch) -> None:
     """Name the mechanism, so the control above cannot pass for an unrelated reason.
 
     Without this, `fix` could start disagreeing with itself for some other cause and the
-    negative control would keep passing while the stated reason had become false.
+    negative control would keep passing while the stated reason had become false. The
+    assertion has to be about what `fix` ITSELF hands to `backcast`, not about what an
+    independent recomputation would hand it, so this captures the array in flight.
     """
+    arch_model = pytest.importorskip("arch").arch_model
     volatility = pytest.importorskip("arch.univariate.volatility")
+
+    seen: list[np.ndarray] = []
+    original = volatility.GARCH.backcast
+
+    def spy(self, resids):
+        seen.append(np.asarray(resids, dtype=float).copy())
+        return original(self, resids)
+
+    monkeypatch.setattr(volatility.GARCH, "backcast", spy)
+
     returns = _garch_returns(n=2000)
+    params = pd.Series(
+        {
+            "mu": GARCH_PARAMS["mu"],
+            "omega": GARCH_PARAMS["omega"],
+            "alpha[1]": GARCH_PARAMS["alpha"],
+            "beta[1]": GARCH_PARAMS["beta"],
+        }
+    )
+    for sample in (returns[:1500], returns):
+        arch_model(sample, mean="Constant", vol="GARCH", p=1, q=1, dist="Normal").fix(params)
+
+    assert len(seen) == 2, "fix should seed the recursion exactly once per call"
+    short_resids, full_resids = seen
+
+    # What fix passed is the sample centred at its OWN estimated mean, not at the mu given.
+    np.testing.assert_allclose(short_resids, returns[:1500] - returns[:1500].mean(), rtol=1e-12)
+    np.testing.assert_allclose(full_resids, returns - returns.mean(), rtol=1e-12)
+    assert not np.allclose(short_resids, returns[:1500] - GARCH_PARAMS["mu"])
+
+    # And that is what makes the seed move: the same residuals taken at the fixed mu would not.
     garch = volatility.GARCH(p=1, q=1)
-
-    at_sample_mean = (
-        garch.backcast(returns[:1500] - returns[:1500].mean()),
-        garch.backcast(returns - returns.mean()),
+    assert original(garch, short_resids) != original(garch, full_resids[:1500])
+    assert original(garch, returns[:1500] - GARCH_PARAMS["mu"]) == original(
+        garch, returns - GARCH_PARAMS["mu"]
     )
-    at_fixed_mu = (
-        garch.backcast(returns[:1500] - GARCH_PARAMS["mu"]),
-        garch.backcast(returns - GARCH_PARAMS["mu"]),
-    )
-
-    # Residuals at the parameter you fixed give the same seed either way: `backcast` is an
-    # EWMA over the first min(75, n) residuals, which a longer sample does not change.
-    assert at_fixed_mu[0] == at_fixed_mu[1]
-    # Residuals at the estimated mean do not, and that is the pair `fix` actually uses.
-    assert at_sample_mean[0] != at_sample_mean[1]
 
 
 def test_arch_is_prefix_stable_under_a_zero_mean_until_the_bounds_bind() -> None:
