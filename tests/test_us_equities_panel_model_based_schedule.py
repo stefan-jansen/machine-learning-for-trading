@@ -247,3 +247,48 @@ def test_a_fit_the_optimizer_did_not_converge_on_is_not_an_estimate(returns):
     assert fits == [], "a non-converged fit was recorded as an estimation"
     assert np.all(np.isnan(values)), "a non-converged fit produced a feature value"
     assert read == [], f"a non-converged result was read for {read}"
+
+
+def test_every_payload_consumer_takes_what_the_producer_builds():
+    """The GARCH payload is built in one place and unpacked in several.
+
+    `garch_walk` takes a tuple, and the tests above call it directly, so nothing here
+    exercises the module-level loop that builds those tuples or the schedule count that
+    reads them back. When `timestamps` became required and the payload grew a fourth
+    element, the `_scheduled_blocks` comprehension still unpacked three - which raises
+    `ValueError: too many values to unpack` on any non-empty payload list, before a
+    single stock is fitted, and no test noticed.
+
+    That is the same shape as the defect it was fixing: a consumer left behind by its
+    producer. Checked statically because the loop needs the panel to run at all.
+    """
+    tree = ast.parse(NOTEBOOK.read_text(encoding="utf-8"))
+
+    built = {
+        len(arg.elts)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "append"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "payloads"
+        for arg in node.args
+        if isinstance(arg, ast.Tuple)
+    }
+    assert len(built) == 1, f"payloads are built with differing arity: {sorted(built)}"
+    arity = built.pop()
+
+    consumed = {
+        (node.iter.lineno, len(node.target.elts) if isinstance(node.target, ast.Tuple) else 1)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.comprehension)
+        and isinstance(node.iter, ast.Name)
+        and node.iter.id == "payloads"
+        and isinstance(node.target, ast.Tuple)
+    }
+    wrong = sorted(line for line, unpacked in consumed if unpacked != arity)
+
+    assert not wrong, (
+        f"a payload is unpacked with the wrong arity at line(s) {wrong}; the producer "
+        "builds a different number of elements, so this raises before any fit runs"
+    )

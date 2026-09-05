@@ -1317,7 +1317,7 @@ print(
 )
 _scheduled_blocks = sum(
     len(refit_boundaries(len(returns), GARCH_BURNIN, GARCH_REFIT_EVERY))
-    for _, returns, _ in payloads
+    for _, returns, _, _ in payloads
 )
 print(f"  {_scheduled_blocks:,} blocks on the schedule", flush=True)
 
