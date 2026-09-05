@@ -14,6 +14,15 @@ Independent checks, because each alone is passable while the bug is present:
   that no evaluation notebook treats ``fold`` as a feature, and that none resolves the
   fold dimension by de-duplicating, which keeps an arbitrary fold rather than the one
   the row is out of sample in.
+
+A case study whose stage 04 has been converted to a refit schedule has no fold dimension
+to resolve: its artifact is one row per join key, and there is nothing for either check to
+be about. The artifact-level check skips such a file on its schema. The source-level check
+needs the equivalent, and takes it from the notebook rather than from the artifact, because
+it runs in a job that checks out no artifacts: a notebook that *refuses* a fold column -
+raising or asserting on ``"fold" in <frame>.columns`` - has established the premise, and a
+list built after that cannot pick the key up. That is the same escape the ``drop("fold")``
+clause below already grants, stated as a precondition instead of as a mutation.
 * :func:`test_validation_windows_also_narrow_the_evaluation_panel` proves that a
   notebook which resolves the fold dimension by validation window also screens on
   those windows. Resolving without narrowing is a second wrong answer: a Chapter 9
@@ -123,6 +132,27 @@ def _feature_list_assignments(tree: ast.Module) -> list[tuple[str, ast.ListComp]
     return out
 
 
+def _refuses_a_fold_column(source: str) -> bool:
+    """True when the notebook stops rather than read an artifact carrying ``fold``.
+
+    Matched on the AST rather than on the text, so a sentence in a markdown cell that
+    happens to mention the column cannot satisfy it. What counts is a comparison of the
+    literal ``"fold"`` against a ``.columns`` attribute, which is the shape both
+    ``assert "fold" not in frame.columns`` and ``if "fold" in frame.columns: raise`` take.
+    """
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Compare) or not isinstance(node.left, ast.Constant):
+            continue
+        if node.left.value != "fold":
+            continue
+        if not any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops):
+            continue
+        for comparator in node.comparators:
+            if isinstance(comparator, ast.Attribute) and comparator.attr == "columns":
+                return True
+    return False
+
+
 def _iterates_fold_keyed_frame(comp: ast.ListComp, source: str) -> bool:
     """True when the comprehension enumerates the columns of the model-based artifact.
 
@@ -154,6 +184,12 @@ def test_evaluation_excludes_fold_from_feature_columns(notebook: Path) -> None:
     source = notebook.read_text()
     if "model_based.parquet" not in source:
         pytest.skip(f"{notebook.parent.name}: does not read model_based.parquet")
+
+    if _refuses_a_fold_column(source):
+        pytest.skip(
+            f"{notebook.parent.name}: refuses an artifact carrying a fold column, so its "
+            "feature lists cannot pick the key up"
+        )
 
     tree = ast.parse(source)
     definitions = _name_definitions(source, tree)
