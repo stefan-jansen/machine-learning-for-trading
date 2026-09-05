@@ -1506,13 +1506,33 @@ print(
 # the last date behind it, and all of them have to fall before the boundary.
 #
 # The third is the one that would otherwise be invisible, because a forward-run probability
-# and a whole-series one look equally plausible sitting in a column. The distinguishing
-# property is what happens when later data is removed. Under the whole-series answer, the
-# probability for a given session moves when observations after it are deleted, because it
-# was partly derived from them. Under the forward answer it cannot move at all. So the
-# chain is re-estimated on the burn-in window, run over it and then over its first half,
-# and the two are compared on the sessions they share. A difference of zero is the
-# demonstration.
+# and a whole-series one look equally plausible sitting in a column. `predict_proba`
+# conditions on the entire series, so its answer for a session moves when observations after
+# it arrive; the forward recursion's cannot. Nothing about the emitted numbers says which
+# one produced them.
+#
+# **The obvious check does not work here, and it is worth saying why rather than shipping
+# it.** Deleting the tail of the series and re-running the walk tests almost nothing.
+# `walk_forward_feature` hands each block the prefix `X[:emit_end]` and keeps only
+# `values[fit_end:emit_end]`, and the block boundaries are a function of the burn-in and the
+# cadence alone - so every block whose window ends before the cut receives a byte-identical
+# prefix in both runs and must agree whatever `apply` does. Only the block the cut falls in
+# carries any evidence at all, and if that stretch happens to be one where the two answers
+# coincide, the test passes on a walk that reads the whole future. Measured on this series
+# with `predict_proba` substituted for the forward recursion: a mid-block cut agreed to
+# 4.3e-12, and a cut over the whole series to 5.9e-13. Both would have passed.
+#
+# **So the check is run the other way round.** The walk is run a second time with the
+# smoothed answer in place of the forward one, and the two emitted columns are required to
+# be **far apart**. That is what makes the column's identity checkable: if the two answers
+# were indistinguishable on this series, no evidence could establish which one is in the
+# file, and the assertion below says so instead of passing quietly. If someone replaced
+# `filtered_state_probs` with `predict_proba` in `hmm_apply`, the separation would collapse
+# to zero and this cell would stop the notebook - which is precisely the substitution that
+# defeated the truncation test.
+#
+# The second walk costs about two seconds; the property it establishes is the one the
+# section is about.
 #
 # The burn-in is reported rather than hidden. The oldest period trains from the first
 # session of the panel, so the burn-in comes out of that period's training window; the cell
@@ -1559,18 +1579,41 @@ print(
     f"window, the earliest of which opens {_earliest_eval}."
 )
 
+
 # %%
-probe_X = hmm_obs[:HMM_BURNIN]
-probe_model, _ = hmm_fit(probe_X)
-cut = len(probe_X) // 2
-with threadpool_limits(limits=1):
-    full_probs = filtered_state_probs(probe_model, probe_X)
-    prefix_probs = filtered_state_probs(probe_model, probe_X[:cut])
-max_drift = float(np.abs(full_probs[:cut] - prefix_probs).max())
-assert max_drift < 1e-10, f"probabilities moved by {max_drift:.2e} - they read the future"
+def _smoothed_apply(fitted: tuple[GaussianHMM, np.ndarray], prefix: np.ndarray) -> np.ndarray:
+    """The library's whole-series answer, for comparison only. Never written to the file."""
+    model, order = fitted
+    with threadpool_limits(limits=1):
+        return model.predict_proba(prefix)[:, order[1]].reshape(-1, 1)
+
+
+hmm_smoothed = walk_forward_feature(
+    hmm_obs,
+    burnin=HMM_BURNIN,
+    refit_every=HMM_REFIT_EVERY,
+    fit=hmm_fit,
+    apply=_smoothed_apply,
+    n_features=1,
+    freeze_after=HMM_FROZEN_AFTER,
+)
+_both = _valued & ~np.isnan(hmm_smoothed[:, 0])
+_gap = np.abs(hmm_probs[_both, 0] - hmm_smoothed[_both, 0])
+# A tenth of the range a probability can take. Far above the level at which two answers
+# could be called the same column, and far below the 0.74 this series actually shows, so it
+# is a floor on the evidence rather than a fit to the measurement.
+MIN_FORWARD_SMOOTHED_SEPARATION = 0.1
+assert _gap.max() > MIN_FORWARD_SMOOTHED_SEPARATION, (
+    f"the forward and smoothed answers differ by at most {_gap.max():.2e} on this series, so "
+    "nothing here can establish which of them the emitted column is - either the recursion "
+    "was replaced by the library's whole-series call, or this series no longer separates the "
+    "two and the column's causality needs evidence this notebook cannot supply"
+)
 print(
-    f"Deleting the last {len(probe_X) - cut} observations of the burn-in window moves the "
-    f"first {cut} probabilities by {max_drift:.2e}."
+    f"The emitted column is the forward answer, and on this series that is a checkable "
+    f"claim: the whole-series answer differs from it by up to {_gap.max():.4f} "
+    f"(mean {_gap.mean():.5f}), on {int((_gap > 1e-3).sum()):,} of {int(_both.sum()):,} "
+    f"emitted sessions."
 )
 
 # %% [markdown]
@@ -1885,18 +1928,32 @@ if len(hmm_param_df) > 0:
 # reads the book as a whole.
 #
 # They are brought onto one grid: every combination of session, product and contract
-# position that the price file contains. A left join then attaches each family where it has
-# a value and leaves an empty cell where it does not, so nothing is invented and no row is
-# dropped for lack of a feature.
+# position that the price file contains, up to the last session the holdout covers. A left
+# join then attaches each family where it has a value and leaves an empty cell where it does
+# not, so nothing is invented and no row is dropped for lack of a feature.
 #
 # The grid used to be repeated once per period, and the key carried the period number, so a
 # model training on one period received the features estimated on that period's training
 # sessions. Every fitted value here is now bounded by its own estimation block instead, and
 # it is the same value whichever period later selects the row - so the grid is written once
 # and the key is `(timestamp, product, position)`.
+#
+# **The upper bound has to be stated now, and under the old design it did not.** A period
+# bounded its own rows, so the artifact reached no further than the last period's evaluation
+# window whatever the price file held. The walks run over each entity's whole history
+# instead, so the grid would otherwise extend to the end of the price file - and a session
+# past `holdout_end` is one no stage in this case study evaluates, carrying a feature value
+# from an estimate frozen before the holdout opened. On this panel the two dates coincide
+# and the filter removes nothing, which is exactly why it is a filter and an assertion
+# rather than a sentence: a price file refreshed past the holdout would otherwise widen the
+# artifact silently.
 
 # %%
-base = df.select(["timestamp", "product", "position"]).unique()
+base = (
+    df.select(["timestamp", "product", "position"])
+    .unique()
+    .filter(pl.col("timestamp") <= _date_lit(HOLDOUT_END))
+)
 
 if len(arima_pl) > 0:
     base = base.join(arima_pl, on=["product", "timestamp"], how="left")
@@ -2001,6 +2058,11 @@ for col in temporal_cols:
 key = ["timestamp", "product", "position"]
 duplicate_keys = temporal_features.select(pl.struct(key).is_duplicated().sum()).item()
 assert duplicate_keys == 0, f"{duplicate_keys} duplicate rows on {key}"
+assert temporal_features["timestamp"].max() <= HOLDOUT_END, (
+    f"the artifact reaches {temporal_features['timestamp'].max()}, past the holdout end "
+    f"{HOLDOUT_END}: no stage evaluates a session beyond it, and the value there would come "
+    "from an estimate frozen before the holdout opened"
+)
 assert "fold" not in temporal_features.columns, (
     "the frame carries a fold column: a value here is bounded by the estimation schedule "
     "and not by a walk-forward period, so there is nothing for a period id to record"
@@ -2444,18 +2506,28 @@ else:
 #    `refit_boundaries` returns the blocks the walk used, and every emitted value has to
 #    fall at or after the end of the block that estimated it. The burn-in it costs is
 #    reported rather than hidden, because it is the price of the arrangement.
-# 5. **Distinguish a model that estimates from one that only transforms.** ARIMA and the
+# 5. **Check that your check can fail.** The natural test of a forward recursion is to
+#    delete the tail of the series and confirm the earlier values do not move, and under a
+#    refit schedule that test is nearly empty: every block whose window closes before the
+#    cut is handed the same prefix in both runs and must agree however the model is applied,
+#    so only the block containing the cut carries evidence. Substituting the whole-series
+#    answer for the forward one here left that test passing at 4e-12. What replaced it asks
+#    whether the two answers are far apart on this series, and stops the notebook when they
+#    are not - because a column whose two candidate meanings coincide cannot be shown to
+#    have either. Run the substitution you are guarding against and watch the guard fail
+#    before believing it.
+# 6. **Distinguish a model that estimates from one that only transforms.** ARIMA and the
 #    hidden Markov model estimate parameters and so need a schedule. The Fourier transform
 #    estimates nothing, so it runs over the full history on the same footing as a rolling
 #    average. Section E prints the fill per column, so the two kinds are visibly different
 #    rather than assumed alike.
-# 6. **Correct twice before reading a t-statistic, and report what the correction did.**
+# 7. **Correct twice before reading a t-statistic, and report what the correction did.**
 #    Consecutive decisions share most of their outcome window, so the uncorrected
 #    standard error is too small; and testing a family of features at once gives as many
 #    chances at a false positive as there are members. Neither correction is a single fixed number - the lag the first one
 #    uses is chosen from the data, so section F prints it per feature rather than letting
 #    the reader assume it equals the horizon.
-# 7. **Record what the features were, not just what they were called.** The fingerprint
+# 8. **Record what the features were, not just what they were called.** The fingerprint
 #    written beside the file is what lets a training run downstream say which version of
 #    these values it read, so that fixing a bug here cannot silently produce two training
 #    runs that look identical in the record.
