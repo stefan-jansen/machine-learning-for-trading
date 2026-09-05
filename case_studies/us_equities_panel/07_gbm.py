@@ -86,6 +86,7 @@
 
 import plotly.graph_objects as go
 import polars as pl
+from IPython.display import display
 from plotly.subplots import make_subplots
 
 from case_studies.research import (
@@ -394,15 +395,20 @@ panel_labels = [label for label in [primary] if label in present] + [
 order_label = panel_labels[0]
 print(f"{catalog.height} candidate models: {catalog.n_unique('config_name')} configurations")
 print(f"at {catalog.n_unique('checkpoint_value')} checkpoints each, on {len(panel_labels)} labels")
-catalog.select(
-    "label",
-    "config_name",
-    "checkpoint_value",
-    "ic_mean",
-    "ic_std",
-    "ic_n_days",
-    "full_coverage",
-).head(15)
+# `display` rather than a bare expression: a cell renders only its last value, and this cell
+# ends with the frozen-set table. Without it the model results table would be computed and
+# never shown.
+display(
+    catalog.select(
+        "label",
+        "config_name",
+        "checkpoint_value",
+        "ic_mean",
+        "ic_std",
+        "ic_n_days",
+        "full_coverage",
+    ).head(15)
+)
 
 set_rows = []
 if is_published_population:
