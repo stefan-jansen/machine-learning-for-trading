@@ -536,23 +536,91 @@ def test_prose_edit_beside_a_computed_alt_is_not_stale(tmp_path, monkeypatch) ->
     assert _drift(tmp_path, monkeypatch, old, new, _notebook([cell]))
 
 
-def test_editing_the_literal_part_of_a_computed_alt_is_stale(tmp_path, monkeypatch) -> None:
-    """A computed alt is not blanked, so its literal parts stay in the compared AST dump."""
-    old = '# %%\nfig = build()\nshow_plotly_with_alt(fig, f"the leader is {leader}")\n'
-    new = '# %%\nfig = build()\nshow_plotly_with_alt(fig, f"the winner is {leader}")\n'
-    cell = {
+def _computed_alt_cell(source_alt: str, carried: str) -> dict:
+    return {
         "cell_type": "code",
         "metadata": {},
-        "source": 'fig = build()\nshow_plotly_with_alt(fig, f"the winner is {leader}")\n',
+        "source": f"fig = build()\nshow_plotly_with_alt(fig, {source_alt})\n",
         "outputs": [
             {
                 "output_type": "display_data",
                 "data": {"image/png": "iVBORw0KGgo="},
-                "metadata": {"image/png": {"alt": "the winner is ridge"}},
+                "metadata": {"image/png": {"alt": carried}},
             }
         ],
     }
+
+
+def test_rewording_a_computed_alt_the_output_carries_is_allowed(tmp_path, monkeypatch) -> None:
+    """The case #867 was filed for.
+
+    Writing alt text against computed values is what stops a description drifting from
+    its figure, and it used to cost a full re-execution to reword: the f-string was left
+    whole in the compared dump, so any edit read as stale. The same reword to a plain
+    literal next door was accepted as a diff.
+
+    The bargain is the same as the literal branch's: accepted only because the output
+    metadata carries the reworded text too.
+    """
+    old = '# %%\nfig = build()\nshow_plotly_with_alt(fig, f"the leader is {leader}")\n'
+    new = '# %%\nfig = build()\nshow_plotly_with_alt(fig, f"the winner is {leader}")\n'
+    cell = _computed_alt_cell('f"the winner is {leader}"', "the winner is ridge")
+
+    assert _drift(tmp_path, monkeypatch, old, new, _notebook([cell]))
+
+
+def test_rewording_a_computed_alt_the_output_does_not_carry_is_stale(tmp_path, monkeypatch) -> None:
+    """Editing the .py and leaving the executed alt saying the old thing is stale.
+
+    Without this the loosening would forgive a notebook whose figure description and
+    whose source disagree, which is the state the whole gate exists to refuse.
+    """
+    old = '# %%\nfig = build()\nshow_plotly_with_alt(fig, f"the leader is {leader}")\n'
+    new = '# %%\nfig = build()\nshow_plotly_with_alt(fig, f"the winner is {leader}")\n'
+    cell = _computed_alt_cell('f"the winner is {leader}"', "the leader is ridge")
+
     assert not _drift(tmp_path, monkeypatch, old, new, _notebook([cell]))
+
+
+def test_changing_what_a_computed_alt_reads_is_stale(tmp_path, monkeypatch) -> None:
+    """Only the prose is forgiven; the interpolated expressions are not.
+
+    `{leader}` to `{runner_up}` changes what the alt asserts about the data, so it has
+    to force the re-run - and it does, because the expression parts stay in the dump.
+    """
+    old = '# %%\nfig = build()\nshow_plotly_with_alt(fig, f"the winner is {leader}")\n'
+    new = '# %%\nfig = build()\nshow_plotly_with_alt(fig, f"the winner is {runner_up}")\n'
+    cell = _computed_alt_cell('f"the winner is {runner_up}"', "the winner is ridge")
+
+    assert not _drift(tmp_path, monkeypatch, old, new, _notebook([cell]))
+
+
+def test_an_implicit_concatenation_of_a_literal_and_an_f_string_is_handled(
+    tmp_path, monkeypatch
+) -> None:
+    """The shape that broke the first attempt at this.
+
+    `"Boosting curve, " f"{n} below zero"` is one JoinedStr whose first constant is a
+    whole quoted literal and whose last is bare prose between the braces. Blanking them
+    textually needs a different placeholder for each, and guessing wrong writes source
+    that does not parse - which does not fail loudly, it makes the exception
+    unavailable for the notebook and reports it as stale. Eight notebooks in the tree
+    have this shape.
+    """
+    old = (
+        "# %%\nfig = build()\nshow_plotly_with_alt(\n    fig,\n"
+        '    "Boosting curve, "\n    f"{n} lines below zero.",\n)\n'
+    )
+    new = (
+        "# %%\nfig = build()\nshow_plotly_with_alt(\n    fig,\n"
+        '    "Boosting curves, "\n    f"{n} lines below zero.",\n)\n'
+    )
+    cell = _computed_alt_cell(
+        '"Boosting curves, " f"{n} lines below zero."',
+        "Boosting curves, 3 lines below zero.",
+    )
+
+    assert _drift(tmp_path, monkeypatch, old, new, _notebook([cell]))
 
 
 def test_a_computed_alt_the_output_does_not_carry_is_stale(tmp_path, monkeypatch) -> None:

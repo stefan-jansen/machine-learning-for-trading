@@ -422,6 +422,11 @@ def git_blob(path: Path) -> str:
 
 ALT_FUNCS = frozenset({"show_with_alt", "show_plotly_with_alt"})
 
+# What `_blank_alts` reports for one alt call. A plain literal is its text; a computed
+# alt is its prose segments in source order, because the rendered string is not knowable
+# from the source; anything else is unknowable and stays in the AST dump.
+_AltText = str | tuple[str, ...] | None
+
 
 def _alt_call_name(func: ast.expr) -> str | None:
     """The called name for a bare ``f(...)`` or a qualified ``mod.f(...)``, else None.
@@ -462,58 +467,94 @@ def _percent_cells(src: str) -> list[tuple[str, str, str]]:
     return [(m, k, "".join(b)) for m, k, b in cells]
 
 
-def _blank_alts(code: str) -> tuple[str, list[str | None]] | None:
-    """(*code* with each alt literal replaced by a placeholder, the alts in source order).
+def _alt_literal_spans(arg: ast.expr) -> list[ast.Constant] | None:
+    """The string constants of an alt argument, each flagged standalone or in-f-string.
 
-    None if *code* does not parse. Works in bytes because ``col_offset`` is a UTF-8
-    byte offset, and replaces from the end so earlier spans keep their offsets.
+    A plain literal is one constant that is the whole argument. An f-string - including
+    an implicit concatenation where any part is one - is an ``ast.JoinedStr`` whose
+    ``values`` interleave ``Constant`` prose with ``FormattedValue`` expressions, and
+    only the prose is safe to edit without re-executing. Changing
+    ``{leader['ic_mean']:+.3f}`` to ``{leader['ic_std']:+.3f}`` changes what the alt
+    asserts about the data, so the expression parts stay in the AST dump and moving one
+    is stale, exactly as it should be.
 
-    An alt built with an f-string is reported as ``None`` rather than skipped. Its text
-    is not knowable from the source, so it cannot be compared against what the outputs
-    carry - but for the same reason it is not blanked either, so it stays in the AST dump
-    and any edit to it is caught as ordinary source drift. Dropping such a call from the
-    list instead would misalign every later position against the carried alts, and
-    omitting it entirely made the counts disagree and failed the whole notebook: eight
-    case studies write the leading configuration into their alt with an f-string, so the
-    carve-out never applied to the notebooks that read their figures off the frame.
+    None for anything else - an alt passed as a variable, say - which the caller reports
+    as unknowable rather than guessing at.
+    """
+    if isinstance(arg, ast.Constant):
+        return [arg] if isinstance(arg.value, str) else None
+    if isinstance(arg, ast.JoinedStr):
+        parts: list[ast.Constant] = []
+        for value in arg.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                parts.append(value)
+            elif not isinstance(value, ast.FormattedValue):
+                return None
+        return parts
+    return None
+
+
+def _blank_alts(code: str) -> tuple[ast.Module, list[_AltText]] | None:
+    """(*code* parsed with every alt's prose neutralised, the alts in source order).
+
+    None if *code* does not parse. The blanking is done on the tree rather than on the
+    source: a prose segment inside an f-string and a quoted piece of an implicit
+    concatenation are the same kind of AST node in the same argument, and only their
+    source text tells them apart. Writing a placeholder over either one textually means
+    guessing which, and getting it wrong produces source that does not parse -
+    ``show_plotly_with_alt(fig, <alt> f"...")`` - which makes the whole exception
+    unavailable for that notebook. Setting the constant's value leaves the question
+    unasked, and it is what the caller wanted anyway: the tree is what gets dumped and
+    compared.
+
+    Both shapes of alt are blanked, and the difference is in what is reported back. A
+    plain literal reports its text, which the caller can require the outputs to carry
+    exactly. A computed alt reports its prose segments in order, because its rendered
+    text is not knowable from the source - the caller can only require that those
+    segments still appear, in order, inside whatever the outputs carry.
+
+    Blanking the computed ones is the point of this change. Writing alt text against
+    computed values is the right thing to do: it is what stops a description drifting
+    from its figure, and several push reviews have asked for it. Leaving those spans in
+    the compared dump priced a wording fix to `case_studies/fx_pairs/06_linear` or
+    `cme_futures/07_gbm` at a full re-execution, while the same fix to a plain-literal
+    alt next door was accepted as a diff - the opposite of what the exception exists
+    for, applied to exactly the notebooks that read their figures off the frame.
+
+    An alt that is neither shape - a variable, say - is reported as ``None`` and left
+    untouched in the tree, so any edit to it is caught as ordinary source drift. It is
+    reported rather than dropped because dropping it would misalign every later
+    position against the carried alts.
     """
     try:
         tree = ast.parse(code)
     except SyntaxError:
         return None
-    data = code.encode("utf-8")
-    line_start = [0]
-    for line in data.splitlines(keepends=True):
-        line_start.append(line_start[-1] + len(line))
 
-    found: list[tuple[int, int, str | None]] = []
+    found: list[tuple[tuple[int, int], _AltText]] = []
     for node in ast.walk(tree):
-        if (
+        if not (
             isinstance(node, ast.Call)
             and _alt_call_name(node.func) in ALT_FUNCS
             and len(node.args) >= 2
         ):
-            arg = node.args[1]
-            if arg.end_lineno is None or arg.end_col_offset is None:
-                return None
-            literal = (
-                arg.value if isinstance(arg, ast.Constant) and isinstance(arg.value, str) else None
-            )
-            found.append(
-                (
-                    line_start[arg.lineno - 1] + arg.col_offset,
-                    line_start[arg.end_lineno - 1] + arg.end_col_offset,
-                    literal,
-                )
-            )
+            continue
+        arg = node.args[1]
+        position = (arg.lineno, arg.col_offset)
+        parts = _alt_literal_spans(arg)
+        if parts is None:
+            found.append((position, None))
+            continue
+        alt: _AltText = (
+            parts[0].value if isinstance(arg, ast.Constant) else tuple(c.value for c in parts)
+        )
+        for const in parts:
+            const.value = "<alt>"
+        found.append((position, alt))
     # ast.walk is breadth-first, not source order; the outputs it is compared against
     # are in source order.
-    found.sort(key=lambda item: item[:2])
-    for begin, finish, literal in reversed(found):
-        if literal is None:
-            continue  # not blanked, so an edit to it stays visible in the AST dump
-        data = data[:begin] + b'"<alt>"' + data[finish:]
-    return data.decode("utf-8"), [alt for _, _, alt in found]
+    found.sort(key=lambda item: item[0])
+    return tree, [alt for _, alt in found]
 
 
 def _semicolon_flags(code: str, tree: ast.Module) -> tuple[bool, ...]:
@@ -582,14 +623,15 @@ def _comparable(
             blanked = _blank_alts(body)
             if blanked is None:
                 return None
-            source = blanked[0]
+            tree = blanked[0]
         else:
-            source = body
-        try:
-            tree = ast.parse(source)
-        except SyntaxError:
-            return None
-        out.append((marker, kind, ast.dump(tree), _semicolon_flags(source, tree)))
+            try:
+                tree = ast.parse(body)
+            except SyntaxError:
+                return None
+        # Semicolon flags read the ORIGINAL body: blanking now only changes a constant's
+        # value, so every position in the tree still describes the source it came from.
+        out.append((marker, kind, ast.dump(tree), _semicolon_flags(body, tree)))
     return out
 
 
@@ -617,7 +659,11 @@ def alt_text_only_drift(stamped_blob: str, py: Path, nb: dict) -> bool:
       executes changed. Only markdown bodies are free, because they are comments in the
       ``.py``, and
     * every alt in the notebook's output metadata already equals the literal in its own
-      cell, so the outputs on disk are the ones this source produces.
+      cell, so the outputs on disk are the ones this source produces. For an alt built
+      from an f-string the rendered text is not knowable from the source, so what is
+      required instead is that the source's prose still appears in the carried alt, in
+      order, with the interpolated values in the gaps. Same bargain, weaker only where
+      it has to be.
 
     Anything else - a changed constant, a reordered call, a trailing semicolon, a moved
     ``# %%``, an alt the outputs do not carry - is stale, which is what the stamp is for.
@@ -662,14 +708,42 @@ def alt_text_only_drift(stamped_blob: str, py: Path, nb: dict) -> bool:
             return False
         for a, c in zip(blanked[1], carried, strict=True):
             if a is None:
-                # A computed alt. Its literal parts are in the AST dump the first half
-                # compared, so a change to them is already stale; what is left to require
-                # is that the output carries an alt at all, which is what catches an alt
-                # call added since the notebook was executed.
+                # An alt this cannot read - a variable, say. Its whole span stays in the
+                # AST dump the first half compared, so any edit to it is already stale;
+                # what is left to require is that the output carries an alt at all, which
+                # is what catches an alt call added since the notebook was executed.
                 if not c:
+                    return False
+            elif isinstance(a, tuple):
+                if not _carries_prose(a, c):
                     return False
             elif a != c:
                 return False
+    return True
+
+
+def _carries_prose(segments: tuple[str, ...], carried: str | None) -> bool:
+    """Whether *carried* is a rendering of an f-string with these prose *segments*.
+
+    The rendered text of a computed alt is not knowable from the source, so it cannot
+    be compared exactly the way a plain literal is. What can be required is that the
+    source's prose still appears in the output, in order, with the interpolated values
+    in the gaps - which holds exactly when the notebook's outputs were produced by, or
+    corrected to, this source.
+
+    That is the same bargain the plain-literal branch strikes: an alt correction is
+    accepted as a diff only when the output metadata carries the correction too.
+    Editing the ``.py`` and leaving the executed alt saying the old thing is stale, and
+    should be.
+    """
+    if carried is None:
+        return False
+    position = 0
+    for segment in segments:
+        found = carried.find(segment, position)
+        if found < 0:
+            return False
+        position = found + len(segment)
     return True
 
 
