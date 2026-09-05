@@ -929,3 +929,62 @@ def test_the_filter_is_prefix_stable_where_handing_the_fit_back_to_arch_is_not()
         through_notebook(full)[:short],
         err_msg="an emitted value moved when later returns arrived",
     )
+
+
+def test_a_rejected_block_leaves_a_gap_rather_than_a_bridged_move() -> None:
+    """A move across a rejected block is not a one-session move and must not count as one.
+
+    `garch_walk_segment` leaves a block empty when its optimizer does not converge, so the
+    emitted series has a hole of up to `refit_every` sessions. Section D classifies a move as
+    a refit jump or an ordinary one by differencing consecutive EMITTED rows, which bridges
+    that hole: the first value after it would be differenced against one 22 sessions earlier
+    and counted as a single-session jump, folding a month of accumulated movement into the
+    numerator of the ratio the section reports.
+
+    This checks the shape the section relies on - that a rejected block really does leave a
+    hole in the emitted index, so the session-number guard has something to catch.
+    """
+    attempts = {"n": 0}
+
+    class FakeResult:
+        params = pd.Series(
+            {"mu": 0.0, "omega": 0.05, "alpha[1]": 0.05, "gamma[1]": 0.05, "beta[1]": 0.85}
+        )
+        loglikelihood = -100.0
+        scale = 1.0
+
+        def __init__(self, flag):
+            self.convergence_flag = flag
+            self.model = self
+            self.volatility = _FakeVolatility()
+
+    class FakeModel:
+        def __init__(self, train, **kwargs):
+            pass
+
+        def fit(self, **kwargs):
+            # The second block fails both its attempt and its retry; every other converges.
+            attempts["n"] += 1
+            return FakeResult(1 if attempts["n"] in (3, 4) else 0)
+
+    namespace = _load_garch_walk({"arch_model": FakeModel})
+    returns = pd.Series(
+        np.linspace(-1, 1, 340), index=pd.date_range("2018-01-01", periods=340, freq="D")
+    )
+
+    values, diagnostics = namespace["garch_walk_segment"](
+        returns, burnin=252, refit_every=21, freeze_after=None
+    )
+
+    emitted = values.dropna()
+    assert not emitted.empty, "the walk emitted nothing, so there is no gap to find"
+    assert any(not record["converged"] for record in diagnostics), (
+        "no block was rejected, so this test is not exercising the gap it exists for"
+    )
+
+    # The hole: some consecutive pair of emitted rows is more than one session apart.
+    positions = returns.index.get_indexer(emitted.index)
+    assert (np.diff(positions) > 1).any(), (
+        "a rejected block did not leave a hole in the emitted series, so a plain diff over "
+        "emitted rows could not bridge one and the guard in section D would be unnecessary"
+    )
