@@ -171,11 +171,23 @@ if narrows_declared_catalog(study, "linear", configs) and not POPULATION_NAME:
         "the canonical population; pass POPULATION_NAME to give it its own"
     )
 
-unknown_diagnostics = sorted(
-    set(DIAGNOSTIC_CONFIG_NAMES) - set(configs.get_column("config_name").unique().to_list())
+# The diagnostic set is published by an unnarrowed canonical run and by nothing else, so the
+# requirement that its configurations be among the ones fitted applies to that run and to
+# nothing else. Asked unconditionally, it refused a perfectly valid narrowed or preview run
+# for leaving out a configuration that run was never going to publish, and the only way past
+# it was to override a parameter irrelevant to what was being fitted.
+is_published_population = (
+    EXECUTION_TIER == "canonical" and not POPULATION_NAME and not PREVIEW_REDUCTIONS
 )
-if not DIAGNOSTIC_CONFIG_NAMES or unknown_diagnostics:
-    raise ValueError(f"diagnostic configurations must be fitted here: {unknown_diagnostics}")
+if is_published_population:
+    unknown_diagnostics = sorted(
+        set(DIAGNOSTIC_CONFIG_NAMES) - set(configs.get_column("config_name").unique().to_list())
+    )
+    if not DIAGNOSTIC_CONFIG_NAMES or unknown_diagnostics:
+        raise ValueError(
+            "an unnarrowed canonical run publishes the diagnostic set, so its configurations "
+            f"have to be among the ones fitted: {unknown_diagnostics}"
+        )
 
 # %% [markdown]
 # ## 2. Binding the declarations to the data
@@ -411,9 +423,6 @@ catalog.select(
 
 # %% tags=["results"]
 set_rows = []
-is_published_population = (
-    EXECUTION_TIER == "canonical" and not POPULATION_NAME and not PREVIEW_REDUCTIONS
-)
 if is_published_population:
     for label_value in panel_labels:
         label_name = label_value.replace("_", "-")
