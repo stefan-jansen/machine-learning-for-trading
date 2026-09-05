@@ -87,7 +87,7 @@ LOG_FILE = Path("/tmp/dl_weekly_experiment.log")
 #
 # We subsample the daily feature/label data to Fridays (weekday=4 in pandas).
 # At Friday frequency, `fwd_ret_5d` represents a non-overlapping
-# Friday-to-Friday return — each observation is informationally independent.
+# Friday-to-Friday return, so each observation is informationally independent.
 
 # %%
 # Load only weekly rows before materializing joins. The full daily join OOM-kills the kernel.
@@ -347,7 +347,7 @@ with open(LOG_FILE, "a") as f:
 # ## Run Darts `NBEATSModel` (1-Step Forecasting)
 #
 # With `darts_output_chunk_length=1`, `NBEATSModel` predicts a single weekly
-# return — eliminating the error compounding that degrades multi-step
+# return, which eliminates the error compounding that degrades multi-step
 # daily forecasting. This is the fair comparison: same horizon, same data,
 # but the forecasting formulation vs direct regression.
 
