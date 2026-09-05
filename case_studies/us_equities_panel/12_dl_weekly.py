@@ -55,20 +55,16 @@ CASE_STUDY_ID = "us_equities_panel"
 PRIMARY_LABEL = "fwd_ret_5d"
 NOTEBOOK = "12_dl_weekly"
 
-# Weekly experiment parameters
-LOOKBACK_WEEKS = 12  # 12 weekly observations = ~3 months
-MAX_FOLDS = 4  # Quick experiment: 4 evenly-spaced folds from the 16-fold CV
 MAX_TRAIN_SEQUENCES = 200_000  # Lower cap for weekly (fewer total sequences)
-N_EPOCHS = 50  # Shorter training — weekly data has fewer samples per fold
 
 # %% tags=["parameters"]
 BATCH_SIZE = 2048
-LOOKBACK = 12
+LOOKBACK = 12  # 12 weekly observations, so ~3 months
 MAX_SYMBOLS = 0
 FORCE_RETRAIN = False  # Set True to retrain configs that already have complete hashes
 PREDICTION_SPLIT = "validation"
-N_EPOCHS = 50
-MAX_FOLDS = 4
+N_EPOCHS = 50  # Shorter training: weekly data has fewer samples per fold
+MAX_FOLDS = 4  # Quick experiment: 4 evenly-spaced folds from the 16-fold CV
 
 # %%
 seed_everything(RANDOM_SEED)

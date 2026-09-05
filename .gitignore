@@ -63,6 +63,11 @@ tests/_internal/notebook_catalog.db
 .DS_Store
 Thumbs.db
 
+# The CI fixture checkout. .github/workflows/test.yml checks ml4t/third-edition-test-data
+# out to this path inside the workspace, so reproducing a case-study job locally puts it
+# here too - and without this line it shows up as an untracked path in every git status.
+test-data/
+
 # Data files (downloaded, not tracked)
 # Download using: uv run python data/download_all.py
 data/**/*.parquet
