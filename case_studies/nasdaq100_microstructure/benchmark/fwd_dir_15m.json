@@ -1,6 +1,6 @@
 {
   "case_study": "nasdaq100_microstructure",
-  "label": "fwd_ret_60m",
+  "label": "fwd_dir_15m",
   "method": "daily_cross_sectional_mean_close_pct_change",
   "periods_per_year": 252,
   "n_symbols_declared": 115,
