@@ -30,28 +30,35 @@ All three are fixed. This is the sweep the issue asked for and could not assume:
 
 ## What this detects, and what it deliberately does not
 
-Polars does not guarantee the row order of a `group_by`, so a *positional* read of one
-is unpinned. Two shapes, and only one of them is a defect:
+Polars does not guarantee the row order of a `group_by`. Two things can be read out of
+one positionally, and they are decided in different places:
 
-    df.sort(k).group_by(g).first()      picks WITHIN each group. The rows were ordered
-                                        before the grouping, so the pick is defined.
-                                        The order of the groups is still unspecified,
-                                        but nothing has read it.
+    df.group_by(g).agg(...).head(3)   reads the order of the GROUPS. Polars establishes
+                                      that nowhere, so no upstream code can have fixed
+                                      it and the chain alone settles the question. This
+                                      is what the check reports.
 
-    df.group_by(g).agg(...).head(3)     reads the GROUP order, which no inner sort
-                                        fixes. This is the defect.
+    df.group_by(g).tail(1)            picks WITHIN each group, so it is decided by the
+                                      order of the frame that was grouped - which is
+                                      routinely established somewhere else entirely.
+                                      `26_mlops_governance/05_feast_feature_store.py:308`
+                                      groups a `panel` whose sort happens three
+                                      functions away. Flagging that from the chain would
+                                      be a guess, so this arm is out of scope.
 
-Sorting between the grouping and the read fixes the second, and so does
-`maintain_order=True`. A `select` in between whose every expression is an aggregate
-collapses the frame to one row, where there is only one order - an `agg` does not,
-because after a `group_by` it produces one row per group.
+Scoping to the first is what makes the check sound rather than heuristic, and a
+soundness a static check does not have is a check people learn to override.
 
-It is a syntactic check over method chains, so it sees neither a chain split across
-statements nor an order dependence that arrives through a variable. It is not the
-whole class - `rng.choice` on an unordered frame and a `.fit()` whose library
-parallelises its initialiser are the other two arms, and neither is visible here.
-What it does cover is the arm that is mechanically decidable, and it covers it with
-no false positives on the tree it was written against.
+Only a sort BETWEEN the grouping and the read counts: `.head(3).sort(k)` takes three
+arbitrary groups and then tidies them. `maintain_order=True` counts. So does a `select`
+in between whose EVERY expression contains an aggregate, which leaves one row - an
+`agg` does not, because after a grouping it produces one row per group, and a bare
+`select(pl.col('k'))` reduces nothing at all.
+
+It is syntactic, so it sees neither a chain split across statements nor an order
+dependence arriving through a variable. And it is one arm of three: `rng.choice` over a
+frame whose order is not established, and a `.fit()` whose library parallelises its
+initialiser, are the others, and neither is visible to a check like this.
 """
 
 from __future__ import annotations
@@ -65,21 +72,27 @@ import pytest
 REPO_ROOT = Path(__file__).parent.parent
 EXCLUDE_PARTS = {".venv", "__pycache__", "archive", "_archive", ".git", "node_modules"}
 
-# Picks a row from WITHIN each group: decided by the frame's order before the grouping.
-PER_GROUP = frozenset({"first", "last", "head", "tail"})
-# Reads the frame positionally: decided by the order of the groups themselves.
-WHOLE_FRAME = frozenset({"row", "item", "to_list", "to_numpy", "to_series"})
-POSITIONAL = PER_GROUP | WHOLE_FRAME
+# Reads that depend on the order of the GROUPS. `head`/`tail`/`first`/`last` applied to
+# the RESULT of a grouping are here too: they take the first n groups, not the first n
+# rows of each.
+GROUP_ORDER_READS = frozenset(
+    {"row", "item", "to_list", "to_numpy", "to_series", "head", "tail", "first", "last"}
+)
+# The same four names applied DIRECTLY to a group_by pick within each group instead,
+# which is a different question this check does not answer. See `unordered_read`.
+PER_GROUP_PICKS = frozenset({"head", "tail", "first", "last"})
 ORDERING = frozenset({"sort", "sort_by", "top_k", "bottom_k"})
-# Expressions that reduce a column to one value, so a `select` built only from them
-# leaves a single row. `first`/`last` are here as aggregates, which is a different use
-# from the frame methods above.
-REDUCERS = frozenset(
+# Aggregates: each reduces a column to one value.
+AGGREGATES = frozenset(
     {
         "median", "mean", "sum", "max", "min", "len", "n_unique", "std", "var",
-        "quantile", "first", "last", "count", "alias", "col", "cast",
+        "quantile", "first", "last", "count",
     }
 )  # fmt: skip
+# Allowed to appear alongside an aggregate without adding rows. On their own they are a
+# projection, which keeps every row - so a `select` needs an aggregate in each of its
+# expressions, not merely somewhere among them.
+WRAPPERS = frozenset({"alias", "col", "cast", "round", "fill_null", "fill_nan"})
 
 
 def _chain(node: ast.AST) -> tuple[list[str], list[ast.Call]]:
@@ -92,40 +105,67 @@ def _chain(node: ast.AST) -> tuple[list[str], list[ast.Call]]:
     return [c.func.attr for c in calls], calls  # type: ignore[union-attr]
 
 
+def _expression_names(node: ast.AST) -> list[str]:
+    return [
+        inner.func.attr
+        for inner in ast.walk(node)
+        if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
+    ]
+
+
 def _collapses_to_one_row(call: ast.Call) -> bool:
     """Whether this link leaves a single row, making a positional read of it safe.
+
+    `select` only. An `agg` after a `group_by` produces one row PER GROUP, so its
+    aggregates say nothing about how many rows the read will see.
+
+    EVERY expression must contain an aggregate, not merely one of them:
+    `select(pl.col('a').median(), pl.col('b'))` keeps a row per value of `b`. And
+    checking only that the names are "allowed" accepts a plain projection -
+    `select(pl.col('k'))` is `col` alone, which reduces nothing.
 
     Only the call's ARGUMENTS are inspected. Walking the node itself descends into its
     receiver, so every link would inherit the names of everything before it and a
     `select` would be judged by the chain that produced its input.
     """
-    # `select` only. An `agg` after a `group_by` produces one row PER GROUP, so its
-    # aggregates say nothing about how many rows the read will see.
     if call.func.attr != "select":  # type: ignore[union-attr]
         return False
     args = [*call.args, *(k.value for k in call.keywords)]
-    names = [
-        inner.func.attr
-        for arg in args
-        for inner in ast.walk(arg)
-        if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
-    ]
-    return bool(names) and all(name in REDUCERS for name in names)
+    if not args:
+        return False
+    for arg in args:
+        # A generator or list of expressions is one argument holding many.
+        parts = arg.elts if isinstance(arg, ast.List | ast.Tuple) else [arg]
+        for part in parts:
+            names = _expression_names(part)
+            if not names or not any(n in AGGREGATES for n in names):
+                return False
+            if any(n not in AGGREGATES and n not in WRAPPERS for n in names):
+                return False
+    return True
 
 
 def unordered_read(call: ast.Call) -> str | None:
-    """Why this chain reads an unordered `group_by` positionally, or None."""
+    """Why this chain reads the order of a `group_by` that nothing has fixed, or None."""
     names, calls = _chain(call)
-    if not names or names[-1] not in POSITIONAL or "group_by" not in names:
+    if not names or names[-1] not in GROUP_ORDER_READS or "group_by" not in names[:-1]:
         return None
-    group = len(names) - 1 - names[::-1].index("group_by")
+    group = len(names) - 2 - names[-2::-1].index("group_by")
     read = len(names) - 1
     if any(kw.arg == "maintain_order" for kw in calls[group].keywords):
         return None
-    if names[read] in PER_GROUP and read == group + 1:
-        if any(name in ORDERING for name in names[:group]):
-            return None
-        return f".group_by(...).{names[read]}() over rows nothing ordered"
+    if read == group + 1 and names[read] in PER_GROUP_PICKS:
+        # `.group_by(g).tail(1)` picks WITHIN each group, so it is decided by the order
+        # of the frame that was grouped - which is routinely established outside this
+        # chain. `26_mlops_governance/05_feast_feature_store.py:308` groups a `panel`
+        # whose sort happens three functions away, inside `load_model_vintage`. Flagging
+        # it here would be a false positive with nothing in the chain to disprove it, so
+        # this arm is out of scope rather than guessed at.
+        return None
+    # Only a sort BETWEEN the grouping and the read counts. Sorting afterwards orders
+    # the arbitrary subset that was already taken, which is the miss this check had:
+    # `.group_by(k).agg(pl.len()).head(3).sort(k)` returns three arbitrary groups in a
+    # tidy order.
     if any(name in ORDERING for name in names[group + 1 : read]):
         return None
     if any(_collapses_to_one_row(link) for link in calls[group + 1 : read]):
@@ -138,18 +178,13 @@ def _findings(source: str, label: str = "<source>") -> list[str]:
         module = ast.parse(source)
     except SyntaxError:
         return []
-    # Only the outermost call of a chain is the one whose result is used. Judging an
-    # inner link on its own reports `.group_by(g).tail(1).sort(k)` as unordered,
-    # because the sort is outside the node being looked at.
-    inner = {
-        id(node.func.value)
-        for node in ast.walk(module)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-    }
+    # Every link is judged, not only the outermost. A read is decided where it happens:
+    # `.group_by(k).agg(pl.len()).head(3).sort(k)` takes three arbitrary groups and then
+    # orders that arbitrary subset, and looking only at the outermost `.sort` misses it.
     lines = source.splitlines()
     out = []
     for node in ast.walk(module):
-        if not isinstance(node, ast.Call) or id(node) in inner:
+        if not isinstance(node, ast.Call):
             continue
         if why := unordered_read(node):
             out.append(f"{label}:{node.lineno}: {why} — {lines[node.lineno - 1].strip()[:80]}")
@@ -177,8 +212,18 @@ HITS = [
     ("group order read positionally", "top = df.group_by('k').agg(pl.col('v').sum()).head(3)\n"),
     ("row(0) on many groups", "first = df.group_by('k').agg(pl.col('v').sum()).row(0)\n"),
     ("to_list of an unordered grouping", "ks = df.group_by('k').len().to_list()\n"),
-    ("per-group pick over unsorted rows", "one = df.group_by('k').first()\n"),
-    ("head per group over unsorted rows", "five = df.group_by('k').head(5)\n"),
+    (
+        "sorted only after the arbitrary subset was taken",
+        "top = df.group_by('k').agg(pl.len()).head(3).sort('k')\n",
+    ),
+    (
+        "a projection is not a reduction",
+        "top = df.group_by('k').agg(pl.len()).select(pl.col('k')).head(3)\n",
+    ),
+    (
+        "one aggregate does not excuse the other expression",
+        "v = df.group_by('k').agg(pl.len()).select(pl.col('a').median(), pl.col('b')).row(0)\n",
+    ),
 ]
 
 NO_HITS = [
@@ -190,6 +235,8 @@ NO_HITS = [
         "v = df.group_by('k').agg(pl.col('a').n_unique()).select(pl.col('a').median()).row(0)\n",
     ),
     ("an aggregate expression, not a frame method", "e = pl.col('v').sort_by('t').first()\n"),
+    ("a per-group pick, which this check does not judge", "one = df.group_by('k').first()\n"),
+    ("a per-group pick then presentation order", "s = df.group_by('k').tail(1).sort('k')\n"),
     (
         "a namespace method that is not a frame read",
         "b = pl.col('s').str.split('_').list.first()\n",
@@ -209,15 +256,15 @@ def test_the_detector_does_not_fire_on_ordered_code(label: str, source: str):
     assert not _findings(source), f"false positive on: {label}"
 
 
-def test_an_inner_link_is_not_judged_without_its_chain():
-    """`.group_by(g).tail(1).sort(k)` is ordered, and the sort is outside the read.
+def test_a_sort_after_the_read_does_not_rescue_it():
+    """Ordering an arbitrary subset leaves it arbitrary.
 
-    Every link of a chain is a Call, so a scan that judges each one reports the
-    `.tail(1)` here as unordered. Four of the eight candidates in the first pass over
-    the tree were this, and taking them at face value would have meant editing correct
-    code.
+    Judging only the outermost call of a chain misses this, because the outermost call
+    is the `.sort` and it looks like ordering. The three groups were already chosen.
     """
-    assert not _findings("snap = panel.group_by('symbol').tail(1).sort('symbol')\n")
+    findings = _findings("top = df.group_by('k').agg(pl.len()).head(3).sort('k')\n")
+
+    assert findings and "group order" in findings[0]
 
 
 # -----------------------------------------------------------------------------
