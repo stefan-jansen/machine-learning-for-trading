@@ -111,6 +111,7 @@ from case_studies.utils.temporal import (
 )
 from data import load_us_equities
 from utils.artifact_specs import resolve_label_horizon
+from utils.data_quality import top_entities
 from utils.paths import display_path, get_case_study_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
@@ -1299,7 +1300,12 @@ symbol_returns = {
 
 garch_symbols = sorted(symbol_returns)
 if MAX_SYMBOLS > 0:
-    garch_symbols = garch_symbols[:MAX_SYMBOLS]
+    # `top_entities` rather than the alphabetically first names: it is the one rule every
+    # loader's `apply_max_symbols` and 05's own reduction reach, so a reduced run here fits
+    # volatility models for the same stocks the reduced 05 goes on to score. Taking the
+    # alphabetical head instead left every scored stock on the market-level broadcast, which
+    # runs clean and measures something else.
+    garch_symbols = sorted(top_entities(returns_panel, MAX_SYMBOLS, "symbol"))
 
 payloads, n_too_short = [], 0
 for symbol in garch_symbols:

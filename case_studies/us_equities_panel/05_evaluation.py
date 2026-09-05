@@ -84,7 +84,7 @@ from scipy.stats import spearmanr
 from case_studies.utils.cv_window import modeling_fold_boundaries
 from case_studies.utils.feature_engineering import quantile_profile
 from utils.artifact_specs import load_setup_config, resolve_label_buffer, resolve_label_horizon
-from utils.data_quality import validate_modeling_inputs
+from utils.data_quality import top_entities, validate_modeling_inputs
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import (
@@ -264,8 +264,12 @@ del temporal
 gc.collect()
 
 if MAX_SYMBOLS > 0:
-    keep = eval_panel.group_by(ENTITY_COL).len().sort("len", descending=True).head(MAX_SYMBOLS)
-    eval_panel = eval_panel.filter(pl.col(ENTITY_COL).is_in(keep[ENTITY_COL]))
+    # `top_entities` rather than a local sort by row count: ties in the count were being
+    # broken arbitrarily here, so a reduced run could score a different five symbols from the
+    # ones every loader's `apply_max_symbols` reduces to, and a symbol only one side chose
+    # carries null features on the other.
+    keep = top_entities(eval_panel, MAX_SYMBOLS, ENTITY_COL)
+    eval_panel = eval_panel.filter(pl.col(ENTITY_COL).is_in(pl.Series(ENTITY_COL, keep).implode()))
     MIN_CROSS_SECTION = min(MIN_CROSS_SECTION, MAX_SYMBOLS)
     print(f"Reduced run: {MAX_SYMBOLS} symbols, cross-section floor {MIN_CROSS_SECTION}")
 
