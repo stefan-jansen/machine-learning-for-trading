@@ -259,7 +259,7 @@ def _vectorized_ic_with_pvals(
     se_ics = ics.std(axis=0) / np.sqrt(ics.shape[0])
     with np.errstate(divide="ignore", invalid="ignore"):
         t_stats = np.nan_to_num(mean_ics / se_ics, nan=0.0)
-    p_values_figure = 2 * (1 - stats.norm.cdf(np.abs(t_stats)))
+    p_values_figure = 2 * stats.norm.sf(np.abs(t_stats))
     return mean_ics, p_values_figure
 
 

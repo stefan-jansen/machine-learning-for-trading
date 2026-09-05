@@ -33,39 +33,23 @@ REPO_ROOT = Path(__file__).parent.parent
 # baseline assertion below deliberately writes the broken form.
 SCANNED_GLOBS = ("[0-9][0-9]_*/*.py", "case_studies/**/*.py", "utils/**/*.py")
 
-# PENDING, not approved. Each of these is the same defect, and the one-token fix
-# is known. It is not applied here because every one of them sits in a paired
-# notebook: editing the `.py` makes the committed `.ipynb` stale, and the
-# provenance gate (`.github/scripts/notebook_provenance.py`) then requires a
-# production re-run in the canonical environment. That re-run is the owning
-# chapter's or case study's work, in its own worktree and its own PR, so the fix
-# ships with the run that renders it rather than leaving output the source no
-# longer produces.
+# The backlog is empty, and the two assertions below are what keep it that way.
 #
-# A worker touching one of these files must apply `sf`, re-run, and delete the
-# row. The list only shrinks: it is a baseline so a *new* occurrence fails
-# immediately, not permission to add one.
+# It was 11 occurrences across 8 paired teaching notebooks, deferred because fixing
+# the `.py` makes the committed `.ipynb` stale and the provenance gate
+# (`.github/scripts/notebook_provenance.py`) then requires a production re-run.
+# Chapters 16 and 17 cleared their five in their own review passes; this change
+# clears the remaining six in Chapters 7, 9 and 15.
 #
-# Re-measured 2026-07-31 against the tree, because it was written against the
-# generation of Ch11-20 notebooks that #428 replaced the next day and both
-# tests had been red on `main` ever since. Two rows moved, in opposite
-# directions, and the repository total is unchanged at 14:
+# The deferral was dischargeable rather than someone else's work: three of those
+# four notebooks were already stamped `executor: local-uv`, so this environment IS
+# the canonical executor. All four were fixed, re-executed unparameterized from the
+# repo root, and re-stamped.
 #
-#   15_causal_estimation/11_factor_zoo_validation      1 -> 0  (row dropped)
-#     the reviewed generation computes it with `sf`, so the defect is gone
-#   16_strategy_simulation/11_sharpe_ratio_inference   1 -> 2
-#     `p_value = 2 * (1 - norm.cdf(abs(z_score)))` became `one_sided_p_value =
-#     1 - psr` and `two_sided_p_value = 2 * min(psr, 1 - psr)` over `psr =
-#     norm.cdf(z_score)` - the same cancellation, respelled and now on two
-#     lines. Not a new defect admitted, the same one re-counted.
-#
-# Both sites are Chapter 16's to fix and re-run, like every other row here.
-PENDING = {
-    "07_defining_the_learning_task/06_ic_inference.py": 2,
-    "07_defining_the_learning_task/07_multiple_testing.py": 1,
-    "09_model_based_features/02_structural_breaks.py": 2,
-    "15_causal_estimation/09_adia_causal_benchmark.py": 1,
-}
+# A row goes back in here only to record a defect that cannot be fixed in the same
+# change, and it must come with the reason. An empty dict with a zero ceiling means a
+# new occurrence anywhere in SCANNED_GLOBS fails immediately.
+PENDING: dict[str, int] = {}
 
 # The ceiling on the whole backlog, and the thing that makes "only shrinks" a
 # rule a test can enforce rather than a sentence in a comment.
@@ -74,11 +58,10 @@ PENDING = {
 # absorbed by raising that row's count: `test_no_new_...` reads the count, so the
 # edit that admits the defect is the edit that hides it. Only the ceiling makes
 # the admission visible, because raising any row without lowering another fails
-# here. It is why a re-count like the 2026-07-31 one above can be checked rather
-# than argued about - the two rows moved and the total did not.
+# here.
 #
 # Lower it whenever a fix lands. Never raise it.
-PENDING_CEILING = 6
+PENDING_CEILING = 0
 
 
 def _is_cdf_call(node: ast.AST) -> bool:
