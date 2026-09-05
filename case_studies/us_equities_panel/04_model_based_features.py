@@ -156,9 +156,11 @@ IntArray = NDArray[np.int64]
 #   capped `05_evaluation` rank over different frames - complete return histories against the
 #   rows that survive eligibility, the fold windows and the label join - so the two sets can
 #   differ, and a stock 05 scores but 04 did not fit carries the market-level volatility
-#   through the coalesce in Section 5. Section 7's variation table is where that shows up:
-#   `garch_cond_vol` falls to one distinct value on the median date and is set aside as
-#   market-level rather than scored.
+#   through the coalesce in Section 5. Nothing here detects that: Section 7's variation table
+#   only reports `garch_cond_vol` as market-level when *every* stock left on the date carries
+#   the broadcast, and a partial overlap puts fitted and substituted values in one column that
+#   still varies across the cross-section. Set the two caps to the same value only after
+#   checking that they select the same names, or leave this one at zero.
 # - **`XS_MIN_STOCKS`** is the narrowest cross-section a daily return distribution is
 #   summarized from. The clustering in Section 2 reads the median of that distribution, and a
 #   median over a handful of names is not a market. It belongs here rather than with the
