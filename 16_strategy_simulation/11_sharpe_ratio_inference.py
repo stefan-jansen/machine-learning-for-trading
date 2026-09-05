@@ -365,8 +365,14 @@ def probabilistic_sharpe_ratio(
     z_score = (observed_sr - benchmark_sr) / se
     psr = norm.cdf(z_score)
 
-    one_sided_p_value = 1 - psr
-    two_sided_p_value = 2 * min(psr, 1 - psr)
+    # `sf` rather than `1 - psr`: the PSR is the cdf and is reported as such, but the p-value
+    # is its tail, and subtracting a probability near one from one keeps only the digits that
+    # survive the cancellation. Measured on the normal: at z = 8 the subtraction returns
+    # 6.66e-16 against a true 6.22e-16, and from z = 9 it returns exactly 0 where the tail is
+    # 1.13e-19. A p-value of 0 is the one value a reader cannot interpret.
+    upper_tail = float(norm.sf(z_score))
+    one_sided_p_value = upper_tail
+    two_sided_p_value = 2 * min(psr, upper_tail)
 
     return {
         "psr": psr,
