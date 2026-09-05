@@ -47,14 +47,14 @@ case_studies/cme_futures/06_linear:
     POPULATION_NAME: smoke-linear
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  measured_s: 56
+  measured_s: 55
 
 case_studies/cme_futures/07_gbm:
   parameters:
     EXECUTION_TIER: preview
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  measured_s: 153
+  measured_s: 152
 
 case_studies/cme_futures/08_tabular_dl:
   parameters:
@@ -63,21 +63,21 @@ case_studies/cme_futures/08_tabular_dl:
     # vocabulary and refuses anything outside it - _TABM_PREVIEW_FIELDS in utils/tabular_dl.py.
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_epochs: 2}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  measured_s: 23
+  measured_s: 24
 
 case_studies/cme_futures/09_dl_lstm:
   parameters:
     EXECUTION_TIER: preview
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, max_train_sequences: 2000}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  measured_s: 52
+  measured_s: 51
 
 case_studies/cme_futures/10_latent_factors:
   # An index notebook: it prints the declared latent-factor request population and launches
   # neither computation, so there is nothing to reduce and no registry row to check.
   parameters: {}
   writes: []
-  measured_s: 14
+  measured_s: 8
   note: >-
     Running it through nb-run.sh with no parameters executes the COMMITTED notebook in place,
     because that is nb-run.sh's production path. A smoke run must not modify the repo, so this
@@ -88,7 +88,7 @@ case_studies/cme_futures/10a_pca:
     EXECUTION_TIER: preview
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_factors: 2}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  measured_s: 12
+  measured_s: 11
 
 case_studies/cme_futures/10b_stochastic_discount_factor:
   parameters:
@@ -118,7 +118,7 @@ case_studies/cme_futures/12_model_analysis:
   parameters:
     EXECUTION_TIER: preview
   writes: []
-  measured_s: 6
+  measured_s: 5
 
 case_studies/cme_futures/13_backtest:
   parameters:
@@ -126,7 +126,7 @@ case_studies/cme_futures/13_backtest:
     PREVIEW_LABELS: ["fwd_ret_5d"]
     PREVIEW_MAX_PREDICTIONS: 3
   writes: [backtest_runs, backtest_metrics, backtest_fold_metrics]
-  measured_s: 27
+  measured_s: 26
 
 case_studies/cme_futures/14_portfolio_management:
   parameters:
@@ -152,7 +152,7 @@ case_studies/cme_futures/16_costs:
     EXECUTION_TIER: preview
     PREVIEW_LABELS: ["fwd_ret_5d"]
   writes: [backtest_runs, backtest_metrics]
-  measured_s: 47
+  measured_s: 46
 
 case_studies/cme_futures/17_holdout_predictions:
   exempt: true
@@ -191,7 +191,7 @@ case_studies/crypto_perps_funding/06_linear:
     POPULATION_NAME: smoke-linear
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  measured_s: 25
+  measured_s: 24
 
 
 case_studies/crypto_perps_funding/07_gbm:
@@ -217,7 +217,7 @@ case_studies/crypto_perps_funding/09_dl_lstm:
     LABELS: ["fwd_ret_8h"]
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, max_train_sequences: 2000}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  measured_s: 34
+  measured_s: 33
 
 case_studies/crypto_perps_funding/10_dl_tcn:
   parameters:
@@ -225,7 +225,7 @@ case_studies/crypto_perps_funding/10_dl_tcn:
     LABELS: ["fwd_ret_8h"]
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, max_train_sequences: 2000}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  measured_s: 24
+  measured_s: 23
 
 case_studies/crypto_perps_funding/11_causal_dml:
   parameters:
@@ -285,7 +285,7 @@ case_studies/etfs/06_linear:
     POPULATION_NAME: smoke-linear
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  measured_s: 20
+  measured_s: 19
 
 case_studies/etfs/07_gbm:
   parameters:
@@ -294,7 +294,7 @@ case_studies/etfs/07_gbm:
     POPULATION_NAME: smoke-gbm
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  measured_s: 60
+  measured_s: 59
 
 case_studies/etfs/08_tabular_dl:
   parameters:
@@ -312,7 +312,7 @@ case_studies/etfs/09_dl_lstm:
     POPULATION_NAME: smoke-lstm
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, max_train_sequences: 2000}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  measured_s: 26
+  measured_s: 25
 
 case_studies/etfs/10_dl_tsmixer:
   parameters:
@@ -325,7 +325,7 @@ case_studies/etfs/10_dl_tsmixer:
     # the model. Keeping this above the temporal-coverage floor is what stops that recurring.
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, max_train_sequences: 2000}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  measured_s: 29
+  measured_s: 28
 
 
 case_studies/etfs/11_latent_factors:
@@ -404,7 +404,7 @@ case_studies/fx_pairs/08_tabular_dl:
     N_EPOCHS: 2
     POPULATION_NAME: smoke-tabm
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  measured_s: 16
+  measured_s: 15
 
 case_studies/fx_pairs/09_dl_tcn:
   parameters:
@@ -463,7 +463,7 @@ case_studies/fx_pairs/14_portfolio_management:
     TOP_N_PREDICTIONS: 3
     POPULATION_NAME: smoke-allocation
   writes: [backtest_runs, backtest_metrics, candidate_sets, candidate_set_members]
-  measured_s: 78
+  measured_s: 77
 
 case_studies/fx_pairs/15_risk_management:
   parameters:
@@ -473,7 +473,7 @@ case_studies/fx_pairs/15_risk_management:
     MAX_RISK_VARIANTS: 2
     POPULATION_NAME: smoke-risk
   writes: [backtest_runs, backtest_metrics]
-  measured_s: 40
+  measured_s: 39
 
 case_studies/fx_pairs/16_costs:
   parameters:
@@ -483,7 +483,7 @@ case_studies/fx_pairs/16_costs:
     MAX_COST_POINTS: 2
     POPULATION_NAME: smoke-costs
   writes: [backtest_runs, backtest_metrics]
-  measured_s: 42
+  measured_s: 41
 
 case_studies/fx_pairs/17_holdout_predictions:
   exempt: true
@@ -497,6 +497,400 @@ case_studies/fx_pairs/18_holdout_backtest:
   exempt_reason: >-
     Reads the holdout prediction set 17_holdout_predictions produces, which cannot exist in a
     preview workspace for the reason recorded on that entry.
+
+# --- sp500_options ----------------------------------------------------------------------------
+#
+# One label, ret_to_expiry, so nothing narrows the catalog and no POPULATION_NAME is needed. Its
+# downstream stages are the best-provided of the nine: 12, 13 and 15 each carry their own
+# PREVIEW_* reductions, and 11 and 14 take the tier alone.
+
+case_studies/sp500_options/06_linear:
+  parameters:
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 21
+
+case_studies/sp500_options/07_gbm:
+  parameters:
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 56
+
+case_studies/sp500_options/08_tabular_dl:
+  parameters:
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_epochs: 2}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 16
+
+case_studies/sp500_options/09_deep_learning:
+  parameters:
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, max_train_sequences: 2000}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 18
+
+case_studies/sp500_options/09a_lstm:
+  parameters:
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, max_train_sequences: 2000}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 19
+
+case_studies/sp500_options/09b_patchtst:
+  parameters:
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, max_train_sequences: 2000}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 55
+
+case_studies/sp500_options/10_causal_dml:
+  parameters:
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS: {max_samples: 20000, max_symbols: 12, n_folds: 2, n_placebo: 12}
+  writes: [causal_runs]
+  measured_s: 12
+
+case_studies/sp500_options/11_model_analysis:
+  parameters:
+    EXECUTION_TIER: preview
+  writes: []
+  measured_s: 10
+
+case_studies/sp500_options/12_backtest:
+  parameters:
+    EXECUTION_TIER: preview
+    PREVIEW_LABELS: ["ret_to_expiry"]
+    PREVIEW_MAX_PREDICTIONS: 3
+  writes: [backtest_runs, backtest_metrics, backtest_fold_metrics]
+  measured_s: 36
+
+case_studies/sp500_options/13_portfolio_management:
+  parameters:
+    EXECUTION_TIER: preview
+    PREVIEW_LABELS: ["ret_to_expiry"]
+    PREVIEW_MAX_BASELINE_CONFIGS: 1
+  writes: [backtest_runs, backtest_metrics, candidate_sets, candidate_set_members]
+  measured_s: 20
+
+case_studies/sp500_options/14_risk_management:
+  exempt: true
+  exempt_reason: >-
+    case_studies/sp500_options/14_risk_management.py:89 refuses any tier but canonical outright,
+    before it opens the study. It validates the risk boundary of a named, finalized candidate set -
+    sp500-options-strategy-candidates-v1 - and requires every member to be a complete backtest. A
+    preview workspace has no such set and could only be given a fabricated one, which would make
+    the check pass against something other than what it exists to check.
+
+case_studies/sp500_options/15_costs:
+  parameters:
+    EXECUTION_TIER: preview
+    PREVIEW_LABELS: ["ret_to_expiry"]
+    PREVIEW_MAX_BASELINE_CONFIGS: 1
+  writes: [backtest_runs, backtest_metrics]
+  measured_s: 22
+
+case_studies/sp500_options/16_holdout_predictions:
+  exempt: true
+  exempt_reason: >-
+    The holdout stage refits from an immutable canonical training spec, and
+    research/models.py::reconstruct_locked_model_request refuses a spec whose execution_tier is
+    not canonical. Structural, and shared by every case study's holdout pair.
+
+case_studies/sp500_options/17_holdout_backtest:
+  exempt: true
+  exempt_reason: >-
+    Reads the holdout prediction set 16_holdout_predictions produces, which cannot exist in a
+    preview workspace for the reason recorded on that entry.
+
+# --- us_firm_characteristics ------------------------------------------------------------------
+#
+# Primary label fwd_ret_1m. 08_latent_factors is an index over 08a through 08d, like cme's
+# 10_latent_factors, so it has nothing to reduce.
+
+case_studies/us_firm_characteristics/06_gbm:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_1m"]
+    POPULATION_NAME: smoke-gbm
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 20, train_sample_frac: 0.5}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 52
+
+case_studies/us_firm_characteristics/07_tabular_dl:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_1m"]
+    POPULATION_NAME: smoke-tabm
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 20, n_epochs: 2}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 16
+
+case_studies/us_firm_characteristics/08_latent_factors:
+  parameters:
+    EXECUTION_TIER: preview
+  writes: []
+  measured_s: 6
+
+case_studies/us_firm_characteristics/08a_ipca:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_1m"]
+    POPULATION_NAME: smoke-ipca
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 20, n_factors: 2, max_iter: 200}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 14
+
+case_studies/us_firm_characteristics/08b_conditional_autoencoder:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_1m"]
+    POPULATION_NAME: smoke-cae
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 20, n_factors: 2, n_epochs: 2}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 14
+
+case_studies/us_firm_characteristics/08c_stochastic_discount_factor:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_1m"]
+    POPULATION_NAME: smoke-sdf
+    PREVIEW_REDUCTIONS:
+      {folds: [0], max_symbols: 20, n_epochs_cond: 1, n_epochs_moment: 1, n_epochs_unc: 1}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 29
+
+case_studies/us_firm_characteristics/08d_supervised_autoencoder:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_1m"]
+    POPULATION_NAME: smoke-sae
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 20, n_epochs: 2}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 14
+
+case_studies/us_firm_characteristics/09_causal_dml:
+  parameters:
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS: {max_samples: 20000, max_symbols: 20, n_folds: 2, n_placebo: 12}
+  writes: [causal_runs]
+  measured_s: 14
+
+case_studies/us_firm_characteristics/15_holdout_predictions:
+  exempt: true
+  exempt_reason: >-
+    The holdout stage refits from an immutable canonical training spec, and
+    research/models.py::reconstruct_locked_model_request refuses a spec whose execution_tier is
+    not canonical. Structural, and shared by every case study's holdout pair.
+
+case_studies/us_firm_characteristics/16_holdout_backtest:
+  exempt: true
+  exempt_reason: >-
+    Reads the holdout prediction set 15_holdout_predictions produces, which cannot exist in a
+    preview workspace for the reason recorded on that entry.
+
+# --- sp500_equity_option_analytics --------------------------------------------------------------
+#
+# Primary label fwd_ret_5d, four variants. 11_latent_factors is an index over 11a through 11e and
+# has nothing to reduce; 12_causal_dml spells its reduction as separate parameters rather than a
+# dict, like etfs' and fx's.
+
+case_studies/sp500_equity_option_analytics/06_linear:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_5d"]
+    POPULATION_NAME: smoke-linear
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 21
+
+case_studies/sp500_equity_option_analytics/07_gbm:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_5d"]
+    POPULATION_NAME: smoke-gbm
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 72
+
+case_studies/sp500_equity_option_analytics/08_tabular_dl:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_5d"]
+    POPULATION_NAME: smoke-tabm
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_epochs: 2}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 19
+
+case_studies/sp500_equity_option_analytics/09_dl_lstm:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_5d"]
+    POPULATION_NAME: smoke-lstm
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, max_train_sequences: 2000}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 36
+
+case_studies/sp500_equity_option_analytics/10_dl_patchtst:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_5d"]
+    POPULATION_NAME: smoke-patchtst
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, max_train_sequences: 2000}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 52
+
+case_studies/sp500_equity_option_analytics/11a_pca:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_5d"]
+    POPULATION_NAME: smoke-pca
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_factors: 2}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 12
+
+case_studies/sp500_equity_option_analytics/11b_ipca:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_5d"]
+    POPULATION_NAME: smoke-ipca
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_factors: 2, max_iter: 200}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 17
+
+case_studies/sp500_equity_option_analytics/11c_conditional_autoencoder:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_5d"]
+    POPULATION_NAME: smoke-cae
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_factors: 2, n_epochs: 2}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 17
+
+case_studies/sp500_equity_option_analytics/11d_stochastic_discount_factor:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_5d"]
+    POPULATION_NAME: smoke-sdf
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 5, n_epochs_cond: 1, n_epochs_moment: 1, n_epochs_unc: 1}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 45
+
+case_studies/sp500_equity_option_analytics/11e_supervised_autoencoder:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_5d"]
+    POPULATION_NAME: smoke-sae
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_epochs: 2}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 17
+
+case_studies/sp500_equity_option_analytics/11_latent_factors:
+  parameters:
+    EXECUTION_TIER: preview
+
+  writes: []
+  measured_s: 8
+
+case_studies/sp500_equity_option_analytics/12_causal_dml:
+  parameters:
+    EXECUTION_TIER: preview
+    PRIMARY_LABEL: fwd_ret_5d
+    MAX_SYMBOLS: 12
+    CV_FOLDS: 2
+    MAX_SAMPLES: 20000
+    N_PLACEBO: 12
+  writes: [causal_runs]
+  measured_s: 12
+
+case_studies/sp500_equity_option_analytics/18_holdout_predictions:
+  exempt: true
+  exempt_reason: >-
+    The holdout stage refits from an immutable canonical training spec, and
+    research/models.py::reconstruct_locked_model_request refuses a spec whose execution_tier is
+    not canonical. Structural, and shared by every case study's holdout pair.
+
+case_studies/sp500_equity_option_analytics/19_holdout_backtest:
+  exempt: true
+  exempt_reason: >-
+    Reads the holdout prediction set 18_holdout_predictions produces, which cannot exist in a preview
+    workspace for the reason recorded on that entry.
+
+# --- nasdaq100_microstructure -------------------------------------------------------------------
+#
+# Primary label fwd_ret_15m. Intraday, so the reductions are symbol caps rather than row samples -
+# a thinned intraday panel changes the decision cadence, which is what stopped crypto's backtest.
+
+case_studies/nasdaq100_microstructure/06_linear:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_15m"]
+    POPULATION_NAME: smoke-linear
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 5}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 83
+  # 6.6 GB measured on 2026-09-05T22:00Z, a five-symbol preview that exited 0 in 83 s. The full
+  # 115-symbol sweep is entered at 60 GB, which is what a run inherits without this: above the
+  # 40 GB line, so it takes every slot and waits for memory the reduced run never wanted. That
+  # is not hypothetical - it happened twice earlier the same evening, for half an hour each.
+  headroom_gb: 15
+
+case_studies/nasdaq100_microstructure/07_gbm:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_15m"]
+    POPULATION_NAME: smoke-gbm
+    # checkpoint_interval, not train_sample_frac. The fifteen fits cost about 40 s in total; the
+    # rest of the run is predicting the intraday validation rows once per checkpoint, and at the
+    # default interval of 50 over 500 trees that is 150 models. At 250 it is 30. Thinning rows
+    # instead would attack the wrong half and change the panel this case study is about.
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 5, checkpoint_interval: 250}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 228
+  # 8.2 GB measured on 2026-09-05T22:01Z, a five-symbol preview that exited 0. Its full sweep is
+  # entered at 65 GB, and that entry is nb-run.sh's own weakest: no completed run backs it.
+  headroom_gb: 15
+
+case_studies/nasdaq100_microstructure/08_dl_nlinear:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_15m"]
+    POPULATION_NAME: smoke-nlinear
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 5, max_train_sequences: 2000}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 145
+
+case_studies/nasdaq100_microstructure/09_dl_lstm:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_15m"]
+    POPULATION_NAME: smoke-lstm
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 5, max_train_sequences: 2000}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 146
+
+case_studies/nasdaq100_microstructure/10_dl_tcn:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_15m"]
+    POPULATION_NAME: smoke-tcn
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 5, max_train_sequences: 2000}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 149
+
+case_studies/nasdaq100_microstructure/11_dl_patchtst:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_15m"]
+    POPULATION_NAME: smoke-patchtst
+    # max_predict_sequences for the same reason 07_gbm caps its checkpoints: the training half
+    # is already small and the run's cost is scoring the intraday validation window. Its three
+    # siblings here come in at 146-149 s without it and are left alone.
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 5, max_train_sequences: 2000, max_predict_sequences: 2000}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 78
 
 # --- declared, and blocked on a defect in the notebook ----------------------------------------
 

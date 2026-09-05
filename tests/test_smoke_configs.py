@@ -49,12 +49,6 @@ UNDECLARED = {
     "case_studies/etfs/16_risk_management",
     "case_studies/etfs/17_costs",
     "case_studies/etfs/20_strategy_analysis",
-    "case_studies/nasdaq100_microstructure/06_linear",
-    "case_studies/nasdaq100_microstructure/07_gbm",
-    "case_studies/nasdaq100_microstructure/08_dl_nlinear",
-    "case_studies/nasdaq100_microstructure/09_dl_lstm",
-    "case_studies/nasdaq100_microstructure/10_dl_tcn",
-    "case_studies/nasdaq100_microstructure/11_dl_patchtst",
     "case_studies/nasdaq100_microstructure/12_causal_dml",
     "case_studies/nasdaq100_microstructure/13_model_analysis",
     "case_studies/nasdaq100_microstructure/14_backtest",
@@ -64,40 +58,12 @@ UNDECLARED = {
     "case_studies/nasdaq100_microstructure/18_holdout_predictions",
     "case_studies/nasdaq100_microstructure/19_holdout_backtest",
     "case_studies/nasdaq100_microstructure/20_strategy_analysis",
-    "case_studies/sp500_equity_option_analytics/06_linear",
-    "case_studies/sp500_equity_option_analytics/07_gbm",
-    "case_studies/sp500_equity_option_analytics/08_tabular_dl",
-    "case_studies/sp500_equity_option_analytics/09_dl_lstm",
-    "case_studies/sp500_equity_option_analytics/10_dl_patchtst",
-    "case_studies/sp500_equity_option_analytics/11_latent_factors",
-    "case_studies/sp500_equity_option_analytics/11a_pca",
-    "case_studies/sp500_equity_option_analytics/11b_ipca",
-    "case_studies/sp500_equity_option_analytics/11c_conditional_autoencoder",
-    "case_studies/sp500_equity_option_analytics/11d_stochastic_discount_factor",
-    "case_studies/sp500_equity_option_analytics/11e_supervised_autoencoder",
-    "case_studies/sp500_equity_option_analytics/12_causal_dml",
     "case_studies/sp500_equity_option_analytics/13_model_analysis",
     "case_studies/sp500_equity_option_analytics/14_backtest",
     "case_studies/sp500_equity_option_analytics/15_portfolio_management",
     "case_studies/sp500_equity_option_analytics/16_risk_management",
     "case_studies/sp500_equity_option_analytics/17_costs",
-    "case_studies/sp500_equity_option_analytics/18_holdout_predictions",
-    "case_studies/sp500_equity_option_analytics/19_holdout_backtest",
     "case_studies/sp500_equity_option_analytics/20_strategy_analysis",
-    "case_studies/sp500_options/06_linear",
-    "case_studies/sp500_options/07_gbm",
-    "case_studies/sp500_options/08_tabular_dl",
-    "case_studies/sp500_options/09_deep_learning",
-    "case_studies/sp500_options/09a_lstm",
-    "case_studies/sp500_options/09b_patchtst",
-    "case_studies/sp500_options/10_causal_dml",
-    "case_studies/sp500_options/11_model_analysis",
-    "case_studies/sp500_options/12_backtest",
-    "case_studies/sp500_options/13_portfolio_management",
-    "case_studies/sp500_options/14_risk_management",
-    "case_studies/sp500_options/15_costs",
-    "case_studies/sp500_options/16_holdout_predictions",
-    "case_studies/sp500_options/17_holdout_backtest",
     "case_studies/sp500_options/18_strategy_analysis",
     "case_studies/sp500_options/90_ic_diagnostic",
     "case_studies/us_equities_panel/06_linear",
@@ -117,21 +83,11 @@ UNDECLARED = {
     "case_studies/us_equities_panel/18_costs",
     "case_studies/us_equities_panel/19_risk_management",
     "case_studies/us_equities_panel/20_strategy_analysis",
-    "case_studies/us_firm_characteristics/06_gbm",
-    "case_studies/us_firm_characteristics/07_tabular_dl",
-    "case_studies/us_firm_characteristics/08_latent_factors",
-    "case_studies/us_firm_characteristics/08a_ipca",
-    "case_studies/us_firm_characteristics/08b_conditional_autoencoder",
-    "case_studies/us_firm_characteristics/08c_stochastic_discount_factor",
-    "case_studies/us_firm_characteristics/08d_supervised_autoencoder",
-    "case_studies/us_firm_characteristics/09_causal_dml",
     "case_studies/us_firm_characteristics/10_model_analysis",
     "case_studies/us_firm_characteristics/11_backtest",
     "case_studies/us_firm_characteristics/12_portfolio_management",
     "case_studies/us_firm_characteristics/13_risk_management",
     "case_studies/us_firm_characteristics/14_costs",
-    "case_studies/us_firm_characteristics/15_holdout_predictions",
-    "case_studies/us_firm_characteristics/16_holdout_backtest",
     "case_studies/us_firm_characteristics/17_strategy_analysis",
 }
 
@@ -151,6 +107,45 @@ def test_every_stage_06_notebook_is_declared_or_recorded_as_undeclared() -> None
 def test_no_entry_names_a_notebook_that_does_not_exist() -> None:
     absent = [key for key in SMOKE if not (REPO_ROOT / f"{key}.py").exists()]
     assert absent == []
+
+
+ENTRY_KEYS = {
+    "parameters",
+    "writes",
+    "measured_s",
+    "headroom_gb",
+    "exempt",
+    "exempt_reason",
+    "blocked_by",
+    "blocked_reason",
+    "note",
+}
+
+
+def test_no_entry_carries_a_key_nothing_reads() -> None:
+    """A misspelled key is silently ignored, and the entry then claims something nobody acts on.
+
+    `headroom_gb` is the case that motivated this: written as `headroom`, the declaration parses,
+    the test suite stays green, and the run inherits the full sweep's memory figure - which for
+    nasdaq100_microstructure/06_linear means taking all six slots and waiting thirty minutes for
+    60 GB a five-symbol preview never wanted.
+    """
+    for key, entry in SMOKE.items():
+        unknown = sorted(set(entry or {}) - ENTRY_KEYS)
+        assert not unknown, f"{key}: {unknown} is read by nothing"
+
+
+def test_a_declared_headroom_lets_the_run_share_the_machine() -> None:
+    """nb-run.sh treats a declaration above 40 GB as "take every slot".
+
+    So a headroom_gb at or above that line is not a reduction, it is the full figure restated,
+    and it reintroduces exactly the stall the field exists to prevent.
+    """
+    for key, entry in SMOKE.items():
+        gb = (entry or {}).get("headroom_gb")
+        if gb is None:
+            continue
+        assert isinstance(gb, int) and 0 < gb <= 40, f"{key}: headroom_gb must be 1-40, got {gb}"
 
 
 def test_a_block_names_its_issue_and_what_it_is_blocked_on() -> None:
