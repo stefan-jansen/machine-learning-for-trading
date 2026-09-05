@@ -341,9 +341,9 @@ print(f"Correlation stats: Mean={lower_tri.mean():.3f}, Std={lower_tri.std():.3f
 # divides by that near-zero number, and the optimizer takes enormous positions along it.
 #
 # What makes the number large is not the assets being risky, it is them being *redundant*: two
-# funds that move together leave a direction with almost no independent variation, and a universe
-# built from nine US sector funds and four broad-market ones has many such pairs. The eigenvalue
-# spectrum below is where to see it.
+# funds that move together leave a direction with almost no independent variation. This universe
+# holds nine US sector funds alongside the broad-market funds that contain those same sectors, so
+# it has many such pairs by construction. The eigenvalue spectrum below is where to see it.
 
 # %%
 condition_number = np.linalg.cond(geometry_cov)

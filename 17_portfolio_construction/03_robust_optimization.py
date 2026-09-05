@@ -87,8 +87,9 @@ from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, ml4t_diverging, ml4t_palette
 
 # %% [markdown]
-# Riskfolio-Lib depends on a narrow CVXPY interface. Fail early with a clear environment
-# message instead of patching a reader's installed package at runtime.
+# Riskfolio-Lib reaches CVXPY through an interface that changed across CVXPY versions, so the
+# check below reports a version mismatch as an environment problem rather than letting it surface
+# later as an unexplained solver failure.
 
 
 # %%
@@ -118,7 +119,12 @@ set_global_seeds(SEED)
 # %% [markdown]
 # ## 1. Data Acquisition
 #
-# We'll use a diversified portfolio of ETFs spanning multiple asset classes.
+# Eleven exchange-traded funds, one per broad exposure: US large, mid and small caps, developed
+# and emerging markets outside the US, aggregate and long-dated Treasuries, high-yield credit,
+# gold, property and commodities. Each is already a diversified basket, so allocating across them
+# is an asset-allocation decision and the estimation problem shows up without the separate problem
+# of picking individual securities. The narrower universe is deliberate: eleven assets need 55
+# covariances estimated where the previous notebook's thirty need 435.
 
 # %%
 # Multi-asset ETF universe
@@ -276,8 +282,9 @@ OPTIMIZATION_SPECS = {
 
 
 # %% [markdown]
-# Map each optimization label to the Riskfolio-Lib call so the portfolio function can
-# focus on orchestration rather than on a long method-specific branch ladder.
+# Riskfolio-Lib names each objective by a pair of strings - a risk measure and what to do with
+# it - so the table below is the translation from the six methods named above into the calls that
+# produce them.
 
 
 # %%
@@ -500,10 +507,7 @@ for col in cumulative.columns:
 final_growth = cumulative.iloc[-1]
 growth_leader = str(final_growth.idxmax())
 fig.update_layout(
-    title=(
-        f"{len(cumulative.columns)} allocations of one universe, "
-        "all weights frozen before the window"
-    ),
+    title="Every weight here was fixed before the window it is scored on",
     xaxis_title="Date",
     yaxis_title="Growth of $1",
     height=500,
@@ -623,7 +627,8 @@ def run_daily_target_engine(*, cost_aware: bool, return_column: str) -> pl.DataF
 
 
 # %% [markdown]
-# Execute both cost settings before aligning their return series with the vectorized path.
+# The two engine runs differ only in whether costs are charged, so the difference between them is
+# the cost and nothing else.
 
 
 # %%
@@ -802,7 +807,7 @@ for col in drawdowns.columns:
 max_drawdowns = drawdowns.min()
 shallowest_name = str(max_drawdowns.idxmax())
 fig.update_layout(
-    title="The shallowest drawdown belongs to the weakest performer",
+    title="The shallowest fall belongs to the allocation that earned least",
     xaxis_title="Date",
     yaxis_title="Drawdown (%)",
     height=450,
@@ -819,7 +824,12 @@ fig.show()
 # %% [markdown]
 # ## 9. Risk Contribution Analysis
 #
-# For risk parity, we verify that risk contributions are equalized.
+# An asset's **risk contribution** is its weight times its marginal effect on portfolio variance,
+# divided by the total: the share of the portfolio's variance that asset is responsible for. Risk
+# parity is defined by making those shares equal, so the chart below is that definition evaluated.
+# The other allocations carry no such constraint, and where their capital concentrates their risk
+# concentrates further - variance is quadratic in the weights, so doubling a weight roughly
+# quadruples what it contributes.
 
 
 # %%
@@ -962,6 +972,19 @@ print(
 # through an engine that charges the declared commission and slippage, and the difference between
 # the two is what implementing the allocation costs. Any ranking computed above it is a ranking of
 # paper portfolios.
+
+# %% [markdown] tags=["results"]
+# ### What this run produced
+#
+# Three tables carry it, and they answer different questions. The weight comparison says where
+# each method put capital; the effective-positions column beside it says how concentrated that is
+# as a number rather than by eye. The performance table scores the six frozen allocations on the
+# test window. The execution bridge at the end repeats one of them - risk parity - through an
+# engine that charges the declared commission and slippage, so the gap between its last row and
+# the paper figure above is what implementing that allocation costs.
+#
+# The ordering in the performance table describes this split. No allocation was retuned against
+# it, and nothing here estimates how the same six would rank on a different train/test cut.
 
 # %% [markdown]
 # ## Key takeaways
