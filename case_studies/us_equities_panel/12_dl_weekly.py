@@ -86,17 +86,17 @@ LOG_FILE = Path("/tmp/dl_weekly_experiment.log")
 # %% [markdown]
 # ## Load and Subsample to Weekly Frequency
 #
-# The daily features and labels are subsampled to Fridays, so consecutive rows for one
-# stock are a week apart and `fwd_ret_5d` becomes a one-step-ahead target.
+# The daily features and labels are subsampled to Fridays, so `fwd_ret_5d` becomes a
+# one-step-ahead target: each row's window runs to about the next row's date.
 #
 # **The windows are mostly, not entirely, non-overlapping, and the label is why.**
-# `02_labels` resolves `fwd_ret_5d` five *sessions* ahead, not five calendar days. In a full
-# trading week those coincide and a Friday's window closes on the next Friday. In a week
-# carrying a market holiday the fifth session falls past it, so that observation's window
-# overlaps the next one by a session. Measured on the 4,565 sessions from 2000-02-01 to
-# 2018-03-26: of 915 consecutive Friday pairs, 752 (82%) close exactly on the next Friday,
-# 134 (15%) close after it and overlap, and 29 (3%) close before it because the next Friday
-# was itself a holiday and carries no row.
+# `02_labels` resolves `fwd_ret_5d` five *sessions* ahead. A full trading week holds exactly
+# five sessions, so a Friday's window closes on the next Friday. A week carrying a market
+# holiday holds four, so the fifth session falls on the Monday after that Friday and the
+# window overlaps the next observation's by a session. Measured on the 4,565 sessions from
+# 2000-02-01 to 2018-03-26, of 915 consecutive Friday pairs: 752 (82%) close exactly on the
+# next Friday, 134 (15%) close after it and overlap, and 29 (3%) close before it because the
+# next Friday was itself a holiday and carries no row.
 #
 # What that costs is the mechanical autocorrelation overlapping windows induce, on about one
 # week in seven. It is small enough to leave the one-step formulation intact and too large to
