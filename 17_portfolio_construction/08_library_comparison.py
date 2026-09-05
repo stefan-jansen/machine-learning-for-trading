@@ -156,10 +156,11 @@ set_global_seeds(SEED)
 # %% [markdown]
 # ## Load Data
 #
-# Load ETF price data from canonical dataset for portfolio optimization.
+# All three libraries are fitted on the same training rows and scored on the same later ones,
+# so any difference between them is the method or its defaults rather than the data.
 
 # %% [markdown]
-# ### Universe and Date Range
+# ### The universe, and where the training window ends
 
 # %%
 # Fixed teaching universe diversified across asset classes
@@ -182,7 +183,7 @@ START_DATE = "2018-01-01"
 END_DATE = "2024-12-01"
 
 # %% [markdown]
-# ### Load and Filter ETF Panel
+# ### Reading the panel
 
 # %%
 etf_data = load_etfs(symbols=SYMBOLS, start_date=START_DATE, end_date=END_DATE).sort(
@@ -191,7 +192,10 @@ etf_data = load_etfs(symbols=SYMBOLS, start_date=START_DATE, end_date=END_DATE).
 print(f"Loaded {etf_data.height:,} rows for {len(SYMBOLS)} fixed teaching ETFs")
 
 # %% [markdown]
-# ### Pivot to Wide Returns Matrix
+# ### One column per fund, one row per session
+#
+# Every library takes its inputs in this shape: an asset-by-time matrix of returns, from which
+# the moments are estimated. Getting there is the last step the three have in common.
 
 # %%
 # Prepare the canonical panel in Polars before crossing into pandas-native optimizer APIs.
@@ -347,9 +351,12 @@ def run_riskfolio(operation, name: str):
     return result
 
 
+# %% [markdown]
+# The scopes above suppress two named warnings and nothing else. The check below feeds them one
+# warning they are meant to catch and one they are not, and shows that the second still comes
+# through - a suppression that swallowed everything would hide a real solver problem.
+
 # %%
-# Prove that the scopes reject only the exact pinned warnings. The unrelated RuntimeWarning is
-# captured as visible evidence instead of being emitted to the notebook's strict stderr stream.
 cvxpy_warning_oracle_message = """
 This use of ``*`` has resulted in matrix multiplication.
 Using ``*`` for matrix multiplication has been deprecated since CVXPY 1.1.
@@ -407,9 +414,13 @@ def common_empirical_prior() -> EmpiricalPrior:
 # %% [markdown]
 # ### Expected Returns & Covariance
 
+# %% [markdown]
+# The three libraries disagree about units: PyPortfolioOpt expects annualized moments, while
+# Riskfolio-Lib and skfolio take the daily observations and annualize internally. Estimating once
+# in daily units and converting at each boundary is what makes the comparison one problem rather
+# than three - otherwise a difference in results could be a difference in what was estimated.
+
 # %%
-# Define the shared estimator once in daily units. PyPortfolioOpt consumes annual
-# moments, while Riskfolio and skfolio consume the daily observations directly.
 common_mean_daily = train_returns.mean()
 common_cov_daily = train_returns.cov(ddof=1)
 mu = common_mean_daily * TRADING_DAYS
@@ -902,8 +913,9 @@ print(
 fold_records = []
 
 # %% [markdown]
-# Feasible folds invoke the unchanged 4% Max-Sharpe estimator and require an exact solver status.
-# Infeasible folds hold cash at the same daily hurdle without calling a ratio solver.
+# Feasible folds invoke the unchanged Max-Sharpe estimator and require an exact solver status.
+# Infeasible folds hold cash at the declared hurdle without calling a ratio solver; the rate
+# is the one printed in the settings block.
 
 # %%
 for fold, (train_indices, test_indices) in enumerate(cv.split(train_returns)):
@@ -951,7 +963,7 @@ fold_summary
 
 # %% [markdown]
 # This demonstration stays inside the training window. Cash rows are explicit feasibility
-# decisions at the same 4% hurdle, while optimized rows expose the solver status and breadth.
+# decisions at the declared hurdle, while optimized rows expose the solver status and breadth.
 
 # %%
 portfolios_skf = {
@@ -979,9 +991,12 @@ skfolio_summary
 # but with very different practical behavior.
 
 # %% [markdown]
-# ## Part 4: Comprehensive Comparison
+# ## Part 4: The thirteen allocations on the test window
 #
-# Let's compare all optimized portfolios using ml4t-diagnostic.
+# Every allocation above was fitted on the training panel and is now frozen. Scoring them all
+# on the same later returns is what separates a difference in objective from a difference in
+# API: two libraries solving the same problem should land in the same place, and where they do
+# not, the reason is a different default rather than a different method.
 
 # %%
 # Collect all portfolio weights
@@ -1017,7 +1032,7 @@ for name, weights in all_portfolios.items():
     portfolio_returns[name] = test_returns_np @ weights.reindex(tickers).values
 
 # %% [markdown]
-# ### Evaluate with ml4t-diagnostic
+# ### Risk and return over the test window
 
 # %%
 # Comprehensive evaluation using PortfolioAnalysis
@@ -1054,10 +1069,11 @@ eval_df
 
 # %% [markdown]
 # These metrics describe frozen allocations on later returns. They support comparison of
-# implementations, but this single historical test is not a license to select a permanent winner.
+# implementations, and one historical test is not grounds for choosing an implementation
+# permanently.
 
 # %% [markdown]
-# ### Execution-Aware Bridge with ml4t-backtest
+# ### What one of them costs to hold
 #
 # Vectorized matrix multiplication is useful for comparing optimizers under identical assumptions.
 # To connect this to deployable execution, replay one optimized portfolio through Engine.
@@ -1183,7 +1199,7 @@ print(f"  Vectorized MaxDD={vec_stats.max_drawdown:.2%}, Engine MaxDD={eng_stats
 # Engine paths; any remaining gap reflects fills and declared costs on identical bars.
 
 # %% [markdown]
-# ### Visualization: Portfolio Comparison
+# ### Growth paths of the comparable implementations
 #
 # The growth chart focuses on the comparable Max-Sharpe implementations and an equal-weight
 # benchmark. Showing four lines preserves the cross-library comparison without a thirteen-line
@@ -1203,7 +1219,9 @@ growth_leader = max(cumulative_growth, key=lambda name: cumulative_growth[name][
 fig = go.Figure()
 for name in growth_methods:
     fig.add_scatter(
-        x=test_dates,
+        # datetime64 rather than the index's pandas Timestamps: the static-image writer that
+        # renders this figure alongside the interactive one cannot serialize a Timestamp.
+        x=np.asarray(test_dates, dtype="datetime64[ns]"),
         y=cumulative_growth[name],
         mode="lines",
         name=name,
@@ -1302,7 +1320,8 @@ fig.update_layout(
 fig.show()
 
 # %% [markdown]
-# Consistency across metrics is more informative than winning one column, but it remains a
+# An allocation ranking mid-table on every column is a different thing from one ranking first
+# on a single column and last elsewhere, and the heatmap is where that shows. It remains a
 # diagnostic of this test period rather than a second selection stage.
 
 # %% [markdown]
@@ -1336,7 +1355,7 @@ conc_df
 # reference indicates broad diversification; larger values expose greater single-name dependence.
 
 # %% [markdown]
-# ### Concentration by Frozen Allocation
+# ### How much each allocation depends on one name
 
 # %%
 fig = make_subplots(
@@ -1467,7 +1486,7 @@ fig.add_bar(
     col=2,
 )
 fig.update_layout(
-    title=f"The turnover penalty cuts trading distance by {turnover_reduction:.0%}",
+    title="A turnover penalty trades breadth for trading distance",
     height=430,
 )
 fig.update_yaxes(title_text="One-way turnover", tickformat=".0%", rangemode="tozero", row=1, col=1)
@@ -1509,7 +1528,9 @@ fig.show()
 # | Objective penalties | Native | Via model settings | Via constraints/settings |
 
 # %% [markdown]
-# ## Key Takeaways
+# ## What the four comparisons produced
+#
+# Four numbers close the notebook, and each one answers a question the sections above set up.
 
 # %%
 ppo_test_sharpe = float(eval_df.filter(pl.col("portfolio") == "PPO: Max Sharpe")["sharpe"].item())
@@ -1517,30 +1538,62 @@ skfolio_test_sharpe = float(
     eval_df.filter(pl.col("portfolio") == "SKF: Max Sharpe")["sharpe"].item()
 )
 max_sharpe_test_gap = abs(ppo_test_sharpe - skfolio_test_sharpe)
-display(
-    Markdown(
-        "\n".join(
-            [
-                f"- **Matched Max-Sharpe implementations agree here**: PyPortfolioOpt records "
-                f"{ppo_test_sharpe:.6f} and skfolio {skfolio_test_sharpe:.6f} on the frozen test, "
-                f"an absolute gap of {max_sharpe_test_gap:.6f} under the common contract.",
-                f"- **Execution changes the realized path**: the matched daily-target bridge "
-                f"moves Sharpe from {vec_stats.sharpe_ratio:.3f} vectorized to "
-                f"{eng_stats.sharpe_ratio:.3f} with {COMMISSION_RATE * 1e4:.0f} bp commission "
-                f"and {SLIPPAGE_RATE * 1e4:.0f} bp slippage.",
-                f"- **Turnover belongs in the objective**: the declared penalty reduces "
-                f"one-way trading distance from {turnover_without:.1%} to {turnover_with:.1%}.",
-                f"- **Regularization changes breadth**: an L2 penalty of {L2_GAMMA:.1f} moves "
-                f"the active Max-Sharpe allocation from {unregularized_positions} to "
-                f"{regularized_positions} positions.",
-                "- **Workflow fit remains the durable distinction**: optimizer objects, broad "
-                "risk interfaces, and sklearn-style validation solve different research needs.",
-            ]
-        )
-    )
+print("Two libraries, one Max-Sharpe problem, frozen test window:")
+print(f"  PyPortfolioOpt {ppo_test_sharpe:.6f}   skfolio {skfolio_test_sharpe:.6f}")
+print(f"  absolute gap   {max_sharpe_test_gap:.6f}")
+print("\nThe same allocation, vectorized and through the engine:")
+print(
+    f"  Sharpe {vec_stats.sharpe_ratio:.3f} -> {eng_stats.sharpe_ratio:.3f} at "
+    f"{COMMISSION_RATE * 1e4:.0f} bp commission and {SLIPPAGE_RATE * 1e4:.0f} bp slippage"
+)
+print("\nWhat the two declared penalties change:")
+print(f"  turnover penalty: one-way trading distance {turnover_without:.1%} -> {turnover_with:.1%}")
+print(
+    f"  L2 penalty of {L2_GAMMA:.1f}: active positions "
+    f"{unregularized_positions} -> {regularized_positions}"
 )
 
-# %% [markdown]
+# %% [markdown] tags=["results"]
+# The first pair is the one the notebook is built to produce. Two libraries given the same
+# moments, the same hurdle and the same long-only budget constraint land on the same test Sharpe
+# ratio to six decimal places, so the API is not the method: where two of these libraries differ
+# on a problem, it is because a default differs, not because the mathematics does.
+#
+# The other three are about what the comparison leaves out. Routing one allocation through an
+# execution engine moves its Sharpe ratio, and the move is entirely the declared commission and
+# slippage on the same bars. The turnover penalty cuts trading distance, and the L2 penalty
+# widens the number of positions held - both are objective terms, so both are choices a reader
+# makes rather than properties of a library.
+#
+# ## Key takeaways
+#
+# 1. **The same objective solved by three APIs is one problem, and the check is arithmetic.**
+#    Estimate the moments once, convert at each library's boundary, and matched objectives agree
+#    to solver tolerance. A gap that survives that is a difference in defaults worth finding.
+# 2. **What differs between these libraries is workflow, not answers.** Optimizer objects, a
+#    single portfolio object spanning many risk measures, and sklearn estimators that drop into a
+#    pipeline solve different research problems. Which fits depends on what surrounds the
+#    allocation step.
+# 3. **A penalty is part of the objective, and changes the answer.** Turnover and L2
+#    regularization change the answer, and a library that exposes them makes an explicit choice
+#    out of what would otherwise be an implicit one.
+# 4. **Concentration needs a number.** The Herfindahl index turns "this looks concentrated" into
+#    something comparable across thirteen allocations and against an equal-weight reference.
+# 5. **A ranking on one test window is a description of that window.** Every allocation here is
+#    frozen and scored once; nothing was re-tuned against the result, and nothing here estimates
+#    how the ordering would change on a different split.
+#
+# ### Known limitations
+#
+# - One training window, one test window, one fixed universe assembled from funds that exist
+#   today. A different split date would refit all thirteen allocations.
+# - The library versions are the ones pinned in the `ml4t` image. Breadth and defaults change
+#   between releases, and the workflow comparison is the part of this that ages best.
+# - Only one of the thirteen allocations is put through the execution engine. The others are
+#   compared gross of costs, so the table ranks paper portfolios.
+# - The walk-forward cross-validation runs inside the training window as a stability
+#   demonstration. It is not a second test, and its folds are not held out from anything.
+#
 # **Next**: [`09_allocator_comparison`](09_allocator_comparison.ipynb) extends the comparison
 # with explicit estimation-risk controls.
 #
