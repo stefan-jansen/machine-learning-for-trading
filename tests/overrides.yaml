@@ -1835,10 +1835,21 @@ case_studies/fx_pairs/02_labels:
 case_studies/fx_pairs/03_financial_features:
   timeout: 300
 case_studies/fx_pairs/04_model_based_features:
+  # The three models now walk their series on the cadence `config/setup.yaml` declares
+  # rather than fitting once per fold, so what bounds this notebook in CI is the number of
+  # estimates, not the number of pairs. `REFIT_EVERY_OVERRIDE` replaces all three cadences
+  # for this run: 504 sessions instead of 63 and 21, which takes the state-space walk from
+  # about 58 estimates per pair to 7 and leaves every emitted row and column where it was.
+  # The burn-ins are deliberately not overridable - a shorter one would move which sessions
+  # carry a value, and the notebook asserts on exactly that.
+  #
+  # The other two bound how hard a single estimate searches, and carry the values this
+  # entry has always used.
   parameters:
-    KALMAN_MAXITER: 50
+    KALMAN_MAXITER_OVERRIDE: 50
     MAX_SYMBOLS: 5
-    N_HMM_RESTARTS: 3
+    N_HMM_RESTARTS_OVERRIDE: 3
+    REFIT_EVERY_OVERRIDE: 504
   timeout: 900
 case_studies/fx_pairs/05_evaluation:
   parameters:

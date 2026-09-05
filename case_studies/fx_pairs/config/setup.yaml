@@ -249,6 +249,77 @@ features:
       representation: percentile within the decision date
       failure_mode: discards the level the state families carry instead
 
+# What `04_model_based_features` decides, declared here for the same reason the
+# feature windows above are: an estimation window is part of a fitted feature's
+# definition, so it belongs where the definition lives rather than inside the
+# notebook that runs it. Every count is in trading sessions on the FX calendar.
+#
+# A fitted feature is bounded by the schedule below and not by a cross-validation
+# fold. The parameters behind a value are estimated from sessions strictly before
+# it, refreshed on the cadence given, and the same value comes out whichever fold
+# later selects the row - so the artifact carries no fold column.
+#
+# The panel runs 2011-01-03 to 2025-12-31, 3,874 sessions, and every pair quotes
+# on all of them. Only one session precedes the oldest fold's training start, so
+# each burn-in below is paid out of that fold's training window rather than ahead
+# of it. The sessions it costs are named against each entry; no validation window
+# is touched, because the earliest one opens 2016-01-05.
+model_based:
+  kalman:
+    # Sessions of a pair's own log price before its local linear trend model is
+    # fitted. One year. The three noise variances are separated by how often the
+    # level moves against how far a quote strays from it, and a shorter window
+    # does not contain enough of either to tell them apart. It costs the oldest
+    # fold 251 of its 1,289 training sessions and no validation session.
+    burnin: 252
+    # How often the three variances are re-estimated. A quarter. Each estimate is
+    # a Nelder-Mead search over the whole expanding history, which is the most
+    # expensive fit in the notebook, and quoting noise is not a fast-moving
+    # quantity. The first value lands 2011-12-22.
+    refit_every: 63
+    # Iteration cap for that search.
+    maxiter: 300
+  hmm:
+    # A calm dollar state and a turbulent one.
+    n_states: 2
+    # Sessions of the dollar factor before the regime chain is fitted. Two years.
+    # A two-state chain has to see both states switch several times before its
+    # transition matrix means anything, and this is one market-level series
+    # rather than a panel, so the burn-in is paid once for the whole notebook.
+    # It matches cme_futures, whose regime model reads a daily market-level
+    # series of the same shape. The dollar factor itself starts 2011-02-01,
+    # after the 21-session volatility window it carries, so the first regime
+    # value lands 2013-01-15: 504 of the oldest fold's 1,269 dollar-factor
+    # training sessions, and no validation session.
+    burnin: 504
+    # How often the chain is re-estimated. A quarter, as in etfs and cme_futures:
+    # regime parameters are the slowest-moving thing this notebook fits and each
+    # estimate costs `n_restarts` expectation-maximization searches.
+    refit_every: 63
+    # Expectation-maximization reaches a local optimum, so each fit is repeated
+    # from this many starting points and the highest training likelihood is kept.
+    n_restarts: 10
+    # A restart is rejected when its final EM step falls by more than this
+    # fraction of the log-likelihood's own magnitude. Real divergence moves
+    # hundreds of nats; what this has to tolerate is single digits against a
+    # likelihood of about 4.3e4.
+    stability_rel_tol: 0.001
+  arima:
+    # Sessions of a pair's own returns before its short-memory return model is
+    # fitted. One year, matching cme_futures' AutoARIMA, which is the same kind
+    # of model on the same kind of daily per-entity series. A return needs the
+    # session before it, so this series starts one session later than the price
+    # panel and the first value lands 2011-12-23, costing the oldest fold 252 of
+    # its 1,289 training sessions and no validation session.
+    burnin: 252
+    # Monthly. The coefficients of a one-lag return model are the fastest-moving
+    # parameters here and the fit is cheap, so this is the shortest cadence in
+    # the block.
+    refit_every: 21
+    # One autoregressive term and one moving-average term - the shortest memory
+    # the family offers, which is all daily currency returns support.
+    order: [1, 0, 1]
+
 evaluation:
   n_splits: 8
   train_size: P5Y
