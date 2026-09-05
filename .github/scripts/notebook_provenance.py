@@ -59,11 +59,19 @@ superseded result to reach ``main`` with every check green.
 
 ``outputs_digest`` answers "are these the outputs that run produced". A notebook
 whose ``.py`` is untouched passed the staleness check carrying outputs from any
-earlier run, which is what ``nbconvert --execute --inplace`` under ``nohup ... &``
-produces: it exits 0 without rewriting the notebook, so the stamp goes on the
-previous run's figures. Computed over the parsed structure with every
-``execution_count`` removed, so re-running to the same values, reformatting the
-JSON, or folding in a prose edit do not move it.
+earlier run. Computed over the parsed structure with every ``execution_count`` and
+every figure ``alt`` removed, so re-running to the same values, reformatting the
+JSON, folding in a prose edit and correcting alt text do not move it - the last
+because ``alt_text_only_drift`` already forgives that edit, on the proven grounds
+that re-executing cannot change the image.
+
+The digest is written from whatever is on disk at stamp time, so it cannot by
+itself catch a run that never wrote the file - ``nbconvert --execute --inplace``
+under ``nohup ... &`` exits 0 and does exactly that, and the resulting stamp agrees
+with itself forever. ``unwritten_run`` catches it at the only moment the state is
+still visible: the ``.py`` moved and the outputs are byte-identical to what the
+previous stamp recorded. ``--allow-unchanged-outputs`` answers it for a notebook
+genuinely deterministic enough that the change altered nothing it prints.
 
 ``library_digest`` answers "did this run use the code that is here now". The
 numbers in a case study are computed in ``case_studies/utils/*.py``, which
@@ -477,7 +485,7 @@ def outputs_digest(nb: dict) -> str:
     carries no output, so folding a prose edit into an executed notebook must not
     invalidate the record of the run.
     """
-    payload = [_without_execution_counts(c.get("outputs") or []) for c in _code_cells(nb)]
+    payload = [_normalized_outputs(c.get("outputs") or []) for c in _code_cells(nb)]
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     ).hexdigest()
@@ -487,11 +495,24 @@ def _code_cells(nb: dict) -> list[dict]:
     return [c for c in nb.get("cells", []) if c.get("cell_type") == "code"]
 
 
-def _without_execution_counts(value: object) -> object:
+# Dropped before hashing. `execution_count` is the kernel's counter, renumbered by
+# every run and cleared by the metadata strippers, and it names no value the
+# notebook reports. `alt` is figure alt text, which `alt_text_only_drift` already
+# forgives in the `.py` on the proven grounds that re-executing cannot change the
+# image - and the workflow it forgives requires the matching output metadata to be
+# corrected too. Hashing the alt would make that documented correction read as a
+# changed result and price four rewritten sentences at a 90-minute re-run, which is
+# the cost the exception exists to remove.
+VOLATILE_OUTPUT_KEYS = frozenset({"execution_count", "alt"})
+
+
+def _normalized_outputs(value: object) -> object:
     if isinstance(value, dict):
-        return {k: _without_execution_counts(v) for k, v in value.items() if k != "execution_count"}
+        return {
+            k: _normalized_outputs(v) for k, v in value.items() if k not in VOLATILE_OUTPUT_KEYS
+        }
     if isinstance(value, list):
-        return [_without_execution_counts(v) for v in value]
+        return [_normalized_outputs(v) for v in value]
     return value
 
 
@@ -505,7 +526,11 @@ def _module_candidates(module: str, from_dir: Path) -> list[Path]:
     reason a chapter's ``async_utils`` is importable at all.
     """
     parts = module.split(".")
-    roots = [REPO_ROOT] if len(parts) > 1 else [from_dir, REPO_ROOT]
+    # Both roots for a dotted name too. `17_portfolio_construction/deepm/` is a real
+    # package inside a chapter directory, so `import deepm.model` resolves against
+    # the chapter, not the repo root - and searching only the root left the code
+    # that computes that chapter's allocations out of the digest entirely.
+    roots = [from_dir, REPO_ROOT]
     out: list[Path] = []
     for root in roots:
         base = root.joinpath(*parts)
@@ -865,12 +890,50 @@ def contradicts_injected_cell(nb: dict, parameters: dict[str, object]) -> str | 
     )
 
 
+def unwritten_run(nb: dict, py: Path) -> str | None:
+    """Why this stamp would record a run that never rewrote the notebook, or None.
+
+    The digests are computed from whatever is in the file at stamp time, so a run
+    that exited without writing leaves the previous run's outputs to be recorded as
+    the new ones - and every later check agrees with itself. That is the failure
+    that motivates the outputs digest, and only this refusal catches it, because
+    afterwards there is nothing left to disagree.
+
+    The signal is a source change with no corresponding output change: the previous
+    stamp says the notebook was executed from a different ``.py``, and the outputs
+    are byte-identical to what that older run produced. ``nbconvert --execute
+    --inplace`` under ``nohup ... &`` exits 0 and leaves exactly that state.
+
+    Silent when there is no previous stamp to compare against, and when the ``.py``
+    has not moved - re-running unchanged source to the same values is a normal
+    thing to do and says nothing about whether the file was written.
+    """
+    previous = nb.get("metadata", {}).get(STAMP_KEY) or {}
+    recorded = previous.get("outputs_digest")
+    if recorded is None:
+        return None
+    if previous.get("source_py_blob") == git_blob(py):
+        return None
+    if recorded != outputs_digest(nb):
+        return None
+    return (
+        "the .py has changed since the last stamp, but the outputs are exactly the "
+        "ones the previous run produced. A run that changed the source and changed "
+        "no output almost always means the execution never wrote this file - "
+        "`nbconvert --execute --inplace` in the background exits 0 and does that. "
+        "Re-execute and check the outputs moved. If this notebook really is "
+        "deterministic enough that the change altered nothing it prints, pass "
+        "--allow-unchanged-outputs to say so."
+    )
+
+
 def stamp_notebook(
     nb_path: Path,
     executor: str,
     notes: str | None = None,
     *,
     parameters: dict[str, object],
+    allow_unchanged_outputs: bool = False,
 ) -> dict:
     """Record how this notebook was executed.
 
@@ -898,6 +961,8 @@ def stamp_notebook(
             "output or an execution count, so nothing in it was executed. A stamp on this "
             "would claim a run that left no trace. Execute it, or leave it cleared."
         )
+    if not allow_unchanged_outputs and (reason := unwritten_run(nb, py)):
+        raise SystemExit(f"refusing to stamp {nb_path.relative_to(REPO_ROOT)}: {reason}")
     stamp = {
         "source_py_blob": git_blob(py),
         # What the run produced, and the repository code that produced it. Neither is
@@ -1355,7 +1420,11 @@ def _cmd_stamp(args: argparse.Namespace) -> int:
         if not isinstance(parameters, dict):
             raise SystemExit("--parameters must be a JSON object of override name to value")
     s = stamp_notebook(
-        Path(args.notebook).resolve(), args.executor, args.notes, parameters=parameters
+        Path(args.notebook).resolve(),
+        args.executor,
+        args.notes,
+        parameters=parameters,
+        allow_unchanged_outputs=args.allow_unchanged_outputs,
     )
     print(
         f"stamped {args.notebook}: source_py_blob={s['source_py_blob'][:12]} "
@@ -1543,6 +1612,14 @@ def main() -> int:
     sp.add_argument("notebook")
     sp.add_argument("--executor", required=True, help="environment label, e.g. ml4t-gpu / local-uv")
     sp.add_argument("--notes", default=None)
+    sp.add_argument(
+        "--allow-unchanged-outputs",
+        action="store_true",
+        help=(
+            "stamp even though the .py moved and the outputs did not - for a notebook "
+            "genuinely deterministic enough that the change altered nothing it prints"
+        ),
+    )
     # The executor states the parameters; the tool does not infer them from
     # notebook metadata written by a different process. See the module docstring.
     params = sp.add_mutually_exclusive_group(required=True)

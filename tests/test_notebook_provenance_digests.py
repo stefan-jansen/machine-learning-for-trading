@@ -344,3 +344,117 @@ def test_folding_prose_in_keeps_the_outputs_digest_valid(tmp_path: Path, monkeyp
     result = check_all()
     assert result.outputs_changed == []
     assert result.stale == [], "sync-prose re-points the blob, so nothing is stale"
+
+
+# -----------------------------------------------------------------------------
+# The failure the digest exists for, which only the stamp can catch
+# -----------------------------------------------------------------------------
+
+
+def test_stamping_a_run_that_never_wrote_the_notebook_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """`--execute --inplace` under `nohup ... &` exits 0 without rewriting the file.
+
+    The digests are computed from whatever is on disk at stamp time, so once such a
+    stamp is written every later check agrees with itself and nothing is left to
+    disagree. This refusal is the only place the state is still visible: the source
+    moved and the outputs are exactly the previous run's.
+    """
+    monkeypatch.setattr(notebook_provenance, "REPO_ROOT", tmp_path)
+    py, nb_path = _seed_stamped_pair(tmp_path)
+
+    py.write_text("# %%\nprint(2)\n")
+    with pytest.raises(SystemExit) as exc:
+        stamp_notebook(nb_path, executor="test", parameters={})
+
+    assert "never wrote this file" in str(exc.value)
+
+
+def test_a_deterministic_notebook_can_say_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The refusal is a heuristic, so it has to be answerable.
+
+    A source change that genuinely alters nothing the notebook prints is possible;
+    the escape hatch makes that a statement someone made rather than a silence.
+    """
+    monkeypatch.setattr(notebook_provenance, "REPO_ROOT", tmp_path)
+    py, nb_path = _seed_stamped_pair(tmp_path)
+    py.write_text("# %%\nprint(2)\n")
+
+    stamp = stamp_notebook(nb_path, executor="test", parameters={}, allow_unchanged_outputs=True)
+
+    assert stamp["source_py_blob"] == notebook_provenance.git_blob(py)
+
+
+def test_re_stamping_unchanged_source_is_not_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Re-running the same `.py` to the same values says nothing about the write.
+
+    Firing here would make every ordinary re-stamp of a deterministic notebook an
+    error, which is how a check earns being ignored.
+    """
+    monkeypatch.setattr(notebook_provenance, "REPO_ROOT", tmp_path)
+    _, nb_path = _seed_stamped_pair(tmp_path)
+
+    assert stamp_notebook(nb_path, executor="test", parameters={})["outputs_digest"]
+
+
+# -----------------------------------------------------------------------------
+# The two exceptions the digest must not break
+# -----------------------------------------------------------------------------
+
+
+def test_correcting_figure_alt_text_does_not_read_as_a_changed_result():
+    """`alt_text_only_drift` forgives an alt-only `.py` edit, and that workflow
+    requires the matching output metadata to be corrected too - it accepts the drift
+    only when "every alt in the notebook's output metadata already equals the literal
+    in its own cell". Hashing the alt would fail exactly the correction the exception
+    was built to make free: `nasdaq100_microstructure/04` is 90 minutes and 43 GB to
+    restate four sentences.
+    """
+
+    def figure(alt: str) -> dict:
+        return {
+            "output_type": "display_data",
+            "data": {"image/png": "AAAA"},
+            "metadata": {"image/png": {"alt": alt}},
+        }
+
+    before = _notebook([_code_cell("show_with_alt(fig, alt)", [figure("A blue line.")])])
+    after = _notebook([_code_cell("show_with_alt(fig, alt)", [figure("A rising blue line.")])])
+
+    assert outputs_digest(before) == outputs_digest(after)
+
+
+def test_the_image_behind_the_alt_text_is_still_hashed():
+    """Blanking the alt must not blank the figure it describes."""
+
+    def figure(png: str) -> dict:
+        return {
+            "output_type": "display_data",
+            "data": {"image/png": png},
+            "metadata": {"image/png": {"alt": "A blue line."}},
+        }
+
+    before = _notebook([_code_cell("show_with_alt(fig, alt)", [figure("AAAA")])])
+    after = _notebook([_code_cell("show_with_alt(fig, alt)", [figure("BBBB")])])
+
+    assert outputs_digest(before) != outputs_digest(after)
+
+
+def test_a_package_inside_a_chapter_directory_is_reached():
+    """`17_portfolio_construction/deepm/` is a real package, imported dotted.
+
+    Resolving dotted names from the repo root alone left the code that computes
+    that chapter's allocations out of the digest, so a change to it produced no
+    drift report at all.
+    """
+    py = REPO_ROOT / "17_portfolio_construction/13_deepm_regime_robust.py"
+    if not py.exists():
+        pytest.skip("the deepm notebook is not in this tree")
+
+    reached = {p.relative_to(REPO_ROOT).as_posix() for p in repo_local_sources(py)}
+
+    assert "17_portfolio_construction/deepm/model.py" in reached
+    assert "17_portfolio_construction/deepm/train.py" in reached
