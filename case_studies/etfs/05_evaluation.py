@@ -169,26 +169,28 @@ print(
 # joined on the date and the ETF, which is the pair that identifies a row everywhere in
 # this case study.
 #
-# The model-based matrix needs one more key resolved before it can join. Each of its
-# columns is the output of a model - a two-state description of whether the broad market
-# is calm or stressed, a filtered version of ten reference price series, and a volatility
-# model per ETF - and `04_model_based_features` fits every one of them inside a single
-# walk-forward window, on that window's training sessions only, then writes the values it
-# infers across the whole window. So each row carries the number of the window whose model
-# produced it, and the same date and ETF appear once per window.
+# The model-based matrix needs restricting before it can be screened. Each of its columns
+# is the output of a model - a two-state description of whether the broad market is calm or
+# stressed, a filtered version of ten reference price series, and a volatility model per
+# ETF - and `04_model_based_features` estimates every one of them on a **refit schedule**:
+# it spends a burn-in, fits on everything up to that point, lets those parameters speak for
+# the sessions until the next refit, and carries on to the end of the history. No
+# observation is ever used to estimate the parameters that describe it, so the value on a
+# date is one number, the same one whichever window a model reads it under, and the table
+# carries one row per date and ETF.
 #
 # A **walk-forward window**, or fold, is a pair of adjacent date ranges: a stretch of
 # history the model is fitted on, and the stretch that follows it, which the model has not
-# seen. A value dated inside the training range was produced by parameters estimated from
-# sessions that run past it, so it is not something a reader could have computed at that
-# date. Only the values dated inside the validation range are. This notebook therefore
-# keeps each model-based row only inside the validation range of the fold that produced
-# it, and drops the extra fold `04` appends past the last one - the fold that trains on
-# everything before the holdout begins so that the final notebook has features to score
-# the holdout with, and which has no validation range on this side of it.
+# seen. What is screened here is the second of those. A rank correlation measured on
+# training dates would be measuring how well a description fits what it was fitted on, and
+# the model notebooks are scored on validation dates, so the screen reads the same rows
+# they do. **The evaluation panel is therefore the union of the validation ranges**, and
+# the two matrices are screened on it alike.
 #
-# What is left is one value per date and ETF, and **the evaluation panel is the union of
-# those validation ranges**, so the two matrices are screened on the same rows.
+# The cell below also reads the older shape of the artifact, in which `04` fitted inside
+# each fold and wrote the same date once per fold. That shape needs each row kept only
+# inside the validation range of the fold that produced it, rather than a date filter; the
+# comment on the branch says when it goes.
 
 # %%
 JOIN_COLS = ["timestamp", "symbol"]

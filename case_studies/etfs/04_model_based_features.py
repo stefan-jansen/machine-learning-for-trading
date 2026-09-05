@@ -1410,13 +1410,26 @@ print(
 # a session's value is the same number whichever fold a later notebook reads it under, so there
 # is nothing for a fold tag to distinguish. Chapter 11 joins this table on the key alone.
 #
-# Three things are checked before anything is written. The key is unique, so no downstream join
-# can multiply rows. Every session-and-symbol the price panel offers is in the output, so no row
-# was lost on the way through the joins. And the column set is exactly what Chapter 11 expects
-# to read.
+# The panel is cut at the holdout's last session. The walks read each ETF's whole history, and
+# the fold-keyed design this replaces never had to say where the emission stopped because the
+# fold windows said it: the last fold ended at the holdout boundary and nothing existed past it.
+# A schedule has no such edge, so an artifact built from it runs as far as the price download
+# happens to reach - and a later download reaching further would silently widen the artifact past
+# the window the case study is defined over. The cut is declared here instead. The panel and the
+# holdout currently end on the same session, so the filter removes nothing today; the assertion
+# below is what makes that a checked fact rather than a coincidence.
+#
+# Three things are then checked before anything is written. The key is unique, so no downstream
+# join can multiply rows. Every session-and-symbol the price panel offers inside the window is in
+# the output, so no row was lost on the way through the joins. And the column set is exactly what
+# Chapter 11 expects to read.
 
 # %%
-skeleton = prices.select(["timestamp", "symbol"]).unique()
+skeleton = (
+    prices.filter(pl.col("timestamp") <= pl.lit(HOLDOUT_END).cast(pl.Date))
+    .select(["timestamp", "symbol"])
+    .unique()
+)
 date_level = hmm_features.join(ffd_features, on="timestamp", how="full", coalesce=True)
 model_based = (
     skeleton.join(date_level, on="timestamp", how="left")
@@ -1437,6 +1450,10 @@ assert model_based.height == skeleton.height, (
 assert "fold" not in model_based.columns, (
     "a fold column reached the panel; the schedule is what bounds an estimate here"
 )
+assert model_based["timestamp"].max() <= pd.Timestamp(HOLDOUT_END).date(), (
+    f"the panel reaches {model_based['timestamp'].max()}, past the holdout's last session "
+    f"{HOLDOUT_END}, which no stage of this case study reads"
+)
 EXPECTED_COLUMNS = [
     "timestamp",
     "symbol",
@@ -1452,6 +1469,12 @@ assert sorted(model_based.columns) == sorted(EXPECTED_COLUMNS), (
 print(
     f"{model_based.height:,} rows, {len(FEATURE_COLS)} features, "
     f"{model_based['symbol'].n_unique()} ETFs, one row per session-symbol."
+)
+print(
+    f"Panel runs {model_based['timestamp'].min()} to {model_based['timestamp'].max()}; the price "
+    f"history ends {prices['timestamp'].max()} and the holdout {HOLDOUT_END}, so "
+    f"{prices.filter(pl.col('timestamp') > pl.lit(HOLDOUT_END).cast(pl.Date)).height:,} rows were "
+    "cut for falling past it."
 )
 
 # %% [markdown]
