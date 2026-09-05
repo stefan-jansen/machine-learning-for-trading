@@ -1,6 +1,50 @@
+# L1 logistic regression. The solver is `saga` rather than `liblinear`, and the tolerance
+# is set explicitly rather than left at scikit-learn's 1e-4 default.
+#
+# Two reasons, and the first one is not optional. These labels are three-class (-1, 0, 1),
+# and scikit-learn 1.8 makes multiclass `liblinear` a hard error; #740 already moved our
+# floor to 1.7. `OneVsRestClassifier(liblinear)` would reproduce the current objective
+# exactly - liblinear multiclass IS one-vs-rest - and would keep the problem below.
+#
+# The second is that `liblinear` does not finish. It is single-threaded coordinate descent
+# and scales about N^1.4 here. Measured on nasdaq100_microstructure's `fwd_dir_15m` panel:
+#
+#     rows      liblinear 1000/1e-4     saga 200/1e-2
+#     400,000     144.4s  converged      11.0s  converged
+#   1,200,000     716.9s  converged      44.8s  converged
+#
+# which extrapolates to roughly eight hours per configuration at the full 16.9M rows against
+# about twenty minutes. That is not a projection: `06_linear` ran 7h23m at 100% of one core
+# on 2026-09-05 and was killed with two of thirteen configurations still unfinished, both of
+# them these L1 ones.
+#
+# saga is also better out of sample at every C measured here: log loss 1.0273-1.0276 against
+# liblinear's 1.0293-1.0294, and accuracy 0.415-0.420 against 0.404-0.410.
+#
+# `tol: 0.001` here rather than the 0.01 the weakly-penalised configurations use, because
+# this is where the penalty binds and exact sparsity is the point of the sweep. At 1e-2 saga
+# leaves coefficients stranded NEAR zero instead of AT zero, which `coef_ != 0` then counts
+# as live. Measured on the same panel, exact zeros against coefficients below 1e-8, out of
+# 198:
+#
+#     C        liblinear 1e-4     saga 1e-2        saga 1e-3
+#     0.001      128 / 128         148 / 149        157 / 157
+#     0.01        40 /  40          24 /  52         87 /  87
+#     0.1          8 /   8           3 /   4         24 /  26
+#
+# The 24-against-52 at C=0.01 is the defect: twenty-eight coefficients below 1e-8 that are
+# not zero. At 1e-3 the two counts agree and saga is *more* sparse than liblinear at every C
+# here, so the tighter tolerance is not a concession - it is what makes the L1 solution an
+# L1 solution.
+#
+# Cost at 1.2M rows: 226s, 352s and 287s for C=0.001, 0.01 and 0.1 against liblinear's 30s,
+# 202s and 499s. **The full-panel cost of this arm is not established** - the 16.9M-row
+# extrapolation is uncertain because it rests on a single scaling estimate taken from the
+# tol=1e-2 timings. Watch it on the first run rather than assuming it is small.
 model_class: LogisticRegression
 params:
   C: 0.01
-  max_iter: 1000
+  max_iter: 200
   penalty: l1
-  solver: liblinear
+  solver: saga
+  tol: 0.001
