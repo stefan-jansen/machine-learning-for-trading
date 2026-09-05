@@ -450,13 +450,20 @@ def test_the_gjr_recursion_does_not_move_when_later_returns_arrive() -> None:
 
 
 def test_arch_moves_earlier_values_when_the_sample_is_extended() -> None:
-    """The negative control: the property above is not vacuous.
+    """The negative control: the prefix-stability assertions above are not vacuous.
 
     A prefix-stability assertion passes trivially against any implementation that happens to
     process observations in order, so on its own it is evidence about nothing. This runs the
     identical assertion against `arch`'s own fixed-parameter result object - the thing the
-    helper replaces - and requires it to FAIL. If `arch` ever becomes prefix-stable this test
-    goes red, and the helper's reason for existing has to be re-established rather than assumed.
+    helper replaces - and requires it to FAIL.
+
+    The mechanism is one line of `ARCHModel.fix`: it takes `resids = self.resids(
+    self.starting_values())`, the residuals at the ESTIMATED mean of whatever array it was
+    handed, and seeds the backcast from those. Under `mean="Constant"` the estimated mean moves
+    when the sample is extended, so the seed moves with it.
+
+    If `arch` ever stops doing this the test goes red, and the helper's reason for existing has
+    to be re-established rather than assumed.
     """
     arch_model = pytest.importorskip("arch").arch_model
     returns = _garch_returns(n=2000)
@@ -477,16 +484,85 @@ def test_arch_moves_earlier_values_when_the_sample_is_extended() -> None:
     full = arch_path(returns)[:1500]
 
     assert not np.array_equal(short, full), (
-        "arch's fixed-parameter path is prefix-stable, which contradicts the measurement this "
-        "helper was written for. Re-derive the reason before deleting the helper."
+        "arch's fixed-parameter path is prefix-stable under an estimated mean, which "
+        "contradicts the measurement this helper was written for. Re-derive the reason before "
+        "deleting the helper."
     )
-    # The disagreement is real but small and decays: it is a seeding and bounds effect, not a
-    # different model. Pinning the shape keeps the negative control from passing for the wrong
-    # reason - a crash or an all-nan path would also satisfy `not array_equal`.
+    # Pin the shape, so a crash or an all-nan path cannot satisfy the assertion above. The
+    # disagreement is a seeding effect: largest at the start, decaying to nothing.
     relative = np.abs(short - full) / np.maximum(np.abs(full), 1e-12)
     assert np.isfinite(relative).all()
     assert relative.max() > 1e-6
     assert relative[0] > relative[-1]
+
+
+def test_the_arch_seed_is_taken_at_the_estimated_mean_not_the_fixed_one() -> None:
+    """Name the mechanism, so the control above cannot pass for an unrelated reason.
+
+    Without this, `fix` could start disagreeing with itself for some other cause and the
+    negative control would keep passing while the stated reason had become false.
+    """
+    volatility = pytest.importorskip("arch.univariate.volatility")
+    returns = _garch_returns(n=2000)
+    garch = volatility.GARCH(p=1, q=1)
+
+    at_sample_mean = (
+        garch.backcast(returns[:1500] - returns[:1500].mean()),
+        garch.backcast(returns - returns.mean()),
+    )
+    at_fixed_mu = (
+        garch.backcast(returns[:1500] - GARCH_PARAMS["mu"]),
+        garch.backcast(returns - GARCH_PARAMS["mu"]),
+    )
+
+    # Residuals at the parameter you fixed give the same seed either way: `backcast` is an
+    # EWMA over the first min(75, n) residuals, which a longer sample does not change.
+    assert at_fixed_mu[0] == at_fixed_mu[1]
+    # Residuals at the estimated mean do not, and that is the pair `fix` actually uses.
+    assert at_sample_mean[0] != at_sample_mean[1]
+
+
+def test_arch_is_prefix_stable_under_a_zero_mean_until_the_bounds_bind() -> None:
+    """The channel is narrower under `mean="Zero"`, and does not close.
+
+    crypto_perps_funding fits a zero-mean model, where nothing is estimated and the seed
+    therefore does not move. What still moves is `variance_bounds`, which clamps every row
+    with two WHOLE-SAMPLE quantities - `np.var(resids) / 1e8` below and
+    `1e7 * (1 + max(resids**2))` above. They sit six orders of magnitude apart, so they change
+    an emitted value only when the variance reaches one - which is what a degenerate fit does.
+    """
+    arch_model = pytest.importorskip("arch").arch_model
+    rng = np.random.default_rng(5)
+    # A quiet series, then a crash 500 observations past the cut. The crash is what moves
+    # np.var(resids), and with it the lower clamp under every row that came before it.
+    quiet = rng.normal(0.0, 0.5, 1500)
+    tail = rng.normal(0.0, 0.5, 500)
+    tail[250] = 400.0
+    returns = np.concatenate([quiet, tail])
+
+    def zero_mean_path(sample: np.ndarray, params: pd.Series) -> np.ndarray:
+        spec = arch_model(sample, mean="Zero", vol="GARCH", p=1, o=1, q=1, dist="Normal")
+        return np.asarray(spec.fix(params).conditional_volatility, dtype=float)
+
+    healthy = pd.Series({"omega": 0.02, "alpha[1]": 0.05, "gamma[1]": 0.08, "beta[1]": 0.88})
+    np.testing.assert_array_equal(
+        zero_mean_path(returns[:1500], healthy), zero_mean_path(returns, healthy)[:1500]
+    )
+
+    # alpha + gamma < 0: a down day REDUCES the variance, so the recursion is driven onto the
+    # lower clamp. arch returns this shape without complaint.
+    degenerate = pd.Series({"omega": 1e-8, "alpha[1]": 0.02, "gamma[1]": -0.30, "beta[1]": 0.90})
+    short = zero_mean_path(returns[:1500], degenerate)
+    full = zero_mean_path(returns, degenerate)[:1500]
+    relative = np.abs(short - full) / np.maximum(np.abs(full), 1e-30)
+    assert (relative > 1e-9).sum() > 1000
+    assert relative.max() > 0.1
+
+    # The helper does not clip that fit silently - it refuses it.
+    with pytest.raises(ValueError, match=r"alpha \+ gamma"):
+        garch11_conditional_volatility(
+            returns, mu=0.0, omega=1e-8, alpha=0.02, beta=0.90, gamma=-0.30, backcast=0.25
+        )
 
 
 def test_the_garch_recursion_reproduces_its_own_definition() -> None:
