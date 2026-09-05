@@ -1016,7 +1016,15 @@ jobs:
       image: ml4t/ml4t:latest
     steps:
       - name: Install git (for checkout inside container)
-        run: apt-get update && apt-get install -y git
+        run: |
+          # A transient apt mirror failure used to kill the whole job.
+          for attempt in 1 2 3; do
+            apt-get update && apt-get install -y git && exit 0
+            echo "apt-get failed (attempt $attempt of 3); retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "::error::apt-get could not install git after three attempts"
+          exit 1
       - uses: actions/checkout@v6
       # The image is built from uv.lock and drifts from it silently the moment the
       # lock moves. It carried ml4t-models 0.1.0a4 for eleven days after the repo
@@ -1141,7 +1149,15 @@ jobs:
           fi
       - name: Install git (for checkout inside container)
         if: steps.reach.outputs.have_key
-        run: apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null
+        run: |
+          # A transient apt mirror failure used to kill the whole job.
+          for attempt in 1 2 3; do
+            apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null && exit 0
+            echo "apt-get failed (attempt $attempt of 3); retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "::error::apt-get could not install git after three attempts"
+          exit 1
 
       - uses: actions/checkout@v6
         if: steps.reach.outputs.have_key
@@ -1239,7 +1255,15 @@ jobs:
           fi
       - name: Install git
         if: steps.reach.outputs.have_key
-        run: apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null
+        run: |
+          # A transient apt mirror failure used to kill the whole job.
+          for attempt in 1 2 3; do
+            apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null && exit 0
+            echo "apt-get failed (attempt $attempt of 3); retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "::error::apt-get could not install git after three attempts"
+          exit 1
 
       - uses: actions/checkout@v6
         if: steps.reach.outputs.have_key
@@ -1326,7 +1350,15 @@ jobs:
           fi
       - name: Install git
         if: steps.reach.outputs.have_key
-        run: apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null
+        run: |
+          # A transient apt mirror failure used to kill the whole job.
+          for attempt in 1 2 3; do
+            apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null && exit 0
+            echo "apt-get failed (attempt $attempt of 3); retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "::error::apt-get could not install git after three attempts"
+          exit 1
 
       - uses: actions/checkout@v6
         if: steps.reach.outputs.have_key
@@ -1413,7 +1445,15 @@ jobs:
           fi
       - name: Install git
         if: steps.reach.outputs.have_key
-        run: apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null
+        run: |
+          # A transient apt mirror failure used to kill the whole job.
+          for attempt in 1 2 3; do
+            apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null && exit 0
+            echo "apt-get failed (attempt $attempt of 3); retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "::error::apt-get could not install git after three attempts"
+          exit 1
 
       - uses: actions/checkout@v6
         if: steps.reach.outputs.have_key
@@ -1547,7 +1587,14 @@ jobs:
       - name: Install git
         if: steps.reach.outputs.have_key
         run: |
-          apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null 2>&1 || true
+          # A transient apt mirror failure used to kill the whole job.
+          for attempt in 1 2 3; do
+            apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null && exit 0
+            echo "apt-get failed (attempt $attempt of 3); retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "::error::apt-get could not install git after three attempts"
+          exit 1
 
       - uses: actions/checkout@v6
         if: steps.reach.outputs.have_key
