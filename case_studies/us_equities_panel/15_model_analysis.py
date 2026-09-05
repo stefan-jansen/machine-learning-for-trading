@@ -33,12 +33,14 @@
 # **Book reference**: Chapters 11-15 for model interpretation and Chapter 16 for the strategy
 # handoff.
 #
-# **Prerequisites**: the phase-one execution notebooks must have published their canonical
-# validation results and the two immutable compatible sets used below. The causal notebook provides
-# any exact causal result hashes included in the separate causal section.
+# **Prerequisites**: the modelling notebooks - [`06_linear`](06_linear.ipynb) through
+# [`13_latent_factors`](13_latent_factors.ipynb) - must have published their canonical validation
+# results and the two immutable compatible sets used below.
+# [`14_causal_dml`](14_causal_dml.ipynb) provides any exact causal result hashes included in the
+# separate causal section.
 
 # %%
-"""Read-only interpretation of explicit phase-one result sets."""
+"""Read-only interpretation of the result sets the modelling notebooks published."""
 
 import json
 import os
@@ -734,5 +736,5 @@ set_table.filter(pl.col("role") == "strategy handoff")
 # Canonical execution covers every declared prediction result. Preview execution is explicitly
 # bounded and cannot publish a candidate set or official population. Shape-based diagnostics use a
 # separate subset because loading every large prediction artifact together is unnecessary. All
-# evidence in this notebook comes from validation data; the holdout remains reserved for the locked
-# strategy evaluation.
+# evidence in this notebook comes from validation data; the holdout is reserved for the replay of
+# whichever configuration validation selects.

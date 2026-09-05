@@ -111,6 +111,7 @@ from case_studies.utils.temporal import (
 )
 from data import load_us_equities
 from utils.artifact_specs import resolve_label_horizon
+from utils.data_quality import top_entities
 from utils.paths import display_path, get_case_study_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
@@ -147,8 +148,19 @@ IntArray = NDArray[np.int64]
 # - **`MAX_FOLDS`** keeps only the *n* earliest cross-validation folds. Zero, the default,
 #   keeps all of them. The folds select the rows Section 7 scores and bound no estimate, so a
 #   shortened run measures the same features over a shorter span.
-# - **`MAX_SYMBOLS`** caps how many stocks are given their own volatility model. Zero, the
-#   default, fits every stock that clears the burn-in.
+# - **`MAX_SYMBOLS`** caps how many stocks are given their own volatility model, taking the
+#   ones with the most return history through `top_entities`. Zero, the default, fits every
+#   stock that clears the burn-in. It does **not** reduce the panel, and that is deliberate:
+#   the regime and market volatility features are computed from the cross-sectional median,
+#   and a median over five stocks is not a market. The cost is that a capped run here and a
+#   capped `05_evaluation` rank over different frames - complete return histories against the
+#   rows that survive eligibility, the fold windows and the label join - so the two sets can
+#   differ, and a stock 05 scores but 04 did not fit carries the market-level volatility
+#   through the coalesce in Section 5. Nothing here detects that: Section 7's variation table
+#   only reports `garch_cond_vol` as market-level when *every* stock left on the date carries
+#   the broadcast, and a partial overlap puts fitted and substituted values in one column that
+#   still varies across the cross-section. Set the two caps to the same value only after
+#   checking that they select the same names, or leave this one at zero.
 # - **`XS_MIN_STOCKS`** is the narrowest cross-section a daily return distribution is
 #   summarized from. The clustering in Section 2 reads the median of that distribution, and a
 #   median over a handful of names is not a market. It belongs here rather than with the
@@ -1299,7 +1311,12 @@ symbol_returns = {
 
 garch_symbols = sorted(symbol_returns)
 if MAX_SYMBOLS > 0:
-    garch_symbols = garch_symbols[:MAX_SYMBOLS]
+    # `top_entities` rather than the alphabetically first names: it is the one rule every
+    # loader's `apply_max_symbols` and 05's own reduction reach, so a reduced run here fits
+    # volatility models for the same stocks the reduced 05 goes on to score. Taking the
+    # alphabetical head instead left every scored stock on the market-level broadcast, which
+    # runs clean and measures something else.
+    garch_symbols = sorted(top_entities(returns_panel, MAX_SYMBOLS, "symbol"))
 
 payloads, n_too_short = [], 0
 for symbol in garch_symbols:

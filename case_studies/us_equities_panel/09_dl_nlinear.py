@@ -368,4 +368,4 @@ compatible_sets
 # - Each epoch checkpoint retains fitted preprocessing, model state, predictions, and coverage.
 # - NLinear applies a linear mapping across a fixed lookback window; nonlinear temporal effects
 #   require a different sequence architecture.
-# - Validation predictions remain separate from the locked holdout assessment.
+# - Validation predictions remain separate from the holdout assessment.

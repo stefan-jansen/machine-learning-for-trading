@@ -2804,13 +2804,18 @@ case_studies/us_equities_panel/04_model_based_features:
   # 067a8e7a6b6ed0bf) against labels written from 2000-01-01 (220,378 rows,
   # 54d5bec0d92f4f7f).
   #
-  # GARCH_MIN_OBS goes with it. #446 dropped both because neither could be received;
-  # START_DATE now can, and GARCH_MIN_OBS was moved into the notebook's parameters cell
-  # so it can too. At a 2000-01-01 start no symbol carries 504 sessions inside a fold's
-  # training window, so every GARCH fit is skipped and the per-fold assembly joins an
-  # empty frame.
+  # No GARCH_MIN_OBS or REGIME_MIN_OBS. Both burn-ins are counted in sessions of one
+  # series now, not inside a fold's training window, and the fixture carries 4,565
+  # sessions from 2000-02-01 - past the 756 the clustering needs and well past the 504
+  # each stock's variance model needs. The entry used to lower GARCH_MIN_OBS to 50
+  # because under per-fold fitting no symbol reached 504 inside a ten-year window and
+  # every fit was skipped; that reason went with the schedule (#790). Verified against
+  # the fixture on 2026-09-05: 02-05 pass with the declared burn-ins.
+  #
+  # XS_MIN_STOCKS stays. The default 50 is a floor on the cross-section a daily return
+  # distribution is summarized from, and the fixture carries 56 symbols in total, so at
+  # the default nearly every date is dropped and the clustering has nothing to fit on.
   parameters:
-    GARCH_MIN_OBS: 50
     START_DATE: '2000-01-01'
     XS_MIN_STOCKS: 25
   timeout: 300

@@ -367,4 +367,4 @@ compatible_sets
 #   sequence window.
 # - Every epoch checkpoint retains separate fitted-state and prediction provenance.
 # - The fixed lookback and mixer dimensions define the temporal context available to the model.
-# - Validation predictions remain separate from the locked holdout assessment.
+# - Validation predictions remain separate from the holdout assessment.
