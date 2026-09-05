@@ -1322,6 +1322,22 @@ jobs:
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
 
+      # This job executes notebooks inside the PUBLISHED image, which drifts from
+      # uv.lock the moment the lock moves and has no way to carry a candidate built
+      # from this commit: `container:` is resolved before any step runs. So when the
+      # lock has moved and the image has not, every notebook here runs against a
+      # dependency set the repository does not declare - and it does not fail in a way
+      # that says so. On #787, which moved ml4t-diagnostic to 0.1.4, it surfaced as
+      # thirteen fold-ordering errors inside cme_futures and a red ch26, none of which
+      # names the environment.
+      #
+      # The guard cannot make the job pass; nothing can until the image is rebuilt from
+      # a landed lock. What it does is put the reason first, so the failure reads as
+      # "this image is not the environment this commit declares" rather than as a
+      # numerical defect in a notebook. That distinction cost four rounds of
+      # investigation the last time it was missing.
+      - name: The image's installed distributions match uv.lock
+        run: python .github/scripts/check_env_matches_lock.py
       - name: Seed case study intermediates
         if: steps.reach.outputs.have_key
         run: |
@@ -1428,6 +1444,22 @@ jobs:
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
 
+      # This job executes notebooks inside the PUBLISHED image, which drifts from
+      # uv.lock the moment the lock moves and has no way to carry a candidate built
+      # from this commit: `container:` is resolved before any step runs. So when the
+      # lock has moved and the image has not, every notebook here runs against a
+      # dependency set the repository does not declare - and it does not fail in a way
+      # that says so. On #787, which moved ml4t-diagnostic to 0.1.4, it surfaced as
+      # thirteen fold-ordering errors inside cme_futures and a red ch26, none of which
+      # names the environment.
+      #
+      # The guard cannot make the job pass; nothing can until the image is rebuilt from
+      # a landed lock. What it does is put the reason first, so the failure reads as
+      # "this image is not the environment this commit declares" rather than as a
+      # numerical defect in a notebook. That distinction cost four rounds of
+      # investigation the last time it was missing.
+      - name: The image's installed distributions match uv.lock
+        run: python .github/scripts/check_env_matches_lock.py
       - name: Seed case study intermediates
         if: steps.reach.outputs.have_key
         run: |
@@ -1618,6 +1650,10 @@ jobs:
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
 
+      # Same reason as the two notebook jobs above: this runs in the published image,
+      # which cannot carry a candidate built from this commit.
+      - name: The image's installed distributions match uv.lock
+        run: python .github/scripts/check_env_matches_lock.py
       - name: Run Ch23 Knowledge Graph notebooks (pipeline order)
         if: steps.reach.outputs.have_key
         env:
