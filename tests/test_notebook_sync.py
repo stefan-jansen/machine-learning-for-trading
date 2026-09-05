@@ -260,7 +260,13 @@ def test_stamp_records_declared_overrides_as_test_mode(tmp_path, monkeypatch) ->
 
 
 def test_stamped_notebooks_are_current_and_production() -> None:
-    stale, testmode, contradicted, _unverified, _alt_only, hollow = check_all(strict=False)
+    result = check_all(strict=False)
+    stale, testmode, contradicted, hollow = (
+        result.stale,
+        result.testmode,
+        result.contradicted,
+        result.hollow,
+    )
     assert not stale and not testmode and not contradicted and not hollow, (
         "Committed notebooks are out of sync with their source .py:\n"
         + (

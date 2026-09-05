@@ -10,6 +10,8 @@ caught mechanically instead of by review.
 The stamp lives in ``nb.metadata["ml4t_provenance"]``::
 
     source_py_blob : git blob hash of the paired .py at execution time
+    outputs_digest : digest over the outputs the run left in the notebook
+    library_digest : digest over the repository code the paired .py imports
     executed_at    : ISO-8601 timestamp
     executor       : environment label (e.g. "ml4t-gpu", "local-uv")
     production     : bool — True iff overrides preserve the full production surface
@@ -48,10 +50,42 @@ refuses to write a stamp that contradicts it. Stamping also rewrites
 ``metadata.papermill.parameters`` to the declared set, so the fossil cannot
 outlive the stamp and disagree with it later.
 
+What the three digests each answer, because they are easy to confuse
+--------------------------------------------------------------------
+
+``source_py_blob`` answers "has the paired ``.py`` changed since somebody stamped
+this". For a long time that was the whole gate, and it left two ways for a
+superseded result to reach ``main`` with every check green.
+
+``outputs_digest`` answers "are these the outputs that run produced". A notebook
+whose ``.py`` is untouched passed the staleness check carrying outputs from any
+earlier run, which is what ``nbconvert --execute --inplace`` under ``nohup ... &``
+produces: it exits 0 without rewriting the notebook, so the stamp goes on the
+previous run's figures. Computed over the parsed structure with every
+``execution_count`` removed, so re-running to the same values, reformatting the
+JSON, or folding in a prose edit do not move it.
+
+``library_digest`` answers "did this run use the code that is here now". The
+numbers in a case study are computed in ``case_studies/utils/*.py``, which
+``source_py_blob`` never covered: #606 changed ``causal.py`` under all nine case
+studies at once and the committed stamps went on claiming runs whose outputs
+described code no longer in the tree. It digests the repository files the paired
+``.py`` imports transitively, keyed by path as well as content.
+
 Gate (``check``): for every tracked ``.ipynb`` that HAS a stamp,
 
 * ``source_py_blob`` must equal ``git hash-object`` of the current paired ``.py``
   (else the ``.py`` changed since the notebook was executed — STALE),
+* ``outputs_digest``, where the stamp records one, must match the notebook's
+  current outputs (else the stored results are not the ones the stamped run
+  produced — OUTPUTS CHANGED),
+* ``library_digest``, where the stamp records one, is compared and *reported*
+  rather than failed (LIBRARY DRIFT). Failing it would block at least five
+  notebooks across three case studies on the day it lands, and that is a separate
+  decision from being able to see the drift at all,
+* a stamp carrying neither digest predates them both and is counted, not failed:
+  every stamp written before they existed lacks them, and none of those notebooks
+  has the defect the fields exist to catch,
 * ``production`` must be True (else a TEST-mode run was committed),
 * some code cell must show it ran - an output or an execution count (else the stamp
   is over a render nothing produced — HOLLOW), and
@@ -102,6 +136,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import re
 import subprocess
@@ -109,6 +144,7 @@ import sys
 from datetime import UTC, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SKIP_PARTS = {"_reference", ".venv", ".git", ".ipynb_checkpoints"}
@@ -420,6 +456,143 @@ def git_blob(path: Path) -> str:
     ).stdout.strip()
 
 
+def outputs_digest(nb: dict) -> str:
+    """A digest over the outputs this notebook stores, in cell order.
+
+    ``source_py_blob`` answers "has the ``.py`` changed since somebody stamped
+    this", which is not the same question as "did these outputs come from that
+    run". A notebook whose ``.py`` is untouched passes the stale check carrying
+    outputs from any earlier run - including a superseded one - and that is a real
+    path a stale result took to ``main``: ``nbconvert --execute --inplace`` under
+    ``nohup ... &`` exits 0 without rewriting the notebook, so the agent stamps a
+    file that still holds the previous run's outputs.
+
+    Computed over the parsed structure rather than the file's bytes, so
+    reformatting, a re-indent or a different ``json.dumps`` cannot move it. Every
+    ``execution_count`` is dropped: the kernel renumbers those on each run and
+    ``strip_papermill_cell_metadata`` and friends may clear them, and neither
+    changes a single value the notebook reports.
+
+    Markdown cells are excluded for the same reason ``sync-prose`` exists: prose
+    carries no output, so folding a prose edit into an executed notebook must not
+    invalidate the record of the run.
+    """
+    payload = [_without_execution_counts(c.get("outputs") or []) for c in _code_cells(nb)]
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _code_cells(nb: dict) -> list[dict]:
+    return [c for c in nb.get("cells", []) if c.get("cell_type") == "code"]
+
+
+def _without_execution_counts(value: object) -> object:
+    if isinstance(value, dict):
+        return {k: _without_execution_counts(v) for k, v in value.items() if k != "execution_count"}
+    if isinstance(value, list):
+        return [_without_execution_counts(v) for v in value]
+    return value
+
+
+def _module_candidates(module: str, from_dir: Path) -> list[Path]:
+    """Where a repo-local ``module`` could live, most specific first.
+
+    Two roots, because the repository has two import mechanisms. Dotted names
+    resolve from the repo root (``case_studies.utils.causal``). A bare name also
+    resolves from the importing file's own directory, because ``sitecustomize``
+    appends every ``NN_*`` chapter directory to ``sys.path`` - which is the only
+    reason a chapter's ``async_utils`` is importable at all.
+    """
+    parts = module.split(".")
+    roots = [REPO_ROOT] if len(parts) > 1 else [from_dir, REPO_ROOT]
+    out: list[Path] = []
+    for root in roots:
+        base = root.joinpath(*parts)
+        out += [base.with_suffix(".py"), base / "__init__.py"]
+    return out
+
+
+def _imported_modules(tree: ast.AST, py: Path) -> set[str]:
+    """Module names *py* imports, with relative imports resolved to dotted names."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                # `from . import x` inside case_studies/utils/ is case_studies.utils.x
+                package = py.resolve().parent
+                for _ in range(node.level - 1):
+                    package = package.parent
+                try:
+                    prefix = ".".join(package.relative_to(REPO_ROOT).parts)
+                except ValueError:
+                    continue
+                base = f"{prefix}.{node.module}" if node.module else prefix
+            else:
+                base = node.module or ""
+            if not base:
+                continue
+            names.add(base)
+            # `from case_studies.utils import causal` names the module in the alias,
+            # not in `node.module`, and that alias is the file that changed.
+            names.update(f"{base}.{a.name}" for a in node.names if a.name != "*")
+    return names
+
+
+def repo_local_sources(py: Path) -> list[Path]:
+    """Every repository file *py* imports, transitively, sorted repo-relative.
+
+    The numbers in a case-study notebook are computed in ``case_studies/utils/*.py``,
+    which ``source_py_blob`` does not cover. #606 changed ``causal.py`` under all
+    nine case studies at once, and the committed stamps went on claiming runs whose
+    outputs described code no longer in the tree - ``analysis_rows`` 88695 -> 88633
+    among them. Nothing in the repository could answer "did this run use the code
+    that is here now", and that absence was the finding.
+
+    Best effort by construction: a module reached through ``importlib``, a plugin
+    registry or a string name is invisible to ``ast``. It covers the import graph,
+    which is where the case-study helpers are.
+    """
+    seen: set[Path] = set()
+    queue = [py.resolve()]
+    while queue:
+        current = queue.pop()
+        if current in seen or not current.is_file():
+            continue
+        seen.add(current)
+        try:
+            tree = ast.parse(current.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError, OSError):
+            continue
+        for module in _imported_modules(tree, current):
+            for candidate in _module_candidates(module, current.parent):
+                if candidate.is_file():
+                    queue.append(candidate.resolve())
+                    break
+    return sorted(p for p in seen - {py.resolve()} if _within_repo(p))
+
+
+def _within_repo(path: Path) -> bool:
+    try:
+        path.relative_to(REPO_ROOT)
+    except ValueError:
+        return False
+    return SKIP_PARTS.isdisjoint(path.parts)
+
+
+def library_digest(py: Path) -> str:
+    """A digest over the repository code *py* imports, transitively.
+
+    Keyed by path as well as content, so moving a module is drift too. An empty
+    import graph still has a digest, which keeps "no repo-local imports" distinct
+    from "not recorded".
+    """
+    lines = [f"{p.relative_to(REPO_ROOT).as_posix()}:{git_blob(p)}" for p in repo_local_sources(py)]
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
 ALT_FUNCS = frozenset({"show_with_alt", "show_plotly_with_alt"})
 
 
@@ -727,6 +900,13 @@ def stamp_notebook(
         )
     stamp = {
         "source_py_blob": git_blob(py),
+        # What the run produced, and the repository code that produced it. Neither is
+        # covered by source_py_blob, and each was a way a superseded result reached
+        # main with every check green: outputs from an earlier run under an untouched
+        # .py, and outputs computed by a case_studies/utils module that has since
+        # moved. See outputs_digest and library_digest.
+        "outputs_digest": outputs_digest(nb),
+        "library_digest": library_digest(py),
         "executed_at": datetime.now(UTC).isoformat(),
         "executor": executor,
         "production": production_parameters(parameters),
@@ -878,15 +1058,44 @@ def destamped(ref: str | None = None, only: set[str] | None = None) -> list[str]
     )
 
 
+class CheckResult(NamedTuple):
+    """The gate's verdicts, one list of repo-relative notebooks each.
+
+    A ``NamedTuple`` rather than a dataclass because callers iterate it - "no
+    category may name a notebook outside ``only``" is asserted by looping over the
+    result - and unpack it positionally.
+    """
+
+    stale: list[str]
+    testmode: list[str]
+    contradicted: list[str]
+    unverified: list[str]
+    alt_only: list[str]
+    hollow: list[str]
+    outputs_changed: list[str]
+    library_drift: list[str]
+    # Stamped before the two digests existed, so neither can be checked. Reported as
+    # a count rather than failed: every stamp predating them lacks both, and failing
+    # those would turn every branch red at once for a defect none of them has.
+    undigested: list[str]
+
+
 def check_all(
     strict: bool = False,
     only: set[str] | None = None,
-) -> tuple[list[str], list[str], list[str], list[str], list[str], list[str]]:
-    """Return (stale, testmode, contradicted, unverified, alt_only, hollow) rows.
+) -> CheckResult:
+    """Return the gate's verdicts over the tracked notebooks.
 
-    ``stale``, ``testmode``, ``contradicted`` and ``hollow`` fail. ``alt_only`` is reported so that forgiving a drift is
-    never silent: a notebook in that list has a ``.py`` that no longer matches its
-    stamp, and the reason it is allowed is printed rather than assumed.
+    ``stale``, ``testmode``, ``contradicted``, ``hollow`` and ``outputs_changed``
+    fail. ``alt_only``, ``library_drift`` and ``undigested`` are reported so that
+    forgiving a drift is never silent: a notebook in one of those lists has
+    something that no longer matches its stamp, and the reason it is allowed is
+    printed rather than assumed.
+
+    ``library_drift`` is deliberately not a failure yet. On the measurement in
+    ml4t/agent-workspace#917 it would immediately block at least five notebooks
+    across three case studies, and turning it into a hard failure is a separate
+    decision from being able to see it at all.
 
     ``only`` restricts the scan to the notebooks whose ``.ipynb`` or paired ``.py``
     is in that set of repo-relative paths. The pre-commit gate passes the staged
@@ -901,6 +1110,9 @@ def check_all(
     unverified: list[str] = []
     alt_only: list[str] = []
     hollow: list[str] = []
+    outputs_changed: list[str] = []
+    library_drift: list[str] = []
+    undigested: list[str] = []
     for nb_path in iter_notebooks():
         rel = str(nb_path.relative_to(REPO_ROOT))
         py = paired_py(nb_path)
@@ -929,7 +1141,26 @@ def check_all(
             contradicted.append(f"{rel} ({conflict})")
         if not was_executed(nb):
             hollow.append(rel)
-    return stale, testmode, contradicted, unverified, alt_only, hollow
+        stamped_outputs = stamp.get("outputs_digest")
+        stamped_library = stamp.get("library_digest")
+        if stamped_outputs is None and stamped_library is None:
+            undigested.append(rel)
+        else:
+            if stamped_outputs is not None and stamped_outputs != outputs_digest(nb):
+                outputs_changed.append(rel)
+            if stamped_library is not None and stamped_library != library_digest(py):
+                library_drift.append(rel)
+    return CheckResult(
+        stale,
+        testmode,
+        contradicted,
+        unverified,
+        alt_only,
+        hollow,
+        outputs_changed,
+        library_drift,
+        undigested,
+    )
 
 
 def code_cells_only(comparable: list[tuple] | None) -> list[tuple] | None:
@@ -1193,13 +1424,13 @@ def _cmd_check(args: argparse.Namespace) -> int:
             for nb in scope:
                 print(f"  {nb.relative_to(REPO_ROOT)}")
             print()
-    stale, testmode, contradicted, unverified, alt_only, hollow = check_all(
-        strict=args.strict, only=only
-    )
+    result = check_all(strict=args.strict, only=only)
+    stale, testmode, contradicted, unverified, alt_only, hollow = result[:6]
+    outputs_changed, library_drift, undigested = result[6:]
     lost = destamped(ref=since_ref, only=only)
-    fail = bool(stale or testmode or contradicted or lost or hollow or orphaned) or (
-        args.strict and bool(unverified)
-    )
+    fail = bool(
+        stale or testmode or contradicted or lost or hollow or orphaned or outputs_changed
+    ) or (args.strict and bool(unverified))
     if orphaned:
         print(
             "ORPHANED (the paired .py was deleted but the rendered .ipynb was kept — "
@@ -1260,12 +1491,28 @@ def _cmd_check(args: argparse.Namespace) -> int:
         )
         for r in contradicted:
             print(f"  {r}")
+    if outputs_changed:
+        print(
+            "OUTPUTS CHANGED (the stored outputs are not the ones the stamped run "
+            "produced — the notebook was edited, or a run exited without rewriting it; "
+            "re-execute and re-stamp, or clear it):"
+        )
+        for r in outputs_changed:
+            print(f"  {r}")
     if alt_only:
         print(
             "ALT-TEXT ONLY (the .py drifted from its stamp only in figure alt text the "
             "outputs already carry, so re-executing could not change them — allowed):"
         )
         for r in alt_only:
+            print(f"  {r}")
+    if library_drift:
+        print(
+            "LIBRARY DRIFT (repository code this notebook imports has moved since it "
+            "was executed, so its outputs may describe code no longer in the tree — "
+            "advisory, re-run when the numbers matter):"
+        )
+        for r in library_drift:
             print(f"  {r}")
     if unverified:
         verb = "UNVERIFIED (no provenance stamp"
@@ -1279,6 +1526,8 @@ def _cmd_check(args: argparse.Namespace) -> int:
         print(
             f"notebook sync OK: {len(stale)} stale, {len(testmode)} test-mode, "
             f"{len(contradicted)} contradicted, {len(alt_only)} alt-text-only, "
+            f"{len(outputs_changed)} outputs-changed, {len(library_drift)} library-drift "
+            f"(advisory), {len(undigested)} stamped before the digests existed, "
             f"{len(unverified)} unverified (advisory)"
         )
     return 1 if fail else 0
