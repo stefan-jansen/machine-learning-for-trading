@@ -184,23 +184,52 @@ def test_a_fit_the_optimizer_did_not_converge_on_is_not_an_estimate(returns):
     `show_warning=False` swallows the warning, so without an explicit check a parameter
     vector the optimizer never converged on would be filtered forward and written to the
     artifact as a feature value. What must happen instead is that the block is left empty.
+
+    The stub is a *usable* result rather than one that raises on access: a stub that raised
+    would be caught by `on_fit_error="skip"` and leave exactly the empty fits and NaN values
+    asserted below, so the test would pass with the convergence check deleted. This one
+    yields coefficients that would filter forward perfectly well, and records every field
+    read, so the only thing that can produce an empty walk is the check itself.
     """
+    read: list[str] = []
+
+    class _Volatility:
+        @staticmethod
+        def backcast(resid):
+            read.append("backcast")
+            return 1.0
+
+    class _Model:
+        volatility = _Volatility()
 
     class _Unconverged:
         convergence_flag = 1
 
-        def __getattr__(self, name):  # pragma: no cover - reaching it is the failure
-            raise AssertionError(f"a non-converged result was read for {name!r}")
+        @property
+        def params(self):
+            read.append("params")
+            return {"mu": 0.0, "omega": 0.1, "alpha[1]": 0.05, "beta[1]": 0.9}
 
-    class _Model:
+        @property
+        def resid(self):
+            read.append("resid")
+            return np.zeros(10)
+
+        @property
+        def model(self):
+            read.append("model")
+            return _Model()
+
+    class _ArchModel:
         def __init__(self, *args, **kwargs):
             pass
 
         def fit(self, **kwargs):
             return _Unconverged()
 
-    functions = _load(_Model)
+    functions = _load(_ArchModel)
     _, values, fits = functions["garch_walk"](("TEST", returns * 100, len(returns)))
 
     assert fits == [], "a non-converged fit was recorded as an estimation"
     assert np.all(np.isnan(values)), "a non-converged fit produced a feature value"
+    assert read == [], f"a non-converged result was read for {read}"
