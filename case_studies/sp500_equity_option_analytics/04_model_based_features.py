@@ -482,6 +482,7 @@ def garch_walk(returns: pd.Series, freeze_after: int | None) -> tuple[pd.Series,
 
     values = walk_forward_feature(
         observations,
+        timestamps=returns.index.to_numpy(),
         burnin=GARCH_BURNIN,
         refit_every=GARCH_REFIT_EVERY,
         fit=fit,

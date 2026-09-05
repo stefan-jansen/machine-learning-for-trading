@@ -1455,6 +1455,7 @@ def _hmm_recording_fit(train: np.ndarray) -> tuple[GaussianHMM, np.ndarray]:
 
 hmm_probs = walk_forward_feature(
     hmm_obs,
+    timestamps=hmm_series["timestamp"],
     burnin=HMM_BURNIN,
     refit_every=HMM_REFIT_EVERY,
     fit=_hmm_recording_fit,
@@ -1590,6 +1591,7 @@ def _smoothed_apply(fitted: tuple[GaussianHMM, np.ndarray], prefix: np.ndarray) 
 
 hmm_smoothed = walk_forward_feature(
     hmm_obs,
+    timestamps=hmm_series["timestamp"],
     burnin=HMM_BURNIN,
     refit_every=HMM_REFIT_EVERY,
     fit=hmm_fit,

@@ -726,6 +726,7 @@ def garch_walk_segment(
 
     values = walk_forward_feature(
         observations,
+        timestamps=ret_series.index.to_numpy(),
         burnin=burnin,
         refit_every=refit_every,
         fit=fit,

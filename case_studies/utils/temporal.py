@@ -524,6 +524,49 @@ def write_model_based(
 # whichever fold later selects the row.
 
 
+def _assert_one_series_in_time_order(timestamps: np.ndarray | pl.Series, n_obs: int) -> None:
+    """Refuse a walk over anything but one entity's rows, earliest first.
+
+    ``walk_forward_feature`` emits a value for row *i* from the rows before it, so "before" has
+    to mean earlier in time. Nothing in the array it is handed says so. Every converted stage-04
+    notebook sorts by entity and timestamp and then partitions, and until this guard the
+    correctness of six case studies' fitted features rested on that discipline alone: an
+    unsorted frame, or a partition that returned two securities in one group, produced a feature
+    fitted on scrambled history and raised nothing, because a block of floats is a block of
+    floats whatever order its rows arrived in.
+
+    Strict increase is the whole test, and it covers both failures. A shuffled series steps
+    backwards somewhere. Two entities concatenated step backwards at the seam - and if they do
+    not, because one entity's history ends before the other's begins, the equal-timestamp case
+    below still catches the overlap that a real panel has. A duplicate timestamp inside one walk
+    is refused rather than tolerated: two rows the schedule cannot order are two rows it cannot
+    say which of them the other's parameters were allowed to see.
+    """
+    values = timestamps.to_numpy() if isinstance(timestamps, pl.Series) else np.asarray(timestamps)
+    if values.ndim != 1:
+        raise ValueError(f"timestamps must be one-dimensional, got shape {values.shape}")
+    if len(values) != n_obs:
+        raise ValueError(
+            f"timestamps carries {len(values):,} entries for a {n_obs:,}-row series; it must "
+            "carry the decision time of every row, in the same order"
+        )
+    if n_obs < 2:
+        return
+    # Datetime and date dtypes do not support `np.diff` on every numpy version polars hands
+    # back, and an integer index is a legitimate time axis here too. A pairwise comparison is
+    # dtype-agnostic and reads the same for all of them.
+    ordered = values[1:] > values[:-1]
+    if not bool(np.all(ordered)):
+        first = int(np.argmin(ordered))
+        raise ValueError(
+            f"timestamps do not strictly increase: entry {first + 1:,} is {values[first + 1]!r} "
+            f"against {values[first]!r} at entry {first:,}. walk_forward_feature emits each "
+            "value from the rows before it, so the rows must be one entity's, earliest first. "
+            "Sort by the time column within the entity, and partition so one call sees one "
+            "entity."
+        )
+
+
 def refit_boundaries(n_obs: int, burnin: int, refit_every: int) -> list[tuple[int, int]]:
     """``(fit_end, emit_end)`` index pairs for one walk over ``n_obs`` observations.
 
@@ -550,6 +593,7 @@ def refit_boundaries(n_obs: int, burnin: int, refit_every: int) -> list[tuple[in
 def walk_forward_feature(
     X: np.ndarray,
     *,
+    timestamps: np.ndarray | pl.Series,
     burnin: int,
     refit_every: int,
     fit: Callable[[np.ndarray], Any],
@@ -580,11 +624,25 @@ def walk_forward_feature(
     a single estimate fails to converge; the default raises, because a model that cannot be
     fitted on most of its blocks is not a feature.
 
+    ``timestamps`` is the decision time of each row of *X*, and it is required rather than
+    optional because it is the only thing here that can tell a walk forward from a walk over a
+    shuffled array. Everything else this function sees is a bare ``(n_obs, n_features)`` block of
+    floats: it cannot tell one entity's series from two concatenated, nor a sorted frame from an
+    unsorted one, so every guarantee above is a statement about time that the array does not
+    carry. The check is that *timestamps* strictly increases. That refuses the unsorted call, and
+    it refuses the concatenation of two entities as well, whose timestamps step backwards at the
+    seam - the two ways a caller's ``sort`` or ``partition_by`` has been the only thing standing
+    between this schedule and a feature fitted on scrambled history.
+
     Returns ``(len(X), n_features)`` with ``np.nan`` wherever no parameters were available: the
     burn-in prefix always, and any skipped block.
+
+    :raises ValueError: if *timestamps* does not carry one entry per row of *X*, or does not
+        strictly increase.
     """
     if on_fit_error not in ("raise", "skip"):
         raise ValueError(f"on_fit_error must be 'raise' or 'skip', got {on_fit_error!r}")
+    _assert_one_series_in_time_order(timestamps, len(X))
     out = np.full((len(X), n_features), np.nan, dtype=float)
     frozen: Any = None
     for fit_end, emit_end in refit_boundaries(len(X), burnin, refit_every):

@@ -625,6 +625,7 @@ def regime_derived(prob_stress: np.ndarray) -> dict[str, np.ndarray]:
 # %%
 regime_prob = walk_forward_feature(
     MARKET_X,
+    timestamps=market["timestamp"],
     burnin=HMM_BURNIN_SESSIONS,
     refit_every=HMM_REFIT_SESSIONS,
     fit=fit_regime_model,
@@ -943,14 +944,16 @@ if MAX_SYMBOLS > 0:
 GARCH_KW = dict(mean="Constant", vol="GARCH", p=1, q=1, dist="Normal")
 
 
-def garch_walk(payload: tuple[str, np.ndarray, int]) -> tuple[str, np.ndarray, list[dict]]:
+def garch_walk(
+    payload: tuple[str, np.ndarray, np.ndarray, int],
+) -> tuple[str, np.ndarray, list[dict]]:
     """One walk-forward GARCH per ETF: refit on schedule, filter forward, freeze at the holdout.
 
     Returns the annualized conditional volatility for every session the ETF quotes on, ``nan``
     over its burn-in, and one record per estimation so section D can measure what refitting
     moved.
     """
-    symbol, returns, freeze_after = payload
+    symbol, returns, sessions, freeze_after = payload
     fits: list[dict] = []
 
     def fit(X_train: np.ndarray) -> dict[str, float]:
@@ -983,6 +986,7 @@ def garch_walk(payload: tuple[str, np.ndarray, int]) -> tuple[str, np.ndarray, l
 
     values = walk_forward_feature(
         returns.reshape(-1, 1),
+        timestamps=sessions,
         burnin=GARCH_BURNIN_SESSIONS,
         refit_every=GARCH_REFIT_SESSIONS,
         fit=fit,
@@ -1025,7 +1029,9 @@ for symbol in all_symbols:
     freeze_after = int(
         series.filter(pl.col("timestamp") < pl.lit(HOLDOUT_START).cast(pl.Date)).height
     )
-    payloads.append((symbol, series["ret"].to_numpy(), freeze_after))
+    payloads.append(
+        (symbol, series["ret"].to_numpy(), series["timestamp"].to_numpy(), freeze_after)
+    )
 
 if too_short:
     listed = ", ".join(f"{sym} ({n})" for sym, n in too_short)
