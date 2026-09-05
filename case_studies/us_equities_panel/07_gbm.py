@@ -337,6 +337,32 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # longer forward window runs out earlier and one global maximum would mark a whole label
 # incomplete for a reason unrelated to any model.
 
+# %% [markdown]
+# ## What the run produced, and the sets it publishes
+#
+# The cell below reports both, because they are one statement: the population is one immutable
+# list covering every label this run fitted, and the candidate sets are the names the later
+# notebooks open it by.
+#
+# `15_model_analysis` and `16_backtest` do not open populations directly - they open
+# *candidate sets*, named per
+# `(label, family)`, because a comparison is only meaningful within one label's protocol. Freezing
+# is what creates those names.
+#
+# Without this the two downstream notebooks name four sets that nothing produces, and they fail
+# differently: `15` raises when `CandidateSet.one` cannot find the name, while `16` would simply
+# backtest whatever subset of names does resolve. A missing name is a silently narrower strategy
+# chain, which is the failure the named-set design exists to prevent.
+#
+# The diagnostic subset is bounded on purpose. `15` holds every diagnostic member's prediction
+# frame in memory at once and correlates them pairwise, so the cost is quadratic in members - and
+# the full set here is one row per configuration *per checkpoint*, which is larger again than the
+# linear grid. `default_mse` is the untuned starting point the leaf and objective sweeps vary from.
+#
+# Only an unnarrowed canonical run publishes. The guard on `narrows_declared_catalog` above already
+# refuses to publish the canonical *population* from a narrowed run; the same condition governs the
+# canonical set names, for the same reason - a name must not mean two different member sets.
+
 # %% tags=["results"]
 catalog = execution.catalog_rows.select(
     "config_name",
@@ -378,29 +404,6 @@ catalog.select(
     "full_coverage",
 ).head(15)
 
-# %% [markdown]
-# ## Freeze the compatible result sets
-#
-# The population above is one immutable list covering every label this run fitted. `15_model_analysis`
-# and `16_backtest` do not open populations directly - they open *candidate sets*, named per
-# `(label, family)`, because a comparison is only meaningful within one label's protocol. Freezing
-# is what creates those names.
-#
-# Without this the two downstream notebooks name four sets that nothing produces, and they fail
-# differently: `15` raises when `CandidateSet.one` cannot find the name, while `16` would simply
-# backtest whatever subset of names does resolve. A missing name is a silently narrower strategy
-# chain, which is the failure the named-set design exists to prevent.
-#
-# The diagnostic subset is bounded on purpose. `15` holds every diagnostic member's prediction
-# frame in memory at once and correlates them pairwise, so the cost is quadratic in members - and
-# the full set here is one row per configuration *per checkpoint*, which is larger again than the
-# linear grid. `default_mse` is the untuned starting point the leaf and objective sweeps vary from.
-#
-# Only an unnarrowed canonical run publishes. The guard on `narrows_declared_catalog` above already
-# refuses to publish the canonical *population* from a narrowed run; the same condition governs the
-# canonical set names, for the same reason - a name must not mean two different member sets.
-
-# %% tags=["results"]
 set_rows = []
 if is_published_population:
     for label_value in panel_labels:
