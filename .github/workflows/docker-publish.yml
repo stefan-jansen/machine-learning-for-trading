@@ -14,6 +14,20 @@ name: Docker Publish
 on:
   push:
     tags: ["v3.*"]
+    # A lock bump stales every published image the moment it lands, and until
+    # 2026-09-05 nothing rebuilt them: this workflow ran on a `v3.*` tag or a manual
+    # dispatch and on nothing else. All three Dockerfiles derive their pinned
+    # constraint from the root `uv.lock`, so #740 moved five distributions
+    # (econml, causalml, scikit-learn, shap, statsforecast) and `ml4t/ml4t:latest`
+    # kept the old five. `test-unit-image` is required and correctly refused the
+    # mismatch, so `main` and every open pull request went red and nothing could
+    # merge until someone dispatched a rebuild by hand.
+    #
+    # No `paths:` filter here: a `paths:` under `push` applies to the tag trigger
+    # too, which would make a release tag whose commit touched none of these files
+    # build nothing at all. The `changes` job below does the filtering instead,
+    # which is also what test.yml does.
+    branches: [main]
   workflow_dispatch:
     inputs:
       images:
@@ -35,11 +49,50 @@ env:
 # ML4T MAIN — Multi-arch (amd64 + arm64 native runners)
 # ============================================================================
 jobs:
+  # Which images a push to `main` staled. A tag or a manual dispatch skips this and
+  # builds whatever it was asked for; only a branch push is filtered.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      ml4t: ${{ steps.filter.outputs.ml4t }}
+      py312: ${{ steps.filter.outputs.py312 }}
+      benchmark: ${{ steps.filter.outputs.benchmark }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            # The root lock and manifest are the resolve every image is built
+            # from, so they stale all three. Each image then adds its own
+            # Dockerfile and, where it has one, its own dependency manifest.
+            ml4t:
+              - 'uv.lock'
+              - 'pyproject.toml'
+              - 'envs/ml4t/Dockerfile'
+            py312:
+              - 'uv.lock'
+              - 'pyproject.toml'
+              - 'envs/py312/Dockerfile'
+              - 'envs/py312/pyproject.toml'
+              - 'envs/py312/bsts-pyproject.toml'
+            benchmark:
+              - 'uv.lock'
+              - 'pyproject.toml'
+              - 'envs/benchmark/Dockerfile'
+              - 'envs/benchmark/pyproject.toml'
+
   build-ml4t:
+    needs: changes
     if: >-
-      github.event_name != 'workflow_dispatch' ||
+      (github.event_name != 'workflow_dispatch' ||
       github.event.inputs.images == 'all' ||
-      github.event.inputs.images == 'ml4t'
+      github.event.inputs.images == 'ml4t') &&
+      (github.event_name == 'workflow_dispatch' ||
+      github.ref_type == 'tag' ||
+      needs.changes.outputs.ml4t == 'true')
     strategy:
       fail-fast: false
       matrix:
@@ -183,10 +236,14 @@ jobs:
   # ============================================================================
   build-py312:
     runs-on: ubuntu-latest
+    needs: changes
     if: >-
-      github.event_name != 'workflow_dispatch' ||
+      (github.event_name != 'workflow_dispatch' ||
       github.event.inputs.images == 'all' ||
-      github.event.inputs.images == 'py312'
+      github.event.inputs.images == 'py312') &&
+      (github.event_name == 'workflow_dispatch' ||
+      github.ref_type == 'tag' ||
+      needs.changes.outputs.py312 == 'true')
 
     steps:
       - name: Free disk space (signature stack + ML deps ~5GB)
@@ -247,10 +304,14 @@ jobs:
   # BENCHMARK — Multi-arch (amd64 + arm64 on NATIVE runners)
   # ============================================================================
   build-benchmark:
+    needs: changes
     if: >-
-      github.event_name != 'workflow_dispatch' ||
+      (github.event_name != 'workflow_dispatch' ||
       github.event.inputs.images == 'all' ||
-      github.event.inputs.images == 'benchmark'
+      github.event.inputs.images == 'benchmark') &&
+      (github.event_name == 'workflow_dispatch' ||
+      github.ref_type == 'tag' ||
+      needs.changes.outputs.benchmark == 'true')
     strategy:
       fail-fast: false
       matrix:

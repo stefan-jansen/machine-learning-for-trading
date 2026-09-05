@@ -54,6 +54,13 @@ on:
         description: "pytest -k filter (e.g. 'us_equities_panel or nasdaq100' to run only those)"
         type: string
         default: ""
+      # The candidate path is exercised only by a commit that moves the resolve, so
+      # without this there is no way to run it deliberately - including to prove it
+      # works before a lock bump depends on it.
+      force_image_candidate:
+        description: "Build the ml4t image from this commit and measure test-unit-image in it"
+        type: boolean
+        default: false
 
 env:
   ML4T_DATA_PATH: ${{ github.workspace }}/test-data/data
@@ -76,6 +83,10 @@ jobs:
       run_py312: ${{ steps.build.outputs.run_py312 }}
       run_neo4j: ${{ steps.build.outputs.run_neo4j }}
       run_benchmark: ${{ steps.build.outputs.run_benchmark }}
+      # Whether this change moves what `ml4t/ml4t:latest` would install. Read
+      # straight off the filter rather than through `build`, because it gates a
+      # job rather than shaping a matrix.
+      image_inputs: ${{ steps.filter.outputs.image-inputs }}
     steps:
       - uses: actions/checkout@v6
       - uses: dorny/paths-filter@v4
@@ -123,6 +134,16 @@ jobs:
             # matrix; it gets its own filter, wired into run_py312 below.
             docker-notebooks:
               - 'tests/test_docker_notebooks.py'
+            # The resolve `envs/ml4t/Dockerfile` performs. When one of these moves,
+            # `ml4t/ml4t:latest` is by definition not the environment this commit
+            # declares, so test-unit-image builds a candidate from the commit
+            # instead of measuring in a published image that predates it. Keep in
+            # step with the `ml4t` filter in docker-publish.yml; a test asserts both
+            # cover what the Dockerfile reads.
+            image-inputs:
+              - 'uv.lock'
+              - 'pyproject.toml'
+              - 'envs/ml4t/Dockerfile'
             ch01:
               - '01_process_is_edge/**'
             ch02-03:
@@ -1052,27 +1073,105 @@ jobs:
   # tmp_path. Measured with ML4T_DATA_PATH at the repo's own data/ directory,
   # which holds loaders and no market data.
   # ---------------------------------------------------------------------------
+  # A commit that moves the resolve gets its own image, because no published one
+  # can be the environment it declares.
+  #
+  # test-unit-image is required, and its first step refuses to measure anything in
+  # an image whose installed distributions do not match uv.lock. Against
+  # `ml4t/ml4t:latest` that made every lock-changing pull request unmergeable: the
+  # image can only be rebuilt from a lock that has landed, and the lock could not
+  # land without the check that needed the rebuild. #740 escaped it only because
+  # its branch predated the guard and so ran a workflow that did not have it, and
+  # the mismatch surfaced on main instead, where it blocked every open PR until
+  # someone dispatched a rebuild by hand.
+  #
+  # So on those commits the image under test is built here, from this tree, and
+  # `latest` stays out of it. It costs a CUDA build (~22 min, warm registry cache)
+  # on the ~18 commits in 60 days that touch these paths, and nothing at all on the
+  # rest.
+  build-image-candidate:
+    needs: changes
+    if: needs.changes.outputs.image_inputs == 'true' || github.event.inputs.force_image_candidate == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Free disk space (CUDA base + ML deps)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo docker image prune -af
+          df -h /
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v3
+      # Read-only: this never publishes. The tag is local to the tarball and the
+      # digest is whatever this tree builds, so nothing here can move `latest`.
+      - name: Build the image this commit declares
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: envs/ml4t/Dockerfile
+          platforms: linux/amd64
+          tags: ml4t/ml4t:candidate
+          outputs: type=docker,dest=/tmp/ml4t-candidate.tar
+          cache-from: type=registry,ref=ml4t/ml4t:buildcache-linux-amd64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ml4t-candidate-image
+          path: /tmp/ml4t-candidate.tar
+          if-no-files-found: error
+          retention-days: 1
+
   test-unit-image:
+    needs: [changes, build-image-candidate]
+    # Plain `always()`, and the candidate's result is handled in a step rather than
+    # here. A `!= 'failure'` in this condition would SKIP the job when the
+    # candidate build broke, and GitHub counts a skipped required check as
+    # satisfied - so a lock bump whose image would not build would have become
+    # mergeable without the image tests running at all. Skipping is the one
+    # outcome this job must never have.
+    if: always()
     runs-on: ubuntu-latest
     # The 26 files measured on 2026-08-24 ran in 3m21s; the list now contains 36.
     # --timeout=900 bounds a hung test but not a hung
     # import, collection or image pull, which would otherwise fall through to
     # GitHub's six-hour default.
     timeout-minutes: 30
-    container:
-      image: ml4t/ml4t:latest
     steps:
-      - name: Install git (for checkout inside container)
+      # `needs` cannot fail this job, because the condition above is unconditional
+      # by design. This step is what turns a broken candidate into a red required
+      # check instead of a green one.
+      - name: The candidate image built
+        if: >-
+          needs.build-image-candidate.result == 'failure' ||
+          needs.build-image-candidate.result == 'cancelled'
         run: |
-          # A transient apt mirror failure used to kill the whole job.
-          for attempt in 1 2 3; do
-            apt-get update && apt-get install -y git && exit 0
-            echo "apt-get failed (attempt $attempt of 3); retrying in $((attempt * 15))s"
-            sleep $((attempt * 15))
-          done
-          echo "::error::apt-get could not install git after three attempts"
+          echo "::error::build-image-candidate ${{ needs.build-image-candidate.result }}:"
+          echo "::error::this commit changes what the image installs, and no image was"
+          echo "::error::produced to measure it in. Measuring in ml4t/ml4t:latest would"
+          echo "::error::test the environment this commit replaces."
           exit 1
       - uses: actions/checkout@v6
+      - name: Load the candidate image
+        if: needs.build-image-candidate.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: ml4t-candidate-image
+          path: /tmp
+      # Not a `container:` on the job, because that is resolved before any step
+      # runs and so cannot name an image this run produced. Running the same two
+      # commands through `docker run` is what lets one required job measure either
+      # image, which keeps the check name stable for branch protection.
+      - name: Which image this commit is measured in
+        id: image
+        run: |
+          if [ -f /tmp/ml4t-candidate.tar ]; then
+            docker load -i /tmp/ml4t-candidate.tar
+            ref=ml4t/ml4t:candidate
+            echo "::notice::measuring in an image built from this commit"
+          else
+            ref=ml4t/ml4t:latest
+            docker pull "$ref"
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
       # The image is built from uv.lock and drifts from it silently the moment the
       # lock moves. It carried ml4t-models 0.1.0a4 for eleven days after the repo
       # declared >=0.1.0a6, so public CI measured a dependency set the repository
@@ -1084,23 +1183,28 @@ jobs:
       # if it passes: a green job in a drifted image is not evidence of green under
       # the declared lock.
       - name: The image's installed distributions match uv.lock
-        run: python .github/scripts/check_env_matches_lock.py
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -w "$GITHUB_WORKSPACE" \
+            ${{ steps.image.outputs.ref }} \
+            python .github/scripts/check_env_matches_lock.py
       - name: Run modelling-environment unit tests
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-          ML4T_PATH: ${{ github.workspace }}
-          ML4T_DATA_PATH: ${{ github.workspace }}/data
-          MPLBACKEND: Agg
         run: |
           # utils.config requires a .env to exist and validates ML4T_DATA_PATH at
           # import, the same as test-unit's steps.
           printf 'ML4T_PATH=%s\nML4T_DATA_PATH=%s/data\n' \
             "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE" > .env
-          # Same reason as test-unit's sweep: the workflow-level ML4T_OUTPUT_DIR
-          # redirects every get_case_study_dir() call at a directory this job
-          # does not seed.
-          unset ML4T_OUTPUT_DIR
-          python -m pytest \
+          # ML4T_OUTPUT_DIR is deliberately not passed in: same reason as
+          # test-unit's sweep, the workflow-level value redirects every
+          # get_case_study_dir() call at a directory this job does not seed.
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -w "$GITHUB_WORKSPACE" \
+            -e "PYTHONPATH=$GITHUB_WORKSPACE" \
+            -e "ML4T_PATH=$GITHUB_WORKSPACE" \
+            -e "ML4T_DATA_PATH=$GITHUB_WORKSPACE/data" \
+            -e MPLBACKEND=Agg \
+            ${{ steps.image.outputs.ref }} \
+            python -m pytest \
             tests/test_crypto_modeling_lineage.py \
             tests/test_common_sample_daily_ic.py \
             tests/test_cv_cached_results.py \
