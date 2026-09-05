@@ -109,45 +109,122 @@ def garch11_conditional_volatility(
     omega: float,
     alpha: float,
     beta: float,
+    backcast: float,
+    gamma: float = 0.0,
+    bounds: tuple[float, float] | None = None,
 ) -> np.ndarray:
-    r"""GARCH(1,1) conditional standard deviation, computed so a value cannot move later.
+    r"""GARCH(1,1) or GJR-GARCH(1,1,1) conditional standard deviation, computed so a value
+    cannot move later.
 
-    :math:`\sigma^2_t = \omega + \alpha \epsilon_{t-1}^2 + \beta \sigma^2_{t-1}`, with
-    :math:`\epsilon_t = r_t - \mu`. Returns one value per input observation, in the units of
-    *returns*.
+    :math:`\sigma^2_t = \omega + (\alpha + \gamma \mathbb{1}[\epsilon_{t-1} < 0])
+    \epsilon_{t-1}^2 + \beta \sigma^2_{t-1}`, with :math:`\epsilon_t = r_t - \mu`. One value
+    per input observation, in the units of *returns*. ``gamma=0`` is the symmetric model; the
+    asymmetry term is what ``arch`` fits under ``o=1``, and three of the four case studies that
+    fit a volatility model here fit it.
 
     **Why this exists rather than ``arch_model(...).fix(params)``.** Under a walk-forward refit
     schedule the recursion is run over a prefix of the series that ends at the end of the block
     being emitted, and only the block's own rows are kept. That is causal only if a value at
     :math:`t` is a function of observations up to :math:`t` and of nothing else in the array it
-    was handed. ``arch``'s own result object does not satisfy that: it derives the residuals,
-    the backcast that seeds :math:`\sigma^2_0` and the variance bounds from the whole sample it
-    is given, so extending the sample moves earlier values. Measured on ``arch==8.0.0`` with SPY
-    returns and one fixed parameter vector: ``fix`` over 1,500 observations and over 2,000 differ
-    by up to 0.19% on the 1,500 they share, largest at the start and decaying to zero. Small, and
-    a dependence on the future all the same, in exactly the channel the schedule exists to close.
+    was handed. ``arch``'s result object is not, and the reason is one line of ``ARCHModel.fix``:
 
-    The seed here is the long-run variance the *parameters* imply, :math:`\omega/(1-\alpha-\beta)`
-    - a function of coefficients estimated strictly before the block, and of no observation in
-    the array. A fit with :math:`\alpha+\beta \ge 1` has no long-run variance, so the
-    persistence is clamped just below one for the seed alone; its influence on any later value
-    decays as :math:`\beta^t` either way. On the SPY series above that decay is complete well
-    inside any burn-in a case study declares: against ``arch``'s own recursion the two agree to
-    within 1e-3 relative from observation 83, and to floating-point equality from 292.
+    .. code-block:: python
 
-    The recurrence is linear in :math:`\sigma^2` and evaluated with ``scipy.signal.lfilter``
-    rather than a Python loop: this runs once per block per entity, tens of thousands of times
-    per notebook, over series of thousands of observations.
+        resids = self.resids(self.starting_values())   # NOT the parameters you fixed
+        backcast = v.backcast(resids)
+        var_bounds = v.variance_bounds(resids)
+
+    The seed and the bounds are derived from residuals taken at the **estimated** mean of
+    whatever array was handed in, so under ``mean="Constant"`` extending the sample moves that
+    mean, moves the backcast, and moves every value the seed still reaches. Read against
+    ``arch==8.0.0``; measured here on 2,000 observations with a variance break, one fixed
+    parameter vector, prefix of 1,500 against the full sample:
+
+    ================================  ==========================================================
+    ``mean="Constant"``               sample mean 0.03496 -> 0.03007, backcast 0.57714 ->
+                                      0.57637. **128 of the 1,500 shared rows move**, by up to
+                                      0.064%, largest at the start and decaying to zero.
+    ``mean="Zero"``                   nothing is estimated, so the residuals are the returns and
+                                      the seed does not move: **bit-identical**.
+    ================================  ==========================================================
+
+    ``mean="Zero"`` is not therefore safe. ``variance_bounds`` clamps every row with two
+    whole-sample quantities - ``np.var(resids) / 1e8`` below and ``1e7 * (1 + max(resids**2))``
+    above - and those move whatever the mean specification is. They are six orders of magnitude
+    apart, so they change an emitted value only when the variance actually reaches one, which is
+    what a degenerate fit does. With :math:`\omega=10^{-8}, \alpha=0.02, \gamma=-0.30,
+    \beta=0.90` - a shape ``arch`` returns without complaint, where a down day *reduces* the
+    variance - the recursion sits on the lower clamp and **1,498 of the 1,500 shared rows move,
+    by up to 64%**, because a shock 500 observations later raised ``np.var(resids)`` and with it
+    the clamp under every earlier row.
+
+    So the dependence on the future is unconditional under an estimated mean, and under a zero
+    mean it opens exactly on the fits that were also being silently clipped. This function takes
+    the seed and the bounds from the caller instead, and raises on the degenerate case rather
+    than emitting a clipped number for it.
+
+    **Every argument must come from before the block.** *backcast* seeds the recursion as
+    :math:`\omega + (\alpha + \gamma/2 + \beta) \cdot \mathrm{backcast}`, where the halved
+    :math:`\gamma` is the asymmetry's contribution under symmetric shocks; pass the mean squared
+    residual of the estimation window, or ``arch``'s own
+    ``result.model.volatility.backcast(training_residuals)``. *bounds*, when given, clips
+    :math:`\sigma^2` at every step as ``arch`` does internally; derive it from
+    ``result.model.volatility.variance_bounds`` over the training residuals. Neither is checked
+    here, because the array handed in reaches the end of the block and nothing computed from it
+    could tell a legitimate seed from one that read the block's own rows.
+
+    **Why there is no parameter-implied seed.** :math:`\omega/(1-\alpha-\gamma/2-\beta)` is
+    the long-run variance the coefficients imply, is a function of no observation at all, and was
+    the seed here until it was measured. Fitting GJR-GARCH on 25 sampled
+    ``sp500_equity_option_analytics`` securities broke it twice, in ways a single guard does not
+    cover. Two fits came out integrated at persistence 1.0000, where the ratio is infinite, any
+    clamp makes it :math:`\omega \times 10^6`, and :math:`\beta=1` means the seed's influence
+    never decays - 56x errors at emitted rows. A third was numerically stationary at persistence
+    0.9953 but had :math:`\omega = 1.6 \times 10^{-8}`, so the implied seed was
+    :math:`3.4 \times 10^{-6}` against a data-supported 2.283, and the recursion reached negative
+    variance 495 observations in. The second case is invisible to any threshold on persistence.
+    A seed bounded by the estimation window cannot do either, whatever the optimizer returns.
+
+    Without *bounds* the recurrence is linear in :math:`\sigma^2` and is evaluated with
+    ``scipy.signal.lfilter`` rather than a Python loop: this runs once per block per entity, tens
+    of thousands of times per notebook, over series of thousands of observations. Clipping makes
+    it nonlinear, so *bounds* costs a Python loop.
+
+    :raises ValueError: if the recursion leaves the positive reals. ``arch`` will return
+        :math:`\alpha + \gamma < 0`, a negative shock coefficient on down days, without
+        complaint; the variance then falls through zero and ``sqrt`` yields ``nan``. A ``nan`` is
+        not a feature value and must not reach an artifact. Passing *bounds* prevents it.
     """
     resid = np.asarray(returns, dtype=float) - mu
     if resid.size == 0:
         return np.empty(0, dtype=float)
-    persistence = min(alpha + beta, 1.0 - 1e-6)
+
+    persistence = alpha + 0.5 * gamma + beta
     driver = np.empty(resid.size, dtype=float)
-    driver[0] = omega / (1.0 - persistence)
-    driver[1:] = omega + alpha * resid[:-1] ** 2
-    # y[0] = driver[0]; y[t] = driver[t] + beta * y[t-1] - the recursion above, in C.
-    return np.sqrt(lfilter([1.0], [1.0, -beta], driver))
+    driver[0] = omega + persistence * float(backcast)
+    driver[1:] = omega + (alpha + gamma * (resid[:-1] < 0.0)) * resid[:-1] ** 2
+
+    if bounds is None:
+        # y[0] = driver[0]; y[t] = driver[t] + beta * y[t-1] - the recursion above, in C. The
+        # sign indicator is already in the driver, so the recursion in sigma^2 is still linear
+        # with constant coefficients.
+        variance = lfilter([1.0], [1.0, -beta], driver)
+        if not np.all(np.isfinite(variance)) or np.any(variance <= 0.0):
+            first = int(np.argmax(~(np.isfinite(variance) & (variance > 0.0))))
+            raise ValueError(
+                f"the variance recursion left the positive reals at observation {first} of "
+                f"{variance.size}: alpha + gamma is {alpha + gamma:.6g}, so a negative return "
+                "reduces the variance rather than raising it. Pass bounds= to clip, or reject "
+                "the fit."
+            )
+    else:
+        low, high = float(bounds[0]), float(bounds[1])
+        variance = np.empty(resid.size, dtype=float)
+        variance[0] = min(max(driver[0], low), high)
+        for t in range(1, resid.size):
+            variance[t] = min(max(driver[t] + beta * variance[t - 1], low), high)
+
+    return np.sqrt(variance)
 
 
 def sort_states_by_variance(model: GaussianHMM) -> np.ndarray:

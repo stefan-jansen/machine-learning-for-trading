@@ -75,7 +75,7 @@ from case_studies.utils.feature_engineering import (
     quantile_profile,
 )
 from utils.cv_splits import load_evaluation_config
-from utils.modeling import fold_temporal_frame, load_modeling_dataset
+from utils.modeling import load_modeling_dataset
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, add_message_title, show_with_alt
 
@@ -140,10 +140,10 @@ print(f"redundancy threshold {REDUNDANCY_CUT} and {N_QUANTILES} groups per settl
 # Two constraints follow, and together they fix which rows may be scored.
 #
 # First, the five features from notebook 04 are themselves model output: a volatility model and a
-# regime model are fitted inside each fold's training block and then run forward. A row therefore
-# has a different value for those five columns depending on which fold you are in, and it is out
-# of sample only in the fold whose training block ended before it. So each row enters exactly
-# once, carrying the version of those columns belonging to the fold that tests it.
+# regime model are fitted on a walk-forward refit schedule and run forward from each estimate.
+# A settlement therefore carries one value for those five columns, computed from parameters
+# estimated strictly before it, whichever fold later tests it. Each row still enters exactly
+# once, selected by the validation window it falls in.
 #
 # Second, a feature scored at time `t` is scored against the return realized by `t` plus eight
 # hours. Reading a return that lands inside the holdout would spend the holdout on a diagnostic.
@@ -157,32 +157,29 @@ financial_cols = [name for name in financial.columns if name not in JOIN_COLS]
 temporal_cols = mds.temporal_feature_names
 
 assert set(mds.feature_names) == set(financial_cols) | set(temporal_cols)
-assert mds.temporal_by_fold is not None
+# A settlement carries one value for the model-based columns, so the loader joins them onto
+# the panel once and there is no per-fold frame to substitute from. A non-None value here would
+# mean the artifact still carries a fold column, and every value below would depend on which
+# fold read it.
+assert mds.temporal_by_fold is None, (
+    "the loader found a fold-keyed model-based artifact, so notebook 04 still writes a fold column"
+)
 
-symbols = mds.dataset["symbol"].unique().to_list()
-base_frame = mds.dataset.select([*JOIN_COLS, *financial_cols, mds.label_col])
-# Selected one fold at a time inside the loop, so the artifact is never held whole.
+base_frame = mds.dataset.select([*JOIN_COLS, *financial_cols, *temporal_cols, mds.label_col])
 
 validation_frames = []
 for split in mds.splits:
-    base = base_frame.filter(
+    frame = base_frame.filter(
         pl.col("timestamp").is_between(split["val_start"], split["val_end"], closed="both")
-    )
-    fold_temporal = (
-        fold_temporal_frame(mds.temporal_by_fold, int(split["fold"]))
-        .filter(pl.col("symbol").is_in(symbols))
-        .select([*JOIN_COLS, *temporal_cols])
-        .with_columns(pl.col("timestamp").cast(base.schema["timestamp"]))
-        .unique(subset=JOIN_COLS)
-    )
-    frame = base.join(fold_temporal, on=JOIN_COLS, how="left").with_columns(
-        pl.lit(split["fold"]).alias("cv_fold")
-    )
+    ).with_columns(pl.lit(split["fold"]).alias("cv_fold"))
     validation_frames.append(frame)
 
 eval_panel = pl.concat(validation_frames).sort(["timestamp", "symbol"])
+# `generate_cv_splits` lays the validation windows end to end, so concatenating them cannot
+# claim a settlement twice. Checked rather than assumed: a duplicate would weight one
+# settlement twice in every correlation below.
 assert eval_panel.select(JOIN_COLS).is_duplicated().sum() == 0
-assert eval_panel.columns == [*JOIN_COLS, *financial_cols, mds.label_col, *temporal_cols, "cv_fold"]
+assert eval_panel.columns == [*JOIN_COLS, *financial_cols, *temporal_cols, mds.label_col, "cv_fold"]
 
 holdout_start = (
     pl.Series([load_evaluation_config(CASE_STUDY_ID)["holdout_start"]])

@@ -792,6 +792,55 @@ def test_preview_records_the_entry_point_when_generated_dirs_are_not_symlinks(
     assert recorded == ("06_linear",)
 
 
+def test_open_study_says_it_read_inputs_in_place(tmp_path: Path, capsys) -> None:
+    """`open_study` takes one of two branches and used to say nothing about which.
+
+    A maintainer worktree symlinks its generated directories to shared artifacts, so it reads
+    inputs in place; a CI checkout has real directories and adopts the workspace. Which branch
+    ran is decided by the checkout, not by the caller, so the same notebook reports different
+    inputs on the two with nothing in the log telling them apart (ml4t/agent-workspace#974).
+    """
+    release, _ = _seed_regeneration_release(tmp_path)
+    generated = release / "case_studies" / "etfs"
+    assert all((generated / name).is_symlink() for name in ("features", "labels", "run_log")), (
+        "fixture must exercise the symlink branch"
+    )
+    capsys.readouterr()
+
+    open_study(
+        "etfs",
+        execution_tier=ExecutionTier.PREVIEW,
+        workspace=tmp_path / "ws",
+        release_root=release,
+    )
+
+    reported = capsys.readouterr().out
+    assert "open_study(etfs)" in reported
+    assert "symlinks - reading inputs in place" in reported
+    assert str(generated) in reported
+
+
+def test_open_study_says_the_workspace_is_the_root(tmp_path: Path, capsys) -> None:
+    """The other branch, which is the one CI takes and the one no worktree here exercises."""
+    release = _seed_release(tmp_path)
+    generated = release / "case_studies" / "etfs"
+    assert not any((generated / name).is_symlink() for name in ("features", "labels", "run_log")), (
+        "fixture must exercise the regular-directory branch"
+    )
+    capsys.readouterr()
+
+    open_study(
+        "etfs",
+        execution_tier=ExecutionTier.PREVIEW,
+        workspace=tmp_path / "ws",
+        release_root=release,
+    )
+
+    reported = capsys.readouterr().out
+    assert "open_study(etfs)" in reported
+    assert "real directories - the workspace is the study root" in reported
+
+
 def test_a_second_study_previewing_into_one_workspace_repoints_the_input_links(
     tmp_path: Path,
 ) -> None:

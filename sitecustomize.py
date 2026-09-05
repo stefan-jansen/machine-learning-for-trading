@@ -53,6 +53,35 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent
 
+
+def _force_utf8_console() -> None:
+    """Make stdout and stderr UTF-8 on Windows, where they default to the ANSI code page.
+
+    A Windows console interpreter encodes ``print`` through ``cp1252``, so the first
+    non-ASCII character in a progress line raises ``UnicodeEncodeError`` and takes the
+    process with it. ``data/futures/positioning/cot_download.py:135`` prints
+    ``f" {len(df):,} rows -> {out_path.name}"`` with a real arrow, and on the Reader
+    install walk that killed the CFTC download *after* all seven years had been fetched
+    and written - the data was on disk and the script died reporting it. Twenty-odd other
+    scripts under ``data/`` print non-ASCII too, so this belongs at the interpreter, not
+    at each print.
+
+    Not ``PYTHONUTF8=1``: that only helps a reader who sets it before every command, and
+    ``.env`` is read too late - the streams already exist by then.
+    """
+    if sys.platform != "win32":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
+try:
+    _force_utf8_console()
+except Exception:  # noqa: BLE001 - startup hook: never break the interpreter
+    pass
+
 for _chapter_dir in sorted(_REPO_ROOT.glob("[0-9][0-9]_*")):
     if _chapter_dir.is_dir():
         _entry = str(_chapter_dir)
