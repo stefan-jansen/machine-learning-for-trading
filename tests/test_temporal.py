@@ -13,7 +13,7 @@ value must not.
 from __future__ import annotations
 
 import warnings
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -697,6 +697,17 @@ def test_an_empty_return_series_gives_an_empty_recursion() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _walk(X: np.ndarray, **kwargs) -> np.ndarray:
+    """``walk_forward_feature`` over a series whose rows are one session apart.
+
+    The tests below are about the refit schedule, and every one of them wants the same
+    unremarkable time axis. Supplying it here keeps ``timestamps`` written out only in the
+    tests that are about ``timestamps``.
+    """
+    kwargs.setdefault("timestamps", np.arange(len(X)))
+    return walk_forward_feature(X, **kwargs)
+
+
 def _mean_fit(X: np.ndarray) -> float:
     """A model whose parameter is trivially readable, so a test can say where it came from."""
     return float(X[:, 0].mean())
@@ -730,7 +741,7 @@ def test_refit_boundaries_fits_once_when_only_one_row_follows_the_burn_in() -> N
 @pytest.mark.parametrize("refit_every", [1, 5, 21])
 def test_the_burn_in_prefix_carries_no_value(refit_every: int) -> None:
     X = np.arange(60, dtype=float).reshape(-1, 1)
-    out = walk_forward_feature(
+    out = _walk(
         X, burnin=20, refit_every=refit_every, fit=_mean_fit, apply=_emit_parameter, n_features=1
     )
     assert np.isnan(out[:20]).all()
@@ -740,9 +751,7 @@ def test_the_burn_in_prefix_carries_no_value(refit_every: int) -> None:
 def test_a_value_is_computed_from_parameters_fitted_strictly_before_it() -> None:
     """The whole point. Row 20's parameter is the mean of rows 0-19 and of nothing later."""
     X = np.arange(60, dtype=float).reshape(-1, 1)
-    out = walk_forward_feature(
-        X, burnin=20, refit_every=10, fit=_mean_fit, apply=_emit_parameter, n_features=1
-    )
+    out = _walk(X, burnin=20, refit_every=10, fit=_mean_fit, apply=_emit_parameter, n_features=1)
     assert out[20, 0] == pytest.approx(X[:20, 0].mean())
     assert out[29, 0] == pytest.approx(X[:20, 0].mean())
     # The next block refits on everything up to 30, so row 30 moves and row 29 does not.
@@ -757,11 +766,9 @@ def test_deleting_later_observations_does_not_move_an_earlier_value() -> None:
     """
     rng = np.random.default_rng(0)
     X = rng.normal(size=(80, 1))
-    full = walk_forward_feature(
-        X, burnin=15, refit_every=6, fit=_mean_fit, apply=_emit_parameter, n_features=1
-    )
+    full = _walk(X, burnin=15, refit_every=6, fit=_mean_fit, apply=_emit_parameter, n_features=1)
     for cut in (40, 55, 79):
-        short = walk_forward_feature(
+        short = _walk(
             X[:cut], burnin=15, refit_every=6, fit=_mean_fit, apply=_emit_parameter, n_features=1
         )
         np.testing.assert_allclose(short, full[:cut], equal_nan=True)
@@ -770,8 +777,8 @@ def test_deleting_later_observations_does_not_move_an_earlier_value() -> None:
 def test_a_rolling_window_forgets_and_an_expanding_one_does_not() -> None:
     X = np.arange(60, dtype=float).reshape(-1, 1)
     kwargs = dict(burnin=20, refit_every=10, fit=_mean_fit, apply=_emit_parameter, n_features=1)
-    expanding = walk_forward_feature(X, **kwargs)
-    rolling = walk_forward_feature(X, window=20, **kwargs)
+    expanding = _walk(X, **kwargs)
+    rolling = _walk(X, window=20, **kwargs)
     assert expanding[20, 0] == pytest.approx(rolling[20, 0])
     assert rolling[40, 0] == pytest.approx(X[20:40, 0].mean())
     assert expanding[40, 0] == pytest.approx(X[:40, 0].mean())
@@ -779,7 +786,7 @@ def test_a_rolling_window_forgets_and_an_expanding_one_does_not() -> None:
 
 def test_the_rolling_window_is_still_bounded_by_the_start_of_the_series() -> None:
     X = np.arange(30, dtype=float).reshape(-1, 1)
-    out = walk_forward_feature(
+    out = _walk(
         X,
         burnin=5,
         refit_every=5,
@@ -792,7 +799,7 @@ def test_the_rolling_window_is_still_bounded_by_the_start_of_the_series() -> Non
 
 
 def test_a_series_shorter_than_the_burn_in_is_all_null_rather_than_an_error() -> None:
-    out = walk_forward_feature(
+    out = _walk(
         np.arange(5, dtype=float).reshape(-1, 1),
         burnin=20,
         refit_every=5,
@@ -809,7 +816,7 @@ def test_a_failing_fit_raises_by_default() -> None:
         raise RuntimeError("did not converge")
 
     with pytest.raises(RuntimeError, match="did not converge"):
-        walk_forward_feature(
+        _walk(
             np.arange(30, dtype=float).reshape(-1, 1),
             burnin=10,
             refit_every=5,
@@ -828,7 +835,7 @@ def test_a_skipped_block_is_null_and_the_walk_carries_on() -> None:
             raise RuntimeError("did not converge")
         return _mean_fit(X)
 
-    out = walk_forward_feature(
+    out = _walk(
         np.arange(30, dtype=float).reshape(-1, 1),
         burnin=10,
         refit_every=5,
@@ -845,7 +852,7 @@ def test_a_skipped_block_is_null_and_the_walk_carries_on() -> None:
 
 def test_apply_returning_the_wrong_number_of_rows_is_refused() -> None:
     with pytest.raises(ValueError, match="one row per input row"):
-        walk_forward_feature(
+        _walk(
             np.arange(30, dtype=float).reshape(-1, 1),
             burnin=10,
             refit_every=5,
@@ -856,7 +863,7 @@ def test_apply_returning_the_wrong_number_of_rows_is_refused() -> None:
 
 
 def test_a_multi_column_feature_keeps_its_columns_in_order() -> None:
-    out = walk_forward_feature(
+    out = _walk(
         np.arange(40, dtype=float).reshape(-1, 1),
         burnin=10,
         refit_every=5,
@@ -883,8 +890,8 @@ def test_a_fitted_hidden_markov_model_walks_forward_without_reading_its_future()
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        full = walk_forward_feature(X, **kwargs)
-        short = walk_forward_feature(X[:220], **kwargs)
+        full = _walk(X, **kwargs)
+        short = _walk(X[:220], **kwargs)
     assert np.isnan(full[:100]).all()
     np.testing.assert_allclose(short, full[:220], rtol=1e-9, equal_nan=True)
     np.testing.assert_allclose(full[100:].sum(axis=1), 1.0, rtol=1e-9)
@@ -899,7 +906,7 @@ def test_no_parameters_are_estimated_past_the_freeze_point() -> None:
         return _mean_fit(X)
 
     X = np.arange(60, dtype=float).reshape(-1, 1)
-    out = walk_forward_feature(
+    out = _walk(
         X,
         burnin=20,
         refit_every=10,
@@ -916,7 +923,7 @@ def test_no_parameters_are_estimated_past_the_freeze_point() -> None:
 
 
 def test_a_freeze_point_inside_the_burn_in_emits_nothing() -> None:
-    out = walk_forward_feature(
+    out = _walk(
         np.arange(60, dtype=float).reshape(-1, 1),
         burnin=20,
         refit_every=10,
@@ -932,7 +939,117 @@ def test_freezing_does_not_change_the_values_before_the_freeze_point() -> None:
     X = np.arange(60, dtype=float).reshape(-1, 1)
     kwargs = dict(burnin=20, refit_every=10, fit=_mean_fit, apply=_emit_parameter, n_features=1)
     np.testing.assert_allclose(
-        walk_forward_feature(X, freeze_after=40, **kwargs)[:41],
-        walk_forward_feature(X, **kwargs)[:41],
+        _walk(X, freeze_after=40, **kwargs)[:41],
+        _walk(X, **kwargs)[:41],
         equal_nan=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# The time axis
+# ---------------------------------------------------------------------------
+#
+# Everything above this line is about WHEN the model is refitted. These are about whether the
+# rows it walks are in time order at all. Until the guard they were not checked anywhere: the
+# function receives a bare float array, so an unsorted frame and two entities concatenated both
+# read as one well-formed series, produce a feature fitted on scrambled history, and raise
+# nothing. Six case studies' stage-04 notebooks sorted correctly and that discipline was the
+# only thing enforcing it.
+
+
+def _walk_over(timestamps) -> np.ndarray:
+    """Walk a 40-row series carrying the given time axis, whatever order it is in."""
+    return walk_forward_feature(
+        np.arange(len(timestamps), dtype=float).reshape(-1, 1),
+        timestamps=timestamps,
+        burnin=10,
+        refit_every=5,
+        fit=_mean_fit,
+        apply=_emit_parameter,
+        n_features=1,
+    )
+
+
+def test_a_walk_in_time_order_is_accepted() -> None:
+    out = _walk_over(pl.date_range(date(2020, 1, 1), date(2020, 2, 9), eager=True))
+    assert out.shape == (40, 1)
+    assert np.isnan(out[:10]).all()
+    assert np.isfinite(out[10:]).all()
+
+
+def test_an_unsorted_series_is_refused() -> None:
+    """A shuffled frame: the rows are all there, and 'the rows before it' means nothing."""
+    days = pl.date_range(date(2020, 1, 1), date(2020, 2, 9), eager=True).to_numpy()
+    shuffled = days.copy()
+    shuffled[7], shuffled[8] = days[8], days[7]
+    with pytest.raises(ValueError, match="do not strictly increase"):
+        _walk_over(shuffled)
+
+
+def test_two_entities_concatenated_are_refused() -> None:
+    """The failure a missing ``partition_by`` produces: one call, two securities' histories."""
+    one = pl.date_range(date(2020, 1, 1), date(2020, 1, 20), eager=True).to_numpy()
+    both = np.concatenate([one, one])
+    with pytest.raises(ValueError, match="do not strictly increase"):
+        _walk_over(both)
+
+
+def test_a_repeated_timestamp_is_refused() -> None:
+    """Two rows the schedule cannot order are two rows it cannot separate fit from emit on."""
+    days = pl.date_range(date(2020, 1, 1), date(2020, 2, 9), eager=True).to_numpy()
+    days[20] = days[19]
+    with pytest.raises(ValueError, match="do not strictly increase"):
+        _walk_over(days)
+
+
+def test_a_time_axis_of_the_wrong_length_is_refused() -> None:
+    with pytest.raises(ValueError, match="entries for a"):
+        walk_forward_feature(
+            np.arange(40, dtype=float).reshape(-1, 1),
+            timestamps=np.arange(39),
+            burnin=10,
+            refit_every=5,
+            fit=_mean_fit,
+            apply=_emit_parameter,
+            n_features=1,
+        )
+
+
+def test_the_guard_refuses_before_the_first_fit_runs() -> None:
+    """Atomicity: nothing is estimated, so a refused walk leaves no partial state behind."""
+    fitted: list[int] = []
+
+    def recording_fit(X: np.ndarray) -> float:
+        fitted.append(len(X))
+        return _mean_fit(X)
+
+    with pytest.raises(ValueError, match="do not strictly increase"):
+        walk_forward_feature(
+            np.arange(40, dtype=float).reshape(-1, 1),
+            timestamps=np.arange(40)[::-1],
+            burnin=10,
+            refit_every=5,
+            fit=recording_fit,
+            apply=_emit_parameter,
+            n_features=1,
+        )
+    assert fitted == []
+
+
+def test_a_polars_series_and_a_numpy_array_are_read_the_same_way() -> None:
+    days = pl.date_range(date(2020, 1, 1), date(2020, 2, 9), eager=True)
+    np.testing.assert_allclose(_walk_over(days), _walk_over(days.to_numpy()), equal_nan=True)
+
+
+def test_a_series_too_short_to_compare_is_accepted() -> None:
+    """One row cannot be out of order, and a walk over it is empty rather than an error."""
+    out = walk_forward_feature(
+        np.zeros((1, 1)),
+        timestamps=np.array([date(2020, 1, 1)]),
+        burnin=10,
+        refit_every=5,
+        fit=_mean_fit,
+        apply=_emit_parameter,
+        n_features=1,
+    )
+    assert np.isnan(out).all()

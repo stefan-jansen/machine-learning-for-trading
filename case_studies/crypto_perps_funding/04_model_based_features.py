@@ -771,6 +771,7 @@ def extract_symbol_garch(
 
     values = walk_forward_feature(
         returns.to_numpy().reshape(-1, 1),
+        timestamps=returns.index.to_numpy(),
         burnin=MIN_TRAIN_BARS,
         refit_every=GARCH_REFIT_EVERY,
         freeze_after=freeze_after,
@@ -1036,6 +1037,7 @@ def extract_hmm_walk(agg_pd: pd.DataFrame) -> tuple[pl.DataFrame, list[dict]]:
 
     values = walk_forward_feature(
         observed.values,
+        timestamps=observed.index.to_numpy(),
         burnin=MIN_TRAIN_BARS,
         refit_every=HMM_REFIT_EVERY,
         freeze_after=freeze_after,

@@ -15,11 +15,10 @@ from arch import arch_model
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
 
 from case_studies.sp500_options._underlying_returns import reconcile_underlying_log_returns
-from case_studies.utils.temporal import walk_forward_feature
+from case_studies.utils.temporal import garch11_conditional_volatility, walk_forward_feature
 
 NOTEBOOK_SOURCE = Path("case_studies/sp500_options/04_model_based_features.py")
 GARCH_FIT_FUNCTIONS = {
-    "causal_gjr_garch_filter",
     "fit_garch_with_retry",
     "summarize_garch_fit",
     "training_garch_filter_state",
@@ -48,6 +47,7 @@ def _load_garch_walk(namespace_extra: dict):
         "pd": pd,
         "date": date,
         "walk_forward_feature": walk_forward_feature,
+        "garch11_conditional_volatility": garch11_conditional_volatility,
         "PERIODS_PER_YEAR": 252,
         **namespace_extra,
     }
@@ -58,19 +58,37 @@ def _load_garch_walk(namespace_extra: dict):
     return namespace
 
 
-def _load_causal_filter():
-    tree = ast.parse(NOTEBOOK_SOURCE.read_text())
-    function = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "causal_gjr_garch_filter"
+def _causal_filter(
+    ret_series: pd.Series,
+    params: pd.Series,
+    scale: float,
+    backcast: float,
+    variance_bounds: tuple[float, float],
+) -> pd.Series:
+    """The recursion the notebook runs, fed the way the notebook feeds it.
+
+    The recursion itself is no longer this notebook's: `garch11_conditional_volatility` is
+    the one implementation, shared with every case study that fits a volatility model, and
+    it is called here rather than copied. What is still this notebook's own is the feeding -
+    `arch` estimates on returns it has scaled, so mu, omega and the bounds are all in scaled
+    units and the volatility comes back divided by the same factor. The tests below are about
+    what the composition emits, so both halves are real: the recursion is the production
+    function and the scaling is three lines that mirror the notebook's `apply`.
+    """
+    sigma = (
+        garch11_conditional_volatility(
+            ret_series.to_numpy(dtype=float) * scale,
+            mu=float(params.get("mu", params.get("Const", 0.0))),
+            omega=float(params["omega"]),
+            alpha=float(params["alpha[1]"]),
+            gamma=float(params["gamma[1]"]),
+            beta=float(params["beta[1]"]),
+            backcast=backcast,
+            bounds=variance_bounds,
+        )
+        / scale
     )
-    namespace = {"np": np, "pd": pd}
-    exec(
-        compile(ast.Module(body=[function], type_ignores=[]), str(NOTEBOOK_SOURCE), "exec"),
-        namespace,
-    )
-    return namespace["causal_gjr_garch_filter"]
+    return pd.Series(sigma, index=ret_series.index)
 
 
 def _load_sv_calibrator(fake_fit):
@@ -208,7 +226,7 @@ def test_causal_garch_prefix_is_invariant_to_same_time_and_future_returns(
     fit_scale: float,
     seed: int,
 ) -> None:
-    causal_filter = _load_causal_filter()
+    causal_filter = _causal_filter
     assert symbol
     rng = np.random.default_rng(seed)
     returns = pd.Series(rng.normal(0, return_std, 400))
@@ -247,7 +265,7 @@ def test_causal_garch_prefix_is_invariant_to_same_time_and_future_returns(
 def test_notebook_does_not_use_arch_fixed_result_for_filtering() -> None:
     source = NOTEBOOK_SOURCE.read_text()
     assert ".fix(" not in source
-    assert "causal_gjr_garch_filter(" in source
+    assert "garch11_conditional_volatility(" in source
 
 
 def test_notebook_uses_identity_safe_segment_returns() -> None:
@@ -260,7 +278,7 @@ def test_notebook_uses_identity_safe_segment_returns() -> None:
 
 
 def test_segment_scale_and_prior_identity_do_not_change_filtered_state() -> None:
-    causal_filter = _load_causal_filter()
+    causal_filter = _causal_filter
     start = date(2020, 1, 1)
     prices = pl.DataFrame(
         {
@@ -858,13 +876,13 @@ def _garch_series(n: int = 1300, seed: int = 11) -> np.ndarray:
 def test_the_filter_is_prefix_stable_where_handing_the_fit_back_to_arch_is_not() -> None:
     """The emission is a function of the past alone, at any prefix length.
 
-    This is what the notebook's hand-written recursion exists for, and it needs a negative
-    control because the obvious alternative looks correct and is not.
+    This is what the explicit recursion exists for, and it needs a negative control because
+    the obvious alternative looks correct and is not.
     `arch_model(prefix).fix(params)` freezes the parameters but NOT the initialization: the
     residual scale, the backcast seeding sigma^2_0 and the variance bounds are all re-derived
     from whatever sample it is handed, so an emitted value moves when later observations
-    arrive. `causal_gjr_garch_filter` takes all three from the training window and is handed
-    them, which is what makes it stable.
+    arrive. `garch11_conditional_volatility` takes all three from the training window and is
+    handed them, which is what makes it stable.
 
     **The extension has to be large, which is why this is not a walk-level test.** Measured
     here: `.fix()` moves by 9.0e-04 relative over a 600-observation extension and by 1.7e-16 -
@@ -927,7 +945,7 @@ def test_the_filter_is_prefix_stable_where_handing_the_fit_back_to_arch_is_not()
     )
 
     def through_notebook(k: int) -> np.ndarray:
-        return namespace["causal_gjr_garch_filter"](
+        return _causal_filter(
             pd.Series(returns[:k]), fitted.params, scale, backcast, bounds
         ).to_numpy()
 

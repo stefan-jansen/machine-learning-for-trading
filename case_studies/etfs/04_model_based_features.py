@@ -625,6 +625,7 @@ def regime_derived(prob_stress: np.ndarray) -> dict[str, np.ndarray]:
 # %%
 regime_prob = walk_forward_feature(
     MARKET_X,
+    timestamps=market["timestamp"],
     burnin=HMM_BURNIN_SESSIONS,
     refit_every=HMM_REFIT_SESSIONS,
     fit=fit_regime_model,
@@ -943,14 +944,16 @@ if MAX_SYMBOLS > 0:
 GARCH_KW = dict(mean="Constant", vol="GARCH", p=1, q=1, dist="Normal")
 
 
-def garch_walk(payload: tuple[str, np.ndarray, int]) -> tuple[str, np.ndarray, list[dict]]:
+def garch_walk(
+    payload: tuple[str, np.ndarray, np.ndarray, int],
+) -> tuple[str, np.ndarray, list[dict]]:
     """One walk-forward GARCH per ETF: refit on schedule, filter forward, freeze at the holdout.
 
     Returns the annualized conditional volatility for every session the ETF quotes on, ``nan``
     over its burn-in, and one record per estimation so section D can measure what refitting
     moved.
     """
-    symbol, returns, freeze_after = payload
+    symbol, returns, sessions, freeze_after = payload
     fits: list[dict] = []
 
     def fit(X_train: np.ndarray) -> dict[str, float]:
@@ -983,6 +986,7 @@ def garch_walk(payload: tuple[str, np.ndarray, int]) -> tuple[str, np.ndarray, l
 
     values = walk_forward_feature(
         returns.reshape(-1, 1),
+        timestamps=sessions,
         burnin=GARCH_BURNIN_SESSIONS,
         refit_every=GARCH_REFIT_SESSIONS,
         fit=fit,
@@ -1025,7 +1029,9 @@ for symbol in all_symbols:
     freeze_after = int(
         series.filter(pl.col("timestamp") < pl.lit(HOLDOUT_START).cast(pl.Date)).height
     )
-    payloads.append((symbol, series["ret"].to_numpy(), freeze_after))
+    payloads.append(
+        (symbol, series["ret"].to_numpy(), series["timestamp"].to_numpy(), freeze_after)
+    )
 
 if too_short:
     listed = ", ".join(f"{sym} ({n})" for sym, n in too_short)
@@ -1058,7 +1064,7 @@ GARCH_COLS = ["garch_cond_vol"]
 
 _blocks = sum(
     len(refit_boundaries(len(r), GARCH_BURNIN_SESSIONS, GARCH_REFIT_SESSIONS))
-    for _, r, _ in payloads
+    for _, r, _, _ in payloads
 )
 print(
     f"Conditional volatility: {garch_features.height:,} values across "
@@ -1071,12 +1077,12 @@ print(
 # inside the holdout, and every ETF's first emitted value falls after it had paid its burn-in.
 
 # %%
-_freeze_by_symbol = {symbol: freeze for symbol, _, freeze in payloads}
+_freeze_by_symbol = {symbol: freeze for symbol, _, _, freeze in payloads}
 _first_value = garch_features.group_by("symbol").agg(pl.col("timestamp").min().alias("first_value"))
 _burnin_session = pl.DataFrame(
     [
         {"symbol": symbol, "burnin_ends": symbol_sessions[symbol][GARCH_BURNIN_SESSIONS - 1]}
-        for symbol, _, _ in payloads
+        for symbol, _, _, _ in payloads
     ]
 )
 for symbol, group in garch_fit_df.group_by("symbol"):
@@ -1110,7 +1116,7 @@ print(
 # configuration of it holds, on real returns.
 
 # %%
-_check_symbol, _check_returns, _check_freeze = payloads[0]
+_check_symbol, _check_returns, _check_sessions, _check_freeze = payloads[0]
 _boundaries = refit_boundaries(len(_check_returns), GARCH_BURNIN_SESSIONS, GARCH_REFIT_SESSIONS)
 # The middle of the development history, offset off the boundary so the cut falls inside a block.
 _midpoint = GARCH_BURNIN_SESSIONS + (_check_freeze - GARCH_BURNIN_SESSIONS) // 2
@@ -1119,7 +1125,9 @@ _cut = max(fit_end for fit_end, _ in _boundaries if fit_end <= _midpoint) + (
 )
 assert _cut not in {fit_end for fit_end, _ in _boundaries}, "the cut landed on a refit boundary"
 _full = next(values for symbol, values, _ in walked if symbol == _check_symbol)
-_, _short, _ = garch_walk((_check_symbol, _check_returns[:_cut], _check_freeze))
+_, _short, _ = garch_walk(
+    (_check_symbol, _check_returns[:_cut], _check_sessions[:_cut], _check_freeze)
+)
 np.testing.assert_allclose(_short, _full[:_cut], rtol=1e-12, equal_nan=True)
 print(
     f"{_check_symbol}: deleting the {len(_check_returns) - _cut:,} sessions after "

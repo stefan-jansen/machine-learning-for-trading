@@ -87,7 +87,11 @@ from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_ser
 
 from case_studies.sp500_options._underlying_returns import reconcile_underlying_log_returns
 from case_studies.utils.artifact_digest import read_digest, value_digest, write_artifact
-from case_studies.utils.temporal import refit_boundaries, walk_forward_feature
+from case_studies.utils.temporal import (
+    garch11_conditional_volatility,
+    refit_boundaries,
+    walk_forward_feature,
+)
 from data import load_sp500_daily_bars, load_sp500_options_straddles
 from utils.artifact_specs import resolve_label_buffer_unit
 from utils.cv_splits import generate_cv_splits, load_evaluation_config
@@ -493,52 +497,13 @@ print(
 # replaces them. A segment is fitted once every twenty-one sessions on everything it has by then,
 # never on a window that reaches past the sessions the fit will speak for.
 #
-# The recursion is written out below rather than taken from the fitting library, and the reason is
-# worth stating because it is the kind of leak a code review does not catch. Handing a fitted result
-# back to `arch` and asking it to filter a longer series makes it recompute the bounds it clips the
-# variance path to, and it computes them from the residuals of the series it was handed - which now
-# includes the later dates. The clipping envelope would then depend on the future. Everything
-# the recursion below needs - the scale, the value it starts from, the clipping bounds - is derived
-# from the training returns alone and passed in.
-
-
-# %%
-def causal_gjr_garch_filter(
-    ret_series: pd.Series,
-    params: pd.Series,
-    scale: float,
-    backcast: float,
-    variance_bounds: tuple[float, float],
-) -> pd.Series:
-    """Apply a training-derived fixed GJR-GARCH recursion using only prior returns."""
-    if ret_series.empty:
-        return pd.Series(dtype=float, index=ret_series.index)
-
-    mu = float(params.get("mu", params.get("Const", 0.0)))
-    omega = float(params["omega"])
-    alpha = float(params["alpha[1]"])
-    gamma = float(params["gamma[1]"])
-    beta = float(params["beta[1]"])
-    lower_bound, upper_bound = variance_bounds
-
-    scaled_residuals = ret_series.to_numpy(dtype=float) * scale - mu
-    conditional_variance = np.empty(len(scaled_residuals), dtype=float)
-    initial_variance = omega + (alpha + 0.5 * gamma + beta) * backcast
-    conditional_variance[0] = np.clip(initial_variance, lower_bound, upper_bound)
-
-    for t in range(1, len(scaled_residuals)):
-        previous_residual = scaled_residuals[t - 1]
-        innovation = previous_residual**2
-        next_variance = (
-            omega
-            + alpha * innovation
-            + gamma * innovation * (previous_residual < 0)
-            + beta * conditional_variance[t - 1]
-        )
-        conditional_variance[t] = np.clip(next_variance, lower_bound, upper_bound)
-
-    conditional_volatility = np.sqrt(conditional_variance) / scale
-    return pd.Series(conditional_volatility, index=ret_series.index)
+# The recursion is run by `garch11_conditional_volatility` rather than by the fitting library, and
+# the reason is worth stating because it is the kind of leak a code review does not catch. Handing
+# a fitted result back to `arch` and asking it to filter a longer series makes it recompute the
+# bounds it clips the variance path to, and it computes them from the residuals of the series it
+# was handed - which now includes the later dates. The clipping envelope would then depend on the
+# future. Everything the recursion needs - the scale, the value it starts from, the clipping
+# bounds - is derived from the training returns alone and passed in.
 
 
 # %% [markdown]
@@ -708,24 +673,39 @@ def garch_walk_segment(
         )
         diagnostics.append(record)
         return {
-            "params": result.params,
+            "mu": float(result.params.get("mu", result.params.get("Const", 0.0))),
+            "omega": float(result.params["omega"]),
+            "alpha": float(result.params["alpha[1]"]),
+            "gamma": float(result.params["gamma[1]"]),
+            "beta": float(result.params["beta[1]"]),
             "scale": fit_scale,
             "backcast": backcast,
             "bounds": static_bounds,
         }
 
     def apply(model: dict, prefix: np.ndarray) -> np.ndarray:
-        filtered = causal_gjr_garch_filter(
-            pd.Series(prefix[:, 0], index=ret_series.index[: len(prefix)]),
-            model["params"],
-            model["scale"],
-            model["backcast"],
-            model["bounds"],
+        # `arch` estimates on returns it has scaled, so mu, omega and the bounds are all in the
+        # scaled units and the recursion has to run there too. Dividing by the same factor
+        # returns the volatility to percent, and the annualization follows.
+        scale = model["scale"]
+        sigma = (
+            garch11_conditional_volatility(
+                prefix[:, 0] * scale,
+                mu=model["mu"],
+                omega=model["omega"],
+                alpha=model["alpha"],
+                gamma=model["gamma"],
+                beta=model["beta"],
+                backcast=model["backcast"],
+                bounds=model["bounds"],
+            )
+            / scale
         )
-        return (filtered.to_numpy() / 100 * np.sqrt(PERIODS_PER_YEAR)).reshape(-1, 1)
+        return (sigma / 100 * np.sqrt(PERIODS_PER_YEAR)).reshape(-1, 1)
 
     values = walk_forward_feature(
         observations,
+        timestamps=ret_series.index.to_numpy(),
         burnin=burnin,
         refit_every=refit_every,
         fit=fit,

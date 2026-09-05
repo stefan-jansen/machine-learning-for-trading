@@ -818,9 +818,11 @@ def kalman_apply(fitted: dict, prefix: np.ndarray) -> np.ndarray:
 
 
 # %% tags=[]
-def _kalman_one_symbol(payload: tuple[str, np.ndarray, int]) -> tuple[str, np.ndarray, list[dict]]:
+def _kalman_one_symbol(
+    payload: tuple[str, np.ndarray, np.ndarray, int],
+) -> tuple[str, np.ndarray, list[dict]]:
     """Walk one pair. Returns its feature block and the parameters behind each estimate."""
-    symbol, log_prices, frozen_at = payload
+    symbol, log_prices, sessions, frozen_at = payload
     estimates: list[dict] = []
 
     def fit(train: np.ndarray) -> dict:
@@ -838,6 +840,7 @@ def _kalman_one_symbol(payload: tuple[str, np.ndarray, int]) -> tuple[str, np.nd
 
     values = walk_forward_feature(
         log_prices.reshape(-1, 1),
+        timestamps=sessions,
         burnin=KALMAN_BURNIN,
         refit_every=KALMAN_REFIT_EVERY,
         fit=fit,
@@ -859,6 +862,7 @@ for symbol in SYMBOLS:
         (
             symbol,
             np.log(sym_data["close"].to_numpy()),
+            sym_data["timestamp"].to_numpy(),
             sum(d < HOLDOUT_START for d in sym_dates),
         )
     )
@@ -1259,6 +1263,7 @@ def _hmm_recording_fit(train: np.ndarray) -> tuple:
 
 hmm_values = walk_forward_feature(
     usd_arr,
+    timestamps=full_usd["timestamp"],
     burnin=HMM_BURNIN,
     refit_every=HMM_REFIT_EVERY,
     fit=_hmm_recording_fit,
@@ -1439,6 +1444,7 @@ for symbol in SYMBOLS:
     try:
         values = walk_forward_feature(
             sym_rets.reshape(-1, 1),
+            timestamps=np.asarray(ret_dates),
             burnin=ARIMA_BURNIN,
             refit_every=ARIMA_REFIT_EVERY,
             fit=arima_fit,
