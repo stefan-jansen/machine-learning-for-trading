@@ -51,7 +51,9 @@
 # %% [markdown]
 # ## The Mean-Variance Framework
 #
-# MPT solves for the optimal portfolio weights to minimize volatility for a given expected return, or maximize returns for a given level of volatility. The key requisite inputs are expected asset returns, standard deviations, and the covariance matrix.
+# **Modern portfolio theory** solves for the weights that minimize volatility at a given expected
+# return, or equivalently maximize expected return at a given volatility. It needs three inputs: an
+# expected return for each asset, each asset's volatility, and the covariance between every pair.
 #
 # Diversification works because the variance of portfolio returns depends on the covariance of the assets and can be reduced below the weighted average of the asset variances by including assets with less than perfect correlation. Given a vector, $\omega$, of portfolio weights and the covariance matrix, $\Sigma$, the portfolio variance, $\sigma_{\text{PF}}^2$ is:
 #
@@ -118,8 +120,11 @@ ML4T_SEQUENTIAL = [COLORS["silver_muted"], COLORS["slate"], COLORS["blue"]]
 # %% [markdown]
 # ## Load Data
 #
-# We'll work with diversified ETFs from the canonical dataset to demonstrate MVO.
-# ETFs are commonly used as building blocks in portfolio construction.
+# Exchange-traded funds are the natural universe for this: each one already holds a diversified
+# basket, so a portfolio over thirty of them is an asset-allocation decision rather than a
+# stock-picking one, and the estimation problem the notebook is about shows up in its cleanest
+# form. The panel below spans equities by region and by sector, government and corporate credit at
+# several maturities, and real assets.
 
 # %%
 START = "2015-01-01"
@@ -210,11 +215,6 @@ print(f"Selected ETFs: {selected_symbols[:5]}...")
 print(f"Scenario hurdle: {RISK_FREE_RATE:.1%} a year")
 
 # %% [markdown]
-# The risk-free rate affects tangency-portfolio rankings more than minimum-variance
-# allocations. When short rates move materially, max-Sharpe portfolios can change
-# even if the covariance matrix stays the same.
-
-# %% [markdown]
 # ## Compute Returns & Covariance
 
 # %%
@@ -278,7 +278,7 @@ geometry_cov = geometry_daily_cov * periods_per_year
 print(f"Covariance matrix shape: {geometry_cov.shape}")
 
 # %% [markdown]
-# ### Correlation Analysis with Interactive Heatmap
+# ### How much independent movement is there to diversify across?
 
 # %%
 # Compute correlation matrix
@@ -341,8 +341,9 @@ print(f"Correlation stats: Mean={lower_tri.mean():.3f}, Std={lower_tri.std():.3f
 # divides by that near-zero number, and the optimizer takes enormous positions along it.
 #
 # What makes the number large is not the assets being risky, it is them being *redundant*: two
-# funds that move together leave a direction with almost no independent variation, and a nineteen-
-# asset universe of ETFs has many such pairs. The eigenvalue spectrum below is where to see it.
+# funds that move together leave a direction with almost no independent variation. This universe
+# holds nine US sector funds alongside the broad-market funds that contain those same sectors, so
+# it has many such pairs by construction. The eigenvalue spectrum below is where to see it.
 
 # %%
 condition_number = np.linalg.cond(geometry_cov)
@@ -429,7 +430,7 @@ simulated, sim_weights = simulate_portfolios(
 simulated.describe()
 
 # %% [markdown]
-# ### Interactive Markowitz Bullet
+# ### The feasible region, and where the extremes of it sit
 
 # %%
 # Convert to pandas for plotly express
@@ -510,7 +511,7 @@ def portfolio_return(weights: np.ndarray, returns: np.ndarray) -> float:
 
 
 # %% [markdown]
-# #### Portfolio Volatility Function
+# The volatility of a weighted combination, which is where the covariance enters.
 
 
 # %%
@@ -520,7 +521,7 @@ def portfolio_volatility(weights: np.ndarray, cov: np.ndarray) -> float:
 
 
 # %% [markdown]
-# #### Sharpe Ratio Function
+# Excess return per unit of volatility, at the hurdle set above.
 
 
 # %%
@@ -532,7 +533,8 @@ def portfolio_sharpe(weights: np.ndarray, returns: np.ndarray, cov: np.ndarray, 
 
 
 # %% [markdown]
-# #### Optimization Objective (Negative Sharpe)
+# `scipy.optimize.minimize` only minimizes, so maximizing the Sharpe ratio means minimizing
+# its negative.
 
 
 # %%
@@ -833,17 +835,16 @@ frontier = compute_efficient_frontier(
 frontier.head()
 
 # %% [markdown]
-# ### Plot: Efficient Frontier with All Portfolios
+# ### The frontier, the cloud it bounds, and the five portfolios against it
 #
-# We build the figure incrementally so each visual layer is easy to reason
-# about: first the random-portfolio cloud, then the efficient frontier curve,
-# then the named portfolio markers, and finally the layout.
+# One chart carries three things: the cloud of random long-only portfolios, the curve that
+# bounds it from above, and the five named solutions. What to look for is where each named
+# portfolio sits relative to the curve - a point on it is optimal for its own risk level under
+# these estimates, and a point inside it is not.
 
 # %% [markdown]
-# #### Layer A: Simulated-Portfolio Cloud
-#
-# A subsample of the Dirichlet-generated portfolios provides a visual sanity
-# check on the feasible region (the "Markowitz bullet").
+# Five thousand of the random portfolios are drawn rather than all of them; the shape of the
+# region is visible well before the point count is.
 
 # %%
 fig = go.Figure()
@@ -865,9 +866,8 @@ _ = fig.add_scatter(
 )
 
 # %% [markdown]
-# #### Layer B: Efficient Frontier Line
-#
-# Overlay the optimized frontier, the upper boundary of the feasible region.
+# The frontier is the upper edge of that region: for each level of volatility, the highest
+# return any long-only combination of these assets achieved under these estimates.
 
 # %%
 # Efficient frontier
@@ -880,10 +880,12 @@ _ = fig.add_scatter(
 )
 
 # %% [markdown]
-# #### Layer C: Named Portfolio Markers
-#
-# Add the headline portfolios (Max Sharpe, Min Volatility, Equal Weight,
-# Inverse Vol, ERC) so we can locate them relative to the frontier.
+# The three heuristics estimate less than the two optimized solutions, and none of them targets
+# mean-variance efficiency, so nothing about their construction places them on the frontier. That
+# is weaker than saying they cannot reach it: under estimates where the assets look alike - equal
+# expected returns and a covariance proportional to the identity - equal weight, inverse volatility
+# and equal risk contribution all coincide with minimum variance and sit on it exactly. What the
+# distance below shows is what these estimates imply here, not a property that holds everywhere.
 
 # %%
 # Portfolio markers
@@ -913,9 +915,7 @@ for name, weights in geometry_portfolios.items():
         name=name,
     )
 
-# %% [markdown]
-# #### Layer D: Layout and Render
-
+# %%
 # %%
 fig.update_layout(
     title="In-sample optimization concentrates at the frontier extremes",
@@ -996,9 +996,10 @@ for name, weights in geometry_portfolios.items():
     print(f"{name:15s}: {n_pos:2d} positions, max weight: {top_weight:.1%}")
 
 # %% [markdown]
-# **Interpretation**: This is where the Markowitz curse becomes concrete. The max-Sharpe
-# solution often wins in-sample by concentrating hard in a few names, while inverse-vol
-# and equal-weight keep diversification by construction.
+# **Interpretation**: This is where the Markowitz curse becomes concrete. The max-Sharpe solution
+# reaches its in-sample Sharpe ratio by concentrating into a few names, because the expected-return
+# vector it maximizes against says those names are where the return is. Inverse volatility and
+# equal weight hold everything by construction: neither has a return estimate to concentrate on.
 
 # %%
 geometry_max_order = np.argsort(geometry_max_sharpe_weights)[::-1]
@@ -1100,7 +1101,7 @@ for i, name in enumerate(test_portfolios):
     )
 
 fig.update_layout(
-    title=(f"Frozen max-Sharpe weights lead the {int(TRAIN_END[:4]) + 1}-{END[:4]} test"),
+    title="Frozen weights diverge once the estimation window ends",
     xaxis_title="Date",
     yaxis_title="Cumulative Return (Growth of $1)",
     height=500,
@@ -1115,7 +1116,7 @@ fig.update_layout(
 fig.show()
 
 # %% [markdown]
-# ### Portfolio Analysis with ml4t-diagnostic
+# ### The frozen max-Sharpe portfolio, in detail
 
 # %%
 # Analyze Max Sharpe portfolio in detail
@@ -1133,7 +1134,7 @@ metrics = analysis.compute_summary_stats()
 print(metrics.summary())
 
 # %% [markdown]
-# ### Factor Decomposition with `ml4t-diagnostic`
+# ### What the test-period returns co-moved with
 #
 # `PortfolioAnalysis` reports the standard summary statistics for this
 # test portfolio. `FactorAnalysis` from the same library answers a different
@@ -1237,7 +1238,7 @@ comparison_df
 #   inverting standalone volatility, the two strategies produce different weights and metrics.
 
 # %% [markdown]
-# ### Execution-Aware Bridge with ml4t-backtest
+# ### Separating what timing costs from what trading costs
 #
 # The vectorized path rebalances to the frozen max-Sharpe target every day at
 # close-to-close returns. The two engine paths use the same daily target schedule with
@@ -1461,7 +1462,7 @@ fig.show()
 # into a small number of deep and persistent drawdowns.
 
 # %% [markdown]
-# ### Portfolio Metrics Visualization
+# ### Where each strategy landed on the test window
 
 # %%
 # Risk-return scatter colored by Sharpe ratio
@@ -1499,6 +1500,29 @@ fig.update_layout(
     margin=dict(l=90, r=100, t=90),
 )
 fig.show()
+
+# %% [markdown] tags=["results"]
+# ### What this run produced
+#
+# Two tables carry the result. The full-sample one after the frontier is geometry: it says where
+# each of the five portfolios sits under estimates drawn from every observation, and none of it is
+# evidence about anything. The comparison table after the train/test split is the measurement -
+# five sets of weights fixed on data through the training cut-off and scored on the years after it,
+# with no allocator chosen from the test result.
+#
+# Read the two as separate analyses, not as two measurements of one portfolio. They do not share a
+# set of weights: the frontier's portfolios are estimated on every observation, and the test table's
+# are fixed at the training cut-off, so differencing them compares one allocation with another
+# rather than showing what a single frozen allocation lost out of sample. Estimation error for a
+# frozen portfolio is the gap between what the training estimates predicted for the training-derived
+# weights and what those same weights went on to realize - a comparison neither table makes here.
+# The position counts printed above describe the full-sample portfolios for the same reason, so they
+# characterize how concentrated each method is under these estimates and do not establish what
+# caused the test result: the optimizer holds a handful of the thirty funds, and the three
+# heuristics that estimate no expected returns hold all of them.
+#
+# The execution bridge is a separate reading. Its three rows differ only in what they model, so the
+# vectorized-to-zero-cost gap is timing and the zero-cost-to-cost-aware gap is fees.
 
 # %% [markdown]
 # ## Key takeaways

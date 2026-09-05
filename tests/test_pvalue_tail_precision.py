@@ -65,7 +65,6 @@ PENDING = {
     "07_defining_the_learning_task/07_multiple_testing.py": 1,
     "09_model_based_features/02_structural_breaks.py": 2,
     "15_causal_estimation/09_adia_causal_benchmark.py": 1,
-    "17_portfolio_construction/05_factor_allocation_evidence.py": 1,
 }
 
 # The ceiling on the whole backlog, and the thing that makes "only shrinks" a
@@ -79,7 +78,7 @@ PENDING = {
 # than argued about - the two rows moved and the total did not.
 #
 # Lower it whenever a fix lands. Never raise it.
-PENDING_CEILING = 7
+PENDING_CEILING = 6
 
 
 def _is_cdf_call(node: ast.AST) -> bool:
