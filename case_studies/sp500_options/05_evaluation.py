@@ -407,8 +407,20 @@ primary_selection_df = keep_outcomes_resolved_before_holdout(primary_label_df, H
 #
 # The join is declared one-to-one in both directions, so a duplicated key raises here
 # rather than quietly multiplying a name's contribution to every statistic that follows.
-# Being an inner join, it also drops any feature row for which no out-of-sample model
-# output exists, which is what confines the frame to the validation periods.
+# Being an inner join, it also drops any feature row for which no model output exists,
+# which is what confines the frame to the validation periods.
+#
+# A row inside a validation period can now carry a null model-based value, and it is worth
+# being precise about why. `04_model_based_features` fits on a refit schedule, so a name has
+# no fitted volatility until its own burn-in has passed - and on this panel a name is only
+# quoted while a straddle near the target maturity exists, so many names are short and reach
+# that point late or never. Under the per-fold design the column was never null, because each
+# fold fitted on its whole training window and then emitted backwards across it: completeness
+# there was a symptom of the leak, not evidence against one.
+#
+# Those rows are dropped rather than kept, and counted rather than dropped quietly. Keeping
+# them would score the stage-03 features on rows where the model-based ones cannot be
+# evaluated, and this section exists to compare the two on the same rows.
 
 # %%
 financial_cols = [c for c in features.columns if c not in META_COLS]
@@ -422,11 +434,19 @@ eval_panel = eval_panel.join(
     validate="1:1",
 )
 
-null_temporal = eval_panel.select(
-    pl.any_horizontal([pl.col(col).is_null() for col in temporal_cols]).sum()
-).item()
-if null_temporal:
-    raise ValueError(f"Evaluation panel has {null_temporal} rows with null temporal features")
+_before_burnin_drop = eval_panel.height
+eval_panel = eval_panel.filter(~pl.any_horizontal([pl.col(col).is_null() for col in temporal_cols]))
+_dropped = _before_burnin_drop - eval_panel.height
+print(
+    f"Rows dropped for carrying no model-based value: {_dropped:,} of "
+    f"{_before_burnin_drop:,} ({_dropped / _before_burnin_drop:.1%})"
+)
+if eval_panel.is_empty():
+    raise ValueError(
+        "No validation row carries a model-based value. Either the burn-in in "
+        "`setup.yaml::model_based` exceeds every segment's history, or "
+        "`04_model_based_features` did not write the columns this section screens."
+    )
 
 # The holdout boundary, asserted on the frame rather than trusted from the filter that
 # produced it: the day each straddle expires must fall before the holdout begins.

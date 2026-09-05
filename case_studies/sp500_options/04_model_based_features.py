@@ -1691,7 +1691,17 @@ temporal = (
         (pl.col("iv_atm") - pl.col("sv_vol")).alias("sv_vrp"),
     )
     .drop(["iv_atm", "sec_id"])
+    # Bounded at the holdout's last session. The walk runs over each segment's whole return
+    # history, which the underlying bar panel carries past the end of the evaluation window;
+    # the fold-keyed design was bounded by the fold windows and so never had to say this.
+    # Rows past the holdout describe sessions no stage of this case study evaluates, and a
+    # feature artifact wider than the period it is read over is a difference every consumer
+    # has to reconcile for itself.
+    .filter(pl.col("timestamp") <= pl.lit(date.fromisoformat(holdout_end)))
     .sort(["timestamp", "symbol"])
+)
+assert temporal["timestamp"].max() <= date.fromisoformat(holdout_end), (
+    "the artifact reaches past the last session the holdout covers"
 )
 
 # %% [markdown]

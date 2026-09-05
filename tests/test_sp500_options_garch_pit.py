@@ -11,6 +11,7 @@ import pandas as pd
 import polars as pl
 import pytest
 import yaml
+from arch import arch_model
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
 
 from case_studies.sp500_options._underlying_returns import reconcile_underlying_log_returns
@@ -840,3 +841,91 @@ def test_a_later_starting_segment_refits_on_its_own_observations() -> None:
     # Every mark is a session the segment actually has.
     assert set(marks[0]).issubset(set(early.index))
     assert set(marks[1]).issubset(set(late.index))
+
+
+def _garch_series(n: int = 1300, seed: int = 11) -> np.ndarray:
+    """A GARCH(1,1) path, so the variance clusters the way the bounds respond to."""
+    rng = np.random.default_rng(seed)
+    h = np.empty(n)
+    e = np.zeros(n)
+    h[0] = 1.0
+    for t in range(1, n):
+        h[t] = 0.05 + 0.10 * e[t - 1] ** 2 + 0.85 * h[t - 1]
+        e[t] = rng.standard_normal() * np.sqrt(h[t])
+    return e[1:]
+
+
+def test_the_filter_is_prefix_stable_where_handing_the_fit_back_to_arch_is_not() -> None:
+    """The emission is a function of the past alone, at any prefix length.
+
+    This is what the notebook's hand-written recursion exists for, and it needs a negative
+    control because the obvious alternative looks correct and is not.
+    `arch_model(prefix).fix(params)` freezes the parameters but NOT the initialization: the
+    residual scale, the backcast seeding sigma^2_0 and the variance bounds are all re-derived
+    from whatever sample it is handed, so an emitted value moves when later observations
+    arrive. `causal_gjr_garch_filter` takes all three from the training window and is handed
+    them, which is what makes it stable.
+
+    **The extension has to be large, which is why this is not a walk-level test.** Measured
+    here: `.fix()` moves by 9.0e-04 relative over a 600-observation extension and by 1.7e-16 -
+    floating-point noise - over a 5-observation one. `walk_forward_feature` extends a block by
+    at most `refit_every`, 21 sessions here, so a truncation check run at the walk level
+    cannot see this whatever series it uses. Measured on real UNH returns at 1.9e-03 over 258
+    observations, which matches the 0.19% reported for SPY. The property belongs to the filter,
+    so it is tested on the filter.
+    """
+    returns = _garch_series()
+    short, full = 700, len(returns)
+    fitted = arch_model(
+        returns[:short],
+        mean="Constant",
+        vol="GARCH",
+        p=1,
+        o=1,
+        q=1,
+        dist="Normal",
+        rescale=False,
+    ).fit(disp="off", show_warning=False)
+
+    def through_arch(k: int) -> np.ndarray:
+        return np.asarray(
+            arch_model(
+                returns[:k],
+                mean="Constant",
+                vol="GARCH",
+                p=1,
+                o=1,
+                q=1,
+                dist="Normal",
+                rescale=False,
+            )
+            .fix(fitted.params.to_numpy())
+            .conditional_volatility,
+            dtype=float,
+        )
+
+    # The negative control runs first. Without it the assertion below could pass on a series
+    # or an extension where nothing could have moved anyway, which is how a prefix-stability
+    # check ends up decorative.
+    arch_short, arch_full = through_arch(short), through_arch(full)
+    arch_drift = np.abs(arch_short - arch_full[:short]) / np.abs(arch_short)
+    assert arch_drift.max() > 1e-5, (
+        "handing the fit back to arch produced a prefix-stable series, so this series and "
+        "this extension cannot demonstrate the defect and the assertion below proves nothing"
+    )
+
+    namespace = _load_garch_walk({"arch_model": arch_model})
+    scale, backcast, bounds = namespace["training_garch_filter_state"](
+        fitted, pd.Series(returns[:short])
+    )
+
+    def through_notebook(k: int) -> np.ndarray:
+        return namespace["causal_gjr_garch_filter"](
+            pd.Series(returns[:k]), fitted.params, scale, backcast, bounds
+        ).to_numpy()
+
+    np.testing.assert_array_equal(
+        through_notebook(short),
+        through_notebook(full)[:short],
+        err_msg="an emitted value moved when later returns arrived",
+    )
