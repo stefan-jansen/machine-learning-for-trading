@@ -280,6 +280,7 @@ case_studies/etfs/06_linear:
     POPULATION_NAME: smoke-linear
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 20
 
 case_studies/etfs/07_gbm:
   parameters:
@@ -288,6 +289,7 @@ case_studies/etfs/07_gbm:
     POPULATION_NAME: smoke-gbm
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 60
 
 case_studies/etfs/08_tabular_dl:
   parameters:
@@ -296,6 +298,7 @@ case_studies/etfs/08_tabular_dl:
     POPULATION_NAME: smoke-tabm
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_epochs: 2}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 19
 
 case_studies/etfs/09_dl_lstm:
   parameters:
@@ -304,6 +307,7 @@ case_studies/etfs/09_dl_lstm:
     POPULATION_NAME: smoke-lstm
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, max_train_sequences: 2000}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 26
 
 case_studies/etfs/10_dl_tsmixer:
   parameters:
@@ -316,60 +320,19 @@ case_studies/etfs/10_dl_tsmixer:
     # the model. Keeping this above the temporal-coverage floor is what stops that recurring.
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, max_train_sequences: 2000}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 29
 
-case_studies/etfs/10a_dl_nlinear:
-  parameters:
-    EXECUTION_TIER: preview
-    LABELS: ["fwd_ret_21d"]
-    POPULATION_NAME: smoke-nlinear
-    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, max_train_sequences: 2000}
-  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
 
 case_studies/etfs/11_latent_factors:
   parameters:
     EXECUTION_TIER: preview
   writes: []
+  measured_s: 6
 
-case_studies/etfs/11a_pca:
-  parameters:
-    EXECUTION_TIER: preview
-    LABELS: ["fwd_ret_21d"]
-    POPULATION_NAME: smoke-pca
-    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_factors: 2}
-  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
 
-case_studies/etfs/11b_ipca:
-  parameters:
-    EXECUTION_TIER: preview
-    LABELS: ["fwd_ret_21d"]
-    POPULATION_NAME: smoke-ipca
-    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_factors: 2, max_iter: 200}
-  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
 
-case_studies/etfs/11c_conditional_autoencoder:
-  parameters:
-    EXECUTION_TIER: preview
-    LABELS: ["fwd_ret_21d"]
-    POPULATION_NAME: smoke-cae
-    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_factors: 2, n_epochs: 2}
-  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
 
-case_studies/etfs/11d_stochastic_discount_factor:
-  parameters:
-    EXECUTION_TIER: preview
-    LABELS: ["fwd_ret_21d"]
-    POPULATION_NAME: smoke-sdf
-    PREVIEW_REDUCTIONS:
-      {folds: [0], max_symbols: 5, n_epochs_cond: 1, n_epochs_moment: 1, n_epochs_unc: 1}
-  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
 
-case_studies/etfs/11e_supervised_autoencoder:
-  parameters:
-    EXECUTION_TIER: preview
-    LABELS: ["fwd_ret_21d"]
-    POPULATION_NAME: smoke-sae
-    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_epochs: 2}
-  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
 
 case_studies/etfs/12_causal_dml:
   parameters:
@@ -380,44 +343,12 @@ case_studies/etfs/12_causal_dml:
     MAX_SAMPLES: 20000
     N_PLACEBO: 12
   writes: [causal_runs]
+  measured_s: 15
 
-case_studies/etfs/13_model_analysis:
-  parameters:
-    EXECUTION_TIER: preview
-  writes: []
 
-case_studies/etfs/14_backtest:
-  parameters:
-    EXECUTION_TIER: preview
-    LABEL: fwd_ret_21d
-    MAX_SYMBOLS: 8
-    TOP_N_PREDICTIONS: 3
-  writes: [backtest_runs, backtest_metrics, backtest_fold_metrics]
 
-case_studies/etfs/15_portfolio_management:
-  parameters:
-    EXECUTION_TIER: preview
-    LABEL: fwd_ret_21d
-    MAX_SYMBOLS: 8
-    TOP_N_PREDICTIONS: 3
-  writes: [backtest_runs, backtest_metrics, candidate_sets, candidate_set_members]
 
-case_studies/etfs/16_risk_management:
-  parameters:
-    EXECUTION_TIER: preview
-    LABEL: fwd_ret_21d
-    MAX_SYMBOLS: 8
-    MAX_RISK_VARIANTS: 2
-    TOP_N_COMBOS: 3
-  writes: [backtest_runs, backtest_metrics]
 
-case_studies/etfs/17_costs:
-  parameters:
-    EXECUTION_TIER: preview
-    LABEL: fwd_ret_21d
-    MAX_SYMBOLS: 8
-    TOP_N_COMBOS: 3
-  writes: [backtest_runs, backtest_metrics]
 
 case_studies/etfs/18_holdout_predictions:
   exempt: true
@@ -432,14 +363,6 @@ case_studies/etfs/19_holdout_backtest:
     Reads the holdout prediction set 18_holdout_predictions produces, which cannot exist in a
     preview workspace for the reason recorded on that entry.
 
-case_studies/etfs/20_strategy_analysis:
-  parameters:
-    EXECUTION_TIER: preview
-  # MAX_SYMBOLS is declared in this notebook's parameters cell and nothing below it reads the
-  # value, so passing one would be a reduction that does not reduce. Declaring it here would
-  # make the smoke run report a cap it never applied. The dead parameter is the notebook's to
-  # fix; the smoke configuration is not the place to paper over it.
-  writes: []
 
 # --- fx_pairs ---------------------------------------------------------------------------------
 #
@@ -455,6 +378,8 @@ case_studies/fx_pairs/06_linear:
     POPULATION_NAME: smoke-linear
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 22
+
 
 case_studies/fx_pairs/07_gbm:
   parameters:
@@ -463,6 +388,7 @@ case_studies/fx_pairs/07_gbm:
     POPULATION_NAME: smoke-gbm
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 18
 
 case_studies/fx_pairs/08_tabular_dl:
   parameters:
@@ -473,6 +399,7 @@ case_studies/fx_pairs/08_tabular_dl:
     N_EPOCHS: 2
     POPULATION_NAME: smoke-tabm
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 16
 
 case_studies/fx_pairs/09_dl_tcn:
   parameters:
@@ -483,6 +410,7 @@ case_studies/fx_pairs/09_dl_tcn:
     N_EPOCHS: 2
     POPULATION_NAME: smoke-tcn
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 14
 
 case_studies/fx_pairs/10_dl_nlinear:
   parameters:
@@ -493,6 +421,7 @@ case_studies/fx_pairs/10_dl_nlinear:
     N_EPOCHS: 2
     POPULATION_NAME: smoke-nlinear
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 14
 
 case_studies/fx_pairs/10a_dl_lstm:
   parameters:
@@ -503,21 +432,14 @@ case_studies/fx_pairs/10a_dl_lstm:
     N_EPOCHS: 2
     POPULATION_NAME: smoke-lstm
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 14
 
-case_studies/fx_pairs/11_causal_dml:
-  parameters:
-    EXECUTION_TIER: preview
-    PRIMARY_LABEL: fwd_ret_1d
-    MAX_SYMBOLS: 12
-    CV_FOLDS: 2
-    MAX_SAMPLES: 20000
-    N_PLACEBO: 12
-  writes: [causal_runs]
 
 case_studies/fx_pairs/12_model_analysis:
   parameters:
     EXECUTION_TIER: preview
   writes: []
+  measured_s: 35
 
 case_studies/fx_pairs/13_backtest:
   parameters:
@@ -526,6 +448,7 @@ case_studies/fx_pairs/13_backtest:
     TOP_N_PREDICTIONS: 3
     POPULATION_NAME: smoke-signal
   writes: [backtest_runs, backtest_metrics, backtest_fold_metrics]
+  measured_s: 37
 
 case_studies/fx_pairs/14_portfolio_management:
   parameters:
@@ -535,6 +458,7 @@ case_studies/fx_pairs/14_portfolio_management:
     TOP_N_PREDICTIONS: 3
     POPULATION_NAME: smoke-allocation
   writes: [backtest_runs, backtest_metrics, candidate_sets, candidate_set_members]
+  measured_s: 78
 
 case_studies/fx_pairs/15_risk_management:
   parameters:
@@ -544,6 +468,7 @@ case_studies/fx_pairs/15_risk_management:
     MAX_RISK_VARIANTS: 2
     POPULATION_NAME: smoke-risk
   writes: [backtest_runs, backtest_metrics]
+  measured_s: 40
 
 case_studies/fx_pairs/16_costs:
   parameters:
@@ -553,6 +478,7 @@ case_studies/fx_pairs/16_costs:
     MAX_COST_POINTS: 2
     POPULATION_NAME: smoke-costs
   writes: [backtest_runs, backtest_metrics]
+  measured_s: 42
 
 case_studies/fx_pairs/17_holdout_predictions:
   exempt: true
@@ -566,8 +492,3 @@ case_studies/fx_pairs/18_holdout_backtest:
   exempt_reason: >-
     Reads the holdout prediction set 17_holdout_predictions produces, which cannot exist in a
     preview workspace for the reason recorded on that entry.
-
-case_studies/fx_pairs/19_strategy_analysis:
-  parameters:
-    EXECUTION_TIER: preview
-  writes: []
