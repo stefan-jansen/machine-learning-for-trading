@@ -227,12 +227,12 @@ print(f"Benchmark: {BENCHMARK_SYMBOL}, {len(spy_returns):,} days")
 # $\Delta/\sigma$ - and that is *larger* for the series with the smaller volatility. The steadier
 # of the two loses more of its ratio, which is what can reorder them: a low-volatility series
 # ranked first at $r_f = 0$ can fall behind a more volatile one once a realistic cash rate is
-# subtracted from both. Sortino is not invariant either, but not for this reason: the rate enters
-# its denominator as well, because downside deviation is measured on returns *after* the rate is
-# subtracted (`periodic_sortino_ratio`). Raising the rate pushes more observations below the
-# threshold and pushes those already below it further down, so the numerator shrinks while the
-# denominator grows and the fall is steeper than any single division would give. What a common
-# rate does leave alone is the information ratio, which is computed on
+# subtracted from both. Sortino is not invariant either, and its sensitivity is not even a division:
+# `periodic_sortino_ratio` measures downside deviation on returns *after* subtracting the rate, so
+# raising the rate moves the numerator and the denominator at once. Which way the ratio goes then
+# depends on the sign of the mean excess return, so there is no single rule to quote here - if the
+# rate matters to a comparison, set it and recompute rather than reasoning about the shift. What a
+# common rate does leave alone is the information ratio, which is computed on
 # active returns - the difference between the two series, from which any rate applied to both
 # cancels before the ratio is taken.
 #
