@@ -1464,8 +1464,23 @@ case_studies/crypto_perps_funding/11_causal_dml:
 case_studies/crypto_perps_funding/12_model_analysis:
   timeout: 300
 case_studies/crypto_perps_funding/13_backtest:
+  # Same shape as 14 below, one level up: it selects complete preview validation
+  # predictions, and only the model notebooks put those in this workspace. 06_linear is
+  # named because it registers all four declared labels on its own, so it is the minimum
+  # that satisfies the selection rather than an arbitrary pick from the family.
+  requires_stage: 06_linear
   timeout: 600
 case_studies/crypto_perps_funding/14_portfolio_management:
+  # Its inputs are the preview-tier signal backtests 13_backtest registers into this
+  # workspace. The seeded registry holds no preview rows and tests/conftest.py records the
+  # measurement behind that: seeding the preview root put rows in the same coverage group
+  # as the predictions a preview run fits, which they cannot win, so 14_backtest refused to
+  # rank anything at all. Declaring the dependency is the alternative to that.
+  #
+  # A full in-order run satisfies it. `pytest -k 14_portfolio_management` on its own now
+  # skips naming 13_backtest, where it used to fail six cells in on "no preview signal
+  # backtests in this workspace".
+  requires_stage: 13_backtest
   parameters:
     # MAX_SYMBOLS was the pre-migration knob and this notebook no longer reads it - the
     # cross-section comes from the frozen candidate set 13_backtest published, not from a
