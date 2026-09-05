@@ -1164,6 +1164,14 @@ show_with_alt(
 # wrong in either direction. The model is fitted per perpetual, so the median across
 # symbols is drawn with the interquartile range behind it. For the regime model the
 # quantity is the expected run length of each state, in settlements.
+#
+# Each perpetual is refit on its own settlements, because its walk starts from its own
+# listing, so the refit dates do not line up across symbols. Taking the cross-section at
+# each date a fit happened would therefore compare a changing subset of perpetuals - and a
+# date where one symbol refit would show a median of one model and an interquartile range
+# of zero, which reads as agreement rather than as a group of one. Each symbol's most
+# recent estimate is carried forward onto a common timeline instead, so every point is the
+# cross-section of every perpetual that had a fitted model by then.
 
 # %%
 GARCH_COEFFICIENTS = ["alpha", "gamma", "beta"]
@@ -1171,8 +1179,20 @@ GARCH_COEFFICIENTS = ["alpha", "gamma", "beta"]
 coefficient_frame = pl.DataFrame(garch_coefficients).with_columns(
     (pl.col("alpha") + pl.col("beta") + pl.col("gamma") / 2).alias("persistence")
 )
+# The timeline is every date any perpetual refit on; the as-of join carries each symbol's
+# latest estimate forward to each of them, and a symbol with no fit yet stays absent rather
+# than being filled.
+_coefficient_timeline = coefficient_frame.select(pl.col("fit_end").unique().sort())
+_coefficient_aligned = pl.concat(
+    [
+        _coefficient_timeline.join_asof(
+            part.sort("fit_end"), on="fit_end", strategy="backward"
+        ).drop_nulls(subset=["persistence"])
+        for (_symbol,), part in coefficient_frame.group_by(["symbol"], maintain_order=True)
+    ]
+)
 coefficient_stability = (
-    coefficient_frame.group_by("fit_end")
+    _coefficient_aligned.group_by("fit_end")
     .agg(
         [
             expression
