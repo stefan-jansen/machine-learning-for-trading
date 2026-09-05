@@ -223,9 +223,12 @@ print(f"Benchmark: {BENCHMARK_SYMBOL}, {len(spy_returns):,} days")
 # which makes every Sharpe and Sortino below an excess-return-over-cash figure only to the extent
 # that cash paid nothing; over a window covering 2022-23 it did not, so these ratios are
 # marginally flattering. Applying the same rate to the benchmark does **not** leave the comparison
-# unchanged: the subtraction lands in the numerator and each ratio then divides by its own
-# volatility, so a rate rise shrinks the ratio of the more volatile series by more and can reorder
-# the two. What a common rate does leave alone is the information ratio, which is computed on
+# unchanged. Sharpe is $(\mu - r_f)/\sigma$, so raising the rate by $\Delta$ costs each series
+# $\Delta/\sigma$ - and that is *larger* for the series with the smaller volatility. The steadier
+# of the two loses more of its ratio, which is what can reorder them: a low-volatility series
+# ranked first at $r_f = 0$ can fall behind a more volatile one once a realistic cash rate is
+# subtracted from both. Sortino behaves the same way with downside deviation in place of
+# $\sigma$. What a common rate does leave alone is the information ratio, which is computed on
 # active returns - the difference between the two series, from which any rate applied to both
 # cancels before the ratio is taken.
 #
