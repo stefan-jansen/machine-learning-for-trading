@@ -5,29 +5,29 @@
   "periods_per_year": 252,
   "n_symbols_declared": 115,
   "n_symbols_in_universe": 113,
-  "sharpe": 2.137382,
-  "cagr": 0.490756,
-  "vol": 0.195917,
+  "sharpe": 1.956409,
+  "cagr": 0.432397,
+  "vol": 0.193347,
   "n_periods": 253,
   "ts_min": "2020-06-30",
   "ts_max": "2021-12-31",
   "by_period": {
     "overall": {
-      "sharpe": 1.795432,
-      "cagr": 0.356536,
-      "vol": 0.178838,
+      "sharpe": 1.663587,
+      "cagr": 0.321157,
+      "vol": 0.176905,
       "n_periods": 381
     },
     "validation": {
-      "sharpe": 2.137382,
-      "cagr": 0.490756,
-      "vol": 0.195917,
+      "sharpe": 1.956409,
+      "cagr": 0.432397,
+      "vol": 0.193347,
       "n_periods": 253
     },
     "holdout": {
-      "sharpe": 0.921576,
-      "cagr": 0.125748,
-      "vol": 0.13896,
+      "sharpe": 0.923802,
+      "cagr": 0.126053,
+      "vol": 0.138911,
       "n_periods": 128
     },
     "validation_window": [

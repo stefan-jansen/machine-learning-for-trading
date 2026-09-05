@@ -140,3 +140,32 @@ def test_a_genuine_crash_is_not_mistaken_for_a_split() -> None:
     ew = _equal_weight_daily(frame)
     assert ew.height == 1, "a genuine -40% session was dropped as a split"
     assert ew["ew_return"][0] == pytest.approx(-0.4)
+
+
+def test_a_factor_coverage_boundary_produces_no_return() -> None:
+    """Adjusted and raw prices are different scales and must never divide one another.
+
+    Falling back to the raw close per row means a symbol whose factor coverage starts,
+    ends, or has a hole divides an adjusted price by an unadjusted one. Unchanged closes
+    of 100 with factors [8, null, 8] would read as -87.5% then +700%, and the residual
+    split screen cannot catch it because the raw ratio is exactly 1.
+    """
+    import datetime as dt
+
+    from build_benchmark import _equal_weight_daily
+
+    dates = [dt.date(2020, 1, 2), dt.date(2020, 1, 3), dt.date(2020, 1, 6)]
+    frame = pl.DataFrame(
+        {
+            "symbol": ["X", "X", "X"],
+            "date": dates,
+            "close": [100.0, 100.0, 100.0],
+            "adj_close": [800.0, 100.0, 800.0],
+            "adj_factor": [8.0, None, 8.0],
+        }
+    )
+    ew = _equal_weight_daily(frame)
+    assert ew.height == 0, (
+        "both pairs straddle a factor-coverage boundary and neither can be priced; got "
+        f"{ew.to_dicts()}"
+    )
