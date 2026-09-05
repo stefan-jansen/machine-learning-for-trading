@@ -42,6 +42,7 @@ from utils.artifact_specs import (
     load_feature_spec,
     load_label_spec,
     resolve_label_buffer,
+    resolve_label_buffer_unit,
     resolve_label_horizon,
     resolve_market_semantics,
     resolve_storage_path,
@@ -281,7 +282,24 @@ class ModelingDataset:
 
 
 def _sha256_file(path: Path) -> str:
-    """Return a stable digest for an identity-defining input artifact."""
+    """Digest an identity-defining input artifact's bytes.
+
+    Stable across repeated writes, not across encodings. Two parquet files holding
+    identical data hash differently if they were written with a different compression
+    codec or row-group size, and this digest is inside `computation.feature_artifacts` and
+    `computation.input_data_spec.artifacts`, which are inside the hashed `computation`
+    block - so a codec change forks the `training_hash` of every run reading that artifact.
+
+    Two things hold that shut. `artifact_digest._PARQUET_WRITE_SETTINGS` states the
+    encoding these artifacts are written under rather than inheriting a library default,
+    and `tests/test_artifact_digest_encoding.py` records the bytes a fixed frame produces
+    under it, so a change arrives as a failing test rather than as a registry that has
+    grown two identities for one piece of work.
+
+    `artifact_digest.value_digest` digests column *values* and is what a new identity
+    version should use here; changing it now would re-key all 1,305 registered training
+    runs across the nine live registries, which is a re-derivation rather than a fix.
+    """
     digest = hashlib.sha256()
     with path.open("rb") as src:
         for chunk in iter(lambda: src.read(1024 * 1024), b""):
@@ -882,7 +900,17 @@ def load_modeling_dataset(
             # Kept lazy. Materialising it here is what made a run hold every fold at once.
             temporal_by_fold_pd = temporal
         else:
-            # Legacy: single feature set, join directly
+            # Fold-free: one value per key, joined straight on. A refit schedule produces this
+            # shape, and so does any stage that fits nothing per fold.
+            #
+            # The names are recorded here for the same reason the fold branch records them:
+            # they say which of the panel's columns came from the model-based artifact. They
+            # were not recorded before, so a fold-free artifact reported no model-based
+            # features at all while its columns sat in `dataset` regardless - the features
+            # were used, and nothing that asks which ones they are could answer. Every
+            # consumer of this list also requires `temporal_by_fold`, which stays None here,
+            # so filling it in changes no fold substitution.
+            _temporal_feature_names = [c for c in temporal_columns if c not in set(_temporal_keys)]
             temporal_dedup = temporal.unique(subset=_temporal_keys, keep="last").collect()
             dataset = features.join(temporal_dedup, on=_temporal_keys, how="left", suffix="_t")
             del temporal_dedup
@@ -910,6 +938,10 @@ def load_modeling_dataset(
     # CV splits — read buffer from setup.yaml (explicit, handles non-standard labels)
     setup = yaml.safe_load((case_dir / "config" / "setup.yaml").read_text())
     label_buffer = resolve_label_buffer(case_study_id, primary_label, setup)
+    # Whether that duration counts sessions or calendar time is the label's to declare,
+    # not each consumer's to guess: `35D` to option expiry is calendar, `21D` on a daily
+    # equity panel is 21 sessions, and the duration alone cannot tell them apart.
+    buffer_unit = resolve_label_buffer_unit(case_study_id, primary_label, setup)
     if not label_buffer:
         raise ValueError(
             f"No explicit label buffer found for '{primary_label}' in "
@@ -925,6 +957,7 @@ def load_modeling_dataset(
         label_buffer=label_buffer,
         outcome_horizon=resolve_label_horizon(case_study_id, primary_label, setup),
         date_col=date_col,
+        buffer_unit=buffer_unit,
     )
     temporal_artifact_splits: list[dict[str, Any]] = []
     if temporal_by_fold_pd is not None:
@@ -968,7 +1001,12 @@ def load_modeling_dataset(
     if wf_horizon and wf_horizon.endswith("M") and wf_horizon[:-1].isdigit():
         wf_horizon = f"{int(wf_horizon[:-1]) * 30}D"
     try:
-        cv_config = make_wf_config(case_study_id, label_horizon=wf_horizon, date_col=date_col)
+        cv_config = make_wf_config(
+            case_study_id,
+            label_horizon=wf_horizon,
+            date_col=date_col,
+            buffer_unit=buffer_unit,
+        )
     except Exception as exc:
         warnings.warn(f"WalkForwardConfig creation failed for {case_study_id}: {exc}", stacklevel=2)
         cv_config = None
@@ -1064,25 +1102,22 @@ def reduce_to_top_entities(
 ) -> pl.DataFrame:
     """Keep the ``max_symbols`` entities with the most rows, ties broken by name.
 
-    Row counts tie readily on these panels, and a tie broken by frame order is
-    not stable across runs or across callers. The entity name is the secondary
-    key so that every caller reducing the same dataset to the same size gets the
-    same universe. Without it a reduced stage-04 run and the reduced model
-    notebooks downstream of it can choose different equal-history symbols, and
-    the ones only a single side chose carry null temporal features - a wrong
-    answer that runs clean rather than a failure.
+    The modelling-side entry point to :func:`utils.data_quality.top_entities`, which
+    is the one rule; the loaders reach the same one through ``apply_max_symbols``.
+    Two callers reducing the same dataset to the same size have to get the same
+    universe, or the ones only a single side chose carry null temporal features - a
+    wrong answer that runs clean rather than a failure.
 
     Production runs set ``max_symbols=0`` and never reach this.
     """
-    top = (
-        dataset.group_by(primary_entity)
-        .len()
-        .sort(["len", primary_entity], descending=[True, False])
-        .head(max_symbols)
-    )
+    from utils.data_quality import top_entities
+
+    selected = top_entities(dataset, max_symbols, primary_entity)
     # implode: is_in against a bare Series of the same dtype is deprecated in
     # polars as ambiguous, and membership in the value set is what is meant.
-    return dataset.filter(pl.col(primary_entity).is_in(top[primary_entity].implode()))
+    return dataset.filter(
+        pl.col(primary_entity).is_in(pl.Series(primary_entity, selected).implode())
+    )
 
 
 def _inclusive_end_of(boundary: str) -> pd.Timestamp:

@@ -79,6 +79,13 @@ Notebooks WITHOUT a stamp are reported as "unverified" but do not fail unless
 as they are re-run through the canonical path, and the gate enforces only where
 provenance exists. Flip to ``--strict`` once the backfill is complete.
 
+**Where this gate runs.** In two places, asking two different questions. The pre-commit hook
+runs it over the *staged* files, so a notebook another session left dirty does not block an
+unrelated commit. CI runs it over the *change*: ``check --since <base>`` on a pull request,
+over the notebooks that pull request touches, and on a push to ``main`` against the previous
+tip. A stale render only reaches a reader through a merge, and until CI ran this the gate
+never covered a merge at all - it fired on every local commit and on nothing that publishes.
+
 Usage::
 
     uv run python .github/scripts/notebook_provenance.py stamp <nb.ipynb> --executor ml4t-gpu --production
@@ -87,6 +94,8 @@ Usage::
     uv run python .github/scripts/notebook_provenance.py clear <nb.ipynb>  # commit it unexecuted
     uv run python .github/scripts/notebook_provenance.py check          # gate (stamped-only)
     uv run python .github/scripts/notebook_provenance.py check --strict  # also fail on unverified
+    uv run python .github/scripts/notebook_provenance.py check --since origin/main  # this branch only
+    uv run python .github/scripts/notebook_provenance.py check --since <tip> --no-merge-base  # a push
 """
 
 from __future__ import annotations
@@ -150,6 +159,14 @@ PRODUCTION_SAFE_PARAMETERS: dict[str, object] = {
     # cannot reduce the run, and register_causal_run refuses a hash that is not a
     # current canonical identity for the same label.
     "SUPERSEDES_CAUSAL": VALIDATED_BY_CONSUMER,
+    # Replaces a holdout evaluation the window already carries instead of adding a second
+    # one. It deletes rows, which is why it is worth saying why it belongs here: it cannot
+    # reduce what the run computes - the refit, the registration and every check still
+    # happen - and the row it removes is one the notebook has already established is a
+    # superseded generation of the same window. Without it a correction that moves every
+    # training identity could be computed but never carried through to the holdout, because
+    # the only route would be editing the notebook's source for one run and editing it back.
+    "REPLACE_HOLDOUT": True,
 }
 
 
@@ -318,6 +335,72 @@ def iter_notebooks() -> list[Path]:
             continue
         out.append(p)
     return sorted(out)
+
+
+def _changed_paths(ref: str, merge_base: bool, diff_filter: str | None = None) -> list[str]:
+    """Repo-relative paths changed relative to ``ref``, optionally by change type.
+
+    ``-z``, because the gate must not lose a notebook for having a space in its name.
+    Plain ``--name-only`` quotes such a path and ``.split()`` then tears it into
+    fragments that match no suffix, so the notebook drops out of scope and passes
+    unchecked - the one thing a gate must never do.
+
+    ``--no-renames`` for the same reason from the other side: rename detection reports
+    only the destination, so moving a ``.py`` would hide the source path whose notebook
+    is now stale, and a rename arrives here as a delete plus an add instead.
+    """
+    spec = f"{ref}...HEAD" if merge_base else f"{ref}..HEAD"
+    cmd = ["git", "diff", "--name-only", "-z", "--no-renames"]
+    if diff_filter:
+        cmd.append(f"--diff-filter={diff_filter}")
+    cmd.append(spec)
+    out = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, check=True).stdout
+    return [name for name in out.split("\0") if name]
+
+
+def notebooks_orphaned_since(ref: str, merge_base: bool = True) -> list[str]:
+    """Notebooks this change left with no source: the ``.py`` deleted, the ``.ipynb`` kept.
+
+    This is the strongest form of the staleness the gate exists to catch - a render whose
+    source is gone can never be re-derived - and :func:`check_all` cannot see it, because
+    its ``paired_py() is None`` branch cannot tell a notebook that was just orphaned from
+    one that was never paired. Tracked notebooks are deliberately unpaired, so the
+    distinction has to come from the diff rather than from the tree.
+    """
+    orphaned: list[str] = []
+    for name in _changed_paths(ref, merge_base, diff_filter="D"):
+        if not name.endswith(".py"):
+            continue
+        nb = (REPO_ROOT / name).with_suffix(".ipynb")
+        if nb.exists() and not (SKIP_PARTS & set(nb.parts)):
+            orphaned.append(f"{nb.relative_to(REPO_ROOT)} (deleted source: {name})")
+    return sorted(orphaned)
+
+
+def notebooks_changed_since(ref: str, merge_base: bool = True) -> list[Path]:
+    """Notebooks this change is answerable for, relative to ``ref``.
+
+    A change owns a notebook if it edited the notebook OR edited the paired ``.py``,
+    since changing the ``.py`` is exactly what makes the rendered notebook stale.
+    Notebooks nobody touched are somebody else's.
+
+    ``merge_base`` picks which question is being asked. For a pull request it is "what
+    does this branch add on top of the base", so the diff runs from the merge base
+    (``ref...HEAD``) and commits that landed on the base meanwhile are not this branch's
+    problem. For a push it is "what does the published tree become", so the diff must run
+    against the previous tip itself (``ref..HEAD``) - a force-push can revert a notebook
+    relative to that tip without the merge base ever seeing it.
+    """
+    owned: set[Path] = set()
+    for name in _changed_paths(ref, merge_base):
+        path = REPO_ROOT / name
+        if path.suffix == ".ipynb":
+            owned.add(path)
+        elif path.suffix == ".py":
+            nb = path.with_suffix(".ipynb")
+            if nb.exists():
+                owned.add(nb)
+    return sorted(p for p in owned if p.exists() and not (SKIP_PARTS & set(p.parts)))
 
 
 def paired_py(nb_path: Path) -> Path | None:
@@ -701,6 +784,25 @@ def stamp_reference(base_branch: str = "main") -> str:
     return "HEAD"
 
 
+def _fork_point(ref: str) -> str:
+    """Where HEAD forked from *ref*, for the de-stamp comparison under ``--since``.
+
+    ``stamp_reference`` answers this for the default base branch. A pull request names
+    its own base, so the same question has to be asked against that ref rather than
+    against ``origin/main``, or a PR onto a release branch compares its stamps to a
+    commit neither side descends from. Falls back to *ref* itself when the two share no
+    history, which is the honest answer for an unrelated ref.
+    """
+    merge_base = subprocess.run(
+        ["git", "merge-base", "HEAD", ref],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return merge_base.stdout.strip() if merge_base.returncode == 0 else ref
+
+
 def was_executed(nb: dict) -> bool:
     """True if any non-empty code cell in *nb* shows evidence of having been run.
 
@@ -1069,13 +1171,42 @@ def _cmd_clear(args: argparse.Namespace) -> int:
 
 def _cmd_check(args: argparse.Namespace) -> int:
     only = {str(Path(p)) for p in args.paths} or None
+    orphaned: list[str] = []
+    since_ref: str | None = None
+    if args.since:
+        if only is not None:
+            print("check: pass --since or paths, not both", file=sys.stderr)
+            return 2
+        merge_base = not args.no_merge_base
+        # Before the scope check returns early: an orphaned notebook is invisible to
+        # check_all by construction, and a change that deletes only a .py leaves nothing
+        # in scope to report it.
+        orphaned = notebooks_orphaned_since(args.since, merge_base=merge_base)
+        scope = notebooks_changed_since(args.since, merge_base=merge_base)
+        only = {str(nb.relative_to(REPO_ROOT)) for nb in scope}
+        since_ref = _fork_point(args.since) if merge_base else args.since
+        if not only and not orphaned:
+            print(f"notebook sync OK: no notebook is changed relative to {args.since}")
+            return 0
+        if scope:
+            print(f"checking {len(scope)} notebook(s) changed relative to {args.since}:")
+            for nb in scope:
+                print(f"  {nb.relative_to(REPO_ROOT)}")
+            print()
     stale, testmode, contradicted, unverified, alt_only, hollow = check_all(
         strict=args.strict, only=only
     )
-    lost = destamped(only=only)
-    fail = bool(stale or testmode or contradicted or lost or hollow) or (
+    lost = destamped(ref=since_ref, only=only)
+    fail = bool(stale or testmode or contradicted or lost or hollow or orphaned) or (
         args.strict and bool(unverified)
     )
+    if orphaned:
+        print(
+            "ORPHANED (the paired .py was deleted but the rendered .ipynb was kept — "
+            "restore the source or delete the notebook with it):"
+        )
+        for r in orphaned:
+            print(f"  {r}")
     if hollow:
         print(
             "HOLLOW (carries a provenance stamp over a notebook with no trace of a run — "
@@ -1182,6 +1313,21 @@ def main() -> int:
         nargs="*",
         help="restrict the scan to these files (the pre-commit gate passes the staged ones); "
         "with none given, the whole tree is scanned",
+    )
+    cp.add_argument(
+        "--since",
+        default=None,
+        metavar="REF",
+        help="check only notebooks this change touched relative to REF (e.g. origin/main), "
+        "counting a notebook as touched when its paired .py changed. This is the merge "
+        "gate: CI passes the PR base here",
+    )
+    cp.add_argument(
+        "--no-merge-base",
+        action="store_true",
+        help="diff REF..HEAD instead of REF...HEAD — use for a push, where the question is "
+        "what the published tree becomes relative to the previous tip, not what a branch "
+        "adds on top of a base",
     )
     cp.set_defaults(func=_cmd_check)
 

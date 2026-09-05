@@ -406,6 +406,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          # notebook_provenance.py --since diffs against the base or the previous
+          # tip, and neither is in a shallow clone.
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v6
         with:
           version: "latest"
@@ -437,6 +441,40 @@ jobs:
         run: |
           source .venv/bin/activate
           python -m pytest tests/test_notebook_output_hygiene.py -q
+      # A committed .ipynb must be its CURRENT .py, executed for real. The gate
+      # existed only as a pre-commit hook, so it fired on every local commit and
+      # on nothing that publishes - a stale render reaches a reader through a
+      # merge, and no merge was covered. Here it covers what this change touched:
+      # a notebook it edited, or one whose paired .py it edited. Scoped, so one
+      # stale notebook elsewhere is somebody else's and does not block this PR.
+      #
+      # It runs on push to main as well as on the PR. Branch protection means
+      # everything should arrive via a PR, but this workflow's own history is that
+      # exports used to land on main as pushes and nothing CI ran had seen them -
+      # a gate that only fires on the path we believe is the only path is how that
+      # happened. On a push the base is the previous tip, so the scope is exactly
+      # what the push introduced.
+      - name: Notebooks this change touched were executed from their current .py
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        run: |
+          source .venv/bin/activate
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # What does this branch add on top of the base: merge-base diff.
+            python .github/scripts/notebook_provenance.py check \
+              --since "origin/${{ github.base_ref }}"
+            exit $?
+          fi
+          # What does the published tree become: diff the previous tip directly,
+          # so a force-push that reverts a notebook relative to it is still seen.
+          base="${{ github.event.before }}"
+          if [[ "$base" =~ ^0+$ ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            # First push, or a force-push that dropped the old tip. There is no
+            # honest scope, so check everything rather than guess a narrower one.
+            echo "previous tip unavailable ($base) - checking every notebook"
+            python .github/scripts/notebook_provenance.py check
+            exit $?
+          fi
+          python .github/scripts/notebook_provenance.py check --since "$base" --no-merge-base
 
   # ---------------------------------------------------------------------------
   # Fast native unit tests — download-script logic (no Docker, no network,
@@ -591,7 +629,10 @@ jobs:
         run: |
           .venv/bin/python -m pytest \
             tests/test_pm_helpers.py \
+            tests/test_fork_pull_request_gating.py \
+            tests/test_env_matches_lock.py \
             tests/test_create_test_data.py \
+            tests/test_generate_intermediates.py \
             tests/test_sample_registry_for_tests.py \
             tests/test_toolchain_pins.py \
             tests/test_conformal_embargo_coverage.py \
@@ -854,8 +895,13 @@ jobs:
         if: steps.reach.outputs.have_key
         run: |
           uv venv --python 3.14
+          # ml4t-backtest joined with tests/test_backtest_presets.py:
+          # ensure_backtest_spec resolves the engine's own BacktestConfig
+          # (case_studies/utils/backtest_loaders.py:169 imports ml4t.backtest), and
+          # without the package four of its tests raise rather than skip. Measured in a
+          # venv holding exactly this list: 4 failed without it, 37 passed with it.
           uv pip install pytest numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
-            scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow \
+            scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow ml4t-backtest \
             "ml4t-diagnostic>=0.1.2" jupytext==1.19.3
       # The precondition is the load-bearing half, the same shape as the
       # data-root anchoring step above. Every test in this job skips politely
@@ -898,9 +944,24 @@ jobs:
           # CI job, which is a real gap and is stated in that file's docstring.
           # The other three tests in the same file assert relations that hold on any
           # extract - they collect as six cases - and are what this job gates.
+          # The two deselects below are not quarantine entries: the quarantine file
+          # describes what test-unit does not run, and both of these are inside a
+          # file this job DOES run. They need the stage 01-05 artifacts of
+          # us_equities_panel and nasdaq100_microstructure, the two case studies
+          # whose rebuild has not produced them, so they fail on any checkout -
+          # here and on a workstation alike. Take them out when those two rebuild.
           .venv/bin/python -m pytest \
             tests/test_eoa_universe_roster.py \
             tests/test_fixture_registry_identity.py \
+            tests/test_reduced_universe_is_shared.py \
+            tests/test_fixture_manifest_matches_builders.py \
+            tests/test_artifact_specs.py \
+            tests/test_backtest_presets.py \
+            tests/test_etf_baseline_parity.py \
+            tests/test_sp500_options_research.py::test_official_population_is_snapshotted_before_option_execution \
+            tests/test_us_firm_research_workflow.py::test_open_study_writes_canonical_results_to_output_dir \
+            --deselect tests/test_artifact_specs.py::test_us_equities_pilot_helpers_preserve_current_outputs \
+            --deselect tests/test_artifact_specs.py::test_microstructure_pilot_helpers_preserve_current_outputs \
             -m "not production_extract" \
             -v --tb=short -rs --junitxml=unit-data.xml
       # A skip here is a failure: these tests run in this job and nowhere else,
@@ -955,8 +1016,28 @@ jobs:
       image: ml4t/ml4t:latest
     steps:
       - name: Install git (for checkout inside container)
-        run: apt-get update && apt-get install -y git
+        run: |
+          # A transient apt mirror failure used to kill the whole job.
+          for attempt in 1 2 3; do
+            apt-get update && apt-get install -y git && exit 0
+            echo "apt-get failed (attempt $attempt of 3); retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "::error::apt-get could not install git after three attempts"
+          exit 1
       - uses: actions/checkout@v6
+      # The image is built from uv.lock and drifts from it silently the moment the
+      # lock moves. It carried ml4t-models 0.1.0a4 for eleven days after the repo
+      # declared >=0.1.0a6, so public CI measured a dependency set the repository
+      # did not declare - and the notebook that failed on it read as a numerical
+      # problem, which cost four rounds of investigation aimed at the notebook.
+      #
+      # This is the check that would have caught it on the day the pin moved. It
+      # runs first because everything after it is only evidence about this commit
+      # if it passes: a green job in a drifted image is not evidence of green under
+      # the declared lock.
+      - name: The image's installed distributions match uv.lock
+        run: python .github/scripts/check_env_matches_lock.py
       - name: Run modelling-environment unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -1006,9 +1087,11 @@ jobs:
             tests/test_sdf_macro_context.py \
             tests/test_sequence_dataset.py \
             tests/test_sequence_identity_roundtrip.py \
+            tests/test_sequence_holdout_rekey.py \
             tests/test_tabular_dl.py \
             tests/test_tabular_dl_adapter.py \
             tests/test_holdout_expected_keys.py \
+            tests/test_holdout_force_regenerates.py \
             tests/test_tabular_dl_identity.py \
             tests/test_tabular_dl_runtime.py \
             tests/test_training_identity_migration.py \
@@ -1037,12 +1120,50 @@ jobs:
       image: ml4t/ml4t:latest
 
     steps:
+      # secrets.TEST_DATA_DEPLOY_KEY is not exposed to a pull_request from a fork,
+      # so the "Checkout test data" step below cannot succeed there: actions/checkout
+      # falls back to the default token, which cannot see a private repository, and
+      # the job fails at a step that has nothing to do with the contribution. On #595,
+      # a two-line packaging fix from an outside contributor, that was 26 red checks -
+      # ch01 through ch26, all eight cs-* jobs and test-py312 - none of them the
+      # contributor's.
+      #
+      # Deciding once whether the run can reach the data, and gating the
+      # data-dependent steps on that, is the same shape as the fix #613 landed for
+      # test-unit-data. It is a step-level gate rather than a job-level `if:` for the
+      # reason recorded there: a job-level `if:` that evaluates false creates no check
+      # run at all, which is unsatisfiable when the context is required.
+      #
+      # What this does not fix, and is said out loud in the notice: a fork pull request
+      # is then green having exercised none of these notebooks. That is the honest
+      # state - it is what happens today, dressed as failure rather than as a skip -
+      # and the merge decision has to account for it.
+      - name: Can this run reach the test data?
+        id: reach
+        run: |
+          if [ -n "${{ secrets.TEST_DATA_DEPLOY_KEY }}" ]; then
+            echo "have_key=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_key=" >> "$GITHUB_OUTPUT"
+            echo "::notice::No test-data deploy key in this context, which is a fork pull request. This job checked out no test data and executed no notebook, so it asserts nothing about this change; the notebooks run on the branch once it is merged."
+          fi
       - name: Install git (for checkout inside container)
-        run: apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null
+        if: steps.reach.outputs.have_key
+        run: |
+          # A transient apt mirror failure used to kill the whole job.
+          for attempt in 1 2 3; do
+            apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null && exit 0
+            echo "apt-get failed (attempt $attempt of 3); retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "::error::apt-get could not install git after three attempts"
+          exit 1
 
       - uses: actions/checkout@v6
+        if: steps.reach.outputs.have_key
 
       - name: Checkout test data
+        if: steps.reach.outputs.have_key
         uses: actions/checkout@v6
         with:
           repository: ml4t/third-edition-test-data
@@ -1051,6 +1172,7 @@ jobs:
           lfs: false
 
       - name: Seed case study intermediates
+        if: steps.reach.outputs.have_key
         run: |
           mkdir -p $ML4T_OUTPUT_DIR
           if [ -d test-data/intermediates ]; then
@@ -1073,6 +1195,7 @@ jobs:
           fi
 
       - name: Run chapter notebooks (${{ matrix.name }})
+        if: steps.reach.outputs.have_key
         env:
           PYTHONPATH: ${{ github.workspace }}
           TEST_FILTER_INPUT: ${{ github.event.inputs.test_filter }}
@@ -1103,12 +1226,50 @@ jobs:
       image: ml4t/ml4t:latest
 
     steps:
+      # secrets.TEST_DATA_DEPLOY_KEY is not exposed to a pull_request from a fork,
+      # so the "Checkout test data" step below cannot succeed there: actions/checkout
+      # falls back to the default token, which cannot see a private repository, and
+      # the job fails at a step that has nothing to do with the contribution. On #595,
+      # a two-line packaging fix from an outside contributor, that was 26 red checks -
+      # ch01 through ch26, all eight cs-* jobs and test-py312 - none of them the
+      # contributor's.
+      #
+      # Deciding once whether the run can reach the data, and gating the
+      # data-dependent steps on that, is the same shape as the fix #613 landed for
+      # test-unit-data. It is a step-level gate rather than a job-level `if:` for the
+      # reason recorded there: a job-level `if:` that evaluates false creates no check
+      # run at all, which is unsatisfiable when the context is required.
+      #
+      # What this does not fix, and is said out loud in the notice: a fork pull request
+      # is then green having exercised none of these notebooks. That is the honest
+      # state - it is what happens today, dressed as failure rather than as a skip -
+      # and the merge decision has to account for it.
+      - name: Can this run reach the test data?
+        id: reach
+        run: |
+          if [ -n "${{ secrets.TEST_DATA_DEPLOY_KEY }}" ]; then
+            echo "have_key=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_key=" >> "$GITHUB_OUTPUT"
+            echo "::notice::No test-data deploy key in this context, which is a fork pull request. This job checked out no test data and executed no notebook, so it asserts nothing about this change; the notebooks run on the branch once it is merged."
+          fi
       - name: Install git
-        run: apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null
+        if: steps.reach.outputs.have_key
+        run: |
+          # A transient apt mirror failure used to kill the whole job.
+          for attempt in 1 2 3; do
+            apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null && exit 0
+            echo "apt-get failed (attempt $attempt of 3); retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "::error::apt-get could not install git after three attempts"
+          exit 1
 
       - uses: actions/checkout@v6
+        if: steps.reach.outputs.have_key
 
       - name: Checkout test data
+        if: steps.reach.outputs.have_key
         uses: actions/checkout@v6
         with:
           repository: ml4t/third-edition-test-data
@@ -1117,6 +1278,7 @@ jobs:
           lfs: false
 
       - name: Seed case study intermediates
+        if: steps.reach.outputs.have_key
         run: |
           mkdir -p $ML4T_OUTPUT_DIR
           if [ -d test-data/intermediates ]; then
@@ -1129,9 +1291,11 @@ jobs:
       # Without it, overrides.yaml's `reruns:` key (tests/conftest.py) silently adds no
       # retry marker, so a notebook marked flaky just fails outright here.
       - name: Install pytest-rerunfailures
+        if: steps.reach.outputs.have_key
         run: pip install --no-cache-dir "pytest-rerunfailures>=15.0"
 
       - name: Run pipeline (${{ matrix.case-study }})
+        if: steps.reach.outputs.have_key
         env:
           PYTHONPATH: ${{ github.workspace }}
           TEST_FILTER_INPUT: ${{ github.event.inputs.test_filter }}
@@ -1157,12 +1321,50 @@ jobs:
       image: ml4t/ml4t-py312:latest
 
     steps:
+      # secrets.TEST_DATA_DEPLOY_KEY is not exposed to a pull_request from a fork,
+      # so the "Checkout test data" step below cannot succeed there: actions/checkout
+      # falls back to the default token, which cannot see a private repository, and
+      # the job fails at a step that has nothing to do with the contribution. On #595,
+      # a two-line packaging fix from an outside contributor, that was 26 red checks -
+      # ch01 through ch26, all eight cs-* jobs and test-py312 - none of them the
+      # contributor's.
+      #
+      # Deciding once whether the run can reach the data, and gating the
+      # data-dependent steps on that, is the same shape as the fix #613 landed for
+      # test-unit-data. It is a step-level gate rather than a job-level `if:` for the
+      # reason recorded there: a job-level `if:` that evaluates false creates no check
+      # run at all, which is unsatisfiable when the context is required.
+      #
+      # What this does not fix, and is said out loud in the notice: a fork pull request
+      # is then green having exercised none of these notebooks. That is the honest
+      # state - it is what happens today, dressed as failure rather than as a skip -
+      # and the merge decision has to account for it.
+      - name: Can this run reach the test data?
+        id: reach
+        run: |
+          if [ -n "${{ secrets.TEST_DATA_DEPLOY_KEY }}" ]; then
+            echo "have_key=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_key=" >> "$GITHUB_OUTPUT"
+            echo "::notice::No test-data deploy key in this context, which is a fork pull request. This job checked out no test data and executed no notebook, so it asserts nothing about this change; the notebooks run on the branch once it is merged."
+          fi
       - name: Install git
-        run: apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null
+        if: steps.reach.outputs.have_key
+        run: |
+          # A transient apt mirror failure used to kill the whole job.
+          for attempt in 1 2 3; do
+            apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null && exit 0
+            echo "apt-get failed (attempt $attempt of 3); retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "::error::apt-get could not install git after three attempts"
+          exit 1
 
       - uses: actions/checkout@v6
+        if: steps.reach.outputs.have_key
 
       - name: Checkout test data
+        if: steps.reach.outputs.have_key
         uses: actions/checkout@v6
         with:
           repository: ml4t/third-edition-test-data
@@ -1171,6 +1373,7 @@ jobs:
           lfs: false
 
       - name: Run py312 notebooks
+        if: steps.reach.outputs.have_key
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
@@ -1213,12 +1416,50 @@ jobs:
           --health-retries 10
 
     steps:
+      # secrets.TEST_DATA_DEPLOY_KEY is not exposed to a pull_request from a fork,
+      # so the "Checkout test data" step below cannot succeed there: actions/checkout
+      # falls back to the default token, which cannot see a private repository, and
+      # the job fails at a step that has nothing to do with the contribution. On #595,
+      # a two-line packaging fix from an outside contributor, that was 26 red checks -
+      # ch01 through ch26, all eight cs-* jobs and test-py312 - none of them the
+      # contributor's.
+      #
+      # Deciding once whether the run can reach the data, and gating the
+      # data-dependent steps on that, is the same shape as the fix #613 landed for
+      # test-unit-data. It is a step-level gate rather than a job-level `if:` for the
+      # reason recorded there: a job-level `if:` that evaluates false creates no check
+      # run at all, which is unsatisfiable when the context is required.
+      #
+      # What this does not fix, and is said out loud in the notice: a fork pull request
+      # is then green having exercised none of these notebooks. That is the honest
+      # state - it is what happens today, dressed as failure rather than as a skip -
+      # and the merge decision has to account for it.
+      - name: Can this run reach the test data?
+        id: reach
+        run: |
+          if [ -n "${{ secrets.TEST_DATA_DEPLOY_KEY }}" ]; then
+            echo "have_key=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_key=" >> "$GITHUB_OUTPUT"
+            echo "::notice::No test-data deploy key in this context, which is a fork pull request. This job checked out no test data and executed no notebook, so it asserts nothing about this change; the notebooks run on the branch once it is merged."
+          fi
       - name: Install git
-        run: apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null
+        if: steps.reach.outputs.have_key
+        run: |
+          # A transient apt mirror failure used to kill the whole job.
+          for attempt in 1 2 3; do
+            apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null && exit 0
+            echo "apt-get failed (attempt $attempt of 3); retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "::error::apt-get could not install git after three attempts"
+          exit 1
 
       - uses: actions/checkout@v6
+        if: steps.reach.outputs.have_key
 
       - name: Checkout test data
+        if: steps.reach.outputs.have_key
         uses: actions/checkout@v6
         with:
           repository: ml4t/third-edition-test-data
@@ -1227,6 +1468,7 @@ jobs:
           lfs: false
 
       - name: Run Ch23 Knowledge Graph notebooks (pipeline order)
+        if: steps.reach.outputs.have_key
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
@@ -1315,13 +1557,50 @@ jobs:
           --health-retries 5
 
     steps:
-      - name: Install git
+      # secrets.TEST_DATA_DEPLOY_KEY is not exposed to a pull_request from a fork,
+      # so the "Checkout test data" step below cannot succeed there: actions/checkout
+      # falls back to the default token, which cannot see a private repository, and
+      # the job fails at a step that has nothing to do with the contribution. On #595,
+      # a two-line packaging fix from an outside contributor, that was 26 red checks -
+      # ch01 through ch26, all eight cs-* jobs and test-py312 - none of them the
+      # contributor's.
+      #
+      # Deciding once whether the run can reach the data, and gating the
+      # data-dependent steps on that, is the same shape as the fix #613 landed for
+      # test-unit-data. It is a step-level gate rather than a job-level `if:` for the
+      # reason recorded there: a job-level `if:` that evaluates false creates no check
+      # run at all, which is unsatisfiable when the context is required.
+      #
+      # What this does not fix, and is said out loud in the notice: a fork pull request
+      # is then green having exercised none of these notebooks. That is the honest
+      # state - it is what happens today, dressed as failure rather than as a skip -
+      # and the merge decision has to account for it.
+      - name: Can this run reach the test data?
+        id: reach
         run: |
-          apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null 2>&1 || true
+          if [ -n "${{ secrets.TEST_DATA_DEPLOY_KEY }}" ]; then
+            echo "have_key=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_key=" >> "$GITHUB_OUTPUT"
+            echo "::notice::No test-data deploy key in this context, which is a fork pull request. This job checked out no test data and executed no notebook, so it asserts nothing about this change; the notebooks run on the branch once it is merged."
+          fi
+      - name: Install git
+        if: steps.reach.outputs.have_key
+        run: |
+          # A transient apt mirror failure used to kill the whole job.
+          for attempt in 1 2 3; do
+            apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null && exit 0
+            echo "apt-get failed (attempt $attempt of 3); retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "::error::apt-get could not install git after three attempts"
+          exit 1
 
       - uses: actions/checkout@v6
+        if: steps.reach.outputs.have_key
 
       - name: Checkout test data
+        if: steps.reach.outputs.have_key
         uses: actions/checkout@v6
         with:
           repository: ml4t/third-edition-test-data
@@ -1330,6 +1609,7 @@ jobs:
           lfs: false
 
       - name: Run Ch02 database benchmark notebooks
+        if: steps.reach.outputs.have_key
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |

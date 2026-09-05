@@ -182,6 +182,28 @@ def test_credential_gated_notebooks_declare_requires_env_not_skip(overrides: dic
     assert hard_skipped_despite_a_gate == set()
 
 
+def test_no_entry_declares_a_reason_for_a_skip_it_does_not_take(overrides: dict) -> None:
+    """``skip_reason`` without ``skip`` is text nothing reads.
+
+    Every one of its seven call sites reaches it only inside a branch already taken on
+    ``skip``, so a reason standing alone describes a notebook that runs anyway. That is
+    worse than silence: ``00_holdout_predictions`` carried "Requires trained model
+    registry (not available in CI test data)" while executing every case study in the
+    registry, and the entry looked accounted for until it timed out.
+
+    What routes a notebook away from a job belongs in the key that does the routing -
+    ``requires_env``, ``docker_env``, ``gpu``, ``tier`` - and each says what it needs
+    without a second copy in prose.
+    """
+    reason_without_skip = {
+        key
+        for key, value in overrides.items()
+        if isinstance(value, dict) and value.get("skip_reason") and not value.get("skip")
+    }
+
+    assert reason_without_skip == set()
+
+
 def _executable(tmp_path: Path) -> Path:
     interpreter = tmp_path / "python"
     interpreter.write_text("#!/bin/sh\n")

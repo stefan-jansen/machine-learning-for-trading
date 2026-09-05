@@ -46,7 +46,7 @@ def widest_label_buffer(case_study: str, setup: Mapping[str, Any]) -> tuple[str,
     :func:`utils.artifact_specs.resolve_label_buffer`, so a label carrying its own spec
     artifact still wins over the setup block.
     """
-    from utils.artifact_specs import resolve_label_buffer
+    from utils.artifact_specs import resolve_label_buffer, resolve_label_buffer_unit
     from utils.cv_splits import normalize_label_buffer
 
     labels = setup.get("labels") or {}
@@ -56,13 +56,31 @@ def widest_label_buffer(case_study: str, setup: Mapping[str, Any]) -> tuple[str,
         raise ValueError(f"{case_study} declares no labels, so no holdout buffer can be derived")
 
     widest: tuple[pd.Timedelta, str, str] | None = None
+    units: dict[str, str] = {}
     for name in names:
         buffer = resolve_label_buffer(case_study, name, setup)
         if not buffer:
             continue
+        units[name] = resolve_label_buffer_unit(case_study, name, setup)
         span = pd.Timedelta(normalize_label_buffer(buffer))
         if widest is None or span > widest[0]:
             widest = (span, str(buffer), name)
+    # "Widest" is decided by comparing the declared durations as timedeltas, which only
+    # answers the question when every label counts the same thing. 21 sessions and 21
+    # calendar days are not the same span, and reading both as timedeltas ranks them
+    # equal, so a mixed declaration would seal the holdout on whichever label happened to
+    # sort first. Refuse rather than pick: no case study declares a mix today, and the
+    # fix when one does is to compare on a common axis, not to keep guessing.
+    if len(set(units.values())) > 1:
+        by_unit = {
+            unit: sorted(n for n, u in units.items() if u == unit) for unit in set(units.values())
+        }
+        raise ValueError(
+            f"{case_study} declares buffers in more than one unit ({by_unit}), and the "
+            "widest buffer is chosen by comparing them as durations, which a session "
+            "count and a calendar span cannot be compared as. Declare one unit for the "
+            "case study, or give the holdout seal an explicit buffer."
+        )
     if widest is None:
         raise ValueError(
             f"{case_study} declares labels {names} and a buffer for none of them, so the gap "

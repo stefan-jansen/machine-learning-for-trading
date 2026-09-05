@@ -26,6 +26,7 @@ from .store import (
     _registry_db_path,
     _run_log_dir,
     _stage_filter_clause,
+    _timestamps_as_utc,
     _training_dir,
 )
 
@@ -646,7 +647,10 @@ def read_predictions(
         renames["fold"] = "fold_id"
     if renames:
         df = df.rename(renames)
-    return df
+    # A naive decision-time column means the same instants as a UTC-aware one and is
+    # localized rather than converted, so the artifacts a case study wrote before
+    # `_timestamps_as_utc` reached the writer still join against the ones it wrote after.
+    return _timestamps_as_utc(df)
 
 
 # ---------------------------------------------------------------------------

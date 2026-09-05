@@ -27,6 +27,7 @@ from case_studies.research import (
     StateTransitionPolicy,
     Study,
     plan_backtests,
+    require_resolved_requests_cover_the_catalog,
     run_backtests,
     run_models,
 )
@@ -139,11 +140,10 @@ def open_study(
     """
     if execution_tier == "canonical":
         if workspace is None:
-            return Study.regenerate(CASE_STUDY, release_root=REPO_ROOT, entry_point=entry_point)
+            return Study.regenerate(CASE_STUDY, entry_point=entry_point)
         return Study.open(
             CASE_STUDY,
             workspace=Path(workspace).expanduser().resolve(),
-            release_root=REPO_ROOT,
             entry_point=entry_point,
         )
     if execution_tier != "preview":
@@ -155,7 +155,6 @@ def open_study(
         return Study.open(
             CASE_STUDY,
             workspace=workspace,
-            release_root=REPO_ROOT,
             entry_point=entry_point,
             execution_tier=ExecutionTier.PREVIEW,
         )
@@ -199,6 +198,11 @@ def model_request_catalog(
 ) -> pl.DataFrame:
     """Return the declared model population as visible Polars rows."""
     selected = set(config_names) if config_names is not None else None
+    if selected is not None and not selected:
+        # An empty selection is the caller's, so say so. Falling through left every row filtered
+        # out and the function reported "no declared requests for <family>", blaming the family's
+        # menu for a list the caller passed empty.
+        raise ValueError("config_names is empty; omit it to request every declared configuration")
     rows = []
     missing_by_label = {}
     for label in labels:
@@ -300,6 +304,7 @@ def run_official_model_catalog(
         resolved = resolve_model_requests(study, request_catalog, execution_tier="canonical")
     if any(request.spec["execution_tier"] != "canonical" for request in resolved):
         raise ValueError("official model populations require canonical requests")
+    require_resolved_requests_cover_the_catalog(request_catalog, resolved)
     expected = expected_prediction_hashes(resolved)
     population = OfficialPopulation.create(
         study,
@@ -805,6 +810,7 @@ def run_official_backtest_requests(
     requests: pl.DataFrame,
     *,
     population_name: str | None,
+    supersedes: str | None = None,
 ) -> FuturesBacktestExecution:
     """Resolve, snapshot, and execute visible futures strategy requests.
 
@@ -813,6 +819,13 @@ def run_official_backtest_requests(
     results are refused entry to an official population, and the workspace holding them is
     discarded afterwards. Everything else - the expected-identity snapshot before the engine
     runs, the order check, the per-request completeness - applies to both tiers.
+
+    ``supersedes`` names the generation of ``population_name`` this run retires. Anything that
+    moves a backtest identity - a corrected label, a changed accounting field, a re-run after a
+    registry reset - produces a different member list under the same name, and
+    ``OfficialPopulation.create`` refuses to write it without being told which snapshot it
+    replaces. The notebooks declare it as a parameter, so the sweep can be re-run without
+    editing this module.
     """
     required = {"request_name", "prediction_hash", "label", "signal"}
     missing = required - set(requests.columns)
@@ -884,6 +897,7 @@ def run_official_backtest_requests(
             name=population_name,
             member_kind="backtest",
             members=expected,
+            supersedes=supersedes,
         )
         if population_name is not None
         else None
@@ -1165,11 +1179,28 @@ def shortlist_signal_configurations(
     return tuple(selected)
 
 
+def _union_members(study: Study, *pools: Iterable[str]) -> list[Result]:
+    """The distinct results across several stage pools, in first-seen order.
+
+    A backtest is identified by its prediction and its strategy spec, and the funnel stage is
+    not part of either. So two stages register one row whenever the later stage changed nothing
+    about a configuration - an allocation that resolves to the same spec the signal stage
+    already ran is exactly that - and the stages' pools then overlap. `CandidateSet.create`
+    refuses a repeated member, so concatenating the pools produced a union that raised precisely
+    when two stages agreed, which is the case the union exists to describe.
+    """
+    seen: dict[str, None] = {}
+    for pool in pools:
+        for value in pool:
+            seen.setdefault(value, None)
+    return [Result.open(study, value) for value in seen]
+
+
 def pre_overlay_candidate_set(study: Study, *, label: str) -> CandidateSet:
     """Return the immutable union of signal and allocation validation results."""
     signal = CandidateSet.one(study, name=candidate_set_name("signal", label))
     allocation = CandidateSet.one(study, name=candidate_set_name("allocation", label))
-    members = [Result.open(study, value) for value in (*signal.members, *allocation.members)]
+    members = _union_members(study, signal.members, allocation.members)
     return _create_comparable_set(study, candidate_set_name("pre-overlay", label), members)
 
 
@@ -1177,7 +1208,7 @@ def final_validation_candidate_set(study: Study, *, label: str) -> CandidateSet:
     """Return the selection pool across signal, allocation, and risk-overlay stages."""
     pre_overlay = pre_overlay_candidate_set(study, label=label)
     risk = CandidateSet.one(study, name=candidate_set_name("risk", label))
-    members = [Result.open(study, value) for value in (*pre_overlay.members, *risk.members)]
+    members = _union_members(study, pre_overlay.members, risk.members)
     return _create_comparable_set(study, candidate_set_name("final-validation", label), members)
 
 

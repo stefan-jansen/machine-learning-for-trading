@@ -68,7 +68,7 @@ import polars as pl
 import yaml
 from plotly.subplots import make_subplots
 
-from case_studies.research import CausalResult, open_study, split_retired_members
+from case_studies.research import CausalResult, open_study, split_unpublished_members
 from case_studies.utils.latent_factors import load_fold_extras
 from case_studies.utils.model_analysis import (
     best_model_per_family_fast,
@@ -186,8 +186,16 @@ print(
 # once as it is published and once as it was - and the representative chosen to stand for the
 # family in every comparison below can be the retired one.
 #
-# `split_retired_members` asks the population lineage instead, and the retired side is printed
-# rather than dropped silently, so the count is auditable against the registry.
+# `split_unpublished_members` asks the population lineage instead, and the excluded side is
+# printed rather than dropped silently, so the count is auditable against the registry.
+#
+# It asks **membership** and not retirement, which is the stronger of the two questions and the
+# one [`14_backtest`](14_backtest.ipynb) already scopes its sweep with. The two differ by the
+# identities no population ever listed: a row written before its notebook declared a population
+# is retired by nobody, so a retirement split admits it, and it can then stand for its family in
+# every comparison below while being invisible to the selection rule. Measured on this registry:
+# 60 such rows, all of them written by notebooks that have since moved onto the research
+# boundary and republished under a real identity.
 
 # %% [markdown]
 # **Present in the metrics is not the same as eligible for selection.** This section reads
@@ -203,13 +211,13 @@ print(
 # Phase 1: Load pre-computed metrics for ALL labels (coverage + multi-label analysis)
 all_labels_metrics = load_all_metrics(CASE_STUDY, label=None).filter(pl.col("label").is_not_null())
 
-_generations = split_retired_members(study, all_labels_metrics)
+_generations = split_unpublished_members(study, all_labels_metrics)
 all_labels_metrics = _generations.live
 print(f"Registered metric rows: {_generations.live.height + _generations.retired.height:,}")
 if _generations.retired.is_empty():
-    print("Retired by a later generation: none")
+    print("Not published by any current population: none")
 else:
-    print(f"Retired by a later generation: {_generations.retired.height:,}")
+    print(f"Not published by any current population: {_generations.retired.height:,}")
     print(
         _generations.retired.group_by("family", "config_name")
         .agg(n=pl.len())
@@ -1239,20 +1247,34 @@ if causal is not None:
 # ### Calibration: Are Prediction Intervals Honest?
 #
 # Point IC tells us whether the ranking is correct on average; it says
-# nothing about whether the model's *uncertainty* is well calibrated.
-# Inductive split-conformal prediction (Vovk et al., 2005; Lei et al.,
-# 2018) gives a distribution-free check: using fold-0 absolute residuals
-# as a calibration set, the symmetric quantile $\hat{q}_{1-\alpha}$
-# defines an interval $[\hat{y} - \hat{q}, \hat{y} + \hat{q}]$ that
-# should cover the true label at rate $1-\alpha$ on the remaining folds.
-# Empirical coverage materially below the nominal level signals
-# overconfident residual scaling: the model is more wrong, more often,
-# than its training-time spread suggests. Width is reported as a
-# fraction of the actuals' standard deviation so families with different
-# return scales are comparable; smaller width at matched coverage means
-# tighter, more useful intervals. See Ch12 §12.6 / `11_conformal_gbm`
-# for the full conformal toolkit (CQR, ACI). What we report here is the
-# minimal residual-calibration diagnostic.
+# nothing about whether the model's *uncertainty* is well calibrated. The
+# width measured here is the one the `conformal_weighted` allocator sizes
+# positions with: calibrated per symbol on every absolute residual known at
+# `t - h`, where `h` is this label's horizon in data steps, falling back to a
+# quantile pooled over every symbol where one has too few residuals of its
+# own. A decision is covered when its absolute residual falls inside that
+# half-width, and `n_uncalibrated` counts the decisions that cleared no
+# warm-up and that no coverage figure describes.
+#
+# Empirical coverage materially below the nominal level signals overconfident
+# residual scaling - the model is more wrong, more often, than its
+# training-time spread suggests. Width is reported as a fraction of the
+# standard deviation of the outcomes it was measured against, so families with
+# different return scales are comparable; smaller width at matched coverage
+# means tighter, more useful intervals.
+#
+# Read it as a diagnostic of residual dispersion rather than a guarantee.
+# Split conformal's finite-sample coverage (Vovk et al., 2005; Lei et al.,
+# 2018) requires the calibration and evaluation scores to be exchangeable and
+# return residuals are not, and nothing in the allocation path reads an
+# interval or a coverage level - the width stands in for a volatility
+# estimate. See Ch12 §12.6 / `11_conformal_gbm` for the full conformal toolkit
+# (CQR, ACI).
+#
+# Each row is the family's highest-IC configuration for the primary label.
+# That is a model-level ranking and not the funnel's - every selection stage
+# ranks on validation backtest Sharpe - and it is used here because this
+# diagnostic runs before any backtest exists to rank.
 
 # %%
 conformal_etfs = conformal_coverage_diagnostic(

@@ -47,7 +47,7 @@ def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> S
     # in the same kernel would otherwise nest one preview root inside another.
     if resolved_root.name == PREVIEW_DIR_NAME:
         resolved_root = resolved_root.parent
-    study = Study.open(CASE_STUDY, workspace=resolved_root, release_root=REPO_ROOT)
+    study = Study.open(CASE_STUDY, workspace=resolved_root)
     study.activate(execution_tier)
     return study
 
@@ -217,8 +217,16 @@ def expected_prediction_hashes(requests: Iterable[Any]) -> tuple[str, ...]:
     return tuple(hashes)
 
 
-def snapshot_model_population(study: Study, *, name: str) -> OfficialPopulation:
-    """Freeze the complete canonical prediction population before model execution."""
+def snapshot_model_population(
+    study: Study, *, name: str, supersedes: str | None = None
+) -> OfficialPopulation:
+    """Freeze the complete canonical prediction population before model execution.
+
+    ``supersedes`` names the generation of ``name`` this run retires. A population is the set of
+    prediction identities, so anything that moves a training identity produces a different member
+    list under the same name, and ``OfficialPopulation.create`` refuses to write it without being
+    told which snapshot it replaces.
+    """
     requests = tuple(
         request
         for family in PREDICTIVE_FAMILIES
@@ -233,6 +241,7 @@ def snapshot_model_population(study: Study, *, name: str) -> OfficialPopulation:
         name=name,
         member_kind="prediction",
         members=expected_prediction_hashes(requests),
+        supersedes=supersedes,
     )
 
 

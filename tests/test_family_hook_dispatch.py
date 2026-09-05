@@ -21,6 +21,8 @@ import pytest
 FAMILY_HOOKS = {
     "latent_factors": ("rekey_holdout_spec", "holdout_training_floor"),
     "linear": ("rekey_holdout_spec",),
+    "deep_learning": ("rekey_holdout_spec",),
+    "tabular_dl": ("rekey_holdout_spec",),
 }
 
 

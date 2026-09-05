@@ -137,6 +137,14 @@ if holdings_df.schema["report_date"] != pl.Date:
 # Filter to the CIKs listed in ALL_INSTITUTIONS. The artifact may contain a
 # wider or narrower set; rows outside this universe are dropped.
 holdings_df = holdings_df.filter(pl.col("cik").is_in(SELECTED_CIKS))
+# Whether a manager filed for a quarter, and when that quarter became public, are
+# questions about what was *disclosed* - not about what enters the graph. The producer
+# counts any disclosed row as evidence a manager filed, so both are answered from the
+# selected holdings before the option filter below. A manager that discloses options only
+# has filed; reading coverage off the filtered frame would make this notebook step back
+# from, or reject, a quarter the producer used, and the parity assertion at the end would
+# then compare two different quarters.
+disclosed_df = holdings_df
 option_rows = holdings_df.filter(
     pl.col("put_call").fill_null("").cast(pl.Utf8).str.strip_chars() != ""
 ).height
@@ -160,8 +168,10 @@ holdings_df = holdings_df.with_columns(
 # A reporting quarter becomes available only after the last included manager
 # files. Duplicate CIK/CUSIP rows in an information table are summed rather than
 # selected positionally.
-quarter_availability = holdings_df.group_by("report_period").agg(
-    pl.col("filing_date").max().alias("timestamp")
+quarter_availability = (
+    disclosed_df.with_columns(pl.col("report_date").alias("report_period"))
+    .group_by("report_period")
+    .agg(pl.col("filing_date").max().alias("timestamp"))
 )
 
 # %% [markdown]
@@ -196,9 +206,10 @@ positions_df = (
 # quarter holds the early filers only, and their peers' absence would read as a
 # mass exit rather than as missing coverage. The downloader applies the same rule,
 # so this is also what keeps the reconstruction below equal to its artifacts.
-covered_ciks = holdings_df["cik"].n_unique()
+covered_ciks = disclosed_df["cik"].n_unique()
 complete_periods = (
-    positions_df.group_by("report_period")
+    disclosed_df.with_columns(pl.col("report_date").alias("report_period"))
+    .group_by("report_period")
     .agg(pl.col("cik").n_unique().alias("n_ciks"))
     .filter(pl.col("n_ciks") == covered_ciks)["report_period"]
     .to_list()
@@ -217,6 +228,14 @@ if partial_periods:
         f"{', '.join(str(p) for p in partial_periods)}"
     )
 positions_df = positions_df.filter(pl.col("report_period").is_in(complete_periods))
+# Every complete quarter, before NUM_QUARTERS narrows what this notebook displays. The
+# ownership-change table is part of the canonical feature set and the producer computes it
+# over the artifact's own last two complete quarters, so it has to be built from this frame
+# rather than from the displayed one: with NUM_QUARTERS=1 over a multi-quarter artifact the
+# truncated frame has nothing to compare, and emitting zero change there would contradict a
+# producer that compared two quarters. A one-quarter *artifact* is the different case the
+# no-comparison branch below handles.
+complete_positions_df = positions_df
 
 if NUM_QUARTERS > 0:
     recent_periods = (
@@ -381,8 +400,8 @@ def select_stock_quarter(df: pl.DataFrame, period, suffix: str) -> pl.DataFrame:
 
 
 # %%
-if len(positions_df) > 0 and positions_df["report_period"].n_unique() > 1:
-    stock_quarter = positions_df.group_by(["cusip", "report_period"]).agg(
+if len(complete_positions_df) > 0 and complete_positions_df["report_period"].n_unique() > 1:
+    stock_quarter = complete_positions_df.group_by(["cusip", "report_period"]).agg(
         pl.col("issuer").first().alias("issuer_name"),
         pl.col("reported_value_usd").sum().alias("quarter_value_usd"),
         pl.col("cik").n_unique().alias("n_institutions"),
@@ -390,7 +409,7 @@ if len(positions_df) > 0 and positions_df["report_period"].n_unique() > 1:
     )
     comparison_periods = stock_quarter["report_period"].unique().sort(descending=True).head(2)
     current_period, prior_period = comparison_periods.to_list()
-    current_availability = positions_df.filter(pl.col("report_period") == current_period)[
+    current_availability = complete_positions_df.filter(pl.col("report_period") == current_period)[
         "timestamp"
     ].max()
     prior = select_stock_quarter(stock_quarter, prior_period, "q1")
@@ -849,6 +868,16 @@ if len(latest_holdings) > 0:
             .sort("cusip")
         )
         print("Added momentum features")
+    else:
+        # With one complete quarter there is nothing to compare against, and the producer
+        # emits both columns anyway - 0.0 and null - so an artifact built with
+        # `--num-filings 1` has the same schema as any other. Skipping them here left the
+        # parity assertion below comparing a frame two columns short.
+        stock_features = stock_features.with_columns(
+            pl.lit(0.0, dtype=pl.Float64).alias("inst_value_change_usd"),
+            pl.lit(None, dtype=pl.Float64).alias("inst_pct_change"),
+        ).sort("cusip")
+        print("Single complete quarter: momentum columns emitted as 0.0 / null")
 
     display(stock_features.head(10))
 

@@ -642,6 +642,203 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     return spec, context
 
 
+@dataclass(frozen=True)
+class LockedSequenceInputs:
+    """Everything a locked sequence specification determines about its own inputs.
+
+    Derived from the spec and never from a preset, so an edit to a preset since the run
+    cannot change what is reconstructed. Both callers below need exactly this set, and they
+    need it to be the SAME set: `rekey_holdout_spec` writes the eligibility manifest and
+    `reconstruct_locked_request` checks it, so a second derivation is two statements of one
+    rule that agree until they do not.
+    """
+
+    label_ref: Any
+    mds: Any
+    split: dict[str, Any]
+    config: dict[str, Any]
+    dataset_pd: Any
+    lookback: int
+    decision_cadence: str | None
+    preprocessing: dict[str, Any]
+
+
+def locked_sequence_inputs(study: Study, spec: dict[str, Any]) -> LockedSequenceInputs:
+    """Rebuild a locked sequence run's inputs from its own specification.
+
+    The configuration comes out of the recorded model block rather than out of
+    `load_configs`, for the reason `reconstruct_locked_request` has always given: a preset is
+    mutable and the spec is not, so reading the preset would let an edit since selection
+    change what is refitted without changing anything a reader can see.
+
+    The dataset is thinned to the locked decision cadence before any window is built,
+    because `resolve_model_request` thins it there too. A weekly-cadence lock reconstructed
+    on every session is not a cheaper refit, it is a different model.
+    """
+    from case_studies.research.contracts import ExecutionTier
+    from case_studies.research.models import locked_holdout_split
+    from case_studies.utils.registry import training_hash_from_spec
+    from utils.modeling import load_modeling_dataset
+
+    computation = spec["computation"]
+    label_ref = study.labels.get(spec["label"], execution_tier=ExecutionTier.CANONICAL)
+    mds = load_modeling_dataset(study.case_study, label_ref.name, max_symbols=0)
+    if mds.date_col != "timestamp" or mds.entity_cols[:1] not in (["symbol"], ["product"]):
+        raise ValueError("locked sequence runner requires canonical entity and timestamp keys")
+    if mds.task_type != "regression":
+        raise ValueError("locked sequence runner currently supports regression labels only")
+    split = locked_holdout_split(spec, mds.dataset, mds.date_col, study.case_study)
+
+    model = computation.get("model")
+    if not isinstance(model, dict) or not isinstance(model.get("params"), dict):
+        raise ValueError("locked sequence model specification is missing")
+    model_params = dict(model["params"])
+    required_training = {
+        name: model_params.pop(name, None)
+        for name in ("batch_size", "checkpoint_interval", "n_epochs")
+    }
+    if any(value is None for value in required_training.values()):
+        raise ValueError("locked sequence model omits exact training parameters")
+    config = _resolve_sequence_config(
+        {
+            "family": "deep_learning",
+            "library": model.get("implementation"),
+            "config_name": str(
+                spec.get("config_name") or f"locked-{training_hash_from_spec(spec)}"
+            ),
+            "params": model_params,
+            **required_training,
+            "seed": int(spec["seed"]),
+        },
+        {},
+    )
+
+    preprocessing = computation.get("preprocessing")
+    if not isinstance(preprocessing, dict) or not preprocessing.get("calendar_id"):
+        raise ValueError("locked sequence preprocessing omits the exact calendar")
+    decision_cadence = config["params"].get("decision_cadence")
+    locked_cv = computation.get("cv") or {}
+    locked_cv_request = locked_cv.get("request") or {}
+    # Presence, not truth. CVSpec.calendar is None whenever it was left unset, and a
+    # resolved CV record still writes the key, so None is an exactly reproducible
+    # choice rather than a missing one - rejecting it would refuse a canonical weekly
+    # run that simply never named a calendar. Only a block that never mentions the key
+    # leaves nothing to reproduce, and defaulting there would silently thin on a
+    # different calendar than the fit did once resolve_rebalance_timestamps honors it.
+    for block in (locked_cv, locked_cv_request):
+        if "calendar" in block:
+            cadence_calendar = block["calendar"]
+            break
+    else:
+        if decision_cadence is not None:
+            raise ValueError(
+                "locked cadence-selected sequence training does not record its calendar, "
+                "so its observation selection cannot be reproduced"
+            )
+        cadence_calendar = None
+    dataset_pd = _select_sequence_observations(
+        mds.dataset,
+        date_col=mds.date_col,
+        cadence=decision_cadence,
+        calendar=cadence_calendar,
+    ).to_pandas()
+    return LockedSequenceInputs(
+        label_ref=label_ref,
+        mds=mds,
+        split=split,
+        config=config,
+        dataset_pd=dataset_pd,
+        lookback=int(config["params"].get("lookback", 60)),
+        decision_cadence=decision_cadence,
+        preprocessing=dict(preprocessing),
+    )
+
+
+def locked_sequence_expected_keys(
+    study: Study,
+    inputs: LockedSequenceInputs,
+    *,
+    splits: list[dict[str, Any]],
+):
+    """The eligibility manifest for ``splits``, by the branch the locked configuration names.
+
+    One function, two callers, and that is the whole point of it. `rekey_holdout_spec` writes
+    what this returns into the spec; `reconstruct_locked_request` checks the spec against what
+    this returns. Stated twice they would agree until a change touched one of them, and the
+    disagreement would not surface as a failure - `validate_locked_expected_keys` compares the
+    manifest against the rule that wrote it, so a holdout built on a second version of the rule
+    registers, validates, and is wrong where nothing looks.
+
+    A sequence model predicts only where a full lookback of history exists and no window
+    crosses a missing expected period, so these keys are not every (entity, date) in the fold.
+    That rule lives in `sequence_validation_keys` and `darts_validation_keys`, which the
+    validation path calls, and this calls them rather than restating what they do.
+    """
+    config = inputs.config
+    mds = inputs.mds
+    calendar_id = str(inputs.preprocessing["calendar_id"])
+    if config.get("library") == "darts":
+        from case_studies.utils.darts_forecasting import darts_validation_keys
+
+        return darts_validation_keys(
+            inputs.dataset_pd,
+            splits,
+            config=config,
+            feature_names=list(mds.feature_names),
+            label_col=mds.label_col,
+            date_col=mds.date_col,
+            entity_col=mds.entity_cols[0],
+            case_study=study.case_study,
+            calendar_id=calendar_id,
+            temporal_by_fold=mds.temporal_by_fold,
+            temporal_keys=list(mds.temporal_keys),
+            temporal_feature_names=list(mds.temporal_feature_names),
+        )
+    return sequence_validation_keys(
+        inputs.dataset_pd,
+        splits,
+        label_col=mds.label_col,
+        date_col=mds.date_col,
+        entity_col=mds.entity_cols[0],
+        lookback=inputs.lookback,
+        calendar_id=calendar_id,
+    )
+
+
+def rekey_holdout_spec(
+    study: Study,
+    spec: dict[str, Any],
+    *,
+    validation_spec: dict[str, Any],
+) -> None:
+    """Recompute the fold-derived fields against the holdout fold, in place, before a lock.
+
+    The sequence half of the hook `case_studies.research.holdout._rekey_holdout_spec`
+    dispatches to. Until this existed every sequence holdout refused with
+    `NotImplementedError`, which is what stopped `sp500_options` the day a corrected label
+    buffer moved its selection from `linear/lasso_f0.7` to `deep_learning/patchtst`.
+
+    One field is re-keyed, and only one. `expected_prediction_keys` describes the validation
+    folds on arrival and has to describe the derived holdout fold instead: carrying it forward
+    locks a manifest `validate_locked_run` rejects, and dropping it locks one it rejects
+    differently. There is no second field. A sequence model resolves no parameter from a
+    fold's own training rows - its `model` block is `{class, implementation, objective,
+    params}` and every one of those is declared - so it carries no `effective_params_by_fold`
+    for `linear`'s replay-and-verify step to apply to.
+
+    `validation_spec` is unused for the same reason it is unused in the latent-factor hook: it
+    exists so the dispatch can pass it to every family, and only a family with data-derived
+    parameters has anything to verify against it.
+    """
+    inputs = locked_sequence_inputs(study, spec)
+    expected = locked_sequence_expected_keys(study, inputs, splits=[inputs.split])
+    spec["computation"]["expected_prediction_keys"] = {
+        "digest": value_digest(expected, ("symbol", "timestamp", "fold")),
+        "n_rows": expected.height,
+        "n_folds": expected["fold"].n_unique(),
+    }
+
+
 def reconstruct_locked_request(
     study: Study,
     spec: dict[str, Any],
@@ -680,13 +877,12 @@ def reconstruct_locked_request(
     locked_max_train_sequences = int(
         (computation.get("input_data_spec") or {}).get("max_train_sequences", 0)
     )
-    label_ref = study.labels.get(spec["label"], execution_tier=ExecutionTier.CANONICAL)
-    mds = load_modeling_dataset(study.case_study, label_ref.name, max_symbols=0)
-    if mds.date_col != "timestamp" or mds.entity_cols[:1] not in (["symbol"], ["product"]):
-        raise ValueError("locked sequence runner requires canonical entity and timestamp keys")
-    if mds.task_type != "regression":
-        raise ValueError("locked sequence runner currently supports regression labels only")
-    split = locked_holdout_split(spec, mds.dataset, mds.date_col, study.case_study)
+    inputs = locked_sequence_inputs(study, spec)
+    label_ref = inputs.label_ref
+    mds = inputs.mds
+    split = inputs.split
+    config = inputs.config
+    model = spec["computation"].get("model")
     if mds.temporal_by_fold is not None and mds.temporal_keys and mds.temporal_feature_names:
         # Coverage, not fold-boundary compatibility - the branch `latent_factors/adapter.py:603`
         # and `gbm.py` already take, for the same reason. Compatibility asks whether the stage-04
@@ -702,29 +898,6 @@ def reconstruct_locked_request(
             date_col=mds.date_col,
         )
 
-    model = computation.get("model")
-    if not isinstance(model, dict) or not isinstance(model.get("params"), dict):
-        raise ValueError("locked sequence model specification is missing")
-    model_params = dict(model["params"])
-    required_training = {
-        name: model_params.pop(name, None)
-        for name in ("batch_size", "checkpoint_interval", "n_epochs")
-    }
-    if any(value is None for value in required_training.values()):
-        raise ValueError("locked sequence model omits exact training parameters")
-    config = _resolve_sequence_config(
-        {
-            "family": "deep_learning",
-            "library": model.get("implementation"),
-            "config_name": str(
-                spec.get("config_name") or f"locked-{training_hash_from_spec(spec)}"
-            ),
-            "params": model_params,
-            **required_training,
-            "seed": int(spec["seed"]),
-        },
-        {},
-    )
     expected_model = {
         "class": config["params"]["architecture"],
         "implementation": config.get("library", "pytorch"),
@@ -758,60 +931,14 @@ def reconstruct_locked_request(
     if numerics != reproduced_numerics or int(spec["seed"]) != int(numerics["seed"]):
         raise ValueError("locked sequence numerics cannot be reproduced")
 
-    preprocessing = computation.get("preprocessing")
-    if not isinstance(preprocessing, dict) or not preprocessing.get("calendar_id"):
-        raise ValueError("locked sequence preprocessing omits the exact calendar")
-    # resolve_model_request thins the dataset to the decision cadence before it builds
-    # any target or window, so reconstruction has to thin it the same way. Otherwise a
-    # weekly-cadence lock retrains on every session, which is a different model. The
-    # cadence comes from the locked model params, never from the preset.
-    decision_cadence = config["params"].get("decision_cadence")
-    locked_cv = computation.get("cv") or {}
-    locked_cv_request = locked_cv.get("request") or {}
-    # Presence, not truth. CVSpec.calendar is None whenever it was left unset, and a
-    # resolved CV record still writes the key, so None is an exactly reproducible
-    # choice rather than a missing one - rejecting it would refuse a canonical weekly
-    # run that simply never named a calendar. Only a block that never mentions the key
-    # leaves nothing to reproduce, and defaulting there would silently thin on a
-    # different calendar than the fit did once resolve_rebalance_timestamps honors it.
-    for block in (locked_cv, locked_cv_request):
-        if "calendar" in block:
-            cadence_calendar = block["calendar"]
-            break
-    else:
-        if decision_cadence is not None:
-            raise ValueError(
-                "locked cadence-selected sequence training does not record its calendar, "
-                "so its observation selection cannot be reproduced"
-            )
-        cadence_calendar = None
-    dataset_pd = _select_sequence_observations(
-        mds.dataset,
-        date_col=mds.date_col,
-        cadence=decision_cadence,
-        calendar=cadence_calendar,
-    ).to_pandas()
-    lookback = int(config["params"].get("lookback", 60))
+    preprocessing = inputs.preprocessing
+    decision_cadence = inputs.decision_cadence
+    dataset_pd = inputs.dataset_pd
+    lookback = inputs.lookback
+    expected = locked_sequence_expected_keys(study, inputs, splits=[split])
     if config.get("library") == "darts":
-        from case_studies.utils.darts_forecasting import (
-            darts_training_identity,
-            darts_validation_keys,
-        )
+        from case_studies.utils.darts_forecasting import darts_training_identity
 
-        expected = darts_validation_keys(
-            dataset_pd,
-            [split],
-            config=config,
-            feature_names=list(mds.feature_names),
-            label_col=mds.label_col,
-            date_col=mds.date_col,
-            entity_col=mds.entity_cols[0],
-            case_study=study.case_study,
-            calendar_id=str(preprocessing["calendar_id"]),
-            temporal_by_fold=mds.temporal_by_fold,
-            temporal_keys=list(mds.temporal_keys),
-            temporal_feature_names=list(mds.temporal_feature_names),
-        )
         input_data_spec = darts_training_identity(
             config,
             mds.label_col,
@@ -828,15 +955,6 @@ def reconstruct_locked_request(
             "output_chunk_length": input_data_spec["output_chunk_length"],
         }
     else:
-        expected = sequence_validation_keys(
-            dataset_pd,
-            [split],
-            label_col=mds.label_col,
-            date_col=mds.date_col,
-            entity_col=mds.entity_cols[0],
-            lookback=lookback,
-            calendar_id=str(preprocessing["calendar_id"]),
-        )
         input_data_spec = {
             "input_data_spec": mds.input_lineage,
             "lookback": lookback,

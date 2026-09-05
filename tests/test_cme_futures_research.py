@@ -593,6 +593,21 @@ def test_visible_requests_snapshot_complete_canonical_backtests(
     assert shortlist[0].hash in set(candidate_sets["fwd_ret_21d"].members)
 
 
+def test_an_empty_config_selection_is_blamed_on_the_caller_not_the_family() -> None:
+    """`config_names=[]` filters every row out, and the family's menu is not why.
+
+    The caller passes `config_names` in code, never from a parameters cell, so an empty list
+    cannot be the empty-means-all idiom `labels` uses; it is a mistake, and reporting it as "no
+    declared requests for 'linear'" sends a reader to the training menu to look for a row that
+    is there.
+    """
+    complete = research_workflow.model_request_catalog("linear")
+    assert complete.height > 0
+
+    with pytest.raises(ValueError, match="config_names is empty"):
+        research_workflow.model_request_catalog("linear", config_names=[])
+
+
 def test_candidate_set_stage_outside_the_funnel_is_refused() -> None:
     """A stage the funnel does not define never reaches the registry as a new namespace."""
     for stage in research_workflow.CANDIDATE_SET_STAGES:
@@ -752,6 +767,46 @@ def _labelled_execution(study: Study, monkeypatch: pytest.MonkeyPatch) -> dict[s
     }
 
 
+def test_a_union_that_adds_nothing_still_resolves_under_the_union_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The funnel's union names have to resolve on every registry, not only on wide ones.
+
+    `pre-overlay` is the union of `signal` and `allocation`. Where the allocation stage
+    registered nothing the signal stage had not, the union has the same members as `signal` and
+    therefore the same identity - a candidate set is its members. Both names still name a step
+    of the funnel, and `stage_backtest_results(stage="pre-overlay")` reads the union by name, so
+    a union that binds no name takes the whole funnel down at the stage after it.
+    """
+    from case_studies.research import CandidateSet, Result
+
+    study = _study(tmp_path)
+    by_label = _labelled_execution(study, monkeypatch)
+    label = research_workflow.ALL_LABELS[0]
+    members = [Result.open(study, value) for value in by_label[label]]
+
+    signal = research_workflow._create_comparable_set(
+        study, research_workflow.candidate_set_name("signal", label), members
+    )
+    allocation = research_workflow._create_comparable_set(
+        study, research_workflow.candidate_set_name("allocation", label), members
+    )
+    assert allocation.hash == signal.hash
+
+    pre_overlay = research_workflow.pre_overlay_candidate_set(study, label=label)
+    assert pre_overlay.hash == signal.hash
+    assert set(pre_overlay.members) == set(by_label[label])
+
+    for stage in ("signal", "allocation", "pre-overlay"):
+        name = research_workflow.candidate_set_name(stage, label)
+        assert CandidateSet.one(study, name=name).hash == signal.hash
+
+    results = research_workflow.stage_backtest_results(
+        study, stage="pre-overlay", label=label, execution_tier="canonical"
+    )
+    assert {result.hash for result in results} == set(by_label[label])
+
+
 def test_final_selection_pool_spans_both_return_horizons(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -800,6 +855,27 @@ def test_selection_catalog_rejects_a_candidate_the_catalog_does_not_describe(
         research_workflow.selection_catalog(study, members)
 
 
+def _pca_catalog() -> pl.DataFrame:
+    """The one declared configuration the wrapper tests below execute."""
+    return pl.DataFrame(
+        {"family": ["latent_factors"], "label": ["fwd_ret_5d"], "config_name": ["pca"]}
+    )
+
+
+def _pca_request():
+    return cast(
+        "object",
+        SimpleNamespace(
+            family="latent_factors",
+            spec={
+                "execution_tier": "canonical",
+                "label": "fwd_ret_5d",
+                "config_name": "pca",
+            },
+        ),
+    )
+
+
 def test_official_model_catalog_forwards_the_population_it_supersedes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -818,7 +894,14 @@ def test_official_model_catalog_forwards_the_population_it_supersedes(
     resolved = (
         cast(
             "object",
-            SimpleNamespace(spec={"execution_tier": "canonical"}),
+            SimpleNamespace(
+                family="latent_factors",
+                spec={
+                    "execution_tier": "canonical",
+                    "label": "fwd_ret_5d",
+                    "config_name": "pca",
+                },
+            ),
         ),
     )
     monkeypatch.setattr(research_workflow, "OfficialPopulation", SimpleNamespace(create=_create))
@@ -833,7 +916,7 @@ def test_official_model_catalog_forwards_the_population_it_supersedes(
 
     research_workflow.run_official_model_catalog(
         cast("object", SimpleNamespace()),
-        pl.DataFrame(),
+        _pca_catalog(),
         population_name="cme_futures-pca-validation-v1",
         resolved_requests=resolved,
         supersedes="2d252634bffb",
@@ -864,12 +947,44 @@ def test_official_model_catalog_defaults_to_superseding_nothing(
 
     research_workflow.run_official_model_catalog(
         cast("object", SimpleNamespace()),
-        pl.DataFrame(),
+        _pca_catalog(),
         population_name="cme_futures-pca-validation-v1",
-        resolved_requests=(SimpleNamespace(spec={"execution_tier": "canonical"}),),
+        resolved_requests=(_pca_request(),),
     )
 
     assert seen["supersedes"] is None
+
+
+def test_a_partial_resolved_set_cannot_snapshot_the_catalog_population(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`resolved_requests` avoids resolving twice; it does not narrow the population.
+
+    `require_complete` cannot catch a partial set: it measures the population against the
+    members it just declared. So a resolved set covering half the catalog snapshotted under
+    the catalog's name, reported complete, and removed every omitted configuration from the
+    comparison the population exists to define.
+    """
+    monkeypatch.setattr(
+        research_workflow,
+        "OfficialPopulation",
+        SimpleNamespace(create=lambda *a, **k: pytest.fail("a partial set reached the snapshot")),
+    )
+    catalog = pl.DataFrame(
+        {
+            "family": ["latent_factors", "latent_factors"],
+            "label": ["fwd_ret_5d", "fwd_ret_21d"],
+            "config_name": ["pca", "pca"],
+        }
+    )
+
+    with pytest.raises(ValueError, match="do not match the declared catalog"):
+        research_workflow.run_official_model_catalog(
+            cast("object", SimpleNamespace()),
+            catalog,
+            population_name="cme_futures-pca-validation-v1",
+            resolved_requests=(_pca_request(),),
+        )
 
 
 def _multifold_frames(n_days: int = 60) -> tuple[pl.DataFrame, pl.DataFrame]:

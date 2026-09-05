@@ -82,7 +82,12 @@ def test_crypto_preview_then_canonical_workspace_isolates_symlinked_inputs(
     (case_root / "config").mkdir()
     (case_root / "config" / "setup.yaml").write_text("evaluation: {}\n")
     (release / "case_studies" / "config").mkdir()
-    monkeypatch.setattr(research_workflow, "REPO_ROOT", release)
+    # The release root is named through the environment rather than by patching the
+    # module's REPO_ROOT: `research_workflow.open_study` no longer passes one, so that
+    # every caller reaches the same resolution - an explicit argument, else
+    # ML4T_RELEASE_ROOT, else REPO_ROOT - and the harness can point a run at a
+    # checkout-shaped tree instead of at the worktree's symlinks into ~/ml4t/artifacts.
+    monkeypatch.setenv("ML4T_RELEASE_ROOT", str(release))
 
     workspace = tmp_path / "workspace"
     preview_study = research_workflow.open_study(execution_tier="preview", workspace=workspace)
@@ -917,3 +922,98 @@ class TestTheSingleRootReadOnlyForm:
         case_dir = release / "case_studies" / "etfs"
 
         assert Study.at(case_dir).case_study == "etfs"
+
+
+def _publish_into_release_registry(release: Path, prediction_hash: str) -> None:
+    """One published prediction in a released registry, written as the registry stores it."""
+    case_dir = release / "case_studies" / "etfs"
+    _open_registry(case_dir).close()
+    # Closed, not merely committed. The registry runs in WAL mode and a released root is
+    # read with `immutable=1`, which tells SQLite to skip WAL recovery - so a row left in
+    # the log rather than checkpointed into the database file is invisible to the read
+    # under test, and the test would pass by not seeing what it is meant to see.
+    db = sqlite3.connect(case_dir / "run_log" / "registry.db")
+    try:
+        db.execute(
+            "INSERT INTO training_runs (training_hash, identity_version, execution_tier, family, "
+            "label, config_name, spec_json, started_at, created_at) "
+            "VALUES ('t-published', 2, 'canonical', 'linear', 'fwd_ret_1d', 'ridge', '{}', "
+            "'2026-09-01T00:00:00', '2026-09-01T00:00:00')"
+        )
+        db.execute(
+            "INSERT INTO prediction_sets (prediction_hash, training_hash, split, created_at) "
+            f"VALUES ('{prediction_hash}', 't-published', 'validation', '2026-09-01T00:00:00')"
+        )
+        db.commit()
+        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        db.close()
+
+
+def test_the_release_root_defaults_to_the_repository(monkeypatch) -> None:
+    """Unset, nothing moves: a reader and a production run read the checkout they are in."""
+    monkeypatch.delenv("ML4T_RELEASE_ROOT", raising=False)
+    from case_studies.research.workspace import default_release_root
+    from utils.paths import REPO_ROOT as repo_root
+
+    assert default_release_root() == repo_root
+
+
+def test_the_environment_names_the_release_root_a_study_reads(tmp_path: Path, monkeypatch) -> None:
+    """The half of #912 that makes a harness run hermetic.
+
+    `open_study` resolved canonical reads through REPO_ROOT, whose
+    `case_studies/<cs>/run_log` is a symlink into the published registry in every
+    maintainer worktree and does not exist on any CI runner. The overlay itself is the
+    contract and is not in question; which released tree an unqualified caller gets is
+    what made a local run and a CI run read different rows.
+    """
+    release = _seed_release(tmp_path)
+    _publish_into_release_registry(release, "published-1")
+    monkeypatch.setenv("ML4T_RELEASE_ROOT", str(release))
+
+    study = Study.open("etfs", workspace=tmp_path / "workspace")
+
+    assert study.release_root == release
+    assert study.predictions.table()["prediction_hash"].to_list() == ["published-1"]
+
+
+def test_a_named_release_root_still_wins_over_the_environment(tmp_path: Path, monkeypatch) -> None:
+    """Otherwise the variable would silently redirect a caller that named its own root.
+
+    Every research_workflow that used to pass `release_root=REPO_ROOT` explicitly now
+    relies on the default, so the precedence has to be stated rather than assumed.
+    """
+    named = _seed_release(tmp_path)
+    _publish_into_release_registry(named, "from-the-argument")
+    other = _seed_release(tmp_path / "elsewhere")
+    _publish_into_release_registry(other, "from-the-environment")
+    monkeypatch.setenv("ML4T_RELEASE_ROOT", str(other))
+
+    study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=named)
+
+    assert study.release_root == named
+    assert study.predictions.table()["prediction_hash"].to_list() == ["from-the-argument"]
+
+
+def test_a_checkout_shaped_release_root_carries_no_run_log(tmp_path: Path) -> None:
+    """What the harness builds, and the property that makes it hermetic.
+
+    It mirrors `config/` and the tracked top-level files and stops there. No `run_log`
+    is the point - that is the directory a maintainer worktree symlinks into
+    `~/ml4t/artifacts` and a CI checkout does not have at all - and no `features` or
+    `labels`, so `_release_manifest_digest` does not walk an artifact tree it is never
+    asked about.
+    """
+    from tests.conftest import _checkout_shaped_release_root
+
+    release = _checkout_shaped_release_root(tmp_path / "out")
+
+    case_dir = release / "case_studies" / "etfs"
+    assert (case_dir / "config").is_dir()
+    for generated in ("run_log", "features", "labels"):
+        assert not (case_dir / generated).exists(), (
+            f"{generated} must not be reachable through the harness release root, or the "
+            "harness reads the machine's published state again"
+        )
+    assert (release / "case_studies" / "config").is_dir()

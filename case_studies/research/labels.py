@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import uuid
@@ -122,13 +121,18 @@ class LabelCatalog:
         if not path.is_file():
             raise FileNotFoundError(f"label artifact is missing: {path}")
         resolved_metadata_path = sidecar_path(path)
+        digest = value_digest(pl.read_parquet(path))
         if resolved_metadata_path.exists():
             metadata = json.loads(resolved_metadata_path.read_text())
-            digest = value_digest(pl.read_parquet(path))
             if metadata.get("digest") != digest:
                 raise ValueError(f"label artifact digest does not match its sidecar: {path}")
-        else:
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+        # The sidecar-less branch used to digest the file's bytes, so the same label values
+        # under a different parquet codec or row-group size produced a different label
+        # identity - and an artifact with a sidecar and one without disagreed about the
+        # same data. Every production label carries a sidecar; the CI fixtures, written
+        # before sidecars existed, do not, so that branch was the difference between what
+        # CI computes and what production computes. `value_digest` digests the values and
+        # answers the same either way.
         return LabelRef(definition=definition, path=path, digest=digest)
 
     def publish(self, definition: LabelDefinition, frame: pl.DataFrame) -> LabelRef:

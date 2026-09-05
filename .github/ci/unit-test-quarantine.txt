@@ -45,7 +45,8 @@
 # `test_holdout_expected_keys` loads `20_strategy_synthesis/holdout.py`, whose
 # module scope reaches lightgbm and torch through the family training paths it
 # dispatches to. It tests two pure functions and needs none of that, but the
-# module cannot be imported without it.
+# module cannot be imported without it. `test_holdout_force_regenerates` loads
+# the same module for the same reason and is behind the same boundary.
 # ---------------------------------------------------------------------------
 # The three files the etfs deep-learning and latent-factor pass added are behind
 # the same boundary. `test_common_sample_daily_ic` tests one pure polars
@@ -70,6 +71,7 @@ tests/test_gbm_holdout_rekey.py
 tests/test_gbm_identity.py
 tests/test_gbm_runtime.py
 tests/test_holdout_expected_keys.py
+tests/test_holdout_force_regenerates.py
 tests/test_insight_chapter.py
 tests/test_latent_epoch_ic_over_dates.py
 tests/test_latent_factors_identity.py
@@ -94,6 +96,12 @@ tests/test_sequence_dataset.py
 # case_studies/utils/deep_learning.py imports torch at module scope (:42), and
 # this module imports sequence_identity_params from it.
 tests/test_sequence_identity_roundtrip.py
+# Behind the same import. The point of these cases is that the two holdout
+# re-key hooks read their keys from the same functions the validation path uses
+# rather than restating the rule, so they monkeypatch `sequence_validation_keys`,
+# `darts_validation_keys` and `_tabm_expected_keys` in place - which means
+# importing the modules that define them, and both reach torch.
+tests/test_sequence_holdout_rekey.py
 tests/test_tabular_dl.py
 tests/test_tabular_dl_adapter.py
 tests/test_tabular_dl_identity.py
@@ -116,14 +124,14 @@ tests/test_training_identity_migration.py
 # notebook, and its other ten tests are pure config assertions that finish in
 # 0.07s. Excluding the file threw those away, which is the same
 # exclude-more-than-you-meant defect the subtraction below exists to fix.
-# Ten, not nine: `test_registering_stage_maps_to_its_actual_entry_point` is
+# Eleven, not nine: `test_registering_stage_maps_to_its_actual_entry_point` is
 # parametrized over five stages, so counting `def test_` undercounts what the
-# deselect leaves behind. Measured 2026-08-27: 88 collected, 78 deselected.
+# deselect leaves behind. Measured 2026-09-03: 105 collected, 94 deselected.
 # ---------------------------------------------------------------------------
 tests/test_case_studies.py                       # cs-<case-study> (test-case-studies)
 tests/test_chapter_notebooks.py                  # chNN (test-chapters)
 tests/test_docker_notebooks.py                   # test-py312, test-neo4j, test-benchmark
-tests/test_model_registry.py::test_model_notebook  # nothing runs it; the file's other ten tests run here
+tests/test_model_registry.py::test_model_notebook  # nothing runs it; the file's other eleven tests run here
 
 # ---------------------------------------------------------------------------
 # Needs the reader's Docker image. It walks every declared third-party import
@@ -154,8 +162,19 @@ tests/test_notebook_sync.py::test_stamped_notebooks_are_current_and_production
 tests/test_external_drift.py
 
 # ---------------------------------------------------------------------------
-# Needs a dataset. This job checks out no test-data and points ML4T_DATA_PATH
-# at the repo's own `data/`, which holds loaders and no market data.
+# Needs a dataset - run by test-unit-data, which checks out the test-data
+# repository. This job checks out no test-data and points ML4T_DATA_PATH at the
+# repo's own `data/`, which holds loaders and no market data.
+#
+# These sat here from 2026-08-24 to 2026-09-03 excluded from this job and named
+# by no other, so the three files ran in no CI job at all - the defect the
+# subtraction above exists to prevent, reappearing one level down because
+# test-unit-data enumerates its files by hand. Measured against the test-data
+# checkout: 35 passed, 0 skipped, up from 14.
+# test_the_data_job_runs_exactly_what_is_quarantined_for_it in
+# tests/test_quarantine_list.py is what keeps this section and that job in step,
+# the same way the modelling-environment section is kept in step with
+# test-unit-image.
 # ---------------------------------------------------------------------------
 tests/test_artifact_specs.py
 tests/test_backtest_presets.py

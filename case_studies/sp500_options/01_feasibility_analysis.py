@@ -75,6 +75,7 @@ from data import (
     load_sp500_options_straddles_raw,
     load_sp500_options_surface,
 )
+from utils.artifact_specs import resolve_label_buffer_unit
 from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
@@ -127,7 +128,13 @@ HOLDOUT_START = str(SETUP["evaluation"]["holdout_start"])
 HOLDOUT_END = str(SETUP["evaluation"]["holdout_end"])
 PRIMARY_LABEL = SETUP["labels"]["primary"]
 LABEL_BUFFER = SETUP["labels"]["buffer"]
-BUFFER_SESSIONS = int(LABEL_BUFFER.rstrip("D"))
+BUFFER_DAYS = int(LABEL_BUFFER.rstrip("D"))
+# What the buffer counts. `ret_to_expiry` resolves at the expiration of its own contracts,
+# which is calendar time, and `setup.yaml` declares that under `labels.buffer_unit`; every
+# other case study's labels are session-gridded and take the `sessions` default. The
+# duration alone cannot say which, so nothing below infers it.
+BUFFER_UNIT = resolve_label_buffer_unit(CASE_STUDY_ID, PRIMARY_LABEL, SETUP)
+BUFFER_NOUN = "sessions" if BUFFER_UNIT == "sessions" else "calendar days"
 CASCADE = SETUP["backtest"]["sweep"]["htm_cost_cascade"]
 TOP_K = max(SETUP["backtest"]["sweep"]["top_k_grid"][PRIMARY_LABEL])
 BREADTH_FLOOR = int(np.ceil(TOP_K / CASCADE["liquid_quantile"]))
@@ -164,7 +171,7 @@ print(
 )
 print(
     f"Walk-forward: {SETUP['evaluation']['n_splits']} folds on the {SETUP['evaluation']['calendar']}"
-    f" calendar, with {BUFFER_SESSIONS} sessions of separation for an outcome known at expiration"
+    f" calendar, with {BUFFER_DAYS} {BUFFER_NOUN} of separation for an outcome known at expiration"
 )
 
 # %% [markdown]
@@ -234,11 +241,16 @@ print(
 # common strike and expiration, their combined price, and the gap between the combined bid and the
 # combined ask.
 #
-# Three properties are checked before anything is computed. The combined price is above zero,
-# because every ratio below divides by it. The panel holds at most one straddle per stock and
-# session, since a second one would double that stock's weight in every average taken across the
-# panel. And the combined price and the combined spread are each the sum of the two legs, which is
-# the arithmetic every cost figure in Section B.3 rests on.
+# Four properties are checked before anything is computed. The two legs share a strike and an
+# expiration, which is what makes the pair a straddle rather than two unrelated contracts. The
+# combined price is above zero, because every ratio below divides by it. The panel holds at most
+# one straddle per stock and session, since a second one would double that stock's weight in every
+# average taken across the panel. And the combined price and the combined spread are each the sum
+# of the two legs, which is the arithmetic every cost figure in Section B.3 rests on.
+#
+# The last of those does not imply the first: a sum stays a sum when the legs are mispaired, so
+# only the strike and expiration check distinguishes a straddle from a call and a put that happen
+# to have been added together.
 
 # %%
 straddles = load_sp500_options_straddles(start_date=START_DATE, end_date=END_DATE)
@@ -255,6 +267,15 @@ legs = research.select(
     .alias("spread"),
 )
 
+# `ne_missing` rather than `!=`. A comparison against a null is null in Polars, and `filter`
+# drops a null predicate, so a straddle missing a strike or an expiration would pass a `!=`
+# test by being unrepresentable in its result rather than by being paired. `ne_missing` treats
+# a null on one side as a difference, which is what the assertion is claiming there is none of.
+unpaired = research.filter(
+    pl.col("put_strike").ne_missing(pl.col("strike"))
+    | pl.col("put_expiration").ne_missing(pl.col("expiration"))
+)
+assert len(unpaired) == 0, "a straddle's legs do not share a strike and an expiration"
 assert research["instr_mid"].min() > 0, "a straddle mid is not a usable denominator"
 assert not research.select(pl.struct("symbol", "timestamp").is_duplicated().any()).item(), (
     "a stock carries more than one straddle on a session"
@@ -774,12 +795,26 @@ print(
 #
 # One quantity here has no counterpart in a case study trading shares. A straddle sold on the last
 # decision date of the development period is not resolved on that date: it resolves when the options
-# expire, `labels.buffer` sessions later. So the last date this notebook may draw a conclusion from
-# is not the last date before the holdout but the last one whose outcome lands before it, and the
-# figure in D.2 has to stop there rather than at the boundary.
+# expire, `labels.buffer` later. So the last date this notebook may draw a conclusion from is not
+# the last date before the holdout but the last one whose outcome lands before it, and the figure in
+# D.2 has to stop there rather than at the boundary.
+#
+# `labels.buffer` is `35D` and a duration cannot say whether that is thirty-five sessions or
+# thirty-five days. Here it is days: an option expires on a date, and the exchange being shut in
+# between does not postpone it. `labels.buffer_unit` declares that, and the seal below counts what
+# it says rather than assuming. Counting sessions instead would put the seal at 2020-11-10 and
+# discard eleven decision dates whose outcomes resolve well before the holdout opens.
 
 # %%
-outcome_seal = timeline["timestamp"][-(BUFFER_SESSIONS + 1)]
+if BUFFER_UNIT == "sessions":
+    outcome_seal = timeline["timestamp"][-(BUFFER_DAYS + 1)]
+else:
+    # The same rule `utils.cv_splits` applies: the outcome of a decision taken at `t` lands at
+    # `t + buffer`, so the last usable decision is the last session strictly before the boundary
+    # less the buffer. Written out rather than taken from the splitter, so the check in D.2 that
+    # the two agree is a check and not a restatement.
+    seal_cutoff = pl.lit(HOLDOUT_START).str.to_date() - pl.duration(days=BUFFER_DAYS)
+    outcome_seal = timeline.filter(pl.col("timestamp") < seal_cutoff)["timestamp"][-1]
 print(
     f"Trading sessions {SESSIONS} | decision dates {len(decisions):,} | stocks per decision date "
     f"{breadth['n_symbols'].min()} to {breadth['n_symbols'].max()}, median "
@@ -801,8 +836,10 @@ print(
 # block is labelled with a price from after the block ends, so validating on the session immediately
 # after training would score the model on data it had partly seen. The fix is to leave a gap between
 # the two, at least as wide as the outcome takes to arrive, and that gap is called **purging**. Its
-# width comes from `labels.buffer`, which `generate_cv_splits` counts in trading sessions on the
-# calendar `evaluation.calendar` names.
+# width comes from `labels.buffer`, and `labels.buffer_unit` says what `generate_cv_splits` counts:
+# sessions on the calendar `evaluation.calendar` names, or calendar days. This case study declares
+# calendar, because its outcome arrives on an expiration date rather than after a number of trading
+# days.
 #
 # The splitter is handed the sessions this panel quotes on inside the development period, which is
 # the same timeline every later stage builds its folds from, because a decision date exists only
@@ -828,24 +865,51 @@ splits = generate_cv_splits(
     case_study_id=CASE_STUDY_ID,
     label_buffer=LABEL_BUFFER,
     date_col="timestamp",
+    buffer_unit=BUFFER_UNIT,
 )
 
 grid = timeline["timestamp"].to_numpy()
-purge_gaps = {
-    int(((grid > np.datetime64(s["train_end"])) & (grid < np.datetime64(s["val_start"]))).sum())
-    for s in splits
-}
+if BUFFER_UNIT == "sessions":
+    # Sessions strictly between the two boundaries: what the splitter counted off the timeline.
+    purge_gaps = {
+        int(((grid > np.datetime64(s["train_end"])) & (grid < np.datetime64(s["val_start"]))).sum())
+        for s in splits
+    }
+else:
+    # Calendar days, so the gap is not a session count and asserting one would fail on a holiday
+    # rather than on a defect. What has to hold is that each validation block opens on the first
+    # session after the buffer has run from the training block's last day.
+    purge_gaps = {
+        int(
+            (np.datetime64(s["val_start"]) - np.datetime64(s["train_end"])) / np.timedelta64(1, "D")
+        )
+        for s in splits
+    }
 last_val = max(split["val_end"] for split in splits)
 assert len(splits) == SETUP["evaluation"]["n_splits"], "fold count differs from setup.yaml"
 assert last_val < np.datetime64(HOLDOUT_START), "a fold reaches into the holdout"
-assert purge_gaps == {BUFFER_SESSIONS}, "a purge gap is not the declared label buffer"
+if BUFFER_UNIT == "sessions":
+    assert purge_gaps == {BUFFER_DAYS}, "a purge gap is not the declared label buffer"
+else:
+    assert min(purge_gaps) >= BUFFER_DAYS, "a purge gap is narrower than the declared label buffer"
+    for split in splits:
+        opens = np.datetime64(split["val_start"])
+        earliest = np.datetime64(split["train_end"]) + np.timedelta64(BUFFER_DAYS, "D")
+        sessions_skipped = int(((grid > earliest) & (grid < opens)).sum())
+        assert sessions_skipped == 0, "a validation block opens later than the buffer requires"
 assert last_val == np.datetime64(outcome_seal), (
     "the last validation outcome resolves after the seal"
 )
+gap_phrase = (
+    f"purge gap {min(purge_gaps)} sessions at every boundary"
+    if BUFFER_UNIT == "sessions"
+    else f"purge gap at least {BUFFER_DAYS} calendar days at every boundary, "
+    f"{min(purge_gaps)} at the narrowest"
+)
 print(
-    f"{len(splits)} folds | purge gap {min(purge_gaps)} sessions at every boundary, from "
-    f"labels.buffer {LABEL_BUFFER} | last validation ends {last_val.date()}, the last date whose "
-    f"outcome resolves before the holdout opens on {HOLDOUT_START}"
+    f"{len(splits)} folds | {gap_phrase}, from labels.buffer {LABEL_BUFFER} counted as "
+    f"{BUFFER_NOUN} | last validation ends {last_val.date()}, the last date whose outcome "
+    f"resolves before the holdout opens on {HOLDOUT_START}"
 )
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
@@ -897,7 +961,7 @@ print(
     f"{LIQUID_CUT:.4f} of premium\n"
     f"decision.entry_cadence {SETUP['decision']['entry_cadence']} | "
     f"decision.execution_delay {SETUP['decision']['execution_delay']} | "
-    f"labels.primary {PRIMARY_LABEL} | labels.buffer {LABEL_BUFFER}\n"
+    f"labels.primary {PRIMARY_LABEL} | labels.buffer {LABEL_BUFFER} ({BUFFER_UNIT})\n"
     f"costs.components.option_spread {ASSUMED_PCT[0]} to {ASSUMED_PCT[-1]} percent of premium per "
     f"crossing; measured {LIQUID_CUT * 50:.2f} at the cheapest fifth, {COST_SHARE * 50:.2f} at the "
     f"median stock, {cost['round_trip'].max() * 50:.2f} at the widest\n"

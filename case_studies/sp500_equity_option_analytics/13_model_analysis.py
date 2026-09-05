@@ -1595,22 +1595,34 @@ else:
 # ### Calibration: Do Prediction Intervals Reach Their Nominal Coverage?
 #
 # Point IC tells us whether the ranking is correct on average; it says
-# nothing about whether the model's *uncertainty* is well calibrated.
-# Inductive split-conformal prediction (Vovk et al., 2005; Lei et al.,
-# 2018) gives a distribution-free check: using the earliest validation
-# fold's absolute residuals as a calibration set, the symmetric quantile
-# $\hat{q}_{1-\alpha}$ defines an interval
-# $[\hat{y} - \hat{q}, \hat{y} + \hat{q}]$ that should cover the true
-# label at rate $1-\alpha$ on later folds.
-# Empirical coverage materially below the nominal level signals
-# overconfident residual scaling: the model misses more often
-# than its training-time spread suggests. Width is reported as a
-# fraction of the actuals' standard deviation so families with different
-# return scales are comparable; smaller width at matched coverage means
-# tighter, more useful intervals. See Ch12 §12.6 / `11_conformal_gbm`
-# for the full conformal toolkit (CQR, ACI). What we report here is the
-# minimal residual-calibration diagnostic on the highest-IC config per
-# family for the primary label.
+# nothing about whether the model's *uncertainty* is well calibrated. The
+# width measured here is the one the `conformal_weighted` allocator sizes
+# positions with: calibrated per symbol on every absolute residual known at
+# `t - h`, where `h` is this label's horizon in data steps, falling back to a
+# quantile pooled over every symbol where one has too few residuals of its
+# own. A decision is covered when its absolute residual falls inside that
+# half-width, and `n_uncalibrated` counts the decisions that cleared no
+# warm-up and that no coverage figure describes.
+#
+# Empirical coverage materially below the nominal level signals overconfident
+# residual scaling - the model is more wrong, more often, than its
+# training-time spread suggests. Width is reported as a fraction of the
+# standard deviation of the outcomes it was measured against, so families with
+# different return scales are comparable; smaller width at matched coverage
+# means tighter, more useful intervals.
+#
+# Read it as a diagnostic of residual dispersion rather than a guarantee.
+# Split conformal's finite-sample coverage (Vovk et al., 2005; Lei et al.,
+# 2018) requires the calibration and evaluation scores to be exchangeable and
+# return residuals are not, and nothing in the allocation path reads an
+# interval or a coverage level - the width stands in for a volatility
+# estimate. See Ch12 §12.6 / `11_conformal_gbm` for the full conformal toolkit
+# (CQR, ACI).
+#
+# Each row is the family's highest-IC configuration for the primary label.
+# That is a model-level ranking and not the funnel's - every selection stage
+# ranks on validation backtest Sharpe - and it is used here because this
+# diagnostic runs before any backtest exists to rank.
 
 # %%
 conformal_df = conformal_coverage_diagnostic(CASE_STUDY, label=PRIMARY_LABEL)
@@ -1628,21 +1640,26 @@ if conformal_df.height > 0:
 
 # %% [markdown]
 # **Read each family's empirical coverage against the nominal level in the same column, and the
-# width beside it.** Coverage below nominal means the interval is too narrow out of time:
-# residuals in the later fold are wider than the earliest fold's calibration set implied. Width
-# is in units of the actuals' standard deviation, so a family can only claim tighter intervals
-# if it reaches comparable coverage while showing a smaller width.
+# width beside it.** Coverage below nominal means the width is too narrow out of time: the
+# residuals a decision met are wider than everything known before it implied. Width is in units
+# of the standard deviation of the outcomes it was measured against, so a family can only claim
+# tighter intervals if it reaches comparable coverage while showing a smaller width.
 #
 # The shortfall to watch for is a systematic one - every family below nominal at every level -
 # rather than one family missing. A systematic shortfall is a statement about the sample, not
-# about the models: it says the calibration fold and the evaluation folds are not exchangeable,
-# which is what a split-conformal interval assumes and what a regime change breaks.
+# about the models: it says the residuals a width was calibrated on and the residuals it was
+# measured against are not exchangeable, which is what a conformal quantile assumes and what a
+# regime change breaks.
 #
-# **This is the section that matters for position sizing.** An interval that under-covers out of
-# time understates residual uncertainty, and a sleeve that froze the earliest fold's quantile
-# would sit larger than the risk it believed it was taking. Where the shortfall is systematic,
-# the online-updating extensions in Chapter 12, Section 12.6 are the next step before any of
-# these intervals is used to size anything.
+# **What a systematic shortfall does and does not establish.** `conformal_weighted` normalizes
+# `1/width` within each side at each timestamp, so a width scale that is uniformly too small
+# divides out and leaves every weight unchanged. Only the *differences* between symbols' widths
+# reach the portfolio, and this table does not measure those: it measures the scale of the
+# residuals against the widths, pooled over the decisions. So a shortfall says the uncertainty
+# estimate is optimistic and is a reason to look at the cross-section of widths before trusting
+# them to size - it is not, on its own, a finding that any position was too large. Where the
+# shortfall is systematic, the online-updating extensions in Chapter 12, Section 12.6 are what
+# to reach for.
 
 # %% [markdown]
 # ## 8. Pre-Backtest Judgment and Handoff
@@ -1764,9 +1781,12 @@ credible.select(
 # **The causal estimate is a separate framing and does not compete in this ranking.** It is a
 # conditional treatment effect for one declared treatment, not a cross-sectional ranking signal.
 #
-# **The calibration result in §7 constrains every tier.** Where intervals under-cover out of
-# time, no candidate should have its interval used for position sizing without the
-# online-updating correction, whatever its IC.
+# **The calibration result in §7 qualifies every tier.** §7 measures the widths
+# `conformal_weighted` would use, so it is about this allocator rather than about intervals in
+# general - but it measures their scale and not their cross-section, and the allocator consumes
+# only the cross-section. Where the widths under-cover out of time, that is a reason to check
+# the online-updating correction before sizing on them, not a disqualification of any candidate
+# on its own.
 #
 # ### Forecast Representation
 #
@@ -1778,8 +1798,8 @@ credible.select(
 #   above, rather than routing every family to the primary label.
 # - **Ensemble**: the pairwise rank correlations in §5 decide whether averaging helps. Low
 #   correlation among families whose intervals all cover zero is diversity among weak signals,
-#   and averaging weak signals does not produce a strong one. Weight by how tight an interval
-#   is rather than by how large a point estimate is.
+#   and averaging weak signals does not produce a strong one. Weight by how tight a conformal
+#   width is rather than by how large a point estimate is.
 
 # %% [markdown]
 # ### The Option Feature Question
@@ -1803,10 +1823,14 @@ credible.select(
 #
 # ### What This Analysis Does Not Tell Us
 #
-# - **Conformal-corrected sizing**: the §7 under-coverage gaps across
-#   all five families mean that static interval widths understate later-fold
-#   uncertainty; ACI-based online updates (Ch12 §12.6) would replace
-#   the frozen calibration quantile before sizing.
+# - **Conformal-corrected sizing**: the §7 under-coverage gaps across all five
+#   families say the widths understate residual scale out of time. The widths are
+#   already expanding rather than fixed - each recalibrates on every residual known
+#   at the decision it sizes - so what is open is not whether to unfreeze them but
+#   whether an adaptive rule that targets coverage directly (ACI, Ch12 §12.6) does
+#   better. And §7 measures scale, while `conformal_weighted` consumes only the
+#   cross-section of widths, so this is a reason to measure that cross-section
+#   before sizing on it rather than a finding about any candidate.
 # - **Transaction costs under weekly rebalancing**: decile spreads
 #   are small in absolute terms and must survive round-trip costs of
 #   6–20 bps for liquid S&P 500 names; with weekly rebalancing,

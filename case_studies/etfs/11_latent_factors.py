@@ -45,9 +45,9 @@
 #
 # The first pair differs in the shape of one function, which is what makes those two worth reading
 # against each other. The second pair breaks the two-stage shape from opposite ends - one because
-# it prices, one because it predicts - and `11e` is the family's own control: it keeps the
-# low-dimensional bottleneck and drops the factor interpretation, so what it does not achieve is
-# what the structure is worth.
+# it prices, one because it predicts - and `11e` is the only member fitted without the family's
+# central assumption at all: it keeps a low-dimensional bottleneck and drops the factor
+# interpretation. It is not a controlled comparison with `11c`, whose network it does not share.
 #
 # **Learning objectives**
 #
@@ -65,9 +65,8 @@
 # [`05_evaluation`](05_evaluation.ipynb) for the walk-forward folds.
 #
 # **What it writes**: nothing. This notebook fits no model, registers no run and opens no holdout.
-# Of the five notebooks it points at, the four on the research boundary each publish their own
-# population; `11e_supervised_autoencoder` is still on the legacy runner and publishes none, which
-# section 3 reads out of the sources rather than asserting here.
+# All five notebooks it points at are on the research boundary and each publishes its own
+# population, which section 3 reads out of the sources rather than asserting here.
 # [`13_model_analysis`](13_model_analysis.ipynb) is where they are compared against the other
 # families.
 
@@ -219,7 +218,7 @@ def published_population(source: str, tree: ast.Module, name: str) -> str:
     and not find. The default is read from the assignment that produces it instead.
     """
     if not publishes_population(tree):
-        return "none - legacy runner"
+        return "none - publishes no population"
     default = re.search(r'population_name = POPULATION_NAME or f"([^"]+)"', source)
     if default is None:
         raise ValueError(f"{notebook_for[name]}.py publishes a population under no readable name")
@@ -230,8 +229,10 @@ def label_coverage(tree: ast.Module) -> str:
     """How many of the declared labels the member's notebook fits.
 
     A migrated notebook resolves the declared menu and raises if a label it declared is missing, so
-    it fits all of them. The legacy runner takes one primary label and a variant cap instead, so
-    the count is not the menu's and is reported as what it is rather than as a number.
+    it fits all of them. A notebook that publishes no population is on a runner that takes one
+    primary label and a variant cap instead, so the count is not the menu's and is reported as
+    what it is rather than as a number. No member is on that path today; the branch stays because
+    the classification is read from the sources rather than declared here.
     """
     return str(len(labels)) if publishes_population(tree) else "primary only"
 
@@ -266,10 +267,14 @@ pl.DataFrame(
 #
 # **The five members are not a ranking.** They are a baseline and two pairs, and the interesting
 # comparisons are within a pair - linear map against network map in the first, pricing against
-# predicting in the second - plus the cross-pair one between `11c` and `11e`, which share a network
-# and a bottleneck and differ only in whether the factor structure is imposed. Every one of those
-# is also read against `11a`, which conditions on nothing. A single ordering over all five would
-# hide all of it.
+# predicting in the second. Every one of those is also read against `11a`, which conditions on
+# nothing. A single ordering over all five would hide all of it.
+#
+# **`11c` and `11e` are not a third pair, although they look like one.** Both are networks and one
+# imposes the factor structure while the other does not, but they differ in depth, width,
+# regularisation and learning rate as well, so the difference between their results is not
+# attributable to the structure. Reading them as a controlled comparison is the mistake this
+# paragraph exists to prevent.
 #
 # **Nothing here compares results, and that is deliberate.** Reading the five populations against
 # each other, and against the linear, boosted and tabular families, is

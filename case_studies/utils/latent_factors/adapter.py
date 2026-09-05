@@ -725,6 +725,16 @@ def _valid_model_dir(model_dir: Path, context: LatentFactorContext) -> bool:
 
 
 def _normalize_prediction_frame(frame: pl.DataFrame) -> pl.DataFrame:
+    """One representation for both sides of the persisted-vs-reconstructed comparison.
+
+    The zone is part of that. `register_prediction_set` writes a naive decision-time column
+    as UTC-aware, while a frame rebuilt from the fitted state carries whatever the context
+    holds, so comparing them as they arrive reports two identical checkpoints as
+    disagreeing. Both sides come through here, so normalizing once is enough.
+    """
+    from case_studies.utils.registry.store import _timestamps_as_utc
+
+    frame = _timestamps_as_utc(frame)
     rename = {
         old: new
         for old, new in {

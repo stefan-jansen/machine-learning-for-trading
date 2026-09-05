@@ -498,6 +498,115 @@ def migrate_equivalent_training_identity(
     )
 
 
+def _referencing_tables(
+    db: sqlite3.Connection, parent: str, parent_key: str
+) -> list[tuple[str, str]]:
+    """Every (table, column) in the schema that points at ``parent(parent_key)``.
+
+    Read from ``PRAGMA foreign_key_list`` rather than written down, so a table added to the
+    schema later is covered without anyone remembering to add it here. A hand-maintained list
+    is what produced the defect this exists to close: `cohort_metrics.leader_hash` references
+    `backtest_runs`, was not on the list, and with foreign keys enabled its absence turns a
+    silent orphan into an IntegrityError that aborts the delete.
+    """
+    found: list[tuple[str, str]] = []
+    tables = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+    for table in tables:
+        if table == parent:
+            continue
+        for fk in db.execute(f"PRAGMA foreign_key_list({table})"):
+            # (id, seq, table, from, to, on_update, on_delete, match)
+            if fk[2] == parent and (fk[4] or parent_key) == parent_key:
+                found.append((table, fk[3]))
+    return found
+
+
+# References the schema declares in prose but not as a foreign key, so
+# `PRAGMA foreign_key_list` cannot find them. Each is here with the reason it carries no key.
+#
+# `backtest_paired_metrics.benchmark_hash` holds a synthetic benchmark as often as a registered
+# one - the equal-weight universe a strategy is compared against is not a backtest_runs row - so
+# a foreign key would refuse the common case. `challenger_hash` next to it does have one.
+#
+# `holdout_evaluations` and `holdout_staging` are keyed on the research lock, and their three
+# hash columns record what the lock resolved to rather than pointing into those tables.
+#
+# The pragma and this list are complementary and neither replaces the other: the pragma covers a
+# table added later that declares its key, this covers the ones that deliberately do not, and
+# `test_delete_prediction_generation` pins both against `REGISTRY_SCHEMA_SQL` so a new
+# unenforced reference fails rather than being silently missed.
+_UNENFORCED_BACKTEST_REFERENCES = (("backtest_paired_metrics", "benchmark_hash"),)
+# One entry per legacy table, on the prediction hash. Both of these rows name a whole
+# generation - training, prediction and backtest hashes together - so listing the backtest
+# column as well deletes the same row twice, and the two entries then mask each other: a typo in
+# either passes because the other still removes the row. A declaration a test cannot fail on is
+# not a safety net.
+_UNENFORCED_PREDICTION_REFERENCES = (
+    ("holdout_evaluations", "holdout_prediction_hash"),
+    ("holdout_staging", "holdout_prediction_hash"),
+)
+
+
+def _existing(db: sqlite3.Connection, refs: tuple[tuple[str, str], ...]) -> list[tuple[str, str]]:
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    return [(table, column) for table, column in refs if table in tables]
+
+
+def delete_prediction_generation(db_path: Path, prediction_hash: str) -> dict[str, int]:
+    """Delete one prediction set, every backtest on it, and every row that references either.
+
+    Returns the row count deleted per table, so a caller can say what it removed rather than
+    asserting it worked.
+
+    The child tables are derived from the schema, not listed. Deleting the two parent rows and
+    leaving the children is worse than leaving the generation in place: the parent is gone, so
+    nothing reports the orphan, while a query joining from the child side still finds it.
+
+    Foreign keys are enabled on this connection. SQLite leaves them off per connection, so the
+    schema's REFERENCES clauses enforce nothing by default and a missed child table succeeds
+    silently instead of raising - which is exactly how the first version of this shipped.
+    """
+    counts: dict[str, int] = {}
+    with closing(sqlite3.connect(str(db_path))) as db:
+        db.execute("PRAGMA foreign_keys = ON")
+        backtests = [
+            row[0]
+            for row in db.execute(
+                "SELECT backtest_hash FROM backtest_runs WHERE prediction_hash = ?",
+                (prediction_hash,),
+            )
+        ]
+        backtest_refs = _referencing_tables(db, "backtest_runs", "backtest_hash") + _existing(
+            db, _UNENFORCED_BACKTEST_REFERENCES
+        )
+        for table, column in backtest_refs:
+            for backtest_hash in backtests:
+                cur = db.execute(f"DELETE FROM {table} WHERE {column} = ?", (backtest_hash,))
+                counts[table] = counts.get(table, 0) + cur.rowcount
+        cur = db.execute("DELETE FROM backtest_runs WHERE prediction_hash = ?", (prediction_hash,))
+        counts["backtest_runs"] = cur.rowcount
+        prediction_refs = _referencing_tables(db, "prediction_sets", "prediction_hash") + _existing(
+            db, _UNENFORCED_PREDICTION_REFERENCES
+        )
+        for table, column in prediction_refs:
+            cur = db.execute(f"DELETE FROM {table} WHERE {column} = ?", (prediction_hash,))
+            counts[table] = counts.get(table, 0) + cur.rowcount
+        cur = db.execute(
+            "DELETE FROM prediction_sets WHERE prediction_hash = ?", (prediction_hash,)
+        )
+        counts["prediction_sets"] = cur.rowcount
+        db.commit()
+
+    run_log = db_path.parent
+    for directory in [run_log / "predictions" / prediction_hash] + [
+        run_log / "backtest" / backtest_hash for backtest_hash in backtests
+    ]:
+        if directory.is_dir():
+            shutil.rmtree(directory)
+
+    return {table: n for table, n in counts.items() if n}
+
+
 def find_semantic_backtest_duplicates(db_path: Path) -> list[DuplicateBacktest]:
     """Find rows differing only by normalized, identity-neutral spec defaults."""
     with closing(sqlite3.connect(str(db_path))) as db:

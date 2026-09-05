@@ -63,6 +63,7 @@ from case_studies.research import open_study
 from case_studies.research.holdout import build_holdout_training_spec
 from case_studies.research.models import reconstruct_locked_model_request
 from case_studies.utils.registry import training_hash_from_spec
+from case_studies.utils.registry.maintenance import delete_prediction_generation
 from case_studies.utils.strategy_analysis import (
     resolve_solvent_carrier,
     training_run_fitted_for_the_holdout,
@@ -73,10 +74,35 @@ from utils.paths import get_case_study_dir
 CASE_STUDY_ID = "sp500_options"
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
+# Replace a holdout evaluation this window already carries, rather than adding a second one.
+# Off by default, because the default should be the methodology: one configuration is measured
+# on the holdout, and the number means what it says only while that stays true. It is a
+# parameter and not a prohibition because a holdout does get re-derived - a corrected input
+# upstream moves every training identity, and the evaluation that was right for the old
+# geometry is then an evaluation of a configuration this case study no longer selects.
+# Refusing that outright would mean a correction could never be carried through to the end.
+REPLACE_HOLDOUT = False
 
 # %%
 study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
+
+
+def _delete_holdout_generation(case_dir, prediction_hash):
+    """Remove one holdout prediction set and everything registered against it.
+
+    Reached only when ``REPLACE_HOLDOUT`` says a generation is superseded. The rows go rather
+    than being marked, because a superseded holdout evaluation that is still readable is still
+    a number someone can quote, and the point of replacing it is that it should not be one.
+
+    The cascade lives in `case_studies/utils/registry/maintenance.py` and derives the child
+    tables from the schema, because the version of this that listed them by hand missed
+    `cohort_metrics.leader_hash` - which with foreign keys enabled aborts the delete rather
+    than orphaning a row.
+    """
+    deleted = delete_prediction_generation(case_dir / "run_log" / "registry.db", prediction_hash)
+    for table, n in sorted(deleted.items()):
+        print(f"  deleted {n:>3} from {table}")
 
 
 def _registered_holdout_generations(case_dir):
@@ -237,19 +263,27 @@ print(f"Holdout training ends {fold['train_end']}, holdout opens {fold['val_star
 # their model had been fitted on folds ending inside the window. They were removed, and the
 # check below is what makes their shape impossible to reintroduce.
 #
-# **The window carries one configuration, and this notebook has no way past that.** The check
-# below is on the carrier rather than on the notebook, and it has exactly two outcomes. With
-# the carrier unchanged this is an idempotent replay: the derivation is deterministic and the
-# training identity covers it, so the same identity comes back and the fit is served from the
-# registry, which is why re-running the notebook is free and safe. With the carrier changed it
-# refuses, names both configurations, and stops.
+# **The window carries one configuration at a time.** The check below is on the carrier rather
+# than on the notebook, and it has three outcomes. With the carrier unchanged this is an
+# idempotent replay: the derivation is deterministic and the training identity covers it, so
+# the same identity comes back and the fit is served from the registry, which is why re-running
+# the notebook is free and safe. With the carrier changed it stops and names both
+# configurations. With `REPLACE_HOLDOUT` set it replaces the earlier generation instead of
+# standing beside it, so the registry never holds two refits of the same window.
 #
-# It refuses rather than offering a replacement switch, and the reason is that a replacement
-# would not be one. Deleting the earlier generation's rows does not undo having observed its
-# result: the selection that produced the new carrier may have been informed by the old
-# holdout number, and no deletion reaches that. A switch here would let the case study take a
-# second look at the window while leaving a registry that shows only one, which is the
-# specific thing that would make the out-of-sample claim false rather than merely weak.
+# What the replacement does not do is undo having observed the earlier result, and that is the
+# part worth understanding rather than enforcing. A holdout number is out-of-sample because
+# nothing about the model was chosen after seeing it. Evaluate a second configuration on the
+# same window and the second number is no longer that, however the registry is arranged: the
+# selection may have been informed by the first. Deleting rows removes the evidence, not the
+# knowledge.
+#
+# So the honest use of this switch is narrow: an input upstream was corrected, every training
+# identity moved with it, and the evaluation being replaced belongs to a configuration this
+# case study no longer selects. That is maintenance, and it has to be possible or a correction
+# could never reach the end of the pipeline. Reaching for it because the first holdout
+# disappointed is the thing that makes an out-of-sample claim false, and no parameter default
+# can tell those two apart - the researcher can, and it is their call.
 
 # %%
 holdout_training_hash = training_hash_from_spec(holdout_spec)
@@ -259,7 +293,7 @@ superseded = [
     for row in _registered_holdout_generations(CASE_DIR)
     if row["refitted"] and (row["training_hash"], row["checkpoint"]) != this_generation
 ]
-if superseded:
+if superseded and not REPLACE_HOLDOUT:
     raise RuntimeError(
         "the holdout window already carries a refit of a different configuration: "
         + ", ".join(
@@ -268,13 +302,15 @@ if superseded:
         )
         + f". This run would evaluate {carrier['config_name']} (training "
         f"{holdout_training_hash}, checkpoint {CHECKPOINT_KIND}={CHECKPOINT_VALUE}) on the "
-        "same window, which would be a second configuration measured on a period this case "
-        "study reports as unseen. This notebook has no way past that: deleting the earlier "
-        "generation would not undo having observed it, and the selection bias it introduces "
-        "is not removed by removing the rows. Either leave the selection where it was, or "
-        "retire the earlier evaluation through the registry's own lifecycle, which records "
-        "that a second look was taken."
+        "same window, which is a second configuration measured on a period this case study "
+        "reports as unseen. Set REPLACE_HOLDOUT=True to replace the earlier generation - "
+        "correct when an upstream fix moved every training identity and the evaluation being "
+        "replaced belongs to a configuration no longer selected - or leave the selection "
+        "where it was."
     )
+for row in superseded:
+    print(f"REPLACING holdout generation {row['prediction_hash']} ({row['config_name']})")
+    _delete_holdout_generation(CASE_DIR, row["prediction_hash"])
 
 # %% tags=["results"]
 request = reconstruct_locked_model_request(

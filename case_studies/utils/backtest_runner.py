@@ -1273,6 +1273,7 @@ def run_backtest(
     # 3. Register
     backtest_hash = None
     if register:
+        _refuse_an_allocation_that_produced_no_target(weights, daily_returns, strategy_spec)
         from case_studies.utils.registry import (
             compute_backtest_fold_metrics,
             register_backtest_fold_metrics,
@@ -1944,12 +1945,44 @@ def _run_vectorized(
     if weights_thinned["timestamp"].dtype != thinned_sel["timestamp"].dtype:
         thinned_sel = thinned_sel.cast({"timestamp": weights_thinned["timestamp"].dtype})
 
-    # Join weights with forward returns
+    # Join weights with forward returns.
+    #
+    # Left, not inner, and then a refusal. An inner join discarded a selected position whose
+    # outcome row is missing, and three things followed. Weights are never renormalized after
+    # the join, so `gross_ret` summed the survivors' contributions against the original
+    # weights - the dropped name was marked at exactly zero return, which is an assertion
+    # about a position nobody could price rather than an exclusion. `n_positions` counted the
+    # survivors, so the one diagnostic that would show the loss reported the reduced count as
+    # though it were intended. And turnover is computed from `weights_thinned` below, which
+    # still holds the dropped name, so the position paid its cost and returned nothing.
+    #
+    # Renormalizing instead would be a filter applied to a chosen position using data from
+    # after the choice: "the selection step is unbiased" and "the realized result is
+    # unbiased" are different claims, and that fails the second while passing the first. So
+    # the run stops. A zero weight is exempt because it is not a position: its outcome
+    # cannot change any number here.
     bt = weights_thinned.join(
         thinned_sel,
         on=["timestamp", "symbol"],
-        how="inner",
+        how="left",
     )
+    unpriceable = bt.filter(
+        (pl.col("weight") != 0.0) & (pl.col("y_true").is_null() | ~pl.col("y_true").is_finite())
+    )
+    if not unpriceable.is_empty():
+        sample = unpriceable.sort("timestamp", "symbol").head(5)
+        named = ", ".join(
+            f"{row['symbol']}@{row['timestamp']}" for row in sample.iter_rows(named=True)
+        )
+        raise ValueError(
+            f"{case_study}/{label}: {unpriceable.height} of {bt.height} selected positions have "
+            f"no usable outcome, across {unpriceable['timestamp'].n_unique()} rebalance dates "
+            f"(first: {named}). Marking them at zero return asserts a result for a position "
+            "nobody could price, and they would still pay turnover. Supply the missing outcome "
+            "rows, or exclude these names before the weights are computed so the selection and "
+            "the realized result are drawn from the same set."
+        )
+    bt = bt.filter(pl.col("y_true").is_not_null())
 
     # Portfolio returns per period
     port_ret = (
@@ -2354,6 +2387,52 @@ def _apply_allocation(
 # ---------------------------------------------------------------------------
 # Risk rules (Ch19) — engine-level integration
 # ---------------------------------------------------------------------------
+
+
+def _refuse_an_allocation_that_produced_no_target(
+    weights: pl.DataFrame | None,
+    daily_returns: pl.DataFrame | None,
+    strategy_spec: dict,
+) -> None:
+    """Refuse to register a run whose strategy produced no target weight at any rebalance.
+
+    An empty weight frame over a non-empty evaluation window is not a strategy that traded
+    little. It is a strategy the engine was never given anything to trade towards, so it holds
+    a flat account for the whole window and every return-derived metric it records is the
+    metric of that flat account: `total_return` 0, `sharpe` 0.0. Written to the registry those
+    read as a configuration that was tried and lost nothing, and a 0.0 Sharpe then sits above
+    every candidate whose Sharpe is negative. Nothing downstream filters it out of the trial
+    count - `cohort_metrics` lists cohort members straight from `backtest_runs` with no
+    zero-trade clause - so an absence is counted as a trial against every real candidate
+    beside it.
+
+    `fx_pairs`' `mvo_ledoit_wolf` at `top_k=2` is the measured case
+    (ml4t/agent-workspace#1004): `compute_mvo_weights` skipped every one of 2,063 rebalances
+    for having a two-name cross-section and returned the empty schema-only frame.
+
+    **The test is the weight frame, not the trade count.** A run with `num_trades == 0` and a
+    non-empty weight frame is a different condition with different causes, and at least one of
+    them is legitimate: a CI fixture whose panel is one or four bars long has a target and no
+    later bar to fill it on under `next_bar` execution. Refusing on the trade count alone
+    stopped eleven such fixture backtests across `test_research_contract_execution` and
+    `test_cme_futures_research`, which is the wrong answer - nothing is wrong with them.
+
+    An empty return series is a different failure with its own diagnosis upstream and is left
+    to it.
+    """
+    if weights is None or weights.height > 0:
+        return
+    if daily_returns is None or daily_returns.height == 0:
+        return
+    strategy = strategy_spec.get("strategy", strategy_spec)
+    raise ValueError(
+        "the strategy produced no target weight at any rebalance, over "
+        f"{daily_returns.height} periods, so this run is refused rather than registered as a "
+        f"Sharpe of 0.0: signal={strategy.get('signal')} "
+        f"allocation={strategy.get('allocation')} rebalance={strategy.get('rebalance')}. "
+        "A run with no target never opened a position and measured nothing; fix the allocator "
+        "or the selection that emptied the weight frame."
+    )
 
 
 def _build_position_rules(risk_spec: dict):

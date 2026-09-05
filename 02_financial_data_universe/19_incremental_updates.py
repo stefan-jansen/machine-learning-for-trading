@@ -63,6 +63,7 @@ from ml4t.data.storage.backend import StorageConfig
 from ml4t.data.update_manager import GapDetector
 from ml4t.data.validation import OHLCVValidator
 
+from utils.downloading import update_through_last_complete_bar
 from utils.paths import get_output_dir
 from utils.style import COLORS
 
@@ -106,27 +107,56 @@ for symbol in symbols:
 # %% [markdown]
 # ### Step 2: Incremental Update (Only New Data)
 #
-# `DataManager.update()` reads the last timestamp in storage, refetches a small
-# overlap (`lookback_days=7`) plus everything since, and merges. We pass
-# `fill_gaps=False` deliberately — the library default `fill_gaps=True` runs a
-# calendar-unaware gap detector that treats every weekend and US holiday as a
-# missing trading day and forward-fills it, silently inflating each symbol's
-# row count by hundreds of phantom bars. For OHLCV data, the right behavior is
-# to leave non-trading days absent and rely on a calendar-aware completeness
-# check downstream.
+# An update reads the last timestamp in storage, refetches a small overlap
+# (`lookback_days=7`) so a bar the vendor revised replaces the stored one, and
+# merges everything since.
+#
+# **Where it stops matters more than where it starts.** Yahoo returns the
+# current exchange date as a row with accumulating volume and no
+# open/high/low/close. A bar with no prices is not a bar, and the provider says
+# so:
+#
+# ```
+# DataValidationError: yahoo: Column 'open' contains 1 null values
+# ```
+#
+# `DataManager.update()` fetches to `datetime.now()`, so it asks for that row on
+# every trading day and raises. `update_through_last_complete_bar` performs the
+# same delta and **finds** the end of its window rather than computing one. It
+# starts a day before the current exchange date — in exchange time, not UTC,
+# since at 22:00 in New York the UTC date is already tomorrow — and steps back a
+# day at a time while the provider refuses the window.
+#
+# The retreat is what a date cannot do. The placeholder row usually resolves a
+# few hours after the close, and sometimes it does not: Yahoo's 2026-09-03 daily
+# bar for AAPL was still `NaN, NaN, NaN, NaN, 37197362` eight and a half hours
+# later, while the same window ending 2026-09-02 was clean on every column. Both
+# look identical from the calendar, so the vendor has to be asked.
+#
+# When a window is refused, ml4t-data logs it at error level. If you see
+# `Failed to fetch AAPL: yahoo: Column 'open' contains 1 null values` below and
+# then a row count on the next line, that is the retreat working: the first
+# window asked for a bar the vendor has not published, and the second one landed.
+#
+# The other reason not to call `update()` blind is its `fill_gaps=True` default:
+# a calendar-unaware gap detector that treats every weekend and US holiday as a
+# missing trading day and forward-fills it, inflating each symbol's row count by
+# hundreds of phantom bars. For OHLCV data the right behavior is to leave
+# non-trading days absent and rely on a calendar-aware completeness check
+# downstream — which is what section 3 does with `GapDetector`.
 
 # %%
 print("=== Incremental Update ===")
 for symbol in symbols:
-    dm.update(symbol, lookback_days=7, provider="yahoo", fill_gaps=False)
-    meta = dm.get_metadata(symbol)
-    print(f"  {symbol}: updated ({meta['row_count']} rows)")
+    rows = update_through_last_complete_bar(dm, storage, symbol, provider="yahoo", lookback_days=7)
+    print(f"  {symbol}: updated ({rows} rows)")
 
 # %% [markdown]
 # Each symbol started with 502 rows (2023-01 through 2024-12). The update
-# fetches the 7-day overlap plus all sessions through today and merges; the
-# resulting row count equals the original 502 plus exactly the new trading
-# sessions — no synthetic weekend/holiday rows.
+# fetches the 7-day overlap plus every session through the last complete bar and
+# merges; the resulting row count equals the original 502 plus exactly the new
+# trading sessions — no synthetic weekend/holiday rows, and no half-formed bar
+# for the session that is still running.
 
 # %% [markdown]
 # ---

@@ -527,7 +527,6 @@ ax.set_xlabel("Impurity importance")
 ax.set_title(f"Lag and signature terms interleave across the top {top_k}")
 ax.invert_yaxis()
 
-plt.tight_layout()
 plt.show()
 
 # %% [markdown]

@@ -119,8 +119,8 @@ def test_no_entry_is_both_ignored_and_deselected() -> None:
     )
 
 
-def _modelling_environment_block() -> list[str]:
-    """The entries under the "needs the modelling environment" heading.
+def _section(marker: str) -> list[str]:
+    """The entries under the heading containing *marker*.
 
     Sections in the quarantine file are separated by full-width `# ---` rules, so a
     heading owns every entry until the next one.
@@ -146,7 +146,7 @@ def _modelling_environment_block() -> list[str]:
         if not entry:
             continue
         if heading is not None:
-            mine = any("modelling environment" in h for h in heading)
+            mine = any(marker in h for h in heading)
             heading = None
         if mine:
             block.append(entry)
@@ -162,22 +162,69 @@ def test_the_image_job_runs_exactly_what_is_quarantined_for_it() -> None:
     removed from here it goes red in test-unit for want of torch. That is the same
     exclude-more-than-you-meant failure this whole file exists to catch.
     """
-    quarantined = set(_modelling_environment_block())
-    assert quarantined, "the modelling-environment section of the quarantine file is empty"
+    _assert_section_matches_job(
+        "modelling environment", "  test-unit-image:", "\n  test-chapters:", exclusive=True
+    )
+
+
+def test_the_data_job_runs_exactly_what_is_quarantined_for_it() -> None:
+    """The same decision, for the section that needs the test-data checkout.
+
+    It needed the check more than the image section did. From 2026-08-24 to
+    2026-09-03 this section excluded three files from `test-unit` and named no job
+    that ran them, and `test-unit-data` - which has the dataset they want - did not
+    list them, so they ran nowhere. That is the enumeration defect this whole
+    subtraction replaced, reappearing one level down because the job on the other
+    side of the exclusion still enumerates by hand.
+    """
+    _assert_section_matches_job(
+        "Needs a dataset", "  test-unit-data:", "\n  test-unit-image:", exclusive=False
+    )
+
+
+def _assert_section_matches_job(
+    marker: str, job_header: str, next_header: str, *, exclusive: bool
+) -> None:
+    """Every test a quarantine section excludes is named by the job that takes it.
+
+    Nothing makes "excluded here, run there" true except the two lists agreeing, and a
+    file dropped from the job is invisible from here: it silently runs nowhere. That is
+    the same exclude-more-than-you-meant failure this file exists to catch.
+
+    ``exclusive`` is the other direction, and the two sections differ on it. A
+    modelling-environment file cannot be collected in `test-unit` at all - it raises on
+    the import - so a file the image job runs and this list does not exclude is a red
+    `test-unit`, and the equality holds both ways. A data-dependent file collects fine
+    and *skips*, so `test-unit-data` legitimately runs files that stay in the sweep; the
+    two the job has always run are exactly that. Requiring equality there would demand
+    they be quarantined, which would give up the collection they still provide.
+
+    A `--deselect` in the job is deliberately not counted. The quarantine file says what
+    `test-unit` does not run; a test deselected inside a file the other job *does* run
+    is that job's own business and is justified in the workflow beside it.
+    """
+    quarantined = set(_section(marker))
+    assert quarantined, f"the {marker!r} section of the quarantine file is empty"
 
     workflow = (REPO_ROOT / ".github/workflows/test.yml").read_text()
-    _, _, after = workflow.partition("  test-unit-image:")
-    job, _, _ = after.partition("\n  test-chapters:")
-    assert job, "no test-unit-image job in .github/workflows/test.yml"
+    _, _, after = workflow.partition(job_header)
+    job, _, _ = after.partition(next_header)
+    assert job, f"no {job_header.strip()} job in .github/workflows/test.yml"
     in_job = {
         token
         for line in job.splitlines()
         for token in [line.strip().rstrip("\\").strip()]
-        if token.startswith("tests/") and token.endswith(".py")
+        if token.startswith("tests/") and ".py" in token
     }
 
-    assert quarantined == in_job, (
-        "the quarantine's modelling-environment section and the test-unit-image job "
-        f"disagree.\n  quarantined but not run by the job: {sorted(quarantined - in_job)}"
-        f"\n  run by the job but not quarantined: {sorted(in_job - quarantined)}"
+    assert not (quarantined - in_job), (
+        f"the quarantine's {marker!r} section excludes these from test-unit and the "
+        f"{job_header.strip()} job does not run them, so they run in no job at all: "
+        f"{sorted(quarantined - in_job)}"
     )
+    if exclusive:
+        assert not (in_job - quarantined), (
+            f"the {job_header.strip()} job runs these and the quarantine's {marker!r} "
+            f"section does not exclude them, so test-unit collects them too and goes "
+            f"red on the import: {sorted(in_job - quarantined)}"
+        )

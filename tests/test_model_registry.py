@@ -166,26 +166,21 @@ _REGISTERING_SUFFIXES = frozenset(
 )
 
 
-# Notebooks whose recorded entry point is the MODEL name rather than their own stem, which is
-# what the pre-migration `run_case_study_model(..., notebook=f"dl_{MODEL}")` wrote.
+# A registering notebook records its own stem, in every case study. There used to be a map of
+# four exceptions here, holding notebooks that recorded the MODEL name instead - what the
+# pre-migration `run_case_study_model(..., notebook=f"dl_{MODEL}")` wrote. All four have since
+# migrated onto the research boundary and now record the stem, so the map expected values no
+# registry held any more and this assertion failed on a fully successful run. Measured on the
+# canonical registries on 2026-09-02:
 #
-# `sp500_equity_option_analytics` is not in this map: its ten registering notebooks all record
-# their stem, which is the value that answers the question the column exists for - which
-# notebook produced this row. `dl_lstm` names a model, and two notebooks in different case
-# studies can fit the same one. The remaining four entries are other case studies' to settle,
-# and until they do, the fleet has both conventions in circulation - measured 2026-08-25, when
-# the only two non-NULL rows in all nine registries were `09_dl_lstm` and `dl_tsmixer`.
-_DL_FAMILY_ENTRY_POINTS = {
-    ("cme_futures", "09_dl_lstm"): "dl_lstm",
-    ("etfs", "10_dl_tsmixer"): "dl_tsmixer",
-    ("sp500_options", "09a_lstm"): "dl_lstm",
-    ("sp500_options", "09b_patchtst"): "dl_patchtst",
-}
-
-
-def _expected_entry_point(case_study: str, stage: str) -> str:
-    """Return the exact entry point declared by one model notebook."""
-    return _DL_FAMILY_ENTRY_POINTS.get((case_study, stage), stage)
+#   cme_futures  09_dl_lstm     2026-08-30   (was expected to write `dl_lstm`)
+#   etfs         10_dl_tsmixer  2026-08-28   (`dl_tsmixer` on 2026-08-24, then the stem)
+#   sp500_options 09a_lstm      2026-09-01   (was expected to write `dl_lstm`)
+#   sp500_options 09b_patchtst  2026-09-01   (was expected to write `dl_patchtst`)
+#
+# The stem is the value that answers the question the column exists for - which notebook
+# produced this row. A model name cannot: two notebooks in different case studies fit the same
+# model. Do not reintroduce the map; if a notebook stops recording its stem, that is the defect.
 
 
 def _quick_parameters(
@@ -251,24 +246,27 @@ def test_etf_checkpoint_contract_parameters_come_from_notebook_overrides() -> No
 
 
 @pytest.mark.parametrize(
-    ("case_study", "stage", "entry_point"),
+    "stage",
     [
-        ("etfs", "09_dl_lstm", "09_dl_lstm"),
-        ("etfs", "10_dl_tsmixer", "dl_tsmixer"),
-        ("sp500_options", "09a_lstm", "dl_lstm"),
-        ("sp500_options", "09b_patchtst", "dl_patchtst"),
-        ("etfs", "11b_ipca", "11b_ipca"),
-        ("etfs", "11c_conditional_autoencoder", "11c_conditional_autoencoder"),
+        "09_dl_lstm",
+        "10_dl_tsmixer",
+        "09a_lstm",
+        "09b_patchtst",
+        "11b_ipca",
+        "11c_conditional_autoencoder",
     ],
 )
-def test_registering_stage_maps_to_its_actual_entry_point(
-    case_study: str, stage: str, entry_point: str
-) -> None:
+def test_a_registering_stage_is_recognised_by_its_suffix(stage: str) -> None:
+    """The six stages whose registration the entry-point assertion below covers.
+
+    This used to also assert a stage-to-entry-point mapping. The mapping is gone - every
+    notebook records its stem - so what is left to check is that the suffix is one the
+    registration assertion is reached for. A stage missing from ``_REGISTERING_SUFFIXES``
+    is skipped there rather than failed, which is the silence the assertion exists to break.
+    """
     match = STAGE_RE.match(stage)
     assert match is not None
-    suffix = stage[len(match.group(0)) :]
-    assert suffix in _REGISTERING_SUFFIXES
-    assert _expected_entry_point(case_study, stage) == entry_point
+    assert stage[len(match.group(0)) :] in _REGISTERING_SUFFIXES
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +379,41 @@ def isolated_model_output(tmp_path_factory):
     return test_root
 
 
+def absent_read_only_inputs(case_study: str) -> list[str]:
+    """The read-only inputs ``isolated_model_output`` found nothing to symlink.
+
+    ``config/`` is tracked. ``features/`` and ``labels/`` are not: they are stage
+    01-05 output, and a maintainer worktree reaches them through
+    ``case_studies/<case study>/{features,labels}`` symlinks into
+    ``~/ml4t/artifacts``. A CI runner has none of those (they are gitignored) and
+    neither does a freshly created worktree, so the fixture links nothing and every
+    notebook fails on its first read with "Missing prerequisites".
+
+    That produced 94 failures naming the notebooks, none of which said anything
+    about a notebook, and a suite whose reds are all environmental is a suite nobody
+    reads. A missing input is a skip, and the skip names the exact directories so it
+    cannot be mistaken for the notebook working.
+    """
+    prod = PROD_CS_DIR / case_study
+    return sorted(subdir for subdir in ("features", "labels") if not (prod / subdir).exists())
+
+
+def test_absent_read_only_inputs_reports_only_what_is_missing(tmp_path, monkeypatch) -> None:
+    """Two-sided, because a skip that swallows a present input is worse than a red.
+
+    The failure this guards is a skip condition that is always true: it would turn
+    all 94 notebook executions green-by-absence and nothing would say so.
+    """
+    monkeypatch.setattr("tests.test_model_registry.PROD_CS_DIR", tmp_path)
+    case = tmp_path / "demo_case"
+    case.mkdir()
+    assert absent_read_only_inputs("demo_case") == ["features", "labels"]
+    (case / "features").mkdir()
+    assert absent_read_only_inputs("demo_case") == ["labels"]
+    (case / "labels").mkdir()
+    assert absent_read_only_inputs("demo_case") == []
+
+
 LOG_PATH = Path("/tmp/model_registry_test.log")
 
 
@@ -465,6 +498,13 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
 
     if overrides.get("skip"):
         pytest.skip(overrides.get("skip_reason", "marked skip in overrides"))
+
+    if absent := absent_read_only_inputs(case_study):
+        pytest.skip(
+            f"case_studies/{case_study}/ has no {', '.join(absent)} to read - stage 01-05 "
+            "output, which a maintainer worktree reaches through a symlink into "
+            "~/ml4t/artifacts and which no CI runner and no fresh worktree has"
+        )
 
     if overrides.get("gpu"):
         try:
@@ -581,7 +621,7 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
             f"{case_study}::{stage} expects to register but wrote no registry under "
             f"{isolated_model_output}"
         )
-        expected_notebook = _expected_entry_point(case_study, stage)
+        expected_notebook = stage
         runs = _query_registry(
             registry_db,
             "training_runs",

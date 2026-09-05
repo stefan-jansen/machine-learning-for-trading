@@ -273,6 +273,22 @@ CREATE TABLE IF NOT EXISTS candidate_set_members (
     UNIQUE (set_hash, member_hash)
 );
 
+-- A candidate set is identified by its members and its comparison contract, so two names for
+-- the same comparison resolve to one `candidate_sets` row. The binding therefore cannot live
+-- on that row: a union that adds nothing to one of its inputs has the input's identity and its
+-- own name, and both names have to resolve. Lineage is per name, because superseding is a
+-- statement about which generation of a named comparison is in force.
+CREATE TABLE IF NOT EXISTS candidate_set_names (
+    name            TEXT NOT NULL,
+    set_hash        TEXT NOT NULL REFERENCES candidate_sets(set_hash),
+    supersedes_hash TEXT,
+    created_at      TEXT NOT NULL,
+    git_commit      TEXT,
+    PRIMARY KEY (name, set_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_candidate_set_names_hash ON candidate_set_names(set_hash);
+
 
 CREATE TABLE IF NOT EXISTS execution_attempts (
     attempt_id          TEXT PRIMARY KEY,
@@ -515,8 +531,42 @@ def _open_registry(case_dir: Path) -> sqlite3.Connection:
     # Migrate existing DBs before running CREATE TABLE IF NOT EXISTS
     _migrate_registry(db)
     db.executescript(REGISTRY_SCHEMA_SQL)
+    _backfill_candidate_set_names(db)
     _declare_uncertainty_columns(db)
     return db
+
+
+def _backfill_candidate_set_names(db: sqlite3.Connection) -> None:
+    """Give every stored candidate set the name binding its identity row records.
+
+    `candidate_sets` holds one row per set of members, so its `name` column can only record the
+    first name a set was written under; a second name for the same members had nowhere to go and
+    was dropped. `candidate_set_names` is where a binding lives now, and this carries the
+    existing ones across. It runs after the schema script rather than in `_migrate_registry`,
+    which runs before the table exists.
+
+    One binding per existing row, carrying that row's lineage, so a migrated registry resolves
+    every name it resolved before.
+
+    Probed with a read before writing, and this matters more than it looks. `_open_registry` is
+    on every path that touches a registry, so an unconditional `INSERT ... SELECT` took the
+    write lock on every open - and with `busy_timeout` at 60s, one contended open blocks for a
+    minute rather than proceeding. The probe is a covering read that answers instantly and
+    leaves the lock alone once the backfill has run, which is every open after the first.
+    """
+    pending = db.execute(
+        "SELECT EXISTS (SELECT 1 FROM candidate_sets s WHERE NOT EXISTS ("
+        "  SELECT 1 FROM candidate_set_names n"
+        "  WHERE n.name = s.name AND n.set_hash = s.set_hash))"
+    ).fetchone()[0]
+    if not pending:
+        return
+    db.execute(
+        "INSERT OR IGNORE INTO candidate_set_names "
+        "(name, set_hash, supersedes_hash, created_at, git_commit) "
+        "SELECT name, set_hash, supersedes_hash, created_at, git_commit FROM candidate_sets"
+    )
+    db.commit()
 
 
 # Metric columns the uncertainty layer produces on every run, which the CREATE TABLE statements
@@ -762,28 +812,32 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
     # ("classification" / "regression"). The schema is now TEXT but legacy
     # rows still carry the float encoding; consumers that filter
     # ``task_type = 'classification'`` would otherwise miss them.
-    if "prediction_metrics" in tables:
-        pm_cols = {row[1] for row in db.execute("PRAGMA table_info(prediction_metrics)").fetchall()}
-        if "task_type" in pm_cols:
-            db.execute(
-                "UPDATE prediction_metrics SET task_type = 'classification' "
-                "WHERE task_type IN (1, 1.0, '1', '1.0')"
-            )
-            db.execute(
-                "UPDATE prediction_metrics SET task_type = 'regression' "
-                "WHERE task_type IN (0, 0.0, '0', '0.0')"
-            )
-    if "fold_metrics" in tables:
-        fm_cols = {row[1] for row in db.execute("PRAGMA table_info(fold_metrics)").fetchall()}
-        if "task_type" in fm_cols:
-            db.execute(
-                "UPDATE fold_metrics SET task_type = 'classification' "
-                "WHERE task_type IN (1, 1.0, '1', '1.0')"
-            )
-            db.execute(
-                "UPDATE fold_metrics SET task_type = 'regression' "
-                "WHERE task_type IN (0, 0.0, '0', '0.0')"
-            )
+    #
+    # Asked before written, because `_open_registry` is on every path that touches a registry
+    # and an `UPDATE` takes the write lock whether or not a row matches. With `busy_timeout` at
+    # 60s that turns one contended open into a minute of waiting, for a rewrite that has had
+    # nothing to do since the last legacy row was converted. The probe is a read over the same
+    # predicate and answers from the table it is about to leave alone.
+    for table in ("prediction_metrics", "fold_metrics"):
+        if table not in tables:
+            continue
+        columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}  # noqa: S608
+        if "task_type" not in columns:
+            continue
+        legacy = db.execute(
+            f"SELECT EXISTS (SELECT 1 FROM {table} "  # noqa: S608
+            "WHERE task_type IN (1, 1.0, '1', '1.0', 0, 0.0, '0', '0.0'))"
+        ).fetchone()[0]
+        if not legacy:
+            continue
+        db.execute(
+            f"UPDATE {table} SET task_type = 'classification' "  # noqa: S608
+            "WHERE task_type IN (1, 1.0, '1', '1.0')"
+        )
+        db.execute(
+            f"UPDATE {table} SET task_type = 'regression' "  # noqa: S608
+            "WHERE task_type IN (0, 0.0, '0', '0.0')"
+        )
 
     db.commit()
 
@@ -1002,6 +1056,72 @@ def _create_wide_table(
 def _save_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, default=str))
+
+
+_PREDICTION_TIME_COLUMNS = ("timestamp", "date", "datetime", "ts")
+
+
+def _timestamps_as_utc(predictions):
+    """Give a naive decision-time column an explicit UTC zone before it is written.
+
+    `gbm`, `linear` and `tabular_dl` write `Datetime(_, 'UTC')`; `deep_learning` reaches
+    this through `flush_fold_predictions`, whose dates come from a numpy `datetime64`
+    array and are therefore naive. Measured on crypto_perps_funding: 578 artifacts UTC-
+    aware and 100 naive, same label, same folds, same 19 symbols, same 2,189 decision
+    times, identical instants. A tz-aware value never equals a naive one, so an exact join
+    on (timestamp, symbol) between the two families returned nothing, and any code
+    assuming one dtype across a case study's artifacts dropped rows instead of failing.
+
+    Naive is read as UTC here, which is what it already meant: every producer derives
+    these timestamps from the label artifact's own axis, and the naive values are the same
+    instants the aware ones carry. This relabels; it never converts a wall time.
+
+    `value_digest` ignores the zone (it is time-unit sensitive and zone-insensitive), so
+    an artifact rewritten through here keeps its digest and no immutable-artifact check
+    moves. The time unit is deliberately left alone for the same reason.
+    """
+    if predictions is None:
+        return predictions
+    try:
+        import polars as pl
+    except ImportError:  # pragma: no cover
+        return predictions
+
+    if isinstance(predictions, pl.DataFrame):
+        naive = [
+            column
+            for column in _PREDICTION_TIME_COLUMNS
+            if column in predictions.columns
+            and isinstance(predictions.schema[column], pl.Datetime)
+            and predictions.schema[column].time_zone is None
+        ]
+        if not naive:
+            return predictions
+        return predictions.with_columns(
+            pl.col(column).dt.replace_time_zone("UTC") for column in naive
+        )
+
+    # pandas is handled in place rather than converted. Both the legacy registration branch
+    # and the pandas side of the versioned one hand the caller's own frame to the writer,
+    # and `pl.from_pandas` on an arbitrary frame is a wider change than this needs. A naive
+    # pandas column localizes to UTC the same way; an already-aware one is left alone.
+    import pandas as pd
+
+    if not isinstance(predictions, pd.DataFrame):
+        return predictions
+    naive = [
+        column
+        for column in _PREDICTION_TIME_COLUMNS
+        if column in predictions.columns
+        and pd.api.types.is_datetime64_any_dtype(predictions[column])
+        and getattr(predictions[column].dtype, "tz", None) is None
+    ]
+    if not naive:
+        return predictions
+    localized = predictions.copy()
+    for column in naive:
+        localized[column] = localized[column].dt.tz_localize("UTC")
+    return localized
 
 
 def _save_parquet(path: Path, frame) -> None:

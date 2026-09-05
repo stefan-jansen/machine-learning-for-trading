@@ -168,7 +168,6 @@ ax.set_title("Combined Stress (VIX>20 + Below 200-MA)")
 ax.set_ylabel("Stress Count (0-2)")
 ax.set_yticks([0, 1, 2])
 
-plt.tight_layout()
 plt.show()
 
 # %% [markdown]
@@ -371,7 +370,6 @@ ax.set_title("Look-Ahead Bias (Smoothed - Filtered)")
 ax.set_ylabel("Probability Difference")
 ax.set_xlabel("Time Step")
 
-plt.tight_layout()
 plt.show()
 
 print(f"Mean absolute bias: {np.mean(np.abs(bias)):.4f}")
@@ -637,7 +635,6 @@ if covid_mask.sum() > 0:
     ax.set_ylabel("P(High-Vol)")
     ax.legend()
 
-plt.tight_layout()
 plt.show()
 
 # %% [markdown]
@@ -769,7 +766,6 @@ ax.fill_between(spy_pd.index, 0, msar_high, alpha=0.7, color=COLORS["amber"])
 ax.set_title("MS-AR: Filtered P(High-Vol)")
 ax.set_ylabel("Probability")
 
-plt.tight_layout()
 plt.show()
 
 # %%
@@ -886,7 +882,6 @@ ax.set_title("Indicator Regime Features - Deterministic")
 ax.set_ylabel("Value")
 ax.legend(loc="upper right")
 
-plt.tight_layout()
 plt.show()
 
 # %% [markdown]

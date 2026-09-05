@@ -540,7 +540,6 @@ ax.set_ylabel("Prediction Error (%)")
 ax.set_title("Prediction Errors Are Larger in the High-Vol Regime")
 ax.legend()
 
-plt.tight_layout()
 plt.show()
 
 # %% [markdown]
@@ -556,7 +555,6 @@ fig, ax = plt.subplots(figsize=(10, 5))
 ax.barh(feature_importance["Feature"], feature_importance["Importance"], color=COLORS["blue"])
 ax.set_xlabel("Impurity-based importance (Gradient Boosting)")
 ax.set_title("Regime Probability Contributes Little; Base Features Dominate")
-plt.tight_layout()
 plt.show()
 
 # %% [markdown]

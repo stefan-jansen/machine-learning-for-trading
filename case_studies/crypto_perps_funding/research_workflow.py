@@ -25,7 +25,6 @@ from case_studies.research.contracts import ExecutionTier
 from case_studies.research.execution import ModelExecution
 from case_studies.research.models import ModelRequest
 from utils.modeling import load_configs
-from utils.paths import REPO_ROOT
 
 CASE_STUDY = "crypto_perps_funding"
 ALL_LABELS = ("fwd_ret_8h", "fwd_ret_24h", "fwd_dir_8h", "fwd_dir_8h_3c")
@@ -39,7 +38,7 @@ def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> S
     """Open canonical regeneration or an isolated reader preview."""
     if execution_tier == "canonical":
         if workspace is None:
-            return Study.regenerate(CASE_STUDY, release_root=REPO_ROOT)
+            return Study.regenerate(CASE_STUDY)
     elif execution_tier == "preview":
         workspace = workspace or os.environ.get("ML4T_OUTPUT_DIR")
         if workspace is None:
@@ -49,7 +48,6 @@ def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> S
     return Study.open(
         CASE_STUDY,
         workspace=Path(workspace).expanduser().resolve(),
-        release_root=REPO_ROOT,
     )
 
 
