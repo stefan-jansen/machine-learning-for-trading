@@ -4,34 +4,34 @@
   "method": "daily_cross_sectional_mean_close_pct_change",
   "periods_per_year": 252,
   "n_symbols_declared": 115,
-  "n_symbols_in_universe": 112,
-  "sharpe": 1.741414,
-  "cagr": 0.375449,
-  "vol": 0.193958,
-  "n_periods": 251,
-  "ts_min": "2020-07-02",
+  "n_symbols_in_universe": 113,
+  "sharpe": 2.137382,
+  "cagr": 0.490756,
+  "vol": 0.195917,
+  "n_periods": 253,
+  "ts_min": "2020-06-30",
   "ts_max": "2021-12-31",
   "by_period": {
     "overall": {
-      "sharpe": 1.4241,
-      "cagr": 0.266108,
-      "vol": 0.176716,
-      "n_periods": 379
+      "sharpe": 1.795432,
+      "cagr": 0.356536,
+      "vol": 0.178838,
+      "n_periods": 381
     },
     "validation": {
-      "sharpe": 1.741414,
-      "cagr": 0.375449,
-      "vol": 0.193958,
-      "n_periods": 251
+      "sharpe": 2.137382,
+      "cagr": 0.490756,
+      "vol": 0.195917,
+      "n_periods": 253
     },
     "holdout": {
-      "sharpe": 0.60533,
-      "cagr": 0.076288,
-      "vol": 0.136826,
+      "sharpe": 0.921576,
+      "cagr": 0.125748,
+      "vol": 0.13896,
       "n_periods": 128
     },
     "validation_window": [
-      "2020-07-02",
+      "2020-06-30",
       "2021-06-30"
     ],
     "holdout_window": [

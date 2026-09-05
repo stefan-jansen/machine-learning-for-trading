@@ -74,3 +74,69 @@ def test_labels_of_one_case_study_do_not_share_a_benchmark_series() -> None:
         for stem, h in heights.items():
             declared = metas[stem].get("by_period", {}).get("overall", {}).get("n_periods")
             assert declared in (None, h), f"{cs}/{stem}: {declared} declared against {h} rows"
+
+
+# --------------------------------------------------------------------------------------
+# Split handling. The NASDAQ-100 minute archive is unadjusted `last_trade_price`, so a
+# close-to-close return spans corporate actions: AAPL closes 499.23 on 2020-08-28 and
+# 129.04 on 2020-08-31, and TSLA splits 5:1 three days later. Both fall inside the
+# validation window, and read naively they are -74% and -80% sessions.
+# --------------------------------------------------------------------------------------
+
+import sys
+
+sys.path.insert(0, str(REPO / "scripts"))
+
+
+def _one_symbol(dates, closes, *, factor=None):
+    return pl.DataFrame(
+        {
+            "symbol": ["X"] * len(dates),
+            "date": dates,
+            "close": closes,
+            "adj_close": closes if factor is None else [c * f for c, f in zip(closes, factor)],
+            "adj_factor": [None] * len(dates) if factor is None else factor,
+        }
+    )
+
+
+def test_a_four_for_one_split_is_not_a_loss_when_a_factor_covers_it() -> None:
+    """`close * adj_factor` must be continuous through the split."""
+    import datetime as dt
+
+    from build_benchmark import _equal_weight_daily
+
+    dates = [dt.date(2020, 8, 27), dt.date(2020, 8, 28), dt.date(2020, 8, 31)]
+    # Unchanged investment value, then a 4:1 split: raw price quarters, factor quadruples.
+    frame = _one_symbol(dates, [500.0, 500.0, 125.0], factor=[8.0, 8.0, 32.0])
+    ew = _equal_weight_daily(frame)
+    assert ew.height == 2
+    assert ew["ew_return"].abs().max() < 1e-9, (
+        f"an unchanged investment value produced a return of {ew['ew_return'].to_list()}"
+    )
+
+
+def test_a_split_in_an_unadjusted_symbol_leaves_the_cross_section() -> None:
+    """With no factor available, the split session is dropped rather than counted."""
+    import datetime as dt
+
+    from build_benchmark import _equal_weight_daily
+
+    dates = [dt.date(2020, 8, 27), dt.date(2020, 8, 28), dt.date(2020, 8, 31)]
+    frame = _one_symbol(dates, [500.0, 500.0, 125.0])
+    ew = _equal_weight_daily(frame)
+    assert ew.height == 1, f"expected the split session to be dropped, got {ew.to_dicts()}"
+    assert abs(ew["ew_return"][0]) < 1e-9
+
+
+def test_a_genuine_crash_is_not_mistaken_for_a_split() -> None:
+    """A -40% session is a move, not a corporate action, and must stay in the panel."""
+    import datetime as dt
+
+    from build_benchmark import _equal_weight_daily
+
+    dates = [dt.date(2020, 3, 11), dt.date(2020, 3, 12)]
+    frame = _one_symbol(dates, [100.0, 60.0])
+    ew = _equal_weight_daily(frame)
+    assert ew.height == 1, "a genuine -40% session was dropped as a split"
+    assert ew["ew_return"][0] == pytest.approx(-0.4)

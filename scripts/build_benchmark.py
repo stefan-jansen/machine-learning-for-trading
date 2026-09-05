@@ -48,6 +48,7 @@ import numpy as np
 import polars as pl
 import yaml
 
+from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
 
 # Each case study reads its prices through its own loader. A name here is a statement that
@@ -59,6 +60,26 @@ _LOADERS: dict[str, tuple[str, str, bool]] = {
     "nasdaq100_microstructure": ("load_nasdaq100_bars", "1m", True),
     "crypto_perps_funding": ("load_crypto_perps", "8h", False),
 }
+
+# Case studies whose bars are RAW, so a close-to-close return spans corporate actions.
+# AlgoSeek's NASDAQ-100 minute archive carries `last_trade_price` and no adjustment
+# column at all - AAPL closes 499.23 on 2020-08-28 and 129.04 on 2020-08-31, which a
+# naive daily return reads as -74%. Both dates are inside the validation window, and
+# TSLA's 5:1 split is three days later. `load_sp500_daily_bars` publishes a cumulative
+# `adj_factor` for the names it covers; `close * adj_factor` is continuous across the
+# split (AAPL: 4044.2 -> 4181.4, the +3.4% it actually traded).
+#
+# Crypto perpetuals have no corporate actions, so they are absent here by fact rather
+# than by omission.
+_ADJUSTMENT_SOURCE: dict[str, str] = {
+    "nasdaq100_microstructure": "load_sp500_daily_bars",
+}
+
+# Ratios a residual split shows up as, for symbols the adjustment source does not cover.
+# Matching a RATIO rather than thresholding a return is what keeps a genuine -40% session
+# in the cross-section: only a move within `_SPLIT_TOLERANCE` of one of these is dropped.
+_SPLIT_RATIOS = (2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 15.0, 20.0, 1.5, 2.5, 3.0 / 2)
+_SPLIT_TOLERANCE = 0.02
 
 
 def _daily_closes(case_study: str, symbols: list[str], start: str, end: str) -> pl.DataFrame:
@@ -86,19 +107,170 @@ def _daily_closes(case_study: str, symbols: list[str], start: str, end: str) -> 
     )
 
 
-def _equal_weight_daily(closes: pl.DataFrame) -> pl.DataFrame:
+def _apply_adjustment(case_study: str, closes: pl.DataFrame, symbols: list[str]) -> pl.DataFrame:
+    """Return ``closes`` with an ``adj_close`` column that is continuous across splits."""
+    if case_study not in _ADJUSTMENT_SOURCE:
+        return closes.with_columns(pl.col("close").alias("adj_close"))
+
+    import data as _data
+
+    factors = (
+        getattr(_data, _ADJUSTMENT_SOURCE[case_study])(
+            start_date=str(closes["date"].min()),
+            end_date=str(closes["date"].max()),
+            symbols=symbols,
+        )
+        .select(
+            pl.col("timestamp").cast(pl.Date).alias("date"),
+            "symbol",
+            pl.col("adj_factor").cast(pl.Float64),
+        )
+        .unique(subset=["symbol", "date"], keep="first")
+    )
+    covered = factors["symbol"].n_unique()
+    print(
+        f"  adjustment: {covered} of {closes['symbol'].n_unique()} symbols carry an "
+        f"adj_factor; the rest are screened for residual split ratios"
+    )
+    return closes.join(factors, on=["symbol", "date"], how="left").with_columns(
+        pl.when(pl.col("adj_factor").is_not_null())
+        .then(pl.col("close") * pl.col("adj_factor"))
+        .otherwise(pl.col("close"))
+        .alias("adj_close")
+    )
+
+
+def _drop_residual_splits(per_symbol: pl.DataFrame) -> tuple[pl.DataFrame, int]:
+    """Null out returns whose price ratio is a split ratio, for unadjusted symbols.
+
+    A symbol with an ``adj_factor`` is already continuous and is never screened. For the
+    rest, a ratio within ``_SPLIT_TOLERANCE`` of a known split ratio (either direction) is
+    a corporate action rather than a move, so the symbol leaves the cross-section for that
+    one session instead of entering it as a -75% return.
+    """
+    ratio = pl.col("prev_close") / pl.col("close")
+    is_split = pl.lit(False)
+    for r in _SPLIT_RATIOS:
+        for cand in (r, 1.0 / r):
+            is_split = is_split | ((ratio / cand - 1.0).abs() < _SPLIT_TOLERANCE)
+    flagged = per_symbol.with_columns(
+        (is_split & pl.col("adj_factor_missing")).alias("residual_split")
+    )
+    n = int(flagged["residual_split"].sum())
+    return flagged.filter(~pl.col("residual_split")), n
+
+
+def _equal_weight_daily(closes: pl.DataFrame, screen_splits: bool = True) -> pl.DataFrame:
     """Cross-sectional equal-weight mean of each symbol's daily close-to-close return.
 
     A symbol contributes on a session only when it has a close on that session AND on the
     one before it, so a listing or a delisting never enters as a return.
     """
+    has_factor = "adj_factor" in closes.columns
     per_symbol = (
         closes.sort(["symbol", "date"])
         .with_columns(
-            (pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0).alias("ret")
+            pl.col("adj_close").shift(1).over("symbol").alias("prev_adj"),
+            pl.col("close").shift(1).over("symbol").alias("prev_close"),
+            (pl.col("adj_factor").is_null() if has_factor else pl.lit(True)).alias(
+                "adj_factor_missing"
+            ),
         )
+        .with_columns((pl.col("adj_close") / pl.col("prev_adj") - 1.0).alias("ret"))
         .drop_nulls("ret")
     )
+    n_split = 0
+    if screen_splits:
+        per_symbol, n_split = _drop_residual_splits(per_symbol)
+    if n_split:
+        print(f"  dropped {n_split} symbol-session(s) whose price ratio is a split ratio")
+    return (
+        per_symbol.group_by("date")
+        .agg(
+            pl.col("ret").mean().alias("ew_return"),
+            pl.len().alias("n_symbols"),
+        )
+        .sort("date")
+    )
+
+
+def _apply_adjustment(case_study: str, closes: pl.DataFrame, symbols: list[str]) -> pl.DataFrame:
+    """Return ``closes`` with an ``adj_close`` column that is continuous across splits."""
+    if case_study not in _ADJUSTMENT_SOURCE:
+        return closes.with_columns(pl.col("close").alias("adj_close"))
+
+    import data as _data
+
+    factors = (
+        getattr(_data, _ADJUSTMENT_SOURCE[case_study])(
+            start_date=str(closes["date"].min()),
+            end_date=str(closes["date"].max()),
+            symbols=symbols,
+        )
+        .select(
+            pl.col("timestamp").cast(pl.Date).alias("date"),
+            "symbol",
+            pl.col("adj_factor").cast(pl.Float64),
+        )
+        .unique(subset=["symbol", "date"], keep="first")
+    )
+    covered = factors["symbol"].n_unique()
+    print(
+        f"  adjustment: {covered} of {closes['symbol'].n_unique()} symbols carry an "
+        f"adj_factor; the rest are screened for residual split ratios"
+    )
+    return closes.join(factors, on=["symbol", "date"], how="left").with_columns(
+        pl.when(pl.col("adj_factor").is_not_null())
+        .then(pl.col("close") * pl.col("adj_factor"))
+        .otherwise(pl.col("close"))
+        .alias("adj_close")
+    )
+
+
+def _drop_residual_splits(per_symbol: pl.DataFrame) -> tuple[pl.DataFrame, int]:
+    """Null out returns whose price ratio is a split ratio, for unadjusted symbols.
+
+    A symbol with an ``adj_factor`` is already continuous and is never screened. For the
+    rest, a ratio within ``_SPLIT_TOLERANCE`` of a known split ratio (either direction) is
+    a corporate action rather than a move, so the symbol leaves the cross-section for that
+    one session instead of entering it as a -75% return.
+    """
+    ratio = pl.col("prev_close") / pl.col("close")
+    is_split = pl.lit(False)
+    for r in _SPLIT_RATIOS:
+        for cand in (r, 1.0 / r):
+            is_split = is_split | ((ratio / cand - 1.0).abs() < _SPLIT_TOLERANCE)
+    flagged = per_symbol.with_columns(
+        (is_split & pl.col("adj_factor_missing")).alias("residual_split")
+    )
+    n = int(flagged["residual_split"].sum())
+    return flagged.filter(~pl.col("residual_split")), n
+
+
+def _equal_weight_daily(closes: pl.DataFrame, screen_splits: bool = True) -> pl.DataFrame:
+    """Cross-sectional equal-weight mean of each symbol's daily close-to-close return.
+
+    A symbol contributes on a session only when it has a close on that session AND on the
+    one before it, so a listing or a delisting never enters as a return.
+    """
+    has_factor = "adj_factor" in closes.columns
+    per_symbol = (
+        closes.sort(["symbol", "date"])
+        .with_columns(
+            pl.col("adj_close").shift(1).over("symbol").alias("prev_adj"),
+            pl.col("close").shift(1).over("symbol").alias("prev_close"),
+            (pl.col("adj_factor").is_null() if has_factor else pl.lit(True)).alias(
+                "adj_factor_missing"
+            ),
+        )
+        .with_columns((pl.col("adj_close") / pl.col("prev_adj") - 1.0).alias("ret"))
+        .drop_nulls("ret")
+    )
+    n_split = 0
+    if screen_splits:
+        per_symbol, n_split = _drop_residual_splits(per_symbol)
+    if n_split:
+        print(f"  dropped {n_split} symbol-session(s) whose price ratio is a split ratio")
     return (
         per_symbol.group_by("date")
         .agg(
@@ -185,16 +357,35 @@ def build(case_study: str, check: bool) -> int:
     hi = max(v[1] for v in spans.values())
     # One extra session of run-up so the first in-span date has a return.
     closes = _daily_closes(case_study, symbols, str(lo.replace(year=lo.year - 1)), str(hi))
-    ew_all = _equal_weight_daily(closes)
+    closes = _apply_adjustment(case_study, closes, symbols)
+    # The residual-split screen belongs only where corporate actions exist. A ratio near
+    # 1.5 or 2.0 is a split in an equity panel and an ordinary session in crypto, which
+    # has no splits at all: screening crypto dropped 11 genuine moves.
+    ew_all = _equal_weight_daily(closes, screen_splits=case_study in _ADJUSTMENT_SOURCE)
 
     failures = 0
     for label, (l_lo, l_hi) in sorted(spans.items()):
-        # The benchmark covers what the strategy is measured over, not the whole panel.
-        # The training prefix is never traded, so including it would compare a strategy's
-        # evaluation-period Sharpe against a benchmark that also carries its training
-        # period. First evaluated session = the label's first session advanced by the
-        # declared train_size.
-        eval_from = _advance_months(l_lo, _months(setup["evaluation"]["train_size"]))
+        # The benchmark covers what the strategy is measured over, not the whole panel:
+        # the training prefix is never traded, and including it would compare a strategy's
+        # evaluation-period Sharpe against a benchmark carrying its training period too.
+        #
+        # Take the boundary from the splitter rather than deriving it. WalkForwardCV
+        # builds folds BACKWARD from the holdout boundary using n_splits and val_size, so
+        # advancing the label's first session by train_size lands in the wrong place -
+        # on nasdaq it gives 2020-07-02 against the splitter's 2020-06-30, silently
+        # dropping two evaluated sessions.
+        eval_from = min(
+            f["val_start"]
+            for f in generate_cv_splits(
+                pl.scan_parquet(labels_dir / f"{label}.parquet")
+                .select("timestamp")
+                .unique()
+                .collect(),
+                case_study_id=case_study,
+                date_col="timestamp",
+            )
+        )
+        eval_from = eval_from.date() if hasattr(eval_from, "date") else eval_from
         ew = ew_all.filter((pl.col("date") >= eval_from) & (pl.col("date") <= l_hi))
         r = ew["ew_return"].to_numpy()
         is_hold = (ew["date"] >= holdout_start) & (ew["date"] <= holdout_end)
@@ -234,13 +425,39 @@ def build(case_study: str, check: bool) -> int:
         pq, js = bench_dir / f"{label}.parquet", bench_dir / f"{label}.json"
         frame = ew.select(pl.col("date").alias("timestamp"), "ew_return")
         if check:
+            # Compare EVERYTHING a consumer reads. Checking only the overall block lets a
+            # moved holdout boundary report MATCHES while the validation and holdout
+            # blocks that load_benchmark_metrics actually returns are stale.
             was = json.loads(js.read_text()) if js.exists() else {}
-            same = was.get("by_period", {}).get("overall") == overall
-            print(f"{label}: {'MATCHES' if same else 'DIFFERS'} committed")
-            if not same:
+            diffs = [k for k in meta if k != "by_period" and was.get(k) != meta[k]]
+            diffs += [
+                f"by_period.{k}"
+                for k in meta["by_period"]
+                if was.get("by_period", {}).get(k) != meta["by_period"][k]
+            ]
+            if not pq.exists():
+                diffs.append("parquet missing")
+            elif not pl.read_parquet(pq).equals(frame):
+                diffs.append("parquet")
+            print(f"{label}: {'MATCHES' if not diffs else 'DIFFERS'} committed")
+            for k in diffs:
                 failures += 1
-                print(f"  committed: {was.get('by_period', {}).get('overall')}")
-                print(f"  rebuilt:   {overall}")
+                if k == "parquet":
+                    print(
+                        f"  parquet: committed {pl.read_parquet(pq).height} rows against {frame.height}"
+                    )
+                else:
+                    was_v = (
+                        was.get("by_period", {}).get(k.split(".", 1)[1])
+                        if k.startswith("by_period.")
+                        else was.get(k)
+                    )
+                    new_v = (
+                        meta["by_period"][k.split(".", 1)[1]]
+                        if k.startswith("by_period.")
+                        else meta[k]
+                    )
+                    print(f"  {k}: {was_v} -> {new_v}")
             continue
 
         bench_dir.mkdir(parents=True, exist_ok=True)
