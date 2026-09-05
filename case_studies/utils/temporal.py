@@ -31,10 +31,10 @@ from threadpoolctl import threadpool_limits
 from case_studies.utils.artifact_digest import write_artifact
 
 __all__ = [
-    "feature_geometry",
-    "garch11_conditional_volatility",
     "filtered_state_probs",
     "fit_hmm_kmeans_init",
+    "fold_feature_geometry",
+    "garch11_conditional_volatility",
     "refit_boundaries",
     "relabel_states",
     "sort_states_by_mean",
@@ -273,20 +273,20 @@ def _cluster_covariance(cluster: np.ndarray, pooled: np.ndarray) -> np.ndarray:
     return np.atleast_2d(np.cov(cluster.T))
 
 
-def feature_geometry(
+def fold_feature_geometry(
     frame: pl.DataFrame,
     *,
     feature_columns: Sequence[str],
     time_column: str,
-    fold_column: str | None = "fold",
+    fold_column: str = "fold",
 ) -> list[dict]:
-    """Per feature, and per fold where there are folds, where the values actually start and stop.
+    """Per fold and feature, where the values actually start and stop.
 
     Returns one record per (fold, feature) with the first and last timestamp carrying a
     non-null value and the null count. This is descriptive, not a check: a fitted feature
     legitimately begins after its estimation window, so a leading gap is only a defect
-    relative to the other features and labels beside it, which this frame cannot see on
-    its own.
+    relative to the other features and labels on the same fold, which this frame cannot
+    see on its own.
 
     It exists because that comparison was impossible after the fact. A model-based feature
     that started late left no trace in the artifact, the registry or any metric:
@@ -294,21 +294,9 @@ def feature_geometry(
     feature's mean, so the affected rows were fitted as average observations and nothing
     raised. Recording the geometry at write time is what lets a later stage compare a
     variant's start against the primary's instead of discovering it by hand.
-
-    ``fold_column=None`` is a frame written by a walk-forward refit schedule rather than by a
-    per-fold fit. There is one value per key, so there is one record per feature and its
-    ``fold`` field is ``None`` - and the leading gap it reports is then the burn-in, which is
-    the same measurement read against a different boundary.
     """
-    if fold_column is None:
-        groups: list[tuple[Any, pl.DataFrame]] = [(None, frame)]
-    else:
-        groups = [
-            (fold_id, part)
-            for (fold_id,), part in frame.group_by([fold_column], maintain_order=True)
-        ]
     records: list[dict] = []
-    for fold_id, part in groups:
+    for (fold_id,), part in frame.group_by([fold_column], maintain_order=True):
         for col in feature_columns:
             present = part.filter(pl.col(col).is_not_null())
             records.append(
@@ -332,7 +320,7 @@ def write_model_based(
     feature_columns: Sequence[str],
     time_column: str,
     written_by: str,
-    fold_column: str | None = "fold",
+    fold_column: str = "fold",
     expected_folds: Sequence[int] | None = None,
     inputs: Mapping[str, str] | None = None,
     metadata: Mapping[str, Any] | None = None,
@@ -345,51 +333,46 @@ def write_model_based(
     none, and the schema was frozen in none, so a notebook could emit a column of the wrong
     dtype or a fold that did not exist and the artifact would still be written and digested.
 
-    ``fold_column=None`` writes the fold-free shape a walk-forward refit schedule produces:
-    one row per key, the same value whichever fold later selects the row. ``expected_folds``
-    is then meaningless and is refused rather than ignored. Every other guard still applies,
-    reading "within a fold" as "in the frame".
-
     Guards, in order, each raising before anything reaches disk:
 
-    * every key, and the fold column where there is one, is present and never null
+    * every key and the fold column is present, and no key value is null
     * ``keys + [fold_column]`` is unique, so a fold cannot carry a row twice
     * every declared feature column is present and not entirely null within any fold
     * the fold ids are exactly ``expected_folds`` when given
 
-    The feature geometry from :func:`feature_geometry` goes into the sidecar metadata under
-    ``feature_geometry``. It is recorded rather than asserted on for the reason given there:
-    this frame cannot tell a legitimate estimation warm-up from an excess one, and a guard
-    that refused every leading gap would reject the case studies where the gap is correct.
+    The per-fold feature geometry from :func:`fold_feature_geometry` goes into the sidecar
+    metadata under ``fold_feature_geometry``. It is recorded rather than asserted on for the
+    reason given there: this frame cannot tell a legitimate estimation warm-up from an
+    excess one, and a guard that refused every leading gap would reject the case studies
+    where the gap is correct.
     """
-    if fold_column is None and expected_folds is not None:
-        raise ValueError("expected_folds was given for a frame written without a fold column")
-
     frame_keys = list(keys)
-    identity = frame_keys if fold_column is None else [*frame_keys, fold_column]
-    missing = [c for c in [*identity, *feature_columns] if c not in frame.columns]
+    missing = [c for c in [*frame_keys, fold_column, *feature_columns] if c not in frame.columns]
     if missing:
         raise ValueError(f"model_based frame is missing declared columns: {missing}")
 
-    null_keys = [c for c in identity if frame[c].null_count()]
+    null_keys = [c for c in [*frame_keys, fold_column] if frame[c].null_count()]
     if null_keys:
         raise ValueError(f"null values in key or fold columns: {null_keys}")
 
+    identity = [*frame_keys, fold_column]
     n_dup = int(frame.select(identity).is_duplicated().sum())
     if n_dup:
         raise ValueError(f"{n_dup:,} duplicate rows on {identity}")
 
-    geometry = feature_geometry(
+    geometry = fold_feature_geometry(
         frame,
         feature_columns=feature_columns,
         time_column=time_column,
         fold_column=fold_column,
     )
-    all_null = [(rec["fold"], rec["feature"]) for rec in geometry if rec["n_null"] == rec["n_rows"]]
-    if all_null:
+    empty_in_fold = [
+        (rec["fold"], rec["feature"]) for rec in geometry if rec["n_null"] == rec["n_rows"]
+    ]
+    if empty_in_fold:
         raise ValueError(
             "feature columns with no value at all in a fold, which means the fit did not "
-            f"run or its output was not joined back: {all_null}"
+            f"run or its output was not joined back: {empty_in_fold}"
         )
 
     if expected_folds is not None:
@@ -399,7 +382,7 @@ def write_model_based(
             raise ValueError(f"fold ids {got} do not match the resolved folds {want}")
 
     merged = dict(metadata or {})
-    merged["feature_geometry"] = [
+    merged["fold_feature_geometry"] = [
         {
             **rec,
             "first_valid": None if rec["first_valid"] is None else str(rec["first_valid"]),

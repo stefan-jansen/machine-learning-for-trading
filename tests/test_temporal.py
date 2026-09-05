@@ -314,7 +314,7 @@ def test_write_model_based_records_where_each_feature_starts(tmp_path: Path) -> 
         .alias("garch_sigma")
     )
     record = write_model_based(frame, tmp_path / "m.parquet", **WRITE_KW)
-    geometry = {(g["fold"], g["feature"]): g for g in record["feature_geometry"]}
+    geometry = {(g["fold"], g["feature"]): g for g in record["fold_feature_geometry"]}
     # The warm-up is visible in the sidecar rather than only in the values, which is the
     # whole point: the defect it stands for left no trace anywhere before this.
     assert geometry[(0, "garch_sigma")]["first_valid"].startswith("2020-01-03")
@@ -363,46 +363,6 @@ def test_write_model_based_rejects_a_null_key(tmp_path: Path) -> None:
 def test_write_model_based_rejects_a_missing_declared_feature(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="missing declared columns"):
         write_model_based(_emit_frame().drop("garch_sigma"), tmp_path / "m.parquet", **WRITE_KW)
-
-
-def test_write_model_based_writes_a_fold_free_frame(tmp_path: Path) -> None:
-    # What a walk-forward refit schedule emits: one row per key, no fold column, the same
-    # value whichever fold later selects the row.
-    frame = _emit_frame(folds=(0,)).drop("fold")
-    record = write_model_based(frame, tmp_path / "m.parquet", fold_column=None, **WRITE_KW)
-    assert record["n_rows"] == 18
-    assert "fold" not in pl.read_parquet(tmp_path / "m.parquet").columns
-    assert "fold_digests" not in record
-
-
-def test_a_fold_free_geometry_record_carries_no_fold(tmp_path: Path) -> None:
-    frame = _emit_frame(folds=(0,)).drop("fold")
-    record = write_model_based(frame, tmp_path / "m.parquet", fold_column=None, **WRITE_KW)
-    geometry = {g["feature"]: g for g in record["feature_geometry"]}
-    assert set(geometry) == set(FEATURES)
-    assert all(g["fold"] is None for g in geometry.values())
-    assert geometry["garch_sigma"]["n_rows"] == 18
-
-
-def test_a_fold_free_frame_still_rejects_a_repeated_key(tmp_path: Path) -> None:
-    # Without a fold column the key alone is the identity, so the second copy of a row is a
-    # duplicate rather than the next fold's re-emission.
-    frame = _emit_frame(folds=(0,)).drop("fold")
-    with pytest.raises(ValueError, match="duplicate rows"):
-        write_model_based(
-            pl.concat([frame, frame.head(1)]),
-            tmp_path / "m.parquet",
-            fold_column=None,
-            **WRITE_KW,
-        )
-
-
-def test_a_fold_free_frame_refuses_expected_folds(tmp_path: Path) -> None:
-    frame = _emit_frame(folds=(0,)).drop("fold")
-    with pytest.raises(ValueError, match="without a fold column"):
-        write_model_based(
-            frame, tmp_path / "m.parquet", fold_column=None, expected_folds=[0], **WRITE_KW
-        )
 
 
 def test_write_model_based_writes_nothing_when_a_guard_fires(tmp_path: Path) -> None:
