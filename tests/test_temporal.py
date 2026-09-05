@@ -25,6 +25,7 @@ from threadpoolctl import threadpool_limits
 from case_studies.utils.temporal import (
     filtered_state_probs,
     fit_hmm_kmeans_init,
+    garch11_conditional_volatility,
     refit_boundaries,
     relabel_states,
     sort_states_by_mean,
@@ -369,6 +370,97 @@ def test_write_model_based_writes_nothing_when_a_guard_fires(tmp_path: Path) -> 
     with pytest.raises(ValueError):
         write_model_based(_emit_frame(folds=(0, 9)), out, expected_folds=[0, 1], **WRITE_KW)
     assert not out.exists()
+
+
+# --- the fold-free artifact a refit schedule produces ------------------------------------
+
+
+def _fold_free_frame() -> pl.DataFrame:
+    return _emit_frame(folds=(0,)).drop("fold")
+
+
+def test_write_model_based_writes_a_frame_that_carries_no_fold_column(tmp_path: Path) -> None:
+    out = tmp_path / "model_based.parquet"
+    record = write_model_based(_fold_free_frame(), out, fold_column=None, **WRITE_KW)
+    assert "fold" not in pl.read_parquet(out).columns
+    assert record["n_rows"] == 18
+    # One geometry record per feature, not per fold and feature.
+    assert {(g["fold"], g["feature"]) for g in record["fold_feature_geometry"]} == {
+        (None, "vol_state"),
+        (None, "garch_sigma"),
+    }
+
+
+def test_the_keys_alone_identify_a_row_when_there_is_no_fold(tmp_path: Path) -> None:
+    frame = _fold_free_frame()
+    frame = pl.concat([frame, frame.head(1)])
+    with pytest.raises(ValueError, match="duplicate rows"):
+        write_model_based(frame, tmp_path / "m.parquet", fold_column=None, **WRITE_KW)
+
+
+def test_expected_folds_is_refused_rather_than_ignored_without_a_fold_column(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "m.parquet"
+    with pytest.raises(ValueError, match="expected_folds"):
+        write_model_based(_fold_free_frame(), out, fold_column=None, expected_folds=[0], **WRITE_KW)
+    assert not out.exists()
+
+
+def test_an_all_null_feature_is_still_refused_without_a_fold_column(tmp_path: Path) -> None:
+    frame = _fold_free_frame().with_columns(pl.lit(None, dtype=pl.Float64).alias("garch_sigma"))
+    with pytest.raises(ValueError, match="no value at all"):
+        write_model_based(frame, tmp_path / "m.parquet", fold_column=None, **WRITE_KW)
+
+
+# ---------------------------------------------------------------------------
+# The GARCH(1,1) recursion.
+#
+# The property is the same one the schedule exists for, one level down: a value must not move
+# when observations after it are appended. `arch`'s own result object fails it, which is why
+# there is a recursion here at all.
+# ---------------------------------------------------------------------------
+
+GARCH_PARAMS = dict(mu=0.05, omega=0.02, alpha=0.08, beta=0.90)
+
+
+def _garch_returns(n: int = 800, seed: int = 3) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    return np.concatenate(
+        [rng.normal(0.0, 0.6, size=n // 2), rng.normal(0.0, 2.2, size=n - n // 2)]
+    )
+
+
+def test_the_garch_recursion_does_not_move_when_later_returns_arrive() -> None:
+    returns = _garch_returns()
+    short = garch11_conditional_volatility(returns[:500], **GARCH_PARAMS)
+    full = garch11_conditional_volatility(returns, **GARCH_PARAMS)
+    np.testing.assert_array_equal(short, full[:500])
+
+
+def test_the_garch_recursion_reproduces_its_own_definition() -> None:
+    returns = _garch_returns(n=60)
+    got = garch11_conditional_volatility(returns, **GARCH_PARAMS)
+    mu, omega = GARCH_PARAMS["mu"], GARCH_PARAMS["omega"]
+    alpha, beta = GARCH_PARAMS["alpha"], GARCH_PARAMS["beta"]
+    resid = returns - mu
+    want = np.empty(len(returns))
+    want[0] = omega / (1.0 - alpha - beta)
+    for t in range(1, len(returns)):
+        want[t] = omega + alpha * resid[t - 1] ** 2 + beta * want[t - 1]
+    np.testing.assert_allclose(got, np.sqrt(want), rtol=1e-12)
+
+
+def test_the_garch_seed_survives_a_non_stationary_fit() -> None:
+    # alpha + beta >= 1 has no long-run variance, so the seed is clamped rather than infinite.
+    out = garch11_conditional_volatility(
+        _garch_returns(n=50), mu=0.0, omega=0.02, alpha=0.3, beta=0.75
+    )
+    assert np.isfinite(out).all()
+
+
+def test_an_empty_return_series_gives_an_empty_recursion() -> None:
+    assert garch11_conditional_volatility(np.empty(0), **GARCH_PARAMS).shape == (0,)
 
 
 # ---------------------------------------------------------------------------

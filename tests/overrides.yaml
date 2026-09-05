@@ -1522,9 +1522,14 @@ case_studies/etfs/04_model_based_features:
   # whole cross-section, the basket never changed, and 12 of 12 backtests recorded
   # num_trades=0. Four notebooks (14, 15, 17, 18) were blocked on that as
   # ml4t/agent-workspace#989. The selection has to have something to reject.
+  #
+  # The estimation schedule is NOT reduced. The fixture carries the full 2006-2025 session
+  # history, so every declared burn-in is payable and every refit boundary falls where it
+  # falls in production - which is the code path worth exercising, since the schedule is what
+  # this stage now is. Only the restart count comes down: it multiplies the regime model's
+  # fits by ten and changes which local optimum is kept, not whether the walk is causal.
   parameters:
-    GARCH_MIN_OBS: 50
-    N_RESTARTS: 1
+    HMM_RESTARTS: 1
   timeout: 900
 case_studies/etfs/05_evaluation:
   # Same reason as 04 above: this stage feeds the same predictions, so reducing it
