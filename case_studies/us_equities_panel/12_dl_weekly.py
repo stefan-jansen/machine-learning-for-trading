@@ -20,9 +20,10 @@ Subsamples daily features/labels to Friday frequency, then compares:
 - LSTM, NLinear (direct regression, lookback=12 weeks)
 - DARTS N-BEATS (1-step-ahead forecasting, lookback=12 weeks)
 
-The key insight: at weekly frequency, fwd_ret_5d becomes a non-overlapping
-1-step-ahead prediction. This removes the error-compounding problem that
-makes multi-step daily forecasting ineffective for cross-sectional ranking.
+Sampling on Fridays makes fwd_ret_5d a 1-step-ahead prediction at that
+frequency, which removes the error compounding that makes multi-step daily
+forecasting ineffective for cross-sectional ranking. It does not make the
+windows non-overlapping; see the note in the loading section.
 """
 
 # %%
@@ -85,9 +86,26 @@ LOG_FILE = Path("/tmp/dl_weekly_experiment.log")
 # %% [markdown]
 # ## Load and Subsample to Weekly Frequency
 #
-# We subsample the daily feature/label data to Fridays (weekday=4 in pandas).
-# At Friday frequency, `fwd_ret_5d` represents a non-overlapping
-# Friday-to-Friday return, so each observation is informationally independent.
+# The daily features and labels are subsampled to Fridays, so consecutive rows for one
+# stock are a week apart and `fwd_ret_5d` becomes a one-step-ahead target.
+#
+# **The windows are mostly, not entirely, non-overlapping, and the label is why.**
+# `02_labels` resolves `fwd_ret_5d` five *sessions* ahead, not five calendar days. In a full
+# trading week those coincide and a Friday's window closes on the next Friday. In a week
+# carrying a market holiday the fifth session falls past it, so that observation's window
+# overlaps the next one by a session. Measured on the 4,565 sessions from 2000-02-01 to
+# 2018-03-26: of 915 consecutive Friday pairs, 752 (82%) close exactly on the next Friday,
+# 134 (15%) close after it and overlap, and 29 (3%) close before it because the next Friday
+# was itself a holiday and carries no row.
+#
+# What that costs is the mechanical autocorrelation overlapping windows induce, on about one
+# week in seven. It is small enough to leave the one-step formulation intact and too large to
+# describe as absent. Sampling every fifth session instead of every Friday would remove it
+# exactly, at the cost of a sampling grid that drifts across weekdays.
+#
+# Non-overlap would not buy independence in any case. Returns cluster in volatility and share
+# a market factor across the cross-section, so what non-overlap removes is the correlation the
+# construction itself imposes, not the dependence in the data.
 
 # %%
 # Load only weekly rows before materializing joins. The full daily join OOM-kills the kernel.
@@ -348,8 +366,8 @@ with open(LOG_FILE, "a") as f:
 #
 # With `darts_output_chunk_length=1`, `NBEATSModel` predicts a single weekly
 # return, which eliminates the error compounding that degrades multi-step
-# daily forecasting. This is the fair comparison: same horizon, same data,
-# but the forecasting formulation vs direct regression.
+# daily forecasting. Both arms read the same rows over the same horizon and differ only in
+# the formulation, forecasting against direct regression.
 
 # %%
 darts_configs = [
