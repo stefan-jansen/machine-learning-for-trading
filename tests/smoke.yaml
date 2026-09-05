@@ -137,7 +137,7 @@ case_studies/cme_futures/14_portfolio_management:
     # backtests three predictions of one configuration has one. Asking for more here does not
     # produce more, it fails the run.
     PREVIEW_MAX_BASELINE_ROWS: 1
-  writes: [backtest_runs, backtest_metrics, candidate_sets, candidate_set_members]
+  writes: [backtest_runs, backtest_metrics]
   measured_s: 28
 
 case_studies/cme_futures/15_risk_management:
@@ -462,7 +462,7 @@ case_studies/fx_pairs/14_portfolio_management:
     TOP_N_CONFIGS: 1
     TOP_N_PREDICTIONS: 3
     POPULATION_NAME: smoke-allocation
-  writes: [backtest_runs, backtest_metrics, candidate_sets, candidate_set_members]
+  writes: [backtest_runs, backtest_metrics]
   measured_s: 77
 
 case_studies/fx_pairs/15_risk_management:
@@ -572,7 +572,7 @@ case_studies/sp500_options/13_portfolio_management:
     EXECUTION_TIER: preview
     PREVIEW_LABELS: ["ret_to_expiry"]
     PREVIEW_MAX_BASELINE_CONFIGS: 1
-  writes: [backtest_runs, backtest_metrics, candidate_sets, candidate_set_members]
+  writes: [backtest_runs, backtest_metrics]
   measured_s: 20
 
 case_studies/sp500_options/14_risk_management:

@@ -96,7 +96,20 @@ UNDECLARED = {
 # refuses it, because a population is canonical by definition and a reduced run must not publish
 # one. So no smoke configuration can promise a row in these, and one that did would be asking for
 # a failure it cannot avoid.
-UNREACHABLE_TABLES = {"official_populations", "official_population_members"}
+# Tables no preview run can write, so declaring one is a promise the run cannot keep.
+#
+# The population tables are refused outright by research/population.py::_refuse_preview_activation.
+# The candidate tables are a convention rather than a refusal, but a total one: every freeze() call
+# site in every case study sits under an `EXECUTION_TIER == "canonical"` guard, and no preview
+# registry written by any of the eight measured chains holds a candidate_sets row. Three
+# portfolio-management entries promised them anyway, and two of those notebooks never call freeze()
+# at all.
+UNREACHABLE_TABLES = {
+    "official_populations",
+    "official_population_members",
+    "candidate_sets",
+    "candidate_set_members",
+}
 
 
 def test_every_stage_06_notebook_is_declared_or_recorded_as_undeclared() -> None:
