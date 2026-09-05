@@ -43,20 +43,12 @@ UNDECLARED = {
     "case_studies/crypto_perps_funding/15_risk_management",
     "case_studies/crypto_perps_funding/16_costs",
     "case_studies/crypto_perps_funding/19_strategy_analysis",
-    "case_studies/etfs/10a_dl_nlinear",
-    "case_studies/etfs/11a_pca",
-    "case_studies/etfs/11b_ipca",
-    "case_studies/etfs/11c_conditional_autoencoder",
-    "case_studies/etfs/11d_stochastic_discount_factor",
-    "case_studies/etfs/11e_supervised_autoencoder",
     "case_studies/etfs/13_model_analysis",
     "case_studies/etfs/14_backtest",
     "case_studies/etfs/15_portfolio_management",
     "case_studies/etfs/16_risk_management",
     "case_studies/etfs/17_costs",
     "case_studies/etfs/20_strategy_analysis",
-    "case_studies/fx_pairs/11_causal_dml",
-    "case_studies/fx_pairs/19_strategy_analysis",
     "case_studies/nasdaq100_microstructure/06_linear",
     "case_studies/nasdaq100_microstructure/07_gbm",
     "case_studies/nasdaq100_microstructure/08_dl_nlinear",
@@ -159,6 +151,22 @@ def test_every_stage_06_notebook_is_declared_or_recorded_as_undeclared() -> None
 def test_no_entry_names_a_notebook_that_does_not_exist() -> None:
     absent = [key for key in SMOKE if not (REPO_ROOT / f"{key}.py").exists()]
     assert absent == []
+
+
+def test_a_block_names_its_issue_and_what_it_is_blocked_on() -> None:
+    """A blocked entry is a notebook that CAN have a smoke run and does not have a working one.
+
+    That is a different statement from an exemption, and the difference is why both exist: an
+    exemption retires a notebook from the standard, a block keeps it inside the standard and
+    records what has to be fixed. Neither may be a bare flag - an entry that says only
+    "blocked" is indistinguishable from one nobody has got to.
+    """
+    for key, entry in SMOKE.items():
+        if entry.get("blocked_by") is None:
+            continue
+        assert isinstance(entry["blocked_by"], int), f"{key}: blocked_by must be an issue number"
+        assert len(entry.get("blocked_reason", "")) > 30, f"{key}: a block needs a reason"
+        assert not entry.get("exempt"), f"{key}: blocked and exempt say different things"
 
 
 def test_an_exemption_says_what_refuses_the_preview() -> None:
@@ -270,6 +278,8 @@ def test_a_declared_notebook_records_what_it_measured() -> None:
     unmeasured = [
         key
         for key, entry in SMOKE.items()
-        if not entry.get("exempt") and entry.get("measured_s") is None
+        if not entry.get("exempt")
+        and entry.get("blocked_by") is None
+        and entry.get("measured_s") is None
     ]
     assert unmeasured == []

@@ -31,6 +31,11 @@
 #
 # `exempt` marks a notebook that cannot be run under the preview tier at all, with the reason. An
 # exemption names the code that refuses, so it can be checked rather than believed.
+#
+# `blocked_by` marks something different, and the distinction is the point: a notebook that CAN
+# meaningfully have a smoke run and does not have a working one today. Its configuration is
+# declared and its defect has an issue. Filing it as exempt would retire the only signal saying
+# so, and leaving it out of the file entirely would make the count look better than it is.
 
 case_studies/cme_futures/06_linear:
   parameters:
@@ -492,3 +497,93 @@ case_studies/fx_pairs/18_holdout_backtest:
   exempt_reason: >-
     Reads the holdout prediction set 17_holdout_predictions produces, which cannot exist in a
     preview workspace for the reason recorded on that entry.
+
+# --- declared, and blocked on a defect in the notebook ----------------------------------------
+
+case_studies/etfs/10a_dl_nlinear:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_21d"]
+    POPULATION_NAME: smoke-nlinear
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, max_train_sequences: 2000}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  blocked_by: 1044
+  blocked_reason: >-
+    Raises KeyError on 'Ridge (Ch11)', a comparison member named as a typed literal that the narrowed population does not contain.
+
+case_studies/etfs/11a_pca:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_21d"]
+    POPULATION_NAME: smoke-pca
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_factors: 2}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  blocked_by: 1044
+  blocked_reason: >-
+    Raises ColumnNotFoundError on "fold_pair" while rendering, not while fitting.
+
+case_studies/etfs/11b_ipca:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_21d"]
+    POPULATION_NAME: smoke-ipca
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_factors: 2, max_iter: 200}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  blocked_by: 1044
+  blocked_reason: >-
+    Formats a None metric into a string without a check: TypeError under a narrowed population.
+
+case_studies/etfs/11c_conditional_autoencoder:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_21d"]
+    POPULATION_NAME: smoke-cae
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_factors: 2, n_epochs: 2}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  blocked_by: 1044
+  blocked_reason: >-
+    Same None-metric formatting as 11b_ipca.
+
+case_studies/etfs/11d_stochastic_discount_factor:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_21d"]
+    POPULATION_NAME: smoke-sdf
+    PREVIEW_REDUCTIONS:
+      {folds: [0], max_symbols: 5, n_epochs_cond: 1, n_epochs_moment: 1, n_epochs_unc: 1}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  blocked_by: 1044
+  blocked_reason: >-
+    Same None-metric formatting as 11b_ipca.
+
+case_studies/etfs/11e_supervised_autoencoder:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_21d"]
+    POPULATION_NAME: smoke-sae
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_epochs: 2}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  blocked_by: 1044
+  blocked_reason: >-
+    Same None-metric formatting as 11b_ipca.
+
+case_studies/fx_pairs/11_causal_dml:
+  parameters:
+    EXECUTION_TIER: preview
+    PRIMARY_LABEL: fwd_ret_1d
+    MAX_SYMBOLS: 12
+    CV_FOLDS: 2
+    MAX_SAMPLES: 20000
+    N_PLACEBO: 12
+  writes: [causal_runs]
+  blocked_by: 1045
+  blocked_reason: >-
+    SUPERSEDES_CAUSAL defaults to a value naming labels a single-label run does not fit, and the notebook correctly refuses.
+
+case_studies/fx_pairs/19_strategy_analysis:
+  parameters:
+    EXECUTION_TIER: preview
+  writes: []
+  blocked_by: 1045
+  blocked_reason: >-
+    Needs a superseding declaration for its candidate set, and has no way to supply one.
