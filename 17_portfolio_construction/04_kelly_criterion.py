@@ -158,7 +158,7 @@ def compute_kelly_fraction(win_prob: float, odds: float = 1.0) -> float:
 
 
 # %% [markdown]
-# #### Growth Function for a Chosen Bet Fraction
+# The expected growth rate at one bet size: what the wager compounds at per bet in the long run.
 
 
 # %%
@@ -254,7 +254,8 @@ def simulate_wealth_paths(
 
 
 # %% [markdown]
-# #### Percentile-Band Plot Helper
+# Each simulation is a thousand independent wealth paths, so what is plotted is their spread:
+# the median path and the bands containing the middle half and the middle 90% of outcomes.
 
 
 # %%
@@ -473,7 +474,8 @@ def kelly_fraction_continuous(
 
 
 # %% [markdown]
-# #### Empirical Growth Objective
+# The growth rate to maximize, evaluated on the realized return series rather than on an
+# assumed distribution - so no normality approximation enters this version.
 
 
 # %%
@@ -487,7 +489,8 @@ def empirical_growth_rate(returns: np.ndarray, fraction: float, risk_free: float
 
 
 # %% [markdown]
-# #### Support-Constrained Numerical Kelly Fraction
+# A fraction large enough to make wealth negative on some historical return has no logarithm,
+# so the search is bounded by the worst return in the sample.
 
 
 # %%
@@ -635,8 +638,10 @@ print(f"  Max:  {np.max(kelly_values):.1%}")
 # where $\Sigma^{-1}$ is the **precision matrix** (inverse covariance) and $\boldsymbol{\mu}$
 # is the vector of expected excess returns.
 #
-# This has the same direction as the **maximum Sharpe ratio portfolio** under aligned assumptions.
-# Tangency optimization normalizes the risky portfolio; Kelly also determines its leverage.
+# The direction of this vector is the same as the maximum-Sharpe portfolio's under aligned
+# assumptions, and the difference is what happens to its length. A mean-variance solution rescales
+# its weights to sum to one, which throws the length away and leaves only the mix. Kelly keeps it:
+# the magnitude of the vector *is* the leverage, and nothing in the formula bounds it.
 
 # %% [markdown]
 # ### Load Multi-Asset Data
@@ -780,10 +785,15 @@ equal_weights = np.full(len(assets), 1 / len(assets))
 portfolio_returns["Equal Weight"] = test_matrix @ equal_weights
 portfolio_gross["Equal Weight"] = float(np.abs(equal_weights).sum())
 
-# 1/gross is the threshold only if every position moves against the book by the same
-# percentage on the same day - every long down that much and every short up that much.
-# It is not a market move: net exposure is far smaller than gross, so a uniform decline
-# of this size does not empty the account. It is the worst case the leverage admits.
+# %% [markdown]
+# **Gross exposure** is the sum of the absolute position sizes: a book 300% long and 200% short
+# has five times the account at risk and is flat on net. Its reciprocal is the move that would end
+# the account, and that is a worst case rather than a market move - it needs every long to fall
+# and every short to rise by that percentage on the same day. Net exposure is far smaller than
+# gross, so a uniform market decline of that size does not do it. What the number establishes is
+# that at high leverage the worst case sits inside a single ordinary session.
+
+# %%
 print("Gross exposure, and the simultaneous adverse move on every position that would")
 print("wipe the account out, with no cap applied:")
 for name, gross in portfolio_gross.items():
@@ -791,7 +801,7 @@ for name, gross in portfolio_gross.items():
     print(f"  {name:<14} {gross:6.2f}x gross    wiped out by {ruin_move:.2%} against every leg")
 
 # %% [markdown]
-# ### Performance Comparison with ml4t-diagnostic
+# ### What each Kelly multiple did on the test window
 
 # %%
 dates = test_returns["timestamp"]
@@ -887,24 +897,28 @@ fig.update_layout(
 fig.show()
 
 # %% [markdown]
-# ## Part 4: Practical Considerations
+# ## Part 4: What the derivation assumed
 #
-# ### When Kelly Works Well
-# - **Known edge**: The probability distribution is well-estimated
-# - **Many bets**: Long time horizon allows law of large numbers to work
-# - **Reinvestment**: Profits are continuously reinvested
+# Every step from the coin toss to the multi-asset solution is exact, and each one assumed
+# something the market does not supply. Naming them in order separates the parts of the result
+# that survive contact with data from the parts that do not.
 #
-# ### Challenges in Finance
-# - **Estimation error**: Returns are not stationary, $\mu$ and $\sigma$ change
-# - **Fat tails**: Real returns have more extreme events than normal
-# - **Correlation changes**: Covariance matrix shifts in crises
-# - **Leverage costs**: Borrowing is not free
+# **The odds are known.** In the binary case $p$ and $b$ are given. In the market case both are
+# estimated, the solution divides by the estimated variance and scales with the estimated mean,
+# and the rolling section above shows how far that estimate moves on one instrument.
 #
-# ### Best Practices
-# 1. **Use fractional Kelly** (half or quarter) to account for uncertainty
-# 2. **Combine with risk constraints** (max position size, VaR limits)
-# 3. **Regularize covariance estimates** (Ledoit-Wolf shrinkage)
-# 4. **Monitor and adjust** as market conditions change
+# **The bet repeats many times, and the stake is a fraction of current wealth.** Kelly is a
+# long-run growth argument: it wins in the limit and says nothing about the horizon a particular
+# investor has. Betting a fraction of *current* wealth is what makes ruin impossible in the coin
+# toss, because a fraction of a positive number stays positive. That property is lost the moment
+# leverage exceeds one, since a position larger than the account can lose more than the account.
+#
+# **Returns are close enough to normal for the second-order expansion to hold.** The
+# mean-over-variance form drops every term past the square. Real returns have fatter tails than
+# normal, and a leveraged position is killed by exactly the observations that expansion discards.
+#
+# **Borrowing is free and unlimited.** There is no funding rate in the objective, no cap on gross
+# exposure and no liquidation rule. Part 3 computes what that assumption is worth in this sample.
 
 # %%
 # Example: Shrinkage estimator for more stable Kelly allocation
@@ -948,7 +962,7 @@ print(
     f"{full_kelly_row['min_wealth_multiple']:.3g}x the starting capital"
 )
 
-# %% [markdown]
+# %% [markdown] tags=["results"]
 # The last line is the one that decides how to read the growth chart above it. At its worst point
 # the full-Kelly path is down to about one ten-millionth of the capital it started with, while
 # carrying more than forty times that capital in gross positions - which is the same thing the
