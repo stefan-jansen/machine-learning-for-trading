@@ -215,7 +215,9 @@ def _allowed_reduction_fields(key: str) -> set[str] | None:
         return set(causal._DML_PREVIEW_FIELDS)
     if "tabular_dl" in stem or "tabm" in stem:
         return set(tabular_dl._TABM_PREVIEW_FIELDS)
-    if "_dl_" in stem or stem.endswith(("_lstm", "_tcn", "_nlinear", "_patchtst", "_tsmixer")):
+    if "_dl_" in stem or stem.endswith(
+        ("_lstm", "_tcn", "_nlinear", "_patchtst", "_tsmixer", "_deep_learning")
+    ):
         return set(deep_learning._SEQUENCE_PREVIEW_FIELDS)
     if stem.endswith("_gbm"):
         return set(gbm._GBM_PREVIEW_FIELDS)
@@ -240,8 +242,11 @@ def test_a_reduction_uses_the_vocabulary_its_family_accepts(key: str) -> None:
     and latent ones do not.
     """
     allowed = _allowed_reduction_fields(key)
-    if allowed is None:
-        pytest.skip(f"no family mapping for {key}")
+    # Not a skip. An entry that declares reductions and matches no family is the one case this
+    # check exists for and cannot see, and it stays invisible because a skip reads as a pass:
+    # sp500_options/09_deep_learning sat in that hole, named for its family in a way none of the
+    # patterns matched.
+    assert allowed is not None, f"{key} declares reductions but maps to no family vocabulary"
     declared = set(SMOKE[key]["parameters"]["PREVIEW_REDUCTIONS"])
     assert declared <= allowed, f"{key}: {sorted(declared - allowed)} not in {sorted(allowed)}"
 
