@@ -373,7 +373,7 @@ def ci_test_pvalue(data: np.ndarray, i: int, j: int, conditioning_set: list) -> 
 
     z = 0.5 * np.log((1 + partial_corr) / (1 - partial_corr))
     z_stat = abs(z) / (1.0 / np.sqrt(n - k - 3))
-    return 2 * (1 - stats.norm.cdf(z_stat))
+    return 2 * stats.norm.sf(z_stat)
 
 
 # %% [markdown]

@@ -548,7 +548,7 @@ def location_shift_features(series: np.ndarray, boundary: int) -> dict:
     p_values = [features.get(f"local_t_abs_{w}", 0.5) for w in [50, 100]]
     p_values = [max(p, 1e-300) for p in p_values]  # Avoid log(0)
     fisher_stat = -2 * sum(np.log(p) for p in p_values)
-    features["fisher_location"] = 1 - stats.chi2.cdf(fisher_stat, df=2 * len(p_values))
+    features["fisher_location"] = stats.chi2.sf(fisher_stat, df=2 * len(p_values))
 
     # Mean difference (standardized)
     pooled_std = np.sqrt((pre.var() + post.var()) / 2)
@@ -582,7 +582,7 @@ def scale_shift_features(series: np.ndarray, boundary: int) -> dict:
     f_stat = max(var_ratio, 1.0 / max(var_ratio, 1e-10))
     df1 = len(post) - 1
     df2 = len(pre) - 1
-    f_pval = 2 * (1 - stats.f.cdf(f_stat, df1, df2))
+    f_pval = 2 * stats.f.sf(f_stat, df1, df2)
     features["f_test_pval"] = f_pval
     features["neg_log10_f_pval"] = -np.log10(max(f_pval, 1e-300))
 

@@ -302,7 +302,7 @@ print(f"  Naive t:     {naive_t:.2f}")
 print(f"  HAC t:       {hac_result['t_stat']:.2f}")
 
 print("\np-Values:")
-print(f"  Naive p:     {2 * (1 - stats.t.cdf(abs(naive_t), len(ic_series) - 1)):.4f}")
+print(f"  Naive p:     {2 * stats.t.sf(abs(naive_t), len(ic_series) - 1):.4f}")
 print(f"  HAC p:       {hac_result['p_value']:.4f}")
 
 # Significance conclusion
@@ -700,7 +700,7 @@ inference_report = {
         "naive": {
             "se": round(float(naive_se), 4),
             "t_stat": round(float(naive_t), 2),
-            "p_value": round(float(2 * (1 - stats.t.cdf(abs(naive_t), len(ic_series) - 1))), 4),
+            "p_value": round(float(2 * stats.t.sf(abs(naive_t), len(ic_series) - 1)), 4),
         },
         "hac": {
             "se": round(float(hac_result["hac_se"]), 4),
