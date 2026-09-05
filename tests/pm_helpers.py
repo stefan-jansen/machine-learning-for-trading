@@ -1157,6 +1157,33 @@ def injected_parameters(
     return resolved or None
 
 
+def _progress_log_path(py_path: Path) -> Path:
+    """Where this run writes its cell-level progress.
+
+    Keyed on the notebook's path relative to the repo root, plus the pid. The stem
+    alone is not unique: `04_model_based_features`, `12_backtest` and `05_evaluation`
+    are shared by all nine case studies and by chapter notebooks, and the file is
+    opened with mode "w" - so one pane truncated another's. Observed on 2026-08-05
+    while `cs-sp500_options` was executing its own `04_model_based_features`: the log
+    held `params={'GARCH_MIN_OBS': 50, 'MAX_SYMBOLS': 5, ...}`, which is the etfs
+    entry from `tests/overrides.yaml`, written by a different pane.
+
+    That matters because `work/2026-08-05-ci-green/PROTOCOL.md` names this file as the
+    way to see which cell a hanging notebook is on, "which is faster than waiting for
+    the traceback". Reporting another job's notebook is worse than reporting nothing:
+    it is wrong and plausible at the same time.
+
+    The pid separates two panes running the same notebook, which the path alone does
+    not. `ML4T_OUTPUT_DIR` would separate them too, but it is not always set and the
+    pid always is.
+    """
+    try:
+        slug = py_path.resolve().relative_to(REPO_ROOT).with_suffix("").as_posix()
+    except ValueError:
+        slug = py_path.stem
+    return Path(f"/tmp/ml4t-pm-{slug.replace('/', '_')}.{os.getpid()}.log")
+
+
 def run_notebook(
     py_path: Path,
     parameters: dict | None = None,
@@ -1290,10 +1317,10 @@ def run_notebook(
     for key in remove_vars:
         saved_env[key] = os.environ.pop(key, None)
 
-    # Cell-level progress — always log to /tmp/ml4t-pm-{name}.log for visibility.
-    # Since request_save_on_cell_execute=True, the executed notebook is updated
-    # after each cell. Monitor it with: watch -n5 'python -c "import json; ..."'
-    progress_log = Path(f"/tmp/ml4t-pm-{nb_name}.log")
+    # Cell-level progress — always logged for visibility. Since
+    # request_save_on_cell_execute=True, the executed notebook is updated after each
+    # cell. Monitor it with: watch -n5 'python -c "import json; ..."'
+    progress_log = _progress_log_path(py_path)
     n_cells = 0
     try:
         with open(progress_log, "w") as pf:
