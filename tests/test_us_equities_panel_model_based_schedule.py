@@ -261,6 +261,9 @@ def test_every_payload_consumer_takes_what_the_producer_builds():
 
     That is the same shape as the defect it was fixing: a consumer left behind by its
     producer. Checked statically because the loop needs the panel to run at all.
+
+    Both kinds of consumer count: the comprehension that reads `payloads` back, and any
+    call site that writes its own tuple - the market-level walk does, outside the pool.
     """
     tree = ast.parse(NOTEBOOK.read_text(encoding="utf-8"))
 
@@ -279,16 +282,31 @@ def test_every_payload_consumer_takes_what_the_producer_builds():
     arity = built.pop()
 
     consumed = {
-        (node.iter.lineno, len(node.target.elts) if isinstance(node.target, ast.Tuple) else 1)
+        (node.iter.lineno, len(node.target.elts))
         for node in ast.walk(tree)
         if isinstance(node, ast.comprehension)
         and isinstance(node.iter, ast.Name)
         and node.iter.id == "payloads"
         and isinstance(node.target, ast.Tuple)
     }
-    wrong = sorted(line for line, unpacked in consumed if unpacked != arity)
+    # And every payload built at a call site rather than by the loop. The market-level
+    # walk at the bottom of Section 4 runs outside the ProcessPoolExecutor and writes its
+    # own tuple, so a change that touches only the loop leaves it raising "not enough
+    # values to unpack" - found by agents-72, whose second fixture run failed there after
+    # the first got past the regime walk.
+    consumed |= {
+        (node.lineno, len(arg.elts))
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "garch_walk"
+        for arg in node.args
+        if isinstance(arg, ast.Tuple)
+    }
+    wrong = sorted(line for line, size in consumed if size != arity)
 
     assert not wrong, (
-        f"a payload is unpacked with the wrong arity at line(s) {wrong}; the producer "
-        "builds a different number of elements, so this raises before any fit runs"
+        f"a payload is built or unpacked with the wrong arity at line(s) {wrong}; it "
+        f"disagrees with the {arity}-element tuple the loop builds, so this raises "
+        "before any fit runs"
     )
