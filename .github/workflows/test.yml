@@ -1337,6 +1337,7 @@ jobs:
       # numerical defect in a notebook. That distinction cost four rounds of
       # investigation the last time it was missing.
       - name: The image's installed distributions match uv.lock
+        if: steps.reach.outputs.have_key
         run: python .github/scripts/check_env_matches_lock.py
       - name: Seed case study intermediates
         if: steps.reach.outputs.have_key
@@ -1459,6 +1460,7 @@ jobs:
       # numerical defect in a notebook. That distinction cost four rounds of
       # investigation the last time it was missing.
       - name: The image's installed distributions match uv.lock
+        if: steps.reach.outputs.have_key
         run: python .github/scripts/check_env_matches_lock.py
       - name: Seed case study intermediates
         if: steps.reach.outputs.have_key
@@ -1653,6 +1655,7 @@ jobs:
       # Same reason as the two notebook jobs above: this runs in the published image,
       # which cannot carry a candidate built from this commit.
       - name: The image's installed distributions match uv.lock
+        if: steps.reach.outputs.have_key
         run: python .github/scripts/check_env_matches_lock.py
       - name: Run Ch23 Knowledge Graph notebooks (pipeline order)
         if: steps.reach.outputs.have_key
