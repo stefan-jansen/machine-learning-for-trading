@@ -61,46 +61,100 @@ def _synthetic_splits() -> list[dict]:
     ]
 
 
-def test_validation_alignment_excludes_holdout_and_wrong_fold_estimates() -> None:
-    """The old keep-last collapse picks holdout state; canonical mapping must not."""
+def test_validation_alignment_keeps_only_dates_inside_a_validation_window() -> None:
+    """One value per date and symbol, and only the dates some fold scores.
+
+    `04_model_based_features` fits on a refit schedule, so there is no per-fold estimate to
+    pick between and no holdout pass to exclude - what is left to get wrong is letting a
+    training date or a holdout date into the panel.
+    """
     temporal = pl.DataFrame(
         {
             "timestamp": [
-                date(2019, 6, 3),
-                date(2019, 6, 3),
-                date(2019, 6, 3),
-                date(2020, 6, 3),
-                date(2020, 6, 3),
-                date(2020, 6, 3),
+                date(2018, 6, 4),  # inside fold 1's training window, scored by nobody
+                date(2019, 6, 3),  # fold 1's validation window
+                date(2020, 6, 3),  # fold 0's validation window
+                date(2021, 6, 3),  # the holdout
             ],
-            "symbol": ["AAA"] * 6,
-            "fold": [0, 1, -1, 0, 1, -1],
-            "temporal_value": [10.0, 11.0, 99.0, 20.0, 21.0, 99.0],
+            "symbol": ["AAA"] * 4,
+            "temporal_value": [1.0, 11.0, 20.0, 99.0],
         }
     )
-
-    old_keep_last = temporal.unique(subset=JOIN_COLS, keep="last", maintain_order=True)
-    assert old_keep_last["fold"].to_list() == [-1, -1]
 
     aligned = _load_alignment_function()["build_validation_temporal_panel"](
         temporal, _synthetic_splits()
     ).sort("timestamp")
-    assert aligned["validation_fold"].to_list() == [1, 0]
+
+    assert aligned["timestamp"].to_list() == [date(2019, 6, 3), date(2020, 6, 3)]
     assert aligned["temporal_value"].to_list() == [11.0, 20.0]
     assert aligned.group_by(JOIN_COLS).len().filter(pl.col("len") > 1).is_empty()
 
 
-def test_validation_alignment_fails_closed_on_duplicate_fold_keys() -> None:
+def test_a_date_two_folds_both_score_is_kept_once() -> None:
+    """Overlapping validation windows contribute one row, not one row per fold.
+
+    The case studies' own folds do not currently overlap, so the overlap is constructed:
+    under the per-fold artifact it produced two rows for one date and symbol, which is why
+    this function used to check for multiply assigned keys. Selecting by window makes it a
+    union, and the check is no longer needed - this pins that it is genuinely not needed
+    rather than merely absent.
+    """
+    overlapping = [
+        {
+            "fold": 0,
+            "train_start": date(2018, 1, 5),
+            "train_end": date(2019, 11, 12),
+            "val_start": date(2020, 1, 6),
+            "val_end": date(2020, 12, 31),
+        },
+        {
+            "fold": 1,
+            "train_start": date(2017, 2, 2),
+            "train_end": date(2018, 11, 12),
+            "val_start": date(2019, 1, 7),
+            "val_end": date(2020, 6, 30),
+        },
+    ]
+    temporal = pl.DataFrame(
+        {
+            "timestamp": [date(2019, 6, 3), date(2020, 3, 16)],
+            "symbol": ["AAA", "AAA"],
+            "temporal_value": [7.0, 8.0],
+        }
+    )
+
+    aligned = _load_alignment_function()["build_validation_temporal_panel"](temporal, overlapping)
+
+    # 2020-03-16 falls inside both windows and appears once.
+    assert aligned.height == 2
+    assert aligned.group_by(JOIN_COLS).len().filter(pl.col("len") > 1).is_empty()
+
+
+def test_validation_alignment_fails_closed_on_a_fold_column() -> None:
+    """A fold column means the artifact came from the design this change replaced."""
     temporal = pl.DataFrame(
         {
             "timestamp": [date(2019, 6, 3), date(2019, 6, 3), date(2020, 6, 3)],
             "symbol": ["AAA", "AAA", "AAA"],
-            "fold": [0, 0, 1],
+            "fold": [0, 1, 1],
             "temporal_value": [10.0, 10.5, 21.0],
         }
     )
 
-    with pytest.raises(ValueError, match="duplicate fold-specific keys"):
+    with pytest.raises(ValueError, match="fold"):
+        _load_alignment_function()["build_validation_temporal_panel"](temporal, _synthetic_splits())
+
+
+def test_validation_alignment_fails_closed_on_duplicate_date_symbol_keys() -> None:
+    temporal = pl.DataFrame(
+        {
+            "timestamp": [date(2019, 6, 3), date(2019, 6, 3), date(2020, 6, 3)],
+            "symbol": ["AAA", "AAA", "AAA"],
+            "temporal_value": [10.0, 10.5, 21.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="duplicate date-symbol keys"):
         _load_alignment_function()["build_validation_temporal_panel"](temporal, _synthetic_splits())
 
 
@@ -160,29 +214,42 @@ def test_real_artifact_alignment_is_safe_after_regeneration() -> None:
         buffer_unit=str(setup["labels"].get("buffer_unit", "sessions")),
     )
 
-    validation_folds = {int(split["fold"]) for split in folds}
-    holdout_fold = len(folds)
-    assert set(temporal["fold"].unique().to_list()) == validation_folds | {holdout_fold}
+    align = _load_alignment_function()["build_validation_temporal_panel"]
 
-    try:
-        aligned = _load_alignment_function()["build_validation_temporal_panel"](temporal, folds)
-    except ValueError as error:
-        # The frozen artifact predates the canonical fold numbering. Rejecting
-        # it is safer than silently remapping estimator identity.
-        assert "no validation rows for fold" in str(error)
+    if "fold" in temporal.columns:
+        # The artifact on disk still comes from the per-fold design; `04` has been converted
+        # to a refit schedule but not yet re-executed against the production store. Rejecting
+        # it is the contract, so that is what is asserted - not skipped, because a silent skip
+        # here is how a stale artifact reaches a model.
+        with pytest.raises(ValueError, match="fold"):
+            align(temporal, folds)
         return
 
-    assert aligned.filter(pl.col("validation_fold") == holdout_fold).is_empty()
+    aligned = align(temporal, folds)
+
     assert aligned.group_by(JOIN_COLS).len().filter(pl.col("len") > 1).is_empty()
+    earliest = min(split["val_start"].date() for split in folds)
+    latest = max(split["val_end"].date() for split in folds)
+    assert aligned["timestamp"].min() >= earliest
+    assert aligned["timestamp"].max() <= latest
     for split in folds:
-        fold_rows = aligned.filter(pl.col("validation_fold") == split["fold"])
-        assert not fold_rows.is_empty()
-        assert fold_rows["timestamp"].min() >= split["val_start"].date()
-        assert fold_rows["timestamp"].max() <= split["val_end"].date()
-        assert split["train_end"].date() < fold_rows["timestamp"].min()
+        window = aligned.filter(
+            pl.col("timestamp").is_between(
+                split["val_start"].date(), split["val_end"].date(), closed="both"
+            )
+        )
+        assert not window.is_empty()
+        assert split["train_end"].date() < window["timestamp"].min()
 
 
-def test_notebook_does_not_collapse_fold_identity_with_keep_last() -> None:
+def test_notebook_reads_the_temporal_panel_through_the_alignment_function() -> None:
+    """The panel is selected by validation window, never collapsed by dropping a key.
+
+    `drop("fold").unique` was the collapse this guarded against when the artifact carried a
+    fold; the artifact has none now, so the equivalent mistake is `unique` on the join keys
+    with no window filter at all, which would silently admit training and holdout dates.
+    """
     source = NOTEBOOK.read_text()
     assert 'drop("fold").unique' not in source
     assert "build_validation_temporal_panel(temporal, cv_folds)" in source
+    assert f"temporal.unique(subset={JOIN_COLS}" not in source

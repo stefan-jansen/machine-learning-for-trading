@@ -42,6 +42,50 @@ def _evaluation_notebooks() -> list[Path]:
     return found
 
 
+def _writes_a_fold_free_artifact(case_dir: Path) -> bool:
+    """True when this case study's stage 04 keys ``model_based.parquet`` without a fold.
+
+    A case study fitted on a refit schedule rather than per fold has no fold to key on: the
+    value at a session comes from parameters estimated before it whichever fold reads the
+    row, so the artifact carries no `fold` column and the clause below has nothing to
+    protect. Read from the producer's write keys, because that is what decides the shape -
+    not from the artifact on disk, which lags a conversion until the notebook is re-executed.
+
+    The call is located by its path argument rather than by searching the text for a keys
+    list: a stage-04 notebook writes more than one artifact, and any other one's keys would
+    answer a question about `model_based.parquet` that it was not asked.
+    """
+    producer = case_dir / "04_model_based_features.py"
+    if not producer.exists():
+        return False
+    source = producer.read_text()
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        arguments = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+        if "keys" not in arguments:
+            continue
+        rendered = " ".join(
+            ast.get_source_segment(source, arg) or "" for arg in [*node.args, *arguments.values()]
+        )
+        if "model_based.parquet" not in rendered:
+            continue
+        keys = ast.get_source_segment(source, arguments["keys"]) or ""
+        fold_column = (
+            ast.get_source_segment(source, arguments["fold_column"])
+            if "fold_column" in arguments
+            else ""
+        ) or ""
+        # `keys=KEY_COLS` is as common as a literal list, and a substring test on the name
+        # sees no "fold" in it however the constant is defined - which would report a
+        # fold-keyed artifact as fold-free and silently retire the clause below for that
+        # case study. `_name_definitions` supplies the constant's own source.
+        expanded = _expands_one_level(f"{keys} {fold_column}", _name_definitions(source, tree))
+        return "fold" not in expanded
+    return False
+
+
 def _model_based_artifacts() -> list[Path]:
     return sorted(CASE_STUDIES.glob("*/features/model_based.parquet"))
 
@@ -154,6 +198,13 @@ def test_evaluation_excludes_fold_from_feature_columns(notebook: Path) -> None:
     source = notebook.read_text()
     if "model_based.parquet" not in source:
         pytest.skip(f"{notebook.parent.name}: does not read model_based.parquet")
+
+    if _writes_a_fold_free_artifact(notebook.parent):
+        pytest.skip(
+            f"{notebook.parent.name}: stage 04 writes no fold column, so no feature list can "
+            "pick one up. Whether the notebook rejects an artifact still carrying one is a "
+            "separate question, checked by the case study that made the conversion."
+        )
 
     tree = ast.parse(source)
     definitions = _name_definitions(source, tree)
