@@ -1631,6 +1631,7 @@ print(
 # - The Fundamental Law arithmetic here is an upper bound on an upper bound, because
 #   nothing in it estimates how dependent the bets are.
 #
-# **Next**: [`04_model_based_features`](04_model_based_features.ipynb) fits features that have
-# to be learned per fold. It writes them to a matrix of their own rather than into this one,
-# and the two are joined when a model stage loads the dataset.
+# **Next**: [`04_model_based_features`](04_model_based_features.ipynb) fits features whose values
+# depend on parameters estimated from data, re-estimated on a schedule rather than computed in
+# closed form. It writes them to a matrix of their own rather than into this one, and the two are
+# joined when a model stage loads the dataset.
