@@ -10,7 +10,7 @@ import subprocess
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -1239,6 +1239,23 @@ def _fail_batch_candidate(candidate: _BatchCandidate, error: Exception) -> None:
         candidate.attempt = None
 
 
+def _progress(message: str) -> None:
+    """One timestamped line per unit of work, flushed.
+
+    Deliberately not a tqdm bar. This runner's output is read two ways and neither favours
+    one: papermill captures it into a notebook cell, and `nb-run.sh` tees it to a log that
+    someone greps hours later to ask whether the run is moving. A bar rewrites one line with
+    carriage returns, which a log file records as an unreadable single line and a captured
+    cell renders as the final frame only - so at 07:30 it says exactly as little as no output
+    at all.
+
+    Discrete lines carry the thing a bar cannot: when each unit finished. That is what makes
+    "no new line for four hours" a legible statement, which is the question this exists to
+    answer.
+    """
+    print(f"[{datetime.now(UTC).strftime('%H:%M:%S')}] {message}", flush=True)
+
+
 def _run_batch_candidate_fold(candidate: _BatchCandidate, fold: dict[str, Any]) -> None:
     if candidate.result is not None or candidate.error is not None:
         return
@@ -1262,6 +1279,11 @@ def _run_batch_candidate_fold(candidate: _BatchCandidate, fold: dict[str, Any]) 
         return
     candidate.frames.append(frame)
     candidate.fit_elapsed_s += elapsed
+    _progress(
+        f"  fold {fold_id} {'reused' if reused else 'fitted'} for "
+        f"{candidate.request.get('config_name', '?')} "
+        f"in {elapsed:6.1f}s (config total {candidate.fit_elapsed_s:7.1f}s)"
+    )
     (candidate.reused_folds if reused else candidate.fitted_folds).append(fold_id)
 
 
@@ -1370,6 +1392,10 @@ def _run_batch_group(
         candidate.result is None and candidate.error is None for candidate in candidates
     )
     if first_pass_needed:
+        _progress(
+            f"linear group {compatibility_key[:12]}: {len(candidates)} configurations x "
+            f"{len(fold_ids)} folds, fold-major"
+        )
         for split in base["splits"]:
             fold_id = int(split["fold"])
             fixed_pending = [
@@ -1388,6 +1414,11 @@ def _run_batch_group(
                     _fail_batch_candidate(candidate, exc)
                 break
             preparation_elapsed_s += time.perf_counter() - started
+            _progress(
+                f"fold {fold_id} of {len(fold_ids)} prepared in "
+                f"{time.perf_counter() - started:.1f}s; {len(fixed_pending)} configurations "
+                f"to fit on it"
+            )
             for candidate in dependent:
                 if candidate.error is not None:
                     continue

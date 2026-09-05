@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import polars as pl
 import pytest
 from hmmlearn.hmm import GaussianHMM
@@ -421,7 +422,8 @@ def test_an_all_null_feature_is_still_refused_without_a_fold_column(tmp_path: Pa
 # there is a recursion here at all.
 # ---------------------------------------------------------------------------
 
-GARCH_PARAMS = dict(mu=0.05, omega=0.02, alpha=0.08, beta=0.90)
+GARCH_PARAMS = dict(mu=0.05, omega=0.02, alpha=0.08, beta=0.90, backcast=1.5)
+GJR_PARAMS = dict(mu=0.05, omega=0.02, alpha=0.04, beta=0.90, gamma=0.07, backcast=1.5)
 
 
 def _garch_returns(n: int = 800, seed: int = 3) -> np.ndarray:
@@ -438,6 +440,153 @@ def test_the_garch_recursion_does_not_move_when_later_returns_arrive() -> None:
     np.testing.assert_array_equal(short, full[:500])
 
 
+def test_the_gjr_recursion_does_not_move_when_later_returns_arrive() -> None:
+    # Same property with the asymmetry term on, because gamma enters through the sign of the
+    # PREVIOUS residual and a prefix ends one observation earlier.
+    returns = _garch_returns()
+    short = garch11_conditional_volatility(returns[:500], **GJR_PARAMS)
+    full = garch11_conditional_volatility(returns, **GJR_PARAMS)
+    np.testing.assert_array_equal(short, full[:500])
+
+
+def test_arch_moves_earlier_values_when_the_sample_is_extended() -> None:
+    """The negative control: the prefix-stability assertions above are not vacuous.
+
+    A prefix-stability assertion passes trivially against any implementation that happens to
+    process observations in order, so on its own it is evidence about nothing. This runs the
+    identical assertion against `arch`'s own fixed-parameter result object - the thing the
+    helper replaces - and requires it to FAIL.
+
+    The mechanism is one line of `ARCHModel.fix`: it takes `resids = self.resids(
+    self.starting_values())`, the residuals at the ESTIMATED mean of whatever array it was
+    handed, and seeds the backcast from those. Under `mean="Constant"` the estimated mean moves
+    when the sample is extended, so the seed moves with it.
+
+    If `arch` ever stops doing this the test goes red, and the helper's reason for existing has
+    to be re-established rather than assumed.
+    """
+    arch_model = pytest.importorskip("arch").arch_model
+    returns = _garch_returns(n=2000)
+    params = pd.Series(
+        {
+            "mu": GARCH_PARAMS["mu"],
+            "omega": GARCH_PARAMS["omega"],
+            "alpha[1]": GARCH_PARAMS["alpha"],
+            "beta[1]": GARCH_PARAMS["beta"],
+        }
+    )
+
+    def arch_path(sample: np.ndarray) -> np.ndarray:
+        spec = arch_model(sample, mean="Constant", vol="GARCH", p=1, q=1, dist="Normal")
+        return np.asarray(spec.fix(params).conditional_volatility, dtype=float)
+
+    short = arch_path(returns[:1500])
+    full = arch_path(returns)[:1500]
+
+    assert not np.array_equal(short, full), (
+        "arch's fixed-parameter path is prefix-stable under an estimated mean, which "
+        "contradicts the measurement this helper was written for. Re-derive the reason before "
+        "deleting the helper."
+    )
+    # Pin the shape, so a crash or an all-nan path cannot satisfy the assertion above. The
+    # disagreement is a seeding effect: largest at the start, decaying to nothing.
+    relative = np.abs(short - full) / np.maximum(np.abs(full), 1e-12)
+    assert np.isfinite(relative).all()
+    assert relative.max() > 1e-6
+    assert relative[0] > relative[-1]
+
+
+def test_the_arch_seed_is_taken_at_the_estimated_mean_not_the_fixed_one(monkeypatch) -> None:
+    """Name the mechanism, so the control above cannot pass for an unrelated reason.
+
+    Without this, `fix` could start disagreeing with itself for some other cause and the
+    negative control would keep passing while the stated reason had become false. The
+    assertion has to be about what `fix` ITSELF hands to `backcast`, not about what an
+    independent recomputation would hand it, so this captures the array in flight.
+    """
+    arch_model = pytest.importorskip("arch").arch_model
+    volatility = pytest.importorskip("arch.univariate.volatility")
+
+    seen: list[np.ndarray] = []
+    original = volatility.GARCH.backcast
+
+    def spy(self, resids):
+        seen.append(np.asarray(resids, dtype=float).copy())
+        return original(self, resids)
+
+    monkeypatch.setattr(volatility.GARCH, "backcast", spy)
+
+    returns = _garch_returns(n=2000)
+    params = pd.Series(
+        {
+            "mu": GARCH_PARAMS["mu"],
+            "omega": GARCH_PARAMS["omega"],
+            "alpha[1]": GARCH_PARAMS["alpha"],
+            "beta[1]": GARCH_PARAMS["beta"],
+        }
+    )
+    for sample in (returns[:1500], returns):
+        arch_model(sample, mean="Constant", vol="GARCH", p=1, q=1, dist="Normal").fix(params)
+
+    assert len(seen) == 2, "fix should seed the recursion exactly once per call"
+    short_resids, full_resids = seen
+
+    # What fix passed is the sample centred at its OWN estimated mean, not at the mu given.
+    np.testing.assert_allclose(short_resids, returns[:1500] - returns[:1500].mean(), rtol=1e-12)
+    np.testing.assert_allclose(full_resids, returns - returns.mean(), rtol=1e-12)
+    assert not np.allclose(short_resids, returns[:1500] - GARCH_PARAMS["mu"])
+
+    # And that is what makes the seed move: the same residuals taken at the fixed mu would not.
+    garch = volatility.GARCH(p=1, q=1)
+    assert original(garch, short_resids) != original(garch, full_resids[:1500])
+    assert original(garch, returns[:1500] - GARCH_PARAMS["mu"]) == original(
+        garch, returns - GARCH_PARAMS["mu"]
+    )
+
+
+def test_arch_is_prefix_stable_under_a_zero_mean_until_the_bounds_bind() -> None:
+    """The channel is narrower under `mean="Zero"`, and does not close.
+
+    crypto_perps_funding fits a zero-mean model, where nothing is estimated and the seed
+    therefore does not move. What still moves is `variance_bounds`, which clamps every row
+    with two WHOLE-SAMPLE quantities - `np.var(resids) / 1e8` below and
+    `1e7 * (1 + max(resids**2))` above. They sit six orders of magnitude apart, so they change
+    an emitted value only when the variance reaches one - which is what a degenerate fit does.
+    """
+    arch_model = pytest.importorskip("arch").arch_model
+    rng = np.random.default_rng(5)
+    # A quiet series, then a crash 500 observations past the cut. The crash is what moves
+    # np.var(resids), and with it the lower clamp under every row that came before it.
+    quiet = rng.normal(0.0, 0.5, 1500)
+    tail = rng.normal(0.0, 0.5, 500)
+    tail[250] = 400.0
+    returns = np.concatenate([quiet, tail])
+
+    def zero_mean_path(sample: np.ndarray, params: pd.Series) -> np.ndarray:
+        spec = arch_model(sample, mean="Zero", vol="GARCH", p=1, o=1, q=1, dist="Normal")
+        return np.asarray(spec.fix(params).conditional_volatility, dtype=float)
+
+    healthy = pd.Series({"omega": 0.02, "alpha[1]": 0.05, "gamma[1]": 0.08, "beta[1]": 0.88})
+    np.testing.assert_array_equal(
+        zero_mean_path(returns[:1500], healthy), zero_mean_path(returns, healthy)[:1500]
+    )
+
+    # alpha + gamma < 0: a down day REDUCES the variance, so the recursion is driven onto the
+    # lower clamp. arch returns this shape without complaint.
+    degenerate = pd.Series({"omega": 1e-8, "alpha[1]": 0.02, "gamma[1]": -0.30, "beta[1]": 0.90})
+    short = zero_mean_path(returns[:1500], degenerate)
+    full = zero_mean_path(returns, degenerate)[:1500]
+    relative = np.abs(short - full) / np.maximum(np.abs(full), 1e-30)
+    assert (relative > 1e-9).sum() > 1000
+    assert relative.max() > 0.1
+
+    # The helper does not clip that fit silently - it refuses it.
+    with pytest.raises(ValueError, match=r"alpha \+ gamma"):
+        garch11_conditional_volatility(
+            returns, mu=0.0, omega=1e-8, alpha=0.02, beta=0.90, gamma=-0.30, backcast=0.25
+        )
+
+
 def test_the_garch_recursion_reproduces_its_own_definition() -> None:
     returns = _garch_returns(n=60)
     got = garch11_conditional_volatility(returns, **GARCH_PARAMS)
@@ -445,18 +594,93 @@ def test_the_garch_recursion_reproduces_its_own_definition() -> None:
     alpha, beta = GARCH_PARAMS["alpha"], GARCH_PARAMS["beta"]
     resid = returns - mu
     want = np.empty(len(returns))
-    want[0] = omega / (1.0 - alpha - beta)
+    want[0] = omega + (alpha + beta) * GARCH_PARAMS["backcast"]
     for t in range(1, len(returns)):
         want[t] = omega + alpha * resid[t - 1] ** 2 + beta * want[t - 1]
     np.testing.assert_allclose(got, np.sqrt(want), rtol=1e-12)
 
 
-def test_the_garch_seed_survives_a_non_stationary_fit() -> None:
-    # alpha + beta >= 1 has no long-run variance, so the seed is clamped rather than infinite.
+def test_the_gjr_recursion_reproduces_its_own_definition() -> None:
+    returns = _garch_returns(n=60)
+    got = garch11_conditional_volatility(returns, **GJR_PARAMS)
+    mu, omega = GJR_PARAMS["mu"], GJR_PARAMS["omega"]
+    alpha, beta, gamma = GJR_PARAMS["alpha"], GJR_PARAMS["beta"], GJR_PARAMS["gamma"]
+    resid = returns - mu
+    want = np.empty(len(returns))
+    want[0] = omega + (alpha + 0.5 * gamma + beta) * GJR_PARAMS["backcast"]
+    for t in range(1, len(returns)):
+        shock = alpha + gamma * (resid[t - 1] < 0.0)
+        want[t] = omega + shock * resid[t - 1] ** 2 + beta * want[t - 1]
+    np.testing.assert_allclose(got, np.sqrt(want), rtol=1e-12)
+
+
+def test_a_zero_gamma_is_the_symmetric_model() -> None:
+    returns = _garch_returns(n=200)
+    np.testing.assert_array_equal(
+        garch11_conditional_volatility(returns, **GARCH_PARAMS),
+        garch11_conditional_volatility(returns, gamma=0.0, **GARCH_PARAMS),
+    )
+
+
+def test_the_asymmetry_raises_variance_only_after_a_negative_return() -> None:
+    # gamma has to attach to the sign of the residual it multiplies, not to the current row.
+    # A sign error here is invisible to every aggregate and to the definition test above if
+    # that test repeats the same mistake, so it is stated directly against constructed input.
+    returns = np.array([0.05, 0.05 - 1.0, 0.05 + 1.0, 0.05, 0.05])
+    sym = garch11_conditional_volatility(returns, **GARCH_PARAMS)
+    asym = garch11_conditional_volatility(returns, **{**GARCH_PARAMS, "gamma": 0.07})
+    # Row 2 follows the -1.0 residual and must be lifted; row 3 follows the +1.0 and must not.
+    assert asym[2] > sym[2]
+    assert asym[3] == pytest.approx(
+        sym[3] + GARCH_PARAMS["beta"] * (asym[2] ** 2 - sym[2] ** 2) / (asym[3] + sym[3]), rel=1e-6
+    )
+
+
+def test_a_degenerate_fit_raises_rather_than_emitting_nan() -> None:
+    """arch returns alpha + gamma < 0 without complaint, and sqrt of it is nan.
+
+    A nan is not a feature value. Measured on sp500_equity_option_analytics: 19% of first
+    blocks come back with a negative net shock coefficient, and the old path emitted them.
+    """
+    with pytest.raises(ValueError, match=r"alpha \+ gamma"):
+        garch11_conditional_volatility(
+            _garch_returns(n=400),
+            mu=0.0,
+            omega=1e-8,
+            alpha=0.02,
+            beta=0.90,
+            gamma=-0.30,
+            backcast=1.0,
+        )
+
+
+def test_bounds_clip_the_recursion_instead_of_raising() -> None:
     out = garch11_conditional_volatility(
-        _garch_returns(n=50), mu=0.0, omega=0.02, alpha=0.3, beta=0.75
+        _garch_returns(n=400),
+        mu=0.0,
+        omega=1e-8,
+        alpha=0.02,
+        beta=0.90,
+        gamma=-0.30,
+        backcast=1.0,
+        bounds=(1e-6, 1e4),
     )
     assert np.isfinite(out).all()
+    assert (out >= np.sqrt(1e-6) - 1e-12).all()
+
+
+def test_an_integrated_fit_no_longer_seeds_from_the_parameters() -> None:
+    """Persistence 1.0 has no long-run variance; the seed comes from the data instead.
+
+    Two of 25 sampled sp500_equity_option_analytics securities fitted to persistence 1.0000,
+    where omega/(1 - persistence) is infinite, any clamp makes it omega x 1e6, and beta = 1
+    means that seed never decays. The backcast bounds the seed whatever the optimizer returns.
+    """
+    out = garch11_conditional_volatility(
+        _garch_returns(n=300), mu=0.0, omega=0.02, alpha=0.10, beta=0.90, backcast=1.5
+    )
+    assert np.isfinite(out).all()
+    assert out[0] == pytest.approx(np.sqrt(0.02 + 1.0 * 1.5))
 
 
 def test_an_empty_return_series_gives_an_empty_recursion() -> None:

@@ -365,6 +365,39 @@ modeling:
         # runner default all along; only the SAE runner never passed one.
         batch_size: 10000
 
+# What `04_model_based_features` decides, declared here for the same reason the feature
+# windows are: an estimation window is part of a fitted feature's definition, so it belongs
+# where the definition lives rather than inside the notebook that runs it. Every count is in
+# NYSE sessions.
+#
+# A fitted feature is bounded by the schedule below and not by a cross-validation fold. The
+# parameters behind a value are estimated from sessions strictly before it, refreshed on the
+# cadence given, and the same value comes out whichever fold later selects the row - so the
+# artifact carries no fold column.
+#
+# The panel runs 2017-01-03 to 2021-12-31, 1,259 sessions over 624 securities carrying an
+# option surface. Fold 0's training window opens 2018-01-04, so only about 250 sessions of
+# history precede the first fold, and that run-up is what a burn-in has to be paid out of.
+model_based:
+  gjr_garch:
+    # Sessions of a security's own adjusted returns before its volatility model is fitted.
+    # One year, and it is bounded above by the panel rather than chosen freely: 252 is very
+    # nearly the 250 sessions that precede fold 0, so it comes out of the run-up instead of
+    # out of training data. Measured against the alternative on the 624-security roster, a
+    # 504 burn-in takes emitted coverage from 76.5% of the panel to 54.7%, takes the
+    # securities that emit nothing at all from 57 to 103, and eats 159,463 of fold 0's
+    # training sessions across 592 securities rather than 22,130 across 121.
+    #
+    # It is not free. A GJR-GARCH fitted on 252 observations returns a degenerate parameter
+    # vector - alpha + gamma < 0, so a larger down-shock lowers next session's variance -
+    # for 19.0% of securities on the first block, against 1.8% of fits averaged over the
+    # whole walk as the expanding window grows. Section C reports both.
+    burnin: 252
+    # How often the parameters are re-estimated. A month. Each estimate is a
+    # quasi-maximum-likelihood fit over the whole expanding history, and the leverage
+    # parameter it is estimated for is not a fast-moving quantity.
+    refit_every: 21
+
 causal:
   treatment: ivrv_spread
   # Bars the treatment's own construction window spans, which is what the placebo block has

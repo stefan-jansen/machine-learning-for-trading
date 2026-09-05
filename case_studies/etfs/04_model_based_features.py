@@ -960,17 +960,22 @@ def garch_walk(payload: tuple[str, np.ndarray, int]) -> tuple[str, np.ndarray, l
             "omega": float(result.params.get("omega", np.nan)),
             "alpha": float(result.params.get("alpha[1]", np.nan)),
             "beta": float(result.params.get("beta[1]", np.nan)),
+            # The value that seeds the recursion, computed by `arch` from the ESTIMATION
+            # window's residuals and nothing else. It has to be produced here, where only
+            # training rows are in scope: the array `apply` receives runs to the end of the
+            # block being emitted, so a seed derived there would read the block's own rows.
+            "backcast": float(result.model.volatility.backcast(np.asarray(result.resid))),
         }
         fits.append({"symbol": symbol, "fit_end": int(len(X_train)), **coefficients})
         return coefficients
 
     def apply(coefficients: dict[str, float], X_prefix: np.ndarray) -> np.ndarray:
         # `garch11_conditional_volatility` rather than the fitted result object's own
-        # `conditional_volatility`: `arch` seeds its recursion from a backcast over whatever
-        # sample it is handed, and the sample here runs to the end of the block being emitted,
-        # so an emitted value would move when the block's later returns arrived. The shared
-        # helper seeds from the coefficients' own implied long-run variance instead, which is
-        # a function of the fit and of no observation in the array.
+        # `conditional_volatility`: `arch` derives its residuals, its seeding backcast and its
+        # variance bounds from whatever sample it is handed, and the sample here runs to the
+        # end of the block being emitted, so an emitted value would move when the block's
+        # later returns arrived. The helper takes every one of those from `fit`, where only
+        # training rows are in scope.
         #
         # The recursion runs on percent returns; restore decimal and annualize.
         sigma = garch11_conditional_volatility(X_prefix[:, 0], **coefficients)
