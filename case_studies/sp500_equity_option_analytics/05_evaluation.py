@@ -221,33 +221,28 @@ print(
 # prices and surfaces, one row per `(timestamp, symbol)`, and they join straight
 # on.
 #
-# **The model-based artifact does not.** A **walk-forward fold** is one
-# training window followed by the validation window immediately after it, and the
-# scheme steps both windows forward to make the next fold. `04_model_based_features`
-# refits its GJR-GARCH model inside each fold's training window, so
-# `model_based.parquet` carries one row per `(timestamp, symbol, fold)` - the same
-# date and name once per fold, with a different set of fitted parameters each
-# time. Each fold's rows span its training window as well as its validation
-# window, and only the validation half is out of sample: inside the training
-# window, the fitted value at a date was estimated from a span that includes that
-# date and everything after it up to the training end. The extra fold that trains
-# on the whole development window is the sharpest case - its rows dated 2019 carry
-# parameters estimated from data through 2020.
+# **The model-based artifact now joins the same way, and it did not use to.**
+# `04_model_based_features` refits its GJR-GARCH on a schedule over each security's
+# own history rather than once inside each fold's training window, so
+# `model_based.parquet` carries one row per `(timestamp, symbol)` and no `fold`
+# column. Every value comes from the last parameters estimated strictly before the
+# session it is stamped with, on a training row exactly as much as on a validation
+# row, so there is no in-sample half to cut away and no fold provenance to mix.
 #
-# Joining that frame on `(timestamp, symbol)` alone would do two things at once.
-# It would **duplicate panel rows**, because the key is not unique on the right
-# side, so a name would appear once per fold in the same cross-section and be
-# counted that many times by every statistic below - including the staleness
-# screen, which would see the duplicates as adjacent identical rows and read them
-# as a column that does not move. And it would **mix fold provenance**, because
-# whichever of those rows a later cell read might be an in-sample fitted value.
+# What that removes from this notebook is the whole apparatus that used to stand
+# here: the per-fold filter, the uniqueness check that caught overlapping
+# validation windows, and the restricted screening window that followed from
+# keeping only validated rows. The GARCH columns are now defined wherever the
+# schedule emitted them, which is every session after a security's own burn-in.
 #
-# So the model-based frame is cut down to each fold's validation window before it
-# is joined, and the result is checked for one row per key rather than assumed to
-# have it. The consequence is that the GARCH columns exist only where a fold
-# validated them, which is the later part of the development window and not all of
-# it - and the screens in section 1 measure them on that window rather than
-# against a denominator they cannot reach.
+# **What it adds is nulls on short names.** A refit schedule emits nothing for a
+# security until that security has cleared its burn-in, and a name that lists late
+# in the panel may never clear it. The old design never produced those: it fitted
+# on each fold's whole training window and emitted backwards across it, so the
+# column was complete precisely because it was fitted on its own future. Those
+# rows are dropped below and counted, rather than raised on. Keeping them would
+# score the financial features on rows where the model-based ones do not exist,
+# and this section exists to compare the two on the same rows.
 
 # %%
 features = pl.read_parquet(CASE_DIR / "features" / "financial.parquet")
@@ -288,19 +283,29 @@ producer_folds = [
     {**f, **{field: fold_boundary_date(f[field]) for field in _SPAN_FIELDS}} for f in producer_folds
 ]
 
-temporal_oos = pl.concat(
-    [
-        temporal.filter(
-            (pl.col("fold") == f["fold"])
-            & (pl.col(DATE_COL) >= f["val_start"])
-            & (pl.col(DATE_COL) <= f["val_end"])
-        )
-        for f in producer_folds
-    ]
-).drop("fold")
+# The artifact is already one row per key and every row is out of sample in the sense that
+# matters: its parameters were fitted strictly before it. What is still cut here is the span,
+# so the screens below are measured over the same validation windows the downstream models are
+# scored on rather than over the whole panel.
+temporal_oos = temporal.filter(
+    (pl.col(DATE_COL) >= min(f["val_start"] for f in producer_folds))
+    & (pl.col(DATE_COL) <= max(f["val_end"] for f in producer_folds))
+)
 if temporal_oos.select(JOIN_COLS).n_unique() != len(temporal_oos):
-    msg = "Fold validation windows overlap: the out-of-sample frame is not one row per key"
+    msg = "model_based.parquet is not one row per (timestamp, symbol)"
     raise ValueError(msg)
+
+# A security that never cleared its burn-in carries no model-based value. Those rows are
+# dropped and counted rather than raised on: keeping them would score the financial features
+# on rows where the model-based ones do not exist, and this section compares the two.
+_before = len(temporal_oos)
+temporal_oos = temporal_oos.drop_nulls(subset=temporal_cols)
+_dropped = _before - len(temporal_oos)
+if _dropped:
+    print(
+        f"Dropped {_dropped:,} of {_before:,} rows ({_dropped / _before:.2%}) whose security had "
+        "not cleared its GARCH burn-in, so no model-based value exists for them."
+    )
 
 # The window the GARCH columns can be screened on. Outside it they are absent by
 # construction rather than missing, and section 1 divides by this rather than by
