@@ -1122,14 +1122,13 @@ jobs:
 
   test-unit-image:
     needs: [changes, build-image-candidate]
-    # `always()` so this still runs when the candidate build was skipped, which is
-    # the common case; a candidate that failed or was cancelled must not fall
-    # through to measuring in `latest`, which is the drift this job exists to
-    # refuse.
-    if: >-
-      always() &&
-      needs.build-image-candidate.result != 'failure' &&
-      needs.build-image-candidate.result != 'cancelled'
+    # Plain `always()`, and the candidate's result is handled in a step rather than
+    # here. A `!= 'failure'` in this condition would SKIP the job when the
+    # candidate build broke, and GitHub counts a skipped required check as
+    # satisfied - so a lock bump whose image would not build would have become
+    # mergeable without the image tests running at all. Skipping is the one
+    # outcome this job must never have.
+    if: always()
     runs-on: ubuntu-latest
     # The 26 files measured on 2026-08-24 ran in 3m21s; the list now contains 36.
     # --timeout=900 bounds a hung test but not a hung
@@ -1137,6 +1136,19 @@ jobs:
     # GitHub's six-hour default.
     timeout-minutes: 30
     steps:
+      # `needs` cannot fail this job, because the condition above is unconditional
+      # by design. This step is what turns a broken candidate into a red required
+      # check instead of a green one.
+      - name: The candidate image built
+        if: >-
+          needs.build-image-candidate.result == 'failure' ||
+          needs.build-image-candidate.result == 'cancelled'
+        run: |
+          echo "::error::build-image-candidate ${{ needs.build-image-candidate.result }}:"
+          echo "::error::this commit changes what the image installs, and no image was"
+          echo "::error::produced to measure it in. Measuring in ml4t/ml4t:latest would"
+          echo "::error::test the environment this commit replaces."
+          exit 1
       - uses: actions/checkout@v6
       - name: Load the candidate image
         if: needs.build-image-candidate.result == 'success'

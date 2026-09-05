@@ -196,19 +196,41 @@ def test_the_candidate_build_never_publishes():
         )
 
 
-def test_a_failed_candidate_does_not_fall_back_to_latest():
+def test_a_broken_candidate_fails_the_required_check():
     """The failure mode that would make the whole thing decorative.
 
-    `test-unit-image` runs under `always()` so a skipped candidate still lets it
-    measure in `latest`, which is correct for the commits that change nothing. A
-    candidate that failed is different: falling through to `latest` there would
-    green a lock bump against the environment it is replacing.
+    A skipped job counts as a satisfied required check. So excluding a failed
+    candidate in the job's own `if` - the obvious way to write "do not fall back
+    to `latest`" - would skip `test-unit-image` exactly when the image could not
+    be built, and a lock bump whose image is broken would become mergeable with
+    the image tests never having run.
+
+    The job therefore runs unconditionally and a step turns a broken candidate
+    into a red check. `build-image-candidate` itself is not in the required set,
+    so this step is the only thing standing between a failed build and a green
+    pull request.
     """
     workflow = yaml.safe_load(TEST_WORKFLOW.read_text(encoding="utf-8"))
-    condition = str(workflow["jobs"]["test-unit-image"]["if"])
+    job = workflow["jobs"]["test-unit-image"]
 
-    for result in ("failure", "cancelled"):
-        assert f"needs.build-image-candidate.result != '{result}'" in condition, (
-            f"test-unit-image runs after a {result} candidate build, and would measure "
-            "the lock bump in the image it is meant to replace"
-        )
+    assert str(job["if"]).strip() == "always()", (
+        "test-unit-image must run unconditionally: any other condition can skip it, "
+        "and a skipped required check is reported as satisfied"
+    )
+
+    guard = next(
+        (
+            step
+            for step in job["steps"]
+            if "needs.build-image-candidate.result == 'failure'" in str(step.get("if", ""))
+        ),
+        None,
+    )
+    assert guard is not None, (
+        "nothing fails test-unit-image when the candidate build fails, so a lock bump "
+        "whose image does not build would pass the check that exists to measure it"
+    )
+    assert "cancelled" in str(guard["if"]), (
+        "the guard ignores a cancelled candidate build, which leaves the same hole"
+    )
+    assert "exit 1" in str(guard.get("run", "")), f"{guard.get('name')} does not fail the job"
