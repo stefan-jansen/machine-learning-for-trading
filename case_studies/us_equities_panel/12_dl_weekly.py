@@ -93,15 +93,18 @@ LOG_FILE = Path("/tmp/dl_weekly_experiment.log")
 # `02_labels` resolves `fwd_ret_5d` five *sessions* ahead. A full trading week holds exactly
 # five sessions, so a Friday's window closes on the next Friday. A week carrying a market
 # holiday holds four, so the fifth session falls on the Monday after that Friday and the
-# window overlaps the next observation's by a session. Measured on the 4,565 sessions from
-# 2000-02-01 to 2018-03-26, of 915 consecutive Friday pairs: 752 (82%) close exactly on the
-# next Friday, 134 (15%) close after it and overlap, and 29 (3%) close before it because the
-# next Friday was itself a holiday and carries no row.
+# window overlaps the next observation's by a session. Counted on the NYSE calendar over the
+# panel's own span, 1990-01-02 to 2018-03-27, of 1,422 consecutive Friday pairs: 1,180 (83.0%)
+# close exactly on the next Friday, 196 (13.8%) close after it and overlap, and 46 (3.2%)
+# close before it because the next Friday was itself a holiday and carries no row. The rate is
+# a property of the exchange calendar rather than of this sample: over 2000-02-01 to
+# 2018-03-26 alone it is 82.3%, 14.5% and 3.2%.
 #
 # What that costs is the mechanical autocorrelation overlapping windows induce, on about one
-# week in seven. It is small enough to leave the one-step formulation intact and too large to
-# describe as absent. Sampling every fifth session instead of every Friday would remove it
-# exactly, at the cost of a sampling grid that drifts across weekdays.
+# week in seven, always by exactly one session. It is small enough to leave the one-step
+# formulation intact and too large to describe as absent. Sampling every fifth session instead
+# of every Friday would remove it exactly, at the cost of a grid that drifts across weekdays
+# and a cadence nobody trades.
 #
 # Non-overlap would not buy independence in any case. Returns cluster in volatility and share
 # a market factor across the cross-section, so what non-overlap removes is the correlation the
