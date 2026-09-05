@@ -158,14 +158,23 @@ print(f"Holdout prediction: {HOLDOUT_PREDICTION_HASH}")
 # window.
 #
 # The embargo matters for this case study's label and would not for every one. A residual
-# observed at `t` measures a return realising over `(t, t + h]` where `h` is the horizon of
-# whichever label the carrier fits - 5, 15 or 60 minutes here - so the last residuals of the
-# validation span reach into the holdout window, and calibrating on them would size holdout
-# positions with holdout price information. The horizon is read from the reviewed table in
-# `conformal.py` rather than assumed from the primary label, because the carrier is resolved
-# across every declared label and is not always the primary's. The reach is minutes rather than
-# the ETF study's three weeks, and it is the same defect at any width: the residuals that cross
-# the boundary are the ones nearest it, which are the ones a calibration weights most.
+# observed at `t` is not resolved until `t + h + 1min`, one bar PAST the label's horizon: the
+# entry leg is the VWAP of the bar after the decision, so a label at `t` consumes a quote at
+# `t + h + 1`. So the last residuals of the validation span reach into the holdout window, and
+# calibrating on them would size holdout positions with holdout price information.
+#
+# The value comes from the reviewed table in `conformal.py`, which records the label BUFFER
+# rather than the horizon for exactly that reason - 6, 16 and 61 for `fwd_ret_5m`,
+# `fwd_ret_15m`/`fwd_dir_15m` and `fwd_ret_60m`. It is read from the carrier's label rather
+# than assumed from the primary, because the carrier is resolved across every declared label.
+# The unit is prediction-data steps, and on this panel a step is one MINUTE, not one decision
+# slot: the modal gap between adjacent prediction timestamps is 0:01:00 for all four labels.
+# Counting in decision slots is what an earlier version of that table did, and it embargoed one
+# minute where the label reaches sixteen.
+#
+# The reach is minutes rather than the ETF study's three weeks, and it is the same defect at any
+# width: the residuals that cross the boundary are the ones nearest it, which are the ones a
+# calibration weights most.
 #
 # The branch is here rather than assumed away because the carrier can change. It does not fire
 # for the one this case study currently reports, which sizes by inverse volatility over a
