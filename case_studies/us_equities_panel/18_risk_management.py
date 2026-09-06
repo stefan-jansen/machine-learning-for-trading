@@ -37,22 +37,19 @@
 # from 3% to 15% and trailing stops from 1% to 20%, so the sweep says how the effect moves with the
 # threshold rather than whether one chosen threshold helped.
 #
-# **The thing to check first is whether an overlay bound at all.** A control that never fired
-# returns the unprotected book unchanged, so its Sharpe and its drawdown match the baseline exactly
-# - and so does its **trade count**, which is the tell. A control that fired closed a position
-# early, and closing a position early is a trade; two books with identical returns and an identical
-# number of trades did not take different actions. A performance column alone cannot separate "the
-# control never bound on this book" from "the control was never installed", and the trade count
-# can.
+# **The thing to check first is whether the overlays changed anything at all.** A control that
+# never fires returns the unprotected book unchanged in every digit, and so does a control that was
+# declared but never reached the engine. One result cannot tell those apart, and the second has
+# happened in this repository: fourteen controls, from a 3% stop to a 40-bar time exit, whose
+# Sharpe, drawdown and trade count all matched the unprotected book exactly, because the
+# configuration declared them in one shape and the engine read another. Fourteen different rules
+# declining to act on one book and agreeing to the last digit is not a result about risk control.
 #
-# That distinction is not hypothetical here. This repository has a recorded case of fourteen
-# controls, from a 3% stop to a 40-bar time exit, whose Sharpe, drawdown **and trade count** all
-# matched the unprotected book in every digit - fourteen different rules cannot all decline to act
-# and still agree to the last digit, and the cause was a declaration the engine never read. The
-# comparison read as a clean pass because every result agreed with its baseline.
-#
-# So the section that reports results compares each overlay's trade count against its source's,
-# rather than reporting performance alone.
+# So the results section compares each overlay against the strategy it was laid on rather than
+# reporting its performance alone. **A difference proves the control acted; identity does not prove
+# it did not** - a stop can close a position the next rebalance would have closed anyway and leave
+# the trade count where it was. Identity across *every* declared setting is a reason to confirm the
+# controls reach the engine, not a conclusion.
 #
 # **Learning objectives.** By the end of this notebook you will be able to:
 #
@@ -60,8 +57,8 @@
 #   why.
 # - Say why an overlay can only remove, and what that implies about how it can change a return
 #   distribution.
-# - Recognise a swept control that never bound, and say why identical results across every setting
-#   is a failure rather than a finding.
+# - Say what a result identical to its unprotected baseline does and does not establish about
+#   whether a control fired, and what evidence would settle it.
 # - Say why a threshold sweep is more informative than a single chosen threshold.
 #
 # **Book reference**: Chapter 19, Sections 19.3 to 19.6.
@@ -267,10 +264,10 @@ selected_sources.select(
 # Fourteen declared controls across the three kinds, planned as one backtest each against the fixed
 # strategy.
 #
-# **What separates a control that did not bind from one that was never installed** is checked after
-# execution, in the section that reports results: each overlay's trade count against the trade
-# count of the strategy it was laid on. An overlay that fired closed a position early and therefore
-# traded; one whose count is identical to its source's took no action at all.
+# **Whether the overlays changed anything is checked after execution**, in the section that reports
+# results: each one against the strategy it was laid on, on the trade count and the Sharpe. A
+# difference establishes that the control acted; identity establishes only that it changed no
+# outcome.
 
 # %%
 risk_requests = []
@@ -501,12 +498,13 @@ if (
     or completed_risk.filter(pl.col("sharpe").is_null() | ~pl.col("sharpe").is_finite()).height
 ):
     raise RuntimeError("The risk catalog is incomplete or mis-staged")
-# Did each control actually act? `num_trades` is registered on every backtest, and an overlay that
-# fired closed a position early, which is a trade. A row whose count equals its source's took no
-# action - legitimate for a loose threshold on a calm book, and the signature of a control the
-# engine never installed when it holds across every declared setting. Reported rather than
-# asserted on, because "no control bound" is a possible truth about a book and only its
-# uniformity across the sweep is evidence of a defect.
+# Did the overlay change anything? Each result is compared against the strategy it was laid on, on
+# the two axes the catalog carries: the trade count and the Sharpe. A row that differs on either
+# acted - there is no other way for the numbers to move. A row identical on both changed no
+# outcome, which is NOT the same as never firing: a stop can close a position the next rebalance
+# would have closed anyway, replacing one exit with an earlier one and leaving the count where it
+# was. What would settle it is a per-control trigger count, which the backtest does not surface
+# into the catalog today.
 overlay_effect = (
     completed_risk.select("label", "backtest_hash", "sharpe", "num_trades")
     .join(
@@ -537,17 +535,28 @@ overlay_effect = (
     .select("label", "risk", "num_trades", "source_num_trades", "trades_moved", "sharpe_moved")
     .sort("label", "risk")
 )
-_bound = int(overlay_effect.get_column("trades_moved").fill_null(False).sum())
-_unknown = int(overlay_effect.get_column("trades_moved").is_null().sum())
-print(
-    f"{_bound} of {overlay_effect.height} overlay results changed the trade count of the book "
-    f"they were laid on; {_unknown} could not be compared for a missing count"
+_moved = int(
+    (
+        overlay_effect.get_column("trades_moved").fill_null(False)
+        | overlay_effect.get_column("sharpe_moved").fill_null(False)
+    ).sum()
 )
-if _bound == 0 and overlay_effect.height and _unknown < overlay_effect.height:
+_unknown = int(
+    (
+        overlay_effect.get_column("trades_moved").is_null()
+        & overlay_effect.get_column("sharpe_moved").is_null()
+    ).sum()
+)
+_comparable = overlay_effect.height - _unknown
+print(
+    f"{_moved} of {_comparable} comparable overlay results differ from the strategy they were "
+    f"laid on; {_unknown} could not be compared for a missing metric"
+)
+if _comparable and _moved == 0:
     print(
-        "  Every declared control left the trade count untouched. Fourteen rules spanning a 3% "
-        "stop to a 20% trailing stop do not all decline to act on one book, so read this as the "
-        "overlay never reaching the engine rather than as evidence about risk control."
+        "  No declared control changed either the trade count or the Sharpe. That is possible on "
+        "a calm book, and it is also what a control the engine never installed looks like, so "
+        "confirm the controls reach the engine before reading it either way."
     )
 overlay_effect
 
@@ -617,10 +626,11 @@ compatible_sets
 # %% [markdown]
 # ## What to notice
 #
-# **Check that the controls bound before reading what they did.** Results identical to the
-# unprotected book across every setting mean the mechanism never fired, and that is
-# indistinguishable from "risk control does not help" if only the performance columns are read.
-# The application counts are what separate the two.
+# **Check that the overlays changed something before reading what they did.** A result identical to
+# the unprotected book on every axis changed no outcome, and identity across every declared setting
+# is a reason to confirm the controls reach the engine rather than a finding about risk control.
+# Neither is settled by the performance columns alone; a per-control trigger count would settle it,
+# and the backtest does not surface one today.
 #
 # **An overlay can only remove, so it reshapes a return distribution rather than shifting it.** It
 # truncates the left tail by closing losers early and truncates the right by closing winners early,
