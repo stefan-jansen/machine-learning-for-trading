@@ -142,6 +142,23 @@ from utils.style import COLORS, add_message_title, ml4t_diverging
 # %% tags=["parameters"]
 CASE_STUDY = "us_firm_characteristics"
 SEED = 42
+# Both names stay bound here although nothing below reads them: that is what makes the harness
+# force preview and supply a workspace - `_declares_tier_and_workspace` in `tests/pm_helpers.py`
+# looks for exactly this pair. Without them the canonical branch regenerates in place, which
+# needs symlinks a CI checkout does not have.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
+
+# %% [markdown]
+# The study is opened before any path or registry read. Under the preview tier, opening it
+# activates a workspace and rewrites `ML4T_OUTPUT_DIR` process-wide; a `CASE_DIR` or a
+# `BacktestExplorer` built first would address the released registry while everything after it
+# reads the preview one. It is opened once and reused - a second `open_study` further down
+# re-activates, and where the two calls disagree about the tier the notebook silently changes
+# registry mid-page.
+
+# %%
+study = open_study(CASE_STUDY, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 
 # %%
 PRIMARY_LABEL = "fwd_ret_1m"  # setup.yaml primary; benchmark series keyed here
@@ -222,7 +239,7 @@ _db = CASE_DIR / "run_log" / "registry.db"
 # Every declared label stays in - they compete at the baseline, and the selection ranges over
 # all of them - so what is excluded is superseded generations, not variant labels.
 _live_index = split_unpublished_members(
-    open_study(CASE_STUDY),
+    study,
     load_prediction_index(CASE_STUDY, split="validation"),
 )
 LIVE_PREDICTIONS = _live_index.live["prediction_hash"].to_list()

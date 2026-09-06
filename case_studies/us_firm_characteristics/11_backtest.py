@@ -62,6 +62,7 @@ from utils.style import COLORS, add_message_title, apply_ml4t_style
 warnings.filterwarnings("ignore")
 apply_ml4t_style()
 
+from case_studies.research import open_study
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import build_backtest_spec, serializable_backtest_spec
 from case_studies.utils.backtest_runner import (
@@ -98,6 +99,22 @@ TOP_N_PREDICTIONS = None
 # How far a no-edge Sharpe may land from zero before the plumbing test is read as a
 # failure of the engine rather than as sampling noise. The whole fleet uses 1.5.
 PLUMBING_SHARPE_TOLERANCE = 1.5
+# Both names stay bound here although nothing below reads them: that is what makes the harness
+# force preview and supply a workspace - `_declares_tier_and_workspace` in `tests/pm_helpers.py`
+# looks for exactly this pair. Without them the canonical branch regenerates in place, which
+# needs symlinks a CI checkout does not have.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
+
+# %% [markdown]
+# The study is opened before anything resolves a path or reads the registry. Under the preview
+# tier, opening it activates a workspace and rewrites `ML4T_OUTPUT_DIR` process-wide, and every
+# later `get_case_study_dir` call resolves against that. A `CASE_DIR`, a prediction index or a
+# `BacktestExplorer` built first would address the released registry while the sweep writes to
+# the preview one, and the two never meet.
+
+# %%
+study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 
 # %% [markdown]
 # ## 1. Setup & Plumbing Test
