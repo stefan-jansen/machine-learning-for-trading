@@ -417,6 +417,86 @@ def test_every_declared_parameter_reaches_its_notebook(
     assert unreachable == {}
 
 
+def _accepted_reduction_fields() -> tuple[set[str], set[str]]:
+    """Every reduction key some family accepts, and the four the DML resolver requires.
+
+    Imported from `case_studies/utils/preview_fields.py`, the module each family resolver
+    reads its own set from, rather than restated here: the guard and the resolver share one
+    object, so the guard cannot go on accepting a name its consumer has dropped. The sets sit
+    apart from the resolvers because four of the five family modules import `torch` at module
+    scope and this job has no torch.
+    """
+    from case_studies.utils.preview_fields import (
+        DML_PREVIEW_FIELDS,
+        GBM_PREVIEW_FIELDS,
+        LATENT_PREVIEW_FIELDS,
+        LINEAR_PREVIEW_FIELDS,
+        SEQUENCE_PREVIEW_FIELDS,
+        TABM_PREVIEW_FIELDS,
+    )
+
+    return set().union(
+        DML_PREVIEW_FIELDS,
+        GBM_PREVIEW_FIELDS,
+        LATENT_PREVIEW_FIELDS,
+        LINEAR_PREVIEW_FIELDS,
+        SEQUENCE_PREVIEW_FIELDS,
+        TABM_PREVIEW_FIELDS,
+    ), set(DML_PREVIEW_FIELDS)
+
+
+def _declared_reductions(overrides: dict) -> dict[str, dict]:
+    return {
+        key: value["parameters"]["PREVIEW_REDUCTIONS"]
+        for key, value in overrides.items()
+        if isinstance(value, dict)
+        and isinstance(value.get("parameters"), dict)
+        and isinstance(value["parameters"].get("PREVIEW_REDUCTIONS"), dict)
+    }
+
+
+def test_every_declared_reduction_key_is_one_some_family_accepts(overrides: dict) -> None:
+    """A misspelled reduction key must fail here rather than as a timeout.
+
+    Each family resolver rejects a key outside its own set, but it does so inside the run,
+    after the fit has been planned. In CI that surfaces as a papermill per-cell timeout and
+    reads as flakiness - which is the confusion #942 was filed about, and it is not
+    distinguishable from contention by timing. The name is knowable without running
+    anything, so it is checked without running anything.
+    """
+    accepted, _ = _accepted_reduction_fields()
+    unknown = {
+        key: sorted(set(reductions) - accepted)
+        for key, reductions in _declared_reductions(overrides).items()
+        if set(reductions) - accepted
+    }
+
+    assert unknown == {}
+
+
+def test_a_causal_reduction_declares_all_four_fields(overrides: dict) -> None:
+    """The DML resolver requires its four fields, and a partial mapping is worse than none.
+
+    `resolve_causal_request` rejects a key outside its four and also rejects a mapping
+    missing one, because a preview that omits `max_samples` would resolve the *full*
+    population under a preview tier - a run priced as a smoke test that costs a canonical
+    one. Entries are identified by the notebook submitting a `study.causal(` request rather
+    than by their stem, so a renamed notebook stays covered.
+    """
+    _, dml_fields = _accepted_reduction_fields()
+    incomplete = {}
+    for key, reductions in _declared_reductions(overrides).items():
+        source_path = REPO_ROOT / f"{key}.py"
+        if not source_path.exists():
+            continue
+        if "study.causal(" not in source_path.read_text(encoding="utf-8"):
+            continue
+        if set(reductions) != dml_fields:
+            incomplete[key] = sorted(reductions)
+
+    assert incomplete == {}
+
+
 def test_requested_configurations_survive_the_fixture_trim(overrides: dict) -> None:
     """A `CONFIG_NAMES` entry must name a configuration the fixture's menu still declares.
 
