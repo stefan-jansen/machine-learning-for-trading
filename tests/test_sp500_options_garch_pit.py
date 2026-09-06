@@ -19,7 +19,6 @@ from case_studies.utils.temporal import garch11_conditional_volatility, walk_for
 
 NOTEBOOK_SOURCE = Path("case_studies/sp500_options/04_model_based_features.py")
 SETUP_YAML = Path("case_studies/sp500_options/config/setup.yaml")
-GARCH_SPEC_KEYS = ("mean", "vol", "p", "o", "q", "dist", "rescale")
 GARCH_FIT_FUNCTIONS = {
     "fit_garch_with_retry",
     "summarize_garch_fit",
@@ -29,54 +28,55 @@ GARCH_FIT_FUNCTIONS = {
 }
 
 
-def _declared_garch_kw() -> dict:
-    """The GARCH specification the notebook passes to `arch_model`, read from the same file.
+def _notebook_garch_keys() -> tuple[str, ...]:
+    """The keys the notebook itself selects for `GARCH_KW`, read out of its source.
 
-    The specification moved out of the notebook body into `config/setup.yaml::model_based` so
-    that `05_evaluation` onwards can say what they were given. `garch_walk_segment` therefore
-    closes over a module-level `GARCH_KW` that the notebook builds at import, and a namespace
-    without it raises `NameError` inside the fit rather than doing anything the test can see:
-    `walk_forward_feature(on_fit_error="skip")` swallows it, the walk emits nothing, and three
-    assertions fail somewhere downstream of the real cause.
-
-    Reading the config rather than restating the dict keeps this namespace in step with the
-    notebook when a declared value moves. It does not assert anything about the values: every
-    test here still passes with `o: 0` in place of `o: 1`, measured, because none of them
-    inspects the fitted specification. `test_the_notebook_builds_its_spec_from_these_keys`
-    below covers the part that can go wrong silently, which is the key list drifting apart.
-    """
-    setup = yaml.safe_load(SETUP_YAML.read_text())
-    garch = setup["model_based"]["garch"]
-    return {key: garch[key] for key in GARCH_SPEC_KEYS}
-
-
-def test_the_notebook_builds_its_spec_from_these_keys() -> None:
-    """`GARCH_SPEC_KEYS` is a copy of a tuple in the notebook, so it can drift from it.
-
-    `_declared_garch_kw` reproduces the notebook's `GARCH_KW` construction rather than
-    importing it, because the notebook is not a module. If the notebook starts declaring an
-    eighth term, the namespace these tests exec against keeps the old seven and the walk is
-    exercised under a specification the notebook never fits. Nothing else here would notice:
-    a missing key raises `KeyError` inside `arch_model`, `walk_forward_feature` swallows it,
-    and the failures land three assertions away from the cause.
+    Parsed rather than restated. A second copy of the key list in this file is the defect
+    that produced the failure this helper exists to prevent, one level up: the specification
+    moved into `config/setup.yaml::model_based` and the exec namespace kept its own idea of
+    what the notebook consumes.
     """
     tree = ast.parse(NOTEBOOK_SOURCE.read_text())
     assignment = next(
         node.value
         for node in tree.body
         if isinstance(node, ast.Assign)
-        and any(isinstance(t, ast.Name) and t.id == "GARCH_KW" for t in node.targets)
+        and any(isinstance(target, ast.Name) and target.id == "GARCH_KW" for target in node.targets)
     )
     assert isinstance(assignment, ast.DictComp), (
-        "GARCH_KW is no longer a comprehension over a literal key tuple, so this check no "
-        "longer reads the key list it claims to read"
+        "GARCH_KW is no longer a comprehension over a literal key tuple, so this file can no "
+        "longer read the keys the notebook consumes and would exec against a guess"
     )
-    generator = assignment.generators[0].iter
-    declared = tuple(element.value for element in generator.elts)
-    assert declared == GARCH_SPEC_KEYS, (
-        f"the notebook builds GARCH_KW from {declared} and this file supplies "
-        f"{GARCH_SPEC_KEYS}; the exec namespace no longer matches the notebook"
+    return tuple(element.value for element in assignment.generators[0].iter.elts)
+
+
+def _declared_garch_kw() -> dict:
+    """The GARCH specification the notebook passes to `arch_model`, from the same two files.
+
+    The specification moved out of the notebook body into `config/setup.yaml::model_based` so
+    that `05_evaluation` onwards can say what they were given. `garch_walk_segment` closes over
+    a module-level `GARCH_KW` the notebook builds at import, and a namespace without it raises
+    `NameError` inside the fit rather than doing anything a test can see:
+    `walk_forward_feature(on_fit_error="skip")` swallows it, the walk emits nothing, and three
+    assertions fail somewhere downstream of the cause.
+
+    The keys come from the notebook and the values from the declaration, so there is one key
+    list rather than two and a key the notebook consumes cannot be missing from this stub.
+
+    It asserts nothing about the values. Measured in this file: every test here still passes
+    with `o: 0` in place of `o: 1`, because none of them inspects the fitted specification.
+    That is a fact about these tests and not about the mechanism - the `us_equities_panel`
+    equivalent does move under the same flip, on a convergence count rather than on anything
+    causal - so do not read it as "a harder specification is always invisible to a suite".
+    """
+    keys = _notebook_garch_keys()
+    garch = yaml.safe_load(SETUP_YAML.read_text())["model_based"]["garch"]
+    missing = [key for key in keys if key not in garch]
+    assert not missing, (
+        f"the notebook passes {missing} to arch_model and "
+        "config/setup.yaml::model_based.garch declares no such key"
     )
+    return {key: garch[key] for key in keys}
 
 
 def _load_garch_walk(namespace_extra: dict):
