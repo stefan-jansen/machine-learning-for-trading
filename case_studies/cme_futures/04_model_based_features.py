@@ -772,7 +772,9 @@ def _arima_walk() -> pl.DataFrame:
         series = full.filter(pl.col("product") == product)
         dates = series["timestamp"].to_numpy()
         values = series["carry_zscore"].to_numpy()
-        frozen_after = int((series["timestamp"] < _date_lit(HOLDOUT_START)).sum())
+        # `_date_lit` builds an expression, which against a Series yields another expression
+        # rather than a mask; the count itself is what the walk freezes on.
+        frozen_after = int(series.filter(pl.col("timestamp") < _date_lit(HOLDOUT_START)).height)
         payloads.append((product, values, dates, frozen_after))
 
     # One call per product, spread across processes. The fits are per product and independent,
