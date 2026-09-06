@@ -994,4 +994,14 @@ case_studies/fx_pairs/19_strategy_analysis:
   writes: []
   blocked_by: 1045
   blocked_reason: >-
-    Needs a superseding declaration for its candidate set, and has no way to supply one.
+    Dies at cell 4 in resolve_solvent_carrier with "No validation rank-1 candidate for
+    fx_pairs (label_filter=None)", before it reads any candidate set. Reproduced 2026-09-05
+    at EXECUTION_TIER=preview, exit 1 after 7s. The branch that raises is `if not
+    candidates`, not `if ranked and not candidates`, so the resolver's query returned nothing
+    BEFORE any supersession filter ran - while the canonical registry holds 3,875
+    backtest_runs, 3,229 at stage='signal'. So this is fx's stage-06+ registry having no
+    in-force rankable candidate rather than a defect in this notebook, and the fx
+    regeneration resolves it by replacing that state. The issue previously described this as
+    a missing superseding declaration for the candidate set, which sent a reader hunting a
+    CandidateSet call that this notebook does not contain - it only reads, via
+    CandidateSet.one.
