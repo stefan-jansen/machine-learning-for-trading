@@ -21,6 +21,29 @@
 # NLinear, LSTM, and PatchTST population is present.
 #
 # Prerequisites: `09_deep_learning` and `09a_lstm`.
+#
+# **Why the population is declared in one notebook and filled by several.** The set of members is
+# a claim made once, before any of them is fitted, so that no family can be added or dropped after
+# its results are visible. This notebook fits the last declared member and then checks that all
+# three are present, which is the point at which the population becomes readable downstream.
+#
+# ## What this model is, and how it differs from the LSTM beside it
+#
+# PatchTST cuts the lookback window into fixed-length patches, embeds each patch as a token, and
+# lets attention weigh every token against every other. Where the LSTM reads the window one
+# session at a time and carries a state forward, this model sees the whole window at once and
+# learns which parts of it to look at.
+#
+# **What the difference buys.** Recurrence reaches a distant session only by carrying information
+# through every session between; attention reaches it directly, so a pattern that depends on two
+# separated stretches of the window is easier to represent. It also parallelizes across the
+# window, where recurrence is sequential by construction.
+#
+# **What it costs, and why both are run.** Attention has no built-in notion that yesterday is
+# nearer than last month - the ordering has to be learned from position embeddings rather than
+# being structural - and it has more parameters to fit from the same data. Running both against
+# the same population and the same folds is what turns "sequence models on options data" from an
+# assertion into a comparison, and either can lose.
 
 # %%
 """Fit the declared S&P 500 options PatchTST request."""
@@ -74,6 +97,21 @@ print(f"training device: {device} (declared: {published_device})")
 
 # %% [markdown]
 # ## Declared request
+#
+# **What the settings decide.** `lookback: 60` and `patch_size: 16` together set the tokens: a
+# sixty-session window becomes a handful of patches rather than sixty steps, which is what makes
+# attention affordable here and also what limits its resolution, since nothing inside a patch is
+# distinguished. `d_model: 64` is the width each patch is embedded into and `n_heads: 4` the
+# number of attention patterns learned in parallel, so the model can attend to several
+# relationships at once instead of averaging them into one. `n_layers: 2` stacks that twice.
+# `dropout: 0.1` is the same regularizer the LSTM uses, and deliberately so: two families whose
+# regularization differs are not being compared on architecture.
+#
+# **The configuration is read from a preset, not written here**, so this architecture cannot
+# quietly differ from the same architecture in another chapter.
+#
+# **Every label is fitted**, because selection downstream ranks across labels as well as across
+# configurations, and a label with no candidates cannot be chosen or ruled out.
 
 # %%
 study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -96,6 +134,18 @@ resolved_model_plan(resolved)
 #
 # The shared sequence runner owns gap-safe window construction, fold fitting, fitted-state reload,
 # checkpoint publication, restart, and exact eligible-key validation.
+#
+# **A checkpoint is part of a configuration, not a detail of how it was fitted.** Training runs for
+# 100 epochs and publishes every fifth, so this one request becomes twenty scored candidates. A
+# network's validation performance is not monotone in training time, and the epoch at which it
+# peaks is a property of the fit a reader is entitled to see rather than a number chosen after the
+# fact. Picking the best epoch after seeing the results is selection, and selection happens once,
+# downstream, on backtests.
+#
+# **Gap-safe means a window never reaches across a fold boundary.** A sequence handed to the model
+# has to end before the validation window opens, or its state carries information from the period
+# being scored. The runner owns that construction because it is exactly the kind of rule that gets
+# restated slightly differently in each notebook and is impossible to notice when it is.
 
 # %%
 if EXECUTION_TIER == "canonical":
@@ -130,3 +180,21 @@ catalog
 # %% [markdown]
 # The official sequence population is complete and ready for model analysis and backtesting. This
 # notebook does not compare configurations or choose a checkpoint.
+#
+# **What completeness means here, and why it is checked rather than assumed.** Every requested
+# checkpoint of all three families produced predictions on exactly the rows its eligibility
+# contract declared, not more and not fewer. A partial checkpoint is refused rather than
+# published: a downstream comparison against a model scored on part of the panel is not a
+# comparison, and by the time anyone reads the result the missing part is invisible.
+#
+# **The three families share one eligibility group, and that is what makes them comparable.** All
+# of them need the same sixty-session window before a symbol can be scored, so they are eligible
+# on the same rows and the difference between their numbers is the models. That does not extend to
+# the cross-sectional families, which score a symbol from its first row; `11_model_analysis` groups
+# by eligibility for exactly that reason.
+#
+# **What has and has not been established at this point.** Three architectures have been fitted on
+# identical folds, identical windows and identical labels, and every checkpoint each of them
+# published is registered and complete. Nothing has been ranked. A reader who wants to know which
+# sequence family works better on options data has the material for that question, and the answer
+# comes from backtests rather than from anything on this page.

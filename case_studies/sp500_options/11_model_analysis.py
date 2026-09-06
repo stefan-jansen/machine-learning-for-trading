@@ -147,13 +147,19 @@ population_audit
 # The table retains each checkpoint as a separate row. It supports descriptive comparison only;
 # strategy selection occurs after every row has an equal-weight validation backtest.
 #
-# **What the four columns are.** The information coefficient is the rank correlation between a
-# model's predictions and the realised label, computed across the symbols priced at one decision
-# time and then averaged over decision times. `ic_mean` is that average, `ic_std` its dispersion
-# across decision times, and `ic_t` the ratio of the two scaled by the number of decision times,
-# so it asks whether the mean is distinguishable from zero rather than whether it is large.
-# `pct_positive` is the share of decision times whose IC exceeded zero, which separates a model
-# that is mildly right most of the time from one carried by a few large periods.
+# **What the four columns are, and the grain they are aggregated at.** The information coefficient
+# is the rank correlation between a model's predictions and the realised label across the symbols
+# priced at one decision time. Those are averaged within a fold to give the fold's IC, and the
+# columns here aggregate over *folds*, not over decision times: `ic_mean` is the mean of the fold
+# ICs, `ic_std` their dispersion across folds, and `pct_positive` the share of folds whose IC came
+# out above zero.
+#
+# **`ic_t` is a fold-level diagnostic and is not the significance test.** It divides `ic_mean` by
+# the standard error implied by that fold-level dispersion, so with a handful of folds it rests on
+# a handful of numbers and is easily moved by one of them. The inferential statistic is `ic_t_hac`,
+# computed on the daily IC series with a HAC correction at the label's overlap, because overlapping
+# labels make neighbouring days dependent and an uncorrected error is too small. Read `ic_t` as a
+# description of how consistent the folds were, never as evidence that the mean is real.
 #
 # **Rank correlation is the point of the choice.** It is invariant to any increasing transform of
 # the predictions, so a model whose values are badly scaled but correctly ordered scores the same

@@ -189,6 +189,21 @@ print(f"Universes: {list(universes)}; symbols held per decision date: {cost_top_
 # representative's signal and overrides three fields: the universe restriction, the concentration,
 # and the spread fraction. Within one representative and universe only the fraction varies, which
 # is what makes a curve a curve.
+#
+# **Why the four fractions are these four.** They are anchors rather than a linear sweep. `1.0` is
+# the order crossing the full quoted spread, which is what a marketable order pays if nothing goes
+# its way. `0.75` is close to the population-average ratio of effective to quoted spread, so it
+# stands for ordinary execution. `0.203` is the best case reported for algorithmic execution in
+# at-the-money equity options, and it is the number that decides whether this strategy is viable
+# at all: if the result only survives there, it survives only for a desk that executes as well as
+# anyone has been measured to. `0.5` sits between the two middle cases so the curve is not read
+# from three points.
+#
+# **The universe axis is not a robustness check, it is a second question.** `full` prices the
+# strategy on every name it selects; `liquid` restricts to the bottom quintile of quoted
+# half-spread at each rebalance. A strategy that only clears its costs on the liquid subset is a
+# different, smaller strategy than the one selected upstream, and reporting the two together is
+# what keeps that from being presented as the same result at a better cost assumption.
 
 # %%
 request_rows = []
@@ -238,6 +253,13 @@ print(
 # are eligible and the concentration changes how many are held. The engine validates the paired
 # option lifecycle, that every selected contract ends either by cash settlement or by liquidation,
 # the retained hedge, and every cost input before publishing.
+#
+# **Re-resolving contracts per request is what makes the comparison honest and what makes it
+# slow.** The alternative - resolving once and re-pricing - would compare one contract set at
+# several cost assumptions, which answers a narrower question than the one asked here: under a
+# liquid-universe restriction the strategy does not hold the same options more cheaply, it holds
+# different options. Sharing a contract set across requests would hide that substitution and
+# report the cost of a portfolio the strategy would not have held.
 
 # %%
 execution = run_official_backtest_requests(
