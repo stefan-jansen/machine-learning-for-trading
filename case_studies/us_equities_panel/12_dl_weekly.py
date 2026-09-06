@@ -662,12 +662,15 @@ show_with_alt(
 #
 # **Within the weekly grid**, direct regression against one-step forecasting is the comparison
 # this notebook was built for: same rows, same horizon, same lookback, two ways of writing the
-# prediction down. Both sides carry a maximum over their own ten checkpoints, and that is not the
-# same as the bias cancelling. How much a maximum of ten exceeds the underlying value depends on
-# how much those ten vary and how correlated they are, and a recurrent fit, a linear map and a
-# stack of forecasting blocks have no reason to agree on either. The curve above is where to see
-# which of the three had the noisier training run, and a gap between two rows smaller than the
-# spread of the curve behind them is not a difference between formulations.
+# prediction down. What the table cannot do is settle it. Each row is a maximum over that
+# configuration's own ten checkpoints, both sides are, and applying the same operation to both is
+# not the same as the bias cancelling - how far a maximum of ten sits above the quantity
+# underneath depends on how much those ten vary and how correlated they are, and a recurrent fit,
+# a linear map over a normalised window and a stack of forecasting blocks have no reason to agree
+# on either. So an ordering here is not evidence that the formulation did anything. Establishing
+# that would take a paired comparison of the two on the same decision dates with an interval
+# around the difference, which is what `15_model_analysis` does for the daily families and which
+# nothing in this notebook computes.
 #
 # **Against the daily families**, the comparison is looser twice over. Those models are scored on
 # every session and these on Fridays only, so the two are measured over different sets of decision
