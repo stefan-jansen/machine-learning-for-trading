@@ -305,7 +305,16 @@ model_based:
     refit_every: 63
     # Expectation-maximization reaches a local optimum, so the fit is repeated
     # from this many starting points and the highest training likelihood is kept.
+    # Measured on etfs' panel through the same estimator, ten restarts give ten
+    # distinct log-likelihoods, so the search explores rather than repeating itself.
     n_restarts: 10
+    # Convergence threshold on the per-settlement log-likelihood gain. Tighter than
+    # hmmlearn's 1e-2 default, which is what this notebook has always fitted at and
+    # what fx_pairs chose independently. Declared rather than baked into the shared
+    # estimator: measured on etfs, the two tolerances move the emitted probability by
+    # about 1e-3 on average and flip none of 756 state assignments, so the looser
+    # default is not wrong - it is just not what this notebook fits at.
+    tol: 1.0e-4
   incremental_ic:
     # A settlement needs this many symbols quoting before its cross-sectional rank
     # correlation is used, and a feature needs this many usable settlements before
