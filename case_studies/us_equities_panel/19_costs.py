@@ -218,6 +218,13 @@ if eligible.is_empty() or not ineligible.is_empty():
 # checkpoint of it, how the signal turned those predictions into positions, how the money was
 # spread across them, and any overlay laid on top. Only the cost varies from here.
 #
+# **"Any overlay laid on top" is the part that has to be carried deliberately.** A strategy drawn
+# from the signal or allocation stage has no overlay, and the backtest runner treats an absent
+# overlay as none - so a risk-overlay strategy re-priced without its risk block runs clean and
+# produces a cost curve for the un-overlaid strategy under the overlaid one's name. That is the
+# same failure as leaving `risk_overlay` out of the pool, reached from the other side. Section 4
+# carries the block through and refuses a risk-overlay source whose spec does not hold one.
+#
 # **Because one configuration is kept per label, some summaries have no width.** A median, a range
 # or a confidence band across configurations is computed over a single row, so all three coincide.
 # That is a property of the shortlist size rather than a finding about stability.
@@ -331,13 +338,14 @@ plan_rows = []
 
 # %%
 def cost_member_records(
-    label, source_row, selection, signal, allocation, cost_request, expected_hash
+    label, source_row, selection, signal, allocation, risk, cost_request, expected_hash
 ):
     request = {
         "label": label,
         "selection": selection,
         "signal": signal,
         "allocation": allocation,
+        "risk": risk,
         "costs": cost_request["costs"],
         "regime": cost_request["regime"],
         "cost_value": cost_request["cost_value"],
@@ -367,11 +375,24 @@ def plan_cost_member(label, prices, cost_request, source_row):
     source_spec = json.loads(source_row["spec_json"])
     signal = dict(source_spec["strategy"]["signal"])
     allocation = source_spec["strategy"].get("allocation")
+    # Every block the source strategy carries has to be carried into the re-priced one, and the
+    # risk block is the one that is easy to lose: it is absent from a signal-stage or an
+    # allocation-stage source, `plan_backtests` and `run_backtests` both default it to None, and
+    # a strategy re-priced without its overlay produces a cost curve for a different strategy
+    # under the overlaid one's name. That is the same defect as excluding risk_overlay from the
+    # pool, arriving from the other side, so it is asserted rather than assumed below.
+    risk = source_spec["strategy"].get("risk")
+    if source_row["stage"] == "risk_overlay" and not risk:
+        raise ValueError(
+            f"backtest {source_row['backtest_hash']} is staged risk_overlay and its spec carries "
+            "no risk block, so re-pricing it would drop the overlay it is named for"
+        )
     plan = plan_backtests(
         study,
         predictions=selected_prediction,
         signal=signal,
         allocation=allocation,
+        risk=risk,
         costs=cost_request["costs"],
         prices=prices,
         chapter="ch18",
@@ -384,6 +405,7 @@ def plan_cost_member(label, prices, cost_request, source_row):
         selected_prediction,
         signal,
         allocation,
+        risk,
         cost_request,
         plan.expected_hashes[0],
     )
@@ -440,6 +462,7 @@ def execute_cost_member(prices, request):
         predictions=request["selection"],
         signal=request["signal"],
         allocation=request["allocation"],
+        risk=request["risk"],
         costs=request["costs"],
         prices=prices,
         chapter="ch18",
