@@ -76,13 +76,8 @@ if TYPE_CHECKING:
     from case_studies.research.workspace import Study
 
 
-_GBM_PREVIEW_FIELDS = {
-    "checkpoint_interval",
-    "folds",
-    "max_iterations",
-    "max_symbols",
-    "train_sample_frac",
-}
+from case_studies.utils.preview_fields import GBM_PREVIEW_FIELDS as _GBM_PREVIEW_FIELDS
+
 _GBM_REQUEST_FIELDS = {
     "checkpoint_interval",
     "device",

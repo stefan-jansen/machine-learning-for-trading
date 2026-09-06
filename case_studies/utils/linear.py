@@ -69,8 +69,7 @@ _MODEL_CLASSES = {
     "ElasticNet": ElasticNet,
     "LogisticRegression": LogisticRegression,
 }
-_PREVIEW_FIELDS = {"folds", "max_symbols", "train_sample_frac"}
-
+from case_studies.utils.preview_fields import LINEAR_PREVIEW_FIELDS as _PREVIEW_FIELDS
 
 # Declared behaviour of this runner. Bump when a change here would change a fitted result: the
 # model classes it dispatches to, how a hyperparameter is derived, the fitting procedure, or what

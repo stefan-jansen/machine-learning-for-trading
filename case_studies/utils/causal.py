@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     from case_studies.research.workspace import Study
 
 
-_DML_PREVIEW_FIELDS = {"max_samples", "max_symbols", "n_folds", "n_placebo"}
+from case_studies.utils.preview_fields import DML_PREVIEW_FIELDS as _DML_PREVIEW_FIELDS
 
 
 @dataclass(frozen=True)

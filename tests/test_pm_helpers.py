@@ -400,24 +400,29 @@ def test_every_declared_parameter_reaches_its_notebook(overrides: dict) -> None:
 def _accepted_reduction_fields() -> tuple[set[str], set[str]]:
     """Every reduction key some family accepts, and the four the DML resolver requires.
 
-    Imported from the modules that enforce them rather than restated here, so the guard
-    cannot go on accepting a name its consumer has dropped.
+    Imported from `case_studies/utils/preview_fields.py`, the module each family resolver
+    reads its own set from, rather than restated here: the guard and the resolver share one
+    object, so the guard cannot go on accepting a name its consumer has dropped. The sets sit
+    apart from the resolvers because four of the five family modules import `torch` at module
+    scope and this job has no torch.
     """
-    from case_studies.utils.causal import _DML_PREVIEW_FIELDS
-    from case_studies.utils.deep_learning import _SEQUENCE_PREVIEW_FIELDS
-    from case_studies.utils.gbm import _GBM_PREVIEW_FIELDS
-    from case_studies.utils.latent_factors.adapter import _PREVIEW_FIELDS as _LATENT_FIELDS
-    from case_studies.utils.linear import _PREVIEW_FIELDS as _LINEAR_FIELDS
-    from case_studies.utils.tabular_dl import _TABM_PREVIEW_FIELDS
+    from case_studies.utils.preview_fields import (
+        DML_PREVIEW_FIELDS,
+        GBM_PREVIEW_FIELDS,
+        LATENT_PREVIEW_FIELDS,
+        LINEAR_PREVIEW_FIELDS,
+        SEQUENCE_PREVIEW_FIELDS,
+        TABM_PREVIEW_FIELDS,
+    )
 
     return set().union(
-        _DML_PREVIEW_FIELDS,
-        _SEQUENCE_PREVIEW_FIELDS,
-        _GBM_PREVIEW_FIELDS,
-        _LATENT_FIELDS,
-        _LINEAR_FIELDS,
-        _TABM_PREVIEW_FIELDS,
-    ), set(_DML_PREVIEW_FIELDS)
+        DML_PREVIEW_FIELDS,
+        GBM_PREVIEW_FIELDS,
+        LATENT_PREVIEW_FIELDS,
+        LINEAR_PREVIEW_FIELDS,
+        SEQUENCE_PREVIEW_FIELDS,
+        TABM_PREVIEW_FIELDS,
+    ), set(DML_PREVIEW_FIELDS)
 
 
 def _declared_reductions(overrides: dict) -> dict[str, dict]:
