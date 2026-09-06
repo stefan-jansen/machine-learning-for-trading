@@ -183,11 +183,9 @@ if narrows_declared_catalog(study, "gbm", configs) and not POPULATION_NAME:
         "the canonical population; pass POPULATION_NAME to give it its own"
     )
 
-# The diagnostic set is published by an unnarrowed canonical run and by nothing else, so the
-# requirement that its configurations be among the ones fitted applies to that run and to
-# nothing else. Asked unconditionally, it refused a perfectly valid narrowed or preview run
-# for leaving out a configuration that run was never going to publish, and the only way past
-# it was to override a parameter irrelevant to what was being fitted.
+# Only an unnarrowed canonical run publishes the diagnostic set, so only that run has to carry
+# every diagnostic configuration. A narrowed or preview run publishes no name and is free to
+# leave any of them out.
 is_published_population = (
     EXECUTION_TIER == "canonical" and not POPULATION_NAME and not PREVIEW_REDUCTIONS
 )
@@ -341,7 +339,7 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # incomplete for a reason unrelated to any model.
 
 # %% [markdown]
-# ## What the run produced, and the sets it publishes
+# ### What the run produced, and the sets it publishes
 #
 # The cell below reports both, because they are one statement: the population is one immutable
 # list covering every label this run fitted, and the candidate sets are the names the later
@@ -409,7 +407,11 @@ display(
         "ic_std",
         "ic_n_days",
         "full_coverage",
-    ).head(15)
+    )
+    # Five per label rather than fifteen off the top. The frame is sorted by label and then by IC,
+    # so a flat head shows one label's block and the paragraph above sends the reader to all three.
+    .group_by("label", maintain_order=True)
+    .head(5)
 )
 
 set_rows = []

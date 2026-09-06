@@ -28,9 +28,9 @@
 # and that stock's loadings, so what the model can say about a stock is exactly what the stock has
 # in common with the rest of the panel - and nothing that is specific to it.
 #
-# **That is a compression, and the discarding is the point.** Five factors stand in for the whole
-# cross-section, so this model is deliberately blind to what makes one stock different from another
-# with the same loadings. The notebooks before it are where stock-specific information lives; this
+# **That is a compression, and the discarding is the point.** A handful of factors stand in for the
+# whole cross-section, so this model is deliberately blind to what separates two stocks that
+# load the same way. The notebooks before it are where stock-specific information lives; this
 # one asks how much is left once you keep only what is shared.
 #
 # **Everything is fitted on training rows only.** Factors and loadings are both estimated inside
@@ -42,7 +42,7 @@
 #
 # - Say what a factor and a loading are in terms of a panel of returns, without reference to an
 #   algorithm.
-# - Explain what a five-factor reconstruction of a stock's return can and cannot contain.
+# - Explain what a few-factor reconstruction of a stock's return can and cannot contain.
 # - Say why the factors have to be extracted inside a fold's training window, and what a
 #   whole-sample extraction would have used.
 # - State what the declared factor count does and does not establish about the right number.
@@ -76,7 +76,6 @@ from utils.paths import get_case_study_dir
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
 LABELS = []
-N_FACTORS = 5
 OVERRIDES = {}
 EXECUTION_TIER = "canonical"
 WORKSPACE = "experiments"
@@ -90,11 +89,13 @@ PREVIEW_N_FACTORS = 0
 # What each setting a run may pass decides:
 #
 # - **`LABELS`** empty fits the primary label and every declared variant. A subset fits only those.
-# - **`N_FACTORS`** is how many common movements are extracted. Five is declared rather than
-#   searched, and that is a design choice with consequences: too few and distinct common movements
-#   are forced into one direction, too many and the later ones are fitting noise that will not
-#   repeat out of sample. Nothing in this case study tunes it, so no result here is evidence that
-#   five is right - only evidence of what five gives.
+# - **The factor count** is how many common movements are extracted. It is read from the preset at
+#   `case_studies/config/pca/pca.yaml` rather than set here, so there is one place to change it
+#   and one place to look. It is declared rather than searched, and that is a design choice with
+#   consequences: too few and distinct common movements are forced into one direction, too many
+#   and the later ones are fitting noise that will not repeat out of sample. Nothing in this case
+#   study tunes it, so no result here is evidence that the declared count is right - only evidence
+#   of what it gives.
 # - **`OVERRIDES`** changes a resolved model parameter. An override moves the training identity, so
 #   an overridden run registers beside the published one rather than replacing it.
 # - **`EXECUTION_TIER`** is `canonical` or `preview`. A canonical run fits the whole panel on every
@@ -113,13 +114,20 @@ if unknown_labels:
 if len(selected_labels) != len(set(selected_labels)):
     raise ValueError("LABELS contains duplicates")
 
+declared_factors = set()
 for label in selected_labels:
     configured = {
-        config["config_name"]
+        config["config_name"]: config
         for config in load_configs(CASE_STUDY_ID, label, family="latent_factors")
     }
     if "pca" not in configured:
         raise ValueError(f"PCA is not configured for {label}")
+    declared_factors.add(int(configured["pca"]["params"]["n_factors"]))
+# One declaration, read rather than restated. A count typed here as well would be a second
+# declaration free to disagree with the preset, and the preset would then decide nothing.
+if len(declared_factors) != 1:
+    raise ValueError(f"the selected labels declare different factor counts: {declared_factors}")
+N_FACTORS = declared_factors.pop()
 
 label_menu = pl.DataFrame(
     {
@@ -174,7 +182,9 @@ requests = tuple(
         family="latent_factors",
         label=label,
         config_name="pca",
-        overrides={"n_factors": int(N_FACTORS), **OVERRIDES},
+        # The preset supplies the factor count; a value passed here would win over it, which is
+        # what OVERRIDES is for and what makes such a run unpublishable.
+        overrides=dict(OVERRIDES),
         execution_tier=EXECUTION_TIER,
         preview_reductions=preview_reductions,
     )
@@ -335,10 +345,7 @@ execution_diagnostics
 # %% tags=["results"]
 set_rows = []
 is_published_population = (
-    EXECUTION_TIER == "canonical"
-    and selected_labels == published_labels
-    and N_FACTORS == 5
-    and not OVERRIDES
+    EXECUTION_TIER == "canonical" and selected_labels == published_labels and not OVERRIDES
 )
 if is_published_population:
     for selected_label in selected_labels:
@@ -382,8 +389,8 @@ compatible_sets
 # keeps the one it was fitted with. [`13b_ipca`](13b_ipca.ipynb) is the answer to both, and the
 # comparison between the two is what the pair is for.
 #
-# **Known limitations.** Five factors are declared rather than searched, so nothing here says five
-# is right. Everything is measured on validation folds that have been read many times over by the
+# **Known limitations.** The factor count is declared rather than searched, so nothing here says
+# the declared one is right. Everything is measured on validation folds read many times over by the
 # time a case study reaches this notebook, and ranking accuracy is not strategy performance.
 #
 # **Next**: [`13b_ipca`](13b_ipca.ipynb) makes a stock's loading a function of what the stock is.

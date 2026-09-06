@@ -255,14 +255,12 @@ shortlist.select(
 # allocator the longest window instead would change what the cheap ones are measured on.
 
 # %%
-# Prices are cached by (label, warmup) rather than loaded once per label. Strategy._build_spec
-# (research/strategy.py:389) digests exactly the frame it is handed, and strategy_warmup_periods
-# (:201-211) resolves a different prefix per allocator: 0 for the non-moment methods, vol_window
-# for inverse_vol / risk_parity / hrp, lookback for mvo and mvo_ledoit_wolf. Handing every member
-# of a label the same 126-bar frame stamps a price digest that 20_strategy_analysis recomputes at
-# the member's own warmup (20:157-169) and then rejects as "does not use canonical validation
-# prices" - and lifecycle.evaluate_holdout (lifecycle.py:342-368) applies the same rule, so the
-# holdout inherits it. cme_futures/research_workflow.py:674-682 caches on the same key.
+# Prices are cached by (label, warmup), not once per label. Each allocator needs a different
+# amount of history before it can decide anything - none for the ones that read only the
+# predictions, a volatility window for the per-stock ones, a longer lookback for the ones that
+# estimate a covariance matrix - and the frame a member was handed is digested into its identity.
+# So the frame has to be the one that member's own warmup implies, and the cache key is what keeps
+# it that way while still loading each distinct frame once.
 _price_cache: dict[tuple[str, int], object] = {}
 
 
@@ -467,15 +465,10 @@ if (
 if EXECUTION_TIER == "canonical":
     for label in completed.get_column("label").unique().sort().to_list():
         label_name = label.replace("_", "-")
-        # No comparison_contract, matching cme_futures/research_workflow.py:811, which builds the
-        # same per-label pool across the full funnel and declares nothing. An empty contract makes
-        # every protocol field required-constant, which is the guard: if two members disagree on
-        # `cv` they measured their Sharpe on different folds and ranking them is not a comparison,
-        # and this field is the only thing checking that. Latent-factor members will refuse on
-        # `feature_artifacts` when they enter this pool - latent builds it from a different object
-        # than the other five families (latent_factors/case_study.py:337-383, carrying the label
-        # digest and setup.yaml bytes). That refusal is a known adapter defect surfacing, not a
-        # property to declare around; report it rather than adding the field here.
+        # Nothing is declared comparable, so every field of the protocol has to be identical
+        # across the members. That is the guard: two rows that measured their Sharpe on different
+        # folds are not two rankings of one thing, and this is what refuses to freeze them
+        # together.
         result_set = study.backtests.freeze(
             completed.filter(pl.col("label") == label),
             name=f"us-equities-{label_name}-allocation-v1",
@@ -559,10 +552,6 @@ show_with_alt(
     f"underlying frame, {_n_positive} of {_above.height} allocators reach a positive Sharpe on at "
     "least one configuration.",
 )
-
-# %% [markdown]
-# The cost and risk notebooks reopen these names together with the matching equal-weight baseline.
-# No model is retrained, and the selected checkpoint remains part of every downstream identity.
 
 # %% [markdown]
 # ## What to notice

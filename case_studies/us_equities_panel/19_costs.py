@@ -657,16 +657,29 @@ show_with_alt(
 )
 
 # %% [markdown]
-# The risk notebook uses the same fixed source configuration from the selection-eligible baseline
-# and allocation sets. Cost rows do not affect that choice.
-
-# %% [markdown]
-# ## Key takeaways and limitations
+# ## What to notice
 #
-# - A cost curve varies transaction-cost assumptions while retaining the source model, checkpoint,
-#   signal, and allocation.
-# - Cost-sensitivity rows remain outside the validation selection population.
-# - The percentage and per-share regimes answer different implementation questions and retain
-#   separate identities.
-# - Uniform cost schedules summarize execution frictions; security-specific liquidity and realized
-#   fills require additional data.
+# **A sweep has to fix its strategy before it varies anything.** Every row above is the same
+# model, the same checkpoint, the same names on the same dates, re-priced. If the sweep were
+# allowed to reorder the field, the strategy carried forward would be whichever one happened to
+# suit the cost assumption, which is choosing a strategy on an assumption rather than testing one
+# against it. That is why these rows are registered outside the population selection is made over.
+#
+# **The two regimes are two assumptions, not two measurements of one thing.** A proportional cost
+# charges the same fraction whatever the share price; a per-share cost charges the same cents on a
+# five-dollar stock as on a five-hundred-dollar one. They disagree most on the cheap end of the
+# panel, which is where a broad long-short book holds a large share of its names, so an ordering
+# that holds under one is not thereby established under the other.
+#
+# **Where a curve crosses zero is a break-even, not a verdict on tradability.** It says what
+# uniform friction this strategy could absorb before the validation Sharpe went negative. Real
+# friction is not uniform: it varies by name, by size, by time of day, and it grows with the
+# position relative to what the stock trades. A strategy whose break-even sits far above any
+# plausible schedule has cleared a floor, not proved it can be traded.
+#
+# **Known limitations.** One configuration per label is re-priced, so nothing here says how the
+# cost curve would look for a strategy that traded differently. The schedules are flat and applied
+# to every name equally, and on this panel the per-share regime is exploratory for the reason the
+# preamble gives - the prices are split- and dividend-adjusted, so a fixed charge per share is not
+# the charge that would have been paid. And the Sharpe being charged is a validation Sharpe, on
+# folds read many times over by the time a case study reaches this notebook.

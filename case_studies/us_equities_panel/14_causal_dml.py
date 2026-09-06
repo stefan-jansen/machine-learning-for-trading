@@ -78,12 +78,14 @@
 import os
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import polars as pl
 import yaml
 
 from case_studies.research import open_study, supersedes_for
 from utils.modeling import load_configs
 from utils.paths import get_case_study_dir
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 # %% [markdown]
 # ## What this estimate rests on, and what it cannot establish
@@ -209,8 +211,10 @@ resolved = request.resolve()
 # ## Inspect the resolved request
 #
 # Resolution fails before fitting if the finalized artifacts omit the treatment or any configured
-# confounder. The table exposes the exact population, temporal design, nuisance estimator, and input
-# identities used by the run.
+# confounder. The table below is what the run will actually estimate: the treatment and the
+# confounder list it resolved, the population and temporal design they are estimated over, the
+# nuisance estimator and the parameters it will be fitted with, and the identity the whole thing
+# hashes to.
 
 # %% tags=["results"]
 spec = resolved.spec
@@ -228,6 +232,8 @@ resolved_table = pl.DataFrame(
             "label": spec["label"],
             "treatment": computation["estimand"]["treatment"],
             "confounders": computation["estimand"]["confounders"],
+            "nuisance_estimator": computation["model"]["class"].rsplit(".", 1)[-1],
+            "nuisance_params": computation["model"]["nuisance_params"],
             "feature_artifacts": artifact_names,
             "features": len(computation["feature_names"]),
             "analysis_rows": computation["analysis_population"]["n_rows"],
@@ -244,9 +250,15 @@ resolved_table
 # %% [markdown]
 # ## Execute and validate the result
 #
-# The runner reopens an exact complete result on retry. A new request produces one causal registry
-# record only after finite effect and HAC uncertainty estimates exist. Causal results remain
-# separate from predictive candidate sets and strategy selection.
+# A result is registered only once a finite effect and a finite HAC standard error both exist, so
+# a row in the table below is an estimate rather than an attempt.
+#
+# Two of its columns are the comparison the method is for. **`naive_effect`** is the treatment
+# regressed on the outcome with nothing removed - what a reader would get by correlating momentum
+# with the forward return. **`confounding_bias_pct`** is how far the double-ML estimate moved away
+# from it, as a percentage, which is the size of what the three declared confounders were
+# accounting for. A large value says the confounders mattered; it says nothing about whether a
+# fourth one is missing.
 
 # %%
 result = resolved.run()
@@ -277,12 +289,55 @@ result_table = pl.DataFrame(
 result_table
 
 # %% [markdown]
+# ### What the permuted treatments produced
+#
+# The refutation p-value above is one number read off the distribution below. Each draw is the
+# whole estimate redone with the treatment permuted in blocks within each stock, so the draws are
+# what the effect looks like when the treatment's real timing has been destroyed and everything
+# else - the confounders, the folds, the nuisance models - is left alone.
+#
+# What to read: where the observed effect sits relative to the bulk of the draws. Far out in a
+# tail means an effect this size is not something the construction produces by itself. Inside the
+# bulk means it is, and no amount of the estimate's own precision changes that. The spread of the
+# draws is also worth looking at on its own - a wide placebo distribution says this estimand is
+# hard to pin down at this sample size, whatever the point estimate came out at.
+
+# %% tags=["results"]
+placebo_effects = [float(value) for value in result.metrics.get("placebo_effects") or []]
+if not placebo_effects:
+    raise RuntimeError(
+        "the causal result registered no placebo draws, so the refutation p-value above has "
+        "nothing behind it"
+    )
+observed_effect = float(result.metrics["dml_effect"])
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+ax.hist(placebo_effects, bins=25, color=COLORS["recede"], edgecolor="none")
+ax.axvline(observed_effect, color=COLORS["blue"], lw=1.6)
+ax.set_xlabel("Estimated effect")
+ax.set_ylabel("Permuted draws")
+add_message_title(
+    ax,
+    "Where the estimate sits once the treatment's timing is destroyed",
+    subtitle=(f"{len(placebo_effects)} block-permuted refits, with the observed effect marked"),
+)
+fig.tight_layout()
+# The alt text counts rather than asserts. Whether the observed effect is extreme is the whole
+# question, so it is read off the draws instead of being described.
+_more_extreme = sum(abs(value) >= abs(observed_effect) for value in placebo_effects)
+show_with_alt(
+    fig,
+    "A histogram of the effect estimated from block-permuted treatments, with a vertical line at "
+    "the effect estimated from the real one. Counted from the draws, "
+    f"{_more_extreme} of {len(placebo_effects)} permutations produced an effect at least as large "
+    "in absolute value as the observed one.",
+)
+
+# %% [markdown]
 # ## Downstream handoff
 #
-# `15_model_analysis.py` can open this exact causal result separately from its predictive result
-# sets. The resolved specification retains the label, treatment, complete confounder list, nuisance
-# defaults and overrides, temporal design, analysis population, finalized input digests, source,
-# runtime, and execution tier needed to reproduce the estimate.
+# [`15_model_analysis`](15_model_analysis.ipynb) opens this result on its own, apart from the
+# predictive ones, because it answers a different question and cannot be ranked beside a score.
 
 # %% [markdown]
 # ## What to notice

@@ -84,21 +84,25 @@
 """Weekly-frequency sequence models: direct regression against one-step forecasting."""
 
 # %%
+import gc
 import os
 import shutil
-import warnings
-from gc import collect
 from pathlib import Path
-
-warnings.filterwarnings("ignore")
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
 import torch
+from IPython.display import display
 
 from case_studies.utils.cv_window import modeling_fold_boundaries
+from case_studies.utils.deep_learning import run_dl_cv
+from case_studies.utils.registry import (
+    load_prediction_metrics,
+    load_prediction_sets,
+    load_training_runs,
+)
 from utils.artifact_specs import load_setup_config, resolve_label_buffer
 from utils.modeling import (
     RANDOM_SEED,
@@ -173,8 +177,6 @@ if FORCE_RETRAIN and SAVE_ROOT.exists():
     shutil.rmtree(SAVE_ROOT)
 PYTORCH_SAVE_DIR.mkdir(parents=True, exist_ok=True)
 DARTS_SAVE_DIR.mkdir(parents=True, exist_ok=True)
-
-LOG_FILE = Path("/tmp/dl_weekly_experiment.log")
 
 # %% [markdown]
 # ## Load and Subsample to Weekly Frequency
@@ -309,7 +311,7 @@ print(f"  Weekly labels: {labels.shape[0]:,} rows")
 
 dataset = features.join(labels, on=["symbol", "timestamp"], how="inner")
 del feat, mb, features, labels
-collect()
+gc.collect()
 
 # A capped universe takes the stocks with the most rows, ties broken by name. Taking the
 # alphabetically first names instead would select on the spelling of a ticker rather than on how
@@ -326,7 +328,7 @@ print(f"  Weekly (Friday): {dataset.shape[0]:,} rows, {n_symbols} symbols")
 dataset_pd = dataset.to_pandas()
 dataset_pd["timestamp"] = pd.to_datetime(dataset_pd["timestamp"])
 del dataset
-collect()
+gc.collect()
 
 # %% [markdown]
 # ## Create Walk-Forward CV Splits
@@ -422,19 +424,24 @@ for name, record in INPUT_LINEAGE["artifacts"].items():
 # %% [markdown]
 # ## The direct-regression arm
 #
-# Both configurations read the same twelve-week window and emit one number, the return, with no
-# structure connecting that output to the inputs it was computed from. `lstm_h64` steps through
-# the window one week at a time, carrying a hidden state that summarises everything it has seen;
-# `nlinear` subtracts the window's last value, applies one linear map to what is left, and adds
-# the value back, so it predicts a change from the most recent observation.
+# Both configurations read the same twelve-week window and emit one number, the return. Neither
+# has any notion that the number is a future value of one of its inputs. `lstm_h64` steps through
+# the window one week at a time, carrying a hidden state that summarises everything it has seen.
+# `nlinear` works one feature at a time: it subtracts that feature's last value, maps the twelve
+# weeks to a single number with a linear layer, and adds the last value back, so each feature is
+# summarised on its own; a final linear layer then combines those per-feature numbers into the
+# prediction. The subtract-and-restore is a normalisation of each input column, not a claim about
+# the output.
 #
 # What comes out is used as a ranking signal across stocks on a date, not as a return forecast to
 # be believed at face value, which is why the scoring below is a rank correlation.
 
 # %%
-from case_studies.utils.deep_learning import run_dl_cv
-
-# Build configs manually with weekly-adjusted lookback
+# The two architectures are the ones 09_dl_nlinear and 10_dl_lstm fit, under a weekly schedule:
+# twelve weekly observations rather than sixty daily ones, and fifty epochs rather than a hundred.
+# They keep the daily presets' names because they are the same architectures, and the registry
+# keeps the two apart anyway - the lookback, the epoch count and the input lineage are all inside
+# the training identity, so a weekly `lstm_h64` and a daily one are different rows.
 pytorch_configs = []
 for name, arch in [("lstm_h64", "lstm"), ("nlinear", "nlinear")]:
     cfg = {
@@ -456,8 +463,6 @@ for name, arch in [("lstm_h64", "lstm"), ("nlinear", "nlinear")]:
     pytorch_configs.append(cfg)
 
 print(f"Running {len(pytorch_configs)} PyTorch configs on {device}...")
-with open(LOG_FILE, "a") as f:
-    f.write("=== PyTorch direct regression (weekly) ===\n")
 
 # %%
 pytorch_result = run_dl_cv(
@@ -492,15 +497,6 @@ print("\nDirect regression, highest-IC checkpoint per configuration:")
 print(f"  configuration: {pytorch_result['best_config_name']}")
 print(f"  epoch: {pytorch_result['best_epoch']}")
 print(f"  mean validation IC: {pytorch_result['best_ic']:.4f}")
-
-with open(LOG_FILE, "a") as f:
-    f.write(
-        f"Best: {pytorch_result['best_config_name']} "
-        f"IC={pytorch_result['best_ic']:.4f} "
-        f"epoch={pytorch_result['best_epoch']}\n"
-    )
-    for r in pytorch_result["grid_results"]:
-        f.write(f"  {r['config_name']}: IC={r['best_ic']:.4f} epoch={r['best_epoch']}\n")
 
 # %% [markdown]
 # ## The forecasting arm
@@ -541,8 +537,6 @@ darts_configs = [
 ]
 
 print(f"Running DARTS N-BEATS (1-step weekly forecasting) on {device}...")
-with open(LOG_FILE, "a") as f:
-    f.write("\n=== DARTS N-BEATS (weekly, 1-step) ===\n")
 
 # %%
 darts_result = run_dl_cv(
@@ -576,9 +570,6 @@ darts_result = run_dl_cv(
 print("\nOne-step forecasting, highest-IC checkpoint:")
 print(f"  epoch: {darts_result['best_epoch']}")
 print(f"  mean validation IC: {darts_result['best_ic']:.4f}")
-
-with open(LOG_FILE, "a") as f:
-    f.write(f"N-BEATS: IC={darts_result['best_ic']:.4f} epoch={darts_result['best_epoch']}\n")
 
 # %% [markdown]
 # ### What more training does to each formulation
@@ -658,21 +649,28 @@ show_with_alt(
 )
 
 # %% [markdown]
-# ## What to notice
+# ## Reading the summary table
 #
-# The table below puts the three weekly fits beside each other, and then beside the daily
-# tabular families already registered on the same label. Two comparisons, and they answer
-# different questions.
+# **Every number in it is a maximum.** Each fit is scored at ten checkpoints, and the row below
+# carries that configuration's best one - which is the same quantity the daily notebooks refuse to
+# report as a single result, because the maximum of ten draws is larger than any one of them
+# whether or not the model learned anything. The curve above is what the maximum was taken from,
+# and it is the honest object: read the row to see where a configuration got to, and the curve to
+# see whether getting there meant anything.
+#
+# Two comparisons follow, and they answer different questions.
 #
 # **Within the weekly grid**, direct regression against one-step forecasting is the comparison
 # this notebook was built for: same rows, same horizon, same lookback, two ways of writing the
-# prediction down.
+# prediction down. Both sides carry the same maximum-over-checkpoints, so the comparison between
+# them is not distorted by it.
 #
-# **Against the daily families**, the comparison is looser and worth reading with that in mind.
-# Those models are scored on every session and these on Fridays only, so the two are measured over
-# different sets of decision dates. A difference between them is a difference in the experiment as
-# much as in the model, which is also why these predictions stay out of the canonical backtest
-# pool.
+# **Against the daily families**, the comparison is looser twice over. Those models are scored on
+# every session and these on Fridays only, so the two are measured over different sets of decision
+# dates; and the daily figure below is a mean over the validation period rather than a maximum
+# over checkpoints, so it is not the same statistic. A difference between the two blocks is a
+# difference in the experiment before it is a difference in the model, which is also why these
+# predictions stay out of the canonical backtest pool.
 #
 # **What generalizes is the reframing.** Whether sampling to a coarser grid pays depends on how
 # much history the panel holds and how fast the signal decays, and a reader applying this to their
@@ -703,33 +701,51 @@ all_results.append(
     }
 )
 
-results_df = pl.DataFrame(all_results).sort("ic", descending=True)
-print(results_df)
+results_df = pl.DataFrame(all_results).sort("ic", descending=True).rename({"ic": "best_ic"})
+display(results_df)
 
 # %%
-# Compare against registry baselines
-import sqlite3
+# The daily families through the registry's own accessors rather than a hand-written join: the
+# three tables this needs are exactly what `load_training_runs`, `load_prediction_sets` and
+# `load_prediction_metrics` return, and `ic_mean_daily` is the mean the metrics table already
+# holds. A join written here would be a fourth copy of a schema that lives in one place.
+daily_runs = [
+    frame
+    for family in ("linear", "gbm", "tabular_dl")
+    if (frame := load_training_runs(CASE_STUDY_ID, family=family, label=PRIMARY_LABEL)).height
+]
+if daily_runs:
+    runs = pl.concat(daily_runs, how="vertical_relaxed")
+    sets = load_prediction_sets(CASE_STUDY_ID, split="validation")
+    metrics = load_prediction_metrics(CASE_STUDY_ID)
+    if sets.height and metrics.height and "ic_mean_daily" in metrics.columns:
+        baselines = (
+            runs.select("training_hash", "family", "config_name", "label")
+            .join(sets.select("training_hash", "prediction_hash"), on="training_hash", how="inner")
+            .join(
+                metrics.select("prediction_hash", "ic_mean_daily"),
+                on="prediction_hash",
+                how="inner",
+            )
+            .drop_nulls("ic_mean_daily")
+            .sort("ic_mean_daily", descending=True)
+            .head(5)
+            .select("family", "config_name", "label", "ic_mean_daily")
+        )
+    else:
+        baselines = pl.DataFrame()
+else:
+    baselines = pl.DataFrame()
 
-db_path = CASE_DIR / "run_log" / "registry.db"
-if db_path.exists():
-    conn = sqlite3.connect(db_path)
-    baselines = pd.read_sql_query(
-        """
-        SELECT t.family, t.config_name, t.label, AVG(f.ic) as mean_ic
-        FROM fold_metrics f
-        JOIN prediction_sets ps ON f.prediction_hash = ps.prediction_hash
-        JOIN training_runs t ON ps.training_hash = t.training_hash
-        WHERE t.label = 'fwd_ret_5d'
-          AND t.family IN ('linear', 'gbm', 'tabular_dl')
-        GROUP BY t.training_hash, t.family, t.config_name, t.label
-        ORDER BY mean_ic DESC
-        LIMIT 5
-    """,
-        conn,
+if baselines.height:
+    print("\nDaily families on the same label, mean validation IC over the period:")
+    display(baselines)
+else:
+    # Said rather than skipped. The paragraph above promises this comparison, and a cell that
+    # prints nothing when the daily families have not been registered yet leaves the reader
+    # looking for a table that was never going to appear.
+    print(
+        "\nNo daily linear, gbm or tabular_dl runs are registered for "
+        f"{PRIMARY_LABEL} in this run log, so the second comparison above has nothing to make. "
+        "Run 06_linear, 07_gbm and 08_tabular_dl first."
     )
-    conn.close()
-
-    print("\nBaseline comparison (fwd_ret_5d, daily CV):")
-    print(baselines.to_string(index=False))
-
-print("\nDone. Full log at:", LOG_FILE)
