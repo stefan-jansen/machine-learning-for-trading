@@ -45,6 +45,7 @@ from case_studies.utils.registry import model_source
 from case_studies.utils.signals import build_target_weights
 from case_studies.utils.sp500_price_lineage import adjustment_scale, continuous_adjusted_panel
 from utils.artifact_specs import resolve_market_runtime, resolve_market_semantics
+from utils.data_quality import top_entities
 from utils.paths import get_case_study_dir
 
 if TYPE_CHECKING:
@@ -1038,15 +1039,14 @@ def load_backtest_prices(
             if col in df.columns:
                 df = df.drop(col)
 
-    # Universe reduction
+    # Universe reduction, through the one rule every other reduction in the repo reaches.
+    # The local version this replaces sorted on the row count alone, and a tie broken by
+    # frame order is not stable between callers: on us_firm_characteristics' panel 423 firms
+    # sit on exactly 300 rows, so a 20-firm reduction here and a 20-firm reduction in
+    # 04_evaluation shared one name out of twenty.
     if max_symbols > 0 and "symbol" in df.columns:
-        top_symbols = (
-            df.group_by("symbol")
-            .agg(pl.len().alias("n"))
-            .sort("n", descending=True)
-            .head(max_symbols)["symbol"]
-        )
-        df = df.filter(pl.col("symbol").is_in(top_symbols.implode()))
+        top_symbols = top_entities(df, max_symbols, "symbol")
+        df = df.filter(pl.col("symbol").is_in(pl.Series("symbol", top_symbols).implode()))
 
     return df.sort("timestamp", "symbol")
 

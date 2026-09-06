@@ -541,3 +541,43 @@ def test_long_short_top_k_is_capped_to_disjoint_sides() -> None:
     assert weights.filter(pl.col("weight") > 0).height == 9
     assert weights.filter(pl.col("weight") < 0).height == 9
     assert weights.filter(pl.col("symbol") == "S09").is_empty()
+
+
+def test_a_cap_redistributes_in_equal_shares_and_drops_no_name() -> None:
+    """``_cap_weights`` bumps every uncapped name by the same amount, not proportionally.
+
+    Both halves of this were documented wrongly and the wrong version reached prose in
+    two case-study notebooks before anyone read the loop. The docstring said
+    "redistribute excess proportionally"; the code computes ``excess / n_free`` and adds
+    that one bump to every name still under the cap. And a cap was described as changing
+    which names are held, when it filters no row at all: what a binding cap moves is the
+    relative exposure across an unchanged holding set.
+
+    The fixture is built so the two rules disagree visibly. The three uncapped names
+    carry 0.18, 0.08 and 0.04, so an equal share gives each +0.10 while a proportional
+    share would give +0.18, +0.08 and +0.04. A test with equal starting weights would
+    pass under either rule and pin nothing.
+    """
+    from case_studies.utils.allocation import _cap_weights
+
+    df = pl.DataFrame(
+        {
+            "timestamp": ["2016-01-31"] * 4,
+            "symbol": ["OVER", "BIG", "MID", "SMALL"],
+            "weight": [0.70, 0.18, 0.08, 0.04],
+        }
+    )
+    out = _cap_weights(df, max_weight=0.40)
+
+    assert out.height == df.height, "a cap must drop no name"
+    assert sorted(out["symbol"]) == sorted(df["symbol"]), "the holding set must not change"
+
+    before = dict(zip(df["symbol"], df["weight"], strict=True))
+    after = dict(zip(out["symbol"], out["weight"], strict=True))
+
+    assert after["OVER"] == pytest.approx(0.40), "the over-cap name is clipped to the cap"
+    bumps = [after[s] - before[s] for s in ("BIG", "MID", "SMALL")]
+    assert bumps == pytest.approx([0.10, 0.10, 0.10]), (
+        "each uncapped name takes an equal share of the 0.30 excess, not a proportional one"
+    )
+    assert sum(after.values()) == pytest.approx(sum(before.values())), "the cap conserves gross"
