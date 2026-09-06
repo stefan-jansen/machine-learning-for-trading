@@ -994,6 +994,39 @@ case_studies/nasdaq100_microstructure/11_dl_patchtst:
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
   measured_s: 78
 
+case_studies/nasdaq100_microstructure/12_causal_dml:
+  parameters:
+    EXECUTION_TIER: preview
+    LABEL: fwd_ret_15m
+    MAX_SYMBOLS: 12
+    CV_FOLDS: 2
+    MAX_SAMPLES: 20000
+    N_PLACEBO: 12
+  writes: [causal_runs]
+  # 39 s and 8.7 GB `Maximum resident`, 2026-09-06, exit 0. The row it wrote carries a computed
+  # refutation_p over 12 successful placebo draws, so the reduction is above MIN_PLACEBO_DRAWS
+  # rather than merely at a number that parses. max_samples is the lever: 20,000 rows of a
+  # one-minute panel is about four sessions across twelve names, and the fit itself takes 3.2 s
+  # of the 39 - the rest is reading the panel.
+  measured_s: 39
+  headroom_gb: 12
+
+# nasdaq's holdout pair, exempt for the reason every case study's holdout pair is exempt.
+
+case_studies/nasdaq100_microstructure/18_holdout_predictions:
+  exempt: true
+  exempt_reason: >-
+    The holdout stage refits from an immutable canonical training spec, and
+    case_studies/research/models.py:75 refuses any spec whose execution_tier is not canonical.
+    Structural, and shared by every case study's holdout pair.
+
+case_studies/nasdaq100_microstructure/19_holdout_backtest:
+  exempt: true
+  exempt_reason: >-
+    Reads the holdout prediction set 18_holdout_predictions produces, which cannot exist in a
+    preview workspace for the reason recorded on that entry.
+
+
 # --- declared, and blocked on a defect in the notebook ----------------------------------------
 
 case_studies/etfs/10a_dl_nlinear:
@@ -1126,3 +1159,70 @@ case_studies/us_equities_panel/04_model_based_features:
     2026-09-05 at 64.6, 69.1 and 71.3 s for the chain over three runs, peak RSS 1.5 GB. This
     entry therefore does NOT demonstrate criterion 13, self-containment; the sidecar gap is the
     fixture's and is owned by the session that regenerates it.
+
+# nasdaq100_microstructure 13 through 17 and 20 are blocked for one reason with two halves, and
+# both halves were measured on 2026-09-06 rather than inferred from the notebooks' age.
+#
+# The first half is that these notebooks are not on the research boundary. 14, 15, 16, 17 and 20
+# call no `open_study` at all - they import `run_backtest` and open `run_log/registry.db` with
+# `sqlite3` directly - and 13_model_analysis reads through `Study.at`, which takes one root and
+# performs no activation. So none of the six declares EXECUTION_TIER or WORKSPACE, there is no
+# preview tier to ask for, and a reduced run would register into the case study's own artifacts.
+# That is the production path, which is what the tier boundary exists to keep a smoke run out of.
+#
+# The second half is that there would be nothing for them to read. Measured against
+# ~/ml4t/artifacts/case_studies/nasdaq100_microstructure/run_log/registry.db, the registry this
+# case study writes to and these notebooks select from: 13 training_runs, and 0 rows in
+# prediction_sets, backtest_runs, decision_artifacts, candidate_sets and fold_metrics. The one
+# official population, nasdaq100_microstructure-linear-validation-v1, declares 61 prediction
+# members and none of them exists. So the selection each of these six opens with resolves to an
+# empty set whatever reduction is declared above it.
+#
+# Each entry names its own completion issue rather than a shared one, because finishing that
+# notebook is what unblocks it and the issues are already per-notebook.
+
+case_studies/nasdaq100_microstructure/13_model_analysis:
+  writes: []
+  blocked_by: 466
+  blocked_reason: >-
+    Reads through Study.at with no EXECUTION_TIER or WORKSPACE parameter, so there is no preview
+    tier to declare, and the six populations it compares resolve to 0 prediction_sets in the
+    canonical registry.
+
+case_studies/nasdaq100_microstructure/14_backtest:
+  writes: []
+  blocked_by: 467
+  blocked_reason: >-
+    Not on the research boundary: it calls run_backtest and sqlite3 directly rather than
+    open_study, so a reduced run has no workspace and would write into the case study's own
+    registry, which holds no prediction_sets to back a sweep.
+
+case_studies/nasdaq100_microstructure/15_portfolio_management:
+  writes: []
+  blocked_by: 468
+  blocked_reason: >-
+    Same shape as 14_backtest - run_backtest and resolve_best_predictions against the case
+    study's own registry, no tier parameter - and it ranks the backtests 14 would have
+    registered, of which there are none.
+
+case_studies/nasdaq100_microstructure/16_risk_management:
+  writes: []
+  blocked_by: 470
+  blocked_reason: >-
+    Same shape as 14_backtest, and it overlays risk on the allocation combinations 15 selects,
+    so it is blocked by both halves of that entry and by 15's.
+
+case_studies/nasdaq100_microstructure/17_costs:
+  writes: []
+  blocked_by: 469
+  blocked_reason: >-
+    Same shape as 14_backtest, and it prices the combinations 15 and 16 select, so it cannot
+    run before either of them does.
+
+case_studies/nasdaq100_microstructure/20_strategy_analysis:
+  writes: []
+  blocked_by: 471
+  blocked_reason: >-
+    Reads the registry with sqlite3 and declares no tier, and it interprets the strategy results
+    14 through 17 would have registered. The completion issue is filed under this notebook's
+    former number, 18_strategy_analysis.
