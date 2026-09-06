@@ -91,7 +91,7 @@ PREVIEW_UNIVERSES: tuple[str, ...] = ("liquid",)
 # happened when the label buffer was corrected. Stale the moment the run it authorizes
 # succeeds, in the same way as the declarations `12_backtest` and `13_portfolio_management`
 # carry.
-SUPERSEDES_COST_POPULATION: str = "70dd36df5992"
+SUPERSEDES_COST_POPULATION: str = "55c4f4ecd70e"
 
 # %% [markdown]
 # ## One strategy per model family

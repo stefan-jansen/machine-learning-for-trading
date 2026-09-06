@@ -73,7 +73,7 @@ WORKSPACE: str = ""
 # It moves whenever `16_holdout_predictions` refits a different configuration, which is what
 # an upstream correction does - the notebook carried no declaration at all, so the first such
 # correction left it unable to register the backtest it had just run.
-SUPERSEDES_HOLDOUT_POPULATION: str = "24482f766132"
+SUPERSEDES_HOLDOUT_POPULATION: str = "1c37919e6cce"
 
 # %%
 study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
