@@ -818,6 +818,50 @@ case_studies/sp500_equity_option_analytics/19_holdout_backtest:
     Reads the holdout prediction set 18_holdout_predictions produces, which cannot exist in a preview
     workspace for the reason recorded on that entry.
 
+# --- stage 04, the one stage below 06 that has a declaration ------------------------------------
+#
+# The smoke standard is written for stages 06 and later, which is where every other entry in this
+# file lives. nasdaq's 04 is here because its conversion onto `walk_forward_feature` and
+# `write_model_based` is the change criterion 7b is measured across, and a configuration that can
+# be re-run in a minute is what makes that a measurement rather than a claim. Nothing requires the
+# other case studies' stage 04s to be declared; `tests/test_smoke_configs.py` still only demands
+# stage 06 and later.
+
+case_studies/nasdaq100_microstructure/04_model_based_features:
+  parameters:
+    # WHICH LEVER DID THE WORK: the date range, not the symbol cap. Measured 2026-09-05 through
+    # nb-run.sh, both at three symbols: the full 2020-01-01..2021-12-31 range takes 285 s, and
+    # the quarter below takes 76 s. So cutting the universe from 115 names to 3 - a 38x cut -
+    # still leaves this notebook over the four-minute bound on its own, because its cost is per
+    # BAR rather than per refit. Three procedures each walk a symbol's minute series once, and
+    # the only one that fits anything fits a 120x4 least squares, which is arithmetic rather
+    # than a search. Roughly 55 s of the 76 is fixed - imports, the parquet scan and the four
+    # label timelines that resolve the folds - and neither lever touches it.
+    #
+    # `model_based.har.refit_every` is NOT the lever here, and the contrast with the case
+    # studies where it is worth recording: lengthening it would stop the smoke run exercising
+    # the per-bar refit path that `walk_forward_feature` was adopted for, and it would buy
+    # little, because a least-squares refit is cheap where an optimizer's search is not.
+    #
+    # The quarter has to reach past 2020-06-30 10:48, which is where fold 1's validation window
+    # opens: every readout in sections C, D and F is taken on validation rows, and a panel that
+    # stops short of them computes features nothing reports on.
+    MAX_SYMBOLS: 3
+    START_DATE: "2020-05-01"
+    END_DATE: "2020-07-31"
+    # WORKSPACE is appended by smoke-chain.sh, which supplies the throwaway directory. It is
+    # where the artifact goes; the labels and the minute panel are still read from the canonical
+    # store, so this is a reduced run of this notebook and not a run of a smaller case study.
+  # Stage 04 registers nothing. It writes an artifact, and what stands in for the registry check
+  # is the notebook's own reconciliation: row count, key uniqueness, no fold column, and every
+  # feature column Float32.
+  writes: []
+  measured_s: 76
+  # 3.6 GB `Maximum resident`, 2026-09-05, from the /usr/bin/time -v file of a three-symbol run
+  # that exited 0. The full 115-symbol sweep is entered at 30 GB in nb-run.sh's table, which a
+  # reduced run would otherwise wait for.
+  headroom_gb: 8
+
 # --- nasdaq100_microstructure -------------------------------------------------------------------
 #
 # Primary label fwd_ret_15m. Intraday, so the reductions are symbol caps rather than row samples -
