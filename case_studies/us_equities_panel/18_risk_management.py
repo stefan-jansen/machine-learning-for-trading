@@ -14,23 +14,63 @@
 # ---
 
 # %% [markdown]
-# # US Equities Panel: Risk Overlays
+# # US equities panel: rules that close a position early
 #
-# For each label, this notebook selects the highest validation-Sharpe configuration from the complete
-# equal-weight and alternative-sizing populations, then applies every declared risk overlay to that
-# fixed configuration. It finally freezes the union of equal-weight, allocation, and risk-overlay
-# rows as the immutable population used for official validation selection.
+# The two notebooks before this one decided which stocks to hold and how much to put in each. Both
+# hold every position from one rebalancing date to the next, whatever it does in between. A **risk
+# overlay** is a rule that can close a position before then.
 #
-# **Learning objectives**
+# Three kinds are declared, and they differ in what they watch:
 #
-# - Fix one selection-eligible strategy configuration per label before applying risk controls.
-# - Hold model, checkpoint, signal, and allocation decisions fixed across overlays.
-# - Freeze the complete validation population used by the research lifecycle.
+# - A **stop loss** closes a position that has lost more than a fixed fraction from where it was
+#   opened. It watches the loss from entry.
+# - A **trailing stop** closes a position that has fallen more than a fixed fraction from its own
+#   best level. It watches the give-back, so a position that rose and then reversed is closed even
+#   while it is still ahead of entry.
+# - A **time exit** closes a position after a fixed number of bars whatever it has done. It watches
+#   nothing about the price, which makes it the control: it tests whether the holding period itself
+#   was the problem, separately from any threshold.
 #
-# **Book reference**: Chapter 19, Sections 19.3-19.6
+# **An overlay only ever removes.** It cannot enter a position the strategy did not take, so it
+# can only cut a loss short or cut a gain short, and which of the two it does more of is exactly
+# what the sweep measures. Fourteen controls are declared across the three kinds, spanning stops
+# from 3% to 15% and trailing stops from 1% to 20%, so the sweep says how the effect moves with the
+# threshold rather than whether one chosen threshold helped.
 #
-# **Prerequisites**: `16_backtest.py` and `17_portfolio_management.py` publish the strategy sets
-# consumed here.
+# **The thing to check first is whether the overlays changed anything at all.** A control that
+# never fires returns the unprotected book unchanged in every digit, and so does a control that was
+# declared but never reached the engine. One result cannot tell those apart, and the second has
+# happened in this repository: fourteen controls, from a 3% stop to a 40-bar time exit, whose
+# Sharpe, drawdown and trade count all matched the unprotected book exactly, because the
+# configuration declared them in one shape and the engine read another. Fourteen different rules
+# declining to act on one book and agreeing to the last digit is not a result about risk control.
+#
+# So the results section compares each overlay against the strategy it was laid on rather than
+# reporting its performance alone. **A difference proves the control acted; matching statistics
+# prove nothing about whether it fired** - a stop can close a position the next rebalance would
+# have closed anyway and leave both numbers where they were. Matching across *every* declared
+# setting is a reason to confirm the controls reach the engine, not a conclusion.
+#
+# **Learning objectives.** By the end of this notebook you will be able to:
+#
+# - Describe what each of the three kinds of overlay watches, and say which one is the control and
+#   why.
+# - Say why an overlay can only remove, and what that implies about how it can change a return
+#   distribution.
+# - Say what a result matching its unprotected baseline on two summary statistics does and does
+#   not establish about whether a control fired, and what evidence would settle it.
+# - Say why a threshold sweep is more informative than a single chosen threshold.
+#
+# **Book reference**: Chapter 19, Sections 19.3 to 19.6.
+#
+# **Prerequisites**: [`16_backtest`](16_backtest.ipynb) and
+# [`17_portfolio_management`](17_portfolio_management.ipynb) have frozen the baseline and
+# allocation sets this notebook draws from.
+#
+# **What it writes**: one validation backtest per fixed configuration and declared control, in
+# `run_log/registry.db`, frozen as one named risk-overlay set per label, plus the union of the
+# three stages as the population validation selection is made over.
+# [`19_costs`](19_costs.ipynb) then charges the chosen strategy for trading.
 
 # %%
 """Generate risk overlays and freeze the official US-equities validation set."""
@@ -79,10 +119,11 @@ PREVIEW_MAX_RISK_CONTROLS = 0
 MAX_SYMBOLS = 0
 
 # %% [markdown]
-# ## Open the selection-eligible strategy rows
+# ## 2. The strategies an overlay may be laid on
 #
-# Canonical execution reopens the named equal-weight and allocation sets. A reduced proof selects
-# preview rows by visible labels and explicit source-row, risk-control, and symbol limits.
+# The baseline and allocation sets, opened and checked complete. Both stages are eligible: an
+# overlay is a rule about when to close a position, and it applies whether the position was sized
+# equally or by an allocator.
 
 # %%
 declared_set_names = [*BASELINE_SET_NAMES, *ALLOCATION_SET_NAMES]
@@ -118,10 +159,10 @@ else:
     raise ValueError(f"Unsupported execution tier: {EXECUTION_TIER!r}")
 
 # %% [markdown]
-# ## Select eligible source rows
+# ## 3. Which rows can carry an overlay
 #
-# Canonical rows come from the named baseline and allocation sets. Preview rows use the visible
-# label and row limits declared above.
+# Complete, validation-split, and produced under this run's tier, with a finite Sharpe. A row
+# failing any of those is refused rather than dropped.
 
 # %%
 backtest_catalog = study.backtests.table(include_preview=True)
@@ -158,10 +199,15 @@ if eligible.is_empty() or not ineligible.is_empty():
     raise ValueError("Risk overlays require complete finite selection-eligible validation rows")
 
 # %% [markdown]
-# ## Fix one source configuration per label
+# ## 4. Fixing the strategy the overlays are applied to
 #
-# The exact model checkpoint, signal, and allocation decisions from the highest validation-Sharpe
-# source row remain fixed while the risk decision changes.
+# One configuration per label, taken on validation Sharpe across both earlier stages. Everything
+# identifying the strategy is then held - the model, the checkpoint, the signal, the sizing - so
+# every row below differs from every other only in the overlay laid on it.
+#
+# **Sweeping overlays across several strategies at once would confound the two.** A table in which
+# both the strategy and the control vary cannot say whether a difference came from the rule or from
+# the book it was applied to.
 
 # %% tags=["results"]
 # Prices are cached by (label, warmup) rather than loaded once per label. Strategy._build_spec
@@ -213,11 +259,15 @@ selected_sources.select(
 )
 
 # %% [markdown]
-# ## Declare and plan every risk overlay
+# ## 5. The controls, and the check that they bound
 #
-# Position and portfolio controls come from the case-study configuration. Every planned identity is
-# snapshotted before the first overlay runs, so unsuccessful controls remain visible in the official
-# population and completed siblings can be reused on restart.
+# Fourteen declared controls across the three kinds, planned as one backtest each against the fixed
+# strategy.
+#
+# **Whether the overlays changed anything is checked after execution**, in the section that reports
+# results: each one against the strategy it was laid on, on the trade count and the Sharpe. A
+# difference establishes that the control acted. Matching values establish only that those two
+# statistics did not move, and leave every other outcome undetermined.
 
 # %%
 risk_requests = []
@@ -344,10 +394,9 @@ if EXECUTION_TIER == "canonical":
 planned_population
 
 # %% [markdown]
-# ## Execute the planned overlay members
+# ## 6. Running them
 #
-# Each source prediction row is passed directly to the shared runner. The pass attempts every
-# independent member before reporting an incomplete official population.
+# Independent per control, so a failure costs that control and leaves the rest usable.
 
 # %%
 execution_rows = []
@@ -427,19 +476,17 @@ if official_population is not None:
 execution_diagnostics
 
 # %% [markdown]
-# ## Freeze the risk and official validation sets
+# ## 7. Naming the overlay sets, and the population selection is made over
 #
-# Both sets are frozen per label, and there is no cross-label union. `20_strategy_analysis` ranks
-# validation Sharpe within one label, so a union is not something it can open - and it could not be
-# created anyway: three labels means three `label_artifact` values, and `CandidateSet.create`
-# refuses any field that differs without being declared comparable
-# (research/comparison.py:65-72). cme_futures builds the same shape - a per-label pool with no
-# contract at `research_workflow.py:811`, and a cross-label pool that declares
-# `cv`, `feature_artifacts` and `label_artifact` at `:830-835` because those are exactly what
-# varies across labels. This case study needs only the first.
+# One frozen risk-overlay set per label, plus the union of all three stages - baseline, allocation
+# and overlay - as the population validation selection is made over.
+#
+# **The union is the point.** A strategy may legitimately come from any of the three stages, so
+# ranking only the last of them would exclude an un-overlaid book that was better than every
+# overlaid one. [`19_costs`](19_costs.ipynb) derives its pool from the same stage sequence for the
+# same reason.
 
 # %% tags=["results"]
-set_rows = []
 completed_risk = study.backtests.table(include_preview=True).filter(
     pl.col("backtest_hash").is_in(planned_population.get_column("backtest_hash"))
 )
@@ -451,6 +498,73 @@ if (
     or completed_risk.filter(pl.col("sharpe").is_null() | ~pl.col("sharpe").is_finite()).height
 ):
     raise RuntimeError("The risk catalog is incomplete or mis-staged")
+# Did the overlay change anything? Each result is compared against the strategy it was laid on, on
+# the two axes the catalog carries: the trade count and the Sharpe. A row that differs on either
+# acted - there is no other way for the numbers to move. A row identical on both changed no
+# neither of the two statistics compared here - which is weaker than "changed nothing", since two
+# different return paths can share a Sharpe and a trade count while differing in total return or in
+# drawdown, and weaker still than "never fired": a stop can close a position the next rebalance
+# would have closed anyway, replacing one exit with an earlier one and leaving the count where it
+# was. What would settle whether a control fired is a per-control trigger count, which the backtest
+# does not surface into the catalog today.
+overlay_effect = (
+    completed_risk.select("label", "backtest_hash", "sharpe", "num_trades")
+    .join(
+        planned_population.select("backtest_hash", "risk", "source_backtest_hash"),
+        on="backtest_hash",
+        how="inner",
+    )
+    .join(
+        backtest_catalog.select(
+            pl.col("backtest_hash").alias("source_backtest_hash"),
+            pl.col("num_trades").alias("source_num_trades"),
+            pl.col("sharpe").alias("source_sharpe"),
+        ),
+        on="source_backtest_hash",
+        how="left",
+    )
+    .with_columns(
+        # Null on either side is unknown rather than unmoved: a source whose trade count was never
+        # registered cannot answer the question, and reading it as "did not move" would
+        # manufacture the very signature this check exists to detect.
+        trades_moved=pl.when(pl.col("num_trades").is_null() | pl.col("source_num_trades").is_null())
+        .then(None)
+        .otherwise(pl.col("num_trades") != pl.col("source_num_trades")),
+        sharpe_moved=pl.when(pl.col("sharpe").is_null() | pl.col("source_sharpe").is_null())
+        .then(None)
+        .otherwise(pl.col("sharpe") != pl.col("source_sharpe")),
+    )
+    .select("label", "risk", "num_trades", "source_num_trades", "trades_moved", "sharpe_moved")
+    .sort("label", "risk")
+)
+# Three outcomes, not two. A row is CHANGED when either comparison is true, because one difference
+# is enough to establish the control acted. It is UNCHANGED only when both are false and both were
+# comparable. Anything else is UNKNOWN - a comparison that could not be made is not evidence of
+# sameness, and collapsing it into one would manufacture the signature this check exists to detect.
+_changed = overlay_effect.get_column("trades_moved").fill_null(False) | overlay_effect.get_column(
+    "sharpe_moved"
+).fill_null(False)
+_comparable_both = (
+    overlay_effect.get_column("trades_moved").is_not_null()
+    & overlay_effect.get_column("sharpe_moved").is_not_null()
+)
+_unchanged = _comparable_both & ~_changed
+n_changed, n_unchanged = int(_changed.sum()), int(_unchanged.sum())
+n_unknown = overlay_effect.height - n_changed - n_unchanged
+print(
+    f"{n_changed} of {overlay_effect.height} overlay results differ from the strategy they were "
+    f"laid on; {n_unchanged} match it on both compared statistics; {n_unknown} could not be "
+    "fully compared"
+)
+if n_unchanged and not n_changed and not n_unknown:
+    print(
+        "  No declared control moved either the trade count or the Sharpe. Neither statistic "
+        "moving is possible on a calm book, and is also what a control the engine never installed "
+        "looks like, so confirm the controls reach the engine before reading it either way."
+    )
+print(overlay_effect)
+
+set_rows = []
 if EXECUTION_TIER == "canonical":
     for label in completed_risk.get_column("label").unique().sort().to_list():
         label_name = label.replace("_", "-")
@@ -513,10 +627,31 @@ compatible_sets
 # same backtest configuration on those predictions.
 
 # %% [markdown]
-# ## Key takeaways and limitations
+# ## What to notice
 #
-# - Risk-overlay requests retain the source strategy decisions and change only the declared control.
-# - The official population contains every complete equal-weight, allocation, and risk-overlay
-#   validation result.
-# - Validation Sharpe and the backtest hash define deterministic selection from that population.
-# - The holdout is used once after selection and may disconfirm the validation evidence.
+# **Check that the overlays moved something before reading what they did.** A result matching the
+# unprotected book on both compared statistics has not been shown to change anything, and matching
+# across every declared setting is a reason to confirm the controls reach the engine rather than a
+# finding about risk control. Neither question is settled by these two columns; a per-control
+# trigger count would settle the first, and the backtest does not surface one today.
+#
+# **An overlay can only remove, so it reshapes a return distribution rather than shifting it.** It
+# truncates the left tail by closing losers early and truncates the right by closing winners early,
+# and which effect dominates is a property of how the strategy's returns actually arrive. A book
+# whose gains come from a few positions running a long way is one an early exit hurts.
+#
+# **A threshold sweep says more than a chosen threshold.** A control that helps at one setting and
+# hurts either side of it has found a feature of this sample. One that improves monotonically as it
+# loosens is saying the overlay is worth nothing and the loosest version is closest to not having
+# it.
+#
+# **The time exit is the control worth reading first.** It watches no price, so where it moves the
+# result as much as a stop does, what the stops were doing was shortening the holding period rather
+# than responding to losses.
+#
+# **Known limitations.** Overlays are evaluated on one fixed configuration per label, so nothing
+# here says whether the same control would help a different strategy. The controls act on bar
+# closes, so an intra-bar breach is not seen. And this remains gross of costs, while an overlay
+# that fires often adds trades - which is charged in [`19_costs`](19_costs.ipynb).
+#
+# **Next**: [`19_costs`](19_costs.ipynb) asks how much friction the chosen strategy absorbs.

@@ -42,8 +42,9 @@ CONSUMERS = {
     "16_backtest.py": ["PREDICTION_SET_NAMES"],
 }
 
-# Notebooks that freeze named sets. `12_dl_weekly` is deliberately absent: it freezes
-# nothing today, which is why the `-weekly-` names are carried as pending below.
+# Notebooks that freeze named sets. `12_dl_weekly` is absent because it freezes nothing, and
+# nothing asks it to: its predictions sit on a Friday grid and are not candidates in the
+# strategy chain. See the disposition note below.
 PRODUCERS = [
     "06_linear.py",
     "07_gbm.py",
@@ -55,13 +56,11 @@ PRODUCERS = [
     "13b_ipca.py",
 ]
 
-# Names `12_dl_weekly` would have to freeze once its disposition is settled. Listing them
-# here rather than deleting them from `15`/`16` keeps the gap visible: whoever migrates or
-# retires `12` has to come here and decide, instead of finding a silently shorter chain.
-PENDING_WEEKLY = {
-    "us-equities-fwd-ret-5d-weekly-v1",
-    "us-equities-fwd-ret-5d-weekly-diagnostics-v1",
-}
+# `12_dl_weekly`'s disposition, settled: it runs and registers, and it names no set that the
+# strategy chain opens. Its `fwd_ret_5d` predictions are scored on Fridays only, so ranking them
+# against the daily families on the same label would compare series measured over different sets
+# of decision dates. `15` and `16` therefore name no `-weekly-` set, and nothing here is pending.
+PENDING_WEEKLY: set[str] = set()
 
 
 def _literal_string_list(path: Path, name: str) -> list[str]:

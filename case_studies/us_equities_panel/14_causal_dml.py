@@ -14,27 +14,63 @@
 # ---
 
 # %% [markdown]
-# # Causal DML - US Equities Panel
+# # US equities panel: a different question - does momentum cause the return, or predict it?
 #
-# This notebook estimates the configured treatment effect through the shared causal request and
-# result boundary. Readers choose the outcome label, nuisance-model overrides, and execution tier.
-# Shared code owns artifact loading, treatment and confounder validation, temporal geometry,
-# nuisance fitting, refutation, identity construction, recovery, and registry publication.
+# Every notebook up to here has asked a predictive question: given what is known about a stock
+# today, what return follows? A model that answers it well has found an association, and an
+# association is enough to trade on. It is not enough to act on in any other way.
 #
-# The notebook is an execution client. It shows what was requested, what the request resolved to,
-# and which immutable result was produced. Dedicated causal and model-analysis material interprets
-# results across case studies.
+# This notebook asks the other question. **Does the treatment change the outcome, or does
+# something else move both?** The treatment here is `past_ret_12m_skip` - a stock's return over
+# the past year excluding the most recent month, the standard momentum measure - and the outcome
+# is the forward return. Momentum predicts returns; that has been true in the panel throughout.
+# Whether it *causes* them is a different claim, and the difference matters because a predictive
+# relation can be an artifact of something both variables respond to.
 #
-# **Learning objectives**
+# **The something-else is called a confounder**, and this case study declares three: recent
+# volatility, an illiquidity rank, and a volume ratio. Each plausibly moves both a stock's past
+# year and its next return, so leaving them alone would let their effect be attributed to
+# momentum.
 #
-# - Define a treatment, outcome, confounder set, and temporal nuisance-fitting design.
-# - Inspect the resolved estimand and its identity-bearing inputs before fitting.
-# - Validate causal estimates, HAC uncertainty, refutation results, and registry persistence.
+# **Double machine learning is a way of removing them without assuming the shape of the
+# relation.** It works in two steps. First, two models predict the outcome from the confounders,
+# and the treatment from the confounders - these are the **nuisance models**, so called because
+# nobody is interested in their predictions; they exist to be subtracted. Second, the treatment
+# effect is estimated from what each model got wrong: the part of the outcome the confounders do
+# not explain, regressed on the part of the treatment they do not explain. Whatever the confounders
+# accounted for has been taken out of both sides before the effect is estimated.
 #
-# **Book reference**: Chapter 15, Section 15.6 (Cross-Dataset Causal Evidence)
+# **"Double" is why machine learning is safe here.** Using a flexible model to remove a confounder
+# would normally bias the estimate, because the model's own error leaks into what is left.
+# Residualising *both* sides and estimating from the two residual series is what cancels that
+# leakage to first order.
 #
-# **Prerequisites**: `03_financial_features.py`, `04_model_based_features.py`, and the finalized
-# label artifacts.
+# **The nuisance models are fitted walk-forward with an embargo**, the same way every predictive
+# model in this case study is. A confounder model fitted on the whole sample would have removed
+# something it learned from the future, and the effect estimated afterwards would inherit it.
+#
+# **Learning objectives.** By the end of this notebook you will be able to:
+#
+# - State the difference between a predictive and a causal claim about the same pair of variables,
+#   and say which one a backtest needs.
+# - Name what a confounder is, and say what happens to an effect estimate if one is left out.
+# - Describe the two steps of double machine learning and say what each residualisation removes.
+# - Say why the nuisance models have to be fitted walk-forward, and what a whole-sample fit would
+#   have leaked.
+# - State the three assumptions this estimate rests on, and say why a small p-value does not
+#   establish any of them.
+# - Explain what a permutation refutation does and does not rule out.
+#
+# **Book reference**: Chapter 15, Section 15.6 (Cross-Dataset Causal Evidence).
+#
+# **Prerequisites**: [`03_financial_features`](03_financial_features.ipynb) and
+# [`04_model_based_features`](04_model_based_features.ipynb) have written the feature matrices, and
+# [`02_labels`](02_labels.ipynb) the outcome label.
+#
+# **What it writes**: one causal result in `run_log/registry.db`.
+# [`15_model_analysis`](15_model_analysis.ipynb) reads it in a section of its own. It is never
+# placed beside a predictive score and never enters a prediction set, because it answers a
+# different question and is not a ranking.
 
 # %%
 """Estimate the configured causal effect through the shared DML boundary."""
@@ -50,18 +86,32 @@ from utils.modeling import load_configs
 from utils.paths import REPO_ROOT, get_case_study_dir
 
 # %% [markdown]
-# ## What the estimator assumes
+# ## What this estimate rests on, and what it cannot establish
 #
-# DML first predicts the outcome and treatment from the declared confounders, then estimates the
-# treatment effect from the two residual series. Walk-forward nuisance fits and an embargo keep
-# future outcomes out of earlier estimates. HAC uncertainty addresses serial dependence, while the
-# block-permutation refutation checks how often a similarly large estimate appears after disrupting
-# the treatment assignment within each symbol.
+# Three assumptions carry the causal claim, and none of them is testable from the data:
 #
-# The estimate still requires conditional ignorability, overlap, and no interference between
-# entities. Those assumptions are not established by a low p-value or a successful refutation. The
-# resolved request therefore records the treatment, outcome, complete confounder list, temporal
-# design, and refutation policy rather than treating DML as an automatic causal conclusion.
+# - **No unmeasured confounder.** Every variable that moves both the treatment and the outcome is
+#   in the declared list. If one is missing, its effect is still attributed to momentum, and
+#   nothing in the output says so.
+# - **Overlap.** At every combination of confounder values that occurs, stocks are found across the
+#   range of the treatment. Where they are not, the effect at those values is extrapolated rather
+#   than estimated.
+# - **No interference.** One stock's treatment does not change another stock's outcome. On a
+#   cross-sectional strategy operating in one market this is the least comfortable of the three:
+#   flows into momentum names are exactly the mechanism by which one stock's past return could move
+#   another's future one.
+#
+# **Two things are computed that are sometimes mistaken for tests of the above.** The uncertainty
+# interval is corrected for serial dependence, because overlapping forward returns are not
+# independent observations and an uncorrected interval would be too narrow. And the **refutation**
+# permutes the treatment in blocks within each stock and re-estimates, asking how often an effect
+# this large appears once the treatment's real timing is destroyed. Blocks rather than individual
+# rows, because permuting row by row would break the serial dependence the test is meant to
+# preserve, and would return a p-value that reads like a refutation without being one.
+#
+# **Both check the estimator, not the assumptions.** A small p-value says the effect is unlikely
+# under the permuted null. It says nothing about whether a confounder was left out, and no
+# refutation can, because the missing variable is missing from the permutation too.
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
@@ -239,11 +289,25 @@ result_table
 # runtime, and execution tier needed to reproduce the estimate.
 
 # %% [markdown]
-# ## Key takeaways and limitations
+# ## What to notice
 #
-# - The resolved request makes the treatment, outcome, confounders, folds, and nuisance models part
-#   of one reproducible estimand.
-# - Walk-forward nuisance fits and the embargo preserve temporal ordering in the observed panel.
-# - HAC uncertainty and block-permutation refutation address specified sampling concerns; causal
-#   interpretation still depends on conditional ignorability, overlap, and limited interference.
-# - The causal result remains separate from predictive model selection and strategy selection.
+# **The estimate is only as good as the confounder list, and the list is a judgement.** Three
+# variables are declared here because each plausibly moves both a stock's past year and its next
+# return. A fourth that nobody thought of would have its effect folded into the momentum estimate,
+# and every diagnostic in this notebook would still pass.
+#
+# **A causal estimate is not a signal.** It is not a ranking across stocks, it produces no
+# prediction, and it cannot be backtested. That is why it is registered separately and read on its
+# own in [`15_model_analysis`](15_model_analysis.ipynb) rather than placed beside the predictive
+# results.
+#
+# **The interesting outcome is not necessarily a large effect.** A predictive relation that
+# survives conditioning on the confounders and a causal estimate near zero are both informative:
+# the first says momentum carries something the three confounders do not, the second says the
+# association may be something they do carry.
+#
+# **Known limitations.** The three assumptions above are not established by anything computed
+# here, and the no-interference one is genuinely doubtful in a single market where flows into
+# momentum names are a plausible channel between stocks. The estimate is made on the development
+# sample only. And one treatment, one outcome and one confounder set is one specification: nothing
+# here explores how the estimate moves under a different plausible choice of any of the three.

@@ -14,26 +14,54 @@
 # ---
 
 # %% [markdown]
-# # Latent Factor Requests for the US Equities Panel
+# # US equities panel: finding the few things three thousand stocks have in common
 #
-# This index separates the two latent-factor computations while keeping their outputs under the
-# same public result contract. [`13a_pca`](13a_pca.ipynb) estimates statistical factors from the
-# finalized feature panel. [`13b_ipca`](13b_ipca.ipynb) estimates characteristic-conditioned
-# factors. Each notebook constructs its own resolved request, validates fitted state and prediction
-# coverage, and returns the corresponding catalog rows.
+# Every model so far has predicted each stock from that stock's own features. But stocks do not
+# move independently - most of what a broad panel does on any day is one thing happening to all of
+# it, and a handful of further things happening to overlapping groups of it. A **latent factor**
+# is one of those common movements: not a column anybody computed, but a pattern extracted from
+# how the returns move together, with each stock carrying a **loading** saying how much of that
+# pattern it takes.
 #
-# Predictive interpretation belongs in [`15_model_analysis`](15_model_analysis.ipynb). This index
-# does not compare metrics or choose between PCA and IPCA.
+# Two ways of extracting them are fitted here, and the difference between them is the whole
+# lesson:
 #
-# **Learning objectives**
+# - [`13a_pca`](13a_pca.ipynb) takes the factors from the return panel alone. Principal component
+#   analysis asks which combinations of stocks account for the most common variation, and answers
+#   without being told anything about the stocks. A loading is then a number attached to a stock,
+#   fitted over the training window and carried forward.
+# - [`13b_ipca`](13b_ipca.ipynb) conditions the loadings on what the stocks *are*. Instrumented
+#   principal components makes a stock's loading a function of its observable characteristics, so
+#   two stocks with the same characteristics load the same way and a stock whose characteristics
+#   change has its loading change with them.
 #
-# - Distinguish the PCA and IPCA requests used by this case study.
-# - Select complete latent-factor results through the shared catalog boundary.
-# - Trace labels, checkpoints, and cross-validation identities without copying hashes.
+# **Why the second exists.** A loading attached to a stock says nothing about a stock that has not
+# been seen, and cannot move when the stock does. On a panel where names enter and leave and a
+# company's size and value change over a decade, that is a real limitation rather than a technical
+# one, and conditioning on characteristics is what removes it. What it costs is a stronger
+# assumption: that the relation between characteristics and loadings is stable, and is the same
+# for every stock.
 #
-# **Book reference**: Chapter 13
+# **This notebook runs nothing.** It is the index over the two that do: it names them, opens what
+# they published, and shows that both are complete. Which of the two is worth more is a predictive
+# question, and it is answered in [`15_model_analysis`](15_model_analysis.ipynb).
 #
-# **Prerequisites**: `13a_pca.py` and `13b_ipca.py` publish the latent-factor results indexed here.
+# **Learning objectives.** By the end of this notebook you will be able to:
+#
+# - Say what a latent factor and a loading are, in terms of a panel of returns rather than of an
+#   algorithm.
+# - State the difference between a loading attached to a stock and a loading conditioned on the
+#   stock's characteristics, and name a situation in which only the second can answer.
+# - Say what the conditioned version assumes in exchange, and when that assumption would be
+#   uncomfortable.
+# - Read a table of published latent-factor results and tell a complete one from an incomplete one.
+#
+# **Book reference**: Chapter 13.
+#
+# **Prerequisites**: [`13a_pca`](13a_pca.ipynb) and [`13b_ipca`](13b_ipca.ipynb) have published the
+# results this index reads.
+#
+# **What it writes**: nothing. It reads.
 
 # %%
 """Reference index for the latent-factor execution notebooks."""
@@ -51,7 +79,18 @@ EXECUTION_TIER = "canonical"
 WORKSPACE = "experiments"
 
 # %% [markdown]
-# ## Result catalog
+# ## What the two notebooks published
+#
+# One row per label per factor model. Read it for two things.
+#
+# **Both models present at every label.** A label carrying a PCA row and no IPCA row means the
+# second notebook did not finish there, and the comparison in
+# [`15_model_analysis`](15_model_analysis.ipynb) would then be measuring a difference between
+# labels rather than between factor models.
+#
+# **`cv_identity` the same across the rows being compared.** It records which walk-forward design
+# a result was fitted and scored under. Two rows with different values measured themselves over
+# different windows, and ranking them is not a comparison.
 #
 # Canonical execution reads the released study. Preview execution reads an isolated workspace.
 # Ordinary Polars filters select complete latent prediction rows by label, configuration,
@@ -92,17 +131,32 @@ latent_results = (
 latent_results
 
 # %% [markdown]
-# ## Handoff
+# ## What happens next
 #
-# Run the PCA and IPCA execution notebooks to create or reuse their exact result identities. Model
-# analysis reopens the named compatible sets for each label protocol. Strategy evaluation receives
-# every selected catalog row and checkpoint; this index makes no predictive or portfolio decision.
+# If a row is missing above, run the notebook that produces it - the execution notebooks reuse an
+# identity that already exists rather than refitting it, so re-running is cheap and safe.
+#
+# [`15_model_analysis`](15_model_analysis.ipynb) reads these results alongside the other model
+# families and asks which ranks the cross-section better.
+# [`16_backtest`](16_backtest.ipynb) backtests every one of them. This index chooses nothing, and
+# the number of factors is not tuned anywhere in this case study: five is declared, and a sweep
+# over that count would be a different experiment.
 
 # %% [markdown]
-# ## Key takeaways and limitations
+# ## What to notice
 #
-# - PCA and IPCA expose the same result and catalog interfaces while fitting different factor
-#   structures.
-# - Catalog fields provide the reader-facing selection boundary; hashes remain provenance keys.
-# - This index summarizes available result identities. Estimation details and fitted-state checks
-#   remain in the two execution notebooks.
+# **The two models answer the same question with different information.** PCA sees only how the
+# returns moved together; IPCA is additionally told what each stock is. Any difference between
+# them is what the characteristics were worth, on this panel, under the assumption that the
+# relation between characteristics and loadings holds across stocks and over time.
+#
+# **A factor model is a compression, and a compression discards.** Five factors summarise a
+# three-thousand-name panel, so whatever is specific to one stock is by construction not in the
+# prediction. That is the trade being made rather than a defect: the models before this one are
+# where stock-specific information lives.
+#
+# **Known limitations.** The factor count is declared, not searched, so nothing here says five is
+# the right number - only what five gives. Both models are fitted on training windows only and
+# scored on validation folds that have been read many times over by the time a case study reaches
+# this notebook. And a latent factor has no name: it is a direction in the returns, and reading an
+# economic story into it is an interpretation this notebook does not support.
