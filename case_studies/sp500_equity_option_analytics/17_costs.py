@@ -262,6 +262,26 @@ print(
 # `PER_SHARE_COMMISSION` and varies a uniform half-spread. It omits a per-order commission floor and does
 # not estimate name-specific spreads, so it is an exploratory convention rather
 # than a second production-cost estimate.
+#
+# **What the grid spans, and where the declared estimate sits inside it.** The percentage
+# axis runs from 0 to 50 basis points round-trip. `config/setup.yaml` declares this strategy's
+# own cost at 13 basis points round-trip, from a 3 to 10 basis point per-leg range, so the
+# sweep reaches roughly four times the estimate rather than bracketing it narrowly. That is
+# deliberate: the question a cost sweep answers is not "does the result survive the number we
+# believe" but "how far past that number does it survive", and a grid that stops near the
+# estimate cannot answer the second.
+#
+# **The equal split between commission and slippage is an assumption, not a measurement.**
+# Nothing in this data separates the two, and the backtest charges their sum, so the split
+# changes no result here. It is stated because it would matter to a reader carrying these
+# numbers to a venue where commission is negotiable and spread is not.
+#
+# **Why a second surface at all.** A percentage charge scales with notional, so it taxes a
+# large position in a cheap name and a small one in an expensive name identically. A per-share
+# charge does not, and the two therefore disagree most exactly where this strategy trades: the
+# S&P 500 spans share prices wide enough that a half-spread of a fixed number of cents is a
+# very different cost at 20 dollars than at 500. The second surface is what makes that
+# disagreement visible rather than assumed away.
 
 # %%
 base_specs = []
@@ -278,8 +298,9 @@ for combo in top_combos.iter_rows(named=True):
     base_specs.append((combo, prediction_hash, base_spec))
 
 # %% [markdown]
-# The percentage-cost surface divides each one-way charge equally between
-# commission and slippage.
+# The eleven points below are one backtest each, at the same specification and prediction set,
+# differing only in the cost charged. Everything else is held so that the curve they trace is
+# attributable to cost and to nothing else.
 
 # %%
 plans = []

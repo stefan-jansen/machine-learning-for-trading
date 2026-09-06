@@ -188,7 +188,8 @@ if set(configs.get_column("label")) != set(declared.get_column("label")) and not
 # family's value unchanged and passes no override.
 #
 # A machine without a card cannot run the declared device at all, and the library refuses to
-# substitute one (`case_studies/utils/latent_factors/library_bridge.py:53-54`). `DEVICE` names the
+# substitute one: the latent-factor runtime raises when CUDA is declared and unavailable rather
+# than falling back to the CPU, because a silent fallback changes what was fitted. `DEVICE` names the
 # device such a run fits on. It travels with `POPULATION_NAME`, because the device it names is
 # inside the training identity: the run computes a different member set and has to publish under
 # its own name rather than into the population the declaration describes.

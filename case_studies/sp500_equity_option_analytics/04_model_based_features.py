@@ -82,16 +82,18 @@ from arch import arch_model
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 
-from case_studies.utils.artifact_digest import read_digest, value_digest, write_artifact
+from case_studies.utils.artifact_digest import read_digest, value_digest
 from case_studies.utils.cv_window import fold_boundary_date, modeling_fold_boundaries
 from case_studies.utils.temporal import (
     garch11_conditional_volatility,
     refit_boundaries,
     walk_forward_feature,
+    write_model_based,
 )
 from data import load_sp500_daily_bars, load_sp500_options_surface
 from utils.artifact_specs import load_setup_config, resolve_label_horizon
 from utils.cv_splits import load_evaluation_config
+from utils.data_quality import top_entities
 from utils.paths import display_path, get_case_study_dir
 from utils.style import ml4t_palette, show_plotly_with_alt
 
@@ -411,7 +413,11 @@ def training_filter_state(result, train_returns: pd.Series) -> tuple[float, floa
 
 # %%
 ANNUALIZE = SETUP["evaluation"]["periods_per_year"] ** 0.5
-GARCH_KW = dict(mean="Constant", vol="GARCH", p=1, o=1, q=1, dist="Normal")
+# The specification is read, not written here, for the reason the schedule is: `o=1` is this case
+# study's declared deviation from the shared GARCH(1,1)-Normal default, and a deviation stated in
+# a notebook is one a reader has to find by reading the notebook. `config/setup.yaml::model_based`
+# carries it and says what property of the data justifies it.
+GARCH_KW = {k: _schedule[k] for k in ("mean", "vol", "p", "o", "q", "dist")}
 
 
 def garch_walk(returns: pd.Series, freeze_after: int | None) -> tuple[pd.Series, list[dict]]:
@@ -564,8 +570,19 @@ assert bars.select([ENTITY, "timestamp"]).is_duplicated().sum() == 0, (
 )
 securities = bars[ENTITY].unique().sort().to_list()
 if MAX_SYMBOLS is not None:
-    securities = securities[:MAX_SYMBOLS]
-    print(f"Reduced run: {MAX_SYMBOLS} of {bars[ENTITY].n_unique()} securities")
+    # Reduce by the rule every other stage reduces by, on the column they reduce on. This used to
+    # take a prefix of the sorted sec_id list, which is the lexically first securities and has
+    # nothing to do with which ones carry data: `05_evaluation` reduces to the most-observed
+    # symbols, so a reduced 04 fitted volatility models for one universe while a reduced 05 scored
+    # another, and the symbols only one side chose carried null features that ran clean.
+    #
+    # The selection is made on `symbol` and then mapped to `sec_id`, rather than counting sec_ids
+    # directly, because `symbol` is what the artifact is keyed on and what every consumer reduces
+    # by. The assertion above - one security per ticker per session - is what makes the mapping
+    # one-to-one, so the two counts agree.
+    kept_symbols = top_entities(bars, MAX_SYMBOLS, entity_col="symbol")
+    securities = bars.filter(pl.col("symbol").is_in(kept_symbols))[ENTITY].unique().sort().to_list()
+    print(f"Reduced run: {len(securities)} of {bars[ENTITY].n_unique()} securities")
 
 log_returns: dict[int, pd.Series] = {}
 for key, frame in (
@@ -1010,10 +1027,16 @@ pl.DataFrame(
 # which supplied the implied volatility the second feature subtracts from.
 
 # %%
-record = write_artifact(
+record = write_model_based(
     model_based,
     FEATURES_DIR / "model_based.parquet",
     keys=PANEL_KEY,
+    feature_columns=FEATURE_COLS,
+    time_column="timestamp",
+    # No fold column. The parameters come off a refit schedule over the whole panel, so a row is
+    # identified by its keys alone and there is no fold for a value to belong to. Passing None
+    # rather than leaving the default is what makes `expected_folds` refused instead of ignored.
+    fold_column=None,
     written_by=f"case_studies/{CASE_STUDY_ID}/04_model_based_features.py",
     inputs={
         # `sec_id` belongs in this digest: it decides which rows form one series, so a changed
