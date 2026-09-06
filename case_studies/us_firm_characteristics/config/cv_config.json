@@ -9,69 +9,13 @@
     {
       "fold": 0,
       "label_buffer": "1M",
-      "train_start": "2005-03-31",
-      "train_end": "2014-12-31",
-      "val_start": "2015-02-27",
-      "val_end": "2015-12-31"
+      "train_start": "1996-12-31",
+      "train_end": "2006-09-29",
+      "val_start": "2006-11-30",
+      "val_end": "2007-09-28"
     },
     {
       "fold": 1,
-      "label_buffer": "1M",
-      "train_start": "2004-04-30",
-      "train_end": "2014-02-28",
-      "val_start": "2014-03-31",
-      "val_end": "2015-01-30"
-    },
-    {
-      "fold": 2,
-      "label_buffer": "1M",
-      "train_start": "2003-05-30",
-      "train_end": "2013-03-28",
-      "val_start": "2013-04-30",
-      "val_end": "2014-02-28"
-    },
-    {
-      "fold": 3,
-      "label_buffer": "1M",
-      "train_start": "2002-06-28",
-      "train_end": "2012-04-30",
-      "val_start": "2012-05-31",
-      "val_end": "2013-03-28"
-    },
-    {
-      "fold": 4,
-      "label_buffer": "1M",
-      "train_start": "2001-07-31",
-      "train_end": "2011-04-29",
-      "val_start": "2011-06-30",
-      "val_end": "2012-04-30"
-    },
-    {
-      "fold": 5,
-      "label_buffer": "1M",
-      "train_start": "2000-08-31",
-      "train_end": "2010-05-28",
-      "val_start": "2010-07-30",
-      "val_end": "2011-05-31"
-    },
-    {
-      "fold": 6,
-      "label_buffer": "1M",
-      "train_start": "1999-09-30",
-      "train_end": "2009-07-31",
-      "val_start": "2009-08-31",
-      "val_end": "2010-06-30"
-    },
-    {
-      "fold": 7,
-      "label_buffer": "1M",
-      "train_start": "1998-10-30",
-      "train_end": "2008-08-29",
-      "val_start": "2008-09-30",
-      "val_end": "2009-07-31"
-    },
-    {
-      "fold": 8,
       "label_buffer": "1M",
       "train_start": "1997-11-28",
       "train_end": "2007-09-28",
@@ -79,12 +23,68 @@
       "val_end": "2008-08-29"
     },
     {
+      "fold": 2,
+      "label_buffer": "1M",
+      "train_start": "1998-10-30",
+      "train_end": "2008-08-29",
+      "val_start": "2008-09-30",
+      "val_end": "2009-07-31"
+    },
+    {
+      "fold": 3,
+      "label_buffer": "1M",
+      "train_start": "1999-09-30",
+      "train_end": "2009-07-31",
+      "val_start": "2009-08-31",
+      "val_end": "2010-06-30"
+    },
+    {
+      "fold": 4,
+      "label_buffer": "1M",
+      "train_start": "2000-08-31",
+      "train_end": "2010-05-28",
+      "val_start": "2010-07-30",
+      "val_end": "2011-05-31"
+    },
+    {
+      "fold": 5,
+      "label_buffer": "1M",
+      "train_start": "2001-07-31",
+      "train_end": "2011-04-29",
+      "val_start": "2011-06-30",
+      "val_end": "2012-04-30"
+    },
+    {
+      "fold": 6,
+      "label_buffer": "1M",
+      "train_start": "2002-06-28",
+      "train_end": "2012-04-30",
+      "val_start": "2012-05-31",
+      "val_end": "2013-03-28"
+    },
+    {
+      "fold": 7,
+      "label_buffer": "1M",
+      "train_start": "2003-05-30",
+      "train_end": "2013-03-28",
+      "val_start": "2013-04-30",
+      "val_end": "2014-02-28"
+    },
+    {
+      "fold": 8,
+      "label_buffer": "1M",
+      "train_start": "2004-04-30",
+      "train_end": "2014-02-28",
+      "val_start": "2014-03-31",
+      "val_end": "2015-01-30"
+    },
+    {
       "fold": 9,
       "label_buffer": "1M",
-      "train_start": "1996-12-31",
-      "train_end": "2006-09-29",
-      "val_start": "2006-11-30",
-      "val_end": "2007-09-28"
+      "train_start": "2005-03-31",
+      "train_end": "2014-12-31",
+      "val_start": "2015-02-27",
+      "val_end": "2015-12-31"
     }
   ]
 }

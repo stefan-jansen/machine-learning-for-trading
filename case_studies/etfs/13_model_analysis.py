@@ -336,10 +336,10 @@ if best_preds.height > 0 and fold_ranges.height > 0:
 
 # %% [markdown]
 # Each fold trains on a fixed 10-year rolling window and validates on the
-# year that follows it. The folds are numbered in reverse-chronological
-# order: fold 0 validates the most recent pre-holdout year (2023) and
-# fold 7 the earliest (2016), with the 10-year training window sliding
-# back accordingly. The holdout period (2024 onwards) is never used for
+# year that follows it. The folds are numbered chronologically: fold 0
+# validates the earliest year (2016) and fold 7 the most recent
+# pre-holdout year (2023), with the 10-year training window sliding
+# forward accordingly. The holdout period (2024 onwards) is never used for
 # model selection.
 #
 # Because the window is a fixed 10 years rather than expanding, every fold

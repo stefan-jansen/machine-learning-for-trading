@@ -557,10 +557,10 @@ print(
 # The splitter is given the whole sample, holdout included, and applies the holdout boundary itself
 # from `evaluation.holdout_start`, which is what every later stage does too. Trimming the data first
 # would shift the first training settlement of most folds, and the figure would then show a training
-# window the pipeline never trains on. The splitter numbers folds from zero backwards from the most
-# recent, so fold 0 is the one that ends against the holdout. The figure draws them earliest-first
-# and labels each with that number, which is why the labels count down; every later stage prints the
-# same ones.
+# window the pipeline never trains on. The splitter numbers folds chronologically, so fold 0 is the
+# earliest and the highest number ends against the holdout. The figure draws them earliest-first
+# and labels each with that number, so the labels count up alongside the dates; every later stage
+# prints the same ones.
 #
 # The gap drawn is the buffer for the primary label, `labels.buffer`. The longest declared variant,
 # `fwd_ret_24h`, resolves three settlements out and carries its own wider buffer in
