@@ -1,0 +1,778 @@
+# ---
+# jupyter:
+#   jupytext:
+#     cell_metadata_filter: tags,-all
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.19.3
+#   kernelspec:
+#     display_name: Python 3 (ipykernel)
+#     language: python
+#     name: python3
+# ---
+
+# %% [markdown]
+# # US equities panel: rules that close a position early
+#
+# The two notebooks before this one decided which stocks to hold and how much to put in each. Both
+# hold every position from one rebalancing date to the next, whatever it does in between. A **risk
+# overlay** is a rule that can close a position before then.
+#
+# Three kinds are declared, and they differ in what they watch:
+#
+# - A **stop loss** closes a position that has lost more than a fixed fraction from where it was
+#   opened. It watches the loss from entry.
+# - A **trailing stop** closes a position that has fallen more than a fixed fraction from its own
+#   best level. It watches the give-back, so a position that rose and then reversed is closed even
+#   while it is still ahead of entry.
+# - A **time exit** closes a position after a fixed number of bars whatever it has done. It watches
+#   nothing about the price, which makes it the control: it tests whether the holding period itself
+#   was the problem, separately from any threshold.
+#
+# **An overlay only ever removes.** It cannot enter a position the strategy did not take, so it
+# can only cut a loss short or cut a gain short, and which of the two it does more of is exactly
+# what the sweep measures. Fourteen controls are declared across the three kinds, spanning stops
+# from 3% to 15% and trailing stops from 1% to 20%, so the sweep says how the effect moves with the
+# threshold rather than whether one chosen threshold helped.
+#
+# **The thing to check first is whether the overlays changed anything at all.** A control that
+# never fires returns the unprotected book unchanged in every digit, and so does a control that was
+# declared in one shape and read by the engine in another. One result cannot tell those apart: both
+# produce a row identical to the book it was laid on. Fourteen different rules, spanning a 3% stop
+# to a 40-bar time exit, all declining to act on one book and agreeing to the last digit would be
+# the second and not the first, and it would read on the page as a finding about risk control.
+#
+# So the results section compares each overlay against the strategy it was laid on rather than
+# reporting its performance alone. **A difference proves the control acted; matching statistics
+# prove nothing about whether it fired** - a stop can close a position the next rebalance would
+# have closed anyway and leave both numbers where they were. Matching across *every* declared
+# setting is a reason to confirm the controls reach the engine, not a conclusion.
+#
+# **Learning objectives.** By the end of this notebook you will be able to:
+#
+# - Describe what each of the three kinds of overlay watches, and say which one is the control and
+#   why.
+# - Say why an overlay can only remove, and what that implies about how it can change a return
+#   distribution.
+# - Say what a result matching its unprotected baseline on two summary statistics does and does
+#   not establish about whether a control fired, and what evidence would settle it.
+# - Say why a threshold sweep is more informative than a single chosen threshold.
+#
+# **Book reference**: Chapter 19, Sections 19.3 to 19.6.
+#
+# **Prerequisites**: [`16_backtest`](16_backtest.ipynb) and
+# [`17_portfolio_management`](17_portfolio_management.ipynb) have frozen the baseline and
+# allocation sets this notebook draws from.
+#
+# **What it writes**: one validation backtest per fixed configuration and declared control, in
+# `run_log/registry.db`, frozen as one named risk-overlay set per label, plus the union of the
+# three stages as the population validation selection is made over.
+# [`19_costs`](19_costs.ipynb) then charges the chosen strategy for trading.
+
+# %%
+"""Generate risk overlays and freeze the official US-equities validation set."""
+
+import json
+import os
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import polars as pl
+
+from case_studies.research import (
+    CandidateSet,
+    OfficialPopulation,
+    open_study,
+    plan_backtests,
+    run_backtests,
+)
+from case_studies.research.strategy import strategy_warmup_periods
+from case_studies.utils.backtest_loaders import load_backtest_prices_for
+from case_studies.utils.sweep_config import (
+    get_portfolio_risk_controls,
+    get_position_risk_controls,
+    get_top_n_predictions,
+)
+from utils.style import add_message_title, ml4t_palette, show_with_alt, zero_line
+
+# %% tags=["parameters"]
+CASE_STUDY_ID = "us_equities_panel"
+BASELINE_SET_NAMES = [
+    "us-equities-fwd-ret-1d-baseline-v1",
+    "us-equities-fwd-ret-5d-baseline-v1",
+    "us-equities-fwd-ret-21d-baseline-v1",
+]
+ALLOCATION_SET_NAMES = [
+    "us-equities-fwd-ret-1d-allocation-v1",
+    "us-equities-fwd-ret-5d-allocation-v1",
+    "us-equities-fwd-ret-21d-allocation-v1",
+]
+VALIDATION_SET_NAME_TEMPLATE = "us-equities-{label}-validation-strategies-v1"
+EXECUTION_TIER = "canonical"
+WORKSPACE = "experiments"
+PREVIEW_LABELS = []
+PREVIEW_MAX_SOURCE_ROWS = 0
+PREVIEW_MAX_RISK_CONTROLS = 0
+MAX_SYMBOLS = 0
+
+# %% [markdown]
+# ## 2. The strategies an overlay may be laid on
+#
+# The baseline and allocation sets, opened and checked complete. Both stages are eligible: an
+# overlay is a rule about when to close a position, and it applies whether the position was sized
+# equally or by an allocator.
+
+# %%
+declared_set_names = [*BASELINE_SET_NAMES, *ALLOCATION_SET_NAMES]
+# Both tiers resolve the study through `open_study`. It reads the labels and features in place and
+# redirects only writes, so a preview run scores the same inputs a canonical one does and cannot
+# publish over it.
+if EXECUTION_TIER == "canonical":
+    if PREVIEW_LABELS or PREVIEW_MAX_SOURCE_ROWS or PREVIEW_MAX_RISK_CONTROLS or MAX_SYMBOLS:
+        raise ValueError("Canonical execution cannot declare preview reductions")
+    if not declared_set_names or len(declared_set_names) != len(set(declared_set_names)):
+        raise ValueError("Canonical execution requires unique named strategy sets")
+    study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER)
+elif EXECUTION_TIER == "preview":
+    if (
+        not PREVIEW_LABELS
+        or PREVIEW_MAX_SOURCE_ROWS < 1
+        or PREVIEW_MAX_RISK_CONTROLS < 1
+        or MAX_SYMBOLS < 1
+    ):
+        raise ValueError(
+            "Preview execution requires labels and explicit row, risk, and symbol limits"
+        )
+    study = open_study(
+        CASE_STUDY_ID,
+        execution_tier=EXECUTION_TIER,
+        workspace=Path(os.environ.get("ML4T_OUTPUT_DIR") or WORKSPACE),
+    )
+else:
+    raise ValueError(f"Unsupported execution tier: {EXECUTION_TIER!r}")
+
+# %% [markdown]
+# ## 3. Which rows can carry an overlay
+#
+# Complete, validation-split, and produced under this run's tier, with a finite Sharpe. A row
+# failing any of those is refused rather than dropped.
+
+# %%
+backtest_catalog = study.backtests.table(include_preview=True)
+if EXECUTION_TIER == "canonical":
+    declared_sets = tuple(CandidateSet.one(study, name=name) for name in declared_set_names)
+    if any(result_set.member_kind != "backtest" for result_set in declared_sets):
+        raise ValueError("Every declared input set must contain backtests")
+    source_members = tuple(member for result_set in declared_sets for member in result_set.members)
+    if len(source_members) != len(set(source_members)):
+        raise ValueError("Declared baseline and allocation sets overlap")
+    eligible = backtest_catalog.filter(pl.col("backtest_hash").is_in(source_members))
+    if eligible.height != len(source_members):
+        raise ValueError("The backtest catalog does not contain every declared strategy member")
+else:
+    eligible = (
+        backtest_catalog.filter(
+            (pl.col("execution_tier") == "preview")
+            & pl.col("stage").is_in(["signal", "allocation"])
+            & pl.col("label").is_in(PREVIEW_LABELS)
+        )
+        .sort("sharpe", "backtest_hash", descending=[True, False])
+        .head(PREVIEW_MAX_SOURCE_ROWS)
+    )
+
+ineligible = eligible.filter(
+    (pl.col("split") != "validation")
+    | (pl.col("execution_tier") != EXECUTION_TIER)
+    | ~pl.col("stage").is_in(["signal", "allocation"])
+    | ~pl.col("complete")
+    | pl.col("sharpe").is_null()
+    | ~pl.col("sharpe").is_finite()
+)
+if eligible.is_empty() or not ineligible.is_empty():
+    raise ValueError("Risk overlays require complete finite selection-eligible validation rows")
+
+# %% [markdown]
+# ## 4. Fixing the strategy the overlays are applied to
+#
+# One configuration per label, taken on validation Sharpe across both earlier stages. Everything
+# identifying the strategy is then held - the model, the checkpoint, the signal, the sizing - so
+# every row below differs from every other only in the overlay laid on it.
+#
+# **Sweeping overlays across several strategies at once would confound the two.** A table in which
+# both the strategy and the control vary cannot say whether a difference came from the rule or from
+# the book it was applied to.
+
+# %% tags=["results"]
+# Prices are cached by (label, warmup), not once per label. A strategy's identity digests the
+# price frame it was handed, and the allocator underneath each overlay needs a different amount of
+# history before it can decide anything - none for the ones reading only the predictions, a
+# volatility window for the per-stock ones, a longer lookback for the ones estimating a covariance
+# matrix. So each member has to receive the frame its own warmup implies, and the cache key is
+# what keeps that true while loading each distinct frame once.
+_price_cache: dict[tuple[str, int], object] = {}
+
+
+def prices_for(label, warmup_periods):
+    key = (str(label), int(warmup_periods))
+    if key not in _price_cache:
+        _price_cache[key] = load_backtest_prices_for(
+            CASE_STUDY_ID,
+            label,
+            split="validation",
+            max_symbols=MAX_SYMBOLS,
+            warmup_periods=int(warmup_periods),
+        )
+    return _price_cache[key]
+
+
+top_n = get_top_n_predictions(CASE_STUDY_ID, "risk_overlay")
+selected_parts = []
+for label in eligible.get_column("label").unique().sort().to_list():
+    selected_parts.append(
+        eligible.filter(pl.col("label") == label)
+        .sort("sharpe", "backtest_hash", descending=[True, False])
+        .head(top_n)
+    )
+selected_sources = pl.concat(selected_parts).sort("label", "backtest_hash")
+if selected_sources.is_empty():
+    raise RuntimeError("No risk-overlay source configuration was selected")
+
+selected_sources.select(
+    "label",
+    "family",
+    "config_name",
+    "checkpoint_kind",
+    "checkpoint_value",
+    "stage",
+    "prediction_hash",
+    "backtest_hash",
+    "sharpe",
+)
+
+# %% [markdown]
+# ## 5. The controls, and the check that they bound
+#
+# Fourteen declared controls across the three kinds, planned as one backtest each against the fixed
+# strategy.
+#
+# **Whether the overlays changed anything is checked after execution**, in the section that reports
+# results: each one against the strategy it was laid on, on the trade count and the Sharpe. A
+# difference establishes that the control acted. Matching values establish only that those two
+# statistics did not move, and leave every other outcome undetermined.
+
+# %%
+risk_requests = []
+for control in get_position_risk_controls(CASE_STUDY_ID):
+    if control["type"] == "time_exit":
+        rule = {"type": control["type"], "bars": control["bars"]}
+    else:
+        rule = {"type": control["type"], "threshold": control["threshold"]}
+    risk_requests.append(
+        {
+            "name": control["name"],
+            "spec": {"name": control["name"], "position_rules": [rule]},
+        }
+    )
+for control in get_portfolio_risk_controls(CASE_STUDY_ID):
+    risk_requests.append(
+        {
+            "name": control["name"],
+            "spec": {
+                "name": control["name"],
+                "portfolio_limits": [{"type": control["type"], "threshold": control["threshold"]}],
+            },
+        }
+    )
+if EXECUTION_TIER == "preview":
+    risk_requests = risk_requests[:PREVIEW_MAX_RISK_CONTROLS]
+if not risk_requests or len({request["name"] for request in risk_requests}) != len(risk_requests):
+    raise ValueError("Risk controls must be non-empty and uniquely named")
+
+prediction_catalog = study.predictions.table(include_preview=True)
+planned_requests = []
+plan_rows = []
+
+
+# %%
+def risk_member_records(
+    label, source_row, selection, signal, allocation, risk_request, expected_hash
+):
+    request = {
+        "label": label,
+        "selection": selection,
+        "signal": signal,
+        "allocation": allocation,
+        "risk": risk_request["spec"],
+        "risk_name": risk_request["name"],
+        "prediction_hash": source_row["prediction_hash"],
+        "source_backtest_hash": source_row["backtest_hash"],
+        "expected_hash": expected_hash,
+    }
+    row = {
+        "label": label,
+        "source_stage": source_row["stage"],
+        "source_backtest_hash": source_row["backtest_hash"],
+        "risk": risk_request["name"],
+        "prediction_hash": source_row["prediction_hash"],
+        "backtest_hash": expected_hash,
+    }
+    return request, row
+
+
+# %%
+def plan_risk_member(label, prices, risk_request, source_row):
+    selected_prediction = prediction_catalog.filter(
+        pl.col("prediction_hash") == source_row["prediction_hash"]
+    )
+    if selected_prediction.height != 1:
+        raise ValueError("A risk source must resolve one prediction catalog row")
+    source_spec = json.loads(source_row["spec_json"])
+    signal = dict(source_spec["strategy"]["signal"])
+    allocation = source_spec["strategy"].get("allocation")
+    plan = plan_backtests(
+        study,
+        predictions=selected_prediction,
+        signal=signal,
+        allocation=allocation,
+        risk=risk_request["spec"],
+        prices=prices,
+        chapter="ch19",
+    )
+    if len(plan.members) != 1:
+        raise RuntimeError("One risk request must plan one backtest")
+    return risk_member_records(
+        label,
+        source_row,
+        selected_prediction,
+        signal,
+        allocation,
+        risk_request,
+        plan.expected_hashes[0],
+    )
+
+
+# %%
+for label in selected_sources.get_column("label").unique().sort().to_list():
+    for source_row in selected_sources.filter(pl.col("label") == label).iter_rows(named=True):
+        for risk_request in risk_requests:
+            prices = prices_for(
+                label,
+                # The source's allocation lives in its spec_json, not as a catalog column, so
+                # source_row.get("allocation") is always None and would silently warm up 0 bars
+                # for every allocation-stage source.
+                strategy_warmup_periods(json.loads(source_row["spec_json"])),
+            )
+            request, row = plan_risk_member(label, prices, risk_request, source_row)
+            planned_requests.append(request)
+            plan_rows.append(row)
+
+# %%
+planned_population = pl.DataFrame(plan_rows).sort(
+    "label", "risk", "source_backtest_hash", "backtest_hash"
+)
+if planned_population.get_column("backtest_hash").n_unique() != planned_population.height:
+    raise ValueError("The risk plan contains duplicate backtest identities")
+
+official_population = None
+if EXECUTION_TIER == "canonical":
+    official_population = OfficialPopulation.create(
+        study,
+        name="us-equities-risk-overlay-v1",
+        member_kind="backtest",
+        members=tuple(planned_population.get_column("backtest_hash")),
+    )
+
+planned_population
+
+# %% [markdown]
+# ## 6. Running them
+#
+# Independent per control, so a failure costs that control and leaves the rest usable.
+
+# %%
+execution_rows = []
+failure_rows = []
+
+
+def execute_risk_member(prices, request):
+    execution = run_backtests(
+        study,
+        predictions=request["selection"],
+        signal=request["signal"],
+        allocation=request["allocation"],
+        risk=request["risk"],
+        prices=prices,
+        chapter="ch19",
+    )
+    if len(execution.results) != 1 or execution.results[0].hash != request["expected_hash"]:
+        raise RuntimeError("Risk execution changed its planned identity")
+    return {
+        "label": request["label"],
+        "source_backtest_hash": request["source_backtest_hash"],
+        "risk": request["risk_name"],
+        "backtest_hash": execution.results[0].hash,
+        "status": execution.diagnostics[0]["status"],
+    }
+
+
+# %% tags=["results"]
+for label in selected_sources.get_column("label").unique().sort().to_list():
+    for request in (item for item in planned_requests if item["label"] == label):
+        try:
+            prices = prices_for(
+                label,
+                strategy_warmup_periods({"strategy": {"allocation": request["allocation"]}}),
+            )
+            execution_rows.append(execute_risk_member(prices, request))
+        except Exception as error:
+            failure_rows.append(
+                {
+                    "label": label,
+                    "source_backtest_hash": request["source_backtest_hash"],
+                    "risk": request["risk_name"],
+                    "backtest_hash": request["expected_hash"],
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                }
+            )
+
+# %% tags=["results"]
+execution_diagnostics = pl.DataFrame(
+    execution_rows,
+    schema={
+        "label": pl.String,
+        "source_backtest_hash": pl.String,
+        "risk": pl.String,
+        "backtest_hash": pl.String,
+        "status": pl.String,
+    },
+)
+failures = pl.DataFrame(
+    failure_rows,
+    schema={
+        "label": pl.String,
+        "source_backtest_hash": pl.String,
+        "risk": pl.String,
+        "backtest_hash": pl.String,
+        "error_type": pl.String,
+        "error": pl.String,
+    },
+)
+if not failures.is_empty():
+    raise RuntimeError(f"Risk population has {failures.height} unsuccessful members")
+
+if official_population is not None:
+    official_population.require_complete()
+
+execution_diagnostics
+
+# %% [markdown]
+# ## 7. Naming the overlay sets, and the population selection is made over
+#
+# One frozen risk-overlay set per label, plus the union of all three stages - baseline, allocation
+# and overlay - as the population validation selection is made over.
+#
+# **The union is the point.** A strategy may legitimately come from any of the three stages, so
+# ranking only the last of them would exclude an un-overlaid book that was better than every
+# overlaid one. [`19_costs`](19_costs.ipynb) derives its pool from the same stage sequence for the
+# same reason.
+
+# %% tags=["results"]
+completed_risk = study.backtests.table(include_preview=True).filter(
+    pl.col("backtest_hash").is_in(planned_population.get_column("backtest_hash"))
+)
+if (
+    completed_risk.height != planned_population.height
+    or completed_risk.filter(~pl.col("complete")).height
+    or completed_risk.filter(pl.col("stage") != "risk_overlay").height
+    or completed_risk.filter(pl.col("execution_tier") != EXECUTION_TIER).height
+    or completed_risk.filter(pl.col("sharpe").is_null() | ~pl.col("sharpe").is_finite()).height
+):
+    raise RuntimeError("The risk catalog is incomplete or mis-staged")
+# Did the overlay change anything? Each result is compared against the strategy it was laid on, on
+# the two axes the catalog carries: the trade count and the Sharpe. A row that differs on either
+# acted - there is no other way for the numbers to move. A row identical on both moved neither of
+# the two statistics compared here - which is weaker than "changed nothing", since two
+# different return paths can share a Sharpe and a trade count while differing in total return or in
+# drawdown, and weaker still than "never fired": a stop can close a position the next rebalance
+# would have closed anyway, replacing one exit with an earlier one and leaving the count where it
+# was. What would settle whether a control fired is a per-control trigger count, which the backtest
+# does not surface into the catalog today.
+overlay_effect = (
+    completed_risk.select("label", "backtest_hash", "sharpe", "num_trades")
+    .join(
+        planned_population.select("backtest_hash", "risk", "source_backtest_hash"),
+        on="backtest_hash",
+        how="inner",
+    )
+    .join(
+        backtest_catalog.select(
+            pl.col("backtest_hash").alias("source_backtest_hash"),
+            pl.col("num_trades").alias("source_num_trades"),
+            pl.col("sharpe").alias("source_sharpe"),
+        ),
+        on="source_backtest_hash",
+        how="left",
+    )
+    .with_columns(
+        # Null on either side is unknown rather than unmoved: a source whose trade count was never
+        # registered cannot answer the question, and reading it as "did not move" would
+        # manufacture the very signature this check exists to detect.
+        trades_moved=pl.when(pl.col("num_trades").is_null() | pl.col("source_num_trades").is_null())
+        .then(None)
+        .otherwise(pl.col("num_trades") != pl.col("source_num_trades")),
+        sharpe_moved=pl.when(pl.col("sharpe").is_null() | pl.col("source_sharpe").is_null())
+        .then(None)
+        .otherwise(pl.col("sharpe") != pl.col("source_sharpe")),
+    )
+    .select("label", "risk", "num_trades", "source_num_trades", "trades_moved", "sharpe_moved")
+    .sort("label", "risk")
+)
+# Three outcomes, not two. A row is CHANGED when either comparison is true, because one difference
+# is enough to establish the control acted. It is UNCHANGED only when both are false and both were
+# comparable. Anything else is UNKNOWN - a comparison that could not be made is not evidence of
+# sameness, and collapsing it into one would manufacture the signature this check exists to detect.
+_changed = overlay_effect.get_column("trades_moved").fill_null(False) | overlay_effect.get_column(
+    "sharpe_moved"
+).fill_null(False)
+_comparable_both = (
+    overlay_effect.get_column("trades_moved").is_not_null()
+    & overlay_effect.get_column("sharpe_moved").is_not_null()
+)
+_unchanged = _comparable_both & ~_changed
+n_changed, n_unchanged = int(_changed.sum()), int(_unchanged.sum())
+n_unknown = overlay_effect.height - n_changed - n_unchanged
+print(
+    f"{n_changed} of {overlay_effect.height} overlay results differ from the strategy they were "
+    f"laid on; {n_unchanged} match it on both compared statistics; {n_unknown} could not be "
+    "fully compared"
+)
+if n_unchanged and not n_changed and not n_unknown:
+    print(
+        "  No declared control moved either the trade count or the Sharpe. Neither statistic "
+        "moving is possible on a calm book, and is also what a control the engine never installed "
+        "looks like, so confirm the controls reach the engine before reading it either way."
+    )
+print(overlay_effect)
+
+set_rows = []
+if EXECUTION_TIER == "canonical":
+    for label in completed_risk.get_column("label").unique().sort().to_list():
+        label_name = label.replace("_", "-")
+        # Nothing is declared comparable, so every field of the protocol has to be identical
+        # across the members. That is the guard: two rows that measured their Sharpe on different
+        # folds are not two rankings of one thing, and this is what refuses to freeze them
+        # together.
+        result_set = study.backtests.freeze(
+            completed_risk.filter(pl.col("label") == label),
+            name=f"us-equities-{label_name}-risk-overlay-v1",
+        )
+        set_rows.append(
+            {"label": label, "set_name": result_set.name, "members": len(result_set.members)}
+        )
+
+        # The selection pool this label's holdout is chosen from: its baseline and allocation
+        # members plus the risk overlays just published. No contract - one label means one
+        # label_artifact, and every other protocol field being required-constant is the guard.
+        validation_candidates = pl.concat(
+            [
+                eligible.filter(pl.col("label") == label),
+                completed_risk.filter(pl.col("label") == label),
+            ]
+        ).sort("backtest_hash")
+        if (
+            validation_candidates.get_column("backtest_hash").n_unique()
+            != validation_candidates.height
+        ):
+            raise ValueError(f"Selection-eligible strategy sets overlap for {label}")
+        validation_set = study.backtests.freeze(
+            validation_candidates,
+            name=VALIDATION_SET_NAME_TEMPLATE.format(label=label_name),
+        )
+        set_rows.append(
+            {
+                "label": label,
+                "set_name": validation_set.name,
+                "members": len(validation_set.members),
+            }
+        )
+
+
+compatible_sets = pl.DataFrame(
+    set_rows,
+    schema={"label": pl.String, "set_name": pl.String, "members": pl.Int64},
+)
+compatible_sets
+
+# %% [markdown]
+# ### What the threshold does
+#
+# The sweep's argument is that a single chosen threshold says almost nothing, and the frame above
+# does not show a shape. Each line below traces one label's Sharpe as one kind of control is
+# loosened: the stop losses along their loss-from-entry threshold, the trailing stops along their
+# give-back threshold, and the time exits along their holding-period cap.
+#
+# The dashed reference in each panel is the unprotected strategy the overlays were laid on, which
+# is what any of these lines has to beat. The loosest declared setting is not that reference: a 20
+# per cent trailing stop is a loose control, not the absence of one.
+#
+# The shapes mean different things. A line that rises all the way to the loosest setting and stays
+# below the reference is a control this book paid for and got nothing from. One with an interior
+# peak has found a threshold this sample liked, which is a much weaker claim than it looks - one
+# sample, one strategy per label, and no correction for having looked at fourteen. A flat line
+# means the measured Sharpe did not move across the declared settings, which is weaker than it
+# sounds in two directions: two different thresholds can produce the same exits, and two different
+# return paths can share a Sharpe. It is not evidence that the controls never fired. Nothing on
+# this page can settle that, and the trigger count that would is not something the backtest
+# records.
+
+# %%
+control_axes = {
+    control["name"]: (control["type"], float(control.get("threshold", control.get("bars"))))
+    for control in get_position_risk_controls(CASE_STUDY_ID)
+}
+# The Sharpe of the strategy each label's overlays were laid on, which is the line they have to
+# clear. Asserted rather than assumed to be one per label: `top_n` is read from the sweep
+# configuration, and a label carrying two sources would need two reference lines, not one drawn
+# from whichever row a dict happened to keep.
+_sources_per_label = selected_sources.group_by("label").len()
+if (_sources_per_label.get_column("len") != 1).any():
+    raise ValueError(
+        "the overlay sweep is drawn against one source strategy per label; this run selected "
+        f"{_sources_per_label.to_dicts()}"
+    )
+unprotected = dict(selected_sources.select("label", "sharpe").iter_rows())
+sweep = (
+    completed_risk.select("label", "backtest_hash", "sharpe")
+    .join(planned_population.select("backtest_hash", "risk"), on="backtest_hash", how="inner")
+    .with_columns(
+        kind=pl.col("risk").replace_strict(
+            {name: kind for name, (kind, _) in control_axes.items()}, default=None
+        ),
+        setting=pl.col("risk").replace_strict(
+            {name: value for name, (_, value) in control_axes.items()},
+            default=None,
+            return_dtype=pl.Float64,
+        ),
+    )
+    .drop_nulls(["kind", "setting"])
+    .sort("kind", "setting")
+)
+kinds = sweep.get_column("kind").unique().sort().to_list()
+sweep_labels = sweep.get_column("label").unique().sort().to_list()
+axis_names = {
+    "stop_loss": "Loss from entry",
+    "trailing_stop": "Give-back from peak",
+    "time_exit": "Bars held",
+}
+# `ml4t_palette` returns a list of that many colours, so it is called once and indexed.
+palette = ml4t_palette(len(sweep_labels), categorical=True)
+
+fig, axes = plt.subplots(1, len(kinds), figsize=(4.2 * len(kinds), 4), sharey=True)
+axes = np.atleast_1d(axes)
+for ax, kind in zip(axes, kinds, strict=True):
+    for index, label in enumerate(sweep_labels):
+        curve = sweep.filter((pl.col("kind") == kind) & (pl.col("label") == label)).sort("setting")
+        ax.plot(
+            curve.get_column("setting"),
+            curve.get_column("sharpe"),
+            marker="o",
+            markersize=4,
+            lw=1.4,
+            color=palette[index],
+            label=label,
+        )
+    for index, label in enumerate(sweep_labels):
+        if label in unprotected:
+            ax.axhline(
+                unprotected[label],
+                color=palette[index],
+                lw=1.0,
+                ls="--",
+                alpha=0.7,
+            )
+    zero_line(ax)
+    ax.set_xlabel(axis_names.get(kind, kind))
+axes[0].set_ylabel("Validation Sharpe")
+axes[-1].legend(fontsize=8, frameon=False)
+add_message_title(
+    axes[0],
+    "Loosening the control, against the book it was laid on",
+    subtitle=(
+        "Validation Sharpe against each control's own threshold, one line per label, with the "
+        "unprotected strategy dashed"
+    ),
+)
+fig.tight_layout()
+# The alt text counts rather than asserts: whether any line turns over is the question the sweep
+# exists to answer, and a panel described as peaking when it does not is a claim the data refutes.
+_peaks = (
+    sweep.group_by("kind", "label")
+    .agg(
+        peak=pl.col("setting").sort_by("sharpe", descending=True).first(),
+        low=pl.col("setting").min(),
+        high=pl.col("setting").max(),
+    )
+    .with_columns(interior=pl.col("peak").is_between(pl.col("low"), pl.col("high"), closed="none"))
+)
+_n_interior = int(_peaks.get_column("interior").sum())
+_above = sum(
+    1
+    for row in sweep.group_by("kind", "label")
+    .agg(best=pl.col("sharpe").max())
+    .iter_rows(named=True)
+    if row["label"] in unprotected and row["best"] > unprotected[row["label"]]
+)
+_pairs = sweep.select("kind", "label").unique().height
+show_with_alt(
+    fig,
+    "Line charts side by side, one panel per kind of control, sharing a vertical Sharpe axis. "
+    "Every panel plots that control's own threshold on the horizontal axis with one line per "
+    "label, a dashed horizontal line per label marking the unprotected strategy it was laid on, "
+    "and a dashed line at zero. Counted from the underlying frame, "
+    f"{_n_interior} of {_peaks.height} label-and-kind curves reach their highest Sharpe at a "
+    "setting that is neither the tightest nor the loosest declared, and "
+    f"{_above} of {_pairs} beat their unprotected reference at any setting.",
+)
+
+# %% [markdown]
+# `20_strategy_analysis.py` reopens one of these per-label sets -
+# `us-equities-<label>-validation-strategies-v1` - and applies the one official rule: highest
+# validation backtest Sharpe with the backtest hash as deterministic tie-break, within that label.
+# The holdout follows from that selection with nothing in between: retrain the selected
+# configuration on everything up to the holdout start, predict the holdout window, and run the
+# same backtest configuration on those predictions.
+
+# %% [markdown]
+# ## What to notice
+#
+# **Check that the overlays moved something before reading what they did.** A result matching the
+# unprotected book on both compared statistics has not been shown to change anything, and matching
+# across every declared setting is a reason to confirm the controls reach the engine rather than a
+# finding about risk control. Neither question is settled by these two columns; a per-control
+# trigger count would settle the first, and the backtest does not surface one today.
+#
+# **An overlay can only remove, so it reshapes a return distribution rather than shifting it.** It
+# truncates the left tail by closing losers early and truncates the right by closing winners early,
+# and which effect dominates is a property of how the strategy's returns actually arrive. A book
+# whose gains come from a few positions running a long way is one an early exit hurts.
+#
+# **A threshold sweep says more than a chosen threshold, and it needs the unprotected book beside
+# it.** A control that helps at one setting and hurts either side of it has found a feature of
+# this sample rather than a property of the strategy. One that improves as it loosens is heading
+# toward the unprotected book without reaching it - the loosest declared setting is still a
+# control - so what says the overlay was not worth having is the reference line, not the trend.
+#
+# **The time exit is the control worth reading first.** It watches no price, so where it moves the
+# result as much as a stop does, what the stops were doing was shortening the holding period rather
+# than responding to losses.
+#
+# **Known limitations.** Overlays are evaluated on one fixed configuration per label, so nothing
+# here says whether the same control would help a different strategy. The controls act on bar
+# closes, so an intra-bar breach is not seen. And this remains gross of costs, while an overlay
+# that fires often adds trades - which is charged in [`19_costs`](19_costs.ipynb).
+#
+# **Next**: [`19_costs`](19_costs.ipynb) asks how much friction the chosen strategy absorbs.

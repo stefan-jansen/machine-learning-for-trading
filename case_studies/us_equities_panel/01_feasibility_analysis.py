@@ -55,6 +55,7 @@
 """US Equities Panel Case Study - Feasibility Analysis."""
 
 import warnings
+from datetime import date
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -63,6 +64,7 @@ import yaml
 from IPython.display import display
 from ml4t.diagnostic.splitters.calendar import TradingCalendar
 
+from case_studies.utils.coverage import assert_sessions_complete
 from case_studies.utils.feasibility import exceedance_curve, fold_timeline, panel_acf
 from data import load_us_equities
 from utils.cv_splits import generate_cv_splits
@@ -311,6 +313,23 @@ mapped = pl.Series(
     .to_numpy()
 ).cast(pl.Date)
 calendar = dates.filter(mapped == pl.col("timestamp")).with_row_index("session")
+
+# That filter answers one direction: which dates in the archive the exchange never held. The
+# other direction is a session the exchange did hold that the archive never printed, which
+# leaves no row to test and so passes in silence. This archive is missing exactly one,
+# `2017-11-08`, upstream - it is the only NYSE session of 14,156 absent between 1962 and 2018 -
+# and it is declared so that a second one refuses instead of being absorbed.
+KNOWN_ABSENT_SESSIONS = [date(2017, 11, 8)]
+_declared = assert_sessions_complete(
+    calendar["timestamp"].to_list(),
+    calendar=CALENDAR,
+    known_absent=KNOWN_ABSENT_SESSIONS,
+    source="01_feasibility_analysis session index",
+)
+print(
+    f"{calendar.height:,} {CALENDAR} sessions, every one the exchange held between "
+    f"{calendar['timestamp'].min()} and {calendar['timestamp'].max()} except {_declared}"
+)
 
 # %% [markdown]
 # The screen itself. `covered` marks the rows whose trailing window is unbroken, `eligible` marks
@@ -673,13 +692,22 @@ print(
 # from `evaluation.holdout_start`, which is what every later stage does too. It is handed dates and
 # no prices, so nothing the holdout contains reaches a number computed above.
 #
-# `generate_cv_splits` numbers folds chronologically, so fold 0 is the earliest and the highest
-# number is the last one before the holdout. The figure draws them earliest-first and labels each
-# with that number, so the labels count up alongside the dates; every later stage prints the same
-# ones. The two assertions below check what the figure cannot show at this scale: that the
-# number of folds is the number `setup.yaml` declares, and that no validation window reaches into
-# the holdout. The figure then draws the boundaries the splitter returned rather than recomputing
-# them, so the picture and the folds cannot disagree.
+# Each fold carries an id from the splitter, and every later stage prints and keys its tables on
+# that same id - so the id is the fold's name across the whole case study, and relabelling the rows
+# by their position here would make this figure's "Fold 0" a different fold from the one the rest of
+# the case study reports.
+#
+# The figure draws the rows earliest-first down the axis, so the picture runs forward in time as the
+# eye moves down whatever the ids do, and labels each row with its own id. Which end of the sample
+# carries the low ids is the splitter's convention rather than something this notebook chooses, so
+# the line below reads it off the boundaries rather than stating it here - a sentence naming a
+# direction goes silently false if the convention changes, and the ids are what the rest of the
+# case study joins on.
+#
+# The two assertions check what the figure cannot show at this scale: that the number of folds is
+# the number `setup.yaml` declares, and that no validation window reaches into the holdout. The
+# figure then draws the boundaries the splitter returned rather than recomputing them, so the
+# picture and the folds cannot disagree.
 
 # %%
 splits = generate_cv_splits(
@@ -691,10 +719,19 @@ splits = generate_cv_splits(
 last_val = max(split["val_end"] for split in splits)
 assert len(splits) == SETUP["evaluation"]["n_splits"], "fold count differs from setup.yaml"
 assert str(last_val.date()) < HOLDOUT_START, "a fold reaches into the holdout"
+# Read the numbering direction off the boundaries rather than asserting it: the fold whose training
+# window opens earliest, against the fold whose validation window ends latest.
+_by_date = sorted(splits, key=lambda split: split["train_start"])
+_earliest_fold, _latest_fold = _by_date[0]["fold"], _by_date[-1]["fold"]
+_direction = (
+    "ascend with time" if _earliest_fold < _latest_fold else "descend as the folds move forward"
+)
 print(
     f"{len(splits)} folds | training {SETUP['evaluation']['train_size']} and validation "
     f"{SETUP['evaluation']['val_size']} each, purged by labels.buffer {LABEL_BUFFER}; the variants "
     f"declare {', '.join(f'{k} at {v}' for k, v in VARIANT_BUFFERS.items())}\n"
+    f"Fold ids {_direction}: the earliest window is fold {_earliest_fold} and the last one before "
+    f"the holdout is fold {_latest_fold}\n"
     f"Last validation ends {last_val.date()}, the holdout opens {HOLDOUT_START}"
 )
 
@@ -709,11 +746,12 @@ add_message_title(
 )
 show_with_alt(
     fig,
-    "One horizontal row per walk-forward fold, the highest-numbered at the top and fold "
-    "zero at the bottom. Each row is a long dark training bar followed immediately by a "
-    "short lighter validation bar. Reading down the rows, both bars shift later in time, "
-    "so the folds roll forward across the sample. A shaded holdout block stands at the "
-    "right-hand edge, and no fold's validation bar reaches it.",
+    "One horizontal row per walk-forward fold, drawn earliest-first down the axis so the top row "
+    f"is the earliest window and the bottom row the last one before the holdout: fold "
+    f"{_earliest_fold} at the top and fold {_latest_fold} at the bottom. Each row is a long dark "
+    "training bar followed immediately by a short lighter validation bar. Reading downward, both "
+    "bars shift later in time, so the folds roll forward across the sample. A shaded holdout "
+    "block stands at the right-hand edge, and no fold's validation bar reaches it.",
 )
 
 # %% [markdown]

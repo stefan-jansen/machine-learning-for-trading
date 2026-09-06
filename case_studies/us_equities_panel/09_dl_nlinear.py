@@ -14,28 +14,74 @@
 # ---
 
 # %% [markdown]
-# # NLinear Models - US Equities Panel
+# # US equities panel: the simplest thing that reads a window
 #
-# This notebook generates walk-forward validation predictions for the published NLinear
-# configurations and every declared epoch checkpoint. Readers choose the label, configurations,
-# parameter overrides, and execution tier. Shared sequence code owns eligible-window construction,
-# fold preprocessing, fitting, checkpoint persistence, restart, coverage, metrics, and registry
-# writes.
+# [`06_linear`](06_linear.ipynb), [`07_gbm`](07_gbm.ipynb) and
+# [`08_tabular_dl`](08_tabular_dl.ipynb) all read the same flat table: one row per stock per
+# session, one column per feature, and nothing in the representation saying the rows are ordered
+# in time. A model on that table sees the past only through columns somebody computed in advance -
+# a 21-session momentum, a rolling volatility. It never sees the sequence itself.
 #
-# The sequence implementation is in `case_studies/utils/deep_learning.py`, and the gap-aware window
-# construction is in `case_studies/utils/sequence_dataset.py`. Readers can change those ordinary
-# Python implementations while keeping the same request, result, and catalog boundary.
+# A **sequence model** is handed the sequence. Each training example here is a **window**: the 60
+# most recent sessions of one stock's features, in order, as a matrix of sessions by features -
+# about three months. The model reads the window and emits one number, the predicted return.
 #
-# **Learning objectives**
+# **A window has to be 60 consecutive sessions of the same stock, and on this panel that binds.**
+# A stock that lists part-way through a fold, halts, or delists leaves a gap, and a window
+# spanning a gap would treat the two sides as consecutive sessions and read the jump across it as
+# one day's move. Windows are therefore built only where the sessions are unbroken, which is why
+# the number of training examples is far smaller than the number of rows and differs between
+# folds.
 #
-# - Configure a gap-aware NLinear sequence experiment and its epoch checkpoints.
-# - Trace eligible windows, preprocessing state, and checkpoint persistence into result identities.
-# - Validate complete prediction coverage before publishing the catalog population.
+# **NLinear is deliberately the least elaborate sequence model there is**, and that is why it
+# comes first. It works one feature at a time. For each feature column of the window it subtracts
+# that column's last value, maps the 60 sessions to a single number with a linear layer, and adds
+# the last value back - so each feature is summarised into one number on its own, with no
+# reference to any other. A final linear layer then combines those per-feature numbers into the
+# one number the notebook predicts. There is no nonlinearity, no recurrence and no attention
+# anywhere in it.
 #
-# **Book reference**: Chapter 13
+# It is here as the control the two notebooks after it have to beat. A recurrent network and a
+# mixing architecture are both far more expressive, and expressiveness is only worth its cost if
+# it buys something a linear map on a normalised window did not already have. Running the
+# elaborate models without this one would leave no way to tell a good result from an easy one.
 #
-# **Prerequisites**: `05_evaluation.py` and the finalized financial and model-based feature
-# artifacts.
+# **The subtract-and-add-back is the whole of the normalisation, and on price-derived features it
+# matters.** A feature that drifts makes a model reading raw levels spend its capacity tracking
+# where that series happens to sit rather than how it is moving. Removing each column's last value
+# before the linear map, and restoring it after, leaves the map looking at the shape of the window
+# rather than its level.
+#
+# **Learning objectives.** By the end of this notebook you will be able to:
+#
+# - Describe what NLinear does to each feature column of a window and how the per-feature results
+#   become one prediction, and say which part of that is the normalisation.
+# - Say why the least expressive model in a comparison is the one to run first, and what a result
+#   from a more elaborate model means without it.
+# - Explain why a window has to be built from consecutive sessions, and what a window spanning a
+#   gap would silently claim.
+# - Read the epoch schedule out of a declared configuration and say how many scoreable models the
+#   run publishes for it.
+#
+# **A neural fit has a meaningful state at every epoch**, in the way a boosted model has one at
+# every iteration and a linear fit does not. An **epoch** is one pass over the training windows.
+# Each configuration here trains for 100 of them and saves its weights every 5, so it publishes
+# twenty scoreable models rather than one, each registered with its own identity. The count that
+# matters downstream is configurations times checkpoints.
+#
+# **Book reference**: Chapter 13. Chapter 6, Section 6.7 (Search accounting and run logging)
+# introduces the run log this notebook writes to.
+#
+# **Prerequisites**: [`03_financial_features`](03_financial_features.ipynb) and
+# [`04_model_based_features`](04_model_based_features.ipynb) have written the feature matrices, and
+# [`05_evaluation`](05_evaluation.ipynb) has established the walk-forward folds.
+#
+# **What it writes**: one training run per configuration and one complete validation prediction set
+# per configuration and epoch checkpoint, in `run_log/registry.db` and under `run_log/training/`
+# and `run_log/predictions/`, grouped under a named population.
+# [`15_model_analysis`](15_model_analysis.ipynb) compares that population against the other
+# families and [`16_backtest`](16_backtest.ipynb) backtests every member and selects on validation
+# backtest Sharpe. **Selection happens there, not here.**
 
 # %%
 """Generate NLinear validation predictions through the shared research interface."""
@@ -46,9 +92,9 @@ from pathlib import Path
 import polars as pl
 import yaml
 
-from case_studies.research import Study, open_study, plan_models
+from case_studies.research import open_study, plan_models
 from utils.modeling import load_configs
-from utils.paths import REPO_ROOT, get_case_study_dir
+from utils.paths import get_case_study_dir
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
@@ -65,17 +111,29 @@ MAX_TRAIN_SEQUENCES = 0
 PREVIEW_N_EPOCHS = 0
 
 # %% [markdown]
-# ## Configure the experiment
+# ## 1. Which configurations, and on which label
 #
-# `CONFIG_NAMES = []` selects every published NLinear configuration. `COMMON_OVERRIDES` changes
-# validated model or runner parameters for every selected configuration. `CONFIG_OVERRIDES` adds
-# changes for one named configuration and takes precedence. Effective defaults and overrides are
-# retained in each resolved training specification.
+# The menu at `config/training/{label}.yaml` lists the sequence configurations declared for a
+# label, and this notebook takes the ones whose architecture is `nlinear`. Each name resolves to a
+# preset holding the full parameter set - here a 60-session lookback, 100 epochs, a checkpoint
+# every 5, and a dropout of 0.1.
 #
-# Canonical requests use CUDA, every eligible sequence, every fold, and the published checkpoint
-# schedule. A reduced check uses the preview tier and declares at least one data or fold reduction.
-# `PREVIEW_N_EPOCHS` shortens the identity-covered model schedule for that preview. Preview results
-# cannot enter official comparisons, candidate sets, locks, or holdout evaluation.
+# What each setting a run may pass decides:
+#
+# - **`CONFIG_NAMES`** empty fits every declared `nlinear` configuration. A named subset fits only
+#   those, which is what to do first: at panel scale a full run is hours, and the point of a first
+#   pass is to find out whether the plumbing works.
+# - **`COMMON_OVERRIDES`** changes a parameter for every selected configuration, and
+#   **`CONFIG_OVERRIDES`** changes one named configuration and takes precedence. An override moves
+#   a training identity, so an overridden run registers beside the published one rather than
+#   replacing it.
+# - **`EXECUTION_TIER`** is `canonical` or `preview`. A canonical run fits every eligible window on
+#   every fold at the published epoch schedule. A preview run has to declare at least one
+#   reduction and carries it in the identity, so its results can never be compared against
+#   canonical ones or reach a holdout decision.
+# - **`PREVIEW_N_EPOCHS`** shortens the schedule for a preview. It is part of the identity rather
+#   than a runtime detail, because a model trained for fewer epochs is a different model rather
+#   than the same one measured sooner.
 
 # %%
 case_dir = get_case_study_dir(CASE_STUDY_ID)
@@ -122,13 +180,9 @@ if FOLD_IDS:
 if MAX_TRAIN_SEQUENCES:
     preview_reductions["max_train_sequences"] = int(MAX_TRAIN_SEQUENCES)
 
-# Both tiers resolve the study through `open_study`, never `Study.open`/`Study.regenerate`
-# directly. In a maintainer worktree the generated directories are symlinks to shared data, and
-# `open_study` handles that by reading inputs in place - `root` stays the release case directory
-# and only writes are redirected to the workspace. `Study.open(workspace=...)` instead puts `root`
-# inside the workspace, so `source = self.root / "labels"` (workspace.py:274) resolves somewhere
-# else and `_ensure_input_link` rejects the link a sibling notebook already made. Two notebooks in
-# one session then cannot both open a preview workspace.
+# Both tiers resolve the study through `open_study`. It reads the labels and features in place and
+# redirects only writes, so a preview run scores the same inputs a canonical one does and cannot
+# publish over it.
 if EXECUTION_TIER == "canonical":
     if preview_reductions or PREVIEW_N_EPOCHS:
         raise ValueError("Canonical execution cannot declare preview reductions")
@@ -145,7 +199,7 @@ else:
     raise ValueError("EXECUTION_TIER must be 'canonical' or 'preview'")
 
 # %% [markdown]
-# ## Build the model requests
+# ## 2. Binding the declarations to the data
 #
 # Each selected NLinear configuration becomes one request with the declared sequence reductions.
 
@@ -184,7 +238,7 @@ request_table = pl.DataFrame(
 request_table
 
 # %% [markdown]
-# ## Plan and execute the selected configurations
+# ## 3. Planning, then fitting
 #
 # The planner resolves every training and epoch-checkpoint identity before fitting and writes the
 # canonical checkpoint population first. Execution builds only sequences that follow the declared
@@ -217,7 +271,7 @@ planned_population
 execution = plan.run()
 
 # %% [markdown]
-# ## Inspect the resolved computation
+# ## 4. What was actually fitted
 #
 # These rows expose the feature, fold, sequence, runtime, model, and checkpoint settings used by
 # the runner, including defaults that were not repeated in the notebook parameters.
@@ -247,7 +301,7 @@ resolved_table = pl.DataFrame(resolved_rows).sort("config_name")
 resolved_table
 
 # %% [markdown]
-# ## Validate and inspect the handoff
+# ## 5. What came out
 #
 # Each catalog row is one complete validation prediction set for one training identity and epoch.
 # Downstream notebooks filter these rows with Polars and pass the selected table directly to
@@ -272,13 +326,12 @@ catalog_rows = execution.catalog_rows.select(
 ).sort("config_name", "checkpoint_value", "prediction_hash")
 catalog_rows
 
-# %%
 # %% [markdown]
-# A prediction set can be registered complete and still have scored no dates: cross-sectional IC
-# needs `min_obs` names on a date, so a reduced universe whose symbols do not overlap in time
-# yields `ic_n_days = 0` and a null IC for every checkpoint while coverage stays complete. That is
-# a run that reports nothing and passes. `11_dl_tsmixer` carried a pinned symbol whitelist to avoid
-# it, which repaired one panel and left the condition unchecked; this asserts it instead.
+# A prediction set can be registered complete and still have scored no dates. Cross-sectional
+# information coefficient needs a minimum number of names quoted on a date before the ranking on
+# that date means anything, so a universe whose stocks do not overlap in time yields no scorable
+# dates and a null IC at every checkpoint while every coverage check passes. That is a run which
+# reports nothing and looks successful, so it is asserted on rather than left to be noticed.
 
 # %% tags=["results"]
 scored = execution.catalog_rows.select("config_name", "checkpoint_value", "ic_mean", "ic_n_days")
@@ -321,7 +374,7 @@ execution_diagnostics = pl.DataFrame(execution.diagnostics)
 execution_diagnostics
 
 # %% [markdown]
-# ## Freeze the compatible result set
+# ## 6. Naming the set the later notebooks open
 #
 # A canonical default CUDA run freezes every returned NLinear prediction row under a stable name.
 # The same bounded family set supplies raw diagnostics because this notebook has one published
@@ -361,11 +414,23 @@ compatible_sets
 # configuration or checkpoint.
 
 # %% [markdown]
-# ## Key takeaways and limitations
+# ## What to notice
 #
-# - Sequence eligibility follows the declared observation calendar and excludes windows that cross
-#   missing expected periods.
-# - Each epoch checkpoint retains fitted preprocessing, model state, predictions, and coverage.
-# - NLinear applies a linear mapping across a fixed lookback window; nonlinear temporal effects
-#   require a different sequence architecture.
-# - Validation predictions remain separate from the holdout assessment.
+# **This is the number the next two notebooks are measured against.** NLinear has one linear map
+# and no nonlinearity, so whatever it reaches is what a window contains before any architecture is
+# brought to bear on it. A recurrent or mixing model that does not clear it has not shown that its
+# extra capacity found anything.
+#
+# **A checkpoint is part of a configuration, not a detail of how it was fitted.** Twenty
+# checkpoints per configuration are twenty candidates, each registered separately, because keeping
+# each configuration's own best epoch after seeing the results would report the maximum of twenty
+# numbers as though it were one.
+#
+# **Known limitations.** Every window is built from consecutive sessions, so a stock's history
+# around a halt or a listing contributes nothing and the training set is not a uniform sample of
+# the panel. What is measured is ranking accuracy on validation folds that have been read many
+# times over by the time a case study reaches this notebook, and it says nothing about what a
+# strategy trading those rankings would earn after costs.
+#
+# **Next**: [`10_dl_lstm`](10_dl_lstm.ipynb) gives the same windows to a model that carries state
+# across them.

@@ -49,16 +49,8 @@ if TYPE_CHECKING:
     from case_studies.utils.latent_factors.case_study import LatentFactorCaseStudyContext
 
 
-_PREVIEW_FIELDS = {
-    "folds",
-    "max_iter",
-    "max_symbols",
-    "n_epochs",
-    "n_epochs_cond",
-    "n_epochs_moment",
-    "n_epochs_unc",
-    "n_factors",
-}
+from case_studies.utils.preview_fields import LATENT_PREVIEW_FIELDS as _PREVIEW_FIELDS
+
 _MODEL_PREVIEW_FIELDS = {
     "cae": {"folds", "max_symbols", "n_epochs", "n_factors"},
     "ipca": {"folds", "max_iter", "max_symbols", "n_factors"},

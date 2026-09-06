@@ -241,6 +241,7 @@ requests = model_requests(
     execution_tier=EXECUTION_TIER,
     overrides={"device": device},
     preview_reductions=PREVIEW_REDUCTIONS,
+    notebook="10a_dl_nlinear",
 )
 resolved = tuple(request.resolve() for request in requests)
 
