@@ -554,9 +554,15 @@ def validation_rows(frame: pl.DataFrame) -> pl.DataFrame:
 # picture of what will be asked of it, not of how it is laid out.
 
 # %%
+# Sorted by fold id, so the row order is a property of this cell rather than of the order
+# `generate_cv_splits` happens to return. Plotly lays a categorical axis out in order of first
+# appearance, bottom upwards, so without the sort the bottom row is whichever fold the splits
+# list puts first - and that is exactly what the fold renumbering changes. The rendered figure
+# is unchanged today; what changes is that the description below stays true when the numbering
+# moves.
 spans = [
     (f"Fold {s['fold']}", kind, pd.Timestamp(s[f"{key}_start"]), pd.Timestamp(s[f"{key}_end"]))
-    for s in splits
+    for s in sorted(splits, key=lambda s: s["fold"])
     for kind, key in (("Training bars", "train"), ("Validation bars", "val"))
 ]
 spans += [
@@ -614,15 +620,15 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Horizontal timeline with one row per fold on a session axis. Every row below the top is a "
-    "validation fold: a long dark navy training bar followed by the shorter amber validation bar "
-    "it is scored on. Fold 0 is the bottom row and holds the latest of those validation windows, "
-    "and each validation row above it holds an earlier one, so their bars overlap. A dashed red "
-    "rule marks where the holdout opens and a shaded band to its right is the holdout itself. "
-    "The top row is the extra fold written for the holdout and has no validation bar: its "
-    "training bar runs from the left edge up to the rule and its light grey holdout bar sits "
-    "inside the band, later than every validation window. No training bar of any row crosses "
-    "the rule.",
+    "Horizontal timeline with one row per fold on a session axis, lowest-numbered fold at the "
+    "bottom. Every row below the top is a validation fold: a long dark navy training bar "
+    "followed by the shorter amber validation bar it is scored on. The validation windows sit "
+    "at different points along the axis and the training bars overlap between rows, because a "
+    "fold tag selects rows rather than changing values. A dashed red rule marks where the "
+    "holdout opens and a shaded band to its right is the holdout itself. The top row is the "
+    "extra fold written for the holdout and has no validation bar: its training bar runs from "
+    "the left edge up to the rule and its light grey holdout bar sits inside the band, later "
+    "than every validation window. No training bar of any row crosses the rule.",
 )
 
 # %% [markdown]
