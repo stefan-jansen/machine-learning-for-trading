@@ -254,10 +254,17 @@ def remap_relative_path(
     for part in relative.parts:
         match = _FOLD_COMPONENT.match(part)
         if match is None:
-            # A training artifact tree nests a directory named by the candidate identity,
-            # which is the training hash - `models/<training_hash>/fold_08/` - so the hash
-            # appears inside the tree as well as naming it.
-            parts.append(renames.get(part, part))
+            # An identity names a path in two shapes. A directory is the hash alone -
+            # `predictions/<prediction_hash>/`, and inside a training tree the candidate
+            # directory `models/<training_hash>/fold_08/`. A snapshot file leads with it
+            # instead: `_snapshots/<date>-<name>/<prediction_hash>.conformal_widths.parquet`.
+            # Matching only whole components leaves the second shape carrying a retired
+            # identity in its name.
+            if part in renames:
+                parts.append(renames[part])
+                continue
+            head, dot, rest = part.partition(".")
+            parts.append(f"{renames[head]}{dot}{rest}" if head in renames else part)
             continue
         parts.append(_rename_fold_token(match, permutation, where=str(relative)))
     return PurePosixPath(*parts) if parts else relative
@@ -858,6 +865,9 @@ _FOLD_ID_COLUMNS: tuple[tuple[str, str], ...] = (
 #: id can take, so the intermediate state is unambiguous rather than merely unlikely.
 _FOLD_ID_OFFSET = 1_000_000
 
+#: A permutation that moves nothing, for a tree whose owning run is not being renumbered.
+_IDENTITY_PERMUTATION: dict[int, int] = {fold: fold for fold in range(1024)}
+
 
 def _table_columns(db: sqlite3.Connection, table: str) -> list[str]:
     return [str(row[1]) for row in db.execute(f"PRAGMA table_info({table})")]
@@ -976,19 +986,7 @@ def _copy_artifact_tree(
         if spec_override is not None and relative.as_posix() == "spec.json":
             target.write_text(json.dumps(spec_override, indent=2, sort_keys=True) + "\n")
             continue
-        if source.suffix == ".parquet" and _remap_parquet(source, target, permutation):
-            continue
-        if source.suffix == ".json":
-            try:
-                document = json.loads(source.read_text())
-            except json.JSONDecodeError:
-                document = None
-            if document is not None:
-                remapped = remap_json_document(document, permutation, identity_renames=renames)
-                if remapped != document:
-                    target.write_text(json.dumps(remapped, indent=1) + "\n")
-                    continue
-        os.link(source, target)
+        _write_migrated_file(source, target, permutation, renames)
 
 
 def _under(run_log: Path, stored: str) -> Path:
@@ -1001,6 +999,56 @@ def _under(run_log: Path, stored: str) -> Path:
     if relative.parts and relative.parts[0] == "run_log":
         return run_log.joinpath(*relative.parts[1:])
     return run_log.parent / relative
+
+
+def _identity_owners(plan: RenumberPlan) -> dict[str, tuple[str, dict[int, int]]]:
+    """Every migrating identity, with the new one and the permutation that moved it."""
+    owners: dict[str, tuple[str, dict[int, int]]] = {}
+    for remap in plan.remaps:
+        owners[remap.source_hash] = (remap.target_hash, remap.permutation)
+        for stored, new in remap.prediction_map.items():
+            owners[stored] = (new, remap.permutation)
+        for stored, new in remap.backtest_map.items():
+            owners[stored] = (new, remap.permutation)
+    return owners
+
+
+def _permutation_for_path(
+    relative: PurePosixPath, owners: Mapping[str, tuple[str, dict[int, int]]]
+) -> dict[int, int]:
+    """The permutation belonging to whichever identity names this path, else the identity map.
+
+    A file outside the three identity trees says which run it belongs to by carrying that
+    run's hash in its path, so the permutation to apply to its contents is read from the path
+    rather than passed down.
+    """
+    for part in relative.parts:
+        owner = owners.get(part) or owners.get(part.partition(".")[0])
+        if owner is not None:
+            return owner[1]
+    return _IDENTITY_PERMUTATION
+
+
+def _write_migrated_file(
+    source: Path,
+    target: Path,
+    permutation: Mapping[int, int],
+    renames: Mapping[str, str],
+) -> None:
+    """Materialize one file at its new path, rewriting it only if it names a fold or a run."""
+    if source.suffix == ".parquet" and _remap_parquet(source, target, permutation):
+        return
+    if source.suffix == ".json":
+        try:
+            document = json.loads(source.read_text())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            document = None
+        if document is not None:
+            remapped = remap_json_document(document, permutation, identity_renames=renames)
+            if remapped != document:
+                target.write_text(json.dumps(remapped, indent=1) + "\n")
+                return
+    os.link(source, target)
 
 
 def _sha256_file(path: Path) -> str:
@@ -1216,13 +1264,31 @@ def _table_counts(db: sqlite3.Connection) -> dict[str, int]:
 def _build_staging_tree(run_log: Path, staging: Path, plan: RenumberPlan) -> None:
     staging.mkdir(parents=True)
     moved = {"training", "predictions", "backtest"}
+    owner = _identity_owners(plan)
+    renames = {stored: new for stored, (new, _) in owner.items()}
     for entry in sorted(run_log.iterdir()):
-        if entry.name in moved or entry.name.startswith("registry.db"):
+        if entry.name in moved:
             continue
-        if entry.is_dir():
-            shutil.copytree(entry, staging / entry.name, copy_function=os.link)
-        else:
+        # The backups beside the live database are snapshots of the registry as it was, and
+        # they stay with the tree this replaces rather than being carried into a migrated one,
+        # where they would read as recoverable state under the new numbering.
+        if entry.name.startswith("registry.db"):
+            continue
+        if entry.is_file():
             os.link(entry, staging / entry.name)
+            continue
+        # Anything else under `run_log` is migrated the same way as the identity trees rather
+        # than hard-linked whole. `_snapshots` holds one conformal-width file per prediction,
+        # named by the prediction hash and carrying a `fold_id` column, so copying it
+        # unchanged would leave a retired identity in a filename and old ids in the data.
+        for source in sorted(entry.rglob("*")):
+            if not source.is_file():
+                continue
+            relative = PurePosixPath(source.relative_to(run_log).as_posix())
+            permutation = _permutation_for_path(relative, owner)
+            target = staging / remap_relative_path(relative, permutation, renames)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _write_migrated_file(source, target, permutation, renames)
     # A consistent copy of the registry, taken through SQLite rather than off the filesystem:
     # the live database has a write-ahead log beside it, so copying the file alone can produce
     # a database missing its most recent commits.
@@ -1237,7 +1303,6 @@ def _build_staging_tree(run_log: Path, staging: Path, plan: RenumberPlan) -> Non
     backtest_map = plan.backtest_map
     permutation_by_source = {remap.source_hash: remap.permutation for remap in plan.remaps}
     spec_by_source = {remap.source_hash: remap.target_spec for remap in plan.remaps}
-    identity = {fold: fold for fold in range(1024)}
 
     for kind, mapping in (
         ("training", training_map),
@@ -1255,7 +1320,7 @@ def _build_staging_tree(run_log: Path, staging: Path, plan: RenumberPlan) -> Non
             target_dir = staging / kind / mapping.get(stored, stored)
             renames: dict[str, str] = {}
             if kind == "training":
-                permutation = permutation_by_source.get(stored, identity)
+                permutation = permutation_by_source.get(stored, _IDENTITY_PERMUTATION)
                 override = spec_by_source.get(stored)
                 if stored in training_map:
                     renames = {stored: training_map[stored]}
@@ -1264,10 +1329,10 @@ def _build_staging_tree(run_log: Path, staging: Path, plan: RenumberPlan) -> Non
                     (remap.source_hash for remap in plan.remaps if stored in remap.prediction_map),
                     None,
                 )
-                permutation = permutation_by_source.get(owner or "", identity)
+                permutation = permutation_by_source.get(owner or "", _IDENTITY_PERMUTATION)
                 override = None
             else:
-                permutation = identity
+                permutation = _IDENTITY_PERMUTATION
                 override = None
             _copy_artifact_tree(
                 source_dir,
@@ -1359,10 +1424,13 @@ def verify_fold_renumbering(staging: Path, retired: Path, plan: RenumberPlan) ->
     with closing(sqlite3.connect(retired / "registry.db")) as before_db:
         report["table_counts_before"] = _table_counts(before_db)
 
+    # Every table holds what it held: a relabeling moves identities, it does not add or drop
+    # results. The one table that grows is the audit trail, which gains a row per migrated run.
     differing = {
         table: (report["table_counts_before"].get(table), count)
         for table, count in report["table_counts"].items()
-        if report["table_counts_before"].get(table) != count
+        if table != "training_identity_migrations"
+        and report["table_counts_before"].get(table) != count
     }
     if differing:
         raise FoldRenumberRefusal(f"row counts moved during migration: {differing}")
@@ -1388,7 +1456,27 @@ def verify_fold_renumbering(staging: Path, retired: Path, plan: RenumberPlan) ->
                 )
             same_file += 1
     report["fitted_artifacts_unmoved"] = same_file
+
+    # The database scan cannot see a filename. `_snapshots` names its files by the prediction
+    # hash they belong to, so a tree copied whole would keep a retired identity in a path while
+    # every table read clean - which is what this catches.
+    stale_paths = [
+        str(path.relative_to(staging))
+        for path in staging.rglob("*")
+        if _path_names_a_retired_identity(path.relative_to(staging), retired_identities)
+    ]
+    if stale_paths:
+        raise FoldRenumberRefusal(f"retired identities still in artifact paths: {stale_paths[:5]}")
+    report["artifact_paths_checked"] = True
     return report
+
+
+def _path_names_a_retired_identity(relative: Path, retired: Iterable[str]) -> bool:
+    retired_set = set(retired)
+    for part in relative.parts:
+        if part in retired_set or part.partition(".")[0] in retired_set:
+            return True
+    return False
 
 
 def apply_fold_renumbering(case_dir: Path, plan: RenumberPlan) -> dict[str, Any]:

@@ -252,3 +252,14 @@ def test_plan_refuses_a_registry_whose_stored_hash_does_not_reproduce(tmp_path) 
     plan = plan_fold_renumbering(case_dir)
     assert plan.remaps == []
     assert any("does not reproduce" in refusal for refusal in plan.refusals)
+
+
+def test_relative_path_renames_a_snapshot_named_by_its_prediction_hash() -> None:
+    # `_snapshots/<date>-<name>/<prediction_hash>.conformal_widths.parquet` leads with the
+    # identity rather than being a directory named by it, so a rule that matched only whole
+    # components would carry a retired hash into the migrated tree.
+    assert remap_relative_path(
+        PurePosixPath("_snapshots/2026-08-30-widths/aaaaaaaaaaaa.conformal_widths.parquet"),
+        {0: 1},
+        {"aaaaaaaaaaaa": "bbbbbbbbbbbb"},
+    ) == PurePosixPath("_snapshots/2026-08-30-widths/bbbbbbbbbbbb.conformal_widths.parquet")
