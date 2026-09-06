@@ -12,6 +12,8 @@ import pytest
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.registry.fold_renumbering import (
     FoldRenumberRefusal,
+    RenumberPlan,
+    TrainingRemap,
     cohort_member_digest,
     derive_fold_permutation,
     plan_fold_renumbering,
@@ -199,14 +201,16 @@ def test_remap_refuses_a_prediction_frame_that_is_not_the_one_the_digest_covers(
 def test_remap_refuses_when_anything_outside_the_fold_fields_moved() -> None:
     spec = _spec(NEWEST_FIRST)
     permutation = derive_fold_permutation(NEWEST_FIRST)
-
     original = remap_training_spec.__globals__["_strip_fold_bearing"]
+    seen: list[int] = []
 
     def _drop_seed(candidate):
         reduced = original(candidate)
         # Stand in for a spec whose non-fold content differs between source and target: the
-        # comparison has to fail on it rather than migrate a different computation.
-        reduced["computation"]["numerics"]["seed"] = id(candidate) % 7
+        # first call is the source and the second the target, so they disagree by construction
+        # rather than by whatever the allocator happened to do.
+        seen.append(1)
+        reduced["computation"]["numerics"]["seed"] = len(seen)
         return reduced
 
     remap_training_spec.__globals__["_strip_fold_bearing"] = _drop_seed
@@ -273,3 +277,44 @@ def test_the_no_fold_sentinel_survives_a_renumber() -> None:
         "fold_id": -1,
         "fold": 1,
     }
+
+
+def test_stored_fold_ids_move_and_the_sentinel_stays(tmp_path) -> None:
+    """The registry's own fold_id columns, including a row that belongs to no fold.
+
+    Written against a database rather than the pure helper because the bug it pins was in the
+    two-pass update: the offset that avoids a primary-key collision is added unconditionally
+    and removed only from values at or above it, so a sentinel of -1 came back as 999999.
+    """
+    import sqlite3
+
+    from case_studies.utils.registry.fold_renumbering import _renumber_fold_ids
+    from case_studies.utils.registry.store import _open_registry
+
+    case_dir = tmp_path / "case"
+    (case_dir / "run_log").mkdir(parents=True)
+    _open_registry(case_dir).close()
+    spec = _spec(NEWEST_FIRST)
+    permutation = derive_fold_permutation(NEWEST_FIRST)
+    remap = TrainingRemap(
+        source_hash="aaaaaaaaaaaa",
+        target_hash="bbbbbbbbbbbb",
+        permutation=permutation,
+        target_spec=spec,
+        prediction_map={"cccccccccccc": "dddddddddddd"},
+    )
+    plan = RenumberPlan(case_study="case", case_dir=case_dir, remaps=[remap])
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        for fold_id in (0, 1, 2, -1):
+            db.execute(
+                "INSERT INTO fold_metrics (prediction_hash, fold_id, computed_at, ic) "
+                "VALUES (?,?,?,?)",
+                # Keyed by the identity the rows still carry: fold ids are renumbered before
+                # the identities are renamed, so this runs against the pre-migration hash.
+                ("cccccccccccc", fold_id, "2026-01-01T00:00:00+00:00", float(fold_id)),
+            )
+        _renumber_fold_ids(db, plan)
+        db.commit()
+        moved = dict(db.execute("SELECT ic, fold_id FROM fold_metrics").fetchall())
+    # Each row keeps its measurement and takes the id its window now carries; -1 keeps its own.
+    assert moved == {0.0: 2, 1.0: 1, 2.0: 0, -1.0: -1}

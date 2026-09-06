@@ -502,6 +502,13 @@ def remap_population_snapshot(
     if not isinstance(members, list):
         raise FoldRenumberRefusal("population snapshot has no member list")
     target["members"] = [member_map.get(str(member), str(member)) for member in members]
+    # `supersedes` names the generation this one retires, and it is inside the hashed snapshot.
+    # Leaving it while `official_populations.supersedes_hash` moves gives one population two
+    # answers about its own lineage, and the hash it is stored under is computed over the
+    # stale one.
+    superseded = target.get("supersedes")
+    if isinstance(superseded, str):
+        target["supersedes"] = member_map.get(superseded, superseded)
     return target, compute_hash(canonical_json(target))
 
 
@@ -662,7 +669,7 @@ def plan_fold_renumbering(case_dir: Path) -> RenumberPlan:
     against what is stored, so a registry this cannot explain produces refusals rather than
     a plan.
     """
-    run_log = case_dir / "run_log"
+    run_log = (case_dir / "run_log").resolve()
     plan = RenumberPlan(case_study=case_dir.name, case_dir=case_dir)
     db = sqlite3.connect(f"file:{run_log / 'registry.db'}?mode=ro", uri=True)
     db.row_factory = sqlite3.Row
@@ -1133,7 +1140,13 @@ def _renumber_fold_ids(db: sqlite3.Connection, plan: RenumberPlan) -> None:
             if not owners[table](str(key)):
                 continue
             permutation = permutation_by_training[resolve[table](str(key))]
-            updates.append((_permute_data(permutation, int(fold_id), where=table), int(rowid)))
+            moved = _permute_data(permutation, int(fold_id), where=table)
+            # A fold id that maps to itself - a declared sentinel, or a permutation's fixed
+            # point - is left alone rather than sent through the offset. The offset is added
+            # unconditionally and removed only from values at or above it, so a negative
+            # sentinel would come back as its offset image instead of itself.
+            if moved != int(fold_id):
+                updates.append((moved, int(rowid)))
         if not updates:
             continue
         db.executemany(
@@ -1346,8 +1359,13 @@ def _build_staging_tree(run_log: Path, staging: Path, plan: RenumberPlan) -> Non
                 permutation = permutation_by_source.get(owner or "", _IDENTITY_PERMUTATION)
                 override = None
             else:
+                # A backtest's `spec.json` carries `backtest_config.metadata.prediction_hash`,
+                # which is both inside the hashed strategy and compared against the row. Copying
+                # the tree unchanged leaves the file disagreeing with the registry about which
+                # prediction the backtest ran on.
                 permutation = _IDENTITY_PERMUTATION
                 override = None
+                renames = dict(prediction_map)
             _copy_artifact_tree(
                 source_dir,
                 target_dir,
@@ -1357,7 +1375,66 @@ def _build_staging_tree(run_log: Path, staging: Path, plan: RenumberPlan) -> Non
             )
 
 
-def _rewrite_staged_registry(staging: Path, plan: RenumberPlan) -> None:
+def _rewrite_prediction_coverage(
+    db: sqlite3.Connection, plan: RenumberPlan, staging: Path, original: Path
+) -> None:
+    """Recompute the coverage evidence that describes a rewritten prediction frame.
+
+    `prediction_coverage` holds a digest of the prediction artifact and digests of its key
+    columns, and the key columns include the fold id. Relabeling the frame moves all three,
+    and `PredictionResult.completeness` compares the artifact against its recorded digest -
+    so a migration that moved the identity and left the evidence would leave every migrated
+    prediction reporting incomplete, which is how a locked backtest would refuse them.
+
+    Each row is reproduced from the frame it was written over before it is rewritten. A row
+    that is not `complete` is refused rather than recomputed: its expected keys are not the
+    ones on disk, and nothing here can reconstruct which rows were missing.
+    """
+    from .completeness import evaluate_prediction_coverage
+
+    db.row_factory = sqlite3.Row
+    updates: list[tuple[str, str, str | None, str]] = []
+    for stored, migrated in sorted(plan.prediction_map.items()):
+        row = db.execute(
+            "SELECT * FROM prediction_coverage WHERE prediction_hash = ?", (migrated,)
+        ).fetchone()
+        if row is None:
+            continue
+        if row["status"] != "complete":
+            raise FoldRenumberRefusal(
+                f"prediction {stored} has {row['status']!r} coverage; its expected keys "
+                "cannot be reconstructed from the artifact"
+            )
+        before = pl.read_parquet(original / "predictions" / stored / "predictions.parquet")
+        after = pl.read_parquet(staging / "predictions" / migrated / "predictions.parquet")
+        recorded = row["artifact_digest"]
+        if recorded is not None and value_digest(before) != recorded:
+            raise FoldRenumberRefusal(
+                f"prediction {stored} does not match its recorded artifact digest"
+            )
+        was = evaluate_prediction_coverage(before, before)
+        if (
+            was.expected_key_digest != row["expected_key_digest"]
+            or was.actual_key_digest != row["actual_key_digest"]
+        ):
+            raise FoldRenumberRefusal(f"prediction {stored} coverage digests do not reproduce")
+        now = evaluate_prediction_coverage(after, after)
+        updates.append(
+            (
+                now.expected_key_digest,
+                now.actual_key_digest,
+                value_digest(after) if recorded is not None else None,
+                migrated,
+            )
+        )
+    db.executemany(
+        "UPDATE prediction_coverage SET expected_key_digest = ?, actual_key_digest = ?, "
+        "artifact_digest = ? WHERE prediction_hash = ?",
+        updates,
+    )
+
+
+def _rewrite_staged_registry(staging: Path, original: Path, plan: RenumberPlan) -> None:
     with closing(sqlite3.connect(staging / "registry.db")) as db:
         db.execute("PRAGMA foreign_keys = OFF")
         db.execute("BEGIN IMMEDIATE")
@@ -1368,6 +1445,7 @@ def _rewrite_staged_registry(staging: Path, plan: RenumberPlan) -> None:
             _rename_identities(db, "backtest", plan.backtest_map)
             _rename_identities(db, "population", plan.population_map)
             _rewrite_documents(db, plan, staging)
+            _rewrite_prediction_coverage(db, plan, staging, original)
             _record_migrations(db, plan)
             db.commit()
         except Exception:
@@ -1404,13 +1482,10 @@ def verify_fold_renumbering(staging: Path, retired: Path, plan: RenumberPlan) ->
             raise FoldRenumberRefusal(f"migration introduced dangling references: {introduced}")
         report["foreign_key_violations"] = dict(sorted(after.items()))
         report["foreign_key_violations_before"] = dict(sorted(baseline.items()))
-        retired_identities = (
-            set(plan.training_map) | set(plan.prediction_map) | set(plan.backtest_map)
-        ) - (
-            set(plan.training_map.values())
-            | set(plan.prediction_map.values())
-            | set(plan.backtest_map.values())
-        )
+        moved = (plan.training_map, plan.prediction_map, plan.backtest_map, plan.population_map)
+        retired_identities = {stored for mapping in moved for stored in mapping} - {
+            new for mapping in moved for new in mapping.values()
+        }
         surviving = surviving_identity_references(db, retired_identities)
         if surviving:
             raise FoldRenumberRefusal(f"retired identities still referenced: {surviving[:5]}")
@@ -1505,14 +1580,19 @@ def apply_fold_renumbering(case_dir: Path, plan: RenumberPlan) -> dict[str, Any]
         raise FoldRenumberRefusal(f"plan holds {len(plan.refusals)} refusals; nothing applied")
     if not plan.remaps:
         raise FoldRenumberRefusal("plan renumbers nothing")
-    run_log = case_dir / "run_log"
-    retired = case_dir / "run_log.pre-fold-renumber"
+    # A worktree's case-study directory reaches the registry through a `run_log` symlink into
+    # the canonical artifact store. Swapping the symlink would leave a migrated tree inside the
+    # worktree and the canonical store untouched, so the swap happens where the data is and the
+    # symlink is left pointing at it.
+    run_log = (case_dir / "run_log").resolve()
+    store_dir = run_log.parent
+    retired = store_dir / "run_log.pre-fold-renumber"
     if retired.exists():
         raise FoldRenumberRefusal(f"{retired} exists; an earlier migration was not cleaned up")
-    staging = case_dir / f".run_log.migrating.{uuid.uuid4().hex}"
+    staging = store_dir / f".run_log.migrating.{uuid.uuid4().hex}"
     try:
         _build_staging_tree(run_log, staging, plan)
-        _rewrite_staged_registry(staging, plan)
+        _rewrite_staged_registry(staging, run_log, plan)
         report = verify_fold_renumbering(staging, run_log, plan)
         os.replace(run_log, retired)
         try:
