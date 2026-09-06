@@ -55,6 +55,7 @@
 """US Equities Panel Case Study - Feasibility Analysis."""
 
 import warnings
+from datetime import date
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -63,6 +64,7 @@ import yaml
 from IPython.display import display
 from ml4t.diagnostic.splitters.calendar import TradingCalendar
 
+from case_studies.utils.coverage import assert_sessions_complete
 from case_studies.utils.feasibility import exceedance_curve, fold_timeline, panel_acf
 from data import load_us_equities
 from utils.cv_splits import generate_cv_splits
@@ -311,6 +313,23 @@ mapped = pl.Series(
     .to_numpy()
 ).cast(pl.Date)
 calendar = dates.filter(mapped == pl.col("timestamp")).with_row_index("session")
+
+# That filter answers one direction: which dates in the archive the exchange never held. The
+# other direction is a session the exchange did hold that the archive never printed, which
+# leaves no row to test and so passes in silence. This archive is missing exactly one,
+# `2017-11-08`, upstream - it is the only NYSE session of 14,156 absent between 1962 and 2018 -
+# and it is declared so that a second one refuses instead of being absorbed.
+KNOWN_ABSENT_SESSIONS = [date(2017, 11, 8)]
+_declared = assert_sessions_complete(
+    calendar["timestamp"].to_list(),
+    calendar=CALENDAR,
+    known_absent=KNOWN_ABSENT_SESSIONS,
+    source="01_feasibility_analysis session index",
+)
+print(
+    f"{calendar.height:,} {CALENDAR} sessions, every one the exchange held between "
+    f"{calendar['timestamp'].min()} and {calendar['timestamp'].max()} except {_declared}"
+)
 
 # %% [markdown]
 # The screen itself. `covered` marks the rows whose trailing window is unbroken, `eligible` marks

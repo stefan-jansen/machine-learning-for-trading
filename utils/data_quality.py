@@ -15,15 +15,13 @@ Usage:
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
-import pandas as pd
 import polars as pl
-from ml4t.diagnostic.splitters.calendar import TradingCalendar
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Sequence
 
 
 def top_entities(
@@ -358,56 +356,6 @@ def gap_summary(
                 "max_gap": [gaps["time_diff"].max()],
             }
         )
-
-
-def absent_calendar_sessions(
-    session_dates: Iterable[date],
-    *,
-    calendar: str,
-    known_absent: Iterable[date] = (),
-) -> list[date]:
-    """Sessions the exchange held between the first and last of *session_dates*, that are not
-    in *session_dates* and are not declared in *known_absent*.
-
-    A panel is normally checked the other way round: each date it carries is asked whether the
-    exchange was open, and the dates that fail are dropped as stray prints. That direction
-    cannot see this one. A session the exchange held and the archive never printed leaves no
-    row to test, so nothing raises, every query succeeds, and one day's rows are simply gone.
-    `us_equities_panel`'s single missing session was found by two counts of an unrelated
-    quantity differing by one, which is the only way a defect of this shape surfaces on its own.
-
-    It matters because every rolling window downstream reads its input in order and treats
-    consecutive elements as consecutive sessions. A variance recursion, a fractional-difference
-    convolution and a rolling average all price the gap across a missing session as one day's
-    move.
-
-    *known_absent* is the declaration, not a suppression: a caller states the sessions it has
-    established are missing upstream, and anything else is returned for the caller to refuse.
-
-    A date counts as a session when it settles itself, which is the rule
-    :meth:`TradingCalendar.get_sessions` applies and the same one a stray-print filter uses -
-    so the two directions cannot disagree about what a session is. Running it over every
-    calendar day of the span enumerates what the exchange held, rather than classifying only
-    the dates the archive happens to carry.
-
-    Args:
-        session_dates: The panel's session index. Order and duplicates do not matter.
-        calendar: Exchange calendar name, as ``config/setup.yaml``'s ``evaluation.calendar``
-            gives it.
-        known_absent: Sessions already established as missing upstream.
-
-    Returns:
-        The undeclared absent sessions, earliest first. Empty when the panel is complete.
-    """
-    present = {d.date() if isinstance(d, datetime) else d for d in session_dates}
-    if not present:
-        return []
-
-    span = pd.date_range(str(min(present)), str(max(present)), freq="D", tz="UTC")
-    settling = TradingCalendar(calendar).get_sessions(pd.DatetimeIndex(span))
-    held = set(pd.DatetimeIndex(settling.to_numpy()).date) & set(span.date)
-    declared = {d.date() if isinstance(d, datetime) else d for d in known_absent}
-    return sorted(held - present - declared)
 
 
 def per_asset_stats(

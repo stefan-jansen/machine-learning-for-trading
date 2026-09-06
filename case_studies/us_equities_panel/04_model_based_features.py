@@ -102,6 +102,7 @@ from ml4t.engineer.features.fdiff import ffdiff, get_ffd_weights
 from statsmodels.tsa.stattools import adfuller
 
 from case_studies.utils.artifact_digest import read_digest, value_digest
+from case_studies.utils.coverage import assert_sessions_complete
 from case_studies.utils.cv_window import modeling_fold_boundaries
 from case_studies.utils.temporal import (
     garch11_conditional_volatility,
@@ -111,7 +112,7 @@ from case_studies.utils.temporal import (
 )
 from data import load_us_equities
 from utils.artifact_specs import resolve_label_horizon
-from utils.data_quality import absent_calendar_sessions, top_entities
+from utils.data_quality import top_entities
 from utils.paths import display_path, get_case_study_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
@@ -355,40 +356,27 @@ print(
     f"{_archive_rows - raw_df.height:,} rows with them"
 )
 
-# The filter above answers one direction only: which archive dates the exchange never held.
-# It cannot see the other, a session the exchange DID hold that the archive never printed,
-# because there is no row to test. That direction is silent - nothing raises, every query
-# succeeds, and one day's rows are simply absent - and the only reason it is known here at
-# all is that two counts of an unrelated quantity came out one apart. So both directions are
-# checked, and a session the archive is missing has to be declared before this stage will
-# emit anything computed over it.
+# The archive is missing one session the exchange held, `2017-11-08`, a Wednesday. It is absent
+# UPSTREAM - the raw archive carries no row on it - so no stage of this case study drops it, and
+# over the whole archive, 1962-01-02 to 2018-03-27, it is the only NYSE session of 14,156 that is
+# absent. It is declared here so it passes deliberately, and so a second one refuses instead.
 #
-# `2017-11-08` is that one session, a Wednesday the NYSE held and the Nasdaq Data Link
-# archive does not carry, and it is missing UPSTREAM: the raw archive has no row on it, so no
-# stage of this case study drops it. Measured over the whole archive, 1962-01-02 to
-# 2018-03-27, it is the only NYSE session of 14,156 that is absent, which is what makes it a
-# single-session outage rather than a calendar or join defect. It costs one session in 7,090
-# over the span this notebook reads.
+# The filter above answers one direction only: which archive dates the exchange never held. The
+# other direction, a session the exchange DID hold that the archive never printed, leaves no row
+# to test - nothing raises, every query succeeds, and one day's rows are simply gone. That is how
+# this one survived until two counts of an unrelated quantity came out one apart.
 KNOWN_ABSENT_SESSIONS = [date(2017, 11, 8)]
 
-_undeclared = absent_calendar_sessions(
-    _sessions["timestamp"].to_list(), calendar=CALENDAR, known_absent=KNOWN_ABSENT_SESSIONS
+_declared = assert_sessions_complete(
+    _sessions["timestamp"].to_list(),
+    calendar=CALENDAR,
+    known_absent=KNOWN_ABSENT_SESSIONS,
+    source="04_model_based_features session index",
 )
-assert not _undeclared, (
-    f"{len(_undeclared)} {CALENDAR} session(s) the archive never printed and this notebook "
-    f"was not told about: {_undeclared[:10]}. Every window below reads its input in order "
-    "and treats consecutive elements as consecutive sessions, so a missing session is priced "
-    "as though the gap across it were one day's move."
-)
-_declared_in_span = [
-    d
-    for d in KNOWN_ABSENT_SESSIONS
-    if _sessions["timestamp"].min() <= d <= _sessions["timestamp"].max()
-]
 print(
     f"Every {CALENDAR} session between {_sessions['timestamp'].min()} and "
-    f"{_sessions['timestamp'].max()} is in the archive except {_declared_in_span}, which is "
-    "declared above"
+    f"{_sessions['timestamp'].max()} is in the archive except {_declared}, which is declared "
+    "above"
 )
 
 # %%

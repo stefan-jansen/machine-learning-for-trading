@@ -63,6 +63,7 @@ from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_ser
 from ml4t.diagnostic.splitters.calendar import TradingCalendar
 
 from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.coverage import assert_sessions_complete
 from case_studies.utils.label_diagnostics import effective_sample_size, panel_autocorrelation
 from data import load_us_equities
 from utils.artifact_specs import resolve_label_horizon
@@ -247,6 +248,34 @@ print(
     f"{sessions.height:,} of {dates.height:,} dates in the archive are "
     f"{setup['evaluation']['calendar']} sessions; the other {dates.height - sessions.height} "
     f"carry stray prints and take {prices.height - panel.height:,} rows with them"
+)
+
+# %% [markdown]
+# The filter above answers one direction only: which dates in the archive the exchange never held.
+# The other direction is a session the exchange **did** hold that the archive never printed, and
+# it leaves no row to test - nothing raises, every query succeeds, and one day's rows are simply
+# gone. A rolling window downstream reads its input in order and treats consecutive elements as
+# consecutive sessions, so a session missing that way is priced as though the gap across it were
+# one day's move.
+#
+# This archive is missing exactly one, `2017-11-08`, a Wednesday. It is missing upstream - the raw
+# archive carries no row on it - and over the whole archive, 1962-01-02 to 2018-03-27, it is the
+# only NYSE session of 14,156 absent. Declaring it here lets it pass deliberately while a second
+# one refuses the notebook before anything is written.
+
+# %%
+KNOWN_ABSENT_SESSIONS = [date(2017, 11, 8)]
+
+_session_dates = sessions["timestamp"]
+_declared = assert_sessions_complete(
+    _session_dates.to_list(),
+    calendar=setup["evaluation"]["calendar"],
+    known_absent=KNOWN_ABSENT_SESSIONS,
+    source="02_labels session index",
+)
+print(
+    f"Every {setup['evaluation']['calendar']} session between {_session_dates.min()} and "
+    f"{_session_dates.max()} is in the archive except {_declared}, which is declared above"
 )
 
 # %% [markdown]

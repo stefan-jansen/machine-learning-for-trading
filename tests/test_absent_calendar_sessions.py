@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from utils.data_quality import absent_calendar_sessions
+from case_studies.utils.coverage import absent_calendar_sessions
 
 # Monday 2017-11-06 to Friday 2017-11-10. Every one is an NYSE session.
 WEEK = [
