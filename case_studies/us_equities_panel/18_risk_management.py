@@ -562,9 +562,8 @@ if n_unchanged and not n_changed and not n_unknown:
         "moving is possible on a calm book, and is also what a control the engine never installed "
         "looks like, so confirm the controls reach the engine before reading it either way."
     )
-overlay_effect
+print(overlay_effect)
 
-# %% tags=["results"]
 set_rows = []
 if EXECUTION_TIER == "canonical":
     for label in completed_risk.get_column("label").unique().sort().to_list():

@@ -92,6 +92,7 @@ from pathlib import Path
 
 warnings.filterwarnings("ignore")
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
@@ -107,6 +108,13 @@ from utils.modeling import (
     seed_everything,
 )
 from utils.paths import get_case_study_dir
+from utils.style import (
+    COLORS,
+    FIGSIZE,
+    add_message_title,
+    ml4t_palette,
+    show_with_alt,
+)
 
 # %% [markdown]
 # ## The values a run can be given
@@ -140,6 +148,9 @@ PRIMARY_LABEL = "fwd_ret_5d"
 NOTEBOOK = "12_dl_weekly"
 
 MAX_TRAIN_SEQUENCES = 200_000
+# Sessions the label looks ahead, which is what makes a Friday grid one-step. Read from the
+# label's own name rather than typed, so a different horizon cannot leave this behind.
+LABEL_HORIZON_SESSIONS = int(PRIMARY_LABEL.rsplit("_", 1)[1].rstrip("d"))
 
 # %% tags=["parameters"]
 BATCH_SIZE = 2048
@@ -176,12 +187,9 @@ LOG_FILE = Path("/tmp/dl_weekly_experiment.log")
 # `02_labels` resolves `fwd_ret_5d` five *sessions* ahead. A full trading week holds exactly
 # five sessions, so a Friday's window closes on the next Friday. A week carrying a market
 # holiday holds four, so the fifth session falls on the Monday after that Friday and the
-# window overlaps the next observation's by a session. Counted on the NYSE calendar over the
-# span the label file covers, 1990-01-30 to 2018-03-20, of 1,417 consecutive Friday pairs:
-# 1,175 (82.9%) close exactly on the next Friday, 196 (13.8%) close after it and overlap, and
-# 46 (3.2%) close before it because the next Friday was itself a holiday and carries no row.
-# The rate is a property of the exchange calendar rather than of this sample: over
-# 2000-02-01 to 2018-03-26 alone it is 82.3%, 14.5% and 3.2%.
+# window overlaps the next observation's by a session. The cell below counts how often each
+# case occurs, on the label file's own session index rather than on a figure written down
+# here - the rate is a property of the exchange calendar, so it moves if the span does.
 #
 # The overlap is always exactly one session and never more. A holiday week holds four
 # sessions, so the fifth falls on the Monday after the next Friday. That is what makes this
@@ -195,6 +203,42 @@ LOG_FILE = Path("/tmp/dl_weekly_experiment.log")
 # Non-overlap would not buy independence in any case. Returns cluster in volatility and share
 # a market factor across the cross-section, so what non-overlap removes is the correlation the
 # construction itself imposes, not the dependence in the data.
+
+# %% tags=["results"]
+# Counted rather than asserted. Each Friday's window closes on the fifth session after it, and
+# the question is where that session falls relative to the next Friday. Reading the session
+# index off the label file is what keeps this a statement about the data the notebook uses.
+_sessions = (
+    pl.scan_parquet(CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet")
+    .select("timestamp")
+    .unique()
+    .sort("timestamp")
+    .collect()
+    .get_column("timestamp")
+    .to_list()
+)
+_position = {session: index for index, session in enumerate(_sessions)}
+_fridays = [session for session in _sessions if session.weekday() == 4]
+_exact = _after = _before = 0
+for _this_friday, _next_friday in zip(_fridays, _fridays[1:]):
+    _close_index = _position[_this_friday] + LABEL_HORIZON_SESSIONS
+    if _close_index >= len(_sessions):
+        continue
+    _close = _sessions[_close_index]
+    if _close == _next_friday:
+        _exact += 1
+    elif _close > _next_friday:
+        _after += 1
+    else:
+        _before += 1
+_pairs = _exact + _after + _before
+print(
+    f"{_sessions[0]} to {_sessions[-1]}, {len(_sessions):,} sessions, {_pairs:,} consecutive "
+    "Friday pairs:"
+)
+print(f"  {_exact:,} ({_exact / _pairs:.1%}) close exactly on the next Friday")
+print(f"  {_after:,} ({_after / _pairs:.1%}) close after it, overlapping by one session")
+print(f"  {_before:,} ({_before / _pairs:.1%}) close before it, the next Friday being a holiday")
 
 # %%
 # Load only weekly rows before materializing joins. The full daily join OOM-kills the kernel.
@@ -526,6 +570,83 @@ print(f"  mean validation IC: {darts_result['best_ic']:.4f}")
 
 with open(LOG_FILE, "a") as f:
     f.write(f"N-BEATS: IC={darts_result['best_ic']:.4f} epoch={darts_result['best_epoch']}\n")
+
+# %% [markdown]
+# ### What more training does to each formulation
+#
+# One line per configuration, tracing out-of-sample information coefficient against the number of
+# training epochs. This is the comparison the notebook exists for, and a single end-of-training
+# number cannot show it.
+#
+# A line that rises and then falls has an interior optimum: the model was still learning, then
+# began fitting the training window at the expense of the validation folds. A line that wanders
+# around zero without trend never had anything to learn, and its highest point is wherever the
+# noise happened to peak. Both produce a respectable-looking maximum, which is why the curve
+# rather than the maximum is what to read.
+#
+# The three direct-regression lines and the forecasting line are drawn together because the
+# formulation is the axis under test. Where they separate, and whether they separate more as
+# training goes on, is what says the reframing did something.
+
+# %%
+curves = pl.concat(
+    [
+        frame.select("config", "epoch", "ic_mean")
+        for frame in (
+            pytorch_result.get("all_learning_curves"),
+            darts_result.get("all_learning_curves"),
+        )
+        if frame is not None and frame.height > 0
+    ],
+    how="vertical",
+).sort("config", "epoch")
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+config_names = curves.get_column("config").unique(maintain_order=True).to_list()
+# `ml4t_palette` returns a list of that many colours, so it is called once and indexed.
+palette = ml4t_palette(len(config_names), categorical=True)
+for index, config_name in enumerate(config_names):
+    series = curves.filter(pl.col("config") == config_name)
+    ax.plot(
+        series.get_column("epoch").to_list(),
+        series.get_column("ic_mean").to_list(),
+        lw=1.4,
+        color=palette[index],
+        label=config_name,
+    )
+ax.axhline(0.0, color=COLORS["neutral"], ls="--", lw=1.0)
+ax.set_xlabel("Training epochs")
+ax.set_ylabel("Mean validation IC")
+ax.legend(frameon=False, fontsize=7)
+add_message_title(
+    ax,
+    "Where each weekly model stops learning and starts fitting the window",
+    subtitle="Out-of-sample information coefficient against training epoch, one line per model",
+)
+# The alt text reads the frame rather than asserting a shape, so a panel described as turning
+# over when it does not is a claim the data refutes.
+_peaks = (
+    curves.group_by("config")
+    .agg(
+        peak_epoch=pl.col("epoch").sort_by("ic_mean", descending=True).first(),
+        last_epoch=pl.col("epoch").max(),
+        first_epoch=pl.col("epoch").min(),
+    )
+    .with_columns(
+        interior=pl.col("peak_epoch").is_between(
+            pl.col("first_epoch"), pl.col("last_epoch"), closed="none"
+        )
+    )
+)
+_n_interior = int(_peaks.get_column("interior").sum())
+show_with_alt(
+    fig,
+    "Line chart of mean validation information coefficient against training epoch, one line per "
+    "weekly configuration, with a dashed line at zero. Counted from the underlying frame, "
+    f"{_n_interior} of {_peaks.height} configurations reach their highest information "
+    "coefficient at an epoch that is neither the first nor the last, which is what an interior "
+    "optimum looks like.",
+)
 
 # %% [markdown]
 # ## What to notice
