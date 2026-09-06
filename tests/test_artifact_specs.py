@@ -95,7 +95,13 @@ def test_microstructure_pilot_helpers_preserve_current_outputs() -> None:
     mds = load_modeling_dataset("nasdaq100_microstructure", "fwd_ret_15m", max_symbols=2)
 
     assert bt.primary_label == "fwd_ret_15m"
-    assert bt.label_buffer == "15min"
+    # 16min, not 15. The purge is the horizon PLUS ONE BAR, because the label's exit leg reads
+    # a quote one bar past the horizon its name states, so a 15-minute buffer would leave the
+    # last bar of every training window inside the first validation label's window. #737 made
+    # that the declared value and this assertion was not moved with it; it has been failing on
+    # `main` ever since for anyone who ran the file, which CI does not - `test-unit-data`
+    # reports "95 passed, 6 deselected" and this test is not among the 95.
+    assert bt.label_buffer == "16min"
     assert bt.calendar == "NYSE"
     assert bt.cadence == "15_minute"
 
@@ -112,7 +118,7 @@ def test_microstructure_pilot_helpers_preserve_current_outputs() -> None:
     assert mds.join_cols == ["symbol", "timestamp"]
     assert len(mds.feature_names) == 88
     assert len(mds.splits) == 2
-    assert mds.label_buffer == "15min"
+    assert mds.label_buffer == "16min"  # same buffer, same reason as above
     assert mds.task_type == "regression"
 
 
