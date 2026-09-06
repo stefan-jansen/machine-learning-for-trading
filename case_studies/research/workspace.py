@@ -389,7 +389,14 @@ class Study:
             shared_config = base_output_root / "config"
             if shared_config.exists():
                 _ensure_config_link(output_root / "config", shared_config)
-            for name in ("labels", "features"):
+            # `benchmark` joins labels and features because it is the same kind of thing: a
+            # committed, read-only input that no stage-06-and-later notebook writes. All nine
+            # case studies ship one. Without it `benchmark_dir` resolves into the preview root,
+            # `load_benchmark_metrics` returns None and `load_benchmark_returns` an empty frame,
+            # and `20_strategy_analysis` dies comparing the selected strategy against a baseline
+            # that is on disk a directory away. Linking it is what lets that notebook have a
+            # smoke run at all rather than a structural exemption.
+            for name in ("labels", "features", "benchmark"):
                 source = self.root / name
                 if source.exists():
                     _ensure_input_link(preview_case, source)

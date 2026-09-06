@@ -906,13 +906,19 @@ ax.errorbar(
     markersize=7,
 )
 ax.axvline(0, color="#9E9E9E", linestyle="--", linewidth=0.8)
-ax.axvline(
-    ew_val["sharpe"],
-    color="#43A047",
-    linestyle=":",
-    linewidth=1.0,
-    label=f"EW validation Sharpe ({ew_val['sharpe']:.2f})",
-)
+# `load_benchmark_metrics` returns None when the benchmark JSON is absent, which its docstring
+# states and which is the ordinary case in a workspace that holds only what this run wrote. The
+# reference line is a comparison against the equal-weight baseline, so without it there is
+# nothing to draw - and drawing the rest of the forest is still worth doing. Same shape as the
+# risk-overlay line below, which has always been conditional.
+if ew_val is not None:
+    ax.axvline(
+        ew_val["sharpe"],
+        color="#43A047",
+        linestyle=":",
+        linewidth=1.0,
+        label=f"EW validation Sharpe ({ew_val['sharpe']:.2f})",
+    )
 risk_sharpe = lineage.get("risk_overlay", {}).get("sharpe")
 if risk_sharpe is not None:
     ax.axvline(
@@ -1808,7 +1814,7 @@ assessment = {
     },
     "benchmark_relative": {
         "benchmark_name": "equal_weight_universe",
-        "benchmark_validation_sharpe": ew_val["sharpe"],
+        "benchmark_validation_sharpe": ew_val["sharpe"] if ew_val is not None else None,
         "benchmark_holdout_sharpe": ew_ho["sharpe"] if HO_VS_EW_AVAILABLE else None,
         "alpha_annualized_placebo": float(alpha_daily * PERIODS_PER_YEAR),
         "alpha_t_hac": float(alpha_t),
