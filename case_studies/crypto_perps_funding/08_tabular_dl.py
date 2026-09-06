@@ -14,22 +14,64 @@
 # ---
 
 # %% [markdown]
-# # TabM models for an unbalanced perpetual-futures panel
+# # TabM on the funding panel, and what a network adds that a tree does not
 #
-# The shared TabM request resolves regression or classification explicitly. Classification requests
-# also resolve their continuous return target, task metrics, fold-specific class weights, and every
-# epoch checkpoint before fitting. The complete checkpoint catalog is the notebook output.
+# [`06_linear`](06_linear.ipynb) and [`07_gbm`](07_gbm.ipynb) read the same design matrix this
+# notebook does: one row per perpetual per settlement, one column per feature, with nothing in
+# the table saying the rows are ordered in time. They differ in what they can represent. A
+# penalized linear model gives each feature one coefficient and can spread weight across a group
+# of near-duplicate columns. A tree ensemble can express an interaction - a condition on one
+# feature evaluated inside a region defined by others - but it reaches one by choosing a single
+# column at each split, and several columns here carry almost the same information, so which one
+# is chosen is close to arbitrary.
 #
-# **Learning objectives**
+# A neural network on the same table answers the same question a third way. Its first layer is a
+# weighted sum of every feature, so like the linear model it never has to choose among correlated
+# columns; the nonlinearity after it lets those sums combine into interactions the linear model
+# cannot write down. That is the reason to fit one here, rather than a general preference for
+# neural networks: the two properties that pulled against each other in the previous two
+# notebooks are not obviously in conflict in this architecture.
 #
-# - distinguish regression, binary classification, and multiclass requests;
-# - inspect the continuous return target and fold-specific imbalance treatment; and
-# - verify fitted-state and checkpoint lineage after GPU execution.
+# **TabM is an ensemble, and the ensemble is the point.** Averaging several independently
+# initialized networks is a standard way to make a neural fit on a table less erratic, and the
+# cost is normally that you train several networks. TabM trains most of one. A backbone of two
+# layers is shared by every member; each member owns only a vector carrying one number per hidden
+# unit, which scales the backbone's output element by element, and its own final linear layer.
+# The members' predictions are averaged. So `n_members: 4` at `hidden_dim: 64` costs four small
+# vectors and four output layers on top of one backbone, not four networks - which is why the
+# member count can be raised much further than the width can.
+#
+# **This notebook fits three of the four declared labels, and two of them are not returns.**
+# `fwd_ret_8h` is a regression target. `fwd_dir_8h` is its sign, a binary classification, and
+# `fwd_dir_8h_3c` adds a flat class for moves too small to trade - three-way, and deliberately
+# unbalanced, because most settlements are small. A classification request therefore resolves
+# more than a regression one: the class weights that correct the imbalance are fitted per fold,
+# because the balance of a fold is a property of its own training window and not of the panel.
+# It also resolves a *continuous* evaluation target, so a classifier's ranking can be scored
+# against the return it was trying to sign rather than against its own discrete labels.
+#
+# **A neural fit has a meaningful state at every epoch**, in the way a boosted model has one at
+# every iteration and a linear fit does not. An epoch is one pass over the training rows. These
+# configurations train for 200 and save the weights every 25, so each produces eight scoreable
+# models rather than one and each is registered separately. What counts downstream is
+# configurations times checkpoints, not configurations.
+#
+# **Learning objectives.** By the end of this notebook you will be able to:
+#
+# - Say what a weight-sharing ensemble holds in common between its members and what it keeps
+#   separate, and why that makes *k* members cost far less than *k* networks.
+# - Tell apart a regression, a binary and a multiclass request, and say what each additionally
+#   resolves before anything is fitted.
+# - Explain why class weights are fitted per fold rather than once for the panel, and what would
+#   go wrong if a single weighting were carried across folds.
+# - Read the epoch schedule out of a declared configuration and say how many scoreable models a
+#   run will publish for it.
+# - Say why a catalog identity has to bind the device policy as well as the model and seed.
 #
 # **Book reference:** Chapter 18, deep learning for tabular data.
 #
-# **Prerequisites:** finalized crypto labels, features, and purged walk-forward folds; CUDA for the
-# canonical run.
+# **Prerequisites:** finalized crypto labels, features, and purged walk-forward folds; CUDA for
+# the canonical run.
 
 # %%
 import os

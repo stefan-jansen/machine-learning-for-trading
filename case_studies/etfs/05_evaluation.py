@@ -85,7 +85,7 @@ from case_studies.utils.feature_engineering import (
 )
 from utils.artifact_specs import load_setup_config, resolve_label_buffer
 from utils.cv_splits import generate_cv_splits
-from utils.data_quality import validate_modeling_inputs
+from utils.data_quality import top_entities, validate_modeling_inputs
 from utils.paths import get_case_study_dir
 
 COLORS = style.COLORS
@@ -359,9 +359,13 @@ n_before_seal = eval_panel.height
 eval_panel = eval_panel.filter(pl.col(DATE_COL) <= last_signal_date).filter(IN_VALIDATION)
 assert eval_panel[DATE_COL].max() <= last_signal_date
 
+# `top_entities` breaks a tie on the symbol, which a local sort did not: ETFs quoted over
+# the same span carry the same row count, and the winner then came from frame order. Two
+# callers reducing the same panel to the same size have to choose the same universe, or a
+# symbol one of them kept joins to null features in the other.
 if MAX_SYMBOLS > 0:
-    top = eval_panel.group_by("symbol").len().sort("len", descending=True).head(MAX_SYMBOLS)
-    eval_panel = eval_panel.filter(pl.col("symbol").is_in(top["symbol"]))
+    kept = top_entities(eval_panel, MAX_SYMBOLS)
+    eval_panel = eval_panel.filter(pl.col("symbol").is_in(kept))
 
 n_rows = eval_panel.height
 n_symbols = eval_panel["symbol"].n_unique()

@@ -21,6 +21,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import yaml
 
 from case_studies.utils.temporal import (
     garch11_conditional_volatility,
@@ -35,11 +36,62 @@ NOTEBOOK = (
     / "04_model_based_features.py"
 )
 
+SETUP = (
+    Path(__file__).resolve().parents[1]
+    / "case_studies"
+    / "us_equities_panel"
+    / "config"
+    / "setup.yaml"
+)
+
 # The declared schedule, mirrored from `config/setup.yaml`. A change there is meant to change
 # what the notebook fits; it is not meant to change whether the values are causal, which is
 # what this module asserts, so the numbers are restated rather than read.
 REGIME = dict(window=21, overlap=5, n_clusters=2, burnin=756, refit_every=63)
 GARCH = dict(burnin=504, refit_every=63)
+
+
+def _garch_kwargs() -> dict:
+    """The `arch_model` keywords the notebook builds, with the values it would read.
+
+    The *keys* are parsed from the notebook rather than restated, because they are a structural
+    dependency rather than a value this module reasons about: the notebook's fit closure reads
+    `GARCH_KW` by key, so a key it consumes and this stub omits raises `KeyError` inside the
+    walk. `walk_forward_feature` runs the per-block fit under `on_fit_error="skip"`, so that
+    exception is swallowed, the walk emits nothing, and the failure surfaces two assertions
+    later as "the shorter walk emitted no volatility" - naming neither the key nor the notebook.
+
+    Restating the keys is what produced exactly that, when the notebook gained `o`. Parsing them
+    means the list cannot drift again. The values come from the declaration the notebook reads,
+    so the stub fits the specification the case study declares.
+
+    This asserts nothing about whether the declared specification is the right one; what it
+    establishes is that the stub and the notebook agree on the call. Measured by flipping the
+    declaration: under `o: 1` five of the six tests here still pass, and the sixth fails because
+    two of twenty-four GJR fits do not converge on this module's synthetic series and are skipped,
+    which is the notebook's convergence rejection working rather than a value moving.
+    """
+    declared = yaml.safe_load(SETUP.read_text())["model_based"]["garch"]
+    assignment = next(
+        node
+        for node in ast.parse(NOTEBOOK.read_text()).body
+        if isinstance(node, ast.Assign)
+        and any(getattr(target, "id", None) == "GARCH_KW" for target in node.targets)
+    )
+    if not isinstance(assignment.value, ast.Dict):
+        raise AssertionError(
+            f"{NOTEBOOK.name} no longer builds GARCH_KW as a dict literal, so its keys cannot "
+            "be read; update this helper alongside the notebook"
+        )
+    keys = [key.value for key in assignment.value.keys if isinstance(key, ast.Constant)]
+    missing = [key for key in keys if key not in declared]
+    if missing:
+        raise AssertionError(
+            f"{NOTEBOOK.name} passes {missing} to arch_model and "
+            "config/setup.yaml::model_based.garch declares no such key"
+        )
+    return {key: declared[key] for key in keys}
+
 
 DEFINITIONS = (
     "LiftedStream",
@@ -75,7 +127,7 @@ def _load(arch_model) -> dict:
         "WASSERSTEIN_OVERLAP": REGIME["overlap"],
         "N_CLUSTERS": REGIME["n_clusters"],
         "SEED": 42,
-        "GARCH_KW": dict(mean="Constant", vol="GARCH", p=1, q=1, dist="Normal"),
+        "GARCH_KW": _garch_kwargs(),
         "GARCH_BURNIN": GARCH["burnin"],
         "GARCH_REFIT_EVERY": GARCH["refit_every"],
     }

@@ -7,8 +7,8 @@ from typing import Any
 import polars as pl
 import yaml
 
+from case_studies.utils.backtest_loaders import VECTORIZED_CASE_STUDIES, declared_rebalance_step
 from case_studies.utils.backtest_loaders import BacktestConfig as CaseStudyBacktestConfig
-from case_studies.utils.backtest_loaders import declared_rebalance_step
 from utils.paths import get_case_study_dir
 
 try:
@@ -461,11 +461,16 @@ def build_backtest_spec(
     strategy_spec: dict[str, Any] = {
         "signal": resolved_signal,
         "execution": {
+            # `VECTORIZED_CASE_STUDIES` rather than a second copy of the same set. The
+            # membership was written out here as well, and the two are read by different
+            # things: this one decides the dispatch in `backtest_runner`, and the constant
+            # decides `IS_VECTORIZED` in four risk-management notebooks. Adding a case study
+            # to one and not the other gives a notebook the wrong branch with nothing raising.
             "mode": (
                 execution_mode
                 if execution_mode is not None
                 else "vectorized"
-                if case_study in {"us_firm_characteristics", "sp500_options"}
+                if case_study in VECTORIZED_CASE_STUDIES
                 else "engine"
             ),
             "engine_preset": "realistic",

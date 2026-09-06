@@ -102,6 +102,7 @@ from ml4t.engineer.features.fdiff import ffdiff, get_ffd_weights
 from statsmodels.tsa.stattools import adfuller
 
 from case_studies.utils.artifact_digest import read_digest, value_digest
+from case_studies.utils.coverage import assert_sessions_complete
 from case_studies.utils.cv_window import modeling_fold_boundaries
 from case_studies.utils.temporal import (
     garch11_conditional_volatility,
@@ -353,6 +354,29 @@ print(
     f"{_sessions.height:,} of {_dates.height:,} dates in the archive are {CALENDAR} sessions; "
     f"the other {_dates.height - _sessions.height} carry stray prints and take "
     f"{_archive_rows - raw_df.height:,} rows with them"
+)
+
+# The archive is missing one session the exchange held, `2017-11-08`, a Wednesday. It is absent
+# UPSTREAM - the raw archive carries no row on it - so no stage of this case study drops it, and
+# over the whole archive, 1962-01-02 to 2018-03-27, it is the only NYSE session of 14,156 that is
+# absent. It is declared here so it passes deliberately, and so a second one refuses instead.
+#
+# The filter above answers one direction only: which archive dates the exchange never held. The
+# other direction, a session the exchange DID hold that the archive never printed, leaves no row
+# to test - nothing raises, every query succeeds, and one day's rows are simply gone. That is how
+# this one survived until two counts of an unrelated quantity came out one apart.
+KNOWN_ABSENT_SESSIONS = [date(2017, 11, 8)]
+
+_declared = assert_sessions_complete(
+    _sessions["timestamp"].to_list(),
+    calendar=CALENDAR,
+    known_absent=KNOWN_ABSENT_SESSIONS,
+    source="04_model_based_features session index",
+)
+print(
+    f"Every {CALENDAR} session between {_sessions['timestamp'].min()} and "
+    f"{_sessions['timestamp'].max()} is in the archive except {_declared}, which is declared "
+    "above"
 )
 
 # %%
@@ -1215,7 +1239,34 @@ print(f"FFD features: {len(ffd_df):,} rows, {ffd_df['symbol'].n_unique()} symbol
 
 
 # %%
-GARCH_KW = dict(mean="Constant", vol="GARCH", p=1, q=1, dist="Normal")
+# The specification comes from `setup.yaml::model_based.garch` rather than from this line,
+# so the model a reader is told about and the model that is fitted are the same statement.
+# These are `arch_model`'s own argument names and are passed through unchanged.
+GARCH_KW = {
+    "mean": str(_GARCH["mean"]),
+    "vol": str(_GARCH["vol"]),
+    "p": int(_GARCH["p"]),
+    "o": int(_GARCH["o"]),
+    "q": int(_GARCH["q"]),
+    "dist": str(_GARCH["dist"]),
+}
+
+# `garch11_conditional_volatility` is a GARCH(1,1) recursion, optionally with the one
+# asymmetry term. A declared parameter it cannot represent has to refuse here rather than be
+# silently dropped on the way to the filter, which is the failure a declaration exists to
+# prevent: the fit would estimate one model and the emitted column would carry another.
+if GARCH_KW["vol"] != "GARCH" or GARCH_KW["p"] != 1 or GARCH_KW["q"] != 1:
+    raise ValueError(
+        f"model_based.garch declares vol={GARCH_KW['vol']} p={GARCH_KW['p']} q={GARCH_KW['q']}; "
+        "the filter this notebook emits through is GARCH(1,1)"
+    )
+if GARCH_KW["o"] not in (0, 1):
+    raise ValueError(f"model_based.garch declares o={GARCH_KW['o']}; the filter carries 0 or 1")
+if GARCH_KW["mean"] not in ("Constant", "Zero"):
+    raise ValueError(
+        f"model_based.garch declares mean={GARCH_KW['mean']}; the filter subtracts a single "
+        "constant, so only Constant and Zero are representable"
+    )
 
 
 def garch_walk(
@@ -1243,9 +1294,14 @@ def garch_walk(
                 f"{result.convergence_flag}"
             )
         coefficients = {
-            "mu": float(result.params["mu"]),
+            # A zero-mean specification estimates no `mu` at all, so the parameter vector has
+            # no such entry to read; the filter still subtracts one and it is zero.
+            "mu": float(result.params["mu"]) if GARCH_KW["mean"] == "Constant" else 0.0,
             "omega": float(result.params["omega"]),
             "alpha": float(result.params["alpha[1]"]),
+            # The leverage coefficient under `o=1`, zero under the symmetric model. Read from
+            # the fit rather than assumed, so a declared `o` reaches the emitted values.
+            "gamma": float(result.params["gamma[1]"]) if GARCH_KW["o"] else 0.0,
             "beta": float(result.params["beta[1]"]),
             # The value that seeds the recursion, computed by `arch` from the ESTIMATION
             # window's residuals and nothing else. It has to be produced here, where only
@@ -1435,7 +1491,11 @@ print(
 # %%
 _mkt_params = pl.DataFrame(mkt_fits).with_columns(
     pl.Series("fit_end_session", [dates[record["fit_end"] - 1] for record in mkt_fits]),
-    (pl.col("alpha") + pl.col("beta")).alias("persistence"),
+    # alpha + gamma/2 + beta. `gamma` is the leverage coefficient, zero under the symmetric
+    # specification this case study declares, and the halving is the asymmetry's contribution
+    # under symmetric shocks - so this reads alpha + beta here and stays the persistence if
+    # `model_based.garch.o` is ever declared as 1.
+    (pl.col("alpha") + pl.col("gamma") / 2 + pl.col("beta")).alias("persistence"),
 )
 
 fig, (ax1, ax2) = plt.subplots(
@@ -1499,7 +1559,9 @@ print(
     f"estimations: {regime_fit_df['centroid_separation'].min():.5f} to "
     f"{regime_fit_df['centroid_separation'].max():.5f}"
 )
-_stock_persistence = (garch_params["alpha"] + garch_params["beta"]).drop_nulls()
+_stock_persistence = (
+    garch_params["alpha"] + garch_params["gamma"] / 2 + garch_params["beta"]
+).drop_nulls()
 print(
     f"Per-stock persistence over {garch_params.height:,} estimations on "
     f"{garch_params['symbol'].n_unique():,} stocks: median {_stock_persistence.median():.4f}, "

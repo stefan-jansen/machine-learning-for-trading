@@ -14,22 +14,64 @@
 # ---
 
 # %% [markdown]
-# # US Equities Panel: Alternative Position Sizing
+# # US equities panel: the same names, sized differently
 #
-# The equal-weight baseline supplies a complete immutable population. Within each label, this
-# notebook ranks baseline validation Sharpe, retains one checkpoint and signal decision per
-# distinct model configuration, and applies every declared alternative sizing method. Equal weight
-# is excluded because it is the baseline and would produce the same backtest identity.
+# [`16_backtest`](16_backtest.ipynb) put the same amount of money in every position. That is the
+# plainest rule there is, and it embeds an assumption worth naming: that a stock the model ranked
+# first and a stock it ranked fiftieth deserve the same capital, and that a quiet stock and a
+# violent one do too.
 #
-# **Learning objectives**
+# This notebook keeps the names and changes only the money. The model, the checkpoint, the
+# rebalancing dates and which stocks are held are all held fixed; what varies is how much goes into
+# each. Every allocator declared in `config/setup.yaml` is applied, and they answer the question
+# in three different ways:
 #
-# - Derive the allocation shortlist from complete equal-weight validation results.
-# - Hold model, checkpoint, and signal decisions fixed while changing position sizing.
-# - Plan, execute, and validate the complete alternative-sizing population.
+# - **From the prediction.** `score_weighted` gives more capital to the names the model was more
+#   confident about, so it trusts the magnitude of a prediction and not only its order.
+#   `conformal_weighted` reads the prediction's uncertainty rather than its size: it weights each
+#   name by one over the width of its prediction interval, so a name the model is less sure about
+#   gets less capital. That is the same width whose calibration
+#   [`15_model_analysis`](15_model_analysis.ipynb) checked, which is why the check there matters
+#   here.
+# - **From each stock's own volatility.** `inverse_vol` puts less into a stock that moves more, so
+#   each position contributes a similar amount of variation rather than a similar amount of money.
+#   `risk_parity` as implemented here is the same idea with a steeper exponent - weight
+#   proportional to one over volatility raised to 1.5 - which approximates equal risk contribution
+#   without estimating how the stocks move together.
+# - **From how the stocks move together.** `mvo_ledoit_wolf` and `hrp` read a covariance matrix, so
+#   they alone can tell that two names which always move together are one bet held twice. That is
+#   the property none of the rules above can see, and it is the one that has to be estimated. These
+#   two need history before they can decide anything, and how much is declared per allocator rather
+#   than assumed.
 #
-# **Book reference**: Chapter 17, Sections 17.2-17.8
+# **Equal weight is excluded here, and not because it lost.** It is the baseline every row is
+# measured against, and re-running it would produce the identical backtest under a new name.
 #
-# **Prerequisites**: `16_backtest.py` publishes the compatible equal-weight baseline sets.
+# **A shortlist is taken first, and that is a real decision.** Applying every allocator to every
+# member of the whole model population would multiply an already large grid by seven. So the
+# highest validation Sharpe per distinct model configuration is carried forward, which means the
+# allocator comparison is made on strategies the equal-weight rule already liked. An allocator that
+# rescues a model equal weight buried is not something this design can find.
+#
+# **Learning objectives.** By the end of this notebook you will be able to:
+#
+# - Name the assumption an equal-weight book makes about its positions, and say what each family
+#   of allocator replaces it with.
+# - Say what a covariance-reading allocator can see that a per-stock one cannot, what it needs in
+#   exchange, and which of the declared allocators actually read one.
+# - Explain why a lookback window is declared per allocator rather than shared, and what a shared
+#   one would silently do to the ones that need less.
+# - State what a shortlist taken on baseline Sharpe makes it impossible for this comparison to
+#   discover.
+#
+# **Book reference**: Chapter 17, Sections 17.2 to 17.8.
+#
+# **Prerequisites**: [`16_backtest`](16_backtest.ipynb) has frozen the equal-weight baseline sets
+# this notebook draws from.
+#
+# **What it writes**: one validation backtest per surviving configuration and allocator, in
+# `run_log/registry.db`, frozen as one named allocation set per label.
+# [`18_risk_management`](18_risk_management.ipynb) reads them next.
 
 # %%
 """Generate the US-equities allocation-stage validation population."""
@@ -76,10 +118,10 @@ PREVIEW_MAX_ALLOCATORS = 0
 MAX_SYMBOLS = 0
 
 # %% [markdown]
-# ## Open and validate the baseline population
+# ## 2. The baseline this notebook varies
 #
-# Canonical execution resolves the named sets produced by the baseline notebook. A reduced proof
-# selects preview baseline rows by visible labels and explicit row, allocator, and symbol limits.
+# The equal-weight sets are opened and checked complete. Everything below changes one thing about
+# them, so a gap here would silently narrow what the allocator comparison is made over.
 
 # %%
 # Both tiers resolve the study through `open_study`, never `Study.open`/`Study.regenerate`
@@ -114,10 +156,11 @@ else:
     raise ValueError(f"Unsupported execution tier: {EXECUTION_TIER!r}")
 
 # %% [markdown]
-# ## Select eligible baseline rows
+# ## 3. Which baseline rows can be re-sized
 #
-# Canonical rows come from the named immutable sets. Preview rows use the visible label and row
-# limits declared above.
+# Complete, validation-split, and produced under this run's tier. A row failing any of those is
+# refused rather than dropped, so the shortlist below is taken from a population that means what it
+# says.
 
 # %%
 backtest_catalog = study.backtests.table(include_preview=True)
@@ -156,11 +199,16 @@ if baseline.is_empty() or not ineligible.is_empty():
     raise ValueError("Allocation requires complete finite equal-weight validation rows")
 
 # %% [markdown]
-# ## Select the declared baseline survivors
+# ## 4. The shortlist, and what it costs
 #
-# `top_n` counts distinct `(family, config_name)` pairs within each label. Sorting first retains the
-# exact prediction checkpoint and equal-weight signal decision associated with the highest baseline
-# validation Sharpe for that model configuration.
+# One row per distinct model configuration, taken on baseline Sharpe. Without it every allocator
+# would be applied to every member of the whole model population, multiplying an already large grid
+# by the number of allocators.
+#
+# **What that makes invisible is worth stating plainly.** The allocators are compared only on
+# strategies the equal-weight rule already ranked highly. An allocator whose value is precisely
+# that it rescues a model equal weight buried cannot be discovered by this design, and no result
+# below is evidence against one existing.
 
 # %% tags=["results"]
 top_n = get_top_n_predictions(CASE_STUDY_ID, "allocation")
@@ -199,11 +247,17 @@ shortlist.select(
 )
 
 # %% [markdown]
-# ## Plan every alternative sizing member
+# ## 5. Planning one backtest per allocator
 #
-# The selected baseline row supplies the prediction and signal decision. The only new decision is
-# position sizing. Every planned identity is snapshotted before execution so an unsuccessful member
-# cannot disappear from the allocation population.
+# Each surviving configuration crossed with each declared allocator, every identity written down
+# before the first runs.
+#
+# **The history each allocator needs is declared per allocator, not shared.** The methods that read
+# a covariance matrix cannot decide anything until they have enough bars to estimate one, and the
+# amount differs between them - the mean-variance method here declares a longer window than the
+# others because shrinkage on a matrix estimated from too few observations collapses toward its
+# target and hands back something close to equal weight under a different name. Giving every
+# allocator the longest window instead would change what the cheap ones are measured on.
 
 # %%
 # Prices are cached by (label, warmup) rather than loaded once per label. Strategy._build_spec
@@ -315,10 +369,10 @@ if EXECUTION_TIER == "canonical":
 planned_population
 
 # %% [markdown]
-# ## Execute the planned members
+# ## 6. Running them
 #
-# Each selected prediction row is passed directly to the shared runner. Completed siblings remain
-# reusable if another sizing member fails, and the notebook raises after attempting the full pass.
+# Independent per member, so a failure costs that allocator on that configuration and leaves the
+# rest usable.
 
 # %%
 execution_rows = []
@@ -397,10 +451,10 @@ if official_population is not None:
 execution_diagnostics
 
 # %% [markdown]
-# ## Freeze the reader-facing allocation sets
+# ## 7. Naming the allocation sets
 #
-# Each label gets one immutable set of alternative sizing results. Costs and risk controls derive
-# their inputs from the union of the matching baseline and allocation sets.
+# One frozen set per label, published only by an unnarrowed canonical run, for the reason
+# [`16_backtest`](16_backtest.ipynb) gives.
 
 # %% tags=["results"]
 set_rows = []
@@ -442,10 +496,19 @@ compatible_sets = pl.DataFrame(
 compatible_sets
 
 # %% [markdown]
-# ## Inspect the alternative-sizing population
+# ## 8. What came out
 #
-# Each point is one complete allocation-stage validation backtest. The chart retains every planned
-# result and groups them only by the allocator named in the request.
+# Each allocator against the equal-weight row it was built from. The comparison is like-for-like:
+# same model, same checkpoint, same names, same dates, different money.
+#
+# **A small difference is a result.** Equal weight is a strong baseline on a broad cross-section
+# precisely because it makes no estimate that can be wrong, and an allocator that reads a
+# covariance matrix has to estimate one well enough to beat that. Where the differences are small,
+# what that says is that the estimation was not worth its error here - not that sizing does not
+# matter.
+#
+# **Still gross of costs.** The allocators differ in how much they trade, and turnover is charged
+# in [`19_costs`](19_costs.ipynb), so an allocator that looks better here may not survive it.
 
 # %% tags=["results"]
 allocation_results = planned_population.select("label", "allocation", "backtest_hash").join(
@@ -481,12 +544,29 @@ fig.show()
 # No model is retrained, and the selected checkpoint remains part of every downstream identity.
 
 # %% [markdown]
-# ## Key takeaways and limitations
+# ## What to notice
 #
-# - Allocation requests change position sizing while retaining the selected model, checkpoint, and
-#   signal rule.
-# - The shortlist uses validation backtest Sharpe within each label and distinct model
-#   configuration.
-# - The population snapshot preserves every planned allocator result across failure and restart.
-# - These comparisons remain validation evidence; costs, risk controls, and the holdout replay are
-#   evaluated separately.
+# **Every row here differs from its baseline in exactly one thing.** Same model, same checkpoint,
+# same names on the same dates, different money. That is what makes a difference attributable to
+# the sizing rule.
+#
+# **Equal weight is hard to beat on a broad cross-section, and the reason is estimation.** The
+# allocators that read a covariance matrix have to estimate one from a finite window, and a
+# three-thousand-name cross-section gives far fewer observations per parameter than a small
+# universe does. An allocator that does not beat equal weight here has not shown that sizing is
+# irrelevant; it has shown that the estimate it needed was not accurate enough to pay for itself.
+#
+# **The shortlist bounds what this can find.** Allocators are compared only on strategies equal
+# weight already ranked highly, so nothing here can discover one whose value is rescuing a model
+# equal weight buried.
+#
+# **Still gross of costs, and the allocators differ in turnover.** A rule that reweights more
+# aggressively trades more, so an ordering established here can change once
+# [`19_costs`](19_costs.ipynb) charges for it.
+#
+# **Known limitations.** The covariance-reading allocators are sensitive to their lookback, and one
+# window per allocator is declared rather than swept, so nothing here separates an allocator's
+# method from its window. Validation folds have been read many times over by this point.
+#
+# **Next**: [`18_risk_management`](18_risk_management.ipynb) lays rules on top that can close a
+# position before the next rebalance.

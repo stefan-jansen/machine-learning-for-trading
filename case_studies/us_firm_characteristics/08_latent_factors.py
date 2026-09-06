@@ -23,6 +23,23 @@
 # to exposures, shared by every firm and every month, so it is fitted on the whole panel instead of
 # one cross-section at a time.
 #
+# A factor here is a return series that many firms move with, and it is called latent because it
+# is not observed: no column of the panel holds it, and it is estimated jointly with the exposures
+# rather than measured first and regressed against second. A firm's return in a month is then its
+# exposures times that month's factor returns, plus whatever is left over.
+#
+# **"A small number" is the claim, and it is the one that can be wrong.** Saying that a few
+# factors drive 2,500 firms is saying the cross-section has far less independent structure than
+# its width suggests, and the model gets its statistical strength from exactly that restriction:
+# with a handful of factors there are few enough parameters to estimate them on a panel this
+# shape. If the restriction is false the residual carries the return and every member of this
+# family underperforms a direct predictor that never imposed it. That is a comparison to make
+# against the linear, boosted and tabular families rather than inside this one, which is why the
+# families meet in [`10_model_analysis`](10_model_analysis.ipynb) and not here.
+#
+# The number of factors is therefore a declared parameter of each member rather than something
+# read off the data, and the four notebooks below each state their own before fitting.
+#
 # Four members of that family are declared here, and they are **two pairs rather than four points
 # on one axis**:
 #

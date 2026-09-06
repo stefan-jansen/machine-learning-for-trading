@@ -152,8 +152,10 @@ declared_labels(study, "gbm")
 # term, no subsampling and double the learning rate - seven declared parameters apart rather than
 # none.
 #
-# Read the gap between them as capacity and you will be reading the wrong axis: at 500 iterations
-# `default_mse` reaches an IC of 0.0243 and `leaves_31_mse` 0.0222, at identical leaf counts.
+# Read the gap between them as capacity and you will be reading the wrong axis. The two sit side
+# by side in the final-iteration chart in Section 4 at identical leaf counts, and whatever
+# separates them there is those seven parameters rather than the number of regions a tree may
+# carve.
 #
 # What the grid does hold fixed is training length - every configuration declares
 # `max_iterations: 500` and `checkpoint_interval: 50` - so the checkpoint comparison below is

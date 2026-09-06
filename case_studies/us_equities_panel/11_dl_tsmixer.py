@@ -14,28 +14,76 @@
 # ---
 
 # %% [markdown]
-# # TSMixer Models - US Equities Panel
+# # US equities panel: mixing along time and across features instead of recurring
 #
-# This notebook generates walk-forward validation predictions for the published TSMixer
-# configurations and every declared epoch checkpoint. Readers choose the label, configurations,
-# parameter overrides, and execution tier. Shared sequence code owns eligible-window construction,
-# fold preprocessing, fitting, checkpoint persistence, restart, coverage, metrics, and registry
-# writes.
+# [`06_linear`](06_linear.ipynb), [`07_gbm`](07_gbm.ipynb) and
+# [`08_tabular_dl`](08_tabular_dl.ipynb) all read the same flat table: one row per stock per
+# session, one column per feature, and nothing in the representation saying the rows are ordered
+# in time. A model on that table sees the past only through columns somebody computed in advance -
+# a 21-session momentum, a rolling volatility. It never sees the sequence itself.
 #
-# The sequence implementation is in `case_studies/utils/deep_learning.py`, and the gap-aware window
-# construction is in `case_studies/utils/sequence_dataset.py`. A new architecture can implement the
-# same ordinary Python request and result contract without changing downstream catalog selection.
+# A **sequence model** is handed the sequence. Each training example here is a **window**: the 60
+# most recent sessions of one stock's features, in order, as a matrix of sessions by features -
+# about three months. The model reads the window and emits one number, the predicted return.
 #
-# **Learning objectives**
+# **A window has to be 60 consecutive sessions of the same stock, and on this panel that binds.**
+# A stock that lists part-way through a fold, halts, or delists leaves a gap, and a window
+# spanning a gap would treat the two sides as consecutive sessions and read the jump across it as
+# one day's move. Windows are therefore built only where the sessions are unbroken, which is why
+# the number of training examples is far smaller than the number of rows and differs between
+# folds.
 #
-# - Configure a TSMixer sequence experiment and its epoch checkpoints.
-# - Trace gap-aware windows, preprocessing state, and mixer parameters into result identities.
-# - Validate complete prediction coverage before publishing the catalog population.
+# [`10_dl_lstm`](10_dl_lstm.ipynb) walked the window one session at a time. **TSMixer** does not
+# walk it at all. The window is a matrix of sessions by features, and the model alternates two
+# operations on it: a small network applied down each feature's column, mixing **across time**,
+# and a small network applied across each session's row, mixing **across features**. Stacking a
+# few of those blocks lets information travel along both axes without any recurrence.
 #
-# **Book reference**: Chapter 13
+# **The reason to try it is the shape of this particular panel.** Recurrence processes a window
+# sequentially, so its cost grows with the window length and its gradient has to survive the whole
+# walk; mixing touches the whole window at once.
 #
-# **Prerequisites**: `05_evaluation.py` and the finalized financial and model-based feature
-# artifacts.
+# The other two models do combine features - the LSTM's gates read the whole feature vector at
+# every step, and NLinear's final layer is a linear combination across features - but each does it
+# in one place and one way. TSMixer makes feature mixing an explicit, nonlinear operation that
+# happens once per block and alternates with mixing along time, so a combination of features can
+# itself be mixed across time and then recombined. On a feature set this dense in the
+# cross-section, that repetition is what is being tested.
+#
+# The configuration here stacks two blocks at a hidden dimension of 32, smaller than the recurrent
+# model's state for the same reason: what bounds the capacity worth fitting is the number of
+# eligible windows.
+#
+# **Learning objectives.** By the end of this notebook you will be able to:
+#
+# - Describe the two mixing operations, say which axis of the window each acts on, and say what
+#   information can travel where after two blocks.
+# - Say how TSMixer's feature mixing differs from the way the other two models combine features,
+#   given that both of them also do.
+# - Explain why an architecture without recurrence can be preferable on long windows, in terms of
+#   cost and of what has to survive training.
+# - Read the epoch schedule out of a declared configuration and say how many scoreable models the
+#   run publishes for it.
+#
+# **A neural fit has a meaningful state at every epoch**, in the way a boosted model has one at
+# every iteration and a linear fit does not. An **epoch** is one pass over the training windows.
+# Each configuration here trains for 100 of them and saves its weights every 5, so it publishes
+# twenty scoreable models rather than one, each registered with its own identity. The count that
+# matters downstream is configurations times checkpoints.
+#
+# **Book reference**: Chapter 13. Chapter 6, Section 6.7 (Search accounting and run logging)
+# introduces the run log this notebook writes to.
+#
+# **Prerequisites**: [`03_financial_features`](03_financial_features.ipynb) and
+# [`04_model_based_features`](04_model_based_features.ipynb) have written the feature matrices, and
+# [`05_evaluation`](05_evaluation.ipynb) has established the walk-forward folds.
+#
+# **What it writes**: one training run per configuration and one complete validation prediction set
+# per configuration and epoch checkpoint, in `run_log/registry.db` and under `run_log/training/`
+# and `run_log/predictions/`, grouped under a named population.
+# [`15_model_analysis`](15_model_analysis.ipynb) compares that population against the other
+# families and [`16_backtest`](16_backtest.ipynb) backtests every member and selects on validation
+# backtest Sharpe. **Selection happens there, not here.**
 
 # %%
 """Generate TSMixer validation predictions through the shared research interface."""
@@ -65,17 +113,29 @@ MAX_TRAIN_SEQUENCES = 0
 PREVIEW_N_EPOCHS = 0
 
 # %% [markdown]
-# ## Configure the experiment
+# ## 1. Which configurations, and on which label
 #
-# `CONFIG_NAMES = []` selects every published TSMixer configuration. `COMMON_OVERRIDES` changes
-# validated model or runner parameters for every selected configuration. `CONFIG_OVERRIDES` adds
-# changes for one named configuration and takes precedence. Effective defaults and overrides are
-# retained in each resolved training specification.
+# The menu at `config/training/{label}.yaml` lists the sequence configurations declared for a
+# label, and this notebook takes the ones whose architecture is `tsmixer`. Each name resolves to a
+# preset holding the full parameter set - here a 60-session lookback, 100 epochs, a checkpoint
+# every 5, and a dropout of 0.1.
 #
-# Canonical requests use CUDA, every eligible sequence, every fold, and the published checkpoint
-# schedule. A reduced check uses the preview tier and declares at least one data or fold reduction.
-# `PREVIEW_N_EPOCHS` shortens the identity-covered model schedule for that preview. Preview results
-# cannot enter official comparisons, candidate sets, locks, or holdout evaluation.
+# What each setting a run may pass decides:
+#
+# - **`CONFIG_NAMES`** empty fits every declared `tsmixer` configuration. A named subset fits only
+#   those, which is what to do first: at panel scale a full run is hours, and the point of a first
+#   pass is to find out whether the plumbing works.
+# - **`COMMON_OVERRIDES`** changes a parameter for every selected configuration, and
+#   **`CONFIG_OVERRIDES`** changes one named configuration and takes precedence. An override moves
+#   a training identity, so an overridden run registers beside the published one rather than
+#   replacing it.
+# - **`EXECUTION_TIER`** is `canonical` or `preview`. A canonical run fits every eligible window on
+#   every fold at the published epoch schedule. A preview run has to declare at least one
+#   reduction and carries it in the identity, so its results can never be compared against
+#   canonical ones or reach a holdout decision.
+# - **`PREVIEW_N_EPOCHS`** shortens the schedule for a preview. It is part of the identity rather
+#   than a runtime detail, because a model trained for fewer epochs is a different model rather
+#   than the same one measured sooner.
 
 # %%
 case_dir = get_case_study_dir(CASE_STUDY_ID)
@@ -145,7 +205,7 @@ else:
     raise ValueError("EXECUTION_TIER must be 'canonical' or 'preview'")
 
 # %% [markdown]
-# ## Build the model requests
+# ## 2. Binding the declarations to the data
 #
 # Each selected TSMixer configuration becomes one request with the declared sequence reductions.
 
@@ -184,7 +244,7 @@ request_table = pl.DataFrame(
 request_table
 
 # %% [markdown]
-# ## Plan and execute the selected configurations
+# ## 3. Planning, then fitting
 #
 # The planner resolves every training and epoch-checkpoint identity before fitting and writes the
 # canonical checkpoint population first. Execution builds only sequences that follow the declared
@@ -217,7 +277,7 @@ planned_population
 execution = plan.run()
 
 # %% [markdown]
-# ## Inspect the resolved computation
+# ## 4. What was actually fitted
 #
 # These rows expose the feature, fold, sequence, runtime, model, and checkpoint settings used by
 # the runner, including defaults that were not repeated in the notebook parameters.
@@ -247,7 +307,7 @@ resolved_table = pl.DataFrame(resolved_rows).sort("config_name")
 resolved_table
 
 # %% [markdown]
-# ## Validate and inspect the handoff
+# ## 5. What came out
 #
 # Each catalog row is one complete validation prediction set for one training identity and epoch.
 # Downstream notebooks filter these rows with Polars and pass the selected table directly to
@@ -321,7 +381,7 @@ execution_diagnostics = pl.DataFrame(execution.diagnostics)
 execution_diagnostics
 
 # %% [markdown]
-# ## Freeze the compatible result set
+# ## 6. Naming the set the later notebooks open
 #
 # A canonical default CUDA run freezes every returned TSMixer prediction row under a stable name.
 # The same bounded family set supplies raw diagnostics because this notebook has one published
@@ -361,10 +421,24 @@ compatible_sets
 # configuration or checkpoint.
 
 # %% [markdown]
-# ## Key takeaways and limitations
+# ## What to notice
 #
-# - TSMixer alternates transformations across the time and feature dimensions of each eligible
-#   sequence window.
-# - Every epoch checkpoint retains separate fitted-state and prediction provenance.
-# - The fixed lookback and mixer dimensions define the temporal context available to the model.
-# - Validation predictions remain separate from the holdout assessment.
+# **Three architectures, one window, one set of folds.** NLinear applies a single linear map, the
+# LSTM walks the window carrying state, and this mixes along both axes. Any difference between
+# them is the architecture, because nothing else varies - which is what makes the comparison worth
+# having, and is also why none of the three chooses anything here.
+#
+# **What is being tested is repeated, explicit feature mixing, not feature mixing as such.** Both
+# of the other models combine features once. If alternating that with temporal mixing block after
+# block is worth anything on this panel, this is where it shows, and the place to look is against
+# the LSTM rather than against NLinear.
+#
+# **A checkpoint is part of a configuration.** Twenty per configuration, each registered
+# separately, for the reason `09_dl_nlinear` gives.
+#
+# **Known limitations.** Windows are built only where sessions are unbroken. Everything measured
+# here is ranking accuracy on validation folds read many times over, and the comparison between
+# the three families is settled on validation backtest Sharpe in
+# [`16_backtest`](16_backtest.ipynb), not here.
+#
+# **Next**: [`12_dl_weekly`](12_dl_weekly.ipynb) keeps these models and changes the sampling grid.

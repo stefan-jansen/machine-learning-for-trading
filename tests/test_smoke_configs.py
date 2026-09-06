@@ -18,18 +18,33 @@ from tests.pm_helpers import unusable_parameters
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SMOKE = yaml.safe_load((REPO_ROOT / "tests" / "smoke.yaml").read_text())
 
-# The stage-01-05 notebooks are closed and locked; the smoke standard is for stages 06 and later.
-FIRST_SMOKE_STAGE = 6
-
 
 def _stage(stem: str) -> int:
     return int("".join(c for c in stem.split("_", 1)[0] if c.isdigit()))
 
 
+def _first_smoke_stage(case_dir: Path) -> int:
+    """The first modelling stage: the one after this case study's evaluation notebook.
+
+    The data stages are closed and locked and the smoke standard begins where the modelling
+    does. That boundary was a literal 6, which is a position rather than a role, and it is
+    wrong for `us_firm_characteristics`: it has no model-based feature stage, so its
+    evaluation is `04_evaluation` and its linear stage is `05_linear`. Under the literal,
+    `05_linear` fell outside `_smoke_notebooks()` altogether, so it had neither a declaration
+    in smoke.yaml nor a line in UNDECLARED, and the ratchet below - whose whole job is to
+    make an undeclared notebook visible - could not see it. Reading the boundary off the
+    evaluation stage gives 6 for the eight case studies numbered that way and 5 for the one
+    that is not.
+    """
+    evaluations = sorted(case_dir.glob("[0-9]*_evaluation.py"))
+    assert len(evaluations) == 1, f"{case_dir.name}: expected one evaluation stage, {evaluations}"
+    return _stage(evaluations[0].stem) + 1
+
+
 def _smoke_notebooks() -> list[str]:
     keys = []
     for path in sorted((REPO_ROOT / "case_studies").glob("*/[0-9]*.py")):
-        if _stage(path.stem) >= FIRST_SMOKE_STAGE:
+        if _stage(path.stem) >= _first_smoke_stage(path.parent):
             keys.append(f"case_studies/{path.parent.name}/{path.stem}")
     return keys
 
@@ -80,8 +95,8 @@ UNDECLARED = {
     "case_studies/us_equities_panel/15_model_analysis",
     "case_studies/us_equities_panel/16_backtest",
     "case_studies/us_equities_panel/17_portfolio_management",
-    "case_studies/us_equities_panel/18_costs",
-    "case_studies/us_equities_panel/19_risk_management",
+    "case_studies/us_equities_panel/18_risk_management",
+    "case_studies/us_equities_panel/19_costs",
     "case_studies/us_equities_panel/20_strategy_analysis",
     "case_studies/us_firm_characteristics/10_model_analysis",
     "case_studies/us_firm_characteristics/11_backtest",

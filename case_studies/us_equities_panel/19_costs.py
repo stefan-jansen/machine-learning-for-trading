@@ -14,23 +14,52 @@
 # ---
 
 # %% [markdown]
-# # US Equities Panel: Transaction-Cost Sensitivity
+# # US equities panel: how much friction the strategy can absorb
 #
-# Cost sensitivity is not a selection step. For each label, this notebook selects the highest
-# validation-Sharpe configuration from the complete equal-weight and alternative-sizing populations,
-# then applies every declared cost value to that fixed configuration. The resulting cost rows cannot
-# replace the configuration chosen from the selection-eligible stages.
+# Three notebooks have now built strategies on this panel and measured them without charging
+# anything to trade: [`16_backtest`](16_backtest.ipynb) took each model's predictions and held the
+# top names against the bottom ones at equal weight, [`17_portfolio_management`](17_portfolio_management.ipynb)
+# varied how the money is spread across those names, and
+# [`18_risk_management`](18_risk_management.ipynb) laid stops and exits over the result. This
+# notebook takes what those produced and asks the question none of them could: at what level of
+# trading cost does it stop being worth doing?
 #
-# **Learning objectives**
+# **This is a sensitivity analysis, not another round of selection.** One configuration per label
+# is fixed first - the highest validation Sharpe among the strategies the three earlier stages
+# produced - and then every declared cost value is applied to that same fixed strategy. Nothing
+# here may replace the configuration that was chosen; a cost sweep that reordered the field would
+# be choosing a strategy on the cost assumption rather than measuring one against it.
 #
-# - Fix one selection-eligible strategy configuration per label before changing costs.
-# - Compare percentage and per-share cost specifications without changing strategy identity.
-# - Plan, execute, and validate the complete cost-sensitivity population.
+# **Two ways of charging for a trade, because they are not the same claim.** A cost in **basis
+# points** is a fraction of the value traded, so a hundred dollars of a five-dollar stock and a
+# hundred dollars of a five-hundred-dollar stock cost the same. A cost **per share** is a fixed
+# amount on each share, so the cheap stock costs a hundred times more to trade. On a panel that
+# spans both, those two assumptions disagree most exactly where this strategy holds most of its
+# names, which is why both grids are swept and reported side by side rather than one being picked.
+#
+# **On this panel the per-share regime is exploratory and the basis-point regime is the headline.**
+# The reason is in the prices: the universe runs from a five-dollar floor to several hundred
+# dollars, and the price a historical bar carries has been adjusted for splits and dividends, so a
+# fixed per-share charge applied to an adjusted price is not the charge that would have been paid.
+# `config/setup.yaml` records that division.
+#
+# **Learning objectives.** By the end of this notebook you will be able to:
+#
+# - Say why a cost sweep has to fix its strategy before it varies anything, and what a sweep that
+#   reordered the field would actually be selecting on.
+# - Derive which stages a re-priced strategy may be drawn from, rather than listing them, and say
+#   what a listed set of stages silently drops.
+# - State the difference between a proportional and a per-share cost, and identify the kind of
+#   universe on which the two disagree most.
+# - Read a curve of net performance against cost level and say what the level where it crosses
+#   zero does and does not tell you about tradability.
 #
 # **Book reference**: Chapter 18, Sections 18.2-18.5
 #
-# **Prerequisites**: `16_backtest.py` and `17_portfolio_management.py` publish the strategy sets
-# consumed here.
+# **Prerequisites**: [`16_backtest`](16_backtest.ipynb),
+# [`17_portfolio_management`](17_portfolio_management.ipynb) and
+# [`18_risk_management`](18_risk_management.ipynb) publish the three stages of strategy this
+# notebook re-prices.
 
 # %%
 """Generate the US-equities cost-sensitivity validation population."""
@@ -58,6 +87,7 @@ from case_studies.utils.sweep_config import (
     get_per_share_commission,
     get_top_n_predictions,
 )
+from case_studies.utils.uncertainty import STAGE_SEQUENCE
 from utils.paths import REPO_ROOT
 
 # %% tags=["parameters"]
@@ -72,6 +102,11 @@ ALLOCATION_SET_NAMES = [
     "us-equities-fwd-ret-5d-allocation-v1",
     "us-equities-fwd-ret-21d-allocation-v1",
 ]
+RISK_SET_NAMES = [
+    "us-equities-fwd-ret-1d-risk-overlay-v1",
+    "us-equities-fwd-ret-5d-risk-overlay-v1",
+    "us-equities-fwd-ret-21d-risk-overlay-v1",
+]
 EXECUTION_TIER = "canonical"
 WORKSPACE = "experiments"
 PREVIEW_LABELS = []
@@ -80,20 +115,32 @@ PREVIEW_MAX_COST_VALUES = 0
 MAX_SYMBOLS = 0
 
 # %% [markdown]
-# ## Open the selection-eligible strategy rows
+# ## 1. Which strategies get re-priced
 #
-# Canonical execution reopens the named equal-weight and allocation sets. A reduced proof selects
-# preview rows by visible labels and explicit source-row, cost-value, and symbol limits.
+# A cost sweep takes a strategy that has already been chosen and asks what it is worth at a range
+# of trading costs. So the pool it draws from is every stage that can produce the configuration a
+# reader would carry forward - and that pool is derived here rather than listed, because a listed
+# one goes stale the moment a stage is added.
+#
+# `STAGE_SEQUENCE` is the order the backtest stages run in: signal, allocation, risk overlay, then
+# cost sensitivity. Everything before the last one is a stage a strategy can come from, so the pool
+# is the sequence minus the terminal stage. Naming the stages by hand instead is how
+# `risk_overlay` came to be missing from this notebook while four of the seven completed case
+# studies carry a risk overlay as their leading validation strategy - and a risk overlay shares its
+# allocation parent's prediction hash, so the omission does not raise. It silently joins the
+# un-overlaid cost curve to a strategy that has an overlay, and Chapter 20 then describes a
+# different strategy from the one it names.
 
 # %%
-declared_set_names = [*BASELINE_SET_NAMES, *ALLOCATION_SET_NAMES]
-# Both tiers resolve the study through `open_study`, never `Study.open`/`Study.regenerate`
-# directly. In a maintainer worktree the generated directories are symlinks to shared data, and
-# `open_study` handles that by reading inputs in place - `root` stays the release case directory
-# and only writes are redirected to the workspace. `Study.open(workspace=...)` instead puts `root`
-# inside the workspace, so `source = self.root / "labels"` (workspace.py:274) resolves somewhere
-# else and `_ensure_input_link` rejects the link a sibling notebook already made. Two notebooks in
-# one session then cannot both open a preview workspace.
+# Every stage a strategy can be carried forward from: the backtest sequence without its
+# terminal stage. Derived from `STAGE_SEQUENCE` so a stage added there reaches this pool
+# without anyone remembering to come here.
+PRE_COST_STAGES = tuple(stage for stage in STAGE_SEQUENCE if stage != "cost_sensitivity")
+
+declared_set_names = [*BASELINE_SET_NAMES, *ALLOCATION_SET_NAMES, *RISK_SET_NAMES]
+# Both tiers resolve the study through `open_study`. It reads the labels, features and earlier
+# results in place and redirects only writes, so a preview run sweeps the same inputs a canonical
+# one does and cannot publish over it.
 if EXECUTION_TIER == "canonical":
     if PREVIEW_LABELS or PREVIEW_MAX_SOURCE_ROWS or PREVIEW_MAX_COST_VALUES or MAX_SYMBOLS:
         raise ValueError("Canonical execution cannot declare preview reductions")
@@ -119,10 +166,11 @@ else:
     raise ValueError(f"Unsupported execution tier: {EXECUTION_TIER!r}")
 
 # %% [markdown]
-# ## Select eligible source rows
+# ## 2. The rows this run will sweep
 #
-# Canonical rows come from the named baseline and allocation sets. Preview rows use the visible
-# label and row limits declared above.
+# A canonical run takes the frozen sets by name. A preview run takes the highest-Sharpe rows of
+# the declared labels up to its declared limit, which is what makes a reduced proof cheap without
+# letting it publish anything.
 
 # %%
 backtest_catalog = study.backtests.table(include_preview=True)
@@ -140,7 +188,7 @@ else:
     eligible = (
         backtest_catalog.filter(
             (pl.col("execution_tier") == "preview")
-            & pl.col("stage").is_in(["signal", "allocation"])
+            & pl.col("stage").is_in(PRE_COST_STAGES)
             & pl.col("label").is_in(PREVIEW_LABELS)
         )
         .sort("sharpe", "backtest_hash", descending=[True, False])
@@ -150,7 +198,7 @@ else:
 ineligible = eligible.filter(
     (pl.col("split") != "validation")
     | (pl.col("execution_tier") != EXECUTION_TIER)
-    | ~pl.col("stage").is_in(["signal", "allocation"])
+    | ~pl.col("stage").is_in(PRE_COST_STAGES)
     | ~pl.col("complete")
     | pl.col("sharpe").is_null()
     | ~pl.col("sharpe").is_finite()
@@ -159,20 +207,36 @@ if eligible.is_empty() or not ineligible.is_empty():
     raise ValueError("Cost analysis requires complete finite selection-eligible validation rows")
 
 # %% [markdown]
-# ## Fix one source configuration per label
+# ## 3. Fixing the strategy that will be re-priced
 #
-# The configured shortlist size for cost sensitivity is applied within each label. The exact model
-# checkpoint, signal, and allocation decisions remain fixed across every cost value.
+# One configuration per label, taken by validation Sharpe from the pool above. `setup.yaml`
+# declares how many to keep - `cost_sensitivity: 1` - and that number is the whole design of this
+# section: a sweep over several strategies at several costs produces a table in which a reader
+# cannot tell a cost effect from a strategy difference.
+#
+# Everything that identifies the strategy is now held: which model produced the predictions, which
+# checkpoint of it, how the signal turned those predictions into positions, how the money was
+# spread across them, and any overlay laid on top. Only the cost varies from here.
+#
+# **"Any overlay laid on top" is the part that has to be carried deliberately.** A strategy drawn
+# from the signal or allocation stage has no overlay, and the backtest runner treats an absent
+# overlay as none - so a risk-overlay strategy re-priced without its risk block runs clean and
+# produces a cost curve for the un-overlaid strategy under the overlaid one's name. That is the
+# same failure as leaving `risk_overlay` out of the pool, reached from the other side. Section 4
+# carries the block through and refuses a risk-overlay source whose spec does not hold one.
+#
+# **Because one configuration is kept per label, some summaries have no width.** A median, a range
+# or a confidence band across configurations is computed over a single row, so all three coincide.
+# That is a property of the shortlist size rather than a finding about stability.
 
 # %% tags=["results"]
-# Prices are cached by (label, warmup) rather than loaded once per label. Strategy._build_spec
-# (research/strategy.py:389) digests exactly the frame it is handed, and strategy_warmup_periods
-# (:201-211) resolves a different prefix per allocator: 0 for the non-moment methods, vol_window
-# for inverse_vol / risk_parity / hrp, lookback for mvo and mvo_ledoit_wolf. Handing every member
-# of a label the same 126-bar frame stamps a price digest that 20_strategy_analysis recomputes at
-# the member's own warmup (20:157-169) and then rejects as "does not use canonical validation
-# prices" - and lifecycle.evaluate_holdout (lifecycle.py:342-368) applies the same rule, so the
-# holdout inherits it. cme_futures/research_workflow.py:674-682 caches on the same key.
+# Prices are cached per label AND per warmup, not once per label. A strategy records the digest of
+# exactly the price frame it was handed, and allocators need different amounts of history before
+# their first decision: none for the simple weighting methods, a volatility window for
+# inverse-volatility and risk parity, a longer lookback for the mean-variance ones. Handing every
+# member of a label one frame long enough for the greediest of them would record a digest that
+# nothing recomputing at a member's own warmup can reproduce, and the later notebooks and the
+# holdout evaluation both check exactly that.
 _price_cache: dict[tuple[str, int], object] = {}
 
 
@@ -214,11 +278,19 @@ selected_sources.select(
 )
 
 # %% [markdown]
-# ## Declare and plan both cost regimes
+# ## 4. The two cost grids
 #
-# The canonical bps regime splits total per-leg cost evenly between commission and slippage. The
-# exploratory per-share regime uses the configured commission and a uniform half-spread. Every
-# planned identity is snapshotted before the first cost backtest runs.
+# **The basis-point grid** charges a fraction of the value traded and splits it evenly between two
+# things a trade pays for: the commission, and the slippage from crossing the spread. Splitting it
+# evenly is a declaration rather than a measurement; what the sweep varies is the total.
+#
+# **The per-share grid** charges the configured commission per share plus a uniform half-spread in
+# cents. A **half-spread** is what one side of a round trip pays to cross the quoted bid-ask gap,
+# so a round trip pays it twice.
+#
+# Every identity is written down before the first backtest runs, for the same reason the model
+# populations were: a sweep that came out short would otherwise look like a smaller sweep rather
+# than a failed one.
 
 # %%
 bps_values = get_cost_grid_bps(CASE_STUDY_ID)
@@ -266,13 +338,14 @@ plan_rows = []
 
 # %%
 def cost_member_records(
-    label, source_row, selection, signal, allocation, cost_request, expected_hash
+    label, source_row, selection, signal, allocation, risk, cost_request, expected_hash
 ):
     request = {
         "label": label,
         "selection": selection,
         "signal": signal,
         "allocation": allocation,
+        "risk": risk,
         "costs": cost_request["costs"],
         "regime": cost_request["regime"],
         "cost_value": cost_request["cost_value"],
@@ -302,11 +375,24 @@ def plan_cost_member(label, prices, cost_request, source_row):
     source_spec = json.loads(source_row["spec_json"])
     signal = dict(source_spec["strategy"]["signal"])
     allocation = source_spec["strategy"].get("allocation")
+    # Every block the source strategy carries has to be carried into the re-priced one, and the
+    # risk block is the one that is easy to lose: it is absent from a signal-stage or an
+    # allocation-stage source, `plan_backtests` and `run_backtests` both default it to None, and
+    # a strategy re-priced without its overlay produces a cost curve for a different strategy
+    # under the overlaid one's name. That is the same defect as excluding risk_overlay from the
+    # pool, arriving from the other side, so it is asserted rather than assumed below.
+    risk = source_spec["strategy"].get("risk")
+    if source_row["stage"] == "risk_overlay" and not risk:
+        raise ValueError(
+            f"backtest {source_row['backtest_hash']} is staged risk_overlay and its spec carries "
+            "no risk block, so re-pricing it would drop the overlay it is named for"
+        )
     plan = plan_backtests(
         study,
         predictions=selected_prediction,
         signal=signal,
         allocation=allocation,
+        risk=risk,
         costs=cost_request["costs"],
         prices=prices,
         chapter="ch18",
@@ -319,6 +405,7 @@ def plan_cost_member(label, prices, cost_request, source_row):
         selected_prediction,
         signal,
         allocation,
+        risk,
         cost_request,
         plan.expected_hashes[0],
     )
@@ -358,10 +445,11 @@ if EXECUTION_TIER == "canonical":
 planned_population
 
 # %% [markdown]
-# ## Execute the planned cost members
+# ## 5. Running the sweep
 #
-# Each source prediction row is passed directly to the shared runner. Failures do not erase the
-# official snapshot or prevent independent siblings from completing and becoming reusable.
+# Each cost value becomes its own backtest of the same fixed strategy. They are independent, so a
+# failure costs that one point on the curve and leaves the rest reusable, and the declared
+# membership stays intact for a re-run to fill.
 
 # %%
 execution_rows = []
@@ -374,6 +462,7 @@ def execute_cost_member(prices, request):
         predictions=request["selection"],
         signal=request["signal"],
         allocation=request["allocation"],
+        risk=request["risk"],
         costs=request["costs"],
         prices=prices,
         chapter="ch18",
@@ -445,10 +534,12 @@ if official_population is not None:
 execution_diagnostics
 
 # %% [markdown]
-# ## Freeze the reader-facing cost sets
+# ## 6. Naming the curves
 #
-# Each label gets one immutable cost-sensitivity set containing both declared regimes. The strategy
-# analysis notebook may describe these rows, but they remain outside the official selection pool.
+# One set per label, holding both regimes, under a name
+# [`20_strategy_analysis`](20_strategy_analysis.ipynb) opens. These rows describe a strategy that
+# was already chosen, so they stay out of the pool anything selects from - a cost row winning a
+# selection would mean the cost assumption picked the strategy.
 
 # %% tags=["results"]
 set_rows = []
@@ -466,15 +557,10 @@ if (
 if EXECUTION_TIER == "canonical":
     for label in completed.get_column("label").unique().sort().to_list():
         label_name = label.replace("_", "-")
-        # No comparison_contract, matching cme_futures/research_workflow.py:811, which builds the
-        # same per-label pool across the full funnel and declares nothing. An empty contract makes
-        # every protocol field required-constant, which is the guard: if two members disagree on
-        # `cv` they measured their Sharpe on different folds and ranking them is not a comparison,
-        # and this field is the only thing checking that. Latent-factor members will refuse on
-        # `feature_artifacts` when they enter this pool - latent builds it from a different object
-        # than the other five families (latent_factors/case_study.py:337-383, carrying the label
-        # digest and setup.yaml bytes). That refusal is a known adapter defect surfacing, not a
-        # property to declare around; report it rather than adding the field here.
+        # No comparison contract is declared, which makes every protocol field
+        # required-constant. That is the guard rather than an omission: two members that disagree
+        # on their cross-validation design measured their Sharpe on different folds, so ranking
+        # them is not a comparison, and this is the only thing that checks it.
         result_set = study.backtests.freeze(
             completed.filter(pl.col("label") == label),
             name=f"us-equities-{label_name}-cost-sensitivity-v1",
@@ -490,10 +576,15 @@ compatible_sets = pl.DataFrame(
 compatible_sets
 
 # %% [markdown]
-# ## Inspect both cost regimes
+# ## 7. Reading the curves
 #
-# Each curve keeps its source model, checkpoint, signal, and allocation fixed. Only the declared
-# transaction-cost value changes along the horizontal axis.
+# One line per label per regime. Everything identifying the strategy is fixed along a line and
+# only the cost changes, so the slope is what friction does to this strategy and the crossing point
+# is the level at which it stops paying.
+#
+# Read the two regimes as two assumptions rather than as two measurements of one thing. They order
+# the universe differently, and where they disagree most is the low-price end of the panel, where a
+# broad long-short book holds a large share of its names.
 
 # %% tags=["results"]
 cost_results = planned_population.select("label", "regime", "cost_value", "backtest_hash").join(

@@ -14,27 +14,57 @@
 # ---
 
 # %% [markdown]
-# # Instrumented Principal Components - US Equities Panel
+# # US equities panel: loadings that depend on what a stock is
 #
-# This notebook generates walk-forward validation predictions from instrumented principal
-# components. Readers choose the labels, factor count, parameter overrides, and execution tier.
-# Shared latent-factor code owns fold preparation, train-only fitting, convergence validation,
-# fitted-state persistence, prediction reconstruction, exact coverage, metrics, and registry
-# writes.
+# [`13a_pca`](13a_pca.ipynb) gave every stock a **loading** on each common movement - a number
+# saying how much of that movement the stock takes - and fitted that number to the stock. Two
+# limitations follow directly, and neither is technical.
 #
-# The implementation is in `case_studies/utils/latent_factors/ipca.py` and its shared research
-# adapter. Readers can modify the factor construction in ordinary Python while preserving the same
-# request, result, and catalog boundary.
+# **A number fitted to a stock cannot answer for a stock it never saw.** On a panel where names
+# list and delist across three decades, that is a large part of the universe.
 #
-# **Learning objectives**
+# **A number fitted to a stock cannot move when the stock does.** A company that was small and
+# cheap ten years ago and is large and expensive now keeps the loading its whole training window
+# implied.
 #
-# - Configure label-specific IPCA requests with train-only fold fitting.
-# - Trace characteristic loadings, convergence evidence, and reconstructed predictions.
-# - Validate exact coverage before publishing compatible label sets.
+# **Instrumented principal component analysis makes the loading a function of the stock's
+# observable characteristics instead.** Rather than fitting a number per stock, it fits a mapping
+# from characteristics to loadings, shared across the whole panel. So a stock that was never seen
+# still has a loading, computed from its characteristics; and a stock whose characteristics change
+# has its loading change with them, without anything being refitted.
 #
-# **Book reference**: Chapter 13
+# **What that buys is paid for with an assumption.** The mapping is the same for every stock and
+# is held fixed across the training window, so the method assumes the relation between what a
+# stock is and how it moves is stable and universal. Where that fails - a characteristic that
+# means something different in one decade than another - the conditioned loadings are wrong in a
+# way the unconditioned ones are not.
 #
-# **Prerequisites**: `05_evaluation.py` and the finalized label and feature artifacts.
+# **Everything is fitted on training rows only**, the mapping included, for the reason
+# [`13a_pca`](13a_pca.ipynb) gives: a relation estimated from the whole sample would have been
+# estimated partly from the returns it is later asked to predict.
+#
+# **Learning objectives.** By the end of this notebook you will be able to:
+#
+# - State the two limitations of a per-stock loading, and say why each is a problem on a panel
+#   whose membership and whose companies both change.
+# - Explain what it means for a loading to be a function of characteristics rather than a number
+#   attached to a stock.
+# - Say what the conditioned model assumes in exchange, and describe a situation where that
+#   assumption would be uncomfortable.
+# - Say why the mapping has to be estimated inside the training window.
+#
+# **Book reference**: Chapter 13.
+#
+# **Prerequisites**: [`03_financial_features`](03_financial_features.ipynb) and
+# [`04_model_based_features`](04_model_based_features.ipynb) have written the feature matrices,
+# [`02_labels`](02_labels.ipynb) the labels, and [`05_evaluation`](05_evaluation.ipynb) has
+# established the walk-forward folds.
+#
+# **What it writes**: one training run and one complete validation prediction set per label, in
+# `run_log/registry.db` and under `run_log/training/` and `run_log/predictions/`, frozen under a
+# name per label. [`13_latent_factors`](13_latent_factors.ipynb) indexes them,
+# [`15_model_analysis`](15_model_analysis.ipynb) compares them against the other families, and
+# [`16_backtest`](16_backtest.ipynb) backtests every one. **Selection happens there, not here.**
 
 # %%
 """Generate IPCA validation predictions through the shared research interface."""
@@ -62,13 +92,22 @@ PREVIEW_N_FACTORS = 0
 PREVIEW_MAX_ITER = 0
 
 # %% [markdown]
-# ## Configure the experiment
+# ## 1. Which labels, and how many factors
 #
-# `LABELS = []` runs the primary label and every configured variant. Set it to a visible subset for
-# a targeted experiment. `N_FACTORS` and `OVERRIDES` are resolved into the complete model
-# specification. Canonical execution uses the complete panel, fold protocol, and convergence
-# settings. Reduced checks use the preview tier, declare every reduction below, and remain outside
-# official result populations.
+# What each setting a run may pass decides:
+#
+# - **`LABELS`** empty fits the primary label and every declared variant. A subset fits only those.
+# - **`N_FACTORS`** is how many common movements are extracted. Five is declared rather than
+#   searched, and that is a design choice with consequences: too few and distinct common movements
+#   are forced into one direction, too many and the later ones are fitting noise that will not
+#   repeat out of sample. Nothing in this case study tunes it, so no result here is evidence that
+#   five is right - only evidence of what five gives.
+# - **`OVERRIDES`** changes a resolved model parameter. An override moves the training identity, so
+#   an overridden run registers beside the published one rather than replacing it.
+# - **`EXECUTION_TIER`** is `canonical` or `preview`. A canonical run fits the whole panel on every
+#   fold. A preview run declares its reductions and carries them in the identity, so its results
+#   can never be compared against canonical ones or reach a holdout decision.
+# - **`FOLD_IDS`** and **`MAX_SYMBOLS`** are the reductions a preview declares.
 
 # %%
 case_dir = get_case_study_dir(CASE_STUDY_ID)
@@ -132,9 +171,15 @@ else:
     raise ValueError("EXECUTION_TIER must be 'canonical' or 'preview'")
 
 # %% [markdown]
-# ## Build the label requests
+# ## 2. Binding the declarations to the data
 #
-# Each selected label receives a separate IPCA request under the shared factor-count specification.
+# One request per label. A **request** is the declaration bound to a label and an execution
+# tier, with its overrides resolved; it holds no data, so the table below can be read before
+# anything is loaded.
+#
+# The labels get separate requests rather than one shared fit because a label defines which
+# rows are scorable and over what horizon. Fitting once and scoring three ways would give the
+# three labels a common estimate built partly from rows that only one of them can see.
 
 # %%
 requests = tuple(
@@ -162,7 +207,15 @@ request_table = pl.DataFrame(
 request_table
 
 # %% [markdown]
-# ## Plan and execute the selected labels
+# ## 3. Planning, then fitting
+#
+# **Planning resolves every identity before any fitting starts**, and the list of them is written
+# down as a population the run then has to fill completely - so a run that came out short reads as
+# a failure rather than as a smaller experiment.
+#
+# The fit itself is iterative: factors and the characteristic mapping are estimated in alternation
+# until they stop moving. Whether that happened is recorded per fold, and it is a statement about
+# the stability of the estimate rather than about whether the mapping it found is any good.
 #
 # The planner resolves every label-specific training and checkpoint identity before fitting and
 # writes the canonical checkpoint population first. Each fold then fits IPCA on its training panel
@@ -194,7 +247,13 @@ planned_population
 execution = plan.run()
 
 # %% [markdown]
-# ## Inspect the resolved computation
+# ## 4. What was actually fitted
+#
+# The fully resolved specification, including every default nothing above restated: the factor
+# count, the feature count, the fold count, and the cross-validation identity. This is the
+# record a result is checked against, and it is what the training hash is computed from - so
+# two rows with the same hash were fitted under the same declaration, and two with different
+# hashes were not.
 
 # %%
 resolved_rows = []
@@ -218,11 +277,16 @@ resolved_table = pl.DataFrame(resolved_rows).sort("label")
 resolved_table
 
 # %% [markdown]
-# ## Validate and inspect the handoff
+# ## 5. What came out
 #
-# Each catalog row is a complete validation prediction set with exact training, label, fold, and
-# fitted-state lineage. Downstream notebooks select these rows with Polars rather than copying
-# hashes, while the hashes remain visible for exact provenance.
+# One row per label, each a complete set of validation predictions carrying the hash of the
+# training run behind it and of the predictions themselves, so any row traces back to the
+# fitted state that produced it.
+#
+# Coverage is checked exactly rather than approximately: a factor model reconstructs a
+# prediction for every stock-date its loadings cover, so a shortfall means a stock or a
+# session the reconstruction could not reach, and that is a fact about the fit rather than a
+# rounding difference.
 
 # %% tags=["results"]
 catalog_columns = [
@@ -275,11 +339,16 @@ execution_diagnostics = pl.DataFrame(execution.diagnostics)
 execution_diagnostics
 
 # %% [markdown]
-# ## Freeze the compatible result sets
+# ## 6. Naming the sets the later notebooks open
 #
-# A canonical default run freezes one complete IPCA result set for each configured label. Each set
-# is also small enough for raw diagnostic comparisons. Preview and customized canonical requests
-# do not publish official sets.
+# One frozen set per label, under a name the later notebooks open by. Only an unnarrowed
+# canonical run publishes one: a name must not mean two different member sets at two different
+# times, so a run that overrode a parameter, narrowed the labels or ran under the preview tier
+# keeps its rows and publishes no name.
+#
+# These sets are small enough to be compared prediction by prediction, which is why
+# [`15_model_analysis`](15_model_analysis.ipynb) does not need a separate bounded subset for
+# them the way it does for the larger grids.
 
 # %% tags=["results"]
 set_rows = []
@@ -315,10 +384,21 @@ compatible_sets
 # a configuration or checkpoint.
 
 # %% [markdown]
-# ## Key takeaways and limitations
+# ## What to notice
 #
-# - IPCA conditions factor loadings on the declared characteristics within each training fold.
-# - Convergence, fitted state, and reconstructed predictions are validated before reuse.
-# - The configured factor count and regularization determine the characteristic structure the model
-#   can represent.
-# - Label-specific sets preserve compatible comparisons for analysis and backtesting.
+# **Read this against [`13a_pca`](13a_pca.ipynb) rather than on its own.** The two extract the same
+# number of factors from the same panel over the same folds, and differ in whether a loading is
+# fitted to a stock or computed from what the stock is. That difference is the only thing a
+# comparison between them measures.
+#
+# **The characteristics are doing the work, so which ones are declared matters.** A characteristic
+# absent from the feature set cannot inform a loading, and one that is present but stale informs it
+# wrongly. This is the model in the case study most sensitive to what stage 03 chose to compute.
+#
+# **A convergence check is not a goodness check.** The fit is iterative, and it either converged or
+# it did not; converging says the estimate is stable, not that the mapping it found is right.
+#
+# **Known limitations.** Five factors, declared rather than searched. The mapping from
+# characteristics to loadings is assumed common across stocks and fixed within a training window,
+# which is the assumption the whole method rests on and which nothing here tests. And everything is
+# measured on validation folds read many times over by the time a case study reaches this notebook.

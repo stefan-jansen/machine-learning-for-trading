@@ -3012,7 +3012,7 @@ case_studies/us_equities_panel/17_portfolio_management:
     PREVIEW_MAX_ALLOCATORS: 2
     MAX_SYMBOLS: 45
   timeout: 300
-case_studies/us_equities_panel/18_costs:
+case_studies/us_equities_panel/19_costs:
   # TOP_N_COMBOS became PREVIEW_MAX_SOURCE_ROWS, and the cost grid is bounded by
   # PREVIEW_MAX_COST_VALUES rather than run in full.
   # See 16_backtest on the 45-symbol floor.
@@ -3022,7 +3022,7 @@ case_studies/us_equities_panel/18_costs:
     PREVIEW_MAX_COST_VALUES: 2
     MAX_SYMBOLS: 45
   timeout: 600
-case_studies/us_equities_panel/19_risk_management:
+case_studies/us_equities_panel/18_risk_management:
   # TOP_N_COMBOS became PREVIEW_MAX_SOURCE_ROWS and MAX_RISK_VARIANTS became
   # PREVIEW_MAX_RISK_CONTROLS.
   # See 16_backtest on the 45-symbol floor.

@@ -273,9 +273,9 @@ plan.select(
 # `SUPERSEDES_POPULATION` names the population hash this run replaces. A changed estimator
 # parameter moves every training identity as surely as a changed menu does, so the refit is a
 # different population under the same name, and `OfficialPopulation.create` refuses to write it
-# without being told which snapshot it supersedes (`research/population.py:246`). The refusal comes
+# without being told which snapshot it supersedes. The refusal comes
 # before the first fit, not at the end: `run_official_models` snapshots the population and only
-# then executes it (`research/execution.py:584,596`), so a run that cannot name its predecessor
+# then executes it, so a run that cannot name its predecessor
 # fails immediately rather than after the sweep. Reproducing an identical member list is a no-op
 # whatever the caller declares, so this parameter matters only when the list genuinely differs.
 

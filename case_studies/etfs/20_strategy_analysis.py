@@ -119,10 +119,12 @@ from case_studies.utils.uncertainty import STAGE_SEQUENCE, descends_from
 from utils.paths import get_case_study_dir, get_output_dir
 
 # %% tags=["parameters"]
-MAX_SYMBOLS = 0
-# Both names stay bound here although nothing below reads them: that is what makes the harness
-# force preview and supply a workspace (`tests/pm_helpers.py:954`). Without them the canonical
-# branch regenerates in place, which needs symlinks a CI checkout does not have.
+# MAX_SYMBOLS is gone. Nothing below read it, and a declared cap the run does not apply is
+# worse than no cap: a reader who sets it gets a full run and no warning. The two names that
+# remain are read - `_declares_tier_and_workspace` (tests/pm_helpers.py) looks for exactly
+# this pair - which is why they stay bound although nothing below references them. Without
+# them the canonical branch regenerates in place, which needs symlinks a CI checkout has not
+# got.
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 
