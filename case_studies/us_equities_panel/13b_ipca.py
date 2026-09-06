@@ -196,6 +196,7 @@ requests = tuple(
         overrides=dict(OVERRIDES),
         execution_tier=EXECUTION_TIER,
         preview_reductions=preview_reductions,
+        notebook="13b_ipca",
     )
     for label in selected_labels
 )
