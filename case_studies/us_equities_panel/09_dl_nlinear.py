@@ -34,24 +34,28 @@
 # folds.
 #
 # **NLinear is deliberately the least elaborate sequence model there is**, and that is why it
-# comes first. It takes the window, subtracts the value in its last row, applies a single linear
-# map to what remains, and adds that last value back. So it predicts a *change* from the most
-# recent observation, and it has no nonlinearity, no recurrence and no attention anywhere in it.
+# comes first. It works one feature at a time. For each feature column of the window it subtracts
+# that column's last value, maps the 60 sessions to a single number with a linear layer, and adds
+# the last value back - so each feature is summarised into one number on its own, with no
+# reference to any other. A final linear layer then combines those per-feature numbers into the
+# one number the notebook predicts. There is no nonlinearity, no recurrence and no attention
+# anywhere in it.
 #
 # It is here as the control the two notebooks after it have to beat. A recurrent network and a
 # mixing architecture are both far more expressive, and expressiveness is only worth its cost if
 # it buys something a linear map on a normalised window did not already have. Running the
 # elaborate models without this one would leave no way to tell a good result from an easy one.
 #
-# **Subtracting the last value is the whole of the normalisation, and on price-derived features it
-# matters.** A window of levels drifts, so a model reading raw levels spends its capacity tracking
-# where the series happens to sit rather than how it is moving. Anchoring on the last observation
-# removes the level and leaves the shape.
+# **The subtract-and-add-back is the whole of the normalisation, and on price-derived features it
+# matters.** A feature that drifts makes a model reading raw levels spend its capacity tracking
+# where that series happens to sit rather than how it is moving. Removing each column's last value
+# before the linear map, and restoring it after, leaves the map looking at the shape of the window
+# rather than its level.
 #
 # **Learning objectives.** By the end of this notebook you will be able to:
 #
-# - Describe what NLinear does to a window in one sentence, and say which part of it is the
-#   normalisation and which part is the model.
+# - Describe what NLinear does to each feature column of a window and how the per-feature results
+#   become one prediction, and say which part of that is the normalisation.
 # - Say why the least expressive model in a comparison is the one to run first, and what a result
 #   from a more elaborate model means without it.
 # - Explain why a window has to be built from consecutive sessions, and what a window spanning a

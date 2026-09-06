@@ -41,9 +41,14 @@
 #
 # **The reason to try it is the shape of this particular panel.** Recurrence processes a window
 # sequentially, so its cost grows with the window length and its gradient has to survive the whole
-# walk. Mixing touches the whole window at once. And the second operation - mixing across
-# features - does something the previous two notebooks do not: it combines columns within a single
-# session, which is the direction a cross-sectional feature set is dense in.
+# walk; mixing touches the whole window at once.
+#
+# The other two models do combine features - the LSTM's gates read the whole feature vector at
+# every step, and NLinear's final layer is a linear combination across features - but each does it
+# in one place and one way. TSMixer makes feature mixing an explicit, nonlinear operation that
+# happens once per block and alternates with mixing along time, so a combination of features can
+# itself be mixed across time and then recombined. On a feature set this dense in the
+# cross-section, that repetition is what is being tested.
 #
 # The configuration here stacks two blocks at a hidden dimension of 32, smaller than the recurrent
 # model's state for the same reason: what bounds the capacity worth fitting is the number of
@@ -53,7 +58,8 @@
 #
 # - Describe the two mixing operations, say which axis of the window each acts on, and say what
 #   information can travel where after two blocks.
-# - Say what mixing across features does that a model reading the window sequentially does not.
+# - Say how TSMixer's feature mixing differs from the way the other two models combine features,
+#   given that both of them also do.
 # - Explain why an architecture without recurrence can be preferable on long windows, in terms of
 #   cost and of what has to survive training.
 # - Read the epoch schedule out of a declared configuration and say how many scoreable models the
@@ -422,9 +428,10 @@ compatible_sets
 # them is the architecture, because nothing else varies - which is what makes the comparison worth
 # having, and is also why none of the three chooses anything here.
 #
-# **Mixing across features is the operation the other two lack.** If it is worth anything on this
-# panel this is where it shows, and the place to look is against the LSTM rather than against
-# NLinear.
+# **What is being tested is repeated, explicit feature mixing, not feature mixing as such.** Both
+# of the other models combine features once. If alternating that with temporal mixing block after
+# block is worth anything on this panel, this is where it shows, and the place to look is against
+# the LSTM rather than against NLinear.
 #
 # **A checkpoint is part of a configuration.** Twenty per configuration, each registered
 # separately, for the reason `09_dl_nlinear` gives.
