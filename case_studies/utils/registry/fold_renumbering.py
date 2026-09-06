@@ -163,12 +163,28 @@ def derive_fold_permutation(folds: Sequence[Mapping[str, Any]]) -> dict[int, int
     return {by_window[window]: rank for rank, window in enumerate(by_validation)}
 
 
+#: Fold ids that do not name a walk-forward fold, and so are carried through a renumber
+#: unchanged. ``-1`` is written by `case_studies/utils/conformal.py:720` to mean "holdout, no
+#: fold partition"; permuting it would turn a statement that a row belongs to no fold into a
+#: claim that it belongs to one. Sentinels are honoured in stored data - a parquet column, a
+#: fold_extras entry - and not in a specification's `cv.folds`, where one would be a defect
+#: rather than a convention.
+_NON_FOLD_SENTINELS = frozenset({-1})
+
+
 def _permute(permutation: Mapping[int, int], fold: Any, *, where: str) -> int:
     if isinstance(fold, bool) or not isinstance(fold, int):
         raise FoldRenumberRefusal(f"{where}: fold id {fold!r} is not an integer")
     if fold not in permutation:
         raise FoldRenumberRefusal(f"{where}: fold id {fold} is outside the permutation")
     return permutation[fold]
+
+
+def _permute_data(permutation: Mapping[int, int], fold: Any, *, where: str) -> int:
+    """Permute a fold id recorded beside a result, letting a declared sentinel through."""
+    if isinstance(fold, int) and not isinstance(fold, bool) and fold in _NON_FOLD_SENTINELS:
+        return fold
+    return _permute(permutation, fold, where=where)
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +224,7 @@ def remap_json_document(
             if match is not None:
                 new_key = _rename_fold_token(match, permutation, where=f"{where}.{key}")
             if key in _FOLD_VALUE_KEYS and isinstance(value, int) and not isinstance(value, bool):
-                new_value: Any = _permute(permutation, value, where=f"{where}.{key}")
+                new_value: Any = _permute_data(permutation, value, where=f"{where}.{key}")
             else:
                 new_value = remap_json_document(
                     value,
@@ -935,17 +951,15 @@ def _remap_parquet(source: Path, target: Path, permutation: Mapping[int, int]) -
     frame = pl.read_parquet(source)
     dtype = frame.schema[fold_column]
     stored = frame.get_column(fold_column).drop_nulls().cast(pl.Int64).unique().to_list()
-    unknown = sorted(set(stored) - set(permutation))
+    unknown = sorted(set(stored) - set(permutation) - _NON_FOLD_SENTINELS)
     if unknown:
         raise FoldRenumberRefusal(f"{source}: fold ids {unknown} are outside the permutation")
+    mapping = {**{sentinel: sentinel for sentinel in _NON_FOLD_SENTINELS}, **dict(permutation)}
     frame = frame.with_columns(
         # `default=None` carries a null fold through as a null rather than failing on it.
         # A value the permutation does not cover is refused above, so nothing else can reach
         # the default and be silently blanked.
-        pl.col(fold_column)
-        .cast(pl.Int64)
-        .replace_strict(dict(permutation), default=None)
-        .cast(dtype)
+        pl.col(fold_column).cast(pl.Int64).replace_strict(mapping, default=None).cast(dtype)
     )
     target.parent.mkdir(parents=True, exist_ok=True)
     frame.write_parquet(target, **_PARQUET_WRITE_SETTINGS)
@@ -1119,7 +1133,7 @@ def _renumber_fold_ids(db: sqlite3.Connection, plan: RenumberPlan) -> None:
             if not owners[table](str(key)):
                 continue
             permutation = permutation_by_training[resolve[table](str(key))]
-            updates.append((_permute(permutation, int(fold_id), where=table), int(rowid)))
+            updates.append((_permute_data(permutation, int(fold_id), where=table), int(rowid)))
         if not updates:
             continue
         db.executemany(

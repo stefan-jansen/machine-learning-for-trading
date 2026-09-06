@@ -263,3 +263,13 @@ def test_relative_path_renames_a_snapshot_named_by_its_prediction_hash() -> None
         {0: 1},
         {"aaaaaaaaaaaa": "bbbbbbbbbbbb"},
     ) == PurePosixPath("_snapshots/2026-08-30-widths/bbbbbbbbbbbb.conformal_widths.parquet")
+
+
+def test_the_no_fold_sentinel_survives_a_renumber() -> None:
+    # `conformal.py` writes fold_id -1 for a holdout row that belongs to no fold. Permuting it
+    # would turn "no fold" into a fold id, and refusing it would block the migration over a
+    # convention the registry declares.
+    assert remap_json_document({"fold_id": -1, "fold": 0}, {0: 1, 1: 0}) == {
+        "fold_id": -1,
+        "fold": 1,
+    }
