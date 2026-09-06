@@ -81,12 +81,14 @@ from scipy.optimize import minimize
 from statsmodels.tsa.arima.model import ARIMA
 from threadpoolctl import threadpool_limits
 
-from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.temporal import (
+    arima_one_step_forecast,
     filtered_state_probs,
     refit_boundaries,
     sort_states_by_variance,
     walk_forward_feature,
+    write_model_based,
 )
 from data import load_fx_pairs
 from utils.artifact_specs import load_setup_config, resolve_label_buffer
@@ -1403,10 +1405,16 @@ print(
 # so it ends where they do.
 #
 # The fitted coefficients must not move when the recursion is extended past the window they
-# were estimated on. `fit.apply(rets, refit=False)` is the call that guarantees it: the
-# state recursion advances with each new observation while the coefficients stay where the
-# fit left them. That is a claim about a library, so the check below compares the two
-# parameter vectors element by element rather than trusting the argument name.
+# were estimated on. `arima_one_step_forecast` is the call that guarantees it: the state
+# recursion advances with each new observation while the coefficients stay where the fit left
+# them. It is shared with cme_futures rather than written here, because the same guarantee is
+# wanted in both and a copy of a guarantee agrees with the original only by luck.
+#
+# That is still a claim about a library underneath, so the check below goes around the helper
+# and compares the parameter vectors element by element against `statsmodels` directly. Routing
+# the check through the helper it is checking would make it agree with itself; an independent
+# oracle is the point of a seal. It is also why a bare `ARIMA(` survives in the cell below
+# without violating the one-filter rule - that cell emits no feature value.
 
 
 # %% tags=[]
@@ -1418,8 +1426,7 @@ def arima_fit(train: np.ndarray) -> dict:
 
 def arima_apply(fitted: dict, prefix: np.ndarray) -> np.ndarray:
     """One-step forecasts over a prefix, with the estimation window's error spread."""
-    extended = fitted["fit"].apply(prefix[:, 0], refit=False)
-    predicted = np.asarray(extended.predict(start=0, end=len(prefix) - 1), dtype=float)
+    predicted = arima_one_step_forecast(fitted["fit"], prefix[:, 0])
     return np.column_stack([predicted, np.full(len(prefix), fitted["resid_std"])])
 
 
@@ -1836,12 +1843,19 @@ print(
 
 # %% tags=[]
 output_path = FEATURES_DIR / "model_based.parquet"
+ARTIFACT_KEY = ["timestamp", "symbol"]
+# Derived rather than listed, so a feature added above cannot be left out of the guard that
+# checks every declared column carries values.
+FEATURE_COLUMNS = [c for c in temporal_df.columns if c not in ARTIFACT_KEY]
 
 FEATURES_DIR.mkdir(parents=True, exist_ok=True)
-record = write_artifact(
+record = write_model_based(
     temporal_df,
     output_path,
-    keys=["timestamp", "symbol"],
+    keys=ARTIFACT_KEY,
+    feature_columns=FEATURE_COLUMNS,
+    time_column="timestamp",
+    fold_column=None,
     written_by="case_studies/fx_pairs/04_model_based_features.py",
     inputs={"load_fx_pairs:4h": value_digest(prices)},
     metadata={
