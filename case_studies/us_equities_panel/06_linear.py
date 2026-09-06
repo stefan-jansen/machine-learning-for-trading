@@ -223,6 +223,7 @@ requests = model_requests(
     configs,
     execution_tier=EXECUTION_TIER,
     preview_reductions=PREVIEW_REDUCTIONS,
+    notebook="06_linear",
 )
 plan = plan_models(study, requests=requests)
 

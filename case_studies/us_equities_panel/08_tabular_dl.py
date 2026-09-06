@@ -220,6 +220,7 @@ for config_name in selected_names:
             overrides=overrides,
             execution_tier=EXECUTION_TIER,
             preview_reductions=preview_reductions,
+            notebook="08_tabular_dl",
         )
     )
 requests = tuple(requests)
