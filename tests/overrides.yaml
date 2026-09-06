@@ -2882,14 +2882,20 @@ case_studies/us_equities_panel/06_linear:
   #
   # LABELS and CONFIG_NAMES narrow the menu from three labels against sixteen published
   # configurations - 48 config-label fits - to one label against two, which is the shape
-  # 07_gbm already uses. `ols` is the unpenalized baseline and `ridge_a1.0` a mid-ladder
-  # penalty, so the pair still exercises both code paths. Narrowing means the run may not
-  # publish the canonical population (narrows_declared_catalog), which is what POPULATION_NAME
-  # is for: the reduced run gets its own name rather than writing a partial member set under
-  # the canonical one.
+  # 07_gbm already uses. Narrowing means the run may not publish the canonical population
+  # (narrows_declared_catalog), which is what POPULATION_NAME is for: the reduced run gets
+  # its own name rather than writing a partial member set under the canonical one.
+  #
+  # The two names are not a free choice. `preset_patches._trim_label_configs` rewrites the
+  # fixture's copy of every `config/training/fwd_*.yaml`, keeping the first
+  # `_MAX_CONFIGS_PER_FAMILY` entries of the `linear` and `gbm` families, and
+  # `load_model_configs` raises on any name the menu does not declare. So a name has to
+  # survive the trim, which for linear leaves `ols` and `ridge_a0.001` - the unpenalized
+  # baseline and the lightest ridge, which still exercises both code paths.
+  # `test_requested_configurations_survive_the_fixture_trim` pins this.
   parameters:
     LABELS: [fwd_ret_1d]
-    CONFIG_NAMES: [ols, ridge_a1.0]
+    CONFIG_NAMES: [ols, ridge_a0.001]
     POPULATION_NAME: ci-preview-linear
   # 300s stands. It was set when this entry was believed to fit 48 config-label pairs at two
   # folds each; it was in fact fitting all 48 at every fold, and the narrowing above cuts that
@@ -2906,9 +2912,15 @@ case_studies/us_equities_panel/07_gbm:
   # population from a narrowed menu (narrows_declared_catalog), which is why POPULATION_NAME
   # is set: the reduced run gets its own population rather than writing a partial one under
   # the canonical name.
+  #
+  # `default_mae` and not `leaves_31_mse`, for the reason 06_linear gives above: the fixture's
+  # menu is trimmed to the first two of the `gbm` family and `leaves_31_mse` is not among them,
+  # so `load_model_configs` would have raised "configurations not declared" the moment this
+  # stage ran. It never did - 06_linear failed ahead of it on every regeneration that reached
+  # this far - so the entry was wrong and untested at the same time.
   parameters:
     LABELS: [fwd_ret_1d]
-    CONFIG_NAMES: [default_mse, leaves_31_mse]
+    CONFIG_NAMES: [default_mse, default_mae]
     POPULATION_NAME: ci-preview-gbm
   timeout: 300
 case_studies/us_equities_panel/08_tabular_dl:
