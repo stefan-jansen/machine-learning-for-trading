@@ -122,9 +122,18 @@ def _cap_weights(
     max_weight: float,
     time_col: str = "timestamp",
 ) -> pl.DataFrame:
-    """Cap per-asset weight and redistribute excess proportionally.
+    """Cap per-asset weight and redistribute the excess in equal shares.
 
-    Iterates until no weight exceeds max_weight (handles cascading overflow).
+    Every name still under ``max_weight`` receives the same bump,
+    ``excess / n_free``, not a share proportional to the weight it already
+    carries. The docstring said "proportionally" until 2026-09-06 and that word
+    was repeated as fact into two case-study notebooks before anyone read the
+    line below it.
+
+    No row is dropped, so the holding set after the cap is the holding set
+    before it: a binding cap moves relative exposure across an unchanged set of
+    names. Iterates until no weight exceeds max_weight, which handles the
+    cascade where a bump pushes a previously free name over the cap.
     Operates on long side only; short side is handled symmetrically.
     """
     if max_weight >= 1.0:
