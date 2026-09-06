@@ -38,6 +38,56 @@
 # collapse to near-constant on some dates has its `ic_mean` measured over fewer of them. Reading
 # `ic_mean` without `ic_n_days` is how a partial-coverage artifact reads as a leader.
 
+# %% [markdown]
+# ## What an information coefficient measures, and what it cannot
+#
+# Everything in the table below is built on the IC, so it is worth being exact about what the
+# number is before reading any of it.
+#
+# On one decision date there is a set of products, a predicted return for each, and the return
+# each actually went on to earn. The IC is the rank correlation between those two lists. It asks
+# a deliberately narrow question: did the model put them **in the right order**? It does not ask
+# whether the predicted magnitudes were close, and it cannot - a model that predicts every return
+# at a hundredth of its true size scores exactly as well as one that gets the levels right, as
+# long as the ordering matches.
+#
+# That narrowness is the point for a strategy of this shape. The backtest in `13_backtest` holds
+# the top-ranked products and shorts the bottom-ranked ones in equal weight, so the ordering is
+# the entire input and the magnitudes are discarded before a position is taken. A diagnostic that
+# rewarded accurate levels would be measuring something the strategy never uses.
+#
+# **It is computed per decision date and then averaged, never pooled.** Pooling every
+# product-date into one correlation would let a period when the whole market moved together
+# masquerade as skill at telling products apart: on a day when everything rallies, a model that
+# ranks products at random still shows agreement between its predictions and the outcomes if the
+# cross-sections are stacked. Correlating within a date and averaging afterwards removes the
+# common move by construction, because it is the same for every product on that date.
+#
+# ### Why a good IC is a small number
+#
+# A reader arriving from a forecasting background should expect these to look disappointing. A
+# monthly-horizon equity or futures IC of 0.03 to 0.05 is a real, usable signal; 0.10 sustained
+# would be remarkable. This is not a weak result being excused - it is what predicting an
+# overwhelmingly noise-dominated quantity looks like when it works. The edge comes from applying
+# a small consistent tilt across many products and many dates, not from being right about any one
+# of them, and the arithmetic of that is what `13_backtest` measures and this notebook does not.
+#
+# ### Why the ranking diagnostic selects nothing
+#
+# A high IC does not imply a tradeable strategy, and this is the boundary the notebook's title
+# refers to. A configuration can rank the cross-section well and still lose money: if its ranking
+# churns from one decision to the next, the turnover it implies costs more than the tilt earns; if
+# its skill sits entirely in the products that are least liquid, the positions cannot be taken at
+# the prices the backtest assumes. Neither of those is visible in an IC, because an IC has no
+# notion of holding anything.
+#
+# So nothing here is a decision. Every complete row in this catalog proceeds to the equal-weight
+# validation backtest, where Sharpe selects and the checkpoint is part of what is selected. This
+# notebook is where a reader forms an expectation and, more usefully, notices where the backtest
+# later disagrees with it - a configuration that ranks well and backtests badly is the most
+# informative row in the whole case study, because the gap between the two is exactly where
+# turnover and tradeability live.
+
 # %%
 """Analyze complete CME futures model and causal result catalogs."""
 
@@ -151,6 +201,13 @@ analysis.sort("label", "family", "config_name", "checkpoint_value")
 # The table compares ranking diagnostics under the declared walk-forward protocol. The backtest
 # engine supplies portfolio returns, transaction costs, contract sizing, and roll execution before
 # selection.
+#
+# The distinction is worth stating as a rule rather than as a caveat: **every quantity in this
+# notebook is a property of the predictions, and every quantity that decides anything is a
+# property of a portfolio.** A prediction has no size, no holding period, no financing and no
+# execution price. Those enter in `13_backtest`, and they are capable of reordering the table
+# below completely - which is why a leaderboard here is a hypothesis about the backtest rather
+# than a preview of it.
 #
 # Conformal weighting, when used later as an allocator, calibrates chronologically from prior
 # validation observations. It uses the calibration-window scale and the finite-sample higher order

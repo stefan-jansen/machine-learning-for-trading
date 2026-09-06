@@ -140,11 +140,11 @@ def build_holdout_cv(
     :func:`case_studies.research.models.locked_holdout_split` checks it again at execution.
 
     The training interval is the whole history available before that window, which is
-    ``min(train_start)`` across the validation folds and never one fold's own start: the fold
-    list runs newest first, so ``folds[0]["train_start"]`` is the *latest* start in the set and
-    would hand the retrain the shortest window it could have had rather than the longest.
-    :func:`utils.cv_splits.earliest_train_start` is that read, and this calls it rather than
-    repeating it.
+    ``min(train_start)`` across the validation folds and never one fold's own start.
+    :func:`utils.cv_splits.earliest_train_start` reads it from the windows, and this calls
+    it rather than repeating it - a read that stays correct across the fold-order change in
+    ml4t-diagnostic 0.1.4, where indexing the list would have silently changed which fold it
+    landed on.
 
     ``train_start_floor`` bounds that below, and exists because "the whole history available"
     is a claim about the FEATURES, not about the calendar. A configuration fitted on fold-scoped

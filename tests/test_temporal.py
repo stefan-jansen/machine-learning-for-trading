@@ -24,6 +24,7 @@ from hmmlearn.hmm import GaussianHMM
 from threadpoolctl import threadpool_limits
 
 from case_studies.utils.temporal import (
+    arima_one_step_forecast,
     filtered_state_probs,
     fit_hmm_kmeans_init,
     garch11_conditional_volatility,
@@ -1108,3 +1109,118 @@ def test_a_series_too_short_to_compare_is_accepted() -> None:
         n_features=1,
     )
     assert np.isnan(out).all()
+
+
+# ---------------------------------------------------------------------------
+# The ARIMA filter
+# ---------------------------------------------------------------------------
+#
+# `arima_one_step_forecast` wraps the one statsmodels call that filters a series under
+# parameters fitted elsewhere. These check the property the shared layer exists for - no
+# emitted value depends on a row at or after the timestamp it is emitted for - rather than
+# the spelling of the call, and they pin the equivalence that lets a notebook adopt the
+# helper without its values moving.
+
+
+def _arma_series(n: int = 240, seed: int = 0) -> np.ndarray:
+    """An ARMA(1,1) series with enough structure for a (1, 0, 1) fit to converge."""
+    rng = np.random.default_rng(seed)
+    eps = rng.standard_normal(n)
+    y = np.zeros(n)
+    for t in range(1, n):
+        y[t] = 0.6 * y[t - 1] + eps[t] + 0.3 * eps[t - 1]
+    return y
+
+
+def _arma_fit(y: np.ndarray, order: tuple[int, int, int] = (1, 0, 1)):
+    from statsmodels.tsa.arima.model import ARIMA
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return ARIMA(y, order=order).fit()
+
+
+def test_the_arima_filter_returns_one_value_per_row_of_the_prefix() -> None:
+    y = _arma_series()
+    out = arima_one_step_forecast(_arma_fit(y[:120]), y[:200])
+    assert out.shape == (200,)
+    assert np.isfinite(out).all()
+
+
+def test_deleting_later_observations_does_not_move_an_earlier_arima_forecast() -> None:
+    """The causality property, measured rather than taken from the keyword's name."""
+    y = _arma_series()
+    fitted = _arma_fit(y[:120])
+    full = arima_one_step_forecast(fitted, y[:240])
+    prefix = arima_one_step_forecast(fitted, y[:180])
+    assert np.abs(full[:180] - prefix).max() < 1e-10
+
+
+def test_the_arima_filter_matches_the_call_the_notebooks_made_by_hand() -> None:
+    """Adopting the helper must not move a value, or the migration is a model change."""
+    y = _arma_series()
+    fitted = _arma_fit(y[:120])
+    by_hand = np.asarray(fitted.apply(y[:200], refit=False).predict(start=0, end=199), dtype=float)
+    assert np.array_equal(arima_one_step_forecast(fitted, y[:200]), by_hand)
+
+
+def test_a_column_vector_and_a_flat_series_are_read_the_same_way() -> None:
+    y = _arma_series()
+    fitted = _arma_fit(y[:120])
+    flat = arima_one_step_forecast(fitted, y[:200])
+    column = arima_one_step_forecast(fitted, y[:200].reshape(-1, 1))
+    assert np.array_equal(flat, column)
+
+
+def test_a_multi_column_prefix_is_refused() -> None:
+    y = _arma_series()
+    fitted = _arma_fit(y[:120])
+    with pytest.raises(ValueError, match="carries 2 columns"):
+        arima_one_step_forecast(fitted, np.column_stack([y[:200], y[:200]]))
+
+
+class _ReestimatingResult:
+    """A results object whose ``apply`` re-estimates, which is what ``refit=True`` does.
+
+    Constructed rather than provoked: statsmodels does not re-estimate under
+    ``refit=False`` today, and the guard exists for the day that default changes.
+    """
+
+    params = np.array([0.5, 0.2])
+
+    def apply(self, endog, refit=False):  # noqa: ARG002 - mirrors the statsmodels signature
+        other = _ReestimatingResult()
+        other.params = np.array([0.9, 0.2])
+        return other
+
+
+def test_a_filter_that_re_estimated_is_refused() -> None:
+    with pytest.raises(ValueError, match="re-estimated the model"):
+        arima_one_step_forecast(_ReestimatingResult(), np.zeros(10))
+
+
+def test_the_arima_filter_walks_forward_without_reading_its_future() -> None:
+    """End to end through the harness: every block's values come from an earlier fit."""
+    y = _arma_series(n=300)
+    values = walk_forward_feature(
+        y.reshape(-1, 1),
+        timestamps=np.arange(300),
+        burnin=120,
+        refit_every=60,
+        fit=lambda train: _arma_fit(train[:, 0]),
+        apply=lambda fitted, prefix: arima_one_step_forecast(fitted, prefix).reshape(-1, 1),
+        n_features=1,
+    )
+    assert np.isnan(values[:120, 0]).all()
+    assert np.isfinite(values[120:, 0]).all()
+
+    shorter = walk_forward_feature(
+        y[:240].reshape(-1, 1),
+        timestamps=np.arange(240),
+        burnin=120,
+        refit_every=60,
+        fit=lambda train: _arma_fit(train[:, 0]),
+        apply=lambda fitted, prefix: arima_one_step_forecast(fitted, prefix).reshape(-1, 1),
+        n_features=1,
+    )
+    assert np.allclose(values[:240, 0], shorter[:, 0], equal_nan=True)

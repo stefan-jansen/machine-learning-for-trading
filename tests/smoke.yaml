@@ -37,6 +37,16 @@
 # declared and its defect has an issue. Filing it as exempt would retire the only signal saying
 # so, and leaving it out of the file entirely would make the count look better than it is.
 
+case_studies/cme_futures/04_model_based_features:
+  parameters:
+    MAX_PRODUCTS: 3
+    REFIT_EVERY_OVERRIDE: 63
+  # Stage 04 writes an artifact rather than registry rows, so there is no table to name here.
+  # What it must produce is a model_based.parquet whose fitted columns carry values: the smoke
+  # run above wrote 30,508 non-null ARIMA forecasts over 31,225 rows.
+  writes: []
+  measured_s: 54
+
 case_studies/cme_futures/06_linear:
   parameters:
     EXECUTION_TIER: preview
@@ -375,6 +385,20 @@ case_studies/etfs/19_holdout_backtest:
 # deep-learning notebooks and the causal one spell the same reductions as separate parameters
 # (MAX_SYMBOLS, MAX_FOLDS, N_EPOCHS, LOOKBACK, N_PLACEBO), and the downstream stages reduce with
 # TOP_K and a TOP_N_* cap. Every one of those is a parameter the notebook already reads.
+
+case_studies/fx_pairs/04_model_based_features:
+  parameters:
+    MAX_SYMBOLS: 3
+    REFIT_EVERY_OVERRIDE: 252
+  # Stage 04 writes an artifact rather than registry rows, so there is no table to name here.
+  # What it must produce is a model_based.parquet whose fitted columns carry values: the
+  # measured run wrote all ten, with 10,863 non-null ARIMA forecasts over 10,866 rows.
+  #
+  # The cadence override is what brings this under the bound. At 63 the same three symbols
+  # took 577s, because the state-space model runs a Nelder-Mead search per refit and that
+  # search, not the data volume, is the cost. Narrowing the universe alone does not reach it.
+  writes: []
+  measured_s: 139
 
 case_studies/fx_pairs/06_linear:
   parameters:

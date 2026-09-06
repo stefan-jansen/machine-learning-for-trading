@@ -31,6 +31,7 @@ from threadpoolctl import threadpool_limits
 from case_studies.utils.artifact_digest import write_artifact
 
 __all__ = [
+    "arima_one_step_forecast",
     "filtered_state_probs",
     "fit_hmm_kmeans_init",
     "fold_feature_geometry",
@@ -225,6 +226,62 @@ def garch11_conditional_volatility(
             variance[t] = min(max(driver[t] + beta * variance[t - 1], low), high)
 
     return np.sqrt(variance)
+
+
+def arima_one_step_forecast(fitted: Any, y_prefix: np.ndarray) -> np.ndarray:
+    """One-step-ahead forecasts across *y_prefix*, under parameters fitted on an earlier block.
+
+    The ARIMA counterpart of :func:`garch11_conditional_volatility`, and it exists for the
+    opposite reason. ``arch`` offers no way to filter a series under fixed parameters without
+    re-deriving its backcast and its variance bounds from whatever array it is handed, so that
+    recursion had to be written out above. ``statsmodels`` does offer one:
+    ``ARIMAResults.apply(endog, refit=False)`` re-runs the Kalman filter over new data with the
+    coefficients left where the fit put them. What is shared here is therefore the correct call
+    and the check that it stayed correct, not a reimplementation of the filter.
+
+    Two neighbouring calls are wrong in ways that no assertion over the output frame can see.
+    ``apply(endog)`` defaults to ``refit=True`` and re-estimates on the array it is given, which
+    in a walk-forward feature means every emitted value was fitted on the block it is emitted
+    over. ``forecast(h)`` continues past the end of the data instead of filtering across it, so
+    it returns *h* values for an *n*-row prefix and lines up with nothing.
+
+    The parameter comparison is not decoration. ``refit=False`` is a keyword whose name is the
+    only thing asserting the behaviour, and a default that changed upstream would otherwise
+    surface as a feature that quietly began reading its own emission window. Comparing the two
+    vectors element by element costs nothing next to the fit and fails loudly instead.
+
+    Parameters
+    ----------
+    fitted
+        A fitted ``ARIMAResults``, estimated on training rows only - inside the closure
+        :func:`walk_forward_feature` calls, it sees exactly those.
+    y_prefix
+        The series to filter across, shape ``(n,)`` or ``(n, 1)``, in time order and beginning
+        where the fitted series began.
+
+    Returns ``(n,)`` one-step-ahead predictions, one per row of *y_prefix*.
+
+    :raises ValueError: if *y_prefix* carries more than one column, or if the parameters moved.
+    """
+    y = np.asarray(y_prefix, dtype=float)
+    if y.ndim == 2:
+        if y.shape[1] != 1:
+            raise ValueError(
+                f"y_prefix carries {y.shape[1]} columns; an ARIMA filter reads one series. "
+                "Select the column before calling."
+            )
+        y = y[:, 0]
+    elif y.ndim != 1:
+        raise ValueError(f"y_prefix must be one- or two-dimensional, got shape {y.shape}")
+
+    extended = fitted.apply(y, refit=False)
+    drift = float(np.abs(np.asarray(fitted.params) - np.asarray(extended.params)).max())
+    if drift != 0.0:
+        raise ValueError(
+            f"apply(refit=False) re-estimated the model: parameters moved by {drift:.3e}. "
+            "Every value this emits would be fitted on the block it is emitted over."
+        )
+    return np.asarray(extended.predict(start=0, end=len(y) - 1), dtype=float)
 
 
 def sort_states_by_variance(model: GaussianHMM) -> np.ndarray:

@@ -33,10 +33,15 @@ def fold_timeline(ax, splits: list[dict], *, holdout: tuple[str, str]) -> None:
         and ``val_start`` is the purge gap and is drawn as such.
 
         Each row is labelled with the splitter's own ``fold``, which numbers folds
-        from zero backwards from the most recent, so the labels count down as the
-        rows move forward. Every later stage prints and keys its tables on that
-        same number, so relabelling the rows by position would make this figure's
-        "Fold 0" a different fold from the one the rest of the case study reports.
+        chronologically, so the labels count up as the rows move forward. Every
+        later stage prints and keys its tables on that same number, so relabelling
+        the rows by position would make this figure's "Fold 0" a different fold
+        from the one the rest of the case study reports.
+
+        A caller's prose should derive the direction from the splits it holds
+        rather than restate it from here. This sentence was the opposite until
+        `ml4t-diagnostic` 0.1.4, and every notebook that took its wording from this
+        docstring inherited the reversal.
     holdout
         Start and end of the holdout, shaded behind the folds.
     """

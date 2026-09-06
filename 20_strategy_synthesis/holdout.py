@@ -64,6 +64,7 @@ from case_studies.utils.registry import (
     register_training_run,
 )
 from case_studies.utils.registry.completeness import evaluate_prediction_coverage
+from utils.cv_splits import most_recent_split
 from utils.modeling import (
     RANDOM_SEED,
     load_configs,
@@ -378,11 +379,12 @@ def build_holdout_split(mds, setup: dict) -> dict:
     hs = dt_date.fromisoformat(holdout_start)
     train_end = str(hs - timedelta(days=buffer_days))
 
-    # Match the validation fold window length
+    # Match the validation fold window length. Fold windows differ in length, so
+    # this reads the fold that ends nearest the holdout rather than a list position.
     if mds.splits:
-        first_split = mds.splits[0]
-        fold_start = dt_date.fromisoformat(str(first_split["train_start"])[:10])
-        fold_end = dt_date.fromisoformat(str(first_split["train_end"])[:10])
+        latest_split = most_recent_split(mds.splits)
+        fold_start = dt_date.fromisoformat(str(latest_split["train_start"])[:10])
+        fold_end = dt_date.fromisoformat(str(latest_split["train_end"])[:10])
         window_days = (fold_end - fold_start).days
         te = dt_date.fromisoformat(train_end)
         train_start = str(te - timedelta(days=window_days))

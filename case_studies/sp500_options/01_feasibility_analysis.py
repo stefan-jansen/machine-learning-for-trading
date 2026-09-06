@@ -847,9 +847,10 @@ print(
 # lands before the holdout. The splitter applies the same buffer at the far end, which is why the
 # last validation session is the one D.1 identified rather than the last session of the period.
 #
-# `generate_cv_splits` numbers folds from zero backwards from the most recent, so fold 0 is the
-# last one before the holdout. The figure draws them earliest-first and labels each with that
-# number, which is why the labels count down; every later stage prints the same ones.
+# `generate_cv_splits` numbers folds chronologically, so fold 0 is the earliest and the highest
+# number is the last one before the holdout. The figure draws them earliest-first and labels each
+# with that number, so the labels count up alongside the dates; every later stage prints the same
+# ones.
 #
 # The four checks below establish what the figure cannot: the gap is
 # narrow against training blocks measured in years, so only counting it off the session timeline can
