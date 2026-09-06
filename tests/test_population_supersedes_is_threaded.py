@@ -81,12 +81,12 @@ def test_the_cme_backtest_sweeps_still_have_no_notebook_parameter() -> None:
     this parameter, and there is no longer a cost to avoid. The notebook's outputs and stamp are
     cleared rather than re-executed, so it claims nothing until the regeneration runs it.
 
-    The three remaining sweeps keep the contract, because a test narrowed to them still says
-    something true and deleting it early would retire the only thing recording the gap. Each is
-    on the stage-06+ review list and takes its parameter in its own visit. Delete this test in
-    the commit that moves the last of the three.
+    The remaining sweeps keep the contract, because a test narrowed to them still says something
+    true and deleting it early would retire the only thing recording the gap. Each is on the
+    stage-06+ review list and takes its parameter in its own visit; `16_costs` took its on
+    2026-09-06. Delete this test in the commit that moves the last of the two.
     """
-    sweeps = ("14_portfolio_management", "15_risk_management", "16_costs")
+    sweeps = ("14_portfolio_management", "15_risk_management")
     for stem in sweeps:
         source = (REPO / "case_studies" / "cme_futures" / f"{stem}.py").read_text()
         assert "SUPERSEDES_" not in source, (
