@@ -171,11 +171,9 @@ if narrows_declared_catalog(study, "linear", configs) and not POPULATION_NAME:
         "the canonical population; pass POPULATION_NAME to give it its own"
     )
 
-# The diagnostic set is published by an unnarrowed canonical run and by nothing else, so the
-# requirement that its configurations be among the ones fitted applies to that run and to
-# nothing else. Asked unconditionally, it refused a perfectly valid narrowed or preview run
-# for leaving out a configuration that run was never going to publish, and the only way past
-# it was to override a parameter irrelevant to what was being fitted.
+# Only an unnarrowed canonical run publishes the diagnostic set, so only that run has to carry
+# every diagnostic configuration. A narrowed or preview run publishes no name and is free to
+# leave any of them out.
 is_published_population = (
     EXECUTION_TIER == "canonical" and not POPULATION_NAME and not PREVIEW_REDUCTIONS
 )
