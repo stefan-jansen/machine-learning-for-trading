@@ -35,6 +35,66 @@
 #
 # **Prerequisites**: `02_labels`, `03_financial_features`, and `04_model_based_features`.
 
+# %% [markdown]
+# ## The question this asks, and why it is not the question the rest of the case study asks
+#
+# Every other modelling notebook here asks a predictive question: given what is observable now,
+# what is the best guess at next period's return? A model that answers it well is useful even if
+# every variable in it is a proxy for something else, because prediction does not require knowing
+# why a relationship holds - only that it keeps holding.
+#
+# This notebook asks a different question. It asks what would happen to the outcome **if the
+# treatment were different and nothing else changed**. That is a claim about intervention rather
+# than association, and it is not answered by a better fit. A model can predict returns from
+# momentum superbly because both are driven by a third thing, and be completely wrong about what
+# changing momentum would do.
+#
+# The distinction matters for what may be done with the answer. A predictive result earns its
+# place by out-of-sample performance and is selected against other configurations on validation
+# Sharpe. A causal estimate is not a candidate for that comparison at all - it does not compete
+# with the gradient boosting configurations, it is not eligible for a backtest, and it never
+# enters the selection funnel. It answers a question about the market's structure that the
+# chapter's narrative rests on, and the value of getting it right is that the narrative is true.
+#
+# ### What double machine learning does about confounding
+#
+# The obstacle is that momentum is not assigned at random. Periods of strong momentum differ
+# systematically from periods of weak momentum in volatility, in trend state, in liquidity - and
+# those differences also move returns. Regressing the outcome on the treatment attributes all of
+# that to the treatment.
+#
+# The classical fix is to include the confounders as controls, which works only if their
+# relationship to the outcome is the shape the model assumes. Double machine learning removes that
+# requirement in two steps. First it predicts the outcome from the confounders alone, and the
+# treatment from the confounders alone, using flexible models that need not be linear in anything.
+# Then it estimates the effect from what is left over in each - the parts of the outcome and the
+# treatment that the confounders could not explain. Whatever the confounders drive has been taken
+# out of both sides before the effect is estimated.
+#
+# The nuisance predictions are **cross-fitted**: the model that residualizes an observation is
+# never fitted on that observation. Without that, a flexible model overfits its own training rows,
+# the residuals are too small there, and the effect estimate inherits a bias that grows with how
+# flexible the nuisance models were. The embargo extends the same idea across time, because a
+# financial panel's neighbouring rows are not independent the way a cross-section's are.
+#
+# ### What the refutation is for
+#
+# A causal estimate cannot be validated the way a prediction can, because the counterfactual is
+# never observed - there is no held-out truth to score against. What can be done is to run the
+# same estimator against data where the answer is known in advance to be nothing, and check that
+# nothing is what comes back.
+#
+# That is the block placebo. The treatment is shuffled so that any genuine relationship to the
+# outcome is destroyed, the whole estimation is re-run, and the effect it reports is recorded. Do
+# that many times and the result is a distribution of effects under the null hypothesis that the
+# treatment does nothing, which is what the reported p-value is computed against.
+#
+# The shuffling is done in **blocks** rather than row by row, and the block size is part of the
+# causal identity for a reason worth stating: a row-by-row shuffle would destroy the series'
+# autocorrelation along with its relationship to the outcome, and an estimator tested against
+# implausibly clean data will pass a test that means nothing. The blocks are sized to preserve the
+# dependence that makes the real series hard, so the placebo is a fair opponent.
+
 # %%
 """Estimate and register the configured FX causal DML specification."""
 
@@ -84,11 +144,18 @@ SUPERSEDES_CAUSAL: str = (
 # %%
 case_dir = get_case_study_dir(CASE_STUDY_ID)
 setup = yaml.safe_load((case_dir / "config" / "setup.yaml").read_text())
-labels = (
-    [PRIMARY_LABEL]
-    if PRIMARY_LABEL
-    else [setup["labels"]["primary"], *setup["labels"].get("variants", [])]
-)
+# The labels this case study declares, and the labels this run fits. They are the same for a
+# canonical run and differ whenever PRIMARY_LABEL narrows it.
+#
+# The distinction decides how `SUPERSEDES_CAUSAL` is read. That declaration names one retired
+# identity per declared label, and it is validated against a label set to catch a typo - a hash
+# attached to a label that does not exist would retire nothing and fail at registration, after
+# the fit is paid for. Validating it against the RUN's labels instead made every narrowed run
+# fail that check, because naming three labels while fitting one looked identical to a typo.
+# Validating against the declared set keeps the typo caught and lets a narrowed run read the
+# entry for the label it is actually fitting.
+DECLARED_LABELS = [setup["labels"]["primary"], *setup["labels"].get("variants", [])]
+labels = [PRIMARY_LABEL] if PRIMARY_LABEL else list(DECLARED_LABELS)
 
 if FORCE_RETRAIN:
     raise ValueError("an identical complete causal request is reused; change the request to refit")
@@ -115,7 +182,11 @@ requests = {
         preview_reductions=reductions,
         overrides={},
         supersedes=causal_supersedes(
-            study, SUPERSEDES_CAUSAL, label, labels=list(labels), execution_tier=tier.value
+            study,
+            SUPERSEDES_CAUSAL,
+            label,
+            labels=DECLARED_LABELS,
+            execution_tier=tier.value,
         ),
     )
     for label in labels
@@ -156,6 +227,14 @@ for horizon, values in computations.items():
 #
 # Cross-fitting groups observations by complete decision timestamps, and the embargo is at least the
 # outcome horizon.
+#
+# Both of those are the panel version of a rule that is trivial in a cross-section. Grouping by
+# timestamp keeps every pair's observation for a session in the same fold, because splitting a
+# session across folds lets a nuisance model residualize one currency using another currency's
+# same-session outcome. The embargo drops the rows on either side of a fold boundary whose
+# outcomes overlap it, because a 21-session forward return computed on the last training session
+# is still being realized during the first validation sessions - the fold boundary separates the
+# decision times but not the outcomes those decisions are scored on.
 #
 # The placebo permutes contiguous blocks within each currency pair rather than shuffling rows,
 # because two separate things make neighbouring rows dependent and a block has to span both.

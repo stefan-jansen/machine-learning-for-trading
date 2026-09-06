@@ -68,7 +68,7 @@ from concurrent.futures import ProcessPoolExecutor
 from datetime import date
 
 # Pin the start method to fork before any pool-using import: Python 3.14 defaults to
-# forkserver, which re-executes this script in every StatsForecast worker.
+# forkserver, which re-executes this script in every worker process the ARIMA walk spawns.
 if multiprocessing.get_start_method(allow_none=True) is None:
     multiprocessing.set_start_method("fork")
 
@@ -79,17 +79,18 @@ import polars as pl
 from hmmlearn.hmm import GaussianHMM
 from plotly.subplots import make_subplots
 from sklearn.cluster import KMeans
-from statsforecast import StatsForecast
-from statsforecast.models import AutoARIMA
+from statsmodels.tsa.arima.model import ARIMA
 from threadpoolctl import threadpool_limits
 
-from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.temporal import (
+    arima_one_step_forecast,
     filtered_state_probs,
     fit_hmm_kmeans_init,
     refit_boundaries,
     sort_states_by_mean,
     walk_forward_feature,
+    write_model_based,
 )
 from data import load_cme_futures
 from utils.artifact_specs import load_setup_config, resolve_label_buffer
@@ -173,6 +174,7 @@ CARRY_ZSCORE_WINDOW = int(SETUP["features"]["windows"]["carry_zscore"][0])
 MODEL_BASED = SETUP["model_based"]
 ARIMA_BURNIN = int(MODEL_BASED["arima"]["burnin"])
 ARIMA_REFIT_FREQ = int(MODEL_BASED["arima"]["refit_every"])
+ARIMA_ORDER = tuple(int(v) for v in MODEL_BASED["arima"]["order"])
 HMM_BURNIN = int(MODEL_BASED["hmm"]["burnin"])
 HMM_REFIT_EVERY = int(MODEL_BASED["hmm"]["refit_every"])
 HMM_N_STATES = int(MODEL_BASED["hmm"]["n_states"])
@@ -583,11 +585,11 @@ print(f"Carry data: {len(carry):,} product-dates")
 # the weights. Its three orders say how many of each go in - `p` past values, `q` past
 # errors, and `d` differences taken first if the series drifts rather than reverting.
 #
-# The orders are not chosen by hand. `AutoARIMA` runs the standard stepwise search,
-# considering `p` and `q` up to 5, picking `d` by a statistical test for whether the
-# series reverts at all, and preferring the combination that fits best after a penalty
-# for the number of weights it uses. Seasonal terms are excluded from that search,
-# because the seasonality this case study cares about is measured directly in C.2.
+# The orders are declared in `setup.yaml` rather than searched for at each refit, and the
+# cell below sets out the measurement behind that. Only the weights are re-estimated on the
+# schedule; `p`, `d` and `q` stay put, so the forecast means the same thing in every block.
+# Seasonal terms play no part here, because the seasonality this case study cares about is
+# measured directly in C.2.
 #
 # **Why every value it emits is a forecast and not a fit.** One call walks each product's
 # whole history a session at a time: at each step the model sees the history up to that
@@ -630,228 +632,116 @@ def _date_lit(value) -> pl.Expr:
 # The periods do not bound this model. It re-estimates every `ARIMA_REFIT_FREQ` sessions on
 # everything up to that point, so a forecast for a session is made by weights fitted only on
 # earlier ones, whether or not a period boundary happens to sit nearby. That is the schedule
-# section A describes, and since 2026-09-04 the hidden Markov model in C.3 is on one too -
-# so the forecasts are no longer replicated onto anything. One value per product and
-# session goes into the file.
+# section A describes, and the hidden Markov model in C.3 is on one too - so the forecasts
+# are no longer replicated onto anything. One value per product and session goes into the
+# file.
 #
-# Cutting the walk per period bought nothing and cost two things. `cross_validation` takes one
-# `n_windows` for every series in a call and validates it against the shortest - hand it a
-# longer walk and it raises `The following series are too short for the cross validation
-# settings` rather than returning what it can. So one call per period meant one walk length per
-# period, and RTY, listed 2017-07-10, was the shortest eligible series in all five. Every other
-# product was truncated to RTY's length, the forecasts landed at the end of each window, and
-# every period's ARIMA began in 2018 whatever its window was - including the period that opens
-# in 2015. The last period's training rows ended up 99.87% empty of a feature its fits declared
-# they were using. The second cost is quieter: the burn-in year was paid once per period rather
-# than once.
+# Cutting the walk per period bought nothing and cost two things. The cross-validation call
+# it used took one `n_windows` for every series and validated it against the shortest, so one
+# call per period meant one walk length per period, and RTY, listed 2017-07-10, was the
+# shortest eligible series in all five. Every other product was truncated to RTY's length,
+# the forecasts landed at the end of each window, and every period's ARIMA began in 2018
+# whatever its window was - including the period that opens in 2015. The last period's
+# training rows ended up 99.87% empty of a feature its fits declared they were using. The
+# second cost is quieter: the burn-in year was paid once per period rather than once.
 #
-# Carry is not thin early. It is 99.3% non-null across all thirty products back to 2011; the gap
-# was the call shape.
+# Carry is not thin early. It is 99.3% non-null across all thirty products back to 2011; the
+# gap was the call shape.
 #
 # One walk per product is also **cheaper than what it replaces**, which is not the usual
 # direction for a correctness fix. The five periods overlap - the most recent spans 2015 to
-# 2023, the oldest 2011 to 2019 - so the per-period design forecast the same product-dates up to
-# five times and kept one. On this panel: 86,204 forecasts against 123,870.
+# 2023, the oldest 2011 to 2019 - so the per-period design forecast the same product-dates up
+# to five times and kept one. On this panel: 86,204 forecasts against 123,870.
+
+# %% [markdown]
+# ### The order is declared, and it used to be searched for
+#
+# Until this notebook was standardized the order was chosen automatically at every refit, by
+# a stepwise search that picked whichever `(p, d, q)` scored best on the history available at
+# that point. It is now read from `setup.yaml`, and since that is a change to the model
+# rather than to the code around it, here is the measurement behind it.
+#
+# Sampling eight refit cutoffs on each of the 30 eligible products - 240 order searches - the
+# automatic selection returned **34 distinct orders**, and **no product held a single order
+# across its own walk**. The most common, `(2,0,1)`, took 11.7% of the searches and `(2,0,2)`
+# 10.4%; the steadiest product spent 6 of its 8 cutoffs on one order and the rest moved more
+# than that.
+#
+# An order that changes almost every month, on an expanding window of the same series, is the
+# information criterion tracking the sample rather than structure being found. It also makes
+# `arima_carry_forecast` a different quantity in every block, which is the property that
+# breaks a comparison across chapters: two products' forecasts, or the same product's in two
+# periods, were not made by the same model.
+#
+# `(2,0,1)` is the modal selection, and the more parsimonious of the two orders that are
+# indistinguishable from each other. The differencing is not a search result at all: carry is
+# already a rolling z-score clipped to plus or minus five, so it is stationary before this
+# model reads it, and `d=0` follows from how the input is built. 199 of the 240 searches
+# agreed; the 41 that differenced it were over-differencing a bounded series.
 
 
 # %%
-def _arima_one_product(payload: tuple[str, int, pd.DataFrame, int | bool]) -> pd.DataFrame:
-    """Walk one product. Module level and picklable, because it runs in a worker process.
-
-    ``refit`` is the last element rather than a module constant because the holdout walk needs
-    ``False`` where the validation walk needs ``ARIMA_REFIT_FREQ``. See ``_arima_holdout_tail``.
-    """
-    _product, n_windows, series, refit = payload
-    return StatsForecast(models=[AutoARIMA(season_length=1)], freq="B", n_jobs=1).cross_validation(
-        df=pd.DataFrame(
-            {
-                "unique_id": series["product"],
-                "ds": pd.to_datetime(series["timestamp"]),
-                "y": series["carry_zscore"].to_numpy(),
-            }
-        ),
-        h=1,
-        step_size=1,
-        n_windows=n_windows,
-        refit=refit,
-    )
+def _arima_fit(train: np.ndarray):
+    """Estimate the coefficients on one block, at the order `setup.yaml` declares."""
+    with warnings.catch_warnings():
+        # Convergence chatter on a short block is expected and the walk's own burn-in is
+        # what handles it; a fit that genuinely fails raises and stops the walk.
+        warnings.simplefilter("ignore")
+        return ARIMA(train[:, 0], order=ARIMA_ORDER).fit()
 
 
-def _arima_walk() -> pl.DataFrame:
-    """One-step walk-forward ARIMA forecasts per product, over the whole development history."""
-    # The cut is on the INPUT, and that is the whole holdout guarantee for this model.
-    # `cross_validation` refits on everything up to each step, so a holdout-dated row left in
-    # here would enter weights used to forecast pre-holdout sessions. No assertion over the
-    # output frame can see that - the weights are not in the frame - and the existing
-    # `max(timestamp) < HOLDOUT_START` check below would keep passing while it happened.
-    history = (
-        carry.filter(pl.col("product").is_in(ARIMA_PRODUCTS))
-        .filter(pl.col("timestamp") < _date_lit(HOLDOUT_START))
-        .drop_nulls(subset=["carry_zscore"])
-        .sort(["product", "timestamp"])
-    )
-    series_lengths = history.group_by("product").len().sort("len")
-    required = ARIMA_BURNIN + 30
-    eligible_lengths = series_lengths.filter(pl.col("len") >= required)
-    excluded = series_lengths.filter(pl.col("len") < required)
-    if excluded.height:
-        # Named, not counted. A product missing from this feature changes what it covers, and
-        # until 2026-08-23 the exclusion happened silently.
-        listed = ", ".join(f"{row[0]} ({row[1]})" for row in excluded.iter_rows())
-        print(f"  excluded, under {required} carry sessions before the holdout: {listed}")
-    if not eligible_lengths.height:
-        print("  no eligible products")
-        return pl.DataFrame(
-            schema={
-                "timestamp": pl.Date,
-                "product": pl.String,
-                "arima_carry_forecast": pl.Float64,
-                "arima_carry_residual": pl.Float64,
-            }
-        )
-    history = history.filter(pl.col("product").is_in(eligible_lengths["product"].to_list()))
+def _arima_apply(fitted, prefix: np.ndarray) -> np.ndarray:
+    """One-step forecasts across a prefix, under the coefficients that block estimated."""
+    return arima_one_step_forecast(fitted, prefix).reshape(-1, 1)
 
-    # One call per product, spread across processes. `n_jobs=-1` inside a single call
-    # parallelises over the series IN that call, so with one series per call it buys nothing -
-    # the walks have to be spread here or the notebook runs thirty ARIMA searches on one core.
-    # Measured: sequential was still going after 49 minutes where the whole notebook used to
-    # take 19. A fork context is named rather than left to the default, because Python 3.14
-    # defaults to forkserver, which re-imports the parent module and cannot reach a function
-    # defined in a notebook kernel.
-    jobs = [
-        (product, int(length) - ARIMA_BURNIN)
-        for product, length in eligible_lengths.sort("product").iter_rows()
-    ]
-    payloads = [
-        (
-            product,
-            n_windows,
-            history.filter(pl.col("product") == product)
-            .select(["product", "timestamp", "carry_zscore"])
-            .to_pandas(),
-            ARIMA_REFIT_FREQ,
-        )
-        for product, n_windows in jobs
-    ]
-    workers = max(1, min(len(payloads), (os.cpu_count() or 2) - 1))
-    print(f"  fitting {len(payloads)} products across {workers} processes", flush=True)
-    with ProcessPoolExecutor(
-        max_workers=workers, mp_context=multiprocessing.get_context("fork")
-    ) as pool:
-        frames = list(pool.map(_arima_one_product, payloads))
-    walks = jobs
-    shortest = min(walks, key=lambda item: item[1])
-    longest = max(walks, key=lambda item: item[1])
-    print(
-        f"  {len(walks)} products fitted, {sum(w for _, w in walks):,} forecasts; "
-        f"walk lengths {shortest[1]:,} ({shortest[0]}) to {longest[1]:,} ({longest[0]})",
-        flush=True,
-    )
-    cv_pl = (
-        pl.from_pandas(pd.concat(frames, ignore_index=True))
-        .rename({"unique_id": "product", "ds": "timestamp"})
-        .with_columns(pl.col("timestamp").cast(pl.Date))
-    )
-    return (
-        history.select(["product", "timestamp"])
-        .join(
-            cv_pl.select(["product", "timestamp", "AutoARIMA", "y"]),
-            on=["product", "timestamp"],
-            how="left",
-        )
-        .with_columns(
-            arima_carry_forecast=pl.col("AutoARIMA"),
-            arima_carry_residual=pl.col("y") - pl.col("AutoARIMA"),
-        )
-        .select(["timestamp", "product", "arima_carry_forecast", "arima_carry_residual"])
+
+def _arima_one_product(payload: tuple[str, np.ndarray, np.ndarray, int]) -> pl.DataFrame:
+    """Walk one product. Module level and picklable, because it runs in a worker process."""
+    product, values, dates, frozen_after = payload
+    forecast = walk_forward_feature(
+        values.reshape(-1, 1),
+        timestamps=dates,
+        burnin=ARIMA_BURNIN,
+        refit_every=ARIMA_REFIT_FREQ,
+        fit=_arima_fit,
+        apply=_arima_apply,
+        n_features=1,
+        freeze_after=frozen_after,
+    )[:, 0]
+    return pl.DataFrame(
+        {
+            "timestamp": dates,
+            "product": [product] * len(dates),
+            "arima_carry_forecast": forecast,
+            "arima_carry_residual": values - forecast,
+        }
     )
 
 
 # %% [markdown]
-# One walk, and then a second one for the holdout - the reason this section has two.
+# One walk, where there used to be two. The old shape cut its input at `HOLDOUT_START` and
+# then ran a second walk across the holdout with refitting switched off, because the first
+# emitted nothing inside the holdout and a holdout evaluation downstream needs a value on
+# every one of those sessions.
 #
-# The walk above cuts its INPUT at `HOLDOUT_START`, which is the whole guarantee that no
-# weight is estimated on a holdout session. It also means the walk emits nothing inside the
-# holdout window, and a holdout evaluation downstream needs a value on every one of those
-# sessions. Measured before the second walk was added: 0 of 217,605 rows in the holdout
-# window carried an ARIMA value.
-#
-# `_arima_holdout_tail` runs the same one-step walk across the holdout window with `refit=False`,
-# so `cross_validation` estimates once, at the cutoff immediately before the first holdout
-# session - on the pre-holdout history and nothing else - and then rolls forward applying those
-# frozen coefficients. Each forecast still conditions on realized carry strictly before its own
-# date, so the walk stays causal; what it does not do is re-estimate inside the holdout, because
+# `freeze_after` is that distinction expressed once. The walk runs over the whole series,
+# holdout sessions included, and past the last pre-holdout session it stops re-estimating and
+# keeps applying what it last fitted. What must not reach into the holdout is an *estimate* -
 # a coefficient refitted on holdout sessions is a parameter estimated on the holdout however
-# causal the forecast around it looks. That is the distinction section A draws, applied here.
+# causal the forecast around it looks - and freezing is what prevents that, rather than a cut
+# on the input. Each forecast still conditions only on carry strictly before its own date,
+# which is the property `arima_one_step_forecast` carries and section A states.
 
 
 # %%
-def _arima_holdout_tail(eligible: list[str]) -> pl.DataFrame:
-    """Forecasts across the holdout window from coefficients estimated entirely before it.
-
-    ``eligible`` is the product list the validation walk actually fitted, so the holdout period
-    covers exactly the products the validation periods cover rather than a set derived twice.
-    """
+def _arima_walk() -> pl.DataFrame:
+    """One-step walk-forward ARIMA forecasts per product, over each product's whole history."""
     full = (
-        carry.filter(pl.col("product").is_in(eligible))
+        carry.filter(pl.col("product").is_in(ARIMA_PRODUCTS))
         .drop_nulls(subset=["carry_zscore"])
         .sort(["product", "timestamp"])
     )
-    payloads = []
-    for product in sorted(eligible):
-        series = full.filter(pl.col("product") == product)
-        n_holdout = series.filter(pl.col("timestamp") >= _date_lit(HOLDOUT_START)).height
-        if n_holdout == 0:
-            # Delisted before the holdout opens. Named rather than dropped silently, for the
-            # same reason the burn-in exclusions above are named.
-            print(f"  no holdout sessions, so no holdout forecast: {product}")
-            continue
-        payloads.append(
-            (
-                product,
-                n_holdout,
-                series.select(["product", "timestamp", "carry_zscore"]).to_pandas(),
-                False,
-            )
-        )
-    if not payloads:
-        return arima_walk.clear()
-    workers = max(1, min(len(payloads), (os.cpu_count() or 2) - 1))
-    print(f"  holdout tail: {len(payloads)} products across {workers} processes", flush=True)
-    with ProcessPoolExecutor(
-        max_workers=workers, mp_context=multiprocessing.get_context("fork")
-    ) as pool:
-        frames = list(pool.map(_arima_one_product, payloads))
-    cv_pl = (
-        pl.from_pandas(pd.concat(frames, ignore_index=True))
-        .rename({"unique_id": "product", "ds": "timestamp"})
-        .with_columns(pl.col("timestamp").cast(pl.Date))
-    )
-    return (
-        cv_pl.filter(pl.col("timestamp") >= _date_lit(HOLDOUT_START))
-        .with_columns(
-            arima_carry_forecast=pl.col("AutoARIMA"),
-            arima_carry_residual=pl.col("y") - pl.col("AutoARIMA"),
-        )
-        .select(["timestamp", "product", "arima_carry_forecast", "arima_carry_residual"])
-        .sort(["product", "timestamp"])
-    )
-
-
-arima_t0 = time.time()
-arima_walk = _arima_walk()
-arima_holdout = (
-    _arima_holdout_tail(arima_walk["product"].unique().to_list())
-    if arima_walk.height
-    else arima_walk.clear()
-)
-# One frame: the pre-holdout walk and the frozen-coefficient tail, end to end. They cover
-# disjoint dates by construction - the walk's input is cut at the boundary and the tail
-# starts there - so this is a concatenation and not a merge.
-arima_pl = (
-    pl.concat([arima_walk, arima_holdout]).sort(["product", "timestamp"])
-    if arima_walk.height
-    else pl.DataFrame(
+    empty = pl.DataFrame(
         schema={
             "timestamp": pl.Date,
             "product": pl.String,
@@ -859,7 +749,58 @@ arima_pl = (
             "arima_carry_residual": pl.Float64,
         }
     )
-)
+
+    # Eligibility is measured on the pre-holdout history, because that is what the estimates
+    # are allowed to come from: a product whose carry only starts inside the holdout has
+    # nothing to fit on, whatever its total length.
+    development = full.filter(pl.col("timestamp") < _date_lit(HOLDOUT_START))
+    lengths = development.group_by("product").len().sort("len")
+    required = ARIMA_BURNIN + 30
+    eligible = lengths.filter(pl.col("len") >= required)
+    excluded = lengths.filter(pl.col("len") < required)
+    if excluded.height:
+        # Named, not counted. A product missing from this feature changes what it covers, and
+        # until 2026-08-23 the exclusion happened silently.
+        listed = ", ".join(f"{row[0]} ({row[1]})" for row in excluded.iter_rows())
+        print(f"  excluded, under {required} carry sessions before the holdout: {listed}")
+    if not eligible.height:
+        print("  no eligible products")
+        return empty
+
+    payloads = []
+    for product in sorted(eligible["product"].to_list()):
+        series = full.filter(pl.col("product") == product)
+        dates = series["timestamp"].to_numpy()
+        values = series["carry_zscore"].to_numpy()
+        # `_date_lit` builds an expression, which against a Series yields another expression
+        # rather than a mask; the count itself is what the walk freezes on.
+        frozen_after = int(series.filter(pl.col("timestamp") < _date_lit(HOLDOUT_START)).height)
+        payloads.append((product, values, dates, frozen_after))
+
+    # One call per product, spread across processes. The fits are per product and independent,
+    # and running them sequentially was still going after 49 minutes where the whole notebook
+    # used to take 19. A fork context is named rather than left to the default, because Python
+    # 3.14 defaults to forkserver, which re-imports the parent module and cannot reach a
+    # function defined in a notebook kernel.
+    workers = max(1, min(len(payloads), (os.cpu_count() or 2) - 1))
+    print(f"  fitting {len(payloads)} products across {workers} processes", flush=True)
+    with ProcessPoolExecutor(
+        max_workers=workers, mp_context=multiprocessing.get_context("fork")
+    ) as pool:
+        frames = list(pool.map(_arima_one_product, payloads))
+
+    walked = pl.concat(frames).sort(["product", "timestamp"])
+    emitted = walked.drop_nulls(subset=["arima_carry_forecast"])
+    print(
+        f"  {len(payloads)} products fitted, {len(emitted):,} forecasts across "
+        f"{len(walked):,} product-sessions",
+        flush=True,
+    )
+    return walked
+
+
+arima_t0 = time.time()
+arima_pl = _arima_walk()
 if arima_pl.height and arima_pl["timestamp"].dtype != pl.Date:
     arima_pl = arima_pl.with_columns(pl.col("timestamp").cast(pl.Date))
 arima_elapsed = time.time() - arima_t0
@@ -1380,8 +1321,8 @@ def _regime_duration(test_states: np.ndarray) -> np.ndarray:
 #
 # `freeze_after` is the index of the last pre-holdout session. Past it the walk stops
 # re-estimating and keeps applying the last estimate it made, so the holdout gets values
-# and contributes no parameter - the same distinction `_arima_holdout_tail` draws in C.1,
-# here supplied by the shared driver.
+# and contributes no parameter - the same distinction C.1's ARIMA walk draws, and supplied
+# to both by the shared driver rather than by a second walk in each section.
 #
 # **This replaces one fit per period.** Under that arrangement the chain was estimated on a
 # period's whole training window and then filtered forward from the *start* of that same
@@ -2058,6 +1999,9 @@ for col in temporal_cols:
 
 # %%
 key = ["timestamp", "product", "position"]
+# Derived rather than listed, so a feature added above cannot be left out of the guard that
+# checks every declared column carries values.
+FEATURE_COLUMNS = [c for c in temporal_features.columns if c not in key]
 duplicate_keys = temporal_features.select(pl.struct(key).is_duplicated().sum()).item()
 assert duplicate_keys == 0, f"{duplicate_keys} duplicate rows on {key}"
 assert temporal_features["timestamp"].max() <= HOLDOUT_END, (
@@ -2134,10 +2078,13 @@ holdout_counts
 
 # %%
 output_path = FEATURES_DIR / "model_based.parquet"
-record = write_artifact(
+record = write_model_based(
     temporal_features,
     output_path,
     keys=key,
+    feature_columns=FEATURE_COLUMNS,
+    time_column="timestamp",
+    fold_column=None,
     written_by=f"case_studies/{STRATEGY_ID}/04_model_based_features.py",
     inputs={
         "load_cme_futures": value_digest(
@@ -2150,6 +2097,7 @@ record = write_artifact(
                 "model": "arima",
                 "burnin": ARIMA_BURNIN,
                 "refit_every": ARIMA_REFIT_FREQ,
+                "order": list(ARIMA_ORDER),
                 "per_entity": True,
                 "frozen_from": str(HOLDOUT_START),
             },

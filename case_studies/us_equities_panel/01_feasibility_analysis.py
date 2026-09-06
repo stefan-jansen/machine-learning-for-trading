@@ -698,15 +698,16 @@ print(
 # the case study reports.
 #
 # The figure draws the rows earliest-first down the axis, so the picture runs forward in time as the
-# eye moves down whatever the ids do, and labels each row with its own id. Which end of the sample carries the low ids is the splitter's
-# convention rather than something this notebook chooses, so the line below reads it off the
-# boundaries rather than stating it here - a sentence naming a direction goes silently false if the
-# convention changes, and the ids are what the rest of the case study joins on.
+# eye moves down whatever the ids do, and labels each row with its own id. Which end of the sample
+# carries the low ids is the splitter's convention rather than something this notebook chooses, so
+# the line below reads it off the boundaries rather than stating it here - a sentence naming a
+# direction goes silently false if the convention changes, and the ids are what the rest of the
+# case study joins on.
 #
-# The two assertions check what the figure cannot show at this scale: that the number of folds is the
-# number `setup.yaml` declares, and that no validation window reaches into the holdout. The figure
-# then draws the boundaries the splitter returned rather than recomputing them, so the picture and
-# the folds cannot disagree.
+# The two assertions check what the figure cannot show at this scale: that the number of folds is
+# the number `setup.yaml` declares, and that no validation window reaches into the holdout. The
+# figure then draws the boundaries the splitter returned rather than recomputing them, so the
+# picture and the folds cannot disagree.
 
 # %%
 splits = generate_cv_splits(
