@@ -309,7 +309,7 @@ panel.with_columns((pl.col("timestamp").dt.year() // 10 * 10).alias("decade")).g
 # where $P$ is the adjusted close of stock $i$ and $t+h$ is $h$ **trading sessions** later:
 # Chapter 7.2's close-to-close convention. It is not the convention the backtest fills at -
 # `setup.yaml` places execution at the next open - and that difference is a real gap, left to
-# [`18_costs`](18_costs.ipynb), which sweeps commission and spread rather than the return
+# [`19_costs`](19_costs.ipynb), which sweeps commission and spread rather than the return
 # definition.
 #
 # Stepping $h$ rows forward inside one stock is **not** the same as stepping $h$ sessions

@@ -48,7 +48,7 @@ costs:
   components: [spread, commission, market_impact, borrow_cost]
   per_leg_cost_bps_range: [5, 20]
   # per_share is the commission rate for the exploratory per-share
-  # cost-sensitivity regime (read by Ch18 18_costs.py and the run_sweep
+  # cost-sensitivity regime (read by Ch18 19_costs.py and the run_sweep
   # planner). IBKR Pro Tiered top tier. NOT used in the headline bps
   # regime — bps regime is the production cost model.
   per_share: 0.0035

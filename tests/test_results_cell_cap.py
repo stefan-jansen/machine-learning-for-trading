@@ -55,8 +55,8 @@ KNOWN_OVER_CAP = {
     "case_studies/nasdaq100_microstructure/07_gbm.py": 4,
     "case_studies/us_equities_panel/16_backtest.py": 5,
     "case_studies/us_equities_panel/17_portfolio_management.py": 5,
-    "case_studies/us_equities_panel/18_costs.py": 5,
-    "case_studies/us_equities_panel/19_risk_management.py": 4,
+    "case_studies/us_equities_panel/19_costs.py": 5,
+    "case_studies/us_equities_panel/18_risk_management.py": 4,
 }
 
 
