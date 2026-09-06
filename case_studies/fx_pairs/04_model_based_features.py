@@ -952,7 +952,7 @@ for symbol, values, _ in kalman_walks:
     )
 
 _first_valued = kalman_df["timestamp"].min()
-_oldest = folds[-1]
+_oldest = min(folds, key=lambda f: f["train_start"])
 _burnt = sum(_oldest["train_start"] <= d < _first_valued for d in all_dates)
 print(
     f"Every state-space value sits at or after the end of the block that estimated it, "
