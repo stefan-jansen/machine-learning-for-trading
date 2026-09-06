@@ -256,7 +256,8 @@ print(
     f"Development panel: {n_rows:,} rows, {n_firms:,} firms, {n_months} month-ends "
     f"from {eval_panel[DATE_COL].min()} to {eval_panel[DATE_COL].max()}\n"
     f"Held back: {len(full_panel) - n_rows:,} rows dated {HOLDOUT_START} or later\n"
-    f"Validation windows: {FOLDS[-1]['val_start']} to {FOLDS[0]['val_end']}, "
+    f"Validation windows: {min(f['val_start'] for f in FOLDS)} to "
+    f"{max(f['val_end'] for f in FOLDS)}, "
     f"{len(FOLDS)} of them, buffered from training by {LABEL_BUFFER}"
 )
 

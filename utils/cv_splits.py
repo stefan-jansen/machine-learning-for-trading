@@ -311,18 +311,16 @@ def generate_cv_splits(
     -------
     list[dict]
         Split dicts with keys ``fold``, ``train_start``, ``train_end``,
-        ``val_start``, ``val_end``, **ordered newest first**. Fold 0 validates
-        on the most recent window and carries the *latest* ``train_start``; the
-        last element is the oldest fold and carries the earliest. The order is
-        asserted before the list is returned, so it cannot change silently.
+        ``val_start``, ``val_end``, **ordered oldest first**. Fold 0 validates
+        on the earliest window and carries the earliest ``train_start``; the
+        last element is the most recent fold. The order is asserted before the
+        list is returned, so it cannot change silently.
 
         Index it only when you mean a position in that order. For "the most
         recent fold" and "everything available before the holdout", call
         :func:`most_recent_split` and :func:`earliest_train_start`, which read
         the boundaries rather than the position and are correct whatever order
-        the list is in. ``splits[0]["train_start"]`` under a comment reading
-        "train on everything up to holdout_start" is the measured failure: on
-        etfs it starts 2013-01-17 where the earliest fold starts 2006-01-13.
+        the list is in - they did not change when the order did.
     """
     from ml4t.diagnostic.splitters import WalkForwardCV
     from ml4t.diagnostic.splitters.config import WalkForwardConfig as LibWalkForwardConfig
@@ -332,7 +330,7 @@ def generate_cv_splits(
     # and reads fold 0 the same way either way.
     if cv_config is not None and "splits" in cv_config:
         precomputed = cv_config["splits"]
-        _assert_newest_first(precomputed, source="the precomputed splits in cv_config")
+        _assert_chronological(precomputed, source="the precomputed splits in cv_config")
         return precomputed
 
     # Normalize label buffer (strip ISO prefix, convert M → days)
@@ -442,49 +440,51 @@ def generate_cv_splits(
             }
         )
 
-    _assert_newest_first(splits)
+    _assert_chronological(splits)
     return splits
 
 
-def _assert_newest_first(
+def _assert_chronological(
     splits: list[dict[str, Any]],
     source: str = "generate_cv_splits",
 ) -> None:
-    """Fail if the folds are not ordered newest first.
+    """Fail if the folds are not ordered oldest first.
 
-    The order is a property of ``fold_direction="backward"`` in the library
-    config, and roughly forty call sites depend on it - some by indexing, some
-    by writing the fold id into an artifact that a later stage reads back by id.
-    If a library change reversed it, every one of them would keep running and
-    quietly mean the opposite. This turns that into an immediate failure.
+    ``ml4t-diagnostic`` 0.1.4 constructs the backward validation windows from the
+    held-out test boundary and then emits the completed folds chronologically, so
+    fold 0 validates on the earliest window and the fold id increases with time.
+    Every earlier release emitted the same windows in the opposite order. Roughly
+    forty call sites read that order - some by indexing, some by writing the fold
+    id into an artifact a later stage reads back by id - and a library change that
+    reversed it again would leave all of them running while quietly meaning the
+    opposite. This turns that into an immediate failure.
 
     It applies to a ``cv_config`` carrying explicit splits too. A caller cannot
-    tell which path produced its list, so a stored fold set that runs oldest
-    first hands fold id 0 to the earliest window while everything built through
-    the generated path gives it to the latest. Measured on the two committed
-    configs: ``us_firm_characteristics/config/cv_config.json`` runs newest first
-    and agrees, ``fx_pairs/config/cv_config.json`` runs oldest first - fold 0
-    validates from 2015-10-28, fold 7 from 2022-12-15 - while
-    ``fx_pairs/04_model_based_features`` tags its artifact through
-    ``generate_cv_splits``. The two meanings of "fold 0" then meet in a join.
+    tell which path produced its list, so a stored fold set that still runs newest
+    first hands fold id 0 to the latest window while everything built through the
+    generated path now hands it to the earliest, and the two meanings meet in a
+    join. Of the two committed configs, ``fx_pairs/config/cv_config.json`` runs
+    oldest first and agrees; ``us_firm_characteristics/config/cv_config.json`` runs
+    newest first - its fold 0 validates from 2022-12-30 - and has to be renumbered
+    together with every registry row that carries its fold ids.
     """
     val_starts = [_split_value(s, "val_start", "test_start") for s in splits]
-    if any(later >= earlier for earlier, later in zip(val_starts, val_starts[1:], strict=False)):
+    if any(later <= earlier for earlier, later in zip(val_starts, val_starts[1:], strict=False)):
         raise RuntimeError(
-            f"{source} produced folds that are not ordered newest first: "
-            f"val_starts {[str(v) for v in val_starts]}. Fold 0 is read as the most "
-            "recent fold everywhere, and stage-04 artifacts carry these ids, so an "
-            "ascending set joins each fold against the wrong end of the sample. "
+            f"{source} produced folds that are not ordered oldest first: "
+            f"val_starts {[str(v) for v in val_starts]}. Fold 0 is read as the "
+            "earliest fold everywhere, and stage-04 artifacts carry these ids, so a "
+            "descending set joins each fold against the wrong end of the sample. "
             "Renumber the source rather than reversing it at the call site."
         )
-    # The ids, not just the order. Reversing an ascending list leaves fold 0 on the
-    # oldest window while the list reads newest first, and every join is by id.
+    # The ids, not just the order. Reversing a descending list leaves fold 0 on the
+    # newest window while the list reads oldest first, and every join is by id.
     ids = [s["fold"] for s in splits]
     if ids != list(range(len(splits))):
         raise RuntimeError(
             f"{source} produced fold ids {ids} against list positions "
-            f"{list(range(len(splits)))}. The list runs newest first, so fold 0 is "
-            "the most recent fold and the ids have to follow the positions - a "
+            f"{list(range(len(splits)))}. The list runs oldest first, so fold 0 is "
+            "the earliest fold and the ids have to follow the positions - a "
             "downstream artifact is joined on the id, never on the position."
         )
 
@@ -514,8 +514,8 @@ def earliest_train_start(splits: Sequence[dict[str, Any]]) -> pd.Timestamp:
 
     A holdout retrain trains on the whole history before the holdout boundary,
     which is ``min(train_start)`` over the fold set and never one fold's own
-    start. Folds run newest first, so ``splits[0]["train_start"]`` is the latest
-    start in the set and hands the retrain the shortest window it could have had.
+    start. Reading a single fold's ``train_start`` hands the retrain a shorter
+    window than it should have, whichever end of the list that fold sits at.
     """
     if not splits:
         raise ValueError("No splits to choose from")

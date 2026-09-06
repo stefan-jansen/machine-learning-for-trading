@@ -37,6 +37,16 @@
 # declared and its defect has an issue. Filing it as exempt would retire the only signal saying
 # so, and leaving it out of the file entirely would make the count look better than it is.
 
+case_studies/cme_futures/04_model_based_features:
+  parameters:
+    MAX_PRODUCTS: 3
+    REFIT_EVERY_OVERRIDE: 63
+  # Stage 04 writes an artifact rather than registry rows, so there is no table to name here.
+  # What it must produce is a model_based.parquet whose fitted columns carry values: the smoke
+  # run above wrote 30,508 non-null ARIMA forecasts over 31,225 rows.
+  writes: []
+  measured_s: 54
+
 case_studies/cme_futures/06_linear:
   parameters:
     EXECUTION_TIER: preview

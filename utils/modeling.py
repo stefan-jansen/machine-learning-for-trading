@@ -1214,14 +1214,13 @@ def append_holdout_fold_if_needed(
     The fold becomes fold N+1, so downstream code iterating ``mds.splits`` produces one holdout
     prediction set per (training run, config) pair without any other change to the training loop.
 
-    "Everything available" is ``min(train_start)`` across the CV folds, not
-    ``splits[0]["train_start"]``. ``generate_cv_splits`` steps backward from the holdout
-    boundary, so fold 0 is the most *recent* fold and carries the *latest* training start.
-    Measured on etfs: ``splits[0]`` starts 2008-01-02 where the earliest fold starts
-    2005-01-03, so indexing the list built a holdout retrain that silently discarded three
-    years. ``case_studies/etfs/04_model_based_features.py`` says so in its CV Fold Setup
-    prose - "Indexing the list hands it the shortest window of the set, silently" - and
-    this function cited that notebook while doing the thing it warns against.
+    "Everything available" is ``min(train_start)`` across the CV folds, which
+    :func:`utils.cv_splits.earliest_train_start` reads from the windows. Indexing the
+    list is what this function used to do, and it silently discarded three years on
+    etfs - 2008-01-02 against an earliest fold start of 2005-01-03 - because fold 0
+    was then the most recent fold. Under ml4t-diagnostic 0.1.4 fold 0 is the earliest
+    and ``splits[0]["train_start"]`` happens to agree, which is exactly why the read
+    stays on the boundaries: it was right before the order changed and is right after.
 
     Idempotent — if the trailing fold already covers the holdout window
     (val_end matches setup.yaml's holdout_end), no fold is appended.
@@ -1260,9 +1259,9 @@ def append_holdout_fold_if_needed(
     # string) and risked a tz-naive/aware comparison on the pandas filter path.
     ho_start_ts = pd.Timestamp(holdout_start)
     ho_end_ts = _inclusive_end_of(holdout_end)
-    # Any fold covering the holdout window, not just the trailing one: the CV
-    # folds run newest first and only the appended holdout fold lands at the end,
-    # so reading one position is a second place the ordering has to be right.
+    # Any fold covering the holdout window, not just the trailing one: reading a
+    # single position is a second place the ordering would have to be right, and
+    # the appended holdout fold is not the only thing that can land at the end.
     already_covered = any(
         s.get("val_end") is not None
         and pd.Timestamp(s["val_end"]) == ho_end_ts

@@ -77,6 +77,7 @@ from scipy import stats
 from sklearn.ensemble import GradientBoostingRegressor
 
 import utils.style  # noqa: F401  # registers + activates the ml4t Plotly template
+from utils.cv_splits import most_recent_split
 from utils.modeling import load_modeling_dataset
 from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
@@ -210,8 +211,11 @@ def assign_volatility_regime(features_df, date_col, splits):
             )
             market_vol_source = "cross-sectional median"
 
-        # `splits` is reverse-chronological; splits[0] is the most recent fold.
-        holdout_boundary = datetime.date.fromisoformat(str(splits[0]["val_start"])[:10])
+        # The boundary is the latest fold's validation start, read from the window
+        # rather than from a list position.
+        holdout_boundary = datetime.date.fromisoformat(
+            str(most_recent_split(splits)["val_start"])[:10]
+        )
 
         # Regime thresholds from pre-holdout data only
         train_market_vol = market_vol.filter(pl.col(date_col) < holdout_boundary)
@@ -264,9 +268,11 @@ features_df = assign_volatility_regime(features_df, date_col, splits)
 # Test: last validation period (most recent data).
 
 # %% tags=[]
-# `mds.splits` is reverse-chronological; splits[0] is the most recent fold.
-TRAIN_END = splits[0]["train_end"]
-TEST_START = splits[0]["val_start"]
+# The test period is the latest fold, read from the window rather than from a
+# list position.
+_latest_split = most_recent_split(splits)
+TRAIN_END = _latest_split["train_end"]
+TEST_START = _latest_split["val_start"]
 
 _train_end = datetime.date.fromisoformat(str(TRAIN_END)[:10])
 _test_start = datetime.date.fromisoformat(str(TEST_START)[:10])
