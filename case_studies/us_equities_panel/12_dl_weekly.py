@@ -191,14 +191,18 @@ LOG_FILE = Path("/tmp/dl_weekly_experiment.log")
 # case occurs, on the label file's own session index rather than on a figure written down
 # here - the rate is a property of the exchange calendar, so it moves if the span does.
 #
-# The overlap is always exactly one session and never more. A holiday week holds four
-# sessions, so the fifth falls on the Monday after the next Friday. That is what makes this
-# worth describing rather than removing: sampling every fifth session would close it exactly
-# and replace it with a grid that drifts across weekdays and a cadence nobody trades.
+# An overlap is usually one session and is not always: a week with one closure pushes the fifth
+# session to the Monday after the next Friday, and a span with two closures can push it further.
+# The printed distribution is what says how far, and it is worth reading rather than assuming,
+# because the length of an overlap is the size of the dependence it introduces.
 #
-# What that costs is the mechanical autocorrelation overlapping windows induce, on about one
-# week in seven. It is small enough to leave the one-step formulation intact and too large to
-# describe as absent.
+# This is worth describing rather than removing: sampling every fifth session instead would close
+# the overlap exactly and replace it with a grid that drifts across weekdays and a cadence nobody
+# trades.
+#
+# What it costs is the mechanical autocorrelation an overlapping window induces, on the share of
+# weeks the cell reports. That share is small enough to leave the one-step formulation intact and
+# too large to describe the windows as non-overlapping.
 #
 # Non-overlap would not buy independence in any case. Returns cluster in volatility and share
 # a market factor across the cross-section, so what non-overlap removes is the correlation the
@@ -219,26 +223,32 @@ _sessions = (
 )
 _position = {session: index for index, session in enumerate(_sessions)}
 _fridays = [session for session in _sessions if session.weekday() == 4]
-_exact = _after = _before = 0
+# The distance, in sessions, between where a Friday's window closes and the next Friday. Zero is
+# an exact fit; positive is an overlap of that many sessions; negative means the window closed
+# before the next Friday, which happens when that Friday is itself a holiday and the label file
+# carries no row for it. The distribution is what gets reported, because the size of an overlap
+# is the thing that matters and a single count cannot carry it.
+_gaps: dict[int, int] = {}
 for _this_friday, _next_friday in zip(_fridays, _fridays[1:]):
     _close_index = _position[_this_friday] + LABEL_HORIZON_SESSIONS
     if _close_index >= len(_sessions):
         continue
-    _close = _sessions[_close_index]
-    if _close == _next_friday:
-        _exact += 1
-    elif _close > _next_friday:
-        _after += 1
-    else:
-        _before += 1
-_pairs = _exact + _after + _before
+    _gap = _close_index - _position[_next_friday]
+    _gaps[_gap] = _gaps.get(_gap, 0) + 1
+_pairs = sum(_gaps.values())
+_exact = _gaps.get(0, 0)
+_after = sum(count for gap, count in _gaps.items() if gap > 0)
+_before = sum(count for gap, count in _gaps.items() if gap < 0)
 print(
     f"{_sessions[0]} to {_sessions[-1]}, {len(_sessions):,} sessions, {_pairs:,} consecutive "
     "Friday pairs:"
 )
 print(f"  {_exact:,} ({_exact / _pairs:.1%}) close exactly on the next Friday")
-print(f"  {_after:,} ({_after / _pairs:.1%}) close after it, overlapping by one session")
-print(f"  {_before:,} ({_before / _pairs:.1%}) close before it, the next Friday being a holiday")
+print(f"  {_after:,} ({_after / _pairs:.1%}) close after it, overlapping the next observation")
+print(f"  {_before:,} ({_before / _pairs:.1%}) close before it, the next Friday carrying no row")
+print("  distance in sessions from the close to the next Friday, and how often:")
+for _gap in sorted(_gaps):
+    print(f"    {_gap:+d}: {_gaps[_gap]:,}")
 
 # %%
 # Load only weekly rows before materializing joins. The full daily join OOM-kills the kernel.
@@ -584,7 +594,7 @@ with open(LOG_FILE, "a") as f:
 # noise happened to peak. Both produce a respectable-looking maximum, which is why the curve
 # rather than the maximum is what to read.
 #
-# The three direct-regression lines and the forecasting line are drawn together because the
+# The two direct-regression lines and the forecasting line are drawn together because the
 # formulation is the axis under test. Where they separate, and whether they separate more as
 # training goes on, is what says the reframing did something.
 
