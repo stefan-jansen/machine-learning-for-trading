@@ -36,7 +36,7 @@ separate answer.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -468,6 +468,7 @@ def _coverage(
     case_dir: Path | None,
     fold_column: tuple[str, ...] | str | None,
     decision_axis: pl.Series | None = None,
+    folds: Sequence[int] | None = None,
 ) -> CoverageReport:
     if frame.is_empty():
         raise CoverageError(
@@ -482,6 +483,26 @@ def _coverage(
     expected = declared_sessions(
         case_study, label, split=split, case_dir=case_dir, decision_axis=decision_axis
     )
+    if folds is not None:
+        # A reduced run fits the folds it declared and no others, so measuring it against all of
+        # them reports a gap that is the reduction itself. Narrowing here rather than in the
+        # caller keeps every condition below comparing against a declaration: the windows are
+        # still setup.yaml's, and a fold present in the frame but outside the subset is still
+        # refused as undeclared.
+        keep = {int(fold) for fold in folds}
+        if not keep:
+            raise CoverageError(
+                f"{case_study}/{label}/{split}: an empty fold subset asks for no coverage at all"
+            )
+        declared_ids = {fold for fold, _, _ in windows if fold is not None}
+        unknown = sorted(keep - declared_ids)
+        if unknown:
+            raise CoverageError(
+                f"{case_study}/{label}/{split}: folds {unknown} are not declared in setup.yaml, "
+                f"which declares {sorted(declared_ids)}; a subset can only narrow"
+            )
+        windows = [window for window in windows if window[0] in keep]
+        expected = {fold: sessions for fold, sessions in expected.items() if fold in keep}
 
     observed = _normalize_time(frame.select(pl.col(time_col)).unique().get_column(time_col))
     observed_set = set(observed.to_list())
@@ -672,6 +693,7 @@ def check_prediction_coverage(
     fold_column: tuple[str, ...] | str | None = _FOLD_ALIASES,
     raise_on_gap: bool = True,
     decision_axis: pl.Series | None = None,
+    folds: Sequence[int] | None = None,
 ) -> CoverageReport:
     """Assert a prediction set covers the declared validation geometry.
 
@@ -697,6 +719,7 @@ def check_prediction_coverage(
         case_dir=case_dir,
         fold_column=fold_column,
         decision_axis=decision_axis,
+        folds=folds,
     )
     if raise_on_gap:
         report.raise_if_incomplete()

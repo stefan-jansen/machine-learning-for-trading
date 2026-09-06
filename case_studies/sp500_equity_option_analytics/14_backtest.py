@@ -90,6 +90,8 @@ from utils.style import COLORS, FIGSIZE, add_message_title, zero_line
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "sp500_equity_option_analytics"
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
 LABEL = ""
 SPLIT = "validation"
 # Zero means the smallest top_k from setup.yaml backtest.sweep.top_k_grid.
@@ -120,6 +122,20 @@ set_global_seeds(SEED)
 # injected parameter wins, otherwise the case study's own declaration.
 
 # %%
+# A preview run reads and registers in a smoke chain's own workspace, under `.preview/<case>`,
+# and `open_study` is what activates that root. Activation rewrites `ML4T_OUTPUT_DIR` for the
+# rest of the process, so it has to happen before the first `get_case_study_dir` rather than
+# beside the registry read further down: `CASE_DIR` has to already answer for the workspace.
+_preview_study = None
+if EXECUTION_TIER == "preview":
+    if not WORKSPACE:
+        raise ValueError("preview execution requires WORKSPACE")
+    _preview_study = open_study(
+        CASE_STUDY_ID,
+        execution_tier="preview",
+        workspace=WORKSPACE,
+        entry_point="14_backtest",
+    )
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 bt_config = get_backtest_config(CASE_STUDY_ID)
 TOP_N = (
@@ -240,8 +256,12 @@ except ValueError as e:
 # `run_log` are symlinks: true in a maintainer worktree, false in every clean clone and CI run.
 # `CASE_DIR` is already the directory this notebook resolved, including under a preview, so
 # asking it directly answers for the registry the rest of the notebook reads.
-_study = Study.at(CASE_DIR, case_study=CASE_STUDY_ID, entry_point="14_backtest")
-_members, _population_notes = prediction_members_in_force(_study)
+_study = (
+    _preview_study
+    if _preview_study is not None
+    else Study.at(CASE_DIR, case_study=CASE_STUDY_ID, entry_point="14_backtest")
+)
+_members, _population_notes = prediction_members_in_force(_study, CASE_DIR)
 for _note in _population_notes:
     print(_note)
 CURRENT_MEMBERS = _members
@@ -253,6 +273,11 @@ pred_index = load_prediction_index(
     CASE_STUDY_ID,
     label=BACKTEST_LABEL,
     split=SPLIT,
+    # Without this the index resolves the case directory itself, which is the canonical one even
+    # when everything else in this notebook is reading a preview workspace: the query took no
+    # part in the activation that `open_study` performed. A preview then reports "No predictions
+    # found" while its own registry holds them - 247 of them on 2026-09-06.
+    case_dir=CASE_DIR,
 )
 if CURRENT_MEMBERS is not None:
     pred_index = pred_index.filter(pl.col("prediction_hash").is_in(CURRENT_MEMBERS))
@@ -404,34 +429,53 @@ SUPERSEDES_BASELINE_POPULATIONS: dict[str, str] = {}
 
 _plan = None
 try:
-    _writable = open_study(CASE_STUDY_ID, entry_point="14_backtest")
+    _writable = (
+        _preview_study
+        if _preview_study is not None
+        else open_study(CASE_STUDY_ID, entry_point="14_backtest")
+    )
 except PermissionError as exc:
     print(f"Not recording the baseline plan here: {exc}")
 else:
-    if _writable.root != CASE_DIR:
+    # A preview's `root` stays the case directory while its writes go to the workspace, so
+    # the registry this run writes is `storage_root` for its tier. At canonical the two are
+    # identical and the guard is exactly as strict as before.
+    if _writable.storage_root(EXECUTION_TIER) != CASE_DIR:
         raise RuntimeError(
-            f"14 ran its sweep against {CASE_DIR} but opened a study rooted at {_writable.root}. "
+            f"14 ran its sweep against {CASE_DIR} but opened a study writing to {_writable.storage_root(EXECUTION_TIER)}. "
             "Recording the plan there would describe a registry this run did not write."
         )
-    _plan = OfficialPopulation.create(
-        _writable,
-        name=BASELINE_POPULATION,
-        member_kind="backtest",
-        members=[row["backtest_hash"] for row in planned],
-        supersedes=population_supersedes(
+    if EXECUTION_TIER != "canonical":
+        # `OfficialPopulation.create` calls `_refuse_preview_activation`, and rightly: a
+        # population is a durable claim about what this case study publishes, and a preview is
+        # discarded with its workspace. The sweep below still executes and still registers its
+        # backtests - what is skipped is the published name over them. `_plan` stays None, which
+        # the attestation below already tests for, because the same state arises when the study
+        # is not writable at all.
+        print(
+            f"{EXECUTION_TIER} tier: the sweep executes and registers, and publishes no "
+            f"official population under {BASELINE_POPULATION}."
+        )
+    else:
+        _plan = OfficialPopulation.create(
             _writable,
             name=BASELINE_POPULATION,
-            declared=SUPERSEDES_BASELINE_POPULATIONS.get(BASELINE_POPULATION),
-        ),
-    )
-    # Opened here, before a single member executes, so a run that dies part-way leaves an
-    # attempt with no attestation behind it and the freeze declines. See
-    # `sweep_attestation_name` for why the record is per attempt rather than per plan.
-    _attempt = open_sweep_attempt(_writable, _plan)
-    print(
-        f"Baseline plan {BASELINE_POPULATION}: {_plan.hash}, {len(planned)} planned, "
-        f"attempt {_attempt}"
-    )
+            member_kind="backtest",
+            members=[row["backtest_hash"] for row in planned],
+            supersedes=population_supersedes(
+                _writable,
+                name=BASELINE_POPULATION,
+                declared=SUPERSEDES_BASELINE_POPULATIONS.get(BASELINE_POPULATION),
+            ),
+        )
+        # Opened here, before a single member executes, so a run that dies part-way leaves an
+        # attempt with no attestation behind it and the freeze declines. See
+        # `sweep_attestation_name` for why the record is per attempt rather than per plan.
+        _attempt = open_sweep_attempt(_writable, _plan)
+        print(
+            f"Baseline plan {BASELINE_POPULATION}: {_plan.hash}, {len(planned)} planned, "
+            f"attempt {_attempt}"
+        )
 
 # %%
 t0 = time.time()

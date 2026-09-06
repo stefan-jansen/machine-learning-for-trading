@@ -250,9 +250,56 @@ case_studies/crypto_perps_funding/12_model_analysis:
   writes: []
   measured_s: 8
 
+case_studies/crypto_perps_funding/13_backtest:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_8h"]
+    POPULATION_SUFFIX: smoke
+    PREVIEW_MAX_PREDICTIONS: 3
+    # Must match the upstream reduction. The model notebooks above reduce to fold 0, so fold 1
+    # has no predictions by construction, and this notebook's coverage gate - the only one of its
+    # kind in the repo - reports that as an incomplete prediction set rather than as a reduction.
+    PREVIEW_FOLDS: [0]
+  writes: [backtest_runs, backtest_metrics, backtest_fold_metrics]
+  measured_s: 37
 
+case_studies/crypto_perps_funding/14_portfolio_management:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_8h"]
+    POPULATION_SUFFIX: smoke
+  writes: [backtest_runs, backtest_metrics, backtest_fold_metrics]
+  measured_s: 123
 
+case_studies/crypto_perps_funding/15_risk_management:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_8h"]
+    POPULATION_SUFFIX: smoke
+  writes: [backtest_runs, backtest_metrics, backtest_fold_metrics]
+  measured_s: 87
 
+case_studies/crypto_perps_funding/16_costs:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_8h"]
+    POPULATION_SUFFIX: smoke
+  writes: [backtest_runs, backtest_metrics, backtest_fold_metrics]
+  measured_s: 72
+
+case_studies/crypto_perps_funding/19_strategy_analysis:
+  blocked_by: 1068
+  blocked_reason: >-
+    `CandidateSet.create` resolves `study.root`, which under a preview is still the canonical case
+    directory, so this notebook reads - and would write - the canonical registry. It fails on
+    `a changed candidate set named 'crypto-final-selection' must explicitly supersedes
+    a840029e01ed`, a hash that exists only in the canonical registry and never in a preview
+    workspace. Reproduced from a completely empty workspace, so it is not workspace reuse.
+    `_refuse_preview_activation` guards `OfficialPopulation.create` and has exactly one call site
+    in the repository; `CandidateSet.create` calls `study.activate()` unguarded and checks only
+    that no MEMBER is preview, which a preview run passes because it resolved canonical members.
+    Declaring this notebook is blocked on the fix, not on a configuration.
+  writes: []
 
 case_studies/crypto_perps_funding/17_holdout_predictions:
   exempt: true
@@ -532,7 +579,8 @@ case_studies/sp500_options/06_linear:
   parameters:
     EXECUTION_TIER: preview
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
-  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics,
+           candidate_fold_completions, execution_attempts]
   measured_s: 21
 
 case_studies/sp500_options/07_gbm:
@@ -546,7 +594,8 @@ case_studies/sp500_options/08_tabular_dl:
   parameters:
     EXECUTION_TIER: preview
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_epochs: 2}
-  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics,
+           candidate_fold_completions, execution_attempts]
   measured_s: 16
 
 case_studies/sp500_options/09_deep_learning:
@@ -588,7 +637,7 @@ case_studies/sp500_options/12_backtest:
     EXECUTION_TIER: preview
     PREVIEW_LABELS: ["ret_to_expiry"]
     PREVIEW_MAX_PREDICTIONS: 3
-  writes: [backtest_runs, backtest_metrics, backtest_fold_metrics]
+  writes: [backtest_runs, backtest_metrics, backtest_fold_metrics, decision_artifacts]
   measured_s: 36
 
 case_studies/sp500_options/13_portfolio_management:
@@ -596,7 +645,7 @@ case_studies/sp500_options/13_portfolio_management:
     EXECUTION_TIER: preview
     PREVIEW_LABELS: ["ret_to_expiry"]
     PREVIEW_MAX_BASELINE_CONFIGS: 1
-  writes: [backtest_runs, backtest_metrics]
+  writes: [backtest_runs, backtest_metrics, backtest_fold_metrics, decision_artifacts]
   measured_s: 20
 
 case_studies/sp500_options/14_risk_management:
@@ -613,8 +662,29 @@ case_studies/sp500_options/15_costs:
     EXECUTION_TIER: preview
     PREVIEW_LABELS: ["ret_to_expiry"]
     PREVIEW_MAX_BASELINE_CONFIGS: 1
-  writes: [backtest_runs, backtest_metrics]
+  writes: [backtest_runs, backtest_metrics, backtest_fold_metrics, decision_artifacts]
   measured_s: 22
+
+# sp500_options/18_strategy_analysis is not declared, and the reason is an ordering dependency
+# rather than a defect. It names two canonical populations as literals -
+# `sp500-options-baseline-validation-v1` and `sp500-options-strategy-candidates-v1` - and a
+# preview cannot publish either, because `population.py::_refuse_preview_activation` refuses a
+# reduced run an official population by design. cme's `19_strategy_analysis` is the shape that
+# resolves this: it branches on the tier and reads its own workspace's candidate set instead of a
+# published name. Porting that shape is the work this entry waits on; inventing a different one
+# here would leave two answers to the same question.
+
+case_studies/sp500_options/90_ic_diagnostic:
+  parameters:
+    MAX_SYMBOLS: 40
+    MAX_FOLDS: 2
+  # The only notebook here whose parameters cell already declares `EXECUTION_TIER = "preview"`
+  # as its default: it is a diagnostic and it registers nothing. The two caps are the whole
+  # reduction. 40 rather than 8 because `MIN_SYMBOLS_PER_DATE = 10` screens every date below ten
+  # names out of both IC computations, and a cap near that floor measures the screen instead of
+  # the notebook.
+  writes: []
+  measured_s: 35
 
 case_studies/sp500_options/16_holdout_predictions:
   exempt: true
@@ -848,6 +918,11 @@ case_studies/sp500_equity_option_analytics/11e_supervised_autoencoder:
 case_studies/sp500_equity_option_analytics/11_latent_factors:
   parameters:
     EXECUTION_TIER: preview
+  # Reads what 11a-11e register rather than fitting anything, so it cannot be first. The stage
+  # sort puts a bare number ahead of its lettered siblings, which is right for 10 -> 10a and
+  # wrong here: it raised "no latent-factor validation rows are registered" on 2026-09-06.
+  runs_after: [11a_pca, 11b_ipca, 11c_conditional_autoencoder, 11d_stochastic_discount_factor,
+               11e_supervised_autoencoder]
 
   writes: []
   measured_s: 8
@@ -862,6 +937,65 @@ case_studies/sp500_equity_option_analytics/12_causal_dml:
     N_PLACEBO: 12
   writes: [causal_runs]
   measured_s: 12
+
+case_studies/sp500_equity_option_analytics/13_model_analysis:
+  parameters:
+    EXECUTION_TIER: preview
+  # Reads and reports; it registers nothing, so there is no table to name. What a preview
+  # establishes here is that the comparison runs against a registry holding only the smoke
+  # chain's own rows and no published population - the fixture-and-clean-clone path through
+  # `declared_population_members`, which the canonical run never takes.
+  writes: []
+  measured_s: 13
+
+case_studies/sp500_equity_option_analytics/14_backtest:
+  parameters:
+    EXECUTION_TIER: preview
+    LABEL: fwd_ret_5d
+    TOP_N_PREDICTIONS: 3
+  # MAX_SYMBOLS is deliberately not declared. The chain's prediction sets already cover eight
+  # symbols, so the panel is reduced where it matters; capping the price load as well selects on
+  # a different universe than the predictions do, and the backtest then reads a cross-section
+  # its signals never scored.
+  writes: [backtest_runs, backtest_metrics, backtest_fold_metrics]
+  measured_s: 18
+
+case_studies/sp500_equity_option_analytics/15_portfolio_management:
+  parameters:
+    EXECUTION_TIER: preview
+    LABEL: fwd_ret_5d
+    TOP_N_PREDICTIONS: 1
+    SKIP_EXPENSIVE_ALLOC: true
+  writes: [backtest_runs, backtest_metrics, backtest_fold_metrics]
+  measured_s: 24
+
+case_studies/sp500_equity_option_analytics/16_risk_management:
+  parameters:
+    EXECUTION_TIER: preview
+    LABEL: fwd_ret_5d
+    MAX_RISK_VARIANTS: 2
+    TOP_N_COMBOS: 1
+  writes: [backtest_runs, backtest_metrics, backtest_fold_metrics]
+  measured_s: 14
+
+case_studies/sp500_equity_option_analytics/17_costs:
+  exempt: true
+  exempt_reason: >-
+    `open_selection_field` resolves its members through `_complete_only`, which calls
+    `study.results.open(hash)` with `include_preview` left at False -
+    case_studies/research/selection_field.py contains no occurrence of `include_preview` at all,
+    so the whole selection path reads canonical results only. A preview's own backtests are then
+    unknown to it and it raises `KeyError: Unknown result hash`. Making a preview able to build a
+    selection field is a change to the mechanism that decides what the book reports, not a smoke
+    configuration. crypto_perps_funding/16_costs is the shape that resolves this: it selects
+    through `selected_final_result(study, label=..., canonical=CANONICAL_RUN)`, which takes the
+    tier as an argument. Porting that is what this entry waits on.
+
+# sp500_equity_option_analytics/20_strategy_analysis is not declared, for the same reason as
+# sp500_options/18: it refuses a preview outright, at `if SELECTED.execution_tier != "canonical"`,
+# after resolving its selection field. The refusal is this case study's choice rather than a
+# corpus-wide one - cme's `19_strategy_analysis` branches on the tier and reads its own
+# workspace's candidate set - so the entry waits on porting that shape, not on a fix here.
 
 case_studies/sp500_equity_option_analytics/18_holdout_predictions:
   exempt: true

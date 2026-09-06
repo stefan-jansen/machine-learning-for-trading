@@ -493,3 +493,47 @@ def test_the_gap_between_folds_is_read_on_the_decision_axis_too(case_dir, monkey
         decision_axis=pl.Series("timestamp", SESSIONS),
     )
     assert report.expected_sessions == len(SESSIONS)
+
+
+def test_a_declared_fold_subset_passes_on_the_folds_it_names(case_dir):
+    """A preview reduced to one fold is complete on that fold, not incomplete on both.
+
+    The crypto smoke chain reduces its model notebooks to `folds: [0]`, so fold 1 has no
+    predictions by construction. Measured against both declared folds the gate reported
+    "1095 of 2189 declared sessions across 2 folds - INCOMPLETE", which is the reduction
+    itself rather than a gap in what the run undertook to produce.
+    """
+    fold_zero = [ts for ts in SESSIONS if ts.day > 10]
+    report = check_prediction_coverage(_frame(fold_zero), "cs", LABEL, case_dir=case_dir, folds=[0])
+    assert report.complete
+    assert report.declared_folds == 1
+    assert report.expected_sessions == 5
+
+
+def test_a_subset_still_catches_a_gap_inside_the_fold_it_names(case_dir):
+    """Narrowing must not become a way to pass. The named fold is checked as strictly as ever."""
+    fold_zero = [ts for ts in SESSIONS if ts.day > 10]
+    with pytest.raises(CoverageError) as excinfo:
+        check_prediction_coverage(_frame(fold_zero[:-1]), "cs", LABEL, case_dir=case_dir, folds=[0])
+    assert "missing_sessions" in str(excinfo.value)
+
+
+def test_a_subset_still_refuses_a_fold_it_did_not_name(case_dir):
+    """A frame carrying fold 1 while declaring only fold 0 is a stale fold, not a bonus."""
+    with pytest.raises(CoverageError) as excinfo:
+        check_prediction_coverage(_frame(), "cs", LABEL, case_dir=case_dir, folds=[0])
+    assert "undeclared_fold" in str(excinfo.value)
+
+
+def test_a_subset_cannot_name_a_fold_setup_yaml_does_not_declare(case_dir):
+    """The subset narrows the declaration; it cannot extend or replace it."""
+    with pytest.raises(CoverageError) as excinfo:
+        check_prediction_coverage(_frame(), "cs", LABEL, case_dir=case_dir, folds=[7])
+    assert "not declared in setup.yaml" in str(excinfo.value)
+
+
+def test_an_empty_subset_is_refused_rather_than_checking_nothing(case_dir):
+    """`folds=[]` would otherwise expect no sessions and pass on any frame at all."""
+    with pytest.raises(CoverageError) as excinfo:
+        check_prediction_coverage(_frame(), "cs", LABEL, case_dir=case_dir, folds=[])
+    assert "no coverage at all" in str(excinfo.value)

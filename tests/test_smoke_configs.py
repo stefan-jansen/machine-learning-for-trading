@@ -53,11 +53,6 @@ def _smoke_notebooks() -> list[str]:
 # set is EXACTLY this, so declaring one means deleting its line and nothing can silently join the
 # list. us_equities_panel is owned by another session and is listed for completeness.
 UNDECLARED = {
-    "case_studies/crypto_perps_funding/13_backtest",
-    "case_studies/crypto_perps_funding/14_portfolio_management",
-    "case_studies/crypto_perps_funding/15_risk_management",
-    "case_studies/crypto_perps_funding/16_costs",
-    "case_studies/crypto_perps_funding/19_strategy_analysis",
     "case_studies/etfs/13_model_analysis",
     "case_studies/etfs/14_backtest",
     "case_studies/etfs/15_portfolio_management",
@@ -73,14 +68,8 @@ UNDECLARED = {
     "case_studies/nasdaq100_microstructure/18_holdout_predictions",
     "case_studies/nasdaq100_microstructure/19_holdout_backtest",
     "case_studies/nasdaq100_microstructure/20_strategy_analysis",
-    "case_studies/sp500_equity_option_analytics/13_model_analysis",
-    "case_studies/sp500_equity_option_analytics/14_backtest",
-    "case_studies/sp500_equity_option_analytics/15_portfolio_management",
-    "case_studies/sp500_equity_option_analytics/16_risk_management",
-    "case_studies/sp500_equity_option_analytics/17_costs",
     "case_studies/sp500_equity_option_analytics/20_strategy_analysis",
     "case_studies/sp500_options/18_strategy_analysis",
-    "case_studies/sp500_options/90_ic_diagnostic",
     "case_studies/us_equities_panel/06_linear",
     "case_studies/us_equities_panel/07_gbm",
     "case_studies/us_equities_panel/08_tabular_dl",
@@ -147,6 +136,7 @@ ENTRY_KEYS = {
     "blocked_by",
     "blocked_reason",
     "note",
+    "runs_after",
 }
 
 
@@ -161,6 +151,26 @@ def test_no_entry_carries_a_key_nothing_reads() -> None:
     for key, entry in SMOKE.items():
         unknown = sorted(set(entry or {}) - ENTRY_KEYS)
         assert not unknown, f"{key}: {unknown} is read by nothing"
+
+
+def test_an_ordering_declaration_names_siblings_that_exist() -> None:
+    """`runs_after` is what stops a chain running an aggregator before its inputs.
+
+    `sp500_equity_option_analytics/11_latent_factors` reads what 11a-11e register, and the stage
+    sort puts a bare number before its lettered siblings - right for 10 -> 10a, wrong here. It
+    failed that way on 2026-09-06 with "no latent-factor validation rows are registered". The
+    declaration is only worth anything if the stems resolve, so a typo has to fail here rather
+    than reorder nothing silently.
+    """
+    for key, entry in SMOKE.items():
+        after = (entry or {}).get("runs_after")
+        if not after:
+            continue
+        case_study = key.rsplit("/", 2)[1]
+        siblings = {k.rsplit("/", 1)[1] for k in SMOKE if k.rsplit("/", 2)[1] == case_study}
+        missing = sorted(stem for stem in after if stem not in siblings)
+        assert not missing, f"{key}: runs_after names {missing}, not declared for {case_study}"
+        assert key.rsplit("/", 1)[1] not in after, f"{key}: runs_after names itself"
 
 
 def test_a_declared_headroom_lets_the_run_share_the_machine() -> None:

@@ -87,6 +87,8 @@ from utils.style import COLORS, FIGSIZE, add_message_title
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "sp500_equity_option_analytics"
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
 LABEL = ""
 MAX_SYMBOLS = 0
 SKIP_EXPENSIVE_ALLOC = False
@@ -100,6 +102,20 @@ TOP_N_PREDICTIONS = None
 # injected parameter wins; otherwise the case study's own declaration does.
 
 # %%
+# A preview run reads and registers in a smoke chain's own workspace, under `.preview/<case>`,
+# and `open_study` is what activates that root. Activation rewrites `ML4T_OUTPUT_DIR` for the
+# rest of the process, so it has to happen before the first `get_case_study_dir` rather than
+# beside the registry read further down: `CASE_DIR` has to already answer for the workspace.
+_preview_study = None
+if EXECUTION_TIER == "preview":
+    if not WORKSPACE:
+        raise ValueError("preview execution requires WORKSPACE")
+    _preview_study = open_study(
+        CASE_STUDY_ID,
+        execution_tier="preview",
+        workspace=WORKSPACE,
+        entry_point="15_portfolio_management",
+    )
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 bt_config = get_backtest_config(CASE_STUDY_ID)
 TOP_N = (
@@ -122,8 +138,12 @@ print(
 # `run_log` are symlinks: true in a maintainer worktree, false in every clean clone and CI run.
 # `CASE_DIR` is already the directory this notebook resolved, including under a preview, so
 # asking it directly answers for the registry the rest of the notebook reads.
-_study = Study.at(CASE_DIR, case_study=CASE_STUDY_ID, entry_point="15_portfolio_management")
-_members, _population_notes = prediction_members_in_force(_study)
+_study = (
+    _preview_study
+    if _preview_study is not None
+    else Study.at(CASE_DIR, case_study=CASE_STUDY_ID, entry_point="15_portfolio_management")
+)
+_members, _population_notes = prediction_members_in_force(_study, CASE_DIR)
 for _note in _population_notes:
     print(_note)
 CURRENT_MEMBERS = _members
@@ -304,32 +324,49 @@ SUPERSEDES_ALLOCATION_POPULATIONS: dict[str, str] = {}
 
 _plan = None
 try:
-    _writable = open_study(CASE_STUDY_ID, entry_point="15_portfolio_management")
+    _writable = (
+        _preview_study
+        if _preview_study is not None
+        else open_study(CASE_STUDY_ID, entry_point="15_portfolio_management")
+    )
 except PermissionError as exc:
     print(f"Not recording the allocation plan here: {exc}")
 else:
-    if _writable.root != CASE_DIR:
+    # A preview's `root` stays the case directory while its writes go to the workspace, so
+    # the registry this run writes is `storage_root` for its tier. At canonical the two are
+    # identical and the guard is exactly as strict as before.
+    if _writable.storage_root(EXECUTION_TIER) != CASE_DIR:
         raise RuntimeError(
-            f"15 ran its sweep against {CASE_DIR} but opened a study rooted at {_writable.root}. "
+            f"15 ran its sweep against {CASE_DIR} but opened a study writing to {_writable.storage_root(EXECUTION_TIER)}. "
             "Recording the plan there would describe a registry this run did not write."
         )
-    _plan = OfficialPopulation.create(
-        _writable,
-        name=ALLOCATION_POPULATION,
-        member_kind="backtest",
-        members=[row["backtest_hash"] for row in planned],
-        supersedes=population_supersedes(
+    if EXECUTION_TIER != "canonical":
+        # `OfficialPopulation.create` refuses a preview, and rightly: a published population is
+        # a durable claim about what this case study publishes, and a preview is discarded with
+        # its workspace. The sweep still executes and still registers. `_plan` stays None, which
+        # the attestation below already tests for - the same state a non-writable study leaves.
+        print(
+            f"{EXECUTION_TIER} tier: the sweep executes and registers, and publishes no "
+            f"official population under {ALLOCATION_POPULATION}."
+        )
+    else:
+        _plan = OfficialPopulation.create(
             _writable,
             name=ALLOCATION_POPULATION,
-            declared=SUPERSEDES_ALLOCATION_POPULATIONS.get(ALLOCATION_POPULATION),
-        ),
-    )
-    # Before any member executes; see `sweep_attestation_name`.
-    _attempt = open_sweep_attempt(_writable, _plan, UPSTREAM_PLANS)
-    print(
-        f"Allocation plan {ALLOCATION_POPULATION}: {_plan.hash}, {len(planned)} planned, "
-        f"attempt {_attempt}"
-    )
+            member_kind="backtest",
+            members=[row["backtest_hash"] for row in planned],
+            supersedes=population_supersedes(
+                _writable,
+                name=ALLOCATION_POPULATION,
+                declared=SUPERSEDES_ALLOCATION_POPULATIONS.get(ALLOCATION_POPULATION),
+            ),
+        )
+        # Before any member executes; see `sweep_attestation_name`.
+        _attempt = open_sweep_attempt(_writable, _plan, UPSTREAM_PLANS)
+        print(
+            f"Allocation plan {ALLOCATION_POPULATION}: {_plan.hash}, {len(planned)} planned, "
+            f"attempt {_attempt}"
+        )
 
 # %% [markdown]
 # A production run fails if any planned backtest fails. The notebook does not

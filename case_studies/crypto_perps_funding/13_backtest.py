@@ -110,6 +110,12 @@ SUPERSEDES_POPULATION: str = ""
 # them cannot name the generation it retires with a single value the way the model population
 # can. Keyed by population name; the refusal prints the name and the hash to put here.
 SUPERSEDES_BACKTESTS: dict[str, str] = {}
+# The folds a reduced upstream run actually fitted. Empty on a canonical run, which is measured
+# against every fold `config/setup.yaml` declares. A preview that reduced to a subset has no rows
+# for the rest by construction, and the coverage gate below would report the reduction itself as
+# an incomplete prediction set - so the run states the subset it declared, and the gate still
+# compares against setup.yaml's windows rather than against whatever the frame happens to hold.
+PREVIEW_FOLDS: list[int] = []
 # The candidate set each label hands downstream is a third generation-bearing name, one per
 # label. Keyed the same way; the refusal prints the name and the hash.
 SUPERSEDES_CANDIDATES: dict[str, str] = {}
@@ -143,6 +149,11 @@ labels = list(LABELS) if LABELS else list(ALL_LABELS)
 
 # %%
 CANONICAL_RUN = EXECUTION_TIER == "canonical" and not WORKSPACE
+if PREVIEW_FOLDS and CANONICAL_RUN:
+    raise ValueError(
+        "PREVIEW_FOLDS narrows the coverage gate and a canonical run may not narrow it: "
+        "the published prediction sets must cover every fold setup.yaml declares"
+    )
 if CANONICAL_RUN:
     prediction_population = freeze_official_model_population(
         study, supersedes=SUPERSEDES_POPULATION or None
@@ -464,6 +475,7 @@ coverage = [
             label,
             case_dir=study.root,
             decision_axis=CLOCK.get_column("timestamp"),
+            folds=PREVIEW_FOLDS or None,
         ),
     )
     for label in labels
