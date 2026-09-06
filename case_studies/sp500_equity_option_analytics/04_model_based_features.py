@@ -639,8 +639,14 @@ for security in securities[:TRUNCATION_SAMPLE]:
     # does inside a block and the check passes without testing anything. The cut below lands
     # mid-block by construction, and the assertion after this loop is what holds it there.
     boundaries = {end for _, end in blocks}
-    cut = blocks[-1][0] + GARCH_REFIT_EVERY // 2
-    cut = min(cut, len(returns) - 1)
+    # The last block can be a single observation, when the series ends one session past a refit.
+    # It then has no session strictly inside it, and a cut clamped into it lands back on the
+    # boundary that opens it - which is the case this assertion exists to refuse. Every earlier
+    # block is a full `GARCH_REFIT_EVERY` wide by construction, so step back one.
+    block_start, block_end = blocks[-1]
+    if block_end - block_start < 2:
+        block_start, block_end = blocks[-2]
+    cut = min(block_start + GARCH_REFIT_EVERY // 2, block_end - 1)
     assert cut not in boundaries, "the truncation point fell on a refit boundary and tests nothing"
     full, _ = garch_walk(returns, None)
     short, _ = garch_walk(returns.iloc[:cut], None)
