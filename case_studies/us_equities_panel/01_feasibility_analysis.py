@@ -692,13 +692,21 @@ print(
 # from `evaluation.holdout_start`, which is what every later stage does too. It is handed dates and
 # no prices, so nothing the holdout contains reaches a number computed above.
 #
-# `generate_cv_splits` numbers folds from zero backwards from the most recent, so fold 0 is the last
-# one before the holdout and the highest number is the earliest. The figure draws them earliest-first
-# and labels each with that number, which is why the labels count down; every later stage prints
-# the same ones. The two assertions below check what the figure cannot show at this scale: that the
-# number of folds is the number `setup.yaml` declares, and that no validation window reaches into
-# the holdout. The figure then draws the boundaries the splitter returned rather than recomputing
-# them, so the picture and the folds cannot disagree.
+# Each fold carries an id from the splitter, and every later stage prints and keys its tables on
+# that same id - so the id is the fold's name across the whole case study, and relabelling the rows
+# by their position here would make this figure's "Fold 0" a different fold from the one the rest of
+# the case study reports.
+#
+# The figure draws the rows earliest-first, so the picture runs forward in time whatever the ids do,
+# and labels each row with its own id. Which end of the sample carries the low ids is the splitter's
+# convention rather than something this notebook chooses, so the line below reads it off the
+# boundaries rather than stating it here - a sentence naming a direction goes silently false if the
+# convention changes, and the ids are what the rest of the case study joins on.
+#
+# The two assertions check what the figure cannot show at this scale: that the number of folds is the
+# number `setup.yaml` declares, and that no validation window reaches into the holdout. The figure
+# then draws the boundaries the splitter returned rather than recomputing them, so the picture and
+# the folds cannot disagree.
 
 # %%
 splits = generate_cv_splits(
@@ -710,10 +718,19 @@ splits = generate_cv_splits(
 last_val = max(split["val_end"] for split in splits)
 assert len(splits) == SETUP["evaluation"]["n_splits"], "fold count differs from setup.yaml"
 assert str(last_val.date()) < HOLDOUT_START, "a fold reaches into the holdout"
+# Read the numbering direction off the boundaries rather than asserting it: the fold whose training
+# window opens earliest, against the fold whose validation window ends latest.
+_by_date = sorted(splits, key=lambda split: split["train_start"])
+_earliest_fold, _latest_fold = _by_date[0]["fold"], _by_date[-1]["fold"]
+_direction = (
+    "ascend with time" if _earliest_fold < _latest_fold else "descend as the folds move forward"
+)
 print(
     f"{len(splits)} folds | training {SETUP['evaluation']['train_size']} and validation "
     f"{SETUP['evaluation']['val_size']} each, purged by labels.buffer {LABEL_BUFFER}; the variants "
     f"declare {', '.join(f'{k} at {v}' for k, v in VARIANT_BUFFERS.items())}\n"
+    f"Fold ids {_direction}: the earliest window is fold {_earliest_fold} and the last one before "
+    f"the holdout is fold {_latest_fold}\n"
     f"Last validation ends {last_val.date()}, the holdout opens {HOLDOUT_START}"
 )
 
@@ -728,11 +745,12 @@ add_message_title(
 )
 show_with_alt(
     fig,
-    "One horizontal row per walk-forward fold, the highest-numbered at the top and fold "
-    "zero at the bottom. Each row is a long dark training bar followed immediately by a "
-    "short lighter validation bar. Reading down the rows, both bars shift later in time, "
-    "so the folds roll forward across the sample. A shaded holdout block stands at the "
-    "right-hand edge, and no fold's validation bar reaches it.",
+    "One horizontal row per walk-forward fold, drawn earliest-first so the bottom row is the "
+    f"earliest window and the top row the last one before the holdout: fold {_earliest_fold} at "
+    f"the bottom and fold {_latest_fold} at the top. Each row is a long dark training bar "
+    "followed immediately by a short lighter validation bar. Reading upward, both bars shift "
+    "later in time, so the folds roll forward across the sample. A shaded holdout block stands "
+    "at the right-hand edge, and no fold's validation bar reaches it.",
 )
 
 # %% [markdown]
