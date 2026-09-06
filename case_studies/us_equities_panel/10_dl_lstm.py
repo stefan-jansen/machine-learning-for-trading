@@ -14,28 +14,69 @@
 # ---
 
 # %% [markdown]
-# # LSTM Models - US Equities Panel
+# # US equities panel: a model that carries state across the window
 #
-# This notebook generates walk-forward validation predictions for the published LSTM
-# configurations and every declared epoch checkpoint. Readers choose the label, configurations,
-# parameter overrides, and execution tier. Shared sequence code owns eligible-window construction,
-# fold preprocessing, fitting, checkpoint persistence, restart, coverage, metrics, and registry
-# writes.
+# [`06_linear`](06_linear.ipynb), [`07_gbm`](07_gbm.ipynb) and
+# [`08_tabular_dl`](08_tabular_dl.ipynb) all read the same flat table: one row per stock per
+# session, one column per feature, and nothing in the representation saying the rows are ordered
+# in time. A model on that table sees the past only through columns somebody computed in advance -
+# a 21-session momentum, a rolling volatility. It never sees the sequence itself.
 #
-# The sequence implementation is in `case_studies/utils/deep_learning.py`, and the gap-aware window
-# construction is in `case_studies/utils/sequence_dataset.py`. A new architecture can implement the
-# same ordinary Python request and result contract without changing downstream catalog selection.
+# A **sequence model** is handed the sequence. Each training example here is a **window**: the 60
+# most recent sessions of one stock's features, in order, as a matrix of sessions by features -
+# about three months. The model reads the window and emits one number, the predicted return.
 #
-# **Learning objectives**
+# **A window has to be 60 consecutive sessions of the same stock, and on this panel that binds.**
+# A stock that lists part-way through a fold, halts, or delists leaves a gap, and a window
+# spanning a gap would treat the two sides as consecutive sessions and read the jump across it as
+# one day's move. Windows are therefore built only where the sessions are unbroken, which is why
+# the number of training examples is far smaller than the number of rows and differs between
+# folds.
 #
-# - Configure an LSTM sequence experiment and its epoch checkpoints.
-# - Trace gap-aware windows, preprocessing state, and recurrent model state into result identities.
-# - Validate complete prediction coverage before publishing the catalog population.
+# [`09_dl_nlinear`](09_dl_nlinear.ipynb) read each window as one fixed-length input and applied a
+# single linear map to it. An **LSTM** reads the window one session at a time instead, carrying a
+# **hidden state** forward: a vector summarising everything it has seen so far, updated at each
+# step and used to predict at the end.
 #
-# **Book reference**: Chapter 13
+# **What the architecture adds is a decision about what to keep.** At each step three learned
+# gates decide how much of the new session to admit, how much of the existing state to discard,
+# and how much of the state to expose. That is what lets a recurrent model carry something from
+# the start of a window to its end without it being diluted at every step, which a plain recurrent
+# network cannot do.
 #
-# **Prerequisites**: `05_evaluation.py` and the finalized financial and model-based feature
-# artifacts.
+# The configuration here stacks two such layers with a hidden state of 64. Two layers rather than
+# one so the second reads a sequence of summaries rather than a sequence of observations; 64
+# rather than more because the training examples are windows, not rows, and the window count is
+# what bounds how much capacity can be estimated from them.
+#
+# **Learning objectives.** By the end of this notebook you will be able to:
+#
+# - Describe what a hidden state is and what the gates of an LSTM decide at each step.
+# - Say what a recurrent model can represent that a single linear map over the same window cannot.
+# - Explain why the number of eligible windows, rather than the number of panel rows, is what
+#   bounds the capacity worth fitting.
+# - Read the epoch schedule out of a declared configuration and say how many scoreable models the
+#   run publishes for it.
+#
+# **A neural fit has a meaningful state at every epoch**, in the way a boosted model has one at
+# every iteration and a linear fit does not. An **epoch** is one pass over the training windows.
+# Each configuration here trains for 100 of them and saves its weights every 5, so it publishes
+# twenty scoreable models rather than one, each registered with its own identity. The count that
+# matters downstream is configurations times checkpoints.
+#
+# **Book reference**: Chapter 13. Chapter 6, Section 6.7 (Search accounting and run logging)
+# introduces the run log this notebook writes to.
+#
+# **Prerequisites**: [`03_financial_features`](03_financial_features.ipynb) and
+# [`04_model_based_features`](04_model_based_features.ipynb) have written the feature matrices, and
+# [`05_evaluation`](05_evaluation.ipynb) has established the walk-forward folds.
+#
+# **What it writes**: one training run per configuration and one complete validation prediction set
+# per configuration and epoch checkpoint, in `run_log/registry.db` and under `run_log/training/`
+# and `run_log/predictions/`, grouped under a named population.
+# [`15_model_analysis`](15_model_analysis.ipynb) compares that population against the other
+# families and [`16_backtest`](16_backtest.ipynb) backtests every member and selects on validation
+# backtest Sharpe. **Selection happens there, not here.**
 
 # %%
 """Generate LSTM validation predictions through the shared research interface."""
@@ -43,12 +84,14 @@
 import os
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import polars as pl
 import yaml
 
-from case_studies.research import Study, open_study, plan_models
+from case_studies.research import open_study, plan_models
 from utils.modeling import load_configs
-from utils.paths import REPO_ROOT, get_case_study_dir
+from utils.paths import get_case_study_dir
+from utils.style import FIGSIZE, add_message_title, ml4t_palette, show_with_alt, zero_line
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
@@ -65,17 +108,29 @@ MAX_TRAIN_SEQUENCES = 0
 PREVIEW_N_EPOCHS = 0
 
 # %% [markdown]
-# ## Configure the experiment
+# ## 1. Which configurations, and on which label
 #
-# `CONFIG_NAMES = []` selects every published LSTM configuration. `COMMON_OVERRIDES` changes
-# validated model or runner parameters for every selected configuration. `CONFIG_OVERRIDES` adds
-# changes for one named configuration and takes precedence. Effective defaults and overrides are
-# retained in each resolved training specification.
+# The menu at `config/training/{label}.yaml` lists the sequence configurations declared for a
+# label, and this notebook takes the ones whose architecture is `lstm`. Each name resolves to a
+# preset holding the full parameter set - here a 60-session lookback, 100 epochs, a checkpoint
+# every 5, and a dropout of 0.1.
 #
-# Canonical requests use CUDA, every eligible sequence, every fold, and the published checkpoint
-# schedule. A reduced check uses the preview tier and declares at least one data or fold reduction.
-# `PREVIEW_N_EPOCHS` shortens the identity-covered model schedule for that preview. Preview results
-# cannot enter official comparisons, candidate sets, locks, or holdout evaluation.
+# What each setting a run may pass decides:
+#
+# - **`CONFIG_NAMES`** empty fits every declared `lstm` configuration. A named subset fits only
+#   those, which is what to do first: at panel scale a full run is hours, and the point of a first
+#   pass is to find out whether the plumbing works.
+# - **`COMMON_OVERRIDES`** changes a parameter for every selected configuration, and
+#   **`CONFIG_OVERRIDES`** changes one named configuration and takes precedence. An override moves
+#   a training identity, so an overridden run registers beside the published one rather than
+#   replacing it.
+# - **`EXECUTION_TIER`** is `canonical` or `preview`. A canonical run fits every eligible window on
+#   every fold at the published epoch schedule. A preview run has to declare at least one
+#   reduction and carries it in the identity, so its results can never be compared against
+#   canonical ones or reach a holdout decision.
+# - **`PREVIEW_N_EPOCHS`** shortens the schedule for a preview. It is part of the identity rather
+#   than a runtime detail, because a model trained for fewer epochs is a different model rather
+#   than the same one measured sooner.
 
 # %%
 case_dir = get_case_study_dir(CASE_STUDY_ID)
@@ -122,13 +177,9 @@ if FOLD_IDS:
 if MAX_TRAIN_SEQUENCES:
     preview_reductions["max_train_sequences"] = int(MAX_TRAIN_SEQUENCES)
 
-# Both tiers resolve the study through `open_study`, never `Study.open`/`Study.regenerate`
-# directly. In a maintainer worktree the generated directories are symlinks to shared data, and
-# `open_study` handles that by reading inputs in place - `root` stays the release case directory
-# and only writes are redirected to the workspace. `Study.open(workspace=...)` instead puts `root`
-# inside the workspace, so `source = self.root / "labels"` (workspace.py:274) resolves somewhere
-# else and `_ensure_input_link` rejects the link a sibling notebook already made. Two notebooks in
-# one session then cannot both open a preview workspace.
+# Both tiers resolve the study through `open_study`. It reads the labels and features in place and
+# redirects only writes, so a preview run scores the same inputs a canonical one does and cannot
+# publish over it.
 if EXECUTION_TIER == "canonical":
     if preview_reductions or PREVIEW_N_EPOCHS:
         raise ValueError("Canonical execution cannot declare preview reductions")
@@ -145,7 +196,7 @@ else:
     raise ValueError("EXECUTION_TIER must be 'canonical' or 'preview'")
 
 # %% [markdown]
-# ## Build the model requests
+# ## 2. Binding the declarations to the data
 #
 # Each selected LSTM configuration becomes one request with the declared sequence reductions.
 
@@ -184,7 +235,7 @@ request_table = pl.DataFrame(
 request_table
 
 # %% [markdown]
-# ## Plan and execute the selected configurations
+# ## 3. Planning, then fitting
 #
 # The planner resolves every training and epoch-checkpoint identity before fitting and writes the
 # canonical checkpoint population first. Execution builds only sequences that follow the declared
@@ -217,7 +268,7 @@ planned_population
 execution = plan.run()
 
 # %% [markdown]
-# ## Inspect the resolved computation
+# ## 4. What was actually fitted
 #
 # These rows expose the feature, fold, sequence, runtime, model, and checkpoint settings used by
 # the runner, including defaults that were not repeated in the notebook parameters.
@@ -247,7 +298,7 @@ resolved_table = pl.DataFrame(resolved_rows).sort("config_name")
 resolved_table
 
 # %% [markdown]
-# ## Validate and inspect the handoff
+# ## 5. What came out
 #
 # Each catalog row is one complete validation prediction set for one training identity and epoch.
 # Downstream notebooks filter these rows with Polars and pass the selected table directly to
@@ -272,13 +323,12 @@ catalog_rows = execution.catalog_rows.select(
 ).sort("config_name", "checkpoint_value", "prediction_hash")
 catalog_rows
 
-# %%
 # %% [markdown]
-# A prediction set can be registered complete and still have scored no dates: cross-sectional IC
-# needs `min_obs` names on a date, so a reduced universe whose symbols do not overlap in time
-# yields `ic_n_days = 0` and a null IC for every checkpoint while coverage stays complete. That is
-# a run that reports nothing and passes. `11_dl_tsmixer` carried a pinned symbol whitelist to avoid
-# it, which repaired one panel and left the condition unchecked; this asserts it instead.
+# A prediction set can be registered complete and still have scored no dates. Cross-sectional
+# information coefficient needs a minimum number of names quoted on a date before the ranking on
+# that date means anything, so a universe whose stocks do not overlap in time yields no scorable
+# dates and a null IC at every checkpoint while every coverage check passes. That is a run which
+# reports nothing and looks successful, so it is asserted on rather than left to be noticed.
 
 # %% tags=["results"]
 scored = execution.catalog_rows.select("config_name", "checkpoint_value", "ic_mean", "ic_n_days")
@@ -286,6 +336,71 @@ unscored = scored.filter(pl.col("ic_n_days").is_null() | (pl.col("ic_n_days") <=
 if not unscored.is_empty():
     raise RuntimeError(f"prediction sets scored no dates: {unscored.to_dicts()}")
 scored
+
+# %% [markdown]
+# ### Where more training stopped helping
+#
+# Each line traces one configuration's validation IC as epochs are added to it. This is the figure
+# the checkpoint dimension exists to produce, and it separates two things a single
+# end-of-training number cannot.
+#
+# A line that rises and then falls has an interior optimum: the model was still learning, then
+# began fitting the training windows at the expense of the validation folds. That is the evidence
+# about whether a two-layer recurrent network's extra parameters were supportable on the number of
+# windows this panel yields. A line that wanders around zero without trend never had anything to
+# learn, and its highest point is wherever the noise happened to peak. Both produce a
+# respectable-looking maximum, which is why the curve rather than the maximum is what to read.
+
+# %%
+curves = scored.sort("config_name", "checkpoint_value")
+config_names = curves.get_column("config_name").unique(maintain_order=True).to_list()
+# `ml4t_palette` returns a list of that many colours, so it is called once and indexed.
+palette = ml4t_palette(len(config_names), categorical=True)
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+for index, config_name in enumerate(config_names):
+    series = curves.filter(pl.col("config_name") == config_name)
+    ax.plot(
+        series.get_column("checkpoint_value"),
+        series.get_column("ic_mean"),
+        marker="o",
+        markersize=4,
+        lw=1.4,
+        color=palette[index],
+        label=config_name,
+    )
+zero_line(ax)
+ax.set_xlabel("Training epochs")
+ax.set_ylabel("Mean validation IC")
+ax.legend(fontsize=8, frameon=False)
+add_message_title(
+    ax,
+    "Whether the recurrent network was still learning when training stopped",
+    subtitle="Out-of-sample information coefficient against epoch, one line per configuration",
+)
+fig.tight_layout()
+# The alt text counts rather than asserts: whether a curve turns over is the question the figure
+# exists to answer, and a line described as peaking when it does not is a claim the data refutes.
+_peaks = (
+    curves.group_by("config_name")
+    .agg(
+        peak=pl.col("checkpoint_value").sort_by("ic_mean", descending=True).first(),
+        first=pl.col("checkpoint_value").min(),
+        last=pl.col("checkpoint_value").max(),
+    )
+    .with_columns(
+        interior=pl.col("peak").is_between(pl.col("first"), pl.col("last"), closed="none")
+    )
+)
+_n_interior = int(_peaks.get_column("interior").sum())
+show_with_alt(
+    fig,
+    "A line chart of mean validation information coefficient against training epoch, one line per "
+    "configuration, with a dashed line at zero. Counted from the underlying frame, "
+    f"{_n_interior} of {_peaks.height} configurations reach their highest information coefficient "
+    "at an epoch that is neither the first nor the last, which is what an interior optimum looks "
+    "like.",
+)
 
 # %%
 coverage_rows = []
@@ -321,7 +436,7 @@ execution_diagnostics = pl.DataFrame(execution.diagnostics)
 execution_diagnostics
 
 # %% [markdown]
-# ## Freeze the compatible result set
+# ## 6. Naming the set the later notebooks open
 #
 # A canonical default CUDA run freezes every returned LSTM prediction row under a stable name. The
 # same bounded family set supplies raw diagnostics because this notebook has one published
@@ -361,11 +476,24 @@ compatible_sets
 # configuration or checkpoint.
 
 # %% [markdown]
-# ## Key takeaways and limitations
+# ## What to notice
 #
-# - The recurrent model consumes only sequence windows permitted by the declared observation
-#   calendar.
-# - Every epoch checkpoint has separate fitted-state and prediction provenance.
-# - The fixed lookback and hidden-state size constrain the temporal relationships the model can
-#   represent.
-# - Validation predictions remain separate from the holdout assessment.
+# **Read this against [`09_dl_nlinear`](09_dl_nlinear.ipynb) rather than on its own.** The two read
+# identical windows over identical folds, so the difference between them is what recurrence and
+# the gating bought on this panel and nothing else.
+#
+# **More capacity is not free at this window count.** The training examples are windows of
+# consecutive sessions, not panel rows, and a two-layer recurrent network has far more parameters
+# to estimate from them than a single linear map does. The learning curve above is the evidence
+# about whether that capacity was supportable here: a curve that turns over says the extra
+# parameters were being spent on the training windows by the end.
+#
+# **A checkpoint is part of a configuration.** Twenty per configuration, each registered
+# separately, for the reason `09_dl_nlinear` gives.
+#
+# **Known limitations.** Windows are built only where sessions are unbroken, so the training set
+# is not a uniform sample of the panel. Everything here is ranking accuracy on validation folds
+# read many times over, and none of it is a statement about tradability.
+#
+# **Next**: [`11_dl_tsmixer`](11_dl_tsmixer.ipynb) drops recurrence entirely and mixes along the
+# two axes of the window in turn.

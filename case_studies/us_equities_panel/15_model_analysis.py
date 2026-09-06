@@ -14,30 +14,60 @@
 # ---
 
 # %% [markdown]
-# # Model Analysis for the US Equities Panel
+# # US equities panel: what the fitted models are worth before any of them is traded
 #
-# This notebook reads immutable validation results produced by the modelling notebooks. An
-# immutable compatible set records exact prediction membership and the protocol fields its members
-# share. The full sets supply the descriptive table and pass unchanged to strategy evaluation.
-# Separate immutable sets identify bounded subsets for diagnostics that load raw predictions.
+# Eight notebooks have now fitted models to this panel and written their validation predictions
+# down. None of them looked at another's results, and none of them chose anything. This notebook
+# is where they are read together for the first time - and it still chooses nothing, because a
+# ranking measure and a strategy are different questions and the second one is settled by a
+# backtest in [`16_backtest`](16_backtest.ipynb).
 #
-# **Learning objectives**
+# What it asks of the population, in order:
 #
-# - Verify that a declared set contains complete canonical validation predictions.
-# - Describe predictive performance with daily cross-sectional information coefficients and
-#   dependence-aware uncertainty intervals.
-# - Compare fold stability and prediction similarity without dropping panel or fold keys.
-# - Evaluate interval coverage with chronological split-conformal calibration.
-# - Keep causal estimates separate from predictive results and strategy candidates.
+# 1. **Is it complete?** Every model notebook published a **named prediction set**: a fixed list
+#   of results, written down before fitting, that the run then had to fill. A set that came out
+#   short would otherwise look like a smaller experiment rather than a failed one, so the first
+#   thing here is to confirm each named set holds every member it promised.
+# 2. **How well does each model rank the cross-section?** Measured by the information coefficient,
+#   with an interval around it that accounts for the dependence overlapping return windows create.
+# 3. **Is a model's ranking ability steady, or does it come from one window?** A configuration
+#   whose skill sits in one fold and vanishes in the others has a mean that describes no period.
+# 4. **Are two models actually different?** Two families can score alike and rank the same names,
+#   in which case the second one adds nothing a portfolio could use.
+# 5. **How wide is the uncertainty around a prediction, and does that width hold up?** One of the
+#   allocators downstream sizes positions by it, so a width that is systematically too narrow
+#   would size positions too large.
+# 6. **What does the causal estimate say, and why is it read apart from all of the above?**
 #
-# **Book reference**: Chapters 11-15 for model interpretation and Chapter 16 for the strategy
-# handoff.
+# **A note on what is being measured.** The **information coefficient** is the rank correlation,
+# across the stocks scored on one date, between what a model predicted and what those stocks went
+# on to earn. It says whether a model orders the cross-section correctly. It does not say what a
+# strategy trading that order would earn, and on a three-thousand-name panel the gap between the
+# two is turnover.
+#
+# **Learning objectives.** By the end of this notebook you will be able to:
+#
+# - Say why a comparison across models has to be made over a membership fixed in advance, and what
+#   a comparison over whatever happened to finish would hide.
+# - Read an information coefficient with an interval around it, and say what the interval is wider
+#   for than a plain standard error would be.
+# - Tell apart a model whose ranking ability is steady across validation windows from one whose
+#   average rests on a single window.
+# - Say when two models that score similarly are carrying the same information and when they are
+#   not, and why an average over shared dates is the comparison that answers it.
+# - Explain what a prediction interval calibrated on past residuals does and does not guarantee,
+#   and why that matters to an allocator that sizes by width.
+# - State why a causal estimate cannot be ranked alongside a predictive score.
+#
+# **Book reference**: Chapters 11 to 15 for model interpretation, Chapter 16 for what happens to
+# these results next.
 #
 # **Prerequisites**: the modelling notebooks - [`06_linear`](06_linear.ipynb) through
-# [`13_latent_factors`](13_latent_factors.ipynb) - must have published their canonical validation
-# results and the two immutable compatible sets used below.
-# [`14_causal_dml`](14_causal_dml.ipynb) provides any exact causal result hashes included in the
-# separate causal section.
+# [`13b_ipca`](13b_ipca.ipynb) - have published their validation results and the named sets read
+# below, and [`14_causal_dml`](14_causal_dml.ipynb) has produced the causal result read in the
+# last section.
+#
+# **What it writes**: nothing. It is read-only over the run log, and it selects nothing.
 
 # %%
 """Read-only interpretation of the result sets the modelling notebooks published."""
@@ -62,7 +92,7 @@ from case_studies.research import (
 from case_studies.utils.backtest_runner import normalize_prediction_columns
 from case_studies.utils.insight_chapter import conformal_coverage_for_selected_prediction
 from case_studies.utils.registry import canonical_json, load_prediction_metrics
-from utils.style import COLORS
+from utils.style import COLORS, add_message_title, show_with_alt, zero_line
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
@@ -84,7 +114,6 @@ PREDICTION_SET_NAMES = [
     "us-equities-fwd-ret-1d-nlinear-v1",
     "us-equities-fwd-ret-1d-lstm-v1",
     "us-equities-fwd-ret-1d-tsmixer-v1",
-    "us-equities-fwd-ret-5d-weekly-v1",
     "us-equities-fwd-ret-1d-pca-v1",
     "us-equities-fwd-ret-1d-ipca-v1",
     "us-equities-fwd-ret-5d-pca-v1",
@@ -101,7 +130,6 @@ OFFICIAL_POPULATION_NAMES = [
     "us-equities-nlinear-checkpoints-v1",
     "us-equities-lstm-checkpoints-v1",
     "us-equities-tsmixer-checkpoints-v1",
-    "us-equities-weekly-checkpoints-v1",
     "us-equities-pca-checkpoints-v1",
     "us-equities-ipca-checkpoints-v1",
 ]
@@ -118,7 +146,6 @@ DIAGNOSTIC_SET_NAMES = [
     "us-equities-fwd-ret-1d-nlinear-v1",
     "us-equities-fwd-ret-1d-lstm-v1",
     "us-equities-fwd-ret-1d-tsmixer-v1",
-    "us-equities-fwd-ret-5d-weekly-diagnostics-v1",
     "us-equities-fwd-ret-1d-pca-v1",
     "us-equities-fwd-ret-1d-ipca-v1",
     "us-equities-fwd-ret-5d-pca-v1",
@@ -129,13 +156,12 @@ DIAGNOSTIC_SET_NAMES = [
 CAUSAL_LABELS = ["fwd_ret_1d"]
 
 # %% [markdown]
-# ## Open the declared result sets
+# ## 1. Opening the named sets, and checking each is whole
 #
-# A prediction result is eligible here when its persisted coverage matches the expected
-# `(symbol, timestamp, fold)` grid and its split and execution tier match the declared analysis.
-# Canonical analysis verifies named compatible sets and their official checkpoint populations.
-# A reduced preview selects a bounded catalog population by visible fields without publishing it.
-# Diagnostic members remain a subset of the strategy handoff in either tier.
+# A result earns its place in the comparison by covering every stock-date-fold its own identity
+# promised, on the validation split, under this run's tier. A result that covers less is not a
+# weaker candidate: it is a candidate measured on a different sample, and averaging it beside the
+# others would make the ranking a statement about who finished rather than about who ranked well.
 
 # %% tags=["results"]
 preview_filters = bool(PREVIEW_LABELS or PREVIEW_FAMILIES or PREVIEW_CONFIG_NAMES)
@@ -166,11 +192,9 @@ else:
     raise ValueError(f"Unsupported execution tier: {EXECUTION_TIER!r}")
 
 include_preview = EXECUTION_TIER == "preview"
-# Metrics are read from the tier's own storage, not from `study.root`. Under preview in a
-# maintainer worktree `open_study` leaves `root` on the release case directory and redirects only
-# writes, so `case_dir=study.root` sends every metric lookup to the released registry while the
-# catalog rows come from the preview one - and every preview row reports as having no metrics.
-# `storage_root` is the accessor that answers "where does this tier's registry live".
+# Metrics are read from the tier's own storage. A preview run writes its rows to an isolated
+# registry while still reading the released labels and features, so the lookup has to be pointed
+# at the registry the rows came from rather than at the released one.
 metrics_case_dir = study.storage_root(EXECUTION_TIER)
 prediction_sets = ()
 diagnostic_sets = ()
@@ -325,12 +349,13 @@ set_table = pl.DataFrame(set_rows)
 set_table
 
 # %% [markdown]
-# ## Validate identities and coverage
+# ## 2. Every result complete, and scored where it said it would be
 #
-# A checkpoint is part of a prediction identity. The catalog below therefore keeps the training
-# hash, checkpoint kind, checkpoint value, and prediction hash together. Coverage is checked before
-# any metric is displayed, and distinct results must have distinct configuration-checkpoint
-# identities.
+# A model fitted for 200 epochs and the same model at epoch 50 are two candidates, not one
+# candidate measured twice, so the checkpoint travels with the configuration everywhere below. The
+# catalog keeps both alongside the hashes that produced them, and nothing is scored until its
+# coverage has been checked - a metric computed on an incomplete set is the one number in this
+# notebook that would look entirely normal.
 
 # %% tags=["results"]
 catalog_rows = []
@@ -387,12 +412,19 @@ catalog = pl.DataFrame(catalog_rows).sort(
 catalog
 
 # %% [markdown]
-# ## Daily predictive performance
+# ## 3. How well each model ranks the cross-section
 #
-# The information coefficient (IC) is the Spearman rank correlation between scores and realized
-# returns within one decision date. Registry metrics pool those daily correlations across folds,
-# giving every decision date equal weight. Heteroskedasticity-and-autocorrelation-consistent (HAC)
-# intervals account for dependence induced by overlapping forward returns.
+# On each decision date, rank the stocks by what the model predicted, rank them by what they went
+# on to earn, and correlate the two rankings: that is the **information coefficient** for that
+# date. Averaging it over every date in the validation period gives each date the same weight,
+# whatever the size of its cross-section.
+#
+# The interval around that average is wider than an ordinary one, and deliberately. A five-session
+# forward return measured every session shares four of its five days with the next one, so
+# consecutive observations are not independent and a plain standard error would treat far more
+# information as present than there is. The correction used here - **HAC**, for
+# heteroskedasticity- and autocorrelation-consistent - widens the interval by what that overlap
+# costs.
 
 # %% tags=["results"]
 metric_rows = []
@@ -436,55 +468,98 @@ performance.select(
 )
 
 # %% [markdown]
-# The plot retains the catalog order rather than sorting by IC. Each horizontal interval shows the
-# sampling uncertainty around one configuration and checkpoint; it is descriptive evidence, not a
-# model-selection rule.
+# The population is several hundred candidates, because a checkpoint is one of them, so a chart
+# with a labelled row per candidate would be a strip several metres long. Two things are worth
+# seeing across that many, and each is a distribution:
+#
+# **Where each family sits.** The left panel puts every candidate's mean daily IC in its family's
+# column, one column per label and family. Read the height of a column's cloud, not any one point:
+# a family whose whole cloud sits above zero ranked the cross-section, and one straddling zero did
+# not.
+#
+# **How much of that is measurable.** The right panel is the half-width of each candidate's
+# interval, on the same vertical scale. Where a family's half-widths are as large as the spread of
+# its point estimates in the left panel, the ordering inside that family is not something the data
+# distinguishes, however cleanly the table sorts.
+#
+# Neither panel selects anything, and the exact interval for any one candidate is in the frame
+# above.
 
 # %% tags=["results"]
 plot_performance = performance.with_columns(
-    (
-        pl.col("label")
-        + " | "
-        + pl.col("family")
-        + "/"
-        + pl.col("config_name")
-        + " @ "
-        + pl.col("checkpoint_kind")
-        + "="
-        + pl.col("checkpoint_value").cast(pl.String).fill_null("final")
-        + " ["
-        + pl.col("prediction_hash").str.slice(0, 8)
-        + "]"
-    ).alias("model_id")
+    half_width=(pl.col("ic_ci_hi") - pl.col("ic_ci_lo")) / 2
+)
+columns = (
+    plot_performance.select("label", "family").unique().sort("label", "family").rows(named=True)
 )
 
-fig, ax = plt.subplots(figsize=(10, max(4, 0.28 * plot_performance.height)))
-y_position = np.arange(plot_performance.height)
-mean_ic = plot_performance["ic_mean_daily"].to_numpy()
-lower = plot_performance["ic_ci_lo"].to_numpy()
-upper = plot_performance["ic_ci_hi"].to_numpy()
-ax.errorbar(
-    mean_ic,
-    y_position,
-    xerr=np.vstack([mean_ic - lower, upper - mean_ic]),
-    fmt="o",
-    color=COLORS["blue"],
-    ecolor=COLORS["neutral"],
-    capsize=2,
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+for ax, column_name, axis_label in zip(
+    axes,
+    ("ic_mean_daily", "half_width"),
+    ("Mean daily cross-sectional IC", "HAC interval half-width"),
+    strict=True,
+):
+    for position, column in enumerate(columns):
+        values = plot_performance.filter(
+            (pl.col("label") == column["label"]) & (pl.col("family") == column["family"])
+        ).get_column(column_name)
+        # Deterministic spread within a column so overlapping candidates stay countable; the
+        # horizontal position carries no meaning of its own.
+        jitter = (values.arg_sort().to_numpy() % 9 - 4) / 40
+        ax.scatter(
+            position + jitter,
+            values.to_numpy(),
+            alpha=0.45,
+            s=16,
+            color=COLORS["blue"],
+            edgecolors="none",
+        )
+    ax.set_xticks(
+        range(len(columns)),
+        [f"{column['label']}\n{column['family']}" for column in columns],
+        rotation=45,
+        ha="right",
+        fontsize=7,
+    )
+    ax.set_xlim(-0.5, len(columns) - 0.5)
+    ax.set_ylabel(axis_label)
+zero_line(axes[0])
+axes[1].set_ylim(bottom=0)
+add_message_title(
+    axes[0],
+    "Read the cloud, not the point: several hundred candidates per column",
+    subtitle="Left, each candidate's mean daily IC; right, the half-width of its HAC interval",
 )
-ax.axvline(0, color=COLORS["negative"], linewidth=0.8, linestyle="--")
-ax.set_yticks(y_position, plot_performance["model_id"].to_list())
-ax.set_xlabel("Daily cross-sectional IC")
-ax.set_title("Daily Cross-Sectional IC with HAC Intervals")
 fig.tight_layout()
-fig.show()
+# The alt text counts rather than asserts: whether any family's cloud clears zero is a fact about
+# the frame, and a panel described as separating the families when it does not is a claim the data
+# refutes.
+_clear = plot_performance.group_by("label", "family").agg(
+    above=(pl.col("ic_ci_lo") > 0).sum(), total=pl.len()
+)
+_n_any = int((_clear.get_column("above") > 0).sum())
+show_with_alt(
+    fig,
+    "Two strip plots side by side, one column per label and model family, sharing that column "
+    "order. The left panel places every candidate at its mean daily cross-sectional information "
+    "coefficient, with a dashed line at zero; the right places the same candidates at the "
+    "half-width of their heteroskedasticity-and-autocorrelation-consistent interval, on an axis "
+    "starting at zero. Points are spread horizontally within a column so overlapping candidates "
+    f"stay visible. Counted from the underlying frame, {_n_any} of {_clear.height} label-family "
+    "columns hold at least one candidate whose interval lies entirely above zero.",
+)
 
 # %% [markdown]
-# ## Fold stability for the diagnostic set
+# ## 4. Whether that ranking ability holds across windows
 #
-# Fold summaries show whether a configuration behaves similarly across validation windows. Raw
-# predictions are loaded only for the explicit diagnostic members. Every artifact must contain
-# finite values and unique canonical keys before its daily IC is computed.
+# An average over sixteen windows says nothing about whether the sixteen agreed. A configuration
+# that ranked the cross-section well in one year and not at all in the others has a mean no reader
+# could have traded through, and it looks identical in the table above to one that worked steadily.
+# The fold summaries below separate them.
+#
+# This is where raw predictions are read rather than registry metrics, which is why it runs over
+# the bounded diagnostic subset rather than the whole population.
 
 # %% tags=["results"]
 KEYS = ["symbol", "timestamp", "fold_id"]
@@ -543,13 +618,17 @@ fold_ic = (
 fold_ic
 
 # %% [markdown]
-# ## Prediction similarity
+# ## 5. Whether two models carry the same information
 #
-# Pairwise similarity uses only observations shared by the two exact results. Joins retain
-# `(symbol, timestamp, fold)`, validate one-to-one cardinality, and confirm that both artifacts
-# carry the same realized return for every shared observation. Spearman correlations are computed
-# within each decision date and then averaged so dates with larger cross-sections receive no extra
-# weight.
+# Two configurations that score alike are not two pieces of evidence if they are ranking the same
+# names in the same order. A portfolio holding both would then be taking one bet at twice the
+# size, which is the failure this section exists to catch.
+#
+# The comparison is made only on the observations both results actually cover, one date at a time,
+# and averaged over dates. Two things are checked before any correlation is computed: that the
+# join is one-to-one, because a join that quietly multiplies rows makes two models look more alike
+# than they are, and that both artifacts carry the same realized return for every shared
+# observation, because if they disagree about what happened they are not comparable at all.
 
 # %% tags=["results"]
 correlation_rows = []
@@ -609,7 +688,7 @@ correlations = pl.DataFrame(correlation_rows).sort("left", "right")
 correlations
 
 # %% [markdown]
-# ## Coverage of the widths that size positions
+# ## 6. How wide the uncertainty is, and whether the width holds up
 #
 # The width measured here is the one the `conformal_weighted` allocator sizes positions with:
 # calibrated per symbol on every absolute residual known at `t - h`, where `h` is that label's
@@ -656,12 +735,13 @@ conformal_coverage.select(
 )
 
 # %% [markdown]
-# ## Causal evidence
+# ## 7. The causal estimate, read on its own terms
 #
-# Double machine learning estimates a treatment effect after using nuisance models to remove the
-# variation explained by declared confounders. Its estimand and uncertainty differ from a predictive
-# score, so causal results are read separately and never enter a prediction set. Each visible label
-# request must resolve to exactly one complete canonical causal result.
+# Everything above asks how well a model orders the cross-section. The estimate below asks
+# something the rest of this notebook cannot: whether moving the treatment would move the outcome,
+# after removing what the declared confounders explain. That is not a score, it ranks nothing, and
+# there is no axis on which it could be placed beside an information coefficient - which is why it
+# is read here on its own and never enters a prediction set.
 
 # %% tags=["results"]
 causal_columns = [
@@ -706,11 +786,13 @@ else:
 causal_results
 
 # %% [markdown]
-# ## Handoff to strategy evaluation
+# ## What goes on to the backtest
 #
-# Strategy evaluation receives every member of the full prediction set. It constructs validation
-# backtests for complete configurations and checkpoints; the later strategy-analysis notebook makes
-# the single selection decision using validation backtest Sharpe.
+# Every member of every full prediction set, unfiltered. Nothing measured above narrows the list:
+# a model that ranked poorly here is still backtested, because ranking accuracy and strategy
+# performance are different questions and this notebook is not qualified to answer the second.
+# [`16_backtest`](16_backtest.ipynb) runs an equal-weight backtest for each one, and the single
+# selection is made on validation backtest Sharpe in the strategy notebooks after it.
 
 # %% tags=["results"]
 print(
@@ -721,20 +803,42 @@ print(f"Members handed off: {len(prediction_members)}")
 set_table.filter(pl.col("role") == "strategy handoff")
 
 # %% [markdown]
-# ## Key takeaways and limitations
+# ## What to notice
 #
-# - Immutable compatible sets make the comparison population explicit and keep unrelated registry
-#   rows out of the analysis.
-# - Daily-pooled IC describes cross-sectional ranking quality while giving each decision date equal
-#   weight; HAC intervals reflect dependence from overlapping return horizons.
-# - Exact three-column joins preserve symbol, decision time, and fold identity when predictions are
-#   compared.
-# - Chronological conformal calibration uses earlier observations to assess coverage on later ones.
-# - Causal estimates answer a treatment-effect question and remain separate from prediction and
-#   strategy contracts.
+# **Fix the population before measuring it.** Comparing whatever results happen to be in a registry
+# lets the comparison change every time something is refitted, and lets a family that failed
+# halfway look like a family that was cheaper to run. Naming the membership in advance and
+# checking it here is what makes "this model ranked above that one" a statement about the models.
 #
-# Canonical execution covers every declared prediction result. Preview execution is explicitly
-# bounded and cannot publish a candidate set or official population. Shape-based diagnostics use a
-# separate subset because loading every large prediction artifact together is unnecessary. All
-# evidence in this notebook comes from validation data; the holdout is reserved for the replay of
-# whichever configuration validation selects.
+# **An average over dates needs an interval that knows the dates are not independent.** A
+# five-session forward return measured every session shares four of its five days with the next
+# one. Treating those as independent observations makes an interval too narrow and a t-statistic
+# too large, on every model equally, so the ranking survives and the significance does not.
+#
+# **A mean IC and a stable IC are different claims.** Averaging across folds hides which folds
+# contributed, and a configuration that ranks well in one window and not at all in the others has
+# an average that describes no period a reader could have traded through.
+#
+# **Two models scoring alike is not two pieces of evidence.** Where predictions correlate closely
+# on the dates they share, a portfolio holding both gets one signal at twice the weight. The
+# pairwise comparison is what separates agreement from redundancy, and it has to be computed on
+# shared observations with the panel keys intact - a join that quietly multiplies rows would make
+# two models look more alike than they are.
+#
+# **A calibrated interval is a description, not a promise.** Split conformal's coverage guarantee
+# needs residuals that are exchangeable, and return residuals are not - they cluster in volatility
+# and share a market factor. Read the coverage here as a diagnostic of how residual dispersion
+# moves, which is what an allocator sizing by width is exposed to.
+#
+# **A causal estimate is answering a different question.** It estimates what a change in the
+# treatment does, after removing what the declared confounders explain. It is not a score that
+# ranks names, so it cannot be placed on the same table as one, and it never enters a prediction
+# set.
+#
+# **Nothing here selects.** Ranking accuracy and strategy performance are different questions, and
+# the second is decided on validation backtest Sharpe in the notebooks that follow.
+#
+# **Known limitations.** Every number above comes from the validation folds, which have been read
+# many times over by the time a case study reaches this notebook; the holdout is opened once, for
+# the replay of whatever validation selects, and it is the only thing here that speaks to
+# performance rather than to selection.

@@ -14,28 +14,74 @@
 # ---
 
 # %% [markdown]
-# # TabM Models - US Equities Panel
+# # US equities panel: a neural network on the same flat table, and what an ensemble of them costs
 #
-# This notebook generates walk-forward validation predictions for the published TabM
-# configurations and every declared epoch checkpoint. Readers choose the label, configurations,
-# parameter overrides, and execution tier. Shared code owns panel preparation, fold preprocessing,
-# fitting, checkpoint persistence, restart, prediction coverage, metrics, and registry writes.
+# [`06_linear`](06_linear.ipynb) and [`07_gbm`](07_gbm.ipynb) read the same design matrix: one row
+# per stock per session, one column per feature, nothing in the representation saying the rows are
+# ordered in time. They differ in what they can express. A penalized linear model gives each
+# feature one coefficient, and where several columns carry nearly the same information it can
+# spread weight across all of them. A tree ensemble can express an interaction - a condition on one
+# feature evaluated inside a region another feature defines - but it gets there by picking one
+# column at each split, and among near-duplicate columns which one gets picked is close to
+# arbitrary.
 #
-# Compatible configurations run together so the large panel is prepared once per fold.
-# Each configuration and checkpoint still has its own immutable identity. The implementation is in
-# `case_studies/utils/tabular_dl.py` for readers who want to change the architecture or add another
-# tabular model family.
+# A neural network on that same table is a third answer. Its first layer is a weighted sum of every
+# feature, so like the linear model it never has to choose between correlated columns; the
+# nonlinearity after it lets those sums combine into interactions the linear model cannot write
+# down. That is the reason to fit one here, rather than a general preference for neural networks:
+# the two properties that pulled against each other in the previous two notebooks are not obviously
+# in conflict in this architecture.
 #
-# **Learning objectives**
+# **TabM is an ensemble, and the ensemble is the point.** Averaging several independently
+# initialized networks is a standard way to make a neural fit less erratic, and the ordinary cost
+# is training that many networks. TabM trains most of one. A two-layer network - the **backbone** -
+# is shared by every member. Each member owns two small things of its own: a vector carrying one
+# number per hidden unit, which scales the backbone's output element by element, and its own final
+# linear layer turning that scaled output into a prediction. The members' predictions are averaged.
+# What differs between members is therefore one vector and one output layer each, set against a
+# backbone as wide as the hidden size - which is why adding members grows the model far more slowly
+# than training that many separate networks would.
 #
-# - Configure TabM candidates and epoch checkpoints through the shared request boundary.
-# - Explain compatible batching, per-candidate persistence, and completed-fold restart.
-# - Validate fitted-state artifacts, prediction coverage, and catalog identities.
+# **The three declared configurations move both dials at once.** `tabm_s`, `tabm_m` and `tabm_l`
+# pair a hidden width of 64, 128 and 256 with 4, 8 and 16 members. So this grid is a capacity
+# ladder rather than an experiment separating width from ensemble size: a difference between two
+# rungs cannot be attributed to either dial on its own.
 #
-# **Book reference**: Chapter 12, Section 12.3 (Deep Learning Alternatives)
+# **A neural fit has a meaningful state at every epoch**, the way a boosted model has one at every
+# iteration and a linear fit does not. An **epoch** is one pass over the training rows. Each
+# configuration here trains for 200 of them and saves its weights every 25, so it produces eight
+# scoreable models rather than one, and each is registered with its own identity. The count that
+# matters downstream is configurations times checkpoints - three times eight - not three.
 #
-# **Prerequisites**: `03_financial_features.py`, `04_model_based_features.py`, and
-# `05_evaluation.py`.
+# **Learning objectives.** By the end of this notebook you will be able to:
+#
+# - Describe what a weight-sharing ensemble holds in common between its members and what it keeps
+#   separate, and say why *k* members cost far less than *k* networks.
+# - Read the epoch schedule out of a declared configuration and say how many scoreable models the
+#   run publishes for it.
+# - Say why a grid that moves width and member count together cannot attribute a difference to
+#   either one, and what a grid that separated them would have to hold fixed.
+# - Recognise that a model can predict nearly the same value for every stock on a date, why that
+#   date then contributes nothing to a ranking measure, and why a run can be registered complete
+#   and still have scored no dates at all.
+# - Locate where a configuration and a stopping point are actually chosen in this case study, and
+#   say why that is not here.
+#
+# **Book reference**: Chapter 12, Section 12.3 (Deep Learning Alternatives). Chapter 6, Section 6.7
+# (Search accounting and run logging) introduces the run log this notebook writes to.
+#
+# **Prerequisites**: [`03_financial_features`](03_financial_features.ipynb) and
+# [`04_model_based_features`](04_model_based_features.ipynb) have written the feature matrices,
+# [`05_evaluation`](05_evaluation.ipynb) has established the walk-forward folds, and
+# [`06_linear`](06_linear.ipynb) and [`07_gbm`](07_gbm.ipynb) fitted the two populations this one
+# sits beside.
+#
+# **What it writes**: one training run per configuration and one complete validation prediction set
+# per configuration and epoch checkpoint, in `run_log/registry.db` and under `run_log/training/`
+# and `run_log/predictions/`, grouped under a named population.
+# [`15_model_analysis`](15_model_analysis.ipynb) compares that population against the other
+# families and [`16_backtest`](16_backtest.ipynb) backtests every member and selects on validation
+# backtest Sharpe. **Selection happens there, not here.**
 
 # %%
 """Generate TabM validation predictions through the shared research interface."""
@@ -46,9 +92,9 @@ from pathlib import Path
 import polars as pl
 import yaml
 
-from case_studies.research import Study, open_study, plan_models
+from case_studies.research import open_study, plan_models
 from utils.modeling import load_configs
-from utils.paths import REPO_ROOT, get_case_study_dir
+from utils.paths import get_case_study_dir
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
@@ -66,18 +112,29 @@ PREVIEW_N_EPOCHS = 0
 PREVIEW_CHECKPOINT_INTERVAL = 0
 
 # %% [markdown]
-# ## Configure the experiment
+# ## 1. Which configurations, and on which label
 #
-# `CONFIG_NAMES = []` runs the complete published TabM menu. Set it to a subset such as
-# `['tabm_s']` for a targeted experiment. `COMMON_OVERRIDES` changes validated TabM or runner
-# parameters for every selected configuration. `CONFIG_OVERRIDES` adds changes for one named
-# configuration and takes precedence. The resolved training specification records all published
-# defaults and overrides. `DIAGNOSTIC_CONFIG_NAMES` declares the bounded subset used for raw
-# prediction comparisons in the analysis notebook.
+# The menu at `config/training/{label}.yaml` lists the TabM configurations declared for a label,
+# and each name resolves to a preset in `case_studies/config/tabm/` holding the full parameter set.
+# The table below shows the whole menu with a column marking which entries this run selected.
 #
-# Canonical requests use CUDA, the complete panel, every fold, and the published epoch schedule.
-# Reduced checks must use the preview tier and declare every reduction below. Preview identities
-# and artifacts are isolated from official comparisons and holdout decisions.
+# What each setting a run may pass decides:
+#
+# - **`CONFIG_NAMES`** empty fits the whole declared menu. A list such as `['tabm_s']` fits that
+#   subset, which is what to do first: at panel scale the full menu is hours, and the point of a
+#   first pass is to find out whether the plumbing works.
+# - **`COMMON_OVERRIDES`** changes a model or runner parameter for every selected configuration and
+#   **`CONFIG_OVERRIDES`** changes one named configuration, taking precedence. An override moves a
+#   training identity, so an overridden run registers beside the published one rather than
+#   replacing it.
+# - **`DIAGNOSTIC_CONFIG_NAMES`** names the small subset [`15_model_analysis`](15_model_analysis.ipynb)
+#   compares predictions across. It is bounded on purpose: that comparison holds every member's
+#   prediction frame in memory at once and correlates them pairwise, so its cost grows with the
+#   square of the membership.
+# - **`EXECUTION_TIER`** is `canonical` or `preview`. A canonical run fits the whole panel on every
+#   fold at the published epoch schedule. A preview run has to declare at least one reduction, and
+#   its results carry that reduction in their identity so they can never be compared against
+#   canonical ones or reach a holdout decision.
 
 # %%
 case_dir = get_case_study_dir(CASE_STUDY_ID)
@@ -122,13 +179,9 @@ if PREVIEW_N_EPOCHS:
 if PREVIEW_CHECKPOINT_INTERVAL:
     preview_reductions["checkpoint_interval"] = int(PREVIEW_CHECKPOINT_INTERVAL)
 
-# Both tiers resolve the study through `open_study`, never `Study.open`/`Study.regenerate`
-# directly. In a maintainer worktree the generated directories are symlinks to shared data, and
-# `open_study` handles that by reading inputs in place - `root` stays the release case directory
-# and only writes are redirected to the workspace. `Study.open(workspace=...)` instead puts `root`
-# inside the workspace, so `source = self.root / "labels"` (workspace.py:274) resolves somewhere
-# else and `_ensure_input_link` rejects the link a sibling notebook already made. Two notebooks in
-# one session then cannot both open a preview workspace.
+# Both tiers resolve the study through `open_study`. It reads the labels and features in place and
+# redirects only writes, so a preview run scores the same inputs a canonical one does and cannot
+# publish over it.
 if EXECUTION_TIER == "canonical":
     if preview_reductions:
         raise ValueError("Canonical execution cannot declare preview reductions")
@@ -145,10 +198,11 @@ else:
     raise ValueError("EXECUTION_TIER must be 'canonical' or 'preview'")
 
 # %% [markdown]
-# ## Build the model requests
+# ## 2. Binding the declarations to the data
 #
-# Each selected configuration becomes one CUDA request after common and configuration-specific
-# overrides are combined.
+# A **request** is one configuration bound to one label and one execution tier, with its overrides
+# resolved. It is what the planner reads, and it holds no data - so the table below can be
+# inspected before anything is loaded.
 
 # %%
 requests = []
@@ -183,14 +237,21 @@ request_table = pl.DataFrame(
 request_table
 
 # %% [markdown]
-# ## Plan and execute the selected configurations
+# ## 3. Planning, then fitting
 #
-# The planner resolves every training and epoch-checkpoint identity before fitting and writes the
-# canonical checkpoint population first. The plan then prepares one fold for all compatible
-# resident candidates. Each
-# declared epoch checkpoint stores fitted preprocessing, model weights, predictions, and coverage
-# evidence before the fold is released. A retry validates completed candidate-fold checkpoints and
-# recomputes only missing or corrupt work.
+# **Planning works out every identity before any fitting starts.** Each configuration-and-epoch
+# pair gets its training and prediction hash from the declarations and the fold boundaries alone,
+# and the list of them is written down as a **population**: a named, immutable membership that the
+# run then has to fill completely. Declaring the membership first is what makes the downstream
+# comparison well defined, because a population that came out short would otherwise look like a
+# smaller experiment rather than a failed one.
+#
+# The plan walks folds on the outside and configurations on the inside, so one prepared fold is
+# resident at a time however many configurations were declared - which on a three-thousand-name
+# panel across sixteen ten-year training windows is the difference between fitting and running out
+# of memory. Every declared epoch saves its preprocessing, its weights and its predictions before
+# the fold is released, so an interrupted run resumes from the last completed fold instead of
+# starting over.
 
 # %%
 plan = plan_models(study, requests=requests)
@@ -216,11 +277,12 @@ planned_population
 execution = plan.run()
 
 # %% [markdown]
-# ## Inspect the resolved computation
+# ## 4. What was actually fitted
 #
-# The resolved specifications below contain the actual feature, label, fold, task, runtime, model,
-# preprocessing, and checkpoint settings used by the runner. This includes defaults that were not
-# repeated in the notebook parameters.
+# A configuration names a preset, and a preset leaves most settings to a default. The table below
+# is the fully resolved specification the runner used - every feature count, fold count, device,
+# epoch schedule and batch size, including the defaults nothing above restated. This is the record
+# a reader checks a result against, and it is what the training hash is computed from.
 
 # %%
 resolved_rows = []
@@ -246,11 +308,16 @@ resolved_table = pl.DataFrame(resolved_rows).sort("config_name")
 resolved_table
 
 # %% [markdown]
-# ## Validate and inspect the handoff
+# ## 5. What came out
 #
-# Each catalog row is one complete validation prediction set for one training identity and epoch.
-# Downstream notebooks filter these rows with ordinary Polars expressions and pass the selected
-# table directly to backtesting. The hashes remain visible for exact provenance and artifact reads.
+# One row per configuration and epoch checkpoint. Each is one complete set of validation
+# predictions, with the hash of the training run that produced it and the hash of the predictions
+# themselves, so any row can be traced back to the exact fitted state behind it.
+#
+# `ic_mean` is the **information coefficient**: on each validation date, rank the stocks by the
+# model's prediction, rank them by the return they went on to earn, correlate the two rankings, and
+# average that daily correlation over the validation period. It measures whether predictions order
+# the cross-section correctly, and nothing about what a strategy trading them would earn.
 
 # %% tags=["results"]
 catalog_columns = [
@@ -271,13 +338,12 @@ catalog_rows = execution.catalog_rows.select(
 ).sort("config_name", "checkpoint_value", "prediction_hash")
 catalog_rows
 
-# %%
 # %% [markdown]
-# A prediction set can be registered complete and still have scored no dates: cross-sectional IC
-# needs `min_obs` names on a date, so a reduced universe whose symbols do not overlap in time
-# yields `ic_n_days = 0` and a null IC for every checkpoint while coverage stays complete. That is
-# a run that reports nothing and passes. `11_dl_tsmixer` carried a pinned symbol whitelist to avoid
-# it, which repaired one panel and left the condition unchecked; this asserts it instead.
+# A prediction set can be registered complete and still have scored no dates. Cross-sectional
+# information coefficient needs a minimum number of names quoted on a date before the ranking on
+# that date means anything, so a universe whose stocks do not overlap in time yields no scorable
+# dates and a null IC at every checkpoint while every coverage check passes. That is a run which
+# reports nothing and looks successful, so it is asserted on rather than left to be noticed.
 
 # %% tags=["results"]
 scored = execution.catalog_rows.select("config_name", "checkpoint_value", "ic_mean", "ic_n_days")
@@ -320,12 +386,17 @@ execution_diagnostics = pl.DataFrame(execution.diagnostics)
 execution_diagnostics
 
 # %% [markdown]
-# ## Freeze the compatible result sets
+# ## 6. Naming the sets the later notebooks open
 #
-# A canonical default CUDA run freezes every returned prediction row under a stable family/label
-# name. The separately named diagnostic subset is bounded by the visible configuration list above.
-# Preview and customized canonical requests retain their result rows without publishing an
-# official set.
+# `16_backtest` never opens the population. It opens **named prediction sets**, one per label and
+# family, because a comparison is only meaningful within one label's protocol.
+# `15_model_analysis` opens both - the population, to confirm the run filled every member it
+# promised, and the named sets, to make the comparison. Freezing is what creates those names.
+#
+# Only an unnarrowed canonical run publishes them, and for the same reason a narrowed run may not
+# publish the canonical population: a name must not mean two different member sets at two different
+# times. A run that overrides a parameter, selects a subset, or runs on a device other than the
+# declared one keeps its rows and publishes no name.
 
 # %% tags=["results"]
 set_rows = []
@@ -370,11 +441,30 @@ compatible_sets
 # configuration or checkpoint.
 
 # %% [markdown]
-# ## Key takeaways and limitations
+# ## What to notice
 #
-# - TabM candidates share compatible fold preparation while each candidate and epoch retains its own
-#   durable fitted state.
-# - Restart validates completed candidate-fold artifacts before deciding what to recompute.
-# - Preview reductions are identity-bearing and remain outside the canonical population.
-# - The architecture learns interactions from the declared tabular features; its validation results
-#   do not establish stability under a changed feature distribution.
+# **A checkpoint is part of a configuration, not a detail of how it was fitted.** Saving weights
+# every 25 epochs turns three configurations into twenty-four scoreable models. Treating that as
+# three candidates while quietly keeping each one's best epoch would report the maximum of eight
+# numbers as though it were one, which is why every checkpoint is registered separately and
+# compared as its own candidate.
+#
+# **A complete run is not the same as a scored one.** Cross-sectional information coefficient needs
+# a minimum number of names on a date before that date can be ranked at all. A universe whose
+# stocks do not overlap in time can satisfy every coverage check and still score zero dates,
+# leaving a null IC under a status that reads complete. The assertion above refuses that rather
+# than reporting it.
+#
+# **This grid measures capacity and nothing finer.** Width and member count move together across
+# the three rungs, so a difference between them is a difference in capacity as a whole. Separating
+# the two would need a grid holding one fixed while the other varies, which this case study does
+# not declare.
+#
+# **Known limitations.** The features are the same point-in-time columns the previous two
+# notebooks read, so anything absent from them is absent here too; the architecture finds
+# interactions among the columns it is given and does not create information. Validation results
+# say how the fits ranked on folds that have been read many times over by the time a case study
+# reaches this notebook, and say nothing about behaviour under a changed feature distribution.
+#
+# **Next**: [`09_dl_nlinear`](09_dl_nlinear.ipynb) drops the flat-table representation and gives a
+# model the ordered window instead.
