@@ -609,6 +609,18 @@ case_studies/sp500_options/17_holdout_backtest:
 #
 # Primary label fwd_ret_1m. 08_latent_factors is an index over 08a through 08d, like cme's
 # 10_latent_factors, so it has nothing to reduce.
+#
+# The linear stage is 05_linear, not 06_linear: this case study has no model-based feature stage,
+# so every stage from the evaluation on is numbered one lower than the other eight.
+
+case_studies/us_firm_characteristics/05_linear:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_1m"]
+    POPULATION_NAME: smoke-linear
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 20, train_sample_frac: 0.5}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 19
 
 case_studies/us_firm_characteristics/06_gbm:
   parameters:
