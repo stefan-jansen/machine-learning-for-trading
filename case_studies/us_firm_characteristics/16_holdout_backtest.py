@@ -209,11 +209,15 @@ print(f"Holdout prediction: {HOLDOUT_PREDICTION_HASH}")
 # is short or dispersed.
 #
 # A width is not purely firm-specific, and the exception matters on a panel with a firm
-# axis this wide. `min_calibration_n` is the number of eligible residuals a name needs
-# before it gets a width of its own. Below it the name is **not dropped**: it receives a
-# pooled width computed from every entity's residuals, which `conformal.py` declares as
-# `sparse_fallback`. So a newly covered firm is sized on the family's typical reliability
-# rather than excluded, and a selected name always carries a width.
+# axis this wide. `min_calibration_n` is the number of validation residuals a name needs
+# before it gets a width of its own, and `compute_holdout_conformal_widths` does drop such
+# a name from its per-symbol table. It is **not left without a width**: the symbols that
+# fall out are recovered by an anti-join against the holdout's own symbol set and given one
+# quantile taken over all the embargoed validation residuals together, recorded in the
+# artifact as `calibration_scope = "pooled"` rather than `"symbol"`. So a thinly covered
+# firm is sized on the family's typical reliability rather than excluded, and every
+# selected name carries a width. `compute_conformal_weights` depends on that: it raises
+# rather than proceeding if any selected asset has no width.
 #
 # What reaches the portfolio is narrower still. `compute_conformal_weights` normalizes
 # `1 / width` within each leg at each timestamp, so only the cross-sectional dispersion of

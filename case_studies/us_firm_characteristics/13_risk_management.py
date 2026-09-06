@@ -259,9 +259,15 @@ if MAX_RISK_VARIANTS > 0:
 #
 # Which cap that is cannot be predicted in either direction, and it is worth being clear
 # that the argument does not rest on one. Scaling every weight by a constant leaves Sharpe
-# unchanged before costs, and a concentration cap changes which names are held rather than
-# only how much, so it can raise or lower realised Sharpe depending on what it excluded.
-# The objection is to the question, not to the answer it would return.
+# unchanged before costs. A per-name cap is not a scaling: `_cap_weights` in
+# `case_studies/utils/allocation.py` clips any weight above `max_weight` and spreads the
+# excess in equal parts across the names still under it, iterating until none is over. **No
+# name is dropped** - the holding set after the cap is the holding set before it - so what a
+# binding cap changes is the relative exposure across an unchanged set of names. That moves
+# realised Sharpe, and it can move it either way: the cap takes exposure from whichever
+# names the allocator weighted most heavily and gives it to the rest, which helps when the
+# heaviest names underperformed and hurts when they carried the return. The objection is to
+# the question, not to the answer it would return.
 #
 # Where this case study does constrain concentration it does so through `top_k`, which is
 # declared in the strategy and swept as part of it.
