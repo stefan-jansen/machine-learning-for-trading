@@ -99,6 +99,7 @@ from case_studies.research import (
     planned_model_plan,
     primary_label,
     run_model_population,
+    supersedes_for_run,
 )
 from utils.style import COLORS, show_plotly_with_alt
 
@@ -152,8 +153,10 @@ declared_labels(study, "gbm")
 # term, no subsampling and double the learning rate - seven declared parameters apart rather than
 # none.
 #
-# Read the gap between them as capacity and you will be reading the wrong axis: at 500 iterations
-# `default_mse` reaches an IC of 0.0243 and `leaves_31_mse` 0.0222, at identical leaf counts.
+# Read the gap between them as capacity and you will be reading the wrong axis. The two sit side
+# by side in the final-iteration chart in Section 4 at identical leaf counts, and whatever
+# separates them there is those seven parameters rather than the number of regions a tree may
+# carve.
 #
 # What the grid does hold fixed is training length - every configuration declares
 # `max_iterations: 500` and `checkpoint_interval: 50` - so the checkpoint comparison below is
@@ -181,11 +184,9 @@ if narrows_declared_catalog(study, "gbm", configs) and not POPULATION_NAME:
         "the canonical population; pass POPULATION_NAME to give it its own"
     )
 
-# The diagnostic set is published by an unnarrowed canonical run and by nothing else, so the
-# requirement that its configurations be among the ones fitted applies to that run and to
-# nothing else. Asked unconditionally, it refused a perfectly valid narrowed or preview run
-# for leaving out a configuration that run was never going to publish, and the only way past
-# it was to override a parameter irrelevant to what was being fitted.
+# Only an unnarrowed canonical run publishes the diagnostic set, so only that run has to carry
+# every diagnostic configuration. A narrowed or preview run publishes no name and is free to
+# leave any of them out.
 is_published_population = (
     EXECUTION_TIER == "canonical" and not POPULATION_NAME and not PREVIEW_REDUCTIONS
 )
@@ -227,6 +228,7 @@ requests = model_requests(
     configs,
     execution_tier=EXECUTION_TIER,
     preview_reductions=PREVIEW_REDUCTIONS,
+    notebook="07_gbm",
 )
 plan = plan_models(study, requests=requests)
 
@@ -285,11 +287,21 @@ planned.select(
 
 # %%
 population_name = POPULATION_NAME or "us-equities-gbm-checkpoints-v1"
+# The declared hash is only meaningful where a generation of this name already exists. A
+# preview run, a first canonical run against an empty `run_log/`, and a run under a
+# caller-chosen `POPULATION_NAME` are all refused by `OfficialPopulation.create` if it is
+# passed anyway. The resolution lives in shared code so no notebook branches on the tier.
+supersedes = supersedes_for_run(
+    study,
+    population_name=population_name,
+    declared=SUPERSEDES_POPULATION,
+    execution_tier=EXECUTION_TIER,
+)
 execution, population = run_model_population(
     study,
     plan,
     population_name=population_name,
-    supersedes=SUPERSEDES_POPULATION or None,
+    supersedes=supersedes,
 )
 
 fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
@@ -339,18 +351,18 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # incomplete for a reason unrelated to any model.
 
 # %% [markdown]
-# ## What the run produced, and the sets it publishes
+# ### What the run produced, and the sets it publishes
 #
 # The cell below reports both, because they are one statement: the population is one immutable
 # list covering every label this run fitted, and the candidate sets are the names the later
 # notebooks open it by.
 #
-# `15_model_analysis` and `16_backtest` do not open populations directly - they open
-# *candidate sets*, named per
-# `(label, family)`, because a comparison is only meaningful within one label's protocol. Freezing
-# is what creates those names.
+# `16_backtest` never opens the population: it opens *candidate sets*, named per
+# `(label, family)`, because a comparison is only meaningful within one label's protocol.
+# `15_model_analysis` opens both - the population, to confirm the run filled every member it
+# promised, and the candidate sets, to make the comparison. Freezing is what creates those names.
 #
-# Without this the two downstream notebooks name four sets that nothing produces, and they fail
+# Without this the two downstream notebooks name six sets that nothing produces, and they fail
 # differently: `15` raises when `CandidateSet.one` cannot find the name, while `16` would simply
 # backtest whatever subset of names does resolve. A missing name is a silently narrower strategy
 # chain, which is the failure the named-set design exists to prevent.
@@ -407,7 +419,11 @@ display(
         "ic_std",
         "ic_n_days",
         "full_coverage",
-    ).head(15)
+    )
+    # Five per label rather than fifteen off the top. The frame is sorted by label and then by IC,
+    # so a flat head shows one label's block and the paragraph above sends the reader to all three.
+    .group_by("label", maintain_order=True)
+    .head(5)
 )
 
 set_rows = []

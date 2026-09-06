@@ -75,12 +75,9 @@ from utils.modeling import RANDOM_SEED, seed_everything
 if TYPE_CHECKING:
     from case_studies.research.workspace import Study
 
-_SEQUENCE_PREVIEW_FIELDS = {
-    "folds",
-    "max_symbols",
-    "max_train_sequences",
-    "max_predict_sequences",
-}
+from case_studies.utils.preview_fields import (
+    SEQUENCE_PREVIEW_FIELDS as _SEQUENCE_PREVIEW_FIELDS,
+)
 
 SEQUENCE_RUNNER_VERSION = 1
 # 2: #767 (174154ad) changed what a sequence family is fitted on. `np.nan_to_num(..., nan=0.0)`

@@ -201,6 +201,7 @@ requests = model_requests(
     execution_tier=EXECUTION_TIER,
     overrides={"device": device},
     preview_reductions=PREVIEW_REDUCTIONS,
+    notebook="11c_conditional_autoencoder",
 )
 resolved = tuple(request.resolve() for request in requests)
 

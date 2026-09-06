@@ -36,16 +36,21 @@ separate answer.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
+import pandas as pd
 import polars as pl
+from ml4t.diagnostic.splitters.calendar import TradingCalendar
 
 from case_studies.utils.notebook_contracts import _first_present, _is_finite
 
 __all__ = [
     "CoverageError",
+    "absent_calendar_sessions",
+    "assert_sessions_complete",
     "CoverageGap",
     "CoverageReport",
     "declared_sessions",
@@ -103,6 +108,98 @@ class CoverageReport:
     def raise_if_incomplete(self) -> None:
         if not self.complete:
             raise CoverageError(self.summary())
+
+
+def absent_calendar_sessions(
+    session_dates: Iterable[date],
+    *,
+    calendar: str,
+    known_absent: Iterable[date] = (),
+) -> list[date]:
+    """Sessions the exchange held between the first and last of *session_dates*, that are not
+    in *session_dates* and are not declared in *known_absent*.
+
+    A panel is normally checked the other way round: each date it carries is asked whether the
+    exchange was open, and the dates that fail are dropped as stray prints. That direction
+    cannot see this one. A session the exchange held and the archive never printed leaves no
+    row to test, so nothing raises, every query succeeds, and one day's rows are simply gone.
+    `us_equities_panel`'s single missing session was found by two counts of an unrelated
+    quantity differing by one, which is the only way a defect of this shape surfaces on its own.
+
+    It matters because every rolling window downstream reads its input in order and treats
+    consecutive elements as consecutive sessions. A variance recursion, a fractional-difference
+    convolution and a rolling average all price the gap across a missing session as one day's
+    move.
+
+    *known_absent* is the declaration, not a suppression: a caller states the sessions it has
+    established are missing upstream, and anything else is returned for the caller to refuse.
+
+    A date counts as a session when it settles itself, which is the rule
+    :meth:`TradingCalendar.get_sessions` applies and the same one a stray-print filter uses -
+    so the two directions cannot disagree about what a session is. Running it over every
+    calendar day of the span enumerates what the exchange held, rather than classifying only
+    the dates the archive happens to carry.
+
+    Args:
+        session_dates: The panel's session index. Order and duplicates do not matter.
+        calendar: Exchange calendar name, as ``config/setup.yaml``'s ``evaluation.calendar``
+            gives it.
+        known_absent: Sessions already established as missing upstream.
+
+    Returns:
+        The undeclared absent sessions, earliest first. Empty when the panel is complete.
+    """
+    present = {d.date() if isinstance(d, datetime) else d for d in session_dates}
+    if not present:
+        return []
+
+    span = pd.date_range(str(min(present)), str(max(present)), freq="D", tz="UTC")
+    settling = TradingCalendar(calendar).get_sessions(pd.DatetimeIndex(span))
+    held = set(pd.DatetimeIndex(settling.to_numpy()).date) & set(span.date)
+    declared = {d.date() if isinstance(d, datetime) else d for d in known_absent}
+    return sorted(held - present - declared)
+
+
+def assert_sessions_complete(
+    session_dates: Iterable[date],
+    *,
+    calendar: str,
+    known_absent: Iterable[date] = (),
+    source: str,
+) -> list[date]:
+    """Refuse a session index missing a session the exchange held and nobody declared.
+
+    The refusing half of :func:`absent_calendar_sessions`, so the message that explains why a
+    gap matters is written once rather than pasted into each notebook that builds an index.
+
+    Returns the declared absences that fall inside this index's own span, so a caller can print
+    what it deliberately tolerated. A caller that tolerates nothing gets an empty list.
+
+    :raises CoverageError: on any absent session that *known_absent* does not name.
+    """
+    undeclared = absent_calendar_sessions(
+        session_dates, calendar=calendar, known_absent=known_absent
+    )
+    if undeclared:
+        shown = ", ".join(str(d) for d in undeclared[:10])
+        more = "" if len(undeclared) <= 10 else f" (and {len(undeclared) - 10} more)"
+        raise CoverageError(
+            f"{source}: {len(undeclared)} {calendar} session(s) the exchange held that this "
+            f"panel does not carry and nothing declared: {shown}{more}. A rolling window reads "
+            "its input in order and treats consecutive elements as consecutive sessions, so a "
+            "missing session is priced as though the gap across it were one period's move. "
+            "Establish whether the session is absent upstream or dropped in a join, then either "
+            "fix the join or declare the session."
+        )
+    present = {d.date() if isinstance(d, datetime) else d for d in session_dates}
+    if not present:
+        return []
+    first, last = min(present), max(present)
+    return sorted(
+        d
+        for d in (x.date() if isinstance(x, datetime) else x for x in known_absent)
+        if first <= d <= last
+    )
 
 
 def _as_date(value) -> date:

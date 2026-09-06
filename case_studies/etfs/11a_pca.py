@@ -200,6 +200,7 @@ requests = model_requests(
     execution_tier=EXECUTION_TIER,
     overrides=overrides,
     preview_reductions=PREVIEW_REDUCTIONS,
+    notebook="11a_pca",
 )
 resolved = tuple(request.resolve() for request in requests)
 

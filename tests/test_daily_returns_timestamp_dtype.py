@@ -3,7 +3,7 @@
 `daily_returns.parquet` is written with `Date` by monthly-rebalance aggregations, `Datetime[ms]`
 by some engine paths and `Datetime[us]` by others. Polars refuses to join across them, so a
 caller holding two of these frames - `17_risk_management`'s paired overlay comparison is one,
-and `us_equities_panel/19_risk_management` is another - failed with a comparison error that
+and `us_equities_panel/18_risk_management` is another - failed with a comparison error that
 depended on which two backtests it happened to be given.
 
 The normalization existed, inside `_align_variants_on_timestamp`, and reached only callers that

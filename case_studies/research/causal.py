@@ -279,6 +279,12 @@ class CausalRequest:
     execution_tier: ExecutionTier
     preview_reductions: dict[str, Any]
     supersedes: str | None = None
+    # The notebook that submitted this request, for `runtime_provenance["notebook_path"]`.
+    # Provenance only - `registry/specs.py:_V2_PROVENANCE_FIELDS` excludes it from the causal
+    # identity, so two notebooks submitting the same analysis still collide on one hash. It
+    # answers the separate question of which notebook produced a row, and `entry_point` cannot:
+    # that names the module (`case_studies.utils.causal`), which every causal notebook shares.
+    notebook: str | None = None
 
     @classmethod
     def from_request(cls, study: Study, request: dict[str, Any]) -> CausalRequest:
@@ -290,6 +296,7 @@ class CausalRequest:
             "execution_tier",
             "preview_reductions",
             "supersedes",
+            "notebook",
         }
         unknown = set(request) - supported
         if unknown:
@@ -316,6 +323,7 @@ class CausalRequest:
             execution_tier=tier,
             preview_reductions=reductions,
             supersedes=(str(request["supersedes"]) if request.get("supersedes") else None),
+            notebook=(str(request["notebook"]) if request.get("notebook") else None),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -326,9 +334,13 @@ class CausalRequest:
             "overrides": dict(self.overrides),
             "execution_tier": self.execution_tier.value,
             "preview_reductions": dict(self.preview_reductions),
+            "notebook": self.notebook,
         }
         # `supersedes` is absent on purpose: this dict is what the resolver turns into
-        # the spec, and the spec is hashed.
+        # the spec, and the spec is hashed. `notebook` is present and safe for the same
+        # reason `supersedes` is not: the resolver reads every field by name and builds
+        # `computation` from a literal set of keys, so a request key it does not name
+        # cannot reach the hash. It lands in `provenance`, which the identity excludes.
 
     def resolve(self) -> ResolvedCausalRequest:
         module = get_adapter("causal", self.method)
