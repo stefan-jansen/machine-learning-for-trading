@@ -64,6 +64,7 @@ import polars as pl
 import yaml
 from scipy.stats import spearmanr
 
+from case_studies.research import open_study
 from case_studies.utils.latent_factors import load_fold_extras
 from case_studies.utils.model_analysis import (
     best_model_per_family_fast,
@@ -104,8 +105,22 @@ DATE_COL = "timestamp"
 ENTITY_COL = "symbol"
 N_BUCKETS = 10
 TOP_N_FEATURES = 15
+# Both names stay bound here although nothing below reads them: that is what makes the harness
+# force preview and supply a workspace - `_declares_tier_and_workspace` in `tests/pm_helpers.py`
+# looks for exactly this pair. Without them the canonical branch regenerates in place, which
+# needs symlinks a CI checkout does not have.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
+
+# %% [markdown]
+# The study is opened before anything resolves a path or reads the registry. Under the preview
+# tier, opening it activates a workspace and rewrites `ML4T_OUTPUT_DIR` process-wide, and every
+# later `get_case_study_dir` call resolves against that. A `CASE_DIR` built first would point at
+# the released registry while everything after it reads the preview one.
 
 # %%
+study = open_study(CASE_STUDY, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
+
 CASE_DIR = get_case_study_dir(CASE_STUDY)
 
 with open(CASE_DIR / "config" / "setup.yaml") as f:

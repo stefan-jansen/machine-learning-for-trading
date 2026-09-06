@@ -76,6 +76,7 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 
+from case_studies.research import open_study
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.backtest_loaders import (
     VECTORIZED_CASE_STUDIES,
@@ -112,6 +113,22 @@ MAX_SYMBOLS = 0
 # controls each.
 MAX_RISK_VARIANTS = 0
 TOP_N_COMBOS = None
+# Both names stay bound here although nothing below reads them: that is what makes the harness
+# force preview and supply a workspace - `_declares_tier_and_workspace` in `tests/pm_helpers.py`
+# looks for exactly this pair. Without them the canonical branch regenerates in place, which
+# needs symlinks a CI checkout does not have.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
+
+# %% [markdown]
+# The study is opened before anything resolves a path or reads the registry. Under the preview
+# tier, opening it activates a workspace and rewrites `ML4T_OUTPUT_DIR` process-wide, and every
+# later `get_case_study_dir` call resolves against that. A `CASE_DIR`, a candidate index or a
+# `BacktestExplorer` built first would address the released registry while this notebook writes
+# to the preview one, and the two never meet.
+
+# %%
+study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
