@@ -321,6 +321,15 @@ def register_training_run(
     spec = _validate_spec(spec)
     t_hash = training_hash_from_spec(spec)
     spec_json_str = canonical_json(spec)
+    # Defaulted here rather than only in `ResultsCatalog.register_training`, because this
+    # function has five other callers and none of them supplied it. A NULL `started_at` is
+    # what leaves a row with no recoverable timing at all: `elapsed_s` is filled in later by
+    # `record_training_runtime` and stays NULL when a run does not reach it, and without a
+    # start there is nothing to fall back on. Measured on the current nasdaq registry,
+    # 2026-09-05: 13 of 13 linear rows carry NULL for both, registered across 3.1 seconds.
+    # "When the identity was registered" is within seconds of "when work on it began" on
+    # every path that registers before fitting, which is all of them.
+    started_at = started_at or _utc_now()
 
     if spec.get("identity_version") in SUPPORTED_IDENTITY_VERSIONS:
         identity_version = int(spec["identity_version"])
