@@ -563,6 +563,7 @@ class RenumberPlan:
     population_map: dict[str, str] = field(default_factory=dict)
     cohort_digests: dict[str, str] = field(default_factory=dict)
     unresolved_cohorts: list[str] = field(default_factory=list)
+    coverage_renderings: dict[str, int] = field(default_factory=dict)
 
     @property
     def training_map(self) -> dict[str, str]:
@@ -1375,25 +1376,53 @@ def _build_staging_tree(run_log: Path, staging: Path, plan: RenumberPlan) -> Non
             )
 
 
+def _prediction_key_frame(frame: pl.DataFrame, *, legacy: bool) -> pl.DataFrame:
+    """The key columns of a prediction frame, rendered the way its digest was taken.
+
+    `completeness._canonical_key_column` normalizes a temporal key to microsecond UTC before
+    rendering it, because a `Date` and a `Datetime("ms")` of the same instant otherwise render
+    differently and never join. Rows registered before that normalization carry digests taken
+    over a plain string cast, so a migration that recomputed them under today's rendering would
+    quietly re-render as well as relabel, and its "the digest moved" would mean two things at
+    once. Both renderings are offered here and the one that reproduces the stored digest is the
+    one the new digest is computed under.
+    """
+    from .completeness import _prediction_key_columns
+
+    if "fold" in frame.columns and "fold_id" not in frame.columns:
+        frame = frame.rename({"fold": "fold_id"})
+    columns = _prediction_key_columns(frame)
+    rendered = []
+    for name in columns:
+        dtype = frame.schema[name]
+        if name == "fold_id":
+            rendered.append(pl.col(name).cast(pl.Int64))
+        elif not legacy and (dtype == pl.Date or isinstance(dtype, pl.Datetime)):
+            rendered.append(pl.col(name).cast(pl.Datetime("us")).cast(pl.String).alias(name))
+        else:
+            rendered.append(pl.col(name).cast(pl.String))
+    return frame.select(*rendered)
+
+
 def _rewrite_prediction_coverage(
     db: sqlite3.Connection, plan: RenumberPlan, staging: Path, original: Path
-) -> None:
+) -> dict[str, int]:
     """Recompute the coverage evidence that describes a rewritten prediction frame.
 
     `prediction_coverage` holds a digest of the prediction artifact and digests of its key
     columns, and the key columns include the fold id. Relabeling the frame moves all three,
     and `PredictionResult.completeness` compares the artifact against its recorded digest -
     so a migration that moved the identity and left the evidence would leave every migrated
-    prediction reporting incomplete, which is how a locked backtest would refuse them.
+    prediction reporting incomplete, which is what a locked backtest reads.
 
-    Each row is reproduced from the frame it was written over before it is rewritten. A row
-    that is not `complete` is refused rather than recomputed: its expected keys are not the
-    ones on disk, and nothing here can reconstruct which rows were missing.
+    Each row is reproduced from the frame it was written over before it is rewritten: the
+    artifact digest exactly, and the key digests under whichever of the two renderings
+    produced them. A row that is not `complete`, or that reproduces under neither, is refused
+    rather than recomputed.
     """
-    from .completeness import evaluate_prediction_coverage
-
     db.row_factory = sqlite3.Row
     updates: list[tuple[str, str, str | None, str]] = []
+    renderings: dict[str, int] = {"current": 0, "legacy": 0}
     for stored, migrated in sorted(plan.prediction_map.items()):
         row = db.execute(
             "SELECT * FROM prediction_coverage WHERE prediction_hash = ?", (migrated,)
@@ -1405,6 +1434,11 @@ def _rewrite_prediction_coverage(
                 f"prediction {stored} has {row['status']!r} coverage; its expected keys "
                 "cannot be reconstructed from the artifact"
             )
+        if row["expected_key_digest"] != row["actual_key_digest"]:
+            raise FoldRenumberRefusal(
+                f"prediction {stored} records different expected and actual key digests "
+                "under a complete coverage row"
+            )
         before = pl.read_parquet(original / "predictions" / stored / "predictions.parquet")
         after = pl.read_parquet(staging / "predictions" / migrated / "predictions.parquet")
         recorded = row["artifact_digest"]
@@ -1412,26 +1446,26 @@ def _rewrite_prediction_coverage(
             raise FoldRenumberRefusal(
                 f"prediction {stored} does not match its recorded artifact digest"
             )
-        was = evaluate_prediction_coverage(before, before)
-        if (
-            was.expected_key_digest != row["expected_key_digest"]
-            or was.actual_key_digest != row["actual_key_digest"]
-        ):
+        rendered = None
+        for legacy in (False, True):
+            keys = _prediction_key_frame(before, legacy=legacy)
+            if value_digest(keys, tuple(keys.columns)) == row["expected_key_digest"]:
+                rendered = legacy
+                break
+        if rendered is None:
             raise FoldRenumberRefusal(f"prediction {stored} coverage digests do not reproduce")
-        now = evaluate_prediction_coverage(after, after)
+        renderings["legacy" if rendered else "current"] += 1
+        keys = _prediction_key_frame(after, legacy=rendered)
+        digest = value_digest(keys, tuple(keys.columns))
         updates.append(
-            (
-                now.expected_key_digest,
-                now.actual_key_digest,
-                value_digest(after) if recorded is not None else None,
-                migrated,
-            )
+            (digest, digest, value_digest(after) if recorded is not None else None, migrated)
         )
     db.executemany(
         "UPDATE prediction_coverage SET expected_key_digest = ?, actual_key_digest = ?, "
         "artifact_digest = ? WHERE prediction_hash = ?",
         updates,
     )
+    return renderings
 
 
 def _rewrite_staged_registry(staging: Path, original: Path, plan: RenumberPlan) -> None:
@@ -1445,7 +1479,7 @@ def _rewrite_staged_registry(staging: Path, original: Path, plan: RenumberPlan) 
             _rename_identities(db, "backtest", plan.backtest_map)
             _rename_identities(db, "population", plan.population_map)
             _rewrite_documents(db, plan, staging)
-            _rewrite_prediction_coverage(db, plan, staging, original)
+            plan.coverage_renderings = _rewrite_prediction_coverage(db, plan, staging, original)
             _record_migrations(db, plan)
             db.commit()
         except Exception:

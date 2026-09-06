@@ -318,3 +318,23 @@ def test_stored_fold_ids_move_and_the_sentinel_stays(tmp_path) -> None:
         moved = dict(db.execute("SELECT ic, fold_id FROM fold_metrics").fetchall())
     # Each row keeps its measurement and takes the id its window now carries; -1 keeps its own.
     assert moved == {0.0: 2, 1.0: 1, 2.0: 0, -1.0: -1}
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_the_key_digest_is_recomputed_under_the_rendering_that_produced_it(legacy) -> None:
+    """Both renderings a stored coverage digest can have been taken under.
+
+    `completeness` normalizes a temporal key to microsecond UTC before rendering it; rows
+    registered before that carry a plain string cast. Recomputing under the wrong one would
+    move the digest for a reason that has nothing to do with the fold ids.
+    """
+    from case_studies.utils.registry.fold_renumbering import _prediction_key_frame
+
+    frame = pl.DataFrame(
+        {"symbol": [1, 2], "timestamp": ["2016-01-29", "2016-01-29"], "fold": [0, 1]}
+    ).with_columns(pl.col("timestamp").str.to_date())
+    rendered = _prediction_key_frame(frame, legacy=legacy)
+    assert rendered.columns == ["symbol", "timestamp", "fold_id"]
+    assert rendered["timestamp"].to_list() == (
+        ["2016-01-29", "2016-01-29"] if legacy else ["2016-01-29 00:00:00.000000"] * 2
+    )
