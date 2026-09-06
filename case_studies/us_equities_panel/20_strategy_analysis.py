@@ -189,7 +189,6 @@ print(f"Selected validation backtest: {selected_validation.hash}")
 # carried in by hand.
 
 # %% tags=["results"]
-
 selected_record = selected_validation.registry_record()
 selected_prediction = study.results.open(selected_record["prediction_hash"])
 selected_prediction_record = selected_prediction.registry_record()
@@ -241,7 +240,6 @@ selection_evidence = candidate_catalog.join(
 # member.
 
 # %% tags=["results"]
-
 if selection_evidence.height != len(validation_set.members):
     raise ValueError("validation set contains incomplete selection evidence")
 if set(selection_evidence["backtest_hash"]) != set(validation_set.members):
@@ -301,7 +299,6 @@ if holdout_prediction.registry_record()["training_hash"] != holdout_training.has
 # a run that came back with the validation hash did not refit.
 
 # %% tags=["results"]
-
 selected_label = selected_training.spec()["label"]
 selected_checkpoint = (
     selected_prediction_record["checkpoint_kind"],
@@ -480,7 +477,6 @@ validation_to_benchmark = validation_pairs.filter(
 # carry the label the selected configuration was fitted on.
 
 # %% tags=["results"]
-
 benchmark_prefix = f"side_ew:{CASE_STUDY_ID}:{selected_label}"
 if any(
     not frame["benchmark_hash"][0].startswith(benchmark_prefix)
@@ -561,7 +557,6 @@ for period, result in (
 # returns; the bottom row shows the decline from each window's running peak.
 
 # %% tags=["results"]
-
 fig, axes = plt.subplots(2, 2, figsize=(12, 7), sharex="col")
 summary = {}
 for column, period in enumerate(("validation", "holdout")):
