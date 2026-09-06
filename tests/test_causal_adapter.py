@@ -951,3 +951,48 @@ def test_naming_the_notebook_records_provenance_without_moving_the_identity(
     assert named.spec["provenance"]["notebook_path"] == "11_causal_dml"
     assert "notebook_path" not in unnamed.spec["provenance"]
     assert named.spec["provenance"]["entry_point"] == "case_studies.utils.causal"
+
+
+def test_the_registered_row_names_the_notebook_not_the_module(tmp_path, monkeypatch) -> None:
+    """`causal_runs.notebook` must answer which notebook ran, and the module is not an answer.
+
+    This path used to write the literal `"case_studies.utils.causal"` into that column, which
+    `spec_json.provenance.entry_point` already carries and which every `*_causal_dml` notebook
+    shares. The other writer, `register_causal_run`'s direct callers, writes the stem - so one
+    notebook appeared in the registry as two populations. `us_firm_characteristics` holds three
+    rows each way today.
+
+    A column, not part of the spec, so it cannot move `causal_hash` - pinned separately by
+    `test_naming_the_notebook_records_provenance_without_moving_the_identity`.
+    """
+    import sqlite3
+
+    from case_studies.utils import causal as causal_module
+
+    study, label, _frame = _causal_fixture(tmp_path, monkeypatch)
+    # The fit itself is not what is under test and the fixture panel is too short to run a
+    # canonical five-fold DML, so the analysis is canned the way the supersedes tests can it.
+    # What is under test is the value the registration writes into one column.
+    monkeypatch.setattr(
+        causal_module,
+        "run_dml_analysis",
+        lambda *a, **k: {
+            "dml_result": {"theta": 0.02, "se_hac": 0.01, "n_obs": 120},
+            "p_value_hac": 0.04,
+            "naive_effect": 0.03,
+            "confounding_bias_pct": 50.0,
+            "refutation": {"empirical_p": 0.1, "n_successful": 100},
+            "started_at": "2026-08-15T00:00:00+00:00",
+            "elapsed_s": 1.0,
+        },
+    )
+
+    result = study.causal(method="dml", label=label.name, notebook="09_causal_dml").run()
+
+    with sqlite3.connect(study.storage_root("canonical") / "run_log" / "registry.db") as db:
+        stored = db.execute(
+            "SELECT notebook FROM causal_runs WHERE causal_hash = ?", (result.hash,)
+        ).fetchone()
+
+    assert stored is not None, "the run registered no causal row"
+    assert stored[0] == "09_causal_dml"

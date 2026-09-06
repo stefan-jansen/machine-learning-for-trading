@@ -1771,7 +1771,14 @@ def run_resolved_causal_request(
         refutation_n_successful=int(refutation_n) if refutation_n is not None else None,
         refutation_placebo_json=_placebo_draws_json(refutation),
         spec_json=canonical_json(spec),
-        notebook="case_studies.utils.causal",
+        # `causal_runs.notebook` says which notebook produced the row, and this path used to
+        # write the module string - which `spec_json.provenance.entry_point` already carries,
+        # and which every causal notebook shares. `us_firm_characteristics` shows the result:
+        # three rows under `09_causal_dml` from `register_causal_run`'s direct callers and
+        # three under `case_studies.utils.causal` from this one, one notebook answering as two
+        # populations. NULL when the request names no notebook, because a wrong name is worse
+        # than none. A column, not part of the spec, so it cannot move `causal_hash`.
+        notebook=(spec.get("provenance") or {}).get("notebook_path"),
         started_at=results.get("started_at"),
         elapsed_s=results.get("elapsed_s"),
         case_dir=case_dir,
