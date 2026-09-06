@@ -697,8 +697,8 @@ print(
 # by their position here would make this figure's "Fold 0" a different fold from the one the rest of
 # the case study reports.
 #
-# The figure draws the rows earliest-first, so the picture runs forward in time whatever the ids do,
-# and labels each row with its own id. Which end of the sample carries the low ids is the splitter's
+# The figure draws the rows earliest-first down the axis, so the picture runs forward in time as the
+# eye moves down whatever the ids do, and labels each row with its own id. Which end of the sample carries the low ids is the splitter's
 # convention rather than something this notebook chooses, so the line below reads it off the
 # boundaries rather than stating it here - a sentence naming a direction goes silently false if the
 # convention changes, and the ids are what the rest of the case study joins on.
@@ -745,12 +745,12 @@ add_message_title(
 )
 show_with_alt(
     fig,
-    "One horizontal row per walk-forward fold, drawn earliest-first so the bottom row is the "
-    f"earliest window and the top row the last one before the holdout: fold {_earliest_fold} at "
-    f"the bottom and fold {_latest_fold} at the top. Each row is a long dark training bar "
-    "followed immediately by a short lighter validation bar. Reading upward, both bars shift "
-    "later in time, so the folds roll forward across the sample. A shaded holdout block stands "
-    "at the right-hand edge, and no fold's validation bar reaches it.",
+    "One horizontal row per walk-forward fold, drawn earliest-first down the axis so the top row "
+    f"is the earliest window and the bottom row the last one before the holdout: fold "
+    f"{_earliest_fold} at the top and fold {_latest_fold} at the bottom. Each row is a long dark "
+    "training bar followed immediately by a short lighter validation bar. Reading downward, both "
+    "bars shift later in time, so the folds roll forward across the sample. A shaded holdout "
+    "block stands at the right-hand edge, and no fold's validation bar reaches it.",
 )
 
 # %% [markdown]
