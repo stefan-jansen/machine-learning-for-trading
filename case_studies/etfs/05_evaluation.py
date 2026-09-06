@@ -271,7 +271,8 @@ display(inventory)
 # makes for the model notebooks, so a fold number denotes the same pair of date ranges
 # wherever it appears.
 #
-# The folds step backwards from the holdout boundary, so fold 0 is the most recent one.
+# The folds are numbered chronologically, so fold 0 is the earliest and the highest number is
+# the one that ends against the holdout boundary.
 # Each validation range stops far enough before the boundary that the forward return of
 # its last date has finished before the holdout opens.
 

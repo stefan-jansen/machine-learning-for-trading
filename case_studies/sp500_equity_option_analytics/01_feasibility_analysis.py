@@ -814,9 +814,9 @@ print(
 # both a solved implied volatility and a share price. That is the timeline the later stages build
 # their folds from as well, because they read the label file, which is written on the same dates
 # and stops a horizon short of the sample's end since a forward return needs sessions after it. The
-# splitter numbers folds from zero backwards from the most recent, so fold 0 is the one that ends
-# against the holdout and fold 1 the earlier one. The figure draws them earliest-first and labels
-# each with that number, which is why the labels count down; every later stage prints the same ones.
+# splitter numbers folds chronologically, so fold 0 is the earlier one and fold 1 ends against the
+# holdout. The figure draws them earliest-first and labels each with that number, so the labels
+# count up alongside the dates; every later stage prints the same ones.
 # It draws the boundaries the splitter returned rather than recomputing them.
 #
 # The purge gap is narrow next to training blocks measured in years, so counting it off the session

@@ -4351,7 +4351,7 @@ requires-dist = [
     { name = "matplotlib", specifier = ">=3.8" },
     { name = "ml4t-backtest", specifier = ">=0.1.3" },
     { name = "ml4t-data", specifier = ">=0.1.2" },
-    { name = "ml4t-diagnostic", specifier = ">=0.1.2" },
+    { name = "ml4t-diagnostic", specifier = ">=0.1.4" },
     { name = "ml4t-engineer", specifier = ">=0.1.3" },
     { name = "ml4t-live", specifier = ">=0.1.0" },
     { name = "ml4t-models", specifier = ">=0.1.2" },
@@ -4481,7 +4481,7 @@ wheels = [
 
 [[package]]
 name = "ml4t-diagnostic"
-version = "0.1.2"
+version = "0.1.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "arch" },
@@ -4499,9 +4499,9 @@ dependencies = [
     { name = "statsmodels" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/35/a1/48352ac1dbd71d4b68eabb45e975e8d39407887807af6a7bacee38171cac/ml4t_diagnostic-0.1.2.tar.gz", hash = "sha256:16679a627e990462353b63dc29712916b6bf9a8038010dc19077ac2cd5325d16", size = 6765531, upload-time = "2026-08-17T19:44:40.384Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/19/e3/fabe85b0a0949ca763e651af721d14d98e27edf25c7cd51f233b6f9fdf88/ml4t_diagnostic-0.1.4.tar.gz", hash = "sha256:08ef361a4c8eeff94934ef074f1d295e981bc51d07cb96c8be9984e31f6706b0", size = 6768618, upload-time = "2026-09-05T18:40:02.909Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f0/d6/f10459d4f4e6bfa09c161d93f46fcec4e704d70f7f6efb75bf93bec863c8/ml4t_diagnostic-0.1.2-py3-none-any.whl", hash = "sha256:cdf49487c866865c5ae7510b93330197f013e1462c805d2e7b07f84372bbdcb6", size = 944350, upload-time = "2026-08-17T19:44:38.369Z" },
+    { url = "https://files.pythonhosted.org/packages/37/2d/b679287ebffd4f1db490c66b4320726741dbe69ff96a1504a62e75c0d5e2/ml4t_diagnostic-0.1.4-py3-none-any.whl", hash = "sha256:c6db745bee1fa61ca1de22e258e78155dce2a7b6c680f901824229358dc2f7e6", size = 944569, upload-time = "2026-09-05T18:40:00.673Z" },
 ]
 
 [[package]]
@@ -5870,7 +5870,7 @@ name = "pip-system-certs"
 version = "5.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pip" },
+    { name = "pip", marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7d/6a/563b05a4f6c9ddc205c98bb413e74221368efb98b8fb9cca96b578b8930c/pip_system_certs-5.3.tar.gz", hash = "sha256:19c8bf9957bcce7d69c4dbc2d0b2ef13de1984d53f50a59012e6dbbad0af67c6", size = 6395, upload-time = "2025-10-16T06:14:55.217Z" }
 wheels = [
