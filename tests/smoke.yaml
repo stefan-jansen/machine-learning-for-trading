@@ -981,3 +981,36 @@ case_studies/fx_pairs/19_strategy_analysis:
   blocked_by: 1045
   blocked_reason: >-
     Needs a superseding declaration for its candidate set, and has no way to supply one.
+
+# Stage 04. The file's standard starts at stage 06 - tests/test_smoke_configs.py's
+# FIRST_SMOKE_STAGE pins that, and its UNDECLARED ratchet is scoped to 06 and later - so this
+# entry is declared rather than required. Spec criterion 11 asks for a smoke configuration per
+# stage per case study, and stage 04 is where us_equities_panel's conversion landed, so the
+# configuration that proves the conversion belongs in the same file as every other one rather
+# than in a session's notes.
+case_studies/us_equities_panel/04_model_based_features:
+  # The reduced data is the reduction. 04 takes no EXECUTION_TIER and writes no registry row:
+  # it is a feature stage, so what it produces is an artifact and a sidecar, and the reduced
+  # CI checkout of the equity archive - 56 symbols against 3,199 - is what makes it cheap.
+  # These two parameters are exactly what tests/overrides.yaml declares for the same notebook.
+  #
+  # START_DATE has to match 02_labels'. 04 asserts that the panel it loads digests to the
+  # value 02_labels recorded against the label file it scores against, and the 1990-01-01
+  # default reads a different panel than labels written from 2000-01-01.
+  #
+  # XS_MIN_STOCKS is a floor on the cross-section a daily return distribution is summarized
+  # from. At the default 50 nearly every date in a 56-symbol checkout is dropped and the
+  # clustering has nothing to fit on.
+  parameters:
+    START_DATE: '2000-01-01'
+    XS_MIN_STOCKS: 25
+  writes: []
+  measured_s: 71
+  note: >-
+    measured_s is the 02_labels-then-04 chain, not 04 alone, and that is a statement about the
+    fixture rather than about the notebook. 04 reads labels/fwd_ret_1d.parquet.digest.json and
+    the CI intermediates carry the label parquets without their digest sidecars, so 04 alone
+    raises FileNotFoundError on a workspace 02 has not written in the same session. Measured
+    2026-09-05 at 64.6, 69.1 and 71.3 s for the chain over three runs, peak RSS 1.5 GB. This
+    entry therefore does NOT demonstrate criterion 13, self-containment; the sidecar gap is the
+    fixture's and is owned by the session that regenerates it.

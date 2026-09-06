@@ -200,6 +200,32 @@ model_based:
     # buys: the fitted persistence of a US equity moves slowly, so a faster cadence would
     # multiply the fits without moving the emitted volatility.
     refit_every: 63
+    # The specification the maximum-likelihood fit estimates, declared here rather than
+    # written into the notebook's call, so what "the GARCH feature" names on this panel is
+    # readable without opening the code. These five are the argument names `arch_model` takes
+    # and 04 passes them through unchanged.
+    #
+    # This is the plain GARCH(1,1)-Normal baseline: a constant mean, a symmetric variance
+    # recursion of order (1,1), and Gaussian innovations. No key here differs from that
+    # baseline, so this case study declares no deviation.
+    #
+    # `o: 0` is the symmetric model. Setting it to 1 adds the leverage term - down days
+    # raising next-day variance more than up days of the same size - which is what
+    # sp500_options and sp500_equity_option_analytics fit on their index series. It is not
+    # fitted here because a broad cross-section of single stocks is where the term is least
+    # reliably identified: many names carry too few large down moves in a two-year estimation
+    # window to separate gamma from alpha, and Section 4b's persistence spread is already the
+    # widest thing the schedule has to hold steady.
+    #
+    # `dist: Normal` is the likelihood, not the filter. It changes which coefficients the
+    # optimizer returns and changes no step of the variance recursion those coefficients are
+    # then run through.
+    mean: Constant
+    vol: GARCH
+    p: 1
+    o: 0
+    q: 1
+    dist: Normal
 
 modeling:
   gbm:
