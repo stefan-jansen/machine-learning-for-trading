@@ -23,6 +23,19 @@
 #
 # Causal DML is reported separately because it estimates a treatment effect rather than a
 # cross-sectional prediction configuration.
+#
+# **Why completeness is established before any number is read.** Every table here is a comparison,
+# and a comparison across populations that do not cover the same rows is not a comparison at all:
+# a model scored on an easier subset of the panel looks better for a reason that has nothing to do
+# with the model. So the notebook refuses before it reports. It requires each prediction to be
+# complete against its own registered eligibility contract, and requires the four populations to
+# share one cross-validation identity, because two models cut on different folds have seen
+# different training data and their diagnostics are not on one scale.
+#
+# **What a reader gets from this page.** A description of what was fitted and how the resulting
+# predictions behave, at the grain the pipeline actually decides on, which is the configuration
+# and its checkpoint together. What a reader does not get is a winner. Nothing here is ranked and
+# nothing here is chosen; that happens downstream, on backtests, and the separation is deliberate.
 
 # %%
 """Analyze complete S&P 500 options model populations."""
@@ -92,6 +105,14 @@ if cv_identities.is_empty() or cv_identities.n_unique() != 1:
 # the same panel - which is a property of the model class, not a defect. Requiring one eligibility
 # digest across all four populations would fail here for a correct run. What must hold is that every
 # prediction sharing an eligibility contract agrees on its dimensions exactly.
+#
+# **The grouping is what makes the diagnostics readable rather than misleading.** Two checkpoints
+# in the same group were scored on identical rows, so the difference between their numbers is the
+# models. Two checkpoints in different groups were not, and the difference between those numbers
+# is the models and the rows together, with no way to separate them from this table. The audit
+# below prints one row per group so that a reader can see which comparisons are available before
+# making one, rather than discovering afterwards that a sequence model was scored on the subset
+# of the panel where a lookback window existed.
 
 # %%
 coverage = coverage.join(
@@ -125,6 +146,32 @@ population_audit
 #
 # The table retains each checkpoint as a separate row. It supports descriptive comparison only;
 # strategy selection occurs after every row has an equal-weight validation backtest.
+#
+# **What the four columns are, and the grain they are aggregated at.** The information coefficient
+# is the rank correlation between a model's predictions and the realised label across the symbols
+# priced at one decision time. Those are averaged within a fold to give the fold's IC, and the
+# columns here aggregate over *folds*, not over decision times: `ic_mean` is the mean of the fold
+# ICs, `ic_std` their dispersion across folds, and `pct_positive` the share of folds whose IC came
+# out above zero.
+#
+# **`ic_t` is a fold-level diagnostic and is not the significance test.** It divides `ic_mean` by
+# the standard error implied by that fold-level dispersion, so with a handful of folds it rests on
+# a handful of numbers and is easily moved by one of them. The inferential statistic is `ic_t_hac`,
+# computed on the daily IC series with a HAC correction at the label's overlap, because overlapping
+# labels make neighbouring days dependent and an uncorrected error is too small. Read `ic_t` as a
+# description of how consistent the folds were, never as evidence that the mean is real.
+#
+# **Rank correlation is the point of the choice.** It is invariant to any increasing transform of
+# the predictions, so a model whose values are badly scaled but correctly ordered scores the same
+# as one that is calibrated, and a squared-error fit is not rewarded for matching the magnitude of
+# a heavy tail it was never going to match. What that invariance costs is any information about
+# the size of the move, which is the reason the number below cannot stand in for a return.
+#
+# **Why none of it selects.** A rank correlation says nothing about whether the ordering survives
+# position sizing, turnover and cost, and those are what decide whether a strategy makes money.
+# Selection is therefore by best validation backtest Sharpe, taken over configurations that each
+# already have an equal-weight backtest, with the checkpoint part of the configuration's identity
+# rather than a detail of how it was fitted. A high IC here is a reason to look, never a result.
 #
 # Each IC is computed on its own prediction's eligible rows, so two rows are directly comparable
 # only when the same eligibility group above covers both. A sequence checkpoint and a linear
@@ -212,6 +259,21 @@ fig.show()
 #
 # The causal result is not mixed into the predictive population or its checkpoint summaries.
 #
+# **It answers a different question from everything above.** The models above rank symbols against
+# each other at a decision time; the estimate below asks what happens to the outcome when the
+# treatment moves, holding the controls fixed. Double machine learning gets there by fitting two
+# nuisance models - one predicting the outcome from the controls, one predicting the treatment
+# from them - and regressing the parts neither explains against each other, so that the effect is
+# estimated on what is left after the controls are accounted for rather than on the raw series.
+#
+# **Two standard errors are reported and they are not interchangeable.** The HAC standard error
+# corrects for the serial correlation that overlapping labels induce, which is what makes the
+# conventional error too small on this data. The placebo p-value is a permutation test: the
+# treatment is shuffled in blocks long enough to preserve that serial dependence, the estimate is
+# recomputed, and the reported value is the share of shuffles reaching the observed effect. The
+# first asks whether the estimate is distinguishable from zero given the dependence; the second
+# asks whether the procedure would have produced it from a treatment that carries no signal.
+#
 # It is resolved as canonical whatever tier this notebook runs at, because the populations above
 # are canonical whatever tier this notebook runs at. Asking a preview run for a preview causal
 # artifact would make the notebook fail unless `10_causal_dml` happened to have run in the same
@@ -238,3 +300,16 @@ causal_summary
 # %% [markdown]
 # Predictive diagnostics and the causal estimate are now available for reader inspection. Neither
 # table changes the complete prediction population or selects a strategy.
+#
+# **Reading the two tables together, and the trap in doing so.** They describe the same data from
+# two directions, and neither confirms the other. A family can rank symbols well and carry no
+# causal effect on the treatment studied here, because ranking exploits any stable association
+# while the estimate is restricted to what survives the controls. The reverse also happens: a
+# treatment effect that is real and small can be invisible to a rank correlation computed across
+# a cross-section it barely moves. Agreement between the two is worth noticing and is not
+# evidence, and disagreement is not a defect in either.
+#
+# **What carries forward.** Only the population itself. The diagnostics are read and left here;
+# the next stage takes every configuration in the population, gives each an equal-weight backtest,
+# and selects on that. Anything a reader concludes from the numbers above should be held until
+# those backtests exist, because the ordering above and the ordering there routinely differ.

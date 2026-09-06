@@ -14,17 +14,52 @@
 # ---
 
 # %% [markdown]
-# # Model diagnostics for perpetual-funding signals
+# # What the fitted models can and cannot tell you about funding
 #
-# This analysis reads only current, complete canonical prediction catalog rows. A row retains its
-# training, prediction, fold, and checkpoint identity. IC, AUC, and loss diagnose models; they do
-# not select the trading configuration. Selection occurs after validation backtests and uses Sharpe.
+# Notebooks 06 through 11 each fitted a family and published its validation predictions. This one
+# reads all of them together and asks what they say - and, as importantly, what they are not
+# entitled to say.
 #
-# **Learning objectives**
+# **Three metrics appear here and none of them selects anything.**
 #
-# - audit the complete model and checkpoint population through the prediction catalog;
-# - compare diagnostic metrics without using them as the strategy selection rule; and
-# - interpret causal evidence separately from predictive performance.
+# The **information coefficient** is the rank correlation, on each settlement, between the
+# predictions and the returns that followed, averaged over settlements. It asks whether the model
+# ordered the perpetuals correctly. It is silent on how far apart they were: a model that ranks
+# perfectly and separates the top from the bottom by a basis point scores the same as one that
+# separates them by a percent.
+#
+# **AUC** applies to the two direction labels rather than to returns. It is the probability that a
+# randomly chosen settlement the model scored higher went on to rise, against one it scored lower.
+# Half is a coin. It measures ordering too, so it is silent about calibration - a model whose
+# probabilities are all near one half in the right order scores well.
+#
+# **Log loss** is the one that reads the probabilities as probabilities. It punishes confidence in
+# the wrong direction far more than hesitation, so a model can improve its AUC and worsen its log
+# loss at the same time by ordering better while becoming overconfident.
+#
+# **Why none of them chooses the strategy.** Every one measures the signal in isolation, on the
+# settlements where it happened to be scored, before any position is sized, any perpetual is
+# funded, or any cost is paid. A model with the highest IC can lose to a lower-ranked one after
+# funding and turnover, and on this case study it can lose for a reason specific to perpetuals:
+# funding is paid by whoever holds the position at settlement, so a signal that flips often pays
+# it repeatedly. Selection therefore happens in [`13_backtest`](13_backtest.ipynb) and after, on
+# validation backtest Sharpe. The numbers here are for understanding what was fitted.
+#
+# **Every checkpoint stays a row.** The deep-learning families save weights every 25 epochs, so a
+# configuration arrives here as eight scoreable models rather than one. They are not collapsed to
+# a per-configuration best: taking the best epoch of each family and comparing those is choosing
+# after seeing the answer, and the epoch that wins on validation is not the one a reader could
+# have picked in advance.
+#
+# **Learning objectives.** By the end of this notebook you will be able to:
+#
+# - Say what IC, AUC and log loss each measure, and name a model that would score well on one
+#   while scoring badly on another.
+# - Explain why a ranking metric cannot decide a trading configuration, and what specifically
+#   about perpetual funding widens that gap.
+# - Read a distribution that keeps every checkpoint, and say why collapsing it to a per-family
+#   best would flatter whichever family saves the most.
+# - Say why the causal estimate is reported beside these tables rather than among them.
 #
 # **Book reference:** Chapters 11 to 19, model comparison and diagnostics.
 #
@@ -154,10 +189,22 @@ show_plotly_with_alt(
 )
 
 # %% [markdown]
-# ## Separate causal result
+# ## The causal estimate, reported beside the diagnostics and not among them
 #
-# The DML estimand is not placed in the predictive catalog. A reader-facing label selection must
-# resolve to exactly one current canonical causal identity.
+# The double machine learning estimate from [`11_causal_dml`](11_causal_dml.ipynb) answers a
+# different question from every metric above. Those ask how well a model orders perpetuals it did
+# not train on. This asks what would happen to the return if the treatment were changed, holding
+# the confounders fixed - a claim about an intervention, not about a ranking.
+#
+# The two do not convert into one another in either direction. A model with a high IC has found
+# something that predicts, which may be an effect, a proxy for one, or a regularity with no causal
+# content at all. An effect estimate that is large and well identified need not predict well,
+# because most of the variation in funding is not the treatment. Putting them in one table would
+# invite exactly that arithmetic, so the estimate is reported on its own with its own uncertainty.
+#
+# `refutation_p` is the placebo check rather than a significance test: it asks how often an
+# estimate this large appears once the treatment is disrupted. It is nullable by contract, and a
+# run that did not reach a verdict is reported as not having one.
 
 # %% tags=["results"]
 causal = CausalResult.one(study, label="fwd_ret_8h", execution_tier=EXECUTION_TIER)

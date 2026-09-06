@@ -19,11 +19,21 @@
 # **Chapter 19 — Risk Management**
 #
 # This notebook tests **position-level risk controls** on the top
-# allocation-stage combos via the ml4t-backtest engine with 15-minute OHLCV
-# bars. Three rule families are swept: stop-loss, trailing stop (including
-# MAE-calibrated variants), and time-exit. Each rule exits an individual
-# position without halting the rest of the book, so the strategy continues
-# trading after a single name's exit.
+# allocation-stage combos via the ml4t-backtest engine. Three rule families are
+# swept: stop-loss, trailing stop (including MAE-calibrated variants), and
+# time-exit. Each rule exits an individual position without halting the rest of
+# the book, so the strategy continues trading after a single name's exit.
+#
+# **Two clocks run here, and every threshold below is stated in the faster one.**
+# The strategy *decides* every fifteen minutes - `decision.cadence_by_label` in
+# `config/setup.yaml`, which is the horizon `fwd_ret_15m` measures. The engine
+# *watches* every minute: `config/backtest/base.yaml` declares
+# `calendar.data_frequency: 1m`, and the broker advances a position's `bars_held`
+# once per price bar it processes. A risk rule is evaluated on the watch clock,
+# not the decision clock, and that is the whole reason these controls can express
+# anything the signal does not already say. A stop that could only fire at the
+# next rebalance would fire exactly when the strategy was going to reconsider the
+# position anyway.
 #
 # Portfolio-level kill switches (max-drawdown breaker, daily-loss limit) are
 # treated as governance instruments in Ch19 §19.8 and are NOT swept as
@@ -143,12 +153,30 @@ prices = load_backtest_prices_for(
 )
 
 # %% [markdown]
-# ### MAE/MFE-Calibrated Trailing Stops
+# ### MAE-Calibrated Trailing Stops
 #
-# Trailing stops are calibrated from historical maximum adverse excursion (MAE)
-# and maximum favorable excursion (MFE) distributions. The engine supports
-# per-position stop mechanisms, so calibrated thresholds are applied directly
-# in the risk overlay sweep below.
+# The thresholds declared in `setup.yaml` are round numbers, chosen before
+# anything was measured. The quantity that would justify one is a property of the
+# price paths themselves: the **maximum adverse excursion** is the worst drawdown
+# reached over a holding horizon. A stop placed inside the body of that
+# distribution cuts positions that would have recovered; one placed outside its
+# tail never fires at all.
+#
+# `calibrate_trailing_stops` converts MAE percentiles - the 10th and the 25th, at
+# 10-, 20- and 40-bar horizons - into thresholds named `trailing_mae_p10_h20` and
+# so on, and the cell below **adds** them to the declared grid rather than
+# replacing it. Both are then swept, which is what lets the round numbers and the
+# calibrated ones be compared on the same base instead of one being asserted to
+# be better.
+#
+# Maximum favorable excursion is the mirror quantity - the best unrealized gain
+# over the same horizon - and it is worth knowing about because it is what a
+# take-profit would be calibrated from. It does not enter this notebook: the
+# calibration reads the adverse side only.
+#
+# It is skipped for the vectorized path and wherever the loaded frame carries no
+# `close` column, because an excursion is a statement about the path a position
+# took between entry and exit and neither of those can see the path.
 
 # %%
 _position_grid = get_position_risk_controls(CASE_STUDY_ID)
@@ -178,16 +206,45 @@ if MAX_RISK_VARIANTS > 0:
 # For each top combo, run one baseline (no risk rules) then one backtest
 # per position-level risk control variant:
 #
-# - **Trailing stop** — exits individual positions when price retraces a
-#   percentage from its high-water mark since entry. Includes MAE-calibrated
-#   variants derived from the prices loaded above.
-# - **Stop-loss** — exits when a position's unrealized loss exceeds a threshold.
-# - **Time exit** — closes a position after a fixed number of bars.
+# The book is long-short - `get_backtest_config("nasdaq100_microstructure").long_short`
+# is `True` - so each rule below has two sides, and the engine implements both.
+#
+# - **Stop-loss** — places a level a fixed percentage away from the position's
+#   base price on the losing side and exits when the bar's range touches it:
+#   below the base and triggered by the bar's low for a long, above it and
+#   triggered by the bar's high for a short. The base is the fill price by
+#   default and the signal price where `stop_level_basis` says so, and the
+#   trigger is intrabar rather than on the close, so a bar that pierces the level
+#   and recovers still exits. It is a statement about absolute loss against that
+#   base and it does not care what the position did before: a long that rose four
+#   percent and gave it all back is not down against its base, and a stop-loss
+#   does not see it.
+# - **Trailing stop** — exits when price retreats by the threshold from the best
+#   level reached *since entry*: the highest price for a long, the lowest for a
+#   short. It is the same instrument measured against a moving reference, so it
+#   converts an unrealized gain into a floor and it does see the long that gave
+#   four percent back. The water mark is the previous bar's by default, which is
+#   what `TrailStopTiming` selects. The declared grid runs 1% to 20%,
+#   wider than the stop-loss grid's 3% to 15%, because the quantity it measures
+#   is a retreat from a high-water mark rather than a drawdown from entry and the
+#   two are not on the same scale.
+# - **Time exit** — closes a position after a fixed number of watch bars, which
+#   on this case study's one-minute feed means minutes. The declared grid is 10,
+#   20 and 40 of them, and it straddles the decision cadence deliberately. A time
+#   exit is a CAP on holding duration and never an extension: the strategy goes
+#   on rebalancing, and a name dropped from the targets is closed whether or not
+#   its cap has been reached. So `time_exit_10` is the only one of the three that
+#   binds on every position it is applied to - it closes five minutes before the
+#   fifteen-minute outcome the position was entered on has even resolved. The
+#   other two bind only on a position the signal would otherwise have carried
+#   through one further decision, or through several.
 #
 # Each rule exits one position at a time; the strategy continues holding
-# everything else and re-enters fresh names on the next rebalance. At
-# 15-minute cadence, every exit incurs round-trip cost — tighter thresholds
-# trigger more often and compound that drag.
+# everything else and re-enters fresh names on the next rebalance. Every
+# triggered exit is a round trip the signal did not ask for, so it is paid for
+# in spread and impact whether or not the loss it avoided was real. That is the
+# trade every row of the sweep is making, and it is why a rule that cuts
+# drawdown can still cost Sharpe.
 
 # %% [markdown]
 # ### Run a single risk-overlay backtest
@@ -281,11 +338,25 @@ print(f"\nRisk sweep complete: {n_done} backtests")
 # This section is **read-only** — queries the registry for risk overlay
 # results and computes impact relative to the allocation-stage baseline.
 #
-# The key metric is `sharpe_delta`: the change in Sharpe from adding the
-# overlay. For intraday strategies, overly tight thresholds can trigger
-# frequently and reduce time-in-market enough to hurt Sharpe even when
-# they successfully cut drawdowns. The analysis identifies which thresholds
-# improve the risk/return trade-off and which cut too aggressively.
+# The key metric is `sharpe_delta`: the change in Sharpe from adding the overlay,
+# measured against the no-overlay Sharpe of the allocation the overlay was applied
+# to, matched on prediction and allocator. That baseline is what makes it a delta
+# rather than a ranking - each combination carries its own allocation method and
+# its own signal, and comparing an overlaid run against another combination's
+# baseline would attribute the difference between two strategies to the risk rule.
+#
+# Two columns move in opposite directions and both are reported. `max_drawdown`
+# is what the overlay is for, and a rule that does not reduce it is not doing its
+# job. `sharpe` is what it costs, through the round trips the exits add and
+# through the time out of the market between an exit and the next decision. For
+# an intraday strategy the second term is the one that bites: a tight threshold
+# on a one-minute watch clock can trigger on ordinary fifteen-minute fluctuation,
+# and each trigger buys a small reduction in drawdown at the price of a full
+# round trip.
+#
+# What transfers to another strategy is the gradient across thresholds - whether
+# the trade-off improves monotonically, turns at some threshold, or never
+# improves at all. The level of any single row does not.
 
 # %%
 from case_studies.utils.backtest_explorer import BacktestExplorer

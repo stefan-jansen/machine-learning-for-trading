@@ -633,6 +633,40 @@ case_studies/sp500_options/17_holdout_backtest:
 #
 # Primary label fwd_ret_1m. 08_latent_factors is an index over 08a through 08d, like cme's
 # 10_latent_factors, so it has nothing to reduce.
+#
+# The linear stage is 05_linear, not 06_linear: this case study has no model-based feature stage,
+# so every stage from the evaluation on is numbered one lower than the other eight.
+
+case_studies/us_firm_characteristics/05_linear:
+  parameters:
+    EXECUTION_TIER: preview
+    LABELS: ["fwd_ret_1m"]
+    POPULATION_NAME: smoke-linear
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 20, train_sample_frac: 0.5}
+  writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
+  measured_s: 19
+  note: >-
+    Which lever does the work, measured rather than assumed. Re-measured 2026-09-06 under
+    ml4t-diagnostic 0.1.4; an earlier set of figures taken under 0.1.2 is superseded and the
+    reason is worth knowing, because it is a property of #808 rather than of this notebook.
+    Holding the other two reductions fixed, against a 19 s baseline: dropping train_sample_frac
+    costs nothing (19 s), running all ten folds costs 8 s (27 s), and running the full universe
+    costs 8 s (27 s). So neither lever dominates and the notebook is cheap at every setting in
+    this grid.
+    Under 0.1.2 the same three runs gave 20, 25 and 39 s, which made the entity cap look like
+    the only lever that mattered. It was not the notebook that changed. #808 flipped the fold
+    order, so `folds: [0]` selected the NEWEST window before and selects the EARLIEST one now
+    (validating 2006-11-30 to 2007-09-28), and this panel's cross-section is much smaller in
+    2006 than in 2015. A full-universe run on the earliest fold is simply cheaper than one on
+    the latest. Any per-fold timing taken before #808 is measuring a different fold.
+    The refit-cadence lever that dominates a stage-04 smoke run - three fx_pairs symbols went
+    from 577 s to 139 s on refit_every alone - has no counterpart here: us_firm_characteristics
+    has no model-based feature stage, so there is no walk_forward_feature, no refit_every and no
+    optimizer inside a refit loop anywhere in the case study. The reductions are declared for
+    determinism and row count rather than to buy time.
+    Verified under 0.1.4: exit 0 in 19 s at 1.6 GB, 28 rows in each declared table, and
+    fold_metrics carries fold_id 0 alone, so `folds: [0]` restricts what is fitted and not only
+    what the identity declares.
 
 case_studies/us_firm_characteristics/06_gbm:
   parameters:
@@ -842,6 +876,50 @@ case_studies/sp500_equity_option_analytics/19_holdout_backtest:
     Reads the holdout prediction set 18_holdout_predictions produces, which cannot exist in a preview
     workspace for the reason recorded on that entry.
 
+# --- stage 04, the one stage below 06 that has a declaration ------------------------------------
+#
+# The smoke standard is written for stages 06 and later, which is where every other entry in this
+# file lives. nasdaq's 04 is here because its conversion onto `walk_forward_feature` and
+# `write_model_based` is the change criterion 7b is measured across, and a configuration that can
+# be re-run in a minute is what makes that a measurement rather than a claim. Nothing requires the
+# other case studies' stage 04s to be declared; `tests/test_smoke_configs.py` still only demands
+# stage 06 and later.
+
+case_studies/nasdaq100_microstructure/04_model_based_features:
+  parameters:
+    # WHICH LEVER DID THE WORK: the date range, not the symbol cap. Measured 2026-09-05 through
+    # nb-run.sh, both at three symbols: the full 2020-01-01..2021-12-31 range takes 285 s, and
+    # the quarter below takes 76 s. So cutting the universe from 115 names to 3 - a 38x cut -
+    # still leaves this notebook over the four-minute bound on its own, because its cost is per
+    # BAR rather than per refit. Three procedures each walk a symbol's minute series once, and
+    # the only one that fits anything fits a 120x4 least squares, which is arithmetic rather
+    # than a search. Roughly 55 s of the 76 is fixed - imports, the parquet scan and the four
+    # label timelines that resolve the folds - and neither lever touches it.
+    #
+    # `model_based.har.refit_every` is NOT the lever here, and the contrast with the case
+    # studies where it is worth recording: lengthening it would stop the smoke run exercising
+    # the per-bar refit path that `walk_forward_feature` was adopted for, and it would buy
+    # little, because a least-squares refit is cheap where an optimizer's search is not.
+    #
+    # The quarter has to reach past 2020-06-30 10:48, which is where fold 1's validation window
+    # opens: every readout in sections C, D and F is taken on validation rows, and a panel that
+    # stops short of them computes features nothing reports on.
+    MAX_SYMBOLS: 3
+    START_DATE: "2020-05-01"
+    END_DATE: "2020-07-31"
+    # WORKSPACE is appended by smoke-chain.sh, which supplies the throwaway directory. It is
+    # where the artifact goes; the labels and the minute panel are still read from the canonical
+    # store, so this is a reduced run of this notebook and not a run of a smaller case study.
+  # Stage 04 registers nothing. It writes an artifact, and what stands in for the registry check
+  # is the notebook's own reconciliation: row count, key uniqueness, no fold column, and every
+  # feature column Float32.
+  writes: []
+  measured_s: 76
+  # 3.6 GB `Maximum resident`, 2026-09-05, from the /usr/bin/time -v file of a three-symbol run
+  # that exited 0. The full 115-symbol sweep is entered at 30 GB in nb-run.sh's table, which a
+  # reduced run would otherwise wait for.
+  headroom_gb: 8
+
 # --- nasdaq100_microstructure -------------------------------------------------------------------
 #
 # Primary label fwd_ret_15m. Intraday, so the reductions are symbol caps rather than row samples -
@@ -1004,7 +1082,17 @@ case_studies/fx_pairs/19_strategy_analysis:
   writes: []
   blocked_by: 1045
   blocked_reason: >-
-    Needs a superseding declaration for its candidate set, and has no way to supply one.
+    Dies at cell 4 in resolve_solvent_carrier with "No validation rank-1 candidate for
+    fx_pairs (label_filter=None)", before it reads any candidate set. Reproduced 2026-09-05
+    at EXECUTION_TIER=preview, exit 1 after 7s. The branch that raises is `if not
+    candidates`, not `if ranked and not candidates`, so the resolver's query returned nothing
+    BEFORE any supersession filter ran - while the canonical registry holds 3,875
+    backtest_runs, 3,229 at stage='signal'. So this is fx's stage-06+ registry having no
+    in-force rankable candidate rather than a defect in this notebook, and the fx
+    regeneration resolves it by replacing that state. The issue previously described this as
+    a missing superseding declaration for the candidate set, which sent a reader hunting a
+    CandidateSet call that this notebook does not contain - it only reads, via
+    CandidateSet.one.
 
 # Stage 04. The file's standard starts at stage 06 - tests/test_smoke_configs.py's
 # FIRST_SMOKE_STAGE pins that, and its UNDECLARED ratchet is scoped to 06 and later - so this

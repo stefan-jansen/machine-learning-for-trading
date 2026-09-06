@@ -411,10 +411,16 @@ features:
 #   - per-allocator overrides in backtest.sweep.allocators
 #
 # ``allocator_lookback`` is the bars-of-underlying-price window applied
-# uniformly to every moment-based allocator. 15-min bars (26 bars/day);
-# 520 bars ≈ 20 trading days ≈ 1 month of intraday coverage. ``periods_per_year``
-# annualizes Sharpe at daily-equivalent grain (252); allocator windows are
-# measured in raw 15-min bars regardless.
+# uniformly to every moment-based allocator. It is counted in ROWS OF THE PRICE
+# FRAME, and that frame is one-minute: ``config/backtest/base.yaml`` declares
+# ``calendar.data_frequency: 1m``, ``load_backtest_prices_for`` returns bars
+# measured at 60-second spacing, and ``_compute_rolling_vol`` applies
+# ``rolling_std(vol_window)`` to those rows with no resampling. So 520 is 520
+# MINUTES - about 1.3 regular sessions - and not the 20 trading days this comment
+# claimed until 2026-09-06. The value is unchanged; what was wrong was the
+# sentence describing it, which read the decision cadence as the bar size.
+# ``periods_per_year`` annualizes Sharpe at daily-equivalent grain (252),
+# independently of this window.
 #
 # Expensive allocators (RP/HRP/MVO_LW) are dropped via expensive_allocators_skip
 # below — covariance estimation at 15-min cadence is prohibitive and
@@ -430,7 +436,7 @@ features:
 execution:
   initial_cash: 1_000_000        # restores prior validated state
   share_type: integer            # US equities trade in whole shares
-  allocator_lookback: 520        # ~20 trading days of 15-min bars
+  allocator_lookback: 520        # rows of the 1-minute price frame: ~1.3 sessions
 
 mapping:
   class: intraday_rank_and_trade
@@ -589,6 +595,46 @@ backtest:
         - {name: time_exit_10,    type: time_exit,     bars: 10}
         - {name: time_exit_20,    type: time_exit,     bars: 20}
         - {name: time_exit_40,    type: time_exit,     bars: 40}
+
+# The model specification 04_model_based_features estimates under. Declared here rather than
+# typed into the notebook so that a window is one number in one place, readable without opening
+# the code that consumes it.
+#
+# This case study fits no GARCH, no regime chain and no ARIMA: its three procedures are a
+# heterogeneous autoregression of realized variance, a rolling Fourier transform and a rolling
+# depth-2 path signature. Only the first estimates anything, which is why only `har` carries a
+# refit schedule.
+model_based:
+  har:
+    # The three lengths of history the regression averages squared one-minute returns over,
+    # in bars. Corsi's day/week/month on a minute grid: minutes, a quarter hour, an hour.
+    components: [5, 15, 60]
+    # Bars of history each refit reads. Two hours - long enough for four coefficients to be
+    # identified, short enough that the fit follows the day rather than the quarter. It is
+    # also the burn-in: the first `fit_window + 1` bars of a symbol carry no HAR value,
+    # because they are what pays for the first estimate.
+    fit_window: 120
+    # Bars between refits. One, which is the finest cadence the panel has and the reason this
+    # artifact carries no fold column: the coefficients describing bar t come from a
+    # regression whose last observation is bar t-1, so no fold boundary enters the fit and a
+    # bar's value is the same value whichever fold selects it.
+    refit_every: 1
+    # Usable observations a refit window needs before it is fitted at all. Below this the four
+    # coefficients are estimated off too few points to identify them, and the bar keeps a null
+    # rather than a fit on whatever survived the warm-up.
+    min_train_obs: 20
+  spectrum:
+    # Bars each trailing window spans. Sixty resolves repetition periods up to an hour, which
+    # is the longest intraday rhythm this panel is asked about.
+    window: 60
+    # The period, in bars, above which power counts as low frequency. Twenty separates a slow
+    # drift in activity from minute-to-minute churn, and it is what `*_low_freq_ratio` is the
+    # share of.
+    low_frequency_period: 20
+  signature:
+    # Bars each signature path spans. Thirty is the horizon over which order flow and price are
+    # expected to lead one another, which is the quantity the cross terms measure.
+    window: 30
 
 evaluation:
   n_splits: 2

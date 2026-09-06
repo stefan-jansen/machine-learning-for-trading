@@ -234,3 +234,65 @@ def test_a_broken_candidate_fails_the_required_check():
         "the guard ignores a cancelled candidate build, which leaves the same hole"
     )
     assert "exit 1" in str(guard.get("run", "")), f"{guard.get('name')} does not fail the job"
+
+
+def _jobs_in_the_published_ml4t_image() -> dict[str, dict]:
+    """Jobs whose `container:` is `ml4t/ml4t:latest`, keyed by job name.
+
+    Only that image. `ml4t-py312` and `ml4t-benchmark` install their own dependency
+    sets on top of a constraint derived from the root lock, so their installed
+    distributions legitimately differ from it and the guard below does not apply.
+    """
+    workflow = yaml.safe_load(TEST_WORKFLOW.read_text(encoding="utf-8"))
+    out = {}
+    for name, spec in workflow["jobs"].items():
+        container = spec.get("container")
+        image = container.get("image") if isinstance(container, dict) else container
+        if image == "ml4t/ml4t:latest":
+            out[name] = spec
+    return out
+
+
+def test_every_job_in_the_published_image_checks_it_against_the_lock():
+    """A `container:` cannot carry an image built from the commit under test.
+
+    GitHub resolves it before any step runs, so these jobs get the published image
+    whatever the lock says - and unlike `test-unit-image` they cannot be pointed at a
+    candidate without restructuring them to `docker run`. The guard cannot make them
+    pass on a lock-changing commit; nothing can until the image is rebuilt from a
+    landed lock. What it does is make the failure say which of the two is wrong.
+
+    Without it the drift arrives as arithmetic. On the commit that moved
+    ml4t-diagnostic to 0.1.4 it surfaced as thirteen fold-ordering errors inside
+    `cs-cme_futures` and a red `ch26`, none of which names the environment - the same
+    shape that cost four rounds of investigation aimed at a notebook the last time an
+    image drifted off the lock.
+
+    This is the check that was missing when `test-unit-image` was pointed at a
+    candidate and these three jobs were not.
+    """
+    unguarded = sorted(
+        name
+        for name, spec in _jobs_in_the_published_ml4t_image().items()
+        if not any(
+            "check_env_matches_lock.py" in str(step.get("run", "")) for step in spec["steps"]
+        )
+    )
+
+    assert not unguarded, (
+        f"{unguarded} execute inside ml4t/ml4t:latest without first checking it against "
+        "uv.lock, so a lock bump reaches them as a numerical failure in a notebook "
+        "rather than as a statement about the environment"
+    )
+
+
+def test_the_guard_runs_before_anything_it_would_explain():
+    """A guard after the work it qualifies explains a failure that already happened."""
+    for name, spec in _jobs_in_the_published_ml4t_image().items():
+        steps = [str(step.get("run", "")) for step in spec["steps"]]
+        guard = next(i for i, s in enumerate(steps) if "check_env_matches_lock.py" in s)
+        work = [i for i, step in enumerate(spec["steps"]) if "pytest" in str(step.get("run", ""))]
+
+        assert not work or guard < min(work), (
+            f"{name} runs its tests before checking the image against the lock"
+        )

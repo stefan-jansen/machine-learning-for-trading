@@ -96,7 +96,7 @@ from case_studies.utils.cv_window import (
 )
 from case_studies.utils.temporal import (
     filtered_state_probs,
-    fit_hmm_kmeans_init,
+    fit_hmm_restarts,
     garch11_conditional_volatility,
     refit_boundaries,
     sort_states_by_variance,
@@ -516,8 +516,13 @@ print(
 # The first is that fitting is a local search. The algorithm improves an initial guess until it
 # stops improving, and where it stops depends on where it started, so a poor start returns a
 # poor description of the data. `fit_hmm_kmeans_init` starts the state distributions from a
-# k-means partition of the observations, which is a guess the data chose, and the fit below is
-# repeated from several starting points, keeping the one with the highest likelihood.
+# k-means partition of the observations, which is a guess the data chose, and `fit_hmm_restarts`
+# repeats it from several starting points, keeping the one with the highest likelihood. That loop
+# used to live in this notebook; `crypto_perps_funding` and `fx_pairs` each wrote their own, so it
+# now lives in the shared module and this notebook declares how many starts it wants. The restarts
+# earn their cost: measured on this panel, ten of them give ten distinct log-likelihoods, spread
+# 2.31 nats at the first refit block, so the k-means start does not land every seed in the same
+# place.
 #
 # The second is that the states come back in an arbitrary order. Nothing in the algorithm says
 # which of the two is state zero, so the same fitted regime can be state zero at one refit and
@@ -553,17 +558,12 @@ hmm_fits: list[dict] = []
 
 def fit_regime_model(X_train: np.ndarray):
     """Fit the regime model on one block's training prefix, keeping the best of N restarts."""
-    best, best_ll = None, -np.inf
-    for seed in range(N_RESTARTS):
-        try:
-            candidate = fit_hmm_kmeans_init(X_train, n_states=STATE_COUNT, random_state=seed)
-            ll = float(candidate.score(X_train))
-        except Exception:
-            continue
-        if ll > best_ll:
-            best, best_ll = candidate, ll
-    if best is None:
-        raise RuntimeError(f"no starting point converged on {len(X_train):,} sessions")
+    best = fit_hmm_restarts(
+        X_train,
+        n_states=STATE_COUNT,
+        random_state=0,
+        n_restarts=N_RESTARTS,
+    ).model
     order = sort_states_by_variance(best)
     calm, stress = int(order[0]), int(order[1])
     hmm_fits.append(

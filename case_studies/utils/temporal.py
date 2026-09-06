@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import polars as pl
@@ -31,9 +31,11 @@ from threadpoolctl import threadpool_limits
 from case_studies.utils.artifact_digest import write_artifact
 
 __all__ = [
+    "HmmFit",
     "arima_one_step_forecast",
     "filtered_state_probs",
     "fit_hmm_kmeans_init",
+    "fit_hmm_restarts",
     "fold_feature_geometry",
     "garch11_conditional_volatility",
     "refit_boundaries",
@@ -334,6 +336,7 @@ def fit_hmm_kmeans_init(
     n_states: int = 2,
     random_state: int = 42,
     n_iter: int = 200,
+    tol: float = 1e-2,
 ) -> GaussianHMM:
     """Fit a ``GaussianHMM`` whose emissions start from a k-means partition of *X*.
 
@@ -371,6 +374,12 @@ def fit_hmm_kmeans_init(
         Seed passed to both ``KMeans`` and the ``GaussianHMM``.
     n_iter
         EM iteration cap.
+    tol
+        Convergence threshold on the per-sample log-likelihood gain. The default is
+        ``hmmlearn``'s own, kept so that callers predating this parameter are unaffected;
+        ``crypto_perps_funding`` and ``fx_pairs`` declare ``1e-4`` in their own configs.
+        Whether the looser default under-converges the case studies that take it is
+        measured separately - it is a property of the data, not of this function.
     """
     with threadpool_limits(1):
         kmeans = KMeans(n_clusters=n_states, random_state=random_state, n_init=10)
@@ -382,6 +391,7 @@ def fit_hmm_kmeans_init(
             n_iter=n_iter,
             random_state=random_state,
             init_params="st",
+            tol=tol,
         )
         model.means_ = kmeans.cluster_centers_
         ridge = np.eye(X.shape[1]) * 1e-6
@@ -391,6 +401,96 @@ def fit_hmm_kmeans_init(
         )
         model.fit(X)
     return model
+
+
+class HmmFit(NamedTuple):
+    """The chosen fit and what the search around it cost.
+
+    ``n_rejected`` and ``n_failed`` are separate because they mean different things: a
+    rejected restart converged and was discarded for going downhill on its last step, a
+    failed one raised. A block where every restart failed and a block where every restart
+    was rejected both leave nothing to emit, and a diagnostics table that reports one
+    number cannot say which happened.
+    """
+
+    model: GaussianHMM
+    log_likelihood: float
+    n_rejected: int
+    n_failed: int
+
+
+def fit_hmm_restarts(
+    X: np.ndarray,
+    *,
+    n_states: int = 2,
+    random_state: int = 42,
+    n_iter: int = 200,
+    tol: float = 1e-2,
+    n_restarts: int = 1,
+    reject_unstable_rel_tol: float | None = None,
+) -> HmmFit:
+    """Fit :func:`fit_hmm_kmeans_init` from several starts and keep the best.
+
+    EM converges to a local optimum, so which one it reaches depends on where it began.
+    Three of the four case studies fitting an HMM answered that by looping over seeds and
+    keeping the highest training likelihood, and each wrote the loop again: ``etfs`` around
+    this module's own primitive, ``crypto_perps_funding`` and ``fx_pairs`` around a
+    ``GaussianHMM`` of their own. This is that loop, once.
+
+    Restart *i* fits at ``random_state + i``, and the seed moves the k-means partition as
+    well as the model. Varying only the model's seed would leave every restart starting
+    from the same partition, which is most of what the starting point is - the restarts
+    would cost N times as much and explore almost nothing.
+
+    ``n_restarts=1`` is a single fit at ``random_state``, which is what the primitive does
+    on its own, so a caller that has not asked for restarts gets exactly the fit it got
+    before this function existed.
+
+    ``reject_unstable_rel_tol`` discards a restart whose final EM step *lowered* the
+    likelihood, comparing the last step against ``-tol * max(|previous|, 1)``. The
+    threshold is relative because these log-likelihoods run to five figures, where an
+    absolute threshold in nats rejects ordinary floating-point chatter at the optimum and
+    so discards every restart. It is ``None`` by default: a downhill final step is a failed
+    fit and rejecting it is the better rule, but turning it on changes what ``etfs`` and
+    ``cme_futures`` select, and that is a change to measure on its own rather than one to
+    deliver underneath a restart parameter.
+
+    :raises RuntimeError: when no restart survives, naming how many failed and how many
+        were rejected, because those call for different fixes.
+    """
+    if n_restarts < 1:
+        raise ValueError(f"n_restarts must be at least 1, got {n_restarts}")
+    best: GaussianHMM | None = None
+    best_ll = -np.inf
+    n_rejected = n_failed = 0
+    for offset in range(n_restarts):
+        try:
+            candidate = fit_hmm_kmeans_init(
+                X,
+                n_states=n_states,
+                random_state=random_state + offset,
+                n_iter=n_iter,
+                tol=tol,
+            )
+            score = float(candidate.score(X))
+        except Exception:
+            n_failed += 1
+            continue
+        if reject_unstable_rel_tol is not None:
+            history = list(candidate.monitor_.history)
+            if len(history) >= 2:
+                scale = max(abs(history[-2]), 1.0)
+                if history[-1] - history[-2] < -reject_unstable_rel_tol * scale:
+                    n_rejected += 1
+                    continue
+        if np.isfinite(score) and score > best_ll:
+            best, best_ll = candidate, score
+    if best is None:
+        raise RuntimeError(
+            f"no starting point survived on {len(X):,} observations: "
+            f"{n_failed} raised, {n_rejected} went downhill on their final step"
+        )
+    return HmmFit(best, best_ll, n_rejected, n_failed)
 
 
 def _cluster_covariance(cluster: np.ndarray, pooled: np.ndarray) -> np.ndarray:
@@ -659,6 +759,7 @@ def walk_forward_feature(
     window: int | None = None,
     freeze_after: int | None = None,
     on_fit_error: str = "raise",
+    apply_scope: str = "prefix",
 ) -> np.ndarray:
     """Emit a fitted feature over one series, refitting on a schedule instead of per fold.
 
@@ -681,6 +782,18 @@ def walk_forward_feature(
     a single estimate fails to converge; the default raises, because a model that cannot be
     fitted on most of its blocks is not a feature.
 
+    ``apply_scope`` says how much of the series ``apply`` is handed. ``"prefix"`` is the default
+    and the recursive case: a GARCH or Kalman filter has to run from the start of the series to
+    reach the block, so it gets ``X[:emit_end]`` and returns one row per input row. ``"block"``
+    hands it ``X[fit_end:emit_end]`` and asks for that many rows, for a model whose emitted value
+    at a row is a function of that row and the parameters alone.
+
+    That distinction is a cost, not a preference. Under ``"prefix"`` the walk hands out
+    ``sum(emit_end)`` rows, which is quadratic in the length of the series and only bounded in
+    practice by ``refit_every`` being large. nasdaq100_microstructure refits its HAR regression at
+    every bar over 174,000 bars per symbol, where the prefix form asks ``apply`` to produce 1.5e10
+    rows for the 174,000 it keeps. ``"block"`` asks for exactly the rows the walk emits.
+
     ``timestamps`` is the decision time of each row of *X*, and it is required rather than
     optional because it is the only thing here that can tell a walk forward from a walk over a
     shuffled array. Everything else this function sees is a bare ``(n_obs, n_features)`` block of
@@ -699,6 +812,8 @@ def walk_forward_feature(
     """
     if on_fit_error not in ("raise", "skip"):
         raise ValueError(f"on_fit_error must be 'raise' or 'skip', got {on_fit_error!r}")
+    if apply_scope not in ("prefix", "block"):
+        raise ValueError(f"apply_scope must be 'prefix' or 'block', got {apply_scope!r}")
     _assert_one_series_in_time_order(timestamps, len(X))
     out = np.full((len(X), n_features), np.nan, dtype=float)
     frozen: Any = None
@@ -716,11 +831,13 @@ def walk_forward_feature(
                     raise
                 continue
             frozen = model
-        values = np.asarray(apply(model, X[:emit_end]), dtype=float)
-        if len(values) != emit_end:
+        start = 0 if apply_scope == "prefix" else fit_end
+        values = np.asarray(apply(model, X[start:emit_end]), dtype=float)
+        if len(values) != emit_end - start:
             raise ValueError(
-                f"apply returned {len(values)} rows for a {emit_end}-row prefix; it must return "
-                "one row per input row so the block slice below lines up"
+                f"apply returned {len(values)} rows for a {emit_end - start}-row "
+                f"{apply_scope}; it must return one row per input row so the block slice "
+                "below lines up"
             )
-        out[fit_end:emit_end] = values[fit_end:emit_end].reshape(emit_end - fit_end, n_features)
+        out[fit_end:emit_end] = values[fit_end - start :].reshape(emit_end - fit_end, n_features)
     return out

@@ -397,6 +397,22 @@ model_based:
     # quasi-maximum-likelihood fit over the whole expanding history, and the leverage
     # parameter it is estimated for is not a fast-moving quantity.
     refit_every: 21
+    # The specification itself, for the same reason the schedule is here: what was fitted is
+    # part of what the feature means, and a reader comparing this chapter's model-based
+    # features against another's needs to see where they differ without reading two notebooks.
+    #
+    # `o: 1` is this case study's declared deviation from the shared GARCH(1,1)-Normal default,
+    # and it is what makes this a GJR rather than a plain GARCH. The justification is a property
+    # of the data, not a preference: a negative return raises next session's variance by more
+    # than a positive return of the same size, and on single-name equity underlying an option
+    # book that asymmetry is what the option prices are quoted around. Section C of the notebook
+    # carries the measurement. `sp500_options` declares the same deviation for the same reason.
+    mean: Constant
+    vol: GARCH
+    p: 1
+    o: 1
+    q: 1
+    dist: Normal
 
 causal:
   treatment: ivrv_spread

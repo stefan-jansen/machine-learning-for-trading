@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.19.5
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -84,7 +84,7 @@ from scipy.stats import spearmanr
 from case_studies.utils.feature_engineering import quantile_profile
 from utils.artifact_specs import load_setup_config, resolve_label_buffer
 from utils.cv_splits import generate_cv_splits
-from utils.data_quality import validate_modeling_inputs
+from utils.data_quality import top_entities, validate_modeling_inputs
 from utils.paths import display_path, get_case_study_dir
 from utils.style import COLORS, GRAY_FILLS, show_plotly_with_alt
 
@@ -378,9 +378,14 @@ eval_panel = (
 assert eval_panel[DATE_COL].max() < HOLDOUT_START
 
 # Reduce the universe for a fast development run. Left at zero, every product is kept.
+# `top_entities` breaks a tie on the product code, which a local sort did not: on a padded
+# grid every product quoting the whole window carries the same row count, and the winner
+# then came from frame order. Two callers reducing the same panel to the same size have to
+# choose the same universe, or a product one of them kept joins to null features in the
+# other and the run answers cleanly and wrongly.
 if MAX_SYMBOLS > 0:
-    top = eval_panel.group_by("product").len().sort("len", descending=True).head(MAX_SYMBOLS)
-    eval_panel = eval_panel.filter(pl.col("product").is_in(top["product"]))
+    kept = top_entities(eval_panel, MAX_SYMBOLS, entity_col="product")
+    eval_panel = eval_panel.filter(pl.col("product").is_in(kept))
 
 n_rows = len(eval_panel)
 n_symbols = eval_panel["product"].n_unique()

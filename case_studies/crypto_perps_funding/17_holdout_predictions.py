@@ -57,6 +57,7 @@ from case_studies.research import open_study
 from case_studies.research.holdout import build_holdout_training_spec
 from case_studies.research.models import reconstruct_locked_model_request
 from case_studies.utils.registry import training_hash_from_spec
+from case_studies.utils.registry.maintenance import delete_prediction_generation
 from case_studies.utils.strategy_analysis import (
     resolve_solvent_carrier,
     training_run_fitted_for_the_holdout,
@@ -83,33 +84,6 @@ REPLACE_HOLDOUT = False
 # %%
 study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
-
-
-def _delete_holdout_generation(case_dir, prediction_hash):
-    """Remove one holdout prediction set and everything registered against it.
-
-    Called only when ``REPLACE_HOLDOUT`` says a generation is superseded. The rows go rather
-    than being marked, because a superseded holdout evaluation that is still readable is
-    still a number someone can quote, and the point of replacing it is that it should not be
-    one.
-    """
-    with sqlite3.connect(str(case_dir / "run_log" / "registry.db")) as conn:
-        backtests = [
-            row[0]
-            for row in conn.execute(
-                "SELECT backtest_hash FROM backtest_runs WHERE prediction_hash = ?",
-                (prediction_hash,),
-            )
-        ]
-        for backtest_hash in backtests:
-            conn.execute(
-                "DELETE FROM backtest_paired_metrics WHERE challenger_hash = ? "
-                "OR benchmark_hash = ?",
-                (backtest_hash, backtest_hash),
-            )
-            conn.execute("DELETE FROM backtest_metrics WHERE backtest_hash = ?", (backtest_hash,))
-            conn.execute("DELETE FROM backtest_runs WHERE backtest_hash = ?", (backtest_hash,))
-        conn.execute("DELETE FROM prediction_sets WHERE prediction_hash = ?", (prediction_hash,))
 
 
 def _registered_holdout_generations(case_dir):
@@ -297,7 +271,17 @@ if superseded and not REPLACE_HOLDOUT:
     )
 for row in superseded:
     print(f"REPLACING holdout generation {row['prediction_hash']} ({row['config_name']})")
-    _delete_holdout_generation(CASE_DIR, row["prediction_hash"])
+    # The rows go rather than being marked: a superseded holdout evaluation that is still
+    # readable is still a number someone can quote, and the point of replacing it is that it
+    # should not be one. `delete_prediction_generation` derives the child tables from
+    # `PRAGMA foreign_key_list` rather than listing them, so a table added to the schema
+    # later is covered without an edit, and it enables foreign keys on its own connection -
+    # SQLite leaves them off per connection, which is the only reason a delete that misses a
+    # child table appears to succeed.
+    removed = delete_prediction_generation(
+        CASE_DIR / "run_log" / "registry.db", row["prediction_hash"]
+    )
+    print(f"  removed {sum(removed.values())} rows: {removed}")
 
 # %% tags=["results"]
 request = reconstruct_locked_model_request(

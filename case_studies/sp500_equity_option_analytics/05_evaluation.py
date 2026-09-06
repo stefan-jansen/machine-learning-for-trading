@@ -99,7 +99,7 @@ from case_studies.utils.feature_engineering import (
     register_frame,
 )
 from utils.cv_splits import load_evaluation_config
-from utils.data_quality import validate_modeling_inputs
+from utils.data_quality import top_entities, validate_modeling_inputs
 from utils.paths import display_path, get_case_study_dir
 
 # Narrow, not blanket: the estimator's own missing-bandwidth warning stays visible.
@@ -342,8 +342,15 @@ if _dropped:
 all_feature_cols = financial_cols + temporal_cols
 
 if MAX_SYMBOLS > 0:
-    top = eval_panel.group_by("symbol").len().sort("len", descending=True).head(MAX_SYMBOLS)
-    eval_panel = eval_panel.filter(pl.col("symbol").is_in(top["symbol"]))
+    # `top_entities` rather than a local reduction. The rule is the same - the most-observed
+    # symbols - but the tie-break is not: this sorted on row count alone, and where counts tie the
+    # winner came from frame order, which is not stable across runs or across callers. Two stages
+    # reducing the same panel to the same size have to get the same universe, or a symbol only one
+    # of them chose carries null features on the other and the run answers wrongly while looking
+    # clean.
+    eval_panel = eval_panel.filter(
+        pl.col("symbol").is_in(top_entities(eval_panel, MAX_SYMBOLS, entity_col="symbol"))
+    )
 
 # %% [markdown]
 # ### Hold back the 2021 window, and the sessions whose labels reach it

@@ -84,7 +84,7 @@ from scipy.stats import t as student_t
 
 from case_studies.utils.feature_engineering import quantile_profile
 from utils.cv_splits import generate_cv_splits
-from utils.data_quality import validate_modeling_inputs
+from utils.data_quality import top_entities, validate_modeling_inputs
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, GRAY_FILLS, show_plotly_with_alt
 
@@ -282,9 +282,14 @@ all_feature_cols = financial_cols + temporal_cols
 # %%
 symbol_filter = None
 if MAX_SYMBOLS > 0:
-    counts = pl.scan_parquet(features_path).group_by("symbol").len().collect()
-    top_syms = counts.sort("len", descending=True).head(MAX_SYMBOLS)["symbol"].to_list()
-    symbol_filter = pl.col("symbol").is_in(top_syms)
+    # `top_entities` is the one rule for reducing a panel's entity axis, and reaching it
+    # here rather than sorting locally is what makes a reduced 05 read the universe a
+    # reduced 04 wrote. Row counts tie on this panel - every name quoting the whole window
+    # sits on the same padded minute grid - and a descending sort over equal counts returns
+    # the group-by's order, which is not stable between runs. The shared rule breaks the
+    # tie on the symbol name.
+    top_syms = top_entities(pl.scan_parquet(features_path), MAX_SYMBOLS)
+    symbol_filter = pl.col("symbol").is_in(pl.Series("symbol", top_syms).implode())
 
 features = pl.scan_parquet(features_path)
 temporal = pl.scan_parquet(temporal_path)

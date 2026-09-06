@@ -89,16 +89,17 @@ from hmmlearn.hmm import GaussianHMM
 from IPython.display import display
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
-from threadpoolctl import threadpool_limits
 
 from case_studies.research.holdout import build_holdout_cv
-from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.temporal import (
     filtered_state_probs,
+    fit_hmm_restarts,
     garch11_conditional_volatility,
     refit_boundaries,
     sort_states_by_variance,
     walk_forward_feature,
+    write_model_based,
 )
 from data import load_crypto_perps
 from utils.artifact_specs import (
@@ -122,6 +123,7 @@ _SETUP = load_setup_config(CASE_STUDY_ID)
 PRIMARY_LABEL = _SETUP["labels"]["primary"]
 MIN_TRAIN_BARS = _SETUP["model_based"]["min_train_bars"]
 HMM_N_RESTARTS = _SETUP["model_based"]["hmm"]["n_restarts"]
+HMM_TOL = _SETUP["model_based"]["hmm"]["tol"]
 GARCH_REFIT_EVERY = _SETUP["model_based"]["garch"]["refit_every"]
 HMM_REFIT_EVERY = _SETUP["model_based"]["hmm"]["refit_every"]
 
@@ -961,36 +963,37 @@ print(f"Settlements the regime model reads: {len(agg_series):,}")
 # because the forward recursion reaches a private method of the modelling library that
 # should be named in one place rather than several.
 #
-# The fit itself is held to a single compute thread. The library initializes through
-# k-means, whose partial sums are reduced across threads, and floating-point addition is
-# not associative - so the starting means depend on how the work happened to be split,
-# expectation-maximization carries that into the transition matrix, so two runs on a
-# machine that was busier or quieter can emit different probabilities from the same
-# data. A seed fixes the draw and not the schedule; holding the fit to one thread fixes
-# both, and here it costs seconds because the observation is two columns wide.
-
-
-# %%
-def fit_best_hmm(x_train: np.ndarray) -> tuple[GaussianHMM | None, float]:
-    """Return the restart with the highest training likelihood, fitted reproducibly."""
-    best_model, best_ll = None, -np.inf
-    with threadpool_limits(limits=1):
-        for seed in range(HMM_N_RESTARTS):
-            try:
-                model = GaussianHMM(
-                    n_components=HMM_N_STATES,
-                    covariance_type="full",
-                    n_iter=200,
-                    random_state=seed,
-                    tol=1e-4,
-                )
-                model.fit(x_train)
-                log_likelihood = model.score(x_train)
-                if log_likelihood > best_ll:
-                    best_ll, best_model = log_likelihood, model
-            except Exception:
-                continue
-    return best_model, best_ll
+# `fit_hmm_restarts` is the third, and it is the search. Expectation-maximization reaches
+# a local optimum, so this notebook has always fitted from ten starting points at every
+# refit and kept the one with the highest training likelihood. That loop used to live here;
+# it now lives in the shared module, because `etfs` and `fx_pairs` each wrote the same loop
+# for themselves and three copies of a selection rule is three places for it to drift.
+#
+# What changed underneath it is where a restart begins. The fits are now initialized from a
+# k-means partition of the training window rather than by the modelling library's own
+# scheme, which is a starting point the data chose rather than one the seed did. The
+# restarts stay: measured on `etfs`' panel through this same estimator, ten of them give ten
+# distinct log-likelihoods, so the better start does not make the search redundant.
+#
+# The fit is also held to a single compute thread, inside the shared helper rather than
+# here. The k-means partial sums are reduced across threads and floating-point addition is
+# not associative, so the starting means depend on how the work happened to be split and
+# expectation-maximization carries that into the transition matrix. Measured on that helper,
+# five thread counts gave five log-likelihoods and five transition matrices, and this
+# notebook's stage-04 artifact was one of three that hashed differently run to run because
+# of it. A seed fixes the draw and not the schedule; pinning the pool fixes both.
+#
+# The convergence threshold is declared in `config/setup.yaml` rather than left to the
+# library. This notebook fits at `1e-4`, a hundred times tighter than hmmlearn's default,
+# and so does `fx_pairs`; `etfs` and `cme_futures` take the default. That difference was
+# measured on the `etfs` panel through this same estimator rather than argued about: across
+# twelve refit blocks the two thresholds move the emitted state probability by about
+# `1e-3` on average, by `0.229` at the single worst row, and **change none of 756 emitted
+# state assignments** at the one-half threshold. Zero flips is the decision result, not a
+# claim that the columns are identical - this probability is read as a continuous feature
+# as well as through a threshold, so the small differences are real even where no
+# classification moves. The declaration is there because two case studies chose the
+# tighter value deliberately, not because the looser one was shown to be wrong.
 
 
 # %% [markdown]
@@ -1016,9 +1019,14 @@ def extract_hmm_walk(agg_pd: pd.DataFrame) -> tuple[pl.DataFrame, list[dict]]:
     diagnostics: list[dict] = []
 
     def fit(train: np.ndarray) -> tuple[GaussianHMM, np.ndarray]:
-        model, log_likelihood = fit_best_hmm(train)
-        if model is None:
-            raise RuntimeError("no restart of the regime model converged")
+        fitted = fit_hmm_restarts(
+            train,
+            n_states=HMM_N_STATES,
+            random_state=0,
+            n_restarts=HMM_N_RESTARTS,
+            tol=HMM_TOL,
+        )
+        model, log_likelihood = fitted.model, fitted.log_likelihood
         order = sort_states_by_variance(model)
         transition = model.transmat_[np.ix_(order, order)]
         # Expected run length of a state whose per-settlement chance of staying is p is
@@ -1472,10 +1480,16 @@ print(
     "produced by parameters estimated before the window opened."
 )
 
-record = write_artifact(
+record = write_model_based(
     temporal,
     FEATURES_DIR / "model_based.parquet",
     keys=["symbol", "timestamp"],
+    feature_columns=sorted(EXPECTED_TEMPORAL),
+    time_column="timestamp",
+    # No fold column. Every parameter behind a value is bounded by the refit schedule
+    # declared above, not by a fold, so a symbol-settlement carries one value whichever
+    # fold reads it and the identity is the keys alone.
+    fold_column=None,
     written_by=f"case_studies/{CASE_STUDY_ID}/04_model_based_features.py",
     inputs={
         "financial": FINANCIAL_DIGEST,
