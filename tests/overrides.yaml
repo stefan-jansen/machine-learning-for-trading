@@ -2548,6 +2548,28 @@ case_studies/sp500_options/04_model_based_features:
     # thousand observations, so CI exercises the production schedule for the model whose
     # schedule this change is really about.
     SV_REFIT_EVERY_OVERRIDE: 252
+    # MAX_SYMBOLS is back, and this time the notebook defines it. The note above records that it
+    # was passed once and silently ignored - papermill logged "Passed unknown parameter" and the
+    # full universe ran anyway - which is the defect tests/pm_helpers.py::unusable_parameters now
+    # catches. The parameters cell declares it, and it reduces through `top_entities`, the same
+    # rule and tie-break 05_evaluation uses, so a reduced 04 and a reduced 05 see one universe.
+    #
+    # 0 - no reduction - and that is a measurement, not an omission. The production straddle panel
+    # carries 627 symbols and the parameter matters there. This fixture carries 22, and section F's
+    # cross-sectional IC does not survive cutting them.
+    #
+    # Measured on this fixture, stages 03 and 04 in one session: 5 symbols raises "No temporal
+    # feature had enough non-null observations for IC", 14 raises the same, 22 passes. Two
+    # explanations were checked and eliminated before settling on this - 980 dates still carry the
+    # 10 symbols MIN_SYMBOLS_PER_DATE wants at a cap of 14, and all 14 selected segments clear the
+    # 252-session GARCH burn-in - so the binding constraint is below those, in the straddle-derived
+    # VRP columns rather than in the GARCH column or the date count. Anyone cutting this further
+    # should first establish which feature loses its IC, rather than lowering the number again.
+    #
+    # The cheap lever on this notebook is cadence, not universe: SV_REFIT_EVERY_OVERRIDE above
+    # already takes the sampler from about eleven refits to three, and the GARCH cadence is left
+    # at production deliberately, per the note above it.
+    MAX_SYMBOLS: 0
   # Budget raised from 1800 on a CI measurement, not on another notebook's number.
   # Slowest of 5 green `cs-sp500_options` runs of .github/workflows/test.yml sampled 2026-09-04:
   # 903.5s, 50% of the old budget. A budget a green run already fills is one

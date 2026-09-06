@@ -395,6 +395,26 @@ model_based:
     # segment's first return through the refit session, expanding rather than rolling,
     # and the parameters then speak for the following month and no earlier session.
     refit_every: 21
+    # The specification, declared for the same reason the schedule is: what was fitted is part of
+    # what the feature means, and a reader comparing this chapter's model-based features against
+    # another chapter's should not have to read two notebooks to find where they differ.
+    #
+    # `o: 1` is this case study's declared deviation from the shared GARCH(1,1)-Normal default,
+    # and it is what makes the recursion a GJR. It is justified by a property of the underlying,
+    # not by preference: a fall raises next session's variance by more than a rise of the same
+    # size, and that asymmetry is what index options are priced around - section C.1 of the
+    # notebook carries it. `sp500_equity_option_analytics` declares the same deviation.
+    #
+    # `rescale: true` is not a model choice. `arch` warns and rescales on its own when returns
+    # are in units it considers poorly scaled, so declaring it makes the scaling explicit and
+    # keeps the fit deterministic rather than dependent on the library's threshold.
+    mean: Constant
+    vol: GARCH
+    p: 1
+    o: 1
+    q: 1
+    dist: Normal
+    rescale: true
   stochastic_volatility:
     # The same burn-in as GARCH, so the two columns start on the same session and the
     # variance risk premium built from each covers the same rows.
