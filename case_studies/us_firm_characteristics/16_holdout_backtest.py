@@ -203,12 +203,24 @@ print(f"Holdout prediction: {HOLDOUT_PREDICTION_HASH}")
 # That distinction is what makes `conformal_weighted` a different strategy from
 # `score_weighted` rather than a rescaling of it. `score_weighted` puts more capital where
 # the predicted return is larger. `conformal_weighted` puts more capital where the
-# prediction has been more reliable, which on a firm panel means the names with enough
-# calibration history to have earned a narrow interval. The two agree only when the model's
-# confidence happens to track its predictions, and on this panel there is no reason it
-# should: a firm's characteristics can imply a large expected return while that firm's own
-# residual history is short or dispersed. `min_calibration_n` is the floor on that history,
-# below which a name gets no width and is not sized at all.
+# prediction has been more reliable. The two agree only when the model's confidence happens
+# to track its predictions, and on this panel there is no reason it should: a firm's
+# characteristics can imply a large expected return while that firm's own residual history
+# is short or dispersed.
+#
+# A width is not purely firm-specific, and the exception matters on a panel with a firm
+# axis this wide. `min_calibration_n` is the number of eligible residuals a name needs
+# before it gets a width of its own. Below it the name is **not dropped**: it receives a
+# pooled width computed from every entity's residuals, which `conformal.py` declares as
+# `sparse_fallback`. So a newly covered firm is sized on the family's typical reliability
+# rather than excluded, and a selected name always carries a width.
+#
+# What reaches the portfolio is narrower still. `compute_conformal_weights` normalizes
+# `1 / width` within each leg at each timestamp, so only the cross-sectional dispersion of
+# the widths inside that month's long and short sides changes any weight. A month in which
+# every selected name carries a similar width, including one where most of them carry the
+# pooled fallback, allocates close to equally, and the level of the widths never reaches
+# the weights at all.
 #
 # No validation observation is dropped at the boundary, and the reason is the label rather
 # than a choice. The embargo exists because a residual observed at `t` measures a return
@@ -247,19 +259,26 @@ else:
 #
 # What that specification does to a prediction, in order, since this notebook is where a
 # reader arrives wanting the whole strategy in one place rather than assembled from four
-# earlier ones. At each month end the model scores every firm in the cross-section. The
-# `top_k` in the carrier's strategy block keeps that many of the highest-scored, drawn from
-# the grid `backtest.sweep.top_k_grid` declares as 5, 10, 20 and 50. The allocator turns
-# those into weights, by score or by conformal width. The result is one weight vector for
-# the month, and the backtest earns each name's realised forward return over that month.
+# earlier ones. At each month end the model scores every firm in the cross-section.
+# `setup.yaml` declares `entry_logic: rank_top_k_long_bottom_k_short`, so the strategy goes
+# **long the top `k` and short the bottom `k`**, drawn from the grid
+# `backtest.sweep.top_k_grid` declares as 5, 10, 20 and 50. The book therefore holds up to
+# `2k` names, not `k`, and the two sides are kept disjoint: `build_target_weights` caps the
+# effective `k` at half the cross-section, leaving the median firm unselected on an odd
+# universe. The allocator sets the weights within each leg, by score or by conformal width,
+# and normalizes the legs separately. The result is one weight vector for the month, and
+# the backtest earns each name's realised forward return over that month.
 #
-# Two thresholds decide whether a change in that vector is traded at all.
-# `backtest.rebalance.default` declares `min_weight_change` 0.005 and `min_trade_value`
-# 100, so a name whose target weight moves by less than half a percentage point, or whose
-# trade would be worth less than a hundred dollars, is left where it is. They exist because
-# a monthly re-scoring produces many small weight changes whose cost exceeds the edge they
-# express, and without a floor the cost sweep in [`14_costs`](14_costs.ipynb) would be
-# measuring churn the strategy never intended to pay for.
+# **`min_weight_change` and `min_trade_value` do not act here**, and the reason is worth
+# stating because `setup.yaml` declares both under `backtest.rebalance.default`. They are
+# engine-path settings: a threshold below which a change in target weight is not turned
+# into an order. This case study runs `_run_vectorized`, which is handed the target weights
+# and computes return and turnover from them directly, and is never handed either
+# threshold. So no trade here is suppressed for being small, and the turnover the cost
+# sweep in [`14_costs`](14_costs.ipynb) charges is the full month-to-month weight change.
+# The declarations stay because the same file drives the engine-path case studies where
+# they do act, which is the same reason `MAX_SYMBOLS` survives in
+# [`13_risk_management`](13_risk_management.ipynb).
 #
 # The run registers under `stage='holdout'`, which the registry derives from the
 # prediction set's split rather than from anything asserted here.

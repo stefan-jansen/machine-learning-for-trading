@@ -250,11 +250,19 @@ if MAX_RISK_VARIANTS > 0:
 #
 # They are absent because `config/setup.yaml` declares none, and that is a position rather
 # than an oversight. A gross-exposure limit or a per-name cap is a constraint the desk
-# operates under whatever the backtest says. Sweeping it alongside the allocators would
-# enter it into a competition ranked on validation Sharpe, and the loosest cap wins that
-# competition almost by definition, since a cap only ever removes exposure the strategy
-# wanted. The result would be a notebook that recommends relaxing a risk limit on the
-# grounds that relaxing it scored higher, which is the failure the separation avoids.
+# operates under whatever the backtest says, so it is specified from outside and not
+# discovered from the data. Sweeping it alongside the allocators would enter it into a
+# competition ranked on validation Sharpe, and that ranking cannot answer the question the
+# limit exists to settle: how much loss the desk is willing to be exposed to. Whichever cap
+# scored highest over the validation months would be the recommendation, and the mandate
+# would have been decided by an estimate rather than by the people who carry the risk.
+#
+# Which cap that is cannot be predicted in either direction, and it is worth being clear
+# that the argument does not rest on one. Scaling every weight by a constant leaves Sharpe
+# unchanged before costs, and a concentration cap changes which names are held rather than
+# only how much, so it can raise or lower realised Sharpe depending on what it excluded.
+# The objection is to the question, not to the answer it would return.
+#
 # Where this case study does constrain concentration it does so through `top_k`, which is
 # declared in the strategy and swept as part of it.
 
