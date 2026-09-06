@@ -615,18 +615,36 @@ compatible_sets
 # loosened: the stop losses along their loss-from-entry threshold, the trailing stops along their
 # give-back threshold, and the time exits along their holding-period cap.
 #
-# The shapes mean different things. A line that improves all the way to the loosest setting is
-# saying the overlay is worth nothing on this book, and its loosest version is simply the closest
-# available thing to not having it. A line with an interior peak has found a threshold this sample
-# liked, which is a much weaker claim than it looks - one sample, one strategy per label. A flat
-# line means the control is not binding at any declared setting, which is what a control that
-# never reaches the engine also looks like, and only the comparison above separates those.
+# The dashed reference in each panel is the unprotected strategy the overlays were laid on, which
+# is what any of these lines has to beat. The loosest declared setting is not that reference: a 20
+# per cent trailing stop is a loose control, not the absence of one.
+#
+# The shapes mean different things. A line that rises all the way to the loosest setting and stays
+# below the reference is a control this book paid for and got nothing from. One with an interior
+# peak has found a threshold this sample liked, which is a much weaker claim than it looks - one
+# sample, one strategy per label, and no correction for having looked at fourteen. A flat line
+# means the measured Sharpe did not move across the declared settings, which is weaker than it
+# sounds in two directions: two different thresholds can produce the same exits, and two different
+# return paths can share a Sharpe. It is not evidence that the controls never fired. Nothing on
+# this page can settle that, and the trigger count that would is not something the backtest
+# records.
 
 # %%
 control_axes = {
     control["name"]: (control["type"], float(control.get("threshold", control.get("bars"))))
     for control in get_position_risk_controls(CASE_STUDY_ID)
 }
+# The Sharpe of the strategy each label's overlays were laid on, which is the line they have to
+# clear. Asserted rather than assumed to be one per label: `top_n` is read from the sweep
+# configuration, and a label carrying two sources would need two reference lines, not one drawn
+# from whichever row a dict happened to keep.
+_sources_per_label = selected_sources.group_by("label").len()
+if (_sources_per_label.get_column("len") != 1).any():
+    raise ValueError(
+        "the overlay sweep is drawn against one source strategy per label; this run selected "
+        f"{_sources_per_label.to_dicts()}"
+    )
+unprotected = dict(selected_sources.select("label", "sharpe").iter_rows())
 sweep = (
     completed_risk.select("label", "backtest_hash", "sharpe")
     .join(planned_population.select("backtest_hash", "risk"), on="backtest_hash", how="inner")
@@ -667,14 +685,26 @@ for ax, kind in zip(axes, kinds, strict=True):
             color=palette[index],
             label=label,
         )
+    for index, label in enumerate(sweep_labels):
+        if label in unprotected:
+            ax.axhline(
+                unprotected[label],
+                color=palette[index],
+                lw=1.0,
+                ls="--",
+                alpha=0.7,
+            )
     zero_line(ax)
     ax.set_xlabel(axis_names.get(kind, kind))
 axes[0].set_ylabel("Validation Sharpe")
 axes[-1].legend(fontsize=8, frameon=False)
 add_message_title(
     axes[0],
-    "Loosening the control, one kind at a time",
-    subtitle="Validation Sharpe against each control's own threshold, one line per label",
+    "Loosening the control, against the book it was laid on",
+    subtitle=(
+        "Validation Sharpe against each control's own threshold, one line per label, with the "
+        "unprotected strategy dashed"
+    ),
 )
 fig.tight_layout()
 # The alt text counts rather than asserts: whether any line turns over is the question the sweep
@@ -689,13 +719,23 @@ _peaks = (
     .with_columns(interior=pl.col("peak").is_between(pl.col("low"), pl.col("high"), closed="none"))
 )
 _n_interior = int(_peaks.get_column("interior").sum())
+_above = sum(
+    1
+    for row in sweep.group_by("kind", "label")
+    .agg(best=pl.col("sharpe").max())
+    .iter_rows(named=True)
+    if row["label"] in unprotected and row["best"] > unprotected[row["label"]]
+)
+_pairs = sweep.select("kind", "label").unique().height
 show_with_alt(
     fig,
-    "Line charts side by side, one panel per kind of control, sharing a vertical Sharpe axis and "
-    "each carrying a dashed line at zero. Every panel plots that control's own threshold on the "
-    "horizontal axis with one line per label. Counted from the underlying frame, "
+    "Line charts side by side, one panel per kind of control, sharing a vertical Sharpe axis. "
+    "Every panel plots that control's own threshold on the horizontal axis with one line per "
+    "label, a dashed horizontal line per label marking the unprotected strategy it was laid on, "
+    "and a dashed line at zero. Counted from the underlying frame, "
     f"{_n_interior} of {_peaks.height} label-and-kind curves reach their highest Sharpe at a "
-    "setting that is neither the tightest nor the loosest declared.",
+    "setting that is neither the tightest nor the loosest declared, and "
+    f"{_above} of {_pairs} beat their unprotected reference at any setting.",
 )
 
 # %% [markdown]
@@ -720,10 +760,11 @@ show_with_alt(
 # and which effect dominates is a property of how the strategy's returns actually arrive. A book
 # whose gains come from a few positions running a long way is one an early exit hurts.
 #
-# **A threshold sweep says more than a chosen threshold.** A control that helps at one setting and
-# hurts either side of it has found a feature of this sample. One that improves monotonically as it
-# loosens is saying the overlay is worth nothing and the loosest version is closest to not having
-# it.
+# **A threshold sweep says more than a chosen threshold, and it needs the unprotected book beside
+# it.** A control that helps at one setting and hurts either side of it has found a feature of
+# this sample rather than a property of the strategy. One that improves as it loosens is heading
+# toward the unprotected book without reaching it - the loosest declared setting is still a
+# control - so what says the overlay was not worth having is the reference line, not the trend.
 #
 # **The time exit is the control worth reading first.** It watches no price, so where it moves the
 # result as much as a stop does, what the stops were doing was shortening the holding period rather
