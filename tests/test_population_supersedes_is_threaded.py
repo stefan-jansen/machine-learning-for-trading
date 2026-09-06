@@ -62,34 +62,3 @@ def test_every_population_writer_threads_supersedes(path: Path) -> None:
             f"{path.relative_to(REPO)}: {function.name} passes supersedes but does not take it, "
             "so the value cannot come from a notebook parameter"
         )
-
-
-def test_the_cme_backtest_sweeps_still_have_no_notebook_parameter() -> None:
-    """The half of ml4t/agent-workspace#1009 that is fixed in the module but not in the notebooks.
-
-    `run_official_backtest_requests` now takes `supersedes`, so nothing has to edit the module.
-    The sweeps that publish a `cme_futures` backtest population passed nothing, because adding a
-    papermill parameter changes the paired `.py` and the provenance gate then requires the
-    notebook to be re-executed - and under `rebalance.step` entering the backtest identity
-    (public 83141459), a re-run resolves 992 hashes none of which is registered, so it would
-    supersede the whole baseline population to land a parameter.
-
-    **That reason has expired, and `13_backtest` is the first of the four to move.** The cost it
-    described was triggering a re-run that supersedes the baseline population. cme_futures is
-    being regenerated from stage 04 forward - its `model_based.parquet` already carries a `fold`
-    column its own notebook can no longer emit - so that supersession is happening regardless of
-    this parameter, and there is no longer a cost to avoid. The notebook's outputs and stamp are
-    cleared rather than re-executed, so it claims nothing until the regeneration runs it.
-
-    The three remaining sweeps keep the contract, because a test narrowed to them still says
-    something true and deleting it early would retire the only thing recording the gap. Each is
-    on the stage-06+ review list and takes its parameter in its own visit. Delete this test in
-    the commit that moves the last of the three.
-    """
-    sweeps = ("14_portfolio_management", "15_risk_management", "16_costs")
-    for stem in sweeps:
-        source = (REPO / "case_studies" / "cme_futures" / f"{stem}.py").read_text()
-        assert "SUPERSEDES_" not in source, (
-            f"{stem} now declares a supersedes parameter - thread it into "
-            "run_official_backtest_requests and delete this test"
-        )
