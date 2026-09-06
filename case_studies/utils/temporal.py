@@ -759,6 +759,7 @@ def walk_forward_feature(
     window: int | None = None,
     freeze_after: int | None = None,
     on_fit_error: str = "raise",
+    apply_scope: str = "prefix",
 ) -> np.ndarray:
     """Emit a fitted feature over one series, refitting on a schedule instead of per fold.
 
@@ -781,6 +782,18 @@ def walk_forward_feature(
     a single estimate fails to converge; the default raises, because a model that cannot be
     fitted on most of its blocks is not a feature.
 
+    ``apply_scope`` says how much of the series ``apply`` is handed. ``"prefix"`` is the default
+    and the recursive case: a GARCH or Kalman filter has to run from the start of the series to
+    reach the block, so it gets ``X[:emit_end]`` and returns one row per input row. ``"block"``
+    hands it ``X[fit_end:emit_end]`` and asks for that many rows, for a model whose emitted value
+    at a row is a function of that row and the parameters alone.
+
+    That distinction is a cost, not a preference. Under ``"prefix"`` the walk hands out
+    ``sum(emit_end)`` rows, which is quadratic in the length of the series and only bounded in
+    practice by ``refit_every`` being large. nasdaq100_microstructure refits its HAR regression at
+    every bar over 174,000 bars per symbol, where the prefix form asks ``apply`` to produce 1.5e10
+    rows for the 174,000 it keeps. ``"block"`` asks for exactly the rows the walk emits.
+
     ``timestamps`` is the decision time of each row of *X*, and it is required rather than
     optional because it is the only thing here that can tell a walk forward from a walk over a
     shuffled array. Everything else this function sees is a bare ``(n_obs, n_features)`` block of
@@ -799,6 +812,8 @@ def walk_forward_feature(
     """
     if on_fit_error not in ("raise", "skip"):
         raise ValueError(f"on_fit_error must be 'raise' or 'skip', got {on_fit_error!r}")
+    if apply_scope not in ("prefix", "block"):
+        raise ValueError(f"apply_scope must be 'prefix' or 'block', got {apply_scope!r}")
     _assert_one_series_in_time_order(timestamps, len(X))
     out = np.full((len(X), n_features), np.nan, dtype=float)
     frozen: Any = None
@@ -816,11 +831,13 @@ def walk_forward_feature(
                     raise
                 continue
             frozen = model
-        values = np.asarray(apply(model, X[:emit_end]), dtype=float)
-        if len(values) != emit_end:
+        start = 0 if apply_scope == "prefix" else fit_end
+        values = np.asarray(apply(model, X[start:emit_end]), dtype=float)
+        if len(values) != emit_end - start:
             raise ValueError(
-                f"apply returned {len(values)} rows for a {emit_end}-row prefix; it must return "
-                "one row per input row so the block slice below lines up"
+                f"apply returned {len(values)} rows for a {emit_end - start}-row "
+                f"{apply_scope}; it must return one row per input row so the block slice "
+                "below lines up"
             )
-        out[fit_end:emit_end] = values[fit_end:emit_end].reshape(emit_end - fit_end, n_features)
+        out[fit_end:emit_end] = values[fit_end - start :].reshape(emit_end - fit_end, n_features)
     return out

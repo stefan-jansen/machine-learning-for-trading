@@ -216,15 +216,15 @@ if excluded_families(CASE_STUDY):
 #
 # `complete` is more than "the run finished". A run that failed partway still leaves rows in the
 # registry, and its score is an average over the folds that finished, which is not the quantity
-# every other row reports. The catalog also requires a current identity before it calls a row
-# complete (`case_studies/research/catalog.py:308-314`): a row registered before the identity
-# scheme carries no digest of the labels and features it was fitted on, so nothing can establish
-# what it was trained against. It stays inspectable and cannot enter a comparison.
+# every other row reports. The catalog builds `complete` as a conjunction, and a current identity
+# is one of its terms: a row registered before the identity scheme carries no digest of the labels
+# and features it was fitted on, so nothing can establish what it was trained against. It stays
+# inspectable and cannot enter a comparison.
 #
 # Execution tier is deliberately not tested. A preview is a reduced computation in a throwaway
 # workspace, so whether preview rows are in front of this notebook at all is settled by which
 # registry `study` opened, not by a column. Re-asserting it as a filter would reject a preview
-# run's own rows unconditionally, which is the defect `8fc28044` fixed on the registry path.
+# run's own rows unconditionally, which is why the registry path does not test it either.
 #
 # This is the correction that unfroze this notebook. Selection used to run over whatever the
 # registry held, filtered only by which families the case study excludes - so the representative

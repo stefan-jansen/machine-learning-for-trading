@@ -233,10 +233,9 @@ if pred_index.is_empty():
 # reports every backtest completed and zero failed, off a population that resolves empty.
 # That is not a late failure, it is a loud success on the wrong rows, and it costs the
 # full sweep to discover.
-# `complete` is the whole test: `catalog.py:309` already requires `identity_status ==
-# "current"` before a row can be complete, and the tier is decided by which registry the
-# rows were read from, not by a column comparison. Re-asserting either here would reject a
-# preview run's own rows - the mistake `8fc28044` fixed on the registry path.
+# `complete` is the whole test: the catalog already requires a current identity before a row
+# can be complete, and the tier is decided by which registry the rows were read from, not by
+# a column comparison. Re-asserting either here would reject a preview run's own rows.
 # The catalog is read off `CASE_DIR`, the directory `load_prediction_index` just read, and
 # not by opening a `Study`: every `Study.open` branch ends in `activate()`, which would both
 # answer for a different registry than the one being filtered and re-point the rest of the

@@ -863,6 +863,61 @@ def test_apply_returning_the_wrong_number_of_rows_is_refused() -> None:
         )
 
 
+def test_a_block_scoped_apply_sees_only_the_rows_the_walk_emits() -> None:
+    """``apply_scope="block"`` is what makes a per-bar refit affordable, so it has to be exact.
+
+    The prefix form is quadratic in the length of the series: at one refit per bar it asks
+    ``apply`` for ``n(n+1)/2`` rows to keep ``n`` of them. A model whose value at a row is a
+    function of that row and the parameters needs none of that, and the two forms have to agree
+    on every value for the substitution to be a cost change rather than a behaviour change.
+    """
+    X = np.arange(40, dtype=float).reshape(-1, 1)
+    seen: list[int] = []
+
+    def apply_block(model, block):
+        seen.append(len(block))
+        return np.full((len(block), 1), model)
+
+    out = _walk(
+        X,
+        burnin=10,
+        refit_every=5,
+        fit=_mean_fit,
+        apply=apply_block,
+        n_features=1,
+        apply_scope="block",
+    )
+    prefix = _walk(X, burnin=10, refit_every=5, fit=_mean_fit, apply=_emit_parameter, n_features=1)
+    np.testing.assert_array_equal(out, prefix)
+    assert seen == [5, 5, 5, 5, 5, 5], "apply was handed something other than the block"
+
+
+def test_a_block_scoped_apply_returning_the_wrong_number_of_rows_is_refused() -> None:
+    with pytest.raises(ValueError, match="one row per input row"):
+        _walk(
+            np.arange(30, dtype=float).reshape(-1, 1),
+            burnin=10,
+            refit_every=5,
+            fit=_mean_fit,
+            apply=lambda model, block: np.full((len(block) + 1, 1), model),
+            n_features=1,
+            apply_scope="block",
+        )
+
+
+def test_an_unknown_apply_scope_is_refused() -> None:
+    with pytest.raises(ValueError, match="apply_scope must be"):
+        _walk(
+            np.arange(30, dtype=float).reshape(-1, 1),
+            burnin=10,
+            refit_every=5,
+            fit=_mean_fit,
+            apply=_emit_parameter,
+            n_features=1,
+            apply_scope="whole",
+        )
+
+
 def test_a_multi_column_feature_keeps_its_columns_in_order() -> None:
     out = _walk(
         np.arange(40, dtype=float).reshape(-1, 1),

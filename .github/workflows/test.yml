@@ -1018,6 +1018,15 @@ jobs:
           # us_equities_panel and nasdaq100_microstructure, the two case studies
           # whose rebuild has not produced them, so they fail on any checkout -
           # here and on a workstation alike. Take them out when those two rebuild.
+          #
+          # The artifact dependency was true and was not the whole reason. Until
+          # 2026-09-06 the microstructure test also asserted `label_buffer ==
+          # "15min"` against a config that has declared 16min since #737, and that
+          # assertion reads the repo config and no data, so it failed two lines
+          # before the artifacts were ever touched. The rebuild alone would not have
+          # made the test pass, and whoever lifted this deselect afterwards would
+          # have read the red as the rebuild being wrong. The literal is corrected,
+          # so this deselect now blocks only on the artifacts, which is what it says.
           .venv/bin/python -m pytest \
             tests/test_eoa_universe_roster.py \
             tests/test_fixture_registry_identity.py \

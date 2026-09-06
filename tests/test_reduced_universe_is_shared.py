@@ -13,21 +13,25 @@ most-observed, {AAPL, AMD, AMZN, FB, TSLA}. Three of five had no temporal
 features at all.
 
 The rules are one rule now (`utils.data_quality.top_entities`), which
-`tests/test_data_quality.py` pins without data. What needs the real fixture is the
-second half: `04` and `05` still select the most-observed symbols with their own
-inline expression and no tie break, so they agree with the shared rule only while
-no tie straddles the cut. On this fixture five symbols sit at exactly 136,140 bars
-and the sixth at 136,131, so the cut at five is clear - and this test is what says
-so out loud, and fails on the day a regenerated fixture moves it.
+`tests/test_data_quality.py` pins without data, and `04` and `05` reach it rather
+than sorting for themselves. They did not until 2026-09-05, and the production
+panel is where that mattered rather than the fixture: every name quoting the whole
+window sits on the same padded minute grid, so 115 symbols tie at one row count and
+a descending sort over them returns the group-by's order. Two runs of the same
+reduced 04 configuration, same code, same data, chose {AAPL, MSFT, TSLA} and
+{AMZN, FB, GOOG}. The fixture never showed it because its cut at five happened to
+be clear.
 
-Needs the test-data checkout, so it runs in test-unit-data.
+So what is checked here is that neither notebook has an expression of its own to be
+unstable with, and that the sizes the overrides inject still agree. Neither needs
+data. The fixture-backed check that no tie straddled the cut is gone with the
+expression that needed it.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import polars as pl
 import pytest
 import yaml
 
@@ -43,36 +47,6 @@ def _injected_max_symbols(stage: str) -> int | None:
     return int(value) if value else None
 
 
-@pytest.fixture(scope="module")
-def bar_counts(test_data_dir: Path) -> pl.DataFrame:
-    """Rows per symbol on the panel stages 02, 03 and 04 all read.
-
-    Resolved through conftest's ``test_data_dir`` rather than by reading
-    ML4T_DATA_PATH here: that variable is rewritten during a session by the same
-    fixture, and this is a statement about the CI fixture. Against the production
-    panel - 123 symbols where the fixture has 12 - the cut lands somewhere else
-    entirely and the question is not the one being asked.
-    """
-    if not (test_data_dir / "manifest.json").is_file():
-        pytest.skip(f"{test_data_dir} is not a test-data checkout (no manifest.json)")
-    hive = test_data_dir / "equities" / "market" / "nasdaq100" / "minute_bars"
-    if not hive.is_dir() or not list(hive.glob("year=*")):
-        pytest.skip(f"no nasdaq100 minute bars under {hive}")
-
-    setup = yaml.safe_load(
-        (REPO_ROOT / "case_studies" / CASE_STUDY / "config" / "setup.yaml").read_text()
-    )
-    universe = sorted(setup["universe"]["symbols"])
-    return (
-        pl.scan_parquet(hive / "**/*.parquet", hive_partitioning=True)
-        .filter(pl.col("symbol").is_in(universe))
-        .filter(pl.col("date").is_between(pl.date(2020, 1, 1), pl.date(2021, 12, 31)))
-        .group_by("symbol")
-        .len()
-        .collect()
-    )
-
-
 def test_the_overrides_still_reduce_these_stages() -> None:
     """Guards the tests below: with no injection they would assert nothing."""
     injected = {stage: _injected_max_symbols(stage) for stage in REDUCED_STAGES}
@@ -85,33 +59,41 @@ def test_every_reduced_stage_is_given_the_same_size() -> None:
     assert len(sizes) == 1, f"stages 02-05 are reduced to different sizes: {sizes}"
 
 
-def test_the_loader_and_an_untied_top_by_count_select_the_same_symbols(
-    bar_counts: pl.DataFrame,
-) -> None:
-    """02 and 03 reduce through the loader; 04 has its own untied expression."""
-    max_symbols = _injected_max_symbols("04_model_based_features")
+@pytest.mark.parametrize("stage", ("04_model_based_features", "05_evaluation"))
+def test_a_reducing_stage_reaches_the_shared_rule(stage: str) -> None:
+    """02 and 03 reduce through the loader; 04 and 05 reduce for themselves.
 
-    shared = sorted(
-        bar_counts.sort(["len", "symbol"], descending=[True, False])
-        .head(max_symbols)["symbol"]
-        .to_list()
-    )
-    untied = sorted(bar_counts.sort("len", descending=True).head(max_symbols)["symbol"].to_list())
-    assert shared == untied, (
-        "the shared reduction and the stage-04 expression choose different symbols; "
-        "stage 04 has to break its tie on the symbol name"
-    )
+    Whether they reduce the *same way* is the whole question, and it is answered by which
+    function they call rather than by what a particular fixture's row counts happen to be.
+    """
+    source = (REPO_ROOT / "case_studies" / CASE_STUDY / f"{stage}.py").read_text()
+    assert "top_entities" in source, f"{stage} does not reach utils.data_quality.top_entities"
 
 
-def test_no_tie_straddles_the_cut(bar_counts: pl.DataFrame) -> None:
-    """What makes the untied expression safe, stated as the property it needs."""
-    max_symbols = _injected_max_symbols("04_model_based_features")
-    ordered = bar_counts.sort(["len", "symbol"], descending=[True, False])
-    assert ordered.height > max_symbols, "the fixture carries no more symbols than the cut"
+@pytest.mark.parametrize("stage", ("04_model_based_features", "05_evaluation"))
+def test_a_reducing_stage_has_no_expression_of_its_own(stage: str) -> None:
+    """A local count-and-take is the shape that was unstable, so it is the shape refused.
 
-    last_kept = ordered["len"][max_symbols - 1]
-    first_dropped = ordered["len"][max_symbols]
-    assert last_kept > first_dropped, (
-        f"symbols tie across the cut at {max_symbols} ({last_kept} bars on both sides), so an "
-        "expression that does not break ties by name can pick either one"
+    Matched on the parsed source rather than on text: `group_by(...)` followed anywhere in
+    the same expression by `head(...)` is a reduction of the entity axis whatever it spells
+    the count. `top_entities` is the only place that chain may live.
+    """
+    import ast
+
+    tree = ast.parse((REPO_ROOT / "case_studies" / CASE_STUDY / f"{stage}.py").read_text())
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        chain, cursor = [], node
+        while isinstance(cursor, ast.Call) and isinstance(cursor.func, ast.Attribute):
+            chain.append(cursor.func.attr)
+            cursor = cursor.func.value
+        if "head" in chain and "group_by" in chain and "sort" in chain:
+            offenders.append((node.lineno, ".".join(reversed(chain))))
+    assert offenders == [], (
+        f"{stage} reduces its entity axis with an expression of its own: {offenders}. "
+        "Every reduction goes through utils.data_quality.top_entities, which breaks the "
+        "row-count tie on the entity name; an untied sort returns the group-by's order and "
+        "picked two different universes on two runs of the same configuration."
     )
