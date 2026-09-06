@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests.pm_helpers import unusable_parameters
+from tests.pm_helpers import parameters_cell_names, unusable_parameters
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SMOKE = yaml.safe_load((REPO_ROOT / "tests" / "smoke.yaml").read_text())
@@ -78,7 +78,6 @@ UNDECLARED = {
     "case_studies/us_equities_panel/09_dl_nlinear",
     "case_studies/us_equities_panel/10_dl_lstm",
     "case_studies/us_equities_panel/11_dl_tsmixer",
-    "case_studies/us_equities_panel/12_dl_weekly",
     "case_studies/us_equities_panel/13_latent_factors",
     "case_studies/us_equities_panel/13a_pca",
     "case_studies/us_equities_panel/13b_ipca",
@@ -88,7 +87,6 @@ UNDECLARED = {
     "case_studies/us_equities_panel/17_portfolio_management",
     "case_studies/us_equities_panel/18_risk_management",
     "case_studies/us_equities_panel/19_costs",
-    "case_studies/us_equities_panel/20_strategy_analysis",
     "case_studies/us_firm_characteristics/10_model_analysis",
     "case_studies/us_firm_characteristics/11_backtest",
     "case_studies/us_firm_characteristics/12_portfolio_management",
@@ -257,6 +255,25 @@ def test_a_reduction_uses_the_vocabulary_its_family_accepts(key: str) -> None:
     assert declared <= allowed, f"{key}: {sorted(declared - allowed)} not in {sorted(allowed)}"
 
 
+# Three spellings, because the causal notebooks split into three shapes rather than the two this
+# check first knew about. cme, crypto, sp500_options and us_firm_characteristics declare the
+# reduction as a PREVIEW_REDUCTIONS dict; etfs, fx_pairs, nasdaq100_microstructure and
+# sp500_equity_option_analytics declare a bare N_PLACEBO alongside MAX_SAMPLES and CV_FOLDS;
+# us_equities_panel declares PREVIEW_N_PLACEBO. The floor is the same one in all three.
+_PLACEBO_PARAMETERS = ("N_PLACEBO", "PREVIEW_N_PLACEBO")
+
+
+def _declared_placebo_draws(parameters: dict) -> int | None:
+    """The placebo count an entry declares, whichever of the three shapes it uses."""
+    inside_reductions = parameters.get("PREVIEW_REDUCTIONS", {}).get("n_placebo")
+    if inside_reductions is not None:
+        return inside_reductions
+    for name in _PLACEBO_PARAMETERS:
+        if (value := parameters.get(name)) is not None:
+            return value
+    return None
+
+
 @pytest.mark.parametrize(
     "key", sorted(k for k, v in SMOKE.items() if "causal" in k and v.get("parameters"))
 )
@@ -271,15 +288,33 @@ def test_a_causal_reduction_can_actually_compute_its_refutation(key: str) -> Non
     """
     from case_studies.utils.causal import MIN_PLACEBO_DRAWS
 
-    parameters = SMOKE[key]["parameters"]
-    # Two spellings, because the causal notebooks split into two shapes: cme, crypto and the
-    # others declare the reduction as a PREVIEW_REDUCTIONS dict, while etfs and fx_pairs declare
-    # N_PLACEBO, MAX_SAMPLES and CV_FOLDS as separate parameters. The floor is the same one.
-    declared = parameters.get("PREVIEW_REDUCTIONS", {}).get("n_placebo")
-    if declared is None:
-        declared = parameters.get("N_PLACEBO")
+    declared = _declared_placebo_draws(SMOKE[key]["parameters"])
     assert declared is not None, f"{key}: a causal smoke run has to declare its placebo count"
     assert declared >= MIN_PLACEBO_DRAWS
+
+
+def test_every_causal_notebook_spells_its_placebo_count_a_way_the_floor_check_knows() -> None:
+    """A spelling `_declared_placebo_draws` does not know reads as "declared nothing".
+
+    That is the wrong failure: the check above then tells the author their entry has no placebo
+    count when it has one, and points at smoke.yaml rather than at this list.
+    us_equities_panel/14_causal_dml is how that surfaced - it declares PREVIEW_N_PLACEBO, a third
+    shape, and the lookup knew two. Checking the notebooks rather than the declared entries means
+    a fourth shape fails here the moment the notebook is written, not when someone first tries to
+    declare a smoke configuration for it.
+    """
+    unknown = {}
+    for path in sorted((REPO_ROOT / "case_studies").glob("*/[0-9]*causal*.py")):
+        declares = parameters_cell_names(path)
+        if "PREVIEW_REDUCTIONS" in declares or set(_PLACEBO_PARAMETERS) & declares:
+            continue
+        unknown[f"{path.parent.name}/{path.stem}"] = sorted(
+            name for name in declares if "PLACEBO" in name.upper()
+        )
+    assert unknown == {}, (
+        f"{unknown} spells its placebo count a way _PLACEBO_PARAMETERS does not list; "
+        "add the spelling there rather than leaving the floor check blind to it"
+    )
 
 
 def test_no_entry_promises_a_table_a_preview_cannot_write() -> None:

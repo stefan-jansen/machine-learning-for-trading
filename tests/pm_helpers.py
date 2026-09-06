@@ -622,6 +622,28 @@ def _papermill_visible(py_path: Path) -> set[str] | None:
         return None
 
 
+def parameters_cell_names(py_path: Path) -> set[str]:
+    """Every name a notebook's `parameters`-tagged cells bind at module level.
+
+    A notebook may carry more than one such cell - `15_model_analysis` has three - so this unions
+    them. `unusable_parameters` reads only the last, because papermill injects after the last and
+    that is the span its overwrite analysis is about; a caller asking what the notebook declares
+    wants all of them.
+    """
+    source = py_path.read_text()
+    tree = ast.parse(source, filename=str(py_path))
+    spans = [
+        (lo, hi)
+        for header, lo, hi in _percent_cell_bounds(source)
+        if PARAMETERS_CELL_MARKER in header
+    ]
+    return {
+        name
+        for name, line in _top_level_bindings(tree)
+        if any(lo <= line <= hi for lo, hi in spans)
+    }
+
+
 def unusable_parameters(
     py_path: Path, names: Iterable[str], *, research_preview: bool = True
 ) -> dict[str, str]:
