@@ -99,7 +99,8 @@ MAX_SYMBOLS = 0
 # None defers to the case study's configured count; an int caps it.
 TOP_N_COMBOS = None
 # Both names stay bound here although nothing below reads them: that is what makes the harness
-# force preview and supply a workspace (`tests/pm_helpers.py:954`). Without them the canonical
+# force preview and supply a workspace - `_declares_tier_and_workspace` in `tests/pm_helpers.py`
+# looks for exactly this pair. Without them the canonical
 # branch regenerates in place, which needs symlinks a CI checkout does not have.
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
@@ -171,7 +172,7 @@ print(f"Live prediction sets: {len(LIVE_PREDICTIONS):,}")
 
 # %%
 # The stages the sweep may draw its carrier from. This is not a free choice: it is exactly the set
-# `resolve_canonical_rank1_lineage` selects over (`case_studies/utils/strategy_analysis.py:355`),
+# `resolve_canonical_rank1_lineage` selects over,
 # and the two have to agree. Pool anything narrower and they can name different configurations -
 # the curve below would then describe a strategy `20_strategy_analysis` does not report, and that
 # notebook would find no cost rows for the carrier it did select.

@@ -455,8 +455,20 @@ for label in ordered_labels:
     folds = by_fold[label]
     ic = folds.get_column("fold_ic")
     iterations = folds.get_column("iterations")
+    # A narrowed population can leave a label with no scored fold, and polars returns None
+    # for the mean of an empty column and for the standard deviation of a single row. Both
+    # then raise on the format below, which turns an absent measurement into a crash in a
+    # cell that only describes one. Say what is missing instead.
+    if folds.height == 0:
+        print(f"{label}: no fold scored, so there is no fold IC to summarise")
+        continue
+    spread = (
+        f"standard deviation across folds {ic.std():.4f}"
+        if folds.height > 1
+        else "one fold only, so no spread across folds"
+    )
     print(
-        f"{label}: mean {ic.mean():+.4f}, standard deviation across folds {ic.std():.4f}, "
+        f"{label}: mean {ic.mean():+.4f}, {spread}, "
         f"{(ic < 0).sum()} of {folds.height} folds negative; "
         f"{iterations.min()}-{iterations.max()} alternations against a cap of "
         f"{folds.get_column('iteration_cap').max()}"
