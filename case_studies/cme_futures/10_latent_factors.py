@@ -70,10 +70,17 @@
 # it is a well-defined thing to estimate, and estimating it with a neural network means not
 # having to assume in advance which functional form it takes.
 #
-# The difference from PCA is the objective rather than the architecture. PCA asks which
+# The difference from PCA is the objective and the inputs, not the architecture. PCA asks which
 # directions explain the most variation; the SDF asks which combination best explains the
 # cross-section of *returns*. A factor that moves a lot but earns nothing is a success for the
 # first and a failure for the second.
+#
+# They also see different data, which is easy to miss and changes what each can find.
+# `run_pca_fold` takes the characteristics panel and discards it with `del`, so PCA is handed
+# returns alone. `run_sdf_fold` passes the characteristics through, and the number of
+# instruments it builds is derived from their width. So the SDF can express "products with high
+# carry and low volatility load on this factor" and PCA structurally cannot, because PCA never
+# sees carry.
 #
 # So the comparison between the two is not "which fits better". It is a question about this
 # panel: whether the directions along which futures returns vary most are also the directions
