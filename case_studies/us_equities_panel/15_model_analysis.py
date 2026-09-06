@@ -92,7 +92,7 @@ from case_studies.research import (
 from case_studies.utils.backtest_runner import normalize_prediction_columns
 from case_studies.utils.insight_chapter import conformal_coverage_for_selected_prediction
 from case_studies.utils.registry import canonical_json, load_prediction_metrics
-from utils.style import COLORS
+from utils.style import COLORS, add_message_title, show_with_alt, zero_line
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
@@ -463,48 +463,87 @@ performance.select(
 )
 
 # %% [markdown]
-# The plot retains the catalog order rather than sorting by IC. Each horizontal interval shows the
-# sampling uncertainty around one configuration and checkpoint; it is descriptive evidence, not a
-# model-selection rule.
+# The population is several hundred candidates, because a checkpoint is one of them, so a chart
+# with a labelled row per candidate would be a strip several metres long. Two things are worth
+# seeing across that many, and each is a distribution:
+#
+# **Where each family sits.** The left panel puts every candidate's mean daily IC in its family's
+# column, one column per label and family. Read the height of a column's cloud, not any one point:
+# a family whose whole cloud sits above zero ranked the cross-section, and one straddling zero did
+# not.
+#
+# **How much of that is measurable.** The right panel is the half-width of each candidate's
+# interval, on the same vertical scale. Where a family's half-widths are as large as the spread of
+# its point estimates in the left panel, the ordering inside that family is not something the data
+# distinguishes, however cleanly the table sorts.
+#
+# Neither panel selects anything, and the exact interval for any one candidate is in the frame
+# above.
 
 # %% tags=["results"]
 plot_performance = performance.with_columns(
-    (
-        pl.col("label")
-        + " | "
-        + pl.col("family")
-        + "/"
-        + pl.col("config_name")
-        + " @ "
-        + pl.col("checkpoint_kind")
-        + "="
-        + pl.col("checkpoint_value").cast(pl.String).fill_null("final")
-        + " ["
-        + pl.col("prediction_hash").str.slice(0, 8)
-        + "]"
-    ).alias("model_id")
+    half_width=(pl.col("ic_ci_hi") - pl.col("ic_ci_lo")) / 2
+)
+columns = (
+    plot_performance.select("label", "family").unique().sort("label", "family").rows(named=True)
 )
 
-fig, ax = plt.subplots(figsize=(10, max(4, 0.28 * plot_performance.height)))
-y_position = np.arange(plot_performance.height)
-mean_ic = plot_performance["ic_mean_daily"].to_numpy()
-lower = plot_performance["ic_ci_lo"].to_numpy()
-upper = plot_performance["ic_ci_hi"].to_numpy()
-ax.errorbar(
-    mean_ic,
-    y_position,
-    xerr=np.vstack([mean_ic - lower, upper - mean_ic]),
-    fmt="o",
-    color=COLORS["blue"],
-    ecolor=COLORS["neutral"],
-    capsize=2,
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+for ax, column_name, axis_label in zip(
+    axes,
+    ("ic_mean_daily", "half_width"),
+    ("Mean daily cross-sectional IC", "HAC interval half-width"),
+    strict=True,
+):
+    for position, column in enumerate(columns):
+        values = plot_performance.filter(
+            (pl.col("label") == column["label"]) & (pl.col("family") == column["family"])
+        ).get_column(column_name)
+        # Deterministic spread within a column so overlapping candidates stay countable; the
+        # horizontal position carries no meaning of its own.
+        jitter = (values.arg_sort().to_numpy() % 9 - 4) / 40
+        ax.scatter(
+            position + jitter,
+            values.to_numpy(),
+            alpha=0.45,
+            s=16,
+            color=COLORS["blue"],
+            edgecolors="none",
+        )
+    ax.set_xticks(
+        range(len(columns)),
+        [f"{column['label']}\n{column['family']}" for column in columns],
+        rotation=45,
+        ha="right",
+        fontsize=7,
+    )
+    ax.set_xlim(-0.5, len(columns) - 0.5)
+    ax.set_ylabel(axis_label)
+zero_line(axes[0])
+axes[1].set_ylim(bottom=0)
+add_message_title(
+    axes[0],
+    "Read the cloud, not the point: several hundred candidates per column",
+    subtitle="Left, each candidate's mean daily IC; right, the half-width of its HAC interval",
 )
-ax.axvline(0, color=COLORS["negative"], linewidth=0.8, linestyle="--")
-ax.set_yticks(y_position, plot_performance["model_id"].to_list())
-ax.set_xlabel("Daily cross-sectional IC")
-ax.set_title("Daily Cross-Sectional IC with HAC Intervals")
 fig.tight_layout()
-fig.show()
+# The alt text counts rather than asserts: whether any family's cloud clears zero is a fact about
+# the frame, and a panel described as separating the families when it does not is a claim the data
+# refutes.
+_clear = plot_performance.group_by("label", "family").agg(
+    above=(pl.col("ic_ci_lo") > 0).sum(), total=pl.len()
+)
+_n_any = int((_clear.get_column("above") > 0).sum())
+show_with_alt(
+    fig,
+    "Two strip plots side by side, one column per label and model family, sharing that column "
+    "order. The left panel places every candidate at its mean daily cross-sectional information "
+    "coefficient, with a dashed line at zero; the right places the same candidates at the "
+    "half-width of their heteroskedasticity-and-autocorrelation-consistent interval, on an axis "
+    "starting at zero. Points are spread horizontally within a column so overlapping candidates "
+    f"stay visible. Counted from the underlying frame, {_n_any} of {_clear.height} label-family "
+    "columns hold at least one candidate whose interval lies entirely above zero.",
+)
 
 # %% [markdown]
 # ## 4. Whether that ranking ability holds across windows

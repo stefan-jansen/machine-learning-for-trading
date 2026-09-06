@@ -74,13 +74,12 @@ import polars as pl
 from case_studies.research import (
     CandidateSet,
     OfficialPopulation,
-    Study,
     open_study,
     plan_backtests,
     run_backtests,
 )
 from case_studies.research.strategy import strategy_warmup_periods
-from case_studies.utils.backtest_loaders import load_backtest_prices_for, warmup_periods_for
+from case_studies.utils.backtest_loaders import load_backtest_prices_for
 from case_studies.utils.sweep_config import (
     get_cost_grid_bps,
     get_cost_grid_half_spread_usd,
@@ -88,7 +87,7 @@ from case_studies.utils.sweep_config import (
     get_top_n_predictions,
 )
 from case_studies.utils.uncertainty import STAGE_SEQUENCE
-from utils.paths import REPO_ROOT
+from utils.style import add_message_title, ml4t_palette, show_with_alt, zero_line
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
@@ -598,22 +597,64 @@ if cost_results.height != planned_population.height:
 
 fig, axes = plt.subplots(1, 2, figsize=(13, 5), sharey=True)
 regime_labels = {
-    "bps": "Total cost (bps per leg)",
-    "per_share": "Half-spread (USD per share)",
+    "bps": "Proportional cost (basis points per leg)",
+    "per_share": "Per-share half-spread (USD)",
 }
+curve_labels = cost_results.get_column("label").unique().sort().to_list()
+# `ml4t_palette` returns a list of that many colours, so it is called once and indexed.
+palette = ml4t_palette(len(curve_labels), categorical=True)
 for ax, regime in zip(axes, ("bps", "per_share"), strict=True):
     regime_rows = cost_results.filter(pl.col("regime") == regime)
-    for label in regime_rows.get_column("label").unique().sort().to_list():
+    for index, label in enumerate(curve_labels):
         curve = regime_rows.filter(pl.col("label") == label).sort("cost_value")
-        ax.plot(curve["cost_value"], curve["sharpe"], marker="o", label=label)
-    ax.axhline(0, color="black", linewidth=0.8, linestyle="--")
+        ax.plot(
+            curve["cost_value"],
+            curve["sharpe"],
+            marker="o",
+            markersize=4,
+            lw=1.4,
+            color=palette[index],
+            label=label,
+        )
+    zero_line(ax)
     ax.set_xlabel(regime_labels[regime])
-    ax.set_title(regime.replace("_", " ").title())
-    ax.legend(fontsize=8)
 axes[0].set_ylabel("Validation Sharpe")
-fig.suptitle("Validation Sharpe across declared transaction costs")
+axes[1].legend(fontsize=8, frameon=False)
+add_message_title(
+    axes[0],
+    "Where each fixed strategy stops paying for itself",
+    subtitle="Validation Sharpe against cost, under a proportional and a per-share schedule",
+)
 fig.tight_layout()
-fig.show()
+# The alt text reads the crossing from the frame rather than asserting one: a curve described as
+# crossing zero when it never does is a claim the data refutes, and where it crosses is the whole
+# question this notebook asks.
+_crossings = []
+for regime in ("bps", "per_share"):
+    for label in curve_labels:
+        curve = (
+            cost_results.filter((pl.col("regime") == regime) & (pl.col("label") == label))
+            .sort("cost_value")
+            .filter(pl.col("sharpe") <= 0)
+        )
+        if curve.height:
+            _crossings.append((regime, label, curve.get_column("cost_value")[0]))
+if _crossings:
+    _crossing_text = "; ".join(
+        f"{label} first reaches zero or below at {value:g} on the {regime} axis"
+        for regime, label, value in _crossings
+    )
+else:
+    _crossing_text = (
+        "no curve reaches zero at any declared cost, so the sweep does not bracket a break-even"
+    )
+show_with_alt(
+    fig,
+    "Two line charts side by side sharing a vertical axis, one line per label with a dashed line "
+    "at zero. The left panel plots validation Sharpe against a proportional cost in basis points "
+    "per leg, the right against a per-share half-spread in dollars; both start at zero cost on "
+    f"the left of their axis. Read from the underlying frame: {_crossing_text}.",
+)
 
 # %% [markdown]
 # The risk notebook uses the same fixed source configuration from the selection-eligible baseline

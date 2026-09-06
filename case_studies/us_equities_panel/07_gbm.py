@@ -347,12 +347,12 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # list covering every label this run fitted, and the candidate sets are the names the later
 # notebooks open it by.
 #
-# `15_model_analysis` and `16_backtest` do not open populations directly - they open
-# *candidate sets*, named per
-# `(label, family)`, because a comparison is only meaningful within one label's protocol. Freezing
-# is what creates those names.
+# `16_backtest` never opens the population: it opens *candidate sets*, named per
+# `(label, family)`, because a comparison is only meaningful within one label's protocol.
+# `15_model_analysis` opens both - the population, to confirm the run filled every member it
+# promised, and the candidate sets, to make the comparison. Freezing is what creates those names.
 #
-# Without this the two downstream notebooks name four sets that nothing produces, and they fail
+# Without this the two downstream notebooks name six sets that nothing produces, and they fail
 # differently: `15` raises when `CandidateSet.one` cannot find the name, while `16` would simply
 # backtest whatever subset of names does resolve. A missing name is a silently narrower strategy
 # chain, which is the failure the named-set design exists to prevent.

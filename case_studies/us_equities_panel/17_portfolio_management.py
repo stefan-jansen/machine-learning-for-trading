@@ -86,7 +86,6 @@ import polars as pl
 from case_studies.research import (
     CandidateSet,
     OfficialPopulation,
-    Study,
     open_study,
     plan_backtests,
     run_backtests,
@@ -101,7 +100,7 @@ from case_studies.utils.sweep_config import (
     get_checkpoints_per_config,
     get_top_n_predictions,
 )
-from utils.paths import REPO_ROOT
+from utils.style import add_message_title, ml4t_palette, show_with_alt, zero_line
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
@@ -124,13 +123,9 @@ MAX_SYMBOLS = 0
 # them, so a gap here would silently narrow what the allocator comparison is made over.
 
 # %%
-# Both tiers resolve the study through `open_study`, never `Study.open`/`Study.regenerate`
-# directly. In a maintainer worktree the generated directories are symlinks to shared data, and
-# `open_study` handles that by reading inputs in place - `root` stays the release case directory
-# and only writes are redirected to the workspace. `Study.open(workspace=...)` instead puts `root`
-# inside the workspace, so `source = self.root / "labels"` (workspace.py:274) resolves somewhere
-# else and `_ensure_input_link` rejects the link a sibling notebook already made. Two notebooks in
-# one session then cannot both open a preview workspace.
+# Both tiers resolve the study through `open_study`. It reads the labels and features in place and
+# redirects only writes, so a preview run scores the same inputs a canonical one does and cannot
+# publish over it.
 if EXECUTION_TIER == "canonical":
     if PREVIEW_LABELS or PREVIEW_MAX_BASELINE_ROWS or PREVIEW_MAX_ALLOCATORS or MAX_SYMBOLS:
         raise ValueError("Canonical execution cannot declare preview reductions")
@@ -521,23 +516,49 @@ if allocation_results.height != planned_population.height:
     raise RuntimeError("The plotted allocation population differs from the planned population")
 
 fig, ax = plt.subplots(figsize=(10, 5))
-for label in allocation_results.get_column("label").unique().sort().to_list():
+allocator_order = allocation_results.get_column("allocation").unique().sort().to_list()
+labels = allocation_results.get_column("label").unique().sort().to_list()
+# `ml4t_palette` returns a list of that many colours, so it is called once and indexed.
+palette = ml4t_palette(len(labels), categorical=True)
+for index, label in enumerate(labels):
     label_rows = allocation_results.filter(pl.col("label") == label)
+    positions = [allocator_order.index(name) for name in label_rows.get_column("allocation")]
+    # A small fixed offset per label so three points on one allocator stay countable rather than
+    # landing on top of each other; the horizontal position carries no meaning of its own.
+    offset = (index - (len(labels) - 1) / 2) * 0.14
     ax.scatter(
-        label_rows["allocation"],
+        [position + offset for position in positions],
         label_rows["sharpe"],
-        alpha=0.5,
-        s=20,
+        alpha=0.6,
+        s=22,
+        color=palette[index],
+        edgecolors="none",
         label=label,
     )
-ax.axhline(0, color="black", linewidth=0.8, linestyle="--")
-ax.set_xlabel("Allocator")
+zero_line(ax)
+ax.set_xticks(range(len(allocator_order)), allocator_order, rotation=25, ha="right")
+ax.set_xlim(-0.5, len(allocator_order) - 0.5)
 ax.set_ylabel("Validation Sharpe")
-ax.set_title("Alternative-sizing validation Sharpe by allocator")
-ax.tick_params(axis="x", rotation=25)
-ax.legend(fontsize=8)
+add_message_title(
+    ax,
+    "What sizing was worth, on the strategies equal weight already liked",
+    subtitle="One point per shortlisted configuration and allocator, coloured by label",
+)
+ax.legend(fontsize=8, frameon=False)
 fig.tight_layout()
-fig.show()
+# The alt text counts rather than asserts: how many allocators clear zero anywhere is a fact about
+# the frame, and a panel described as beating the baseline when it does not is a claim the data
+# refutes.
+_above = allocation_results.group_by("allocation").agg(best=pl.col("sharpe").max())
+_n_positive = int((_above.get_column("best") > 0).sum())
+show_with_alt(
+    fig,
+    "A scatter plot with one column per allocator and a dashed line at zero. Each point is one "
+    "shortlisted configuration re-sized by that allocator, placed at its validation Sharpe, with "
+    "the three labels offset slightly from one another and coloured separately. Counted from the "
+    f"underlying frame, {_n_positive} of {_above.height} allocators reach a positive Sharpe on at "
+    "least one configuration.",
+)
 
 # %% [markdown]
 # The cost and risk notebooks reopen these names together with the matching equal-weight baseline.

@@ -81,9 +81,9 @@ from pathlib import Path
 import polars as pl
 import yaml
 
-from case_studies.research import Study, open_study, supersedes_for
+from case_studies.research import open_study, supersedes_for
 from utils.modeling import load_configs
-from utils.paths import REPO_ROOT, get_case_study_dir
+from utils.paths import get_case_study_dir
 
 # %% [markdown]
 # ## What this estimate rests on, and what it cannot establish
@@ -176,13 +176,9 @@ if PREVIEW_N_FOLDS:
 if PREVIEW_N_PLACEBO:
     preview_reductions["n_placebo"] = int(PREVIEW_N_PLACEBO)
 
-# Both tiers resolve the study through `open_study`, never `Study.open`/`Study.regenerate`
-# directly. In a maintainer worktree the generated directories are symlinks to shared data, and
-# `open_study` handles that by reading inputs in place - `root` stays the release case directory
-# and only writes are redirected to the workspace. `Study.open(workspace=...)` instead puts `root`
-# inside the workspace, so `source = self.root / "labels"` (workspace.py:274) resolves somewhere
-# else and `_ensure_input_link` rejects the link a sibling notebook already made. Two notebooks in
-# one session then cannot both open a preview workspace.
+# Both tiers resolve the study through `open_study`. It reads the labels and features in place and
+# redirects only writes, so a preview run scores the same inputs a canonical one does and cannot
+# publish over it.
 if EXECUTION_TIER == "canonical":
     if preview_reductions:
         raise ValueError("Canonical execution cannot declare preview reductions")

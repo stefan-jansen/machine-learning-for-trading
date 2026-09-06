@@ -78,14 +78,12 @@ import polars as pl
 from case_studies.research import (
     CandidateSet,
     OfficialPopulation,
-    Study,
     open_study,
     plan_backtests,
     run_backtests,
 )
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.sweep_config import get_entry_schemes_for
-from utils.paths import REPO_ROOT
 from utils.style import COLORS, show_with_alt, zero_line
 
 # %% [markdown]
@@ -140,13 +138,9 @@ MAX_SYMBOLS = 0
 
 # %%
 preview_filters = bool(PREVIEW_LABELS or PREVIEW_FAMILIES or PREVIEW_CONFIG_NAMES)
-# Both tiers resolve the study through `open_study`, never `Study.open`/`Study.regenerate`
-# directly. In a maintainer worktree the generated directories are symlinks to shared data, and
-# `open_study` handles that by reading inputs in place - `root` stays the release case directory
-# and only writes are redirected to the workspace. `Study.open(workspace=...)` instead puts `root`
-# inside the workspace, so `source = self.root / "labels"` (workspace.py:274) resolves somewhere
-# else and `_ensure_input_link` rejects the link a sibling notebook already made. Two notebooks in
-# one session then cannot both open a preview workspace.
+# Both tiers resolve the study through `open_study`. It reads the labels and features in place and
+# redirects only writes, so a preview run scores the same inputs a canonical one does and cannot
+# publish over it.
 if EXECUTION_TIER == "canonical":
     if preview_filters or PREVIEW_MAX_PREDICTIONS or MAX_SYMBOLS:
         raise ValueError("Canonical execution cannot declare preview reductions")
