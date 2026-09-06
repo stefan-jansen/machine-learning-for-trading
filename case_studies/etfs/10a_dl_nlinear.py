@@ -546,15 +546,33 @@ print(f"Common sample: {COMMON_ROWS:,} rows on {COMMON_DAYS:,} dates")
 for _name, _ic in COMMON_IC.items():
     print(f"  {_name}: IC={_ic:+.4f} on the shared rows")
 
-_labels = ["Ridge (Ch11)", "GBM (Ch12)", f"NLinear ({CONFIG_NAME})"]
+# Charted in a fixed order, but only the members the population actually carries. A narrowed
+# run - a smoke configuration, or a fit restricted to one family - publishes no linear or GBM
+# leader, and a label list written as a literal turns that into a KeyError on a presentational
+# cell rather than into a comparison drawn over what is there.
+_SELF = f"NLinear ({CONFIG_NAME})"
+_labels = [name for name in ["Ridge (Ch11)", "GBM (Ch12)", _SELF] if name in COMMON_IC]
+_missing = [name for name in ["Ridge (Ch11)", "GBM (Ch12)"] if name not in COMMON_IC]
+if _missing:
+    print(
+        f"No {' or '.join(_missing)} baseline in this population, so the chart compares "
+        f"{len(_labels)} of 3 families. The cross-chapter comparison needs a canonical run."
+    )
 _vals = [COMMON_IC[name] for name in _labels]
 fig_cmp = go.Figure(
     go.Bar(
         x=_labels,
         y=_vals,
         marker=dict(
-            color=[COLORS["slate"], COLORS["copper"], COLORS["blue"]],
-            line=dict(color=COLORS["amber"], width=[0, 0, 3]),
+            color=[
+                {"Ridge (Ch11)": COLORS["slate"], "GBM (Ch12)": COLORS["copper"]}.get(
+                    name, COLORS["blue"]
+                )
+                for name in _labels
+            ],
+            # The amber outline marks this notebook's own model, wherever it lands once the
+            # absent families are dropped.
+            line=dict(color=COLORS["amber"], width=[3 if n == _SELF else 0 for n in _labels]),
         ),
         text=[f"{value:+.4f}" for value in _vals],
         textposition="outside",
@@ -605,14 +623,25 @@ _coverage_text = (
     if not partial_epochs
     else f"Checkpoints at epochs {partial_epochs} were not published, on partial coverage."
 )
+# The baselines named in prose come from the population rather than from a literal, for the
+# same reason the chart's labels do: a sentence naming a model the run did not fit is a
+# sentence that goes stale silently.
+_present = [
+    f"{name.split(' (')[0]} **{COMMON_IC[name]:+.3f}**" for name in _labels if name != _SELF
+]
+_baseline_clause = (
+    "against " + " and ".join(_present)
+    if _present
+    else "with no flat-feature baseline in this population to compare against"
+)
+
 display(
     Markdown(
         f"""
 - **The simplest sequence model is measured against the flat-feature families on rows all three
   actually share** - {COMMON_ROWS:,} of them across {COMMON_DAYS:,} dates, intersected on
   `(symbol, timestamp)` and recomputed rather than assumed comparable. On that common sample the
-  peak checkpoint scores **{COMMON_IC[f"NLinear ({CONFIG_NAME})"]:+.3f}**, against Ridge
-  **{COMMON_IC["Ridge (Ch11)"]:+.3f}** and GBM **{COMMON_IC["GBM (Ch12)"]:+.3f}**. Its own
+  peak checkpoint scores **{COMMON_IC[_SELF]:+.3f}**, {_baseline_clause}. Its own
   mean daily IC over the whole validation sample is **{PEAK_IC:+.3f}** at epoch
   **{PEAK_EPOCH}**.
 - **Coverage is comparable across the checkpoint choice.** {_coverage_text} The guard stays
