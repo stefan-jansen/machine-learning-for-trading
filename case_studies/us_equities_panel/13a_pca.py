@@ -14,26 +14,51 @@
 # ---
 
 # %% [markdown]
-# # Principal Components - US Equities Panel
+# # US equities panel: the few movements the whole panel shares
 #
-# This notebook generates walk-forward validation predictions from return-panel principal
-# components. Readers choose the labels, factor count, parameter overrides, and execution tier.
-# Shared latent-factor code owns fold preparation, train-only fitting, fitted-state persistence,
-# prediction reconstruction, exact coverage, metrics, and registry writes.
+# Most of what three thousand stocks do on a given day is not three thousand different things.
+# One movement runs through nearly all of them, a few more run through overlapping groups, and
+# what is left over is specific to each name. **Principal component analysis** finds those shared
+# movements without being told anything about the stocks: it looks only at how the returns moved
+# together and extracts the directions that account for the most of that common variation, in
+# order.
 #
-# The implementation is in `case_studies/utils/latent_factors/pca.py` and its shared research
-# adapter. Readers can modify the factor construction in ordinary Python while preserving the same
-# request, result, and catalog boundary.
+# Each extracted direction is a **factor**. Each stock gets a **loading** on each factor, saying
+# how much of that movement it takes. A prediction for a stock is then rebuilt from the factors
+# and that stock's loadings, so what the model can say about a stock is exactly what the stock has
+# in common with the rest of the panel - and nothing that is specific to it.
 #
-# **Learning objectives**
+# **That is a compression, and the discarding is the point.** Five factors stand in for the whole
+# cross-section, so this model is deliberately blind to what makes one stock different from another
+# with the same loadings. The notebooks before it are where stock-specific information lives; this
+# one asks how much is left once you keep only what is shared.
 #
-# - Configure label-specific PCA requests with train-only fold fitting.
-# - Trace fitted components, checkpoint identities, and reconstructed predictions.
-# - Validate exact coverage before publishing compatible label sets.
+# **Everything is fitted on training rows only.** Factors and loadings are both estimated inside
+# each fold's training window and then applied to the validation rows, because a factor extracted
+# from the whole sample would have been computed partly from the returns it is later asked to
+# predict.
 #
-# **Book reference**: Chapter 13
+# **Learning objectives.** By the end of this notebook you will be able to:
 #
-# **Prerequisites**: `05_evaluation.py` and the finalized label and feature artifacts.
+# - Say what a factor and a loading are in terms of a panel of returns, without reference to an
+#   algorithm.
+# - Explain what a five-factor reconstruction of a stock's return can and cannot contain.
+# - Say why the factors have to be extracted inside a fold's training window, and what a
+#   whole-sample extraction would have used.
+# - State what the declared factor count does and does not establish about the right number.
+#
+# **Book reference**: Chapter 13.
+#
+# **Prerequisites**: [`03_financial_features`](03_financial_features.ipynb) and
+# [`04_model_based_features`](04_model_based_features.ipynb) have written the feature matrices,
+# [`02_labels`](02_labels.ipynb) the labels, and [`05_evaluation`](05_evaluation.ipynb) has
+# established the walk-forward folds.
+#
+# **What it writes**: one training run and one complete validation prediction set per label, in
+# `run_log/registry.db` and under `run_log/training/` and `run_log/predictions/`, frozen under a
+# name per label. [`13_latent_factors`](13_latent_factors.ipynb) indexes them,
+# [`15_model_analysis`](15_model_analysis.ipynb) compares them against the other families, and
+# [`16_backtest`](16_backtest.ipynb) backtests every one. **Selection happens there, not here.**
 
 # %%
 """Generate PCA validation predictions through the shared research interface."""
@@ -60,12 +85,22 @@ FOLD_IDS = []
 PREVIEW_N_FACTORS = 0
 
 # %% [markdown]
-# ## Configure the experiment
+# ## 1. Which labels, and how many factors
 #
-# `LABELS = []` runs the primary label and every configured variant. Set it to a visible subset for
-# a targeted experiment. `N_FACTORS` and `OVERRIDES` are resolved into the complete model
-# specification. Canonical execution uses the complete panel and fold protocol. Reduced checks use
-# the preview tier, declare every reduction below, and remain outside official result populations.
+# What each setting a run may pass decides:
+#
+# - **`LABELS`** empty fits the primary label and every declared variant. A subset fits only those.
+# - **`N_FACTORS`** is how many common movements are extracted. Five is declared rather than
+#   searched, and that is a design choice with consequences: too few and distinct common movements
+#   are forced into one direction, too many and the later ones are fitting noise that will not
+#   repeat out of sample. Nothing in this case study tunes it, so no result here is evidence that
+#   five is right - only evidence of what five gives.
+# - **`OVERRIDES`** changes a resolved model parameter. An override moves the training identity, so
+#   an overridden run registers beside the published one rather than replacing it.
+# - **`EXECUTION_TIER`** is `canonical` or `preview`. A canonical run fits the whole panel on every
+#   fold. A preview run declares its reductions and carries them in the identity, so its results
+#   can never be compared against canonical ones or reach a holdout decision.
+# - **`FOLD_IDS`** and **`MAX_SYMBOLS`** are the reductions a preview declares.
 
 # %%
 case_dir = get_case_study_dir(CASE_STUDY_ID)
@@ -127,9 +162,15 @@ else:
     raise ValueError("EXECUTION_TIER must be 'canonical' or 'preview'")
 
 # %% [markdown]
-# ## Build the label requests
+# ## 2. Binding the declarations to the data
 #
-# Each selected label receives a separate PCA request under the shared factor-count specification.
+# One request per label. A **request** is the declaration bound to a label and an execution
+# tier, with its overrides resolved; it holds no data, so the table below can be read before
+# anything is loaded.
+#
+# The labels get separate requests rather than one shared fit because a label defines which
+# rows are scorable and over what horizon. Fitting once and scoring three ways would give the
+# three labels a common estimate built partly from rows that only one of them can see.
 
 # %%
 requests = tuple(
@@ -157,7 +198,11 @@ request_table = pl.DataFrame(
 request_table
 
 # %% [markdown]
-# ## Plan and execute the selected labels
+# ## 3. Planning, then fitting
+#
+# **Planning resolves every identity before any fitting starts**, and the list of them is written
+# down as a population the run then has to fill completely - so a run that came out short reads as
+# a failure rather than as a smaller experiment.
 #
 # The planner resolves every label-specific training and checkpoint identity before fitting and
 # writes the canonical checkpoint population first. Each fold then fits PCA on its training return
@@ -189,7 +234,13 @@ planned_population
 execution = plan.run()
 
 # %% [markdown]
-# ## Inspect the resolved computation
+# ## 4. What was actually fitted
+#
+# The fully resolved specification, including every default nothing above restated: the factor
+# count, the feature count, the fold count, and the cross-validation identity. This is the
+# record a result is checked against, and it is what the training hash is computed from - so
+# two rows with the same hash were fitted under the same declaration, and two with different
+# hashes were not.
 
 # %%
 resolved_rows = []
@@ -212,11 +263,16 @@ resolved_table = pl.DataFrame(resolved_rows).sort("label")
 resolved_table
 
 # %% [markdown]
-# ## Validate and inspect the handoff
+# ## 5. What came out
 #
-# Each catalog row is a complete validation prediction set with exact training, label, fold, and
-# fitted-state lineage. Downstream notebooks select these rows with Polars rather than copying
-# hashes, while the hashes remain visible for exact provenance.
+# One row per label, each a complete set of validation predictions carrying the hash of the
+# training run behind it and of the predictions themselves, so any row traces back to the
+# fitted state that produced it.
+#
+# Coverage is checked exactly rather than approximately: a factor model reconstructs a
+# prediction for every stock-date its loadings cover, so a shortfall means a stock or a
+# session the reconstruction could not reach, and that is a fact about the fit rather than a
+# rounding difference.
 
 # %% tags=["results"]
 catalog_columns = [
@@ -269,11 +325,16 @@ execution_diagnostics = pl.DataFrame(execution.diagnostics)
 execution_diagnostics
 
 # %% [markdown]
-# ## Freeze the compatible result sets
+# ## 6. Naming the sets the later notebooks open
 #
-# A canonical default run freezes one complete PCA result set for each configured label. Each set
-# is also small enough for raw diagnostic comparisons. Preview and customized canonical requests
-# do not publish official sets.
+# One frozen set per label, under a name the later notebooks open by. Only an unnarrowed
+# canonical run publishes one: a name must not mean two different member sets at two different
+# times, so a run that overrode a parameter, narrowed the labels or ran under the preview tier
+# keeps its rows and publishes no name.
+#
+# These sets are small enough to be compared prediction by prediction, which is why
+# [`15_model_analysis`](15_model_analysis.ipynb) does not need a separate bounded subset for
+# them the way it does for the larger grids.
 
 # %% tags=["results"]
 set_rows = []
@@ -309,11 +370,24 @@ compatible_sets
 # a configuration or checkpoint.
 
 # %% [markdown]
-# ## Key takeaways and limitations
+# ## What to notice
 #
-# - PCA is fitted separately inside each training fold and then applied to that fold's validation
-#   observations.
-# - Fitted components and reconstructed predictions are digest-validated before reuse.
-# - The factor model represents linear directions of variation in the training return panel; it
-#   does not identify a structural economic factor.
-# - Label-specific sets preserve compatible comparisons for analysis and backtesting.
+# **A factor has no name.** It is a direction in the returns, ordered by how much common variation
+# it accounts for. The first one usually looks like the market because the market is what most
+# stocks share, but nothing in the method labels it, and reading an economic story into the second
+# or third is an interpretation this notebook does not support.
+#
+# **What this model cannot say is as informative as what it can.** A prediction is built only from
+# what a stock shares with the panel, so where it ranks the cross-section well, the ranking is
+# coming from common movement rather than from anything specific to a name.
+#
+# **The loadings belong to the stocks that were there.** A loading is fitted per stock, so a stock
+# with no training history in a fold has none, and a stock whose character changes over a decade
+# keeps the one it was fitted with. [`13b_ipca`](13b_ipca.ipynb) is the answer to both, and the
+# comparison between the two is what the pair is for.
+#
+# **Known limitations.** Five factors are declared rather than searched, so nothing here says five
+# is right. Everything is measured on validation folds that have been read many times over by the
+# time a case study reaches this notebook, and ranking accuracy is not strategy performance.
+#
+# **Next**: [`13b_ipca`](13b_ipca.ipynb) makes a stock's loading a function of what the stock is.
