@@ -38,12 +38,21 @@
 # threshold rather than whether one chosen threshold helped.
 #
 # **The thing to check first is whether an overlay bound at all.** A control that never fired
-# produces a result identical to the unprotected book in every digit, and identity across every
-# setting means the mechanism was never installed rather than that risk control does not help.
-# That failure has happened in this repository, at fourteen controls from a 3% stop to a 40-bar
-# time exit on a book drawing down 42% - a 3% stop cannot fail to fire on such a book, and the
-# comparison read as a clean pass because every result agreed with its baseline. So this notebook
-# reports how many times each control was applied, not only what the result was.
+# returns the unprotected book unchanged, so its Sharpe and its drawdown match the baseline exactly
+# - and so does its **trade count**, which is the tell. A control that fired closed a position
+# early, and closing a position early is a trade; two books with identical returns and an identical
+# number of trades did not take different actions. A performance column alone cannot separate "the
+# control never bound on this book" from "the control was never installed", and the trade count
+# can.
+#
+# That distinction is not hypothetical here. This repository has a recorded case of fourteen
+# controls, from a 3% stop to a 40-bar time exit, whose Sharpe, drawdown **and trade count** all
+# matched the unprotected book in every digit - fourteen different rules cannot all decline to act
+# and still agree to the last digit, and the cause was a declaration the engine never read. The
+# comparison read as a clean pass because every result agreed with its baseline.
+#
+# So the section that reports results compares each overlay's trade count against its source's,
+# rather than reporting performance alone.
 #
 # **Learning objectives.** By the end of this notebook you will be able to:
 #
@@ -258,11 +267,10 @@ selected_sources.select(
 # Fourteen declared controls across the three kinds, planned as one backtest each against the fixed
 # strategy.
 #
-# **The count of applications is recorded, not only the result.** An overlay that never fires
-# returns a book identical to the unprotected one, and a sweep in which every setting returns the
-# same numbers is a mechanism that was never installed rather than evidence that risk control does
-# not help. The two are indistinguishable from the results alone, which is why the application
-# count is part of what this section reports.
+# **What separates a control that did not bind from one that was never installed** is checked after
+# execution, in the section that reports results: each overlay's trade count against the trade
+# count of the strategy it was laid on. An overlay that fired closed a position early and therefore
+# traded; one whose count is identical to its source's took no action at all.
 
 # %%
 risk_requests = []
@@ -482,7 +490,6 @@ execution_diagnostics
 # same reason.
 
 # %% tags=["results"]
-set_rows = []
 completed_risk = study.backtests.table(include_preview=True).filter(
     pl.col("backtest_hash").is_in(planned_population.get_column("backtest_hash"))
 )
@@ -494,6 +501,58 @@ if (
     or completed_risk.filter(pl.col("sharpe").is_null() | ~pl.col("sharpe").is_finite()).height
 ):
     raise RuntimeError("The risk catalog is incomplete or mis-staged")
+# Did each control actually act? `num_trades` is registered on every backtest, and an overlay that
+# fired closed a position early, which is a trade. A row whose count equals its source's took no
+# action - legitimate for a loose threshold on a calm book, and the signature of a control the
+# engine never installed when it holds across every declared setting. Reported rather than
+# asserted on, because "no control bound" is a possible truth about a book and only its
+# uniformity across the sweep is evidence of a defect.
+overlay_effect = (
+    completed_risk.select("label", "backtest_hash", "sharpe", "num_trades")
+    .join(
+        planned_population.select("backtest_hash", "risk", "source_backtest_hash"),
+        on="backtest_hash",
+        how="inner",
+    )
+    .join(
+        backtest_catalog.select(
+            pl.col("backtest_hash").alias("source_backtest_hash"),
+            pl.col("num_trades").alias("source_num_trades"),
+            pl.col("sharpe").alias("source_sharpe"),
+        ),
+        on="source_backtest_hash",
+        how="left",
+    )
+    .with_columns(
+        # Null on either side is unknown rather than unmoved: a source whose trade count was never
+        # registered cannot answer the question, and reading it as "did not move" would
+        # manufacture the very signature this check exists to detect.
+        trades_moved=pl.when(pl.col("num_trades").is_null() | pl.col("source_num_trades").is_null())
+        .then(None)
+        .otherwise(pl.col("num_trades") != pl.col("source_num_trades")),
+        sharpe_moved=pl.when(pl.col("sharpe").is_null() | pl.col("source_sharpe").is_null())
+        .then(None)
+        .otherwise(pl.col("sharpe") != pl.col("source_sharpe")),
+    )
+    .select("label", "risk", "num_trades", "source_num_trades", "trades_moved", "sharpe_moved")
+    .sort("label", "risk")
+)
+_bound = int(overlay_effect.get_column("trades_moved").fill_null(False).sum())
+_unknown = int(overlay_effect.get_column("trades_moved").is_null().sum())
+print(
+    f"{_bound} of {overlay_effect.height} overlay results changed the trade count of the book "
+    f"they were laid on; {_unknown} could not be compared for a missing count"
+)
+if _bound == 0 and overlay_effect.height and _unknown < overlay_effect.height:
+    print(
+        "  Every declared control left the trade count untouched. Fourteen rules spanning a 3% "
+        "stop to a 20% trailing stop do not all decline to act on one book, so read this as the "
+        "overlay never reaching the engine rather than as evidence about risk control."
+    )
+overlay_effect
+
+# %% tags=["results"]
+set_rows = []
 if EXECUTION_TIER == "canonical":
     for label in completed_risk.get_column("label").unique().sort().to_list():
         label_name = label.replace("_", "-")

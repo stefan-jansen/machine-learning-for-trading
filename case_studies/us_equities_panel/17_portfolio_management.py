@@ -28,12 +28,21 @@
 #
 # - **From the prediction.** `score_weighted` gives more capital to the names the model was more
 #   confident about, so it trusts the magnitude of a prediction and not only its order.
+#   `conformal_weighted` reads the prediction's uncertainty rather than its size: it weights each
+#   name by one over the width of its prediction interval, so a name the model is less sure about
+#   gets less capital. That is the same width whose calibration
+#   [`15_model_analysis`](15_model_analysis.ipynb) checked, which is why the check there matters
+#   here.
 # - **From each stock's own volatility.** `inverse_vol` puts less into a stock that moves more, so
 #   each position contributes a similar amount of variation rather than a similar amount of money.
-# - **From how the stocks move together.** `risk_parity`, `mvo_ledoit_wolf` and `hrp` all read a
-#   covariance matrix, so they can tell that two names that always move together are one bet held
-#   twice. This is the group that needs history before it can decide anything, and the amount it
-#   needs is declared per allocator rather than assumed.
+#   `risk_parity` as implemented here is the same idea with a steeper exponent - weight
+#   proportional to one over volatility raised to 1.5 - which approximates equal risk contribution
+#   without estimating how the stocks move together.
+# - **From how the stocks move together.** `mvo_ledoit_wolf` and `hrp` read a covariance matrix, so
+#   they alone can tell that two names which always move together are one bet held twice. That is
+#   the property none of the rules above can see, and it is the one that has to be estimated. These
+#   two need history before they can decide anything, and how much is declared per allocator rather
+#   than assumed.
 #
 # **Equal weight is excluded here, and not because it lost.** It is the baseline every row is
 # measured against, and re-running it would produce the identical backtest under a new name.
@@ -48,8 +57,8 @@
 #
 # - Name the assumption an equal-weight book makes about its positions, and say what each family
 #   of allocator replaces it with.
-# - Say what a covariance-reading allocator can see that a per-stock one cannot, and what it needs
-#   in exchange.
+# - Say what a covariance-reading allocator can see that a per-stock one cannot, what it needs in
+#   exchange, and which of the declared allocators actually read one.
 # - Explain why a lookback window is declared per allocator rather than shared, and what a shared
 #   one would silently do to the ones that need less.
 # - State what a shortlist taken on baseline Sharpe makes it impossible for this comparison to
