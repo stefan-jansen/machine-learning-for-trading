@@ -46,10 +46,10 @@
 # declining to act on one book and agreeing to the last digit is not a result about risk control.
 #
 # So the results section compares each overlay against the strategy it was laid on rather than
-# reporting its performance alone. **A difference proves the control acted; identity does not prove
-# it did not** - a stop can close a position the next rebalance would have closed anyway and leave
-# the trade count where it was. Identity across *every* declared setting is a reason to confirm the
-# controls reach the engine, not a conclusion.
+# reporting its performance alone. **A difference proves the control acted; matching statistics
+# prove nothing about whether it fired** - a stop can close a position the next rebalance would
+# have closed anyway and leave both numbers where they were. Matching across *every* declared
+# setting is a reason to confirm the controls reach the engine, not a conclusion.
 #
 # **Learning objectives.** By the end of this notebook you will be able to:
 #
@@ -57,8 +57,8 @@
 #   why.
 # - Say why an overlay can only remove, and what that implies about how it can change a return
 #   distribution.
-# - Say what a result identical to its unprotected baseline does and does not establish about
-#   whether a control fired, and what evidence would settle it.
+# - Say what a result matching its unprotected baseline on two summary statistics does and does
+#   not establish about whether a control fired, and what evidence would settle it.
 # - Say why a threshold sweep is more informative than a single chosen threshold.
 #
 # **Book reference**: Chapter 19, Sections 19.3 to 19.6.
@@ -266,8 +266,8 @@ selected_sources.select(
 #
 # **Whether the overlays changed anything is checked after execution**, in the section that reports
 # results: each one against the strategy it was laid on, on the trade count and the Sharpe. A
-# difference establishes that the control acted; identity establishes only that it changed no
-# outcome.
+# difference establishes that the control acted. Matching values establish only that those two
+# statistics did not move, and leave every other outcome undetermined.
 
 # %%
 risk_requests = []
@@ -501,10 +501,12 @@ if (
 # Did the overlay change anything? Each result is compared against the strategy it was laid on, on
 # the two axes the catalog carries: the trade count and the Sharpe. A row that differs on either
 # acted - there is no other way for the numbers to move. A row identical on both changed no
-# outcome, which is NOT the same as never firing: a stop can close a position the next rebalance
+# neither of the two statistics compared here - which is weaker than "changed nothing", since two
+# different return paths can share a Sharpe and a trade count while differing in total return or in
+# drawdown, and weaker still than "never fired": a stop can close a position the next rebalance
 # would have closed anyway, replacing one exit with an earlier one and leaving the count where it
-# was. What would settle it is a per-control trigger count, which the backtest does not surface
-# into the catalog today.
+# was. What would settle whether a control fired is a per-control trigger count, which the backtest
+# does not surface into the catalog today.
 overlay_effect = (
     completed_risk.select("label", "backtest_hash", "sharpe", "num_trades")
     .join(
@@ -535,28 +537,30 @@ overlay_effect = (
     .select("label", "risk", "num_trades", "source_num_trades", "trades_moved", "sharpe_moved")
     .sort("label", "risk")
 )
-_moved = int(
-    (
-        overlay_effect.get_column("trades_moved").fill_null(False)
-        | overlay_effect.get_column("sharpe_moved").fill_null(False)
-    ).sum()
+# Three outcomes, not two. A row is CHANGED when either comparison is true, because one difference
+# is enough to establish the control acted. It is UNCHANGED only when both are false and both were
+# comparable. Anything else is UNKNOWN - a comparison that could not be made is not evidence of
+# sameness, and collapsing it into one would manufacture the signature this check exists to detect.
+_changed = overlay_effect.get_column("trades_moved").fill_null(False) | overlay_effect.get_column(
+    "sharpe_moved"
+).fill_null(False)
+_comparable_both = (
+    overlay_effect.get_column("trades_moved").is_not_null()
+    & overlay_effect.get_column("sharpe_moved").is_not_null()
 )
-_unknown = int(
-    (
-        overlay_effect.get_column("trades_moved").is_null()
-        & overlay_effect.get_column("sharpe_moved").is_null()
-    ).sum()
-)
-_comparable = overlay_effect.height - _unknown
+_unchanged = _comparable_both & ~_changed
+n_changed, n_unchanged = int(_changed.sum()), int(_unchanged.sum())
+n_unknown = overlay_effect.height - n_changed - n_unchanged
 print(
-    f"{_moved} of {_comparable} comparable overlay results differ from the strategy they were "
-    f"laid on; {_unknown} could not be compared for a missing metric"
+    f"{n_changed} of {overlay_effect.height} overlay results differ from the strategy they were "
+    f"laid on; {n_unchanged} match it on both compared statistics; {n_unknown} could not be "
+    "fully compared"
 )
-if _comparable and _moved == 0:
+if n_unchanged and not n_changed and not n_unknown:
     print(
-        "  No declared control changed either the trade count or the Sharpe. That is possible on "
-        "a calm book, and it is also what a control the engine never installed looks like, so "
-        "confirm the controls reach the engine before reading it either way."
+        "  No declared control moved either the trade count or the Sharpe. Neither statistic "
+        "moving is possible on a calm book, and is also what a control the engine never installed "
+        "looks like, so confirm the controls reach the engine before reading it either way."
     )
 overlay_effect
 
@@ -626,11 +630,11 @@ compatible_sets
 # %% [markdown]
 # ## What to notice
 #
-# **Check that the overlays changed something before reading what they did.** A result identical to
-# the unprotected book on every axis changed no outcome, and identity across every declared setting
-# is a reason to confirm the controls reach the engine rather than a finding about risk control.
-# Neither is settled by the performance columns alone; a per-control trigger count would settle it,
-# and the backtest does not surface one today.
+# **Check that the overlays moved something before reading what they did.** A result matching the
+# unprotected book on both compared statistics has not been shown to change anything, and matching
+# across every declared setting is a reason to confirm the controls reach the engine rather than a
+# finding about risk control. Neither question is settled by these two columns; a per-control
+# trigger count would settle the first, and the backtest does not surface one today.
 #
 # **An overlay can only remove, so it reshapes a return distribution rather than shifting it.** It
 # truncates the left tail by closing losers early and truncates the right by closing winners early,
