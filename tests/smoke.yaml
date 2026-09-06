@@ -621,6 +621,18 @@ case_studies/us_firm_characteristics/05_linear:
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 20, train_sample_frac: 0.5}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
   measured_s: 19
+  note: >-
+    Which lever does the work, measured rather than assumed, because the answer here is the
+    opposite of the one fx_pairs gives. Holding the other two fixed: dropping
+    train_sample_frac costs nothing (20 s against 19), running all ten folds costs 6 s (25 s),
+    and running the full universe costs 20 s (39 s). So the entity cap is the only lever that
+    moves this notebook, and even with every reduction removed it finishes in 39 s.
+    The refit-cadence lever that dominates a stage-04 smoke run - three fx_pairs symbols went
+    from 577 s to 139 s on refit_every alone - has no counterpart here: us_firm_characteristics
+    has no model-based feature stage, so there is no walk_forward_feature, no refit_every and no
+    optimizer inside a refit loop anywhere in the case study. A linear fit on a monthly panel is
+    cheap at every setting in this grid, and the reductions are declared for determinism and
+    row count rather than to buy time.
 
 case_studies/us_firm_characteristics/06_gbm:
   parameters:

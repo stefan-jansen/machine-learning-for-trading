@@ -34,6 +34,21 @@
 # twelve observations is [`17_strategy_analysis`](17_strategy_analysis.ipynb)'s subject,
 # with the intervals to say it.
 #
+# **The window is 2016, declared in `config/setup.yaml` as `holdout_start` 2016-01-01 to
+# `holdout_end` 2016-12-31.** The panel is monthly and `labels.rebalance_step` is 1, so the
+# strategy takes a decision at each month end and the window holds twelve of them. That
+# twelve is not incidental to the reading of this notebook; it is the sample size behind
+# every number section 4 prints, and it is why the language there is about what the figures
+# cannot separate rather than about what they show.
+#
+# Why the holdout is one year rather than five is a consequence of the walk-forward scheme
+# rather than a preference. `evaluation` declares ten splits with a ten-year training window
+# and a one-year validation window each, rolling forward across a panel that begins in 1996.
+# Widening the holdout takes those years away from the ten folds that select the model, and
+# on a monthly panel a fold cannot be shortened much before its validation year stops
+# containing enough cross-sections to rank anything. The cost of the choice is precisely the
+# sampling error this notebook keeps naming.
+#
 # **Prerequisites:** [`15_holdout_predictions`](15_holdout_predictions.ipynb).
 #
 # **Scope:** one backtest. No selection, no comparison beyond a printed pair.
@@ -179,6 +194,22 @@ print(f"Holdout prediction: {HOLDOUT_PREDICTION_HASH}")
 # residuals of the validation prediction set, which is what the allocator would have had
 # standing at the start of the window.
 #
+# A conformal width is an interval around a prediction, sized so that a stated fraction of
+# past errors fell inside an interval built the same way. The `alpha` in the allocator's
+# parameters is the fraction allowed to fall outside, so a smaller alpha buys a wider
+# interval. The width is therefore a statement about how wrong this model has been on
+# this name, and nothing about how large the return is expected to be.
+#
+# That distinction is what makes `conformal_weighted` a different strategy from
+# `score_weighted` rather than a rescaling of it. `score_weighted` puts more capital where
+# the predicted return is larger. `conformal_weighted` puts more capital where the
+# prediction has been more reliable, which on a firm panel means the names with enough
+# calibration history to have earned a narrow interval. The two agree only when the model's
+# confidence happens to track its predictions, and on this panel there is no reason it
+# should: a firm's characteristics can imply a large expected return while that firm's own
+# residual history is short or dispersed. `min_calibration_n` is the floor on that history,
+# below which a name gets no width and is not sized at all.
+#
 # No validation observation is dropped at the boundary, and the reason is the label rather
 # than a choice. The embargo exists because a residual observed at `t` measures a return
 # realising over `(t, t+h]`, so with `h > 0` the last residuals of the validation span
@@ -213,6 +244,22 @@ else:
 # slippage are the levels `setup.yaml` declares, the same ones every validation number in
 # this case study was net of, and the same ones sitting inside the swept grid in
 # [`14_costs`](14_costs.ipynb).
+#
+# What that specification does to a prediction, in order, since this notebook is where a
+# reader arrives wanting the whole strategy in one place rather than assembled from four
+# earlier ones. At each month end the model scores every firm in the cross-section. The
+# `top_k` in the carrier's strategy block keeps that many of the highest-scored, drawn from
+# the grid `backtest.sweep.top_k_grid` declares as 5, 10, 20 and 50. The allocator turns
+# those into weights, by score or by conformal width. The result is one weight vector for
+# the month, and the backtest earns each name's realised forward return over that month.
+#
+# Two thresholds decide whether a change in that vector is traded at all.
+# `backtest.rebalance.default` declares `min_weight_change` 0.005 and `min_trade_value`
+# 100, so a name whose target weight moves by less than half a percentage point, or whose
+# trade would be worth less than a hundred dollars, is left where it is. They exist because
+# a monthly re-scoring produces many small weight changes whose cost exceeds the edge they
+# express, and without a floor the cost sweep in [`14_costs`](14_costs.ipynb) would be
+# measuring churn the strategy never intended to pay for.
 #
 # The run registers under `stage='holdout'`, which the registry derives from the
 # prediction set's split rather than from anything asserted here.
@@ -337,6 +384,23 @@ print(f"Holdout backtest: {result.backtest_hash}")
 # twelve observations. Both facts push the pair apart on their own, before any real change
 # in the strategy's edge. [`17_strategy_analysis`](17_strategy_analysis.ipynb) is where
 # they are given intervals and a paired comparison.
+#
+# Four statistics are printed and they do not all mean the same amount here. CAGR is the
+# constant annual growth rate that would have produced the window's total return, and over
+# a window that is exactly one year it is just that return, so it adds no information the
+# return does not already carry and is reported for comparability with the other case
+# studies. Sharpe is the mean monthly return divided by its standard deviation, annualised
+# at the `periods_per_year` of 12 that `setup.yaml` declares; estimated from twelve
+# observations its standard error is large enough that the interval around it will cover a
+# wide range of values, which is the whole reason it is not interpreted here.
+#
+# Maximum drawdown and win rate are the two that behave differently, in opposite
+# directions. Maximum drawdown is the largest peak-to-trough fall in the equity curve, and
+# it is a single realised extreme rather than an average, so it is the one figure here a
+# short window does not shrink the meaning of: the strategy either did or did not give that
+# much back. Win rate is the fraction of the twelve months that were positive, so it moves
+# in steps of one twelfth and cannot distinguish a strategy that wins narrowly from one
+# that wins by a wide margin. Read it as a count, not as a probability.
 
 # %% tags=["results"]
 metrics = result.metrics

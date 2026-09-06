@@ -32,6 +32,23 @@
 # from the data structure the backtest runs on. Simulating a stop on it would
 # mean inventing an intra-month path and reporting what the invention did.
 #
+# **The absence comes from the data release, not from the backtest engine**, and that is
+# what makes it permanent rather than a limitation someone could fund away. Read the two
+# declarations in `config/setup.yaml` together. `universe.identifiers` is
+# `anonymous_split_scoped_firm_axis`, and the note beside it records that identifiers
+# persist only inside each released tensor block, with no published mapping between
+# blocks. The observations themselves are monthly characteristic vectors. So there is no
+# ticker to look a daily price up against, and no continuous firm identity to look it up
+# along; a within-month price series for these firms cannot be bought, joined or
+# reconstructed. Switching this case study to an engine path would produce the same empty
+# table with more machinery behind it.
+#
+# The other case studies in the book differ on exactly this point rather than on the
+# quality of their engineering. An engine path is available where the instrument has a
+# public identifier and an intraday or daily price history to go with it. Here the release
+# deliberately does not publish one, because anonymity is what allowed the characteristics
+# to be released at all.
+#
 # So this notebook establishes a boundary rather than a result. It selects the
 # parent run the overlays would have been applied to, states which controls the
 # configuration declares, and registers none of them. The registry query in
@@ -168,9 +185,18 @@ prices = load_backtest_prices_for(CASE_STUDY_ID, LABEL, split="validation", max_
 # %% [markdown]
 # ### MAE/MFE-Calibrated Trailing Stops
 #
-# MAE/MFE calibration requires an engine path with intra-period prices. The
-# vectorized monthly-outcome path skips this calibration and leaves the
-# configured position-control catalog unexecuted.
+# Maximum adverse excursion is the furthest a position moved against the direction it was
+# opened in before it was closed; maximum favourable excursion is the furthest it moved in
+# that direction. Both are properties of the path a position travelled while it was held,
+# and calibrating a stop from them means setting the threshold where it would have avoided
+# the losers without cutting the winners short: a stop tighter than the typical winner's
+# adverse excursion closes trades that were about to work.
+#
+# That calibration therefore needs the same thing the stops themselves need, which is a
+# price between the open and the close. On the vectorized monthly-outcome path a position
+# has an entry weight and a realised month, and no excursion at all - not an unmeasured
+# one, an undefined one. So this calibration is skipped and the configured
+# position-control catalog is left unexecuted.
 
 # %%
 _position_grid = get_position_risk_controls(CASE_STUDY_ID)
@@ -214,6 +240,23 @@ if MAX_RISK_VARIANTS > 0:
 # rules, and the portfolio-control list is empty by configuration, so the loop body
 # has nothing to register and the count below is zero by construction rather than by
 # failure. The two are different outcomes and the counters separate them.
+#
+# The two lists are empty for different reasons, and only one of them is about this
+# backtest path. A position-level control asks what one position did while it was held,
+# so it is blocked by the missing intra-month price. A portfolio-level control asks what
+# the book looked like at a rebalance: gross exposure, the largest weight any single name
+# may carry, the number of names that must be held. Every one of those is answerable from
+# the weight vector this path does hold, so the vectorized path is no obstacle to them.
+#
+# They are absent because `config/setup.yaml` declares none, and that is a position rather
+# than an oversight. A gross-exposure limit or a per-name cap is a constraint the desk
+# operates under whatever the backtest says. Sweeping it alongside the allocators would
+# enter it into a competition ranked on validation Sharpe, and the loosest cap wins that
+# competition almost by definition, since a cap only ever removes exposure the strategy
+# wanted. The result would be a notebook that recommends relaxing a risk limit on the
+# grounds that relaxing it scored higher, which is the failure the separation avoids.
+# Where this case study does constrain concentration it does so through `top_k`, which is
+# declared in the strategy and swept as part of it.
 
 # %%
 n_done = 0
