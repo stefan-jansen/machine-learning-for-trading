@@ -646,17 +646,27 @@ case_studies/us_firm_characteristics/05_linear:
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
   measured_s: 19
   note: >-
-    Which lever does the work, measured rather than assumed, because the answer here is the
-    opposite of the one fx_pairs gives. Holding the other two fixed: dropping
-    train_sample_frac costs nothing (20 s against 19), running all ten folds costs 6 s (25 s),
-    and running the full universe costs 20 s (39 s). So the entity cap is the only lever that
-    moves this notebook, and even with every reduction removed it finishes in 39 s.
+    Which lever does the work, measured rather than assumed. Re-measured 2026-09-06 under
+    ml4t-diagnostic 0.1.4; an earlier set of figures taken under 0.1.2 is superseded and the
+    reason is worth knowing, because it is a property of #808 rather than of this notebook.
+    Holding the other two reductions fixed, against a 19 s baseline: dropping train_sample_frac
+    costs nothing (19 s), running all ten folds costs 8 s (27 s), and running the full universe
+    costs 8 s (27 s). So neither lever dominates and the notebook is cheap at every setting in
+    this grid.
+    Under 0.1.2 the same three runs gave 20, 25 and 39 s, which made the entity cap look like
+    the only lever that mattered. It was not the notebook that changed. #808 flipped the fold
+    order, so `folds: [0]` selected the NEWEST window before and selects the EARLIEST one now
+    (validating 2006-11-30 to 2007-09-28), and this panel's cross-section is much smaller in
+    2006 than in 2015. A full-universe run on the earliest fold is simply cheaper than one on
+    the latest. Any per-fold timing taken before #808 is measuring a different fold.
     The refit-cadence lever that dominates a stage-04 smoke run - three fx_pairs symbols went
     from 577 s to 139 s on refit_every alone - has no counterpart here: us_firm_characteristics
     has no model-based feature stage, so there is no walk_forward_feature, no refit_every and no
-    optimizer inside a refit loop anywhere in the case study. A linear fit on a monthly panel is
-    cheap at every setting in this grid, and the reductions are declared for determinism and
-    row count rather than to buy time.
+    optimizer inside a refit loop anywhere in the case study. The reductions are declared for
+    determinism and row count rather than to buy time.
+    Verified under 0.1.4: exit 0 in 19 s at 1.6 GB, 28 rows in each declared table, and
+    fold_metrics carries fold_id 0 alone, so `folds: [0]` restricts what is fitted and not only
+    what the identity declares.
 
 case_studies/us_firm_characteristics/06_gbm:
   parameters:
