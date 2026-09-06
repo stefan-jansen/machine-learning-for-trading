@@ -335,10 +335,29 @@ model_based:
     # cadence before the schedule was declared here; what moved is where the two
     # numbers live.
     burnin: 252
-    # How often the order and the weights are re-chosen. Monthly. The stepwise
-    # order search is the expensive step, so this is what bounds the walk's cost
-    # without narrowing the universe.
+    # How often the weights are re-estimated. Monthly.
     refit_every: 21
+    # (p, d, q), declared rather than selected per window.
+    #
+    # This replaced AutoARIMA's stepwise search, and the measurement that decided it is
+    # worth stating because it is the reason rather than the justification. Sampling
+    # eight refit cutoffs on each of the 30 eligible products, 240 searches in all,
+    # AutoARIMA returned 34 distinct orders and NO product held a single order across
+    # its own walk. The modal choice (2,0,1) took 11.7% of searches and (2,0,2) 10.4%;
+    # the best any product managed was 6 of its 8 cutoffs on one order. An order that
+    # changes almost every month on an expanding window of the same series is the
+    # information criterion moving with the sample, not structure being found, and it
+    # makes "the ARIMA carry forecast" a different quantity in every block.
+    #
+    # (2,0,1) is the modal selection and the more parsimonious of the two that are
+    # indistinguishable from each other.
+    #
+    # d=0 is by construction, not by search: carry_zscore is already a rolling z-score
+    # clipped to +/-5, so it is stationary before this model sees it. 83% of the searches
+    # agreed (199 of 240 chose d=0); the 17% that differenced it were over-differencing a
+    # bounded series, which is a known failure of automatic selection rather than a
+    # property of carry.
+    order: [2, 0, 1]
   hmm:
     # Backwardation and contango.
     n_states: 2

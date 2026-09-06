@@ -96,3 +96,35 @@ def test_two_runs_of_one_spec_keep_one_identity_and_differ_in_start(tmp_path: Pa
     first = study.results.register_training(spec, started_at="2026-09-05T01:00:00+00:00")
     second = study.results.register_training(spec, started_at="2026-09-05T02:00:00+00:00")
     assert first.hash == second.hash
+
+
+def test_the_direct_registration_path_also_records_a_start(tmp_path: Path) -> None:
+    """The default belongs to `register_training_run`, not to `ResultsCatalog`.
+
+    `ResultsCatalog.register_training` supplied the default, and five other callers of
+    `register_training_run` did not: `gbm.py:1395`, `latent_factors/cv.py:1707`, and the
+    re-registration path inside `registration.py` itself. A row registered through any of
+    them carried NULL for `started_at`, and because `elapsed_s` is filled in later by
+    `record_training_runtime` and stays NULL when a run never reaches it, such a row holds no
+    recoverable timing at all - not a duration, not a start, nothing to difference.
+
+    Measured on `nasdaq100_microstructure`'s live registry, 2026-09-05: 13 of 13 `linear`
+    rows carry NULL for both, registered across 3.1 seconds of wall clock. That corpus is
+    what `reference/case-study-runtimes.md` prices the next run from.
+
+    Refs ml4t/agent-workspace#1026.
+    """
+    from case_studies.utils.registry.registration import register_training_run
+
+    study = _study(tmp_path)
+    spec = _training_spec()
+    before = datetime.now(UTC)
+    training_hash = register_training_run(
+        "etfs", spec=spec, case_dir=study.root, entry_point="tests"
+    )
+    after = datetime.now(UTC)
+
+    started_at, _elapsed_s = _row(study, training_hash)
+    assert started_at is not None, "a row registered off the research path holds no timing"
+    assert before <= datetime.fromisoformat(started_at) <= after
+    assert training_hash == training_hash_from_spec(spec), "defaulting a start moved the identity"

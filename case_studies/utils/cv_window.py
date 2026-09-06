@@ -331,7 +331,7 @@ def assert_variant_folds_are_out_of_sample(
     which never reads ``val_start`` and would pass on a geometry that leaks.
 
     **Compares timestamps, never dates.** At date granularity
-    nasdaq100_microstructure fold 0 reads as a violation, 2020-12-29 against
+    a nasdaq100_microstructure fold reads as a violation, 2020-12-29 against
     2020-12-29; the bars are minutes, the fit closes at 15:22 and the variant's
     validation opens at 15:38.
 

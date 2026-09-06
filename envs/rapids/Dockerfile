@@ -76,7 +76,7 @@ RUN pip install --no-cache-dir \
     "psutil>=5.9" \
     "jupyterlab>=4.1" \
     "ml4t-data>=0.1.2" \
-    "ml4t-diagnostic>=0.1.2" \
+    "ml4t-diagnostic>=0.1.4" \
     "ml4t-engineer>=0.1.3" \
     "pytest>=8.0" \
     "pyyaml>=6.0" && \
