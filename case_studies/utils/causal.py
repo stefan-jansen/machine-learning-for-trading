@@ -1112,14 +1112,22 @@ def _causal_runtime_identity() -> dict[str, str]:
     }
 
 
-def _causal_runtime_provenance(study: Study) -> dict[str, Any]:
-    return {
+def _causal_runtime_provenance(study: Study, *, notebook: str | None = None) -> dict[str, Any]:
+    record: dict[str, Any] = {
         "entry_point": "case_studies.utils.causal",
         "packages": _causal_runtime_identity(),
         "platform": platform.platform(),
         "python": platform.python_version(),
         "source_commit": study.manifest.get("baseline_source_commit", "unknown"),
     }
+    # `notebook_path` says which notebook produced a row; `entry_point` says which module ran.
+    # Different questions, and the module is legitimately shared - every causal notebook calls
+    # this one, so `entry_point` cannot name a notebook and should not try. Both sit in
+    # `registry/specs.py:_V2_PROVENANCE_FIELDS`, so neither reaches the causal identity. Absent
+    # when the caller names no notebook: a wrong notebook name would be worse than none.
+    if notebook:
+        record["notebook_path"] = notebook
+    return record
 
 
 def _whole_timestamp_tail(
@@ -1573,7 +1581,7 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     }
     if tier is ExecutionTier.PREVIEW:
         computation["preview_reductions"] = reductions
-    provenance = _causal_runtime_provenance(study)
+    provenance = _causal_runtime_provenance(study, notebook=request.get("notebook"))
     spec = ResolvedSpec.create(
         family="causal_dml",
         label=label_ref.name,

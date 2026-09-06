@@ -924,3 +924,30 @@ def test_the_outcome_horizon_is_registered_and_is_not_the_buffer(tmp_path, monke
 
     assert refutation["label_buffer_steps"] == 3
     assert refutation["label_horizon_steps"] == 1
+
+
+def test_naming_the_notebook_records_provenance_without_moving_the_identity(
+    tmp_path, monkeypatch
+) -> None:
+    """`notebook=` answers which notebook wrote a row, and must not reprice the analysis.
+
+    `entry_point` in a causal spec names the module, `case_studies.utils.causal`, which every
+    `*_causal_dml` notebook shares - so it cannot say which one ran. `notebook_path` can, and
+    it is in `_V2_PROVENANCE_FIELDS`, so recording it moves no hash and forces no refit. That
+    is the whole reason this is safe to add to notebooks whose rows already exist, and it is
+    worth pinning rather than asserting: `computation` is hashed whole, so a request field
+    that leaked into it would reprice every causal row in the corpus.
+    """
+    study, label, _frame = _causal_fixture(tmp_path, monkeypatch)
+
+    unnamed = study.causal(method="dml", label=label.name).resolve()
+    named = study.causal(method="dml", label=label.name, notebook="11_causal_dml").resolve()
+
+    from case_studies.utils.registry.specs import training_hash_from_spec
+
+    assert named.spec["computation"] == unnamed.spec["computation"]
+    assert training_hash_from_spec(named.spec) == training_hash_from_spec(unnamed.spec)
+
+    assert named.spec["provenance"]["notebook_path"] == "11_causal_dml"
+    assert "notebook_path" not in unnamed.spec["provenance"]
+    assert named.spec["provenance"]["entry_point"] == "case_studies.utils.causal"
