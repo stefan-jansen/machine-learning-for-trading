@@ -99,6 +99,7 @@ from case_studies.research import (
     planned_model_plan,
     primary_label,
     run_model_population,
+    supersedes_for_run,
 )
 from utils.style import COLORS, show_plotly_with_alt
 
@@ -286,11 +287,21 @@ planned.select(
 
 # %%
 population_name = POPULATION_NAME or "us-equities-gbm-checkpoints-v1"
+# The declared hash is only meaningful where a generation of this name already exists. A
+# preview run, a first canonical run against an empty `run_log/`, and a run under a
+# caller-chosen `POPULATION_NAME` are all refused by `OfficialPopulation.create` if it is
+# passed anyway. The resolution lives in shared code so no notebook branches on the tier.
+supersedes = supersedes_for_run(
+    study,
+    population_name=population_name,
+    declared=SUPERSEDES_POPULATION,
+    execution_tier=EXECUTION_TIER,
+)
 execution, population = run_model_population(
     study,
     plan,
     population_name=population_name,
-    supersedes=SUPERSEDES_POPULATION or None,
+    supersedes=supersedes,
 )
 
 fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
