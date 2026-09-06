@@ -1315,6 +1315,25 @@ case_studies/cme_futures/09_dl_lstm:
   timeout: 300
 case_studies/cme_futures/10_latent_factors:
   timeout: 180
+case_studies/cme_futures/10a_pca:
+  # No PREVIEW_REDUCTIONS, and that is a measurement rather than an omission. #942 listed this
+  # entry among ten declaring a reduction their overrides never set. True, and not the same as
+  # failing without one: run focused on its own seeded workspace against the regenerated
+  # fixture, 2026-09-06, it passed three times at 57s, 59s and 62s, peak 1.49 GB.
+  #
+  # Those seconds are an upper bound and not a CI figure. The workstation was carrying three
+  # production chains and a fixture regeneration at the time, measured at 22-26 runnable on 24
+  # cores - roughly a 6x contention factor that has nothing to do with this notebook. Treat them
+  # as "well inside 300 even at six times cost", which is the claim they support, and not as the
+  # runtime to size a budget from. The entries elsewhere in this file that quote a percentage of
+  # budget take theirs from green `cs-*` runs of .github/workflows/test.yml, which is the right
+  # source once this notebook has a few.
+  #
+  # 1.49 GB is not subject to that caveat: peak resident does not inflate under CPU contention.
+  #
+  # The budget is stated rather than left to the harness default so the number has somewhere to
+  # sit beside what it was measured against.
+  timeout: 300
 case_studies/cme_futures/10b_stochastic_discount_factor:
   skip: true
   skip_reason: 'TEMPORARY: case-study end-to-end pipeline times out or fails with trimmed test-data; needs full fixture rebuild'
