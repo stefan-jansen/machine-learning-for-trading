@@ -53,6 +53,19 @@ from case_studies.utils.sweep_config import get_entry_schemes_for
 from utils.paths import REPO_ROOT
 from utils.style import COLORS, show_with_alt, zero_line
 
+# %% [markdown]
+# ### Which prediction sets enter the pool
+#
+# Every model notebook froze its results under a name per label and family, and the list below is
+# the pool this baseline ranks. A name missing from it is a family that never competes, so the
+# list is the declaration of what the strategy chain is allowed to choose from.
+#
+# **The weekly experiment is deliberately absent.** [`12_dl_weekly`](12_dl_weekly.ipynb) fits
+# `fwd_ret_5d` on a Friday-only grid, and its predictions carry the same label as the daily models
+# below. Ranking them together would compare series scored on different sets of decision dates -
+# one on every session, one on about a fifth of them - and read the difference as a difference
+# between models. It runs and registers; it is not a candidate here.
+
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
 PREDICTION_SET_NAMES = [
@@ -66,7 +79,6 @@ PREDICTION_SET_NAMES = [
     "us-equities-fwd-ret-1d-nlinear-v1",
     "us-equities-fwd-ret-1d-lstm-v1",
     "us-equities-fwd-ret-1d-tsmixer-v1",
-    "us-equities-fwd-ret-5d-weekly-v1",
     "us-equities-fwd-ret-1d-pca-v1",
     "us-equities-fwd-ret-1d-ipca-v1",
     "us-equities-fwd-ret-5d-pca-v1",
