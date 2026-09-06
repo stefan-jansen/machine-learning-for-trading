@@ -2812,35 +2812,57 @@ case_studies/sp500_options/90_ic_diagnostic:
 case_studies/us_equities_panel/01_feasibility_analysis:
   timeout: 120
 case_studies/us_equities_panel/02_labels:
+  # 1996, not 2000. The three stages that take a START_DATE have to agree - 04 asserts the
+  # panel it loads digests to what 02 recorded - and the value is set by what 06_linear needs,
+  # not by what 02 needs. See 04 below for the measurement.
   parameters:
-    START_DATE: '2000-01-01'
-  timeout: 120
+    START_DATE: '1996-01-01'
+  timeout: 150
 case_studies/us_equities_panel/03_financial_features:
+  # START_DATE has to match 02_labels and 04_model_based_features; see 04 for why it is 1996.
+  # The timeout goes up with it: 400s measured at the 2000 start on 2026-09-06, over a span
+  # 22% shorter than this one. Raised to 900 rather than to a scaled estimate, because the
+  # scaling of this stage across a longer span has not been measured and 600 left no room to
+  # find out.
   parameters:
-    START_DATE: '2000-01-01'
-  timeout: 600
+    START_DATE: '1996-01-01'
+  timeout: 900
 case_studies/us_equities_panel/04_model_based_features:
   # START_DATE has to match 02_labels above. 04 asserts that the panel it loads
   # digests to the value 02_labels recorded against the label file it scores
   # against, and without this it loaded its own 1990-01-01 default (298,055 rows,
-  # 067a8e7a6b6ed0bf) against labels written from 2000-01-01 (220,378 rows,
-  # 54d5bec0d92f4f7f).
+  # 067a8e7a6b6ed0bf) against labels written from a later start.
   #
   # No GARCH_MIN_OBS or REGIME_MIN_OBS. Both burn-ins are counted in sessions of one
-  # series now, not inside a fold's training window, and the fixture carries 4,565
-  # sessions from 2000-02-01 - past the 756 the clustering needs and well past the 504
-  # each stock's variance model needs. The entry used to lower GARCH_MIN_OBS to 50
-  # because under per-fold fitting no symbol reached 504 inside a ten-year window and
-  # every fit was skipped; that reason went with the schedule (#790). Verified against
-  # the fixture on 2026-09-05: 02-05 pass with the declared burn-ins.
+  # series now, not inside a fold's training window. The entry used to lower GARCH_MIN_OBS
+  # to 50 because under per-fold fitting no symbol reached 504 inside a ten-year window and
+  # every fit was skipped; that reason went with the schedule (#790).
+  #
+  # START_DATE is 1996-01-01 and not 2000-01-01, and the reason is a stage further down.
+  # The burn-ins are counted from the start of the panel, so the first 756 sessions carry no
+  # `wass_*` value and the first 504 carry no `garch_cond_vol`. That is fine for 02-05, which
+  # is where it was checked before, and it is not fine for 06_linear: 06 fits per fold, and
+  # on a panel starting 2000-02-01 the span is 18.2 years, too short to hold `train_size: 10Y`
+  # plus `n_splits: 16` at `val_size: 1Y`. generate_cv_splits falls back to an expanding
+  # window, the fixture gets 15 folds rather than the declared 16, and fold 0 trains on 223
+  # sessions - inside every burn-in above. Measured on the 2026-09-06 fixture: 19 declared
+  # features entirely missing from fold 0's training rows, 7 from fold 1's and 5 from fold 2's,
+  # which is what `standardized_fold` refuses ("the declared feature list no longer describes
+  # the design matrix").
+  #
+  # Fold 0's training window grows by about 261 sessions per year of earlier start. Measured
+  # against a synthetic weekday index to the same end date: 1998 gives 16 folds and 518
+  # sessions, 1996 gives 16 and 1041, 1990 - the production default all three stages carry -
+  # gives 16 and 2606. 1996 is the latest start that clears the 756-session clustering burn-in,
+  # so it is the cheapest one that works. A full run is unaffected either way.
   #
   # XS_MIN_STOCKS stays. The default 50 is a floor on the cross-section a daily return
   # distribution is summarized from, and the fixture carries 56 symbols in total, so at
   # the default nearly every date is dropped and the clustering has nothing to fit on.
   parameters:
-    START_DATE: '2000-01-01'
+    START_DATE: '1996-01-01'
     XS_MIN_STOCKS: 25
-  timeout: 300
+  timeout: 450
 case_studies/us_equities_panel/05_evaluation:
   parameters:
     MAX_SYMBOLS: 5
@@ -2851,34 +2873,43 @@ case_studies/us_equities_panel/06_linear:
   # so only on the research_preview=True path. generate_intermediates.py passes this same
   # entry with research_preview=False and no output_dir, so an EXECUTION_TIER written down
   # here would force the preview tier on the run that is meant to be canonical.
-  # MAX_FOLDS and MAX_SYMBOLS are folded into PREVIEW_REDUCTIONS by _collect_preview_reductions.
+  #
+  # That is also why MAX_FOLDS and MAX_SYMBOLS are gone. They were here on the strength of
+  # "_collect_preview_reductions folds them into PREVIEW_REDUCTIONS", which is true on the
+  # research_preview=True path and false on the one the sentence above says this entry takes.
+  # Papermill logged "Passed unknown parameter" for both on 2026-09-06 and the notebook ran
+  # unreduced. The reduction below is one this notebook takes on the canonical path.
+  #
+  # LABELS and CONFIG_NAMES narrow the menu from three labels against sixteen published
+  # configurations - 48 config-label fits - to one label against two, which is the shape
+  # 07_gbm already uses. `ols` is the unpenalized baseline and `ridge_a1.0` a mid-ladder
+  # penalty, so the pair still exercises both code paths. Narrowing means the run may not
+  # publish the canonical population (narrows_declared_catalog), which is what POPULATION_NAME
+  # is for: the reduced run gets its own name rather than writing a partial member set under
+  # the canonical one.
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-  # 300s, not 120s. 06 runs the widest workload of the model notebooks under these reductions -
-  # LABELS and CONFIG_NAMES both empty means all three labels against all sixteen published linear
-  # configurations, 48 config-label fits at two folds each - and it carried the tightest budget of
-  # the seventeen. 07_gbm has 300s for 2 fits and 08_tabular_dl 180s for 1. The budget was inverted
-  # against the work. It timed out at 120s in a full-chain run on a box at load 39 with ten
-  # concurrent pytest processes, then passed alone under the same load, so nothing here is broken -
-  # but a shared CI runner is normally loaded, and a margin that survives only an idle machine is
-  # not a margin.
+    LABELS: [fwd_ret_1d]
+    CONFIG_NAMES: [ols, ridge_a1.0]
+    POPULATION_NAME: ci-preview-linear
+  # 300s stands. It was set when this entry was believed to fit 48 config-label pairs at two
+  # folds each; it was in fact fitting all 48 at every fold, and the narrowing above cuts that
+  # to 2 pairs. The margin is now larger than the number suggests rather than smaller.
   timeout: 300
 case_studies/us_equities_panel/07_gbm:
-  # See 06_linear on why EXECUTION_TIER is not written here.
+  # See 06_linear on why EXECUTION_TIER is not written here, and on why MAX_FOLDS and
+  # MAX_SYMBOLS are gone: this notebook declares neither, papermill dropped both, and the
+  # "at two folds" in the paragraph below was never what ran.
   #
-  # The declared menu is 15 GBM configurations per label across three labels. All 45 at two
-  # folds does not finish inside any timeout worth having in CI - it ran past 180s on the
-  # population fit - so this narrows to one label and two configurations. 07 refuses to
-  # publish the canonical population from a narrowed menu (narrows_declared_catalog), which
-  # is why POPULATION_NAME is set: the reduced run gets its own population rather than
-  # writing a partial one under the canonical name.
+  # The declared menu is 15 GBM configurations per label across three labels. All 45 does not
+  # finish inside any timeout worth having in CI - it ran past 180s on the population fit - so
+  # this narrows to one label and two configurations. 07 refuses to publish the canonical
+  # population from a narrowed menu (narrows_declared_catalog), which is why POPULATION_NAME
+  # is set: the reduced run gets its own population rather than writing a partial one under
+  # the canonical name.
   parameters:
     LABELS: [fwd_ret_1d]
     CONFIG_NAMES: [default_mse, leaves_31_mse]
     POPULATION_NAME: ci-preview-gbm
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
   timeout: 300
 case_studies/us_equities_panel/08_tabular_dl:
   # A reduction is only legal under the preview tier, as for 06 and 07 above.

@@ -380,18 +380,38 @@ def test_every_override_key_names_a_notebook(overrides: dict) -> None:
     assert orphaned == []
 
 
-def test_every_declared_parameter_reaches_its_notebook(overrides: dict) -> None:
-    """Every name in a `parameters` block must survive papermill's injection.
+@pytest.mark.parametrize("research_preview", [True, False], ids=["preview", "canonical"])
+def test_every_declared_parameter_reaches_its_notebook(
+    overrides: dict, research_preview: bool
+) -> None:
+    """Every name in a `parameters` block must survive papermill's injection, on both paths.
 
     Driven through `unusable_parameters` rather than a copy of its predicate, so
     the sweep cannot go on asserting a rule the helper has stopped applying.
+
+    Parametrised over the tier because `tests/overrides.yaml` has two consumers and they
+    inject differently. The smoke path calls `run_notebook(research_preview=True)`, where
+    `_collect_preview_reductions` folds MAX_FOLDS and MAX_SYMBOLS into PREVIEW_REDUCTIONS;
+    `tests/generate_intermediates.py:315` passes False, where they are passed through by
+    name and papermill drops any the parameters cell does not declare. Asking only the
+    preview question is what let `us_equities_panel` 06 and 07 carry a reduction the
+    fixture generator could not apply: both ran unreduced on 2026-09-06, and 06_linear
+    then failed because fold 0's 223-session training window is shorter than the
+    756-session burn-in `model_based.regime` declares, leaving 19 declared features
+    entirely missing from its design matrix.
     """
     unreachable = {
-        key: unusable_parameters(REPO_ROOT / f"{key}.py", value["parameters"])
+        key: unusable
         for key, value in overrides.items()
-        if isinstance(value, dict)
-        and isinstance(value.get("parameters"), dict)
-        and unusable_parameters(REPO_ROOT / f"{key}.py", value["parameters"])
+        if isinstance(value, dict) and isinstance(value.get("parameters"), dict)
+        for unusable in [
+            unusable_parameters(
+                REPO_ROOT / f"{key}.py",
+                value["parameters"],
+                research_preview=research_preview,
+            )
+        ]
+        if unusable
     }
 
     assert unreachable == {}
