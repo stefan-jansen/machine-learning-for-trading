@@ -1226,3 +1226,35 @@ case_studies/nasdaq100_microstructure/20_strategy_analysis:
     Reads the registry with sqlite3 and declares no tier, and it interprets the strategy results
     14 through 17 would have registered. The completion issue is filed under this notebook's
     former number, 18_strategy_analysis.
+
+# --- us_equities_panel: the two stages that cannot have a smoke run ----------------------------
+#
+# The other fifteen stage-06-and-later notebooks in this case study are on the research boundary
+# and take a preview tier. They stay on test_smoke_configs.py's UNDECLARED ratchet because nothing
+# has measured them yet, not because anything refuses them, and a chain run is what moves them off
+# it. These two are a different statement: neither has an execution tier to ask for, so there is no
+# reduced run to measure.
+#
+# Each names its own completion issue rather than a shared one, following the
+# nasdaq100_microstructure entries above.
+
+case_studies/us_equities_panel/12_dl_weekly:
+  writes: []
+  blocked_by: 510
+  blocked_reason: >-
+    Declares no EXECUTION_TIER, no WORKSPACE and calls no open_study - zero occurrences of each -
+    so it resolves its output as get_case_study_dir(CASE_STUDY_ID) / "run_log" / ... and trains
+    with register=True. A reduced run would register into the released case study rather than into
+    a workspace, which is the production path the tier boundary exists to keep a smoke run out of.
+    FORCE_RETRAIN additionally shutil.rmtree's that released directory, so the reduction knobs it
+    does have cannot make a run safe, only small. It is the one uep modelling notebook off the
+    research boundary.
+
+case_studies/us_equities_panel/20_strategy_analysis:
+  writes: []
+  blocked_by: 520
+  blocked_reason: >-
+    Opens the study with Study.open(CASE_STUDY_ID), which is read-only and canonical, and resolves
+    its input through CandidateSet.one on a validation set that 18_risk_management freezes under
+    its own EXECUTION_TIER == "canonical" guard. A preview chain never creates that set, and this
+    notebook declares no tier parameter with which to ask for one.
