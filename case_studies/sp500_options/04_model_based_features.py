@@ -86,15 +86,17 @@ from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 
 from case_studies.sp500_options._underlying_returns import reconcile_underlying_log_returns
-from case_studies.utils.artifact_digest import read_digest, value_digest, write_artifact
+from case_studies.utils.artifact_digest import read_digest, value_digest
 from case_studies.utils.temporal import (
     garch11_conditional_volatility,
     refit_boundaries,
     walk_forward_feature,
+    write_model_based,
 )
 from data import load_sp500_daily_bars, load_sp500_options_straddles
 from utils.artifact_specs import resolve_label_buffer_unit
 from utils.cv_splits import generate_cv_splits, load_evaluation_config
+from utils.data_quality import top_entities
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, add_message_title, show_with_alt
@@ -145,6 +147,11 @@ SV_RETRY_TUNE = 4000
 # production run - it is not in `notebook_provenance.PRODUCTION_SAFE_PARAMETERS` - so a
 # reduced render cannot be stamped as one.
 SV_REFIT_EVERY_OVERRIDE = None
+# Symbols to keep, most-observed first. 0 is a production run and reduces nothing. The knobs above
+# make one sampler run cheaper and this one makes the panel smaller, which is the term a smoke run
+# needs: without it a reduced run still fits GARCH on every symbol, so a preview of this notebook
+# cost what the full run costs.
+MAX_SYMBOLS = 0
 
 # %%
 CASE_DIR = get_case_study_dir("sp500_options")
@@ -167,8 +174,27 @@ set_global_seeds(SEED)
 
 # %%
 prices = load_sp500_options_straddles()
-underlying = load_sp500_daily_bars(symbols=prices["symbol"].unique().sort().to_list())
 features = pl.read_parquet(FEATURES_DIR / "financial.parquet")
+if MAX_SYMBOLS > 0:
+    # Reduce on the universe that actually reaches the models, which is the intersection of the
+    # straddle panel and the feature matrix - not on either one alone. Selecting from the straddle
+    # panel by itself picks the most-quoted names in the whole options universe, and on a reduced
+    # feature matrix most of them have no features: measured on the CI fixture, the 14 most-quoted
+    # straddles include 7 of the 22 symbols stage 03 wrote, which is below the 10-symbol floor
+    # section F's cross-sectional IC needs, so every date was skipped and the notebook raised.
+    #
+    # `top_entities` and its name tie-break are the same rule `05_evaluation` reduces by, so a
+    # reduced 04 and a reduced 05 see one universe.
+    common = pl.Series(sorted(set(prices["symbol"].unique()) & set(features["symbol"].unique())))
+    kept_symbols = top_entities(
+        prices.filter(pl.col("symbol").is_in(common)), MAX_SYMBOLS, entity_col="symbol"
+    )
+    prices = prices.filter(pl.col("symbol").is_in(kept_symbols))
+    features = features.filter(pl.col("symbol").is_in(kept_symbols))
+    print(
+        f"Reduced run: {len(kept_symbols)} of {len(common)} symbols carrying both quotes and features"
+    )
+underlying = load_sp500_daily_bars(symbols=prices["symbol"].unique().sort().to_list())
 
 print(f"Straddle quotes:  {prices.height:,} rows, {prices['symbol'].n_unique()} symbols")
 print(f"Underlying bars:  {underlying.height:,} rows, {underlying['symbol'].n_unique()} symbols")
@@ -210,6 +236,10 @@ GARCH_REFIT_EVERY = int(_schedule["garch"]["refit_every"])
 SV_BURNIN = int(_schedule["stochastic_volatility"]["burnin"])
 SV_REFIT_EVERY = int(SV_REFIT_EVERY_OVERRIDE or _schedule["stochastic_volatility"]["refit_every"])
 SV_CALIBRATION_WINDOW = int(_schedule["stochastic_volatility"]["calibration_window"])
+# The GARCH specification, read rather than written here for the reason the schedule is. `o=1` is
+# this case study's declared deviation from the shared GARCH(1,1)-Normal default; setup.yaml says
+# what property of the underlying justifies it.
+GARCH_KW = {k: _schedule["garch"][k] for k in ("mean", "vol", "p", "o", "q", "dist", "rescale")}
 cv_folds = generate_cv_splits(
     features.select("timestamp"),
     case_study_id=STRATEGY_ID,
@@ -517,16 +547,7 @@ print(
 # %%
 def fit_garch_with_retry(train_returns: pd.Series):
     """Fit GJR-GARCH once, then retry a nonconverged optimizer deterministically."""
-    model = arch_model(
-        train_returns,
-        mean="Constant",
-        vol="GARCH",
-        p=1,
-        o=1,
-        q=1,
-        dist="Normal",
-        rescale=True,
-    )
+    model = arch_model(train_returns, **GARCH_KW)
     result = model.fit(disp="off", show_warning=False)
     retried = result.convergence_flag != 0
     if retried:
@@ -1800,10 +1821,16 @@ per_year
 # forward is what makes the chain a chain.
 
 # %%
-record = write_artifact(
+record = write_model_based(
     temporal,
     FEATURES_DIR / "model_based.parquet",
     keys=["timestamp", "symbol"],
+    feature_columns=feature_cols,
+    time_column="timestamp",
+    # No fold column: both volatility models come off a refit schedule over the whole panel, so a
+    # row is identified by its keys alone. Passing None rather than relying on the default is what
+    # makes `expected_folds` refused instead of quietly ignored.
+    fold_column=None,
     written_by="case_studies/sp500_options/04_model_based_features.py",
     inputs={
         "features/financial.parquet": read_digest(FEATURES_DIR / "financial.parquet")["digest"],

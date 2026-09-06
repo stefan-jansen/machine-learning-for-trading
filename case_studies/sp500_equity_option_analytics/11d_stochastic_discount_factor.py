@@ -127,15 +127,15 @@ declared_labels(study, "latent_factors")
 # and a conditional phase in which the discount factor is refitted with the state variables
 # available to it. `checkpoint_epochs: [256, 512, 768, 1024]` is applied **within each phase**.
 #
-# The published checkpoint number is a single integer across both phases, so
-# `case_studies/utils/latent_factors/library_bridge.py:691` offsets the conditional phase by the
-# unconditional budget: conditional epoch *e* is published as `256 + e`. The unconditional phase is
+# The published checkpoint number is a single integer across both phases, so the library offsets
+# the conditional phase by the unconditional budget when it labels a checkpoint: conditional epoch
+# *e* is published as `256 + e`. The unconditional phase is
 # only 256 epochs long, so exactly one scheduled checkpoint falls inside it.
 #
 # **The library also keeps four states per fit that are not epochs, and none of them is published.**
 # It captures, in each phase, the state with the lowest validation loss and the state with the
-# highest validation Sharpe. `library_bridge.py:691-701` maps those onto zero and the negative
-# integers so that two training phases fit on one axis, but the schedule that decides what gets
+# highest validation Sharpe. The same labelling maps those onto zero and the negative integers so
+# that two training phases fit on one axis, but the schedule that decides what gets
 # registered is built from the physical epochs alone, so the four are computed and discarded. Section
 # 5 says why that is the right disposal and why the axis they were packed onto is still a trap.
 #
@@ -182,12 +182,13 @@ if set(configs.get_column("label")) != set(declared.get_column("label")) and not
 # this one is a torch model trained on the declared device, so it passes no override.
 #
 # The adapter resolves a macro panel for `sdf` and refuses it for every other latent model
-# (`case_studies/utils/latent_factors/adapter.py:400-402`). Those macro values are hashed into the
+# when the adapter resolves the request. Those macro values are hashed into the
 # request alongside the characteristics, so a run whose macro panel differs is a different training
 # identity rather than the same model on slightly different inputs.
 #
 # A machine without a card cannot run the declared device at all, and the library refuses to
-# substitute one (`case_studies/utils/latent_factors/library_bridge.py:53-54`). `DEVICE` names the
+# substitute one: the latent-factor runtime raises when CUDA is declared and unavailable rather
+# than falling back to the CPU, because a silent fallback changes what was fitted. `DEVICE` names the
 # device such a run fits on. It travels with `POPULATION_NAME`, because the device it names is
 # inside the training identity: the run computes a different member set and has to publish under
 # its own name rather than into the population the declaration describes.
@@ -483,8 +484,8 @@ show_plotly_with_alt(
 # section 3 fails the catalog rather than trusting that it stayed true.
 #
 # **The axis those states were packed onto is still a trap, and the sign of `checkpoint_value` is
-# not a safe test.** `library_bridge.py:691-701` flattens two training phases onto one integer, which
-# puts one validation-chosen state on `0` - the same value IPCA legitimately publishes for its single
+# not a safe test.** Flattening two training phases onto one integer puts one validation-chosen
+# state on `0` - the same value IPCA legitimately publishes for its single
 # fit. A `< 0` filter would keep the most dangerous of the four and a `<= 0` filter would throw away
 # a sibling's only checkpoint. Anything that needs to identify a checkpoint's kind reads the
 # library's named constants, never the arithmetic.

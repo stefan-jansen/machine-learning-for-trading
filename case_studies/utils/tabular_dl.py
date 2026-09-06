@@ -55,9 +55,9 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+from case_studies.utils.preview_fields import TABM_PREVIEW_FIELDS as _TABM_PREVIEW_FIELDS
 from utils.modeling import RANDOM_SEED, seed_everything
 
-_TABM_PREVIEW_FIELDS = {"checkpoint_interval", "folds", "max_symbols", "n_epochs"}
 _TABM_IMBALANCE_METHODS = {"balanced", "none"}
 # What a case study gets when its setup.yaml declares no `modeling.tabular_dl` block. Eight of the
 # nine declare none, so these are the values every existing TabM identity was fitted under.

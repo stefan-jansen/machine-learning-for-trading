@@ -1906,7 +1906,10 @@ def _run_vectorized(
 ) -> dict:
     """Run vectorized backtest (weight × forward return - costs).
 
-    Used for us_firm_characteristics, sp500_options, nasdaq100_microstructure.
+    Used for the case studies in `VECTORIZED_CASE_STUDIES`: us_firm_characteristics and
+    sp500_options. This line named nasdaq100_microstructure until 2026-09-06 and nothing
+    dispatched it here - no config declares `execution.mode`, so the preset's default decides,
+    and nasdaq is not in the set.
 
     Cost dispatch supports two models:
       * percentage — fractional drag = turnover × (commission_bps + slippage_bps) / 1e4

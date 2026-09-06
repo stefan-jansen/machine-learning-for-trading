@@ -258,7 +258,7 @@ plan.select(
 #
 # It defaults to empty, and the run that published this population passed the predecessor hash
 # as a parameter instead. The hash is part of what the snapshot is hashed over
-# (`research/population.py:87`), so no default is right for both readers: a re-run that means
+# (the population registry refuses it), so no default is right for both readers: a re-run that means
 # to resolve the published population must be handed the same hash the published run used,
 # while a first run against a fresh registry must be handed nothing. `run_log/` is not in the
 # repository, so a reader's first run starts from an empty registry, where a non-empty

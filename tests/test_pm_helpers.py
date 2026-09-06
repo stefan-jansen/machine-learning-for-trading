@@ -380,21 +380,169 @@ def test_every_override_key_names_a_notebook(overrides: dict) -> None:
     assert orphaned == []
 
 
-def test_every_declared_parameter_reaches_its_notebook(overrides: dict) -> None:
-    """Every name in a `parameters` block must survive papermill's injection.
+@pytest.mark.parametrize("research_preview", [True, False], ids=["preview", "canonical"])
+def test_every_declared_parameter_reaches_its_notebook(
+    overrides: dict, research_preview: bool
+) -> None:
+    """Every name in a `parameters` block must survive papermill's injection, on both paths.
 
     Driven through `unusable_parameters` rather than a copy of its predicate, so
     the sweep cannot go on asserting a rule the helper has stopped applying.
+
+    Parametrised over the tier because `tests/overrides.yaml` has two consumers and they
+    inject differently. The smoke path calls `run_notebook(research_preview=True)`, where
+    `_collect_preview_reductions` folds MAX_FOLDS and MAX_SYMBOLS into PREVIEW_REDUCTIONS;
+    `tests/generate_intermediates.py:315` passes False, where they are passed through by
+    name and papermill drops any the parameters cell does not declare. Asking only the
+    preview question is what let `us_equities_panel` 06 and 07 carry a reduction the
+    fixture generator could not apply: both ran unreduced on 2026-09-06, and 06_linear
+    then failed because fold 0's 223-session training window is shorter than the
+    756-session burn-in `model_based.regime` declares, leaving 19 declared features
+    entirely missing from its design matrix.
     """
     unreachable = {
-        key: unusable_parameters(REPO_ROOT / f"{key}.py", value["parameters"])
+        key: unusable
         for key, value in overrides.items()
-        if isinstance(value, dict)
-        and isinstance(value.get("parameters"), dict)
-        and unusable_parameters(REPO_ROOT / f"{key}.py", value["parameters"])
+        if isinstance(value, dict) and isinstance(value.get("parameters"), dict)
+        for unusable in [
+            unusable_parameters(
+                REPO_ROOT / f"{key}.py",
+                value["parameters"],
+                research_preview=research_preview,
+            )
+        ]
+        if unusable
     }
 
     assert unreachable == {}
+
+
+def _accepted_reduction_fields() -> tuple[set[str], set[str]]:
+    """Every reduction key some family accepts, and the four the DML resolver requires.
+
+    Imported from `case_studies/utils/preview_fields.py`, the module each family resolver
+    reads its own set from, rather than restated here: the guard and the resolver share one
+    object, so the guard cannot go on accepting a name its consumer has dropped. The sets sit
+    apart from the resolvers because four of the five family modules import `torch` at module
+    scope and this job has no torch.
+    """
+    from case_studies.utils.preview_fields import (
+        DML_PREVIEW_FIELDS,
+        GBM_PREVIEW_FIELDS,
+        LATENT_PREVIEW_FIELDS,
+        LINEAR_PREVIEW_FIELDS,
+        SEQUENCE_PREVIEW_FIELDS,
+        TABM_PREVIEW_FIELDS,
+    )
+
+    return set().union(
+        DML_PREVIEW_FIELDS,
+        GBM_PREVIEW_FIELDS,
+        LATENT_PREVIEW_FIELDS,
+        LINEAR_PREVIEW_FIELDS,
+        SEQUENCE_PREVIEW_FIELDS,
+        TABM_PREVIEW_FIELDS,
+    ), set(DML_PREVIEW_FIELDS)
+
+
+def _declared_reductions(overrides: dict) -> dict[str, dict]:
+    return {
+        key: value["parameters"]["PREVIEW_REDUCTIONS"]
+        for key, value in overrides.items()
+        if isinstance(value, dict)
+        and isinstance(value.get("parameters"), dict)
+        and isinstance(value["parameters"].get("PREVIEW_REDUCTIONS"), dict)
+    }
+
+
+def test_every_declared_reduction_key_is_one_some_family_accepts(overrides: dict) -> None:
+    """A misspelled reduction key must fail here rather than as a timeout.
+
+    Each family resolver rejects a key outside its own set, but it does so inside the run,
+    after the fit has been planned. In CI that surfaces as a papermill per-cell timeout and
+    reads as flakiness - which is the confusion #942 was filed about, and it is not
+    distinguishable from contention by timing. The name is knowable without running
+    anything, so it is checked without running anything.
+    """
+    accepted, _ = _accepted_reduction_fields()
+    unknown = {
+        key: sorted(set(reductions) - accepted)
+        for key, reductions in _declared_reductions(overrides).items()
+        if set(reductions) - accepted
+    }
+
+    assert unknown == {}
+
+
+def test_a_causal_reduction_declares_all_four_fields(overrides: dict) -> None:
+    """The DML resolver requires its four fields, and a partial mapping is worse than none.
+
+    `resolve_causal_request` rejects a key outside its four and also rejects a mapping
+    missing one, because a preview that omits `max_samples` would resolve the *full*
+    population under a preview tier - a run priced as a smoke test that costs a canonical
+    one. Entries are identified by the notebook submitting a `study.causal(` request rather
+    than by their stem, so a renamed notebook stays covered.
+    """
+    _, dml_fields = _accepted_reduction_fields()
+    incomplete = {}
+    for key, reductions in _declared_reductions(overrides).items():
+        source_path = REPO_ROOT / f"{key}.py"
+        if not source_path.exists():
+            continue
+        if "study.causal(" not in source_path.read_text(encoding="utf-8"):
+            continue
+        if set(reductions) != dml_fields:
+            incomplete[key] = sorted(reductions)
+
+    assert incomplete == {}
+
+
+def test_requested_configurations_survive_the_fixture_trim(overrides: dict) -> None:
+    """A `CONFIG_NAMES` entry must name a configuration the fixture's menu still declares.
+
+    `preset_patches._trim_label_configs` rewrites the fixture's copy of every
+    `config/training/fwd_*.yaml`, keeping the first `_MAX_CONFIGS_PER_FAMILY` entries of
+    each family in `_TRIM_FAMILIES`, and both `generate_intermediates.py` and `conftest.py`
+    call it. `load_model_configs` raises on any name the resulting menu does not declare, so
+    an override naming a configuration the trim removed is a failed stage rather than a
+    narrower one.
+
+    Nothing checked this. `us_equities_panel/07_gbm` asked for `leaves_31_mse` while the trim
+    kept `default_mse` and `default_mae`, and the entry was wrong and untested at the same
+    time: `06_linear` failed ahead of it on every regeneration that reached that far, so the
+    name was never resolved.
+    """
+    from tests.preset_patches import _MAX_CONFIGS_PER_FAMILY, _TRIM_FAMILIES
+
+    def declared_after_trim(case_study: str, labels: list[str] | None) -> set[str]:
+        menus = REPO_ROOT / "case_studies" / case_study / "config" / "training"
+        names: set[str] = set()
+        for menu in sorted(menus.glob("*.yaml")):
+            if labels and menu.stem not in labels:
+                continue
+            for family, configs in (yaml.safe_load(menu.read_text()) or {}).items():
+                if not isinstance(configs, list):
+                    continue
+                keep = configs[:_MAX_CONFIGS_PER_FAMILY] if family in _TRIM_FAMILIES else configs
+                names |= set(keep)
+        return names
+
+    missing = {}
+    for key, value in overrides.items():
+        if not isinstance(value, dict):
+            continue
+        params = value.get("parameters") or {}
+        requested = params.get("CONFIG_NAMES")
+        if not requested:
+            continue
+        case_study = key.split("/")[1]
+        if not (REPO_ROOT / "case_studies" / case_study / "config" / "training").is_dir():
+            continue
+        absent = sorted(set(requested) - declared_after_trim(case_study, params.get("LABELS")))
+        if absent:
+            missing[key] = absent
+
+    assert missing == {}
 
 
 def test_resolved_registry_path_follows_the_tier_the_harness_binds(tmp_path: Path) -> None:

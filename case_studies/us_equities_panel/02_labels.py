@@ -63,6 +63,7 @@ from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_ser
 from ml4t.diagnostic.splitters.calendar import TradingCalendar
 
 from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.coverage import assert_sessions_complete
 from case_studies.utils.label_diagnostics import effective_sample_size, panel_autocorrelation
 from data import load_us_equities
 from utils.artifact_specs import resolve_label_horizon
@@ -250,6 +251,34 @@ print(
 )
 
 # %% [markdown]
+# The filter above answers one direction only: which dates in the archive the exchange never held.
+# The other direction is a session the exchange **did** hold that the archive never printed, and
+# it leaves no row to test - nothing raises, every query succeeds, and one day's rows are simply
+# gone. A rolling window downstream reads its input in order and treats consecutive elements as
+# consecutive sessions, so a session missing that way is priced as though the gap across it were
+# one day's move.
+#
+# This archive is missing exactly one, `2017-11-08`, a Wednesday. It is missing upstream - the raw
+# archive carries no row on it - and over the whole archive, 1962-01-02 to 2018-03-27, it is the
+# only NYSE session of 14,156 absent. Declaring it here lets it pass deliberately while a second
+# one refuses the notebook before anything is written.
+
+# %%
+KNOWN_ABSENT_SESSIONS = [date(2017, 11, 8)]
+
+_session_dates = sessions["timestamp"]
+_declared = assert_sessions_complete(
+    _session_dates.to_list(),
+    calendar=setup["evaluation"]["calendar"],
+    known_absent=KNOWN_ABSENT_SESSIONS,
+    source="02_labels session index",
+)
+print(
+    f"Every {setup['evaluation']['calendar']} session between {_session_dates.min()} and "
+    f"{_session_dates.max()} is in the archive except {_declared}, which is declared above"
+)
+
+# %% [markdown]
 # What the panel holds, a decade at a time, and two things in it that shape the rest of the
 # notebook. The number of stocks quoting on a session grows steadily across the sample, so a
 # threshold written as a fixed number of names would mean something different at the start than
@@ -280,7 +309,7 @@ panel.with_columns((pl.col("timestamp").dt.year() // 10 * 10).alias("decade")).g
 # where $P$ is the adjusted close of stock $i$ and $t+h$ is $h$ **trading sessions** later:
 # Chapter 7.2's close-to-close convention. It is not the convention the backtest fills at -
 # `setup.yaml` places execution at the next open - and that difference is a real gap, left to
-# [`18_costs`](18_costs.ipynb), which sweeps commission and spread rather than the return
+# [`19_costs`](19_costs.ipynb), which sweeps commission and spread rather than the return
 # definition.
 #
 # Stepping $h$ rows forward inside one stock is **not** the same as stepping $h$ sessions

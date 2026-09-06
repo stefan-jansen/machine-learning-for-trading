@@ -13,59 +13,156 @@
 #     name: python3
 # ---
 
+# %% [markdown]
+# # US equities panel: predicting a week ahead instead of five days ahead
+#
+# The three sequence notebooks before this one - [`09_dl_nlinear`](09_dl_nlinear.ipynb),
+# [`10_dl_lstm`](10_dl_lstm.ipynb) and [`11_dl_tsmixer`](11_dl_tsmixer.ipynb) - read a window of
+# daily rows and predict a return five sessions ahead. That is a **multi-step** problem: the
+# quantity being predicted spans five periods of the grid the model reads. This notebook changes
+# the grid rather than the models, and asks whether that alone is worth anything.
+#
+# **Sampling on Fridays makes the same label a one-step problem.** `fwd_ret_5d` is the return over
+# the next five *sessions*, and a full trading week holds exactly five, so on a Friday-only grid
+# each row's label lands on about the next row. Nothing about the label changed; what changed is
+# how many steps of the model's own grid it spans. Two things follow, and they pull in opposite
+# directions. A one-step target avoids the error compounding that makes a multi-step forecast
+# progressively vaguer, and the reader should expect that to help. Against it, subsampling to one
+# day in five throws away four fifths of the rows, and a sequence model on a smaller sample is a
+# weaker fit. The experiment is worth running because neither effect is obviously larger.
+#
+# **Two formulations of the same task are compared.** Both read a **lookback** window of the
+# twelve most recent weekly feature vectors for a stock - about three months - and both are scored
+# on the same rows over the same horizon.
+#
+# - **Direct regression** treats the window as fixed-length input to a model whose output is one
+#   number, the return. `lstm_h64` is a two-layer recurrent network that consumes the window one
+#   week at a time and carries a hidden state forward; `nlinear` normalizes the window by its last
+#   value and applies a single linear map. Neither has any notion that its output is a future
+#   value of one of its inputs.
+# - **One-step forecasting** treats the window as the history of a time series and asks for its
+#   next value. `NBEATSModel`, from the Darts library, is built for that formulation: a stack of
+#   blocks that each fit a piece of the signal and pass the remainder to the next.
+#   `darts_output_chunk_length=1` is what makes it predict a single week rather than a sequence.
+#
+# The comparison is therefore between two ways of writing down the same prediction, at a frequency
+# where the second is well posed. On a daily grid it would not be: N-BEATS asked for five days
+# would compound its own output four times.
+#
+# **What the reader should carry away is the reframing, not this panel's numbers.** Whether a
+# weekly grid helps depends on how much history the panel has and how strongly the signal decays,
+# and both differ by market.
+#
+# **Learning objectives.** By the end of this notebook you will be able to:
+#
+# - Say what makes a prediction one-step rather than multi-step, and why that is a property of the
+#   sampling grid rather than of the label.
+# - State the two costs of subsampling a daily panel to weekly and say which one a longer history
+#   would relieve.
+# - Distinguish direct regression from forecasting as two formulations of one prediction, and say
+#   what each assumes about the relationship between input and output.
+# - Explain why a walk-forward fold has to be resolved from the label file rather than written into
+#   the notebook, and what a hand-written window would be free to do.
+# - Say what a training identity has to cover before a run may be skipped as already complete, and
+#   what goes wrong when the feature set is outside it.
+#
+# **Book reference**: Chapter 13, Section 13.9. Table 13.5 reports the results this notebook
+# produces.
+#
+# **Prerequisites**: [`03_financial_features`](03_financial_features.ipynb) and
+# [`04_model_based_features`](04_model_based_features.ipynb) have written the feature matrices,
+# and [`02_labels`](02_labels.ipynb) has written `fwd_ret_5d`.
+#
+# **What it writes**: one training run and one validation prediction set per configuration, in
+# `run_log/registry.db` and under `run_log/training/`. These predictions sit on a Friday grid and
+# are deliberately **not** entered into the canonical backtest pool that
+# [`16_backtest`](16_backtest.ipynb) ranks: the daily models it ranks are scored on every session,
+# and a Friday-only series competing against them on the same label would be compared on a
+# different set of decision dates rather than on a different model.
+
 # %%
-"""Weekly-frequency DL experiment: direct regression vs 1-step forecasting.
-
-Subsamples daily features/labels to Friday frequency, then compares:
-- LSTM, NLinear (direct regression, lookback=12 weeks)
-- DARTS N-BEATS (1-step-ahead forecasting, lookback=12 weeks)
-
-Sampling on Fridays makes fwd_ret_5d a 1-step-ahead prediction at that
-frequency, which removes the error compounding that makes multi-step daily
-forecasting ineffective for cross-sectional ranking. It does not make the
-windows non-overlapping; see the note in the loading section.
-"""
+"""Weekly-frequency sequence models: direct regression against one-step forecasting."""
 
 # %%
+import gc
 import os
 import shutil
-import warnings
-from gc import collect
 from pathlib import Path
 
-warnings.filterwarnings("ignore")
-
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
 import torch
+from IPython.display import display
 
 from case_studies.utils.cv_window import modeling_fold_boundaries
+from case_studies.utils.deep_learning import run_dl_cv
+from case_studies.utils.registry import (
+    load_prediction_metrics,
+    load_prediction_sets,
+    load_training_runs,
+)
 from utils.artifact_specs import load_setup_config, resolve_label_buffer
 from utils.modeling import (
     RANDOM_SEED,
     build_modeling_input_lineage,
-    load_configs,
     reduce_to_top_entities,
     seed_everything,
 )
 from utils.paths import get_case_study_dir
+from utils.style import (
+    COLORS,
+    FIGSIZE,
+    add_message_title,
+    ml4t_palette,
+    show_with_alt,
+)
+
+# %% [markdown]
+# ## The values a run can be given
+#
+# What each one decides:
+#
+# - **`LOOKBACK`** is how many weekly observations a model sees before predicting. Twelve is about
+#   three months, which is long enough to carry a quarter's momentum and short enough that a stock
+#   needs only twelve weeks of history before it contributes any training window at all.
+# - **`N_EPOCHS`** is how many passes the fit makes over its training rows. Fifty rather than the
+#   daily notebooks' longer schedules, because a Friday grid holds a fifth of the rows and a pass
+#   over it is a fifth of the gradient steps.
+# - **`MAX_FOLDS`** takes that many of the case study's walk-forward folds, evenly spaced and
+#   always including the earliest and the most recent. Four rather than all sixteen: this notebook
+#   fits four sequence models and the reframing it tests shows up across the sample's span rather
+#   than in the density of folds along it.
+# - **`MAX_TRAIN_SEQUENCES`** caps how many lookback windows one fold contributes. A cap is what
+#   keeps a fold's memory bounded on a three-thousand-name panel; it is lower here than in the
+#   daily notebooks because a weekly grid yields fewer windows to begin with.
+# - **`BATCH_SIZE`** is how many windows a gradient step averages over. It affects speed and the
+#   noise in each step, not what the model can represent.
+# - **`MAX_SYMBOLS`** caps the universe, taking the stocks with the most rows. Zero, the default,
+#   keeps all of them.
+# - **`FORCE_RETRAIN`** discards fitted state and refits configurations the registry already holds
+#   as complete. Leave it off unless the identity below has changed in a way the registry cannot
+#   see.
 
 # %%
 CASE_STUDY_ID = "us_equities_panel"
 PRIMARY_LABEL = "fwd_ret_5d"
 NOTEBOOK = "12_dl_weekly"
 
-MAX_TRAIN_SEQUENCES = 200_000  # Lower cap for weekly (fewer total sequences)
+MAX_TRAIN_SEQUENCES = 200_000
+# Sessions the label looks ahead, which is what makes a Friday grid one-step. Read from the
+# label's own name rather than typed, so a different horizon cannot leave this behind.
+LABEL_HORIZON_SESSIONS = int(PRIMARY_LABEL.rsplit("_", 1)[1].rstrip("d"))
 
 # %% tags=["parameters"]
 BATCH_SIZE = 2048
-LOOKBACK = 12  # 12 weekly observations, so ~3 months
+LOOKBACK = 12
 MAX_SYMBOLS = 0
-FORCE_RETRAIN = False  # Set True to retrain configs that already have complete hashes
+FORCE_RETRAIN = False
 PREDICTION_SPLIT = "validation"
-N_EPOCHS = 50  # Shorter training: weekly data has fewer samples per fold
-MAX_FOLDS = 4  # Quick experiment: 4 evenly-spaced folds from the 16-fold CV
+N_EPOCHS = 50
+MAX_FOLDS = 4
 
 # %%
 seed_everything(RANDOM_SEED)
@@ -81,8 +178,6 @@ if FORCE_RETRAIN and SAVE_ROOT.exists():
 PYTORCH_SAVE_DIR.mkdir(parents=True, exist_ok=True)
 DARTS_SAVE_DIR.mkdir(parents=True, exist_ok=True)
 
-LOG_FILE = Path("/tmp/dl_weekly_experiment.log")
-
 # %% [markdown]
 # ## Load and Subsample to Weekly Frequency
 #
@@ -93,25 +188,68 @@ LOG_FILE = Path("/tmp/dl_weekly_experiment.log")
 # `02_labels` resolves `fwd_ret_5d` five *sessions* ahead. A full trading week holds exactly
 # five sessions, so a Friday's window closes on the next Friday. A week carrying a market
 # holiday holds four, so the fifth session falls on the Monday after that Friday and the
-# window overlaps the next observation's by a session. Counted on the NYSE calendar over the
-# span the label file covers, 1990-01-30 to 2018-03-20, of 1,417 consecutive Friday pairs:
-# 1,175 (82.9%) close exactly on the next Friday, 196 (13.8%) close after it and overlap, and
-# 46 (3.2%) close before it because the next Friday was itself a holiday and carries no row.
-# The rate is a property of the exchange calendar rather than of this sample: over
-# 2000-02-01 to 2018-03-26 alone it is 82.3%, 14.5% and 3.2%.
+# window overlaps the next observation's by a session. The cell below counts how often each
+# case occurs, on the label file's own session index rather than on a figure written down
+# here - the rate is a property of the exchange calendar, so it moves if the span does.
 #
-# The overlap is always exactly one session and never more. A holiday week holds four
-# sessions, so the fifth falls on the Monday after the next Friday. That is what makes this
-# worth describing rather than removing: sampling every fifth session would close it exactly
-# and replace it with a grid that drifts across weekdays and a cadence nobody trades.
+# An overlap is usually one session and is not always: a week with one closure pushes the fifth
+# session to the Monday after the next Friday, and a span with two closures can push it further.
+# The printed distribution is what says how far, and it is worth reading rather than assuming,
+# because the length of an overlap is the size of the dependence it introduces.
 #
-# What that costs is the mechanical autocorrelation overlapping windows induce, on about one
-# week in seven. It is small enough to leave the one-step formulation intact and too large to
-# describe as absent.
+# This is worth describing rather than removing: sampling every fifth session instead would close
+# the overlap exactly and replace it with a grid that drifts across weekdays and a cadence nobody
+# trades.
+#
+# What it costs is the mechanical autocorrelation an overlapping window induces, on the share of
+# weeks the cell reports. That share is small enough to leave the one-step formulation intact and
+# too large to describe the windows as non-overlapping.
 #
 # Non-overlap would not buy independence in any case. Returns cluster in volatility and share
 # a market factor across the cross-section, so what non-overlap removes is the correlation the
 # construction itself imposes, not the dependence in the data.
+
+# %% tags=["results"]
+# Counted rather than asserted. Each Friday's window closes on the fifth session after it, and
+# the question is where that session falls relative to the next Friday. Reading the session
+# index off the label file is what keeps this a statement about the data the notebook uses.
+_sessions = (
+    pl.scan_parquet(CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet")
+    .select("timestamp")
+    .unique()
+    .sort("timestamp")
+    .collect()
+    .get_column("timestamp")
+    .to_list()
+)
+_position = {session: index for index, session in enumerate(_sessions)}
+_fridays = [session for session in _sessions if session.weekday() == 4]
+# The distance, in sessions, between where a Friday's window closes and the next Friday. Zero is
+# an exact fit; positive is an overlap of that many sessions; negative means the window closed
+# before the next Friday, which happens when that Friday is itself a holiday and the label file
+# carries no row for it. The distribution is what gets reported, because the size of an overlap
+# is the thing that matters and a single count cannot carry it.
+_gaps: dict[int, int] = {}
+for _this_friday, _next_friday in zip(_fridays, _fridays[1:]):
+    _close_index = _position[_this_friday] + LABEL_HORIZON_SESSIONS
+    if _close_index >= len(_sessions):
+        continue
+    _gap = _close_index - _position[_next_friday]
+    _gaps[_gap] = _gaps.get(_gap, 0) + 1
+_pairs = sum(_gaps.values())
+_exact = _gaps.get(0, 0)
+_after = sum(count for gap, count in _gaps.items() if gap > 0)
+_before = sum(count for gap, count in _gaps.items() if gap < 0)
+print(
+    f"{_sessions[0]} to {_sessions[-1]}, {len(_sessions):,} sessions, {_pairs:,} consecutive "
+    "Friday pairs:"
+)
+print(f"  {_exact:,} ({_exact / _pairs:.1%}) close exactly on the next Friday")
+print(f"  {_after:,} ({_after / _pairs:.1%}) close after it, overlapping the next observation")
+print(f"  {_before:,} ({_before / _pairs:.1%}) close before it, the next Friday carrying no row")
+print("  distance in sessions from the close to the next Friday, and how often:")
+for _gap in sorted(_gaps):
+    print(f"    {_gap:+d}: {_gaps[_gap]:,}")
 
 # %%
 # Load only weekly rows before materializing joins. The full daily join OOM-kills the kernel.
@@ -173,15 +311,13 @@ print(f"  Weekly labels: {labels.shape[0]:,} rows")
 
 dataset = features.join(labels, on=["symbol", "timestamp"], how="inner")
 del feat, mb, features, labels
-collect()
+gc.collect()
 
-# Subsample to symbol filter if needed. Selecting by name takes whichever symbols sort first,
-# which says nothing about how much history they carry: on this panel the alphabetical head is
-# A, AA, AAL, AAMC, AAN, and AAL and AAMC only list part-way through the fold range. A reduced
-# run then builds folds whose training window is empty for most of the universe, every fold falls
-# under the sequence floor in prepare_fold_sequence_stores, and the run dies on "No valid folds
-# created". reduce_to_top_entities takes the symbols with the most rows, ties broken by name, and
-# is what every other reduced notebook here uses.
+# A capped universe takes the stocks with the most rows, ties broken by name. Taking the
+# alphabetically first names instead would select on the spelling of a ticker rather than on how
+# much history it carries, and a sequence model needs history: a stock that lists part-way through
+# a fold contributes no complete lookback window to it. This is the rule every reduced notebook in
+# the case study applies, so a capped run here selects the same universe as a capped run elsewhere.
 if MAX_SYMBOLS > 0:
     dataset = reduce_to_top_entities(dataset, "symbol", MAX_SYMBOLS)
     print(f"  Filtered to {MAX_SYMBOLS} symbols: {dataset.shape[0]:,} rows")
@@ -192,7 +328,7 @@ print(f"  Weekly (Friday): {dataset.shape[0]:,} rows, {n_symbols} symbols")
 dataset_pd = dataset.to_pandas()
 dataset_pd["timestamp"] = pd.to_datetime(dataset_pd["timestamp"])
 del dataset
-collect()
+gc.collect()
 
 # %% [markdown]
 # ## Create Walk-Forward CV Splits
@@ -286,16 +422,26 @@ for name, record in INPUT_LINEAGE["artifacts"].items():
     print(f"  {name}: {record['sha256'][:12]}, {record['size'] / 1e9:.2f} GB")
 
 # %% [markdown]
-# ## Run Direct Regression Models (LSTM, NLinear)
+# ## The direct-regression arm
 #
-# These models take a lookback window of 12 weekly feature vectors and
-# predict `fwd_ret_5d` directly as a scalar. The sequence provides temporal
-# context; the output is the cross-sectional ranking signal.
+# Both configurations read the same twelve-week window and emit one number, the return. Neither
+# has any notion that the number is a future value of one of its inputs. `lstm_h64` steps through
+# the window one week at a time, carrying a hidden state that summarises everything it has seen.
+# `nlinear` works one feature at a time: it subtracts that feature's last value, maps the twelve
+# weeks to a single number with a linear layer, and adds the last value back, so each feature is
+# summarised on its own; a final linear layer then combines those per-feature numbers into the
+# prediction. The subtract-and-restore is a normalisation of each input column, not a claim about
+# the output.
+#
+# What comes out is used as a ranking signal across stocks on a date, not as a return forecast to
+# be believed at face value, which is why the scoring below is a rank correlation.
 
 # %%
-from case_studies.utils.deep_learning import run_dl_cv
-
-# Build configs manually with weekly-adjusted lookback
+# The two architectures are the ones 09_dl_nlinear and 10_dl_lstm fit, under a weekly schedule:
+# twelve weekly observations rather than sixty daily ones, and fifty epochs rather than a hundred.
+# They keep the daily presets' names because they are the same architectures, and the registry
+# keeps the two apart anyway - the lookback, the epoch count and the input lineage are all inside
+# the training identity, so a weekly `lstm_h64` and a daily one are different rows.
 pytorch_configs = []
 for name, arch in [("lstm_h64", "lstm"), ("nlinear", "nlinear")]:
     cfg = {
@@ -317,8 +463,6 @@ for name, arch in [("lstm_h64", "lstm"), ("nlinear", "nlinear")]:
     pytorch_configs.append(cfg)
 
 print(f"Running {len(pytorch_configs)} PyTorch configs on {device}...")
-with open(LOG_FILE, "a") as f:
-    f.write("=== PyTorch direct regression (weekly) ===\n")
 
 # %%
 pytorch_result = run_dl_cv(
@@ -339,13 +483,9 @@ pytorch_result = run_dl_cv(
     register=True,
     force_retrain=FORCE_RETRAIN,
     prediction_split=PREDICTION_SPLIT,
-    # feature_names is in the identity, not only in the training call. Without identity_params or
-    # input_data_spec, _config_identity_params returns None (deep_learning.py:1723-1747) and
-    # build_training_spec hashes family, config, label, n_folds, n_epochs and the preset params -
-    # so changing what the model trains on leaves the spec hash where it was. With
-    # FORCE_RETRAIN False the pre-filter at :1765-1782 then finds the previous run complete and
-    # skips it, and the notebook reports the old model's numbers under the new feature set. A
-    # clean registry retrains and looks correct, which is why this is invisible locally.
+    # The feature set belongs in the identity, not only in the training call. A run is skipped
+    # when the registry already holds its training hash as complete, so anything the hash does
+    # not cover is something a re-run cannot notice has changed.
     identity_params={"feature_names": feature_names},
     input_data_spec=INPUT_LINEAGE,
     case_study=CASE_STUDY_ID,
@@ -353,27 +493,25 @@ pytorch_result = run_dl_cv(
 )
 
 # %%
-print("\nPyTorch results:")
-print(f"  Best config: {pytorch_result['best_config_name']}")
-print(f"  Best epoch: {pytorch_result['best_epoch']}")
-print(f"  Best IC: {pytorch_result['best_ic']:.4f}")
-
-with open(LOG_FILE, "a") as f:
-    f.write(
-        f"Best: {pytorch_result['best_config_name']} "
-        f"IC={pytorch_result['best_ic']:.4f} "
-        f"epoch={pytorch_result['best_epoch']}\n"
-    )
-    for r in pytorch_result["grid_results"]:
-        f.write(f"  {r['config_name']}: IC={r['best_ic']:.4f} epoch={r['best_epoch']}\n")
+print("\nDirect regression, highest-IC checkpoint per configuration:")
+print(f"  configuration: {pytorch_result['best_config_name']}")
+print(f"  epoch: {pytorch_result['best_epoch']}")
+print(f"  mean validation IC: {pytorch_result['best_ic']:.4f}")
 
 # %% [markdown]
-# ## Run Darts `NBEATSModel` (1-Step Forecasting)
+# ## The forecasting arm
 #
-# With `darts_output_chunk_length=1`, `NBEATSModel` predicts a single weekly
-# return, which eliminates the error compounding that degrades multi-step
-# daily forecasting. Both arms read the same rows over the same horizon and differ only in
-# the formulation, forecasting against direct regression.
+# `NBEATSModel` treats the window as the history of a series and predicts its next value. Its
+# blocks each fit part of the signal and hand the remainder to the next block, so the fit is built
+# up as a sum of pieces rather than as one map from window to output.
+#
+# `darts_output_chunk_length=1` is the setting that makes this one-step. Asked for five steps on a
+# daily grid the same model would feed its own output back in four times, and each of those
+# passes carries the previous error forward - which is the compounding a weekly grid removes by
+# construction rather than by choosing a better model.
+#
+# Both arms read the same rows over the same horizon with the same lookback, so the difference
+# between them is the formulation and nothing else.
 
 # %%
 darts_configs = [
@@ -399,8 +537,6 @@ darts_configs = [
 ]
 
 print(f"Running DARTS N-BEATS (1-step weekly forecasting) on {device}...")
-with open(LOG_FILE, "a") as f:
-    f.write("\n=== DARTS N-BEATS (weekly, 1-step) ===\n")
 
 # %%
 darts_result = run_dl_cv(
@@ -420,13 +556,9 @@ darts_result = run_dl_cv(
     max_train_sequences=MAX_TRAIN_SEQUENCES,
     register=True,
     force_retrain=FORCE_RETRAIN,
-    # feature_names is in the identity, not only in the training call. Without identity_params or
-    # input_data_spec, _config_identity_params returns None (deep_learning.py:1723-1747) and
-    # build_training_spec hashes family, config, label, n_folds, n_epochs and the preset params -
-    # so changing what the model trains on leaves the spec hash where it was. With
-    # FORCE_RETRAIN False the pre-filter at :1765-1782 then finds the previous run complete and
-    # skips it, and the notebook reports the old model's numbers under the new feature set. A
-    # clean registry retrains and looks correct, which is why this is invisible locally.
+    # The feature set belongs in the identity, not only in the training call. A run is skipped
+    # when the registry already holds its training hash as complete, so anything the hash does
+    # not cover is something a re-run cannot notice has changed.
     identity_params={"feature_names": feature_names},
     input_data_spec=INPUT_LINEAGE,
     case_study=CASE_STUDY_ID,
@@ -435,22 +567,125 @@ darts_result = run_dl_cv(
 )
 
 # %%
-print("\nDARTS N-BEATS results:")
-print(f"  Best epoch: {darts_result['best_epoch']}")
-print(f"  Best IC: {darts_result['best_ic']:.4f}")
-
-with open(LOG_FILE, "a") as f:
-    f.write(f"N-BEATS: IC={darts_result['best_ic']:.4f} epoch={darts_result['best_epoch']}\n")
+print("\nOne-step forecasting, highest-IC checkpoint:")
+print(f"  epoch: {darts_result['best_epoch']}")
+print(f"  mean validation IC: {darts_result['best_ic']:.4f}")
 
 # %% [markdown]
-# ## Summary
+# ### What more training does to each formulation
 #
-# Compare direct regression (LSTM, NLinear) against 1-step `NBEATSModel` forecasting,
-# and against the tabular baselines (GBM, Ridge, TabM) already in the registry.
+# One line per configuration, tracing out-of-sample information coefficient against the number of
+# training epochs. This is the comparison the notebook exists for, and a single end-of-training
+# number cannot show it.
+#
+# A line that rises and then falls has an interior optimum: the model was still learning, then
+# began fitting the training window at the expense of the validation folds. A line that wanders
+# around zero without trend never had anything to learn, and its highest point is wherever the
+# noise happened to peak. Both produce a respectable-looking maximum, which is why the curve
+# rather than the maximum is what to read.
+#
+# The two direct-regression lines and the forecasting line are drawn together because the
+# formulation is the axis under test. Where they separate, and whether they separate more as
+# training goes on, is what says the reframing did something.
+
+# %%
+curves = pl.concat(
+    [
+        frame.select("config", "epoch", "ic_mean")
+        for frame in (
+            pytorch_result.get("all_learning_curves"),
+            darts_result.get("all_learning_curves"),
+        )
+        if frame is not None and frame.height > 0
+    ],
+    how="vertical",
+).sort("config", "epoch")
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+config_names = curves.get_column("config").unique(maintain_order=True).to_list()
+# `ml4t_palette` returns a list of that many colours, so it is called once and indexed.
+palette = ml4t_palette(len(config_names), categorical=True)
+for index, config_name in enumerate(config_names):
+    series = curves.filter(pl.col("config") == config_name)
+    ax.plot(
+        series.get_column("epoch").to_list(),
+        series.get_column("ic_mean").to_list(),
+        lw=1.4,
+        color=palette[index],
+        label=config_name,
+    )
+ax.axhline(0.0, color=COLORS["neutral"], ls="--", lw=1.0)
+ax.set_xlabel("Training epochs")
+ax.set_ylabel("Mean validation IC")
+ax.legend(frameon=False, fontsize=7)
+add_message_title(
+    ax,
+    "Where each weekly model stops learning and starts fitting the window",
+    subtitle="Out-of-sample information coefficient against training epoch, one line per model",
+)
+# The alt text reads the frame rather than asserting a shape, so a panel described as turning
+# over when it does not is a claim the data refutes.
+_peaks = (
+    curves.group_by("config")
+    .agg(
+        peak_epoch=pl.col("epoch").sort_by("ic_mean", descending=True).first(),
+        last_epoch=pl.col("epoch").max(),
+        first_epoch=pl.col("epoch").min(),
+    )
+    .with_columns(
+        interior=pl.col("peak_epoch").is_between(
+            pl.col("first_epoch"), pl.col("last_epoch"), closed="none"
+        )
+    )
+)
+_n_interior = int(_peaks.get_column("interior").sum())
+show_with_alt(
+    fig,
+    "Line chart of mean validation information coefficient against training epoch, one line per "
+    "weekly configuration, with a dashed line at zero. Counted from the underlying frame, "
+    f"{_n_interior} of {_peaks.height} configurations reach their highest information "
+    "coefficient at an epoch that is neither the first nor the last, which is what an interior "
+    "optimum looks like.",
+)
+
+# %% [markdown]
+# ## Reading the summary table
+#
+# **Every number in it is a maximum.** Each fit is scored at ten checkpoints, and the row below
+# carries that configuration's best one - which is the same quantity the daily notebooks refuse to
+# report as a single result, because the maximum of ten draws is larger than any one of them
+# whether or not the model learned anything. The curve above is what the maximum was taken from,
+# and it is the honest object: read the row to see where a configuration got to, and the curve to
+# see whether getting there meant anything.
+#
+# Two comparisons follow, and they answer different questions.
+#
+# **Within the weekly grid**, direct regression against one-step forecasting is the comparison
+# this notebook was built for: same rows, same horizon, same lookback, two ways of writing the
+# prediction down. What the table cannot do is settle it. Each row is a maximum over that
+# configuration's own ten checkpoints, both sides are, and applying the same operation to both is
+# not the same as the bias cancelling - how far a maximum of ten sits above the quantity
+# underneath depends on how much those ten vary and how correlated they are, and a recurrent fit,
+# a linear map over a normalised window and a stack of forecasting blocks have no reason to agree
+# on either. So an ordering here is not evidence that the formulation did anything. Establishing
+# that would take a paired comparison of the two on the same decision dates with an interval
+# around the difference, which is what `15_model_analysis` does for the daily families and which
+# nothing in this notebook computes.
+#
+# **Against the daily families**, the comparison is looser twice over. Those models are scored on
+# every session and these on Fridays only, so the two are measured over different sets of decision
+# dates; and the daily figure below is a mean over the validation period rather than a maximum
+# over checkpoints, so it is not the same statistic. A difference between the two blocks is a
+# difference in the experiment before it is a difference in the model, which is also why these
+# predictions stay out of the canonical backtest pool.
+#
+# **What generalizes is the reframing.** Whether sampling to a coarser grid pays depends on how
+# much history the panel holds and how fast the signal decays, and a reader applying this to their
+# own data should expect the balance between the two costs to land differently.
 
 # %%
 print("\n" + "=" * 60)
-print("WEEKLY DL EXPERIMENT RESULTS")
+print("Weekly sequence models: validation IC by formulation")
 print("=" * 60)
 
 # Collect DL results
@@ -473,33 +708,51 @@ all_results.append(
     }
 )
 
-results_df = pl.DataFrame(all_results).sort("ic", descending=True)
-print(results_df)
+results_df = pl.DataFrame(all_results).sort("ic", descending=True).rename({"ic": "best_ic"})
+display(results_df)
 
 # %%
-# Compare against registry baselines
-import sqlite3
+# The daily families through the registry's own accessors rather than a hand-written join: the
+# three tables this needs are exactly what `load_training_runs`, `load_prediction_sets` and
+# `load_prediction_metrics` return, and `ic_mean_daily` is the mean the metrics table already
+# holds. A join written here would be a fourth copy of a schema that lives in one place.
+daily_runs = [
+    frame
+    for family in ("linear", "gbm", "tabular_dl")
+    if (frame := load_training_runs(CASE_STUDY_ID, family=family, label=PRIMARY_LABEL)).height
+]
+if daily_runs:
+    runs = pl.concat(daily_runs, how="vertical_relaxed")
+    sets = load_prediction_sets(CASE_STUDY_ID, split="validation")
+    metrics = load_prediction_metrics(CASE_STUDY_ID)
+    if sets.height and metrics.height and "ic_mean_daily" in metrics.columns:
+        baselines = (
+            runs.select("training_hash", "family", "config_name", "label")
+            .join(sets.select("training_hash", "prediction_hash"), on="training_hash", how="inner")
+            .join(
+                metrics.select("prediction_hash", "ic_mean_daily"),
+                on="prediction_hash",
+                how="inner",
+            )
+            .drop_nulls("ic_mean_daily")
+            .sort("ic_mean_daily", descending=True)
+            .head(5)
+            .select("family", "config_name", "label", "ic_mean_daily")
+        )
+    else:
+        baselines = pl.DataFrame()
+else:
+    baselines = pl.DataFrame()
 
-db_path = CASE_DIR / "run_log" / "registry.db"
-if db_path.exists():
-    conn = sqlite3.connect(db_path)
-    baselines = pd.read_sql_query(
-        """
-        SELECT t.family, t.config_name, t.label, AVG(f.ic) as mean_ic
-        FROM fold_metrics f
-        JOIN prediction_sets ps ON f.prediction_hash = ps.prediction_hash
-        JOIN training_runs t ON ps.training_hash = t.training_hash
-        WHERE t.label = 'fwd_ret_5d'
-          AND t.family IN ('linear', 'gbm', 'tabular_dl')
-        GROUP BY t.training_hash, t.family, t.config_name, t.label
-        ORDER BY mean_ic DESC
-        LIMIT 5
-    """,
-        conn,
+if baselines.height:
+    print("\nDaily families on the same label, mean validation IC over the period:")
+    display(baselines)
+else:
+    # Said rather than skipped. The paragraph above promises this comparison, and a cell that
+    # prints nothing when the daily families have not been registered yet leaves the reader
+    # looking for a table that was never going to appear.
+    print(
+        "\nNo daily linear, gbm or tabular_dl runs are registered for "
+        f"{PRIMARY_LABEL} in this run log, so the second comparison above has nothing to make. "
+        "Run 06_linear, 07_gbm and 08_tabular_dl first."
     )
-    conn.close()
-
-    print("\nBaseline comparison (fwd_ret_5d, daily CV):")
-    print(baselines.to_string(index=False))
-
-print("\nDone. Full log at:", LOG_FILE)

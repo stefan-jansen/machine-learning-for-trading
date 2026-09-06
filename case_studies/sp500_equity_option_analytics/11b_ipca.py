@@ -423,9 +423,10 @@ by_label = catalog.select(
     # folds behind `ic_mean`, which is what the rows are ordered by. So this column is a
     # comparability guarantee about one statistic attached to a ranking on another. It is kept
     # because unequal day counts are still the thing that makes two rows incomparable, and
-    # flagged because the two are not the same measurement: `registry/metrics.py:203` averages
-    # folds for `ic_mean`, and `:234-250` computes the daily family together. Reading the
-    # ordering on `ic_mean_daily` would need `PredictionCatalog` to carry it.
+    # flagged because the two are not the same measurement: the registry averages folds for
+    # `ic_mean` and computes the daily family separately, so `ic_n_days` describes one and the
+    # ordering uses the other. Reading the ordering on `ic_mean_daily` would need
+    # `PredictionCatalog` to carry it.
     full_coverage=pl.col("ic_n_days") == pl.col("ic_n_days").max(),
 ).sort("ic_mean", descending=True)
 by_label
