@@ -397,6 +397,81 @@ def test_every_declared_parameter_reaches_its_notebook(overrides: dict) -> None:
     assert unreachable == {}
 
 
+def _accepted_reduction_fields() -> tuple[set[str], set[str]]:
+    """Every reduction key some family accepts, and the four the DML resolver requires.
+
+    Imported from the modules that enforce them rather than restated here, so the guard
+    cannot go on accepting a name its consumer has dropped.
+    """
+    from case_studies.utils.causal import _DML_PREVIEW_FIELDS
+    from case_studies.utils.deep_learning import _SEQUENCE_PREVIEW_FIELDS
+    from case_studies.utils.gbm import _GBM_PREVIEW_FIELDS
+    from case_studies.utils.latent_factors.adapter import _PREVIEW_FIELDS as _LATENT_FIELDS
+    from case_studies.utils.linear import _PREVIEW_FIELDS as _LINEAR_FIELDS
+    from case_studies.utils.tabular_dl import _TABM_PREVIEW_FIELDS
+
+    return set().union(
+        _DML_PREVIEW_FIELDS,
+        _SEQUENCE_PREVIEW_FIELDS,
+        _GBM_PREVIEW_FIELDS,
+        _LATENT_FIELDS,
+        _LINEAR_FIELDS,
+        _TABM_PREVIEW_FIELDS,
+    ), set(_DML_PREVIEW_FIELDS)
+
+
+def _declared_reductions(overrides: dict) -> dict[str, dict]:
+    return {
+        key: value["parameters"]["PREVIEW_REDUCTIONS"]
+        for key, value in overrides.items()
+        if isinstance(value, dict)
+        and isinstance(value.get("parameters"), dict)
+        and isinstance(value["parameters"].get("PREVIEW_REDUCTIONS"), dict)
+    }
+
+
+def test_every_declared_reduction_key_is_one_some_family_accepts(overrides: dict) -> None:
+    """A misspelled reduction key must fail here rather than as a timeout.
+
+    Each family resolver rejects a key outside its own set, but it does so inside the run,
+    after the fit has been planned. In CI that surfaces as a papermill per-cell timeout and
+    reads as flakiness - which is the confusion #942 was filed about, and it is not
+    distinguishable from contention by timing. The name is knowable without running
+    anything, so it is checked without running anything.
+    """
+    accepted, _ = _accepted_reduction_fields()
+    unknown = {
+        key: sorted(set(reductions) - accepted)
+        for key, reductions in _declared_reductions(overrides).items()
+        if set(reductions) - accepted
+    }
+
+    assert unknown == {}
+
+
+def test_a_causal_reduction_declares_all_four_fields(overrides: dict) -> None:
+    """The DML resolver requires its four fields, and a partial mapping is worse than none.
+
+    `resolve_causal_request` rejects a key outside its four and also rejects a mapping
+    missing one, because a preview that omits `max_samples` would resolve the *full*
+    population under a preview tier - a run priced as a smoke test that costs a canonical
+    one. Entries are identified by the notebook submitting a `study.causal(` request rather
+    than by their stem, so a renamed notebook stays covered.
+    """
+    _, dml_fields = _accepted_reduction_fields()
+    incomplete = {}
+    for key, reductions in _declared_reductions(overrides).items():
+        source_path = REPO_ROOT / f"{key}.py"
+        if not source_path.exists():
+            continue
+        if "study.causal(" not in source_path.read_text(encoding="utf-8"):
+            continue
+        if set(reductions) != dml_fields:
+            incomplete[key] = sorted(reductions)
+
+    assert incomplete == {}
+
+
 def test_resolved_registry_path_follows_the_tier_the_harness_binds(tmp_path: Path) -> None:
     """The path a caller snapshots must be the one the run under that tier opens.
 
