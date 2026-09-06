@@ -338,3 +338,118 @@ def test_the_key_digest_is_recomputed_under_the_rendering_that_produced_it(legac
     assert rendered["timestamp"].to_list() == (
         ["2016-01-29", "2016-01-29"] if legacy else ["2016-01-29 00:00:00.000000"] * 2
     )
+
+
+def _coverage_registry(tmp_path, *, legacy: bool):
+    """A registry holding one prediction, its coverage row, and its parquet on disk."""
+    import sqlite3
+
+    from case_studies.utils.artifact_digest import value_digest
+    from case_studies.utils.registry.fold_renumbering import _prediction_key_frame
+    from case_studies.utils.registry.store import _open_registry
+
+    case_dir = tmp_path / "case"
+    (case_dir / "run_log").mkdir(parents=True)
+    _open_registry(case_dir).close()
+    frame = pl.DataFrame(
+        {
+            "symbol": [1, 2, 3],
+            "timestamp": ["2016-01-29", "2016-02-29", "2016-03-31"],
+            "fold": [0, 1, 2],
+            "prediction": [0.1, 0.2, 0.3],
+        }
+    ).with_columns(pl.col("timestamp").str.to_date())
+    for name, folds in (("old", [0, 1, 2]), ("new", [2, 1, 0])):
+        directory = case_dir / "run_log" / "predictions" / f"{name}aaaaaaaaa"
+        directory.mkdir(parents=True)
+        frame.with_columns(pl.Series("fold", folds)).write_parquet(
+            directory / "predictions.parquet"
+        )
+    keys = _prediction_key_frame(frame, legacy=legacy)
+    stored = value_digest(keys, tuple(keys.columns))
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        db.execute(
+            "INSERT INTO prediction_coverage (prediction_hash, expected_key_digest, "
+            "actual_key_digest, n_expected, n_actual, n_duplicates, n_missing, n_extra, "
+            "n_null, n_non_finite, n_folds_expected, n_folds_actual, schema_json, "
+            "artifact_digest, status) VALUES (?,?,?,3,3,0,0,0,0,0,3,3,'{}',?,'complete')",
+            ("newaaaaaaaaa", stored, stored, value_digest(frame)),
+        )
+    return case_dir, stored
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_coverage_digests_are_rewritten_under_the_rendering_they_were_taken_under(
+    tmp_path, legacy
+) -> None:
+    import sqlite3
+
+    from case_studies.utils.artifact_digest import value_digest
+    from case_studies.utils.registry.fold_renumbering import (
+        _prediction_key_frame,
+        _rewrite_prediction_coverage,
+    )
+
+    case_dir, stored = _coverage_registry(tmp_path, legacy=legacy)
+    run_log = case_dir / "run_log"
+    plan = RenumberPlan(
+        case_study="case",
+        case_dir=case_dir,
+        remaps=[
+            TrainingRemap(
+                source_hash="aaaaaaaaaaaa",
+                target_hash="bbbbbbbbbbbb",
+                permutation={0: 2, 1: 1, 2: 0},
+                target_spec={},
+                prediction_map={"oldaaaaaaaaa": "newaaaaaaaaa"},
+            )
+        ],
+    )
+    with sqlite3.connect(run_log / "registry.db") as db:
+        renderings = _rewrite_prediction_coverage(db, plan, run_log, run_log)
+        db.commit()
+        row = db.execute(
+            "SELECT expected_key_digest, actual_key_digest, artifact_digest "
+            "FROM prediction_coverage WHERE prediction_hash = 'newaaaaaaaaa'"
+        ).fetchone()
+
+    assert renderings == ({"current": 0, "legacy": 1} if legacy else {"current": 1, "legacy": 0})
+    migrated = pl.read_parquet(run_log / "predictions" / "newaaaaaaaaa" / "predictions.parquet")
+    keys = _prediction_key_frame(migrated, legacy=legacy)
+    expected = value_digest(keys, tuple(keys.columns))
+    assert row[0] == row[1] == expected != stored
+    assert row[2] == value_digest(migrated)
+
+
+def test_coverage_rewrite_refuses_a_digest_that_reproduces_under_neither_rendering(
+    tmp_path,
+) -> None:
+    import sqlite3
+
+    from case_studies.utils.registry.fold_renumbering import _rewrite_prediction_coverage
+
+    case_dir, _ = _coverage_registry(tmp_path, legacy=True)
+    run_log = case_dir / "run_log"
+    with sqlite3.connect(run_log / "registry.db") as db:
+        db.execute(
+            "UPDATE prediction_coverage SET expected_key_digest = ?, actual_key_digest = ?",
+            ("0" * 16, "0" * 16),
+        )
+    plan = RenumberPlan(
+        case_study="case",
+        case_dir=case_dir,
+        remaps=[
+            TrainingRemap(
+                source_hash="aaaaaaaaaaaa",
+                target_hash="bbbbbbbbbbbb",
+                permutation={0: 2, 1: 1, 2: 0},
+                target_spec={},
+                prediction_map={"oldaaaaaaaaa": "newaaaaaaaaa"},
+            )
+        ],
+    )
+    with (
+        sqlite3.connect(run_log / "registry.db") as db,
+        pytest.raises(FoldRenumberRefusal, match="coverage digests do not reproduce"),
+    ):
+        _rewrite_prediction_coverage(db, plan, run_log, run_log)
