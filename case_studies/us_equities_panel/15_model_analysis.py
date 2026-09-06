@@ -92,7 +92,7 @@ from case_studies.research import (
 from case_studies.utils.backtest_runner import normalize_prediction_columns
 from case_studies.utils.insight_chapter import conformal_coverage_for_selected_prediction
 from case_studies.utils.registry import canonical_json, load_prediction_metrics
-from utils.style import COLORS
+from utils.style import COLORS, add_message_title, show_with_alt, zero_line
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
@@ -158,11 +158,10 @@ CAUSAL_LABELS = ["fwd_ret_1d"]
 # %% [markdown]
 # ## 1. Opening the named sets, and checking each is whole
 #
-# A prediction result is eligible here when its persisted coverage matches the expected
-# `(symbol, timestamp, fold)` grid and its split and execution tier match the declared analysis.
-# Canonical analysis verifies named compatible sets and their official checkpoint populations.
-# A reduced preview selects a bounded catalog population by visible fields without publishing it.
-# Diagnostic members remain a subset of the strategy handoff in either tier.
+# A result earns its place in the comparison by covering every stock-date-fold its own identity
+# promised, on the validation split, under this run's tier. A result that covers less is not a
+# weaker candidate: it is a candidate measured on a different sample, and averaging it beside the
+# others would make the ranking a statement about who finished rather than about who ranked well.
 
 # %% tags=["results"]
 preview_filters = bool(PREVIEW_LABELS or PREVIEW_FAMILIES or PREVIEW_CONFIG_NAMES)
@@ -193,11 +192,9 @@ else:
     raise ValueError(f"Unsupported execution tier: {EXECUTION_TIER!r}")
 
 include_preview = EXECUTION_TIER == "preview"
-# Metrics are read from the tier's own storage, not from `study.root`. Under preview in a
-# maintainer worktree `open_study` leaves `root` on the release case directory and redirects only
-# writes, so `case_dir=study.root` sends every metric lookup to the released registry while the
-# catalog rows come from the preview one - and every preview row reports as having no metrics.
-# `storage_root` is the accessor that answers "where does this tier's registry live".
+# Metrics are read from the tier's own storage. A preview run writes its rows to an isolated
+# registry while still reading the released labels and features, so the lookup has to be pointed
+# at the registry the rows came from rather than at the released one.
 metrics_case_dir = study.storage_root(EXECUTION_TIER)
 prediction_sets = ()
 diagnostic_sets = ()
@@ -354,10 +351,11 @@ set_table
 # %% [markdown]
 # ## 2. Every result complete, and scored where it said it would be
 #
-# A checkpoint is part of a prediction identity. The catalog below therefore keeps the training
-# hash, checkpoint kind, checkpoint value, and prediction hash together. Coverage is checked before
-# any metric is displayed, and distinct results must have distinct configuration-checkpoint
-# identities.
+# A model fitted for 200 epochs and the same model at epoch 50 are two candidates, not one
+# candidate measured twice, so the checkpoint travels with the configuration everywhere below. The
+# catalog keeps both alongside the hashes that produced them, and nothing is scored until its
+# coverage has been checked - a metric computed on an incomplete set is the one number in this
+# notebook that would look entirely normal.
 
 # %% tags=["results"]
 catalog_rows = []
@@ -416,10 +414,17 @@ catalog
 # %% [markdown]
 # ## 3. How well each model ranks the cross-section
 #
-# The information coefficient (IC) is the Spearman rank correlation between scores and realized
-# returns within one decision date. Registry metrics pool those daily correlations across folds,
-# giving every decision date equal weight. Heteroskedasticity-and-autocorrelation-consistent (HAC)
-# intervals account for dependence induced by overlapping forward returns.
+# On each decision date, rank the stocks by what the model predicted, rank them by what they went
+# on to earn, and correlate the two rankings: that is the **information coefficient** for that
+# date. Averaging it over every date in the validation period gives each date the same weight,
+# whatever the size of its cross-section.
+#
+# The interval around that average is wider than an ordinary one, and deliberately. A five-session
+# forward return measured every session shares four of its five days with the next one, so
+# consecutive observations are not independent and a plain standard error would treat far more
+# information as present than there is. The correction used here - **HAC**, for
+# heteroskedasticity- and autocorrelation-consistent - widens the interval by what that overlap
+# costs.
 
 # %% tags=["results"]
 metric_rows = []
@@ -463,55 +468,98 @@ performance.select(
 )
 
 # %% [markdown]
-# The plot retains the catalog order rather than sorting by IC. Each horizontal interval shows the
-# sampling uncertainty around one configuration and checkpoint; it is descriptive evidence, not a
-# model-selection rule.
+# The population is several hundred candidates, because a checkpoint is one of them, so a chart
+# with a labelled row per candidate would be a strip several metres long. Two things are worth
+# seeing across that many, and each is a distribution:
+#
+# **Where each family sits.** The left panel puts every candidate's mean daily IC in its family's
+# column, one column per label and family. Read the height of a column's cloud, not any one point:
+# a family whose whole cloud sits above zero ranked the cross-section, and one straddling zero did
+# not.
+#
+# **How much of that is measurable.** The right panel is the half-width of each candidate's
+# interval, on the same vertical scale. Where a family's half-widths are as large as the spread of
+# its point estimates in the left panel, the ordering inside that family is not something the data
+# distinguishes, however cleanly the table sorts.
+#
+# Neither panel selects anything, and the exact interval for any one candidate is in the frame
+# above.
 
 # %% tags=["results"]
 plot_performance = performance.with_columns(
-    (
-        pl.col("label")
-        + " | "
-        + pl.col("family")
-        + "/"
-        + pl.col("config_name")
-        + " @ "
-        + pl.col("checkpoint_kind")
-        + "="
-        + pl.col("checkpoint_value").cast(pl.String).fill_null("final")
-        + " ["
-        + pl.col("prediction_hash").str.slice(0, 8)
-        + "]"
-    ).alias("model_id")
+    half_width=(pl.col("ic_ci_hi") - pl.col("ic_ci_lo")) / 2
+)
+columns = (
+    plot_performance.select("label", "family").unique().sort("label", "family").rows(named=True)
 )
 
-fig, ax = plt.subplots(figsize=(10, max(4, 0.28 * plot_performance.height)))
-y_position = np.arange(plot_performance.height)
-mean_ic = plot_performance["ic_mean_daily"].to_numpy()
-lower = plot_performance["ic_ci_lo"].to_numpy()
-upper = plot_performance["ic_ci_hi"].to_numpy()
-ax.errorbar(
-    mean_ic,
-    y_position,
-    xerr=np.vstack([mean_ic - lower, upper - mean_ic]),
-    fmt="o",
-    color=COLORS["blue"],
-    ecolor=COLORS["neutral"],
-    capsize=2,
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+for ax, column_name, axis_label in zip(
+    axes,
+    ("ic_mean_daily", "half_width"),
+    ("Mean daily cross-sectional IC", "HAC interval half-width"),
+    strict=True,
+):
+    for position, column in enumerate(columns):
+        values = plot_performance.filter(
+            (pl.col("label") == column["label"]) & (pl.col("family") == column["family"])
+        ).get_column(column_name)
+        # Deterministic spread within a column so overlapping candidates stay countable; the
+        # horizontal position carries no meaning of its own.
+        jitter = (values.arg_sort().to_numpy() % 9 - 4) / 40
+        ax.scatter(
+            position + jitter,
+            values.to_numpy(),
+            alpha=0.45,
+            s=16,
+            color=COLORS["blue"],
+            edgecolors="none",
+        )
+    ax.set_xticks(
+        range(len(columns)),
+        [f"{column['label']}\n{column['family']}" for column in columns],
+        rotation=45,
+        ha="right",
+        fontsize=7,
+    )
+    ax.set_xlim(-0.5, len(columns) - 0.5)
+    ax.set_ylabel(axis_label)
+zero_line(axes[0])
+axes[1].set_ylim(bottom=0)
+add_message_title(
+    axes[0],
+    "Read the cloud, not the point: several hundred candidates per column",
+    subtitle="Left, each candidate's mean daily IC; right, the half-width of its HAC interval",
 )
-ax.axvline(0, color=COLORS["negative"], linewidth=0.8, linestyle="--")
-ax.set_yticks(y_position, plot_performance["model_id"].to_list())
-ax.set_xlabel("Daily cross-sectional IC")
-ax.set_title("Daily Cross-Sectional IC with HAC Intervals")
 fig.tight_layout()
-fig.show()
+# The alt text counts rather than asserts: whether any family's cloud clears zero is a fact about
+# the frame, and a panel described as separating the families when it does not is a claim the data
+# refutes.
+_clear = plot_performance.group_by("label", "family").agg(
+    above=(pl.col("ic_ci_lo") > 0).sum(), total=pl.len()
+)
+_n_any = int((_clear.get_column("above") > 0).sum())
+show_with_alt(
+    fig,
+    "Two strip plots side by side, one column per label and model family, sharing that column "
+    "order. The left panel places every candidate at its mean daily cross-sectional information "
+    "coefficient, with a dashed line at zero; the right places the same candidates at the "
+    "half-width of their heteroskedasticity-and-autocorrelation-consistent interval, on an axis "
+    "starting at zero. Points are spread horizontally within a column so overlapping candidates "
+    f"stay visible. Counted from the underlying frame, {_n_any} of {_clear.height} label-family "
+    "columns hold at least one candidate whose interval lies entirely above zero.",
+)
 
 # %% [markdown]
 # ## 4. Whether that ranking ability holds across windows
 #
-# Fold summaries show whether a configuration behaves similarly across validation windows. Raw
-# predictions are loaded only for the explicit diagnostic members. Every artifact must contain
-# finite values and unique canonical keys before its daily IC is computed.
+# An average over sixteen windows says nothing about whether the sixteen agreed. A configuration
+# that ranked the cross-section well in one year and not at all in the others has a mean no reader
+# could have traded through, and it looks identical in the table above to one that worked steadily.
+# The fold summaries below separate them.
+#
+# This is where raw predictions are read rather than registry metrics, which is why it runs over
+# the bounded diagnostic subset rather than the whole population.
 
 # %% tags=["results"]
 KEYS = ["symbol", "timestamp", "fold_id"]
@@ -572,11 +620,15 @@ fold_ic
 # %% [markdown]
 # ## 5. Whether two models carry the same information
 #
-# Pairwise similarity uses only observations shared by the two exact results. Joins retain
-# `(symbol, timestamp, fold)`, validate one-to-one cardinality, and confirm that both artifacts
-# carry the same realized return for every shared observation. Spearman correlations are computed
-# within each decision date and then averaged so dates with larger cross-sections receive no extra
-# weight.
+# Two configurations that score alike are not two pieces of evidence if they are ranking the same
+# names in the same order. A portfolio holding both would then be taking one bet at twice the
+# size, which is the failure this section exists to catch.
+#
+# The comparison is made only on the observations both results actually cover, one date at a time,
+# and averaged over dates. Two things are checked before any correlation is computed: that the
+# join is one-to-one, because a join that quietly multiplies rows makes two models look more alike
+# than they are, and that both artifacts carry the same realized return for every shared
+# observation, because if they disagree about what happened they are not comparable at all.
 
 # %% tags=["results"]
 correlation_rows = []
@@ -685,10 +737,11 @@ conformal_coverage.select(
 # %% [markdown]
 # ## 7. The causal estimate, read on its own terms
 #
-# Double machine learning estimates a treatment effect after using nuisance models to remove the
-# variation explained by declared confounders. Its estimand and uncertainty differ from a predictive
-# score, so causal results are read separately and never enter a prediction set. Each visible label
-# request must resolve to exactly one complete canonical causal result.
+# Everything above asks how well a model orders the cross-section. The estimate below asks
+# something the rest of this notebook cannot: whether moving the treatment would move the outcome,
+# after removing what the declared confounders explain. That is not a score, it ranks nothing, and
+# there is no axis on which it could be placed beside an information coefficient - which is why it
+# is read here on its own and never enters a prediction set.
 
 # %% tags=["results"]
 causal_columns = [
@@ -785,8 +838,7 @@ set_table.filter(pl.col("role") == "strategy handoff")
 # **Nothing here selects.** Ranking accuracy and strategy performance are different questions, and
 # the second is decided on validation backtest Sharpe in the notebooks that follow.
 #
-# Canonical execution covers every declared prediction result. Preview execution is explicitly
-# bounded and cannot publish a candidate set or official population. Shape-based diagnostics use a
-# separate subset because loading every large prediction artifact together is unnecessary. All
-# evidence in this notebook comes from validation data; the holdout is reserved for the replay of
-# whichever configuration validation selects.
+# **Known limitations.** Every number above comes from the validation folds, which have been read
+# many times over by the time a case study reaches this notebook; the holdout is opened once, for
+# the replay of whatever validation selects, and it is the only thing here that speaks to
+# performance rather than to selection.

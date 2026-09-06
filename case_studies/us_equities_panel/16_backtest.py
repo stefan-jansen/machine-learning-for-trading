@@ -45,8 +45,8 @@
 #
 # **Learning objectives.** By the end of this notebook you will be able to:
 #
-# - Describe how a cross-sectional ranking becomes a long-short book, and name every decision that
-#   turns has to make.
+# - Describe how a cross-sectional ranking becomes a long-short book, and name every decision a
+#   rebalance has to make.
 # - Say why the plainest sizing rule is the right one for a baseline, and what a comparison under
 #   a sophisticated allocator would confound.
 # - Say why the whole model population is backtested rather than a shortlist chosen on ranking
@@ -78,15 +78,13 @@ import polars as pl
 from case_studies.research import (
     CandidateSet,
     OfficialPopulation,
-    Study,
     open_study,
     plan_backtests,
     run_backtests,
 )
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.sweep_config import get_entry_schemes_for
-from utils.paths import REPO_ROOT
-from utils.style import COLORS, show_with_alt, zero_line
+from utils.style import COLORS, add_message_title, show_with_alt, zero_line
 
 # %% [markdown]
 # ### Which prediction sets enter the pool
@@ -140,13 +138,9 @@ MAX_SYMBOLS = 0
 
 # %%
 preview_filters = bool(PREVIEW_LABELS or PREVIEW_FAMILIES or PREVIEW_CONFIG_NAMES)
-# Both tiers resolve the study through `open_study`, never `Study.open`/`Study.regenerate`
-# directly. In a maintainer worktree the generated directories are symlinks to shared data, and
-# `open_study` handles that by reading inputs in place - `root` stays the release case directory
-# and only writes are redirected to the workspace. `Study.open(workspace=...)` instead puts `root`
-# inside the workspace, so `source = self.root / "labels"` (workspace.py:274) resolves somewhere
-# else and `_ensure_input_link` rejects the link a sibling notebook already made. Two notebooks in
-# one session then cannot both open a preview workspace.
+# Both tiers resolve the study through `open_study`. It reads the labels and features in place and
+# redirects only writes, so a preview run scores the same inputs a canonical one does and cannot
+# publish over it.
 if EXECUTION_TIER == "canonical":
     if preview_filters or PREVIEW_MAX_PREDICTIONS or MAX_SYMBOLS:
         raise ValueError("Canonical execution cannot declare preview reductions")
@@ -427,15 +421,10 @@ if (
 if EXECUTION_TIER == "canonical":
     for label in completed.get_column("label").unique().sort().to_list():
         label_name = label.replace("_", "-")
-        # No comparison_contract, matching cme_futures/research_workflow.py:811, which builds the
-        # same per-label pool across the full funnel and declares nothing. An empty contract makes
-        # every protocol field required-constant, which is the guard: if two members disagree on
-        # `cv` they measured their Sharpe on different folds and ranking them is not a comparison,
-        # and this field is the only thing checking that. Latent-factor members will refuse on
-        # `feature_artifacts` when they enter this pool - latent builds it from a different object
-        # than the other five families (latent_factors/case_study.py:337-383, carrying the label
-        # digest and setup.yaml bytes). That refusal is a known adapter defect surfacing, not a
-        # property to declare around; report it rather than adding the field here.
+        # Nothing is declared comparable, so every field of the protocol has to be identical
+        # across the members. That is the guard: two rows that measured their Sharpe on different
+        # folds are not two rankings of one thing, and this is what refuses to freeze them
+        # together.
         result_set = study.backtests.freeze(
             completed.filter(pl.col("label") == label),
             name=f"us-equities-{label_name}-baseline-v1",
@@ -484,7 +473,11 @@ ax.set_xticks(
 )
 ax.set_xlim(-0.5, len(groups) - 0.5)
 ax.set_ylabel("Validation Sharpe")
-ax.set_title("Equal-weight baseline Sharpe by label and model family")
+add_message_title(
+    ax,
+    "What the plainest sizing rule was worth, before any cost",
+    subtitle="One point per complete equal-weight validation backtest",
+)
 fig.tight_layout()
 show_with_alt(
     fig,
@@ -493,10 +486,6 @@ show_with_alt(
     "spread horizontally within its column so overlapping points stay visible. A dashed "
     "horizontal reference line marks zero.",
 )
-
-# %% [markdown]
-# The allocation notebook consumes these complete named baseline sets. Selection remains based on
-# validation backtest Sharpe, with the checkpoint retained as part of the selected configuration.
 
 # %% [markdown]
 # ## What to notice

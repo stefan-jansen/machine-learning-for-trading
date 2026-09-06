@@ -92,13 +92,12 @@ WORKSPACE = "experiments"
 # a result was fitted and scored under. Two rows with different values measured themselves over
 # different windows, and ranking them is not a comparison.
 #
-# Canonical execution reads the released study. Preview execution reads an isolated workspace.
-# Ordinary Polars filters select complete latent prediction rows by label, configuration,
-# checkpoint, and protocol. Hashes remain visible for provenance, but readers pass selected rows or
-# named compatible sets to downstream code rather than copying them.
+# Canonical execution reads the released study; preview execution reads an isolated workspace.
 
 # %%
 if EXECUTION_TIER == "canonical":
+    # `Study.open` with no workspace, not `open_study`: this notebook writes nothing, and that is
+    # the call that opens the released study read-only. `open_study` opens it for regeneration.
     study = Study.open(CASE_STUDY_ID)
 elif EXECUTION_TIER == "preview":
     study = open_study(
@@ -139,8 +138,8 @@ latent_results
 # [`15_model_analysis`](15_model_analysis.ipynb) reads these results alongside the other model
 # families and asks which ranks the cross-section better.
 # [`16_backtest`](16_backtest.ipynb) backtests every one of them. This index chooses nothing, and
-# the number of factors is not tuned anywhere in this case study: five is declared, and a sweep
-# over that count would be a different experiment.
+# the number of factors is not tuned anywhere in this case study: each model's preset declares one
+# and a sweep over that count would be a different experiment.
 
 # %% [markdown]
 # ## What to notice
@@ -150,13 +149,13 @@ latent_results
 # them is what the characteristics were worth, on this panel, under the assumption that the
 # relation between characteristics and loadings holds across stocks and over time.
 #
-# **A factor model is a compression, and a compression discards.** Five factors summarise a
-# three-thousand-name panel, so whatever is specific to one stock is by construction not in the
+# **A factor model is a compression, and a compression discards.** A handful of factors summarise
+# a three-thousand-name panel, so whatever is specific to one stock is by construction not in the
 # prediction. That is the trade being made rather than a defect: the models before this one are
 # where stock-specific information lives.
 #
-# **Known limitations.** The factor count is declared, not searched, so nothing here says five is
-# the right number - only what five gives. Both models are fitted on training windows only and
+# **Known limitations.** The factor count is declared, not searched, so nothing here says the
+# declared one is right - only what it gives. Both models are fitted on training windows only and
 # scored on validation folds that have been read many times over by the time a case study reaches
 # this notebook. And a latent factor has no name: it is a direction in the returns, and reading an
 # economic story into it is an interpretation this notebook does not support.

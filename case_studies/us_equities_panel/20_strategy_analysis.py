@@ -57,7 +57,7 @@ from case_studies.utils.registry import (
 )
 from case_studies.utils.registry.specs import project_training_identity
 from case_studies.utils.strategy_analysis import select_holdout_self_backtest
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
@@ -563,12 +563,14 @@ for period, result in (
 # %% tags=["results"]
 
 fig, axes = plt.subplots(2, 2, figsize=(12, 7), sharex="col")
+summary = {}
 for column, period in enumerate(("validation", "holdout")):
     returns = return_frames[period]
     values = returns["daily_return"].to_numpy()
     wealth = np.cumprod(1.0 + values)
     running_peak = np.maximum.accumulate(np.concatenate(([1.0], wealth)))[1:]
     drawdown = wealth / running_peak - 1.0
+    summary[period] = (float(wealth[-1] - 1.0), float(drawdown.min()))
     axes[0, column].plot(returns["timestamp"], wealth - 1.0, color=COLORS["blue"])
     axes[0, column].axhline(0, color=COLORS["neutral"], linewidth=0.8, linestyle="--")
     axes[0, column].set_title(f"{period.title()} Cumulative Return")
@@ -584,7 +586,18 @@ axes[0, 0].set_ylabel("Cumulative return")
 axes[1, 0].set_ylabel("Drawdown")
 fig.suptitle("Locked Strategy Across Validation and Holdout Windows")
 fig.tight_layout()
-fig.show()
+# The alt text reads the two end points and the two troughs from the frames rather than describing
+# a shape, so a window described as ending ahead when it does not is a claim the data refutes.
+_read = "; ".join(
+    f"{period} ends at {total:+.1%} cumulative return with a worst drawdown of {worst:.1%}"
+    for period, (total, worst) in summary.items()
+)
+show_with_alt(
+    fig,
+    "Four panels in two columns, validation on the left and holdout on the right, each column "
+    "sharing a time axis. The top row traces cumulative return with a dashed line at zero; the "
+    f"bottom row shades the decline from each window's running peak. Read from the frames: {_read}.",
+)
 
 # %% [markdown]
 # ## Computed assessment

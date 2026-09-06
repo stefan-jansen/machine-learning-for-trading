@@ -75,14 +75,13 @@ from pathlib import Path
 import polars as pl
 import yaml
 
-from case_studies.research import Study, open_study, plan_models
+from case_studies.research import open_study, plan_models
 from utils.modeling import load_configs
-from utils.paths import REPO_ROOT, get_case_study_dir
+from utils.paths import get_case_study_dir
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
 LABELS = []
-N_FACTORS = 5
 OVERRIDES = {}
 EXECUTION_TIER = "canonical"
 WORKSPACE = "experiments"
@@ -97,11 +96,13 @@ PREVIEW_MAX_ITER = 0
 # What each setting a run may pass decides:
 #
 # - **`LABELS`** empty fits the primary label and every declared variant. A subset fits only those.
-# - **`N_FACTORS`** is how many common movements are extracted. Five is declared rather than
-#   searched, and that is a design choice with consequences: too few and distinct common movements
-#   are forced into one direction, too many and the later ones are fitting noise that will not
-#   repeat out of sample. Nothing in this case study tunes it, so no result here is evidence that
-#   five is right - only evidence of what five gives.
+# - **The factor count** is how many common movements are extracted. It is read from the preset at
+#   `case_studies/config/ipca/ipca.yaml` rather than set here, so there is one place to change it
+#   and one place to look. It is declared rather than searched, and that is a design choice with
+#   consequences: too few and distinct common movements are forced into one direction, too many
+#   and the later ones are fitting noise that will not repeat out of sample. Nothing in this case
+#   study tunes it, so no result here is evidence that the declared count is right - only evidence
+#   of what it gives.
 # - **`OVERRIDES`** changes a resolved model parameter. An override moves the training identity, so
 #   an overridden run registers beside the published one rather than replacing it.
 # - **`EXECUTION_TIER`** is `canonical` or `preview`. A canonical run fits the whole panel on every
@@ -120,13 +121,20 @@ if unknown_labels:
 if len(selected_labels) != len(set(selected_labels)):
     raise ValueError("LABELS contains duplicates")
 
+declared_factors = set()
 for label in selected_labels:
     configured = {
-        config["config_name"]
+        config["config_name"]: config
         for config in load_configs(CASE_STUDY_ID, label, family="latent_factors")
     }
     if "ipca" not in configured:
         raise ValueError(f"IPCA is not configured for {label}")
+    declared_factors.add(int(configured["ipca"]["params"]["n_factors"]))
+# One declaration, read rather than restated. A count typed here as well would be a second
+# declaration free to disagree with the preset, and the preset would then decide nothing.
+if len(declared_factors) != 1:
+    raise ValueError(f"the selected labels declare different factor counts: {declared_factors}")
+N_FACTORS = declared_factors.pop()
 
 label_menu = pl.DataFrame(
     {
@@ -148,13 +156,9 @@ if PREVIEW_N_FACTORS:
 if PREVIEW_MAX_ITER:
     preview_reductions["max_iter"] = int(PREVIEW_MAX_ITER)
 
-# Both tiers resolve the study through `open_study`, never `Study.open`/`Study.regenerate`
-# directly. In a maintainer worktree the generated directories are symlinks to shared data, and
-# `open_study` handles that by reading inputs in place - `root` stays the release case directory
-# and only writes are redirected to the workspace. `Study.open(workspace=...)` instead puts `root`
-# inside the workspace, so `source = self.root / "labels"` (workspace.py:274) resolves somewhere
-# else and `_ensure_input_link` rejects the link a sibling notebook already made. Two notebooks in
-# one session then cannot both open a preview workspace.
+# Both tiers resolve the study through `open_study`. It reads the labels and features in place and
+# redirects only writes, so a preview run scores the same inputs a canonical one does and cannot
+# publish over it.
 if EXECUTION_TIER == "canonical":
     if preview_reductions:
         raise ValueError("Canonical execution cannot declare preview reductions")
@@ -187,7 +191,9 @@ requests = tuple(
         family="latent_factors",
         label=label,
         config_name="ipca",
-        overrides={"n_factors": int(N_FACTORS), **OVERRIDES},
+        # The preset supplies the factor count; a value passed here would win over it, which is
+        # what OVERRIDES is for and what makes such a run unpublishable.
+        overrides=dict(OVERRIDES),
         execution_tier=EXECUTION_TIER,
         preview_reductions=preview_reductions,
     )
@@ -353,10 +359,7 @@ execution_diagnostics
 # %% tags=["results"]
 set_rows = []
 is_published_population = (
-    EXECUTION_TIER == "canonical"
-    and selected_labels == published_labels
-    and N_FACTORS == 5
-    and not OVERRIDES
+    EXECUTION_TIER == "canonical" and selected_labels == published_labels and not OVERRIDES
 )
 if is_published_population:
     for selected_label in selected_labels:
@@ -395,10 +398,12 @@ compatible_sets
 # absent from the feature set cannot inform a loading, and one that is present but stale informs it
 # wrongly. This is the model in the case study most sensitive to what stage 03 chose to compute.
 #
-# **A convergence check is not a goodness check.** The fit is iterative, and it either converged or
-# it did not; converging says the estimate is stable, not that the mapping it found is right.
+# **A convergence check is not a goodness check.** The fit alternates between the factors and the
+# mapping until they stop moving, and the runner refuses a fold that never got there rather than
+# reporting it - so every result you see converged. That says the estimate is stable, not that the
+# mapping it found is right.
 #
-# **Known limitations.** Five factors, declared rather than searched. The mapping from
+# **Known limitations.** The factor count is declared rather than searched. The mapping from
 # characteristics to loadings is assumed common across stocks and fixed within a training window,
 # which is the assumption the whole method rests on and which nothing here tests. And everything is
 # measured on validation folds read many times over by the time a case study reaches this notebook.

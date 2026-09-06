@@ -84,12 +84,14 @@
 import os
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import polars as pl
 import yaml
 
-from case_studies.research import Study, open_study, plan_models
+from case_studies.research import open_study, plan_models
 from utils.modeling import load_configs
-from utils.paths import REPO_ROOT, get_case_study_dir
+from utils.paths import get_case_study_dir
+from utils.style import FIGSIZE, add_message_title, ml4t_palette, show_with_alt, zero_line
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
@@ -175,13 +177,9 @@ if FOLD_IDS:
 if MAX_TRAIN_SEQUENCES:
     preview_reductions["max_train_sequences"] = int(MAX_TRAIN_SEQUENCES)
 
-# Both tiers resolve the study through `open_study`, never `Study.open`/`Study.regenerate`
-# directly. In a maintainer worktree the generated directories are symlinks to shared data, and
-# `open_study` handles that by reading inputs in place - `root` stays the release case directory
-# and only writes are redirected to the workspace. `Study.open(workspace=...)` instead puts `root`
-# inside the workspace, so `source = self.root / "labels"` (workspace.py:274) resolves somewhere
-# else and `_ensure_input_link` rejects the link a sibling notebook already made. Two notebooks in
-# one session then cannot both open a preview workspace.
+# Both tiers resolve the study through `open_study`. It reads the labels and features in place and
+# redirects only writes, so a preview run scores the same inputs a canonical one does and cannot
+# publish over it.
 if EXECUTION_TIER == "canonical":
     if preview_reductions or PREVIEW_N_EPOCHS:
         raise ValueError("Canonical execution cannot declare preview reductions")
@@ -325,13 +323,12 @@ catalog_rows = execution.catalog_rows.select(
 ).sort("config_name", "checkpoint_value", "prediction_hash")
 catalog_rows
 
-# %%
 # %% [markdown]
-# A prediction set can be registered complete and still have scored no dates: cross-sectional IC
-# needs `min_obs` names on a date, so a reduced universe whose symbols do not overlap in time
-# yields `ic_n_days = 0` and a null IC for every checkpoint while coverage stays complete. That is
-# a run that reports nothing and passes. `11_dl_tsmixer` carried a pinned symbol whitelist to avoid
-# it, which repaired one panel and left the condition unchecked; this asserts it instead.
+# A prediction set can be registered complete and still have scored no dates. Cross-sectional
+# information coefficient needs a minimum number of names quoted on a date before the ranking on
+# that date means anything, so a universe whose stocks do not overlap in time yields no scorable
+# dates and a null IC at every checkpoint while every coverage check passes. That is a run which
+# reports nothing and looks successful, so it is asserted on rather than left to be noticed.
 
 # %% tags=["results"]
 scored = execution.catalog_rows.select("config_name", "checkpoint_value", "ic_mean", "ic_n_days")
@@ -339,6 +336,71 @@ unscored = scored.filter(pl.col("ic_n_days").is_null() | (pl.col("ic_n_days") <=
 if not unscored.is_empty():
     raise RuntimeError(f"prediction sets scored no dates: {unscored.to_dicts()}")
 scored
+
+# %% [markdown]
+# ### Where more training stopped helping
+#
+# Each line traces one configuration's validation IC as epochs are added to it. This is the figure
+# the checkpoint dimension exists to produce, and it separates two things a single
+# end-of-training number cannot.
+#
+# A line that rises and then falls has an interior optimum: the model was still learning, then
+# began fitting the training windows at the expense of the validation folds. That is the evidence
+# about whether a two-layer recurrent network's extra parameters were supportable on the number of
+# windows this panel yields. A line that wanders around zero without trend never had anything to
+# learn, and its highest point is wherever the noise happened to peak. Both produce a
+# respectable-looking maximum, which is why the curve rather than the maximum is what to read.
+
+# %%
+curves = scored.sort("config_name", "checkpoint_value")
+config_names = curves.get_column("config_name").unique(maintain_order=True).to_list()
+# `ml4t_palette` returns a list of that many colours, so it is called once and indexed.
+palette = ml4t_palette(len(config_names), categorical=True)
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+for index, config_name in enumerate(config_names):
+    series = curves.filter(pl.col("config_name") == config_name)
+    ax.plot(
+        series.get_column("checkpoint_value"),
+        series.get_column("ic_mean"),
+        marker="o",
+        markersize=4,
+        lw=1.4,
+        color=palette[index],
+        label=config_name,
+    )
+zero_line(ax)
+ax.set_xlabel("Training epochs")
+ax.set_ylabel("Mean validation IC")
+ax.legend(fontsize=8, frameon=False)
+add_message_title(
+    ax,
+    "Whether the recurrent network was still learning when training stopped",
+    subtitle="Out-of-sample information coefficient against epoch, one line per configuration",
+)
+fig.tight_layout()
+# The alt text counts rather than asserts: whether a curve turns over is the question the figure
+# exists to answer, and a line described as peaking when it does not is a claim the data refutes.
+_peaks = (
+    curves.group_by("config_name")
+    .agg(
+        peak=pl.col("checkpoint_value").sort_by("ic_mean", descending=True).first(),
+        first=pl.col("checkpoint_value").min(),
+        last=pl.col("checkpoint_value").max(),
+    )
+    .with_columns(
+        interior=pl.col("peak").is_between(pl.col("first"), pl.col("last"), closed="none")
+    )
+)
+_n_interior = int(_peaks.get_column("interior").sum())
+show_with_alt(
+    fig,
+    "A line chart of mean validation information coefficient against training epoch, one line per "
+    "configuration, with a dashed line at zero. Counted from the underlying frame, "
+    f"{_n_interior} of {_peaks.height} configurations reach their highest information coefficient "
+    "at an epoch that is neither the first nor the last, which is what an interior optimum looks "
+    "like.",
+)
 
 # %%
 coverage_rows = []
@@ -422,8 +484,9 @@ compatible_sets
 #
 # **More capacity is not free at this window count.** The training examples are windows of
 # consecutive sessions, not panel rows, and a two-layer recurrent network has far more parameters
-# to estimate from them than a single linear map does. Where the learning curve turns over is the
-# evidence about whether that capacity was supportable here.
+# to estimate from them than a single linear map does. The learning curve above is the evidence
+# about whether that capacity was supportable here: a curve that turns over says the extra
+# parameters were being spent on the training windows by the end.
 #
 # **A checkpoint is part of a configuration.** Twenty per configuration, each registered
 # separately, for the reason `09_dl_nlinear` gives.

@@ -92,9 +92,9 @@ from pathlib import Path
 import polars as pl
 import yaml
 
-from case_studies.research import Study, open_study, plan_models
+from case_studies.research import open_study, plan_models
 from utils.modeling import load_configs
-from utils.paths import REPO_ROOT, get_case_study_dir
+from utils.paths import get_case_study_dir
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
@@ -338,7 +338,6 @@ catalog_rows = execution.catalog_rows.select(
 ).sort("config_name", "checkpoint_value", "prediction_hash")
 catalog_rows
 
-# %%
 # %% [markdown]
 # A prediction set can be registered complete and still have scored no dates. Cross-sectional
 # information coefficient needs a minimum number of names quoted on a date before the ranking on
@@ -389,9 +388,10 @@ execution_diagnostics
 # %% [markdown]
 # ## 6. Naming the sets the later notebooks open
 #
-# The downstream notebooks do not open populations. They open **named prediction sets**, one per
-# label and family, because a comparison is only meaningful within one label's protocol. Freezing
-# is what creates those names.
+# `16_backtest` never opens the population. It opens **named prediction sets**, one per label and
+# family, because a comparison is only meaningful within one label's protocol.
+# `15_model_analysis` opens both - the population, to confirm the run filled every member it
+# promised, and the named sets, to make the comparison. Freezing is what creates those names.
 #
 # Only an unnarrowed canonical run publishes them, and for the same reason a narrowed run may not
 # publish the canonical population: a name must not mean two different member sets at two different
