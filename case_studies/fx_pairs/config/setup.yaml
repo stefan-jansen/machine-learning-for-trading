@@ -306,8 +306,8 @@ model_based:
     stability_rel_tol: 0.001
   arima:
     # Sessions of a pair's own returns before its short-memory return model is
-    # fitted. One year, matching cme_futures' AutoARIMA, which is the same kind
-    # of model on the same kind of daily per-entity series. A return needs the
+    # fitted. One year, matching cme_futures' ARIMA, which is the same kind of
+    # model on the same kind of daily per-entity series. A return needs the
     # session before it, so this series starts one session later than the price
     # panel and the first value lands 2011-12-23, costing the oldest fold 252 of
     # its 1,289 training sessions and no validation session.
