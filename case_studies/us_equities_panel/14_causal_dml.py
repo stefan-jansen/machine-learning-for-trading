@@ -253,12 +253,14 @@ resolved_table
 # A result is registered only once a finite effect and a finite HAC standard error both exist, so
 # a row in the table below is an estimate rather than an attempt.
 #
-# Two of its columns are the comparison the method is for. **`naive_effect`** is the treatment
-# regressed on the outcome with nothing removed - what a reader would get by correlating momentum
-# with the forward return. **`confounding_bias_pct`** is how far the double-ML estimate moved away
-# from it, as a percentage, which is the size of what the three declared confounders were
-# accounting for. A large value says the confounders mattered; it says nothing about whether a
-# fourth one is missing.
+# Two of its columns are the comparison the method is for. **`naive_effect`** is the slope from
+# regressing the forward return on momentum with an intercept and nothing removed - the
+# unadjusted answer, fitted on exactly the rows the second stage uses, so the two estimates are
+# made on the same sample rather than on samples that differ. **`confounding_bias_pct`** is the
+# gap between the two, `naive_effect` minus `dml_effect`, as a percentage of the adjusted
+# estimate's magnitude. It is the size of what the three declared confounders were accounting for,
+# measured against what survives them. A large value says the confounders mattered; it says
+# nothing about whether a fourth one is missing.
 
 # %%
 result = resolved.run()
