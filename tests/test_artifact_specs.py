@@ -98,9 +98,12 @@ def test_microstructure_pilot_helpers_preserve_current_outputs() -> None:
     # 16min, not 15. The purge is the horizon PLUS ONE BAR, because the label's exit leg reads
     # a quote one bar past the horizon its name states, so a 15-minute buffer would leave the
     # last bar of every training window inside the first validation label's window. #737 made
-    # that the declared value and this assertion was not moved with it; it has been failing on
-    # `main` ever since for anyone who ran the file, which CI does not - `test-unit-data`
-    # reports "95 passed, 6 deselected" and this test is not among the 95.
+    # that the declared value and this assertion was not moved with it.
+    #
+    # It went unreported because `test-unit-data` deselects this test by node id - it is one of
+    # the "6 deselected" that job reports - on the grounds that it needs stage 01-05 artifacts
+    # the nasdaq rebuild has not produced. That reason is true of the two lines below and was
+    # never true of this one, which reads the repo config and no data.
     assert bt.label_buffer == "16min"
     assert bt.calendar == "NYSE"
     assert bt.cadence == "15_minute"
