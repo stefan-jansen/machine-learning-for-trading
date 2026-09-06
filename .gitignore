@@ -236,6 +236,24 @@ case_studies/*/catalog/*.json
 # generated preview fixtures (tests/generate_intermediates.py)
 case_studies/.preview/
 
+# Preview workspaces, wherever a run puts them. `open_study(workspace=...)` resolves its
+# argument against the working directory, so a bare name like "smoke-1045" lands a workspace
+# in the REPO ROOT, which the line above does not reach - it covers only one under
+# case_studies/. Such a workspace holds absolute symlinks into this machine's artifact store
+# and a real registry.db, so committing one hands a reader dangling links and puts into git
+# the database AGENTS.md keeps in the artifact store precisely so it never lives here. One was
+# committed on 2026-09-06 reproducing a blocked notebook, and had to be removed.
+#
+# `.preview/` is the invariant: `storage_root` builds `<workspace>/.preview/<case_study>`
+# whatever the workspace is called.
+**/.preview/
+
+# A registry belongs in the artifact store and never in the repo, and a preview workspace
+# creates one at `<workspace>/.preview/<case_study>/run_log/`. The `case_studies/*/run_log`
+# rules below cannot reach a workspace outside case_studies/, so this catches the shape at
+# any depth.
+**/run_log/
+
 # tearsheets 18_strategy_analysis writes to its OUTPUT_DIR (a run output, not source)
 case_studies/ch20_*/
 
