@@ -895,6 +895,20 @@ def load_modeling_dataset(
     # against a frame made unique on its keys, and neither it nor the META_LEAK drop moves a row.
     #
     # Production runs pass ``max_symbols=0`` and no ``symbols``, so neither branch fires.
+    #
+    # Bound before the filter because the fold geometry below is derived from the label frame,
+    # and a reduced universe is a different timeline: ``generate_cv_splits`` reads the unique
+    # timestamps of whatever frame it is handed, so dropping 25 of cme_futures' 30 products
+    # removes four sessions and moves every fold boundary two sessions earlier. Measured
+    # 2026-09-06: the same call over the full universe puts fold 0's validation window at
+    # 2019-01-03..2020-01-02 and over a five-product preview at 2018-12-31..2019-12-30. Nothing
+    # downstream follows that shift - ``canonical_window`` always reads the whole label parquet -
+    # so the backtest loads prices for the canonical window, the preview's predictions carry two
+    # sessions that window does not, and ``Strategy._decision_weights`` refuses the decision
+    # artifact for keys outside the price grid. Before #780 the reduction ran after both frames
+    # were read whole, so this call already saw the full timeline; pushing it into the scans is
+    # what put a reduced frame here.
+    unreduced_labels_lazy = labels_lazy
     if entity_cols:
         primary_entity = entity_cols[0]
         keep: list | None = None
@@ -1003,7 +1017,7 @@ def load_modeling_dataset(
     # feature-joined frame lets warm-up nulls or feature availability shift the
     # calendar and makes model selection disagree with canonical_window().
     splits = generate_cv_splits(
-        labels,
+        unreduced_labels_lazy.select(date_col).unique().collect(),
         case_study_id=case_study_id,
         label_buffer=label_buffer,
         outcome_horizon=resolve_label_horizon(case_study_id, primary_label, setup),
