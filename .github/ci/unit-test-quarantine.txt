@@ -102,6 +102,11 @@ tests/test_sequence_identity_roundtrip.py
 # `darts_validation_keys` and `_tabm_expected_keys` in place - which means
 # importing the modules that define them, and both reach torch.
 tests/test_sequence_holdout_rekey.py
+# Only one of its checks reaches torch - the reduction vocabulary is read from the
+# runners themselves rather than restated, so it imports deep_learning. The whole file
+# moves because this section and test-unit-image's list are one decision, and
+# test_the_image_job_runs_exactly_what_is_quarantined_for_it holds them to it.
+tests/test_smoke_configs.py
 tests/test_tabular_dl.py
 tests/test_tabular_dl_adapter.py
 tests/test_tabular_dl_identity.py

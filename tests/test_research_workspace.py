@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 import polars as pl
@@ -1066,3 +1067,44 @@ def test_a_checkout_shaped_release_root_carries_no_run_log(tmp_path: Path) -> No
             "harness reads the machine's published state again"
         )
     assert (release / "case_studies" / "config").is_dir()
+
+
+def test_a_bare_label_read_keeps_the_tier_the_study_was_opened_at(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`labels.get(name)` must not re-activate the study at canonical.
+
+    `LabelCatalog.get` used to default `execution_tier` to CANONICAL and pass it straight to
+    `Study.activate`, so a caller who did not name a tier silently undid the preview activation
+    the notebook performed when it called `open_study`. A canonical activation skips the
+    `.preview` path segment and skips linking `labels/` and `features/` into the preview case
+    directory, so the label resolved to `<workspace>/<case_study>/labels/<name>.parquet` -
+    a path nothing writes - and the run died claiming the artifact was missing.
+
+    Asserted through the resolved path rather than through the returned ref, because the ref is
+    identical either way and the path is the thing that was wrong.
+    """
+    release = _seed_release(tmp_path)
+    case_dir = release / "case_studies" / "etfs"
+    artifacts = tmp_path / "artifacts" / "labels"
+    artifacts.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": ["SPY", "SPY"],
+            "timestamp": [datetime(2024, 1, 2), datetime(2024, 1, 3)],
+            "fwd_ret_21d": [0.01, -0.02],
+        }
+    ).write_parquet(artifacts / "fwd_ret_21d.parquet")
+    # A maintainer worktree, which is the shape open_study reads inputs in place for.
+    (case_dir / "labels").symlink_to(artifacts, target_is_directory=True)
+
+    workspace = tmp_path / "workspace"
+    study = open_study("etfs", execution_tier="preview", workspace=workspace, release_root=release)
+
+    resolved = study.labels.get("fwd_ret_21d").path
+
+    assert resolved.is_file(), f"a bare read resolved to a path nothing writes: {resolved}"
+    assert ".preview" in resolved.parts, f"a bare read left the preview tier: {resolved}"
+    # And naming the tier explicitly reaches the same artifact, so the default is a default
+    # rather than a second behaviour.
+    assert study.labels.get("fwd_ret_21d", execution_tier="preview").path == resolved
