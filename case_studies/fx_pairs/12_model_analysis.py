@@ -269,6 +269,24 @@ representative_predictions = pl.concat(prediction_frames, how="diagonal_relaxed"
 #
 # Fold identifiers are labels, not dates. The table orders validation windows by their earliest
 # timestamp and retains checkpoint identity in every row.
+#
+# **What the spread across folds is telling you.** An average IC computed over five validation
+# windows can be produced two ways that mean opposite things. A configuration that scores a
+# similar small positive number in every window has found something that persisted across five
+# different market regimes. A configuration that scores strongly in one window and around zero or
+# negative in the rest can reach the same average, and what it has found is one period.
+#
+# The second is the more common outcome and the easier one to mistake for the first, because the
+# summary row is identical. It is also the one a walk-forward protocol is specifically designed to
+# expose: each window is fitted on its own past, so a configuration that only works when a
+# particular regime is in the training data reveals itself as soon as a window arrives where it
+# is not.
+#
+# For currencies this matters more than it would elsewhere, because the regimes are long. Carry
+# and momentum in FX go through multi-year stretches of working and multi-year stretches of not,
+# and five validation windows drawn from a single decade can easily contain only one turn between
+# them. A configuration that is stable across these five folds has cleared a lower bar than the
+# phrase suggests, and one that is not stable across them has failed a very low one.
 
 # %% tags=["results"]
 fold_rows = []
@@ -320,6 +338,23 @@ fold_figure.show()
 # matrix covers one label: scores fitted against different targets are not comparable ranks of the
 # same quantity, so the pivot takes the primary label the menu declares rather than all three.
 # Return buckets and conformal coverage carry no such restriction and run over every label.
+#
+# **Why ask whether the families agree.** The sweep fits a linear model, gradient boosting, and
+# three sequence architectures, and the implicit promise of doing that is that they bring
+# different views of the same data. This is where that promise is checked rather than assumed.
+#
+# If the score correlations come back near one, the families are reproducing each other's
+# rankings and the breadth of the sweep is nominal: the effective number of independent attempts
+# is far smaller than the row count, whichever one wins the backtest wins by a margin that is
+# mostly noise, and there is nothing for an ensemble to average away. If they come back low or
+# mixed, the families are disagreeing about which pairs to hold, and the choice between them is a
+# real one with real consequences for the backtest.
+#
+# It also bears on how the eventual winner should be read. Selecting the best of five
+# near-identical configurations is close to selecting at random among them, and the deflated
+# Sharpe machinery downstream exists precisely because the number of things tried inflates the
+# best result. That correction divides by a count of trials, and this section is where a reader
+# can see whether that count is measuring independent attempts or the same attempt five times.
 
 # %% tags=["results"]
 primary = representative_predictions.filter(pl.col("label") == primary_label)
@@ -381,6 +416,23 @@ with pl.Config(tbl_rows=bucket_summary.height):
 
 # %% [markdown]
 # ## Coverage of the widths that size positions
+#
+# **What a conformal width is, and why a portfolio wants one.** A point prediction says where a
+# return is likely to land and says nothing about how confident that is. Two pairs can carry the
+# same predicted return with entirely different dispersion around it, and a portfolio that sizes
+# both the same is taking more risk in one than in the other without having decided to.
+#
+# Split conformal produces the missing quantity without assuming a distribution. Residuals from
+# data the model was not fitted on are collected, and the width is a quantile of their absolute
+# values: the interval is as wide as the model has recently been wrong. Nothing is assumed to be
+# Gaussian and nothing is estimated from the evaluation window.
+#
+# The allocator downstream does not use it as an interval at all. It reads the width as a
+# per-symbol volatility estimate and sizes inversely to it, so a pair the model has lately been
+# wrong about gets a smaller position. That is why coverage is checked here even though no
+# decision reads a coverage level: the width is only a sensible risk proxy if it tracks the
+# dispersion it claims to, and a width that systematically under-covers is a position size that
+# is systematically too large.
 #
 # The width reported here is the one `conformal_weighted` allocates with: calibrated per symbol on
 # every residual known at `t - h`, where `h` is the label's horizon in data steps, with a pooled
