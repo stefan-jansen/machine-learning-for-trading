@@ -1126,6 +1126,45 @@ def _align_variants_on_timestamp(
     return matrix, names
 
 
+def _distinct_trials(
+    matrix: np.ndarray, names: list[str], *, keep: int
+) -> tuple[np.ndarray, list[str]]:
+    """Collapse columns carrying the same result series into one trial each.
+
+    A regularisation grid that runs past the point where the penalty stops binding
+    submits several configurations and produces one result. On
+    ``nasdaq100_microstructure``/``fwd_dir_15m``, L1 logistic at C=10 and C=100 agree to
+    six decimals in log loss and to the coefficient in sparsity (195 of 198 non-zero),
+    under liblinear and saga independently: at C >= 10 the penalty is barely binding and
+    a further tenfold weakening changes the fitted model not at all. Each configuration
+    still occupies a training row, a prediction set and a backtest.
+
+    The multiple-testing adjustment asks how many chances the selection had to find a
+    high Sharpe by luck. A configuration that reproduces another one's series supplies no
+    chance, so counting it inflates K, inflates the expected maximum a zero-skill cohort
+    would reach, and understates the deflated Sharpe underneath.
+
+    Equality is exact and needs no tolerance: two configurations that converged to the
+    same fitted model emit the same predictions and so the same returns, bit for bit. A
+    read-only scan of the fleet on 2026-09-07 found 375 of 15152 registered backtests
+    reproducing another one in the same ``(stage, label)``, in runs of up to six (``ols``
+    through ``ridge_a10.0`` on sp500_equity_option_analytics and us_firm_characteristics);
+    rounding to twelve decimals first found exactly the same 375, so a tolerance would
+    widen the rule without finding anything. Two series that differ only in the sign of a
+    zero are left as two, which errs toward counting a trial that is not one.
+
+    ``keep`` is the column that must survive as its group's representative — the cohort
+    leader, so every adjusted statistic still refers to the row the caller reports.
+    Returns the collapsed matrix and its names, in first-seen group order.
+    """
+    groups: dict[bytes, list[int]] = {}
+    for column in range(matrix.shape[1]):
+        key = np.ascontiguousarray(matrix[:, column]).tobytes()
+        groups.setdefault(key, []).append(column)
+    representatives = [keep if keep in members else members[0] for members in groups.values()]
+    return matrix[:, representatives], [names[column] for column in representatives]
+
+
 def cohort_member_digest(hashes: Iterable[str]) -> str:
     """Identify a cohort by its members rather than by how many it has.
 
@@ -1160,6 +1199,16 @@ def compute_cohort_metrics(
     …) will fail at insert with a foreign-key violation. Callers compose
     the dict from ``load_daily_returns_with_timestamp(case_study, hash)``
     keyed on the backtest hash — do not key on family/method names.
+
+    Every estimator below runs on the cohort's *distinct results*, not on the
+    configurations submitted: a regularisation grid that runs past the point where the
+    penalty stops binding hands in several configurations and produces one series, and
+    each of those occupies a training row, a prediction set and a backtest. The
+    correction is for how many chances the selection had to find a high Sharpe by luck,
+    and a repeat supplies none. ``k_variants`` is that count, because it is the K a
+    notebook prints beside a deflated Sharpe and it has to be the K that deflated it;
+    ``k_variants_submitted`` records the configurations, and ``member_digest`` still
+    covers every aligned member. See :func:`_distinct_trials`.
 
     Estimators
     ----------
@@ -1216,9 +1265,25 @@ def compute_cohort_metrics(
     leader_hash = names[leader_idx]
     leader_arr = matrix[:, leader_idx]
 
+    # Every selection adjustment below runs on the distinct results rather than on the
+    # submitted configurations: a grid that saturates hands in several configurations
+    # and produces one series, and the correction is for how many chances the selection
+    # had. `k_variants` and `member_digest` still describe the cohort's membership, which
+    # is what a reader matches a stored correction against.
+    trial_matrix, trial_names = _distinct_trials(matrix, names, keep=leader_idx)
+    k_trials = trial_matrix.shape[1]
+    trial_leader_idx = trial_names.index(leader_hash)
+    trial_sharpes = _sharpe_per_column(trial_matrix, periods_per_year)
+
     out: dict[str, Any] = {
         "leader_hash": leader_hash,
-        "k_variants": int(k_variants),
+        # The trials every adjustment below faced, which is what a K printed beside a
+        # deflated Sharpe has to be. Equal to the membership unless the cohort holds
+        # configurations that produced the same series; see `_distinct_trials`.
+        "k_variants": int(k_trials),
+        # The configurations the cohort holds. Larger than `k_variants` exactly when a
+        # grid saturated, and the two together are what says by how much.
+        "k_variants_submitted": int(k_variants),
         # `names` is the cohort the correction below is actually computed over, after
         # alignment has dropped whatever could not be aligned. Persisting its digest is
         # what lets a reader establish that a stored correction belongs to the cohort it
@@ -1248,20 +1313,20 @@ def compute_cohort_metrics(
 
     # Effective trials — MP and ER
     try:
-        et_mp = effective_number_of_trials(matrix, method="marchenko_pastur")
+        et_mp = effective_number_of_trials(trial_matrix, method="marchenko_pastur")
         out["n_trials_effective_mp"] = float(et_mp.k_eff)
     except _ESTIMATOR_ERRORS as exc:
         warnings.warn(f"n_trials_effective_mp failed for {leader_hash}: {exc}", stacklevel=2)
         out["n_trials_effective_mp"] = None
     try:
-        et_er = effective_number_of_trials(matrix, method="effective_rank")
+        et_er = effective_number_of_trials(trial_matrix, method="effective_rank")
         out["n_trials_effective_er"] = float(et_er.k_eff)
     except _ESTIMATOR_ERRORS as exc:
         warnings.warn(f"n_trials_effective_er failed for {leader_hash}: {exc}", stacklevel=2)
         out["n_trials_effective_er"] = None
 
     # DSR — raw, MP, ER (three calls; library handles K correctly per method)
-    arr_list = [matrix[:, i] for i in range(k_variants)]
+    arr_list = [trial_matrix[:, i] for i in range(k_trials)]
     methods: tuple[
         tuple[str, Literal["marchenko_pastur", "effective_rank"] | None],
         ...,
@@ -1274,7 +1339,7 @@ def compute_cohort_metrics(
         try:
             if method is not None:
                 dsr = deflated_sharpe_ratio(
-                    matrix,
+                    trial_matrix,
                     periods_per_year=periods_per_year,
                     correlation_method=method,
                 )
@@ -1294,31 +1359,31 @@ def compute_cohort_metrics(
     # RAS — Rademacher Adjusted Sharpe lower bound on leader Sharpe
     try:
         complexity = rademacher_complexity(
-            matrix,
+            trial_matrix,
             n_simulations=rademacher_n_simulations,
             random_state=rademacher_seed,
         )
-        annualized_sharpes = sharpes  # already annualized
+        annualized_sharpes = trial_sharpes  # already annualized
         ras_result = cast(
             RASResult,
             ras_sharpe_adjustment(
                 annualized_sharpes,
                 complexity=complexity,
                 n_samples=n_periods,
-                n_strategies=k_variants,
+                n_strategies=k_trials,
                 return_result=True,
             ),
         )
         out["ras_complexity"] = float(complexity)
-        out["ras_n_strategies"] = float(k_variants)
-        out["ras_leader"] = float(ras_result.adjusted_values[leader_idx])
+        out["ras_n_strategies"] = float(k_trials)
+        out["ras_leader"] = float(ras_result.adjusted_values[trial_leader_idx])
         # RASResult reports adjusted values, not a p-value, so there is no
         # p-value to surface for the RAS adjustment.
         out["ras_pvalue"] = None
     except _ESTIMATOR_ERRORS as exc:
         warnings.warn(f"ras_sharpe_adjustment failed for {leader_hash}: {exc}", stacklevel=2)
         out["ras_complexity"] = None
-        out["ras_n_strategies"] = float(k_variants)
+        out["ras_n_strategies"] = float(k_trials)
         out["ras_leader"] = None
         out["ras_pvalue"] = None
 
@@ -1329,14 +1394,14 @@ def compute_cohort_metrics(
     out["reality_check_k"] = None
     if baseline_returns is not None:
         try:
-            challenger_returns = {name: matrix[:, i] for i, name in enumerate(names)}
+            challenger_returns = {name: trial_matrix[:, i] for i, name in enumerate(trial_names)}
             rc = compute_reality_check(challenger_returns, baseline_returns)
             if rc:
                 out["reality_check_pvalue"] = float(rc.get("reality_check_pvalue", float("nan")))
                 out["reality_check_statistic"] = float(
                     rc.get("reality_check_statistic", float("nan"))
                 )
-                out["reality_check_k"] = float(rc.get("k_strategies", k_variants))
+                out["reality_check_k"] = float(rc.get("k_strategies", k_trials))
         except _ESTIMATOR_ERRORS as exc:
             warnings.warn(f"reality_check failed for {leader_hash}: {exc}", stacklevel=2)
 
@@ -1355,7 +1420,7 @@ def compute_cohort_metrics(
         try:
             from ml4t.diagnostic.evaluation.stats import compute_pbo
 
-            fold_names = [n for n in names if n in fold_returns_by_hash]
+            fold_names = [n for n in trial_names if n in fold_returns_by_hash]
             if len(fold_names) >= 2:
                 fold_sharpes = np.array(
                     [fold_returns_by_hash[n] for n in fold_names], dtype=np.float64
