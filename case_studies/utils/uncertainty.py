@@ -46,14 +46,62 @@ from __future__ import annotations
 import hashlib
 import re
 import warnings
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Final, Literal, cast
 
 import numpy as np
 import polars as pl
+
+
+class EntireRegistry:
+    """The population scope that reads every registered row, retired generations included."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "ENTIRE_REGISTRY"
+
+
+class NoCarrier:
+    """The carrier scope that re-ranks the candidates on raw Sharpe instead of naming one."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "NO_CARRIER"
+
+
+ENTIRE_REGISTRY: Final = EntireRegistry()
+"""Ask the paired and cohort producers to compute over the whole registry.
+
+The scope arguments that decide what a published number covers carry no default, so a
+caller that wants the widest reading has to write it down. That is the whole point: the
+wide reading is almost never what a strategy-analysis notebook means, and when it was a
+default, omitting the argument type-checked, ran, and produced plausible numbers that
+were wrong exactly when the registry held a generation the notebook does not report.
+Naming it here also makes the wide callers greppable, which they were not.
+"""
+
+NO_CARRIER: Final = NoCarrier()
+"""Ask ``populate_paired_metrics`` to rank its own candidates on raw Sharpe.
+
+The legacy ranking, kept because the rung-pinned case studies restrict on a dimension
+``resolve_canonical_rank1_lineage`` does not know. It is not the canonical selection: it
+orders on raw Sharpe and applies neither the common-support re-ranking nor the
+restrictions the resolver holds, so a caller that can resolve the lineage should pass it
+rather than this.
+"""
+
+PredictionScope = Iterable[str] | EntireRegistry
+"""The population a published number is computed over: a list of prediction hashes,
+or :data:`ENTIRE_REGISTRY`."""
+
+CarrierScope = Mapping[str, Any] | NoCarrier
+"""The lineage pairs #2-6 are pinned to: a ``resolve_canonical_rank1_lineage`` result,
+or :data:`NO_CARRIER`."""
 
 
 def periods_per_year_from_setup(case_study: str) -> int:

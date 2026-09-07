@@ -342,7 +342,15 @@ if missing_kinds or stale_paired:
         if missing_kinds
         else f"{stale_paired} pair(s) challenged by a retired prediction"
     )
-    rows = populate_paired_metrics(CASE_STUDY, prediction_hashes=LIVE_PREDICTIONS, carrier=CARRIER)
+    # `replace_all=False` is additive: the pairs this call does not produce stay. That is
+    # what this notebook has always done, and it is stated now because the argument
+    # decides what the table a reader loads below contains.
+    rows = populate_paired_metrics(
+        CASE_STUDY,
+        prediction_hashes=LIVE_PREDICTIONS,
+        carrier=CARRIER,
+        replace_all=False,
+    )
     written = sum(1 for r in rows if "skip" not in r)
     print(f"backtest_paired_metrics: wrote {written} pairs ({reason})")
 else:
