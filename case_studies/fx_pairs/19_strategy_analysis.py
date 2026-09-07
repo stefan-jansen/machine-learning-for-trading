@@ -82,6 +82,7 @@ from case_studies.utils.strategy_analysis import (
     resolve_canonical_rank1_lineage,
     resolve_solvent_carrier,
 )
+from case_studies.utils.uncertainty import ENTIRE_REGISTRY
 from utils.paths import get_case_study_dir
 from utils.style import COLORS
 
@@ -692,11 +693,15 @@ with warnings.catch_warnings(record=True) as _cohort_warnings:
     warnings.simplefilter("always")
     _cohort_counts = compute_and_register(CASE_STUDY_ID, prediction_hashes=ADMITTED_PREDICTIONS)
 _undefined = Counter(str(entry.message).split(" for ")[0] for entry in _cohort_warnings)
+# The cohort call above is scoped to `ADMITTED_PREDICTIONS` and this one is not: the pairs
+# are selected from every registered prediction set. Stated rather than defaulted;
+# narrowing it changes published numbers and is ml4t/agent-workspace#1006.
 _paired_rows = populate_paired_metrics(
     CASE_STUDY_ID,
     periods_per_year=_periods_per_year,
     carrier=resolve_canonical_rank1_lineage(CASE_STUDY_ID, admitted=ADMITTED),
     replace_all=True,
+    prediction_hashes=ENTIRE_REGISTRY,
 )
 print(
     f"cohort_metrics: {sum(_cohort_counts[k] for k in ('family', 'stagelabel', 'label'))} rows; "

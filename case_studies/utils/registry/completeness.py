@@ -158,10 +158,57 @@ def _canonical_key_column(frame, name: str):
     return pl.col(name).cast(pl.String)
 
 
+# The rendering `_canonical_key_column` implements, stamped onto every digest it produces.
+# A digest carrying no prefix was written before this existed, under the rendering that cast
+# each key column straight to String - so a `Date` rendered `2016-01-29` and a `Datetime("ms")`
+# of the same instant rendered `2016-01-29 00:00:00.000`, and the same key set digested two
+# ways. Bump this whenever `_canonical_key_column` changes what it emits.
+KEY_DIGEST_RENDERING = "k2"
+_LEGACY_KEY_DIGEST_RENDERING = "k1"
+
+
+def key_digest_rendering(digest: str) -> str:
+    """Which rendering produced *digest*.
+
+    An unprefixed digest is `k1`: the straight-cast rendering every coverage row written
+    before `_canonical_key_column` normalized temporal columns carries. Measured across the
+    fleet 2026-09-07, 166 of 4,469 rows are still `k1` and all of them are
+    `us_equities_panel`'s - the residue no current sweep touches.
+    """
+    prefix, sep, _ = digest.partition(":")
+    return prefix if sep else _LEGACY_KEY_DIGEST_RENDERING
+
+
+def require_comparable_key_digests(digests, *, what: str) -> None:
+    """Refuse to treat digests from different renderings as comparable.
+
+    Two digests taken under different renderings are unequal whatever their key sets, and
+    nothing about the inequality says so - which is how a rendering change turns into a
+    silent mis-grouping rather than an error (ml4t/agent-workspace#1065). A consumer that
+    groups predictions by their eligibility digest reports more distinct contracts than
+    exist and tells a reader that two checkpoints scored on identical rows are not
+    comparable.
+
+    Measured when #1065 was filed: grouping each registry by the stored digest against one
+    uniform rendering split one set in sp500_options, one in us_firm_characteristics and two
+    in cme_futures, and nothing raised - the guard at the consumer only rejects a group whose
+    members disagree on `n_expected`, `n_actual` or `n_folds`, and the split halves agree on
+    all three.
+    """
+    renderings = sorted({key_digest_rendering(str(digest)) for digest in digests if digest})
+    if len(renderings) > 1:
+        raise ValueError(
+            f"{what} spans coverage-key renderings {renderings}, so its digests cannot be "
+            "compared: two digests taken under different renderings are unequal whatever "
+            "their key sets. Re-register the rows written under the older rendering, or "
+            "compare within one rendering."
+        )
+
+
 def _key_digest(frame, key_columns: tuple[str, ...]) -> str:
     from case_studies.utils.artifact_digest import value_digest
 
-    return value_digest(frame, key_columns)
+    return f"{KEY_DIGEST_RENDERING}:{value_digest(frame, key_columns)}"
 
 
 def evaluate_prediction_coverage(expected_keys, predictions) -> PredictionCoverage:

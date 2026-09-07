@@ -1547,7 +1547,13 @@ def test_linear_runner_replays_valid_models_after_registration_interrupt(
     assert recovered.predictions[0].complete
     assert recovered.predictions[0].coverage()["n_expected"] == 12
     assert attempted_predictions is not None
-    assert recovered.predictions[0].load().equals(attempted_predictions)
+    # The replay writes exactly what the interrupted attempt computed. Compared without the
+    # `label` column, which the publication path stamps onto every frame and the runner's own
+    # frame therefore does not carry (ml4t/agent-workspace#887); it is asserted separately
+    # rather than dropped from the comparison silently.
+    republished = recovered.predictions[0].load()
+    assert republished.get_column("label").unique().to_list() == ["fwd_ret_1d"]
+    assert republished.drop("label").equals(attempted_predictions)
     assert fitted_digests == {
         path.name: linear._sha256(path) for path in sorted(model_dir.glob("fold_*.joblib"))
     }

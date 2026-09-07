@@ -44,16 +44,65 @@ benchmark name in the registry is non-default.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import warnings
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Final, Literal, cast
 
 import numpy as np
 import polars as pl
+
+
+class EntireRegistry:
+    """The population scope that reads every registered row, retired generations included."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "ENTIRE_REGISTRY"
+
+
+class NoCarrier:
+    """The carrier scope that re-ranks the candidates on raw Sharpe instead of naming one."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "NO_CARRIER"
+
+
+ENTIRE_REGISTRY: Final = EntireRegistry()
+"""Ask the paired and cohort producers to compute over the whole registry.
+
+The scope arguments that decide what a published number covers carry no default, so a
+caller that wants the widest reading has to write it down. That is the whole point: the
+wide reading is almost never what a strategy-analysis notebook means, and when it was a
+default, omitting the argument type-checked, ran, and produced plausible numbers that
+were wrong exactly when the registry held a generation the notebook does not report.
+Naming it here also makes the wide callers greppable, which they were not.
+"""
+
+NO_CARRIER: Final = NoCarrier()
+"""Ask ``populate_paired_metrics`` to rank its own candidates on raw Sharpe.
+
+The legacy ranking, kept because the rung-pinned case studies restrict on a dimension
+``resolve_canonical_rank1_lineage`` does not know. It is not the canonical selection: it
+orders on raw Sharpe and applies neither the common-support re-ranking nor the
+restrictions the resolver holds, so a caller that can resolve the lineage should pass it
+rather than this.
+"""
+
+PredictionScope = Iterable[str] | EntireRegistry
+"""The population a published number is computed over: a list of prediction hashes,
+or :data:`ENTIRE_REGISTRY`."""
+
+CarrierScope = Mapping[str, Any] | NoCarrier
+"""The lineage pairs #2-6 are pinned to: a ``resolve_canonical_rank1_lineage`` result,
+or :data:`NO_CARRIER`."""
 
 
 def periods_per_year_from_setup(case_study: str) -> int:
@@ -661,18 +710,52 @@ def compute_independent_diff_uncertainty(
     n_boot: int = 2000,
     seed: int = 0,
 ) -> dict[str, float]:
-    """Independent-bootstrap difference CI for two disjoint return series.
+    """Difference CI for two return series that share no timestamps.
 
-    Use when challenger and baseline come from non-overlapping windows
-    (e.g. holdout vs validation of the same lineage). Bootstraps each
-    series over its full window separately, then forms the difference
-    distribution from independent draws.
+    Use when challenger and baseline come from non-overlapping windows (e.g.
+    holdout vs validation of the same lineage). Each side is bootstrapped over its
+    own window and the difference distribution is formed from those draws.
 
-    Returns the same dict shape as :func:`compute_paired_uncertainty`
-    so registry callers are interchangeable. ``info_ratio`` columns are
-    NaN — there is no diff *series* to ratio when the windows are
-    disjoint. Block length is resolved once from ``(case_study, label)``
-    and applied to both bootstraps.
+    What is independent here is the two *resampling* draws, and that is forced by
+    the windows sharing no observations: there is no difference series to resample,
+    so there is nothing to pair on. It is not a claim that the two Sharpes are
+    independent. They are not — the same strategy, the same market factor and a
+    volatility regime spanning the boundary make them dependent whether or not
+    their windows touch — and nothing below needs them to be.
+
+    What the interval covers, and what it does not
+    ----------------------------------------------
+    Resampling inside a window conditions on that window's realized returns, so
+    each side's spread is the sampling noise *given* those returns. The interval is
+    calibrated for the difference between the two windows' own population Sharpes,
+    and the dependence between the windows does not disturb that: in a Gaussian
+    simulation (n=126 a side, 400 replications, 400 draws, a mean shift common to
+    both windows) coverage of the nominal 95% interval was 0.945 to 0.948 at every
+    correlation between the two windows' shifts from +1 through 0 to -1.
+
+    It is not calibrated for the question the validation-to-holdout decay is
+    usually read as asking — the strategy has one edge, is this gap noise? A regime
+    that lands differently on the two windows moves their Sharpes apart, and a
+    resampler that never looks outside either window cannot see it. Coverage of
+    that target in the same simulation: 0.945 when the two windows carry an
+    identical shift (nothing to miss), 0.873 when the shifts are independent, 0.850
+    when they are opposed. Mean interval width was 7.82 in all three, because the
+    interval cannot widen for something it cannot see.
+
+    So the error runs toward under-coverage and never toward over-coverage, and the
+    reading that this interval is conservative because it ignores a positive
+    covariance is wrong: the same conditioning that drops the covariance term drops
+    it from both marginals too, and what is left uncovered is the part of the
+    regime the two windows do not share. There is no fix inside a resampling
+    scheme — estimating that term needs a model of how a regime carries across the
+    boundary, not a different resample — so this is a limit on the reading rather
+    than a defect in the arithmetic. A decay this interval leaves unresolved is
+    weaker evidence of stability than the same interval over one window would be.
+
+    Returns the same dict shape as :func:`compute_paired_uncertainty` so registry
+    callers are interchangeable. ``info_ratio`` columns are NaN — there is no diff
+    *series* to ratio when the windows are disjoint. Block length is resolved per
+    side from ``(case_study, label)``.
     """
     from ml4t.diagnostic.evaluation.stats import _stationary_bootstrap_indices
 
@@ -1004,6 +1087,39 @@ def load_daily_returns_with_timestamp(case_study: str, backtest_hash: str) -> pl
     ).drop_nulls()
 
 
+def stored_cohort_members(members_json: str | None) -> list[str] | None:
+    """The members a stored ``cohort_metrics`` row says its correction covers.
+
+    ``None`` for a row written before the members were persisted, which is a different
+    state from a cohort that is empty: the first cannot be verified at all, the second
+    verifies trivially. Every ``cohort_metrics`` row in the fleet on 2026-09-07 - 109 of
+    them across five registries - was in the first state.
+    """
+    if members_json is None:
+        return None
+    members = json.loads(members_json)
+    return sorted(str(member) for member in members)
+
+
+def cohort_membership_diff(
+    stored: Iterable[str], in_hand: Iterable[str]
+) -> tuple[list[str], list[str]]:
+    """``(missing, extra)`` between the members a stored row covers and a cohort in hand.
+
+    ``missing`` is stored and absent from the cohort the reader assembled; ``extra`` is
+    assembled and not covered by the correction. Empty lists mean the stored correction is
+    about exactly this cohort.
+
+    This is what a digest comparison cannot do. Two cohorts of the same size with one
+    member swapped have different digests and the same ``k_variants``, so the digest
+    establishes that they differ and says nothing about how - a swapped member and a
+    changed selection rule look identical through it.
+    """
+    stored_set = {str(member) for member in stored}
+    in_hand_set = {str(member) for member in in_hand}
+    return sorted(stored_set - in_hand_set), sorted(in_hand_set - stored_set)
+
+
 def _align_variants_on_timestamp(
     returns_by_hash: dict[str, pl.DataFrame],
 ) -> tuple[np.ndarray, list[str]] | None:
@@ -1044,6 +1160,45 @@ def _align_variants_on_timestamp(
     return matrix, names
 
 
+def _distinct_trials(
+    matrix: np.ndarray, names: list[str], *, keep: int
+) -> tuple[np.ndarray, list[str]]:
+    """Collapse columns carrying the same result series into one trial each.
+
+    A regularisation grid that runs past the point where the penalty stops binding
+    submits several configurations and produces one result. On
+    ``nasdaq100_microstructure``/``fwd_dir_15m``, L1 logistic at C=10 and C=100 agree to
+    six decimals in log loss and to the coefficient in sparsity (195 of 198 non-zero),
+    under liblinear and saga independently: at C >= 10 the penalty is barely binding and
+    a further tenfold weakening changes the fitted model not at all. Each configuration
+    still occupies a training row, a prediction set and a backtest.
+
+    The multiple-testing adjustment asks how many chances the selection had to find a
+    high Sharpe by luck. A configuration that reproduces another one's series supplies no
+    chance, so counting it inflates K, inflates the expected maximum a zero-skill cohort
+    would reach, and understates the deflated Sharpe underneath.
+
+    Equality is exact and needs no tolerance: two configurations that converged to the
+    same fitted model emit the same predictions and so the same returns, bit for bit. A
+    read-only scan of the fleet on 2026-09-07 found 375 of 15152 registered backtests
+    reproducing another one in the same ``(stage, label)``, in runs of up to six (``ols``
+    through ``ridge_a10.0`` on sp500_equity_option_analytics and us_firm_characteristics);
+    rounding to twelve decimals first found exactly the same 375, so a tolerance would
+    widen the rule without finding anything. Two series that differ only in the sign of a
+    zero are left as two, which errs toward counting a trial that is not one.
+
+    ``keep`` is the column that must survive as its group's representative — the cohort
+    leader, so every adjusted statistic still refers to the row the caller reports.
+    Returns the collapsed matrix and its names, in first-seen group order.
+    """
+    groups: dict[bytes, list[int]] = {}
+    for column in range(matrix.shape[1]):
+        key = np.ascontiguousarray(matrix[:, column]).tobytes()
+        groups.setdefault(key, []).append(column)
+    representatives = [keep if keep in members else members[0] for members in groups.values()]
+    return matrix[:, representatives], [names[column] for column in representatives]
+
+
 def cohort_member_digest(hashes: Iterable[str]) -> str:
     """Identify a cohort by its members rather than by how many it has.
 
@@ -1078,6 +1233,16 @@ def compute_cohort_metrics(
     …) will fail at insert with a foreign-key violation. Callers compose
     the dict from ``load_daily_returns_with_timestamp(case_study, hash)``
     keyed on the backtest hash — do not key on family/method names.
+
+    Every estimator below runs on the cohort's *distinct results*, not on the
+    configurations submitted: a regularisation grid that runs past the point where the
+    penalty stops binding hands in several configurations and produces one series, and
+    each of those occupies a training row, a prediction set and a backtest. The
+    correction is for how many chances the selection had to find a high Sharpe by luck,
+    and a repeat supplies none. ``k_variants`` is that count, because it is the K a
+    notebook prints beside a deflated Sharpe and it has to be the K that deflated it;
+    ``k_variants_submitted`` records the configurations, and ``member_digest`` still
+    covers every aligned member. See :func:`_distinct_trials`.
 
     Estimators
     ----------
@@ -1134,14 +1299,41 @@ def compute_cohort_metrics(
     leader_hash = names[leader_idx]
     leader_arr = matrix[:, leader_idx]
 
+    # Every selection adjustment below runs on the distinct results rather than on the
+    # submitted configurations: a grid that saturates hands in several configurations
+    # and produces one series, and the correction is for how many chances the selection
+    # had. `k_variants` and `member_digest` still describe the cohort's membership, which
+    # is what a reader matches a stored correction against.
+    trial_matrix, trial_names = _distinct_trials(matrix, names, keep=leader_idx)
+    k_trials = trial_matrix.shape[1]
+    if k_trials < 2:
+        # The same rule as the `k_variants < 2` guard above, applied to what the cohort
+        # actually tried. A cohort whose configurations all produced one series ran no
+        # selection, so there is nothing to correct for and no correction to report. Left
+        # unguarded it writes a half-row: `dsr_raw` computed at K=1, which is the
+        # undeflated Sharpe, beside NULL MP and ER columns whose estimators refuse a
+        # single strategy - and a reader takes the first for a corrected figure.
+        return {}
+    trial_leader_idx = trial_names.index(leader_hash)
+    trial_sharpes = _sharpe_per_column(trial_matrix, periods_per_year)
+
     out: dict[str, Any] = {
         "leader_hash": leader_hash,
-        "k_variants": int(k_variants),
+        # The trials every adjustment below faced, which is what a K printed beside a
+        # deflated Sharpe has to be. Equal to the membership unless the cohort holds
+        # configurations that produced the same series; see `_distinct_trials`.
+        "k_variants": int(k_trials),
+        # The configurations the cohort holds. Larger than `k_variants` exactly when a
+        # grid saturated, and the two together are what says by how much.
+        "k_variants_submitted": int(k_variants),
         # `names` is the cohort the correction below is actually computed over, after
-        # alignment has dropped whatever could not be aligned. Persisting its digest is
-        # what lets a reader establish that a stored correction belongs to the cohort it
-        # is about to report it against, rather than inferring it from a matching count.
+        # alignment has dropped whatever could not be aligned. The digest identifies it
+        # cheaply and the members are the fact a reader checks against: the digest is
+        # one-way, so on its own it turns verification into a replay of every selection
+        # rule that was in force when the row was written. Both come from `names` here so
+        # they cannot describe different cohorts.
         "member_digest": cohort_member_digest(names),
+        "members_json": json.dumps(sorted(names)),
         "periods_per_year": float(periods_per_year),
         "leader_sharpe": float(sharpes[leader_idx]),
     }
@@ -1166,20 +1358,20 @@ def compute_cohort_metrics(
 
     # Effective trials — MP and ER
     try:
-        et_mp = effective_number_of_trials(matrix, method="marchenko_pastur")
+        et_mp = effective_number_of_trials(trial_matrix, method="marchenko_pastur")
         out["n_trials_effective_mp"] = float(et_mp.k_eff)
     except _ESTIMATOR_ERRORS as exc:
         warnings.warn(f"n_trials_effective_mp failed for {leader_hash}: {exc}", stacklevel=2)
         out["n_trials_effective_mp"] = None
     try:
-        et_er = effective_number_of_trials(matrix, method="effective_rank")
+        et_er = effective_number_of_trials(trial_matrix, method="effective_rank")
         out["n_trials_effective_er"] = float(et_er.k_eff)
     except _ESTIMATOR_ERRORS as exc:
         warnings.warn(f"n_trials_effective_er failed for {leader_hash}: {exc}", stacklevel=2)
         out["n_trials_effective_er"] = None
 
     # DSR — raw, MP, ER (three calls; library handles K correctly per method)
-    arr_list = [matrix[:, i] for i in range(k_variants)]
+    arr_list = [trial_matrix[:, i] for i in range(k_trials)]
     methods: tuple[
         tuple[str, Literal["marchenko_pastur", "effective_rank"] | None],
         ...,
@@ -1192,7 +1384,7 @@ def compute_cohort_metrics(
         try:
             if method is not None:
                 dsr = deflated_sharpe_ratio(
-                    matrix,
+                    trial_matrix,
                     periods_per_year=periods_per_year,
                     correlation_method=method,
                 )
@@ -1212,31 +1404,31 @@ def compute_cohort_metrics(
     # RAS — Rademacher Adjusted Sharpe lower bound on leader Sharpe
     try:
         complexity = rademacher_complexity(
-            matrix,
+            trial_matrix,
             n_simulations=rademacher_n_simulations,
             random_state=rademacher_seed,
         )
-        annualized_sharpes = sharpes  # already annualized
+        annualized_sharpes = trial_sharpes  # already annualized
         ras_result = cast(
             RASResult,
             ras_sharpe_adjustment(
                 annualized_sharpes,
                 complexity=complexity,
                 n_samples=n_periods,
-                n_strategies=k_variants,
+                n_strategies=k_trials,
                 return_result=True,
             ),
         )
         out["ras_complexity"] = float(complexity)
-        out["ras_n_strategies"] = float(k_variants)
-        out["ras_leader"] = float(ras_result.adjusted_values[leader_idx])
+        out["ras_n_strategies"] = float(k_trials)
+        out["ras_leader"] = float(ras_result.adjusted_values[trial_leader_idx])
         # RASResult reports adjusted values, not a p-value, so there is no
         # p-value to surface for the RAS adjustment.
         out["ras_pvalue"] = None
     except _ESTIMATOR_ERRORS as exc:
         warnings.warn(f"ras_sharpe_adjustment failed for {leader_hash}: {exc}", stacklevel=2)
         out["ras_complexity"] = None
-        out["ras_n_strategies"] = float(k_variants)
+        out["ras_n_strategies"] = float(k_trials)
         out["ras_leader"] = None
         out["ras_pvalue"] = None
 
@@ -1247,14 +1439,14 @@ def compute_cohort_metrics(
     out["reality_check_k"] = None
     if baseline_returns is not None:
         try:
-            challenger_returns = {name: matrix[:, i] for i, name in enumerate(names)}
+            challenger_returns = {name: trial_matrix[:, i] for i, name in enumerate(trial_names)}
             rc = compute_reality_check(challenger_returns, baseline_returns)
             if rc:
                 out["reality_check_pvalue"] = float(rc.get("reality_check_pvalue", float("nan")))
                 out["reality_check_statistic"] = float(
                     rc.get("reality_check_statistic", float("nan"))
                 )
-                out["reality_check_k"] = float(rc.get("k_strategies", k_variants))
+                out["reality_check_k"] = float(rc.get("k_strategies", k_trials))
         except _ESTIMATOR_ERRORS as exc:
             warnings.warn(f"reality_check failed for {leader_hash}: {exc}", stacklevel=2)
 
@@ -1273,7 +1465,7 @@ def compute_cohort_metrics(
         try:
             from ml4t.diagnostic.evaluation.stats import compute_pbo
 
-            fold_names = [n for n in names if n in fold_returns_by_hash]
+            fold_names = [n for n in trial_names if n in fold_returns_by_hash]
             if len(fold_names) >= 2:
                 fold_sharpes = np.array(
                     [fold_returns_by_hash[n] for n in fold_names], dtype=np.float64

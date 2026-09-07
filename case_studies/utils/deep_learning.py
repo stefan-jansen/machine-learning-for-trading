@@ -53,6 +53,7 @@ from case_studies.utils.cv_results import (
     combine_cv_results,
     rebuild_cv_result_from_registry,
 )
+from case_studies.utils.folds import fold_seed
 from case_studies.utils.registry.store import (
     _save_parquet,
     flush_fold_predictions,
@@ -899,6 +900,7 @@ def reconstruct_locked_request(
             split,
             mds.temporal_by_fold,
             source_timeline=mds.dataset.get_column(mds.date_col),
+            declared_folds=mds.temporal_artifact_splits,
             date_col=mds.date_col,
         )
 
@@ -2286,7 +2288,9 @@ def run_dl_cv(
     _has_fold_temporal = temporal_by_fold is not None and temporal_keys and temporal_feature_names
 
     for split in splits:
-        seed_everything(seed + split["fold"])
+        # The fold's number is an input to the fit, not a label on it: renumbering the
+        # windows reseeds every one of them. See `folds.fold_seed`.
+        seed_everything(fold_seed(seed, split["fold"]))
 
         train_mask = (dates_series >= split["train_start"]) & (dates_series <= split["train_end"])
         val_mask = (dates_series >= split["val_start"]) & (dates_series <= split["val_end"])

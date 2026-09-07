@@ -619,10 +619,12 @@ def test_a_descending_fold_list_is_refused_rather_than_returned() -> None:
 def test_a_precomputed_split_set_is_held_to_the_same_order() -> None:
     """A caller cannot tell which path produced its list, so both owe the contract.
 
-    Under 0.1.4 the generated path emits oldest first, which is the order
-    fx_pairs/config/cv_config.json already runs in. us_firm_characteristics/config/
-    cv_config.json still runs newest first and is refused here until it is
-    renumbered together with the registry rows carrying its fold ids.
+    Under 0.1.4 the generated path emits oldest first. This docstring named the two
+    committed configs the wrong way round until 2026-09-07:
+    us_firm_characteristics/config/cv_config.json is the one that already runs in
+    that order, renumbered by #791; fx_pairs/config/cv_config.json is the one still
+    running newest first and refused. The test below reads both files rather than
+    describing them.
     """
     df = pl.DataFrame({"timestamp": pd.date_range("2010-01-01", "2020-01-01", freq="B")})
     descending = {
@@ -644,6 +646,67 @@ def test_a_precomputed_split_set_is_held_to_the_same_order() -> None:
         "splits": [{**split, "fold": i} for i, split in enumerate(reversed(descending["splits"]))]
     }
     assert [s["fold"] for s in generate_cv_splits(df, cv_config=renumbered)] == [0, 1]
+
+
+# Committed configs still running newest first, each naming the issue that decides
+# what happens to it. Empty is the intended steady state: `us_firm_characteristics`
+# left it at #791 and `fx_pairs` at #1073, both by renumbering the file and re-running
+# rather than remapping the rows registered under the old numbering.
+CV_CONFIGS_PENDING_RENUMBER: dict[str, str] = {}
+
+
+def _committed_cv_configs() -> dict[str, dict]:
+    """Every committed `cv_config.json` that carries precomputed splits.
+
+    `us_equities_panel`'s carries walk-forward parameters and no `splits` list, so it
+    goes through the generated path and owes nothing here.
+    """
+    import json
+
+    from utils import CASE_STUDIES_DIR
+
+    found = {}
+    for path in sorted(CASE_STUDIES_DIR.glob("*/config/cv_config.json")):
+        config = json.loads(path.read_text())
+        if "splits" in config:
+            found[path.parents[1].name] = config
+    return found
+
+
+@pytest.mark.parametrize("case_study", sorted(_committed_cv_configs()))
+def test_a_committed_cv_config_is_ascending_or_is_a_declared_exception(case_study: str) -> None:
+    """The ordering contract, read off the committed files rather than described.
+
+    `_assert_chronological`'s docstring named these two the wrong way round from the
+    day it was written until 2026-09-07, and nothing failed, because the only test
+    that fed a committed config to the generator - `test_fx_materialized_folds_...`
+    below - skips wherever the production label artifact is absent, which is every
+    CI job. A guard that fires only in a `--case-study` worktree is not one CI has.
+
+    This runs anywhere: the precomputed path returns before it looks at a dataset,
+    so no artifact is needed. It fails in both directions. A config that becomes
+    ascending while still listed as an exception fails, so the renumbering cannot
+    land without the exception being removed; and a config that regresses to
+    descending fails, so the state cannot drift back silently.
+    """
+    config = _committed_cv_configs()[case_study]
+    frame = pl.DataFrame({"timestamp": []})
+
+    if case_study in CV_CONFIGS_PENDING_RENUMBER:
+        with pytest.raises(RuntimeError, match="not ordered oldest first"):
+            generate_cv_splits(frame, cv_config=config)
+        return
+
+    splits = generate_cv_splits(frame, cv_config=config)
+    val_starts = [str(split["val_start"]) for split in splits]
+    assert val_starts == sorted(val_starts), case_study
+    assert [split["fold"] for split in splits] == list(range(len(splits))), case_study
+
+
+def test_every_declared_exception_is_a_config_that_exists() -> None:
+    """An exception naming a file that is gone stops excluding anything and starts
+    hiding that nothing is excluded, which is how the docstring above went stale."""
+    assert set(CV_CONFIGS_PENDING_RENUMBER) <= set(_committed_cv_configs())
 
 
 def test_fx_materialized_folds_match_the_canonical_label_clock() -> None:

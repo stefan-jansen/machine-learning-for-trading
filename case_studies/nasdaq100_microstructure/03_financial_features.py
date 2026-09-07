@@ -919,10 +919,11 @@ agreement.filter(pl.col("column").is_in(["kyle_lambda", f"{PRIMARY_SIGNAL}_xs", 
 # midpoint series would be reading its own answer. The five intermediates the families are
 # assembled from go with them.
 #
-# One null policy is applied once: a row is kept when the three carriers of the volatility
-# and impact family have warmed up, of which Kyle's lambda at an hour is the binding one.
-# Requiring it subsumes every shorter window in that family, and the longer families of
-# Section C.5 fill in at the same bar, which is what F1 shows.
+# One null policy is applied once: a row is kept when the one-minute return, the realized
+# volatility and Kyle's lambda - the three columns the volatility and impact family is gated
+# on - have all warmed up, of which Kyle's lambda at an hour is the binding one. Requiring it
+# subsumes every shorter window in that family, and the longer families of Section C.5 fill
+# in at the same bar, which is what F1 shows.
 #
 # What the policy keeps is not everywhere dense, and the gaps are all of one kind. A bar on
 # which neither venue printed has no dollar volume, no Amihud value and no volume-weighted

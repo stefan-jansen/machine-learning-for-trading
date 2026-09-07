@@ -21,6 +21,13 @@ The record is evidence about a file that will not exist much longer. What consum
 which check admits which retrain - is decided where locks are taken and executed, not
 here; this script only makes the answer recordable while it is still knowable.
 
+It also records the supersession in the case study's registry, via
+``declare_artifact_supersession``, which is what admits the first training run fitted on
+the new file (ml4t/agent-workspace#987). The two records answer different questions - the
+sidecar whether a lock survives the replacement, the registry whether a new run may join a
+population fitted on the old vintage - and an author who has established the first should
+not have to know a second command to state the second.
+
 Usage:
     uv run python scripts/record_artifact_supersession.py \
         --superseded ~/ml4t/preserved/.../model_based.parquet \
@@ -45,6 +52,9 @@ from case_studies.utils.artifact_digest import (  # noqa: E402
     fold_digests,
     read_digest,
     sidecar_path,
+)
+from case_studies.utils.registry.registration import (  # noqa: E402
+    declare_artifact_supersession,
 )
 
 
@@ -130,6 +140,31 @@ def main() -> int:
         return 0
     sidecar_path(new_path).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
     print(f"wrote {sidecar_path(new_path)}")
+
+    # After the sidecar, because the sidecar is the evidence and this is a consequence of
+    # it. A registry that cannot take the declaration - no registry at the artifact's case
+    # directory, or no registered run fitted on the superseded sha - is reported rather than
+    # raised: the fold-continuity finding above is established either way, and the author
+    # who needs the registry edge is told exactly why they did not get one.
+    case_dir = new_path.resolve().parent.parent
+    artifact_name = new_path.name.split(".")[0]
+    if not (case_dir / "run_log" / "registry.db").is_file():
+        print(f"no registry at {case_dir / 'run_log'}: registry supersession not declared")
+        return 0
+    try:
+        declare_artifact_supersession(
+            case_dir.name,
+            artifact_name,
+            sha256=new_sha,
+            supersedes_sha256=old_sha,
+            case_dir=case_dir,
+        )
+    except ValueError as exc:
+        print(f"registry supersession not declared: {exc}")
+        return 0
+    print(
+        f"declared in {case_dir.name}'s registry: {artifact_name} {new_sha[:12]} supersedes {old_sha[:12]}"
+    )
     return 0
 
 

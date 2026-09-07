@@ -156,10 +156,15 @@ class CausalResult:
                     if "refutation_placebo_json" in columns
                     else "NULL AS refutation_placebo_json"
                 )
+                frozen_column = (
+                    "refutation_frozen_fraction"
+                    if "refutation_frozen_fraction" in columns
+                    else "NULL AS refutation_frozen_fraction"
+                )
                 row = db.execute(
                     "SELECT n_obs, dml_effect, dml_se_hac, p_value_hac, naive_effect, "
                     f"confounding_bias_pct, refutation_p, {draws_column}, spec_json, "
-                    f"{placebo_column} "
+                    f"{placebo_column}, {frozen_column} "
                     "FROM causal_runs WHERE causal_hash = ?",
                     (causal_hash,),
                 ).fetchone()
@@ -185,6 +190,13 @@ class CausalResult:
                     # not there. An empty list rather than None when the column exists
                     # but the run predates it, so callers need one check, not two.
                     "placebo_effects": json.loads(row[9]) if row[9] else [],
+                    # The diagnostic the refutation's own warning tells the reader to
+                    # weigh the p-value against. It reaches a reader only from here: the
+                    # warning fires while the fit runs, and a re-run that hits the cache
+                    # performs no fit. None rather than 0.0 when the column is absent or
+                    # the refutation recorded none - zero asserts that permutation moved
+                    # every row, which is the opposite of not knowing.
+                    "placebo_frozen_fraction": row[10],
                     # Derived here so every reader gets the same verdict from the same
                     # rule. A p-value alone cannot say whether the draws could have
                     # rejected at all, so a caller that re-applies a bare threshold

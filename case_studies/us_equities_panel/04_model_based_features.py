@@ -1528,7 +1528,7 @@ for ax, burnin_end in (
     ax.axvline(holdout_start, color=COLORS["copper"], ls="--", lw=1.2)
 add_message_title(
     ax1,
-    "The volatility model re-estimates to nearly the same persistence; the regime model does not",
+    "Refits reproduce the volatility persistence but not the regime separation",
     subtitle="One marker per re-estimation. Shaded: burn-in. Dashed: re-estimation stops",
 )
 show_with_alt(
