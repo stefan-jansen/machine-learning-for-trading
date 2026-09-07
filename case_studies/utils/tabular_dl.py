@@ -46,6 +46,7 @@ from sklearn.preprocessing import StandardScaler
 
 from case_studies.research.models import ModelRun
 from case_studies.utils.artifact_digest import value_digest
+from case_studies.utils.folds import fold_seed
 from case_studies.utils.registry import clear_prediction_sets, compute_fold_metrics_from_predictions
 from case_studies.utils.runtime import cpu_seconds
 
@@ -2834,7 +2835,9 @@ def run_tabm_cv(
             is_tabpfn = artifact_name.startswith("tabpfn")
             fold_t0 = time.perf_counter()
             fold_cpu0 = cpu_seconds()
-            seed_everything(seed + fd["fold"])
+            # The fold's number is an input to the fit, not a label on it: renumbering
+            # the windows reseeds every one of them. See `folds.fold_seed`.
+            seed_everything(fold_seed(seed, fd["fold"]))
             fold_prediction_frame = None
             fold_training_record = None
             if is_tabpfn:

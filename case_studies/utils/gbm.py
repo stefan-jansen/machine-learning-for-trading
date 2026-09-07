@@ -64,6 +64,7 @@ from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.derived_params import quantize_derived
 from case_studies.utils.folds import (
     FOLD_PREPARATION_VERSION,
+    fold_seed,
     prepare_gbm_folds_from_mds,
     training_labels_for_split,
 )
@@ -781,10 +782,11 @@ def prepare_gbm_folds(
         )
 
         # Optional train subsample (never touch val — OOS IC uses full val slice).
-        # Seed is tied to fold_id for reproducibility.
+        # The seed is the fold's number added to the base, so which rows a reduced run
+        # keeps changes when the windows are renumbered. See `folds.fold_seed`.
         if 0.0 < train_sample_frac < 1.0 and len(X_train) > 0:
             n_keep = max(1, int(len(X_train) * train_sample_frac))
-            rng = np.random.default_rng(seed + fold_id)
+            rng = np.random.default_rng(fold_seed(seed, fold_id))
             keep_idx = rng.choice(len(X_train), size=n_keep, replace=False)
             keep_idx.sort()  # preserve row order
             X_train = X_train[keep_idx]

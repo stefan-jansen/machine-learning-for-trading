@@ -20,6 +20,7 @@ from ml4t.diagnostic.metrics import cross_sectional_ic
 from threadpoolctl import threadpool_limits
 
 from case_studies.utils.backtest_loaders import get_rebalance_step, thin_to_rebalance_dates
+from case_studies.utils.folds import fold_seed
 from case_studies.utils.latent_factors.cae import run_cae_fold
 from case_studies.utils.latent_factors.ipca import run_ipca_fold
 from case_studies.utils.latent_factors.library_bridge import configure_latent_torch_runtime
@@ -899,7 +900,9 @@ def run_latent_factor_cv(
         for split in splits:
             if not active_models:
                 break
-            seed_everything(RANDOM_SEED + int(split["fold"]))
+            # The fold's number is an input to the fit, not a label on it: renumbering
+            # the windows reseeds every one of them. See `folds.fold_seed`.
+            seed_everything(fold_seed(RANDOM_SEED, int(split["fold"])))
             fold_inputs = _prepare_fold_inputs(
                 dataset=dataset,
                 split=split,
