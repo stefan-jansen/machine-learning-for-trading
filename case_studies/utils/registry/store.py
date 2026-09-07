@@ -236,6 +236,13 @@ CREATE TABLE IF NOT EXISTS cohort_metrics (
     -- for one live member and k_variants is unchanged, so a reader comparing counts
     -- accepts a correction from a different cohort than the one it asked for.
     member_digest               TEXT,
+    -- The members that digest covers, as a sorted JSON array. The digest is one-way, so
+    -- with it alone verifying a row means rebuilding the member list from the registry
+    -- and re-hashing it - and that rebuild replays every selection rule in force when
+    -- the row was written. When one has moved since, a real membership disagreement is
+    -- indistinguishable from a rule change. Stored, the comparison is against a fact and
+    -- names the members that differ; see uncertainty.cohort_membership_diff.
+    members_json                TEXT,
     periods_per_year            REAL NOT NULL,
     computed_at                 TEXT NOT NULL,
     n_trials_effective_mp       REAL,
@@ -780,6 +787,8 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
         # `uncertainty._distinct_trials`.
         if "k_variants_submitted" not in cohort_cols:
             db.execute("ALTER TABLE cohort_metrics ADD COLUMN k_variants_submitted INTEGER")
+        if "members_json" not in cohort_cols:
+            db.execute("ALTER TABLE cohort_metrics ADD COLUMN members_json TEXT")
 
     if "prediction_coverage" in tables:
         coverage_cols = {

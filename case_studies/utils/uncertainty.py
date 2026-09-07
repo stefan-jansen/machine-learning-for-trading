@@ -44,6 +44,7 @@ benchmark name in the registry is non-default.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import warnings
 from collections.abc import Iterable, Mapping
@@ -1086,6 +1087,39 @@ def load_daily_returns_with_timestamp(case_study: str, backtest_hash: str) -> pl
     ).drop_nulls()
 
 
+def stored_cohort_members(members_json: str | None) -> list[str] | None:
+    """The members a stored ``cohort_metrics`` row says its correction covers.
+
+    ``None`` for a row written before the members were persisted, which is a different
+    state from a cohort that is empty: the first cannot be verified at all, the second
+    verifies trivially. Every ``cohort_metrics`` row in the fleet on 2026-09-07 - 109 of
+    them across five registries - was in the first state.
+    """
+    if members_json is None:
+        return None
+    members = json.loads(members_json)
+    return sorted(str(member) for member in members)
+
+
+def cohort_membership_diff(
+    stored: Iterable[str], in_hand: Iterable[str]
+) -> tuple[list[str], list[str]]:
+    """``(missing, extra)`` between the members a stored row covers and a cohort in hand.
+
+    ``missing`` is stored and absent from the cohort the reader assembled; ``extra`` is
+    assembled and not covered by the correction. Empty lists mean the stored correction is
+    about exactly this cohort.
+
+    This is what a digest comparison cannot do. Two cohorts of the same size with one
+    member swapped have different digests and the same ``k_variants``, so the digest
+    establishes that they differ and says nothing about how - a swapped member and a
+    changed selection rule look identical through it.
+    """
+    stored_set = {str(member) for member in stored}
+    in_hand_set = {str(member) for member in in_hand}
+    return sorted(stored_set - in_hand_set), sorted(in_hand_set - stored_set)
+
+
 def _align_variants_on_timestamp(
     returns_by_hash: dict[str, pl.DataFrame],
 ) -> tuple[np.ndarray, list[str]] | None:
@@ -1285,10 +1319,13 @@ def compute_cohort_metrics(
         # grid saturated, and the two together are what says by how much.
         "k_variants_submitted": int(k_variants),
         # `names` is the cohort the correction below is actually computed over, after
-        # alignment has dropped whatever could not be aligned. Persisting its digest is
-        # what lets a reader establish that a stored correction belongs to the cohort it
-        # is about to report it against, rather than inferring it from a matching count.
+        # alignment has dropped whatever could not be aligned. The digest identifies it
+        # cheaply and the members are the fact a reader checks against: the digest is
+        # one-way, so on its own it turns verification into a replay of every selection
+        # rule that was in force when the row was written. Both come from `names` here so
+        # they cannot describe different cohorts.
         "member_digest": cohort_member_digest(names),
+        "members_json": json.dumps(sorted(names)),
         "periods_per_year": float(periods_per_year),
         "leader_sharpe": float(sharpes[leader_idx]),
     }
