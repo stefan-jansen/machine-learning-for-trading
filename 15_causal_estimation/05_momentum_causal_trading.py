@@ -983,7 +983,7 @@ for col, label in [("naive", "Naive"), ("causal", "Causal"), ("heuristic", "Heur
     )
 
 fig.update_layout(
-    title="Causal regime scaling neither matches nor dominates the naive baseline out-of-sample",
+    title="Causal regime scaling does not improve on the naive baseline out-of-sample",
     height=720,
     width=1100,
     barmode="group",
