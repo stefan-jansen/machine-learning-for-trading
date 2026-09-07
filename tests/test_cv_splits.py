@@ -37,6 +37,7 @@ from utils.cv_splits import (
     make_wf_config,
     most_recent_split,
     normalize_label_buffer,
+    select_folds,
 )
 from utils.modeling import validate_temporal_fold_coverage, validate_temporal_split_geometry
 
@@ -800,3 +801,79 @@ def test_the_accessors_refuse_an_empty_fold_set() -> None:
         most_recent_split([])
     with pytest.raises(ValueError, match="No splits"):
         earliest_train_start([])
+
+
+# ---------------------------------------------------------------------------
+# A reduction names the folds it keeps (#1076)
+# ---------------------------------------------------------------------------
+
+
+def _fold_set(ids: list[int]) -> list[dict]:
+    """Folds carrying *ids*, one year of validation each, oldest id validating first."""
+    return [
+        {
+            "fold": fold_id,
+            "train_start": pd.Timestamp(f"{2011 + fold_id}-01-03"),
+            "train_end": pd.Timestamp(f"{2015 + fold_id}-12-31"),
+            "val_start": pd.Timestamp(f"{2016 + fold_id}-01-04"),
+            "val_end": pd.Timestamp(f"{2017 + fold_id}-01-03"),
+        }
+        for fold_id in ids
+    ]
+
+
+def test_a_reduction_reads_the_fold_id_and_not_the_list_position() -> None:
+    """The same two folds come back whatever order the set is handed over in.
+
+    A head slice cannot do this: on the reversed set it returns the last two ids.
+    """
+    ascending = _fold_set([0, 1, 2, 3])
+    reversed_set = list(reversed(ascending))
+    for ordering in (ascending, reversed_set, [ascending[3], ascending[1], ascending[0]]):
+        assert {split["fold"] for split in select_folds(ordering, [0, 1])} == {0, 1}
+
+    # What the head slice this replaced would have returned from the same set.
+    assert {split["fold"] for split in reversed_set[:2]} == {3, 2}
+
+
+def test_a_reduction_keeps_the_order_the_fold_set_was_given_in() -> None:
+    """Selection filters; it does not reorder. Chronology is the caller's contract."""
+    ascending = _fold_set([0, 1, 2, 3])
+    assert [split["fold"] for split in select_folds(ascending, [2, 0])] == [0, 2]
+    assert [split["fold"] for split in select_folds(list(reversed(ascending)), [0, 2])] == [2, 0]
+
+
+def test_a_reduction_refuses_an_id_the_fold_set_does_not_carry() -> None:
+    """A partial set fails here rather than quietly reporting a smaller experiment.
+
+    This is where a count and a declaration part company: ``splits[:2]`` on a set
+    that starts at fold 2 returns two folds and calls them the first two.
+    """
+    partial = _fold_set([2, 3, 4])
+    with pytest.raises(ValueError, match=r"names \[0, 1\]"):
+        select_folds(partial, range(2))
+    assert [split["fold"] for split in partial[:2]] == [2, 3]
+
+
+def test_a_reduction_that_keeps_no_fold_is_refused() -> None:
+    with pytest.raises(ValueError, match="no fold ids"):
+        select_folds(_fold_set([0, 1]), [])
+
+
+def test_the_harness_count_and_the_selection_mean_the_same_folds() -> None:
+    """``MAX_FOLDS = n`` means folds 0..n-1 on both sides of the harness boundary.
+
+    ``tests/pm_helpers.py`` translates the count into ids for every notebook that
+    takes ``PREVIEW_REDUCTIONS``; the three notebooks that read ``MAX_FOLDS``
+    directly pass ``range(MAX_FOLDS)`` to :func:`select_folds`. If either side is
+    ever changed to mean the most recent n instead, one preview run would reduce
+    its model stages and its evaluation stages to opposite ends of the sample.
+    """
+    from tests.pm_helpers import PREVIEW_TRANSLATED_PARAMETERS
+
+    key, cast, _aliases = PREVIEW_TRANSLATED_PARAMETERS["MAX_FOLDS"]
+    assert key == "folds"
+    assert cast(3) == [0, 1, 2]
+
+    folds = _fold_set([0, 1, 2, 3])
+    assert select_folds(folds, cast(3)) == select_folds(folds, range(3))

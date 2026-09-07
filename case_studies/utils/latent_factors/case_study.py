@@ -17,6 +17,7 @@ from case_studies.utils.latent_factors.library_bridge import preferred_latent_de
 from case_studies.utils.latent_factors.macro_context import load_configured_macro_context
 from data import load_macro
 from utils.artifact_specs import load_feature_spec, load_label_spec, resolve_storage_path
+from utils.cv_splits import select_folds
 from utils.modeling import load_configs, load_modeling_dataset
 from utils.paths import get_case_study_dir
 
@@ -132,7 +133,11 @@ def load_case_study_context(
         resolved_primary,
         eval_label=modeling_dataset.eval_label_col,
     )
-    splits = modeling_dataset.splits[:max_folds] if max_folds else modeling_dataset.splits
+    splits = (
+        select_folds(modeling_dataset.splits, range(max_folds))
+        if max_folds
+        else modeling_dataset.splits
+    )
 
     return LatentFactorCaseStudyContext(
         case_study_id=case_study_id,
@@ -291,7 +296,7 @@ def run_case_study_variants(
         # `max_folds=2` smoke test does not silently retrain variants on the
         # full split set.
         variant_splits = (
-            modeling_dataset.splits[: context.max_folds]
+            select_folds(modeling_dataset.splits, range(context.max_folds))
             if context.max_folds
             else modeling_dataset.splits
         )
