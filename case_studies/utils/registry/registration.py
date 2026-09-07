@@ -1124,16 +1124,19 @@ def register_prediction_set(
             raise ValueError(
                 "versioned prediction registration requires predictions and expected_keys"
             )
-        from .completeness import evaluate_prediction_coverage
+        from .completeness import (
+            evaluate_prediction_coverage,
+            require_comparable_key_digests,
+        )
 
         coverage = evaluate_prediction_coverage(expected_keys, predictions)
         if not coverage.complete and not allow_partial:
             raise ValueError(f"prediction coverage is partial: {coverage.as_dict()}")
         db = _open_registry(case_dir)
         try:
-            existing_schema = db.execute(
+            existing_coverage = db.execute(
                 """
-                SELECT c.schema_json
+                SELECT c.schema_json, c.expected_key_digest
                 FROM prediction_coverage c
                 JOIN prediction_sets p ON p.prediction_hash = c.prediction_hash
                 WHERE p.training_hash = ? AND p.split = ?
@@ -1143,8 +1146,19 @@ def register_prediction_set(
             ).fetchone()
         finally:
             db.close()
-        if existing_schema is not None and existing_schema[0] != coverage.schema_json:
-            raise ValueError("prediction schema differs from an existing checkpoint")
+        if existing_coverage is not None:
+            if existing_coverage[0] != coverage.schema_json:
+                raise ValueError("prediction schema differs from an existing checkpoint")
+            # And the same question one level down. A checkpoint registered under a changed
+            # key rendering digests differently from its siblings whatever its keys, so a
+            # consumer grouping a training run's checkpoints by eligibility splits one
+            # contract into two and nothing says why (ml4t/agent-workspace#1065). Refusing
+            # here is what makes the next rendering change arrive as an error naming its
+            # cause rather than as a quiet mis-grouping in a notebook.
+            require_comparable_key_digests(
+                (existing_coverage[1], coverage.expected_key_digest),
+                what=f"training run {training_hash} at split {split!r}",
+            )
 
     p_hash = prediction_hash_from_parts(
         training_hash,

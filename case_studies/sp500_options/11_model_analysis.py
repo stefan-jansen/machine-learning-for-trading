@@ -48,6 +48,7 @@ from case_studies.sp500_options.research_workflow import (
     official_prediction_catalog,
     open_study,
 )
+from case_studies.utils.registry.completeness import require_comparable_key_digests
 
 MODEL_POPULATIONS = (
     "sp500-options-linear-validation-v1",
@@ -117,6 +118,14 @@ if cv_identities.is_empty() or cv_identities.n_unique() != 1:
 # %%
 coverage = coverage.join(
     catalog.select("prediction_hash", "family"), on="prediction_hash", how="left"
+)
+# The grouping below is only meaningful within one key rendering. Two digests taken under
+# different renderings are unequal whatever their key sets, so a mixed population reports more
+# distinct eligibility contracts than exist and tells a reader that two checkpoints scored on
+# identical rows are not comparable - which the dimension check on each group cannot catch,
+# because the split halves agree on every dimension (ml4t/agent-workspace#1065).
+require_comparable_key_digests(
+    coverage.get_column("expected_key_digest"), what="this notebook's model populations"
 )
 for digest, group in coverage.group_by("expected_key_digest"):
     if group.select("n_expected", "n_actual", "n_folds").n_unique() != 1:
