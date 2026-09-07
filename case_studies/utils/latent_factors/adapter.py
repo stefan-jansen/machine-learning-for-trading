@@ -596,6 +596,7 @@ def reconstruct_locked_request(
             split,
             case.temporal_by_fold,
             source_timeline=case.dataset.get_column(case.date_col),
+            declared_folds=case.temporal_artifact_splits,
             date_col=case.date_col,
         )
     case.splits = [split]

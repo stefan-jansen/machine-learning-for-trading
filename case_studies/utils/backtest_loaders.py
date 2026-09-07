@@ -1496,6 +1496,26 @@ def resolve_decision_schedule(
     return schedule.gather_every(step) if step > 1 else schedule
 
 
+@cache
+def declares_rebalance_step(case_study: str) -> bool:
+    """Does *case_study* declare ``labels.rebalance_step`` for any label at all?
+
+    The per-label question is :func:`declared_rebalance_step`. This is the per-case-study
+    one, and it exists because the step is emitted into the hashed spec only for a caller
+    that names its label: where a case study declares steps, an unlabelled call builds a
+    spec whose identity is not the identity the run registers (ml4t/agent-workspace#1028).
+    `build_backtest_spec` refuses such a call, and this is the condition it refuses on.
+    """
+    from utils import CASE_STUDIES_DIR
+
+    setup_path = CASE_STUDIES_DIR / case_study / "config" / "setup.yaml"
+    try:
+        setup = yaml.safe_load(setup_path.read_text())
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return bool((setup.get("labels") or {}).get("rebalance_step"))
+
+
 def declared_rebalance_step(case_study: str, label: str) -> int | None:
     """The declared step for ``(case_study, label)``, or None when none is declared.
 

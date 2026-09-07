@@ -167,6 +167,12 @@ CREATE TABLE IF NOT EXISTS causal_runs (
     refutation_p     REAL,
     refutation_n_successful INTEGER,
     refutation_placebo_json TEXT,
+    -- The share of treatment rows block permutation could not move, because they sit in
+    -- segments too short to hold two blocks. The runner warns that it must be read
+    -- alongside the p-value - the bias runs toward p = 1 - and the warning fires only on
+    -- a fresh fit, so without the column a reader who regenerates the result from the
+    -- registry gets the p-value and no way to see whether to trust it.
+    refutation_frozen_fraction REAL,
     spec_json        TEXT,
     notebook         TEXT,
     started_at       TEXT,
@@ -350,6 +356,19 @@ CREATE TABLE IF NOT EXISTS decision_artifacts (
     artifact_digest     TEXT NOT NULL,
     canonical           INTEGER NOT NULL,
     created_at          TEXT NOT NULL
+);
+
+-- One declared edge per superseded input artifact: "the file registered runs pin as
+-- `supersedes_sha256` was deliberately replaced by `sha256`". A training run fits on
+-- whatever is on disk, so without a declaration a regenerated artifact silently mixes two
+-- vintages into one population (ml4t/agent-workspace#987). `register_training_run` refuses
+-- an undeclared change and `declare_artifact_supersession` is how an author declares one.
+CREATE TABLE IF NOT EXISTS artifact_supersessions (
+    artifact_name      TEXT NOT NULL,
+    sha256             TEXT NOT NULL,
+    supersedes_sha256  TEXT NOT NULL,
+    declared_at        TEXT NOT NULL,
+    PRIMARY KEY (artifact_name, supersedes_sha256)
 );
 
 """
@@ -793,6 +812,16 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
         db, "candidate_sets", "supersedes_hash"
     ):
         db.execute("ALTER TABLE candidate_sets ADD COLUMN supersedes_hash TEXT")
+
+    # The share of treatment rows the block permutation could not move. It is computed on
+    # every fit and warned about, and the warning only fires when the fit executes, so a
+    # cache-hit re-run reported the p-value with no way to see whether it was biased toward
+    # 1. Additive and outside the causal computation specification, so it moves no causal
+    # hash and invalidates no registered row.
+    if "causal_runs" in tables and not _table_has_column(
+        db, "causal_runs", "refutation_frozen_fraction"
+    ):
+        db.execute("ALTER TABLE causal_runs ADD COLUMN refutation_frozen_fraction REAL")
 
     # The placebo draws behind refutation_p. Only the scalars were stored, so the
     # permutation-distribution figure every causal notebook draws had no source in the

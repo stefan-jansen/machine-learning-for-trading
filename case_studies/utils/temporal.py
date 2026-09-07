@@ -557,6 +557,53 @@ def fold_feature_geometry(
     return records
 
 
+def _require_declared_fold_geometry(
+    frame: pl.DataFrame,
+    *,
+    fold_column: str,
+    metadata: Mapping[str, Any] | None,
+) -> None:
+    """A fold-scoped artifact must state the window each of its folds was fitted over.
+
+    The frame says which fold ids exist and never says what bounded them, and no consumer can
+    recover the boundaries from the values. `temporal_artifact_fold_boundaries` falls back to
+    `generate_cv_splits`, which returns the cross-validation folds and nothing else - so a fold
+    the producer appended beyond the rolling set is invisible to every consumer, and the window
+    its estimator was fitted over is not recorded anywhere (ml4t/agent-workspace#994).
+
+    That is not hypothetical. `us_equities_panel`'s stage-04 artifact carries folds 0..16 while
+    its resolved geometry declares 0..15; fold 16 holds 9,978,112 rows spanning 1990-01-30 to
+    2018-03-27, which is the holdout, and nothing states the boundary it was estimated under.
+    `require_fold_scoped_temporal_holdout_coverage` therefore accepts it on trust.
+
+    Refusing here is what makes the gap closable without a regeneration: no stage-04 producer
+    in the repository currently writes a fold column, so this costs nothing today and binds the
+    moment one does - which is when the appended fold would otherwise arrive undeclared again.
+    The declaration is validated under the same rule the consumer reads it back with, so a bad
+    one fails at the write rather than in a notebook hours later.
+    """
+    from case_studies.utils.cv_window import validated_temporal_folds
+
+    declared = (metadata or {}).get("fold_geometry")
+    present = sorted({int(f) for f in frame[fold_column].unique()})
+    if declared is None:
+        raise ValueError(
+            f"a fold-scoped artifact must declare the geometry of its folds: pass "
+            f"metadata['fold_geometry'] covering folds {present}. The frame states which "
+            "folds exist and never states what bounded them, so an undeclared fold is "
+            "invisible to every consumer that reads the artifact back."
+        )
+    folds = validated_temporal_folds(declared, source="metadata['fold_geometry']")
+    undeclared = sorted(set(present) - {fold["fold"] for fold in folds})
+    if undeclared:
+        raise ValueError(
+            f"metadata['fold_geometry'] declares folds "
+            f"{sorted(fold['fold'] for fold in folds)} and the frame carries {present}: "
+            f"{undeclared} would be written with no recorded boundary. An appended holdout "
+            "fold is declared alongside the rolling ones, not left for a consumer to trust."
+        )
+
+
 def write_model_based(
     frame: pl.DataFrame,
     path: Path | str,
@@ -636,6 +683,9 @@ def write_model_based(
         want = sorted(int(f) for f in expected_folds)
         if got != want:
             raise ValueError(f"fold ids {got} do not match the resolved folds {want}")
+
+    if fold_column is not None:
+        _require_declared_fold_geometry(frame, fold_column=fold_column, metadata=metadata)
 
     merged = dict(metadata or {})
     merged["fold_feature_geometry"] = [

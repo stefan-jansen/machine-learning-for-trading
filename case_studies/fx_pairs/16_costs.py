@@ -25,11 +25,32 @@
 # Sweeping before the overlay charges the grid against a configuration the next notebook may
 # discard.
 #
+# This is a perturbation analysis, not a choice. It asks what happens to a settled strategy if the
+# cost model is wrong, which is a different question from which strategy to trade. The two must
+# stay separate for a mechanical reason: a strategy allowed to compete on its own cost assumption
+# would win by having costs assumed away, and the ranking would report the most optimistic
+# assumption rather than the best strategy.
+#
+# **Why basis points here.** FX spreads are quoted in pips, a fraction of the rate itself, so a
+# proportional charge is how the friction is actually expressed - there is no share or contract
+# to bill per unit. Case studies where nominal prices are stable, or where spreads are measured
+# from quote data, use per-share instead; applying a flat per-unit charge to a rate would assume
+# spread scales with the level, which it does not. The configured grid runs from 0 to 50 basis
+# points per traded leg, against a real quoted band of roughly 1 to 3 for major pairs and 3 to 8
+# for crosses, so most of the grid sits deliberately past anything plausible.
+#
+# `config/setup.yaml` names the cost components as spread and swap points. That list is a
+# taxonomy, read by the Chapter 18 teaching notebooks to describe what the friction consists of;
+# the backtest charges a single aggregate rate per traded leg. So this curve perturbs the
+# aggregate, and the overnight financing cost of carrying a position is described rather than
+# separately priced.
+#
 # **Learning objectives**
 #
 # - Select from an immutable validation candidate set by backtest Sharpe.
 # - Preserve model, checkpoint, signal, allocation, and execution identities across a cost curve.
 # - Keep cost sensitivity outside the official selection cohort.
+# - Read a cost curve as a statement about turnover.
 #
 # **Book reference**: Chapter 18
 #
@@ -106,6 +127,13 @@ SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
 # Cost variants are descendants of that choice and cannot improve their own chance of selection.
 # Preview mode uses a deterministic allocation request from the reduced catalog and remains
 # outside candidate sets.
+#
+# Getting the parent wrong has a quiet failure mode. The cost curve would be computed correctly,
+# the population would freeze and validate, and every number would be right - about a strategy
+# the chapter does not report. Nothing raises, because a cost sweep over the wrong parent is a
+# perfectly valid sweep. That is why the stage the parent came from is printed rather than
+# assumed, and why the selection here is made over the same three stages, in the same way, as
+# `resolve_canonical_rank1_lineage` selects the strategy the chapter goes on to describe.
 
 # %% tags=["results"]
 set_global_seeds(SEED)
@@ -352,6 +380,20 @@ pl.DataFrame(
 # slippage each receive half. The identity audit removes only the cost fields and the chapter label;
 # every remaining field must match the selected validation strategy. Production freezes the full
 # sensitivity set before the first backtest is written.
+#
+# The even split between commission and slippage is a modelling convention, not a measurement.
+# Nothing in the data says the two halves of the friction are equal; the split exists so that a
+# single configured rate can populate two fields the backtest engine charges separately. Read the
+# total, not the halves.
+#
+# What the curve measures, once it exists, is turnover. Cost enters the return series through
+# `|delta w|` at each rebalance, so a strategy's sensitivity to the assumed rate is set by how
+# much of the book it moves and how often, not by how good its predictions are. Two strategies
+# with the same gross Sharpe can have breakevens that differ by an order of magnitude, and the
+# whole reason to plot a curve rather than report one number is that the difference is invisible
+# at any single rate. The quantity to read off is where the curve crosses zero and how far that
+# sits from the quoted band above - a strategy that survives to 40 basis points on pairs that
+# trade at 3 has room; one that dies at 4 is reporting an edge that is really a spread.
 
 # %% tags=["results"]
 cost_grid = get_cost_grid_bps(CASE_STUDY_ID)
@@ -448,6 +490,15 @@ if not include_preview:
 # the first member ran, and `require_complete` is what turns that declaration into a published
 # result. Publishing it does not make it selectable - a cost sensitivity is a curve through a
 # parameter the strategy does not choose, and later selection reads the allocation population.
+#
+# "Registered but not selectable" is a distinction worth being concrete about, because both parts
+# are deliberate. These rows are written to the registry, complete and current, exactly like every
+# other backtest: the curve is a published result that a reader can look up and re-derive. What
+# makes them unselectable is that the downstream stages read named populations rather than
+# querying the registry for whatever is complete, so a cost sibling is never a member of a set
+# anything ranks. The separation lives in which population a stage reads, not in a flag on the
+# row - which is why a stage that queried the registry directly would silently acquire eleven
+# copies of one strategy, each at a different assumed rate, and would rank them.
 
 # %% tags=["results"]
 # A sweep that recomputes everything and a sweep that recomputes nothing print the same summary
@@ -515,6 +566,17 @@ pl.DataFrame(cost_rows).sort("label", "total_cost_bps")
 # %% [markdown]
 # ## Key takeaways
 #
-# - Each label has one validation-selected parent strategy.
+# - Each label has one validation-selected parent strategy, chosen across all three upstream
+#   stages so the curve prices the strategy the chapter reports rather than a sibling of it.
 # - Cost siblings preserve every non-cost identity field.
-# - Cost sensitivity is frozen for completeness but excluded from later selection.
+# - Cost sensitivity is frozen for completeness but excluded from later selection. A strategy that
+#   could compete on its cost assumption would win by assuming costs away.
+# - Basis points are the FX regime because spreads are quoted as a fraction of the rate. The
+#   declared components are a taxonomy; the backtest charges one aggregate rate per traded leg.
+# - The curve is a turnover measurement. Read where it crosses zero and compare that to the
+#   quoted band, not the Sharpe at any single rate.
+#
+# The breakeven this produces is still a validation-period number, and turnover is not stable
+# across regimes: a strategy that trades more in volatile periods pays more exactly when spreads
+# are widest, and a curve computed at a constant rate cannot show that. The curve bounds the
+# question rather than settling it.

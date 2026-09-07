@@ -36,6 +36,36 @@
 # meaningfully have a smoke run and does not have a working one today. Its configuration is
 # declared and its defect has an issue. Filing it as exempt would retire the only signal saying
 # so, and leaving it out of the file entirely would make the count look better than it is.
+#
+# `headroom_gb` is the memory a REDUCED run needs, and it is not a papermill parameter:
+# smoke-chain.sh passes it to nb-run.sh as NB_RUN_HEADROOM_GB. nb-run's own table is keyed by
+# notebook and holds the FULL sweep's figure, so without this an eight-symbol preview has to wait
+# for the twenty gigabytes the whole-universe run wants. On 2026-09-06 that stopped the etfs chain
+# before its first notebook: 15 GB available against a 20 GB precondition, for a run that peaks
+# under 3. The etfs entries below all declare 4, which is the largest peak the chain has ever
+# recorded - 2.4 GB for 10_dl_tsmixer, 0.9 GB at the low end - rounded up. One figure for the
+# whole chain rather than nineteen slightly different ones, because the statement each would make
+# is the same: this is a small run.
+#
+# **What a green smoke run does NOT establish.** A narrowed run gives itself its own
+# `POPULATION_NAME` - `smoke-linear` rather than `<cs>-linear-validation-v1` - because narrowing
+# to one label makes the run less than the declared catalog and the notebook then refuses to
+# publish under the canonical name. That is sanctioned and it is explained at each entry that
+# uses it. The consequence is not obvious and cost two production chains on 2026-09-06: a name
+# with no prior generation takes `OfficialPopulation.create`'s first-version path, where
+# `supersedes=None` is correct. A production re-run publishes under the CANONICAL name, which
+# already has a generation, and `create` refuses unless the run names the snapshot it replaces.
+#
+# So a smoke run exercises the registration code down a branch production never takes. Every
+# etfs and crypto model notebook was green under this file on the morning of 2026-09-06 and
+# every one of them failed at registration that afternoon, after doing all of its fitting, on
+# `a changed population named ... must explicitly supersedes ...`.
+#
+# Criterion 11 is a check that the notebook computes and registers at reduced scale. It is not
+# evidence that a production re-run of the same notebook registers, and nothing in this file can
+# be. What establishes that is the declared `SUPERSEDES_POPULATION` literal in the notebook's own
+# parameters cell, resolved through `supersedes_for_run`, checked against the tip its case
+# study's registry currently holds.
 
 case_studies/cme_futures/04_model_based_features:
   parameters:
@@ -295,7 +325,8 @@ case_studies/etfs/06_linear:
     POPULATION_NAME: smoke-linear
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  measured_s: 19
+  headroom_gb: 4
+  measured_s: 39
 
 case_studies/etfs/07_gbm:
   parameters:
@@ -304,7 +335,8 @@ case_studies/etfs/07_gbm:
     POPULATION_NAME: smoke-gbm
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, train_sample_frac: 0.5}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  measured_s: 59
+  headroom_gb: 4
+  measured_s: 133
 
 case_studies/etfs/08_tabular_dl:
   parameters:
@@ -313,7 +345,8 @@ case_studies/etfs/08_tabular_dl:
     POPULATION_NAME: smoke-tabm
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_epochs: 2}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  measured_s: 19
+  headroom_gb: 4
+  measured_s: 51
 
 case_studies/etfs/09_dl_lstm:
   parameters:
@@ -322,7 +355,8 @@ case_studies/etfs/09_dl_lstm:
     POPULATION_NAME: smoke-lstm
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, max_train_sequences: 2000}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  measured_s: 25
+  headroom_gb: 4
+  measured_s: 62
 
 case_studies/etfs/10_dl_tsmixer:
   parameters:
@@ -335,14 +369,16 @@ case_studies/etfs/10_dl_tsmixer:
     # the model. Keeping this above the temporal-coverage floor is what stops that recurring.
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, max_train_sequences: 2000}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  measured_s: 28
+  headroom_gb: 4
+  measured_s: 60
 
 
 case_studies/etfs/11_latent_factors:
   parameters:
     EXECUTION_TIER: preview
   writes: []
-  measured_s: 6
+  headroom_gb: 4
+  measured_s: 35
 
 
 
@@ -358,12 +394,72 @@ case_studies/etfs/12_causal_dml:
     MAX_SAMPLES: 20000
     N_PLACEBO: 12
   writes: [causal_runs]
-  measured_s: 15
+  headroom_gb: 4
+  measured_s: 44
 
+case_studies/etfs/13_model_analysis:
+  parameters:
+    EXECUTION_TIER: preview
+  # It reads the registry and renders; nothing it does is registered. The reductions it would
+  # otherwise want - N_BUCKETS, TOP_N_FEATURES, REGIME_WINDOW - describe the analysis rather than
+  # its cost, so narrowing them would change what the notebook says instead of what it spends.
+  writes: []
+  measured_s: 52
+  headroom_gb: 4
 
+case_studies/etfs/14_backtest:
+  parameters:
+    EXECUTION_TIER: preview
+    LABEL: fwd_ret_21d
+    MAX_SYMBOLS: 8
+    TOP_N_PREDICTIONS: 3
+    # TOP_K is left at 0, which means the smallest feasible k from setup.yaml
+    # backtest.sweep.top_k_grid. Pinning a k here would state a portfolio width the case study
+    # does not declare, and the smallest one is already the cheapest.
+  writes: [backtest_runs, backtest_metrics, backtest_fold_metrics]
+  measured_s: 46
+  headroom_gb: 4
 
+case_studies/etfs/15_portfolio_management:
+  parameters:
+    EXECUTION_TIER: preview
+    LABEL: fwd_ret_21d
+    MAX_SYMBOLS: 8
+    TOP_N_PREDICTIONS: 3
+  writes: [backtest_runs, backtest_metrics]
+  measured_s: 93
+  headroom_gb: 4
 
+case_studies/etfs/16_risk_management:
+  parameters:
+    EXECUTION_TIER: preview
+    LABEL: fwd_ret_21d
+    MAX_SYMBOLS: 8
+    TOP_N_COMBOS: 2
+    # Zero means every declared control; two caps the position and the portfolio family each, so
+    # the run still exercises both kinds rather than whichever the config happens to list first.
+    MAX_RISK_VARIANTS: 2
+  writes: [backtest_runs, backtest_metrics]
+  measured_s: 45
+  headroom_gb: 4
 
+case_studies/etfs/17_costs:
+  parameters:
+    EXECUTION_TIER: preview
+    LABEL: fwd_ret_21d
+    MAX_SYMBOLS: 8
+    TOP_N_COMBOS: 2
+  writes: [backtest_runs, backtest_metrics]
+  measured_s: 141
+  headroom_gb: 4
+
+case_studies/etfs/20_strategy_analysis:
+  parameters:
+    EXECUTION_TIER: preview
+  # Reads the backtests the stages above registered and describes the chosen configuration.
+  writes: []
+  measured_s: 28
+  headroom_gb: 4
 
 case_studies/etfs/18_holdout_predictions:
   exempt: true
@@ -1036,9 +1132,8 @@ case_studies/etfs/10a_dl_nlinear:
     POPULATION_NAME: smoke-nlinear
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, max_train_sequences: 2000}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  blocked_by: 1044
-  blocked_reason: >-
-    Raises KeyError on 'Ridge (Ch11)', a comparison member named as a typed literal that the narrowed population does not contain.
+  measured_s: 207
+  headroom_gb: 4
 
 case_studies/etfs/11a_pca:
   parameters:
@@ -1047,20 +1142,21 @@ case_studies/etfs/11a_pca:
     POPULATION_NAME: smoke-pca
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_factors: 2}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  blocked_by: 1044
-  blocked_reason: >-
-    Raises ColumnNotFoundError on "fold_pair" while rendering, not while fitting.
+  measured_s: 80
+  headroom_gb: 4
 
 case_studies/etfs/11b_ipca:
   parameters:
     EXECUTION_TIER: preview
     LABELS: ["fwd_ret_21d"]
     POPULATION_NAME: smoke-ipca
-    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_factors: 2, max_iter: 200}
+    # max_iter 200 measured 458 s on 2026-09-06, over the five-minute criterion. The header's
+    # rule is that such a figure is a notebook to reduce further rather than a number to edit,
+    # and the alternating least squares this caps is where the time goes.
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_factors: 2, max_iter: 50}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  blocked_by: 1044
-  blocked_reason: >-
-    Formats a None metric into a string without a check: TypeError under a narrowed population.
+  measured_s: 71
+  headroom_gb: 4
 
 case_studies/etfs/11c_conditional_autoencoder:
   parameters:
@@ -1069,9 +1165,8 @@ case_studies/etfs/11c_conditional_autoencoder:
     POPULATION_NAME: smoke-cae
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_factors: 2, n_epochs: 2}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  blocked_by: 1044
-  blocked_reason: >-
-    Same None-metric formatting as 11b_ipca.
+  measured_s: 188
+  headroom_gb: 4
 
 case_studies/etfs/11d_stochastic_discount_factor:
   parameters:
@@ -1081,9 +1176,8 @@ case_studies/etfs/11d_stochastic_discount_factor:
     PREVIEW_REDUCTIONS:
       {folds: [0], max_symbols: 5, n_epochs_cond: 1, n_epochs_moment: 1, n_epochs_unc: 1}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  blocked_by: 1044
-  blocked_reason: >-
-    Same None-metric formatting as 11b_ipca.
+  measured_s: 36
+  headroom_gb: 4
 
 case_studies/etfs/11e_supervised_autoencoder:
   parameters:
@@ -1092,9 +1186,8 @@ case_studies/etfs/11e_supervised_autoencoder:
     POPULATION_NAME: smoke-sae
     PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 8, n_epochs: 2}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
-  blocked_by: 1044
-  blocked_reason: >-
-    Same None-metric formatting as 11b_ipca.
+  measured_s: 42
+  headroom_gb: 4
 
 case_studies/fx_pairs/11_causal_dml:
   parameters:

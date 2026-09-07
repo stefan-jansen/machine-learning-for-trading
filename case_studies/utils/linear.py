@@ -659,6 +659,7 @@ def _require_holdout_temporal_features(mds, split: dict[str, Any]) -> None:
             split,
             mds.temporal_by_fold,
             source_timeline=mds.dataset.get_column(mds.date_col),
+            declared_folds=mds.temporal_artifact_splits,
             date_col=mds.date_col,
         )
     except ValueError as exc:
@@ -825,6 +826,7 @@ def reconstruct_locked_request(
             split,
             mds.temporal_by_fold,
             source_timeline=mds.dataset.get_column(mds.date_col),
+            declared_folds=mds.temporal_artifact_splits,
             date_col=mds.date_col,
         )
     expected = _expected_keys_from_dataset(
