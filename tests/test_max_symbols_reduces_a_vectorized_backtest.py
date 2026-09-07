@@ -1,11 +1,17 @@
-"""MAX_SYMBOLS reduces the vectorized backtest, not just the price frame.
+"""A price panel narrower than the predictions stops a vectorized run.
 
 ml4t/agent-workspace#911. The vectorized path computes `gross_ret = weight *
-y_true` from the predictions frame, and reads `prices` only for the rebalance
+y_true` from the predictions frame and reads `prices` only for the rebalance
 calendar - the same set of decision dates whichever symbols are in the panel. So
-a preview taken at a reduced `MAX_SYMBOLS` was the production sweep with the
+a preview taken at a reduced `MAX_SYMBOLS` was the production sweep at the
 production cost per backtest: measured on us_firm_characteristics/11_backtest,
 32 backtests at 300 symbols and at 3,708 agreed in every column to six decimals.
+
+Narrowing the predictions to the panel instead would make the traded universe
+decide the portfolio without entering the backtest identity, and the caller
+hashes its specification before this module sees it - `11_backtest.py:273`
+computes `backtest_hash_from_parts` and skips a matching run before calling
+`run_backtest`, so a reduced preview would be served the full-universe result.
 """
 
 from __future__ import annotations
@@ -74,7 +80,7 @@ def _run(monkeypatch, prices, **kwargs) -> dict:
 
     monkeypatch.setattr(br, "_run_vectorized", fake_vectorized)
 
-    result = br.run_backtest(
+    br.run_backtest(
         "us_firm_characteristics",
         "pred1",
         SPEC,
@@ -83,36 +89,29 @@ def _run(monkeypatch, prices, **kwargs) -> dict:
         register=False,
         **kwargs,
     )
-    captured["strategy_spec"] = result.strategy_spec
     return captured
 
 
-def test_a_reduced_price_panel_reduces_the_backtest(monkeypatch) -> None:
-    """The defect: the panel was reduced and the backtest ran over all four names.
-
-    B outranks C, so a top-2 over the full cross-section holds {A, B}. Over the
-    reduced panel it holds {A, C} - the selection is made inside the universe the
-    panel defines, which is what the parameter reads as and what a preview needs
-    it to mean.
-    """
-    captured = _run(monkeypatch, _prices(["A", "C"]))
-    assert captured["predictions"]["symbol"].to_list() == ["A", "C"]
-    assert sorted(captured["weights"]["symbol"].to_list()) == ["A", "C"]
+def test_a_panel_that_cannot_price_the_predictions_stops_the_run(monkeypatch) -> None:
+    """The defect: the panel was reduced and the sweep ran over all four names."""
+    with pytest.raises(ValueError) as excinfo:
+        _run(monkeypatch, _prices(["A", "C"]))
+    message = str(excinfo.value)
+    assert "2 of which it cannot price" in message
+    assert "['B', 'D']" in message
+    # Names the knob that does reduce this stage, so the reader is not left to guess.
+    assert "TOP_N_PREDICTIONS" in message
 
 
-def test_the_full_panel_leaves_the_predictions_alone(monkeypatch) -> None:
-    """The control: nothing is dropped when the panel carries every predicted name."""
+def test_a_covering_panel_runs(monkeypatch) -> None:
+    """The control: nothing is refused when the panel carries every predicted name."""
     captured = _run(monkeypatch, _prices(["A", "B", "C", "D", "E"]))
     assert captured["predictions"]["symbol"].to_list() == ["A", "B", "C", "D"]
     assert sorted(captured["weights"]["symbol"].to_list()) == ["A", "B"]
 
 
-def test_a_precomputed_allocation_is_not_silently_narrowed(monkeypatch) -> None:
-    """The Ch19 risk sweep hands in weights an allocator solved for.
-
-    Dropping positions out of that would leave weights summing to something the
-    allocator never chose, so the reduction applies where the selection is made.
-    """
+def test_a_precomputed_allocation_is_held_to_the_same_panel(monkeypatch) -> None:
+    """The Ch19 risk sweep reads y_true from the same predictions frame."""
     weights = pl.DataFrame(
         {
             "timestamp": [datetime(2024, 1, 1)] * 4,
@@ -120,29 +119,17 @@ def test_a_precomputed_allocation_is_not_silently_narrowed(monkeypatch) -> None:
             "weight": [0.25, 0.25, 0.25, 0.25],
         }
     )
-    captured = _run(monkeypatch, _prices(["A", "C"]), precomputed_weights=weights)
-    assert captured["weights"]["symbol"].to_list() == ["A", "B", "C", "D"]
-    assert captured["predictions"]["symbol"].to_list() == ["A", "B", "C", "D"]
-
-
-def test_a_panel_that_prices_nothing_stops_the_run() -> None:
-    from case_studies.utils.backtest_runner import restrict_to_priced_universe
-
-    with pytest.raises(ValueError, match="would have no universe"):
-        restrict_to_priced_universe(
-            _predictions(), _prices(["X", "Y"]), case_study="demo", label="fwd_ret_1m"
-        )
+    with pytest.raises(ValueError, match="cannot price"):
+        _run(monkeypatch, _prices(["A", "C"]), precomputed_weights=weights)
 
 
 def test_an_empty_panel_is_left_to_the_engine() -> None:
     """No panel is not a reduction to zero; the engine's own guards cover it."""
-    from case_studies.utils.backtest_runner import restrict_to_priced_universe
+    from case_studies.utils.backtest_runner import refuse_predictions_the_panel_cannot_price
 
-    predictions = _predictions()
-    restricted = restrict_to_priced_universe(
-        predictions, pl.DataFrame(), case_study="demo", label="fwd_ret_1m"
+    refuse_predictions_the_panel_cannot_price(
+        _predictions(), pl.DataFrame(), case_study="demo", label="fwd_ret_1m"
     )
-    assert restricted.equals(predictions)
 
 
 def test_the_htm_option_path_keeps_its_own_universe(monkeypatch) -> None:
@@ -166,11 +153,7 @@ def test_the_htm_option_path_keeps_its_own_universe(monkeypatch) -> None:
         }
 
     monkeypatch.setattr(br, "_run_htm_daily_mtm", fake_htm)
-    monkeypatch.setattr(
-        br,
-        "declared_rebalance_step",
-        lambda *_: None,
-    )
+    monkeypatch.setattr(br, "declared_rebalance_step", lambda *_: None)
     br.run_backtest(
         "sp500_options",
         "pred1",
@@ -181,55 +164,3 @@ def test_the_htm_option_path_keeps_its_own_universe(monkeypatch) -> None:
         register=False,
     )
     assert captured["predictions"]["symbol"].to_list() == ["A", "B", "C", "D"]
-
-
-def test_a_reduced_universe_gets_its_own_identity(monkeypatch) -> None:
-    """A reduced run is a different portfolio, so it must hash as one.
-
-    Without this the skip-if-complete check inside `run_backtest`, and the same
-    check `11_backtest` runs before submitting a scheme, both hash prediction plus
-    strategy alone - and a preview at reduced MAX_SYMBOLS would be served the
-    full-universe result or register its numbers under the full run's hash.
-    """
-    from case_studies.utils.registry.specs import backtest_hash_from_parts
-
-    reduced = _run(monkeypatch, _prices(["A", "C"]))["strategy_spec"]
-    full = _run(monkeypatch, _prices(["A", "B", "C", "D"]))["strategy_spec"]
-    assert reduced["strategy"]["signal"]["universe_n_symbols"] == 2
-    # Absent, not equal to the full width: stamping it unconditionally would
-    # re-key every backtest already registered.
-    assert "universe_n_symbols" not in full["strategy"]["signal"]
-    assert backtest_hash_from_parts("pred1", reduced) != backtest_hash_from_parts("pred1", full)
-
-
-def test_a_locked_specification_refuses_a_narrowed_universe(monkeypatch) -> None:
-    """The holdout producer hashed its spec already; it cannot be narrowed under it."""
-    import case_studies.utils.backtest_runner as br
-
-    spec = {
-        "version": 2,
-        "strategy": {
-            "signal": {"method": "equal_weight_top_k", "top_k": 2, "long_short": False},
-            "rebalance": {"mode": "vectorized", "cadence": "daily", "step": 1},
-        },
-        "backtest_config": {
-            "cash": {"initial": 100_000.0},
-            "commission": {"model": "percentage", "rate": 0.0},
-            "slippage": {"model": "percentage", "rate": 0.0},
-            "account": {"allow_short_selling": False},
-            "metadata": {"prediction_hash": "pred1"},
-        },
-    }
-    spec["strategy"]["rebalance"]["min_weight_change"] = 0.0
-    spec["strategy"]["rebalance"]["min_trade_value"] = 0.0
-    monkeypatch.setattr(br, "substitute_continuous_return_for_classification", lambda p, *_: p)
-    with pytest.raises(ValueError, match="covers 2 of the 4 predicted symbols"):
-        br.run_backtest(
-            "us_firm_characteristics",
-            "pred1",
-            spec,
-            prices=_prices(["A", "C"]),
-            predictions=_predictions(),
-            register=False,
-            resolved_spec_only=True,
-        )

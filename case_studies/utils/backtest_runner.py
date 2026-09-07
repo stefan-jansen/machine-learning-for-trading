@@ -1210,10 +1210,35 @@ def resolved_allow_short_selling(
     return allow_short
 
 
-def restrict_to_priced_universe(
+def _restore_ruin_nans(metrics: dict) -> dict:
+    """Put the NaNs back that SQLite turned into NULLs on the way in.
+
+    `compute_portfolio_metrics` reports a stopped path's ranking metrics as NaN
+    precisely so a notebook formatting `f"{sharpe:.3f}"` prints `nan` rather than
+    raising on a None. SQLite stores that NaN as NULL, so the skip-if-complete
+    branch - which reads the metrics back out of the registry rather than
+    recomputing them - handed the None straight to those same lines. A cached
+    bankrupt run therefore failed where a fresh one printed
+    (ml4t/agent-workspace#1051's neighbour, found by review job #18941).
+
+    Only where `ruin` says the NULL was written on purpose. Everywhere else a
+    NULL means the metric was never computed, and inventing a NaN for it would
+    claim a measurement that was not made.
+    """
+    if metrics.get("ruin") != 1.0:
+        return metrics
+    from case_studies.utils.registry.store import _BACKTEST_UNCERTAINTY_COLUMNS
+
+    for name in (*RUIN_UNRANKABLE_METRICS, *_BACKTEST_UNCERTAINTY_COLUMNS):
+        if name in metrics and metrics[name] is None:
+            metrics[name] = float("nan")
+    return metrics
+
+
+def refuse_predictions_the_panel_cannot_price(
     predictions: pl.DataFrame, prices: pl.DataFrame, *, case_study: str, label: str
-) -> pl.DataFrame:
-    """Drop predictions for symbols the price panel does not carry.
+) -> None:
+    """Stop a vectorized run whose price panel does not cover what it will trade.
 
     The vectorized path takes both the universe and the P&L from the predictions
     frame - ``gross_ret = weight * y_true`` - and uses ``prices`` only for the
@@ -1225,24 +1250,29 @@ def restrict_to_priced_universe(
     19 s, and the random-signal plumbing Sharpe read -0.149212 at 100, 300, 1000
     and 3,708 symbols alike (ml4t/agent-workspace#911).
 
-    Restricting the predictions to the priced universe makes the panel mean what
-    the parameter reads as - the set this run can trade - so a reduced panel is a
-    reduced run, and a preview costs what a preview should. It also closes the
-    trap the issue names: the path was pricing positions in names the panel does
-    not carry, which would begin to differ silently between preview and production
-    the moment the vectorized path started joining prices for returns.
+    Silently trading the predictions the panel does not carry is what made that
+    knob inert, and quietly narrowing the predictions to the panel instead is
+    worse: the traded universe would then decide the portfolio without entering
+    the backtest identity, and the caller hashes its specification before it ever
+    reaches this module - `us_firm_characteristics/11_backtest.py:273` computes
+    `backtest_hash_from_parts` and skips a matching run before calling
+    `run_backtest`. A reduced preview would be served the full-universe result.
 
-    This is not a production change. Measured 2026-09-07: every one of the 3,708
-    symbols `us_firm_characteristics` predicts for `fwd_ret_1m` and `fwd_class_1m`
-    is in its 9,861-symbol price panel, so at ``max_symbols=0`` the filter removes
-    nothing.
+    So the run stops. A preview at a reduced `MAX_SYMBOLS` no longer measures the
+    production sweep at the production cost per backtest while looking reduced -
+    it refuses, and says which knob does reduce this stage. `TOP_N_PREDICTIONS`
+    cuts the number of backtests, and each one it leaves is a full, honest run.
 
-    The caller stamps the resulting width into the spec when the filter does
-    remove something - see ``run_backtest``. A reduced run is a different backtest
-    and has to hash as one.
+    This fires on nothing that exists. Measured 2026-09-07 on the
+    us_firm_characteristics panel: every one of the 3,708 symbols it predicts for
+    `fwd_ret_1m` and `fwd_class_1m` is in its 9,861-symbol price panel, and
+    ``top_entities`` - the one rule every reduction in the repo reaches - selects
+    the identical symbol set from the price panel and from the label panel at 5,
+    12 and 200, which are the caps `tests/overrides.yaml` runs the backtest
+    notebooks at.
     """
-    if "symbol" not in prices.columns or prices.is_empty():
-        return predictions
+    if "symbol" not in prices.columns or prices.is_empty() or predictions.is_empty():
+        return
     priced = prices.select("symbol").unique()
     if priced["symbol"].dtype != predictions["symbol"].dtype:
         priced = _align_symbol_dtype(
@@ -1252,15 +1282,20 @@ def restrict_to_priced_universe(
             target_side="predictions",
             other_side="price panel",
         )
-    restricted = predictions.join(priced, on="symbol", how="semi")
-    if restricted.is_empty() and not predictions.is_empty():
-        raise ValueError(
-            f"{case_study}/{label}: none of the {predictions['symbol'].n_unique()} predicted "
-            f"symbols appears in the {priced.height}-symbol price panel, so this backtest "
-            "would have no universe. The panel and the fitting stages are drawn from "
-            "different symbol sets, or the panel was reduced past every predicted name."
-        )
-    return restricted
+    unpriced = predictions.join(priced, on="symbol", how="anti")
+    if unpriced.is_empty():
+        return
+    missing = sorted(unpriced["symbol"].unique().to_list())
+    raise ValueError(
+        f"{case_study}/{label}: the price panel carries {priced.height} symbols and the "
+        f"predictions carry {predictions['symbol'].n_unique()}, {len(missing)} of which it "
+        f"cannot price (first: {missing[:5]}). The vectorized path takes its universe and "
+        "its P&L from the predictions, so a narrower panel does not reduce this run - it "
+        "would trade every predicted name at the full cost per backtest while reading as a "
+        "reduction. Load the panel the predictions were fitted on. To reduce this stage, "
+        "cut TOP_N_PREDICTIONS, which lowers the number of backtests and leaves each one a "
+        "full run."
+    )
 
 
 def run_backtest(
@@ -1404,49 +1439,17 @@ def run_backtest(
         prediction_hash=prediction_hash,
     )
 
-    # Make the price panel the tradeable universe on the vectorized path, which
-    # otherwise ignores it entirely - see `restrict_to_priced_universe`. Only where
-    # the selection is made here: when the caller hands in `precomputed_weights` the
-    # selection already happened, and quietly dropping positions out of it would
-    # leave weights that no longer sum to what the allocator solved for. The
-    # sp500_options HTM path is excluded because its `prices` frame and its
-    # predictions are not indexed by the same kind of symbol.
-    if (
-        strategy.get("rebalance", {}).get("mode") == "vectorized"
-        and precomputed_weights is None
-        and not (case_study == "sp500_options" and label == "ret_to_expiry")
+    # A price panel that does not cover the predictions does not reduce a
+    # vectorized run, it just makes the parameter read as if it did - see
+    # `refuse_predictions_the_panel_cannot_price`. The sp500_options HTM path is
+    # excluded because its `prices` frame and its predictions are not indexed by
+    # the same kind of symbol.
+    if strategy.get("rebalance", {}).get("mode") == "vectorized" and not (
+        case_study == "sp500_options" and label == "ret_to_expiry"
     ):
-        _before = predictions["symbol"].n_unique() if predictions.height else 0
-        predictions = restrict_to_priced_universe(
+        refuse_predictions_the_panel_cannot_price(
             predictions, prices, case_study=case_study, label=label
         )
-        _after = predictions["symbol"].n_unique() if predictions.height else 0
-        if _after != _before:
-            # A reduced universe is a different portfolio, so it has to be a
-            # different identity. Without this the skip-if-complete check below,
-            # and the same check `11_backtest` runs before submitting a scheme,
-            # both hash prediction + strategy alone: a preview at reduced
-            # MAX_SYMBOLS would be served the full-universe result, or would
-            # register its own numbers under the full run's hash.
-            #
-            # Stamped only when the filter bites, so no registered backtest is
-            # re-keyed: production panels cover every predicted symbol, and there
-            # the key never appears.
-            if resolved_spec_only:
-                raise ValueError(
-                    f"{case_study}/{label}: the price panel covers {_after} of the "
-                    f"{_before} predicted symbols, so this run would trade a narrower "
-                    "universe than the resolved specification it was handed declares. A "
-                    "locked backtest cannot have its universe narrowed underneath its "
-                    "own hash. Load the full price panel."
-                )
-            # Copied, not stamped in place: `ensure_backtest_spec` returns the
-            # caller's own object for an already-canonical spec, and a sweep loop
-            # that reuses one would carry the stamp into the next backtest.
-            strategy_spec = deepcopy(strategy_spec)
-            strategy_spec["strategy"]["signal"]["universe_n_symbols"] = _after
-            strategy = strategy_view(strategy_spec)
-            signal_config = strategy["signal"]
 
     # Skip-if-complete: if the backtest_hash already has complete artifacts,
     # return the cached result instead of re-running (unless force_rebacktest).
@@ -1474,7 +1477,11 @@ def run_backtest(
                     if _metric_cols:
                         _q = f"SELECT {', '.join(_metric_cols)} FROM backtest_metrics WHERE backtest_hash = ?"
                         _row = _db.execute(_q, (_bt_status.backtest_hash,)).fetchone()
-                        cached_metrics = dict(zip(_metric_cols, _row, strict=True)) if _row else {}
+                        cached_metrics = (
+                            _restore_ruin_nans(dict(zip(_metric_cols, _row, strict=True)))
+                            if _row
+                            else {}
+                        )
                     else:
                         cached_metrics = {}
                 finally:

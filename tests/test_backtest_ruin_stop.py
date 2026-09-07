@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import math
 import sqlite3
+from datetime import datetime
+from types import SimpleNamespace
 
 import numpy as np
 import polars as pl
@@ -234,3 +236,98 @@ def test_the_plumbing_test_refuses_a_bankrupt_random_run(monkeypatch) -> None:
         br.run_plumbing_test(
             "demo", pl.DataFrame(), spec, predictions=predictions, label="fwd_ret_1m", seed=7
         )
+
+
+def test_a_bankrupt_run_served_from_the_cache_still_formats(monkeypatch, tmp_path) -> None:
+    """The skip-if-complete branch reads metrics back out of SQLite, where NaN is NULL.
+
+    So a cached bankrupt run handed `None` to the same `f"{sharpe:.3f}"` lines the
+    NaN exists to protect, and failed where a freshly computed one printed.
+    """
+    import case_studies.utils.backtest_runner as br
+    import case_studies.utils.conformal as conformal
+    import case_studies.utils.registry.store as store
+
+    case_dir = tmp_path / "cs"
+    run_log = case_dir / "run_log"
+    backtest_dir = run_log / "backtest" / "cachedhash"
+    backtest_dir.mkdir(parents=True)
+    pl.DataFrame({"timestamp": [datetime(2009, 1, 1)], "daily_return": [0.0]}).write_parquet(
+        backtest_dir / "daily_returns.parquet"
+    )
+    with sqlite3.connect(run_log / "registry.db") as db:
+        db.execute(
+            "CREATE TABLE backtest_metrics (backtest_hash TEXT PRIMARY KEY, computed_at TEXT, "
+            "sharpe REAL, total_return REAL, ruin REAL)"
+        )
+        # What the engine wrote: NaN in, NULL out.
+        db.execute(
+            "INSERT INTO backtest_metrics VALUES ('cachedhash', 'now', ?, -1.0, 1.0)",
+            (float("nan"),),
+        )
+    assert (
+        sqlite3.connect(run_log / "registry.db")
+        .execute("SELECT sharpe FROM backtest_metrics")
+        .fetchone()[0]
+        is None
+    )
+
+    monkeypatch.setattr(br, "get_backtest_config", lambda _: object())
+    monkeypatch.setattr(br, "ensure_backtest_spec", lambda *args, **kw: args[2])
+    monkeypatch.setattr(conformal, "ensure_conformal_calibration_identity", lambda spec: spec)
+    monkeypatch.setattr(br, "substitute_continuous_return_for_classification", lambda p, *_: p)
+    monkeypatch.setattr(store, "_case_dir", lambda _cs: case_dir)
+    monkeypatch.setattr(
+        br,
+        "_refuse_an_allocation_that_produced_no_target",
+        lambda *a, **k: None,
+        raising=False,
+    )
+
+    from case_studies.utils.registry import completeness
+
+    monkeypatch.setattr(
+        completeness,
+        "backtest_run_status",
+        lambda *a, **k: SimpleNamespace(
+            complete=True, backtest_hash="cachedhash", summary=lambda: "cached"
+        ),
+    )
+    import case_studies.utils.registry as registry
+
+    monkeypatch.setattr(
+        registry,
+        "backtest_run_status",
+        lambda *a, **k: SimpleNamespace(
+            complete=True, backtest_hash="cachedhash", summary=lambda: "cached"
+        ),
+    )
+    monkeypatch.setattr(registry, "backtest_dir", lambda _cs, h: backtest_dir)
+
+    spec = {
+        "version": 2,
+        "strategy": {
+            "signal": {"method": "equal_weight_top_k", "top_k": 1, "long_short": False},
+            "rebalance": {"mode": "vectorized", "cadence": "daily", "step": 1},
+        },
+        "backtest_config": {"cash": {"initial": 1.0}, "account": {}},
+    }
+    result = br.run_backtest(
+        "us_firm_characteristics",
+        "pred1",
+        spec,
+        prices=pl.DataFrame({"timestamp": [datetime(2024, 1, 1)], "symbol": ["A"], "close": [1.0]}),
+        predictions=pl.DataFrame(
+            {
+                "timestamp": [datetime(2024, 1, 1)],
+                "symbol": ["A"],
+                "y_score": [1.0],
+                "y_true": [0.1],
+            }
+        ),
+        register=True,
+    )
+    assert result.metrics["ruin"] == 1.0
+    assert math.isnan(result.metrics["sharpe"])
+    # The line `12_portfolio_management.py:245` runs on every sweep result.
+    assert f"Sharpe={result.metrics.get('sharpe', 0):.3f}" == "Sharpe=nan"
