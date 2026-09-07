@@ -954,15 +954,7 @@ def compute_reality_check(
         block_size=block_size,
         random_state=seed,
     )
-    # Same rule as the cohort leader: a bankrupt challenger is not the one to name.
-    # Its mean excess return is a small negative number rather than a large one, for
-    # the reason `_ruined_columns` gives, so it beats every challenger that lost more
-    # slowly.
-    excess = np.mean(strategies - bench.reshape(-1, 1), axis=0)
-    excess = np.where(_ruined_columns(strategies), np.nan, excess)
-    if np.all(np.isnan(excess)):
-        return {}
-    best_idx = _leader_index(excess, keep_names)
+    best_idx = _leader_index(np.mean(strategies - bench.reshape(-1, 1), axis=0), keep_names)
     return {
         "reality_check_pvalue": float(rc.get("p_value", float("nan"))),
         "reality_check_statistic": float(rc.get("test_statistic", float("nan"))),
@@ -974,42 +966,6 @@ def compute_reality_check(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-
-def _ruined_columns(matrix: np.ndarray) -> np.ndarray:
-    """Which columns are the return path of a book that lost its capital.
-
-    Read off the series rather than taken from a caller, because this module is
-    handed returns and nothing else - no case study, no registry, no row. That is
-    enough: a path whose cumulative equity reaches zero is bankrupt whoever wrote
-    it, so the test is the definition rather than a heuristic. The engine's
-    `first_ruin_index` is the one implementation of it, imported here rather than
-    restated; the import is local because `backtest_runner` imports this module the
-    same way (`periods_per_year_from_setup`), and two module-level imports would
-    close the cycle.
-
-    Why a leader has to know. `_apply_ruin_semantics` registers sharpe, sortino,
-    calmar, omega, stability and tail_ratio as null for a ruined run precisely so it
-    cannot sort against a solvent one, and every ranking that reads those columns
-    honours that. This module computes its own scores from the return matrix and
-    therefore never sees the decision, so without this the two disagree about the
-    same run and only one of them is right (ml4t/agent-workspace#1079).
-
-    It is not a rare disagreement. The series the engine persists for a ruined path
-    is -1.0 followed by n-1 zeros, whose per-period Sharpe is -1/sqrt(n-1): the one
-    -1.0 inflates the dispersion it is divided by, and every later zero shrinks the
-    mean without adding any. Annualized at 252 periods that is -0.50 over 1,000
-    periods and -0.32 over 2,500 - the middle of a losing population, not the bottom
-    of it. Several case studies here have negative-Sharpe cohorts by construction.
-    """
-    from case_studies.utils.backtest_runner import first_ruin_index
-
-    if matrix.ndim != 2 or matrix.shape[1] == 0:
-        return np.zeros(0, dtype=bool)
-    return np.array(
-        [first_ruin_index(matrix[:, j]) is not None for j in range(matrix.shape[1])],
-        dtype=bool,
-    )
 
 
 def _leader_index(scores: np.ndarray, names: Sequence[str]) -> int:
@@ -1357,30 +1313,6 @@ def compute_cohort_metrics(
     if aligned is None:
         return {}
     matrix, names = aligned
-
-    # A bankrupt member leaves the cohort here, before anything is computed over it,
-    # rather than being excluded from the leader choice alone. Excluding it only from
-    # the leader choice produces a worse state than the defect: `deflated_sharpe_ratio`
-    # takes the trial population and picks its own observed strategy with
-    # `np.argmax(sharpe_ratios)`, with no parameter to name one, so a bankrupt member
-    # left among the trials becomes the run the deflation is computed about while
-    # `leader_hash` names a different one - two numbers in one row describing two runs.
-    #
-    # Dropping it from the trials is also the right reading of what the deflation
-    # corrects for. It asks how likely the best of K looks this good by luck, and
-    # "best" ranges over what the selection could actually have taken. A path that lost
-    # its capital cannot be selected - ml4t/agent-workspace#920 is precisely that rule -
-    # so it was never one of the chances, and counting it would inflate K for an
-    # opportunity that did not exist. Everything below therefore describes the solvent
-    # cohort: `member_digest` and `members_json` included, so a reader matching a stored
-    # correction against a membership gets the set the correction ran over.
-    solvent = ~_ruined_columns(matrix)
-    if not solvent.any():
-        return {}
-    if not solvent.all():
-        matrix = matrix[:, solvent]
-        names = [name for name, keep in zip(names, solvent, strict=True) if keep]
-
     n_periods, k_variants = matrix.shape
     if k_variants < 2:
         return {}
