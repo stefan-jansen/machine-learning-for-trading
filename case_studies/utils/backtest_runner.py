@@ -24,6 +24,7 @@ Usage::
 
 from __future__ import annotations
 
+import math
 import warnings
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -264,6 +265,19 @@ def calendar_periods_per_year(calendar: str) -> int:
 #
 # `ruin` and `ruin_period` are registered as metrics, never as identity fields:
 # they say what happened in a run, not what was asked for.
+#
+# The unrankable value is NaN and not None, which is a decision about the readers
+# rather than about the metric. SQLite stores a NaN as NULL, so the registry and
+# every SQL reader see exactly the intended "no value" - `ORDER BY sharpe DESC`
+# puts it last, `AVG` skips it, and the fifteen `sharpe IS NOT NULL` filters drop
+# it. A None would reach the notebooks that format a metric as `f"{sharpe:.3f}"`
+# as a TypeError several frames from the cause; NaN formats as `nan`, which is
+# what those lines should print.
+#
+# The cost is that polars sorts a NaN *first* on a descending sort, so anything
+# ranking these dicts in memory before they reach SQLite has to say what it
+# wants. `rank_returns_on_common_support` is the one place that does, and it
+# converts to null and passes `nulls_last=True`.
 RUIN_UNRANKABLE_METRICS: tuple[str, ...] = (
     "sharpe",
     "sortino",
@@ -328,6 +342,37 @@ def stop_returns_at_ruin(
     return daily_returns.with_columns(pl.Series(column, stopped)), index
 
 
+def _apply_ruin_semantics(
+    out: dict[str, float | None], ruin_period: int | None, *, uncertainty_columns: bool = True
+) -> dict[str, float | None]:
+    """Stamp `ruin`/`ruin_period` and, for a stopped path, what it actually reports.
+
+    The three descriptive metrics are stated here rather than read back from the
+    diagnostic library. A stopped path ends at exactly zero equity by
+    construction, so total return, CAGR and maximum drawdown are known to be
+    -1.0 - and the library does not always produce them. On a path that ruins in
+    its first period the drawdown series divides by a running maximum of zero and
+    comes back all-NaN, which `_safe` turns into 0.0; a single-period path takes
+    the short branch in the caller, where every value is 0.0. Both reported ruin
+    beside a drawdown of nothing.
+    """
+    out["ruin"] = 0.0 if ruin_period is None else 1.0
+    out["ruin_period"] = None if ruin_period is None else float(ruin_period)
+    if ruin_period is None:
+        return out
+    out["total_return"] = -1.0
+    out["max_drawdown"] = -1.0
+    out["cagr"] = -1.0
+    # Every ratio that ranks one path against another, and every confidence band
+    # drawn around one, is undefined for a path that ended.
+    out.update(dict.fromkeys(RUIN_UNRANKABLE_METRICS, float("nan")))
+    if uncertainty_columns:
+        from case_studies.utils.registry.store import _BACKTEST_UNCERTAINTY_COLUMNS
+
+        out.update(dict.fromkeys(_BACKTEST_UNCERTAINTY_COLUMNS, float("nan")))
+    return out
+
+
 def compute_portfolio_metrics(
     returns: np.ndarray,
     *,
@@ -389,26 +434,28 @@ def compute_portfolio_metrics(
     returns, ruin_period = apply_ruin_stop(returns)
 
     if len(returns) < 2:
-        return {
-            "sharpe": 0.0,
-            "sortino": 0.0,
-            "total_return": 0.0,
-            "max_drawdown": 0.0,
-            "cagr": 0.0,
-            "calmar": 0.0,
-            "volatility": 0.0,
-            "win_rate": 0.0,
-            "omega": 0.0,
-            "var_95": 0.0,
-            "cvar_95": 0.0,
-            "stability": 0.0,
-            "skewness": 0.0,
-            "kurtosis": 0.0,
-            "tail_ratio": 0.0,
-            "n_periods": int(len(returns)),
-            "ruin": 0.0 if ruin_period is None else 1.0,
-            "ruin_period": None if ruin_period is None else float(ruin_period),
-        }
+        return _apply_ruin_semantics(
+            {
+                "sharpe": 0.0,
+                "sortino": 0.0,
+                "total_return": 0.0,
+                "max_drawdown": 0.0,
+                "cagr": 0.0,
+                "calmar": 0.0,
+                "volatility": 0.0,
+                "win_rate": 0.0,
+                "omega": 0.0,
+                "var_95": 0.0,
+                "cvar_95": 0.0,
+                "stability": 0.0,
+                "skewness": 0.0,
+                "kurtosis": 0.0,
+                "tail_ratio": 0.0,
+                "n_periods": int(len(returns)),
+            },
+            ruin_period,
+            uncertainty_columns=False,
+        )
 
     analysis = PortfolioAnalysis(returns=returns, periods_per_year=periods_per_year)
     with warnings.catch_warnings():
@@ -444,18 +491,10 @@ def compute_portfolio_metrics(
         "kurtosis": _safe(pm.kurtosis),
         "tail_ratio": _safe(pm.tail_ratio),
         "n_periods": int(len(returns)),
-        "ruin": 0.0 if ruin_period is None else 1.0,
-        "ruin_period": None if ruin_period is None else float(ruin_period),
     }
 
+    out = _apply_ruin_semantics(out, ruin_period)
     if ruin_period is not None:
-        # Every ratio that ranks one path against another, and every confidence
-        # band drawn around one, is undefined for a path that ended. NULL, not a
-        # number a selection step would sort on.
-        from case_studies.utils.registry.store import _BACKTEST_UNCERTAINTY_COLUMNS
-
-        out.update(dict.fromkeys(RUIN_UNRANKABLE_METRICS, None))
-        out.update(dict.fromkeys(_BACKTEST_UNCERTAINTY_COLUMNS, None))
         return out
 
     if uncertainty and len(returns) >= 4:
@@ -1197,6 +1236,10 @@ def restrict_to_priced_universe(
     symbols `us_firm_characteristics` predicts for `fwd_ret_1m` and `fwd_class_1m`
     is in its 9,861-symbol price panel, so at ``max_symbols=0`` the filter removes
     nothing.
+
+    The caller stamps the resulting width into the spec when the filter does
+    remove something - see ``run_backtest``. A reduced run is a different backtest
+    and has to hash as one.
     """
     if "symbol" not in prices.columns or prices.is_empty():
         return predictions
@@ -1373,9 +1416,37 @@ def run_backtest(
         and precomputed_weights is None
         and not (case_study == "sp500_options" and label == "ret_to_expiry")
     ):
+        _before = predictions["symbol"].n_unique() if predictions.height else 0
         predictions = restrict_to_priced_universe(
             predictions, prices, case_study=case_study, label=label
         )
+        _after = predictions["symbol"].n_unique() if predictions.height else 0
+        if _after != _before:
+            # A reduced universe is a different portfolio, so it has to be a
+            # different identity. Without this the skip-if-complete check below,
+            # and the same check `11_backtest` runs before submitting a scheme,
+            # both hash prediction + strategy alone: a preview at reduced
+            # MAX_SYMBOLS would be served the full-universe result, or would
+            # register its own numbers under the full run's hash.
+            #
+            # Stamped only when the filter bites, so no registered backtest is
+            # re-keyed: production panels cover every predicted symbol, and there
+            # the key never appears.
+            if resolved_spec_only:
+                raise ValueError(
+                    f"{case_study}/{label}: the price panel covers {_after} of the "
+                    f"{_before} predicted symbols, so this run would trade a narrower "
+                    "universe than the resolved specification it was handed declares. A "
+                    "locked backtest cannot have its universe narrowed underneath its "
+                    "own hash. Load the full price panel."
+                )
+            # Copied, not stamped in place: `ensure_backtest_spec` returns the
+            # caller's own object for an already-canonical spec, and a sweep loop
+            # that reuses one would carry the stamp into the next backtest.
+            strategy_spec = deepcopy(strategy_spec)
+            strategy_spec["strategy"]["signal"]["universe_n_symbols"] = _after
+            strategy = strategy_view(strategy_spec)
+            signal_config = strategy["signal"]
 
     # Skip-if-complete: if the backtest_hash already has complete artifacts,
     # return the cached result instead of re-running (unless force_rebacktest).
@@ -2946,7 +3017,7 @@ def run_plumbing_test(
             contract_specs=contract_specs,
         )
         sharpe = result.metrics["sharpe"]
-        if sharpe is None:
+        if sharpe is None or math.isnan(sharpe):
             # The engine stops a path that loses its capital and registers no
             # Sharpe for it, so there is no number to compare against the
             # tolerance. The random signal is not the finding here: a

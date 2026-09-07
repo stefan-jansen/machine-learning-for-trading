@@ -123,3 +123,44 @@ def test_both_halves_of_the_grid_report_both_numbers(tmp_path, monkeypatch) -> N
         get_top_k_values_for(case_study, "fwd_ret_5d", 24, long_short=False)
     assert "price panel 24" in str(excinfo.value)
     assert "ranked cross-section 3" in str(excinfo.value)
+
+
+def test_disagreeing_prediction_sets_leave_the_callers_number_standing(
+    tmp_path, monkeypatch
+) -> None:
+    """The resolver samples the registry; the caller sweeps a chosen population.
+
+    Those are different questions. A width taken from an unrelated set could
+    remove a concentration that is feasible for the sets actually being swept, so
+    the resolver only speaks when its sample is unanimous.
+    """
+    from case_studies.utils.sweep_config import ranked_cross_section_width
+
+    case_study = _case_study(tmp_path, monkeypatch, n_prediction_symbols=6)
+    run_log = tmp_path / case_study / "run_log"
+    (run_log / "predictions" / "pred2").mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "timestamp": [1] * 40,
+            "symbol": [f"S{i}" for i in range(40)],
+            "y_score": [0.0] * 40,
+        }
+    ).write_parquet(run_log / "predictions" / "pred2" / "predictions.parquet")
+    with sqlite3.connect(run_log / "registry.db") as db:
+        db.execute("INSERT INTO training_runs VALUES ('t2', 'gbm', 'other', 'fwd_ret_5d')")
+        db.execute("INSERT INTO prediction_sets VALUES ('pred2', 't2', 'validation')")
+
+    with pytest.warns(UserWarning, match="disagree on the ranked cross-section"):
+        assert ranked_cross_section_width(case_study, "fwd_ret_5d") is None
+    with pytest.warns(UserWarning):
+        schemes = get_entry_schemes_for(case_study, "fwd_ret_5d", n_assets=24, long_short=False)
+    assert [s["top_k"] for s in schemes] == [3, 5, 10]
+
+
+def test_a_caller_that_knows_its_population_is_believed(tmp_path, monkeypatch) -> None:
+    """`ranked_width` skips the registry sample entirely."""
+    case_study = _case_study(tmp_path, monkeypatch, n_prediction_symbols=100)
+    schemes = get_entry_schemes_for(
+        case_study, "fwd_ret_5d", n_assets=24, long_short=False, ranked_width=6
+    )
+    assert [s["top_k"] for s in schemes] == [3, 5]

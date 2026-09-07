@@ -74,7 +74,7 @@ def _run(monkeypatch, prices, **kwargs) -> dict:
 
     monkeypatch.setattr(br, "_run_vectorized", fake_vectorized)
 
-    br.run_backtest(
+    result = br.run_backtest(
         "us_firm_characteristics",
         "pred1",
         SPEC,
@@ -83,6 +83,7 @@ def _run(monkeypatch, prices, **kwargs) -> dict:
         register=False,
         **kwargs,
     )
+    captured["strategy_spec"] = result.strategy_spec
     return captured
 
 
@@ -180,3 +181,55 @@ def test_the_htm_option_path_keeps_its_own_universe(monkeypatch) -> None:
         register=False,
     )
     assert captured["predictions"]["symbol"].to_list() == ["A", "B", "C", "D"]
+
+
+def test_a_reduced_universe_gets_its_own_identity(monkeypatch) -> None:
+    """A reduced run is a different portfolio, so it must hash as one.
+
+    Without this the skip-if-complete check inside `run_backtest`, and the same
+    check `11_backtest` runs before submitting a scheme, both hash prediction plus
+    strategy alone - and a preview at reduced MAX_SYMBOLS would be served the
+    full-universe result or register its numbers under the full run's hash.
+    """
+    from case_studies.utils.registry.specs import backtest_hash_from_parts
+
+    reduced = _run(monkeypatch, _prices(["A", "C"]))["strategy_spec"]
+    full = _run(monkeypatch, _prices(["A", "B", "C", "D"]))["strategy_spec"]
+    assert reduced["strategy"]["signal"]["universe_n_symbols"] == 2
+    # Absent, not equal to the full width: stamping it unconditionally would
+    # re-key every backtest already registered.
+    assert "universe_n_symbols" not in full["strategy"]["signal"]
+    assert backtest_hash_from_parts("pred1", reduced) != backtest_hash_from_parts("pred1", full)
+
+
+def test_a_locked_specification_refuses_a_narrowed_universe(monkeypatch) -> None:
+    """The holdout producer hashed its spec already; it cannot be narrowed under it."""
+    import case_studies.utils.backtest_runner as br
+
+    spec = {
+        "version": 2,
+        "strategy": {
+            "signal": {"method": "equal_weight_top_k", "top_k": 2, "long_short": False},
+            "rebalance": {"mode": "vectorized", "cadence": "daily", "step": 1},
+        },
+        "backtest_config": {
+            "cash": {"initial": 100_000.0},
+            "commission": {"model": "percentage", "rate": 0.0},
+            "slippage": {"model": "percentage", "rate": 0.0},
+            "account": {"allow_short_selling": False},
+            "metadata": {"prediction_hash": "pred1"},
+        },
+    }
+    spec["strategy"]["rebalance"]["min_weight_change"] = 0.0
+    spec["strategy"]["rebalance"]["min_trade_value"] = 0.0
+    monkeypatch.setattr(br, "substitute_continuous_return_for_classification", lambda p, *_: p)
+    with pytest.raises(ValueError, match="covers 2 of the 4 predicted symbols"):
+        br.run_backtest(
+            "us_firm_characteristics",
+            "pred1",
+            spec,
+            prices=_prices(["A", "C"]),
+            predictions=_predictions(),
+            register=False,
+            resolved_spec_only=True,
+        )

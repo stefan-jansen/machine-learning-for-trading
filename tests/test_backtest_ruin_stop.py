@@ -9,6 +9,9 @@ zero and `(1 + r)` inverts the sign of every later period. The worst of them,
 
 from __future__ import annotations
 
+import math
+import sqlite3
+
 import numpy as np
 import polars as pl
 import pytest
@@ -28,9 +31,48 @@ def test_a_bankrupt_path_reports_no_sharpe() -> None:
     """The defect: a path whose equity crossed zero was still ranked."""
     out = _metrics(_RUINED)
     assert out["ruin"] == 1.0
-    assert out["sharpe"] is None
-    assert out["sortino"] is None
-    assert out["calmar"] is None
+    assert math.isnan(out["sharpe"])
+    assert math.isnan(out["sortino"])
+    assert math.isnan(out["calmar"])
+
+
+def test_the_unrankable_value_survives_the_round_trip_a_reader_makes() -> None:
+    """NaN, so that SQLite stores NULL and a notebook's `f"{x:.3f}"` still prints.
+
+    A None would reach `12_portfolio_management`'s progress line as a TypeError,
+    which its `except Exception` counts as a failed execution - a run that
+    registered successfully reported as a failure.
+    """
+    sharpe = _metrics(_RUINED)["sharpe"]
+    assert f"{sharpe:.3f}" == "nan"
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE m (sharpe REAL)")
+    db.execute("INSERT INTO m VALUES (?)", (sharpe,))
+    db.execute("INSERT INTO m VALUES (2.0)")
+    assert db.execute("SELECT COUNT(*) FROM m WHERE sharpe IS NOT NULL").fetchone()[0] == 1
+    assert db.execute("SELECT sharpe FROM m ORDER BY sharpe DESC").fetchall() == [(2.0,), (None,)]
+
+
+def test_a_path_that_ruins_in_its_first_period_still_reports_the_loss() -> None:
+    """The diagnostic library divides by a running maximum of zero and returns NaN.
+
+    `_safe` turned that into a drawdown of 0.0 beside `ruin=1`, which reads as a
+    bankruptcy that cost nothing.
+    """
+    out = compute_portfolio_metrics(np.array([-1.2, 0.1]), periods_per_year=12, uncertainty=False)
+    assert out["ruin"] == 1.0
+    assert out["max_drawdown"] == -1.0
+    assert out["total_return"] == -1.0
+    assert out["cagr"] == -1.0
+
+
+def test_a_single_period_wipeout_is_not_a_flat_series() -> None:
+    """The short branch reported zeros for every metric, ruin included."""
+    out = compute_portfolio_metrics(np.array([-1.2]), periods_per_year=12, uncertainty=False)
+    assert out["ruin"] == 1.0
+    assert out["total_return"] == -1.0
+    assert out["max_drawdown"] == -1.0
+    assert math.isnan(out["sharpe"])
 
 
 def test_a_bankrupt_path_reports_the_loss_it_actually_took() -> None:
@@ -47,7 +89,7 @@ def test_a_solvent_path_is_untouched() -> None:
     out = _metrics(_SOLVENT)
     assert out["ruin"] == 0.0
     assert out["ruin_period"] is None
-    assert isinstance(out["sharpe"], float)
+    assert not math.isnan(out["sharpe"])
     assert out["total_return"] > 0.0
 
 
@@ -129,6 +171,33 @@ def test_a_common_support_ranking_puts_a_bankrupt_candidate_last() -> None:
         periods_per_year=12,
     )
     assert ranking["backtest_hash"].to_list() == ["solvent", "ruined"]
+    assert ranking["sharpe"][1] is None
+
+
+def test_a_comparison_window_that_misses_the_ruin_does_not_make_it_rankable() -> None:
+    """The intersection can end before the period that wiped the account out.
+
+    A bankrupt book restricted to the months before it went bankrupt is not a
+    rankable strategy, and it would otherwise outrank a solvent candidate with a
+    negative Sharpe on the strength of the window the comparison happened to pick.
+    """
+    from case_studies.utils.strategy_analysis import rank_returns_on_common_support
+
+    early = pl.datetime_range(
+        pl.datetime(2009, 1, 1), pl.datetime(2009, 1, 1) + pl.duration(days=29), "1d", eager=True
+    )
+    full = pl.datetime_range(
+        pl.datetime(2009, 1, 1), pl.datetime(2009, 1, 1) + pl.duration(days=108), "1d", eager=True
+    )
+    ranking = rank_returns_on_common_support(
+        {
+            # Ruins at period 40, well past the 30-day intersection below.
+            "ruined": pl.DataFrame({"timestamp": full, "daily_return": _RUINED}),
+            "losing": pl.DataFrame({"timestamp": early, "daily_return": [-0.01] * 30}),
+        },
+        periods_per_year=12,
+    )
+    assert ranking["backtest_hash"].to_list() == ["losing", "ruined"]
     assert ranking["sharpe"][1] is None
 
 

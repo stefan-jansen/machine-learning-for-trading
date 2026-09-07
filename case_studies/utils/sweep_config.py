@@ -381,31 +381,46 @@ def _periods_per_year_for(case_study: str) -> float:
     return float(ppy)
 
 
+# How many registered prediction sets the width resolver reads before it decides.
+# One is enough where they agree and cannot detect it where they do not.
+_RANKED_WIDTH_SAMPLE = 8
+
+
 def ranked_cross_section_width(
     case_study: str, label: str, *, split: str = "validation"
 ) -> int | None:
     """Distinct symbols in the predictions an entry-scheme sweep will rank.
 
-    ``None`` when nothing is registered yet for ``(label, split)``, or when the
-    artifact behind the first registered prediction set is missing - a case study
-    whose model stages have not run has no ranked cross-section, and inventing one
-    would refuse a sweep that has not been set up wrong.
+    ``None`` when nothing is registered yet for ``(label, split)``, when the
+    artifacts behind the registered sets are missing, or when the sampled sets do
+    not agree on a width. A case study whose model stages have not run has no
+    ranked cross-section, and inventing one would refuse a sweep that has not
+    been set up wrong.
 
-    One prediction set is read, not all of them: every prediction set for a label
-    is scored over the same feature panel, so they share a width. Measured
-    2026-09-07 over six registered sets per label in etfs, us_firm_characteristics,
-    sp500_equity_option_analytics and us_equities_panel: one width per label in
-    every case, 99 / 3,708 / 549 / 3,147 respectively.
+    The registry is sampled rather than asked about the population a particular
+    caller is sweeping, and those are different questions: `cme_futures/13_backtest`
+    selects official or preview candidates, and a width taken from an unrelated
+    set could remove a concentration that is feasible for the ones actually being
+    swept. So the resolver only speaks when the sample is unanimous - up to eight
+    registered sets, all reporting the same width - and otherwise returns ``None``
+    and leaves the caller's own number standing. A caller that knows its
+    population passes ``ranked_width`` and skips this entirely.
 
-    Distinct symbols over the window, which is the same count the callers take off
-    the price panel, so the comparison in ``get_entry_schemes_for`` is between two
-    measurements of the same kind. The number that literally bounds a ranking is
-    the per-date cross-section, which is smaller - 88 against 99 for etfs, 2,032
-    against 3,708 for us_firm_characteristics - and moving the rule onto it would
-    change which concentrations are feasible today. That is a separate decision
-    about the rule; this function is about which set the rule reads.
+    Unanimity is the common case, not a hope: measured 2026-09-07 over six
+    registered sets per label in etfs, us_firm_characteristics,
+    sp500_equity_option_analytics and us_equities_panel, every label had exactly
+    one width - 99, 3,708, 549 and 3,147 respectively.
+
+    Distinct symbols over the window, which is the same count the callers take
+    off the price panel, so the comparison in ``get_entry_schemes_for`` is between
+    two measurements of the same kind. The number that literally bounds a ranking
+    is the per-date cross-section, which is smaller - 88 against 99 for etfs,
+    2,032 against 3,708 for us_firm_characteristics - and moving the rule onto it
+    would change which concentrations are feasible today. That is a separate
+    decision about the rule; this function is about which set the rule reads.
     """
     import sqlite3
+    import warnings
 
     from case_studies.utils.registry.store import _case_dir, _registry_db_path, _run_log_dir
 
@@ -415,27 +430,42 @@ def ranked_cross_section_width(
         return None
     try:
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as db:
-            row = db.execute(
+            rows = db.execute(
                 """
                 SELECT p.prediction_hash
                 FROM prediction_sets p
                 JOIN training_runs t ON t.training_hash = p.training_hash
                 WHERE t.label = ? AND p.split = ?
+                LIMIT ?
                 """,
-                (label, split),
-            ).fetchone()
+                (label, split, _RANKED_WIDTH_SAMPLE),
+            ).fetchall()
     except sqlite3.Error:
         return None
-    if row is None:
-        return None
 
-    artifact = _run_log_dir(case_dir) / "predictions" / row[0] / "predictions.parquet"
-    if not artifact.is_file():
+    widths: set[int] = set()
+    for (prediction_hash,) in rows:
+        artifact = _run_log_dir(case_dir) / "predictions" / prediction_hash / "predictions.parquet"
+        if not artifact.is_file():
+            continue
+        try:
+            widths.add(
+                int(pl.scan_parquet(artifact).select(pl.col("symbol").n_unique()).collect().item())
+            )
+        except (pl.exceptions.PolarsError, OSError, ValueError):
+            return None
+    if not widths:
         return None
-    try:
-        return int(pl.scan_parquet(artifact).select(pl.col("symbol").n_unique()).collect().item())
-    except (pl.exceptions.PolarsError, OSError, ValueError):
+    if len(widths) > 1:
+        warnings.warn(
+            f"{case_study}/{label}: registered prediction sets disagree on the ranked "
+            f"cross-section ({sorted(widths)}), so the entry-scheme feasibility rule falls "
+            "back to the caller's price-panel width. Pass ranked_width= with the width of "
+            "the population actually being swept.",
+            stacklevel=2,
+        )
         return None
+    return widths.pop()
 
 
 def get_entry_schemes_for(

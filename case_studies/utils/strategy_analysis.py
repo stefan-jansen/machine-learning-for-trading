@@ -20,6 +20,7 @@ Usage::
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timezone
@@ -72,6 +73,13 @@ UNIVERSE_RESTRICTIONS: dict[str, str] = {
 # information only. The corrected S&P 500 options carrier is the liquid-universe
 # cross-stage rank-1. Two alternative allocator rows tie its Sharpe exactly, so
 # the deterministic tie-break preserves the simpler equal-weight baseline spec.
+
+
+def _ruined(returns) -> bool:
+    """Whether this return path took its account through zero equity anywhere."""
+    from case_studies.utils.backtest_runner import first_ruin_index
+
+    return first_ruin_index(returns) is not None
 
 
 def rank_returns_on_common_support(
@@ -128,7 +136,19 @@ def rank_returns_on_common_support(
         # of a mean to a dispersion describes a process that continues
         # (ml4t/agent-workspace#920). The candidate stays on the frame so the
         # caller can see it was compared, and sorts below every solvent one.
+        #
+        # Ruin is read off the *whole* series, not off the common-support slice.
+        # The intersection can end before the period that wiped the account out,
+        # and a bankrupt book restricted to the months before it went bankrupt is
+        # not a rankable strategy - it would outrank a solvent candidate with a
+        # negative Sharpe on the strength of the window the comparison happened
+        # to choose.
+        #
+        # None rather than the NaN the metrics carry: polars sorts a NaN first on
+        # a descending sort, which is the one place that matters here.
         sharpe = metrics["sharpe"]
+        if _ruined(frame["daily_return"].to_numpy()) or (sharpe is not None and math.isnan(sharpe)):
+            sharpe = None
         rows.append(
             {
                 "backtest_hash": backtest_hash,
