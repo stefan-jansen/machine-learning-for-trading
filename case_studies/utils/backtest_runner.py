@@ -1235,41 +1235,40 @@ def _restore_ruin_nans(metrics: dict) -> dict:
     return metrics
 
 
-def refuse_predictions_the_panel_cannot_price(
+def warn_if_the_panel_does_not_bound_the_universe(
     predictions: pl.DataFrame, prices: pl.DataFrame, *, case_study: str, label: str
 ) -> None:
-    """Stop a vectorized run whose price panel does not cover what it will trade.
+    """Say when a price panel is not the universe a vectorized run will trade.
 
-    The vectorized path takes both the universe and the P&L from the predictions
-    frame - ``gross_ret = weight * y_true`` - and uses ``prices`` only for the
-    rebalance calendar, which is the same set of decision dates whichever symbols
-    are in the panel. So ``load_backtest_prices_for(..., max_symbols=N)`` reduced
-    the price frame and nothing else. Measured on us_firm_characteristics/11_backtest,
-    2026-08-24: 8 predictions x 4 schemes at 300 symbols and at 3,708 gave
-    bit-identical Sharpe, CAGR and drawdown on all 32 backtests, in 21 s against
-    19 s, and the random-signal plumbing Sharpe read -0.149212 at 100, 300, 1000
-    and 3,708 symbols alike (ml4t/agent-workspace#911).
+    The vectorized path computes ``gross_ret = weight * y_true`` from the
+    predictions frame and reads ``prices`` only for the rebalance calendar, which
+    is the same set of decision dates whichever symbols are in the panel. So
+    ``load_backtest_prices_for(..., max_symbols=N)`` reduces the price frame and
+    nothing else, and a preview taken at a reduced ``MAX_SYMBOLS`` is the
+    production sweep with the production cost per backtest. Measured on
+    us_firm_characteristics/11_backtest, 2026-08-24: 8 predictions x 4 schemes at
+    300 symbols and at 3,708 gave bit-identical Sharpe, CAGR and drawdown across
+    all 32 backtests, in 21 s against 19 s (ml4t/agent-workspace#911).
 
-    Silently trading the predictions the panel does not carry is what made that
-    knob inert, and quietly narrowing the predictions to the panel instead is
-    worse: the traded universe would then decide the portfolio without entering
-    the backtest identity, and the caller hashes its specification before it ever
-    reaches this module - `us_firm_characteristics/11_backtest.py:273` computes
-    `backtest_hash_from_parts` and skips a matching run before calling
-    `run_backtest`. A reduced preview would be served the full-universe result.
+    This warns and does not act, which is a decision the engine cannot make on
+    its own. Both ways of acting were tried and both are wrong here:
 
-    So the run stops. A preview at a reduced `MAX_SYMBOLS` no longer measures the
-    production sweep at the production cost per backtest while looking reduced -
-    it refuses, and says which knob does reduce this stage. `TOP_N_PREDICTIONS`
-    cuts the number of backtests, and each one it leaves is a full, honest run.
+    * **Narrowing the predictions to the panel** makes the traded universe decide
+      the portfolio without entering the backtest identity. The caller hashes its
+      specification before this module sees the run -
+      ``us_firm_characteristics/11_backtest.py:273`` computes
+      ``backtest_hash_from_parts`` and skips a matching run - so a reduced preview
+      would be served the full-universe result. Stamping the universe inside
+      ``run_backtest`` is too late for that check, and a symbol count is not a
+      universe in any case: ``{A, B}`` and ``{A, C}`` are different portfolios.
+    * **Refusing the run** stops a preview that is legitimately configured this
+      way. Measured on CI 2026-09-07: the `us_firm_characteristics` fixture holds
+      a 5-symbol price panel against 20-symbol predictions, and refusing took
+      four notebooks down.
 
-    This fires on nothing that exists. Measured 2026-09-07 on the
-    us_firm_characteristics panel: every one of the 3,708 symbols it predicts for
-    `fwd_ret_1m` and `fwd_class_1m` is in its 9,861-symbol price panel, and
-    ``top_entities`` - the one rule every reduction in the repo reaches - selects
-    the identical symbol set from the price panel and from the label panel at 5,
-    12 and 200, which are the caps `tests/overrides.yaml` runs the backtest
-    notebooks at.
+    What closes this is the caller declaring the universe it trades, in the spec,
+    before it hashes - which is a notebook change. Until then the parameter is
+    inert here and this says so at the moment it happens.
     """
     if "symbol" not in prices.columns or prices.is_empty() or predictions.is_empty():
         return
@@ -1285,16 +1284,14 @@ def refuse_predictions_the_panel_cannot_price(
     unpriced = predictions.join(priced, on="symbol", how="anti")
     if unpriced.is_empty():
         return
-    missing = sorted(unpriced["symbol"].unique().to_list())
-    raise ValueError(
+    warnings.warn(
         f"{case_study}/{label}: the price panel carries {priced.height} symbols and the "
-        f"predictions carry {predictions['symbol'].n_unique()}, {len(missing)} of which it "
-        f"cannot price (first: {missing[:5]}). The vectorized path takes its universe and "
-        "its P&L from the predictions, so a narrower panel does not reduce this run - it "
-        "would trade every predicted name at the full cost per backtest while reading as a "
-        "reduction. Load the panel the predictions were fitted on. To reduce this stage, "
-        "cut TOP_N_PREDICTIONS, which lowers the number of backtests and leaves each one a "
-        "full run."
+        f"predictions carry {predictions['symbol'].n_unique()}, {unpriced['symbol'].n_unique()} "
+        "of which it cannot price. The vectorized path takes its universe and its P&L from "
+        "the predictions, so this run trades every predicted name at the full cost per "
+        "backtest and the narrower panel reduces nothing (ml4t/agent-workspace#911). "
+        "TOP_N_PREDICTIONS is the knob that reduces this stage.",
+        stacklevel=2,
     )
 
 
@@ -1441,13 +1438,13 @@ def run_backtest(
 
     # A price panel that does not cover the predictions does not reduce a
     # vectorized run, it just makes the parameter read as if it did - see
-    # `refuse_predictions_the_panel_cannot_price`. The sp500_options HTM path is
-    # excluded because its `prices` frame and its predictions are not indexed by
-    # the same kind of symbol.
+    # `warn_if_the_panel_does_not_bound_the_universe`. The sp500_options HTM path
+    # is excluded because its `prices` frame and its predictions are not indexed
+    # by the same kind of symbol.
     if strategy.get("rebalance", {}).get("mode") == "vectorized" and not (
         case_study == "sp500_options" and label == "ret_to_expiry"
     ):
-        refuse_predictions_the_panel_cannot_price(
+        warn_if_the_panel_does_not_bound_the_universe(
             predictions, prices, case_study=case_study, label=label
         )
 

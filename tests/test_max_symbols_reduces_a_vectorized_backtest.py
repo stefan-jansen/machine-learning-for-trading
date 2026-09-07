@@ -1,4 +1,4 @@
-"""A price panel narrower than the predictions stops a vectorized run.
+"""A price panel narrower than the predictions is reported, not acted on.
 
 ml4t/agent-workspace#911. The vectorized path computes `gross_ret = weight *
 y_true` from the predictions frame and reads `prices` only for the rebalance
@@ -7,11 +7,15 @@ a preview taken at a reduced `MAX_SYMBOLS` was the production sweep at the
 production cost per backtest: measured on us_firm_characteristics/11_backtest,
 32 backtests at 300 symbols and at 3,708 agreed in every column to six decimals.
 
-Narrowing the predictions to the panel instead would make the traded universe
-decide the portfolio without entering the backtest identity, and the caller
-hashes its specification before this module sees it - `11_backtest.py:273`
-computes `backtest_hash_from_parts` and skips a matching run before calling
-`run_backtest`, so a reduced preview would be served the full-universe result.
+Both ways of acting on it are wrong here, and each was tried. Narrowing the
+predictions to the panel makes the traded universe decide the portfolio without
+entering the backtest identity - the caller hashes its specification before this
+module sees the run, so a reduced preview would be served the full-universe
+result. Refusing the run stops a preview that is legitimately configured this
+way: the CI `us_firm_characteristics` fixture holds a 5-symbol panel against
+20-symbol predictions, and refusing took four notebooks down. What closes it is
+the caller declaring the universe it trades, before it hashes, which is a
+notebook change.
 """
 
 from __future__ import annotations
@@ -92,25 +96,31 @@ def _run(monkeypatch, prices, **kwargs) -> dict:
     return captured
 
 
-def test_a_panel_that_cannot_price_the_predictions_stops_the_run(monkeypatch) -> None:
+def test_a_panel_that_cannot_price_the_predictions_says_so(monkeypatch) -> None:
     """The defect: the panel was reduced and the sweep ran over all four names."""
-    with pytest.raises(ValueError) as excinfo:
-        _run(monkeypatch, _prices(["A", "C"]))
-    message = str(excinfo.value)
+    with pytest.warns(UserWarning) as record:
+        captured = _run(monkeypatch, _prices(["A", "C"]))
+    message = str(record[0].message)
     assert "2 of which it cannot price" in message
-    assert "['B', 'D']" in message
     # Names the knob that does reduce this stage, so the reader is not left to guess.
     assert "TOP_N_PREDICTIONS" in message
+    # And says it without changing the run: the identity the caller already hashed
+    # describes a sweep over all four names, and that is what it gets.
+    assert captured["predictions"]["symbol"].to_list() == ["A", "B", "C", "D"]
 
 
-def test_a_covering_panel_runs(monkeypatch) -> None:
-    """The control: nothing is refused when the panel carries every predicted name."""
-    captured = _run(monkeypatch, _prices(["A", "B", "C", "D", "E"]))
+def test_a_covering_panel_is_silent(monkeypatch) -> None:
+    """The control: nothing is reported when the panel carries every predicted name."""
+    import warnings as _warnings
+
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error", UserWarning)
+        captured = _run(monkeypatch, _prices(["A", "B", "C", "D", "E"]))
     assert captured["predictions"]["symbol"].to_list() == ["A", "B", "C", "D"]
     assert sorted(captured["weights"]["symbol"].to_list()) == ["A", "B"]
 
 
-def test_a_precomputed_allocation_is_held_to_the_same_panel(monkeypatch) -> None:
+def test_a_precomputed_allocation_is_reported_on_too(monkeypatch) -> None:
     """The Ch19 risk sweep reads y_true from the same predictions frame."""
     weights = pl.DataFrame(
         {
@@ -119,17 +129,21 @@ def test_a_precomputed_allocation_is_held_to_the_same_panel(monkeypatch) -> None
             "weight": [0.25, 0.25, 0.25, 0.25],
         }
     )
-    with pytest.raises(ValueError, match="cannot price"):
+    with pytest.warns(UserWarning, match="cannot price"):
         _run(monkeypatch, _prices(["A", "C"]), precomputed_weights=weights)
 
 
-def test_an_empty_panel_is_left_to_the_engine() -> None:
+def test_an_empty_panel_says_nothing() -> None:
     """No panel is not a reduction to zero; the engine's own guards cover it."""
-    from case_studies.utils.backtest_runner import refuse_predictions_the_panel_cannot_price
+    import warnings as _warnings
 
-    refuse_predictions_the_panel_cannot_price(
-        _predictions(), pl.DataFrame(), case_study="demo", label="fwd_ret_1m"
-    )
+    from case_studies.utils.backtest_runner import warn_if_the_panel_does_not_bound_the_universe
+
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error", UserWarning)
+        warn_if_the_panel_does_not_bound_the_universe(
+            _predictions(), pl.DataFrame(), case_study="demo", label="fwd_ret_1m"
+        )
 
 
 def test_the_htm_option_path_keeps_its_own_universe(monkeypatch) -> None:
