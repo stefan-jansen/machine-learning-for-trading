@@ -68,7 +68,7 @@ CONFIG_NAME = ""
 # replaces. Empty means the fit must leave exactly one current identity on its own.
 # Papermill passes parameters through as strings, which is why this is a str and not a
 # mapping.
-SUPERSEDES_CAUSAL: str = "f4d06287382a"
+SUPERSEDES_CAUSAL: str = ""
 
 # %%
 study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)

@@ -20,6 +20,7 @@ from ml4t.diagnostic.metrics import cross_sectional_ic
 from threadpoolctl import threadpool_limits
 
 from case_studies.utils.backtest_loaders import get_rebalance_step, thin_to_rebalance_dates
+from case_studies.utils.folds import fold_seed
 from case_studies.utils.latent_factors.cae import run_cae_fold
 from case_studies.utils.latent_factors.ipca import run_ipca_fold
 from case_studies.utils.latent_factors.library_bridge import configure_latent_torch_runtime
@@ -884,7 +885,7 @@ def run_latent_factor_cv(
             {"fold_id": int(split["fold"]), **completed[int(split["fold"])][1]}
             for split, _ in prepared_folds
         ]
-        _require_ipca_convergence("ipca", ordered_extras)
+        _require_fit_convergence("ipca", ordered_extras)
         for split, model_input in prepared_folds:
             checkpoint_preds, extra, fold_elapsed = completed[int(split["fold"])]
             record_fold(
@@ -899,7 +900,9 @@ def run_latent_factor_cv(
         for split in splits:
             if not active_models:
                 break
-            seed_everything(RANDOM_SEED + int(split["fold"]))
+            # The fold's number is an input to the fit, not a label on it: renumbering
+            # the windows reseeds every one of them. See `folds.fold_seed`.
+            seed_everything(fold_seed(RANDOM_SEED, int(split["fold"])))
             fold_inputs = _prepare_fold_inputs(
                 dataset=dataset,
                 split=split,
@@ -971,7 +974,7 @@ def run_latent_factor_cv(
         fold_metrics[model_name] = fold_ics_df
         all_extras[model_name] = state[model_name]["fold_extras"]
 
-        _require_ipca_convergence(model_name, state[model_name]["fold_extras"])
+        _require_fit_convergence(model_name, state[model_name]["fold_extras"])
 
         model_dir = model_dirs[model_name]
         if model_dir is not None:
@@ -1105,6 +1108,57 @@ def _filter_dataset_for_splits(
         )
         used = used | train | validation
     return dataset.filter(used)
+
+
+# Every latent-factor model that iterates towards a fit. `pca` is deliberately absent: it is
+# a deterministic decomposition with nothing to converge, so asking it for a determination
+# would refuse every PCA cohort.
+_CONVERGENCE_GUARDED_MODELS = frozenset({"ipca", "cae", "sae", "sdf"})
+
+
+def _require_fit_convergence(
+    model_name: str,
+    fold_extras: list[dict[str, Any]],
+) -> None:
+    """Refuse to register any iterative latent-factor cohort that did not converge.
+
+    `_require_ipca_convergence` below reads a ``converged`` flag that only the IPCA branch of
+    `library_bridge` wrote, so its name was accurate and its coverage was one model of four.
+    An SDF, CAE or SAE fit that never identified registered anyway: nothing compared the
+    objective at the last step with the one before it, nothing required the terminal Sharpe
+    to be finite, its predictions entered the population, and `require_complete` and the
+    notebook's IC table both passed. The failure was invisible at the point where it
+    happened and showed up only as results that were quietly meaningless.
+
+    The determination is not the same statement for every model, and `library_bridge`'s
+    ``convergence_criterion`` records which one was applied: IPCA reports whether its
+    alternating least squares settled within ``tol``, and the three gradient-descent models
+    report a finite terminal objective, plus a finite terminal Sharpe for the SDF. What the
+    guard requires is identical either way - a determination exists, and it is positive.
+    """
+    if model_name not in _CONVERGENCE_GUARDED_MODELS:
+        return
+    if model_name == "ipca":
+        _require_ipca_convergence(model_name, fold_extras)
+        return
+
+    # An absent flag is a runner that stopped writing the determination, which is how this
+    # guard silently loses a model. It is refused separately from a negative flag so the
+    # message says which of the two happened. IPCA keeps the older reading, where an absent
+    # flag counts as a fit that did not settle, because its stored extras were written
+    # under it.
+    undetermined = [int(extra["fold_id"]) for extra in fold_extras if "converged" not in extra]
+    if undetermined:
+        raise RuntimeError(
+            f"{model_name} recorded no convergence determination for folds {undetermined}; "
+            "refusing to register predictions from a fit that was never checked"
+        )
+    failed = [int(extra["fold_id"]) for extra in fold_extras if not extra["converged"]]
+    if failed:
+        raise RuntimeError(
+            f"{model_name} did not converge for folds "
+            f"{failed}; refusing to register predictions from a fit that did not identify"
+        )
 
 
 def _require_ipca_convergence(

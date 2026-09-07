@@ -445,6 +445,57 @@ def test_causal_run_registers_once_and_reopens_after_restart(tmp_path, monkeypat
     assert json.loads(json.dumps(reopened.spec)) == reopened.spec
 
 
+def test_the_frozen_fraction_reaches_the_registry_and_survives_a_cache_hit(
+    tmp_path, monkeypatch
+) -> None:
+    """The diagnostic the refutation's own warning names must reach the reader who
+    regenerates the result rather than the one who watched the fit.
+
+    `_assert_placebo_permutation_possible` warns that `placebo_frozen_fraction` has to be
+    read alongside the p-value, and it warns from inside the fit. The second `run()` below
+    is served from cache and performs no fit, so it emits no warning - which is exactly the
+    re-run a reader does to reproduce a published number. Registering the fraction is what
+    makes that reader able to see whether the p-value is biased toward 1.
+    """
+    study, label, _frame = _causal_fixture(tmp_path, monkeypatch)
+    calls = 0
+
+    def run_analysis(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return {
+            "dml_result": {"theta": 0.02, "se_hac": 0.01, "n_obs": 120},
+            "p_value_hac": 0.04,
+            "naive_effect": 0.03,
+            "confounding_bias_pct": 50.0,
+            "refutation": {
+                "empirical_p": 0.1,
+                "n_successful": 10,
+                "placebo_frozen_fraction": 0.023,
+            },
+        }
+
+    monkeypatch.setattr(causal, "run_dml_analysis", run_analysis)
+    request = study.causal(
+        method="dml",
+        label=label.name,
+        execution_tier="preview",
+        preview_reductions={
+            "max_samples": 240,
+            "max_symbols": 6,
+            "n_folds": 2,
+            "n_placebo": 10,
+        },
+    )
+
+    first = request.run()
+    second = request.run()
+
+    assert calls == 1
+    assert first.metrics["placebo_frozen_fraction"] == pytest.approx(0.023)
+    assert second.metrics["placebo_frozen_fraction"] == pytest.approx(0.023)
+
+
 def test_causal_cache_accepts_provenance_only_drift(tmp_path, monkeypatch) -> None:
     study, label, _frame = _causal_fixture(tmp_path, monkeypatch)
     calls = 0

@@ -64,6 +64,7 @@ from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.derived_params import quantize_derived
 from case_studies.utils.folds import (
     FOLD_PREPARATION_VERSION,
+    fold_seed,
     prepare_gbm_folds_from_mds,
     training_labels_for_split,
 )
@@ -256,6 +257,13 @@ GBM_RUNNER_VERSION = 1
 # on the ordering of a feature and routes a missing value down its own branch, so both would only
 # fabricate observations. Bump when that casting changes.
 GBM_PREPROCESSING_ID = "lightgbm-native-float32/v1"
+
+# The object a registered GBM run fits, recorded as `computation.model.class` and declared by
+# every `config/lgb/*.yaml` preset so the configuration catalog a notebook prints names the same
+# thing the registry does. It is the native Booster, not the `LGBMRegressor` that `create_model`
+# builds for callers outside the registered path - a distinction the catalog's blank `model_class`
+# column used to hide from the reader.
+GBM_MODEL_CLASS = "lightgbm.Booster"
 
 
 def _best_gpu_device(library: str) -> str | None:
@@ -774,10 +782,11 @@ def prepare_gbm_folds(
         )
 
         # Optional train subsample (never touch val — OOS IC uses full val slice).
-        # Seed is tied to fold_id for reproducibility.
+        # The seed is the fold's number added to the base, so which rows a reduced run
+        # keeps changes when the windows are renumbered. See `folds.fold_seed`.
         if 0.0 < train_sample_frac < 1.0 and len(X_train) > 0:
             n_keep = max(1, int(len(X_train) * train_sample_frac))
-            rng = np.random.default_rng(seed + fold_id)
+            rng = np.random.default_rng(fold_seed(seed, fold_id))
             keep_idx = rng.choice(len(X_train), size=n_keep, replace=False)
             keep_idx.sort()  # preserve row order
             X_train = X_train[keep_idx]
@@ -1788,7 +1797,7 @@ def _build_gbm_resolved_request(
         },
         "cv": base["cv_record"],
         "model": {
-            "class": "lightgbm.Booster",
+            "class": GBM_MODEL_CLASS,
             "implementation": "lightgbm",
             "effective_params_by_fold": effective,
             "huber_alpha_scale": config.get("huber_alpha_scale"),

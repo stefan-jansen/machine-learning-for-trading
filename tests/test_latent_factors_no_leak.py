@@ -755,7 +755,13 @@ def test_legacy_fresh_and_cached_outputs_share_physical_checkpoint_surface(
     def fake_cae(chars_train, returns_train, chars_val, returns_val, **_kwargs):
         del chars_train, returns_train, returns_val
         physical = chars_val[..., 0]
-        return {0: physical - 1.0, 5: physical}, {"checkpoint_epochs": [0, 5]}
+        # `converged` because the real CAE runner records one: `_require_fit_convergence`
+        # refuses a cohort whose extras carry no determination, and a double that omits it
+        # is not standing in for the runner.
+        return (
+            {0: physical - 1.0, 5: physical},
+            {"checkpoint_epochs": [0, 5], "converged": True},
+        )
 
     monkeypatch.setitem(cv._MODEL_RUNNERS, "cae", fake_cae)
     kwargs = {
@@ -842,7 +848,13 @@ def test_filesystem_cache_requires_each_checkpoint_for_each_fold(
         del chars_train, returns_train, returns_val
         fit_calls += 1
         physical = chars_val[..., 0]
-        return {0: physical - 1.0, 5: physical}, {"checkpoint_epochs": [0, 5]}
+        # `converged` because the real CAE runner records one: `_require_fit_convergence`
+        # refuses a cohort whose extras carry no determination, and a double that omits it
+        # is not standing in for the runner.
+        return (
+            {0: physical - 1.0, 5: physical},
+            {"checkpoint_epochs": [0, 5], "converged": True},
+        )
 
     monkeypatch.setitem(cv._MODEL_RUNNERS, "cae", fake_cae)
     cache_dir = tmp_path / "cache"

@@ -46,7 +46,9 @@ VALID_PREDICTION_SPLITS = frozenset({"validation", "holdout"})
 # Columns a schema migration added, which an immutable row may therefore be missing
 # through no change of its own. Nothing else is filled on NULL: see the comment at the
 # backfill itself for why a nullable column is not the same as a migrated one.
-MIGRATION_BACKFILLED_COLUMNS = frozenset({"refutation_n_successful", "refutation_placebo_json"})
+MIGRATION_BACKFILLED_COLUMNS = frozenset(
+    {"refutation_n_successful", "refutation_placebo_json", "refutation_frozen_fraction"}
+)
 MAX_PREDICTION_STD_RATIO = 100.0
 
 
@@ -2277,6 +2279,7 @@ def register_causal_run(
     refutation_p: float | None,
     refutation_n_successful: int | None = None,
     refutation_placebo_json: str | None = None,
+    refutation_frozen_fraction: float | None = None,
     spec_json: str,
     notebook: str | None,
     started_at: str | None,
@@ -2336,6 +2339,7 @@ def register_causal_run(
             "confounding_bias_pct",
             "refutation_p",
             "refutation_n_successful",
+            "refutation_frozen_fraction",
             "spec_json",
             "notebook",
         )
@@ -2363,6 +2367,7 @@ def register_causal_run(
             confounding_bias_pct,
             refutation_p,
             refutation_n_successful,
+            refutation_frozen_fraction,
             spec_json,
             notebook,
         )
@@ -2424,9 +2429,10 @@ def register_causal_run(
                 n_folds, n_obs, dml_effect, dml_se_hac, p_value_hac,
                 naive_effect, confounding_bias_pct, refutation_p,
                 refutation_n_successful, refutation_placebo_json,
+                refutation_frozen_fraction,
                 spec_json, notebook, started_at, elapsed_s, git_commit,
                 supersedes_hash, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(causal_hash) DO UPDATE SET
                 label=excluded.label,
                 treatment=excluded.treatment,
@@ -2447,6 +2453,12 @@ def register_causal_run(
                 refutation_placebo_json=COALESCE(
                     excluded.refutation_placebo_json, causal_runs.refutation_placebo_json
                 ),
+                -- Plain, not COALESCE: this column is in `comparable_columns`, so by the
+                -- time the UPDATE runs the value either matched the stored one or was
+                -- backfilled into it. That is the `refutation_n_successful` shape, not the
+                -- `refutation_placebo_json` one, which is fill-once because nothing
+                -- compares it.
+                refutation_frozen_fraction=excluded.refutation_frozen_fraction,
                 spec_json=excluded.spec_json,
                 notebook=excluded.notebook,
                 started_at=excluded.started_at,
@@ -2471,6 +2483,8 @@ def register_causal_run(
                OR causal_runs.confounding_bias_pct IS NOT excluded.confounding_bias_pct
                OR causal_runs.refutation_p IS NOT excluded.refutation_p
                OR causal_runs.refutation_n_successful IS NOT excluded.refutation_n_successful
+               OR causal_runs.refutation_frozen_fraction
+                   IS NOT excluded.refutation_frozen_fraction
                OR causal_runs.spec_json IS NOT excluded.spec_json
                OR causal_runs.notebook IS NOT excluded.notebook
                OR (excluded.supersedes_hash IS NOT NULL
@@ -2492,6 +2506,7 @@ def register_causal_run(
                 refutation_p,
                 refutation_n_successful,
                 refutation_placebo_json,
+                refutation_frozen_fraction,
                 spec_json,
                 notebook,
                 started_at,

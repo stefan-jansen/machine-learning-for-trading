@@ -46,6 +46,7 @@ from sklearn.preprocessing import StandardScaler
 
 from case_studies.research.models import ModelRun
 from case_studies.utils.artifact_digest import value_digest
+from case_studies.utils.folds import fold_seed
 from case_studies.utils.registry import clear_prediction_sets, compute_fold_metrics_from_predictions
 from case_studies.utils.runtime import cpu_seconds
 
@@ -63,6 +64,13 @@ _TABM_IMBALANCE_METHODS = {"balanced", "none"}
 # nine declare none, so these are the values every existing TabM identity was fitted under.
 DEFAULT_TABM_DEVICE = "cuda"
 DEFAULT_TABM_NUM_THREADS = 8
+# The object a registered TabM run fits, recorded as `computation.model.class` and declared by
+# the `config/tabm/tabm_*.yaml` presets. `tabpfn.yaml` sits in the same family and the same
+# directory and is a different model - `_run_tabpfn_fold` builds a `TabPFNRegressor`, and
+# `_resolve_tabm_config` refuses it on the canonical path for that reason - so this is a real
+# distinction inside `tabular_dl` that the catalog's blank `model_class` column hid.
+TABM_MODEL_CLASS = "TabMModel"
+TABPFN_MODEL_CLASS = "TabPFNRegressor"
 TABM_RUNNER_VERSION = 1
 TABM_STATE_VERSION = 1
 
@@ -351,7 +359,7 @@ def _resolve_model_request_from_materialized(
         "task": task,
         "cv": cv_record,
         "model": {
-            "class": "TabMModel",
+            "class": TABM_MODEL_CLASS,
             "implementation": "pytorch",
             "objective": "classification" if mds.task_type == "classification" else "regression",
             "params": {
@@ -2828,7 +2836,9 @@ def run_tabm_cv(
             is_tabpfn = artifact_name.startswith("tabpfn")
             fold_t0 = time.perf_counter()
             fold_cpu0 = cpu_seconds()
-            seed_everything(seed + fd["fold"])
+            # The fold's number is an input to the fit, not a label on it: renumbering
+            # the windows reseeds every one of them. See `folds.fold_seed`.
+            seed_everything(fold_seed(seed, fd["fold"]))
             fold_prediction_frame = None
             fold_training_record = None
             if is_tabpfn:
