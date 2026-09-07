@@ -457,11 +457,18 @@ if registered_stage[0] != "holdout":
 # %% [markdown]
 # ## 4. What the holdout says
 #
-# The two rows below are the same strategy on two windows. The validation figure
-# is the one the configuration was chosen on and is optimistic by construction:
-# it is the maximum of a search, and the maximum of a search is a biased estimate
-# of the thing searched over. The holdout figure has no such bias from *this*
-# case study's selection.
+# The two rows below are the same strategy on two windows. Both are read from
+# `backtest_metrics`, so each is measured over the span its own run priced. The
+# validation row is therefore the registered run's own figure and not the number the
+# selection was decided on: the field here holds a conformal allocator that sits out
+# its warm-up and books it as returns of exactly zero, so the ranking re-measures every
+# candidate over the sessions they all price. That figure is printed above the table,
+# and on this registry the two differ - 2.6329 over the shared sessions against 2.6087
+# stored.
+#
+# Either way the validation figure is optimistic by construction: it is the maximum of
+# a search, and the maximum of a search is a biased estimate of the thing searched over.
+# The holdout figure has no such bias from *this* case study's selection.
 #
 # It carries a different one. The window is a single year, and 2021 was a
 # particular year - a broad advance in US equities - so a result this good in a
@@ -470,6 +477,13 @@ if registered_stage[0] != "holdout":
 # window it was tested on, and nothing downstream of here can either.
 
 # %%
+# The metric the configuration was actually selected on, stated before the table so the
+# validation row below is read as what it is - the registered run over its own span.
+print(
+    f"selected on Sharpe={CARRIER['val_sharpe']:.4f} over the "
+    f"{CARRIER['comparison_n_periods'] or 'full'} sessions every candidate prices"
+)
+
 with sqlite3.connect(REGISTRY_DB) as db:
     comparison = pl.read_database(
         """
@@ -488,7 +502,7 @@ if comparison.height != 2:
 comparison = comparison.with_columns(
     pl.when(pl.col("backtest_hash") == HOLDOUT_BACKTEST_HASH)
     .then(pl.lit("holdout (2021)"))
-    .otherwise(pl.lit("validation (selected on)"))
+    .otherwise(pl.lit("validation (registered span)"))
     .alias("window")
 ).sort("window")
 comparison.select(
@@ -526,10 +540,12 @@ comparison.select(
 
 # %%
 _holdout = comparison.filter(pl.col("window") == "holdout (2021)").row(0, named=True)
-_validation = comparison.filter(pl.col("window") == "validation (selected on)").row(0, named=True)
+_validation = comparison.filter(pl.col("window") == "validation (registered span)").row(
+    0, named=True
+)
 _spans_zero = _holdout["sharpe_ci95_lo"] <= 0.0 <= _holdout["sharpe_ci95_hi"]
 print(
-    f"Validation Sharpe {_validation['sharpe']:.3f} "
+    f"Validation Sharpe {_validation['sharpe']:.3f} over the registered span "
     f"[{_validation['sharpe_ci95_lo']:.3f}, {_validation['sharpe_ci95_hi']:.3f}] "
     f"over {int(_validation['n_periods'])} sessions"
 )

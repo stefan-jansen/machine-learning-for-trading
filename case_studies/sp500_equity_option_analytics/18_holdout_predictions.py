@@ -572,9 +572,12 @@ print(
 # The information coefficient is the rank correlation between the prediction and
 # the realized label. Reading the holdout's beside the validation figure for the
 # same configuration says whether the signal decayed, and by how much; it does
-# not license a claim about either number on its own, because the validation
-# figure is the one the configuration was selected on and is optimistic by
-# construction.
+# not license a claim about either number on its own. The configuration was
+# selected on validation backtest Sharpe and never on an information coefficient
+# (`reference/CASE_STUDY_PIPELINE.md` section 5), so the validation row below is the
+# selected configuration's IC rather than the quantity the selection ranked - and it
+# is still optimistic, because the configuration it describes is the maximum of a
+# search.
 
 # %%
 with sqlite3.connect(REGISTRY_DB) as db:
@@ -591,7 +594,7 @@ if _holdout_ic is None:
 
 split_table = pl.DataFrame(
     {
-        "split": ["validation (selected on)", "holdout (2021)"],
+        "split": ["validation (selected configuration)", "holdout (2021)"],
         "prediction": [selected_prediction.hash, HOLDOUT_PREDICTION.hash],
         "ic_mean": [
             None if _validation_ic is None else _validation_ic[0],

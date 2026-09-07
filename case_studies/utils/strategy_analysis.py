@@ -694,6 +694,26 @@ def select_holdout_self_backtest(
     ).backtest_hash
 
 
+class NoSelectableCandidates(RuntimeError):
+    """The case study currently publishes no configuration that may be selected.
+
+    Every refusal `selectable_validation_candidates` raises for an empty pool is this
+    type, so a caller asking *whether* a selection exists can answer "no" without
+    swallowing an unrelated failure. It subclasses ``RuntimeError`` because that is what
+    the selector raised before the type existed, and every caller that reports the refusal
+    rather than branching on it keeps working unchanged.
+
+    `has_holdout_predictions` is the caller that needs the distinction: it reports whether
+    a holdout already covers the current top-N, and an initialised registry with no
+    eligible validation backtest is a legitimate "not yet", not an error. It used to catch
+    `ValueError`, which is what the pool it built itself raised; routing it through the
+    canonical selector changed the type under it, and in
+    `20_strategy_synthesis/00_holdout_predictions.py` that call sits outside the
+    generation loop's handler, so one un-run case study would have stopped every case
+    study after it.
+    """
+
+
 SELECTION_STAGES: tuple[str, ...] = ("signal", "allocation", "risk_overlay")
 """The pool a configuration is selected from.
 
@@ -810,7 +830,7 @@ def selectable_validation_candidates(
     # would have been a regression on the one case study whose refit changed a fold count.
     published_predictions = published_members_at(case_dir, member_kind="prediction")
     if published_predictions is not None and not published_predictions:
-        raise RuntimeError(
+        raise NoSelectableCandidates(
             f"{case_study} declares prediction populations and publishes no prediction "
             "identities, so there is nothing it may select. Re-run the stage that publishes "
             "them rather than ranking over an empty population."
@@ -909,7 +929,7 @@ def selectable_validation_candidates(
     ranked = len(candidates)
     published_backtests = published_members_at(case_dir, member_kind="backtest")
     if published_backtests is not None and not published_backtests:
-        raise RuntimeError(
+        raise NoSelectableCandidates(
             f"{case_study} declares backtest populations and publishes no backtest "
             "identities, so there is nothing it may select. Re-run the stage that publishes "
             "them rather than ranking over an empty population."
@@ -926,14 +946,14 @@ def selectable_validation_candidates(
         admitted_before = len(candidates)
         candidates = [row for row in candidates if row["backtest_hash"] in admitted]
         if admitted_before and not candidates:
-            raise RuntimeError(
+            raise NoSelectableCandidates(
                 f"None of the {admitted_before} live validation backtests for {case_study} "
                 f"is among the {len(admitted)} the frozen candidate set admits. The set and "
                 "the registry describe different sweeps; re-freeze the set rather than "
                 "selecting outside it."
             )
     if ranked and not candidates:
-        raise RuntimeError(
+        raise NoSelectableCandidates(
             f"Every one of the {ranked} ranked validation backtests for {case_study} belongs "
             "to a superseded generation or to none the case study publishes, on the backtest "
             "side or the prediction side. The stages have been rebuilt and nothing was "
@@ -950,14 +970,14 @@ def selectable_validation_candidates(
         # only the label filter sent the reader to LABEL_RESTRICTIONS, which
         # was not the cause.
         if carrier_pin:
-            raise RuntimeError(
+            raise NoSelectableCandidates(
                 f"Carrier pin {carrier_pin!r} for {case_study} matches no validation "
                 f"backtest in {db_path}. A pin is a backtest-hash prefix and every "
                 "hash changes when the sweep is rebuilt, so a pin outlives at most "
                 "one rebuild. Re-derive it from the current registry, or remove the "
                 "entry from CARRIER_PINS to select by validation Sharpe."
             )
-        raise RuntimeError(
+        raise NoSelectableCandidates(
             f"No validation rank-1 candidate for {case_study} (label_filter={label_filter})"
         )
 

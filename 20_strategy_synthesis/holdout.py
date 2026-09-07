@@ -65,6 +65,7 @@ from case_studies.utils.strategy_analysis import (
     LABEL_RESTRICTIONS,
     SELECTION_STAGES,
     UNIVERSE_RESTRICTIONS,
+    NoSelectableCandidates,
     selectable_validation_candidates,
 )
 from utils.cv_splits import most_recent_split
@@ -535,9 +536,16 @@ def has_holdout_predictions(cs_id: str, *, top_n: int = 5) -> bool:
     if not db_path.exists():
         return False
 
+    # Both refusals mean the same thing here: nothing is currently selectable, so no
+    # holdout can cover the current top-N. `ValueError` is this module's own refusal after
+    # the dedupe; `NoSelectableCandidates` is the canonical selector's for an empty pool -
+    # an initialised registry with no eligible validation backtest, a population that
+    # publishes nothing, a carrier pin left over from an earlier sweep. Answering False
+    # sends the caller to `generate_holdout`, which asks the same selector again without a
+    # guard and reports whichever refusal applies from inside the driver's own handler.
     try:
         candidates = select_best_models(cs_id, top_n=top_n)
-    except ValueError:
+    except (ValueError, NoSelectableCandidates):
         return False
     candidate_hashes = [c["training_hash"] for c in candidates]
     if not candidate_hashes:

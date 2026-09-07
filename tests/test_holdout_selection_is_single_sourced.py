@@ -369,3 +369,38 @@ def test_a_retired_prediction_cannot_raise_the_coverage_bar_over_the_live_ones(
     from_holdout, from_resolver = _both_selections(CASE_STUDY)
     assert from_holdout == "bt_live"
     assert from_resolver == "bt_live"
+
+
+def test_a_registry_with_nothing_eligible_answers_no_holdout_rather_than_raising(
+    case_dir: Path,
+) -> None:
+    """Asking whether a holdout exists is a question, and "nothing to select" is an answer.
+
+    `has_holdout_predictions` reports whether a holdout already covers the current top-N.
+    A case study whose validation stages have not run yet has no top-N, and that is a
+    normal state - the driver's next step is to generate one. The check used to catch
+    `ValueError`, which is what the pool this module built for itself raised; routing it
+    through the canonical selector changed the exception under it to `RuntimeError`.
+
+    The consequence is not local. In `20_strategy_synthesis/00_holdout_predictions.py` the
+    call sits at `was_cached = has_holdout_predictions(cs_id) and not FORCE`, one line
+    ABOVE the `try` that guards generation, so a single un-run case study would abort the
+    loop and every case study after it in `cs_list` would never run.
+    """
+    _registry(case_dir / "run_log" / "registry.db", [])
+
+    assert HOLDOUT.has_holdout_predictions(CASE_STUDY) is False
+
+
+def test_the_refusal_is_still_raised_where_it_has_to_be_reported(case_dir: Path) -> None:
+    """The other half: the availability check absorbs it, the selection does not.
+
+    `NoSelectableCandidates` subclasses `RuntimeError`, so returning False from the check
+    is not a decision to stay quiet - `generate_holdout` asks the same selector again with
+    no guard, and the refusal reaches the driver's own handler, which prints it against
+    the case study it belongs to.
+    """
+    _registry(case_dir / "run_log" / "registry.db", [])
+
+    with pytest.raises(strategy_analysis.NoSelectableCandidates):
+        HOLDOUT.select_best_models(CASE_STUDY, top_n=1)
