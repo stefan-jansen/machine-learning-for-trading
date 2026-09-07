@@ -500,6 +500,131 @@ class BacktestRunResult:
     execution_mode: str = "engine"
 
 
+# ---------------------------------------------------------------------------
+# Risk-control trigger counts
+# ---------------------------------------------------------------------------
+
+# The controls the engine knows how to build, and therefore the ones it can count.
+# The names are the `type` values a spec declares under `strategy.risk`.
+RISK_POSITION_RULE_TYPES = ("stop_loss", "trailing_stop", "time_exit")
+RISK_PORTFOLIO_LIMIT_TYPES = ("max_drawdown", "daily_loss")
+RISK_CONTROL_TYPES = RISK_POSITION_RULE_TYPES + RISK_PORTFOLIO_LIMIT_TYPES
+
+
+class RiskTriggerLog:
+    """How many times each declared risk control acted during one backtest.
+
+    A risk overlay that never fired was indistinguishable from one that was never
+    installed, and the two have opposite meanings (ml4t/agent-workspace#1051). The
+    registry carried `num_trades` and the performance metrics and nothing else, so
+    a reader comparing an overlay against the strategy it was laid on could
+    conclude "the control acted" from a difference and nothing at all from a
+    match: a stop can close a position the next rebalance would have closed
+    anyway, leaving the trade count where it was. `rules/notebook-standards.md`
+    C17 records the failure that hides behind that - 56 registered
+    `crypto_perps_funding/16_risk_management` results whose Sharpe, drawdown and
+    trade count matched the unprotected book in every digit, because the
+    configuration declared its controls in a shape the engine does not read and
+    nothing was installed.
+
+    So the counts distinguish three states, and the third is the one that was
+    missing:
+
+    * nothing declared - every count is ``None``, which is what "no overlay" means;
+    * declared and never fired - ``0``;
+    * declared and fired - the number of times.
+
+    A fourth state, declared but not installable on this execution path, is not
+    represented because it is refused instead: registering a row named for a
+    control the path cannot apply is the C17 failure itself.
+
+    Counts are per control *type*, not per declared control: two stops in one spec
+    share a key and their firings sum. Every sweep in the tree declares one
+    control per backtest, so the distinction has no reader today.
+    """
+
+    def __init__(self) -> None:
+        self._counts: dict[str, int] = {}
+
+    def declare(self, control: str) -> None:
+        """Record that this control was installed, before it has fired."""
+        self._counts.setdefault(control, 0)
+
+    def record(self, control: str, n: int = 1) -> None:
+        self._counts[control] = self._counts.get(control, 0) + n
+
+    def as_metrics(self) -> dict[str, float | None]:
+        """One registered column per control type, plus the total.
+
+        Every column is ``None`` when no control was declared, so a NULL reads as
+        "no overlay here" rather than as "not measured".
+        """
+        if not self._counts:
+            return {"risk_triggers": None} | {
+                f"risk_triggers_{name}": None for name in RISK_CONTROL_TYPES
+            }
+        return {"risk_triggers": float(sum(self._counts.values()))} | {
+            f"risk_triggers_{name}": (float(self._counts[name]) if name in self._counts else None)
+            for name in RISK_CONTROL_TYPES
+        }
+
+
+class _CountedPositionRule:
+    """Delegate to a position rule and count the exits it produces.
+
+    Structural, not inherited: ``ml4t.backtest.risk.PositionRule`` is a Protocol
+    and ``RuleChain`` is a plain dataclass over ``rules``, so a wrapper with
+    ``evaluate`` composes wherever the real rule does.
+
+    Only exits are counted - ``EXIT_FULL`` and ``EXIT_PARTIAL``. ``HOLD`` and
+    ``ADJUST_STOP`` are not firings: moving a stop level is the control working
+    without acting on the book, and counting it would report a rule that closed
+    nothing as the most active one in the sweep. No rule in ml4t-backtest 0.1.3
+    returns ``ADJUST_STOP``, so the exclusion is for rules added later.
+    """
+
+    def __init__(self, rule, control: str, log: RiskTriggerLog) -> None:
+        self._rule = rule
+        self._control = control
+        self._log = log
+        log.declare(control)
+
+    def evaluate(self, state):
+        from ml4t.backtest.risk import ActionType
+
+        action = self._rule.evaluate(state)
+        if action.action in (ActionType.EXIT_FULL, ActionType.EXIT_PARTIAL):
+            self._log.record(self._control)
+        return action
+
+
+def _counted_portfolio_limit(limit, control: str, log: RiskTriggerLog):
+    """Wrap a portfolio limit so each breach *episode* is counted once.
+
+    ``RiskManager.update`` re-checks every limit on every bar and returns whatever
+    is breached, so a halted book breaches again on each of the bars that follow.
+    Counting those would report one drawdown halt as several hundred firings. The
+    count moves on the rising edge only: not breached, then breached.
+    """
+    from ml4t.backtest.risk import PortfolioLimit
+
+    class _CountedPortfolioLimit(PortfolioLimit):
+        def __init__(self) -> None:
+            self._limit = limit
+            self._breached = False
+            log.declare(control)
+
+        def check(self, state):
+            result = self._limit.check(state)
+            breached = bool(result.breached)
+            if breached and not self._breached:
+                log.record(control)
+            self._breached = breached
+            return result
+
+    return _CountedPortfolioLimit()
+
+
 def _target_weights_by_timestamp(
     weights: pl.DataFrame,
 ) -> dict[date | datetime, dict[str, float]]:
@@ -1622,9 +1747,12 @@ def _run_engine(
     if transition_timestamps and config.execution_mode.value != "same_bar":
         raise ValueError("state-transition sequencing requires same-bar engine execution")
 
-    # Build risk components from spec (Ch19)
-    position_rules = _build_position_rules(risk_spec)
-    risk_manager = _build_risk_manager(risk_spec, initial_cash)
+    # Build risk components from spec (Ch19). The log counts what each installed
+    # control actually did, so a reader can tell an overlay that never fired from
+    # one that was never installed - see `RiskTriggerLog`.
+    trigger_log = RiskTriggerLog()
+    position_rules = _build_position_rules(risk_spec, trigger_log)
+    risk_manager = _build_risk_manager(risk_spec, initial_cash, trigger_log)
 
     # Rebalance thresholds are sourced from setup.yaml::backtest.rebalance and
     # always present in the canonical strategy.rebalance block (populated by
@@ -1791,6 +1919,7 @@ def _run_engine(
     ppy = overall_periods_per_year(case_study, calendar, daily_df)
     metrics = compute_portfolio_metrics(returns_arr, periods_per_year=ppy, trim_leading_zeros=False)
     metrics.update(funding_metrics)
+    metrics.update(trigger_log.as_metrics())
 
     # Engine-specific metrics (execution details not derivable from returns)
     m = engine_result.metrics
@@ -1953,6 +2082,9 @@ def _run_htm_daily_mtm(
     percentile = float(signal_config.get("percentile", 90.0))
     if risk_spec:
         raise ValueError("the specialized option path does not support risk overlays")
+    # Refused above, so every count is None: no control was installed here, and a
+    # NULL says that rather than leaving the columns unwritten (#1051).
+    trigger_log = RiskTriggerLog()
     required_accounting = {
         "n_roll",
         "delta_hedge",
@@ -2064,6 +2196,7 @@ def _run_htm_daily_mtm(
             uncertainty=True,
         )
     )
+    metrics.update(trigger_log.as_metrics())
 
     # Number of distinct rebalance events (= entry days with any new cohort).
     # `n_open.sum()` is the count of cohort-days, kept under a distinct key.
@@ -2288,8 +2421,9 @@ def _run_vectorized(
                 port_ret = port_ret_filtered
 
     # Apply portfolio-level risk overlays (post-hoc on return series)
+    trigger_log = RiskTriggerLog()
     if risk_spec:
-        port_ret = _apply_vectorized_risk(port_ret, risk_spec)
+        port_ret = _apply_vectorized_risk(port_ret, risk_spec, trigger_log)
 
     # Daily returns DataFrame
     daily_returns = port_ret.select(
@@ -2319,6 +2453,7 @@ def _run_vectorized(
     avg_turnover = cast(float, port_ret["turnover"].mean()) if n > 0 else 0.0
     metrics["avg_turnover"] = avg_turnover
     metrics["n_periods"] = n
+    metrics.update(trigger_log.as_metrics())
 
     return {
         "daily_returns": daily_returns,
@@ -2331,7 +2466,9 @@ def _run_vectorized(
 # ---------------------------------------------------------------------------
 
 
-def _apply_vectorized_risk(port_ret: pl.DataFrame, risk_spec: dict) -> pl.DataFrame:
+def _apply_vectorized_risk(
+    port_ret: pl.DataFrame, risk_spec: dict, log: RiskTriggerLog | None = None
+) -> pl.DataFrame:
     """Apply portfolio-level risk limits to a close-to-close return series.
 
     Used by the vectorized + HTM dispatch paths (us_firm_characteristics,
@@ -2355,6 +2492,22 @@ def _apply_vectorized_risk(port_ret: pl.DataFrame, risk_spec: dict) -> pl.DataFr
         engine path (which has proper ``DailyLossLimit`` halt-on-update
         semantics through ``ml4t.backtest.risk``).
     """
+    # A position rule declared here installs nothing on this path - the
+    # close-to-close series cannot express an intrabar stop - so the run would
+    # register under an identity named for a stop that never ran. That is
+    # `rules/notebook-standards.md` C17's shape, and ml4t/agent-workspace#1051 is
+    # about not letting it register silently, so it stops here instead.
+    position_rules = risk_spec.get("position_rules", [])
+    if position_rules:
+        declared = ", ".join(str(rc.get("name", rc.get("type"))) for rc in position_rules)
+        raise ValueError(
+            f"position rules ({declared}) cannot be applied on the vectorized path: an "
+            "intrabar stop needs position tracking that a close-to-close return series "
+            "does not carry. Registering the run anyway would name a result for a control "
+            "that never ran. Move the case study to the engine path, or sweep "
+            "portfolio-level limits here instead."
+        )
+
     limits = risk_spec.get("portfolio_limits", [])
     if not limits:
         return port_ret
@@ -2364,6 +2517,8 @@ def _apply_vectorized_risk(port_ret: pl.DataFrame, risk_spec: dict) -> pl.DataFr
         ltype = lc["type"]
         if ltype == "max_drawdown":
             dd_threshold = lc["threshold"]
+            if log is not None:
+                log.declare("max_drawdown")
         elif ltype == "daily_loss":
             raise ValueError(
                 "daily_loss portfolio limit is not supported on the "
@@ -2389,6 +2544,9 @@ def _apply_vectorized_risk(port_ret: pl.DataFrame, risk_spec: dict) -> pl.DataFr
             exit_eq = float(peak[i]) * (1.0 - abs(dd_threshold)) * (1.0 - breach_slippage)
             returns[i] = exit_eq / prior_eq - 1.0
             returns[i + 1 :] = 0.0
+            # At most once: the breaker exits the book and zeroes every later bar.
+            if log is not None:
+                log.record("max_drawdown")
 
     return port_ret.with_columns(pl.Series("net_ret", returns))
 
@@ -2637,11 +2795,16 @@ def _refuse_an_allocation_that_produced_no_target(
     )
 
 
-def _build_position_rules(risk_spec: dict):
+def _build_position_rules(risk_spec: dict, log: RiskTriggerLog | None = None):
     """Create ml4t-backtest PositionRule objects from risk spec.
 
     Supports: stop_loss, trailing_stop, time_exit.
     Returns a RuleChain (multiple rules) or single rule, or None.
+
+    An unrecognized ``type`` used to fall through the if-chain and contribute
+    nothing, so a spec naming one produced no rule, a distinct identity hash, and
+    a registered row named for a control that never ran - the shape
+    ``rules/notebook-standards.md`` C17 generalizes. It is refused instead.
     """
     rules_config = risk_spec.get("position_rules", [])
     if not rules_config:
@@ -2653,22 +2816,33 @@ def _build_position_rules(risk_spec: dict):
     for rc in rules_config:
         rtype = rc["type"]
         if rtype == "stop_loss":
-            rules.append(StopLoss(pct=rc["threshold"]))
+            rule = StopLoss(pct=rc["threshold"])
         elif rtype == "trailing_stop":
-            rules.append(TrailingStop(pct=rc["threshold"]))
+            rule = TrailingStop(pct=rc["threshold"])
         elif rtype == "time_exit":
-            rules.append(TimeExit(max_bars=rc["bars"]))
+            rule = TimeExit(max_bars=rc["bars"])
+        else:
+            raise ValueError(
+                f"unknown position rule type {rtype!r} in strategy.risk.position_rules; "
+                f"the engine builds {sorted(RISK_POSITION_RULE_TYPES)}. A type it does not "
+                "recognize installs nothing, and the run would register under a distinct "
+                f"identity named {rc.get('name', rtype)!r} for a control that never ran."
+            )
+        rules.append(_CountedPositionRule(rule, rtype, log) if log is not None else rule)
 
     if not rules:
         return None
     return RuleChain(rules) if len(rules) > 1 else rules[0]
 
 
-def _build_risk_manager(risk_spec: dict, initial_cash: float):
+def _build_risk_manager(risk_spec: dict, initial_cash: float, log: RiskTriggerLog | None = None):
     """Create RiskManager with portfolio-level limits from risk spec.
 
     Supports: max_drawdown, daily_loss.
     Returns initialized RiskManager, or None.
+
+    Refuses an unrecognized ``type`` for the reason given in
+    ``_build_position_rules``.
     """
     limits_config = risk_spec.get("portfolio_limits", [])
     if not limits_config:
@@ -2680,9 +2854,17 @@ def _build_risk_manager(risk_spec: dict, initial_cash: float):
     for lc in limits_config:
         ltype = lc["type"]
         if ltype == "max_drawdown":
-            limits.append(MaxDrawdownLimit(max_drawdown=lc["threshold"]))
+            limit = MaxDrawdownLimit(max_drawdown=lc["threshold"])
         elif ltype == "daily_loss":
-            limits.append(DailyLossLimit(max_daily_loss_pct=lc["threshold"]))
+            limit = DailyLossLimit(max_daily_loss_pct=lc["threshold"])
+        else:
+            raise ValueError(
+                f"unknown portfolio limit type {ltype!r} in strategy.risk.portfolio_limits; "
+                f"the engine builds {sorted(RISK_PORTFOLIO_LIMIT_TYPES)}. A type it does not "
+                "recognize installs nothing, and the run would register under a distinct "
+                f"identity named {lc.get('name', ltype)!r} for a control that never ran."
+            )
+        limits.append(_counted_portfolio_limit(limit, ltype, log) if log is not None else limit)
 
     if not limits:
         return None

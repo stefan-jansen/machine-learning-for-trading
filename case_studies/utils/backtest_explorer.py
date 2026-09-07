@@ -1191,7 +1191,8 @@ class BacktestExplorer:
         -------
         pl.DataFrame
             Columns: risk_name, risk_type, sharpe, max_drawdown, num_trades,
-            allocator, prediction_hash, baseline_sharpe, sharpe_delta
+            risk_triggers, allocator, prediction_hash, baseline_sharpe,
+            sharpe_delta
 
         Each overlay's ``baseline_sharpe`` is the no-overlay Sharpe of the
         allocation it was applied to, matched on ``(prediction_hash,
@@ -1207,6 +1208,13 @@ class BacktestExplorer:
         elif prediction_hashes:
             pred_clause = " AND b.prediction_hash IN (SELECT value FROM json_each(?))"
             pred_params = (json.dumps(list(prediction_hashes)),)
+        # Absent from a registry written before the engine counted triggers, where
+        # the question this column answers simply cannot be answered.
+        triggers_select = (
+            "bm.risk_triggers"
+            if self._has_metric_column("risk_triggers")
+            else "NULL AS risk_triggers"
+        )
         df = self._query(
             f"""
             SELECT
@@ -1216,7 +1224,8 @@ class BacktestExplorer:
                 t.config_name,
                 bm.sharpe,
                 bm.max_drawdown,
-                bm.num_trades
+                bm.num_trades,
+                {triggers_select}
             FROM backtest_runs b
             JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
             JOIN training_runs t ON p.training_hash = t.training_hash
@@ -1236,12 +1245,13 @@ class BacktestExplorer:
             return df
 
         rows = []
-        for spec_str, pred_h, sharpe, max_dd, trades in zip(
+        for spec_str, pred_h, sharpe, max_dd, trades, triggers in zip(
             df["spec_json"].to_list(),
             df["prediction_hash"].to_list(),
             df["sharpe"].to_list(),
             df["max_drawdown"].to_list(),
             df["num_trades"].to_list(),
+            df["risk_triggers"].to_list(),
             strict=False,
         ):
             spec = _parse_spec(spec_str) or {}
@@ -1267,6 +1277,12 @@ class BacktestExplorer:
                     "sharpe": sharpe,
                     "max_drawdown": max_dd,
                     "num_trades": trades,
+                    # How many times the control acted. 0 is an overlay that was
+                    # installed and never fired; NULL is a run the engine did not
+                    # count, which is every row registered before
+                    # ml4t/agent-workspace#1051. Matching Sharpe and trade counts
+                    # never established either one on their own.
+                    "risk_triggers": triggers,
                     "prediction_hash": pred_h,
                     "allocator": strategy_view(spec)
                     .get("allocation", {})
