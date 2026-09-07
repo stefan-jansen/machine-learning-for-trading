@@ -1357,21 +1357,38 @@ def compute_cohort_metrics(
     if aligned is None:
         return {}
     matrix, names = aligned
+
+    # A bankrupt member leaves the cohort here, before anything is computed over it,
+    # rather than being excluded from the leader choice alone. Excluding it only from
+    # the leader choice produces a worse state than the defect: `deflated_sharpe_ratio`
+    # takes the trial population and picks its own observed strategy with
+    # `np.argmax(sharpe_ratios)`, with no parameter to name one, so a bankrupt member
+    # left among the trials becomes the run the deflation is computed about while
+    # `leader_hash` names a different one - two numbers in one row describing two runs.
+    #
+    # Dropping it from the trials is also the right reading of what the deflation
+    # corrects for. It asks how likely the best of K looks this good by luck, and
+    # "best" ranges over what the selection could actually have taken. A path that lost
+    # its capital cannot be selected - ml4t/agent-workspace#920 is precisely that rule -
+    # so it was never one of the chances, and counting it would inflate K for an
+    # opportunity that did not exist. Everything below therefore describes the solvent
+    # cohort: `member_digest` and `members_json` included, so a reader matching a stored
+    # correction against a membership gets the set the correction ran over.
+    solvent = ~_ruined_columns(matrix)
+    if not solvent.any():
+        return {}
+    if not solvent.all():
+        matrix = matrix[:, solvent]
+        names = [name for name, keep in zip(names, solvent, strict=True) if keep]
+
     n_periods, k_variants = matrix.shape
     if k_variants < 2:
         return {}
 
     sharpes = _sharpe_per_column(matrix, periods_per_year)
-    # The leader is chosen among the solvent members; the ruined ones stay in the
-    # cohort. They were tried, so they count toward K and toward the trial
-    # distribution the deflation corrects for - what they cannot be is the result the
-    # correction is computed about. A cohort in which every member went bankrupt has
-    # no leader to name, and falls out here the same way one with no measurable Sharpe
-    # does.
-    leader_scores = np.where(_ruined_columns(matrix), np.nan, sharpes)
-    if np.all(np.isnan(leader_scores)):
+    if np.all(np.isnan(sharpes)):
         return {}
-    leader_idx = _leader_index(leader_scores, names)
+    leader_idx = _leader_index(sharpes, names)
     leader_hash = names[leader_idx]
     leader_arr = matrix[:, leader_idx]
 

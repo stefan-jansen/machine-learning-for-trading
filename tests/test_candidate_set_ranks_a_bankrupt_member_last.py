@@ -103,3 +103,15 @@ def test_an_all_solvent_set_ranks_exactly_as_before(monkeypatch) -> None:
     """The common case must not move."""
     rows = [("mid", 1.0, 0.0), ("top", 3.0, 0.0), ("low", -1.0, 0.0)]
     assert _rank(monkeypatch, rows, ["mid", "top", "low"]) == ["top", "mid", "low"]
+
+
+def test_a_set_whose_members_all_went_bankrupt_has_nothing_to_select(monkeypatch) -> None:
+    """Ordering last protects the selection only while something solvent is ahead.
+
+    `best_validation_sharpe` takes the head unconditionally, so an all-bankrupt set
+    would hand back a bankrupt selection - the outcome #920 exists to prevent,
+    reached through the fix for it.
+    """
+    rows = [("a", None, 1.0), ("b", None, 1.0)]
+    with pytest.raises(ValueError, match="no solvent member to select"):
+        _rank(monkeypatch, rows, ["a", "b"])

@@ -460,6 +460,13 @@ class CandidateSet:
         )
         if rows.height != len(self.members):
             raise ValueError("candidate set contains an ineligible selection member")
+        if rows.height and bool(rows.get_column("_ruined").all()):
+            # Ordering a bankrupt member last protects the selection only while something
+            # solvent is ahead of it. `best_validation_sharpe` takes the head
+            # unconditionally, so a set whose members all went bankrupt would hand back a
+            # bankrupt selection - the outcome #920 exists to prevent, reached through the
+            # fix for it. There is nothing here to select.
+            raise ValueError("candidate set has no solvent member to select")
         if any(not Result.open(self.study, member_hash).complete for member_hash in self.members):
             raise ValueError("candidate set contains an incomplete selection member")
         return tuple(rows.get_column("backtest_hash"))

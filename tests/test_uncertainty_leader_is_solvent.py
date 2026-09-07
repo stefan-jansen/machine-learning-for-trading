@@ -16,10 +16,14 @@ losing cohort rather than at the bottom of it.
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timedelta
+
 import numpy as np
+import polars as pl
 import pytest
 
-from case_studies.utils.uncertainty import compute_reality_check
+from case_studies.utils.uncertainty import compute_cohort_metrics, compute_reality_check
 
 
 def _ruined(n: int) -> np.ndarray:
@@ -92,3 +96,41 @@ def test_an_all_solvent_cohort_is_unchanged() -> None:
     }
     out = compute_reality_check(challengers, np.zeros(n), n_bootstrap=50, seed=0)
     assert out["reality_check_best"] == "better"
+
+
+def _frame(arr: np.ndarray) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "timestamp": [datetime(2024, 1, 1) + timedelta(days=i) for i in range(arr.size)],
+            "ret": arr,
+        }
+    )
+
+
+def test_the_deflation_is_computed_about_the_leader_it_names() -> None:
+    """A bankrupt member left among the trials would become a second, unnamed leader.
+
+    `deflated_sharpe_ratio` picks its own observed strategy with
+    `np.argmax(sharpe_ratios)` and takes no parameter naming one, so excluding a
+    bankrupt member from the leader choice alone puts two runs in one row: the
+    `leader_hash` column naming a solvent one and every `dsr_*` column describing
+    the bankrupt one. It leaves the cohort instead.
+    """
+    n = 1_000
+    out = compute_cohort_metrics(
+        {
+            "bankrupt": _frame(_ruined(n)),
+            "loses_faster": _frame(_solvent_loser(n, -0.004, seed=5)),
+            "loses_slower": _frame(_solvent_loser(n, -0.003, seed=6)),
+        },
+        periods_per_year=252,
+    )
+    assert out["leader_hash"] == "loses_slower"
+    assert "bankrupt" not in json.loads(out["members_json"])
+    assert out["k_variants"] == 2
+    assert out["leader_sharpe"] == pytest.approx(
+        _solvent_loser(n, -0.003, seed=6).mean()
+        / _solvent_loser(n, -0.003, seed=6).std(ddof=1)
+        * np.sqrt(252),
+        rel=1e-6,
+    )
