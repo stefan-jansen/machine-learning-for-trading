@@ -131,6 +131,16 @@ validation_spans = [
     for split in cv_splits
 ]
 model_windows = [*validation_spans, (holdout_start.date(), holdout_end.date())]
+# Whether a window also names a fold depends on which artifact vintage is on disk, and
+# both are in circulation. Stage 04 now writes one row per stock-date. A fixture built
+# before that conversion writes one row per (key, fold) with genuinely different values
+# per fold, so there the fold is still how a date is addressed.
+FOLD_KEYED_ARTIFACT = "fold" in pl.scan_parquet(model_src).collect_schema().names()
+if FOLD_KEYED_ARTIFACT:
+    _holdout_fold = pl.scan_parquet(model_src).select(pl.max("fold")).collect().item()
+    model_folds = [split["fold"] for split in cv_splits] + [_holdout_fold]
+else:
+    model_folds = [None] * len(model_windows)
 # By date rather than by position: `ml4t-diagnostic` 0.1.4 reversed fold numbering, so
 # which end of the list holds the latest window is the thing that moved.
 last_validation_span = max(validation_spans)
@@ -176,31 +186,21 @@ filter_end = train_end + timedelta(days=30)
 
 
 # %%
-def collapse_fold_replication(frame: pl.DataFrame) -> pl.DataFrame:
-    """One row per `(symbol, timestamp)`, refusing any collapse that would lose a value.
+def window_terms(clipped: list[tuple]) -> list[pl.Expr]:
+    """One predicate per evaluation window, to be OR-ed into a single filter.
 
-    A no-op against a current artifact, which carries one row per stock-date. An
-    artifact written before stage 04 dropped the fold column carries one row per
-    `(key, fold)` holding the same value repeated, and CI still installs such a
-    fixture, so this notebook has to read both shapes rather than assume the newer.
-
-    The collapse is not taken on trust. `unique()` over every selected column must
-    reduce to exactly the distinct key count: that happens only when the replicated
-    rows agree everywhere, so a genuine per-fold difference raises here instead of
-    being silently reduced to whichever row sorted first.
+    Against a fold-free artifact a window is a date range and nothing else. Against a
+    fold-keyed one the same window also names the fold whose fitted state that range is
+    evaluated under, and the two must be applied together: those vintages hold different
+    values for the same stock-date, so a date range alone would return one row per fold
+    and no rule for choosing between them.
     """
-    keys = frame.select("symbol", "timestamp").n_unique()
-    if frame.height == keys:
-        return frame
-    distinct = frame.unique()
-    if distinct.height != keys:
-        raise ValueError(
-            f"model_based.parquet holds {frame.height:,} rows over {keys:,} distinct "
-            f"(symbol, timestamp) keys, and {distinct.height:,} of them differ on a feature "
-            "value. A fold-replicated artifact may repeat a row but not disagree with itself; "
-            "this one carries per-fold values, which this notebook cannot resolve to one."
-        )
-    return distinct.sort(["timestamp", "symbol"])
+    if FOLD_KEYED_ARTIFACT:
+        return [
+            (pl.col("fold") == fold) & pl.col("timestamp").is_between(start, end)
+            for fold, start, end in clipped
+        ]
+    return [pl.col("timestamp").is_between(start, end) for _, start, end in clipped]
 
 
 # %%
@@ -211,8 +211,8 @@ def collapse_fold_replication(frame: pl.DataFrame) -> pl.DataFrame:
 _span_lo = pd.Timestamp(filter_start).date()
 _span_hi = pd.Timestamp(filter_end).date()
 model_spans = [
-    (max(_span_lo, start), min(_span_hi, end))
-    for start, end in model_windows
+    (fold, max(_span_lo, start), min(_span_hi, end))
+    for fold, (start, end) in zip(model_folds, model_windows, strict=True)
     if start <= _span_hi and end >= _span_lo
 ]
 if not model_spans:
@@ -220,12 +220,16 @@ if not model_spans:
         f"No validation window and not the sealed holdout covers {_span_lo}..{_span_hi}; "
         "the materialization range lies outside every window this model was evaluated on"
     )
-model_features = collapse_fold_replication(
+model_features = (
     pl.scan_parquet(model_src)
-    .filter(pl.any_horizontal(*[pl.col("timestamp").is_between(s, e) for s, e in model_spans]))
+    .filter(pl.any_horizontal(*window_terms(model_spans)))
     .select(["symbol", "timestamp", *MODEL_FEATURES])
     .collect()
     .sort(["timestamp", "symbol"])
+)
+assert not model_features.select(pl.struct("symbol", "timestamp").is_duplicated().any()).item(), (
+    "a stock-date resolved to more than one model-based row; the evaluation windows "
+    "this notebook derived are not disjoint over the materialization range"
 )
 model_features.with_columns(pl.col("timestamp").cast(pl.Datetime("ns"))).write_parquet(
     model_feast_path

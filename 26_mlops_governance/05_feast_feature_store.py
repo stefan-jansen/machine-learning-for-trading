@@ -143,15 +143,26 @@ print(f"Sealed holdout starts on {holdout_start.date()}")
 # %%
 timeline = pl.scan_parquet(feature_views[0].source_path).select("timestamp").unique().collect()
 cv_splits = generate_cv_splits(timeline, case_study_id=CASE_STUDY_ID, label_buffer="1D")
-# `model_based.parquet` carries one row per stock-date and no `fold` column: stage 04
-# fits on a rolling refit schedule, so a date's value is the same whichever fold reads
-# it. What the windows still decide is the date range served to the offline store - a
-# feature value is only servable for a session the model was evaluated on.
+# A window decides the date range served to the offline store: a feature value is only
+# servable for a session the model was evaluated on. Whether it *also* names a fold
+# depends on which artifact vintage is on disk, and both are in circulation. Stage 04
+# now writes one row per stock-date, so a date's value is the same whichever fold reads
+# it. A fixture built before that conversion writes one row per (key, fold) with
+# genuinely different values per fold, so there the fold is still how a date is
+# addressed and cannot be collapsed away.
+MODEL_BASED_PATH = feature_views[1].source_path
+FOLD_KEYED_ARTIFACT = "fold" in pl.scan_parquet(MODEL_BASED_PATH).collect_schema().names()
+
 validation_spans = [
     (pd.Timestamp(split["val_start"]).date(), pd.Timestamp(split["val_end"]).date())
     for split in cv_splits
 ]
 model_windows = [*validation_spans, (holdout_start.date(), holdout_end.date())]
+if FOLD_KEYED_ARTIFACT:
+    _holdout_fold = pl.scan_parquet(MODEL_BASED_PATH).select(pl.max("fold")).collect().item()
+    model_folds = [split["fold"] for split in cv_splits] + [_holdout_fold]
+else:
+    model_folds = [None] * len(model_windows)
 # By date rather than by position: `ml4t-diagnostic` 0.1.4 reversed fold numbering, so
 # which end of the list holds the latest window is the thing that moved.
 last_validation_span = max(validation_spans)
@@ -200,31 +211,21 @@ print(f"Offline training window {TRAINING_START} to {TRAINING_END}; serving as o
 
 
 # %%
-def collapse_fold_replication(frame: pl.DataFrame) -> pl.DataFrame:
-    """One row per `(symbol, timestamp)`, refusing any collapse that would lose a value.
+def window_terms(clipped: list[tuple]) -> list[pl.Expr]:
+    """One predicate per evaluation window, to be OR-ed into a single filter.
 
-    A no-op against a current artifact, which carries one row per stock-date. An
-    artifact written before stage 04 dropped the fold column carries one row per
-    `(key, fold)` holding the same value repeated, and CI still installs such a
-    fixture, so this notebook has to read both shapes rather than assume the newer.
-
-    The collapse is not taken on trust. `unique()` over every selected column must
-    reduce to exactly the distinct key count: that happens only when the replicated
-    rows agree everywhere, so a genuine per-fold difference raises here instead of
-    being silently reduced to whichever row sorted first.
+    Against a fold-free artifact a window is a date range and nothing else. Against a
+    fold-keyed one the same window also names the fold whose fitted state that range is
+    evaluated under, and the two must be applied together: those vintages hold different
+    values for the same stock-date, so a date range alone would return one row per fold
+    and no rule for choosing between them.
     """
-    keys = frame.select("symbol", "timestamp").n_unique()
-    if frame.height == keys:
-        return frame
-    distinct = frame.unique()
-    if distinct.height != keys:
-        raise ValueError(
-            f"model_based.parquet holds {frame.height:,} rows over {keys:,} distinct "
-            f"(symbol, timestamp) keys, and {distinct.height:,} of them differ on a feature "
-            "value. A fold-replicated artifact may repeat a row but not disagree with itself; "
-            "this one carries per-fold values, which this notebook cannot resolve to one."
-        )
-    return distinct.sort(["timestamp", "symbol"])
+    if FOLD_KEYED_ARTIFACT:
+        return [
+            (pl.col("fold") == fold) & pl.col("timestamp").is_between(start, end)
+            for fold, start, end in clipped
+        ]
+    return [pl.col("timestamp").is_between(start, end) for _, start, end in clipped]
 
 
 # %%
@@ -262,8 +263,8 @@ def load_model_vintage(
     start_date = pd.Timestamp(start).date()
     end_date = pd.Timestamp(end).date()
     clipped = [
-        (max(start_date, window_start), min(end_date, window_end))
-        for window_start, window_end in model_windows
+        (fold, max(start_date, window_start), min(end_date, window_end))
+        for fold, (window_start, window_end) in zip(model_folds, model_windows, strict=True)
         if window_start <= end_date and window_end >= start_date
     ]
     if not clipped:
@@ -271,13 +272,15 @@ def load_model_vintage(
             f"No validation window and not the sealed holdout covers {start}..{end}; "
             "the requested range lies outside every window this model was evaluated on"
         )
-    frame = pl.scan_parquet(feature_views[1].source_path).filter(
-        pl.any_horizontal(*[pl.col("timestamp").is_between(s, e) for s, e in clipped])
-    )
+    frame = pl.scan_parquet(MODEL_BASED_PATH).filter(pl.any_horizontal(*window_terms(clipped)))
     if assets is not None:
         frame = frame.filter(pl.col("symbol").is_in(assets))
     result = frame.select(["symbol", "timestamp", *columns]).collect().sort(["timestamp", "symbol"])
-    return collapse_fold_replication(result)
+    assert not result.select(pl.struct("symbol", "timestamp").is_duplicated().any()).item(), (
+        "a stock-date resolved to more than one model-based row; the evaluation windows "
+        "this notebook derived are not disjoint over the requested range"
+    )
+    return result
 
 
 # %% [markdown]
