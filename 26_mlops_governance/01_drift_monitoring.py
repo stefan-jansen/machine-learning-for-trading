@@ -36,7 +36,13 @@ CASE_STUDY_ID = "us_equities_panel"
 # cross-validation / validation predictions, never a holdout set, so monitoring
 # them would mean labelling a validation window as "holdout".
 PRIMARY_LABEL = "fwd_ret_5d"
-REFERENCE_START = "2015-01-01"
+# Left unset so the reference window is derived from the fixture's own fold geometry.
+# "2015-01-01" stood here, which was not an independent choice: it sat one day inside
+# the then-final validation fold (2015-01-02..2015-12-30). #819 restored this case
+# study to 16 folds and moved every boundary, so a literal that used to land inside a
+# window now lands wherever the new geometry puts it. Set it to a date string to pin
+# the window by hand.
+REFERENCE_START = None
 LOOKBACK_DAYS = 63
 KS_WATCH_PVALUE = 0.05  # §26.3 K-S trigger
 SEED = 42
@@ -175,15 +181,28 @@ def validate_feature_data(features_df: pl.DataFrame, required_columns: list[str]
 
 
 # %% [markdown]
-# ### Resolve fitted feature state by walk-forward fold
+# ### Resolve fitted feature state by evaluation window
 #
-# `model_based.parquet` stores one fitted feature vintage per fold. Each date
-# must use its validation fold, while the sealed holdout uses the dedicated
-# final fold fitted only on pre-holdout observations.
+# `model_based.parquet` carries one row per stock-date and no `fold` column.
+# Stage 04 fits its transforms on a rolling refit schedule, so a date's value is
+# the same whichever fold later reads it - the artifact's own prose puts it as
+# "one value whichever fold later reads it".
+#
+# A fold is therefore not something to select on, but the *date range* still is:
+# a drift measurement is only meaningful over sessions the model was actually
+# evaluated on, so the scan is restricted to the union of the walk-forward
+# validation windows and the sealed holdout rather than to the whole file.
 
 
 # %%
-def load_temporal_panel(start_date: object, end_date: object, columns: list[str]) -> pl.DataFrame:
+def evaluation_spans() -> tuple[list[tuple[object, object]], tuple[object, object]]:
+    """The validation windows and the sealed holdout, as date ranges.
+
+    Read from `generate_cv_splits` rather than written down. A window stated as a
+    literal is a claim about the fixture's geometry that nothing checks, and it
+    silently becomes false: #819 restored this case study to 16 folds, which moves
+    every boundary the previous 15-fold geometry had.
+    """
     timeline = (
         pl.scan_parquet(CASE_DIR / "features" / "financial.parquet")
         .select("timestamp")
@@ -191,31 +210,60 @@ def load_temporal_panel(start_date: object, end_date: object, columns: list[str]
         .collect()
     )
     splits = generate_cv_splits(timeline, case_study_id=CASE_STUDY_ID, label_buffer="1D")
-    temporal = pl.scan_parquet(CASE_DIR / "features" / "model_based.parquet")
-    holdout_fold = temporal.select(pl.max("fold")).collect().item()
-    windows = [
-        (
-            split["fold"],
-            pd.Timestamp(split["val_start"]).date(),
-            pd.Timestamp(split["val_end"]).date(),
-        )
+    validation = [
+        (pd.Timestamp(split["val_start"]).date(), pd.Timestamp(split["val_end"]).date())
         for split in splits
     ]
-    windows.append((holdout_fold, holdout_start.date(), holdout_end.date()))
+    return validation, (holdout_start.date(), holdout_end.date())
 
-    frames = [
-        temporal.filter(
-            (pl.col("fold") == fold)
-            & pl.col("timestamp").is_between(
-                max(start_date, window_start), min(end_date, window_end)
-            )
-        ).select(["symbol", "timestamp", *columns])
-        for fold, window_start, window_end in windows
-        if window_start <= end_date and window_end >= start_date
+
+VALIDATION_SPANS, HOLDOUT_SPAN = evaluation_spans()
+EVALUATION_SPANS = [*VALIDATION_SPANS, HOLDOUT_SPAN]
+# Chosen by date, not by position: `ml4t-diagnostic` 0.1.4 reversed fold numbering, so
+# which end of the list holds the latest window is exactly the thing that moved.
+LAST_VALIDATION_SPAN = max(VALIDATION_SPANS)
+print(
+    f"{len(VALIDATION_SPANS)} validation windows, "
+    f"{min(VALIDATION_SPANS)[0]} to {LAST_VALIDATION_SPAN[1]}; holdout {HOLDOUT_SPAN[0]}"
+)
+
+# The reference distribution is the most recent stretch the model was validated on
+# before the holdout was sealed, which is the latest validation window. Derived rather
+# than pinned, for the reason in the parameters cell.
+if REFERENCE_START is None:
+    REFERENCE_START = str(LAST_VALIDATION_SPAN[0])
+print(f"Reference window starts {REFERENCE_START} (latest validation window)")
+
+
+# %%
+def load_temporal_panel(start_date: object, end_date: object, columns: list[str]) -> pl.DataFrame:
+    """Model-based features over the requested range, restricted to evaluated sessions.
+
+    One filter over the union of the spans, not one frame per span concatenated. A
+    concat double-counts any date two spans cover, and the duplicate-key assertion
+    below would report that only after the fact. Under a single filter a duplicate
+    is impossible by construction, which puts that assertion back to saying the
+    thing it is meant to say: the artifact is unique on `(symbol, timestamp)`.
+    """
+    clipped = [
+        (max(start_date, span_start), min(end_date, span_end))
+        for span_start, span_end in EVALUATION_SPANS
+        if span_start <= end_date and span_end >= start_date
     ]
-    result = pl.concat(frames).collect().sort(["timestamp", "symbol"])
+    if not clipped:
+        raise ValueError(
+            f"No validation window and not the sealed holdout covers {start_date}..{end_date}; "
+            "the requested range lies outside every window this model was evaluated on"
+        )
+    result = (
+        pl.scan_parquet(CASE_DIR / "features" / "model_based.parquet")
+        .filter(pl.any_horizontal(*[pl.col("timestamp").is_between(s, e) for s, e in clipped]))
+        .select(["symbol", "timestamp", *columns])
+        .collect()
+        .sort(["timestamp", "symbol"])
+    )
     duplicate_keys = result.select(pl.struct("symbol", "timestamp").is_duplicated().any()).item()
-    assert duplicate_keys is False
+    assert duplicate_keys is False, "model_based.parquet is not unique on (symbol, timestamp)"
     return result
 
 
