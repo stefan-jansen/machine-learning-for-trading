@@ -50,6 +50,10 @@ _BEST_SCHEMA: dict[str, pl.DataType] = {
     "config_name": pl.Utf8,
     "label": pl.Utf8,
     "signal_method": pl.Utf8,
+    # The entry-scheme sweep varies concentration and nothing else, so without
+    # this the ten-row top table reads as one strategy repeated at different
+    # Sharpes (ml4t/agent-workspace#910).
+    "top_k": pl.Int64,
     "universe_filter": pl.Utf8,
     "exit_at_max_days": pl.Int64,
     "sharpe": pl.Float64,
@@ -288,8 +292,8 @@ class BacktestExplorer:
         -------
         pl.DataFrame
             Columns: backtest_hash, prediction_hash, source, family,
-            config_name, label, signal_method, sharpe, cagr, max_drawdown,
-            total_return, volatility, ic_mean
+            config_name, label, signal_method, top_k, sharpe, cagr,
+            max_drawdown, total_return, volatility, ic_mean
         """
         filter_sql = ""
         filter_params: list[str] = []
@@ -386,8 +390,14 @@ class BacktestExplorer:
         exit_at_max_days = [
             strategy_view(sp).get("signal", {}).get("exit_at_max_days") for sp in parsed
         ]
+        # Every entry scheme in a baseline sweep is `equal_weight_top_k` and varies
+        # only `top_k`, so `signal_method` alone made nine of the ten rows read as
+        # the same strategy. `top_k` sits one key across from `method` in the spec
+        # this block already parses (ml4t/agent-workspace#910).
+        top_k = [strategy_view(sp).get("signal", {}).get("top_k") for sp in parsed]
         df = df.with_columns(
             pl.Series("signal_method", methods),
+            pl.Series("top_k", top_k, dtype=pl.Int64),
             pl.Series("universe_filter", universe_filters),
             pl.Series("exit_at_max_days", exit_at_max_days, dtype=pl.Int64),
         )
@@ -400,6 +410,7 @@ class BacktestExplorer:
             "config_name",
             "label",
             "signal_method",
+            "top_k",
             "universe_filter",
             "exit_at_max_days",
             "sharpe",
@@ -1747,19 +1758,40 @@ class BacktestExplorer:
     # concentration_curve: Sharpe vs top_k at allocation stage
     # -----------------------------------------------------------------
 
-    def concentration_curve(self, prediction_hash: str) -> pl.DataFrame:
-        """Sharpe vs top_k for a given prediction at allocation stage.
+    def concentration_curve(
+        self, prediction_hash: str, *, stage: str | tuple[str, ...] = "allocation"
+    ) -> pl.DataFrame:
+        """Sharpe vs top_k for a given prediction, at one or more stages.
 
         Shows how portfolio concentration affects performance — typically
         more actionable than allocator comparison alone.
+
+        Parameters
+        ----------
+        stage : str or tuple of str, default ``"allocation"``
+            Which backtest stages to read. The default is unchanged, but the
+            entry-scheme sweep that varies concentration lives at the **signal**
+            stage, and that is where the first three notebooks of the backtesting
+            sequence read. This method used to hardcode the allocation stage, so
+            asking it about a baseline sweep returned an empty frame with no
+            indication that the rows were one stage away (ml4t/agent-workspace#910).
 
         Returns
         -------
         pl.DataFrame
             Columns: top_k, allocator, sharpe, max_drawdown, cagr
+
+        Raises
+        ------
+        ValueError
+            When the prediction has backtests, but none at the requested stage.
+            An empty frame cannot say whether the sweep was never run or was run
+            somewhere else, and those need different responses.
         """
+        stages = (stage,) if isinstance(stage, str) else tuple(stage)
+        placeholders = ", ".join("?" for _ in stages)
         df = self._query(
-            """
+            f"""
             SELECT
                 b.spec_json,
                 bm.sharpe,
@@ -1768,13 +1800,14 @@ class BacktestExplorer:
             FROM backtest_runs b
             JOIN backtest_metrics bm ON bm.backtest_hash = b.backtest_hash
             WHERE b.prediction_hash = ?
-              AND b.stage = 'allocation'
+              AND b.stage IN ({placeholders})
               AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
             """,
-            (prediction_hash,),
+            (prediction_hash, *stages),
         )
         if df.is_empty():
+            self._refuse_if_the_curve_is_at_another_stage(prediction_hash, stages)
             return df
 
         rows = []
@@ -1800,6 +1833,28 @@ class BacktestExplorer:
             )
 
         return pl.DataFrame(rows).sort("top_k")
+
+    def _refuse_if_the_curve_is_at_another_stage(
+        self, prediction_hash: str, stages: tuple[str, ...]
+    ) -> None:
+        """Raise when this prediction has backtests, but not at the stage asked for."""
+        elsewhere = self._query(
+            "SELECT stage, COUNT(*) AS n FROM backtest_runs "
+            "WHERE prediction_hash = ? GROUP BY stage ORDER BY n DESC",
+            (prediction_hash,),
+        )
+        if elsewhere.is_empty():
+            return
+        held = {row["stage"]: row["n"] for row in elsewhere.iter_rows(named=True)}
+        if set(held) & set(stages):
+            return
+        counted = ", ".join(f"{name}: {n}" for name, n in held.items())
+        raise ValueError(
+            f"no concentration curve at stage {list(stages)} for prediction "
+            f"{prediction_hash[:12]} in {self.case_study}, which has backtests at "
+            f"{counted}. The entry-scheme sweep that varies top_k runs at the signal "
+            "stage; pass stage='signal' to read it."
+        )
 
     # -----------------------------------------------------------------
     # repr
