@@ -1235,6 +1235,12 @@ def _restore_ruin_nans(metrics: dict) -> dict:
     return metrics
 
 
+# One entry per (case study, label, panel width, prediction width) already reported, so a
+# sweep of twelve backtests over one prediction set prints the diagnostic once rather than
+# twelve times. Process-scoped: a notebook is one process, which is the scope that matters.
+_UNPRICED_UNIVERSE_REPORTED: set[tuple[str, str, int, int]] = set()
+
+
 def warn_if_the_panel_does_not_bound_the_universe(
     predictions: pl.DataFrame, prices: pl.DataFrame, *, case_study: str, label: str
 ) -> None:
@@ -1269,6 +1275,16 @@ def warn_if_the_panel_does_not_bound_the_universe(
     What closes this is the caller declaring the universe it trades, in the spec,
     before it hashes - which is a notebook change. Until then the parameter is
     inert here and this says so at the moment it happens.
+
+    Said twice, on purpose. Every notebook that reaches this line installs a
+    blanket ``warnings.filterwarnings("ignore")`` at import - eleven of them, from
+    ``us_firm_characteristics/11_backtest.py:62`` to
+    ``nasdaq100_microstructure/15_portfolio_management.py:59`` - so a diagnostic
+    that only warns is a diagnostic no reader of the executed notebook ever sees.
+    The ``warnings`` call is what a library caller and the tests read; the print is
+    what survives the filter and lands in the rendered cell. It is emitted once per
+    (case study, label, panel width, prediction width) because a sweep calls
+    ``run_backtest`` once per scheme and would otherwise repeat it dozens of times.
     """
     if "symbol" not in prices.columns or prices.is_empty() or predictions.is_empty():
         return
@@ -1284,15 +1300,19 @@ def warn_if_the_panel_does_not_bound_the_universe(
     unpriced = predictions.join(priced, on="symbol", how="anti")
     if unpriced.is_empty():
         return
-    warnings.warn(
+    message = (
         f"{case_study}/{label}: the price panel carries {priced.height} symbols and the "
         f"predictions carry {predictions['symbol'].n_unique()}, {unpriced['symbol'].n_unique()} "
         "of which it cannot price. The vectorized path takes its universe and its P&L from "
         "the predictions, so this run trades every predicted name at the full cost per "
         "backtest and the narrower panel reduces nothing (ml4t/agent-workspace#911). "
-        "TOP_N_PREDICTIONS is the knob that reduces this stage.",
-        stacklevel=2,
+        "TOP_N_PREDICTIONS is the knob that reduces this stage."
     )
+    warnings.warn(message, stacklevel=2)
+    seen = (case_study, label, priced.height, int(predictions["symbol"].n_unique()))
+    if seen not in _UNPRICED_UNIVERSE_REPORTED:
+        _UNPRICED_UNIVERSE_REPORTED.add(seen)
+        print(f"  WARN warn_if_the_panel_does_not_bound_the_universe: {message}")
 
 
 def run_backtest(

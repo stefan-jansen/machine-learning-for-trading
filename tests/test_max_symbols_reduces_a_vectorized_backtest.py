@@ -178,3 +178,46 @@ def test_the_htm_option_path_keeps_its_own_universe(monkeypatch) -> None:
         register=False,
     )
     assert captured["predictions"]["symbol"].to_list() == ["A", "B", "C", "D"]
+
+
+def test_the_notebooks_blanket_warning_filter_does_not_hide_it(capsys) -> None:
+    """Eleven backtest notebooks ignore warnings at import; the reader still sees this.
+
+    `us_firm_characteristics/11_backtest.py:62` and ten siblings call
+    `warnings.filterwarnings("ignore")` before the first backtest runs, so a
+    diagnostic that only warns reaches nobody who reads the executed notebook.
+    This asserts the message survives that filter, which is the condition the
+    notebook actually runs under - `pytest.warns` in the tests above installs its
+    own filter and cannot see the difference.
+    """
+    import warnings as _warnings
+
+    from case_studies.utils.backtest_runner import warn_if_the_panel_does_not_bound_the_universe
+
+    with _warnings.catch_warnings():
+        _warnings.filterwarnings("ignore")
+        warn_if_the_panel_does_not_bound_the_universe(
+            _predictions(), _prices(["A", "B"]), case_study="filtered", label="fwd_ret_1m"
+        )
+    assert "cannot price" in capsys.readouterr().out
+
+
+def test_a_sweep_over_one_prediction_set_says_it_once(capsys) -> None:
+    """A twelve-scheme sweep calls `run_backtest` twelve times over one panel.
+
+    Each call sees the same panel and the same predictions, so twelve copies of
+    one diagnostic would bury the cell output it is printed into. The case study
+    name here is distinct from every other test in this file, so what is counted
+    is this loop and not a report some earlier test already made.
+    """
+    import warnings as _warnings
+
+    from case_studies.utils.backtest_runner import warn_if_the_panel_does_not_bound_the_universe
+
+    with _warnings.catch_warnings():
+        _warnings.filterwarnings("ignore")
+        for _ in range(12):
+            warn_if_the_panel_does_not_bound_the_universe(
+                _predictions(), _prices(["A", "B"]), case_study="swept", label="fwd_ret_1m"
+            )
+    assert capsys.readouterr().out.count("cannot price") == 1
