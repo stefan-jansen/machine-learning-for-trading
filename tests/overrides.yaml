@@ -2055,27 +2055,34 @@ case_studies/fx_pairs/19_strategy_analysis:
   skip_reason: "Reads back the holdout lineage 17 and 18 produce; with those skipped there is
     nothing for it to resolve."
   timeout: 300
-# max_symbols is 10 rather than 5 through this case study's data and model stages, for the
-# reason case_studies/etfs/06_linear states: top_k_grid [5, 10, 20] and long-short, so the
-# smallest declared concentration needs 2 x 5 = 10 names. The label and feature stages move
-# with the model stages because they bound what the model stages can see, and 14-16 already
-# load a 12-symbol price panel, which is wide enough to hold it. Ten is reachable through
-# `load_nasdaq100_bars`: `data/equities/market/nasdaq100/minute_bars` carries 12 symbols,
-# measured 2026-09-07 on ml4t/third-edition-test-data 63a9e4e. The seeded
-# `intermediates/nasdaq100_microstructure` features carry 5 because they were generated
-# under the cap this entry raises, not because the bars stop there.
+# max_symbols stays 5 here. The arithmetic asks for 10 - top_k_grid [5, 10, 20] and
+# long-short, so the smallest declared concentration needs 2 x 5 = 10 disjoint names - and the
+# raw fixture could supply it: `data/equities/market/nasdaq100/minute_bars` carries 12 symbols,
+# all with quotes. What binds is one step further in. The model stages fit from the fold
+# artifacts, and `intermediates/nasdaq100_microstructure/folds/*/fold_*_meta.parquet` carries
+# 5 symbols on ml4t/third-edition-test-data 63a9e4e, measured 2026-09-07. `max_symbols` at a
+# model stage selects from the fold universe and cannot widen past it, so a cap of 10 over
+# 5-symbol folds still registers 5-symbol predictions - which is what CI measured on
+# 34157373964, where every stage ran and 14_backtest still refused at a ranked cross-section
+# of 5. Raising 01-05 without the folds also re-creates the ml4t/agent-workspace#988
+# divergence the 04 entry below warns about: features over 10 names, folds over 5.
+#
+# etfs and cme_futures are raised in this same file because their seeded folds are already
+# wide - 55-56 and 30 - so a model-stage cap selects from them. nasdaq and
+# crypto_perps_funding are the two whose folds were generated at 5, and both need the fixture
+# regenerated rather than an override (ml4t/agent-workspace#1077).
 case_studies/nasdaq100_microstructure/01_feasibility_analysis:
   parameters:
-    MAX_SYMBOLS: 10
+    MAX_SYMBOLS: 5
   timeout: 120
 case_studies/nasdaq100_microstructure/02_labels:
   parameters:
-    MAX_SYMBOLS: 10
+    MAX_SYMBOLS: 5
     START_DATE: '2000-01-01'
   timeout: 120
 case_studies/nasdaq100_microstructure/03_financial_features:
   parameters:
-    MAX_SYMBOLS: 10
+    MAX_SYMBOLS: 5
     START_DATE: '2000-01-01'
   timeout: 120
 case_studies/nasdaq100_microstructure/04_model_based_features:
@@ -2086,12 +2093,12 @@ case_studies/nasdaq100_microstructure/04_model_based_features:
   # covered none of fold 0 and validate_temporal_fold_coverage failed at 0.0%.
   long_running: true
   parameters:
-    MAX_SYMBOLS: 10
+    MAX_SYMBOLS: 5
     START_DATE: '2000-01-01'
   timeout: 900
 case_studies/nasdaq100_microstructure/05_evaluation:
   parameters:
-    MAX_SYMBOLS: 10
+    MAX_SYMBOLS: 5
   timeout: 300
 case_studies/nasdaq100_microstructure/06_linear:
   parameters:
@@ -2101,7 +2108,7 @@ case_studies/nasdaq100_microstructure/06_linear:
     # cutting the cross-section does not touch it. `folds` is the reduction that does.
     PREVIEW_REDUCTIONS:
       folds: [0]
-      max_symbols: 10
+      max_symbols: 5
       train_sample_frac: 0.02
   # Measured after the preview branch stopped re-resolving: slowest cell 211s (the fit),
   # planning 121s, 342s end to end. Timeout is per cell, so this is ~2.8x the slowest.
@@ -2116,7 +2123,7 @@ case_studies/nasdaq100_microstructure/07_gbm:
       checkpoint_interval: 10
       folds: [0]
       max_iterations: 20
-      max_symbols: 10
+      max_symbols: 5
       train_sample_frac: 0.02
   # Measured the same way: slowest cell 362s, planning 147s, 515s end to end.
   tier: weekly
@@ -2138,7 +2145,7 @@ case_studies/nasdaq100_microstructure/08_dl_nlinear:
     POPULATION_NAME: nasdaq100_microstructure-nlinear-preview
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 10
+      max_symbols: 5
       max_train_sequences: 2000
   timeout: 600
 case_studies/nasdaq100_microstructure/09_dl_lstm:
@@ -2158,7 +2165,7 @@ case_studies/nasdaq100_microstructure/09_dl_lstm:
     POPULATION_NAME: nasdaq100_microstructure-lstm_h64-preview
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 10
+      max_symbols: 5
       max_train_sequences: 2000
   timeout: 600
 case_studies/nasdaq100_microstructure/10_dl_tcn:
@@ -2178,7 +2185,7 @@ case_studies/nasdaq100_microstructure/10_dl_tcn:
     POPULATION_NAME: nasdaq100_microstructure-tcn-preview
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 10
+      max_symbols: 5
       max_train_sequences: 2000
   timeout: 600
 case_studies/nasdaq100_microstructure/11_dl_patchtst:
@@ -2194,7 +2201,7 @@ case_studies/nasdaq100_microstructure/11_dl_patchtst:
     POPULATION_NAME: nasdaq100_microstructure-patchtst-preview
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 10
+      max_symbols: 5
       max_train_sequences: 2000
       # The training cap bounded the fit and left the forward pass over validation
       # scaling with the panel, which is why this cell sat at its 600s budget while
