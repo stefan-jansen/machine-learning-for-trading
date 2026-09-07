@@ -328,7 +328,7 @@ class BacktestExplorer:
               AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
               {filter_sql}
-            ORDER BY bm.sharpe DESC
+            ORDER BY bm.sharpe DESC, b.backtest_hash ASC
             LIMIT ?
             """,
             (
@@ -828,7 +828,7 @@ class BacktestExplorer:
             FROM backtest_runs b
             JOIN backtest_metrics bm ON bm.backtest_hash = b.backtest_hash
             WHERE {where_sql}
-            ORDER BY bm.sharpe DESC
+            ORDER BY bm.sharpe DESC, b.backtest_hash ASC
             """,
             tuple(params),
         )
@@ -1637,7 +1637,7 @@ class BacktestExplorer:
               AND b.stage IS NOT NULL
               AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
-            ORDER BY bm.sharpe DESC
+            ORDER BY bm.sharpe DESC, b.backtest_hash ASC
             """,
             (prediction_hash,),
         )
