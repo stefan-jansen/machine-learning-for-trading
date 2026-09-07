@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -427,6 +428,7 @@ def run_sdf_fold_with_library(
         "training_history": list(fit.history),
         "train_metrics": dict(fit.train_metrics),
         "sdf_sharpe": _latest_sdf_sharpe(fit.history),
+        **fit_convergence(fit.history, require_finite_sharpe=True),
     }
     return checkpoint_predictions, extras
 
@@ -614,6 +616,7 @@ def _run_checkpointed_latent_pipeline(
         "train_history": list(fit.history),
         "train_metrics": dict(fit.train_metrics),
         "checkpoint_predictions": checkpoint_predictions,
+        **fit_convergence(fit.history),
     }
 
 
@@ -652,6 +655,7 @@ def _run_checkpointed_signal_pipeline(
         "train_history": list(fit.history),
         "train_metrics": dict(fit.train_metrics),
         "checkpoint_predictions": checkpoint_predictions,
+        **fit_convergence(fit.history),
     }
 
 
@@ -701,6 +705,69 @@ def _sdf_checkpoint_label(checkpoint: tuple[str, int], *, n_epochs_unc: int) -> 
     if checkpoint == ("unconditional", 0):
         return -3
     return int(epoch if phase == "unconditional" else n_epochs_unc + epoch)
+
+
+def fit_convergence(
+    history: Sequence[dict[str, float | str]],
+    *,
+    require_finite_sharpe: bool = False,
+) -> dict[str, Any]:
+    """A convergence determination for a latent-factor fit trained by gradient descent.
+
+    IPCA reports ``converged`` from its own alternating-least-squares tolerance, and
+    ``_require_fit_convergence`` in ``cv.py`` refuses a cohort any fold failed it in. CAE,
+    SAE and the SDF wrote no such flag, so a fit that never identified registered: its
+    predictions entered the population, ``require_complete`` passed and the notebook's IC
+    table printed normally.
+
+    These three have no tolerance to settle within - they stop on an epoch budget, and a
+    short SAE fit routinely ends on a higher loss than the step before it - so what is
+    checkable is that the fit produced a finite terminal objective, and for the SDF a finite
+    terminal Sharpe as well. ``objective_delta`` is recorded as a diagnostic and nothing is
+    gated on it, because a large last step is a fact about the schedule rather than a
+    failure.
+
+    The terminal objective is the LAST recorded ``train_loss``, not the last finite one.
+    Reading it the way :func:`_latest_sdf_sharpe` reads the Sharpe - backwards until
+    something is finite - returns the value from before the fit diverged and calls that
+    convergence, which is the opposite of what happened. Entries carrying no ``train_loss``
+    are skipped rather than ending the trace: CAE appends a ``validation_best`` summary
+    entry after its per-checkpoint ones, so its objective is never on the last entry.
+    """
+    trace = [
+        float(entry["train_loss"])
+        for entry in history
+        if isinstance(entry.get("train_loss"), (int, float))
+    ]
+    terminal = trace[-1] if trace else None
+    delta = trace[-1] - trace[-2] if len(trace) >= 2 else None
+    converged = terminal is not None and bool(np.isfinite(terminal))
+
+    determination: dict[str, Any] = {
+        "converged": converged,
+        "convergence_criterion": "finite_terminal_objective",
+        "iterations": len(trace),
+        "terminal_objective": terminal,
+        "objective_delta": delta,
+    }
+    if require_finite_sharpe:
+        sharpe = _terminal_metric(history, "train_sharpe")
+        determination["converged"] = converged and sharpe is not None and bool(np.isfinite(sharpe))
+        determination["convergence_criterion"] = "finite_terminal_objective_and_sharpe"
+        determination["terminal_sharpe"] = sharpe
+    return determination
+
+
+def _terminal_metric(
+    history: Sequence[dict[str, float | str]],
+    key: str,
+) -> float | None:
+    """The value of ``key`` on the last entry that carries one, finite or not."""
+    for entry in reversed(history):
+        value = entry.get(key)
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
 
 
 def _latest_sdf_sharpe(history: tuple[dict[str, float | str], ...]) -> float | None:
