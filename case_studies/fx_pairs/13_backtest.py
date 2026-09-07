@@ -21,11 +21,32 @@
 # complete model configuration and checkpoint is evaluated. The input is a Polars catalog selection,
 # so no prediction hash is copied into orchestration code.
 #
+# This is the step that turns a model into a strategy. Everything before it scored pairs; nothing
+# before it has said what you would have held or what it would have returned. Rank correlation
+# and AUC measure whether the ordering carries information, and a model can be clearly informative
+# by both and still lose money once the ordering is turned into positions - the information may
+# sit in pairs too illiquid to hold, or in a part of the distribution the sleeves never reach.
+# The return series produced here is the first quantity in the chain that a trader could have
+# experienced, and it is the reference every later stage is measured against.
+#
+# Equal weight is used deliberately rather than for convenience. It is the choice not to choose a
+# size, so the resulting return series carries the ranking's contribution and nothing else. Any
+# other weighting would blend the model's information with a view about sizing, and the
+# allocation notebook could then no longer attribute its improvement to allocation.
+#
+# **A note on how this appears in the registry.** These runs register with `stage='signal'`, and
+# the notebook asserts it. That stored value names the strategy component being varied - here the
+# signal mapping - and it does not mean there is a separate "signal stage" upstream of a backtest.
+# These *are* the baseline backtests. In prose, write "the baseline backtests" and "baseline
+# (equal-weight) Sharpe", never "signal Sharpe", which reads as a metric of the predictions rather
+# than of a traded strategy.
+#
 # **Learning objectives**
 #
 # - Freeze the exact prediction population before running a baseline sweep.
 # - Send selected catalog rows to the canonical FX engine.
 # - Verify that every declared prediction and portfolio-size combination produces one backtest.
+# - Read the baseline as the reference the allocation, risk and cost stages are measured against.
 #
 # **Book reference**: Chapter 16
 #
@@ -232,6 +253,15 @@ pl.DataFrame(
 #
 # Planning resolves every backtest identity without running or writing it. Production freezes that
 # complete expected set before the first member executes, so a failed member remains visible.
+#
+# Visibility is the whole point, and it is worth being explicit about the alternative. A sweep that
+# collected whatever finished would publish a baseline whose membership depends on which runs
+# happened to succeed. Failures are not random with respect to the thing being measured: a
+# configuration that produces degenerate scores, or one whose predictions are too sparse to fill a
+# sleeve, is more likely to fail and would silently leave the population. The surviving baseline
+# would then look better than the sweep that produced it, and nothing in the output would record
+# that anything was dropped. Declaring the expected set first converts that from a silent
+# improvement into an incomplete population that refuses to publish.
 
 # %% tags=["results"]
 planned_hashes = []
@@ -340,6 +370,18 @@ backtest_rows
 # %% [markdown]
 # ## Key takeaways
 #
-# - The baseline evaluates every complete model configuration and checkpoint.
+# - The baseline evaluates every complete model configuration and checkpoint, so the population
+#   is configurations times checkpoints times portfolio sizes. That product is the number of
+#   trials every later comparison is drawn from.
+# - Equal weight isolates the ranking's contribution. It is the reference the allocation, risk and
+#   cost stages are each measured against, which is why it is computed before any of them.
 # - Catalog rows pass directly to the existing FX backtest engine.
-# - Immutable population membership makes missing or failed jobs visible.
+# - Immutable population membership makes missing or failed jobs visible. Failures correlate with
+#   the thing being measured, so a sweep that published its survivors would flatter itself.
+# - These rows carry `stage='signal'`. They are the baseline backtests; the stored value names the
+#   varied component, not a stage before the backtest.
+#
+# The Sharpe ratios here are validation numbers over a single history, and the best of a large
+# grid is high partly because the grid is large. Nothing at this stage separates a configuration
+# that ranks well from one that ranked well once. That separation is what the holdout is for, and
+# it is spent once, at the end, against the whole candidate set rather than against the leader.

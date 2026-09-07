@@ -93,7 +93,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
-SUPERSEDES_POPULATION: str = "cc48431f8869"
+SUPERSEDES_POPULATION: str = ""
 
 # %%
 study = open_study(

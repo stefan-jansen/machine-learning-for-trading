@@ -1,5 +1,6 @@
 checkpoint_interval: 50
 max_iterations: 500
+model_class: lightgbm.Booster
 params:
   bagging_fraction: 0.8
   bagging_freq: 1

@@ -108,6 +108,7 @@ def _require_holdout_temporal_features(case: Any, split: dict[str, Any]) -> None
         split,
         case.temporal_by_fold,
         source_timeline=case.dataset.get_column(case.date_col),
+        declared_folds=case.temporal_artifact_splits,
         date_col=case.date_col,
     )
 

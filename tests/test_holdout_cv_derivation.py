@@ -560,6 +560,13 @@ def test_a_date_only_val_end_covers_the_whole_final_session_on_an_intraday_panel
 # both that it accepts a covered fold and that it is no weaker than the id check it replaces.
 
 
+# `declared_folds=[]` throughout: these artifacts declare no fold geometry, which is the state
+# every fold-scoped artifact on disk is in and the state the coverage check exists for. The
+# assertion a declaration buys - that the estimator's `train_end` falls before the evaluation
+# window opens - is pinned in tests/test_temporal_fold_declaration.py
+# (ml4t/agent-workspace#994).
+
+
 def _coverage_split(**overrides: Any) -> dict[str, Any]:
     return {
         "fold": 2,
@@ -582,29 +589,37 @@ def test_a_covered_holdout_fold_is_accepted_and_a_gap_in_it_is_not() -> None:
     artifact = pl.DataFrame({"fold": [2, 2, 2], "timestamp": dates})
     source = pl.Series("timestamp", dates)
 
-    require_fold_scoped_temporal_holdout_coverage(split, artifact, source_timeline=source)
+    require_fold_scoped_temporal_holdout_coverage(
+        split, artifact, source_timeline=source, declared_folds=[]
+    )
 
     # A val_end past the last session is the calendar's doing, not a gap: the endpoint required
     # is the last SOURCE observation inside the window, not the boundary itself.
     require_fold_scoped_temporal_holdout_coverage(
-        _coverage_split(val_end="2022-01-01T00:00:00"), artifact, source_timeline=source
+        _coverage_split(val_end="2022-01-01T00:00:00"),
+        artifact,
+        source_timeline=source,
+        declared_folds=[],
     )
 
     with pytest.raises(ValueError, match="temporal date coverage"):
         require_fold_scoped_temporal_holdout_coverage(
-            split, artifact.head(2), source_timeline=source
+            split, artifact.head(2), source_timeline=source, declared_folds=[]
         )
     with pytest.raises(ValueError, match="no holdout fold"):
         require_fold_scoped_temporal_holdout_coverage(
-            split, artifact.with_columns(pl.lit(1).alias("fold")), source_timeline=source
+            split,
+            artifact.with_columns(pl.lit(1).alias("fold")),
+            source_timeline=source,
+            declared_folds=[],
         )
     with pytest.raises(ValueError, match="no requested training rows"):
         require_fold_scoped_temporal_holdout_coverage(
-            split, artifact.tail(2), source_timeline=source
+            split, artifact.tail(2), source_timeline=source, declared_folds=[]
         )
     with pytest.raises(ValueError, match="no observations in the holdout evaluation window"):
         require_fold_scoped_temporal_holdout_coverage(
-            split, artifact, source_timeline=source.head(1)
+            split, artifact, source_timeline=source.head(1), declared_folds=[]
         )
 
 
@@ -625,7 +640,9 @@ def test_a_hole_in_the_middle_of_a_covered_range_is_still_a_gap() -> None:
     artifact = pl.DataFrame({"fold": [2] * missing.len(), "timestamp": missing})
 
     with pytest.raises(ValueError, match="temporal date coverage"):
-        require_fold_scoped_temporal_holdout_coverage(split, artifact, source_timeline=source)
+        require_fold_scoped_temporal_holdout_coverage(
+            split, artifact, source_timeline=source, declared_folds=[]
+        )
 
 
 def test_an_artifact_one_session_short_of_the_window_end_is_refused() -> None:
@@ -645,7 +662,9 @@ def test_an_artifact_one_session_short_of_the_window_end_is_refused() -> None:
     artifact = pl.DataFrame({"fold": [2] * short.len(), "timestamp": short})
 
     with pytest.raises(ValueError, match="evaluation endpoint"):
-        require_fold_scoped_temporal_holdout_coverage(split, artifact, source_timeline=source)
+        require_fold_scoped_temporal_holdout_coverage(
+            split, artifact, source_timeline=source, declared_folds=[]
+        )
 
 
 def test_coverage_refuses_both_cases_the_fold_id_check_refuses() -> None:
@@ -676,13 +695,13 @@ def test_coverage_refuses_both_cases_the_fold_id_check_refuses() -> None:
     # evaluation window.
     with pytest.raises(ValueError, match=r"fold 0 train: temporal date coverage 72/120"):
         require_fold_scoped_temporal_holdout_coverage(
-            {**holdout, "fold": 0}, artifact, source_timeline=source
+            {**holdout, "fold": 0}, artifact, source_timeline=source, declared_folds=[]
         )
 
     # Fresh id: nothing to join at all.
     with pytest.raises(ValueError, match="no holdout fold 8"):
         require_fold_scoped_temporal_holdout_coverage(
-            {**holdout, "fold": 8}, artifact, source_timeline=source
+            {**holdout, "fold": 8}, artifact, source_timeline=source, declared_folds=[]
         )
 
 

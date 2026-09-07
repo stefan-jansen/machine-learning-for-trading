@@ -352,7 +352,12 @@ def test_real_prediction_subset_is_identity_covered_and_preview_only(tmp_path: P
     assert prediction.complete
     assert replayed.hash == prediction.hash
     assert prediction.execution_tier == "preview"
-    assert prediction.load().shape == (10, 5)
+    # Six columns, not five: a published frame now states the label it was produced under
+    # (ml4t/agent-workspace#887), which is data about the frame and is excluded from the
+    # digest that pins its content.
+    frame = prediction.load()
+    assert frame.shape == (10, 6)
+    assert frame.get_column("label").unique().to_list() == ["ret_to_expiry"]
     assert computation["input_data_spec"]["source_prediction_hash"] == source_hash
     assert computation["preview_reductions"] == {
         "source_prediction_hash": source_hash,
