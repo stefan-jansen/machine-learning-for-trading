@@ -954,7 +954,15 @@ def compute_reality_check(
         block_size=block_size,
         random_state=seed,
     )
-    best_idx = _leader_index(np.mean(strategies - bench.reshape(-1, 1), axis=0), keep_names)
+    # Same rule as the cohort leader: a bankrupt challenger is not the one to name.
+    # Its mean excess return is a small negative number rather than a large one, for
+    # the reason `_ruined_columns` gives, so it beats every challenger that lost more
+    # slowly.
+    excess = np.mean(strategies - bench.reshape(-1, 1), axis=0)
+    excess = np.where(_ruined_columns(strategies), np.nan, excess)
+    if np.all(np.isnan(excess)):
+        return {}
+    best_idx = _leader_index(excess, keep_names)
     return {
         "reality_check_pvalue": float(rc.get("p_value", float("nan"))),
         "reality_check_statistic": float(rc.get("test_statistic", float("nan"))),
@@ -966,6 +974,42 @@ def compute_reality_check(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _ruined_columns(matrix: np.ndarray) -> np.ndarray:
+    """Which columns are the return path of a book that lost its capital.
+
+    Read off the series rather than taken from a caller, because this module is
+    handed returns and nothing else - no case study, no registry, no row. That is
+    enough: a path whose cumulative equity reaches zero is bankrupt whoever wrote
+    it, so the test is the definition rather than a heuristic. The engine's
+    `first_ruin_index` is the one implementation of it, imported here rather than
+    restated; the import is local because `backtest_runner` imports this module the
+    same way (`periods_per_year_from_setup`), and two module-level imports would
+    close the cycle.
+
+    Why a leader has to know. `_apply_ruin_semantics` registers sharpe, sortino,
+    calmar, omega, stability and tail_ratio as null for a ruined run precisely so it
+    cannot sort against a solvent one, and every ranking that reads those columns
+    honours that. This module computes its own scores from the return matrix and
+    therefore never sees the decision, so without this the two disagree about the
+    same run and only one of them is right (ml4t/agent-workspace#1079).
+
+    It is not a rare disagreement. The series the engine persists for a ruined path
+    is -1.0 followed by n-1 zeros, whose per-period Sharpe is -1/sqrt(n-1): the one
+    -1.0 inflates the dispersion it is divided by, and every later zero shrinks the
+    mean without adding any. Annualized at 252 periods that is -0.50 over 1,000
+    periods and -0.32 over 2,500 - the middle of a losing population, not the bottom
+    of it. Several case studies here have negative-Sharpe cohorts by construction.
+    """
+    from case_studies.utils.backtest_runner import first_ruin_index
+
+    if matrix.ndim != 2 or matrix.shape[1] == 0:
+        return np.zeros(0, dtype=bool)
+    return np.array(
+        [first_ruin_index(matrix[:, j]) is not None for j in range(matrix.shape[1])],
+        dtype=bool,
+    )
 
 
 def _leader_index(scores: np.ndarray, names: Sequence[str]) -> int:
@@ -1318,9 +1362,16 @@ def compute_cohort_metrics(
         return {}
 
     sharpes = _sharpe_per_column(matrix, periods_per_year)
-    if np.all(np.isnan(sharpes)):
+    # The leader is chosen among the solvent members; the ruined ones stay in the
+    # cohort. They were tried, so they count toward K and toward the trial
+    # distribution the deflation corrects for - what they cannot be is the result the
+    # correction is computed about. A cohort in which every member went bankrupt has
+    # no leader to name, and falls out here the same way one with no measurable Sharpe
+    # does.
+    leader_scores = np.where(_ruined_columns(matrix), np.nan, sharpes)
+    if np.all(np.isnan(leader_scores)):
         return {}
-    leader_idx = _leader_index(sharpes, names)
+    leader_idx = _leader_index(leader_scores, names)
     leader_hash = names[leader_idx]
     leader_arr = matrix[:, leader_idx]
 
