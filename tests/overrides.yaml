@@ -1236,6 +1236,8 @@ case_studies/cme_futures/05_evaluation:
 # this case study's arithmetic: top_k_grid [5, 10] and long-short, so the smallest declared
 # concentration needs 2 x 5 = 10 names to hold a long and a short leg that do not overlap.
 # This also clears the fold-4 feature-column loss the header of this file records at 5.
+# Ten is reachable here: `intermediates/cme_futures/features/financial.parquet` carries 30
+# products, measured 2026-09-07 on ml4t/third-edition-test-data 63a9e4e.
 case_studies/cme_futures/06_linear:
   # 120s is measured here, not copied. Slowest of 5 green `cs-cme_futures` runs of
   # .github/workflows/test.yml sampled 2026-09-04: 15.1s, 13% of the budget, against
@@ -1429,19 +1431,28 @@ case_studies/crypto_perps_funding/02_labels:
   timeout: 120
 case_studies/crypto_perps_funding/03_financial_features:
   timeout: 120
-# max_symbols is 6 rather than 5 for the reason case_studies/etfs/06_linear states:
-# top_k_grid [3, 5, 10] and long-short, so the smallest concentration needs 2 x 3 = 6 names.
-# 04 and 05 move together because 04 builds the temporal artifact the model stages read, and
-# a cap the artifact does not share is what ml4t/agent-workspace#988 measured diverging.
+# max_symbols stays 5 here, and unlike the other three case studies raising it would change
+# nothing: the whole crypto fixture is five perpetuals. `data/crypto/market/perps_1h.parquet`,
+# `premium_index_8h.parquet` and `funding_rate.parquet` each carry exactly the five symbols
+# `tests/create_test_data.py:CRYPTO_SYMBOLS` names, measured 2026-09-07 on
+# ml4t/third-edition-test-data 63a9e4e, and every seeded feature and fold artifact under
+# `intermediates/crypto_perps_funding` carries the same five. This case study declares
+# top_k_grid [3, 5, 10] and is long-short, so its smallest concentration needs 2 x 3 = 6 names
+# and no cap written here can produce a sixth. `cs-crypto_perps_funding` therefore fails at
+# 13_backtest with "no concentration declared ... can be realized", which is
+# ml4t/agent-workspace#989's cause stated rather than the twelve zero-trade backtests it used
+# to register silently. Widening it means widening the fixture, which regenerates
+# `intermediates/crypto_perps_funding` and is the coupling create_test_data.py's crypto header
+# records as ml4t/agent-workspace#970.
 case_studies/crypto_perps_funding/04_model_based_features:
   parameters:
     HMM_N_RESTARTS: 1
-    MAX_SYMBOLS: 6
+    MAX_SYMBOLS: 5
     MIN_TRAIN_BARS: 10
   timeout: 300
 case_studies/crypto_perps_funding/05_evaluation:
   parameters:
-    MAX_SYMBOLS: 6
+    MAX_SYMBOLS: 5
   timeout: 300
 case_studies/crypto_perps_funding/06_linear:
   # 120s is measured here, not copied. Slowest of 5 green `cs-crypto_perps_funding` runs of
@@ -1585,7 +1596,9 @@ case_studies/etfs/05_evaluation:
 # every scheme is dropped and the sweep registers nothing, which is the zero-trade state
 # ml4t/agent-workspace#989 recorded and #1003 makes loud. Six rather than something rounder
 # because cs-etfs is already the longest case-study job on main at 43m and the model cost
-# scales with the cross-section.
+# scales with the cross-section. Six is reachable: the fixture carries 56 funds
+# (`intermediates/etfs/features/financial.parquet`, measured 2026-09-07 on
+# ml4t/third-edition-test-data 63a9e4e), not the 24 the 02_labels entry above still says.
 case_studies/etfs/06_linear:
   # 120s is measured here, not copied. Slowest of 5 green `cs-etfs` runs of
   # .github/workflows/test.yml sampled 2026-09-04: 16.1s, 13% of the budget, against
@@ -2046,7 +2059,11 @@ case_studies/fx_pairs/19_strategy_analysis:
 # reason case_studies/etfs/06_linear states: top_k_grid [5, 10, 20] and long-short, so the
 # smallest declared concentration needs 2 x 5 = 10 names. The label and feature stages move
 # with the model stages because they bound what the model stages can see, and 14-16 already
-# load a 12-symbol price panel, which is wide enough to hold it.
+# load a 12-symbol price panel, which is wide enough to hold it. Ten is reachable through
+# `load_nasdaq100_bars`: `data/equities/market/nasdaq100/minute_bars` carries 12 symbols,
+# measured 2026-09-07 on ml4t/third-edition-test-data 63a9e4e. The seeded
+# `intermediates/nasdaq100_microstructure` features carry 5 because they were generated
+# under the cap this entry raises, not because the bars stop there.
 case_studies/nasdaq100_microstructure/01_feasibility_analysis:
   parameters:
     MAX_SYMBOLS: 10
