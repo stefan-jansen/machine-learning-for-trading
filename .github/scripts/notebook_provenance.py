@@ -464,6 +464,18 @@ def git_blob(path: Path) -> str:
     ).stdout.strip()
 
 
+# Papermill's own cell, and it never survives to a commit: `nb-run.sh` stamps first, because
+# the stamper cross-checks its parameter declaration against this cell, and drops the cell
+# second, before `jupytext --sync` can bake the argument values into the paired `.py`. Both
+# orderings are deliberate and neither can move. What that leaves is a digest computed over
+# one more code cell than the committed notebook has, so every parameterized production run
+# reported OUTPUTS CHANGED on a notebook nothing had touched - etfs/18_holdout_predictions
+# on 2026-09-07, whose only override was the production-safe REPLACE_HOLDOUT. Excluding the
+# cell here means the digest describes the notebook as it is committed, which is the only
+# form anything ever reads it in.
+INJECTED_PARAMETERS_TAG = "injected-parameters"
+
+
 def outputs_digest(nb: dict) -> str:
     """A digest over the outputs this notebook stores, in cell order.
 
@@ -485,7 +497,11 @@ def outputs_digest(nb: dict) -> str:
     carries no output, so folding a prose edit into an executed notebook must not
     invalidate the record of the run.
     """
-    payload = [_normalized_outputs(c.get("outputs") or []) for c in _code_cells(nb)]
+    payload = [
+        _normalized_outputs(c.get("outputs") or [])
+        for c in _code_cells(nb)
+        if INJECTED_PARAMETERS_TAG not in (c.get("metadata") or {}).get("tags", [])
+    ]
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     ).hexdigest()
