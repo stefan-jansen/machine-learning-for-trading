@@ -146,16 +146,14 @@ prices = load_backtest_prices_for(
     CASE_STUDY_ID, BACKTEST_LABEL, split="validation", max_symbols=MAX_SYMBOLS
 )
 n_assets = prices["symbol"].n_unique()
-if TOP_K:
-    PLUMBING_TOP_K = TOP_K
-else:
-    _feasible_top_k = get_top_k_values_for(CASE_STUDY_ID, BACKTEST_LABEL, n_assets)
-    if not _feasible_top_k:
-        raise ValueError(
-            f"top_k_grid for {BACKTEST_LABEL!r} in {CASE_STUDY_ID} has no value < "
-            f"n_assets={n_assets}; declare a feasible k in setup.yaml"
-        )
-    PLUMBING_TOP_K = _feasible_top_k[0]
+# Called unconditionally, because the call is the feasibility check: it raises when no
+# declared k fits `n_assets`. It used to sit in the `else` of `if TOP_K:`, so a papermill
+# TOP_K skipped the check as well as the default it was there to supply. At MAX_SYMBOLS: 3
+# with TOP_K: 1 that is what let this notebook run a `6 predictions x 0 schemes` sweep,
+# register nothing, and report an analysis of rows the fixture already held
+# (ml4t/agent-workspace#1084).
+_feasible_top_k = get_top_k_values_for(CASE_STUDY_ID, BACKTEST_LABEL, n_assets)
+PLUMBING_TOP_K = TOP_K if TOP_K else _feasible_top_k[0]
 print(
     f"Price support: {len(prices):,} rows across {n_assets} historical symbols; "
     f"plumbing-test top-K={PLUMBING_TOP_K}"
