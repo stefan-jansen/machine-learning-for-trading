@@ -63,6 +63,22 @@ def _unsuperseded_hash(db: sqlite3.Connection, name: str) -> str | None:
     return heads[0][0] if len(heads) == 1 else None
 
 
+def _comparable_protocol_value(field: str, value):
+    """One protocol field rendered so two producers' statements of it can be compared.
+
+    Only `feature_artifacts` needs it, and why is in
+    :func:`case_studies.research.results.normalized_feature_artifacts`: six producers write a
+    mapping and the latent adapter writes a list, so two members fitted on identical files
+    declared themselves incompatible (ml4t/agent-workspace#891). Every other field is compared
+    exactly, as before.
+    """
+    if field != "feature_artifacts":
+        return value
+    from .results import normalized_feature_artifacts
+
+    return normalized_feature_artifacts(value)
+
+
 def candidate_set_supersedes(study: Study, *, name: str, declared: str | None) -> str | None:
     """Whether a declared candidate-set generation may be offered to :meth:`CandidateSet.create`.
 
@@ -160,12 +176,21 @@ class CandidateSet:
         comparable_fields = set(contract.get("comparable_fields") or [])
         base = protocols[0]
         for protocol in protocols[1:]:
-            differences = {key for key in base if base.get(key) != protocol.get(key)}
+            differences = {
+                key
+                for key in base
+                if _comparable_protocol_value(key, base.get(key))
+                != _comparable_protocol_value(key, protocol.get(key))
+            }
             undeclared = differences - comparable_fields
             if undeclared:
                 raise ValueError(
                     f"candidate set contains protocol-incompatible results: {sorted(undeclared)}"
                 )
+        # Compared normalized, stored raw. `common_protocol` enters `set_hash`, so rewriting
+        # the rendering here would re-key all 37 candidate sets across the five case studies
+        # that hold one, to change no answer. The comparison above is where the question is
+        # asked, and it is the question that was being answered wrongly.
         common_protocol = {
             key: value for key, value in base.items() if key not in comparable_fields
         }

@@ -463,10 +463,20 @@ def _assert_chronological(
     tell which path produced its list, so a stored fold set that still runs newest
     first hands fold id 0 to the latest window while everything built through the
     generated path now hands it to the earliest, and the two meanings meet in a
-    join. Of the two committed configs, ``fx_pairs/config/cv_config.json`` runs
-    oldest first and agrees; ``us_firm_characteristics/config/cv_config.json`` runs
-    newest first - its fold 0 validates from 2022-12-30 - and has to be renumbered
-    together with every registry row that carries its fold ids.
+    join. Two committed configs carry precomputed splits, and this named them the
+    wrong way round until 2026-09-07. Measured:
+    ``us_firm_characteristics/config/cv_config.json`` runs oldest first and agrees -
+    #791 renumbered it and re-ran the case study rather than migrating its rows.
+    ``fx_pairs/config/cv_config.json`` runs newest first, fold 0 validating from
+    2023-01-03 down to fold 7 at 2016-01-05, and is refused here. It is the one
+    still to be renumbered; #1073 carries the decision, because for that case study
+    a renumber is not only a relabel. ``us_equities_panel``'s config carries no
+    ``splits`` list at all and goes through the generated path, so it is not in
+    question.
+
+    ``tests/test_cv_splits.py`` asserts that state directly on the committed files,
+    so it is executable rather than a comment that can go stale the way this one
+    did.
     """
     val_starts = [_split_value(s, "val_start", "test_start") for s in splits]
     if any(later <= earlier for earlier, later in zip(val_starts, val_starts[1:], strict=False)):

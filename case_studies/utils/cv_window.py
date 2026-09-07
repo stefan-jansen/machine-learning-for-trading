@@ -208,7 +208,14 @@ def modeling_fold_boundaries(case_study: str, label: str) -> list[dict] | None:
     ]
 
 
-def _validated_temporal_folds(raw_folds: Any, *, source: str) -> list[dict[str, Any]]:
+def validated_temporal_folds(raw_folds: Any, *, source: str) -> list[dict[str, Any]]:
+    """The declared fold geometry, or a refusal naming where the bad declaration came from.
+
+    Public because the producer validates the declaration it is about to write with the same
+    rule the consumer reads it back under (:func:`write_model_based`). A geometry that only
+    fails on the read side fails in a notebook hours later, on a machine that no longer has
+    the frame that produced it.
+    """
     if not isinstance(raw_folds, list) or not raw_folds:
         raise ValueError(f"{source} has no temporal fold geometry")
     folds: list[dict[str, Any]] = []
@@ -247,7 +254,7 @@ def temporal_artifact_fold_boundaries(
     if metadata_path.is_file():
         metadata = json.loads(metadata_path.read_text())
         if "fold_geometry" in metadata:
-            return _validated_temporal_folds(
+            return validated_temporal_folds(
                 metadata["fold_geometry"],
                 source=str(metadata_path),
             )
@@ -291,7 +298,7 @@ def temporal_artifact_fold_boundaries(
     if include_outcome_horizon:
         split_kwargs["outcome_horizon"] = resolve_label_horizon(case_study, primary_label, setup)
     folds = generate_cv_splits(timeline, **split_kwargs)
-    return _validated_temporal_folds(
+    return validated_temporal_folds(
         folds,
         source=f"legacy Stage 04 route for {case_study}",
     )

@@ -114,6 +114,7 @@ from case_studies.utils.strategy_analysis import (
     write_strategy_assessment,
 )
 from case_studies.utils.sweep_config import get_universe_filters_for
+from case_studies.utils.uncertainty import ENTIRE_REGISTRY, NO_CARRIER
 from utils.paths import get_case_study_dir, get_output_dir
 
 # %% tags=["parameters"]
@@ -199,7 +200,11 @@ if _n_cohorts == 0 or "cohort_metrics" in _stale:
     # unnoticed and every cohort figure would render blank. Catch it here, where the before
     # and after counts are both in hand.
     _n_cohorts_before = _n_cohorts
-    _counts = compute_and_register(CASE_STUDY, universe_filter=_UNIVERSE_FILTER)
+    # Cohorts are scoped by the rung's universe filter and by nothing else: every
+    # prediction set on that rung counts toward K, retired generations included.
+    _counts = compute_and_register(
+        CASE_STUDY, universe_filter=_UNIVERSE_FILTER, prediction_hashes=ENTIRE_REGISTRY
+    )
     _n_cohorts = sum(_counts[k] for k in ("family", "stagelabel", "label"))
     if _n_cohorts == 0:
         # Backtests are registered - the refusal above guarantees it - so a run that computes
@@ -223,7 +228,16 @@ else:
     print(f"already populated: cohort_metrics {_n_cohorts} rows")
 
 if _n_pairs == 0 or "backtest_paired_metrics" in _stale:
-    _pairs = populate_paired_metrics(CASE_STUDY, explorer, rung=_RUNG, replace_all=True)
+    # `NO_CARRIER` is the raw-Sharpe ranking inside the producer rather than a resolved
+    # lineage: this case study pins a rung the canonical resolver does not know about.
+    _pairs = populate_paired_metrics(
+        CASE_STUDY,
+        explorer,
+        rung=_RUNG,
+        replace_all=True,
+        carrier=NO_CARRIER,
+        prediction_hashes=ENTIRE_REGISTRY,
+    )
     _n_pairs = sum(1 for row in _pairs if "skip" not in row)
     print(f"populated backtest_paired_metrics: {_n_pairs} pairs")
 else:

@@ -62,6 +62,7 @@ from utils.style import COLORS, add_message_title, apply_ml4t_style
 warnings.filterwarnings("ignore")
 apply_ml4t_style()
 
+from case_studies.research import open_study
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import build_backtest_spec, serializable_backtest_spec
 from case_studies.utils.backtest_runner import (
@@ -98,6 +99,22 @@ TOP_N_PREDICTIONS = None
 # How far a no-edge Sharpe may land from zero before the plumbing test is read as a
 # failure of the engine rather than as sampling noise. The whole fleet uses 1.5.
 PLUMBING_SHARPE_TOLERANCE = 1.5
+# Both names stay bound here although nothing below reads them: that is what makes the harness
+# force preview and supply a workspace - `_declares_tier_and_workspace` in `tests/pm_helpers.py`
+# looks for exactly this pair. Without them the canonical branch regenerates in place, which
+# needs symlinks a CI checkout does not have.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
+
+# %% [markdown]
+# The study is opened before anything resolves a path or reads the registry. Under the preview
+# tier, opening it activates a workspace and rewrites `ML4T_OUTPUT_DIR` process-wide, and every
+# later `get_case_study_dir` call resolves against that. A `CASE_DIR`, a prediction index or a
+# `BacktestExplorer` built first would address the released registry while the sweep writes to
+# the preview one, and the two never meet.
+
+# %%
+study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 
 # %% [markdown]
 # ## 1. Setup & Plumbing Test
@@ -163,6 +180,7 @@ strategy_spec = build_backtest_spec(
     prediction_hash="plumbing_test",
     initial_cash=bt_config.initial_cash,
     chapter="ch16",
+    label=LABEL,
     signal={
         "method": "score_weighted_top_k",
         "top_k": TOP_K,
@@ -268,6 +286,11 @@ for pred_row in pred_index.iter_rows(named=True):
             prediction_hash=pred_hash,
             initial_cash=bt_config.initial_cash,
             chapter="ch16",
+            # The step this label declares is part of the backtest identity, and it reaches
+            # the spec only through `label=`. Without it the hash below is one no run
+            # registers, so every one of the registry's baseline rows reads as missing and
+            # the sweep recomputes all of them (ml4t/agent-workspace#1028).
+            label=LABEL,
             signal=signal,
         )
         backtest_hash = backtest_hash_from_parts(pred_hash, serializable_backtest_spec(spec))

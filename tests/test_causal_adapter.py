@@ -445,6 +445,57 @@ def test_causal_run_registers_once_and_reopens_after_restart(tmp_path, monkeypat
     assert json.loads(json.dumps(reopened.spec)) == reopened.spec
 
 
+def test_the_frozen_fraction_reaches_the_registry_and_survives_a_cache_hit(
+    tmp_path, monkeypatch
+) -> None:
+    """The diagnostic the refutation's own warning names must reach the reader who
+    regenerates the result rather than the one who watched the fit.
+
+    `_assert_placebo_permutation_possible` warns that `placebo_frozen_fraction` has to be
+    read alongside the p-value, and it warns from inside the fit. The second `run()` below
+    is served from cache and performs no fit, so it emits no warning - which is exactly the
+    re-run a reader does to reproduce a published number. Registering the fraction is what
+    makes that reader able to see whether the p-value is biased toward 1.
+    """
+    study, label, _frame = _causal_fixture(tmp_path, monkeypatch)
+    calls = 0
+
+    def run_analysis(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return {
+            "dml_result": {"theta": 0.02, "se_hac": 0.01, "n_obs": 120},
+            "p_value_hac": 0.04,
+            "naive_effect": 0.03,
+            "confounding_bias_pct": 50.0,
+            "refutation": {
+                "empirical_p": 0.1,
+                "n_successful": 10,
+                "placebo_frozen_fraction": 0.023,
+            },
+        }
+
+    monkeypatch.setattr(causal, "run_dml_analysis", run_analysis)
+    request = study.causal(
+        method="dml",
+        label=label.name,
+        execution_tier="preview",
+        preview_reductions={
+            "max_samples": 240,
+            "max_symbols": 6,
+            "n_folds": 2,
+            "n_placebo": 10,
+        },
+    )
+
+    first = request.run()
+    second = request.run()
+
+    assert calls == 1
+    assert first.metrics["placebo_frozen_fraction"] == pytest.approx(0.023)
+    assert second.metrics["placebo_frozen_fraction"] == pytest.approx(0.023)
+
+
 def test_causal_cache_accepts_provenance_only_drift(tmp_path, monkeypatch) -> None:
     study, label, _frame = _causal_fixture(tmp_path, monkeypatch)
     calls = 0
@@ -924,3 +975,75 @@ def test_the_outcome_horizon_is_registered_and_is_not_the_buffer(tmp_path, monke
 
     assert refutation["label_buffer_steps"] == 3
     assert refutation["label_horizon_steps"] == 1
+
+
+def test_naming_the_notebook_records_provenance_without_moving_the_identity(
+    tmp_path, monkeypatch
+) -> None:
+    """`notebook=` answers which notebook wrote a row, and must not reprice the analysis.
+
+    `entry_point` in a causal spec names the module, `case_studies.utils.causal`, which every
+    `*_causal_dml` notebook shares - so it cannot say which one ran. `notebook_path` can, and
+    it is in `_V2_PROVENANCE_FIELDS`, so recording it moves no hash and forces no refit. That
+    is the whole reason this is safe to add to notebooks whose rows already exist, and it is
+    worth pinning rather than asserting: `computation` is hashed whole, so a request field
+    that leaked into it would reprice every causal row in the corpus.
+    """
+    study, label, _frame = _causal_fixture(tmp_path, monkeypatch)
+
+    unnamed = study.causal(method="dml", label=label.name).resolve()
+    named = study.causal(method="dml", label=label.name, notebook="11_causal_dml").resolve()
+
+    from case_studies.utils.registry.specs import training_hash_from_spec
+
+    assert named.spec["computation"] == unnamed.spec["computation"]
+    assert training_hash_from_spec(named.spec) == training_hash_from_spec(unnamed.spec)
+
+    assert named.spec["provenance"]["notebook_path"] == "11_causal_dml"
+    assert "notebook_path" not in unnamed.spec["provenance"]
+    assert named.spec["provenance"]["entry_point"] == "case_studies.utils.causal"
+
+
+def test_the_registered_row_names_the_notebook_not_the_module(tmp_path, monkeypatch) -> None:
+    """`causal_runs.notebook` must answer which notebook ran, and the module is not an answer.
+
+    This path used to write the literal `"case_studies.utils.causal"` into that column, which
+    `spec_json.provenance.entry_point` already carries and which every `*_causal_dml` notebook
+    shares. The other writer, `register_causal_run`'s direct callers, writes the stem - so one
+    notebook appeared in the registry as two populations. `us_firm_characteristics` holds three
+    rows each way today.
+
+    A column, not part of the spec, so it cannot move `causal_hash` - pinned separately by
+    `test_naming_the_notebook_records_provenance_without_moving_the_identity`.
+    """
+    import sqlite3
+
+    from case_studies.utils import causal as causal_module
+
+    study, label, _frame = _causal_fixture(tmp_path, monkeypatch)
+    # The fit itself is not what is under test and the fixture panel is too short to run a
+    # canonical five-fold DML, so the analysis is canned the way the supersedes tests can it.
+    # What is under test is the value the registration writes into one column.
+    monkeypatch.setattr(
+        causal_module,
+        "run_dml_analysis",
+        lambda *a, **k: {
+            "dml_result": {"theta": 0.02, "se_hac": 0.01, "n_obs": 120},
+            "p_value_hac": 0.04,
+            "naive_effect": 0.03,
+            "confounding_bias_pct": 50.0,
+            "refutation": {"empirical_p": 0.1, "n_successful": 100},
+            "started_at": "2026-08-15T00:00:00+00:00",
+            "elapsed_s": 1.0,
+        },
+    )
+
+    result = study.causal(method="dml", label=label.name, notebook="09_causal_dml").run()
+
+    with sqlite3.connect(study.storage_root("canonical") / "run_log" / "registry.db") as db:
+        stored = db.execute(
+            "SELECT notebook FROM causal_runs WHERE causal_hash = ?", (result.hash,)
+        ).fetchone()
+
+    assert stored is not None, "the run registered no causal row"
+    assert stored[0] == "09_causal_dml"

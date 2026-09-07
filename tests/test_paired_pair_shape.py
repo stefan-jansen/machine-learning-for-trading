@@ -35,7 +35,12 @@ import polars as pl
 import pytest
 
 from case_studies.utils import paired_metrics
-from case_studies.utils.uncertainty import STAGE_SEQUENCE, joint_returns
+from case_studies.utils.uncertainty import (
+    ENTIRE_REGISTRY,
+    NO_CARRIER,
+    STAGE_SEQUENCE,
+    joint_returns,
+)
 
 
 @pytest.fixture
@@ -211,7 +216,13 @@ def test_the_producer_gives_every_stage_transition_the_default_shape(
     # is stated here. `populate_paired_metrics` reads it from the case study's own
     # declaration when omitted, and this test is about the pair shape, not the scale.
     paired_metrics.populate_paired_metrics(
-        "unit_cs", _Explorer(), periods_per_year=252, verbose=False
+        "unit_cs",
+        _Explorer(),
+        periods_per_year=252,
+        verbose=False,
+        carrier=NO_CARRIER,
+        prediction_hashes=ENTIRE_REGISTRY,
+        replace_all=False,
     )
 
     # One transition per consecutive pair of stages, and none of them takes the overlay
@@ -242,7 +253,15 @@ def test_the_producer_skips_a_stage_the_case_study_has_not_run(
     monkeypatch.setattr(paired_metrics, "_benchmark_returns_from_artifact", lambda *a, **k: None)
 
     explorer = _Explorer(("signal", "allocation", "cost_sensitivity"))
-    paired_metrics.populate_paired_metrics("unit_cs", explorer, periods_per_year=252, verbose=False)
+    paired_metrics.populate_paired_metrics(
+        "unit_cs",
+        explorer,
+        periods_per_year=252,
+        verbose=False,
+        carrier=NO_CARRIER,
+        prediction_hashes=ENTIRE_REGISTRY,
+        replace_all=False,
+    )
 
     kinds = [kind for kind, _ in seen if kind.endswith("_leader")]
     assert "allocation_leader" in kinds
@@ -313,7 +332,13 @@ def test_the_producer_will_not_pair_two_stages_that_branched_separately(
             return lineage
 
     paired_metrics.populate_paired_metrics(
-        "unit_cs", _Sibling(), periods_per_year=252, verbose=False
+        "unit_cs",
+        _Sibling(),
+        periods_per_year=252,
+        verbose=False,
+        carrier=NO_CARRIER,
+        prediction_hashes=ENTIRE_REGISTRY,
+        replace_all=False,
     )
 
     kinds = [kind for kind, _ in seen if kind.endswith("_leader")]

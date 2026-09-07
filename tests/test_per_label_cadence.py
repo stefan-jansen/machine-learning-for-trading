@@ -149,8 +149,13 @@ class TestBuildSpecRefusesAnUnlabelledCall:
                 signal={"method": "equal_weight_top_k", "top_k": 2},
             )
 
-    def test_no_overrides_means_no_new_requirement(self):
-        """Every case study that declares nothing keeps calling exactly as it did."""
+    def test_no_cadence_override_means_the_case_study_default(self):
+        """Declaring no per-label cadence still resolves to the case-study cadence.
+
+        The label is passed because `labels.rebalance_step` makes it mandatory for every
+        case study that declares one - etfs does (ml4t/agent-workspace#1028) - not because
+        this case study overrides a cadence. What is asserted here is the cadence.
+        """
         from case_studies.utils.backtest_presets import build_backtest_spec
 
         cfg = _config()
@@ -167,6 +172,7 @@ class TestBuildSpecRefusesAnUnlabelledCall:
             prediction_hash="h",
             initial_cash=100_000.0,
             signal={"method": "equal_weight_top_k", "top_k": 2},
+            label="fwd_ret_21d",
         )
         assert spec["strategy"]["rebalance"]["cadence"] == "monthly_month_end"
 

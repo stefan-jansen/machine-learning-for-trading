@@ -622,7 +622,31 @@ def _papermill_visible(py_path: Path) -> set[str] | None:
         return None
 
 
-def unusable_parameters(py_path: Path, names: Iterable[str]) -> dict[str, str]:
+def parameters_cell_names(py_path: Path) -> set[str]:
+    """Every name a notebook's `parameters`-tagged cells bind at module level.
+
+    A notebook may carry more than one such cell - `15_model_analysis` has three - so this unions
+    them. `unusable_parameters` reads only the last, because papermill injects after the last and
+    that is the span its overwrite analysis is about; a caller asking what the notebook declares
+    wants all of them.
+    """
+    source = py_path.read_text()
+    tree = ast.parse(source, filename=str(py_path))
+    spans = [
+        (lo, hi)
+        for header, lo, hi in _percent_cell_bounds(source)
+        if PARAMETERS_CELL_MARKER in header
+    ]
+    return {
+        name
+        for name, line in _top_level_bindings(tree)
+        if any(lo <= line <= hi for lo, hi in spans)
+    }
+
+
+def unusable_parameters(
+    py_path: Path, names: Iterable[str], *, research_preview: bool = True
+) -> dict[str, str]:
     """Map each declared parameter name that cannot reach the notebook to why.
 
     An empty dict means every name is injectable. Everything turns on where
@@ -655,6 +679,13 @@ def unusable_parameters(py_path: Path, names: Iterable[str]) -> dict[str, str]:
     Args:
         py_path: the notebook's `.py` source
         names: the parameter names `overrides.yaml` declares for it
+        research_preview: which of the two callers this entry is being judged for.
+            `injected_parameters` folds the translated names into PREVIEW_REDUCTIONS
+            only under the preview tier; on the canonical path it passes them through
+            by name, so a notebook that declares the mapping and not the names does
+            not receive them. Defaulting to True keeps the smoke path's answer, and
+            the fixture generator's path is the one that has to be asked for
+            explicitly - see `test_every_declared_parameter_reaches_both_callers`.
 
     Returns:
         {name: reason} for the names that cannot take effect.
@@ -698,8 +729,17 @@ def unusable_parameters(py_path: Path, names: Iterable[str]) -> dict[str, str]:
         if tagged
         else set()
     )
+    # The translation is a property of the caller, not of the notebook. `injected_parameters`
+    # applies `_collect_preview_reductions` only under `research_preview=True`; on the canonical
+    # path it strips the `PREVIEW_`-prefixed names and passes everything else through by name.
+    # Exempting these unconditionally is what let `us_equities_panel` 06 and 07 declare
+    # MAX_FOLDS and MAX_SYMBOLS that `tests/generate_intermediates.py` - which passes
+    # `research_preview=False` - could never inject: papermill logged "Passed unknown parameter"
+    # for both and the fixture ran unreduced.
     translated = (
-        set(PREVIEW_TRANSLATED_PARAMETERS) if TRANSLATION_TARGET in cell_declares else set()
+        set(PREVIEW_TRANSLATED_PARAMETERS)
+        if research_preview and TRANSLATION_TARGET in cell_declares
+        else set()
     )
 
     events: list[tuple[str, str, int]] = []
@@ -1047,10 +1087,16 @@ def resolved_registry_path(
 
 # The override names `_collect_preview_reductions` folds into PREVIEW_REDUCTIONS, mapped to the
 # reduction key each becomes. `unusable_parameters` reads the same table, so a name that reaches a
-# notebook by translation is not reported unreachable for not appearing in its source. Two places
-# stating this list separately is what let one of them go stale: measured on
-# agent/us-equities-panel-notebooks, `06_linear` and `07_gbm` declare PREVIEW_REDUCTIONS and were
-# reported unreachable on MAX_FOLDS and MAX_SYMBOLS, which do reach them.
+# notebook by translation is not reported unreachable for not appearing in its source.
+#
+# It reaches it **on the preview path only**. `injected_parameters` calls the fold under
+# `research_preview=True` and passes the names through untranslated otherwise, and
+# `tests/generate_intermediates.py:315` is the caller that passes False. An earlier version of
+# this note recorded that `06_linear` and `07_gbm` "do reach them", which was true of the smoke
+# path and false of the fixture path; both notebooks ran unreduced on 2026-09-06 with papermill
+# logging "Passed unknown parameter" for each, and `us_equities_panel/06_linear` then failed on
+# fold 0, whose 223-session training window is shorter than the 756-session burn-in
+# `model_based.regime` declares. So `unusable_parameters` takes the path as an argument.
 TRANSLATION_TARGET = "PREVIEW_REDUCTIONS"
 
 # The third element is every reduction name that states the same quantity. A translated default

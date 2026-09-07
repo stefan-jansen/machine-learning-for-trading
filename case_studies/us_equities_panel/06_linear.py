@@ -97,6 +97,7 @@ from case_studies.research import (
     planned_model_plan,
     primary_label,
     run_model_population,
+    supersedes_for_run,
 )
 from utils.style import COLORS, show_plotly_with_alt
 
@@ -171,11 +172,9 @@ if narrows_declared_catalog(study, "linear", configs) and not POPULATION_NAME:
         "the canonical population; pass POPULATION_NAME to give it its own"
     )
 
-# The diagnostic set is published by an unnarrowed canonical run and by nothing else, so the
-# requirement that its configurations be among the ones fitted applies to that run and to
-# nothing else. Asked unconditionally, it refused a perfectly valid narrowed or preview run
-# for leaving out a configuration that run was never going to publish, and the only way past
-# it was to override a parameter irrelevant to what was being fitted.
+# Only an unnarrowed canonical run publishes the diagnostic set, so only that run has to carry
+# every diagnostic configuration. A narrowed or preview run publishes no name and is free to
+# leave any of them out.
 is_published_population = (
     EXECUTION_TIER == "canonical" and not POPULATION_NAME and not PREVIEW_REDUCTIONS
 )
@@ -225,6 +224,7 @@ requests = model_requests(
     configs,
     execution_tier=EXECUTION_TIER,
     preview_reductions=PREVIEW_REDUCTIONS,
+    notebook="06_linear",
 )
 plan = plan_models(study, requests=requests)
 
@@ -290,11 +290,21 @@ planned.select(
 
 # %%
 population_name = POPULATION_NAME or "us-equities-linear-checkpoints-v1"
+# The declared hash is only meaningful where a generation of this name already exists. A
+# preview run, a first canonical run against an empty `run_log/`, and a run under a
+# caller-chosen `POPULATION_NAME` are all refused by `OfficialPopulation.create` if it is
+# passed anyway. The resolution lives in shared code so no notebook branches on the tier.
+supersedes = supersedes_for_run(
+    study,
+    population_name=population_name,
+    declared=SUPERSEDES_POPULATION,
+    execution_tier=EXECUTION_TIER,
+)
 execution, population = run_model_population(
     study,
     plan,
     population_name=population_name,
-    supersedes=SUPERSEDES_POPULATION or None,
+    supersedes=supersedes,
 )
 
 fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
@@ -401,12 +411,13 @@ catalog.select(
 # %% [markdown]
 # ## Freeze the compatible result sets
 #
-# The population above is one immutable list covering every label this run fitted. `15_model_analysis`
-# and `16_backtest` do not open populations directly - they open *candidate sets*, named per
-# `(label, family)`, because a comparison is only meaningful within one label's protocol. Freezing
-# is what creates those names.
+# The population above is one immutable list covering every label this run fitted.
+# `16_backtest` never opens it: it opens *candidate sets*, named per `(label, family)`, because a
+# comparison is only meaningful within one label's protocol. `15_model_analysis` opens both - the
+# population, to confirm the run filled every member it promised, and the candidate sets, to make
+# the comparison. Freezing is what creates those names.
 #
-# Without this the two downstream notebooks name four sets that nothing produces, and they fail
+# Without this the two downstream notebooks name six sets that nothing produces, and they fail
 # differently: `15` raises when `CandidateSet.one` cannot find the name, while `16` would simply
 # backtest whatever subset of names does resolve. A missing name is a silently narrower strategy
 # chain, which is the failure the named-set design exists to prevent.

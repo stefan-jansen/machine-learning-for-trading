@@ -24,6 +24,7 @@ from darts.models import NBEATSModel, TSMixerModel
 from ml4t.diagnostic.metrics import cross_sectional_ic
 
 from case_studies.utils.cv_results import assemble_cv_result
+from case_studies.utils.folds import fold_seed
 from utils.modeling import RANDOM_SEED, seed_everything
 
 SUPPORTED_DARTS_ARCHITECTURES = {"nbeats", "tsmixer"}
@@ -473,7 +474,7 @@ def select_full_coverage_checkpoint(
 def _build_darts_model(
     cfg: dict[str, Any],
     device: str,
-    fold_seed: int,
+    split_seed: int,
     input_chunk_length: int,
     output_chunk_length: int,
     trainer_callbacks: list[Any] | None = None,
@@ -503,7 +504,12 @@ def _build_darts_model(
         params.setdefault("use_static_covariates", False)
     params["n_epochs"] = cfg.get("n_epochs", 100)
     params["batch_size"] = cfg.get("batch_size", 2048)
-    params["random_state"] = fold_seed
+    # The caller derived this from the fold's number (`folds.fold_seed`), so unlike the
+    # other five sites the fold index reaches a declared model hyperparameter rather than
+    # only the process-global RNG. It still reaches no stored spec: `params` is built at
+    # fit time and passed straight to the constructor, and this family records no
+    # effective params, so a renumbered run looks correct everywhere it is written down.
+    params["random_state"] = split_seed
     params["save_checkpoints"] = False
     params["force_reset"] = True
     trainer = dict(params.pop("pl_trainer_kwargs", {}))
@@ -1120,8 +1126,12 @@ def run_darts_cv(
         )
 
         for split in splits:
-            fold_seed = cfg_seed + split["fold"]
-            seed_everything(fold_seed)
+            # The fold's number is an input to the fit, not a label on it. This site
+            # goes one step further than the other five: the value is also assigned to
+            # `params["random_state"]` in `_build_darts_model`, so the fold number lands
+            # in the model's own declared hyperparameters. See `folds.fold_seed`.
+            split_seed = fold_seed(cfg_seed, split["fold"])
+            seed_everything(split_seed)
             fold_dataset = (
                 _overlay_fold_temporal_features(
                     config_dataset,
@@ -1190,7 +1200,7 @@ def run_darts_cv(
             model = _build_darts_model(
                 cfg,
                 device,
-                fold_seed,
+                split_seed,
                 input_chunk_length,
                 output_chunk_length,
                 trainer_callbacks=[

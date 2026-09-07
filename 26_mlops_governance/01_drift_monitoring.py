@@ -36,7 +36,13 @@ CASE_STUDY_ID = "us_equities_panel"
 # cross-validation / validation predictions, never a holdout set, so monitoring
 # them would mean labelling a validation window as "holdout".
 PRIMARY_LABEL = "fwd_ret_5d"
-REFERENCE_START = "2015-01-01"
+# Left unset so the reference window is derived from the fixture's own fold geometry.
+# "2015-01-01" stood here, which was not an independent choice: it sat one day inside
+# the then-final validation fold (2015-01-02..2015-12-30). #819 restored this case
+# study to 16 folds and moved every boundary, so a literal that used to land inside a
+# window now lands wherever the new geometry puts it. Set it to a date string to pin
+# the window by hand.
+REFERENCE_START = None
 LOOKBACK_DAYS = 63
 KS_WATCH_PVALUE = 0.05  # §26.3 K-S trigger
 SEED = 42
@@ -175,15 +181,28 @@ def validate_feature_data(features_df: pl.DataFrame, required_columns: list[str]
 
 
 # %% [markdown]
-# ### Resolve fitted feature state by walk-forward fold
+# ### Resolve fitted feature state by evaluation window
 #
-# `model_based.parquet` stores one fitted feature vintage per fold. Each date
-# must use its validation fold, while the sealed holdout uses the dedicated
-# final fold fitted only on pre-holdout observations.
+# `model_based.parquet` carries one row per stock-date and no `fold` column.
+# Stage 04 fits its transforms on a rolling refit schedule, so a date's value is
+# the same whichever fold later reads it - the artifact's own prose puts it as
+# "one value whichever fold later reads it".
+#
+# A fold is therefore not something to select on, but the *date range* still is:
+# a drift measurement is only meaningful over sessions the model was actually
+# evaluated on, so the scan is restricted to the union of the walk-forward
+# validation windows and the sealed holdout rather than to the whole file.
 
 
 # %%
-def load_temporal_panel(start_date: object, end_date: object, columns: list[str]) -> pl.DataFrame:
+def evaluation_spans() -> tuple[list[tuple[object, object]], tuple[object, object]]:
+    """The validation windows and the sealed holdout, as date ranges.
+
+    Read from `generate_cv_splits` rather than written down. A window stated as a
+    literal is a claim about the fixture's geometry that nothing checks, and it
+    silently becomes false: #819 restored this case study to 16 folds, which moves
+    every boundary the previous 15-fold geometry had.
+    """
     timeline = (
         pl.scan_parquet(CASE_DIR / "features" / "financial.parquet")
         .select("timestamp")
@@ -191,31 +210,129 @@ def load_temporal_panel(start_date: object, end_date: object, columns: list[str]
         .collect()
     )
     splits = generate_cv_splits(timeline, case_study_id=CASE_STUDY_ID, label_buffer="1D")
-    temporal = pl.scan_parquet(CASE_DIR / "features" / "model_based.parquet")
-    holdout_fold = temporal.select(pl.max("fold")).collect().item()
-    windows = [
-        (
-            split["fold"],
-            pd.Timestamp(split["val_start"]).date(),
-            pd.Timestamp(split["val_end"]).date(),
-        )
+    validation = [
+        (pd.Timestamp(split["val_start"]).date(), pd.Timestamp(split["val_end"]).date())
         for split in splits
     ]
-    windows.append((holdout_fold, holdout_start.date(), holdout_end.date()))
+    return validation, (holdout_start.date(), holdout_end.date())
 
-    frames = [
-        temporal.filter(
-            (pl.col("fold") == fold)
-            & pl.col("timestamp").is_between(
-                max(start_date, window_start), min(end_date, window_end)
-            )
-        ).select(["symbol", "timestamp", *columns])
-        for fold, window_start, window_end in windows
-        if window_start <= end_date and window_end >= start_date
+
+MODEL_BASED_PATH = CASE_DIR / "features" / "model_based.parquet"
+# Which artifact vintage is on disk decides how a date's feature value is addressed, and
+# both are in circulation: stage 04 writes one row per stock-date, while a fixture built
+# before that conversion writes one row per (key, fold) with *genuinely different* values
+# per fold - measured on the published CI fixture, 22,576 of 22,890 rows disagree between
+# folds. So the fold column is not redundant there and cannot be collapsed away; where it
+# exists, each date must still be read from the fold that evaluated it.
+FOLD_KEYED_ARTIFACT = "fold" in pl.scan_parquet(MODEL_BASED_PATH).collect_schema().names()
+
+
+# %%
+def folds_by_coverage(path, windows: list[tuple]) -> list[object]:
+    """Pair each evaluation window with the artifact fold that covers it, by date.
+
+    Never by fold id. `ml4t-diagnostic` 0.1.4 reversed what a fold number means, and a
+    legacy artifact was written under the older convention, so pairing a stored id with
+    a freshly generated one joins each date against the wrong vintage - invisibly, since
+    both ids exist and the join succeeds. Ordering both sides by date is the one pairing
+    that does not depend on which convention wrote the file.
+    """
+    coverage = (
+        pl.scan_parquet(path)
+        .group_by("fold")
+        .agg(pl.max("timestamp").alias("last_covered"))
+        .collect()
+        .sort("last_covered")
+    )
+    stored = coverage["fold"].to_list()
+    if len(stored) != len(windows):
+        raise ValueError(
+            f"model_based.parquet carries {len(stored)} folds and this notebook derived "
+            f"{len(windows)} evaluation windows. They cannot be paired by date, so the "
+            "artifact does not describe the geometry this case study now declares; "
+            "regenerate it against the current stage 04."
+        )
+    order = sorted(range(len(windows)), key=lambda i: windows[i])
+    paired: list[object] = [None] * len(windows)
+    for position, window_index in enumerate(order):
+        paired[window_index] = stored[position]
+    return paired
+
+
+VALIDATION_SPANS, HOLDOUT_SPAN = evaluation_spans()
+EVALUATION_SPANS = [*VALIDATION_SPANS, HOLDOUT_SPAN]
+# Fold ids for the legacy path only. The holdout rows carry the artifact's highest fold,
+# fitted on pre-holdout observations alone.
+EVALUATION_FOLDS = (
+    folds_by_coverage(MODEL_BASED_PATH, EVALUATION_SPANS)
+    if FOLD_KEYED_ARTIFACT
+    else [None] * len(EVALUATION_SPANS)
+)
+# Chosen by date, not by position: `ml4t-diagnostic` 0.1.4 reversed fold numbering, so
+# which end of the list holds the latest window is exactly the thing that moved.
+LAST_VALIDATION_SPAN = max(VALIDATION_SPANS)
+print(
+    f"{len(VALIDATION_SPANS)} validation windows, "
+    f"{min(VALIDATION_SPANS)[0]} to {LAST_VALIDATION_SPAN[1]}; holdout {HOLDOUT_SPAN[0]}"
+)
+
+# The reference distribution is the most recent stretch the model was validated on
+# before the holdout was sealed, which is the latest validation window. Derived rather
+# than pinned, for the reason in the parameters cell.
+if REFERENCE_START is None:
+    REFERENCE_START = str(LAST_VALIDATION_SPAN[0])
+print(f"Reference window starts {REFERENCE_START} (latest validation window)")
+
+
+# %%
+def window_terms(clipped: list[tuple]) -> list[pl.Expr]:
+    """One predicate per evaluation window, to be OR-ed into a single filter.
+
+    Against a fold-free artifact a window is a date range and nothing else. Against a
+    fold-keyed one the same window also names the fold whose fitted state that range is
+    evaluated under, and the two must be applied together: those vintages hold different
+    values for the same stock-date, so a date range alone would return one row per fold
+    and no rule for choosing between them.
+    """
+    if FOLD_KEYED_ARTIFACT:
+        return [
+            (pl.col("fold") == fold) & pl.col("timestamp").is_between(start, end)
+            for fold, start, end in clipped
+        ]
+    return [pl.col("timestamp").is_between(start, end) for _, start, end in clipped]
+
+
+# %%
+def load_temporal_panel(start_date: object, end_date: object, columns: list[str]) -> pl.DataFrame:
+    """Model-based features over the requested range, restricted to evaluated sessions.
+
+    One filter over the union of the windows, not one frame per window concatenated. A
+    concat double-counts any date two windows cover and would do it silently, so the
+    duplicate-key assertion below could only report it after the fact; under a single
+    filter it states what it is for, that one stock-date resolves to one row.
+    """
+    clipped = [
+        (fold, max(start_date, span_start), min(end_date, span_end))
+        for fold, (span_start, span_end) in zip(EVALUATION_FOLDS, EVALUATION_SPANS, strict=True)
+        if span_start <= end_date and span_end >= start_date
     ]
-    result = pl.concat(frames).collect().sort(["timestamp", "symbol"])
+    if not clipped:
+        raise ValueError(
+            f"No validation window and not the sealed holdout covers {start_date}..{end_date}; "
+            "the requested range lies outside every window this model was evaluated on"
+        )
+    result = (
+        pl.scan_parquet(MODEL_BASED_PATH)
+        .filter(pl.any_horizontal(*window_terms(clipped)))
+        .select(["symbol", "timestamp", *columns])
+        .collect()
+        .sort(["timestamp", "symbol"])
+    )
     duplicate_keys = result.select(pl.struct("symbol", "timestamp").is_duplicated().any()).item()
-    assert duplicate_keys is False
+    assert duplicate_keys is False, (
+        "a stock-date resolved to more than one model-based row; the evaluation windows "
+        "this notebook derived are not disjoint over the requested range"
+    )
     return result
 
 

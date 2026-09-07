@@ -69,8 +69,7 @@ _MODEL_CLASSES = {
     "ElasticNet": ElasticNet,
     "LogisticRegression": LogisticRegression,
 }
-_PREVIEW_FIELDS = {"folds", "max_symbols", "train_sample_frac"}
-
+from case_studies.utils.preview_fields import LINEAR_PREVIEW_FIELDS as _PREVIEW_FIELDS
 
 # Declared behaviour of this runner. Bump when a change here would change a fitted result: the
 # model classes it dispatches to, how a hyperparameter is derived, the fitting procedure, or what
@@ -660,6 +659,7 @@ def _require_holdout_temporal_features(mds, split: dict[str, Any]) -> None:
             split,
             mds.temporal_by_fold,
             source_timeline=mds.dataset.get_column(mds.date_col),
+            declared_folds=mds.temporal_artifact_splits,
             date_col=mds.date_col,
         )
     except ValueError as exc:
@@ -826,6 +826,7 @@ def reconstruct_locked_request(
             split,
             mds.temporal_by_fold,
             source_timeline=mds.dataset.get_column(mds.date_col),
+            declared_folds=mds.temporal_artifact_splits,
             date_col=mds.date_col,
         )
     expected = _expected_keys_from_dataset(

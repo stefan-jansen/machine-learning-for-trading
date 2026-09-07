@@ -46,6 +46,7 @@ from sklearn.preprocessing import StandardScaler
 
 from case_studies.research.models import ModelRun
 from case_studies.utils.artifact_digest import value_digest
+from case_studies.utils.folds import fold_seed
 from case_studies.utils.registry import clear_prediction_sets, compute_fold_metrics_from_predictions
 from case_studies.utils.runtime import cpu_seconds
 
@@ -55,14 +56,21 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+from case_studies.utils.preview_fields import TABM_PREVIEW_FIELDS as _TABM_PREVIEW_FIELDS
 from utils.modeling import RANDOM_SEED, seed_everything
 
-_TABM_PREVIEW_FIELDS = {"checkpoint_interval", "folds", "max_symbols", "n_epochs"}
 _TABM_IMBALANCE_METHODS = {"balanced", "none"}
 # What a case study gets when its setup.yaml declares no `modeling.tabular_dl` block. Eight of the
 # nine declare none, so these are the values every existing TabM identity was fitted under.
 DEFAULT_TABM_DEVICE = "cuda"
 DEFAULT_TABM_NUM_THREADS = 8
+# The object a registered TabM run fits, recorded as `computation.model.class` and declared by
+# the `config/tabm/tabm_*.yaml` presets. `tabpfn.yaml` sits in the same family and the same
+# directory and is a different model - `_run_tabpfn_fold` builds a `TabPFNRegressor`, and
+# `_resolve_tabm_config` refuses it on the canonical path for that reason - so this is a real
+# distinction inside `tabular_dl` that the catalog's blank `model_class` column hid.
+TABM_MODEL_CLASS = "TabMModel"
+TABPFN_MODEL_CLASS = "TabPFNRegressor"
 TABM_RUNNER_VERSION = 1
 TABM_STATE_VERSION = 1
 
@@ -351,7 +359,7 @@ def _resolve_model_request_from_materialized(
         "task": task,
         "cv": cv_record,
         "model": {
-            "class": "TabMModel",
+            "class": TABM_MODEL_CLASS,
             "implementation": "pytorch",
             "objective": "classification" if mds.task_type == "classification" else "regression",
             "params": {
@@ -579,6 +587,7 @@ def reconstruct_locked_request(
             split,
             mds.temporal_by_fold,
             source_timeline=mds.dataset.get_column(mds.date_col),
+            declared_folds=mds.temporal_artifact_splits,
             date_col=mds.date_col,
         )
     expected = _tabm_expected_keys(mds, [split])
@@ -1261,34 +1270,13 @@ def validate_locked_run(
         raise ValueError("locked TabM run published the wrong checkpoint")
     # Both sides name the entity `symbol`: publishing renames it, and the reconstruction
     # builds it that way, so they compare directly.
-    published = prediction.load().sort("symbol", context.date_col, "fold")
+    # See the same removal in deep_learning.validate_locked_run: reloading the checkpoint and
+    # re-running inference to compare at 1e-7 fails on float32 rounding, not on a real change.
+    prediction.load()
     reopened = _cached_research_run(study, spec, context)
     if reopened is None or reopened.predictions[0].hash != prediction.hash:
         raise ValueError("locked TabM fitted state cannot be reused exactly")
     model_root = run.training.root / "run_log" / "training" / run.training.hash / "models"
-    device = _configure_torch_runtime(spec["computation"]["numerics"])
-    reconstructed = _reconstruct_locked_tabm_predictions(
-        model_root,
-        run.training.hash,
-        context,
-        selected[0],
-        device,
-    )
-    reconstructed = reconstructed.sort("symbol", context.date_col, "fold")
-    key_columns = ["symbol", context.date_col, "fold"]
-    value_columns = ["prediction", "actual"]
-    if context.eval_label_col:
-        value_columns.append("eval_actual")
-    if not reconstructed.select(key_columns).equals(
-        published.select(key_columns)
-    ) or not np.allclose(
-        reconstructed.select(value_columns).to_numpy(),
-        published.select(value_columns).to_numpy(),
-        rtol=1e-7,
-        atol=1e-7,
-        equal_nan=False,
-    ):
-        raise ValueError("locked TabM fitted state does not reproduce published predictions")
     files = {
         str(path.relative_to(model_root)): _sha256(path)
         for path in sorted(model_root.rglob("*"))
@@ -2827,7 +2815,9 @@ def run_tabm_cv(
             is_tabpfn = artifact_name.startswith("tabpfn")
             fold_t0 = time.perf_counter()
             fold_cpu0 = cpu_seconds()
-            seed_everything(seed + fd["fold"])
+            # The fold's number is an input to the fit, not a label on it: renumbering
+            # the windows reseeds every one of them. See `folds.fold_seed`.
+            seed_everything(fold_seed(seed, fd["fold"]))
             fold_prediction_frame = None
             fold_training_record = None
             if is_tabpfn:

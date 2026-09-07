@@ -39,11 +39,10 @@
 #
 # **The thing to check first is whether the overlays changed anything at all.** A control that
 # never fires returns the unprotected book unchanged in every digit, and so does a control that was
-# declared but never reached the engine. One result cannot tell those apart, and the second has
-# happened in this repository: fourteen controls, from a 3% stop to a 40-bar time exit, whose
-# Sharpe, drawdown and trade count all matched the unprotected book exactly, because the
-# configuration declared them in one shape and the engine read another. Fourteen different rules
-# declining to act on one book and agreeing to the last digit is not a result about risk control.
+# declared in one shape and read by the engine in another. One result cannot tell those apart: both
+# produce a row identical to the book it was laid on. Fourteen different rules, spanning a 3% stop
+# to a 40-bar time exit, all declining to act on one book and agreeing to the last digit would be
+# the second and not the first, and it would read on the page as a finding about risk control.
 #
 # So the results section compares each overlay against the strategy it was laid on rather than
 # reporting its performance alone. **A difference proves the control acted; matching statistics
@@ -79,24 +78,25 @@ import json
 import os
 from pathlib import Path
 
+import matplotlib.pyplot as plt
+import numpy as np
 import polars as pl
 
 from case_studies.research import (
     CandidateSet,
     OfficialPopulation,
-    Study,
     open_study,
     plan_backtests,
     run_backtests,
 )
 from case_studies.research.strategy import strategy_warmup_periods
-from case_studies.utils.backtest_loaders import load_backtest_prices_for, warmup_periods_for
+from case_studies.utils.backtest_loaders import load_backtest_prices_for
 from case_studies.utils.sweep_config import (
     get_portfolio_risk_controls,
     get_position_risk_controls,
     get_top_n_predictions,
 )
-from utils.paths import REPO_ROOT
+from utils.style import add_message_title, ml4t_palette, show_with_alt, zero_line
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
@@ -127,13 +127,9 @@ MAX_SYMBOLS = 0
 
 # %%
 declared_set_names = [*BASELINE_SET_NAMES, *ALLOCATION_SET_NAMES]
-# Both tiers resolve the study through `open_study`, never `Study.open`/`Study.regenerate`
-# directly. In a maintainer worktree the generated directories are symlinks to shared data, and
-# `open_study` handles that by reading inputs in place - `root` stays the release case directory
-# and only writes are redirected to the workspace. `Study.open(workspace=...)` instead puts `root`
-# inside the workspace, so `source = self.root / "labels"` (workspace.py:274) resolves somewhere
-# else and `_ensure_input_link` rejects the link a sibling notebook already made. Two notebooks in
-# one session then cannot both open a preview workspace.
+# Both tiers resolve the study through `open_study`. It reads the labels and features in place and
+# redirects only writes, so a preview run scores the same inputs a canonical one does and cannot
+# publish over it.
 if EXECUTION_TIER == "canonical":
     if PREVIEW_LABELS or PREVIEW_MAX_SOURCE_ROWS or PREVIEW_MAX_RISK_CONTROLS or MAX_SYMBOLS:
         raise ValueError("Canonical execution cannot declare preview reductions")
@@ -210,14 +206,12 @@ if eligible.is_empty() or not ineligible.is_empty():
 # the book it was applied to.
 
 # %% tags=["results"]
-# Prices are cached by (label, warmup) rather than loaded once per label. Strategy._build_spec
-# (research/strategy.py:389) digests exactly the frame it is handed, and strategy_warmup_periods
-# (:201-211) resolves a different prefix per allocator: 0 for the non-moment methods, vol_window
-# for inverse_vol / risk_parity / hrp, lookback for mvo and mvo_ledoit_wolf. Handing every member
-# of a label the same 126-bar frame stamps a price digest that 20_strategy_analysis recomputes at
-# the member's own warmup (20:157-169) and then rejects as "does not use canonical validation
-# prices" - and lifecycle.evaluate_holdout (lifecycle.py:342-368) applies the same rule, so the
-# holdout inherits it. cme_futures/research_workflow.py:674-682 caches on the same key.
+# Prices are cached by (label, warmup), not once per label. A strategy's identity digests the
+# price frame it was handed, and the allocator underneath each overlay needs a different amount of
+# history before it can decide anything - none for the ones reading only the predictions, a
+# volatility window for the per-stock ones, a longer lookback for the ones estimating a covariance
+# matrix. So each member has to receive the frame its own warmup implies, and the cache key is
+# what keeps that true while loading each distinct frame once.
 _price_cache: dict[tuple[str, int], object] = {}
 
 
@@ -500,8 +494,8 @@ if (
     raise RuntimeError("The risk catalog is incomplete or mis-staged")
 # Did the overlay change anything? Each result is compared against the strategy it was laid on, on
 # the two axes the catalog carries: the trade count and the Sharpe. A row that differs on either
-# acted - there is no other way for the numbers to move. A row identical on both changed no
-# neither of the two statistics compared here - which is weaker than "changed nothing", since two
+# acted - there is no other way for the numbers to move. A row identical on both moved neither of
+# the two statistics compared here - which is weaker than "changed nothing", since two
 # different return paths can share a Sharpe and a trade count while differing in total return or in
 # drawdown, and weaker still than "never fired": a stop can close a position the next rebalance
 # would have closed anyway, replacing one exit with an earlier one and leaving the count where it
@@ -568,15 +562,10 @@ set_rows = []
 if EXECUTION_TIER == "canonical":
     for label in completed_risk.get_column("label").unique().sort().to_list():
         label_name = label.replace("_", "-")
-        # No comparison_contract, matching cme_futures/research_workflow.py:811, which builds the
-        # same per-label pool across the full funnel and declares nothing. An empty contract makes
-        # every protocol field required-constant, which is the guard: if two members disagree on
-        # `cv` they measured their Sharpe on different folds and ranking them is not a comparison,
-        # and this field is the only thing checking that. Latent-factor members will refuse on
-        # `feature_artifacts` when they enter this pool - latent builds it from a different object
-        # than the other five families (latent_factors/case_study.py:337-383, carrying the label
-        # digest and setup.yaml bytes). That refusal is a known adapter defect surfacing, not a
-        # property to declare around; report it rather than adding the field here.
+        # Nothing is declared comparable, so every field of the protocol has to be identical
+        # across the members. That is the guard: two rows that measured their Sharpe on different
+        # folds are not two rankings of one thing, and this is what refuses to freeze them
+        # together.
         result_set = study.backtests.freeze(
             completed_risk.filter(pl.col("label") == label),
             name=f"us-equities-{label_name}-risk-overlay-v1",
@@ -619,6 +608,137 @@ compatible_sets = pl.DataFrame(
 compatible_sets
 
 # %% [markdown]
+# ### What the threshold does
+#
+# The sweep's argument is that a single chosen threshold says almost nothing, and the frame above
+# does not show a shape. Each line below traces one label's Sharpe as one kind of control is
+# loosened: the stop losses along their loss-from-entry threshold, the trailing stops along their
+# give-back threshold, and the time exits along their holding-period cap.
+#
+# The dashed reference in each panel is the unprotected strategy the overlays were laid on, which
+# is what any of these lines has to beat. The loosest declared setting is not that reference: a 20
+# per cent trailing stop is a loose control, not the absence of one.
+#
+# The shapes mean different things. A line that rises all the way to the loosest setting and stays
+# below the reference is a control this book paid for and got nothing from. One with an interior
+# peak has found a threshold this sample liked, which is a much weaker claim than it looks - one
+# sample, one strategy per label, and no correction for having looked at fourteen. A flat line
+# means the measured Sharpe did not move across the declared settings, which is weaker than it
+# sounds in two directions: two different thresholds can produce the same exits, and two different
+# return paths can share a Sharpe. It is not evidence that the controls never fired. Nothing on
+# this page can settle that, and the trigger count that would is not something the backtest
+# records.
+
+# %%
+control_axes = {
+    control["name"]: (control["type"], float(control.get("threshold", control.get("bars"))))
+    for control in get_position_risk_controls(CASE_STUDY_ID)
+}
+# The Sharpe of the strategy each label's overlays were laid on, which is the line they have to
+# clear. Asserted rather than assumed to be one per label: `top_n` is read from the sweep
+# configuration, and a label carrying two sources would need two reference lines, not one drawn
+# from whichever row a dict happened to keep.
+_sources_per_label = selected_sources.group_by("label").len()
+if (_sources_per_label.get_column("len") != 1).any():
+    raise ValueError(
+        "the overlay sweep is drawn against one source strategy per label; this run selected "
+        f"{_sources_per_label.to_dicts()}"
+    )
+unprotected = dict(selected_sources.select("label", "sharpe").iter_rows())
+sweep = (
+    completed_risk.select("label", "backtest_hash", "sharpe")
+    .join(planned_population.select("backtest_hash", "risk"), on="backtest_hash", how="inner")
+    .with_columns(
+        kind=pl.col("risk").replace_strict(
+            {name: kind for name, (kind, _) in control_axes.items()}, default=None
+        ),
+        setting=pl.col("risk").replace_strict(
+            {name: value for name, (_, value) in control_axes.items()},
+            default=None,
+            return_dtype=pl.Float64,
+        ),
+    )
+    .drop_nulls(["kind", "setting"])
+    .sort("kind", "setting")
+)
+kinds = sweep.get_column("kind").unique().sort().to_list()
+sweep_labels = sweep.get_column("label").unique().sort().to_list()
+axis_names = {
+    "stop_loss": "Loss from entry",
+    "trailing_stop": "Give-back from peak",
+    "time_exit": "Bars held",
+}
+# `ml4t_palette` returns a list of that many colours, so it is called once and indexed.
+palette = ml4t_palette(len(sweep_labels), categorical=True)
+
+fig, axes = plt.subplots(1, len(kinds), figsize=(4.2 * len(kinds), 4), sharey=True)
+axes = np.atleast_1d(axes)
+for ax, kind in zip(axes, kinds, strict=True):
+    for index, label in enumerate(sweep_labels):
+        curve = sweep.filter((pl.col("kind") == kind) & (pl.col("label") == label)).sort("setting")
+        ax.plot(
+            curve.get_column("setting"),
+            curve.get_column("sharpe"),
+            marker="o",
+            markersize=4,
+            lw=1.4,
+            color=palette[index],
+            label=label,
+        )
+    for index, label in enumerate(sweep_labels):
+        if label in unprotected:
+            ax.axhline(
+                unprotected[label],
+                color=palette[index],
+                lw=1.0,
+                ls="--",
+                alpha=0.7,
+            )
+    zero_line(ax)
+    ax.set_xlabel(axis_names.get(kind, kind))
+axes[0].set_ylabel("Validation Sharpe")
+axes[-1].legend(fontsize=8, frameon=False)
+add_message_title(
+    axes[0],
+    "Loosening the control, against the book it was laid on",
+    subtitle=(
+        "Validation Sharpe against each control's own threshold, one line per label, with the "
+        "unprotected strategy dashed"
+    ),
+)
+fig.tight_layout()
+# The alt text counts rather than asserts: whether any line turns over is the question the sweep
+# exists to answer, and a panel described as peaking when it does not is a claim the data refutes.
+_peaks = (
+    sweep.group_by("kind", "label")
+    .agg(
+        peak=pl.col("setting").sort_by("sharpe", descending=True).first(),
+        low=pl.col("setting").min(),
+        high=pl.col("setting").max(),
+    )
+    .with_columns(interior=pl.col("peak").is_between(pl.col("low"), pl.col("high"), closed="none"))
+)
+_n_interior = int(_peaks.get_column("interior").sum())
+_above = sum(
+    1
+    for row in sweep.group_by("kind", "label")
+    .agg(best=pl.col("sharpe").max())
+    .iter_rows(named=True)
+    if row["label"] in unprotected and row["best"] > unprotected[row["label"]]
+)
+_pairs = sweep.select("kind", "label").unique().height
+show_with_alt(
+    fig,
+    "Line charts side by side, one panel per kind of control, sharing a vertical Sharpe axis. "
+    "Every panel plots that control's own threshold on the horizontal axis with one line per "
+    "label, a dashed horizontal line per label marking the unprotected strategy it was laid on, "
+    "and a dashed line at zero. Counted from the underlying frame, "
+    f"{_n_interior} of {_peaks.height} label-and-kind curves reach their highest Sharpe at a "
+    "setting that is neither the tightest nor the loosest declared, and "
+    f"{_above} of {_pairs} beat their unprotected reference at any setting.",
+)
+
+# %% [markdown]
 # `20_strategy_analysis.py` reopens one of these per-label sets -
 # `us-equities-<label>-validation-strategies-v1` - and applies the one official rule: highest
 # validation backtest Sharpe with the backtest hash as deterministic tie-break, within that label.
@@ -640,10 +760,11 @@ compatible_sets
 # and which effect dominates is a property of how the strategy's returns actually arrive. A book
 # whose gains come from a few positions running a long way is one an early exit hurts.
 #
-# **A threshold sweep says more than a chosen threshold.** A control that helps at one setting and
-# hurts either side of it has found a feature of this sample. One that improves monotonically as it
-# loosens is saying the overlay is worth nothing and the loosest version is closest to not having
-# it.
+# **A threshold sweep says more than a chosen threshold, and it needs the unprotected book beside
+# it.** A control that helps at one setting and hurts either side of it has found a feature of
+# this sample rather than a property of the strategy. One that improves as it loosens is heading
+# toward the unprotected book without reaching it - the loosest declared setting is still a
+# control - so what says the overlay was not worth having is the reference line, not the trend.
 #
 # **The time exit is the control worth reading first.** It watches no price, so where it moves the
 # result as much as a stop does, what the stops were doing was shortening the holding period rather

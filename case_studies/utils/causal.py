@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     from case_studies.research.workspace import Study
 
 
-_DML_PREVIEW_FIELDS = {"max_samples", "max_symbols", "n_folds", "n_placebo"}
+from case_studies.utils.preview_fields import DML_PREVIEW_FIELDS as _DML_PREVIEW_FIELDS
 
 
 @dataclass(frozen=True)
@@ -1112,14 +1112,22 @@ def _causal_runtime_identity() -> dict[str, str]:
     }
 
 
-def _causal_runtime_provenance(study: Study) -> dict[str, Any]:
-    return {
+def _causal_runtime_provenance(study: Study, *, notebook: str | None = None) -> dict[str, Any]:
+    record: dict[str, Any] = {
         "entry_point": "case_studies.utils.causal",
         "packages": _causal_runtime_identity(),
         "platform": platform.platform(),
         "python": platform.python_version(),
         "source_commit": study.manifest.get("baseline_source_commit", "unknown"),
     }
+    # `notebook_path` says which notebook produced a row; `entry_point` says which module ran.
+    # Different questions, and the module is legitimately shared - every causal notebook calls
+    # this one, so `entry_point` cannot name a notebook and should not try. Both sit in
+    # `registry/specs.py:_V2_PROVENANCE_FIELDS`, so neither reaches the causal identity. Absent
+    # when the caller names no notebook: a wrong notebook name would be worse than none.
+    if notebook:
+        record["notebook_path"] = notebook
+    return record
 
 
 def _whole_timestamp_tail(
@@ -1573,7 +1581,7 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     }
     if tier is ExecutionTier.PREVIEW:
         computation["preview_reductions"] = reductions
-    provenance = _causal_runtime_provenance(study)
+    provenance = _causal_runtime_provenance(study, notebook=request.get("notebook"))
     spec = ResolvedSpec.create(
         family="causal_dml",
         label=label_ref.name,
@@ -1614,6 +1622,19 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
         runtime_provenance=provenance,
     )
     return spec, context
+
+
+def _frozen_fraction(refutation: dict) -> float | None:
+    """The share of treatment rows block permutation could not move, or None.
+
+    `run_dml_analysis` computes it on every fit and warns that it must be read alongside
+    the p-value: rows in segments too short to hold two blocks keep their observed values,
+    so the placebo distribution is biased toward p = 1. A refutation that produced too few
+    successful placebos returns an empty dict and there is no fraction to record - None,
+    not 0.0, because zero is the claim that permutation moved every row.
+    """
+    value = refutation.get("placebo_frozen_fraction")
+    return float(value) if value is not None else None
 
 
 def _placebo_draws_json(refutation: dict) -> str | None:
@@ -1762,8 +1783,21 @@ def run_resolved_causal_request(
         refutation_p=float(refutation_p) if refutation_p is not None else None,
         refutation_n_successful=int(refutation_n) if refutation_n is not None else None,
         refutation_placebo_json=_placebo_draws_json(refutation),
+        # The share of treatment rows the permutation could not move. The runner warns
+        # that it has to be read alongside the p-value, and that warning fires only when
+        # the fit executes - which on this path is exactly the branch above, where a cache
+        # hit returns without one. Registering it is what lets the cached read answer the
+        # question the fresh run answered in stdout and nowhere else.
+        refutation_frozen_fraction=_frozen_fraction(refutation),
         spec_json=canonical_json(spec),
-        notebook="case_studies.utils.causal",
+        # `causal_runs.notebook` says which notebook produced the row, and this path used to
+        # write the module string - which `spec_json.provenance.entry_point` already carries,
+        # and which every causal notebook shares. `us_firm_characteristics` shows the result:
+        # three rows under `09_causal_dml` from `register_causal_run`'s direct callers and
+        # three under `case_studies.utils.causal` from this one, one notebook answering as two
+        # populations. NULL when the request names no notebook, because a wrong name is worse
+        # than none. A column, not part of the spec, so it cannot move `causal_hash`.
+        notebook=(spec.get("provenance") or {}).get("notebook_path"),
         started_at=results.get("started_at"),
         elapsed_s=results.get("elapsed_s"),
         case_dir=case_dir,
@@ -1906,6 +1940,7 @@ def register_causal_run(
         refutation_p=float(refutation_p) if refutation_p is not None else None,
         refutation_n_successful=int(refutation_n) if refutation_n is not None else None,
         refutation_placebo_json=_placebo_draws_json(ref),
+        refutation_frozen_fraction=_frozen_fraction(ref),
         spec_json=canonical_json(spec),
         notebook=notebook,
         started_at=started_at or results.get("started_at"),

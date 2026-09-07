@@ -74,13 +74,12 @@ import polars as pl
 from case_studies.research import (
     CandidateSet,
     OfficialPopulation,
-    Study,
     open_study,
     plan_backtests,
     run_backtests,
 )
 from case_studies.research.strategy import strategy_warmup_periods
-from case_studies.utils.backtest_loaders import load_backtest_prices_for, warmup_periods_for
+from case_studies.utils.backtest_loaders import load_backtest_prices_for
 from case_studies.utils.sweep_config import (
     get_cost_grid_bps,
     get_cost_grid_half_spread_usd,
@@ -88,7 +87,7 @@ from case_studies.utils.sweep_config import (
     get_top_n_predictions,
 )
 from case_studies.utils.uncertainty import STAGE_SEQUENCE
-from utils.paths import REPO_ROOT
+from utils.style import add_message_title, ml4t_palette, show_with_alt, zero_line
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
@@ -598,34 +597,89 @@ if cost_results.height != planned_population.height:
 
 fig, axes = plt.subplots(1, 2, figsize=(13, 5), sharey=True)
 regime_labels = {
-    "bps": "Total cost (bps per leg)",
-    "per_share": "Half-spread (USD per share)",
+    "bps": "Proportional cost (basis points per leg)",
+    "per_share": "Per-share half-spread (USD)",
 }
+curve_labels = cost_results.get_column("label").unique().sort().to_list()
+# `ml4t_palette` returns a list of that many colours, so it is called once and indexed.
+palette = ml4t_palette(len(curve_labels), categorical=True)
 for ax, regime in zip(axes, ("bps", "per_share"), strict=True):
     regime_rows = cost_results.filter(pl.col("regime") == regime)
-    for label in regime_rows.get_column("label").unique().sort().to_list():
+    for index, label in enumerate(curve_labels):
         curve = regime_rows.filter(pl.col("label") == label).sort("cost_value")
-        ax.plot(curve["cost_value"], curve["sharpe"], marker="o", label=label)
-    ax.axhline(0, color="black", linewidth=0.8, linestyle="--")
+        ax.plot(
+            curve["cost_value"],
+            curve["sharpe"],
+            marker="o",
+            markersize=4,
+            lw=1.4,
+            color=palette[index],
+            label=label,
+        )
+    zero_line(ax)
     ax.set_xlabel(regime_labels[regime])
-    ax.set_title(regime.replace("_", " ").title())
-    ax.legend(fontsize=8)
 axes[0].set_ylabel("Validation Sharpe")
-fig.suptitle("Validation Sharpe across declared transaction costs")
+axes[1].legend(fontsize=8, frameon=False)
+add_message_title(
+    axes[0],
+    "Where each fixed strategy stops paying for itself",
+    subtitle="Validation Sharpe against cost, under a proportional and a per-share schedule",
+)
 fig.tight_layout()
-fig.show()
+# The alt text reads the crossing from the frame rather than asserting one: a curve described as
+# crossing zero when it never does is a claim the data refutes, and where it crosses is the whole
+# question this notebook asks.
+_crossings = []
+for regime in ("bps", "per_share"):
+    for label in curve_labels:
+        curve = (
+            cost_results.filter((pl.col("regime") == regime) & (pl.col("label") == label))
+            .sort("cost_value")
+            .filter(pl.col("sharpe") <= 0)
+        )
+        if curve.height:
+            _crossings.append((regime, label, curve.get_column("cost_value")[0]))
+if _crossings:
+    _crossing_text = "; ".join(
+        f"{label} first reaches zero or below at {value:g} on the {regime} axis"
+        for regime, label, value in _crossings
+    )
+else:
+    _crossing_text = (
+        "no curve reaches zero at any declared cost, so the sweep does not bracket a break-even"
+    )
+show_with_alt(
+    fig,
+    "Two line charts side by side sharing a vertical axis, one line per label with a dashed line "
+    "at zero. The left panel plots validation Sharpe against a proportional cost in basis points "
+    "per leg, the right against a per-share half-spread in dollars; both start at zero cost on "
+    f"the left of their axis. Read from the underlying frame: {_crossing_text}.",
+)
 
 # %% [markdown]
-# The risk notebook uses the same fixed source configuration from the selection-eligible baseline
-# and allocation sets. Cost rows do not affect that choice.
-
-# %% [markdown]
-# ## Key takeaways and limitations
+# ## What to notice
 #
-# - A cost curve varies transaction-cost assumptions while retaining the source model, checkpoint,
-#   signal, and allocation.
-# - Cost-sensitivity rows remain outside the validation selection population.
-# - The percentage and per-share regimes answer different implementation questions and retain
-#   separate identities.
-# - Uniform cost schedules summarize execution frictions; security-specific liquidity and realized
-#   fills require additional data.
+# **A sweep has to fix its strategy before it varies anything.** Every row above is the same
+# model, the same checkpoint, the same names on the same dates, re-priced. If the sweep were
+# allowed to reorder the field, the strategy carried forward would be whichever one happened to
+# suit the cost assumption, which is choosing a strategy on an assumption rather than testing one
+# against it. That is why these rows are registered outside the population selection is made over.
+#
+# **The two regimes are two assumptions, not two measurements of one thing.** A proportional cost
+# charges the same fraction whatever the share price; a per-share cost charges the same cents on a
+# five-dollar stock as on a five-hundred-dollar one. They disagree most on the cheap end of the
+# panel, which is where a broad long-short book holds a large share of its names, so an ordering
+# that holds under one is not thereby established under the other.
+#
+# **Where a curve crosses zero is a break-even, not a verdict on tradability.** It says what
+# uniform friction this strategy could absorb before the validation Sharpe went negative. Real
+# friction is not uniform: it varies by name, by size, by time of day, and it grows with the
+# position relative to what the stock trades. A strategy whose break-even sits far above any
+# plausible schedule has cleared a floor, not proved it can be traded.
+#
+# **Known limitations.** One configuration per label is re-priced, so nothing here says how the
+# cost curve would look for a strategy that traded differently. The schedules are flat and applied
+# to every name equally, and on this panel the per-share regime is exploratory for the reason the
+# preamble gives - the prices are split- and dividend-adjusted, so a fixed charge per share is not
+# the charge that would have been paid. And the Sharpe being charged is a validation Sharpe, on
+# folds read many times over by the time a case study reaches this notebook.

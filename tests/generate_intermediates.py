@@ -111,10 +111,29 @@ def seed_configs(output_dir: Path, case_studies: Iterable[str] = CASE_STUDIES) -
 
     # Copy global model presets so load_configs() can find them.
     # load_configs() resolves presets at {case_dir.parent}/config/{model_type}/*.yaml
+    #
+    # Refreshed on every run, like the per-case-study configs above. Guarding this on
+    # `not dst.exists()` meant the copy ran once, on a tree that had no config/ yet, and
+    # never again - so a preset added or edited after the first generation never reached
+    # the fixture. sp500_options/06_linear failed the 2026-09-06 regeneration on
+    # `Preset not found: lasso_f0.5.yaml`, which has been in case_studies/config/lasso/
+    # since the initial release: the fixture held only the five `lasso_a*` presets that
+    # existed when its config/ was first written.
+    #
+    # Refreshing is not the ownership problem the per-case-study loop guards against.
+    # These presets are shared by all nine case studies rather than owned by the one the
+    # run was scoped to, so bringing them into line with source is what a scoped run
+    # should do, not a rewrite of state it does not own.
     global_config_src = cs_root / "config"
     global_config_dst = output_dir / "config"
-    if global_config_src.exists() and not global_config_dst.exists():
-        shutil.copytree(global_config_src, global_config_dst)
+    if global_config_src.exists():
+        if global_config_dst.exists():
+            shutil.rmtree(global_config_dst)
+        shutil.copytree(
+            global_config_src,
+            global_config_dst,
+            ignore=shutil.ignore_patterns("__pycache__"),
+        )
         _patch_presets_for_testing(global_config_dst)
 
     print(f"Seeded configs into {output_dir} for: {', '.join(case_studies)}")

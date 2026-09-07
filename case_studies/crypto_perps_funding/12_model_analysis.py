@@ -63,8 +63,13 @@
 #
 # **Book reference:** Chapters 11 to 19, model comparison and diagnostics.
 #
-# **Prerequisites:** complete canonical outputs from the model execution notebooks and the causal
-# notebook.
+# **Prerequisites:** complete canonical outputs from [`06_linear`](06_linear.ipynb) through
+# [`10_dl_tcn`](10_dl_tcn.ipynb), and the causal result from
+# [`11_causal_dml`](11_causal_dml.ipynb).
+#
+# **What it writes:** nothing to the registry. This notebook is read-only over what the model
+# notebooks published; every table below is a description of rows that already exist, and no
+# decision taken here propagates anywhere.
 
 # %%
 import os
@@ -86,7 +91,13 @@ EXECUTION_TIER = "canonical"
 WORKSPACE = os.environ.get("ML4T_OUTPUT_DIR", "")
 
 # %% [markdown]
-# ## Complete predictive catalog
+# ## 1. Assemble the complete predictive catalog
+#
+# Diagnostics on a partial catalog are worse than no diagnostics, because they look the same. If
+# one family's checkpoints are missing, every cross-family comparison below silently becomes a
+# comparison over a different set of models, and nothing in the resulting tables says so. So the
+# catalog is assembled and checked for completeness first, and the analysis refuses to begin
+# otherwise.
 
 # %% tags=["results"]
 study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -139,10 +150,22 @@ catalog.select(
 ).sort("label", "family", "config_name", "checkpoint_value")
 
 # %% [markdown]
-# ## Diagnostic summaries
+# ## 2. Diagnostic summaries
 #
 # These tables describe the registered validation predictions without collapsing checkpoint
 # identity or intersecting away missing keys. Any incomplete row was rejected before this analysis.
+#
+# Both of those conditions are doing work. **Not collapsing checkpoints** means a deep-learning
+# configuration appears as its eight scored models rather than as one number chosen after the fact;
+# what you are reading is a distribution per family, not a leaderboard. **Not intersecting keys**
+# means each row is scored on the settlements its own fold declares, rather than on the settlements
+# every family happens to share. Intersecting would make the numbers look more comparable while
+# quietly changing the sample each was measured on - and on an unbalanced perpetual panel, where
+# symbols list and delist mid-history, that intersection can be a good deal smaller than any
+# individual family's coverage.
+#
+# Read these as descriptions of what was fitted. A family that scores poorly here may still win the
+# backtest, and a family that scores well here may lose it to funding paid on a signal that flips.
 
 # %% tags=["results"]
 diagnostics = catalog.select(
@@ -357,9 +380,24 @@ Markdown(
 # %% [markdown]
 # ## Key takeaways and limitations
 #
-# - Catalog completeness is checked against the declared canonical checkpoint population before any
-#   diagnostic is interpreted.
-# - IC, AUC, and loss describe predictions. Validation backtest Sharpe selects the trading
-#   configuration later in the pipeline.
-# - Model comparisons remain conditional on the finalized features, labels, universe, and validation
-#   period. The causal estimate also depends on its declared observed-confounder assumptions.
+# - **Completeness is checked before anything is interpreted.** A diagnostic computed over a
+#   catalog missing a family's checkpoints reads exactly like one computed over a complete catalog.
+#   That is why the check is a blocking error rather than a warning.
+# - **These three metrics describe predictions; none of them selects.** IC and AUC measure ordering
+#   and are silent about magnitude and calibration respectively; log loss reads probabilities as
+#   probabilities and can move opposite to AUC. Selection is validation backtest Sharpe, in
+#   [`13_backtest`](13_backtest.ipynb).
+# - **On perpetuals the gap between ranking and Sharpe has a specific cause.** Funding is paid by
+#   whoever holds the position at settlement, so a signal that reverses often pays it repeatedly. A
+#   ranking metric cannot see that, because it never holds anything.
+# - **Every checkpoint stays a row, so more checkpoints means more points and not more weight.**
+#   Collapsing to a per-configuration best would flatter whichever family saves most often, and
+#   would report a maximum over draws as if it were one model's score.
+# - **The causal estimate sits beside these tables and does not convert into them.** A high IC may
+#   be an effect, a proxy for one, or a regularity with no causal content; a well-identified effect
+#   need not predict, because most of the variation in funding is not the treatment. Putting both
+#   in one table would invite arithmetic that neither supports.
+# - **Everything here is conditional on the finalized features, labels, universe and validation
+#   period**, and the causal estimate is additionally conditional on its declared
+#   observed-confounder assumptions. Two validation folds is what this case study's history
+#   supports, and every comparison below rests on them.

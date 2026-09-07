@@ -20,6 +20,7 @@ import pytest
 from case_studies.utils import paired_metrics as pm
 from case_studies.utils.paired_metrics import _prune_paired_metrics
 from case_studies.utils.registry.store import _open_registry
+from case_studies.utils.uncertainty import ENTIRE_REGISTRY, NO_CARRIER
 
 
 @pytest.fixture
@@ -163,6 +164,8 @@ class TestTheRebuildEntryPoint:
             "nasdaq100_microstructure",
             self._explorer(self._leader_row()),
             replace_all=True,
+            carrier=NO_CARRIER,
+            prediction_hashes=ENTIRE_REGISTRY,
             verbose=False,
             write_case_dir=case_dir,
         )
@@ -171,10 +174,10 @@ class TestTheRebuildEntryPoint:
             ("feasible_leader", "side_ew:nasdaq100_microstructure:fwd_ret_5m")
         }
 
-    def test_without_replace_all_the_earlier_rows_stay(
+    def test_replace_all_false_leaves_the_earlier_rows(
         self, case_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The default is additive, and the callers that rely on it must keep it."""
+        """False is additive, and the callers that ask for it must keep getting it."""
         _seed_run(case_dir, "full_leader")
         _seed_run(case_dir, "feasible_leader")
         _seed(case_dir, ("full_leader", "side_ew:nasdaq100_microstructure:fwd_ret_5m"))
@@ -183,6 +186,9 @@ class TestTheRebuildEntryPoint:
         pm.populate_paired_metrics(
             "nasdaq100_microstructure",
             self._explorer(self._leader_row()),
+            replace_all=False,
+            carrier=NO_CARRIER,
+            prediction_hashes=ENTIRE_REGISTRY,
             verbose=False,
             write_case_dir=case_dir,
         )
@@ -197,6 +203,8 @@ class TestTheRebuildEntryPoint:
             "nasdaq100_microstructure",
             self._explorer(pl.DataFrame()),
             replace_all=True,
+            carrier=NO_CARRIER,
+            prediction_hashes=ENTIRE_REGISTRY,
             verbose=False,
             write_case_dir=case_dir,
         )

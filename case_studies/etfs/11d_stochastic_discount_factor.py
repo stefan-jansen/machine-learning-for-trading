@@ -526,9 +526,19 @@ by_fold = {
 }
 for label in panel_labels:
     ic = by_fold[label].get_column("fold_ic")
+    # See 11b: polars returns None for the mean of an empty column and for the standard
+    # deviation of a single row, and a narrowed population produces both.
+    if ic.len() == 0:
+        print(f"{label} at cumulative epoch {last_checkpoint}: no fold scored, so there is no IC")
+        continue
+    spread = (
+        f"standard deviation across folds {ic.std():.4f}"
+        if ic.len() > 1
+        else "one fold only, so no spread across folds"
+    )
     print(
         f"{label} at cumulative epoch {last_checkpoint}: mean {ic.mean():+.4f}, "
-        f"standard deviation across folds {ic.std():.4f}, "
+        f"{spread}, "
         f"{(ic < 0).sum()} of {ic.len()} folds negative"
     )
 

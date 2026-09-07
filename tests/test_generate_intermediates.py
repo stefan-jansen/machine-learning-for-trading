@@ -96,3 +96,36 @@ def test_seed_configs_defaults_to_every_case_study(tmp_path: Path) -> None:
 
     seeded = {p.name for p in tmp_path.iterdir() if p.is_dir()}
     assert set(CASE_STUDIES) <= seeded
+
+
+def test_seed_configs_refreshes_shared_presets_over_an_existing_tree(tmp_path: Path) -> None:
+    """Every preset a seeded case study names has to resolve after seeding.
+
+    The shared preset copy used to be guarded on ``not dst.exists()``, so it ran once
+    on a tree that had no ``config/`` and never again. A preset added or edited after
+    that first generation never reached the fixture, and the notebook that named it
+    failed with ``Preset not found`` against a file that had been in the repo since the
+    initial release - which is how sp500_options/06_linear went down on 2026-09-06.
+
+    Written against the contract rather than the copy: seed over a tree that already
+    holds a stale ``config/``, then require that every preset named by a seeded case
+    study's training menus exists. That fails on the old guard and cannot be satisfied
+    by any implementation that leaves a preset behind.
+    """
+    stale = tmp_path / "config" / "lasso"
+    stale.mkdir(parents=True)
+    (stale / "lasso_a0.1.yaml").write_text("stale: true\n")
+
+    seed_configs(tmp_path, ["sp500_options"])
+
+    named: set[str] = set()
+    for menu in (tmp_path / "sp500_options" / "config" / "training").glob("*.yaml"):
+        for line in menu.read_text().splitlines():
+            entry = line.strip()
+            if entry.startswith("- "):
+                named.add(entry[2:].strip().strip("\"'"))
+
+    assert named, "no presets named by sp500_options' training menus"
+    available = {p.stem for p in (tmp_path / "config").rglob("*.yaml")}
+    assert named <= available, f"presets named but not seeded: {sorted(named - available)}"
+    assert "stale" not in (stale / "lasso_a0.1.yaml").read_text()
