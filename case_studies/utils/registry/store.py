@@ -352,6 +352,19 @@ CREATE TABLE IF NOT EXISTS decision_artifacts (
     created_at          TEXT NOT NULL
 );
 
+-- One declared edge per superseded input artifact: "the file registered runs pin as
+-- `supersedes_sha256` was deliberately replaced by `sha256`". A training run fits on
+-- whatever is on disk, so without a declaration a regenerated artifact silently mixes two
+-- vintages into one population (ml4t/agent-workspace#987). `register_training_run` refuses
+-- an undeclared change and `declare_artifact_supersession` is how an author declares one.
+CREATE TABLE IF NOT EXISTS artifact_supersessions (
+    artifact_name      TEXT NOT NULL,
+    sha256             TEXT NOT NULL,
+    supersedes_sha256  TEXT NOT NULL,
+    declared_at        TEXT NOT NULL,
+    PRIMARY KEY (artifact_name, supersedes_sha256)
+);
+
 """
 
 

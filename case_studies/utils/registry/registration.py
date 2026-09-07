@@ -85,6 +85,177 @@ def _sampling_reduced(spec_json: str | None) -> bool:
     return False
 
 
+def _input_artifact_shas(spec: dict | str | None) -> dict[str, str]:
+    """The whole-file sha256 a training spec pins per input artifact.
+
+    ``computation.input_data_spec.artifacts`` is what six of the seven producers build from
+    ``mds.input_lineage``; the latent adapter records a ``files`` list instead
+    (ml4t/agent-workspace#891) and reaches this as an empty mapping, which is a weaker check
+    for that family rather than a wrong one.
+    """
+    if isinstance(spec, str):
+        try:
+            spec = json.loads(spec)
+        except (TypeError, ValueError):
+            return {}
+    if not isinstance(spec, dict):
+        return {}
+    computation = spec.get("computation")
+    if not isinstance(computation, dict):
+        return {}
+    input_data_spec = computation.get("input_data_spec")
+    if not isinstance(input_data_spec, dict):
+        return {}
+    artifacts = input_data_spec.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return {}
+    return {
+        str(name): str(record["sha256"])
+        for name, record in sorted(artifacts.items())
+        if isinstance(record, dict) and record.get("sha256")
+    }
+
+
+def _registered_artifact_shas(db, *, label: str) -> dict[str, set[str]]:
+    """Per artifact name, the shas the runs already registered for *label* were fitted on.
+
+    Scoped to the label because the name ``label`` addresses ``labels/<label>.parquet``:
+    across labels those are different files by design, so a name-only comparison would
+    refuse every legitimate run. The case-study-wide artifacts (``financial``,
+    ``model_based``) are unaffected by the narrowing - a case study fits its labels from the
+    same files - and where one ever does not, the per-label answer is the right one.
+    """
+    shas: dict[str, set[str]] = {}
+    for (spec_json,) in db.execute("SELECT spec_json FROM training_runs WHERE label = ?", (label,)):
+        for name, sha in _input_artifact_shas(spec_json).items():
+            shas.setdefault(name, set()).add(sha)
+    return shas
+
+
+def _declared_artifact_supersessions(db, *, artifact_name: str, sha256: str) -> set[str]:
+    """The shas *sha256* is declared to replace for *artifact_name*."""
+    return {
+        row[0]
+        for row in db.execute(
+            "SELECT supersedes_sha256 FROM artifact_supersessions "
+            "WHERE artifact_name = ? AND sha256 = ?",
+            (artifact_name, sha256),
+        )
+    }
+
+
+def _enforce_input_artifact_vintage(db, spec: dict) -> None:
+    """A run may not join a population fitted on a different vintage of the same artifact.
+
+    A training run pins its inputs by whole-file sha256 and then fits on whatever is on
+    disk, and nothing compares the two. Regenerate a stage-03 or stage-04 artifact and the
+    next run registers against a vintage no prior member of that population was fitted
+    under - and it is silent, so the mixture is found later by comparing the registry to the
+    disk by hand, if at all (ml4t/agent-workspace#987).
+
+    Measured on the fleet 2026-09-07: `fx_pairs` has 138 training runs pinning one
+    `model_based` sha and **zero** of them match the file on disk. That state is safe only
+    for as long as nobody runs a modelling notebook there, and nothing enforced it.
+
+    Refusing here is what makes it cheap: `register_training_run` runs before the fit on
+    every path, so the run stops at the moment the change can still be undone rather than
+    after a population has been mixed.
+
+    Superseding an artifact on purpose is a legitimate operation, so the refusal has a
+    declared override rather than a bypass: :func:`declare_artifact_supersession` records
+    which sha the new one replaces, the same way a changed population names the snapshot it
+    supersedes and a second causal identity names the one it retires. Every diverging sha
+    must be declared, so a declaration cannot half-cover a registry that already holds two
+    vintages.
+    """
+    label = spec.get("label")
+    incoming = _input_artifact_shas(spec)
+    if not incoming or not label:
+        return
+    registered = _registered_artifact_shas(db, label=str(label))
+    for name, sha in incoming.items():
+        known = registered.get(name)
+        if not known or sha in known:
+            # Nothing to compare against, or this run is fitting on the vintage the
+            # population already carries.
+            continue
+        undeclared = sorted(
+            known - _declared_artifact_supersessions(db, artifact_name=name, sha256=sha)
+        )
+        if not undeclared:
+            continue
+        raise ValueError(
+            f"input artifact {name!r} on disk hashes {sha}, but every training run "
+            f"registered for label {label!r} was fitted on {undeclared if len(undeclared) > 1 else undeclared[0]}. "
+            f"Registering this run would put two vintages of one artifact in the same "
+            f"population with nothing recording it. If the artifact was regenerated on "
+            f"purpose, declare it: declare_artifact_supersession(case_study, {name!r}, "
+            f"sha256={sha!r}, supersedes_sha256={undeclared[0]!r}). If it was not, the "
+            f"artifact on disk is not the one this population was built from - restore it "
+            f"rather than fitting on it."
+        )
+
+
+def declare_artifact_supersession(
+    case_study: str,
+    artifact_name: str,
+    *,
+    sha256: str,
+    supersedes_sha256: str,
+    case_dir: Path | None = None,
+) -> None:
+    """Record that *sha256* deliberately replaces *supersedes_sha256* for *artifact_name*.
+
+    The override for :func:`_enforce_input_artifact_vintage`. An author who regenerates a
+    stage-03 or stage-04 artifact on purpose calls this once, naming the sha being retired,
+    and every later run reading the new file registers normally.
+
+    Validated the way ``declare_causal_supersedes`` is, and for the same reason: this is a
+    function an author calls by hand with a hash copied out of an error message, so a
+    mistyped predecessor must be refused rather than recorded. A declaration naming a sha no
+    registered run was fitted on cannot unblock anything and would sit in the registry
+    reading as though it had.
+    """
+    if sha256 == supersedes_sha256:
+        raise ValueError(f"artifact {artifact_name!r} cannot supersede itself ({sha256})")
+    if case_dir is None:
+        case_dir = _case_dir(case_study)
+    db = _open_registry(case_dir)
+    try:
+        pinned = {
+            sha
+            for (spec_json,) in db.execute("SELECT spec_json FROM training_runs")
+            for name, sha in _input_artifact_shas(spec_json).items()
+            if name == artifact_name
+        }
+        if supersedes_sha256 not in pinned:
+            raise ValueError(
+                f"no training run in {case_study}'s registry was fitted on "
+                f"{artifact_name!r} at {supersedes_sha256}, so there is nothing to "
+                f"supersede. Registered: {sorted(pinned) or 'none'}."
+            )
+        existing = db.execute(
+            "SELECT sha256 FROM artifact_supersessions "
+            "WHERE artifact_name = ? AND supersedes_sha256 = ?",
+            (artifact_name, supersedes_sha256),
+        ).fetchone()
+        if existing is not None:
+            if existing[0] != sha256:
+                raise ValueError(
+                    f"artifact {artifact_name!r} already declares {existing[0]} supersedes "
+                    f"{supersedes_sha256}; {sha256} cannot also supersede it"
+                )
+            return
+        db.execute(
+            "INSERT INTO artifact_supersessions "
+            "(artifact_name, sha256, supersedes_sha256, declared_at) VALUES (?, ?, ?, ?)",
+            (artifact_name, sha256, supersedes_sha256, _utc_now()),
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
 def _validate_prediction_dispersion(predictions, *, refuse: bool = True) -> None:
     """Reject a prediction set with an implausible score scale on any fold.
 
@@ -330,6 +501,16 @@ def register_training_run(
     # "When the identity was registered" is within seconds of "when work on it began" on
     # every path that registers before fitting, which is all of them.
     started_at = started_at or _utc_now()
+
+    # Ahead of both branches, because both write before they insert - the versioned one an
+    # immutable spec.json, the legacy one the same file unconditionally - and this check has
+    # to refuse before anything about the new vintage is on disk. Every path that reaches
+    # here registers before the fit, so the refusal costs no training time.
+    vintage_db = _open_registry(case_dir)
+    try:
+        _enforce_input_artifact_vintage(vintage_db, spec)
+    finally:
+        vintage_db.close()
 
     if spec.get("identity_version") in SUPPORTED_IDENTITY_VERSIONS:
         identity_version = int(spec["identity_version"])
