@@ -1253,6 +1253,7 @@ jobs:
             tests/test_tabular_dl_adapter.py \
             tests/test_holdout_expected_keys.py \
             tests/test_holdout_force_regenerates.py \
+            tests/test_holdout_selection_is_single_sourced.py \
             tests/test_tabular_dl_identity.py \
             tests/test_tabular_dl_runtime.py \
             tests/test_latent_convergence_guard.py \

@@ -69,9 +69,13 @@ def _resolver_db(path: Path, *, backtest_hash: str) -> None:
             );
             CREATE TABLE backtest_metrics (backtest_hash TEXT PRIMARY KEY, sharpe REAL);
             CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL);
+            CREATE TABLE prediction_metrics (
+                prediction_hash TEXT PRIMARY KEY, ic_mean REAL, ic_n_days REAL
+            );
             INSERT INTO training_runs VALUES ('train_us', 'owner_config', 'gbm', 'fwd_ret_1m', NULL);
             INSERT INTO prediction_sets VALUES ('pred_us', 'train_us', 'validation');
             INSERT INTO fold_metrics VALUES ('pred_us', 0.02);
+            INSERT INTO prediction_metrics VALUES ('pred_us', 0.02, 250);
             """
         )
         db.execute(
@@ -116,78 +120,87 @@ def test_carrier_pins_are_single_sourced_and_well_formed() -> None:
         assert assignments == []
 
 
-def _module_level_literal(path: Path, name: str) -> object:
-    """Read a module-level constant without importing the module.
+def test_the_carrier_restriction_has_no_second_implementation() -> None:
+    """One rule, and where it is not applied, no machinery pretending to apply it.
 
-    `20_strategy_synthesis/holdout.py` imports lightgbm, which `test-unit` does not
-    install, so executing it to read two constants makes this test depend on the
-    modelling environment for no reason. Parsing gets the same values.
+    `_apply_carrier_pin` was defined twice with different signatures - a mapping lookup in
+    `20_strategy_synthesis/01_aggregate_synthesis.py` and a predicate argument in
+    `case_studies/utils/paired_metrics.py` - and both had become unreachable: the mapping
+    was permanently empty and no caller anywhere supplied the predicate. Two dead
+    implementations of one rule is how the config-name copy came to select
+    `us_firm_characteristics`' weakest advanced configuration for a whole registry rebuild
+    while every notebook inside that case study reported its best.
 
-    `ast.literal_eval` alone is not enough: these are declared as
-    ``frozenset({"..."})``, and a call node is not a literal. The frozenset call is
-    unwrapped here rather than evaluated, so nothing in the parsed file runs.
+    Where an owner does pin a carrier, the live mechanism is
+    `carrier_pins.carrier_config_name`, which resolves the pin against the registry and
+    raises when it matches nothing - checked behaviourally elsewhere in this file. What is
+    checked here is that nothing has grown a second one beside it.
+
+    Read by parsing: `01_aggregate_synthesis.py` is a notebook, and importing one runs it.
     """
-    tree = ast.parse(path.read_text())
-    for node in ast.walk(tree):
-        targets = (
-            node.targets
-            if isinstance(node, ast.Assign)
-            else [node.target]
-            if isinstance(node, ast.AnnAssign)
-            else []
+    repo = Path(__file__).parents[1]
+    for relative in (
+        "20_strategy_synthesis/01_aggregate_synthesis.py",
+        "case_studies/utils/paired_metrics.py",
+    ):
+        tree = ast.parse((repo / relative).read_text())
+        defined = sorted(
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and "carrier_pin" in node.name
         )
-        if not any(isinstance(t, ast.Name) and t.id == name for t in targets):
-            continue
-        value = node.value
-        assert value is not None, f"{name} in {path.name} is annotated with no value"
-        return _as_value(value)
-    raise AssertionError(f"{path.name} declares no module-level {name}")
-
-
-def _as_value(node: ast.expr) -> object:
-    if isinstance(node, ast.Call):
-        func = node.func
-        builtin = func.id if isinstance(func, ast.Name) else None
-        assert builtin in {"frozenset", "set"}, (
-            f"unsupported call {ast.dump(func)} in a mirrored constant; this reader "
-            "evaluates nothing, so extend it deliberately rather than importing"
+        assert defined == [], (
+            f"{relative} defines {defined}; the carrier restriction has one implementation, "
+            "in case_studies/utils/carrier_pins.py, and a second copy is what drifted"
         )
-        assert len(node.args) == 1, f"{builtin}() with {len(node.args)} arguments"
-        return frozenset(_as_value(node.args[0]))
-    if isinstance(node, ast.Dict):
-        return {
-            _as_value(k): _as_value(v)
-            for k, v in zip(node.keys, node.values, strict=True)
-            if k is not None
-        }
-    if isinstance(node, (ast.Set, ast.List, ast.Tuple)):
-        return [_as_value(e) for e in node.elts]
-    return ast.literal_eval(node)
 
 
-def test_mirrored_selection_restrictions_have_not_drifted() -> None:
-    """The two copies of each selection restriction must still hold the same value.
+def test_the_selection_restrictions_are_declared_once() -> None:
+    """`holdout.py` must import each selection restriction, not declare its own copy.
 
     `case_studies/utils/strategy_analysis.py` and `20_strategy_synthesis/holdout.py`
-    each declare `LABEL_RESTRICTIONS` and `UNIVERSE_RESTRICTIONS`, and both carry a
+    each used to declare `LABEL_RESTRICTIONS` and `UNIVERSE_RESTRICTIONS`, under a
     "keep these in sync" comment where a mechanism should be. A comment is not a
     mechanism: the same arrangement one directory over - `_CARRIER_PIN_PREDICATES`
     hand-copying a carrier choice under a "keep in sync" note - had been out of sync
-    across a whole registry rebuild with nothing failing.
+    across a whole registry rebuild with nothing failing. A drift check was the earlier
+    answer here and it only ever asked whether two values agreed today; there is now one
+    value, and this asks that the second declaration has not come back.
 
-    These two are exact duplicates rather than translations, so drift is directly
-    checkable and this test costs nothing. It says nothing about whether either value
-    is correct; it says the two copies agree, which is the property the comments
-    claim and nothing else enforces.
+    Read by parsing rather than by importing, because `holdout.py`'s module scope reaches
+    lightgbm and torch, which this job does not install.
+    `tests/test_holdout_selection_is_single_sourced.py` asserts the runtime identity in
+    the job that does.
     """
-    holdout = Path(__file__).parents[1] / "20_strategy_synthesis" / "holdout.py"
+    tree = ast.parse(
+        (Path(__file__).parents[1] / "20_strategy_synthesis" / "holdout.py").read_text()
+    )
+    imported = {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "case_studies.utils.strategy_analysis"
+        for alias in node.names
+    }
     for name in ("LABEL_RESTRICTIONS", "UNIVERSE_RESTRICTIONS"):
-        here = getattr(strategy_analysis, name)
-        there = _module_level_literal(holdout, name)
-        assert here == there, (
-            f"{name} has drifted between case_studies/utils/strategy_analysis.py and "
-            f"20_strategy_synthesis/holdout.py: {here!r} against {there!r}. Both files "
-            "say to keep these in sync; whichever is right, they cannot disagree."
+        declared = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            and any(
+                isinstance(target, ast.Name) and target.id == name
+                for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+            )
+        ]
+        assert not declared, (
+            f"20_strategy_synthesis/holdout.py declares its own {name} again. One "
+            "declaration, in case_studies/utils/strategy_analysis.py, imported here - a "
+            "second copy is a restriction a case study declares and the holdout selector "
+            "does not read."
+        )
+        assert name in imported, (
+            f"20_strategy_synthesis/holdout.py neither declares nor imports {name}, so "
+            "whatever it applies to holdout selection is not what the case study declared."
         )
 
 

@@ -127,7 +127,7 @@ from case_studies.utils.strategy_analysis import (
     plot_cost_decay,
     plot_ic_vs_sharpe,
     rank_backtests_on_common_support,
-    resolve_canonical_rank1_lineage,
+    resolve_solvent_carrier,
     select_holdout_self_backtest,
 )
 from utils.paths import display_path, get_case_study_dir, get_output_dir
@@ -249,7 +249,9 @@ if not LIVE_PREDICTIONS:
 print(f"Live prediction sets: {len(LIVE_PREDICTIONS):,}")
 # Resolved before the guard because the guard asks about this holdout, not about holdouts
 # in general. §6 re-resolves it and checks the two agree.
-_lineage = resolve_canonical_rank1_lineage(CASE_STUDY)
+# `resolve_solvent_carrier` rather than the bare lineage resolver: same selection, and it
+# additionally refuses a carrier whose equity reached zero.
+_lineage = resolve_solvent_carrier(CASE_STUDY)
 _expected_holdout = _lineage["holdout_backtest_hash"]
 with sqlite3.connect(str(_db)) as _con:
     _tables = {r[0] for r in _con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -388,7 +390,7 @@ else:
 # allocator variants are candidates and either can win.
 
 # %%
-rank1 = resolve_canonical_rank1_lineage(CASE_STUDY)
+rank1 = resolve_solvent_carrier(CASE_STUDY)
 TOP_HASH = rank1["val_backtest_hash"]
 TOP_PHASH = rank1["val_prediction_hash"]
 RANK1_STAGE = rank1["val_stage"]

@@ -74,6 +74,7 @@ from case_studies.utils.registry import (
     resolve_best_backtest_runs,
 )
 from case_studies.utils.registry.specs import training_hash_from_spec
+from case_studies.utils.strategy_analysis import resolve_solvent_carrier
 from case_studies.utils.uncertainty import load_daily_returns_with_timestamp
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE, add_message_title
@@ -141,15 +142,30 @@ FIELD = open_selection_field(
     resolve_best_backtest_runs=resolve_best_backtest_runs,
 )
 CANDIDATES = FIELD.candidate_set
-SELECTED = FIELD.selected
 FIELD_HASHES = list(FIELD.members)
 FIELD_NAME = f"frozen candidate set {CANDIDATES.hash}" if CANDIDATES is not None else "live ranking"
 SELECTION_SOURCE = FIELD.source
+# The field says which backtests may be chosen from; the resolver says which one is chosen,
+# and it is handed the field rather than the whole registry. `SelectionField.selected` is
+# `CandidateSet.best_validation_sharpe`, which ranks the stored Sharpe column with a hash
+# tie-break and applies nothing else - no re-ranking onto the timestamps every candidate
+# prices, no label or universe restriction, no refusal of a run whose equity reached zero.
+# This case study's field holds a conformal allocator that sits out its warm-up and books it
+# as returns of exactly zero, so the two rankings read two different samples: they name the
+# same backtest on this registry and value it at 2.6087 stored against 2.6329 over the shared
+# sessions. `20_strategy_analysis` resolves the same way, so all three notebooks describe one
+# configuration.
+CARRIER = resolve_solvent_carrier(CASE_STUDY_ID, admitted=frozenset(FIELD_HASHES))
+SELECTED = _study.results.open(CARRIER["val_backtest_hash"])
+print(
+    f"{FIELD_NAME}: {len(FIELD_HASHES)} members, resolver picks {SELECTED.hash}, "
+    f"stored-Sharpe pick {FIELD.selected.hash}"
+)
 
 # The label the stages after the selection run under is the winner's, not the case study's
 # primary. An injected LABEL is a request to run a different one, and it has to agree with what
 # was selected or the holdout backtest would be keyed to a contract the selection does not name.
-HOLDOUT_LABEL = FIELD.label
+HOLDOUT_LABEL = CARRIER["label"]
 if REQUESTED_LABEL and REQUESTED_LABEL != HOLDOUT_LABEL:
     raise RuntimeError(
         f"LABEL={REQUESTED_LABEL!r} was requested but the selection carried forward is "
@@ -441,11 +457,18 @@ if registered_stage[0] != "holdout":
 # %% [markdown]
 # ## 4. What the holdout says
 #
-# The two rows below are the same strategy on two windows. The validation figure
-# is the one the configuration was chosen on and is optimistic by construction:
-# it is the maximum of a search, and the maximum of a search is a biased estimate
-# of the thing searched over. The holdout figure has no such bias from *this*
-# case study's selection.
+# The two rows below are the same strategy on two windows. Both are read from
+# `backtest_metrics`, so each is measured over the span its own run priced. The
+# validation row is therefore the registered run's own figure and not the number the
+# selection was decided on: the field here holds a conformal allocator that sits out
+# its warm-up and books it as returns of exactly zero, so the ranking re-measures every
+# candidate over the sessions they all price. That figure is printed above the table,
+# and on this registry the two differ - 2.6329 over the shared sessions against 2.6087
+# stored.
+#
+# Either way the validation figure is optimistic by construction: it is the maximum of
+# a search, and the maximum of a search is a biased estimate of the thing searched over.
+# The holdout figure has no such bias from *this* case study's selection.
 #
 # It carries a different one. The window is a single year, and 2021 was a
 # particular year - a broad advance in US equities - so a result this good in a
@@ -454,6 +477,13 @@ if registered_stage[0] != "holdout":
 # window it was tested on, and nothing downstream of here can either.
 
 # %%
+# The metric the configuration was actually selected on, stated before the table so the
+# validation row below is read as what it is - the registered run over its own span.
+print(
+    f"selected on Sharpe={CARRIER['val_sharpe']:.4f} over the "
+    f"{CARRIER['comparison_n_periods'] or 'full'} sessions every candidate prices"
+)
+
 with sqlite3.connect(REGISTRY_DB) as db:
     comparison = pl.read_database(
         """
@@ -472,7 +502,7 @@ if comparison.height != 2:
 comparison = comparison.with_columns(
     pl.when(pl.col("backtest_hash") == HOLDOUT_BACKTEST_HASH)
     .then(pl.lit("holdout (2021)"))
-    .otherwise(pl.lit("validation (selected on)"))
+    .otherwise(pl.lit("validation (registered span)"))
     .alias("window")
 ).sort("window")
 comparison.select(
@@ -510,10 +540,12 @@ comparison.select(
 
 # %%
 _holdout = comparison.filter(pl.col("window") == "holdout (2021)").row(0, named=True)
-_validation = comparison.filter(pl.col("window") == "validation (selected on)").row(0, named=True)
+_validation = comparison.filter(pl.col("window") == "validation (registered span)").row(
+    0, named=True
+)
 _spans_zero = _holdout["sharpe_ci95_lo"] <= 0.0 <= _holdout["sharpe_ci95_hi"]
 print(
-    f"Validation Sharpe {_validation['sharpe']:.3f} "
+    f"Validation Sharpe {_validation['sharpe']:.3f} over the registered span "
     f"[{_validation['sharpe_ci95_lo']:.3f}, {_validation['sharpe_ci95_hi']:.3f}] "
     f"over {int(_validation['n_periods'])} sessions"
 )

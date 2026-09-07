@@ -86,6 +86,7 @@ from case_studies.utils.backtest_presets import strategy_view
 from case_studies.utils.notebook_contracts import prediction_members_in_force
 from case_studies.utils.registry import resolve_best_backtest_runs
 from case_studies.utils.registry.specs import training_hash_from_spec
+from case_studies.utils.strategy_analysis import resolve_solvent_carrier
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "sp500_equity_option_analytics"
@@ -162,15 +163,30 @@ FIELD = open_selection_field(
     resolve_best_backtest_runs=resolve_best_backtest_runs,
 )
 CANDIDATES = FIELD.candidate_set
-SELECTED = FIELD.selected
 FIELD_HASHES = list(FIELD.members)
 FIELD_NAME = f"frozen candidate set {CANDIDATES.hash}" if CANDIDATES is not None else "live ranking"
 SELECTION_SOURCE = FIELD.source
+# The field says which backtests may be chosen from; the resolver says which one is chosen,
+# and it is handed the field rather than the whole registry. `SelectionField.selected` is
+# `CandidateSet.best_validation_sharpe`, which ranks the stored Sharpe column with a hash
+# tie-break and applies nothing else - no re-ranking onto the timestamps every candidate
+# prices, no label or universe restriction, no refusal of a run whose equity reached zero.
+# This case study's field holds a conformal allocator that sits out its warm-up and books it
+# as returns of exactly zero, so the two rankings read two different samples: they name the
+# same backtest on this registry and value it at 2.6087 stored against 2.6329 over the shared
+# sessions. `20_strategy_analysis` resolves the same way, so all three notebooks describe one
+# configuration.
+CARRIER = resolve_solvent_carrier(CASE_STUDY_ID, admitted=frozenset(FIELD_HASHES))
+SELECTED = study.results.open(CARRIER["val_backtest_hash"])
+print(
+    f"{FIELD_NAME}: {len(FIELD_HASHES)} members, resolver picks {SELECTED.hash}, "
+    f"stored-Sharpe pick {FIELD.selected.hash}"
+)
 
 # The label the stages after the selection run under is the winner's, not the case study's
 # primary. An injected LABEL is a request to run a different one, and it has to agree with what
 # was selected or the holdout refit would be keyed to a contract the selection does not name.
-HOLDOUT_LABEL = FIELD.label
+HOLDOUT_LABEL = CARRIER["label"]
 if REQUESTED_LABEL and REQUESTED_LABEL != HOLDOUT_LABEL:
     raise RuntimeError(
         f"LABEL={REQUESTED_LABEL!r} was requested but the selection carried forward is "
@@ -556,9 +572,12 @@ print(
 # The information coefficient is the rank correlation between the prediction and
 # the realized label. Reading the holdout's beside the validation figure for the
 # same configuration says whether the signal decayed, and by how much; it does
-# not license a claim about either number on its own, because the validation
-# figure is the one the configuration was selected on and is optimistic by
-# construction.
+# not license a claim about either number on its own. The configuration was
+# selected on validation backtest Sharpe and never on an information coefficient
+# (`reference/CASE_STUDY_PIPELINE.md` section 5), so the validation row below is the
+# selected configuration's IC rather than the quantity the selection ranked - and it
+# is still optimistic, because the configuration it describes is the maximum of a
+# search.
 
 # %%
 with sqlite3.connect(REGISTRY_DB) as db:
@@ -575,7 +594,7 @@ if _holdout_ic is None:
 
 split_table = pl.DataFrame(
     {
-        "split": ["validation (selected on)", "holdout (2021)"],
+        "split": ["validation (selected configuration)", "holdout (2021)"],
         "prediction": [selected_prediction.hash, HOLDOUT_PREDICTION.hash],
         "ic_mean": [
             None if _validation_ic is None else _validation_ic[0],

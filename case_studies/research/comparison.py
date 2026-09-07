@@ -5,6 +5,7 @@ import sqlite3
 from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
@@ -12,6 +13,7 @@ import polars as pl
 from case_studies.utils.registry.specs import canonical_json, compute_hash
 from case_studies.utils.registry.store import _git_hash, _open_registry, _utc_now
 
+from .population import _refuse_preview_activation
 from .results import Result
 
 if TYPE_CHECKING:
@@ -121,6 +123,30 @@ def candidate_set_supersedes(study: Study, *, name: str, declared: str | None) -
     return None
 
 
+def _candidate_set_root(study: Study) -> Path:
+    """The registry a candidate set is read from and written to, for the tier that is running.
+
+    A ``Study``'s ``root`` is the canonical case directory whatever tier is active, so every
+    read and every write here addressed the shared registry even under a preview. A preview
+    then resolved *canonical* members - so each one's ``execution_tier`` reads ``canonical``
+    and the member check in :meth:`CandidateSet.create` passes - and ``create`` opened the
+    canonical registry and wrote to it. Nothing downstream distinguishes that row from one a
+    canonical run wrote.
+
+    That is not hypothetical. A preview of ``crypto_perps_funding/19_strategy_analysis``
+    failed with ``a changed candidate set named 'crypto-final-selection' must explicitly
+    supersedes a840029e01ed``, and ``a840029e01ed`` is not in the preview workspace: it is in
+    the canonical crypto registry, written by that case study's canonical chain. It raised
+    only because the name was already bound. With the name unbound - a freshly reset registry,
+    which is the state five of six case studies were in on the morning of 2026-09-06 - the
+    same call reaches the write. The failure that exposed this is the case where it is safe.
+
+    :meth:`Study.storage_root` returns the canonical case directory for the canonical tier, so
+    a canonical run resolves to exactly the path it resolved before.
+    """
+    return study.storage_root(study.execution_tier)
+
+
 @dataclass(frozen=True)
 class CandidateSet:
     study: Study
@@ -142,6 +168,13 @@ class CandidateSet:
         supersedes: str | None = None,
     ) -> CandidateSet:
         study.require_writable()
+        # `OfficialPopulation.create` refuses a preview here and this did not, though both
+        # perform the same activation into the canonical registry. The tier check further
+        # down refuses preview MEMBERS, which is a different question and passes: under a
+        # preview the members resolved are the canonical ones, so every tier reads
+        # `canonical`. Activation is what `_refuse_preview_activation` is named for and it is
+        # what this does.
+        _refuse_preview_activation(study)
         study.activate()
         resolved = tuple(members)
         if not resolved:
@@ -211,7 +244,7 @@ class CandidateSet:
                 }
             )
         )
-        db = _open_registry(study.root)
+        db = _open_registry(_candidate_set_root(study))
         try:
             existing = db.execute(
                 "SELECT member_kind, comparison_contract_json FROM candidate_sets WHERE set_hash = ?",
@@ -296,7 +329,7 @@ class CandidateSet:
         two names for the same members each resolve to it, and superseding one does not retire
         the other.
         """
-        with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
+        with closing(sqlite3.connect(_candidate_set_root(study) / "run_log" / "registry.db")) as db:
             bindings = name_bindings(db, name)
             heads = _live_heads(bindings)
             if len(heads) != 1:
@@ -323,7 +356,7 @@ class CandidateSet:
         no way to say which of its names the caller meant, and this is the one the registry
         records on the identity row; :meth:`one` is the way in when the name is what matters.
         """
-        db_path = study.root / "run_log" / "registry.db"
+        db_path = _candidate_set_root(study) / "run_log" / "registry.db"
         with closing(sqlite3.connect(db_path)) as db:
             row = db.execute(
                 "SELECT name, member_kind, comparison_contract_json, supersedes_hash "

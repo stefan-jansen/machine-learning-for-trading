@@ -47,7 +47,6 @@
 # %%
 """US Firm Characteristics: Holdout Predictions."""
 
-import sqlite3
 import warnings
 
 import polars as pl
@@ -58,9 +57,11 @@ from case_studies.research import open_study
 from case_studies.research.holdout import build_holdout_training_spec
 from case_studies.research.models import reconstruct_locked_model_request
 from case_studies.utils.registry import training_hash_from_spec
+from case_studies.utils.registry.maintenance import delete_prediction_generation
 from case_studies.utils.strategy_analysis import (
+    holdout_generations_to_retire,
+    registered_holdout_generations,
     resolve_solvent_carrier,
-    training_run_fitted_for_the_holdout,
 )
 from utils.paths import get_case_study_dir
 
@@ -90,72 +91,19 @@ CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 def _delete_holdout_generation(case_dir, prediction_hash):
     """Remove one holdout prediction set and everything registered against it.
 
-    Called only when ``REPLACE_HOLDOUT`` says a generation is superseded. The rows go
-    rather than being marked, because a superseded holdout evaluation that is still
-    readable is still a number someone can quote, and the point of replacing it is that it
+    The rows go rather than being marked, because a holdout evaluation that is still
+    readable is still a number someone can quote, and the point of removing it is that it
     should not be one.
+
+    The cascade lives in `case_studies/utils/registry/maintenance.py` and derives the child
+    tables from the schema. The version this replaces listed them by hand and was already
+    missing `cohort_metrics.leader_hash`, which with foreign keys enabled aborts the delete
+    rather than orphaning a row - so on any registry with a cohort this function raised
+    instead of deleting, and the generation it was called on stayed.
     """
-    with sqlite3.connect(str(case_dir / "run_log" / "registry.db")) as conn:
-        backtests = [
-            row[0]
-            for row in conn.execute(
-                "SELECT backtest_hash FROM backtest_runs WHERE prediction_hash = ?",
-                (prediction_hash,),
-            )
-        ]
-        for backtest_hash in backtests:
-            conn.execute(
-                "DELETE FROM backtest_paired_metrics WHERE challenger_hash = ? "
-                "OR benchmark_hash = ?",
-                (backtest_hash, backtest_hash),
-            )
-            conn.execute("DELETE FROM backtest_metrics WHERE backtest_hash = ?", (backtest_hash,))
-            conn.execute("DELETE FROM backtest_runs WHERE backtest_hash = ?", (backtest_hash,))
-        conn.execute("DELETE FROM prediction_sets WHERE prediction_hash = ?", (prediction_hash,))
-
-
-def _registered_holdout_generations(case_dir):
-    """Every holdout prediction set in the registry, and whether its model was refitted.
-
-    `refitted` is read from the training run's own CV rather than from the prediction
-    set's split: the split says where the predictions land, and a model fitted on the
-    validation folds can publish predictions over the holdout window. That is the defect
-    the generation below replaces, and it is why this is the same predicate the canonical
-    lineage resolver applies.
-    """
-    with sqlite3.connect(str(case_dir / "run_log" / "registry.db")) as conn:
-        rows = conn.execute(
-            """
-            SELECT p.prediction_hash, p.training_hash, p.checkpoint_kind, p.checkpoint_value,
-                   t.config_name, t.spec_json
-            FROM prediction_sets p
-            JOIN training_runs t ON t.training_hash = p.training_hash
-            WHERE p.split = 'holdout'
-            ORDER BY p.prediction_hash
-            """
-        ).fetchall()
-    return [
-        {
-            "prediction_hash": prediction_hash,
-            "training_hash": training_hash,
-            # The checkpoint is part of the configuration, not a detail of it: one training
-            # run publishes one prediction set per declared checkpoint, and moving the
-            # selection from one checkpoint to another is a different configuration
-            # evaluated on the same window. Identity on the training hash alone would see
-            # that as the same generation and let both stand.
-            "checkpoint": (checkpoint_kind, checkpoint_value),
-            "config_name": config_name,
-            "refitted": training_run_fitted_for_the_holdout(training_spec_json),
-        }
-        for (
-            prediction_hash,
-            training_hash,
-            checkpoint_kind,
-            checkpoint_value,
-            config_name,
-            training_spec_json,
-        ) in rows
-    ]
+    deleted = delete_prediction_generation(case_dir / "run_log" / "registry.db", prediction_hash)
+    for table, n in sorted(deleted.items()):
+        print(f"  deleted {n:>3} from {table}")
 
 
 # %% [markdown]
@@ -279,11 +227,49 @@ print(f"Holdout training ends {fold['train_end']}, holdout opens {fold['val_star
 # %%
 holdout_training_hash = training_hash_from_spec(holdout_spec)
 this_generation = (holdout_training_hash, (CHECKPOINT_KIND, CHECKPOINT_VALUE))
-superseded = [
-    row
-    for row in _registered_holdout_generations(CASE_DIR)
-    if row["refitted"] and (row["training_hash"], row["checkpoint"]) != this_generation
-]
+retire = holdout_generations_to_retire(CASE_DIR, this_generation=this_generation)
+# A row whose training run records no CV split cannot be shown either way, and deleting on
+# that would discard a result nothing has established is wrong. It stops the run instead.
+if retire.unattributable:
+    raise RuntimeError(
+        "the holdout window carries prediction sets whose training runs record no CV split, "
+        "so whether they were refitted for the holdout cannot be established: "
+        + ", ".join(
+            f"{row['prediction_hash']} (training {row['training_hash']})"
+            for row in retire.unattributable
+        )
+        + ". Establish what produced them before registering another evaluation on the same "
+        "window; this notebook will not delete a row it cannot show is not a holdout result."
+    )
+# A row whose training run declares a non-holdout CV may not be reported as a holdout
+# result, and it is also not something to delete unattended: `generate_holdout` refits on a
+# holdout fold and then registers the predictions under the VALIDATION training identity, so
+# this record covers both a validation-fitted model published over the window and a real
+# refit filed under the wrong identity. Nothing owned this before - the filter here was
+# `row["refitted"]`, which made exactly these rows invisible to the refusal and to
+# everything after it.
+if retire.not_out_of_sample and not REPLACE_HOLDOUT:
+    raise RuntimeError(
+        "the holdout window carries prediction sets whose training runs declare a CV split "
+        "other than the holdout: "
+        + ", ".join(
+            f"{row['prediction_hash']} ({row['config_name']}, training {row['training_hash']})"
+            for row in retire.not_out_of_sample
+        )
+        + ". Each is either a validation-fitted model published over the window, which is "
+        "not an out-of-sample result, or a refit registered under its validation training "
+        "identity, which `20_strategy_synthesis/holdout.py::generate_holdout` produces - and "
+        "the registry cannot tell those apart. Establish which, then set REPLACE_HOLDOUT="
+        "True to remove it, or leave it and resolve the identity instead."
+    )
+for row in retire.not_out_of_sample:
+    print(
+        f"REMOVING {row['prediction_hash']} ({row['config_name']}, training "
+        f"{row['training_hash']}): its training run declares a non-holdout CV, so it is not "
+        "reportable as a holdout evaluation under the identity it carries"
+    )
+    _delete_holdout_generation(CASE_DIR, row["prediction_hash"])
+superseded = list(retire.superseded)
 if superseded and not REPLACE_HOLDOUT:
     raise RuntimeError(
         "the holdout window already carries a refit of a different configuration: "
@@ -345,7 +331,7 @@ print(
 # the registry is immutable and a reader looking at it later will see both.
 
 # %% tags=["results"]
-for row in _registered_holdout_generations(CASE_DIR):
+for row in registered_holdout_generations(CASE_DIR):
     note = (
         "refitted for the holdout" if row["refitted"] else "VALIDATION-FITTED - not out of sample"
     )

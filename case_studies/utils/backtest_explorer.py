@@ -50,6 +50,10 @@ _BEST_SCHEMA: dict[str, pl.DataType] = {
     "config_name": pl.Utf8,
     "label": pl.Utf8,
     "signal_method": pl.Utf8,
+    # The entry-scheme sweep varies concentration and nothing else, so without
+    # this the ten-row top table reads as one strategy repeated at different
+    # Sharpes (ml4t/agent-workspace#910).
+    "top_k": pl.Int64,
     "universe_filter": pl.Utf8,
     "exit_at_max_days": pl.Int64,
     "sharpe": pl.Float64,
@@ -155,6 +159,20 @@ class BacktestExplorer:
             if not rows:
                 return pl.DataFrame()
             return pl.DataFrame([dict(r) for r in rows])
+        finally:
+            db.close()
+
+    def _has_metric_column(self, column: str) -> bool:
+        """Whether ``backtest_metrics`` carries this column in this registry.
+
+        A registry written before a metric existed has no column for it, and
+        selecting one that is not there is a hard SQLite error rather than a NULL.
+        """
+        db = sqlite3.connect(str(self._db_path))
+        try:
+            return column in {
+                row[1] for row in db.execute("PRAGMA table_info(backtest_metrics)").fetchall()
+            }
         finally:
             db.close()
 
@@ -274,8 +292,8 @@ class BacktestExplorer:
         -------
         pl.DataFrame
             Columns: backtest_hash, prediction_hash, source, family,
-            config_name, label, signal_method, sharpe, cagr, max_drawdown,
-            total_return, volatility, ic_mean
+            config_name, label, signal_method, top_k, sharpe, cagr,
+            max_drawdown, total_return, volatility, ic_mean
         """
         filter_sql = ""
         filter_params: list[str] = []
@@ -328,7 +346,7 @@ class BacktestExplorer:
               AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
               {filter_sql}
-            ORDER BY bm.sharpe DESC
+            ORDER BY bm.sharpe DESC, b.backtest_hash ASC
             LIMIT ?
             """,
             (
@@ -372,8 +390,14 @@ class BacktestExplorer:
         exit_at_max_days = [
             strategy_view(sp).get("signal", {}).get("exit_at_max_days") for sp in parsed
         ]
+        # Every entry scheme in a baseline sweep is `equal_weight_top_k` and varies
+        # only `top_k`, so `signal_method` alone made nine of the ten rows read as
+        # the same strategy. `top_k` sits one key across from `method` in the spec
+        # this block already parses (ml4t/agent-workspace#910).
+        top_k = [strategy_view(sp).get("signal", {}).get("top_k") for sp in parsed]
         df = df.with_columns(
             pl.Series("signal_method", methods),
+            pl.Series("top_k", top_k, dtype=pl.Int64),
             pl.Series("universe_filter", universe_filters),
             pl.Series("exit_at_max_days", exit_at_max_days, dtype=pl.Int64),
         )
@@ -386,6 +410,7 @@ class BacktestExplorer:
             "config_name",
             "label",
             "signal_method",
+            "top_k",
             "universe_filter",
             "exit_at_max_days",
             "sharpe",
@@ -582,11 +607,22 @@ class BacktestExplorer:
         Returns
         -------
         pl.DataFrame
-            Columns: allocator, n, avg_sharpe, best_sharpe, avg_max_dd
+            Columns: allocator, n, ruined, avg_sharpe, best_sharpe, avg_max_dd.
+            ``n`` counts the runs with a rankable Sharpe and every statistic is
+            taken over those; ``ruined`` counts the runs the engine stopped at zero
+            equity, which carry no Sharpe to rank.
         """
         if not stages:
             return pl.DataFrame()
         placeholders = ", ".join("?" for _ in stages)
+        # A run the engine stopped at ruin carries a null Sharpe by design
+        # (ml4t/agent-workspace#920). Dropping those in SQL, as this query used to,
+        # would take an allocator that went bankrupt in every run off the table
+        # entirely and report the survivors as the whole population. The rows are
+        # kept and counted under `ruined`; the Sharpe and drawdown statistics are
+        # taken over the solvent runs only, so `avg_max_dd` is a mean of drawdowns
+        # that were actually measured.
+        ruin_select = "bm.ruin" if self._has_metric_column("ruin") else "NULL AS ruin"
         coverage_params: tuple[str, ...] = ()
         coverage_sql = full_coverage_prediction_sql("p", "t", "pm")
         if prediction_hashes:
@@ -603,7 +639,8 @@ class BacktestExplorer:
                 t.family,
                 t.config_name,
                 bm.sharpe,
-                bm.max_drawdown
+                bm.max_drawdown,
+                {ruin_select}
             FROM backtest_runs b
             JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
             JOIN training_runs t ON p.training_hash = t.training_hash
@@ -613,7 +650,6 @@ class BacktestExplorer:
               AND p.split != 'holdout'
               {excluded_family_sql(self.case_study, "t.family")[0]}
               {coverage_sql}
-              AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
         """
         params: tuple = (
@@ -657,15 +693,21 @@ class BacktestExplorer:
         if df.is_empty():
             return df
 
+        # A run whose drawdown passed -100% crossed zero equity, so it is bankrupt
+        # whether or not the engine that produced it recorded `ruin` - registries
+        # written before that column carry the evidence only in the drawdown.
+        ruined = (pl.col("ruin") == 1.0) | (pl.col("max_drawdown") <= -1.0)
+        rankable = pl.col("sharpe").is_not_null() & ~ruined.fill_null(False)
         return (
             df.group_by("allocator")
             .agg(
-                n=pl.len(),
-                avg_sharpe=pl.col("sharpe").mean(),
-                best_sharpe=pl.col("sharpe").max(),
-                avg_max_dd=pl.col("max_drawdown").mean(),
+                n=rankable.sum(),
+                ruined=ruined.fill_null(False).sum(),
+                avg_sharpe=pl.col("sharpe").filter(rankable).mean(),
+                best_sharpe=pl.col("sharpe").filter(rankable).max(),
+                avg_max_dd=pl.col("max_drawdown").filter(rankable).mean(),
             )
-            .sort("avg_sharpe", descending=True)
+            .sort("avg_sharpe", descending=True, nulls_last=True)
         )
 
     # -----------------------------------------------------------------
@@ -828,7 +870,7 @@ class BacktestExplorer:
             FROM backtest_runs b
             JOIN backtest_metrics bm ON bm.backtest_hash = b.backtest_hash
             WHERE {where_sql}
-            ORDER BY bm.sharpe DESC
+            ORDER BY bm.sharpe DESC, b.backtest_hash ASC
             """,
             tuple(params),
         )
@@ -1160,7 +1202,8 @@ class BacktestExplorer:
         -------
         pl.DataFrame
             Columns: risk_name, risk_type, sharpe, max_drawdown, num_trades,
-            allocator, prediction_hash, baseline_sharpe, sharpe_delta
+            risk_triggers, allocator, prediction_hash, baseline_sharpe,
+            sharpe_delta
 
         Each overlay's ``baseline_sharpe`` is the no-overlay Sharpe of the
         allocation it was applied to, matched on ``(prediction_hash,
@@ -1176,6 +1219,13 @@ class BacktestExplorer:
         elif prediction_hashes:
             pred_clause = " AND b.prediction_hash IN (SELECT value FROM json_each(?))"
             pred_params = (json.dumps(list(prediction_hashes)),)
+        # Absent from a registry written before the engine counted triggers, where
+        # the question this column answers simply cannot be answered.
+        triggers_select = (
+            "bm.risk_triggers"
+            if self._has_metric_column("risk_triggers")
+            else "NULL AS risk_triggers"
+        )
         df = self._query(
             f"""
             SELECT
@@ -1185,7 +1235,8 @@ class BacktestExplorer:
                 t.config_name,
                 bm.sharpe,
                 bm.max_drawdown,
-                bm.num_trades
+                bm.num_trades,
+                {triggers_select}
             FROM backtest_runs b
             JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
             JOIN training_runs t ON p.training_hash = t.training_hash
@@ -1205,12 +1256,13 @@ class BacktestExplorer:
             return df
 
         rows = []
-        for spec_str, pred_h, sharpe, max_dd, trades in zip(
+        for spec_str, pred_h, sharpe, max_dd, trades, triggers in zip(
             df["spec_json"].to_list(),
             df["prediction_hash"].to_list(),
             df["sharpe"].to_list(),
             df["max_drawdown"].to_list(),
             df["num_trades"].to_list(),
+            df["risk_triggers"].to_list(),
             strict=False,
         ):
             spec = _parse_spec(spec_str) or {}
@@ -1236,6 +1288,12 @@ class BacktestExplorer:
                     "sharpe": sharpe,
                     "max_drawdown": max_dd,
                     "num_trades": trades,
+                    # How many times the control acted. 0 is an overlay that was
+                    # installed and never fired; NULL is a run the engine did not
+                    # count, which is every row registered before
+                    # ml4t/agent-workspace#1051. Matching Sharpe and trade counts
+                    # never established either one on their own.
+                    "risk_triggers": triggers,
                     "prediction_hash": pred_h,
                     "allocator": strategy_view(spec)
                     .get("allocation", {})
@@ -1637,7 +1695,7 @@ class BacktestExplorer:
               AND b.stage IS NOT NULL
               AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
-            ORDER BY bm.sharpe DESC
+            ORDER BY bm.sharpe DESC, b.backtest_hash ASC
             """,
             (prediction_hash,),
         )
@@ -1700,19 +1758,40 @@ class BacktestExplorer:
     # concentration_curve: Sharpe vs top_k at allocation stage
     # -----------------------------------------------------------------
 
-    def concentration_curve(self, prediction_hash: str) -> pl.DataFrame:
-        """Sharpe vs top_k for a given prediction at allocation stage.
+    def concentration_curve(
+        self, prediction_hash: str, *, stage: str | tuple[str, ...] = "allocation"
+    ) -> pl.DataFrame:
+        """Sharpe vs top_k for a given prediction, at one or more stages.
 
         Shows how portfolio concentration affects performance — typically
         more actionable than allocator comparison alone.
+
+        Parameters
+        ----------
+        stage : str or tuple of str, default ``"allocation"``
+            Which backtest stages to read. The default is unchanged, but the
+            entry-scheme sweep that varies concentration lives at the **signal**
+            stage, and that is where the first three notebooks of the backtesting
+            sequence read. This method used to hardcode the allocation stage, so
+            asking it about a baseline sweep returned an empty frame with no
+            indication that the rows were one stage away (ml4t/agent-workspace#910).
 
         Returns
         -------
         pl.DataFrame
             Columns: top_k, allocator, sharpe, max_drawdown, cagr
+
+        Raises
+        ------
+        ValueError
+            When the prediction has backtests, but none at the requested stage.
+            An empty frame cannot say whether the sweep was never run or was run
+            somewhere else, and those need different responses.
         """
+        stages = (stage,) if isinstance(stage, str) else tuple(stage)
+        placeholders = ", ".join("?" for _ in stages)
         df = self._query(
-            """
+            f"""
             SELECT
                 b.spec_json,
                 bm.sharpe,
@@ -1721,13 +1800,14 @@ class BacktestExplorer:
             FROM backtest_runs b
             JOIN backtest_metrics bm ON bm.backtest_hash = b.backtest_hash
             WHERE b.prediction_hash = ?
-              AND b.stage = 'allocation'
+              AND b.stage IN ({placeholders})
               AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
             """,
-            (prediction_hash,),
+            (prediction_hash, *stages),
         )
         if df.is_empty():
+            self._refuse_if_the_curve_is_at_another_stage(prediction_hash, stages)
             return df
 
         rows = []
@@ -1753,6 +1833,28 @@ class BacktestExplorer:
             )
 
         return pl.DataFrame(rows).sort("top_k")
+
+    def _refuse_if_the_curve_is_at_another_stage(
+        self, prediction_hash: str, stages: tuple[str, ...]
+    ) -> None:
+        """Raise when this prediction has backtests, but not at the stage asked for."""
+        elsewhere = self._query(
+            "SELECT stage, COUNT(*) AS n FROM backtest_runs "
+            "WHERE prediction_hash = ? GROUP BY stage ORDER BY n DESC",
+            (prediction_hash,),
+        )
+        if elsewhere.is_empty():
+            return
+        held = {row["stage"]: row["n"] for row in elsewhere.iter_rows(named=True)}
+        if set(held) & set(stages):
+            return
+        counted = ", ".join(f"{name}: {n}" for name, n in held.items())
+        raise ValueError(
+            f"no concentration curve at stage {list(stages)} for prediction "
+            f"{prediction_hash[:12]} in {self.case_study}, which has backtests at "
+            f"{counted}. The entry-scheme sweep that varies top_k runs at the signal "
+            "stage; pass stage='signal' to read it."
+        )
 
     # -----------------------------------------------------------------
     # repr

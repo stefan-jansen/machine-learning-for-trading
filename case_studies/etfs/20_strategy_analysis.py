@@ -111,8 +111,8 @@ from case_studies.utils.strategy_analysis import (
     plot_concentration_curve,
     plot_equity_drawdown,
     plot_sharpe_waterfall,
-    resolve_canonical_rank1_lineage,
     resolve_holdout_self_backtest,
+    resolve_solvent_carrier,
     write_strategy_assessment,
 )
 from case_studies.utils.uncertainty import STAGE_SEQUENCE, descends_from
@@ -307,7 +307,12 @@ SELECTED_LABEL = top_signal.row(0, named=True)["label"]
 # The resolver is given the same field, not the whole registry: it re-ranks on common timestamp
 # support wherever a conformal candidate is present, so a row this notebook never admitted would
 # otherwise decide how far the intersection reaches and therefore which admitted row wins.
-CARRIER = resolve_canonical_rank1_lineage(CASE_STUDY, admitted=ADMITTED)
+#
+# `resolve_solvent_carrier` rather than the bare lineage resolver, so a carrier whose equity
+# reached zero is refused rather than reported. A long-short book with no margin call keeps
+# compounding through zero, so every metric it reports after that point - including a Sharpe high
+# enough to top a ranking - is arithmetic on a balance that no longer exists.
+CARRIER = resolve_solvent_carrier(CASE_STUDY, admitted=ADMITTED)
 if CARRIER["val_backtest_hash"] != TOP_HASH:
     raise RuntimeError(
         "this notebook's ranking and the canonical resolver disagree on the carrier: "

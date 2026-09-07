@@ -49,6 +49,7 @@ warnings.filterwarnings("ignore")
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_returns
 from case_studies.utils.strategy_analysis import (
+    allocation_method_of,
     compute_cost_bps,
     training_run_fitted_for_the_holdout,
 )
@@ -302,10 +303,9 @@ def _apply_rung_restriction(df: pl.DataFrame, cs: str) -> pl.DataFrame:
     return df.filter(rung["predicate"])
 
 
-# Carrier pin: a validation-time a-priori tie-break, distinct from the rung restrictions
-# above. EMPTY, and that is the normal state. It held
-# `"us_firm_characteristics": pl.col("config_name") == "default_huber"` until 2026-08-25,
-# copied from case_studies.utils.strategy_analysis.CARRIER_PINS and translated into a
+# There is no carrier pin here, and there is no mechanism for one. `_CARRIER_PIN_PREDICATES`
+# held `"us_firm_characteristics": pl.col("config_name") == "default_huber"` until 2026-08-25,
+# copied from `case_studies.utils.strategy_analysis.CARRIER_PINS` and translated into a
 # config-name predicate, under a "keep in sync" comment doing the job a mechanism should.
 #
 # It had not been in sync for a rebuild. Against the current registry `default_huber` is the
@@ -314,29 +314,15 @@ def _apply_rung_restriction(df: pl.DataFrame, cs: str) -> pl.DataFrame:
 # (59 backtests, 3.116). So this restricted one case study to its worst advanced configuration
 # while every notebook inside that case study reported its best.
 #
-# Worse than the hash pin removed from CARRIER_PINS the same day, because a hash pin dies loudly:
-# every hash changes when a sweep is rebuilt, so it resolves to nothing and stops. A config-name
-# predicate survives the rebuild and keeps selecting, silently and wrongly.
+# Worse than the hash pin removed from `CARRIER_PINS` the same day, because a hash pin dies
+# loudly: every hash changes when a sweep is rebuilt, so it resolves to nothing and stops. A
+# config-name predicate survives the rebuild and keeps selecting, silently and wrongly.
 #
-# If a carrier restriction is ever needed here again, call `carrier_pins.carrier_config_name(cs)`,
-# which resolves a pin to its config through the registry - the thing this copy existed to avoid
-# and the thing that would have failed loudly instead of filtering to the wrong config.
-_CARRIER_PIN_PREDICATES: dict[str, pl.Expr] = {}
-
-
-def _apply_carrier_pin(df: pl.DataFrame, cs: str) -> pl.DataFrame:
-    """Restrict candidate rows to the pinned model carrier, if configured.
-
-    Applied alongside `_apply_rung_restriction` at every cross-stage
-    carrier-selection site (signal / allocation / cross-stage spine /
-    holdout-pairing walk). Deliberately NOT applied to the §20.3 rank-cluster
-    diagnostics, which measure the rank-cluster width across the full model
-    space and must stay carrier-agnostic.
-    """
-    pred = _CARRIER_PIN_PREDICATES.get(cs)
-    if pred is None or df.is_empty() or "config_name" not in df.columns:
-        return df
-    return df.filter(pred)
+# The mapping stayed empty behind an `_apply_carrier_pin` that could no longer fire, which is a
+# second implementation of a rule nothing applied. A carrier restriction needed here again is
+# `carrier_pins.carrier_config_name(cs)`, which resolves an owner's pin to its config through
+# the registry - the thing the copy existed to avoid, and the thing that would have failed
+# loudly rather than filtering to the wrong config.
 
 
 def _progression_for(
@@ -636,7 +622,6 @@ def build_backtest_rows():
                 pl.col("label").is_in(list(label_restriction))
             )
         signal_candidates = _apply_rung_restriction(signal_candidates, cs)
-        signal_candidates = _apply_carrier_pin(signal_candidates, cs)
         best_signal = signal_candidates.head(1)
         signal_sharpe = best_signal["sharpe"][0] if not best_signal.is_empty() else None
         best_source = best_signal["source"][0] if not best_signal.is_empty() else ""
@@ -670,22 +655,14 @@ def build_backtest_rows():
                     pl.col("label").is_in(list(label_restriction))
                 )
             alloc_candidates = _apply_rung_restriction(alloc_candidates, cs)
-            alloc_candidates = _apply_carrier_pin(alloc_candidates, cs)
             best_alloc = alloc_candidates.head(1)
             alloc_sharpe = best_alloc["sharpe"][0] if not best_alloc.is_empty() else None
-            # When a carrier pin is active, the allocator comparison must run on
-            # the pinned carrier's prediction so the reported best_allocator NAME
-            # matches the pinned alloc_sharpe. Without this, compare_allocators
-            # pools across every prediction (e.g. an experimental conformal run on
-            # a non-carrier model) and can return an allocator that was never run
-            # on the deployed carrier. Non-pinned CSes pass None (unchanged).
-            alloc_comp_pred = (
-                best_alloc["prediction_hash"][0]
-                if cs in _CARRIER_PIN_PREDICATES and not best_alloc.is_empty()
-                else None
+            # The allocator that produced `alloc_sharpe`, read from that row's own spec, so
+            # the name and the number describe one configuration. See
+            # `strategy_analysis.allocation_method_of`.
+            best_allocator = allocation_method_of(
+                cs, best_alloc["backtest_hash"][0] if not best_alloc.is_empty() else None
             )
-            alloc_comp = explorer.compare_allocators(prediction_hash=alloc_comp_pred)
-            best_allocator = alloc_comp["allocator"][0] if not alloc_comp.is_empty() else ""
         else:
             alloc_sharpe = None
             best_allocator = ""
@@ -722,7 +699,6 @@ def build_backtest_rows():
         if label_restriction and "label" in cross_stage.columns and not cross_stage.is_empty():
             cross_stage = cross_stage.filter(pl.col("label").is_in(list(label_restriction)))
         cross_stage = _apply_rung_restriction(cross_stage, cs)
-        cross_stage = _apply_carrier_pin(cross_stage, cs)
         if not cross_stage.is_empty():
             cross_stage = cross_stage.sort("sharpe", descending=True).unique(
                 subset=["prediction_hash"], keep="first", maintain_order=True
@@ -1160,7 +1136,6 @@ def _val_rank1_carrier(cs: str) -> dict | None:
     if label_restriction and "label" in cand.columns:
         cand = cand.filter(pl.col("label").is_in(list(label_restriction)))
     cand = _apply_rung_restriction(cand, cs)
-    cand = _apply_carrier_pin(cand, cs)
     if cand.is_empty():
         return None
     # Do NOT dedup by prediction_hash here. The walk needs to surface every
@@ -1584,7 +1559,6 @@ for cs, explorer in explorers.items():
     if label_restriction and "label" in cand.columns:
         cand = cand.filter(pl.col("label").is_in(list(label_restriction)))
     cand = _apply_rung_restriction(cand, cs)
-    cand = _apply_carrier_pin(cand, cs)
     if cand.is_empty():
         continue
     cand = cand.sort("sharpe", descending=True).unique(

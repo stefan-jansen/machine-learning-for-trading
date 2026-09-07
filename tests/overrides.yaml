@@ -1232,6 +1232,12 @@ case_studies/cme_futures/05_evaluation:
   # zero-row subplot. The fixture carries all 30 products, which is what production
   # evaluates, and the reduction bought nothing: the panel is 38k rows either way.
   timeout: 600
+# max_symbols is 10 rather than 5 for the reason case_studies/etfs/06_linear states, with
+# this case study's arithmetic: top_k_grid [5, 10] and long-short, so the smallest declared
+# concentration needs 2 x 5 = 10 names to hold a long and a short leg that do not overlap.
+# This also clears the fold-4 feature-column loss the header of this file records at 5.
+# Ten is reachable here: `intermediates/cme_futures/features/financial.parquet` carries 30
+# products, measured 2026-09-07 on ml4t/third-edition-test-data 63a9e4e.
 case_studies/cme_futures/06_linear:
   # 120s is measured here, not copied. Slowest of 5 green `cs-cme_futures` runs of
   # .github/workflows/test.yml sampled 2026-09-04: 15.1s, 13% of the budget, against
@@ -1249,7 +1255,7 @@ case_studies/cme_futures/06_linear:
     # for the same reason as 07_gbm below: the reduction is what it was calibrated against.
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 5
+      max_symbols: 10
   timeout: 120
 case_studies/cme_futures/07_gbm:
   parameters:
@@ -1275,7 +1281,7 @@ case_studies/cme_futures/07_gbm:
       checkpoint_interval: 10
       folds: [0, 1]
       max_iterations: 20
-      max_symbols: 5
+      max_symbols: 10
   # Measured the same way and at the same load: 172.9 s end to end. Kept at 180 s.
   timeout: 180
 case_studies/cme_futures/08_tabular_dl:
@@ -1425,6 +1431,19 @@ case_studies/crypto_perps_funding/02_labels:
   timeout: 120
 case_studies/crypto_perps_funding/03_financial_features:
   timeout: 120
+# max_symbols stays 5 here, and unlike the other three case studies raising it would change
+# nothing: the whole crypto fixture is five perpetuals. `data/crypto/market/perps_1h.parquet`,
+# `premium_index_8h.parquet` and `funding_rate.parquet` each carry exactly the five symbols
+# `tests/create_test_data.py:CRYPTO_SYMBOLS` names, measured 2026-09-07 on
+# ml4t/third-edition-test-data 63a9e4e, and every seeded feature and fold artifact under
+# `intermediates/crypto_perps_funding` carries the same five. This case study declares
+# top_k_grid [3, 5, 10] and is long-short, so its smallest concentration needs 2 x 3 = 6 names
+# and no cap written here can produce a sixth. `cs-crypto_perps_funding` therefore fails at
+# 13_backtest with "no concentration declared ... can be realized", which is
+# ml4t/agent-workspace#989's cause stated rather than the twelve zero-trade backtests it used
+# to register silently. Widening it means widening the fixture, which regenerates
+# `intermediates/crypto_perps_funding` and is the coupling create_test_data.py's crypto header
+# records as ml4t/agent-workspace#970.
 case_studies/crypto_perps_funding/04_model_based_features:
   parameters:
     HMM_N_RESTARTS: 1
@@ -1569,6 +1588,17 @@ case_studies/etfs/05_evaluation:
   # Same reason as 04 above: this stage feeds the same predictions, so reducing it
   # re-narrows the cross-section that 04 was widened to preserve.
   timeout: 900
+# max_symbols is 6 rather than 5 across this case study's model stages, and the number is
+# derived rather than chosen. `get_entry_schemes_for` drops any declared `top_k` at or above
+# the universe the signal ranks, because holding k of k is the equal-weight benchmark rather
+# than a selection. etfs declares top_k_grid [5, 10, 20] and is long-only, so 6 is the
+# smallest cross-section at which the smallest declared concentration is realizable - at 5
+# every scheme is dropped and the sweep registers nothing, which is the zero-trade state
+# ml4t/agent-workspace#989 recorded and #1003 makes loud. Six rather than something rounder
+# because cs-etfs is already the longest case-study job on main at 43m and the model cost
+# scales with the cross-section. Six is reachable: the fixture carries 56 funds
+# (`intermediates/etfs/features/financial.parquet`, measured 2026-09-07 on
+# ml4t/third-edition-test-data 63a9e4e), not the 24 the 02_labels entry above still says.
 case_studies/etfs/06_linear:
   # 120s is measured here, not copied. Slowest of 5 green `cs-etfs` runs of
   # .github/workflows/test.yml sampled 2026-09-04: 16.1s, 13% of the budget, against
@@ -1587,7 +1617,7 @@ case_studies/etfs/06_linear:
   parameters:
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 5
+      max_symbols: 6
   timeout: 120
 case_studies/etfs/07_gbm:
   # As 06_linear. The iteration and checkpoint axes are left at their declared values: a
@@ -1596,7 +1626,7 @@ case_studies/etfs/07_gbm:
   parameters:
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 5
+      max_symbols: 6
   timeout: 180
 case_studies/etfs/08_tabular_dl:
   # DEVICE and POPULATION_NAME travel together. The runner refuses to substitute a CPU
@@ -1612,7 +1642,7 @@ case_studies/etfs/08_tabular_dl:
     POPULATION_NAME: etfs-tabular_dl-preview
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 5
+      max_symbols: 6
   timeout: 300
 case_studies/etfs/09_dl_lstm:
   # Converted onto the research boundary, so the notebook no longer binds BATCH_SIZE, LOOKBACK or
@@ -1631,7 +1661,7 @@ case_studies/etfs/09_dl_lstm:
     POPULATION_NAME: etfs-lstm-preview
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 5
+      max_symbols: 6
   timeout: 180
 case_studies/etfs/10_dl_tsmixer:
   # Converted onto the research boundary alongside 09_dl_lstm, so the same three names are gone:
@@ -1697,7 +1727,7 @@ case_studies/etfs/11a_pca:
     POPULATION_NAME: etfs-pca-preview
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 5
+      max_symbols: 6
   timeout: 300
 case_studies/etfs/11b_ipca:
   # max_symbols must match 04_model_based_features for the same reason as 11a,
@@ -1722,7 +1752,7 @@ case_studies/etfs/11b_ipca:
     POPULATION_NAME: etfs-ipca-preview
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 5
+      max_symbols: 6
       n_factors: 1
   # Budget raised from 300 on a CI measurement, not on another notebook's number.
   # Slowest of 5 green `cs-etfs` runs of .github/workflows/test.yml sampled 2026-09-04:
@@ -1759,7 +1789,7 @@ case_studies/etfs/11c_conditional_autoencoder:
     LABELS: ['fwd_ret_21d']
     POPULATION_NAME: etfs-cae-preview
     PREVIEW_REDUCTIONS:
-      max_symbols: 5
+      max_symbols: 6
   timeout: 900
 case_studies/etfs/11d_stochastic_discount_factor:
   # Still skipped, but not for the reason it used to claim. The old skip_reason said
@@ -1782,7 +1812,7 @@ case_studies/etfs/11e_supervised_autoencoder:
     LABELS: ['fwd_ret_21d']
     POPULATION_NAME: etfs-sae-preview
     PREVIEW_REDUCTIONS:
-      max_symbols: 5
+      max_symbols: 6
   timeout: 900
 case_studies/etfs/12_causal_dml:
   parameters:
@@ -2025,6 +2055,22 @@ case_studies/fx_pairs/19_strategy_analysis:
   skip_reason: "Reads back the holdout lineage 17 and 18 produce; with those skipped there is
     nothing for it to resolve."
   timeout: 300
+# max_symbols stays 5 here. The arithmetic asks for 10 - top_k_grid [5, 10, 20] and
+# long-short, so the smallest declared concentration needs 2 x 5 = 10 disjoint names - and the
+# raw fixture could supply it: `data/equities/market/nasdaq100/minute_bars` carries 12 symbols,
+# all with quotes. What binds is one step further in. The model stages fit from the fold
+# artifacts, and `intermediates/nasdaq100_microstructure/folds/*/fold_*_meta.parquet` carries
+# 5 symbols on ml4t/third-edition-test-data 63a9e4e, measured 2026-09-07. `max_symbols` at a
+# model stage selects from the fold universe and cannot widen past it, so a cap of 10 over
+# 5-symbol folds still registers 5-symbol predictions - which is what CI measured on
+# 34157373964, where every stage ran and 14_backtest still refused at a ranked cross-section
+# of 5. Raising 01-05 without the folds also re-creates the ml4t/agent-workspace#988
+# divergence the 04 entry below warns about: features over 10 names, folds over 5.
+#
+# etfs and cme_futures are raised in this same file because their seeded folds are already
+# wide - 55-56 and 30 - so a model-stage cap selects from them. nasdaq and
+# crypto_perps_funding are the two whose folds were generated at 5, and both need the fixture
+# regenerated rather than an override (ml4t/agent-workspace#1077).
 case_studies/nasdaq100_microstructure/01_feasibility_analysis:
   parameters:
     MAX_SYMBOLS: 5
