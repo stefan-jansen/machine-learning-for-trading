@@ -300,9 +300,34 @@ WRITE_KW = dict(
 )
 
 
+def _geometry(folds: tuple[int, ...] = (0, 1)) -> list[dict]:
+    """The declaration a fold-scoped write must carry (ml4t/agent-workspace#994).
+
+    The frame states which fold ids exist and never states what bounded them, so
+    `write_model_based` refuses a fold-scoped artifact that does not declare its geometry.
+    The boundaries here are arbitrary and ordered; nothing in these tests reads them.
+    """
+    return [
+        {
+            "fold": fold,
+            "train_start": datetime(2020, 1, 1).isoformat(),
+            "train_end": (datetime(2020, 1, 1) + timedelta(days=fold)).isoformat(),
+            "val_start": (datetime(2020, 1, 2) + timedelta(days=fold)).isoformat(),
+            "val_end": (datetime(2020, 1, 6) + timedelta(days=fold)).isoformat(),
+        }
+        for fold in folds
+    ]
+
+
 def test_write_model_based_writes_the_artifact_and_its_sidecar(tmp_path: Path) -> None:
     out = tmp_path / "model_based.parquet"
-    record = write_model_based(_emit_frame(), out, expected_folds=[0, 1], **WRITE_KW)
+    record = write_model_based(
+        _emit_frame(),
+        out,
+        expected_folds=[0, 1],
+        metadata={"fold_geometry": _geometry()},
+        **WRITE_KW,
+    )
     assert out.exists()
     assert record["n_rows"] == 36
     assert pl.read_parquet(out).height == 36
@@ -315,7 +340,9 @@ def test_write_model_based_records_where_each_feature_starts(tmp_path: Path) -> 
         .otherwise(pl.col("garch_sigma"))
         .alias("garch_sigma")
     )
-    record = write_model_based(frame, tmp_path / "m.parquet", **WRITE_KW)
+    record = write_model_based(
+        frame, tmp_path / "m.parquet", metadata={"fold_geometry": _geometry()}, **WRITE_KW
+    )
     geometry = {(g["fold"], g["feature"]): g for g in record["fold_feature_geometry"]}
     # The warm-up is visible in the sidecar rather than only in the values, which is the
     # whole point: the defect it stands for left no trace anywhere before this.
@@ -333,7 +360,12 @@ def test_write_model_based_rejects_a_duplicated_row_within_a_fold(tmp_path: Path
 
 def test_write_model_based_allows_the_same_key_in_two_folds(tmp_path: Path) -> None:
     # The identity is key + fold, not key: every fold re-emits the same panel rows.
-    record = write_model_based(_emit_frame(folds=(0, 1, 2)), tmp_path / "m.parquet", **WRITE_KW)
+    record = write_model_based(
+        _emit_frame(folds=(0, 1, 2)),
+        tmp_path / "m.parquet",
+        metadata={"fold_geometry": _geometry((0, 1, 2))},
+        **WRITE_KW,
+    )
     assert record["n_rows"] == 54
 
 

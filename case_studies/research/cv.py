@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
@@ -51,6 +52,7 @@ def require_fold_scoped_temporal_holdout_coverage(
     temporal_by_fold: Any,
     *,
     source_timeline: Any,
+    declared_folds: Sequence[dict[str, Any]],
     date_col: str = "timestamp",
     fold_col: str = "fold",
 ) -> None:
@@ -69,6 +71,22 @@ def require_fold_scoped_temporal_holdout_coverage(
     rows spanning the dates it will train and evaluate on. This checks exactly that, against the
     fold the derived holdout CV names, and it is strictly the stronger check where both apply:
     a fold with matching boundaries but missing rows passes compatibility and fails here.
+
+    ``declared_folds`` is the artifact's own ``temporal_artifact_splits``. It is required
+    rather than optional so a new caller has to decide rather than silently lose the check.
+    Where it declares a fold with the requested id - which a producer that appends its holdout
+    rows *and* declares their geometry gives it (ml4t/agent-workspace#994) - the declared
+    ``train_end`` must fall before the requested fold's evaluation window opens, or the
+    feature estimator saw the sessions the holdout is scored on. Where it does not, coverage
+    is all that can be asked and the boundary rests on the producer's own assertion, which is
+    inside the sha256 the artifact is pinned by.
+
+    One difference that reads as a leak and is not: the model's training window ends a label
+    buffer earlier than the feature estimator's, because the buffer pulls the label cutoff
+    back. Features on the model's training rows therefore embed sessions after its label
+    cutoff and before the holdout opens - fresher than the labels beside them, and drawn
+    entirely from outside the evaluated window, so they cannot move the holdout number. The
+    check below is against the *evaluation* window for exactly that reason.
     """
     import polars as pl
 
@@ -95,6 +113,21 @@ def require_fold_scoped_temporal_holdout_coverage(
 
     train_start, train_end = boundary("train_start"), boundary("train_end")
     val_start, val_end = boundary("val_start"), boundary("val_end")
+
+    declared = next((fold for fold in declared_folds if int(fold["fold"]) == fold_id), None)
+    if declared is not None:
+        raw_train_end = declared["train_end"]
+        if isinstance(raw_train_end, str):
+            raw_train_end = datetime.fromisoformat(raw_train_end)
+        declared_train_end = pl.Series([raw_train_end]).cast(dtype, strict=False).item()
+        if declared_train_end >= val_start:
+            raise ValueError(
+                f"fold-scoped temporal artifact declares fold {fold_id} fitted through "
+                f"{declared_train_end}, which reaches the holdout evaluation window opening "
+                f"{val_start}: the feature estimator saw the sessions this holdout is "
+                "scored on"
+            )
+
     if not dates.is_between(train_start, train_end, closed="both").any():
         raise ValueError("fold-scoped temporal holdout has no requested training rows")
     if isinstance(source_timeline, pl.Series):
