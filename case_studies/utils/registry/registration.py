@@ -272,14 +272,19 @@ def declare_artifact_supersession(
 def _resolved_prediction_label(
     case_study: str, training_hash: str, label: str | None, case_dir: Path
 ) -> str | None:
-    """The label a prediction set was produced under: the caller's, else its parent run's.
+    """The label a prediction set was produced under: its parent run's, checked against the caller's.
 
     `training_runs.label` is authoritative and always present, so a caller that does not pass
     one is not an error - it is the common case, and every family reaches this through
-    `publish_predictions`, whose `label` is optional.
+    `publish_predictions`, whose `label` is optional. No family runner passes one.
+
+    A caller that passes a label the parent run disagrees with is refused rather than
+    believed. Letting the argument win would stamp the artifact with a label its own
+    training run was not fitted under, and the coverage guard reading that column would
+    then accept the wrong declaration and refuse the right one - which is the mistake this
+    column exists to catch, made one layer up.
     """
-    if label:
-        return label
+    registered = None
     try:
         db = _open_registry(case_dir)
         try:
@@ -289,8 +294,64 @@ def _resolved_prediction_label(
         finally:
             db.close()
     except sqlite3.Error:
+        registered = None
+    else:
+        registered = row[0] if row and row[0] else None
+    if label and registered and label != registered:
+        raise ValueError(
+            f"predictions of training run {training_hash} are being published as {label!r}, "
+            f"but that run is registered against label {registered!r} in {case_study}. One of "
+            f"the two is wrong, and stamping the artifact with either would record a "
+            f"declaration the other contradicts."
+        )
+    return label or registered
+
+
+def _prediction_frame_label(predictions) -> str | None:
+    """The single label *predictions* states, or ``None`` where it states none."""
+    from case_studies.utils.artifact_digest import PREDICTION_LABEL_COLUMN
+
+    if predictions is None or PREDICTION_LABEL_COLUMN not in getattr(predictions, "columns", ()):
         return None
-    return row[0] if row and row[0] else None
+    import polars as pl
+
+    frame = predictions if isinstance(predictions, pl.DataFrame) else pl.from_pandas(predictions)
+    present = sorted(
+        str(value) for value in frame.get_column(PREDICTION_LABEL_COLUMN).unique().drop_nulls()
+    )
+    if len(present) > 1:
+        raise ValueError(f"prediction frame carries labels {present}, which is more than one")
+    return present[0] if present else None
+
+
+def _without_prediction_label(predictions, label: str | None):
+    """*predictions* as its content is measured: without the label it was produced under.
+
+    The label is a constant the registry already holds on the parent training run, so it is
+    data about the frame rather than part of it - which is why `artifact_digest` excludes it
+    and why every digest recorded before the column existed stays valid. `schema_json` has
+    to agree: recording a schema without the column while writing a parquet that has it
+    makes the published artifact fail its own immutability check when it is read back and
+    re-registered, which is what a resumed or replayed registration does.
+
+    A frame that states a label the publication contradicts is refused here rather than
+    silently stripped, because the two are then telling different stories about what was
+    fitted.
+    """
+    from case_studies.utils.artifact_digest import PREDICTION_LABEL_COLUMN
+
+    stated = _prediction_frame_label(predictions)
+    if stated is None:
+        return predictions
+    if label and stated != label:
+        raise ValueError(
+            f"prediction frame carries label(s) ['{stated}'] and is being published as {label!r}"
+        )
+    import polars as pl
+
+    if isinstance(predictions, pl.DataFrame):
+        return predictions.drop(PREDICTION_LABEL_COLUMN)
+    return predictions.drop(columns=[PREDICTION_LABEL_COLUMN])
 
 
 def _with_prediction_label(predictions, label: str | None):
@@ -304,11 +365,11 @@ def _with_prediction_label(predictions, label: str | None):
     frame whose own `label` disagrees since that was found; the column it reads was never
     written.
 
-    Written here because this is the one path every family publishes through. A frame that
-    already carries the column keeps it, and a disagreement is refused rather than
-    overwritten: the caller and the parent training run are then telling two different
-    stories about what was fitted, and quietly picking one is how the mistake this closes
-    got made in the first place.
+    Written here because this is the one path every family publishes through, and last,
+    because everything that measures the frame - coverage, `schema_json`, the artifact
+    digest - measures it without this column. :func:`_without_prediction_label` has already
+    taken any column the caller supplied off, and refused it if it disagreed with the label
+    being published under.
     """
     import polars as pl
 
@@ -1120,6 +1181,13 @@ def register_prediction_set(
     # normalizing later would store a naive schema beside a UTC-aware parquet and make two
     # equivalent checkpoints disagree on nothing but the zone.
     predictions = _timestamps_as_utc(predictions)
+    # Resolved and removed before anything measures the frame, so coverage, `schema_json`
+    # and the artifact digest all describe the same thing: the predictions, without the
+    # label they were produced under. The column goes back on at the write below.
+    resolved_label = _resolved_prediction_label(
+        case_study, training_hash, label, case_dir
+    ) or _prediction_frame_label(predictions)
+    predictions = _without_prediction_label(predictions, resolved_label)
     coverage = None
     if identity_version in SUPPORTED_IDENTITY_VERSIONS:
         if predictions is None or expected_keys is None:
@@ -1187,11 +1255,9 @@ def register_prediction_set(
         # is data about the frame rather than part of its content identity - and excluding
         # it is what keeps every `artifact_digest` already recorded in the fleet valid
         # (ml4t/agent-workspace#887). Coverage and `schema_json` above are computed on the
-        # frame as handed in, so neither moves either.
-        published_predictions = _with_prediction_label(
-            normalized_predictions,
-            _resolved_prediction_label(case_study, training_hash, label, case_dir),
-        )
+        # frame with the column removed, for the same reason and so that the artifact
+        # written here passes its own immutability check when it is read back.
+        published_predictions = _with_prediction_label(normalized_predictions, resolved_label)
         prediction_artifact_digest = published_prediction_digest(normalized_predictions)
         pred_dir = _prediction_dir(case_dir, p_hash)
         pred_path = pred_dir / "predictions.parquet"

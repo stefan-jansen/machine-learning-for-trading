@@ -191,3 +191,49 @@ def test_the_coverage_guard_now_has_evidence_to_refuse_on(tmp_path: Path) -> Non
         split="validation",
         source="predictions",
     )
+
+
+def test_a_caller_label_the_training_run_contradicts_is_refused(tmp_path: Path) -> None:
+    """The parent run is authoritative, so an argument disagreeing with it is a mistake.
+
+    Believing the argument would stamp the artifact with a label its own training run was
+    not fitted under, and `_reject_label_mismatch` would then accept the wrong declaration
+    and refuse the right one - the mistake the column exists to catch, made one layer up.
+    No family runner passes `label` at all; every one of them reaches this through
+    `publish_predictions`, which leaves it None.
+    """
+    with pytest.raises(ValueError, match="is registered against label 'fwd_ret_21d'"):
+        _publish(tmp_path, _training(tmp_path), label=OTHER_LABEL)
+
+
+def test_a_caller_label_agreeing_with_the_training_run_is_fine(tmp_path: Path) -> None:
+    """The control: passing the right label is not an error, it is redundant."""
+    p_hash = _publish(tmp_path, _training(tmp_path, label=OTHER_LABEL), label=OTHER_LABEL)
+    assert _frame(tmp_path, p_hash).get_column("label").unique().to_list() == [OTHER_LABEL]
+
+
+def test_the_published_artifact_re_registers_as_it_was_read(tmp_path: Path) -> None:
+    """A replayed registration hands back the frame it wrote, label column and all.
+
+    `schema_json` is recorded from the frame handed in and compared against the next
+    checkpoint's, so recording a schema without the label while writing a parquet that has
+    it made the published artifact fail against itself: reading it back and registering it
+    again raised "prediction schema differs from an existing checkpoint" on identical
+    content. Both are now taken without the column, the same way its digest is.
+    """
+    training_hash = _training(tmp_path)
+    first = _publish(tmp_path, training_hash, label=LABEL)
+    published = _frame(tmp_path, first)
+    assert "label" in published.columns
+    assert _publish(tmp_path, training_hash, predictions=published) == first
+    assert _recorded_digest(tmp_path, first) == value_digest(_predictions())
+
+
+def test_a_read_back_artifact_published_under_another_run_is_still_refused(
+    tmp_path: Path,
+) -> None:
+    """The control: the label travels with the frame and still has to agree."""
+    published = _frame(tmp_path, _publish(tmp_path, _training(tmp_path), label=LABEL))
+    other = _training(tmp_path, label=OTHER_LABEL, config="ridge_other")
+    with pytest.raises(ValueError, match="is being published as"):
+        _publish(tmp_path, other, predictions=published)
