@@ -1278,14 +1278,21 @@ def warn_if_the_panel_does_not_bound_the_universe(
 
     Said twice, on purpose. 22 of the 35 notebooks that call ``run_backtest`` or
     ``run_plumbing_test`` install a blanket ``warnings.filterwarnings("ignore")``
-    at import, measured 2026-09-07 - every backtest, portfolio, risk and cost
-    stage in ``etfs``, ``nasdaq100_microstructure``,
-    ``sp500_equity_option_analytics`` and ``us_firm_characteristics``, plus four
-    holdout backtests. The 13 that do not are ``crypto_perps_funding``,
-    ``fx_pairs`` and ``us_equities_panel``. Corpus-wide 77 case-study notebooks
-    install it. So a diagnostic that only warns is one that four of the seven case
-    studies' readers never see, and which of the seven is not something this
-    function can know.
+    at import, measured 2026-09-07 over ``case_studies/*/[0-9]*.py``::
+
+        cme_futures                    1 of 1    fx_pairs                0 of 5
+        etfs                           5 of 5    us_equities_panel       0 of 4
+        nasdaq100_microstructure       5 of 5    crypto_perps_funding    1 of 5
+        sp500_equity_option_analytics  5 of 5
+        us_firm_characteristics        5 of 5
+
+    Five case studies filter every backtest-calling notebook they have, two filter
+    none, and ``crypto_perps_funding`` filters only ``18_holdout_backtest.py``. So
+    a diagnostic that only warns is silent for the readers of five of the seven,
+    and which of the seven this is being read in is not something this function
+    can know. (76 of the 195 numbered case-study notebooks install it in total; a
+    recursive grep also finds an archived notebook and the line you are reading,
+    which is why that count comes back as 78 - ml4t/agent-workspace#1078.)
     The ``warnings`` call is what a library caller and the tests read; the print is
     what survives the filter and lands in the rendered cell. It is emitted once per
     (case study, label, panel width, prediction width) because a sweep calls
