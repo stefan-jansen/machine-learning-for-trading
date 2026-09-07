@@ -257,6 +257,13 @@ GBM_RUNNER_VERSION = 1
 # fabricate observations. Bump when that casting changes.
 GBM_PREPROCESSING_ID = "lightgbm-native-float32/v1"
 
+# The object a registered GBM run fits, recorded as `computation.model.class` and declared by
+# every `config/lgb/*.yaml` preset so the configuration catalog a notebook prints names the same
+# thing the registry does. It is the native Booster, not the `LGBMRegressor` that `create_model`
+# builds for callers outside the registered path - a distinction the catalog's blank `model_class`
+# column used to hide from the reader.
+GBM_MODEL_CLASS = "lightgbm.Booster"
+
 
 def _best_gpu_device(library: str) -> str | None:
     """Return "cuda" if library supports CUDA on this system, else None.
@@ -1788,7 +1795,7 @@ def _build_gbm_resolved_request(
         },
         "cv": base["cv_record"],
         "model": {
-            "class": "lightgbm.Booster",
+            "class": GBM_MODEL_CLASS,
             "implementation": "lightgbm",
             "effective_params_by_fold": effective,
             "huber_alpha_scale": config.get("huber_alpha_scale"),

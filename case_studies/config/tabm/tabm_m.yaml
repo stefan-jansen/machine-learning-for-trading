@@ -1,5 +1,6 @@
 batch_size: 4096
 checkpoint_interval: 25
+model_class: TabMModel
 n_epochs: 200
 params:
   dropout: 0.1
