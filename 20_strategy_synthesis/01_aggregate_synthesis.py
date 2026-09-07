@@ -49,6 +49,7 @@ warnings.filterwarnings("ignore")
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_returns
 from case_studies.utils.strategy_analysis import (
+    allocation_method_of,
     compute_cost_bps,
     training_run_fitted_for_the_holdout,
 )
@@ -656,18 +657,12 @@ def build_backtest_rows():
             alloc_candidates = _apply_rung_restriction(alloc_candidates, cs)
             best_alloc = alloc_candidates.head(1)
             alloc_sharpe = best_alloc["sharpe"][0] if not best_alloc.is_empty() else None
-            # `compare_allocators` pools across every prediction, so the allocator NAME it
-            # returns can be one that was never run on the row `alloc_sharpe` came from - an
-            # experimental conformal run on a non-carrier model, say. Scoping it to the
-            # leading allocation row's own prediction is what keeps the printed name and the
-            # printed Sharpe describing one configuration. This used to be conditional on a
-            # carrier pin being configured, which made the two agree only for the one case
-            # study that had one.
-            alloc_comp_pred = (
-                best_alloc["prediction_hash"][0] if not best_alloc.is_empty() else None
+            # The allocator that produced `alloc_sharpe`, read from that row's own spec, so
+            # the name and the number describe one configuration. See
+            # `strategy_analysis.allocation_method_of`.
+            best_allocator = allocation_method_of(
+                cs, best_alloc["backtest_hash"][0] if not best_alloc.is_empty() else None
             )
-            alloc_comp = explorer.compare_allocators(prediction_hash=alloc_comp_pred)
-            best_allocator = alloc_comp["allocator"][0] if not alloc_comp.is_empty() else ""
         else:
             alloc_sharpe = None
             best_allocator = ""

@@ -1153,6 +1153,51 @@ def resolve_canonical_rank1_lineage(
     }
 
 
+def allocation_method_of(case_study: str, backtest_hash: str | None) -> str:
+    """The allocation method one backtest declares, read from its own specification.
+
+    A page that prints an allocator's name beside a Sharpe has to take both from one row.
+    `BacktestExplorer.compare_allocators` cannot supply the pair: it ranks allocators by
+    their MEAN Sharpe across the configurations each was run on, so the allocator it puts
+    first is routinely not the one on the single highest-Sharpe row - the sweeps vary
+    concentration per prediction and per allocator, and mean and maximum then disagree.
+    Measured on the production registries 2026-09-07, on each case study's leading
+    allocation-stage row: `etfs` printed `risk_parity` beside a Sharpe of 0.8769 that `hrp`
+    produced, and `sp500_equity_option_analytics` printed `mvo_ledoit_wolf` beside 2.0408,
+    also `hrp`. The other four agreed.
+
+    Scoping the comparison to that row's own prediction narrows the disagreement and does
+    not close it, because mean and maximum still differ within one prediction. Reading the
+    specification closes it: there is exactly one allocator on the row.
+
+    Ask this of an allocation-stage row. A row there with no allocation block is the
+    equal-weight baseline re-run, and equal weight is an allocation decision
+    (``reference/CASE_STUDY_PIPELINE.md`` section 12), so it is named rather than left
+    blank. A risk-overlay row can also carry no allocation block, meaning something else
+    entirely, and this would misname it.
+
+    The strategy block is read through ``strategy_view`` rather than by indexing
+    ``spec["strategy"]``, so this and ``compare_allocators`` cannot come to disagree about
+    which specification shapes carry one.
+    """
+    import sqlite3
+
+    from case_studies.utils.backtest_presets import strategy_view
+    from utils.paths import get_case_study_dir
+
+    if not backtest_hash:
+        return ""
+    db_path = get_case_study_dir(case_study) / "run_log" / "registry.db"
+    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as db:
+        row = db.execute(
+            "SELECT spec_json FROM backtest_runs WHERE backtest_hash = ?", (backtest_hash,)
+        ).fetchone()
+    if row is None or not row[0]:
+        return ""
+    allocation = strategy_view(json.loads(row[0])).get("allocation") or {}
+    return allocation.get("method") or "equal_weight"
+
+
 INSOLVENT_MAX_DRAWDOWN = -1.0
 """Drawdown at or past which a run's equity reached zero.
 
