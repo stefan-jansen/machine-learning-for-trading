@@ -184,3 +184,69 @@ def test_a_run_pinning_no_artifacts_is_not_blocked(tmp_path: Path) -> None:
     }
     register_training_run("etfs", latent, case_dir=tmp_path)
     assert _registered(tmp_path) == 2
+
+
+def test_recording_a_supersession_declares_it_in_the_registry(tmp_path: Path) -> None:
+    """One author action leaves both records, so the refusal names a command that finishes.
+
+    `scripts/record_artifact_supersession.py` establishes that a new artifact extended the
+    old one rather than replacing it, fold by fold, while both files are still on disk. That
+    is exactly the case where a new training run should be allowed to join the population
+    fitted on the old vintage, so the script now declares it here too.
+    """
+    import hashlib
+    import subprocess
+    import sys
+
+    import polars as pl
+
+    from case_studies.utils.artifact_digest import write_artifact
+
+    def _sha(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def _frame(folds: range) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "fold": [f for f in folds for _ in range(2)],
+                "symbol": [s for _ in folds for s in ("AAA", "BBB")],
+                "feature": [float(f * 10 + i) for f in folds for i in range(2)],
+            }
+        )
+
+    features = tmp_path / "features"
+    features.mkdir()
+    old = features / "superseded.parquet"
+    write_artifact(
+        _frame(range(3)), old, keys=["fold", "symbol"], written_by="t", fold_column="fold"
+    )
+    new = features / "model_based.parquet"
+    write_artifact(
+        _frame(range(4)), new, keys=["fold", "symbol"], written_by="t", fold_column="fold"
+    )
+
+    register_training_run("etfs", _spec(model_based=_sha(old)), case_dir=tmp_path)
+
+    repo_root = Path(__file__).resolve().parent.parent
+    done = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "record_artifact_supersession.py"),
+            "--superseded",
+            str(old),
+            "--current",
+            str(new),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=repo_root,
+    )
+    assert done.returncode == 0, done.stderr
+    assert "supersedes" in done.stdout, done.stdout
+
+    # The point of the wiring: no second command between the recorder and a run that fits
+    # on the file it just established as an extension.
+    register_training_run(
+        "etfs", _spec(model_based=_sha(new), config_name="ridge_wide"), case_dir=tmp_path
+    )
+    assert _registered(tmp_path) == 2

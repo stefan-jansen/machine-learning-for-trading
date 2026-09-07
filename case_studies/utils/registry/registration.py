@@ -215,6 +215,16 @@ def declare_artifact_supersession(
     mistyped predecessor must be refused rather than recorded. A declaration naming a sha no
     registered run was fitted on cannot unblock anything and would sit in the registry
     reading as though it had.
+
+    ``scripts/record_artifact_supersession.py`` records the neighbouring fact in the new
+    artifact's *sidecar* - which folds came through the replacement unchanged - and calls
+    this function when it succeeds, so one author action leaves both records. The two are
+    not interchangeable: the sidecar answers whether a lock fitted on the old file can be
+    reconstructed against the new one, and refuses a replacement that is not a fold-wise
+    extension; this answers whether a new training run may join a population fitted on the
+    old vintage, which is a live question exactly when the sidecar route refuses. The
+    registry is where this one belongs because the guard that reads it runs at registration
+    time, where a spec carries shas and no artifact paths.
     """
     if sha256 == supersedes_sha256:
         raise ValueError(f"artifact {artifact_name!r} cannot supersede itself ({sha256})")
