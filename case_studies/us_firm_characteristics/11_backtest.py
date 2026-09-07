@@ -163,6 +163,7 @@ strategy_spec = build_backtest_spec(
     prediction_hash="plumbing_test",
     initial_cash=bt_config.initial_cash,
     chapter="ch16",
+    label=LABEL,
     signal={
         "method": "score_weighted_top_k",
         "top_k": TOP_K,
@@ -268,6 +269,11 @@ for pred_row in pred_index.iter_rows(named=True):
             prediction_hash=pred_hash,
             initial_cash=bt_config.initial_cash,
             chapter="ch16",
+            # The step this label declares is part of the backtest identity, and it reaches
+            # the spec only through `label=`. Without it the hash below is one no run
+            # registers, so every one of the registry's baseline rows reads as missing and
+            # the sweep recomputes all of them (ml4t/agent-workspace#1028).
+            label=LABEL,
             signal=signal,
         )
         backtest_hash = backtest_hash_from_parts(pred_hash, serializable_backtest_spec(spec))

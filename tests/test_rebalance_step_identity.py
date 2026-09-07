@@ -11,6 +11,7 @@ ml4t/agent-workspace#1005.
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime
 
 import polars as pl
@@ -175,4 +176,104 @@ class TestAUnitStepIsNotNormalizedAway:
         )
         assert backtest_hash_from_parts("pred123", _spec(3)) != backtest_hash_from_parts(
             "pred123", _spec(1)
+        )
+
+
+# ---------------------------------------------------------------------------
+# The step reaches the identity only through `label=` (ml4t/agent-workspace#1028)
+# ---------------------------------------------------------------------------
+
+
+class TestAnUnlabelledSpecCannotBeBuiltWhereAStepIsDeclared:
+    """A spec a caller can build must hash to the identity the run registers.
+
+    `build_backtest_spec` emits `strategy.rebalance.step` only when a label resolves one,
+    while `run_backtest` stamps the declared step onto whatever spec it is handed. So the
+    same backtest has two identities - one for a caller that named its label and one for a
+    caller that did not - and only the first is ever registered.
+
+    That is not theoretical. `us_firm_characteristics/11_backtest` built its sweep specs
+    without a label, pre-hashed them to decide what to skip, and then handed each one to
+    `run_backtest`, which stamped the step before registering. Measured against that case
+    study's registry on 2026-09-07: **2,276 of 2,276 registered baseline rows** hash to
+    something the notebook's own skip check never computes, so a re-run recomputes every one
+    of them.
+
+    The fleet's 21,117 pre-key rows that #1028 was filed on are gone - every registry was
+    re-swept 2026-09-06/07 and all 15,152 rows now carry the key - so the step stays in the
+    identity exactly as `83141459` put it. What is fixed here is the half that survives the
+    re-sweep: the key is emitted conditionally, and the condition is an argument.
+    """
+
+    def _prices(self):
+        return pl.DataFrame(
+            {
+                "timestamp": [datetime(2024, 1, d) for d in range(2, 12) for _ in range(2)],
+                "symbol": ["AAA", "BBB"] * 10,
+                "open": [100.0, 50.0] * 10,
+                "high": [101.0, 51.0] * 10,
+                "low": [99.0, 49.0] * 10,
+                "close": [100.5, 50.5] * 10,
+                "volume": [1000.0, 900.0] * 10,
+            }
+        )
+
+    def test_a_case_study_declaring_a_step_refuses_an_unlabelled_call(self) -> None:
+        """The refusal is the fix: the divergent spec can no longer be built."""
+        from case_studies.utils.backtest_loaders import get_backtest_config
+        from case_studies.utils.backtest_presets import build_backtest_spec
+
+        with pytest.raises(ValueError, match="labels.rebalance_step"):
+            build_backtest_spec(
+                "us_firm_characteristics",
+                get_backtest_config("us_firm_characteristics"),
+                signal={"method": "equal_weight_top_k", "top_k": 2, "long_short": False},
+                prices=self._prices(),
+                prediction_hash="pred123",
+                initial_cash=1_000_000.0,
+            )
+
+    def test_the_stamping_run_backtest_applies_does_not_move_a_labelled_specs_hash(self) -> None:
+        """The contract behind the refusal, stated as the identity it protects.
+
+        `run_backtest` setdefaults the declared step onto the spec before it hashes and
+        registers. On a spec built with a label that is a no-op; on one built without a
+        label it moves the hash, which is how a pre-hashing caller ends up planning an
+        identity nothing registers.
+        """
+        from case_studies.utils.backtest_loaders import (
+            declared_rebalance_step,
+            get_backtest_config,
+        )
+        from case_studies.utils.backtest_presets import (
+            build_backtest_spec,
+            serializable_backtest_spec,
+        )
+        from case_studies.utils.registry.specs import backtest_hash_from_parts
+
+        case_study, label = "us_firm_characteristics", "fwd_ret_1m"
+        declared = declared_rebalance_step(case_study, label)
+        assert declared is not None, f"{case_study}/{label} declares no step; pick one that does"
+
+        spec = build_backtest_spec(
+            case_study,
+            get_backtest_config(case_study),
+            signal={"method": "equal_weight_top_k", "top_k": 2, "long_short": False},
+            prices=self._prices(),
+            prediction_hash="pred123",
+            initial_cash=1_000_000.0,
+            label=label,
+        )
+        planned = backtest_hash_from_parts("pred123", serializable_backtest_spec(spec))
+
+        # Exactly what `run_backtest` does to the spec before it registers.
+        spec["strategy"]["rebalance"].setdefault("step", declared)
+        assert backtest_hash_from_parts("pred123", serializable_backtest_spec(spec)) == planned
+
+        # The control: without the step the same stamping moves the identity, which is the
+        # divergence the refusal above makes unreachable.
+        unlabelled = copy.deepcopy(spec)
+        unlabelled["strategy"]["rebalance"].pop("step")
+        assert (
+            backtest_hash_from_parts("pred123", serializable_backtest_spec(unlabelled)) != planned
         )
