@@ -24,7 +24,11 @@ Six pair types are produced per case study:
 
 All pairs use the paired stationary block bootstrap
 (``compute_paired_uncertainty``); pair #3 uses independent per-window draws
-(``compute_independent_diff_uncertainty``) since the windows are disjoint.
+(``compute_independent_diff_uncertainty``) because its two windows share no
+observations, so there is no difference series to pair on. Disjointness removes the
+pairing; it does not make the two Sharpes independent, and the interval that comes
+back is calibrated for the gap between those two windows rather than for the
+strategy having one edge across both. See that function for the measurement.
 """
 
 from __future__ import annotations
@@ -802,11 +806,14 @@ def _populate_pair(
 ):
     """Compute and register one paired-metric row. Idempotent UPSERT.
 
-    With ``disjoint_windows=True`` (val→holdout decay), each side is
-    bootstrapped independently over its full window and the difference
-    distribution is built from independent draws. Otherwise, the streams are
-    inner-joined on timestamp and a paired stationary bootstrap runs on the
-    aligned diff series.
+    With ``disjoint_windows=True`` (val→holdout decay), each side is bootstrapped
+    over its full window and the difference distribution is built from those draws,
+    because two windows that share no timestamps leave no difference series to
+    resample. That is the absence of a pairing, not independence: see
+    :func:`case_studies.utils.uncertainty.compute_independent_diff_uncertainty` for
+    what the resulting interval does and does not cover. Otherwise, the streams are
+    inner-joined on timestamp and a paired stationary bootstrap runs on the aligned
+    diff series.
 
     ``challenger_overlays_baseline`` says what a leading flat run on the challenger
     means, and the two pair shapes here answer differently. Against the equal-weight
