@@ -59,6 +59,7 @@ from case_studies.research import (
     open_sweep_attempt,
     population_supersedes,
     predictions_identity,
+    published_population_names_at,
     sweep_plan_name,
 )
 from case_studies.utils.backtest_explorer import BacktestExplorer
@@ -245,6 +246,10 @@ _members, _population_notes = prediction_members_in_force(_study)
 for _note in _population_notes:
     print(_note)
 CURRENT_MEMBERS = _members
+# Kept for the refusal below, which has to name what scoped the read. `_population_notes`
+# reports gaps in coverage, not which populations are in force, and by the time the
+# baseline read comes back empty the only thing that explains it is the names.
+CURRENT_POPULATIONS = sorted(published_population_names_at(_study.root))
 if CURRENT_MEMBERS is not None:
     print(f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force")
 
@@ -531,6 +536,26 @@ all_baselines = explorer.best(
     top_n=9999,
     prediction_hashes=sorted(CURRENT_MEMBERS) if CURRENT_MEMBERS is not None else None,
 )
+
+# An empty read here is a statement about the registry, not a result to summarise. The
+# division below is the first thing to touch it, so without this the failure arrives as
+# `ZeroDivisionError: division by zero` and reads like a defect in the analysis - which is
+# how ml4t/agent-workspace#1086 presented. The population is in force and its members are
+# registered; what none of them has is a backtest, and only the counts say so.
+if CURRENT_MEMBERS is not None and all_baselines.is_empty():
+    _signal_rows = explorer.specs("signal").height
+    raise RuntimeError(
+        f"The populations in force publish {len(CURRENT_MEMBERS):,} prediction sets and not "
+        f"one of them carries a signal backtest, so there is no baseline to rank. "
+        f"Populations: {', '.join(CURRENT_POPULATIONS) or '(none named)'}. "
+        f"The registry holds {_signal_rows:,} signal backtest(s), all against prediction "
+        f"sets outside the populations, so this is a population and a set of backtests "
+        f"describing different generations rather than an empty registry. A fixture "
+        f"generated through a stage earlier than the backtest stage produces exactly this: "
+        f"the model notebooks declare the population and nothing goes on to backtest its "
+        f"members (ml4t/agent-workspace#1086)."
+    )
+
 search_context = {
     "total": len(all_baselines),
     "median_sharpe": all_baselines["sharpe"].median(),
