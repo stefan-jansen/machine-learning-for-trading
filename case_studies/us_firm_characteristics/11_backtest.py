@@ -49,7 +49,6 @@
 # %%
 """Ch16 backtest and equal-weight baseline for US Firm Characteristics."""
 
-import sqlite3
 import time
 import warnings
 from collections import Counter
@@ -254,6 +253,22 @@ total_backtests = n_predictions * n_schemes
 print(
     f"\nTotal grid: {n_predictions} predictions x {n_schemes} schemes = {total_backtests} backtests"
 )
+
+# A grid with no schemes is a configuration error, not a result, and it is silent at the
+# point it happens: `get_entry_schemes_for` drops each declared k that the cross-section
+# cannot realize and returns the empty list, so the sweep below completes in zero seconds
+# reporting zero failures, and every section after it reads a registry this run never wrote
+# to. Refuse here, where the numbers that explain it are still in hand, rather than several
+# cells later on whatever the first empty read happens to raise
+# (ml4t/agent-workspace#1075).
+if n_schemes == 0:
+    raise RuntimeError(
+        f"No entry scheme in backtest.sweep.top_k_grid[{LABEL!r}] is feasible on "
+        f"{n_assets} assets. A scheme needs k < n_assets, because k == n_assets is the "
+        f"whole universe and that is the equal-weight benchmark rather than a "
+        f"prediction-based portfolio; long-short additionally needs 2k <= n_assets so the "
+        f"two legs stay disjoint. Widen the universe (MAX_SYMBOLS) or declare a smaller k."
+    )
 
 # %%
 results = []
@@ -476,22 +491,16 @@ top = (
 # this sweep, so on its own the table cannot tell a five-name portfolio from a fifty-
 # name one - the dimension the sweep exists to vary. The concentration is in the same
 # spec, one key across, and is joined back here.
-with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
-    concentration = (
-        pl.DataFrame(
-            conn.execute(
-                "SELECT backtest_hash, spec_json FROM backtest_runs WHERE stage = 'signal'"
-            ).fetchall(),
-            schema=["backtest_hash", "spec_json"],
-            orient="row",
-        )
-        .with_columns(
-            names_per_side=pl.col("spec_json")
-            .str.json_path_match("$.strategy.signal.top_k")
-            .cast(pl.Int64)
-        )
-        .drop("spec_json")
+concentration = (
+    explorer.specs("signal")
+    .drop("stage")
+    .with_columns(
+        names_per_side=pl.col("spec_json")
+        .str.json_path_match("$.strategy.signal.top_k")
+        .cast(pl.Int64)
     )
+    .drop("spec_json")
+)
 
 top = top.join(concentration, on="backtest_hash", how="left")
 print(top.select("source", "names_per_side", "sharpe", "cagr", "max_drawdown"))

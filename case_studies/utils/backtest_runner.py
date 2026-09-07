@@ -24,6 +24,7 @@ Usage::
 
 from __future__ import annotations
 
+import math
 import warnings
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -226,6 +227,152 @@ def calendar_periods_per_year(calendar: str) -> int:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Ruin: an account that loses its capital stops there
+# ---------------------------------------------------------------------------
+
+# What a bankrupt path reports, and why it reports that.
+#
+# A long-short book can lose more than it holds in a single period: the long leg
+# stops at -100%, but the short leg's loss is unbounded, and a squeeze on a
+# concentrated short costs more than the account holds. Compounding straight
+# through zero is not a larger version of that loss, it is a different quantity.
+# Once equity is negative, `(1 + r)` inverts the sign of every later period, so a
+# gain on the underlying reduces the balance and the series after that point is
+# not a return series. Measured on the `us_firm_characteristics` registry,
+# 2026-09-07: 46 registered runs hold a period return below -100%, and the worst
+# of them reports sharpe 1.547 and a positive cagr against a total return of
+# -202.3 (ml4t/agent-workspace#920).
+#
+# The engine models no creditor, so the largest loss it can express is the
+# capital: the period that would take equity through zero is truncated to
+# exactly -100%, and every later period is 0.0, because there is nothing left to
+# trade. That is the "floor equity at zero" option of the three the issue offers.
+# The other two need something the case studies do not declare - a margin rule
+# needs a maintenance requirement and a borrow rate, and halting the path without
+# flooring it leaves a shorter series that still compares against full-length
+# ones as though the difference were performance.
+#
+# Descriptive statistics of the stopped path are then true statements:
+# `total_return`, `max_drawdown` and `cagr` all read -1.0, and a mean drawdown
+# over a sweep is back inside [-1, 0] rather than the -8.15 a sweep of
+# twenty-four with five insolvent members reported. The risk-adjusted ratios are
+# not statements about the stopped path at all. A ratio of a mean to a dispersion
+# describes a process that continues; this one ended. So they are registered as
+# NULL - `BacktestExplorer.best()` already reads `sharpe IS NOT NULL` as "not
+# rankable", and SQL `AVG` and `ORDER BY ... DESC` both keep NULLs out of the way
+# on their own. Nothing downstream has to know about ruin to stop ranking it.
+#
+# `ruin` and `ruin_period` are registered as metrics, never as identity fields:
+# they say what happened in a run, not what was asked for.
+#
+# The unrankable value is NaN and not None, which is a decision about the readers
+# rather than about the metric. SQLite stores a NaN as NULL, so the registry and
+# every SQL reader see exactly the intended "no value" - `ORDER BY sharpe DESC`
+# puts it last, `AVG` skips it, and the fifteen `sharpe IS NOT NULL` filters drop
+# it. A None would reach the notebooks that format a metric as `f"{sharpe:.3f}"`
+# as a TypeError several frames from the cause; NaN formats as `nan`, which is
+# what those lines should print.
+#
+# The cost is that polars sorts a NaN *first* on a descending sort, so anything
+# ranking these dicts in memory before they reach SQLite has to say what it
+# wants. `rank_returns_on_common_support` is the one place that does, and it
+# converts to null and passes `nulls_last=True`.
+RUIN_UNRANKABLE_METRICS: tuple[str, ...] = (
+    "sharpe",
+    "sortino",
+    "calmar",
+    "omega",
+    "stability",
+    "tail_ratio",
+)
+
+
+def first_ruin_index(returns) -> int | None:
+    """Index of the first period whose loss takes cumulative equity to zero.
+
+    ``None`` when the path stays solvent. A period return below -100% is not by
+    itself ruin - prior gains can absorb it - so the test is on the equity curve
+    rather than on any single return.
+    """
+    arr = np.asarray(returns, dtype=float)
+    if arr.size == 0:
+        return None
+    equity = np.cumprod(1.0 + arr)
+    # Non-finite equity is a broken series rather than a bankrupt one, and
+    # silently reporting it as ruin would hide the breakage. It is excluded here
+    # and left to `_safe` downstream.
+    hit = np.flatnonzero(np.isfinite(equity) & (equity <= 0.0))
+    return int(hit[0]) if hit.size else None
+
+
+def apply_ruin_stop(returns) -> tuple[np.ndarray, int | None]:
+    """Stop a return series at the period that wipes the account out.
+
+    Returns ``(series, ruin_index)``. The ruin period is truncated to exactly
+    -1.0 and every later period is set to 0.0. A solvent series is returned
+    unchanged with ``None``. Idempotent: a stopped series reports the same index
+    and is not changed again, so a caller that applies this to both the return
+    frame and the array it computes metrics from cannot make the two disagree.
+    """
+    arr = np.asarray(returns, dtype=float)
+    index = first_ruin_index(arr)
+    if index is None:
+        return arr, None
+    stopped = arr.copy()
+    stopped[index] = -1.0
+    stopped[index + 1 :] = 0.0
+    return stopped, index
+
+
+def stop_returns_at_ruin(
+    daily_returns: pl.DataFrame, column: str = "daily_return"
+) -> tuple[pl.DataFrame, int | None]:
+    """`apply_ruin_stop` over a ``[timestamp, daily_return]`` frame.
+
+    The engine paths also emit an equity curve, a trade log and a fill log. Those
+    are the broker's raw record of what it did, including the trade that took the
+    account out, and they are deliberately left alone: the stop is a statement
+    about what the account had left to compound, not a claim that the fills did
+    not happen.
+    """
+    stopped, index = apply_ruin_stop(daily_returns[column].to_numpy())
+    if index is None:
+        return daily_returns, None
+    return daily_returns.with_columns(pl.Series(column, stopped)), index
+
+
+def _apply_ruin_semantics(
+    out: dict[str, float | None], ruin_period: int | None, *, uncertainty_columns: bool = True
+) -> dict[str, float | None]:
+    """Stamp `ruin`/`ruin_period` and, for a stopped path, what it actually reports.
+
+    The three descriptive metrics are stated here rather than read back from the
+    diagnostic library. A stopped path ends at exactly zero equity by
+    construction, so total return, CAGR and maximum drawdown are known to be
+    -1.0 - and the library does not always produce them. On a path that ruins in
+    its first period the drawdown series divides by a running maximum of zero and
+    comes back all-NaN, which `_safe` turns into 0.0; a single-period path takes
+    the short branch in the caller, where every value is 0.0. Both reported ruin
+    beside a drawdown of nothing.
+    """
+    out["ruin"] = 0.0 if ruin_period is None else 1.0
+    out["ruin_period"] = None if ruin_period is None else float(ruin_period)
+    if ruin_period is None:
+        return out
+    out["total_return"] = -1.0
+    out["max_drawdown"] = -1.0
+    out["cagr"] = -1.0
+    # Every ratio that ranks one path against another, and every confidence band
+    # drawn around one, is undefined for a path that ended.
+    out.update(dict.fromkeys(RUIN_UNRANKABLE_METRICS, float("nan")))
+    if uncertainty_columns:
+        from case_studies.utils.registry.store import _BACKTEST_UNCERTAINTY_COLUMNS
+
+        out.update(dict.fromkeys(_BACKTEST_UNCERTAINTY_COLUMNS, float("nan")))
+    return out
+
+
 def compute_portfolio_metrics(
     returns: np.ndarray,
     *,
@@ -236,7 +383,7 @@ def compute_portfolio_metrics(
     uncertainty_n_boot: int = 1000,
     uncertainty_seed: int = 0,
     trim_leading_zeros: bool = False,
-) -> dict[str, float]:
+) -> dict[str, float | None]:
     """Compute portfolio metrics using ml4t-diagnostic.
 
     Replaces hand-rolled Sharpe/drawdown/etc. with the library's
@@ -267,9 +414,12 @@ def compute_portfolio_metrics(
 
     Returns
     -------
-    dict[str, float]
+    dict[str, float | None]
         Metric name → value. Keys match the existing backtest_metrics schema,
-        plus uncertainty columns when ``uncertainty=True``.
+        plus uncertainty columns when ``uncertainty=True``, plus ``ruin`` and
+        ``ruin_period``. A path stopped at ruin carries ``None`` for every
+        ranking metric and every uncertainty column - see
+        ``RUIN_UNRANKABLE_METRICS``.
     """
     from ml4t.diagnostic.evaluation import PortfolioAnalysis
 
@@ -278,25 +428,34 @@ def compute_portfolio_metrics(
         if len(nonzero) > 0:
             returns = returns[nonzero[0] :]
 
+    # Stop the path at the period that takes equity through zero, before anything
+    # is measured off it. See RUIN_UNRANKABLE_METRICS above for what a stopped
+    # path reports and why.
+    returns, ruin_period = apply_ruin_stop(returns)
+
     if len(returns) < 2:
-        return {
-            "sharpe": 0.0,
-            "sortino": 0.0,
-            "total_return": 0.0,
-            "max_drawdown": 0.0,
-            "cagr": 0.0,
-            "calmar": 0.0,
-            "volatility": 0.0,
-            "win_rate": 0.0,
-            "omega": 0.0,
-            "var_95": 0.0,
-            "cvar_95": 0.0,
-            "stability": 0.0,
-            "skewness": 0.0,
-            "kurtosis": 0.0,
-            "tail_ratio": 0.0,
-            "n_periods": int(len(returns)),
-        }
+        return _apply_ruin_semantics(
+            {
+                "sharpe": 0.0,
+                "sortino": 0.0,
+                "total_return": 0.0,
+                "max_drawdown": 0.0,
+                "cagr": 0.0,
+                "calmar": 0.0,
+                "volatility": 0.0,
+                "win_rate": 0.0,
+                "omega": 0.0,
+                "var_95": 0.0,
+                "cvar_95": 0.0,
+                "stability": 0.0,
+                "skewness": 0.0,
+                "kurtosis": 0.0,
+                "tail_ratio": 0.0,
+                "n_periods": int(len(returns)),
+            },
+            ruin_period,
+            uncertainty_columns=False,
+        )
 
     analysis = PortfolioAnalysis(returns=returns, periods_per_year=periods_per_year)
     with warnings.catch_warnings():
@@ -333,6 +492,10 @@ def compute_portfolio_metrics(
         "tail_ratio": _safe(pm.tail_ratio),
         "n_periods": int(len(returns)),
     }
+
+    out = _apply_ruin_semantics(out, ruin_period)
+    if ruin_period is not None:
+        return out
 
     if uncertainty and len(returns) >= 4:
         try:
@@ -374,6 +537,131 @@ class BacktestRunResult:
     engine_result: Any = None  # BacktestResult from ml4t-backtest
     weights: pl.DataFrame | None = None
     execution_mode: str = "engine"
+
+
+# ---------------------------------------------------------------------------
+# Risk-control trigger counts
+# ---------------------------------------------------------------------------
+
+# The controls the engine knows how to build, and therefore the ones it can count.
+# The names are the `type` values a spec declares under `strategy.risk`.
+RISK_POSITION_RULE_TYPES = ("stop_loss", "trailing_stop", "time_exit")
+RISK_PORTFOLIO_LIMIT_TYPES = ("max_drawdown", "daily_loss")
+RISK_CONTROL_TYPES = RISK_POSITION_RULE_TYPES + RISK_PORTFOLIO_LIMIT_TYPES
+
+
+class RiskTriggerLog:
+    """How many times each declared risk control acted during one backtest.
+
+    A risk overlay that never fired was indistinguishable from one that was never
+    installed, and the two have opposite meanings (ml4t/agent-workspace#1051). The
+    registry carried `num_trades` and the performance metrics and nothing else, so
+    a reader comparing an overlay against the strategy it was laid on could
+    conclude "the control acted" from a difference and nothing at all from a
+    match: a stop can close a position the next rebalance would have closed
+    anyway, leaving the trade count where it was. `rules/notebook-standards.md`
+    C17 records the failure that hides behind that - 56 registered
+    `crypto_perps_funding/16_risk_management` results whose Sharpe, drawdown and
+    trade count matched the unprotected book in every digit, because the
+    configuration declared its controls in a shape the engine does not read and
+    nothing was installed.
+
+    So the counts distinguish three states, and the third is the one that was
+    missing:
+
+    * nothing declared - every count is ``None``, which is what "no overlay" means;
+    * declared and never fired - ``0``;
+    * declared and fired - the number of times.
+
+    A fourth state, declared but not installable on this execution path, is not
+    represented because it is refused instead: registering a row named for a
+    control the path cannot apply is the C17 failure itself.
+
+    Counts are per control *type*, not per declared control: two stops in one spec
+    share a key and their firings sum. Every sweep in the tree declares one
+    control per backtest, so the distinction has no reader today.
+    """
+
+    def __init__(self) -> None:
+        self._counts: dict[str, int] = {}
+
+    def declare(self, control: str) -> None:
+        """Record that this control was installed, before it has fired."""
+        self._counts.setdefault(control, 0)
+
+    def record(self, control: str, n: int = 1) -> None:
+        self._counts[control] = self._counts.get(control, 0) + n
+
+    def as_metrics(self) -> dict[str, float | None]:
+        """One registered column per control type, plus the total.
+
+        Every column is ``None`` when no control was declared, so a NULL reads as
+        "no overlay here" rather than as "not measured".
+        """
+        if not self._counts:
+            return {"risk_triggers": None} | {
+                f"risk_triggers_{name}": None for name in RISK_CONTROL_TYPES
+            }
+        return {"risk_triggers": float(sum(self._counts.values()))} | {
+            f"risk_triggers_{name}": (float(self._counts[name]) if name in self._counts else None)
+            for name in RISK_CONTROL_TYPES
+        }
+
+
+class _CountedPositionRule:
+    """Delegate to a position rule and count the exits it produces.
+
+    Structural, not inherited: ``ml4t.backtest.risk.PositionRule`` is a Protocol
+    and ``RuleChain`` is a plain dataclass over ``rules``, so a wrapper with
+    ``evaluate`` composes wherever the real rule does.
+
+    Only exits are counted - ``EXIT_FULL`` and ``EXIT_PARTIAL``. ``HOLD`` and
+    ``ADJUST_STOP`` are not firings: moving a stop level is the control working
+    without acting on the book, and counting it would report a rule that closed
+    nothing as the most active one in the sweep. No rule in ml4t-backtest 0.1.3
+    returns ``ADJUST_STOP``, so the exclusion is for rules added later.
+    """
+
+    def __init__(self, rule, control: str, log: RiskTriggerLog) -> None:
+        self._rule = rule
+        self._control = control
+        self._log = log
+        log.declare(control)
+
+    def evaluate(self, state):
+        from ml4t.backtest.risk import ActionType
+
+        action = self._rule.evaluate(state)
+        if action.action in (ActionType.EXIT_FULL, ActionType.EXIT_PARTIAL):
+            self._log.record(self._control)
+        return action
+
+
+def _counted_portfolio_limit(limit, control: str, log: RiskTriggerLog):
+    """Wrap a portfolio limit so each breach *episode* is counted once.
+
+    ``RiskManager.update`` re-checks every limit on every bar and returns whatever
+    is breached, so a halted book breaches again on each of the bars that follow.
+    Counting those would report one drawdown halt as several hundred firings. The
+    count moves on the rising edge only: not breached, then breached.
+    """
+    from ml4t.backtest.risk import PortfolioLimit
+
+    class _CountedPortfolioLimit(PortfolioLimit):
+        def __init__(self) -> None:
+            self._limit = limit
+            self._breached = False
+            log.declare(control)
+
+        def check(self, state):
+            result = self._limit.check(state)
+            breached = bool(result.breached)
+            if breached and not self._breached:
+                log.record(control)
+            self._breached = breached
+            return result
+
+    return _CountedPortfolioLimit()
 
 
 def _target_weights_by_timestamp(
@@ -922,6 +1210,123 @@ def resolved_allow_short_selling(
     return allow_short
 
 
+def _restore_ruin_nans(metrics: dict) -> dict:
+    """Put the NaNs back that SQLite turned into NULLs on the way in.
+
+    `compute_portfolio_metrics` reports a stopped path's ranking metrics as NaN
+    precisely so a notebook formatting `f"{sharpe:.3f}"` prints `nan` rather than
+    raising on a None. SQLite stores that NaN as NULL, so the skip-if-complete
+    branch - which reads the metrics back out of the registry rather than
+    recomputing them - handed the None straight to those same lines. A cached
+    bankrupt run therefore failed where a fresh one printed
+    (ml4t/agent-workspace#1051's neighbour, found by review job #18941).
+
+    Only where `ruin` says the NULL was written on purpose. Everywhere else a
+    NULL means the metric was never computed, and inventing a NaN for it would
+    claim a measurement that was not made.
+    """
+    if metrics.get("ruin") != 1.0:
+        return metrics
+    from case_studies.utils.registry.store import _BACKTEST_UNCERTAINTY_COLUMNS
+
+    for name in (*RUIN_UNRANKABLE_METRICS, *_BACKTEST_UNCERTAINTY_COLUMNS):
+        if name in metrics and metrics[name] is None:
+            metrics[name] = float("nan")
+    return metrics
+
+
+# One entry per (case study, label, panel width, prediction width) already reported, so a
+# sweep of twelve backtests over one prediction set prints the diagnostic once rather than
+# twelve times. Process-scoped: a notebook is one process, which is the scope that matters.
+_UNPRICED_UNIVERSE_REPORTED: set[tuple[str, str, int, int]] = set()
+
+
+def warn_if_the_panel_does_not_bound_the_universe(
+    predictions: pl.DataFrame, prices: pl.DataFrame, *, case_study: str, label: str
+) -> None:
+    """Say when a price panel is not the universe a vectorized run will trade.
+
+    The vectorized path computes ``gross_ret = weight * y_true`` from the
+    predictions frame and reads ``prices`` only for the rebalance calendar, which
+    is the same set of decision dates whichever symbols are in the panel. So
+    ``load_backtest_prices_for(..., max_symbols=N)`` reduces the price frame and
+    nothing else, and a preview taken at a reduced ``MAX_SYMBOLS`` is the
+    production sweep with the production cost per backtest. Measured on
+    us_firm_characteristics/11_backtest, 2026-08-24: 8 predictions x 4 schemes at
+    300 symbols and at 3,708 gave bit-identical Sharpe, CAGR and drawdown across
+    all 32 backtests, in 21 s against 19 s (ml4t/agent-workspace#911).
+
+    This warns and does not act, which is a decision the engine cannot make on
+    its own. Both ways of acting were tried and both are wrong here:
+
+    * **Narrowing the predictions to the panel** makes the traded universe decide
+      the portfolio without entering the backtest identity. The caller hashes its
+      specification before this module sees the run -
+      ``us_firm_characteristics/11_backtest.py:273`` computes
+      ``backtest_hash_from_parts`` and skips a matching run - so a reduced preview
+      would be served the full-universe result. Stamping the universe inside
+      ``run_backtest`` is too late for that check, and a symbol count is not a
+      universe in any case: ``{A, B}`` and ``{A, C}`` are different portfolios.
+    * **Refusing the run** stops a preview that is legitimately configured this
+      way. Measured on CI 2026-09-07: the `us_firm_characteristics` fixture holds
+      a 5-symbol price panel against 20-symbol predictions, and refusing took
+      four notebooks down.
+
+    What closes this is the caller declaring the universe it trades, in the spec,
+    before it hashes - which is a notebook change. Until then the parameter is
+    inert here and this says so at the moment it happens.
+
+    Said twice, on purpose. 22 of the 35 notebooks that call ``run_backtest`` or
+    ``run_plumbing_test`` install a blanket ``warnings.filterwarnings("ignore")``
+    at import, measured 2026-09-07 over ``case_studies/*/[0-9]*.py``::
+
+        cme_futures                    1 of 1    fx_pairs                0 of 5
+        etfs                           5 of 5    us_equities_panel       0 of 4
+        nasdaq100_microstructure       5 of 5    crypto_perps_funding    1 of 5
+        sp500_equity_option_analytics  5 of 5
+        us_firm_characteristics        5 of 5
+
+    Five case studies filter every backtest-calling notebook they have, two filter
+    none, and ``crypto_perps_funding`` filters only ``18_holdout_backtest.py``. So
+    a diagnostic that only warns is silent for the readers of five of the seven,
+    and which of the seven this is being read in is not something this function
+    can know. (76 of the 195 numbered case-study notebooks install it in total; a
+    recursive grep also finds an archived notebook and the line you are reading,
+    which is why that count comes back as 78 - ml4t/agent-workspace#1078.)
+    The ``warnings`` call is what a library caller and the tests read; the print is
+    what survives the filter and lands in the rendered cell. It is emitted once per
+    (case study, label, panel width, prediction width) because a sweep calls
+    ``run_backtest`` once per scheme and would otherwise repeat it dozens of times.
+    """
+    if "symbol" not in prices.columns or prices.is_empty() or predictions.is_empty():
+        return
+    priced = prices.select("symbol").unique()
+    if priced["symbol"].dtype != predictions["symbol"].dtype:
+        priced = _align_symbol_dtype(
+            predictions,
+            priced,
+            case_study=case_study,
+            target_side="predictions",
+            other_side="price panel",
+        )
+    unpriced = predictions.join(priced, on="symbol", how="anti")
+    if unpriced.is_empty():
+        return
+    message = (
+        f"{case_study}/{label}: the price panel carries {priced.height} symbols and the "
+        f"predictions carry {predictions['symbol'].n_unique()}, {unpriced['symbol'].n_unique()} "
+        "of which it cannot price. The vectorized path takes its universe and its P&L from "
+        "the predictions, so this run trades every predicted name at the full cost per "
+        "backtest and the narrower panel reduces nothing (ml4t/agent-workspace#911). "
+        "TOP_N_PREDICTIONS is the knob that reduces this stage."
+    )
+    warnings.warn(message, stacklevel=2)
+    seen = (case_study, label, priced.height, int(predictions["symbol"].n_unique()))
+    if seen not in _UNPRICED_UNIVERSE_REPORTED:
+        _UNPRICED_UNIVERSE_REPORTED.add(seen)
+        print(f"  WARN warn_if_the_panel_does_not_bound_the_universe: {message}")
+
+
 def run_backtest(
     case_study: str,
     prediction_hash: str,
@@ -1063,6 +1468,18 @@ def run_backtest(
         prediction_hash=prediction_hash,
     )
 
+    # A price panel that does not cover the predictions does not reduce a
+    # vectorized run, it just makes the parameter read as if it did - see
+    # `warn_if_the_panel_does_not_bound_the_universe`. The sp500_options HTM path
+    # is excluded because its `prices` frame and its predictions are not indexed
+    # by the same kind of symbol.
+    if strategy.get("rebalance", {}).get("mode") == "vectorized" and not (
+        case_study == "sp500_options" and label == "ret_to_expiry"
+    ):
+        warn_if_the_panel_does_not_bound_the_universe(
+            predictions, prices, case_study=case_study, label=label
+        )
+
     # Skip-if-complete: if the backtest_hash already has complete artifacts,
     # return the cached result instead of re-running (unless force_rebacktest).
     if register and not force_rebacktest:
@@ -1089,7 +1506,11 @@ def run_backtest(
                     if _metric_cols:
                         _q = f"SELECT {', '.join(_metric_cols)} FROM backtest_metrics WHERE backtest_hash = ?"
                         _row = _db.execute(_q, (_bt_status.backtest_hash,)).fetchone()
-                        cached_metrics = dict(zip(_metric_cols, _row, strict=True)) if _row else {}
+                        cached_metrics = (
+                            _restore_ruin_nans(dict(zip(_metric_cols, _row, strict=True)))
+                            if _row
+                            else {}
+                        )
                     else:
                         cached_metrics = {}
                 finally:
@@ -1433,9 +1854,12 @@ def _run_engine(
     if transition_timestamps and config.execution_mode.value != "same_bar":
         raise ValueError("state-transition sequencing requires same-bar engine execution")
 
-    # Build risk components from spec (Ch19)
-    position_rules = _build_position_rules(risk_spec)
-    risk_manager = _build_risk_manager(risk_spec, initial_cash)
+    # Build risk components from spec (Ch19). The log counts what each installed
+    # control actually did, so a reader can tell an overlay that never fired from
+    # one that was never installed - see `RiskTriggerLog`.
+    trigger_log = RiskTriggerLog()
+    position_rules = _build_position_rules(risk_spec, trigger_log)
+    risk_manager = _build_risk_manager(risk_spec, initial_cash, trigger_log)
 
     # Rebalance thresholds are sourced from setup.yaml::backtest.rebalance and
     # always present in the canonical strategy.rebalance block (populated by
@@ -1594,11 +2018,15 @@ def _run_engine(
             (pl.col("timestamp").dt.date() >= window[0])
             & (pl.col("timestamp").dt.date() <= window[1])
         )
+    # The persisted return path stops where the account does, so the parquet, the
+    # overall metrics and the per-fold metrics all describe the same series.
+    daily_df, _ = stop_returns_at_ruin(daily_df)
     returns_arr = daily_df["daily_return"].to_numpy()
 
     ppy = overall_periods_per_year(case_study, calendar, daily_df)
     metrics = compute_portfolio_metrics(returns_arr, periods_per_year=ppy, trim_leading_zeros=False)
     metrics.update(funding_metrics)
+    metrics.update(trigger_log.as_metrics())
 
     # Engine-specific metrics (execution details not derivable from returns)
     m = engine_result.metrics
@@ -1761,6 +2189,9 @@ def _run_htm_daily_mtm(
     percentile = float(signal_config.get("percentile", 90.0))
     if risk_spec:
         raise ValueError("the specialized option path does not support risk overlays")
+    # Refused above, so every count is None: no control was installed here, and a
+    # NULL says that rather than leaving the columns unwritten (#1051).
+    trigger_log = RiskTriggerLog()
     required_accounting = {
         "n_roll",
         "delta_hedge",
@@ -1859,6 +2290,9 @@ def _run_htm_daily_mtm(
     # HTM uses daily MTM on NYSE sessions → periods_per_year = 252. Operates on
     # the FINAL daily_returns (post-slice, post-risk-overlay) so the persisted
     # parquet and the registered metrics are derived from the same series.
+    # The persisted return path stops where the account does, so the parquet, the
+    # overall metrics and the per-fold metrics all describe the same series.
+    daily_returns, _ = stop_returns_at_ruin(daily_returns)
     returns_arr = daily_returns["daily_return"].to_numpy()
     metrics.update(
         compute_portfolio_metrics(
@@ -1869,6 +2303,7 @@ def _run_htm_daily_mtm(
             uncertainty=True,
         )
     )
+    metrics.update(trigger_log.as_metrics())
 
     # Number of distinct rebalance events (= entry days with any new cohort).
     # `n_open.sum()` is the count of cohort-days, kept under a distinct key.
@@ -2093,14 +2528,19 @@ def _run_vectorized(
                 port_ret = port_ret_filtered
 
     # Apply portfolio-level risk overlays (post-hoc on return series)
+    trigger_log = RiskTriggerLog()
     if risk_spec:
-        port_ret = _apply_vectorized_risk(port_ret, risk_spec)
+        port_ret = _apply_vectorized_risk(port_ret, risk_spec, trigger_log)
 
     # Daily returns DataFrame
     daily_returns = port_ret.select(
         pl.col("timestamp"),
         pl.col("net_ret").alias("daily_return"),
     )
+
+    # The persisted return path stops where the account does, so the parquet, the
+    # overall metrics and the per-fold metrics all describe the same series.
+    daily_returns, _ = stop_returns_at_ruin(daily_returns)
 
     # Portfolio metrics via ml4t-diagnostic
     returns_arr = daily_returns["daily_return"].to_numpy()
@@ -2120,6 +2560,7 @@ def _run_vectorized(
     avg_turnover = cast(float, port_ret["turnover"].mean()) if n > 0 else 0.0
     metrics["avg_turnover"] = avg_turnover
     metrics["n_periods"] = n
+    metrics.update(trigger_log.as_metrics())
 
     return {
         "daily_returns": daily_returns,
@@ -2132,7 +2573,9 @@ def _run_vectorized(
 # ---------------------------------------------------------------------------
 
 
-def _apply_vectorized_risk(port_ret: pl.DataFrame, risk_spec: dict) -> pl.DataFrame:
+def _apply_vectorized_risk(
+    port_ret: pl.DataFrame, risk_spec: dict, log: RiskTriggerLog | None = None
+) -> pl.DataFrame:
     """Apply portfolio-level risk limits to a close-to-close return series.
 
     Used by the vectorized + HTM dispatch paths (us_firm_characteristics,
@@ -2156,6 +2599,22 @@ def _apply_vectorized_risk(port_ret: pl.DataFrame, risk_spec: dict) -> pl.DataFr
         engine path (which has proper ``DailyLossLimit`` halt-on-update
         semantics through ``ml4t.backtest.risk``).
     """
+    # A position rule declared here installs nothing on this path - the
+    # close-to-close series cannot express an intrabar stop - so the run would
+    # register under an identity named for a stop that never ran. That is
+    # `rules/notebook-standards.md` C17's shape, and ml4t/agent-workspace#1051 is
+    # about not letting it register silently, so it stops here instead.
+    position_rules = risk_spec.get("position_rules", [])
+    if position_rules:
+        declared = ", ".join(str(rc.get("name", rc.get("type"))) for rc in position_rules)
+        raise ValueError(
+            f"position rules ({declared}) cannot be applied on the vectorized path: an "
+            "intrabar stop needs position tracking that a close-to-close return series "
+            "does not carry. Registering the run anyway would name a result for a control "
+            "that never ran. Move the case study to the engine path, or sweep "
+            "portfolio-level limits here instead."
+        )
+
     limits = risk_spec.get("portfolio_limits", [])
     if not limits:
         return port_ret
@@ -2165,6 +2624,8 @@ def _apply_vectorized_risk(port_ret: pl.DataFrame, risk_spec: dict) -> pl.DataFr
         ltype = lc["type"]
         if ltype == "max_drawdown":
             dd_threshold = lc["threshold"]
+            if log is not None:
+                log.declare("max_drawdown")
         elif ltype == "daily_loss":
             raise ValueError(
                 "daily_loss portfolio limit is not supported on the "
@@ -2190,6 +2651,9 @@ def _apply_vectorized_risk(port_ret: pl.DataFrame, risk_spec: dict) -> pl.DataFr
             exit_eq = float(peak[i]) * (1.0 - abs(dd_threshold)) * (1.0 - breach_slippage)
             returns[i] = exit_eq / prior_eq - 1.0
             returns[i + 1 :] = 0.0
+            # At most once: the breaker exits the book and zeroes every later bar.
+            if log is not None:
+                log.record("max_drawdown")
 
     return port_ret.with_columns(pl.Series("net_ret", returns))
 
@@ -2438,11 +2902,16 @@ def _refuse_an_allocation_that_produced_no_target(
     )
 
 
-def _build_position_rules(risk_spec: dict):
+def _build_position_rules(risk_spec: dict, log: RiskTriggerLog | None = None):
     """Create ml4t-backtest PositionRule objects from risk spec.
 
     Supports: stop_loss, trailing_stop, time_exit.
     Returns a RuleChain (multiple rules) or single rule, or None.
+
+    An unrecognized ``type`` used to fall through the if-chain and contribute
+    nothing, so a spec naming one produced no rule, a distinct identity hash, and
+    a registered row named for a control that never ran - the shape
+    ``rules/notebook-standards.md`` C17 generalizes. It is refused instead.
     """
     rules_config = risk_spec.get("position_rules", [])
     if not rules_config:
@@ -2454,22 +2923,33 @@ def _build_position_rules(risk_spec: dict):
     for rc in rules_config:
         rtype = rc["type"]
         if rtype == "stop_loss":
-            rules.append(StopLoss(pct=rc["threshold"]))
+            rule = StopLoss(pct=rc["threshold"])
         elif rtype == "trailing_stop":
-            rules.append(TrailingStop(pct=rc["threshold"]))
+            rule = TrailingStop(pct=rc["threshold"])
         elif rtype == "time_exit":
-            rules.append(TimeExit(max_bars=rc["bars"]))
+            rule = TimeExit(max_bars=rc["bars"])
+        else:
+            raise ValueError(
+                f"unknown position rule type {rtype!r} in strategy.risk.position_rules; "
+                f"the engine builds {sorted(RISK_POSITION_RULE_TYPES)}. A type it does not "
+                "recognize installs nothing, and the run would register under a distinct "
+                f"identity named {rc.get('name', rtype)!r} for a control that never ran."
+            )
+        rules.append(_CountedPositionRule(rule, rtype, log) if log is not None else rule)
 
     if not rules:
         return None
     return RuleChain(rules) if len(rules) > 1 else rules[0]
 
 
-def _build_risk_manager(risk_spec: dict, initial_cash: float):
+def _build_risk_manager(risk_spec: dict, initial_cash: float, log: RiskTriggerLog | None = None):
     """Create RiskManager with portfolio-level limits from risk spec.
 
     Supports: max_drawdown, daily_loss.
     Returns initialized RiskManager, or None.
+
+    Refuses an unrecognized ``type`` for the reason given in
+    ``_build_position_rules``.
     """
     limits_config = risk_spec.get("portfolio_limits", [])
     if not limits_config:
@@ -2481,9 +2961,17 @@ def _build_risk_manager(risk_spec: dict, initial_cash: float):
     for lc in limits_config:
         ltype = lc["type"]
         if ltype == "max_drawdown":
-            limits.append(MaxDrawdownLimit(max_drawdown=lc["threshold"]))
+            limit = MaxDrawdownLimit(max_drawdown=lc["threshold"])
         elif ltype == "daily_loss":
-            limits.append(DailyLossLimit(max_daily_loss_pct=lc["threshold"]))
+            limit = DailyLossLimit(max_daily_loss_pct=lc["threshold"])
+        else:
+            raise ValueError(
+                f"unknown portfolio limit type {ltype!r} in strategy.risk.portfolio_limits; "
+                f"the engine builds {sorted(RISK_PORTFOLIO_LIMIT_TYPES)}. A type it does not "
+                "recognize installs nothing, and the run would register under a distinct "
+                f"identity named {lc.get('name', ltype)!r} for a control that never ran."
+            )
+        limits.append(_counted_portfolio_limit(limit, ltype, log) if log is not None else limit)
 
     if not limits:
         return None
@@ -2564,7 +3052,22 @@ def run_plumbing_test(
             calendar=calendar,
             contract_specs=contract_specs,
         )
-        return float(result.metrics["sharpe"])
+        sharpe = result.metrics["sharpe"]
+        if sharpe is None or math.isnan(sharpe):
+            # The engine stops a path that loses its capital and registers no
+            # Sharpe for it, so there is no number to compare against the
+            # tolerance. The random signal is not the finding here: a
+            # configuration that bankrupts a no-edge book is what the plumbing
+            # test exists to surface, and it says so rather than raising a
+            # TypeError several frames away.
+            raise ValueError(
+                f"{case_study}/{label}: the random-signal plumbing run went bankrupt "
+                f"at period {result.metrics.get('ruin_period')} of "
+                f"{result.metrics.get('n_periods')}, so it has no Sharpe to test. A "
+                "no-edge signal that loses the whole account points at the sizing or "
+                "the short leg, not at the signal."
+            )
+        return float(sharpe)
 
     # Engine plumbing test
     from ml4t.backtest import DataFeed, Engine, RebalanceConfig, Strategy, TargetWeightExecutor

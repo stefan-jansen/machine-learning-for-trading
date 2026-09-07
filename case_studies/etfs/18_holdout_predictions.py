@@ -46,7 +46,6 @@
 # %%
 """ETFs: Holdout Predictions."""
 
-import sqlite3
 import warnings
 
 import polars as pl
@@ -58,8 +57,9 @@ from case_studies.research.holdout import build_holdout_training_spec
 from case_studies.research.models import reconstruct_locked_model_request
 from case_studies.utils.registry import training_hash_from_spec
 from case_studies.utils.strategy_analysis import (
+    holdout_generations_to_retire,
+    registered_holdout_generations,
     resolve_solvent_carrier,
-    training_run_fitted_for_the_holdout,
 )
 from utils.paths import get_case_study_dir
 
@@ -67,93 +67,10 @@ from utils.paths import get_case_study_dir
 CASE_STUDY_ID = "etfs"
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
-# Whether a holdout generation for a DIFFERENT configuration may be superseded by this run.
-# Off by default: see section 3.
-#
-# The flag exists because the holdout is not a one-shot resource, which is a ruling and not
-# an oversight. What the rule against consulting the holdout forbids is SELECTING on it: the
-# configuration evaluated here is chosen by validation backtest Sharpe, and no holdout number
-# feeds back into that choice. It says nothing about how many times the evaluation may be
-# computed, and a wrong result is deleted and re-run rather than left standing because it was
-# observed. Reading the rule as a physical constraint is what produced a lock layer around
-# this window, and it is being removed. The guard here is against something narrower and real:
-# two generations readable at once, so nobody downstream has to choose between them and nobody
-# can quote whichever number they prefer.
-REPLACE_HOLDOUT = False
 
 # %%
 study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
-
-
-def _delete_holdout_generation(case_dir, prediction_hash):
-    """Remove one holdout prediction set and everything registered against it.
-
-    Called only when ``REPLACE_HOLDOUT`` says a generation is superseded. The rows go
-    rather than being marked, because a superseded holdout evaluation that is still
-    readable is still a number someone can quote, and the point of replacing it is that it
-    should not be one.
-    """
-    with sqlite3.connect(str(case_dir / "run_log" / "registry.db")) as conn:
-        backtests = [
-            row[0]
-            for row in conn.execute(
-                "SELECT backtest_hash FROM backtest_runs WHERE prediction_hash = ?",
-                (prediction_hash,),
-            )
-        ]
-        for backtest_hash in backtests:
-            conn.execute(
-                "DELETE FROM backtest_paired_metrics WHERE challenger_hash = ? "
-                "OR benchmark_hash = ?",
-                (backtest_hash, backtest_hash),
-            )
-            conn.execute("DELETE FROM backtest_metrics WHERE backtest_hash = ?", (backtest_hash,))
-            conn.execute("DELETE FROM backtest_runs WHERE backtest_hash = ?", (backtest_hash,))
-        conn.execute("DELETE FROM prediction_sets WHERE prediction_hash = ?", (prediction_hash,))
-
-
-def _registered_holdout_generations(case_dir):
-    """Every holdout prediction set in the registry, and whether its model was refitted.
-
-    ``refitted`` is read from the training run's own CV rather than from the prediction set's
-    split: the split says where the predictions land, and a model fitted on the validation
-    folds can publish predictions over the holdout window. That is the distinction the whole
-    notebook turns on, and it is the same predicate the canonical lineage resolver applies.
-    """
-    with sqlite3.connect(str(case_dir / "run_log" / "registry.db")) as conn:
-        rows = conn.execute(
-            """
-            SELECT p.prediction_hash, p.training_hash, p.checkpoint_kind, p.checkpoint_value,
-                   t.config_name, t.spec_json
-            FROM prediction_sets p
-            JOIN training_runs t ON t.training_hash = p.training_hash
-            WHERE p.split = 'holdout'
-            ORDER BY p.prediction_hash
-            """
-        ).fetchall()
-    return [
-        {
-            "prediction_hash": prediction_hash,
-            "training_hash": training_hash,
-            # The checkpoint is part of the configuration, not a detail of it: one training run
-            # publishes one prediction set per declared checkpoint, and moving the selection
-            # from one checkpoint to another is a different configuration evaluated on the same
-            # window. Identity on the training hash alone would see that as the same generation
-            # and let both stand.
-            "checkpoint": (checkpoint_kind, checkpoint_value),
-            "config_name": config_name,
-            "refitted": training_run_fitted_for_the_holdout(training_spec_json),
-        }
-        for (
-            prediction_hash,
-            training_hash,
-            checkpoint_kind,
-            checkpoint_value,
-            config_name,
-            training_spec_json,
-        ) in rows
-    ]
 
 
 # %% [markdown]
@@ -259,32 +176,61 @@ print(f"Holdout training ends {fold['train_end']}, holdout opens {fold['val_star
 # fold is not one of the validation folds. A run that came back with the validation training
 # hash would mean the refit did not happen, so that is checked rather than assumed.
 #
-# **The window carries one configuration at a time.** The holdout is re-runnable, and that
-# is not the same as free: every configuration evaluated on it is another look at a period
-# the case study reports as unseen, and two evaluated quietly would make that report false.
+# **The window carries one configuration, and this notebook has no way past that.** The check
+# below is on the carrier rather than on the notebook, and it has exactly two outcomes. With
+# the carrier unchanged this is an idempotent replay: the derivation is deterministic and the
+# training identity covers it, so the same identity comes back and the fit is served from the
+# registry, which is why re-running the notebook is free and safe. With the carrier changed it
+# refuses, names both configurations, and stops.
 #
-# So the check below is on the carrier rather than on the notebook, and it has exactly two
-# outcomes. With the carrier unchanged this is an idempotent replay: the derivation is
-# deterministic and the training identity covers it, so the same identity comes back and
-# the fit is served from the registry. With the carrier changed it refuses, names both
-# configurations, and stops.
-#
-# `REPLACE_HOLDOUT` is the only way past that, and it is a replacement rather than an
-# addition: the superseded generation's rows are deleted, so the registry never holds two
-# refits of the holdout window and no downstream resolver has to choose between them.
-# Deleting is what makes the earlier evaluation cost something to discard. It is also the
-# only honest shape - a run that had been observed and then quietly kept alongside its
-# replacement would let a reader take whichever number they preferred.
+# It refuses rather than offering a replacement switch, and the reason is that a replacement
+# would not be one. Deleting the earlier generation's rows does not undo having observed its
+# result: the selection that produced the new carrier may have been informed by the old
+# holdout number, and no deletion reaches that. A switch here would let the case study take a
+# second look at the window while leaving a registry that shows only one, which is the
+# specific thing that would make the out-of-sample claim false rather than merely weak.
 
 # %%
 holdout_training_hash = training_hash_from_spec(holdout_spec)
 this_generation = (holdout_training_hash, (CHECKPOINT_KIND, CHECKPOINT_VALUE))
-superseded = [
-    row
-    for row in _registered_holdout_generations(CASE_DIR)
-    if row["refitted"] and (row["training_hash"], row["checkpoint"]) != this_generation
-]
-if superseded and not REPLACE_HOLDOUT:
+retire = holdout_generations_to_retire(CASE_DIR, this_generation=this_generation)
+# A row whose training run records no CV split cannot be shown either way, and deleting on
+# that would discard a result nothing has established is wrong. It stops the run instead.
+if retire.unattributable:
+    raise RuntimeError(
+        "the holdout window carries prediction sets whose training runs record no CV split, "
+        "so whether they were refitted for the holdout cannot be established: "
+        + ", ".join(
+            f"{row['prediction_hash']} (training {row['training_hash']})"
+            for row in retire.unattributable
+        )
+        + ". Establish what produced them before registering another evaluation on the same "
+        "window; this notebook will not delete a row it cannot show is not a holdout result."
+    )
+# A row whose training run declares a non-holdout CV may not be reported as a holdout
+# result, and it is also not something to delete unattended: `generate_holdout` refits on a
+# holdout fold and then registers the predictions under the VALIDATION training identity, so
+# this record covers both a validation-fitted model published over the window and a real
+# refit filed under the wrong identity. Nothing owned this before - the filter here was
+# `row["refitted"]`, which made exactly these rows invisible to the refusal and to
+# everything after it.
+if retire.not_out_of_sample:
+    raise RuntimeError(
+        "the holdout window carries prediction sets whose training runs declare a CV split "
+        "other than the holdout: "
+        + ", ".join(
+            f"{row['prediction_hash']} ({row['config_name']}, training {row['training_hash']})"
+            for row in retire.not_out_of_sample
+        )
+        + ". Each is either a validation-fitted model published over the window, which is "
+        "not an out-of-sample result, or a refit registered under its validation training "
+        "identity, which `20_strategy_synthesis/holdout.py::generate_holdout` produces - and "
+        "the registry cannot tell those apart. This notebook has no way past that: "
+        "establish which it is and resolve it through the registry's own lifecycle, which "
+        "records that the row was retired."
+    )
+superseded = list(retire.superseded)
+if superseded:
     raise RuntimeError(
         "the holdout window already carries a refit of a different configuration: "
         + ", ".join(
@@ -293,12 +239,13 @@ if superseded and not REPLACE_HOLDOUT:
         )
         + f". This run would evaluate {carrier['config_name']} (training "
         f"{holdout_training_hash}, checkpoint {CHECKPOINT_KIND}={CHECKPOINT_VALUE}) on the "
-        "same window. Set REPLACE_HOLDOUT=True to discard the earlier generation, or leave "
-        "the selection where it was."
+        "same window, which would be a second configuration measured on a period this case "
+        "study reports as unseen. This notebook has no way past that: deleting the earlier "
+        "generation would not undo having observed it, and the selection bias it introduces "
+        "is not removed by removing the rows. Either leave the selection where it was, or "
+        "retire the earlier evaluation through the registry's own lifecycle, which records "
+        "that a second look was taken."
     )
-for row in superseded:
-    print(f"REPLACING holdout generation {row['prediction_hash']} ({row['config_name']})")
-    _delete_holdout_generation(CASE_DIR, row["prediction_hash"])
 
 # %% tags=["results"]
 request = reconstruct_locked_model_request(
@@ -343,7 +290,7 @@ print(
 # marked VALIDATION-FITTED is not an out-of-sample result whatever its numbers say.
 
 # %% tags=["results"]
-for row in _registered_holdout_generations(CASE_DIR):
+for row in registered_holdout_generations(CASE_DIR):
     note = (
         "refitted for the holdout" if row["refitted"] else "VALIDATION-FITTED - not out of sample"
     )

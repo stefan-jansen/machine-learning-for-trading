@@ -579,6 +579,18 @@ def compute_backtest_fold_metrics(
     if ts_dtype != pl.Date:
         daily_returns = daily_returns.with_columns(pl.col("timestamp").cast(pl.Date))
 
+    # Where the account ended, read off the whole series before it is cut up.
+    # A fold that begins after ruin is all zeros, and a slice of zeros is
+    # indistinguishable from a fold in which the strategy simply did not trade:
+    # `compute_portfolio_metrics` on it reports `ruin=0`, a Sharpe of 0 and no
+    # drawdown, which is a clean row for a period in which the book did not exist
+    # (ml4t/agent-workspace#920). The fold that contains the ruin finds it for
+    # itself; the folds after it are told.
+    from case_studies.utils.backtest_runner import first_ruin_index
+
+    ruin_index = first_ruin_index(daily_returns["daily_return"].to_numpy())
+    ruin_date = None if ruin_index is None else daily_returns["timestamp"].to_list()[ruin_index]
+
     for split in splits:
         fold_id = split["fold"]
         val_start = str(split["val_start"])[:10]  # "YYYY-MM-DD"
@@ -599,6 +611,14 @@ def compute_backtest_fold_metrics(
 
         returns_arr = fold_returns["daily_return"].to_numpy()
         fold_metrics = compute_portfolio_metrics(returns_arr, periods_per_year=periods_per_year)
+        if ruin_date is not None and start_date > ruin_date:
+            from case_studies.utils.backtest_runner import _apply_ruin_semantics
+
+            # The account was already gone when this fold opened. Report the ruin
+            # rather than the zeros it leaves behind, and carry the whole path's
+            # index so the fold rows agree with the overall row about where it
+            # happened.
+            fold_metrics = _apply_ruin_semantics(fold_metrics, ruin_index)
 
         # Add fold metadata
         fold_metrics["n_days"] = len(fold_returns)

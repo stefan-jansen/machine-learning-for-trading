@@ -48,7 +48,6 @@
 # %%
 """US Firm Characteristics: Portfolio: Allocator Sweep."""
 
-import sqlite3
 import time
 import warnings
 from collections import Counter
@@ -312,24 +311,16 @@ from case_studies.utils.backtest_explorer import BacktestExplorer
 
 explorer = BacktestExplorer(CASE_STUDY_ID)
 
-with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
-    grid = (
-        pl.DataFrame(
-            conn.execute(
-                "SELECT backtest_hash, stage, spec_json FROM backtest_runs "
-                "WHERE stage IN ('signal', 'allocation')"
-            ).fetchall(),
-            schema=["backtest_hash", "stage", "spec_json"],
-            orient="row",
-        )
-        .with_columns(
-            allocator=pl.col("spec_json").str.json_path_match("$.strategy.allocation.method"),
-            names_per_side=pl.col("spec_json")
-            .str.json_path_match("$.strategy.signal.top_k")
-            .cast(pl.Int64),
-        )
-        .drop("spec_json")
+grid = (
+    explorer.specs(["signal", "allocation"])
+    .with_columns(
+        allocator=pl.col("spec_json").str.json_path_match("$.strategy.allocation.method"),
+        names_per_side=pl.col("spec_json")
+        .str.json_path_match("$.strategy.signal.top_k")
+        .cast(pl.Int64),
     )
+    .drop("spec_json")
+)
 
 # %% [markdown]
 # Two frames carry every table below. The baseline is restricted to the concentrations

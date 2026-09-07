@@ -1103,14 +1103,40 @@ def rank_by_validation_sharpe(
     The same rule `CandidateSet._ranked_validation_hashes` applies, so a preview ranking and a
     canonical one differ in which rows they see and in nothing else. A member with no Sharpe is
     refused rather than sorted to an end, which is what a null would otherwise do silently.
+
+    Unless it is bankrupt. A null Sharpe used to mean exactly one thing - the run was not
+    measured - and refusing was the whole of the right answer. Since ml4t/agent-workspace#920
+    it means two, because a path whose equity reaches zero stops compounding and registers
+    `sharpe`, `sortino`, `calmar`, `omega`, `stability` and `tail_ratio` as null on purpose:
+    ranking a bankrupt path is the thing that issue exists to prevent. The `ruin` column is what
+    separates the two, so this reads it rather than testing the Sharpe alone:
+
+    * ``ruin = 1.0`` - bankrupt. It sorts last, ahead of nothing, and is never selected. It does
+      not disqualify the set, because a sweep that produced one bankrupt member and eleven
+      solvent ones has a perfectly good ranking of the eleven.
+    * null Sharpe, no ruin flag - not measured. Refused, as before.
+
+    Sorting last rather than dropping is what `strategy_analysis.rank_returns_on_common_support`
+    already does for the same condition, so a reader comparing the two sees one rule.
+
+    A registry written before #920 has no `ruin` column at all, which is not the same as no
+    bankrupt member; there the check falls back to the null test that was the whole rule then.
     """
     members = {result.hash: result for result in results}
     if not members:
         raise ValueError("ranking by validation Sharpe requires at least one result")
+    table = study.backtests.table(include_preview=True)
+    ruined = (
+        (pl.col("ruin") == 1.0).fill_null(False) if "ruin" in table.columns else pl.lit(False)  # noqa: FBT003
+    )
     rows = (
-        study.backtests.table(include_preview=True)
-        .filter(pl.col("backtest_hash").is_in(list(members)) & pl.col("sharpe").is_not_null())
-        .sort("sharpe", "backtest_hash", descending=[True, False])
+        table.filter(
+            pl.col("backtest_hash").is_in(list(members)) & (pl.col("sharpe").is_not_null() | ruined)
+        )
+        .with_columns(ruined.alias("_ruined"))
+        .sort(
+            "_ruined", "sharpe", "backtest_hash", descending=[False, True, False], nulls_last=True
+        )
     )
     if rows.height != len(members):
         raise ValueError("a result being ranked has no validation Sharpe recorded")

@@ -568,8 +568,19 @@ def backtest_run_status(
 
         has_metrics = False
         if require_metrics:
+            # A NULL sharpe means "no metric pass has run here" everywhere except one
+            # case: a path the engine stopped at ruin registers every ranking metric as
+            # NULL on purpose, so that nothing sorts a bankrupt account against a solvent
+            # one (ml4t/agent-workspace#920). Reading that as incomplete would re-run the
+            # backtest on every pass and never converge, so `ruin` is what separates
+            # them. `ruin` is absent from a registry written before that column existed,
+            # in which case a NULL sharpe still means unmeasured.
+            has_ruin = "ruin" in {
+                row[1] for row in db.execute("PRAGMA table_info(backtest_metrics)").fetchall()
+            }
+            measured = "sharpe IS NOT NULL OR ruin = 1.0" if has_ruin else "sharpe IS NOT NULL"
             m_row = db.execute(
-                "SELECT sharpe FROM backtest_metrics WHERE backtest_hash = ? AND sharpe IS NOT NULL",
+                f"SELECT sharpe FROM backtest_metrics WHERE backtest_hash = ? AND ({measured})",
                 (b_hash,),
             ).fetchone()
             has_metrics = m_row is not None

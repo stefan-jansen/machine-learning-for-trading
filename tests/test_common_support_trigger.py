@@ -85,6 +85,9 @@ def case_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             );
             CREATE TABLE backtest_metrics (backtest_hash TEXT PRIMARY KEY, sharpe REAL);
             CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL);
+            CREATE TABLE prediction_metrics (
+                prediction_hash TEXT PRIMARY KEY, ic_mean REAL, ic_n_days REAL
+            );
             -- The spec is what separates a refit from a validation-fitted model scored on
             -- a later window, so the holdout lineage resolver reads it. This fixture has no
             -- holdout at all: 'train' declares the validation CV, and its presence is what
@@ -95,6 +98,7 @@ def case_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             );
             INSERT INTO prediction_sets VALUES ('pred', 'train', 'validation', NULL, NULL);
             INSERT INTO fold_metrics VALUES ('pred', 0.02);
+            INSERT INTO prediction_metrics VALUES ('pred', 0.02, 250);
             """
         )
     return root
