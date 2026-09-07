@@ -37,6 +37,7 @@ from sklearn.linear_model import Ridge
 
 from case_studies.sp500_options._ic_diagnostics import daily_ic
 from case_studies.utils.artifact_digest import value_digest
+from utils.cv_splits import select_folds
 from utils.modeling import generate_cv_splits, prepare_cv_folds
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
@@ -99,7 +100,7 @@ splits = generate_cv_splits(
     date_col="timestamp",
 )
 if MAX_FOLDS:
-    splits = splits[:MAX_FOLDS]
+    splits = select_folds(splits, range(MAX_FOLDS))
 if not splits:
     raise ValueError("diagnostic fold selection is empty")
 
@@ -449,7 +450,7 @@ decomposition_ic
 # %%
 pca_fold = prepare_cv_folds(
     dataset.to_pandas(),
-    splits[:1],
+    select_folds(splits, [0]),
     feature_names,
     DIAGNOSTIC_LABEL,
     "timestamp",

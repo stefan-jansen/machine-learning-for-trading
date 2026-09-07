@@ -29,7 +29,7 @@ Design decisions:
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -464,15 +464,18 @@ def _assert_chronological(
     first hands fold id 0 to the latest window while everything built through the
     generated path now hands it to the earliest, and the two meanings meet in a
     join. Two committed configs carry precomputed splits, and this named them the
-    wrong way round until 2026-09-07. Measured:
-    ``us_firm_characteristics/config/cv_config.json`` runs oldest first and agrees -
-    #791 renumbered it and re-ran the case study rather than migrating its rows.
-    ``fx_pairs/config/cv_config.json`` runs newest first, fold 0 validating from
-    2023-01-03 down to fold 7 at 2016-01-05, and is refused here. It is the one
-    still to be renumbered; #1073 carries the decision, because for that case study
-    a renumber is not only a relabel. ``us_equities_panel``'s config carries no
-    ``splits`` list at all and goes through the generated path, so it is not in
-    question.
+    wrong way round until 2026-09-07. Both now run oldest first and both agree with
+    what their case study has registered:
+    ``us_firm_characteristics/config/cv_config.json`` was renumbered by #791, which
+    re-ran the case study rather than migrating its rows.
+    ``fx_pairs/config/cv_config.json`` ran newest first, fold 0 validating from
+    2023-01-03 down to fold 7 at 2016-01-05, and was refused here until #1073
+    renumbered it. That one cost no re-run: its 148 registered training specs were
+    already written by 0.1.4's generator and carry ascending ids, so the committed
+    file was a stale record rather than an input - no notebook reads it, because
+    ``generate_cv_splits`` takes the precomputed path only for a caller that passes
+    ``cv_config=`` explicitly. ``us_equities_panel``'s config carries no ``splits``
+    list at all and goes through the generated path, so it is not in question.
 
     ``tests/test_cv_splits.py`` asserts that state directly on the committed files,
     so it is executable rather than a comment that can go stale the way this one
@@ -530,3 +533,51 @@ def earliest_train_start(splits: Sequence[dict[str, Any]]) -> pd.Timestamp:
     if not splits:
         raise ValueError("No splits to choose from")
     return min(pd.Timestamp(s["train_start"]) for s in splits)
+
+
+def select_folds(
+    splits: Sequence[dict[str, Any]],
+    fold_ids: Iterable[int],
+) -> list[dict[str, Any]]:
+    """The folds carrying *fold_ids*, in the order they appear in *splits*.
+
+    A reduction has to say **which** folds it keeps. A count off one end of an
+    ordered list does not: ``splits[:2]`` kept the two most recent folds before
+    ml4t-diagnostic 0.1.4 and keeps the two earliest after it, and neither reading
+    is written down anywhere, so the same code silently became a different
+    experiment. Three case studies reduced their fold set that way (#1076).
+
+    Naming the ids is also what makes the reduction checkable against the windows:
+    a reader can hold ``[0, 1]`` against the fold table, and cannot hold ``[:2]``
+    against anything without knowing which release produced the list.
+
+    This is the same contract the model families already apply to the ``folds``
+    key of a preview reduction (``case_studies/utils/linear.py`` and
+    ``case_studies/utils/gbm.py`` both filter by id and refuse an id the fold set
+    does not carry). ``MAX_FOLDS = n`` is the count form of it, and
+    ``tests/pm_helpers.py::PREVIEW_TRANSLATED_PARAMETERS`` is where the harness
+    turns that count into ids for every notebook that takes ``PREVIEW_REDUCTIONS``:
+    ``list(range(n))``, the earliest n. A notebook that reads ``MAX_FOLDS``
+    directly passes ``range(MAX_FOLDS)`` here and means the same thing by it.
+
+    Raises
+    ------
+    ValueError
+        If *fold_ids* is empty, or names an id the fold set does not carry. A
+        reduction that silently keeps fewer folds than it asked for reports under
+        the same name as one that got what it asked for.
+    """
+    requested = [int(fold_id) for fold_id in fold_ids]
+    if not requested:
+        raise ValueError("select_folds was given no fold ids; a reduction has to keep some fold")
+    available = {int(_split_value(s, "fold")): s for s in splits}
+    missing = sorted(set(requested) - set(available))
+    if missing:
+        raise ValueError(
+            f"fold reduction names {missing}, which the fold set does not carry - "
+            f"it has {sorted(available)}. Reduce to ids that exist rather than to a "
+            "count, so a set with fewer folds than expected fails here instead of "
+            "reporting a smaller experiment under the same name."
+        )
+    wanted = set(requested)
+    return [s for s in splits if int(_split_value(s, "fold")) in wanted]

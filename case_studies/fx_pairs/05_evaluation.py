@@ -75,7 +75,7 @@ from scipy.stats import spearmanr
 
 from case_studies.utils.feature_engineering import quantile_profile
 from utils.artifact_specs import resolve_label_buffer
-from utils.cv_splits import generate_cv_splits, load_evaluation_config
+from utils.cv_splits import generate_cv_splits, load_evaluation_config, select_folds
 from utils.data_quality import validate_modeling_inputs
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, show_plotly_with_alt
@@ -243,7 +243,7 @@ def fold_windows(outcome_horizon: str) -> list[dict]:
         label_buffer=LABEL_BUFFER,
         outcome_horizon=outcome_horizon,
     )
-    return splits[:MAX_FOLDS] if MAX_FOLDS > 0 else splits
+    return select_folds(splits, range(MAX_FOLDS)) if MAX_FOLDS > 0 else splits
 
 
 def validation_rows(splits: list[dict]) -> pl.DataFrame:
