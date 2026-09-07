@@ -88,9 +88,9 @@ PREVIEW_ALLOCATORS: tuple[str, ...] = ("score_weighted",)
 # names the current hash, and empty is correct only for a name this registry has never held.
 # Each of these is stale the moment the run it authorizes succeeds, because that run becomes
 # the generation the next one has to name.
-SUPERSEDES_BASELINE_CANDIDATES: str = "caa48f7d7108"
-SUPERSEDES_ALLOCATION_POPULATION: str = "2120daa51778"
-SUPERSEDES_STRATEGY_CANDIDATES: str = "2b2083f67223"
+SUPERSEDES_BASELINE_CANDIDATES: str = ""
+SUPERSEDES_ALLOCATION_POPULATION: str = ""
+SUPERSEDES_STRATEGY_CANDIDATES: str = ""
 
 # %% [markdown]
 # ## Freeze what is being selected from

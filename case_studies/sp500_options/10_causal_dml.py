@@ -38,7 +38,7 @@ from case_studies.sp500_options.research_workflow import open_study
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
-SUPERSEDES_CAUSAL: str = "3498c82ad588"
+SUPERSEDES_CAUSAL: str = ""
 
 # %% [markdown]
 # ## Declared and resolved request
