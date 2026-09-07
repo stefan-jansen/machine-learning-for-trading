@@ -241,9 +241,24 @@ _on_disk = {
     for _path in sorted(CASE_DIR.glob(_pattern))
     if _path.is_file()
 }
+# `feature_artifacts` has two shapes in the registry and both are current, and they differ in two
+# ways rather than one. The older rows store a list of `{"role": ..., "sha256": "sha256:<hex>"}`;
+# the newer ones a mapping of role -> `{"sha256": "<hex>", "size": ...}` - no prefix. This case
+# study holds 15 of the first and 175 of the second, so which the selected fit carries is not
+# knowable in advance. Reading the mapping as a list raises `TypeError: string indices must be
+# integers` because iterating it yields its keys; reading it without restoring the prefix is
+# worse, because the comparison below then fails on artifacts that are byte-identical on disk
+# and reports them as retired.
+_artifacts = VALIDATION_SPEC["computation"].get("feature_artifacts") or {}
+if isinstance(_artifacts, dict):
+    _entries = [{"role": _role, **_value} for _role, _value in _artifacts.items()]
+else:
+    _entries = list(_artifacts)
 _pinned = {
-    entry["role"]: entry["sha256"]
-    for entry in VALIDATION_SPEC["computation"].get("feature_artifacts", [])
+    _entry["role"]: _entry["sha256"]
+    if str(_entry["sha256"]).startswith("sha256:")
+    else f"sha256:{_entry['sha256']}"
+    for _entry in _entries
 }
 _moved = [
     f"{_role} (pinned {_sha[:19]}...)" for _role, _sha in _pinned.items() if _sha not in _on_disk
