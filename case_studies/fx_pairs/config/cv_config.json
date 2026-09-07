@@ -9,54 +9,14 @@
   "splits": [
     {
       "fold": 0,
-      "train_start": "2018-01-04",
-      "train_end": "2022-12-29",
-      "val_start": "2023-01-03",
-      "val_end": "2023-12-28",
+      "train_start": "2011-01-04",
+      "train_end": "2015-12-31",
+      "val_start": "2016-01-05",
+      "val_end": "2017-01-03",
       "label_buffer": "1D"
     },
     {
       "fold": 1,
-      "train_start": "2017-01-04",
-      "train_end": "2021-12-30",
-      "val_start": "2022-01-03",
-      "val_end": "2022-12-30",
-      "label_buffer": "1D"
-    },
-    {
-      "fold": 2,
-      "train_start": "2016-01-05",
-      "train_end": "2020-12-31",
-      "val_start": "2021-01-05",
-      "val_end": "2021-12-31",
-      "label_buffer": "1D"
-    },
-    {
-      "fold": 3,
-      "train_start": "2015-01-05",
-      "train_end": "2020-01-02",
-      "val_start": "2020-01-06",
-      "val_end": "2021-01-04",
-      "label_buffer": "1D"
-    },
-    {
-      "fold": 4,
-      "train_start": "2014-01-03",
-      "train_end": "2019-01-02",
-      "val_start": "2019-01-04",
-      "val_end": "2020-01-03",
-      "label_buffer": "1D"
-    },
-    {
-      "fold": 5,
-      "train_start": "2013-01-03",
-      "train_end": "2018-01-02",
-      "val_start": "2018-01-04",
-      "val_end": "2019-01-03",
-      "label_buffer": "1D"
-    },
-    {
-      "fold": 6,
       "train_start": "2012-01-04",
       "train_end": "2016-12-30",
       "val_start": "2017-01-04",
@@ -64,11 +24,51 @@
       "label_buffer": "1D"
     },
     {
+      "fold": 2,
+      "train_start": "2013-01-03",
+      "train_end": "2018-01-02",
+      "val_start": "2018-01-04",
+      "val_end": "2019-01-03",
+      "label_buffer": "1D"
+    },
+    {
+      "fold": 3,
+      "train_start": "2014-01-03",
+      "train_end": "2019-01-02",
+      "val_start": "2019-01-04",
+      "val_end": "2020-01-03",
+      "label_buffer": "1D"
+    },
+    {
+      "fold": 4,
+      "train_start": "2015-01-05",
+      "train_end": "2020-01-02",
+      "val_start": "2020-01-06",
+      "val_end": "2021-01-04",
+      "label_buffer": "1D"
+    },
+    {
+      "fold": 5,
+      "train_start": "2016-01-05",
+      "train_end": "2020-12-31",
+      "val_start": "2021-01-05",
+      "val_end": "2021-12-31",
+      "label_buffer": "1D"
+    },
+    {
+      "fold": 6,
+      "train_start": "2017-01-04",
+      "train_end": "2021-12-30",
+      "val_start": "2022-01-03",
+      "val_end": "2022-12-30",
+      "label_buffer": "1D"
+    },
+    {
       "fold": 7,
-      "train_start": "2011-01-04",
-      "train_end": "2015-12-31",
-      "val_start": "2016-01-05",
-      "val_end": "2017-01-03",
+      "train_start": "2018-01-04",
+      "train_end": "2022-12-29",
+      "val_start": "2023-01-03",
+      "val_end": "2023-12-28",
       "label_buffer": "1D"
     }
   ]

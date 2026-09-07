@@ -648,14 +648,11 @@ def test_a_precomputed_split_set_is_held_to_the_same_order() -> None:
     assert [s["fold"] for s in generate_cv_splits(df, cv_config=renumbered)] == [0, 1]
 
 
-# The committed configs that still run newest first, each naming the issue that
-# decides what happens to it. `fx_pairs` is not a stale file: 148 registered
-# training runs carry its fold ids, and 19 of them - `tabular_dl` 9 and
-# `deep_learning` 10 - derive a fold's seed from that id (`folds.fold_seed`,
-# #1056), so a renumber is a refit for those and a relabel only for the other 129.
-# #791 hit the same wall on us_firm_characteristics and re-ran rather than
-# migrating. #1073 carries the decision here.
-CV_CONFIGS_PENDING_RENUMBER = {"fx_pairs": "#1073"}
+# Committed configs still running newest first, each naming the issue that decides
+# what happens to it. Empty is the intended steady state: `us_firm_characteristics`
+# left it at #791 and `fx_pairs` at #1073, both by renumbering the file and re-running
+# rather than remapping the rows registered under the old numbering.
+CV_CONFIGS_PENDING_RENUMBER: dict[str, str] = {}
 
 
 def _committed_cv_configs() -> dict[str, dict]:
