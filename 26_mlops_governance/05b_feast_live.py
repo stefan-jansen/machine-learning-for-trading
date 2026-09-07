@@ -174,12 +174,40 @@ filter_end = train_end + timedelta(days=30)
     .write_parquet(financial_feast_path)
 )
 
+
+# %%
+def collapse_fold_replication(frame: pl.DataFrame) -> pl.DataFrame:
+    """One row per `(symbol, timestamp)`, refusing any collapse that would lose a value.
+
+    A no-op against a current artifact, which carries one row per stock-date. An
+    artifact written before stage 04 dropped the fold column carries one row per
+    `(key, fold)` holding the same value repeated, and CI still installs such a
+    fixture, so this notebook has to read both shapes rather than assume the newer.
+
+    The collapse is not taken on trust. `unique()` over every selected column must
+    reduce to exactly the distinct key count: that happens only when the replicated
+    rows agree everywhere, so a genuine per-fold difference raises here instead of
+    being silently reduced to whichever row sorted first.
+    """
+    keys = frame.select("symbol", "timestamp").n_unique()
+    if frame.height == keys:
+        return frame
+    distinct = frame.unique()
+    if distinct.height != keys:
+        raise ValueError(
+            f"model_based.parquet holds {frame.height:,} rows over {keys:,} distinct "
+            f"(symbol, timestamp) keys, and {distinct.height:,} of them differ on a feature "
+            "value. A fold-replicated artifact may repeat a row but not disagree with itself; "
+            "this one carries per-fold values, which this notebook cannot resolve to one."
+        )
+    return distinct.sort(["timestamp", "symbol"])
+
+
 # %%
 # One filter over the union of the evaluation windows, not one frame per window
-# concatenated. A concat double-counts any date two windows cover and the duplicate-key
-# assertion would catch that only afterwards; under a single filter a duplicate cannot
-# arise, so the assertion goes back to stating what it is for - that the artifact is
-# unique on `(symbol, timestamp)`.
+# concatenated. A concat double-counts any date two windows cover, and would do it
+# silently; under a single filter the only duplication that can reach the result is the
+# artifact's own, which `collapse_fold_replication` resolves or refuses.
 _span_lo = pd.Timestamp(filter_start).date()
 _span_hi = pd.Timestamp(filter_end).date()
 model_spans = [
@@ -192,15 +220,12 @@ if not model_spans:
         f"No validation window and not the sealed holdout covers {_span_lo}..{_span_hi}; "
         "the materialization range lies outside every window this model was evaluated on"
     )
-model_features = (
+model_features = collapse_fold_replication(
     pl.scan_parquet(model_src)
     .filter(pl.any_horizontal(*[pl.col("timestamp").is_between(s, e) for s, e in model_spans]))
     .select(["symbol", "timestamp", *MODEL_FEATURES])
     .collect()
     .sort(["timestamp", "symbol"])
-)
-assert not model_features.select(pl.struct("symbol", "timestamp").is_duplicated().any()).item(), (
-    "model_based.parquet is not unique on (symbol, timestamp)"
 )
 model_features.with_columns(pl.col("timestamp").cast(pl.Datetime("ns"))).write_parquet(
     model_feast_path

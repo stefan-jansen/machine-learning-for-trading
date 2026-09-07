@@ -236,14 +236,41 @@ print(f"Reference window starts {REFERENCE_START} (latest validation window)")
 
 
 # %%
+def collapse_fold_replication(frame: pl.DataFrame) -> pl.DataFrame:
+    """One row per `(symbol, timestamp)`, refusing any collapse that would lose a value.
+
+    A no-op against a current artifact, which carries one row per stock-date. An
+    artifact written before stage 04 dropped the fold column carries one row per
+    `(key, fold)` holding the same value repeated, and CI still installs such a
+    fixture, so this notebook has to read both shapes rather than assume the newer.
+
+    The collapse is not taken on trust. `unique()` over every selected column must
+    reduce to exactly the distinct key count: that happens only when the replicated
+    rows agree everywhere, so a genuine per-fold difference raises here instead of
+    being silently reduced to whichever row sorted first.
+    """
+    keys = frame.select("symbol", "timestamp").n_unique()
+    if frame.height == keys:
+        return frame
+    distinct = frame.unique()
+    if distinct.height != keys:
+        raise ValueError(
+            f"model_based.parquet holds {frame.height:,} rows over {keys:,} distinct "
+            f"(symbol, timestamp) keys, and {distinct.height:,} of them differ on a feature "
+            "value. A fold-replicated artifact may repeat a row but not disagree with itself; "
+            "this one carries per-fold values, which this notebook cannot resolve to one."
+        )
+    return distinct.sort(["timestamp", "symbol"])
+
+
+# %%
 def load_temporal_panel(start_date: object, end_date: object, columns: list[str]) -> pl.DataFrame:
     """Model-based features over the requested range, restricted to evaluated sessions.
 
     One filter over the union of the spans, not one frame per span concatenated. A
-    concat double-counts any date two spans cover, and the duplicate-key assertion
-    below would report that only after the fact. Under a single filter a duplicate
-    is impossible by construction, which puts that assertion back to saying the
-    thing it is meant to say: the artifact is unique on `(symbol, timestamp)`.
+    concat double-counts any date two spans cover, and would do it silently; under a
+    single filter the only duplication that can reach the result is the artifact's
+    own, which `collapse_fold_replication` resolves or refuses.
     """
     clipped = [
         (max(start_date, span_start), min(end_date, span_end))
@@ -262,9 +289,7 @@ def load_temporal_panel(start_date: object, end_date: object, columns: list[str]
         .collect()
         .sort(["timestamp", "symbol"])
     )
-    duplicate_keys = result.select(pl.struct("symbol", "timestamp").is_duplicated().any()).item()
-    assert duplicate_keys is False, "model_based.parquet is not unique on (symbol, timestamp)"
-    return result
+    return collapse_fold_replication(result)
 
 
 # %% [markdown]

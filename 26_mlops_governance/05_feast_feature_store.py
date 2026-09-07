@@ -200,6 +200,34 @@ print(f"Offline training window {TRAINING_START} to {TRAINING_END}; serving as o
 
 
 # %%
+def collapse_fold_replication(frame: pl.DataFrame) -> pl.DataFrame:
+    """One row per `(symbol, timestamp)`, refusing any collapse that would lose a value.
+
+    A no-op against a current artifact, which carries one row per stock-date. An
+    artifact written before stage 04 dropped the fold column carries one row per
+    `(key, fold)` holding the same value repeated, and CI still installs such a
+    fixture, so this notebook has to read both shapes rather than assume the newer.
+
+    The collapse is not taken on trust. `unique()` over every selected column must
+    reduce to exactly the distinct key count: that happens only when the replicated
+    rows agree everywhere, so a genuine per-fold difference raises here instead of
+    being silently reduced to whichever row sorted first.
+    """
+    keys = frame.select("symbol", "timestamp").n_unique()
+    if frame.height == keys:
+        return frame
+    distinct = frame.unique()
+    if distinct.height != keys:
+        raise ValueError(
+            f"model_based.parquet holds {frame.height:,} rows over {keys:,} distinct "
+            f"(symbol, timestamp) keys, and {distinct.height:,} of them differ on a feature "
+            "value. A fold-replicated artifact may repeat a row but not disagree with itself; "
+            "this one carries per-fold values, which this notebook cannot resolve to one."
+        )
+    return distinct.sort(["timestamp", "symbol"])
+
+
+# %%
 def load_training_events(start: str, end: str) -> pl.DataFrame:
     labels = (
         pl.scan_parquet(CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet")
@@ -227,10 +255,9 @@ def load_model_vintage(
     """Load the model features servable for each decision date in the range.
 
     One filter over the union of the evaluation windows, not one frame per window
-    concatenated. A concat double-counts any date two windows cover and the
-    duplicate-key assertion would catch that only afterwards; under a single filter
-    a duplicate cannot arise, so the assertion goes back to stating what it is for -
-    that the artifact is unique on `(symbol, timestamp)`.
+    concatenated. A concat double-counts any date two windows cover, and would do it
+    silently; under a single filter the only duplication that can reach the result is
+    the artifact's own, which `collapse_fold_replication` resolves or refuses.
     """
     start_date = pd.Timestamp(start).date()
     end_date = pd.Timestamp(end).date()
@@ -250,10 +277,7 @@ def load_model_vintage(
     if assets is not None:
         frame = frame.filter(pl.col("symbol").is_in(assets))
     result = frame.select(["symbol", "timestamp", *columns]).collect().sort(["timestamp", "symbol"])
-    assert not result.select(pl.struct("symbol", "timestamp").is_duplicated().any()).item(), (
-        "model_based.parquet is not unique on (symbol, timestamp)"
-    )
-    return result
+    return collapse_fold_replication(result)
 
 
 # %% [markdown]
