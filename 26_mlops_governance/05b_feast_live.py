@@ -111,6 +111,39 @@ feast_tmp = tempfile.mkdtemp(prefix="feast_ml4t_")
 feast_data_dir = Path(feast_tmp) / "data"
 feast_data_dir.mkdir()
 
+
+# %%
+def folds_by_coverage(path, windows: list[tuple]) -> list[object]:
+    """Pair each evaluation window with the artifact fold that covers it, by date.
+
+    Never by fold id. `ml4t-diagnostic` 0.1.4 reversed what a fold number means, and a
+    legacy artifact was written under the older convention, so pairing a stored id with
+    a freshly generated one joins each date against the wrong vintage - invisibly, since
+    both ids exist and the join succeeds. Ordering both sides by date is the one pairing
+    that does not depend on which convention wrote the file.
+    """
+    coverage = (
+        pl.scan_parquet(path)
+        .group_by("fold")
+        .agg(pl.max("timestamp").alias("last_covered"))
+        .collect()
+        .sort("last_covered")
+    )
+    stored = coverage["fold"].to_list()
+    if len(stored) != len(windows):
+        raise ValueError(
+            f"model_based.parquet carries {len(stored)} folds and this notebook derived "
+            f"{len(windows)} evaluation windows. They cannot be paired by date, so the "
+            "artifact does not describe the geometry this case study now declares; "
+            "regenerate it against the current stage 04."
+        )
+    order = sorted(range(len(windows)), key=lambda i: windows[i])
+    paired: list[object] = [None] * len(windows)
+    for position, window_index in enumerate(order):
+        paired[window_index] = stored[position]
+    return paired
+
+
 financial_src = CASE_DIR / "features" / "financial.parquet"
 model_src = CASE_DIR / "features" / "model_based.parquet"
 
@@ -136,11 +169,11 @@ model_windows = [*validation_spans, (holdout_start.date(), holdout_end.date())]
 # before that conversion writes one row per (key, fold) with genuinely different values
 # per fold, so there the fold is still how a date is addressed.
 FOLD_KEYED_ARTIFACT = "fold" in pl.scan_parquet(model_src).collect_schema().names()
-if FOLD_KEYED_ARTIFACT:
-    _holdout_fold = pl.scan_parquet(model_src).select(pl.max("fold")).collect().item()
-    model_folds = [split["fold"] for split in cv_splits] + [_holdout_fold]
-else:
-    model_folds = [None] * len(model_windows)
+model_folds = (
+    folds_by_coverage(model_src, model_windows)
+    if FOLD_KEYED_ARTIFACT
+    else [None] * len(model_windows)
+)
 # By date rather than by position: `ml4t-diagnostic` 0.1.4 reversed fold numbering, so
 # which end of the list holds the latest window is the thing that moved.
 last_validation_span = max(validation_spans)

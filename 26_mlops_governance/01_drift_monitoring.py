@@ -226,23 +226,48 @@ MODEL_BASED_PATH = CASE_DIR / "features" / "model_based.parquet"
 # exists, each date must still be read from the fold that evaluated it.
 FOLD_KEYED_ARTIFACT = "fold" in pl.scan_parquet(MODEL_BASED_PATH).collect_schema().names()
 
+
+# %%
+def folds_by_coverage(path, windows: list[tuple]) -> list[object]:
+    """Pair each evaluation window with the artifact fold that covers it, by date.
+
+    Never by fold id. `ml4t-diagnostic` 0.1.4 reversed what a fold number means, and a
+    legacy artifact was written under the older convention, so pairing a stored id with
+    a freshly generated one joins each date against the wrong vintage - invisibly, since
+    both ids exist and the join succeeds. Ordering both sides by date is the one pairing
+    that does not depend on which convention wrote the file.
+    """
+    coverage = (
+        pl.scan_parquet(path)
+        .group_by("fold")
+        .agg(pl.max("timestamp").alias("last_covered"))
+        .collect()
+        .sort("last_covered")
+    )
+    stored = coverage["fold"].to_list()
+    if len(stored) != len(windows):
+        raise ValueError(
+            f"model_based.parquet carries {len(stored)} folds and this notebook derived "
+            f"{len(windows)} evaluation windows. They cannot be paired by date, so the "
+            "artifact does not describe the geometry this case study now declares; "
+            "regenerate it against the current stage 04."
+        )
+    order = sorted(range(len(windows)), key=lambda i: windows[i])
+    paired: list[object] = [None] * len(windows)
+    for position, window_index in enumerate(order):
+        paired[window_index] = stored[position]
+    return paired
+
+
 VALIDATION_SPANS, HOLDOUT_SPAN = evaluation_spans()
 EVALUATION_SPANS = [*VALIDATION_SPANS, HOLDOUT_SPAN]
 # Fold ids for the legacy path only. The holdout rows carry the artifact's highest fold,
 # fitted on pre-holdout observations alone.
-if FOLD_KEYED_ARTIFACT:
-    _splits = generate_cv_splits(
-        pl.scan_parquet(CASE_DIR / "features" / "financial.parquet")
-        .select("timestamp")
-        .unique()
-        .collect(),
-        case_study_id=CASE_STUDY_ID,
-        label_buffer="1D",
-    )
-    _holdout_fold = pl.scan_parquet(MODEL_BASED_PATH).select(pl.max("fold")).collect().item()
-    EVALUATION_FOLDS = [s["fold"] for s in _splits] + [_holdout_fold]
-else:
-    EVALUATION_FOLDS = [None] * len(EVALUATION_SPANS)
+EVALUATION_FOLDS = (
+    folds_by_coverage(MODEL_BASED_PATH, EVALUATION_SPANS)
+    if FOLD_KEYED_ARTIFACT
+    else [None] * len(EVALUATION_SPANS)
+)
 # Chosen by date, not by position: `ml4t-diagnostic` 0.1.4 reversed fold numbering, so
 # which end of the list holds the latest window is exactly the thing that moved.
 LAST_VALIDATION_SPAN = max(VALIDATION_SPANS)
