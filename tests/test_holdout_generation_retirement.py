@@ -16,10 +16,16 @@ The three answers are governed by different rules and the middle one is the gap:
 
 * a refit of another configuration is a second holdout evaluation, and replacing it is a
   research decision - deleting the rows does not undo having observed them;
-* a run whose CV says it was not fitted for the holdout published nothing out of sample, so
-  removing it spends nothing and leaving it is the harm;
+* a run whose CV declares something other than the holdout may not be reported as a holdout
+  result, and cannot be deleted unattended either: `20_strategy_synthesis/holdout.py`'s
+  `generate_holdout` refits on a holdout fold and then registers the predictions under the
+  VALIDATION training identity, so this record covers both a validation-fitted model
+  published over the window and a real refit filed under the wrong identity;
 * a run that records no CV split establishes neither, and deleting on that would destroy a
   result nothing has shown to be wrong.
+
+Two of the three are therefore refusals rather than deletions. The gap was never that
+nothing deleted these rows - it was that nothing SAW them.
 """
 
 from __future__ import annotations
@@ -84,11 +90,13 @@ THIS_GENERATION = ("train_current", ("iteration", 500))
 def test_a_validation_fitted_row_is_found_rather_than_filtered_out(case_dir: Path) -> None:
     """The gap itself.
 
-    `pred_stale` publishes over the holdout window from a model fitted on the validation
-    folds. It is not a refit, so the `refitted` filter this replaces skipped it entirely -
-    it raised no refusal and it was never passed to the deletion. It sat beside the real
-    evaluation, readable and quotable, and whichever row a downstream resolver reached first
-    became the published number.
+    `pred_stale` declares a validation CV and publishes over the holdout window. The
+    `refitted` filter this replaces skipped it entirely - it raised no refusal and reached
+    nothing after one. It sat beside the real evaluation, readable and quotable, and
+    whichever row a downstream resolver reached first became the published number.
+
+    Being seen is the fix. What is then done with it is a refusal, because the same record
+    is what `generate_holdout` writes for a genuine refit.
     """
     _registry(
         case_dir / "run_log" / "registry.db",

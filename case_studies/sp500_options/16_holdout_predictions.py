@@ -257,17 +257,32 @@ if retire.unattributable:
         + ". Establish what produced them before registering another evaluation on the same "
         "window; this notebook will not delete a row it cannot show is not a holdout result."
     )
-# A validation-fitted model publishing over the holdout window is not a holdout evaluation,
-# so removing it spends nothing and leaving it is the harm - it is readable, quotable, and
-# indistinguishable downstream from a real one. Nothing owned this before: the filter here
-# was `row["refitted"]`, which made exactly these rows invisible to both the refusal and the
-# deletion that follows it.
+# A row whose training run declares a non-holdout CV may not be reported as a holdout
+# result, and it is also not something to delete unattended: `generate_holdout` refits on a
+# holdout fold and then registers the predictions under the VALIDATION training identity, so
+# this record covers both a validation-fitted model published over the window and a real
+# refit filed under the wrong identity. Nothing owned this before - the filter here was
+# `row["refitted"]`, which made exactly these rows invisible to the refusal and to
+# everything after it.
+if retire.not_out_of_sample and not REPLACE_HOLDOUT:
+    raise RuntimeError(
+        "the holdout window carries prediction sets whose training runs declare a CV split "
+        "other than the holdout: "
+        + ", ".join(
+            f"{row['prediction_hash']} ({row['config_name']}, training {row['training_hash']})"
+            for row in retire.not_out_of_sample
+        )
+        + ". Each is either a validation-fitted model published over the window, which is "
+        "not an out-of-sample result, or a refit registered under its validation training "
+        "identity, which `20_strategy_synthesis/holdout.py::generate_holdout` produces - and "
+        "the registry cannot tell those apart. Establish which, then set REPLACE_HOLDOUT="
+        "True to remove it, or leave it and resolve the identity instead."
+    )
 for row in retire.not_out_of_sample:
     print(
-        f"DELETING {row['prediction_hash']} ({row['config_name']}, training "
-        f"{row['training_hash']}): its training run declares a validation CV, so it "
-        "published over the holdout window without being refitted for it and is not an "
-        "out-of-sample evaluation"
+        f"REMOVING {row['prediction_hash']} ({row['config_name']}, training "
+        f"{row['training_hash']}): its training run declares a non-holdout CV, so it is not "
+        "reportable as a holdout evaluation under the identity it carries"
     )
     _delete_holdout_generation(CASE_DIR, row["prediction_hash"])
 superseded = list(retire.superseded)

@@ -197,15 +197,22 @@ def holdout_refit_status(training_spec_json: str | None) -> HoldoutRefitStatus:
     ``refit``
         The run's CV declares the holdout fold. This is a holdout evaluation.
     ``not_out_of_sample``
-        The run records a CV split and it is not the holdout. Whatever it published over the
-        holdout window, it is not an out-of-sample result, and a row asserting one is worse
-        than a missing row: it is readable, quotable, and indistinguishable downstream from a
-        real evaluation.
+        The run records a CV split and it is not the holdout. **This is a statement about
+        the record, not a finding about the fit.** `20_strategy_synthesis/holdout.py`'s
+        `generate_holdout` genuinely refits on a holdout fold and then registers the
+        predictions under the *validation* training identity, whose CV says ``validation`` -
+        so a row answering this way is either a validation-fitted model published over the
+        holdout window or a real refit filed under the wrong identity, and the registry
+        cannot tell them apart. Either way it may not be reported as a holdout result, and
+        either way only an operator can say which it is.
     ``unattributable``
-        The run records no CV split, so nothing can be concluded either way. Absence of
-        evidence is not evidence of the second case, and the holdout lineage is not a place
-        to assume - a caller that deletes on this answer deletes a result it cannot show is
-        wrong.
+        The run records no CV split, so nothing can be concluded either way.
+
+    Neither of the last two authorizes a deletion on its own, which is the correction to
+    make about this function: a non-holdout CV declaration does not establish that no
+    holdout evaluation occurred. What they authorize is a refusal that names the row, which
+    is what nothing did before - the notebooks filtered on the two-valued predicate and
+    these rows were invisible to the refusal and to everything after it.
     """
     if not training_spec_json:
         return "unattributable"
@@ -305,18 +312,25 @@ class HoldoutGenerationsToRetire:
     not_out_of_sample: tuple[dict[str, Any], ...]
     """Rows whose training run records a CV split that is not the holdout.
 
-    These are not holdout evaluations at all - a validation-fitted model publishing over
-    the holdout window, which is the defect `29f13165` fixed. Removing one spends nothing,
-    because nothing out-of-sample was ever measured; leaving it is the harm, since it reads
-    downstream exactly like a real evaluation and whichever row resolves first becomes the
-    published number.
+    Two different things produce this record and it cannot separate them. One is a
+    validation-fitted model publishing over the holdout window, the defect `29f13165`
+    fixed, which is not a holdout evaluation at all. The other is a genuine refit filed
+    under the validation training identity, which is what
+    `20_strategy_synthesis/holdout.py`'s `generate_holdout` does - it builds a holdout fold,
+    trains on it, and then registers the predictions against `candidate["training_hash"]`.
+
+    So this bucket is refused rather than deleted. A row in it may not be reported as a
+    holdout result, because on the first reading nothing out of sample was measured and on
+    the second the identity is wrong; but deleting it automatically would, on the second
+    reading, destroy a real evaluation on the strength of a record that is known to be
+    unreliable for exactly this distinction.
     """
 
     unattributable: tuple[dict[str, Any], ...]
     """Rows whose training run records no CV split, so neither can be concluded.
 
-    Refused rather than deleted. A missing specification is not evidence that a run was not
-    refitted, and deleting on it would destroy a result that cannot be shown to be wrong.
+    Refused, and with no way past: a missing specification is not evidence that a run was
+    not refitted, and there is nothing recorded to adjudicate from.
     """
 
 
