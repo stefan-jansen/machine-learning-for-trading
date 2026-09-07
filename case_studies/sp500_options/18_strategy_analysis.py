@@ -113,7 +113,7 @@ from case_studies.utils.strategy_analysis import (
     gate2_holdout_diff_not_excludes_zero_negatively,
     gate_passes,
     plot_equity_drawdown,
-    resolve_canonical_rank1_lineage,
+    resolve_solvent_carrier,
     write_strategy_assessment,
 )
 from utils.paths import get_case_study_dir, get_output_dir
@@ -203,7 +203,10 @@ def _fmt(val: float | None, fmt: str = ".4f") -> str:
 # therefore which admitted candidate does. A membership check on the winner passes while the
 # answer has already been moved by a row that was never eligible.
 _candidate_hashes = frozenset(CandidateSet.one(_selection_study, name=STRATEGY_CANDIDATES).members)
-_lineage = resolve_canonical_rank1_lineage(CASE_STUDY, admitted=_candidate_hashes)
+# `resolve_solvent_carrier` rather than the bare lineage resolver: it applies the same
+# selection and additionally refuses a carrier whose equity reached zero, whose Sharpe is
+# arithmetic on a balance that no longer exists.
+_lineage = resolve_solvent_carrier(CASE_STUDY, admitted=_candidate_hashes)
 TOP_HASH = _lineage["val_backtest_hash"]
 TOP_PHASH = _lineage["val_prediction_hash"]
 HO_HASH = _lineage["holdout_backtest_hash"]

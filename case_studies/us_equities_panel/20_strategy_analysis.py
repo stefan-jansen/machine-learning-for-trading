@@ -56,7 +56,10 @@ from case_studies.utils.registry import (
     training_hash_from_spec,
 )
 from case_studies.utils.registry.specs import project_training_identity
-from case_studies.utils.strategy_analysis import select_holdout_self_backtest
+from case_studies.utils.strategy_analysis import (
+    resolve_solvent_carrier,
+    select_holdout_self_backtest,
+)
 from utils.style import COLORS, show_with_alt
 
 # %% tags=["parameters"]
@@ -171,10 +174,14 @@ for candidate_hash in validation_set.members:
         raise ValueError(f"{candidate_hash} does not use canonical validation prices")
 
 # %% [markdown]
-# Apply the deterministic validation rule only after every member has passed the protocol checks.
+# Apply the selection rule only after every member has passed the protocol checks. The
+# candidate set says which backtests may be chosen from; `resolve_solvent_carrier` says which
+# one is chosen, and it is handed the set rather than the whole registry. It is the same
+# resolver the holdout notebooks use.
 
 # %% tags=["results"]
-selected_validation = validation_set.best_validation_sharpe()
+carrier = resolve_solvent_carrier(CASE_STUDY_ID, admitted=frozenset(validation_set.members))
+selected_validation = study.results.open(carrier["val_backtest_hash"])
 if not isinstance(selected_validation, BacktestResult) or not selected_validation.complete:
     raise ValueError("selected validation backtest is incomplete")
 if selected_validation.execution_tier != "canonical":
@@ -258,8 +265,17 @@ if not required_selection_metrics <= set(selection_evidence.columns) or any(
     raise ValueError("validation set contains a non-finite selection metric")
 
 selection_evidence = selection_evidence.sort(["sharpe", "backtest_hash"], descending=[True, False])
+if selected_validation.hash not in selection_evidence["backtest_hash"].to_list():
+    raise ValueError("the selected carrier is not among the candidates this table describes")
+# The table is ordered by the stored Sharpe, which is descriptive. Where its first row is not
+# the carrier, the two orderings disagree and saying so is the point of showing the table: the
+# stored column compares configurations over whatever span each one priced, and the selection
+# compares them over the span they share.
 if selection_evidence["backtest_hash"][0] != selected_validation.hash:
-    raise ValueError("displayed selection evidence disagrees with the candidate-set rule")
+    print(
+        f"stored-Sharpe order leads with {selection_evidence['backtest_hash'][0]}; the carrier "
+        f"is {selected_validation.hash}, selected over the sessions every candidate prices"
+    )
 selection_evidence
 
 # %% [markdown]

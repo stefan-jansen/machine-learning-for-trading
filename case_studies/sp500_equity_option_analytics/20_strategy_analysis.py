@@ -79,6 +79,7 @@ from case_studies.utils.registry import (
     resolve_best_backtest_runs,
 )
 from case_studies.utils.registry.specs import training_hash_from_spec
+from case_studies.utils.strategy_analysis import resolve_solvent_carrier
 from case_studies.utils.sweep_config import (
     get_cost_grid_bps,
     get_cost_grid_half_spread_usd,
@@ -176,15 +177,25 @@ FIELD = open_selection_field(
     resolve_best_backtest_runs=resolve_best_backtest_runs,
 )
 CANDIDATES = FIELD.candidate_set
-SELECTED = FIELD.selected
 FIELD_HASHES = list(FIELD.members)
+# The field says which backtests may be chosen from; the resolver says which one is chosen.
+# `SelectionField` answers both through `best_validation_sharpe`, which ranks the stored
+# Sharpe column with a hash tie-break and nothing else - no re-ranking on the timestamps the
+# candidates share, no solvency refusal, no label or universe restriction. On this registry
+# the two name the same backtest and report different numbers for it: 2.6087 stored against
+# 2.6329 over the sessions every candidate prices, because the field holds a conformal
+# allocator that sits out its warm-up and books it as returns of exactly zero. The resolver
+# is what `18_holdout_predictions` and `19_holdout_backtest` run, so it is what this page
+# has to report.
+CARRIER = resolve_solvent_carrier(CASE_STUDY, admitted=frozenset(FIELD_HASHES))
+SELECTED = _study.results.open(CARRIER["val_backtest_hash"])
 FIELD_NAME = f"frozen candidate set {CANDIDATES.hash}" if CANDIDATES is not None else "live ranking"
 SELECTION_SOURCE = FIELD.source
 
 # The label the stages after the selection run under is the winner's, not the case study's
 # primary. An injected LABEL is a request to run a different one, and it has to agree with what
 # was selected or the analysis would be keyed to a contract the selection does not name.
-LABEL = FIELD.label
+LABEL = CARRIER["label"]
 if REQUESTED_LABEL and REQUESTED_LABEL != LABEL:
     raise RuntimeError(
         f"LABEL={REQUESTED_LABEL!r} was requested but the selection carried forward is "
