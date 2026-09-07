@@ -1276,14 +1276,16 @@ def warn_if_the_panel_does_not_bound_the_universe(
     before it hashes - which is a notebook change. Until then the parameter is
     inert here and this says so at the moment it happens.
 
-    Said twice, on purpose. Every notebook that reaches this line installs a
-    blanket ``warnings.filterwarnings("ignore")`` at import. Twenty-two of the
-    notebooks that call ``run_backtest`` or ``run_plumbing_test`` do, across all
-    six case studies that run a backtest - from
-    ``us_firm_characteristics/11_backtest.py:62`` to
-    ``sp500_equity_option_analytics/17_costs.py:50`` - and 77 do corpus-wide,
-    measured 2026-09-07. So a diagnostic that only warns is a diagnostic no reader
-    of the executed notebook ever sees.
+    Said twice, on purpose. 22 of the 35 notebooks that call ``run_backtest`` or
+    ``run_plumbing_test`` install a blanket ``warnings.filterwarnings("ignore")``
+    at import, measured 2026-09-07 - every backtest, portfolio, risk and cost
+    stage in ``etfs``, ``nasdaq100_microstructure``,
+    ``sp500_equity_option_analytics`` and ``us_firm_characteristics``, plus four
+    holdout backtests. The 13 that do not are ``crypto_perps_funding``,
+    ``fx_pairs`` and ``us_equities_panel``. Corpus-wide 77 case-study notebooks
+    install it. So a diagnostic that only warns is one that four of the seven case
+    studies' readers never see, and which of the seven is not something this
+    function can know.
     The ``warnings`` call is what a library caller and the tests read; the print is
     what survives the filter and lands in the rendered cell. It is emitted once per
     (case study, label, panel width, prediction width) because a sweep calls
