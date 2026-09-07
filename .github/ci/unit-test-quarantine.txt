@@ -78,6 +78,9 @@ tests/test_latent_factors_identity.py
 tests/test_latent_factors_no_leak.py
 tests/test_latent_input_identity.py
 tests/test_lightning_announcement_silence.py
+# `test_locked_sequence_key_alignment` imports `align_keys_to_published` from
+# `case_studies/utils/deep_learning.py`, which imports torch at module scope.
+tests/test_locked_sequence_key_alignment.py
 tests/test_family_hook_dispatch.py
 tests/test_model_analysis_selection.py
 tests/test_model_source_identity_versions.py
