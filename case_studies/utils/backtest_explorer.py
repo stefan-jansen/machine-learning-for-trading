@@ -68,6 +68,18 @@ _BEST_SCHEMA: dict[str, pl.DataType] = {
     "ic_n_days": pl.Float64,
 }
 
+# Canonical schema for BacktestExplorer.specs() output. Declared rather than inferred:
+# polars types an empty column as Null, and `.str.json_path_match` on a Null series raises
+# SchemaError instead of returning an empty result. A notebook whose registry holds no rows
+# for the stage it asks about would then fail on the dtype, several cells after the fact,
+# reporting a schema problem for what is actually an empty sweep
+# (ml4t/agent-workspace#1075).
+_SPEC_SCHEMA: dict[str, pl.DataType] = {
+    "backtest_hash": pl.Utf8,
+    "stage": pl.Utf8,
+    "spec_json": pl.Utf8,
+}
+
 # ---------------------------------------------------------------------------
 # Result containers
 # ---------------------------------------------------------------------------
@@ -200,6 +212,33 @@ class BacktestExplorer:
         if df.is_empty():
             return {}
         return dict(zip(df["stage"].to_list(), df["n"].to_list(), strict=False))
+
+    def specs(self, stages: str | Iterable[str]) -> pl.DataFrame:
+        """Every backtest hash and its spec JSON for ``stages``, schema-stable when empty.
+
+        ``best()`` reports the metrics and the model that produced a run, not the strategy
+        dimensions a sweep varies - the entry scheme's ``top_k``, the allocator. Those live
+        in the spec, so a notebook that varies them reads them back here and joins on
+        ``backtest_hash`` rather than opening ``registry.db`` itself.
+
+        The columns of ``_SPEC_SCHEMA`` are returned whether or not any row matched, so a
+        caller's ``json_path_match`` sees String and yields an empty frame rather than
+        raising on a Null column.
+        """
+        wanted = [stages] if isinstance(stages, str) else list(stages)
+        if not wanted:
+            return pl.DataFrame(schema=_SPEC_SCHEMA)
+        placeholders = ", ".join("?" * len(wanted))
+        df = self._query(
+            "SELECT backtest_hash, stage, spec_json FROM backtest_runs "
+            f"WHERE stage IN ({placeholders})",
+            tuple(wanted),
+        )
+        if df.is_empty():
+            return pl.DataFrame(schema=_SPEC_SCHEMA)
+        return df.select(
+            [pl.col(name).cast(dtype).alias(name) for name, dtype in _SPEC_SCHEMA.items()]
+        )
 
     # -----------------------------------------------------------------
     # best: top backtests at a stage

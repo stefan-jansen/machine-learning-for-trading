@@ -3324,9 +3324,18 @@ case_studies/us_firm_characteristics/10_model_analysis:
   timeout: 300
 case_studies/us_firm_characteristics/11_backtest:
   parameters:
-    MAX_SYMBOLS: 5
+    # The sweep's entry schemes come from backtest.sweep.top_k_grid, which for every
+    # us_firm_characteristics label is [5, 10, 20, 50]. `get_entry_schemes_for` drops a
+    # scheme when k >= n_assets (that is the whole universe, i.e. the equal-weight
+    # benchmark) and, long-short, when 2k > n_assets, because the two legs must be
+    # disjoint. So the smallest declared scheme needs ten symbols, and at MAX_SYMBOLS: 5
+    # every member of the grid was filtered out: the sweep ran a 19 x 0 grid, registered
+    # nothing, and section 3 read an empty registry (ml4t/agent-workspace#1075). Twelve
+    # admits ew_top5 and matches 12_portfolio_management, so the two notebooks sweep the
+    # same universe.
+    MAX_SYMBOLS: 12
     TOP_K: 2
-  timeout: 120
+  timeout: 300
 case_studies/us_firm_characteristics/12_portfolio_management:
   parameters:
     # top_k_grid starts at 5, so a cap of 5 empties the grid and the sweep registers
