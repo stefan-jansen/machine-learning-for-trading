@@ -1255,6 +1255,9 @@ jobs:
             tests/test_holdout_force_regenerates.py \
             tests/test_tabular_dl_identity.py \
             tests/test_tabular_dl_runtime.py \
+            tests/test_latent_convergence_guard.py \
+            tests/test_fold_seed_coupling.py \
+            tests/test_model_catalog_columns.py \
             tests/test_training_identity_migration.py \
             -q --tb=short --timeout=900 --timeout-method=thread -rf
 
