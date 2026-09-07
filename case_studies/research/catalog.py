@@ -106,6 +106,11 @@ _BACKTEST_METRIC_COLUMNS = (
     # Sharpe clears zero.
     "sharpe_ci95_lo",
     "sharpe_ci95_hi",
+    # Whether the path ended, and where. Without these a catalog reader can only
+    # infer a bankrupt run from `max_drawdown`, and cannot infer it at all once
+    # the engine floors the drawdown at -1.0 (ml4t/agent-workspace#920).
+    "ruin",
+    "ruin_period",
 )
 BACKTEST_RESERVED_COLUMNS: dict[str, Any] = {
     "catalog_version": pl.Int64,

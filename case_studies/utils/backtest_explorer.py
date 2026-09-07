@@ -158,6 +158,20 @@ class BacktestExplorer:
         finally:
             db.close()
 
+    def _has_metric_column(self, column: str) -> bool:
+        """Whether ``backtest_metrics`` carries this column in this registry.
+
+        A registry written before a metric existed has no column for it, and
+        selecting one that is not there is a hard SQLite error rather than a NULL.
+        """
+        db = sqlite3.connect(str(self._db_path))
+        try:
+            return column in {
+                row[1] for row in db.execute("PRAGMA table_info(backtest_metrics)").fetchall()
+            }
+        finally:
+            db.close()
+
     def _backtest_dir(self, b_hash: str) -> Path:
         return self.case_dir / "run_log" / "backtest" / b_hash
 
@@ -582,11 +596,22 @@ class BacktestExplorer:
         Returns
         -------
         pl.DataFrame
-            Columns: allocator, n, avg_sharpe, best_sharpe, avg_max_dd
+            Columns: allocator, n, ruined, avg_sharpe, best_sharpe, avg_max_dd.
+            ``n`` counts the runs with a rankable Sharpe and every statistic is
+            taken over those; ``ruined`` counts the runs the engine stopped at zero
+            equity, which carry no Sharpe to rank.
         """
         if not stages:
             return pl.DataFrame()
         placeholders = ", ".join("?" for _ in stages)
+        # A run the engine stopped at ruin carries a null Sharpe by design
+        # (ml4t/agent-workspace#920). Dropping those in SQL, as this query used to,
+        # would take an allocator that went bankrupt in every run off the table
+        # entirely and report the survivors as the whole population. The rows are
+        # kept and counted under `ruined`; the Sharpe and drawdown statistics are
+        # taken over the solvent runs only, so `avg_max_dd` is a mean of drawdowns
+        # that were actually measured.
+        ruin_select = "bm.ruin" if self._has_metric_column("ruin") else "NULL AS ruin"
         coverage_params: tuple[str, ...] = ()
         coverage_sql = full_coverage_prediction_sql("p", "t", "pm")
         if prediction_hashes:
@@ -603,7 +628,8 @@ class BacktestExplorer:
                 t.family,
                 t.config_name,
                 bm.sharpe,
-                bm.max_drawdown
+                bm.max_drawdown,
+                {ruin_select}
             FROM backtest_runs b
             JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
             JOIN training_runs t ON p.training_hash = t.training_hash
@@ -613,7 +639,6 @@ class BacktestExplorer:
               AND p.split != 'holdout'
               {excluded_family_sql(self.case_study, "t.family")[0]}
               {coverage_sql}
-              AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
         """
         params: tuple = (
@@ -657,15 +682,21 @@ class BacktestExplorer:
         if df.is_empty():
             return df
 
+        # A run whose drawdown passed -100% crossed zero equity, so it is bankrupt
+        # whether or not the engine that produced it recorded `ruin` - registries
+        # written before that column carry the evidence only in the drawdown.
+        ruined = (pl.col("ruin") == 1.0) | (pl.col("max_drawdown") <= -1.0)
+        rankable = pl.col("sharpe").is_not_null() & ~ruined.fill_null(False)
         return (
             df.group_by("allocator")
             .agg(
-                n=pl.len(),
-                avg_sharpe=pl.col("sharpe").mean(),
-                best_sharpe=pl.col("sharpe").max(),
-                avg_max_dd=pl.col("max_drawdown").mean(),
+                n=rankable.sum(),
+                ruined=ruined.fill_null(False).sum(),
+                avg_sharpe=pl.col("sharpe").filter(rankable).mean(),
+                best_sharpe=pl.col("sharpe").filter(rankable).max(),
+                avg_max_dd=pl.col("max_drawdown").filter(rankable).mean(),
             )
-            .sort("avg_sharpe", descending=True)
+            .sort("avg_sharpe", descending=True, nulls_last=True)
         )
 
     # -----------------------------------------------------------------

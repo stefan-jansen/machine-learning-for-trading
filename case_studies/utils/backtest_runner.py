@@ -226,6 +226,108 @@ def calendar_periods_per_year(calendar: str) -> int:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Ruin: an account that loses its capital stops there
+# ---------------------------------------------------------------------------
+
+# What a bankrupt path reports, and why it reports that.
+#
+# A long-short book can lose more than it holds in a single period: the long leg
+# stops at -100%, but the short leg's loss is unbounded, and a squeeze on a
+# concentrated short costs more than the account holds. Compounding straight
+# through zero is not a larger version of that loss, it is a different quantity.
+# Once equity is negative, `(1 + r)` inverts the sign of every later period, so a
+# gain on the underlying reduces the balance and the series after that point is
+# not a return series. Measured on the `us_firm_characteristics` registry,
+# 2026-09-07: 46 registered runs hold a period return below -100%, and the worst
+# of them reports sharpe 1.547 and a positive cagr against a total return of
+# -202.3 (ml4t/agent-workspace#920).
+#
+# The engine models no creditor, so the largest loss it can express is the
+# capital: the period that would take equity through zero is truncated to
+# exactly -100%, and every later period is 0.0, because there is nothing left to
+# trade. That is the "floor equity at zero" option of the three the issue offers.
+# The other two need something the case studies do not declare - a margin rule
+# needs a maintenance requirement and a borrow rate, and halting the path without
+# flooring it leaves a shorter series that still compares against full-length
+# ones as though the difference were performance.
+#
+# Descriptive statistics of the stopped path are then true statements:
+# `total_return`, `max_drawdown` and `cagr` all read -1.0, and a mean drawdown
+# over a sweep is back inside [-1, 0] rather than the -8.15 a sweep of
+# twenty-four with five insolvent members reported. The risk-adjusted ratios are
+# not statements about the stopped path at all. A ratio of a mean to a dispersion
+# describes a process that continues; this one ended. So they are registered as
+# NULL - `BacktestExplorer.best()` already reads `sharpe IS NOT NULL` as "not
+# rankable", and SQL `AVG` and `ORDER BY ... DESC` both keep NULLs out of the way
+# on their own. Nothing downstream has to know about ruin to stop ranking it.
+#
+# `ruin` and `ruin_period` are registered as metrics, never as identity fields:
+# they say what happened in a run, not what was asked for.
+RUIN_UNRANKABLE_METRICS: tuple[str, ...] = (
+    "sharpe",
+    "sortino",
+    "calmar",
+    "omega",
+    "stability",
+    "tail_ratio",
+)
+
+
+def first_ruin_index(returns) -> int | None:
+    """Index of the first period whose loss takes cumulative equity to zero.
+
+    ``None`` when the path stays solvent. A period return below -100% is not by
+    itself ruin - prior gains can absorb it - so the test is on the equity curve
+    rather than on any single return.
+    """
+    arr = np.asarray(returns, dtype=float)
+    if arr.size == 0:
+        return None
+    equity = np.cumprod(1.0 + arr)
+    # Non-finite equity is a broken series rather than a bankrupt one, and
+    # silently reporting it as ruin would hide the breakage. It is excluded here
+    # and left to `_safe` downstream.
+    hit = np.flatnonzero(np.isfinite(equity) & (equity <= 0.0))
+    return int(hit[0]) if hit.size else None
+
+
+def apply_ruin_stop(returns) -> tuple[np.ndarray, int | None]:
+    """Stop a return series at the period that wipes the account out.
+
+    Returns ``(series, ruin_index)``. The ruin period is truncated to exactly
+    -1.0 and every later period is set to 0.0. A solvent series is returned
+    unchanged with ``None``. Idempotent: a stopped series reports the same index
+    and is not changed again, so a caller that applies this to both the return
+    frame and the array it computes metrics from cannot make the two disagree.
+    """
+    arr = np.asarray(returns, dtype=float)
+    index = first_ruin_index(arr)
+    if index is None:
+        return arr, None
+    stopped = arr.copy()
+    stopped[index] = -1.0
+    stopped[index + 1 :] = 0.0
+    return stopped, index
+
+
+def stop_returns_at_ruin(
+    daily_returns: pl.DataFrame, column: str = "daily_return"
+) -> tuple[pl.DataFrame, int | None]:
+    """`apply_ruin_stop` over a ``[timestamp, daily_return]`` frame.
+
+    The engine paths also emit an equity curve, a trade log and a fill log. Those
+    are the broker's raw record of what it did, including the trade that took the
+    account out, and they are deliberately left alone: the stop is a statement
+    about what the account had left to compound, not a claim that the fills did
+    not happen.
+    """
+    stopped, index = apply_ruin_stop(daily_returns[column].to_numpy())
+    if index is None:
+        return daily_returns, None
+    return daily_returns.with_columns(pl.Series(column, stopped)), index
+
+
 def compute_portfolio_metrics(
     returns: np.ndarray,
     *,
@@ -236,7 +338,7 @@ def compute_portfolio_metrics(
     uncertainty_n_boot: int = 1000,
     uncertainty_seed: int = 0,
     trim_leading_zeros: bool = False,
-) -> dict[str, float]:
+) -> dict[str, float | None]:
     """Compute portfolio metrics using ml4t-diagnostic.
 
     Replaces hand-rolled Sharpe/drawdown/etc. with the library's
@@ -267,9 +369,12 @@ def compute_portfolio_metrics(
 
     Returns
     -------
-    dict[str, float]
+    dict[str, float | None]
         Metric name → value. Keys match the existing backtest_metrics schema,
-        plus uncertainty columns when ``uncertainty=True``.
+        plus uncertainty columns when ``uncertainty=True``, plus ``ruin`` and
+        ``ruin_period``. A path stopped at ruin carries ``None`` for every
+        ranking metric and every uncertainty column - see
+        ``RUIN_UNRANKABLE_METRICS``.
     """
     from ml4t.diagnostic.evaluation import PortfolioAnalysis
 
@@ -277,6 +382,11 @@ def compute_portfolio_metrics(
         nonzero = np.flatnonzero(np.asarray(returns) != 0.0)
         if len(nonzero) > 0:
             returns = returns[nonzero[0] :]
+
+    # Stop the path at the period that takes equity through zero, before anything
+    # is measured off it. See RUIN_UNRANKABLE_METRICS above for what a stopped
+    # path reports and why.
+    returns, ruin_period = apply_ruin_stop(returns)
 
     if len(returns) < 2:
         return {
@@ -296,6 +406,8 @@ def compute_portfolio_metrics(
             "kurtosis": 0.0,
             "tail_ratio": 0.0,
             "n_periods": int(len(returns)),
+            "ruin": 0.0 if ruin_period is None else 1.0,
+            "ruin_period": None if ruin_period is None else float(ruin_period),
         }
 
     analysis = PortfolioAnalysis(returns=returns, periods_per_year=periods_per_year)
@@ -332,7 +444,19 @@ def compute_portfolio_metrics(
         "kurtosis": _safe(pm.kurtosis),
         "tail_ratio": _safe(pm.tail_ratio),
         "n_periods": int(len(returns)),
+        "ruin": 0.0 if ruin_period is None else 1.0,
+        "ruin_period": None if ruin_period is None else float(ruin_period),
     }
+
+    if ruin_period is not None:
+        # Every ratio that ranks one path against another, and every confidence
+        # band drawn around one, is undefined for a path that ended. NULL, not a
+        # number a selection step would sort on.
+        from case_studies.utils.registry.store import _BACKTEST_UNCERTAINTY_COLUMNS
+
+        out.update(dict.fromkeys(RUIN_UNRANKABLE_METRICS, None))
+        out.update(dict.fromkeys(_BACKTEST_UNCERTAINTY_COLUMNS, None))
+        return out
 
     if uncertainty and len(returns) >= 4:
         try:
@@ -1594,6 +1718,9 @@ def _run_engine(
             (pl.col("timestamp").dt.date() >= window[0])
             & (pl.col("timestamp").dt.date() <= window[1])
         )
+    # The persisted return path stops where the account does, so the parquet, the
+    # overall metrics and the per-fold metrics all describe the same series.
+    daily_df, _ = stop_returns_at_ruin(daily_df)
     returns_arr = daily_df["daily_return"].to_numpy()
 
     ppy = overall_periods_per_year(case_study, calendar, daily_df)
@@ -1859,6 +1986,9 @@ def _run_htm_daily_mtm(
     # HTM uses daily MTM on NYSE sessions → periods_per_year = 252. Operates on
     # the FINAL daily_returns (post-slice, post-risk-overlay) so the persisted
     # parquet and the registered metrics are derived from the same series.
+    # The persisted return path stops where the account does, so the parquet, the
+    # overall metrics and the per-fold metrics all describe the same series.
+    daily_returns, _ = stop_returns_at_ruin(daily_returns)
     returns_arr = daily_returns["daily_return"].to_numpy()
     metrics.update(
         compute_portfolio_metrics(
@@ -2101,6 +2231,10 @@ def _run_vectorized(
         pl.col("timestamp"),
         pl.col("net_ret").alias("daily_return"),
     )
+
+    # The persisted return path stops where the account does, so the parquet, the
+    # overall metrics and the per-fold metrics all describe the same series.
+    daily_returns, _ = stop_returns_at_ruin(daily_returns)
 
     # Portfolio metrics via ml4t-diagnostic
     returns_arr = daily_returns["daily_return"].to_numpy()

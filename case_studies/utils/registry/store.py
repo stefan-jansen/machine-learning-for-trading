@@ -597,10 +597,16 @@ _BACKTEST_UNCERTAINTY_COLUMNS = (
     "bootstrap_n",
 )
 
+# Written on every run by `compute_portfolio_metrics`: whether the path lost its
+# capital, and the index of the period where it did (ml4t/agent-workspace#920).
+_BACKTEST_RUIN_COLUMNS = ("ruin", "ruin_period")
+
 _DECLARED_METRIC_COLUMNS: dict[str, tuple[str, ...]] = {
-    "backtest_metrics": _BACKTEST_UNCERTAINTY_COLUMNS,
+    "backtest_metrics": _BACKTEST_UNCERTAINTY_COLUMNS + _BACKTEST_RUIN_COLUMNS,
     # n_periods rides along: the fold table declares n_days, and the metric pass writes both.
-    "backtest_fold_metrics": _BACKTEST_UNCERTAINTY_COLUMNS + ("n_periods",),
+    "backtest_fold_metrics": _BACKTEST_UNCERTAINTY_COLUMNS
+    + _BACKTEST_RUIN_COLUMNS
+    + ("n_periods",),
     "prediction_metrics": tuple(
         f"{metric}_{suffix}"
         for metric in ("ic", "auc")
