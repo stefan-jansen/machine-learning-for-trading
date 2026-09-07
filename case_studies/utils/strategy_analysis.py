@@ -31,7 +31,10 @@ import numpy as np
 import polars as pl
 
 from case_studies.utils.carrier_pins import CARRIER_PINS
-from case_studies.utils.notebook_contracts import degenerate_prediction_sql
+from case_studies.utils.notebook_contracts import (
+    degenerate_prediction_sql,
+    full_coverage_prediction_sql,
+)
 from case_studies.utils.uncertainty import STAGE_SEQUENCE
 
 # ---------------------------------------------------------------------------
@@ -46,8 +49,8 @@ from case_studies.utils.uncertainty import STAGE_SEQUENCE
 # forward returns as daily returns, inflating Sharpes (e.g. fwd_ret_10d
 # allocation Sharpe ~6.5) to non-credible levels. ret_to_expiry runs through
 # the HTM daily-MTM cohort path and is the only label with an honest cost
-# model for this CS. Mirrors the canonical definition in
-# 20_strategy_synthesis/holdout.py::LABEL_RESTRICTIONS - keep these in sync.
+# model for this CS. This is the only definition: ``20_strategy_synthesis/holdout.py``
+# imports it from here rather than keeping a copy in sync by comment.
 LABEL_RESTRICTIONS: dict[str, frozenset[str]] = {
     "sp500_options": frozenset({"ret_to_expiry"}),
 }
@@ -61,8 +64,9 @@ LABEL_RESTRICTIONS: dict[str, frozenset[str]] = {
 # Ch18 htm_cost_cascade comparison, never as the deployed carrier). Without this
 # pin, full-universe allocation backtests registered by the standard sweep
 # (e.g. the 2026-05-31 L1-grid rollout) leak into rank-1 by raw Sharpe and
-# orphan the liquid-lineage holdout. Mirrored in 20_strategy_synthesis/holdout.py
-# (select_best_models) - keep in sync.
+# orphan the liquid-lineage holdout. This is the only definition; ``holdout.py``
+# imports it, and ``select_best_models`` applies it by going through
+# :func:`selectable_validation_candidates` rather than by repeating the filter.
 UNIVERSE_RESTRICTIONS: dict[str, str] = {
     "sp500_options": "liquid",
 }
@@ -530,6 +534,249 @@ def select_holdout_self_backtest(
     ).backtest_hash
 
 
+SELECTION_STAGES: tuple[str, ...] = ("signal", "allocation", "risk_overlay")
+"""The pool a configuration is selected from.
+
+``reference/CASE_STUDY_PIPELINE.md`` section 5: the selected configuration is the
+highest validation backtest Sharpe across these three stages, exactly.
+``cost_sensitivity`` is a perturbation analysis rather than an alternative strategy and
+is excluded; the ``benchmark`` family is excluded separately, below.
+"""
+
+
+def selectable_validation_candidates(
+    case_study: str,
+    *,
+    admitted: frozenset[str] | None = None,
+    labels: Sequence[str] | None = None,
+    families: Sequence[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Every validation backtest this case study may select from, best Sharpe first.
+
+    One implementation, because holdout selection had two. ``holdout.select_best_models``
+    built its own pool out of ``BacktestExplorer.best`` per stage and this function's
+    caller built one in SQL, and the two were held together by a comment. They applied
+    different eligibility filters - membership on the prediction side there, a
+    retired-set exclusion on both sides here - and different orderings, so they could
+    name different configurations for the single holdout use. Measured on ``fx_pairs``
+    2026-09-07: ``deep_learning/tcn`` on ``fwd_ret_21d`` has two backtests tied at Sharpe
+    0.2639142245820113, and ``select_best_models`` answered ``9402978117e9`` while this
+    path answered ``56070f34dff1``. Same model, two strategy specifications, and the
+    holdout replays the specification exactly.
+
+    Eligibility, in the order it is applied:
+
+    * the stage pool (:data:`SELECTION_STAGES`) on ``split='validation'``, non-null
+      Sharpe, ``family != 'benchmark'``, and no degenerate prediction set;
+    * ``LABEL_RESTRICTIONS`` and ``UNIVERSE_RESTRICTIONS``, or a ``CARRIER_PINS`` entry
+      where the owner has recorded one, which supersedes the ranking entirely;
+    * ``families`` and ``labels``, the caller's own narrowing - ``labels`` replaces the
+      declared restriction rather than adding to it, so a preview that narrowed its pool
+      resolves inside the pool it narrowed to;
+    * **publication**: an identity is selectable only where the population its producer
+      publishes still lists it, asked per member kind and on both sides of the join.
+
+    Publication is the membership question, not the exclusion one, and the two are not
+    the same set. A prediction that no population ever listed was retired by nobody, so
+    an exclusion set admits it and a membership set does not - which is how an
+    experimental result its case study never published reaches a ranking.
+    :func:`published_members_at` already subtracts what is retired, so membership is
+    never the weaker test; where a registry declares no population of a kind it answers
+    ``None`` and that kind places no constraint, which is the state of a fixture or of a
+    registry written before the mechanism existed.
+
+    ``admitted``, when given, is applied here rather than checked against the winner
+    afterwards - see :func:`resolve_canonical_rank1_lineage`, whose common-support
+    re-ranking is decided by the whole field and not only by the row that wins.
+
+    Each candidate is a dict with ``backtest_hash``, ``prediction_hash``, ``stage``,
+    ``training_hash``, ``family``, ``config_name``, ``label``, ``sharpe`` and
+    ``spec_json``. Ordering is Sharpe descending, then the signal-only specification
+    ahead of one carrying an allocation block, then ``backtest_hash`` ascending - a total
+    order, so two callers ranking the same registry cannot disagree.
+    """
+    import sqlite3
+
+    from case_studies.research.population import published_members_at
+    from utils.paths import get_case_study_dir
+
+    case_dir = get_case_study_dir(case_study)
+    db_path = case_dir / "run_log" / "registry.db"
+    label_filter = tuple(labels) if labels is not None else LABEL_RESTRICTIONS.get(case_study)
+    universe_pin = UNIVERSE_RESTRICTIONS.get(case_study)
+    carrier_pin = CARRIER_PINS.get(case_study)
+    columns = (
+        "backtest_hash",
+        "prediction_hash",
+        "stage",
+        "training_hash",
+        "family",
+        "config_name",
+        "label",
+        "sharpe",
+        "spec_json",
+    )
+
+    base_select = """
+        SELECT b.backtest_hash, b.prediction_hash, b.stage,
+               t.training_hash, t.family, t.config_name, t.label,
+               bm.sharpe, b.spec_json
+        FROM backtest_runs b
+        JOIN backtest_metrics bm ON bm.backtest_hash = b.backtest_hash
+        JOIN prediction_sets p ON p.prediction_hash = b.prediction_hash
+        JOIN training_runs t ON t.training_hash = p.training_hash
+        JOIN prediction_metrics pm ON pm.prediction_hash = p.prediction_hash
+    """
+    # A Sharpe computed over fewer decision dates than its peers describes a different
+    # sample, so it is not comparable with theirs and must not be ranked beside them
+    # (`reference/CASE_STUDY_PIPELINE.md` section 10). `select_best_models` applied this
+    # through `BacktestExplorer.best` and this resolver did not, which is one more way the
+    # two pools could differ, and the collapsed path takes the stronger of the two rather
+    # than the one that happened to be shorter. Measured across all nine production
+    # registries 2026-09-07: it removes 18 of etfs' 2,038 ranked rows, none anywhere else,
+    # and moves no rank-1.
+    #
+    # The explorer's other bar, `num_trades > 0`, is not carried over. It is not part of
+    # the selection rule - a flat period is an observation of zero, not an abstention - and
+    # it removes nothing from any of the nine.
+    coverage_bar = full_coverage_prediction_sql("p", "t", "pm")
+
+    if carrier_pin:
+        # Documented a-priori carrier pin: resolve directly to the pinned
+        # validation backtest rather than the max-Sharpe cross-stage rank-1.
+        # The owner-controlled pin is a validation-time choice. Current-lineage
+        # carrier decisions are deferred until all model producers finish.
+        val_sql = base_select + (
+            " WHERE b.backtest_hash LIKE ?"
+            " AND p.split = 'validation'"
+            " AND bm.sharpe IS NOT NULL"
+            + degenerate_prediction_sql("p.prediction_hash")
+            + coverage_bar
+            + " ORDER BY bm.sharpe DESC, b.backtest_hash ASC"
+        )
+        params: tuple = (carrier_pin + "%",)
+    else:
+        stages = ",".join("?" for _ in SELECTION_STAGES)
+        val_sql = base_select + (
+            f" WHERE b.stage IN ({stages})"
+            " AND p.split = 'validation'"
+            " AND bm.sharpe IS NOT NULL"
+            " AND t.family != 'benchmark'"
+            + degenerate_prediction_sql("p.prediction_hash")
+            + coverage_bar
+        )
+        params = tuple(SELECTION_STAGES)
+        if label_filter:
+            placeholders = ",".join("?" for _ in label_filter)
+            val_sql += f" AND t.label IN ({placeholders})"
+            params += tuple(label_filter)
+        if families:
+            placeholders = ",".join("?" for _ in families)
+            val_sql += f" AND t.family IN ({placeholders})"
+            params += tuple(families)
+        if universe_pin:
+            val_sql += " AND json_extract(b.spec_json, '$.strategy.signal.universe_filter') = ?"
+            params += (universe_pin,)
+        # Tie-break: among rows with identical Sharpe (e.g. the equal-weight baseline
+        # equal-weight selection and its economically identical equal_weight
+        # allocation-stage re-run, which share a prediction), prefer the
+        # signal-only spec (no allocation block). That is the spec the holdout
+        # is replayed from, so the canonical lineage stays poolable with its
+        # holdout. Final ``backtest_hash`` key makes the order deterministic.
+        val_sql += (
+            " ORDER BY bm.sharpe DESC,"
+            " (json_extract(b.spec_json, '$.strategy.allocation') IS NULL) DESC,"
+            " b.backtest_hash ASC"
+        )
+
+    db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = db.execute(val_sql, params).fetchall()
+    finally:
+        db.close()
+    candidates = [dict(zip(columns, row, strict=True)) for row in rows]
+
+    # A superseded generation is still complete, still `current` under its schema version,
+    # and still ranks. `identity_status` says the registry understands the row; it says
+    # nothing about whether the row is the one its producer still publishes, which is
+    # recorded in the population lineage instead. Without this the carrier can be resolved
+    # from a retired generation - measured on fx_pairs, where a rebuilt allocation stage
+    # left the retired conformal-v2 backtest ranking first and every downstream notebook
+    # refused it as unreproducible rather than selecting the generation in force.
+    #
+    # Both sides of the join, because a retired generation reaches the ranking through
+    # either. The backtest side is the obvious one. The prediction side is the one that
+    # survived unnoticed: a refit that changes no numbers - a relabel, a re-key, a rerun
+    # that reproduces its inputs - publishes value-for-value identical predictions under a
+    # new identity, so the old and new rows carry the SAME Sharpe to the last digit. On an
+    # exact tie the ORDER BY returns whichever row it likes, and "whichever it likes" was
+    # observed returning the retired one. Measured on sp500_equity_option_analytics: three
+    # candidates at sharpe 1.965796084396144, and the resolver took a training run from a
+    # superseded generation, against which a full 17-point cost surface was then registered.
+    #
+    # That is the shape worth remembering: the tie is produced BY CONSTRUCTION whenever a
+    # refit changes nothing, so every lane that has ever superseded a population is exposed,
+    # and the defect is invisible wherever no tie exists and silently wrong wherever one
+    # does. Which is why it survived.
+    #
+    # The question is asked per NAME rather than globally, for both kinds. The naive
+    # "retired by someone and listed by nobody in force" reads as equivalent and is not:
+    # one identity is legitimately listed under several names, and a narrowed or preview
+    # run keeps its own frozen snapshot in force forever.
+    ranked = len(candidates)
+    for key, member_kind in (("backtest_hash", "backtest"), ("prediction_hash", "prediction")):
+        published = published_members_at(case_dir, member_kind=member_kind)
+        if published is None:
+            continue
+        if not published:
+            raise RuntimeError(
+                f"{case_study} declares {member_kind} populations and publishes no "
+                f"{member_kind} identities, so there is nothing it may select. Re-run the "
+                "stage that publishes them rather than ranking over an empty population."
+            )
+        candidates = [row for row in candidates if row[key] in published]
+
+    if admitted is not None:
+        admitted_before = len(candidates)
+        candidates = [row for row in candidates if row["backtest_hash"] in admitted]
+        if admitted_before and not candidates:
+            raise RuntimeError(
+                f"None of the {admitted_before} live validation backtests for {case_study} "
+                f"is among the {len(admitted)} the frozen candidate set admits. The set and "
+                "the registry describe different sweeps; re-freeze the set rather than "
+                "selecting outside it."
+            )
+    if ranked and not candidates:
+        raise RuntimeError(
+            f"Every one of the {ranked} ranked validation backtests for {case_study} belongs "
+            "to a superseded generation or to none the case study publishes, on the backtest "
+            "side or the prediction side. The stages have been rebuilt and nothing was "
+            "re-registered under a name still in force, so there is no configuration this "
+            "case study currently publishes. Re-run the validation stages rather than "
+            "selecting a retired one."
+        )
+    if not candidates:
+        # Name the restriction that emptied the set. A pin is the one whose
+        # failure is silent and total: it is a backtest-hash prefix, a hash
+        # covers the whole strategy spec, and a rebuilt sweep produces new
+        # ones - so a pin entered against an earlier registry matches nothing
+        # and this is the first cell of the notebook that touches it. Reporting
+        # only the label filter sent the reader to LABEL_RESTRICTIONS, which
+        # was not the cause.
+        if carrier_pin:
+            raise RuntimeError(
+                f"Carrier pin {carrier_pin!r} for {case_study} matches no validation "
+                f"backtest in {db_path}. A pin is a backtest-hash prefix and every "
+                "hash changes when the sweep is rebuilt, so a pin outlives at most "
+                "one rebuild. Re-derive it from the current registry, or remove the "
+                "entry from CARRIER_PINS to select by validation Sharpe."
+            )
+        raise RuntimeError(
+            f"No validation rank-1 candidate for {case_study} (label_filter={label_filter})"
+        )
+    return candidates
+
+
 def resolve_canonical_rank1_lineage(
     case_study: str,
     *,
@@ -576,144 +823,12 @@ def resolve_canonical_rank1_lineage(
     # run narrows its pool with PREVIEW_LABELS and the resolver knew nothing about that, so
     # it could resolve a carrier on a label the pool excludes - the carrier is then not in
     # the pool, and the notebook reports it missing. The default is the declared
-    # restriction, which is what every canonical run wants.
-    label_filter = tuple(labels) if labels is not None else LABEL_RESTRICTIONS.get(case_study)
-    universe_pin = UNIVERSE_RESTRICTIONS.get(case_study)
-    carrier_pin = CARRIER_PINS.get(case_study)
+    # restriction, which is what every canonical run wants. The pool itself is
+    # `selectable_validation_candidates`, which `holdout.select_best_models` also ranks,
+    # so the two cannot name different carriers for the single holdout use.
+    candidates = selectable_validation_candidates(case_study, admitted=admitted, labels=labels)
 
-    base_select = """
-        SELECT b.backtest_hash, b.prediction_hash, b.stage,
-               t.training_hash, t.family, t.config_name, t.label,
-               bm.sharpe, b.spec_json
-        FROM backtest_runs b
-        JOIN backtest_metrics bm ON bm.backtest_hash = b.backtest_hash
-        JOIN prediction_sets p ON p.prediction_hash = b.prediction_hash
-        JOIN training_runs t ON t.training_hash = p.training_hash
-    """
-
-    if carrier_pin:
-        # Documented a-priori carrier pin: resolve directly to the pinned
-        # validation backtest rather than the max-Sharpe cross-stage rank-1.
-        # The owner-controlled pin is a validation-time choice. Current-lineage
-        # carrier decisions are deferred until all model producers finish.
-        val_sql = base_select + (
-            " WHERE b.backtest_hash LIKE ?"
-            " AND p.split = 'validation'"
-            " AND bm.sharpe IS NOT NULL"
-            + degenerate_prediction_sql("p.prediction_hash")
-            + " ORDER BY bm.sharpe DESC LIMIT 1"
-        )
-        params: tuple = (carrier_pin + "%",)
-    else:
-        val_sql = base_select + (
-            " WHERE b.stage IN ('signal','allocation','risk_overlay','holdout')"
-            " AND p.split = 'validation'"
-            " AND bm.sharpe IS NOT NULL"
-            " AND t.family != 'benchmark'" + degenerate_prediction_sql("p.prediction_hash")
-        )
-        params = ()
-        if label_filter:
-            placeholders = ",".join("?" for _ in label_filter)
-            val_sql += f" AND t.label IN ({placeholders})"
-            params = tuple(label_filter)
-        if universe_pin:
-            val_sql += " AND json_extract(b.spec_json, '$.strategy.signal.universe_filter') = ?"
-            params = params + (universe_pin,)
-        # Tie-break: among rows with identical Sharpe (e.g. the equal-weight baseline
-        # equal-weight selection and its economically identical equal_weight
-        # allocation-stage re-run, which share a prediction), prefer the
-        # signal-only spec (no allocation block). That is the spec the holdout
-        # is replayed from, so the canonical lineage stays poolable with its
-        # holdout. Final ``backtest_hash`` key makes the order deterministic.
-        val_sql += (
-            " ORDER BY bm.sharpe DESC,"
-            " (json_extract(b.spec_json, '$.strategy.allocation') IS NULL) DESC,"
-            " b.backtest_hash ASC"
-        )
-
-    db = sqlite3.connect(str(db_path))
-    try:
-        candidates = db.execute(val_sql, params).fetchall()
-        # A superseded generation is still complete, still `current` under its schema version,
-        # and still ranks. `identity_status` says the registry understands the row; it says
-        # nothing about whether the row is the one its producer still publishes, which is
-        # recorded in the population lineage instead. Without this the carrier can be resolved
-        # from a retired generation - measured on fx_pairs, where a rebuilt allocation stage
-        # left the retired conformal-v2 backtest ranking first and every downstream notebook
-        # refused it as unreproducible rather than selecting the generation in force.
-        #
-        # `superseded_members_at` asks the lineage per NAME, which is the whole point: the same
-        # identity is legitimately listed under several names, so "retired by someone" is not
-        # the same question and would drop members a narrowed run still publishes.
-        from case_studies.research.population import superseded_members_at
-
-        # Both sides of the join, because a retired generation reaches the ranking through
-        # either. The backtest side is the obvious one. The prediction side is the one that
-        # survived unnoticed: a refit that changes no numbers - a relabel, a re-key, a rerun
-        # that reproduces its inputs - publishes value-for-value identical predictions under a
-        # new identity, so the old and new rows carry the SAME Sharpe to the last digit. On an
-        # exact tie the ORDER BY returns whichever row it likes, and "whichever it likes" was
-        # observed returning the retired one. Measured on sp500_equity_option_analytics: three
-        # candidates at sharpe 1.965796084396144, and the resolver took a training run from a
-        # superseded generation, against which a full 17-point cost surface was then registered.
-        #
-        # That is the shape worth remembering: the tie is produced BY CONSTRUCTION whenever a
-        # refit changes nothing, so every lane that has ever superseded a population is exposed,
-        # and the defect is invisible wherever no tie exists and silently wrong wherever one
-        # does. Which is why it survived.
-        #
-        # `superseded_members_at` is asked per NAME rather than globally, for both kinds. The
-        # naive "retired by someone and listed by nobody in force" reads as equivalent and is
-        # not: one identity is legitimately listed under several names, and a narrowed or
-        # preview run keeps its own frozen snapshot in force forever.
-        case_dir = get_case_study_dir(case_study)
-        retired = superseded_members_at(case_dir, member_kind="backtest")
-        retired_predictions = superseded_members_at(case_dir, member_kind="prediction")
-        ranked = len(candidates)
-        candidates = [
-            row for row in candidates if row[0] not in retired and row[1] not in retired_predictions
-        ]
-        if admitted is not None:
-            admitted_before = len(candidates)
-            candidates = [row for row in candidates if row[0] in admitted]
-            if admitted_before and not candidates:
-                raise RuntimeError(
-                    f"None of the {admitted_before} live validation backtests for {case_study} "
-                    f"is among the {len(admitted)} the frozen candidate set admits. The set and "
-                    "the registry describe different sweeps; re-freeze the set rather than "
-                    "selecting outside it."
-                )
-        if ranked and not candidates:
-            raise RuntimeError(
-                f"Every one of the {ranked} ranked validation backtests for {case_study} belongs "
-                "to a superseded generation, on the backtest side or the prediction side. The stages have been rebuilt and nothing was "
-                "re-registered under a name still in force, so there is no configuration this "
-                "case study currently publishes. Re-run the validation stages rather than "
-                "selecting a retired one."
-            )
-        if not candidates:
-            # Name the restriction that emptied the set. A pin is the one whose
-            # failure is silent and total: it is a backtest-hash prefix, a hash
-            # covers the whole strategy spec, and a rebuilt sweep produces new
-            # ones - so a pin entered against an earlier registry matches nothing
-            # and this is the first cell of the notebook that touches it. Reporting
-            # only the label filter sent the reader to LABEL_RESTRICTIONS, which
-            # was not the cause.
-            if carrier_pin:
-                raise RuntimeError(
-                    f"Carrier pin {carrier_pin!r} for {case_study} matches no validation "
-                    f"backtest in {db_path}. A pin is a backtest-hash prefix and every "
-                    "hash changes when the sweep is rebuilt, so a pin outlives at most "
-                    "one rebuild. Re-derive it from the current registry, or remove the "
-                    "entry from CARRIER_PINS to select by validation Sharpe."
-                )
-            raise RuntimeError(
-                f"No validation rank-1 candidate for {case_study} (label_filter={label_filter})"
-            )
-    finally:
-        db.close()
-
-    def _is_conformal(row: tuple[Any, ...]) -> bool:
+    def _is_conformal(row: dict[str, Any]) -> bool:
         # Every conformal calibration abstains, and the version decides only for how long.
         # `walk_forward_v2` sits out the earliest fold entirely, because it calibrates from
         # whole earlier folds and the earliest has none. `walk_forward_v3` calibrates from the
@@ -729,7 +844,7 @@ def resolve_canonical_rank1_lineage(
         # that also held a v2 one, which removes a live result from the comparison rather than
         # aligning it. The version is now read by neither: the property that matters is that a
         # conformal candidate is present, and it is asked directly.
-        strategy = json.loads(row[8]).get("strategy", {})
+        strategy = json.loads(row["spec_json"]).get("strategy", {})
         allocation = strategy.get("allocation") or {}
         return allocation.get("method") == "conformal_weighted"
 
@@ -739,25 +854,36 @@ def resolve_canonical_rank1_lineage(
 
         common_ranking = rank_backtests_on_common_support(
             case_study,
-            [row[0] for row in candidates],
+            [row["backtest_hash"] for row in candidates],
             periods_per_year=int(periods_per_year_from_setup(case_study)),
         )
         rank_rows = {row["backtest_hash"]: row for row in common_ranking.iter_rows(named=True)}
-        val = next(row for row in candidates if row[0] == common_ranking["backtest_hash"][0])
+        val = next(
+            row for row in candidates if row["backtest_hash"] == common_ranking["backtest_hash"][0]
+        )
         val_sharpe = float(common_ranking["sharpe"][0])
         comparison_n_periods: int | None = int(common_ranking["n_periods"][0])
         comparison_start = common_ranking["start"][0]
         comparison_end = common_ranking["end"][0]
-        if any(rank_rows[row[0]]["n_periods"] != comparison_n_periods for row in candidates):
+        if any(
+            rank_rows[row["backtest_hash"]]["n_periods"] != comparison_n_periods
+            for row in candidates
+        ):
             raise RuntimeError("Common-support ranking produced unequal n_periods")
     else:
         val = candidates[0]
-        val_sharpe = float(val[7])
+        val_sharpe = float(val["sharpe"])
         comparison_n_periods = None
         comparison_start = None
         comparison_end = None
 
-    (val_bh, val_ph, val_stage, train_h, family, config_name, label, _, _) = val
+    val_bh = val["backtest_hash"]
+    val_ph = val["prediction_hash"]
+    val_stage = val["stage"]
+    train_h = val["training_hash"]
+    family = val["family"]
+    config_name = val["config_name"]
+    label = val["label"]
 
     # Match holdout by strategy spec to the val rank-1 backtest, so an
     # experimental side-channel allocator (e.g., conformal_weighted) on

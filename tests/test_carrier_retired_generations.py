@@ -49,6 +49,16 @@ def _registry(path: Path, rows: list[tuple[str, str, str, float]]) -> None:
                 backtest_hash TEXT PRIMARY KEY, sharpe REAL, max_drawdown REAL
             );
             CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL);
+            CREATE TABLE prediction_metrics (
+                prediction_hash TEXT PRIMARY KEY, ic_mean REAL, ic_n_days REAL
+            );
+            CREATE TABLE official_populations (
+                population_hash TEXT PRIMARY KEY, name TEXT, member_kind TEXT,
+                supersedes_hash TEXT
+            );
+            CREATE TABLE official_population_members (
+                population_hash TEXT, member_hash TEXT
+            );
             """
         )
         for prediction_hash in sorted({prediction for _, prediction, _, _ in rows}):
@@ -62,6 +72,7 @@ def _registry(path: Path, rows: list[tuple[str, str, str, float]]) -> None:
                 (prediction_hash, training_hash),
             )
             db.execute("INSERT INTO fold_metrics VALUES (?, 0.02)", (prediction_hash,))
+            db.execute("INSERT INTO prediction_metrics VALUES (?, 0.02, 250)", (prediction_hash,))
         for backtest_hash, prediction_hash, stage, sharpe in rows:
             db.execute(
                 "INSERT INTO backtest_runs VALUES (?, ?, ?, ?)",
@@ -78,17 +89,46 @@ def case_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path / FIXTURE_CASE_STUDY
 
 
-def _retire(monkeypatch: pytest.MonkeyPatch, *, backtests=(), predictions=()) -> None:
-    """Record what the population lineage reports as superseded, per member kind."""
+def _supersede(case_dir: Path, *, backtests=None, predictions=None) -> None:
+    """Write the lineage that retires some members and publishes the rest.
 
-    def _superseded(_case_dir, member_kind="backtest"):
-        return frozenset(backtests if member_kind == "backtest" else predictions)
-
-    monkeypatch.setattr("case_studies.research.population.superseded_members_at", _superseded)
+    Two generations per member kind: the first lists what is retired, the second
+    supersedes it and lists what the case study now publishes. Written into the registry
+    rather than patched into the reader, because the resolver asks the *membership*
+    question - which identities does a population in force still list - and only a real
+    lineage answers it. A registry with no populations declares no membership at all, and
+    there the ranking stands as it is.
+    """
+    with sqlite3.connect(str(case_dir / "run_log" / "registry.db")) as db:
+        for member_kind, generations in (
+            ("backtest", backtests),
+            ("prediction", predictions),
+        ):
+            if generations is None:
+                continue
+            retired, published = generations
+            db.execute(
+                "INSERT INTO official_populations VALUES (?, ?, ?, NULL)",
+                (f"{member_kind}_gen1", f"fixture-{member_kind}s", member_kind),
+            )
+            db.execute(
+                "INSERT INTO official_populations VALUES (?, ?, ?, ?)",
+                (
+                    f"{member_kind}_gen2",
+                    f"fixture-{member_kind}s",
+                    member_kind,
+                    f"{member_kind}_gen1",
+                ),
+            )
+            db.executemany(
+                "INSERT INTO official_population_members VALUES (?, ?)",
+                [(f"{member_kind}_gen1", member) for member in sorted(retired)]
+                + [(f"{member_kind}_gen2", member) for member in sorted(published)],
+            )
 
 
 def test_a_retired_backtest_loses_to_the_live_row_it_outranks(
-    case_dir: Path, monkeypatch: pytest.MonkeyPatch
+    case_dir: Path,
 ) -> None:
     """Rank alone would take ``retired_run``; the lineage is what demotes it."""
     _registry(
@@ -98,7 +138,7 @@ def test_a_retired_backtest_loses_to_the_live_row_it_outranks(
             ("live_run", "pred_new", "allocation", 1.10),
         ],
     )
-    _retire(monkeypatch, backtests={"retired_run"})
+    _supersede(case_dir, backtests=({"retired_run"}, {"live_run"}))
 
     assert (
         strategy_analysis.resolve_canonical_rank1_lineage(FIXTURE_CASE_STUDY)["val_backtest_hash"]
@@ -107,7 +147,7 @@ def test_a_retired_backtest_loses_to_the_live_row_it_outranks(
 
 
 def test_a_retired_prediction_demotes_the_backtests_that_read_it(
-    case_dir: Path, monkeypatch: pytest.MonkeyPatch
+    case_dir: Path,
 ) -> None:
     """The side that hides.
 
@@ -123,7 +163,7 @@ def test_a_retired_prediction_demotes_the_backtests_that_read_it(
             ("b_live_run", "pred_new", "allocation", 1.75),
         ],
     )
-    _retire(monkeypatch, predictions={"pred_old"})
+    _supersede(case_dir, predictions=({"pred_old"}, {"pred_new"}))
 
     resolved = strategy_analysis.resolve_canonical_rank1_lineage(FIXTURE_CASE_STUDY)
     assert resolved["val_backtest_hash"] == "b_live_run"
@@ -131,7 +171,7 @@ def test_a_retired_prediction_demotes_the_backtests_that_read_it(
 
 
 def test_an_all_retired_field_refuses_rather_than_returning_a_retired_carrier(
-    case_dir: Path, monkeypatch: pytest.MonkeyPatch
+    case_dir: Path,
 ) -> None:
     """The failure mode that would not announce itself.
 
@@ -147,13 +187,16 @@ def test_an_all_retired_field_refuses_rather_than_returning_a_retired_carrier(
             ("retired_signal", "pred_old", "signal", 1.10),
         ],
     )
-    _retire(monkeypatch, backtests={"retired_alloc", "retired_signal"})
+    _supersede(
+        case_dir,
+        backtests=({"retired_alloc", "retired_signal"}, {"a_backtest_from_another_label"}),
+    )
 
     with pytest.raises(RuntimeError, match="superseded generation"):
         strategy_analysis.resolve_canonical_rank1_lineage(FIXTURE_CASE_STUDY)
 
 
-def test_an_empty_lineage_retires_nothing(case_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_empty_lineage_retires_nothing(case_dir: Path) -> None:
     """A case study that has never superseded a population selects on rank alone."""
     _registry(
         case_dir / "run_log" / "registry.db",
@@ -162,7 +205,6 @@ def test_an_empty_lineage_retires_nothing(case_dir: Path, monkeypatch: pytest.Mo
             ("second_run", "pred_only", "signal", 1.10),
         ],
     )
-    _retire(monkeypatch)
 
     assert (
         strategy_analysis.resolve_canonical_rank1_lineage(FIXTURE_CASE_STUDY)["val_backtest_hash"]
