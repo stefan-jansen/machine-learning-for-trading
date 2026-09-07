@@ -1,6 +1,7 @@
 checkpoint_interval: 50
 huber_alpha_scale: 0.5
 max_iterations: 500
+model_class: lightgbm.Booster
 params:
   objective: huber
   seed: 42

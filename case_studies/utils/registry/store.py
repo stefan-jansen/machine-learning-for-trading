@@ -167,6 +167,12 @@ CREATE TABLE IF NOT EXISTS causal_runs (
     refutation_p     REAL,
     refutation_n_successful INTEGER,
     refutation_placebo_json TEXT,
+    -- The share of treatment rows block permutation could not move, because they sit in
+    -- segments too short to hold two blocks. The runner warns that it must be read
+    -- alongside the p-value - the bias runs toward p = 1 - and the warning fires only on
+    -- a fresh fit, so without the column a reader who regenerates the result from the
+    -- registry gets the p-value and no way to see whether to trust it.
+    refutation_frozen_fraction REAL,
     spec_json        TEXT,
     notebook         TEXT,
     started_at       TEXT,
@@ -218,12 +224,25 @@ CREATE TABLE IF NOT EXISTS cohort_metrics (
     label         TEXT NOT NULL,
     family        TEXT,
     leader_hash   TEXT NOT NULL REFERENCES backtest_runs(backtest_hash),
+    -- The trials the correction was computed over, which is the K a notebook prints
+    -- beside a deflated Sharpe and so has to be the K that deflated it.
     k_variants                  INTEGER NOT NULL,
+    -- The configurations the cohort holds. Larger than k_variants exactly when a
+    -- regularisation grid ran past the point where the penalty stops binding and
+    -- several configurations produced one series; see uncertainty._distinct_trials.
+    k_variants_submitted        INTEGER,
     -- sha256 over the cohort's sorted member backtest hashes. A count cannot say
     -- which variants a stored correction was computed over: swap one retired member
     -- for one live member and k_variants is unchanged, so a reader comparing counts
     -- accepts a correction from a different cohort than the one it asked for.
     member_digest               TEXT,
+    -- The members that digest covers, as a sorted JSON array. The digest is one-way, so
+    -- with it alone verifying a row means rebuilding the member list from the registry
+    -- and re-hashing it - and that rebuild replays every selection rule in force when
+    -- the row was written. When one has moved since, a real membership disagreement is
+    -- indistinguishable from a rule change. Stored, the comparison is against a fact and
+    -- names the members that differ; see uncertainty.cohort_membership_diff.
+    members_json                TEXT,
     periods_per_year            REAL NOT NULL,
     computed_at                 TEXT NOT NULL,
     n_trials_effective_mp       REAL,
@@ -350,6 +369,19 @@ CREATE TABLE IF NOT EXISTS decision_artifacts (
     artifact_digest     TEXT NOT NULL,
     canonical           INTEGER NOT NULL,
     created_at          TEXT NOT NULL
+);
+
+-- One declared edge per superseded input artifact: "the file registered runs pin as
+-- `supersedes_sha256` was deliberately replaced by `sha256`". A training run fits on
+-- whatever is on disk, so without a declaration a regenerated artifact silently mixes two
+-- vintages into one population (ml4t/agent-workspace#987). `register_training_run` refuses
+-- an undeclared change and `declare_artifact_supersession` is how an author declares one.
+CREATE TABLE IF NOT EXISTS artifact_supersessions (
+    artifact_name      TEXT NOT NULL,
+    sha256             TEXT NOT NULL,
+    supersedes_sha256  TEXT NOT NULL,
+    declared_at        TEXT NOT NULL,
+    PRIMARY KEY (artifact_name, supersedes_sha256)
 );
 
 """
@@ -747,6 +779,16 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
         cohort_cols = {row[1] for row in db.execute("PRAGMA table_info(cohort_metrics)").fetchall()}
         if "member_digest" not in cohort_cols:
             db.execute("ALTER TABLE cohort_metrics ADD COLUMN member_digest TEXT")
+        # The configurations the cohort holds, which is not the same as the trials the
+        # correction was computed over: a regularisation grid that saturates submits
+        # several and produces one series. `k_variants` is the trial count, because that
+        # is the K printed beside a deflated Sharpe; this is what was submitted, and the
+        # two together say by how much a grid ran past saturation. See
+        # `uncertainty._distinct_trials`.
+        if "k_variants_submitted" not in cohort_cols:
+            db.execute("ALTER TABLE cohort_metrics ADD COLUMN k_variants_submitted INTEGER")
+        if "members_json" not in cohort_cols:
+            db.execute("ALTER TABLE cohort_metrics ADD COLUMN members_json TEXT")
 
     if "prediction_coverage" in tables:
         coverage_cols = {
@@ -793,6 +835,16 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
         db, "candidate_sets", "supersedes_hash"
     ):
         db.execute("ALTER TABLE candidate_sets ADD COLUMN supersedes_hash TEXT")
+
+    # The share of treatment rows the block permutation could not move. It is computed on
+    # every fit and warned about, and the warning only fires when the fit executes, so a
+    # cache-hit re-run reported the p-value with no way to see whether it was biased toward
+    # 1. Additive and outside the causal computation specification, so it moves no causal
+    # hash and invalidates no registered row.
+    if "causal_runs" in tables and not _table_has_column(
+        db, "causal_runs", "refutation_frozen_fraction"
+    ):
+        db.execute("ALTER TABLE causal_runs ADD COLUMN refutation_frozen_fraction REAL")
 
     # The placebo draws behind refutation_p. Only the scalars were stored, so the
     # permutation-distribution figure every causal notebook draws had no source in the

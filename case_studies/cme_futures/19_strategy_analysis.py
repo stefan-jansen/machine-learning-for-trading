@@ -60,6 +60,7 @@ from case_studies.utils.strategy_analysis import (
     resolve_solvent_carrier,
     select_holdout_self_backtest,
 )
+from case_studies.utils.uncertainty import ENTIRE_REGISTRY
 from utils.style import COLORS
 
 # %% tags=["parameters"]
@@ -173,8 +174,15 @@ cohort_counts = compute_and_register(
     prediction_hashes=pool.get_column("prediction_hash").unique().to_list(),
     verbose=False,
 )
+# The cohort call above is scoped to the reported pool and this one is not: the pairs are
+# selected from every registered prediction set. Stated rather than defaulted; narrowing
+# it changes published numbers and is ml4t/agent-workspace#1006.
 paired_rows = populate_paired_metrics(
-    "cme_futures", carrier=carrier, replace_all=True, verbose=False
+    "cme_futures",
+    carrier=carrier,
+    replace_all=True,
+    prediction_hashes=ENTIRE_REGISTRY,
+    verbose=False,
 )
 print(f"cohort_metrics: {sum(cohort_counts[k] for k in ('family', 'stagelabel', 'label'))} rows")
 print(f"backtest_paired_metrics: {sum(1 for r in paired_rows if 'skip' not in r)} pairs")

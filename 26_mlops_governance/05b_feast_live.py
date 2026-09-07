@@ -42,9 +42,16 @@
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
 PRIMARY_LABEL = "fwd_ret_1d"
-TRAINING_START = "2015-10-01"
-TRAINING_END = "2015-12-30"
-AS_OF_DATE = "2016-01-04"
+# Left unset so the offline window and the serving date are derived from the fixture's
+# own fold geometry. The literals that stood here - 2015-10-01 / 2015-12-30 / 2016-01-04
+# - were not independent choices: TRAINING_END equalled the then-final validation fold's
+# `val_end` to the day. #819 restored this case study to 16 folds and moved every
+# boundary. Set any of them to a date string to pin it by hand.
+TRAINING_START = None
+TRAINING_END = None
+AS_OF_DATE = None
+# How much of the final validation window the offline join draws on, when derived.
+TRAINING_LOOKBACK_DAYS = 91
 N_SAMPLE_ASSETS = 8
 
 # %%
@@ -104,11 +111,95 @@ feast_tmp = tempfile.mkdtemp(prefix="feast_ml4t_")
 feast_data_dir = Path(feast_tmp) / "data"
 feast_data_dir.mkdir()
 
+
+# %%
+def folds_by_coverage(path, windows: list[tuple]) -> list[object]:
+    """Pair each evaluation window with the artifact fold that covers it, by date.
+
+    Never by fold id. `ml4t-diagnostic` 0.1.4 reversed what a fold number means, and a
+    legacy artifact was written under the older convention, so pairing a stored id with
+    a freshly generated one joins each date against the wrong vintage - invisibly, since
+    both ids exist and the join succeeds. Ordering both sides by date is the one pairing
+    that does not depend on which convention wrote the file.
+    """
+    coverage = (
+        pl.scan_parquet(path)
+        .group_by("fold")
+        .agg(pl.max("timestamp").alias("last_covered"))
+        .collect()
+        .sort("last_covered")
+    )
+    stored = coverage["fold"].to_list()
+    if len(stored) != len(windows):
+        raise ValueError(
+            f"model_based.parquet carries {len(stored)} folds and this notebook derived "
+            f"{len(windows)} evaluation windows. They cannot be paired by date, so the "
+            "artifact does not describe the geometry this case study now declares; "
+            "regenerate it against the current stage 04."
+        )
+    order = sorted(range(len(windows)), key=lambda i: windows[i])
+    paired: list[object] = [None] * len(windows)
+    for position, window_index in enumerate(order):
+        paired[window_index] = stored[position]
+    return paired
+
+
 financial_src = CASE_DIR / "features" / "financial.parquet"
 model_src = CASE_DIR / "features" / "model_based.parquet"
 
 financial_feast_path = feast_data_dir / "financial.parquet"
 model_feast_path = feast_data_dir / "model_based.parquet"
+
+setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
+holdout_start = pd.Timestamp(setup["evaluation"]["holdout_start"])
+holdout_end = pd.Timestamp(setup["evaluation"]["holdout_end"])
+timeline = pl.scan_parquet(financial_src).select("timestamp").unique().collect()
+cv_splits = generate_cv_splits(timeline, case_study_id=CASE_STUDY_ID, label_buffer="1D")
+# `model_based.parquet` carries one row per stock-date and no `fold` column: stage 04
+# fits on a rolling refit schedule, so a date's value is the same whichever fold reads
+# it. The windows still decide the date range served - a feature value is only servable
+# for a session the model was evaluated on.
+validation_spans = [
+    (pd.Timestamp(split["val_start"]).date(), pd.Timestamp(split["val_end"]).date())
+    for split in cv_splits
+]
+model_windows = [*validation_spans, (holdout_start.date(), holdout_end.date())]
+# Whether a window also names a fold depends on which artifact vintage is on disk, and
+# both are in circulation. Stage 04 now writes one row per stock-date. A fixture built
+# before that conversion writes one row per (key, fold) with genuinely different values
+# per fold, so there the fold is still how a date is addressed.
+FOLD_KEYED_ARTIFACT = "fold" in pl.scan_parquet(model_src).collect_schema().names()
+model_folds = (
+    folds_by_coverage(model_src, model_windows)
+    if FOLD_KEYED_ARTIFACT
+    else [None] * len(model_windows)
+)
+# By date rather than by position: `ml4t-diagnostic` 0.1.4 reversed fold numbering, so
+# which end of the list holds the latest window is the thing that moved.
+last_validation_span = max(validation_spans)
+
+# Derived from the geometry rather than pinned, for the reason in the parameters cell.
+if TRAINING_END is None:
+    TRAINING_END = str(last_validation_span[1])
+if TRAINING_START is None:
+    TRAINING_START = str(
+        max(
+            last_validation_span[0],
+            pd.Timestamp(TRAINING_END).date() - pd.Timedelta(days=TRAINING_LOOKBACK_DAYS),
+        )
+    )
+if AS_OF_DATE is None:
+    AS_OF_DATE = str(
+        pl.scan_parquet(financial_src)
+        .filter(pl.col("timestamp") >= holdout_start.date())
+        .select(pl.min("timestamp"))
+        .collect()
+        .item()
+    )
+assert pd.Timestamp(TRAINING_END) < holdout_start, (
+    f"TRAINING_END {TRAINING_END} must precede sealed holdout {holdout_start.date()}"
+)
+print(f"Offline training window {TRAINING_START} to {TRAINING_END}; serving as of {AS_OF_DATE}")
 
 train_start = pd.Timestamp(TRAINING_START).date()
 train_end = pd.Timestamp(TRAINING_END).date()
@@ -126,38 +217,53 @@ filter_end = train_end + timedelta(days=30)
     .write_parquet(financial_feast_path)
 )
 
-# %%
-setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
-holdout_start = pd.Timestamp(setup["evaluation"]["holdout_start"])
-holdout_end = pd.Timestamp(setup["evaluation"]["holdout_end"])
-timeline = pl.scan_parquet(financial_src).select("timestamp").unique().collect()
-cv_splits = generate_cv_splits(timeline, case_study_id=CASE_STUDY_ID, label_buffer="1D")
-holdout_fold = pl.scan_parquet(model_src).select(pl.max("fold")).collect().item()
-model_windows = [
-    (
-        split["fold"],
-        pd.Timestamp(split["val_start"]).date(),
-        pd.Timestamp(split["val_end"]).date(),
-    )
-    for split in cv_splits
-]
-model_windows.append((holdout_fold, holdout_start.date(), holdout_end.date()))
 
 # %%
-model_scan = pl.scan_parquet(model_src)
-model_frames = [
-    model_scan.filter(
-        (pl.col("fold") == fold)
-        & pl.col("timestamp").is_between(
-            max(pd.Timestamp(filter_start).date(), start),
-            min(pd.Timestamp(filter_end).date(), end),
-        )
-    ).select(["symbol", "timestamp", *MODEL_FEATURES])
-    for fold, start, end in model_windows
-    if start <= pd.Timestamp(filter_end).date() and end >= pd.Timestamp(filter_start).date()
+def window_terms(clipped: list[tuple]) -> list[pl.Expr]:
+    """One predicate per evaluation window, to be OR-ed into a single filter.
+
+    Against a fold-free artifact a window is a date range and nothing else. Against a
+    fold-keyed one the same window also names the fold whose fitted state that range is
+    evaluated under, and the two must be applied together: those vintages hold different
+    values for the same stock-date, so a date range alone would return one row per fold
+    and no rule for choosing between them.
+    """
+    if FOLD_KEYED_ARTIFACT:
+        return [
+            (pl.col("fold") == fold) & pl.col("timestamp").is_between(start, end)
+            for fold, start, end in clipped
+        ]
+    return [pl.col("timestamp").is_between(start, end) for _, start, end in clipped]
+
+
+# %%
+# One filter over the union of the evaluation windows, not one frame per window
+# concatenated. A concat double-counts any date two windows cover, and would do it
+# silently; under a single filter the only duplication that can reach the result is the
+# artifact's own, which `collapse_fold_replication` resolves or refuses.
+_span_lo = pd.Timestamp(filter_start).date()
+_span_hi = pd.Timestamp(filter_end).date()
+model_spans = [
+    (fold, max(_span_lo, start), min(_span_hi, end))
+    for fold, (start, end) in zip(model_folds, model_windows, strict=True)
+    if start <= _span_hi and end >= _span_lo
 ]
-model_features = pl.concat(model_frames).collect().sort(["timestamp", "symbol"])
-assert not model_features.select(pl.struct("symbol", "timestamp").is_duplicated().any()).item()
+if not model_spans:
+    raise ValueError(
+        f"No validation window and not the sealed holdout covers {_span_lo}..{_span_hi}; "
+        "the materialization range lies outside every window this model was evaluated on"
+    )
+model_features = (
+    pl.scan_parquet(model_src)
+    .filter(pl.any_horizontal(*window_terms(model_spans)))
+    .select(["symbol", "timestamp", *MODEL_FEATURES])
+    .collect()
+    .sort(["timestamp", "symbol"])
+)
+assert not model_features.select(pl.struct("symbol", "timestamp").is_duplicated().any()).item(), (
+    "a stock-date resolved to more than one model-based row; the evaluation windows "
+    "this notebook derived are not disjoint over the materialization range"
+)
 model_features.with_columns(pl.col("timestamp").cast(pl.Datetime("ns"))).write_parquet(
     model_feast_path
 )
@@ -446,16 +552,19 @@ assert n_match == n_total, f"Feast parity failed for {mismatch_cols}"
 def sample_assets(n_assets: int) -> list[str]:
     from data import load_us_equities
 
-    # Rank on prior dollar liquidity, not nominal share volume.
-    prices = load_us_equities(start_date="2015-10-01", end_date="2015-12-31")
+    # Rank on prior dollar liquidity, not nominal share volume. Ranked over the tail of
+    # the offline training window rather than a pinned calendar month, so the sample
+    # follows the derived window instead of silently drifting away from it.
+    rank_from = pd.Timestamp(TRAINING_END).date() - pd.Timedelta(days=30)
+    prices = load_us_equities(start_date=TRAINING_START, end_date=TRAINING_END)
     return (
         prices.lazy()
         .sort("symbol", "timestamp")
         .with_columns((pl.col("adj_close") * pl.col("adj_volume")).alias("dollar_volume"))
         .with_columns(pl.col("dollar_volume").rolling_mean(21).over("symbol").alias("adv_21d"))
         .filter(
-            (pl.col("timestamp") >= pl.date(2015, 12, 1))
-            & (pl.col("timestamp") <= pl.date(2015, 12, 31))
+            (pl.col("timestamp") >= rank_from)
+            & (pl.col("timestamp") <= pd.Timestamp(TRAINING_END).date())
         )
         .group_by("symbol")
         .agg(pl.col("adv_21d").mean().alias("avg_adv_21d"))

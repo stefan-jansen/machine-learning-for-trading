@@ -530,6 +530,32 @@ def split_retired_members(
     return RetirementSplit(live=index.filter(~is_retired), retired=index.filter(is_retired))
 
 
+def _membership_root(study: Study) -> Path:
+    """The registry whose populations answer for the rows this study is reading.
+
+    ``study.root`` is the released case directory whatever tier the study was opened for -
+    ``activate`` redirects every later path lookup into ``.preview/<case>`` and deliberately
+    leaves ``root`` where it is. Asking membership of it under a preview therefore asks the
+    CANONICAL registry whether the predictions this run has just fitted are published, and they
+    never are: measured on the etfs smoke chain 2026-09-05, a preview workspace holding 247
+    prediction sets scored zero against the release's published set, and every stage from
+    ``13_model_analysis`` on refused with "nothing published to sweep" or "no live prediction
+    sets". Six notebooks, one cause.
+
+    A preview root answers ``None`` instead, because it declares no populations and cannot:
+    :func:`_refuse_preview_activation` stops a reduced run from publishing one, on the grounds
+    that a population is canonical by definition. ``None`` is the documented "membership cannot
+    be asked here" case, so the caller falls back to the exclusion split and the index passes
+    through - the same answer a fixture registry gets, and the only honest one for rows nothing
+    has published or retired.
+
+    Canonical is untouched: ``storage_root(CANONICAL)`` is ``study.root``.
+    """
+    if _preview_is_active(study) and not study.read_only:
+        return study.storage_root(ExecutionTier.PREVIEW)
+    return study.root
+
+
 def split_unpublished_members(
     study: Study,
     index: pl.DataFrame,
@@ -566,7 +592,7 @@ def split_unpublished_members(
             f"candidate index has no {column!r} column, so membership cannot be decided on it; "
             f"it carries {sorted(index.columns)}"
         )
-    published = published_members_at(study.root, member_kind=member_kind)
+    published = published_members_at(_membership_root(study), member_kind=member_kind)
     if published is None:
         return split_retired_members(study, index, member_kind=member_kind, column=column)
     is_published = pl.col(column).is_in(list(published))

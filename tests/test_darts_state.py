@@ -275,7 +275,7 @@ def test_weekly_nbeats_preset_builds_without_adapter_parameters() -> None:
     model = _build_darts_model(
         config,
         device="cpu",
-        fold_seed=7,
+        split_seed=7,
         input_chunk_length=12,
         output_chunk_length=2,
     )

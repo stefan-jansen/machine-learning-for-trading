@@ -321,7 +321,7 @@ ax.set_ylabel("Permuted draws")
 add_message_title(
     ax,
     "Where the estimate sits once the treatment's timing is destroyed",
-    subtitle=(f"{len(placebo_effects)} block-permuted refits, with the observed effect marked"),
+    subtitle="Block-permuted refits, with the observed effect marked",
 )
 fig.tight_layout()
 # The alt text counts rather than asserts. Whether the observed effect is extreme is the whole
