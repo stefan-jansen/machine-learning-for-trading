@@ -639,7 +639,30 @@ def selectable_validation_candidates(
     # The explorer's other bar, `num_trades > 0`, is not carried over. It is not part of
     # the selection rule - a flat period is an observation of zero, not an abstention - and
     # it removes nothing from any of the nine.
-    coverage_bar = full_coverage_prediction_sql("p", "t", "pm")
+    #
+    # The maximum is taken WITHIN the published population, not across the whole table, and
+    # the difference is not cosmetic. The bar keeps rows whose `ic_n_days` equals the
+    # maximum for their `(split, family, label)`; a retired prediction scored over a longer
+    # window sets that maximum, and every live row for the same family and label then falls
+    # below it and is dropped by the query. Filtering publication afterwards cannot put them
+    # back - they never came out of the database. `BacktestExplorer.best` passes the
+    # population for exactly this reason, and dropping it while collapsing the two selectors
+    # would have been a regression on the one case study whose refit changed a fold count.
+    published_predictions = published_members_at(case_dir, member_kind="prediction")
+    if published_predictions is not None and not published_predictions:
+        raise RuntimeError(
+            f"{case_study} declares prediction populations and publishes no prediction "
+            "identities, so there is nothing it may select. Re-run the stage that publishes "
+            "them rather than ranking over an empty population."
+        )
+    coverage_params: tuple = ()
+    if published_predictions is None:
+        coverage_bar = full_coverage_prediction_sql("p", "t", "pm")
+    else:
+        coverage_bar = full_coverage_prediction_sql(
+            "p", "t", "pm", population_subquery="SELECT value FROM json_each(?)"
+        )
+        coverage_params = (json.dumps(sorted(published_predictions)),)
 
     if carrier_pin:
         # Documented a-priori carrier pin: resolve directly to the pinned
@@ -654,7 +677,7 @@ def selectable_validation_candidates(
             + coverage_bar
             + " ORDER BY bm.sharpe DESC, b.backtest_hash ASC"
         )
-        params: tuple = (carrier_pin + "%",)
+        params: tuple = (carrier_pin + "%",) + coverage_params
     else:
         stages = ",".join("?" for _ in SELECTION_STAGES)
         val_sql = base_select + (
@@ -665,7 +688,7 @@ def selectable_validation_candidates(
             + degenerate_prediction_sql("p.prediction_hash")
             + coverage_bar
         )
-        params = tuple(SELECTION_STAGES)
+        params = tuple(SELECTION_STAGES) + coverage_params
         if label_filter:
             placeholders = ",".join("?" for _ in label_filter)
             val_sql += f" AND t.label IN ({placeholders})"
@@ -724,16 +747,19 @@ def selectable_validation_candidates(
     # one identity is legitimately listed under several names, and a narrowed or preview
     # run keeps its own frozen snapshot in force forever.
     ranked = len(candidates)
-    for key, member_kind in (("backtest_hash", "backtest"), ("prediction_hash", "prediction")):
-        published = published_members_at(case_dir, member_kind=member_kind)
+    published_backtests = published_members_at(case_dir, member_kind="backtest")
+    if published_backtests is not None and not published_backtests:
+        raise RuntimeError(
+            f"{case_study} declares backtest populations and publishes no backtest "
+            "identities, so there is nothing it may select. Re-run the stage that publishes "
+            "them rather than ranking over an empty population."
+        )
+    for key, published in (
+        ("backtest_hash", published_backtests),
+        ("prediction_hash", published_predictions),
+    ):
         if published is None:
             continue
-        if not published:
-            raise RuntimeError(
-                f"{case_study} declares {member_kind} populations and publishes no "
-                f"{member_kind} identities, so there is nothing it may select. Re-run the "
-                "stage that publishes them rather than ranking over an empty population."
-            )
         candidates = [row for row in candidates if row[key] in published]
 
     if admitted is not None:
@@ -774,7 +800,78 @@ def selectable_validation_candidates(
         raise RuntimeError(
             f"No validation rank-1 candidate for {case_study} (label_filter={label_filter})"
         )
-    return candidates
+
+    return _rank_on_common_support_where_a_conformal_candidate_is_present(case_study, candidates)
+
+
+def _rank_on_common_support_where_a_conformal_candidate_is_present(
+    case_study: str, candidates: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Re-order the field on exact common timestamp support, when one is needed.
+
+    Every conformal calibration abstains, and the version decides only for how long.
+    ``walk_forward_v2`` sits out the earliest fold entirely, because it calibrates from
+    whole earlier folds and the earliest has none. ``walk_forward_v3`` calibrates from the
+    fold's own elapsed history, which shortens the abstention to a warm-up - three
+    decisions on an 8-hourly grid - and does not remove it. A candidate that holds nothing
+    for its first N decisions books N returns of exactly zero and is ranked against
+    allocators measured over the full span, so the field has to be re-ranked on common
+    support either way.
+
+    Reading the version to decide decided two things and was right about neither. As the
+    trigger it switched the alignment off for a field of v3 candidates, which still need
+    it. As the eligibility test it discarded every v3 conformal candidate from a field that
+    also held a v2 one, which removes a live result from the comparison rather than
+    aligning it. The version is read by neither: the property that matters is that a
+    conformal candidate is present, and it is asked directly.
+
+    This sits inside the shared field rather than in one caller, and that is the point. It
+    changes the order, not just the winner: when it lived in ``resolve_canonical_rank1_lineage``
+    alone, ``select_best_models`` read the same candidates in stored-Sharpe order, so on a
+    case study with a conformal candidate the two agreed on eligibility and could still
+    name different configurations - and the degeneracy fallback's rank-2 and rank-3 were
+    ordered by a criterion the rank-1 was not.
+
+    Each candidate keeps its registered ``sharpe`` and gains ``comparison_sharpe``, which is
+    the Sharpe over the timestamps every candidate prices, or ``None`` where no re-ranking
+    was needed. Callers reporting the selection's Sharpe want ``comparison_sharpe`` where it
+    is set; callers reporting what the registry stored want ``sharpe``.
+    """
+
+    def _is_conformal(row: dict[str, Any]) -> bool:
+        strategy = json.loads(row["spec_json"]).get("strategy", {})
+        allocation = strategy.get("allocation") or {}
+        return allocation.get("method") == "conformal_weighted"
+
+    if not any(_is_conformal(row) for row in candidates):
+        return [
+            {**row, "comparison_sharpe": None, "comparison_n_periods": None} for row in candidates
+        ]
+
+    from case_studies.utils.uncertainty import periods_per_year_from_setup
+
+    common_ranking = rank_backtests_on_common_support(
+        case_study,
+        [row["backtest_hash"] for row in candidates],
+        periods_per_year=int(periods_per_year_from_setup(case_study)),
+    )
+    rank_rows = {row["backtest_hash"]: row for row in common_ranking.iter_rows(named=True)}
+    comparison_n_periods = int(common_ranking["n_periods"][0])
+    if any(
+        rank_rows[row["backtest_hash"]]["n_periods"] != comparison_n_periods for row in candidates
+    ):
+        raise RuntimeError("Common-support ranking produced unequal n_periods")
+    by_hash = {row["backtest_hash"]: row for row in candidates}
+    return [
+        {
+            **by_hash[backtest_hash],
+            "comparison_sharpe": float(rank_rows[backtest_hash]["sharpe"]),
+            "comparison_n_periods": comparison_n_periods,
+            "comparison_start": rank_rows[backtest_hash]["start"],
+            "comparison_end": rank_rows[backtest_hash]["end"],
+        }
+        for backtest_hash in common_ranking["backtest_hash"].to_list()
+    ]
 
 
 def resolve_canonical_rank1_lineage(
@@ -827,55 +924,19 @@ def resolve_canonical_rank1_lineage(
     # `selectable_validation_candidates`, which `holdout.select_best_models` also ranks,
     # so the two cannot name different carriers for the single holdout use.
     candidates = selectable_validation_candidates(case_study, admitted=admitted, labels=labels)
-
-    def _is_conformal(row: dict[str, Any]) -> bool:
-        # Every conformal calibration abstains, and the version decides only for how long.
-        # `walk_forward_v2` sits out the earliest fold entirely, because it calibrates from
-        # whole earlier folds and the earliest has none. `walk_forward_v3` calibrates from the
-        # fold's own elapsed history, which shortens the abstention to a warm-up - three
-        # decisions on an 8-hourly grid - and does not remove it. A candidate that holds
-        # nothing for its first N decisions books N returns of exactly zero and is ranked
-        # against allocators measured over the full span, so the field has to be re-ranked on
-        # common support either way.
-        #
-        # Reading the version here decided two things and was right about neither. As the
-        # trigger it switched the alignment off for a field of v3 candidates, which still need
-        # it. As the eligibility test it discarded every v3 conformal candidate from a field
-        # that also held a v2 one, which removes a live result from the comparison rather than
-        # aligning it. The version is now read by neither: the property that matters is that a
-        # conformal candidate is present, and it is asked directly.
-        strategy = json.loads(row["spec_json"]).get("strategy", {})
-        allocation = strategy.get("allocation") or {}
-        return allocation.get("method") == "conformal_weighted"
-
-    conformal_present = any(_is_conformal(row) for row in candidates)
-    if conformal_present:
-        from case_studies.utils.uncertainty import periods_per_year_from_setup
-
-        common_ranking = rank_backtests_on_common_support(
-            case_study,
-            [row["backtest_hash"] for row in candidates],
-            periods_per_year=int(periods_per_year_from_setup(case_study)),
-        )
-        rank_rows = {row["backtest_hash"]: row for row in common_ranking.iter_rows(named=True)}
-        val = next(
-            row for row in candidates if row["backtest_hash"] == common_ranking["backtest_hash"][0]
-        )
-        val_sharpe = float(common_ranking["sharpe"][0])
-        comparison_n_periods: int | None = int(common_ranking["n_periods"][0])
-        comparison_start = common_ranking["start"][0]
-        comparison_end = common_ranking["end"][0]
-        if any(
-            rank_rows[row["backtest_hash"]]["n_periods"] != comparison_n_periods
-            for row in candidates
-        ):
-            raise RuntimeError("Common-support ranking produced unequal n_periods")
-    else:
-        val = candidates[0]
-        val_sharpe = float(val["sharpe"])
-        comparison_n_periods = None
-        comparison_start = None
-        comparison_end = None
+    val = candidates[0]
+    # The field is already in its final order, common-support re-ranking included, so the
+    # rank-1 is read rather than recomputed. `comparison_sharpe` is set exactly where that
+    # re-ranking ran, and it is the Sharpe over the timestamps every candidate prices - the
+    # only one the candidates can be compared on.
+    val_sharpe = (
+        float(val["comparison_sharpe"])
+        if val["comparison_sharpe"] is not None
+        else float(val["sharpe"])
+    )
+    comparison_n_periods: int | None = val["comparison_n_periods"]
+    comparison_start = val.get("comparison_start")
+    comparison_end = val.get("comparison_end")
 
     val_bh = val["backtest_hash"]
     val_ph = val["prediction_hash"]

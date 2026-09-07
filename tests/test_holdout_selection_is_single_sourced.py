@@ -20,14 +20,17 @@ Both properties are pinned here, on the two registries where they are visible.
 
 from __future__ import annotations
 
+import datetime as dt
 import importlib.util
 import json
 import sqlite3
 import sys
 from pathlib import Path
 
+import polars as pl
 import pytest
 
+import case_studies.utils.uncertainty as uncertainty
 from case_studies.utils import strategy_analysis
 
 _SPEC = importlib.util.spec_from_file_location(
@@ -246,3 +249,105 @@ def test_the_selection_restrictions_have_exactly_one_definition() -> None:
     assert HOLDOUT.LABEL_RESTRICTIONS is strategy_analysis.LABEL_RESTRICTIONS
     assert HOLDOUT.UNIVERSE_RESTRICTIONS is strategy_analysis.UNIVERSE_RESTRICTIONS
     assert HOLDOUT.HOLDOUT_SELECTION_STAGES == strategy_analysis.SELECTION_STAGES
+
+
+# The plain allocator is the better strategy over the whole span and the worse one over the
+# stretch both candidates cover: its ten best sessions are exactly the ones the conformal
+# allocator sat out. So the two readings disagree, and which candidate comes back says which
+# ranking ran.
+_SESSIONS = [dt.datetime(2024, 1, 1) + dt.timedelta(days=i) for i in range(40)]
+_PLAIN_RETURNS = [0.05] * 10 + [0.02, -0.01] * 15
+_CONFORMAL_RETURNS = [0.03, 0.01] * 15
+_CONFORMAL_SPEC = json.dumps(
+    {
+        "strategy": {
+            "signal": {"method": "equal_weight_top_k", "top_k": 10},
+            "allocation": {
+                "method": "conformal_weighted",
+                "calibration_version": "walk_forward_v3",
+            },
+        }
+    }
+)
+
+
+def _daily_returns(case_dir: Path, backtest_hash: str, values: list[float]) -> None:
+    out = case_dir / "run_log" / "backtest" / backtest_hash
+    out.mkdir(parents=True)
+    pl.DataFrame(
+        {"timestamp": _SESSIONS[len(_SESSIONS) - len(values) :], "returns": values}
+    ).write_parquet(out / "daily_returns.parquet")
+
+
+def test_the_common_support_re_ranking_orders_the_field_both_entry_points_read(
+    case_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A conformal candidate re-orders the field, and both callers must read that order.
+
+    A conformal allocator holds nothing until it is calibrated and books the warm-up as
+    returns of exactly zero, so a whole-span Sharpe compares it against a different sample
+    from every other candidate. The resolver answers that by re-ranking the field on the
+    timestamps every candidate prices. That re-ranking used to sit in the resolver alone,
+    so the other entry point read the same candidates in stored-Sharpe order - which is a
+    different answer whenever the two rankings disagree, and this fixture is built so they
+    do: `bt_plain` stores the higher Sharpe and loses over the thirty sessions both price.
+
+    It changes the order and not only the winner, which is why it belongs to the field: the
+    holdout retrain falls back to rank-2 when rank-1's refit degenerates, and a rank-2
+    ordered by a criterion the rank-1 was not is not the runner-up of anything.
+    """
+    monkeypatch.setattr(uncertainty, "periods_per_year_from_setup", lambda cs: 365)
+    _registry(
+        case_dir / "run_log" / "registry.db",
+        [
+            ("bt_plain", "pred_plain", "allocation", 9.0, _WITH_ALLOCATION),
+            ("bt_conformal", "pred_conformal", "allocation", 1.0, _CONFORMAL_SPEC),
+        ],
+    )
+    _daily_returns(case_dir, "bt_plain", _PLAIN_RETURNS)
+    _daily_returns(case_dir, "bt_conformal", _CONFORMAL_RETURNS)
+
+    from_holdout, from_resolver = _both_selections(CASE_STUDY)
+    assert from_holdout == "bt_conformal", (
+        f"the holdout entry point selected {from_holdout}, which is the stored-Sharpe "
+        "answer; the field was re-ranked on common support and it read the order from "
+        "before that"
+    )
+    assert from_resolver == "bt_conformal"
+
+
+def test_a_retired_prediction_cannot_raise_the_coverage_bar_over_the_live_ones(
+    case_dir: Path,
+) -> None:
+    """The bar is a maximum, so an ineligible row can set it and empty the field.
+
+    Only rows whose `ic_n_days` equals the maximum for their `(split, family, label)` are
+    comparable, and are kept. A retired prediction scored over a longer window sets that
+    maximum, every live row for the same family and label falls below it, and the query
+    returns nothing - so filtering publication in Python afterwards has nothing left to
+    filter. The maximum has to be taken inside the published population, which is what
+    `full_coverage_prediction_sql`'s `population_subquery` is for.
+    """
+    _registry(
+        case_dir / "run_log" / "registry.db",
+        [
+            ("bt_retired", "pred_retired", "allocation", 2.0, _WITH_ALLOCATION),
+            ("bt_live", "pred_live", "allocation", 1.0, _WITH_ALLOCATION),
+        ],
+        published=["pred_live"],
+    )
+    with sqlite3.connect(str(case_dir / "run_log" / "registry.db")) as db:
+        # Same family and label as the live row, so it is the same coverage group, and
+        # scored over more decision dates, so it is the group's maximum.
+        db.execute(
+            "UPDATE prediction_metrics SET ic_n_days = 300 WHERE prediction_hash = ?",
+            ("pred_retired",),
+        )
+        db.execute(
+            "UPDATE training_runs SET config_name = 'config_pred_live' WHERE training_hash = ?",
+            ("train_pred_retired",),
+        )
+
+    from_holdout, from_resolver = _both_selections(CASE_STUDY)
+    assert from_holdout == "bt_live"
+    assert from_resolver == "bt_live"
