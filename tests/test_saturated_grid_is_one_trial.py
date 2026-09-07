@@ -101,3 +101,17 @@ def test_the_repeat_stays_in_the_cohort_it_is_a_member_of() -> None:
     assert out["member_digest"] == cohort_member_digest(cohort.keys())
     assert out["k_variants_submitted"] == 6
     assert out["ras_n_strategies"] == 5.0, "RAS records the trials it adjusted for"
+
+
+def test_a_cohort_that_tried_one_thing_reports_no_correction() -> None:
+    """Two configurations and one result between them is not a selection.
+
+    Left unguarded the row is worse than absent: `dsr_raw` is computed at K=1, which is
+    the undeflated Sharpe, while the MP and ER estimators refuse a single strategy and
+    leave NULLs beside it. A reader takes the one populated column for a corrected figure.
+    """
+    rng = np.random.default_rng(3)
+    values = rng.normal(0.0005, 0.01, OBSERVATIONS)
+    cohort = {"bt_a": _frame(values), "bt_b": _frame(values.copy())}
+
+    assert compute_cohort_metrics(cohort, periods_per_year=PERIODS_PER_YEAR) == {}

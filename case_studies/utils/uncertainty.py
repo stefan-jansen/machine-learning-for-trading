@@ -1306,6 +1306,14 @@ def compute_cohort_metrics(
     # is what a reader matches a stored correction against.
     trial_matrix, trial_names = _distinct_trials(matrix, names, keep=leader_idx)
     k_trials = trial_matrix.shape[1]
+    if k_trials < 2:
+        # The same rule as the `k_variants < 2` guard above, applied to what the cohort
+        # actually tried. A cohort whose configurations all produced one series ran no
+        # selection, so there is nothing to correct for and no correction to report. Left
+        # unguarded it writes a half-row: `dsr_raw` computed at K=1, which is the
+        # undeflated Sharpe, beside NULL MP and ER columns whose estimators refuse a
+        # single strategy - and a reader takes the first for a corrected figure.
+        return {}
     trial_leader_idx = trial_names.index(leader_hash)
     trial_sharpes = _sharpe_per_column(trial_matrix, periods_per_year)
 
