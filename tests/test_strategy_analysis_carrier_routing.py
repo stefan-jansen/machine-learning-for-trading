@@ -1,7 +1,13 @@
-"""Every strategy-analysis notebook takes its carrier from the shared resolver.
+"""Every notebook that names a carrier takes it from the shared resolver.
 
-A strategy-analysis notebook reports one configuration: the one the case study's holdout
-notebooks refitted and priced. Those resolve it through
+Three notebooks per case study name one: the holdout refit, the holdout backtest, and the
+strategy analysis that reports what they produced. They have to name the same one, and the
+only thing that makes that true is all three asking the same function. This checks all
+three, because checking one of them is what let `sp500_equity_option_analytics` route its
+analysis through the resolver while its two holdout notebooks still ranked a stored Sharpe
+column - a disagreement that would have read as a missing holdout.
+
+They resolve it through
 `case_studies.utils.strategy_analysis.resolve_solvent_carrier`. A notebook that ranks a
 Sharpe column itself is running a second selection against the same registry, and the two
 answer differently for reasons that have nothing to do with which strategy is better:
@@ -32,14 +38,22 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RESOLVER = "resolve_solvent_carrier"
-NOTEBOOKS = sorted(REPO_ROOT.glob("case_studies/*/[0-9]*_strategy_analysis.py"))
+NOTEBOOKS = sorted(
+    path
+    for pattern in (
+        "case_studies/*/[0-9]*_strategy_analysis.py",
+        "case_studies/*/[0-9]*_holdout_predictions.py",
+        "case_studies/*/[0-9]*_holdout_backtest.py",
+    )
+    for path in REPO_ROOT.glob(pattern)
+)
 
 
 def _tree(path: Path) -> ast.Module:
     return ast.parse(path.read_text(encoding="utf-8"), str(path))
 
 
-@pytest.mark.parametrize("path", NOTEBOOKS, ids=lambda p: p.parts[-2])
+@pytest.mark.parametrize("path", NOTEBOOKS, ids=lambda p: f"{p.parts[-2]}/{p.stem}")
 def test_the_carrier_is_resolved_through_the_shared_resolver(path: Path) -> None:
     """Imported from the shared module, and actually called.
 
@@ -75,11 +89,23 @@ def test_the_corpus_this_covers_is_not_empty() -> None:
     """Guard the guard.
 
     The parametrization is a glob, so a rename that no longer matches turns every case
-    above into zero cases and the file passes while checking nothing. There are nine case
-    studies with a strategy-analysis notebook and there is no reason for that to shrink.
+    above into zero cases and the file passes while checking nothing. Nine case studies
+    have a strategy analysis and eight of them have the holdout pair, and there is no
+    reason for either count to shrink.
     """
-    assert len(NOTEBOOKS) >= 9, (
-        f"only {len(NOTEBOOKS)} strategy-analysis notebooks matched "
-        f"case_studies/*/[0-9]*_strategy_analysis.py: "
-        f"{[str(p.relative_to(REPO_ROOT)) for p in NOTEBOOKS]}"
+    kinds = {
+        kind: sorted(p.parts[-2] for p in NOTEBOOKS if p.stem.endswith(kind))
+        for kind in ("strategy_analysis", "holdout_predictions", "holdout_backtest")
+    }
+    assert len(kinds["strategy_analysis"]) >= 9, (
+        f"only {len(kinds['strategy_analysis'])} strategy-analysis notebooks matched: "
+        f"{kinds['strategy_analysis']}"
+    )
+    assert len(kinds["holdout_predictions"]) >= 8, (
+        f"only {len(kinds['holdout_predictions'])} holdout-prediction notebooks matched: "
+        f"{kinds['holdout_predictions']}"
+    )
+    assert len(kinds["holdout_backtest"]) >= 8, (
+        f"only {len(kinds['holdout_backtest'])} holdout-backtest notebooks matched: "
+        f"{kinds['holdout_backtest']}"
     )

@@ -256,10 +256,18 @@ strategy_carrier = candidate_frame.filter(pl.col("backtest_hash") == SELECTED.ha
 baseline_pool = candidate_frame.filter(
     (pl.col("allocator") == "equal_weight") & pl.col("risk").is_null()
 )
+# Two numbers for one run, and they are not interchangeable. `val_sharpe` is what the
+# selection was made on: the field holds a conformal allocator that sits out its warm-up and
+# books it as returns of exactly zero, so every candidate is re-ranked over the sessions they
+# all price. `sharpe` is what `backtest_metrics` stores, computed over this run's own span.
+# The stored column is what the within-frame comparisons below are drawn from - a difference
+# between two rows of it is meaningful, and a difference between it and the selection metric
+# is not - so both are printed rather than one silently standing for the other.
 print(
     f"{FIELD_NAME}: {len(FIELD_HASHES)} members "
     f"({baseline_pool.height} equal-weight baselines), selected {SELECTED.hash} "
-    f"at validation Sharpe {strategy_carrier['sharpe']:.3f}"
+    f"at validation Sharpe {CARRIER['val_sharpe']:.3f} over the sessions every candidate "
+    f"prices ({strategy_carrier['sharpe']:.3f} as registered over its own span)"
 )
 
 # %% [markdown]
