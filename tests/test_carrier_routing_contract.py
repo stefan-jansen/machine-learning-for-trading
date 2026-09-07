@@ -120,6 +120,41 @@ def test_carrier_pins_are_single_sourced_and_well_formed() -> None:
         assert assignments == []
 
 
+def test_the_carrier_restriction_has_no_second_implementation() -> None:
+    """One rule, and where it is not applied, no machinery pretending to apply it.
+
+    `_apply_carrier_pin` was defined twice with different signatures - a mapping lookup in
+    `20_strategy_synthesis/01_aggregate_synthesis.py` and a predicate argument in
+    `case_studies/utils/paired_metrics.py` - and both had become unreachable: the mapping
+    was permanently empty and no caller anywhere supplied the predicate. Two dead
+    implementations of one rule is how the config-name copy came to select
+    `us_firm_characteristics`' weakest advanced configuration for a whole registry rebuild
+    while every notebook inside that case study reported its best.
+
+    Where an owner does pin a carrier, the live mechanism is
+    `carrier_pins.carrier_config_name`, which resolves the pin against the registry and
+    raises when it matches nothing - checked behaviourally elsewhere in this file. What is
+    checked here is that nothing has grown a second one beside it.
+
+    Read by parsing: `01_aggregate_synthesis.py` is a notebook, and importing one runs it.
+    """
+    repo = Path(__file__).parents[1]
+    for relative in (
+        "20_strategy_synthesis/01_aggregate_synthesis.py",
+        "case_studies/utils/paired_metrics.py",
+    ):
+        tree = ast.parse((repo / relative).read_text())
+        defined = sorted(
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and "carrier_pin" in node.name
+        )
+        assert defined == [], (
+            f"{relative} defines {defined}; the carrier restriction has one implementation, "
+            "in case_studies/utils/carrier_pins.py, and a second copy is what drifted"
+        )
+
+
 def test_the_selection_restrictions_are_declared_once() -> None:
     """`holdout.py` must import each selection restriction, not declare its own copy.
 
