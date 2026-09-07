@@ -155,6 +155,14 @@ def _both_selections(case_study: str) -> tuple[str, str]:
     )
 
 
+def _both_selection_sharpes(case_study: str) -> tuple[float, float]:
+    """The Sharpe each entry point reports for the configuration it selected."""
+    return (
+        HOLDOUT.select_best_models(case_study, top_n=1)[0]["val_sharpe"],
+        strategy_analysis.resolve_canonical_rank1_lineage(case_study)["val_sharpe"],
+    )
+
+
 def test_an_exact_sharpe_tie_resolves_to_the_specification_the_holdout_replays(
     case_dir: Path,
 ) -> None:
@@ -314,6 +322,16 @@ def test_the_common_support_re_ranking_orders_the_field_both_entry_points_read(
         "before that"
     )
     assert from_resolver == "bt_conformal"
+
+    # And they have to report the same number for it. The common-support Sharpe is what
+    # the selection was made on; the stored one describes a different sample and is what
+    # the whole re-ranking exists to stop the field being compared by.
+    holdout_sharpe, resolver_sharpe = _both_selection_sharpes(CASE_STUDY)
+    assert holdout_sharpe == resolver_sharpe
+    assert holdout_sharpe != 1.0, (
+        "the holdout entry point reported the stored Sharpe of the row it selected, not "
+        "the common-support Sharpe the selection was made on"
+    )
 
 
 def test_a_retired_prediction_cannot_raise_the_coverage_bar_over_the_live_ones(

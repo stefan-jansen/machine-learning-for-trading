@@ -164,7 +164,13 @@ def _candidate_from_row(cs_id: str, row: dict) -> dict:
         "config_name": row["config_name"],
         "training_spec": json.loads(train_row["spec_json"]),
         "strategy_spec": json.loads(row["spec_json"]),
-        "val_sharpe": row["sharpe"],
+        # The Sharpe the selection was made on, which is the common-support one wherever the
+        # field was re-ranked. Reporting the stored value instead would have the two entry
+        # points agree on the configuration and print different numbers for it, and chapter
+        # 20 measures holdout decay against this.
+        "val_sharpe": (
+            row["comparison_sharpe"] if row["comparison_sharpe"] is not None else row["sharpe"]
+        ),
         "label": row["label"] or "",
     }
 
