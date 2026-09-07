@@ -71,6 +71,30 @@ def value_digest(df: pl.DataFrame, columns: Sequence[str] | None = None) -> str:
     return compute_hash(content, length=DIGEST_LENGTH)
 
 
+PREDICTION_LABEL_COLUMN = "label"
+
+
+def published_prediction_digest(df: pl.DataFrame) -> str:
+    """The content digest of a published prediction frame, excluding its label column.
+
+    A published frame states which label it was produced under, so a coverage check can tell
+    which declaration applies to it (ml4t/agent-workspace#887). That column is data *about*
+    the frame - it is a constant, and the registry already holds the same value on the
+    prediction set's parent training run - so it is excluded from the frame's content
+    identity, exactly as it is kept out of `computation`.
+
+    Excluding it is what makes writing it free. `value_digest` over the whole frame is
+    recorded as `prediction_coverage.artifact_digest` and re-checked against the file on
+    every completeness test, so a column added to the frame would make every registered
+    prediction set fail its own digest and every re-registration raise "immutable prediction
+    artifact conflict". Digesting the frame without the column gives the same value for a
+    frame written before the column existed and for one written after, so the fleet's
+    recorded digests stay valid and nothing is stranded.
+    """
+    columns = [c for c in df.columns if c != PREDICTION_LABEL_COLUMN]
+    return value_digest(df, columns)
+
+
 def fold_digests(df: pl.DataFrame, *, fold_column: str = "fold") -> dict[str, str]:
     """Return one content digest per fold id in *df*, keyed by the id as a string.
 

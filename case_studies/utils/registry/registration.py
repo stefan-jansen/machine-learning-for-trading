@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
 import uuid
 from pathlib import Path
 from typing import Any
@@ -264,6 +265,66 @@ def declare_artifact_supersession(
         db.commit()
     finally:
         db.close()
+
+
+def _resolved_prediction_label(
+    case_study: str, training_hash: str, label: str | None, case_dir: Path
+) -> str | None:
+    """The label a prediction set was produced under: the caller's, else its parent run's.
+
+    `training_runs.label` is authoritative and always present, so a caller that does not pass
+    one is not an error - it is the common case, and every family reaches this through
+    `publish_predictions`, whose `label` is optional.
+    """
+    if label:
+        return label
+    try:
+        db = _open_registry(case_dir)
+        try:
+            row = db.execute(
+                "SELECT label FROM training_runs WHERE training_hash = ?", (training_hash,)
+            ).fetchone()
+        finally:
+            db.close()
+    except sqlite3.Error:
+        return None
+    return row[0] if row and row[0] else None
+
+
+def _with_prediction_label(predictions, label: str | None):
+    """Stamp *label* onto a published prediction frame, so it states its own declaration.
+
+    A coverage check is sized by the label's outcome horizon, and the frames carried no
+    record of which label produced them, so a caller checking a variant's predictions against
+    the case study's primary label got a small, plausible, entirely spurious gap - two
+    sessions on `crypto_perps_funding`, invisible in the direction that makes the observed
+    frame a subset of the declaration (ml4t/agent-workspace#887). `coverage.py` has refused a
+    frame whose own `label` disagrees since that was found; the column it reads was never
+    written.
+
+    Written here because this is the one path every family publishes through. A frame that
+    already carries the column keeps it, and a disagreement is refused rather than
+    overwritten: the caller and the parent training run are then telling two different
+    stories about what was fitted, and quietly picking one is how the mistake this closes
+    got made in the first place.
+    """
+    import polars as pl
+
+    from case_studies.utils.artifact_digest import PREDICTION_LABEL_COLUMN
+
+    if predictions is None or not label:
+        return predictions
+    if PREDICTION_LABEL_COLUMN in predictions.columns:
+        present = sorted(
+            str(value)
+            for value in predictions.get_column(PREDICTION_LABEL_COLUMN).unique().drop_nulls()
+        )
+        if present and present != [label]:
+            raise ValueError(
+                f"prediction frame carries label(s) {present} and is being published as {label!r}"
+            )
+        return predictions
+    return predictions.with_columns(pl.lit(label, dtype=pl.String).alias(PREDICTION_LABEL_COLUMN))
 
 
 def _validate_prediction_dispersion(predictions, *, refuse: bool = True) -> None:
@@ -1097,12 +1158,22 @@ def register_prediction_set(
         assert coverage is not None
         import polars as pl
 
-        from case_studies.utils.artifact_digest import value_digest
+        from case_studies.utils.artifact_digest import published_prediction_digest
 
         normalized_predictions = (
             predictions if isinstance(predictions, pl.DataFrame) else pl.from_pandas(predictions)
         )
-        prediction_artifact_digest = value_digest(normalized_predictions)
+        # The published frame states its own label; the digest is taken without it. The
+        # column is a constant the registry already holds on the parent training run, so it
+        # is data about the frame rather than part of its content identity - and excluding
+        # it is what keeps every `artifact_digest` already recorded in the fleet valid
+        # (ml4t/agent-workspace#887). Coverage and `schema_json` above are computed on the
+        # frame as handed in, so neither moves either.
+        published_predictions = _with_prediction_label(
+            normalized_predictions,
+            _resolved_prediction_label(case_study, training_hash, label, case_dir),
+        )
+        prediction_artifact_digest = published_prediction_digest(normalized_predictions)
         pred_dir = _prediction_dir(case_dir, p_hash)
         pred_path = pred_dir / "predictions.parquet"
         temporary = pred_dir / f".predictions.{uuid.uuid4().hex}.tmp"
@@ -1120,7 +1191,8 @@ def register_prediction_set(
                     raise ValueError(f"immutable prediction identity conflict for {p_hash}")
                 if (
                     not pred_path.exists()
-                    or value_digest(pl.read_parquet(pred_path)) != prediction_artifact_digest
+                    or published_prediction_digest(pl.read_parquet(pred_path))
+                    != prediction_artifact_digest
                 ):
                     raise ValueError(f"immutable prediction artifact conflict for {p_hash}")
                 recorded_digest = db.execute(
@@ -1141,7 +1213,7 @@ def register_prediction_set(
             else:
                 if pred_path.exists():
                     try:
-                        orphaned_digest = value_digest(pl.read_parquet(pred_path))
+                        orphaned_digest = published_prediction_digest(pl.read_parquet(pred_path))
                     except (OSError, ValueError, pl.exceptions.PolarsError) as exc:
                         raise ValueError(
                             f"immutable prediction artifact conflict for {p_hash}"
@@ -1149,7 +1221,7 @@ def register_prediction_set(
                     if orphaned_digest != prediction_artifact_digest:
                         raise ValueError(f"immutable prediction artifact conflict for {p_hash}")
                 else:
-                    _save_parquet(temporary, normalized_predictions)
+                    _save_parquet(temporary, published_predictions)
                 try:
                     db.execute(
                         """
@@ -1188,8 +1260,18 @@ def register_prediction_set(
     else:
         # Save predictions
         if predictions is not None:
+            import polars as pl
+
             pred_dir = _prediction_dir(case_dir, p_hash)
-            _save_parquet(pred_dir / "predictions.parquet", predictions)
+            frame = predictions if isinstance(predictions, pl.DataFrame) else None
+            _save_parquet(
+                pred_dir / "predictions.parquet",
+                predictions
+                if frame is None
+                else _with_prediction_label(
+                    frame, _resolved_prediction_label(case_study, training_hash, label, case_dir)
+                ),
+            )
 
         # Insert into DB
         db = _open_registry(case_dir)
@@ -1226,20 +1308,7 @@ def register_prediction_set(
             y_true_col, y_score_col = _detect_score_cols(predictions)
             prediction_columns = set(predictions.columns)
             metric_entity_col = "product" if "product" in prediction_columns else "symbol"
-            # Resolve label from training_runs if caller didn't supply it.
-            resolved_label = label
-            if not resolved_label:
-                try:
-                    db_lookup = _open_registry(case_dir)
-                    row = db_lookup.execute(
-                        "SELECT label FROM training_runs WHERE training_hash = ?",
-                        (training_hash,),
-                    ).fetchone()
-                    if row and row[0]:
-                        resolved_label = row[0]
-                    db_lookup.close()
-                except Exception:  # noqa: BLE001
-                    pass
+            resolved_label = _resolved_prediction_label(case_study, training_hash, label, case_dir)
             direction_frame, direction_name = (
                 _sibling_direction_labels(case_study, case_dir, resolved_label)
                 if task_type != "classification"

@@ -27,14 +27,14 @@ from .contracts import ExecutionTier
 _VERIFIED_ARTIFACT_DIGESTS: dict[tuple[str, int, int], str] = {}
 
 
-def _verified_digest(path: Path, load) -> str:
+def _verified_digest(path: Path, load, digest_fn=None) -> str:
     from case_studies.utils.artifact_digest import value_digest
 
     stat = path.stat()
     key = (str(path), stat.st_mtime_ns, stat.st_size)
     digest = _VERIFIED_ARTIFACT_DIGESTS.get(key)
     if digest is None:
-        digest = value_digest(load())
+        digest = (digest_fn or value_digest)(load())
         _VERIFIED_ARTIFACT_DIGESTS[key] = digest
     return digest
 
@@ -445,7 +445,17 @@ class PredictionResult(Result):
         recorded_digest = coverage.get("artifact_digest")
         if recorded_digest:
             try:
-                if _verified_digest(prediction_file, self.load) != recorded_digest:
+                # The same digest `register_prediction_set` recorded: the frame's `label`
+                # column states which declaration a coverage check should apply to it and is
+                # not part of its content identity (ml4t/agent-workspace#887), so a labelled
+                # artifact and the unlabelled one written before the column existed digest
+                # alike and neither reports incomplete.
+                from case_studies.utils.artifact_digest import published_prediction_digest
+
+                if (
+                    _verified_digest(prediction_file, self.load, published_prediction_digest)
+                    != recorded_digest
+                ):
                     return f"{prediction_file} does not match its recorded digest"
             except (OSError, ValueError, pl.exceptions.PolarsError):
                 return f"{prediction_file} could not be read to verify its digest"
