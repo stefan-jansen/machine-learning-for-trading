@@ -2945,7 +2945,22 @@ def run_plumbing_test(
             calendar=calendar,
             contract_specs=contract_specs,
         )
-        return float(result.metrics["sharpe"])
+        sharpe = result.metrics["sharpe"]
+        if sharpe is None:
+            # The engine stops a path that loses its capital and registers no
+            # Sharpe for it, so there is no number to compare against the
+            # tolerance. The random signal is not the finding here: a
+            # configuration that bankrupts a no-edge book is what the plumbing
+            # test exists to surface, and it says so rather than raising a
+            # TypeError several frames away.
+            raise ValueError(
+                f"{case_study}/{label}: the random-signal plumbing run went bankrupt "
+                f"at period {result.metrics.get('ruin_period')} of "
+                f"{result.metrics.get('n_periods')}, so it has no Sharpe to test. A "
+                "no-edge signal that loses the whole account points at the sizing or "
+                "the short leg, not at the signal."
+            )
+        return float(sharpe)
 
     # Engine plumbing test
     from ml4t.backtest import DataFeed, Engine, RebalanceConfig, Strategy, TargetWeightExecutor

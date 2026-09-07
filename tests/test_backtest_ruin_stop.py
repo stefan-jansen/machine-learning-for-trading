@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import numpy as np
 import polars as pl
+import pytest
 
 from case_studies.utils.backtest_runner import compute_portfolio_metrics
 
@@ -107,3 +108,60 @@ def test_a_loss_that_the_book_survives_is_not_ruin() -> None:
     survived, no_index = apply_ruin_stop(np.array([1.0, 1.0, -0.6, 0.1]))
     assert no_index is None
     assert (survived == np.array([1.0, 1.0, -0.6, 0.1])).all()
+
+
+def test_a_common_support_ranking_puts_a_bankrupt_candidate_last() -> None:
+    """A null Sharpe must not sort to the top of a descending polars sort.
+
+    SQL puts NULLs last on `ORDER BY ... DESC`; polars puts them first unless
+    told otherwise, so the ranking that reads these metrics has to say so.
+    """
+    from case_studies.utils.strategy_analysis import rank_returns_on_common_support
+
+    timestamps = pl.datetime_range(
+        pl.datetime(2009, 1, 1), pl.datetime(2009, 1, 1) + pl.duration(days=108), "1d", eager=True
+    )
+    ranking = rank_returns_on_common_support(
+        {
+            "ruined": pl.DataFrame({"timestamp": timestamps, "daily_return": _RUINED}),
+            "solvent": pl.DataFrame({"timestamp": timestamps, "daily_return": _SOLVENT}),
+        },
+        periods_per_year=12,
+    )
+    assert ranking["backtest_hash"].to_list() == ["solvent", "ruined"]
+    assert ranking["sharpe"][1] is None
+
+
+def test_the_plumbing_test_refuses_a_bankrupt_random_run(monkeypatch) -> None:
+    """No Sharpe to compare against the tolerance, so it says why."""
+    from types import SimpleNamespace
+
+    import case_studies.utils.backtest_runner as br
+
+    spec = {
+        "version": 2,
+        "strategy": {"rebalance": {"mode": "vectorized"}},
+        "backtest_config": {},
+    }
+    predictions = pl.DataFrame(
+        {
+            "timestamp": [pl.datetime(2024, 1, 1)] * 2,
+            "symbol": ["A", "B"],
+            "y_score": [0.8, 0.2],
+            "y_true": [0.1, -0.1],
+        }
+    )
+    monkeypatch.setattr(br, "get_backtest_config", lambda _: object())
+    monkeypatch.setattr(br, "ensure_backtest_spec", lambda *args, **kwargs: args[2])
+    monkeypatch.setattr(
+        br,
+        "run_backtest",
+        lambda *a, **k: SimpleNamespace(
+            metrics={"sharpe": None, "ruin": 1.0, "ruin_period": 40.0, "n_periods": 109}
+        ),
+    )
+
+    with pytest.raises(ValueError, match="went bankrupt at period 40.0 of 109"):
+        br.run_plumbing_test(
+            "demo", pl.DataFrame(), spec, predictions=predictions, label="fwd_ret_1m", seed=7
+        )

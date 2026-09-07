@@ -124,16 +124,21 @@ def rank_returns_on_common_support(
             uncertainty=False,
             trim_leading_zeros=False,
         )
+        # A path the engine stopped at ruin carries no Sharpe, by design: a ratio
+        # of a mean to a dispersion describes a process that continues
+        # (ml4t/agent-workspace#920). The candidate stays on the frame so the
+        # caller can see it was compared, and sorts below every solvent one.
+        sharpe = metrics["sharpe"]
         rows.append(
             {
                 "backtest_hash": backtest_hash,
-                "sharpe": float(metrics["sharpe"]),
+                "sharpe": None if sharpe is None else float(sharpe),
                 "n_periods": aligned.height,
                 "start": common[0],
                 "end": common[-1],
             }
         )
-    return pl.DataFrame(rows).sort("sharpe", descending=True)
+    return pl.DataFrame(rows).sort("sharpe", descending=True, nulls_last=True)
 
 
 def rank_backtests_on_common_support(
