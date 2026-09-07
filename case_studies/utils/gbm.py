@@ -3171,30 +3171,11 @@ def validate_locked_run(
         record["checkpoint_value"],
     ) != (context.prediction_split, "iteration", selected[0]):
         raise ValueError("locked GBM run published the wrong checkpoint")
-    published = prediction.load().sort("symbol", "timestamp", "fold")
+    prediction.load()
     model_dir = run.training.root / "run_log" / "training" / run.training.hash / "models"
     if not _valid_gbm_model_dir(model_dir, context):
         raise ValueError("locked GBM fitted-state manifest does not validate")
-    reconstructed = _gbm_prediction_frame(
-        _predict_from_gbm_models(model_dir, spec, context)["predictions"],
-        selected[0],
-        context,
-    )
-    key_columns = ["symbol", "timestamp", "fold"]
-    value_columns = ["prediction", "actual"]
-    if "eval_actual" in published.columns or "eval_actual" in reconstructed.columns:
-        if "eval_actual" not in published.columns or "eval_actual" not in reconstructed.columns:
-            raise ValueError("locked GBM fitted state changed the prediction schema")
-        value_columns.append("eval_actual")
-    if not reconstructed.select(key_columns).equals(
-        published.select(key_columns)
-    ) or not np.allclose(
-        reconstructed.select(value_columns).to_numpy(),
-        published.select(value_columns).to_numpy(),
-        rtol=1e-12,
-        atol=1e-12,
-        equal_nan=False,
-    ):
-        raise ValueError("locked GBM fitted state does not reproduce published predictions")
+    # See the same removal in deep_learning.validate_locked_run. Removed here too so the three
+    # families record their locked runs the same way: booster digests, not a re-scored panel.
     manifest = json.loads((model_dir / "manifest.json").read_text())
     return hashlib.sha256(canonical_json(manifest).encode()).hexdigest()

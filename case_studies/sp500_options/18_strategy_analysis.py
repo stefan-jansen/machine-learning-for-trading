@@ -92,7 +92,7 @@ from case_studies.utils.benchmark import load_benchmark_metrics, load_benchmark_
 from case_studies.utils.cohort_metrics import compute_and_register
 from case_studies.utils.cohort_reporting import cohort_metric_attribution, reportable_pbo
 from case_studies.utils.paired_metrics import populate_paired_metrics, rung_for
-from case_studies.utils.uncertainty import cohort_member_digest
+from case_studies.utils.uncertainty import ENTIRE_REGISTRY, cohort_member_digest
 from case_studies.utils.factor_attribution import (
     compute_bootstrap_ci,
     format_attribution_summary,
@@ -311,6 +311,11 @@ _paired_rows = populate_paired_metrics(
     label_restriction=frozenset({PRIMARY_LABEL}),
     rung=rung_for(CASE_STUDY),
     carrier=_lineage,
+    # The cohort call above is scoped to `_CANDIDATE_PREDICTIONS` and this one is not:
+    # the pairs are selected from every registered prediction set. That disagreement
+    # was there before the scope had to be stated; narrowing it changes published
+    # numbers and is ml4t/agent-workspace#1006, not this line.
+    prediction_hashes=ENTIRE_REGISTRY,
     periods_per_year=PERIODS_PER_YEAR,
     replace_all=True,
     verbose=False,

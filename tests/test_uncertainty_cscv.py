@@ -13,6 +13,7 @@ Covers two pieces P2.5 added:
 from __future__ import annotations
 
 import warnings
+from datetime import date, timedelta
 from math import comb
 from pathlib import Path
 
@@ -285,41 +286,27 @@ def test_sparse_bootstrap_samples_do_not_emit_correlation_warnings() -> None:
     assert result["bootstrap_n"] == 100.0
 
 
-def test_the_default_trim_matches_the_chapter_20_producer_it_shares_a_table_with() -> None:
-    """Two producers write ``backtest_paired_metrics`` and must not disagree on the sample.
+def test_where_a_benchmark_pair_starts_is_pinned_by_what_it_returns() -> None:
+    """One producer, and the start rule stated as a property rather than as an agreement.
 
-    ``20_strategy_synthesis/01_aggregate_synthesis.py`` carries its own copy of the joint
-    coercion, ``_joint_coerce``, and ``case_studies/utils/paired_metrics.py`` reaches
-    ``joint_returns``. Both compute the same three stage transitions for the same case study,
-    so if their start rules part company then ``sharpe_diff`` for one row depends on which
-    producer ran last. This runs the real Ch20 function - lifted out of the notebook source
-    rather than reimplemented - against the shared one.
+    ``20_strategy_synthesis/01_aggregate_synthesis.py`` carried its own copy of the joint
+    coercion, ``_joint_coerce``, while ``case_studies/utils/paired_metrics.py`` reached
+    ``joint_returns``. Both wrote ``backtest_paired_metrics`` for the same stage
+    transitions, so a change to one and not the other made ``sharpe_diff`` for a row depend
+    on which producer ran last. The copy is gone and Ch20 calls the shared helper, so there
+    is no second implementation left for a test to check the first against.
 
-    The pairs are built rather than drawn at random, because the only session the two rules
-    could disagree on is one where the earlier starter posts an exactly zero return on the
-    later starter's opening day, and a continuous distribution never produces one.
+    What that test was really protecting is the rule itself, and this pins it directly: for
+    a strategy against a benchmark the sample keeps only sessions finite on both sides, and
+    opens on the first session where both are trading. Asserted on what comes back rather
+    than against a second copy of the arithmetic, because a reference implementation in the
+    test would be the same duplication one file further away.
 
-    The duplicate should go; that is a notebook edit obliging a production re-execution of the
-    synthesis across all nine registries. Until then, this is what stops it drifting.
+    The pairs are built rather than drawn at random, because the session the rule turns on
+    is one where the earlier starter posts an exactly zero return on the later starter's
+    opening day, and a continuous distribution never produces one.
     """
-    import ast
-
     from case_studies.utils.uncertainty import joint_returns
-
-    repo_root = Path(__file__).resolve().parents[1]
-    source = (repo_root / "20_strategy_synthesis" / "01_aggregate_synthesis.py").read_text()
-    tree = ast.parse(source)
-    definition = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "_joint_coerce"
-    )
-    namespace: dict = {"np": np}
-    exec(  # noqa: S102 - running the producer itself is the point of the check
-        compile(ast.Module(body=[definition], type_ignores=[]), "01_aggregate_synthesis", "exec"),
-        namespace,
-    )
-    ch20_coerce = namespace["_joint_coerce"]
 
     pairs = [
         # The boundary: the baseline is flat on the session the challenger first trades.
@@ -355,12 +342,117 @@ def test_the_default_trim_matches_the_chapter_20_producer_it_shares_a_table_with
         pairs.append((challenger, baseline))
 
     for challenger, baseline in pairs:
-        theirs_c, theirs_b = ch20_coerce(challenger, baseline)
-        ours_c, ours_b = joint_returns(challenger, baseline)
+        kept_c, kept_b = joint_returns(challenger, baseline)
 
-        assert ours_c.size == theirs_c.size
-        np.testing.assert_allclose(ours_c, theirs_c)
-        np.testing.assert_allclose(ours_b, theirs_b)
+        assert kept_c.size == kept_b.size, "a paired bootstrap refuses a misaligned pair"
+        assert np.isfinite(kept_c).all() and np.isfinite(kept_b).all()
+
+        finite = np.isfinite(challenger) & np.isfinite(baseline)
+        survivors_c = np.asarray(challenger, dtype=np.float64)[finite]
+        survivors_b = np.asarray(baseline, dtype=np.float64)[finite]
+        both_trading = (survivors_c != 0.0) & (survivors_b != 0.0)
+
+        if not both_trading.any():
+            assert kept_c.size == 0, "no session where both traded is no sample"
+            continue
+
+        # The sample is a suffix of the jointly finite sessions, so nothing inside it is
+        # reordered or dropped, and it opens on the first session where both were trading.
+        assert kept_c.size == survivors_c.size - int(np.flatnonzero(both_trading)[0])
+        np.testing.assert_allclose(kept_c, survivors_c[survivors_c.size - kept_c.size :])
+        np.testing.assert_allclose(kept_b, survivors_b[survivors_b.size - kept_b.size :])
+        assert kept_c[0] != 0.0 and kept_b[0] != 0.0
+        assert not (
+            (survivors_c[: survivors_c.size - kept_c.size] != 0.0)
+            & (survivors_b[: survivors_b.size - kept_b.size] != 0.0)
+        ).any(), "no earlier session had both sides trading"
+
+
+def test_the_ch20_producer_can_say_which_pairing_it_holds() -> None:
+    """The copy took no position, and a producer that cannot say gets one pair type wrong.
+
+    Ch20's ``_joint_coerce`` hard-coded the both-sides-traded rule. That is right for a
+    strategy against a benchmark, where the challenger's leading zeros are warmup before its
+    first signal, and wrong for a risk overlay against its own carrier, where a flat
+    challenger is a position it chose to hold and is the effect the comparison exists to
+    measure. Trimming those rows pulls the measured difference toward zero in exactly the
+    direction the overlay is under test, and nothing in the copy could express the
+    difference.
+
+    Every pair this notebook builds today is the first kind. The point is that the second is
+    now sayable, so a future overlay pair is a keyword rather than a second copy of the
+    coercion with the other rule in it.
+
+    Ch20's real function is lifted out of the notebook source rather than reimplemented,
+    because a test that passes the flag to the shared helper by hand cannot see what the
+    producer does with it.
+    """
+    import ast
+
+    from case_studies.utils.uncertainty import compute_paired_uncertainty, joint_returns
+
+    repo_root = Path(__file__).resolve().parents[1]
+    source = (repo_root / "20_strategy_synthesis" / "01_aggregate_synthesis.py").read_text()
+    tree = ast.parse(source)
+    wanted = {"_populate_pair", "_min_paired_n"}
+    definitions = [
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+    assert {node.name for node in definitions} == wanted
+    namespace: dict = {
+        "np": np,
+        "pl": pl,
+        "joint_returns": joint_returns,
+        "compute_paired_uncertainty": compute_paired_uncertainty,
+        "compute_independent_diff_uncertainty": lambda *a, **k: {},
+    }
+    exec(  # noqa: S102 - running the producer itself is the point of the check
+        compile(ast.Module(body=definitions, type_ignores=[]), "01_aggregate_synthesis", "exec"),
+        namespace,
+    )
+    populate_pair = namespace["_populate_pair"]
+
+    # The challenger sits flat for its first six sessions while the baseline trades.
+    rng = np.random.default_rng(5)
+    baseline = rng.normal(0.0005, 0.01, 40)
+    challenger = baseline + rng.normal(0.0, 0.002, 40)
+    challenger[:6] = 0.0
+    frames = [
+        pl.DataFrame(
+            {
+                "timestamp": [date(2020, 1, 1) + timedelta(days=i) for i in range(40)],
+                "ret": list(values),
+            }
+        )
+        for values in (challenger, baseline)
+    ]
+
+    as_benchmark = populate_pair(
+        "unit_cs",
+        "chal",
+        "bench",
+        "equal_weight",
+        *frames,
+        252,
+        "fwd_ret_5d",
+        challenger_overlays_baseline=False,
+    )
+    as_overlay = populate_pair(
+        "unit_cs",
+        "chal",
+        "bench",
+        "risk_overlay_leader",
+        *frames,
+        252,
+        "fwd_ret_5d",
+        challenger_overlays_baseline=True,
+    )
+
+    assert as_benchmark["n_overlap"] == 34, "warmup before the challenger's first signal"
+    assert as_overlay["n_overlap"] == 40, "six sessions the overlay chose to sit out"
+    assert as_benchmark["sharpe_diff"] != as_overlay["sharpe_diff"], (
+        "if the two shapes agreed, neither the keyword nor this test would be worth having"
+    )
 
 
 def test_the_overlay_trim_starts_at_the_earlier_of_the_two_first_sessions() -> None:

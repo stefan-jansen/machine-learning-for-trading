@@ -24,7 +24,11 @@ Six pair types are produced per case study:
 
 All pairs use the paired stationary block bootstrap
 (``compute_paired_uncertainty``); pair #3 uses independent per-window draws
-(``compute_independent_diff_uncertainty``) since the windows are disjoint.
+(``compute_independent_diff_uncertainty``) because its two windows share no
+observations, so there is no difference series to pair on. Disjointness removes the
+pairing; it does not make the two Sharpes independent, and the interval that comes
+back is calibrated for the gap between those two windows rather than for the
+strategy having one edge across both. See that function for the measurement.
 """
 
 from __future__ import annotations
@@ -50,6 +54,10 @@ from case_studies.utils.strategy_analysis import (
 from case_studies.utils.uncertainty import (
     SIGNAL_BASELINE_BY_CASE_STUDY,
     STAGE_SEQUENCE,
+    CarrierScope,
+    EntireRegistry,
+    NoCarrier,
+    PredictionScope,
     compute_independent_diff_uncertainty,
     compute_paired_uncertainty,
     descends_from,
@@ -798,11 +806,14 @@ def _populate_pair(
 ):
     """Compute and register one paired-metric row. Idempotent UPSERT.
 
-    With ``disjoint_windows=True`` (val→holdout decay), each side is
-    bootstrapped independently over its full window and the difference
-    distribution is built from independent draws. Otherwise, the streams are
-    inner-joined on timestamp and a paired stationary bootstrap runs on the
-    aligned diff series.
+    With ``disjoint_windows=True`` (val→holdout decay), each side is bootstrapped
+    over its full window and the difference distribution is built from those draws,
+    because two windows that share no timestamps leave no difference series to
+    resample. That is the absence of a pairing, not independence: see
+    :func:`case_studies.utils.uncertainty.compute_independent_diff_uncertainty` for
+    what the resulting interval does and does not cover. Otherwise, the streams are
+    inner-joined on timestamp and a paired stationary bootstrap runs on the aligned
+    diff series.
 
     ``challenger_overlays_baseline`` says what a leading flat run on the challenger
     means, and the two pair shapes here answer differently. Against the equal-weight
@@ -958,12 +969,12 @@ def populate_paired_metrics(
     label_restriction: frozenset[str] | None = None,
     rung: dict | None = None,
     carrier_pin_predicate: pl.Expr | None = None,
-    carrier: Mapping[str, Any] | None = None,
+    carrier: CarrierScope,
     periods_per_year: int | None = None,
     verbose: bool = True,
-    replace_all: bool = False,
+    replace_all: bool,
     write_case_dir: Path | None = None,
-    prediction_hashes: Iterable[str] | None = None,
+    prediction_hashes: PredictionScope,
 ) -> list[dict]:
     """Compute all six paired-bootstrap pair types for ``cs`` and register them.
 
@@ -982,23 +993,23 @@ def populate_paired_metrics(
       study's own ``evaluation.periods_per_year`` declaration rather than to a
       cadence, so a caller that omits it gets its own scale instead of someone
       else's.
-    * ``carrier`` — a ``resolve_canonical_rank1_lineage`` result. When given, pairs
-      #2-6 use its validation and holdout backtests instead of re-ranking the
-      registry here. Pair #1 is unaffected: it is about the signal leader, not the
-      carrier. Omitting it keeps the legacy ranking, which is not the canonical
-      selection - it orders on raw Sharpe and applies neither the common-support
-      re-ranking nor the restrictions the resolver holds - so a caller that can
-      resolve the lineage should pass it. The rung-pinned case studies
+    * ``carrier`` — a ``resolve_canonical_rank1_lineage`` result, or ``NO_CARRIER``.
+      With a lineage, pairs #2-6 use its validation and holdout backtests instead of
+      re-ranking the registry here. Pair #1 is unaffected: it is about the signal
+      leader, not the carrier. ``NO_CARRIER`` keeps the legacy ranking, which is not
+      the canonical selection - it orders on raw Sharpe and applies neither the
+      common-support re-ranking nor the restrictions the resolver holds - so a caller
+      that can resolve the lineage should pass it. The rung-pinned case studies
       (sp500_options, nasdaq100_microstructure) restrict on a dimension the resolver
-      does not know, which is why this is a parameter rather than the default.
+      does not know, which is why the legacy ranking still exists at all.
 
     ``replace_all`` makes the call a complete snapshot: pairs it did not write are
     deleted, so a rebuild under a different selection does not leave the previous
     selection's rows behind. Registration alone is an UPSERT keyed on
     ``(challenger_hash, benchmark_hash)``, which cannot remove a row it no longer
-    produces. Default False keeps the additive behaviour every other caller relies
-    on. A call that writes nothing prunes nothing - that is a failed rebuild, not
-    an empty snapshot.
+    produces, so False is additive: the previous selection's rows survive alongside
+    the corrected ones. A call that writes nothing prunes nothing - that is a failed
+    rebuild, not an empty snapshot.
 
     ``periods_per_year`` used to be ``freq: str = "daily"``, resolved through a
     name-to-count map. That default is silently right for the six case studies that
@@ -1018,11 +1029,19 @@ def populate_paired_metrics(
     ``extra_paired_rows`` the Ch20 producer builds); each pair is also written to
     ``backtest_paired_metrics`` via ``register_paired_metrics``.
 
-    ``prediction_hashes`` restricts every candidate read to that population. A pair is a
-    comparison between two strategies the caller reports; selecting either side from the
-    whole registry lets a retired generation be the challenger or the benchmark, and the
-    difference is then measured against a strategy its own publisher replaced. Detecting
-    those rows and rebuilding without this would write them back unchanged.
+    ``prediction_hashes`` restricts every candidate read to that population, or
+    ``ENTIRE_REGISTRY`` for the whole-registry read. A pair is a comparison between two
+    strategies the caller reports; selecting either side from the whole registry lets a
+    retired generation be the challenger or the benchmark, and the difference is then
+    measured against a strategy its own publisher replaced. Detecting those rows and
+    rebuilding without this would write them back unchanged.
+
+    ``carrier``, ``replace_all`` and ``prediction_hashes`` carry no default. Each decides
+    what the numbers this writes are computed over, and each used to default to the widest
+    reading, so omitting one type-checked, ran, and produced plausible rows that were wrong
+    exactly when the registry held something the caller does not report - invisible in
+    review, in CI and in the output. Requiring them costs one line per call site and makes
+    the wide readers greppable. See ``uncertainty.ENTIRE_REGISTRY``.
 
     ``write_case_dir`` redirects the registry *write* to an alternate case dir
     (reads still come from the live tree) — used by the verification harness to
@@ -1030,7 +1049,12 @@ def populate_paired_metrics(
     """
     if explorer is None:
         explorer = BacktestExplorer(cs)
-    live = list(prediction_hashes) if prediction_hashes is not None else None
+    # Both scopes are stated by the caller and carry no default; the sentinels are
+    # normalized here so the rest of the body reads the same as it did when they were
+    # `None`. `ENTIRE_REGISTRY` is the whole-registry read, `NO_CARRIER` the raw-Sharpe
+    # re-rank. See `uncertainty.ENTIRE_REGISTRY` for why neither is a default.
+    live = None if isinstance(prediction_hashes, EntireRegistry) else list(prediction_hashes)
+    lineage = None if isinstance(carrier, NoCarrier) else carrier
     if periods_per_year is None:
         from case_studies.utils.uncertainty import periods_per_year_from_setup
 
@@ -1078,7 +1102,7 @@ def populate_paired_metrics(
         # resolved it through the canonical selection, which is the answer this ranking is a
         # cheaper approximation of. With no carrier the sort stands, with `backtest_hash` as
         # a final key so the choice is at least deterministic.
-        carrier_backtest = str(carrier["val_backtest_hash"]) if carrier else None
+        carrier_backtest = str(lineage["val_backtest_hash"]) if lineage else None
         cand1 = cand.sort(["sharpe", "backtest_hash"], descending=[True, False]).unique(
             subset=["prediction_hash"], keep="first", maintain_order=True
         )
@@ -1169,7 +1193,7 @@ def populate_paired_metrics(
         subset=["prediction_hash"], keep="first", maintain_order=True
     )
 
-    if carrier is None:
+    if lineage is None:
         leader = cand.row(0, named=True)
     else:
         # The caller resolved the carrier through ``resolve_canonical_rank1_lineage``, so
@@ -1180,11 +1204,11 @@ def populate_paired_metrics(
         # ``walk_forward_v2`` run and the ``walk_forward_v3`` one that replaced it, and
         # the pairs were written against a carrier the case study does not report.
         leader = {
-            "backtest_hash": carrier["val_backtest_hash"],
-            "prediction_hash": carrier["val_prediction_hash"],
-            "label": carrier["label"],
-            "family": carrier["family"],
-            "config_name": carrier["config_name"],
+            "backtest_hash": lineage["val_backtest_hash"],
+            "prediction_hash": lineage["val_prediction_hash"],
+            "label": lineage["label"],
+            "family": lineage["family"],
+            "config_name": lineage["config_name"],
         }
     leader_hash = leader["backtest_hash"]
     leader_phash = leader["prediction_hash"]
@@ -1218,7 +1242,7 @@ def populate_paired_metrics(
     # does - and passing the leader's hash alongside a later candidate's spec asks for a
     # holdout that matches neither. That used to be masked by the pin falling through to an
     # unpinned query; now that the pin is strict it would answer None instead.
-    if carrier is None:
+    if lineage is None:
         ho_lineage = _holdout_lineage_for(
             cs,
             leader_label,
@@ -1228,17 +1252,17 @@ def populate_paired_metrics(
             prefer_prediction_hash=val_rank1["prediction_hash"] if val_rank1 else leader_phash,
             retired_hashes=_retired_prediction_hashes(cs),
         )
-    elif carrier.get("holdout_backtest_hash") is None:
+    elif lineage.get("holdout_backtest_hash") is None:
         ho_lineage = None
     else:
         # Same rule as the leader: the caller's lineage is the answer. Its holdout is the
         # refit of this exact configuration, which is what makes pair #3 a comparison of
         # one strategy across two periods rather than of two models.
         ho_lineage = {
-            "backtest_hash": carrier["holdout_backtest_hash"],
-            "label": carrier["label"],
-            "family": carrier["family"],
-            "config_name": carrier["config_name"],
+            "backtest_hash": lineage["holdout_backtest_hash"],
+            "label": lineage["label"],
+            "family": lineage["family"],
+            "config_name": lineage["config_name"],
         }
     ho_hash = ho_lineage["backtest_hash"] if ho_lineage else None
     ho_label = ho_lineage["label"] if ho_lineage else leader_label

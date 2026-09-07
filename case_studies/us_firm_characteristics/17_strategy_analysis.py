@@ -229,6 +229,7 @@ def _fmt(val: float | None, fmt: str = ".4f") -> str:
 # %%
 from case_studies.utils.cohort_metrics import compute_and_register
 from case_studies.utils.paired_metrics import populate_paired_metrics
+from case_studies.utils.uncertainty import ENTIRE_REGISTRY
 
 _db = CASE_DIR / "run_log" / "registry.db"
 # The prediction sets their publishers still stand behind. `compute_and_register` scopes cohorts
@@ -333,8 +334,17 @@ if (
     # ranks the registry on raw Sharpe, which is a fourth selector beside the resolver,
     # this notebook and the costs sweep - and here it picked the retired conformal
     # generation, so the pairs described a carrier the case study does not report.
+    # The cohort call above is scoped to `LIVE_PREDICTIONS` and this one is not: the
+    # pairs are selected from every registered prediction set. Stated rather than
+    # defaulted; narrowing it changes published numbers and is
+    # ml4t/agent-workspace#1006. `replace_all=False` keeps the write additive, which
+    # is what this notebook has always done.
     _paired_rows = populate_paired_metrics(
-        CASE_STUDY, periods_per_year=PERIODS_PER_YEAR, carrier=_lineage
+        CASE_STUDY,
+        periods_per_year=PERIODS_PER_YEAR,
+        carrier=_lineage,
+        prediction_hashes=ENTIRE_REGISTRY,
+        replace_all=False,
     )
     _n_cohorts = sum(_cohort_counts[k] for k in ("family", "stagelabel", "label"))
     _n_pairs = sum(1 for row in _paired_rows if "skip" not in row)

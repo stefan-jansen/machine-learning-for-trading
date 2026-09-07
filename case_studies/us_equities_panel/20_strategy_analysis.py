@@ -439,10 +439,13 @@ selected_performance
 # %% [markdown]
 # ## Required paired comparisons
 #
-# Validation and holdout windows are disjoint, so their difference uses independently resampled
-# windows registered under `val_rank1_self`. Benchmark evidence uses the equal-weight return artifact
-# for the selected label and window. Each comparison must resolve once and carry finite interval
-# bounds.
+# Validation and holdout windows share no observations, so there is no difference series to pair
+# on and each window is resampled over its own length, registered under `val_rank1_self`. That is
+# the absence of a pairing rather than independence: the two Sharpes are the same strategy in
+# adjacent periods and stay dependent. The interval is for the gap between these two windows, and
+# a regime that lands differently on each is outside what it covers. Benchmark evidence uses the
+# equal-weight return artifact for the selected label and window. Each comparison must resolve
+# once and carry finite interval bounds.
 
 # %% tags=["results"]
 holdout_pairs = load_paired_metrics(

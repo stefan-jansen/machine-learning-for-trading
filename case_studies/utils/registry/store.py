@@ -224,12 +224,25 @@ CREATE TABLE IF NOT EXISTS cohort_metrics (
     label         TEXT NOT NULL,
     family        TEXT,
     leader_hash   TEXT NOT NULL REFERENCES backtest_runs(backtest_hash),
+    -- The trials the correction was computed over, which is the K a notebook prints
+    -- beside a deflated Sharpe and so has to be the K that deflated it.
     k_variants                  INTEGER NOT NULL,
+    -- The configurations the cohort holds. Larger than k_variants exactly when a
+    -- regularisation grid ran past the point where the penalty stops binding and
+    -- several configurations produced one series; see uncertainty._distinct_trials.
+    k_variants_submitted        INTEGER,
     -- sha256 over the cohort's sorted member backtest hashes. A count cannot say
     -- which variants a stored correction was computed over: swap one retired member
     -- for one live member and k_variants is unchanged, so a reader comparing counts
     -- accepts a correction from a different cohort than the one it asked for.
     member_digest               TEXT,
+    -- The members that digest covers, as a sorted JSON array. The digest is one-way, so
+    -- with it alone verifying a row means rebuilding the member list from the registry
+    -- and re-hashing it - and that rebuild replays every selection rule in force when
+    -- the row was written. When one has moved since, a real membership disagreement is
+    -- indistinguishable from a rule change. Stored, the comparison is against a fact and
+    -- names the members that differ; see uncertainty.cohort_membership_diff.
+    members_json                TEXT,
     periods_per_year            REAL NOT NULL,
     computed_at                 TEXT NOT NULL,
     n_trials_effective_mp       REAL,
@@ -766,6 +779,16 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
         cohort_cols = {row[1] for row in db.execute("PRAGMA table_info(cohort_metrics)").fetchall()}
         if "member_digest" not in cohort_cols:
             db.execute("ALTER TABLE cohort_metrics ADD COLUMN member_digest TEXT")
+        # The configurations the cohort holds, which is not the same as the trials the
+        # correction was computed over: a regularisation grid that saturates submits
+        # several and produces one series. `k_variants` is the trial count, because that
+        # is the K printed beside a deflated Sharpe; this is what was submitted, and the
+        # two together say by how much a grid ran past saturation. See
+        # `uncertainty._distinct_trials`.
+        if "k_variants_submitted" not in cohort_cols:
+            db.execute("ALTER TABLE cohort_metrics ADD COLUMN k_variants_submitted INTEGER")
+        if "members_json" not in cohort_cols:
+            db.execute("ALTER TABLE cohort_metrics ADD COLUMN members_json TEXT")
 
     if "prediction_coverage" in tables:
         coverage_cols = {

@@ -48,7 +48,10 @@ from case_studies.sp500_options.research_workflow import (
     official_prediction_catalog,
     open_study,
 )
-from case_studies.utils.registry.completeness import require_comparable_key_digests
+from case_studies.utils.registry.completeness import (
+    key_digest_value,
+    require_comparable_key_digests,
+)
 
 MODEL_POPULATIONS = (
     "sp500-options-linear-validation-v1",
@@ -127,7 +130,16 @@ coverage = coverage.join(
 require_comparable_key_digests(
     coverage.get_column("expected_key_digest"), what="this notebook's model populations"
 )
-for digest, group in coverage.group_by("expected_key_digest"):
+# Grouped on the digest value rather than the stored string. A row written before the rendering
+# was stamped and a row written after it carry the same key set as `<value>` and `k2:<value>`,
+# and grouping the strings would split one contract in two for no reason a reader could see -
+# the same mis-grouping the check above refuses, arriving through the prefix instead.
+coverage = coverage.with_columns(
+    pl.col("expected_key_digest")
+    .map_elements(key_digest_value, return_dtype=pl.String)
+    .alias("eligibility")
+)
+for digest, group in coverage.group_by("eligibility"):
     if group.select("n_expected", "n_actual", "n_folds").n_unique() != 1:
         raise RuntimeError(
             f"predictions sharing eligibility {digest[0]} disagree on coverage dimensions"
@@ -136,7 +148,7 @@ for digest, group in coverage.group_by("expected_key_digest"):
         raise RuntimeError(f"eligibility {digest[0]} has predictions short of their declaration")
 
 population_audit = (
-    coverage.group_by("expected_key_digest")
+    coverage.group_by("eligibility")
     .agg(
         pl.col("family").unique().sort().str.join(", ").alias("families"),
         pl.len().alias("predictions"),

@@ -342,7 +342,15 @@ if missing_kinds or stale_paired:
         if missing_kinds
         else f"{stale_paired} pair(s) challenged by a retired prediction"
     )
-    rows = populate_paired_metrics(CASE_STUDY, prediction_hashes=LIVE_PREDICTIONS, carrier=CARRIER)
+    # `replace_all=False` is additive: the pairs this call does not produce stay. That is
+    # what this notebook has always done, and it is stated now because the argument
+    # decides what the table a reader loads below contains.
+    rows = populate_paired_metrics(
+        CASE_STUDY,
+        prediction_hashes=LIVE_PREDICTIONS,
+        carrier=CARRIER,
+        replace_all=False,
+    )
     written = sum(1 for r in rows if "skip" not in r)
     print(f"backtest_paired_metrics: wrote {written} pairs ({reason})")
 else:
@@ -1354,11 +1362,13 @@ else:
     )
     print()
     print(
-        "The validation and holdout windows are disjoint by design, so the populator "
-        "bootstraps each window separately over its whole length and takes the difference of "
-        "independent draws. Nothing is truncated and no two draws are paired. Read the interval "
-        "as a difference of two independently resampled Sharpes, not as a comparison over "
-        "overlapping calendar time."
+        "The validation and holdout windows share no observations, so there is no difference "
+        "series to pair on and the populator bootstraps each window separately over its whole "
+        "length. Nothing is truncated and no two draws are paired. That is the absence of a "
+        "pairing, not independence - the two Sharpes are the same strategy in adjacent periods "
+        "and stay dependent. Read the interval as the gap between these two windows, not as a "
+        "comparison over overlapping calendar time and not as a test of whether one edge "
+        "carried across both."
     )
 
 # %%
@@ -1417,6 +1427,13 @@ else:
 # *series*, and disjoint windows produce no such series. An interval read as though the two were
 # contemporaneous, or as though draws were matched to each other, would be read as something
 # stronger than it is.
+#
+# **Independent draws are not independent Sharpes.** Resampling inside a window conditions on that
+# window's returns, so the interval measures the gap between these two windows. What it cannot see
+# is a market regime that lands differently on the two of them, and that is the part which decides
+# whether one edge carried across both. The interval therefore runs narrow, not wide, for that
+# second reading - an unresolved decay here is weaker evidence of stability than the same interval
+# over a single window would be.
 #
 # **The holdout is short.** Whatever the point estimates, an interval computed over a window this
 # size is wide, and a decay that is not statistically resolved is the expected outcome rather than

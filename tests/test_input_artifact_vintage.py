@@ -155,6 +155,56 @@ def test_a_declaration_does_not_wave_through_a_third_vintage(tmp_path: Path) -> 
         )
 
 
+def test_a_second_regeneration_registers_on_a_declared_chain(tmp_path: Path) -> None:
+    """A regeneration of a regeneration, which is the same operation done twice.
+
+    Declaring that C replaces B is the whole of what an author can say: A already names B as
+    its successor, and `declare_artifact_supersession` refuses a second successor for one
+    sha, so C -> A cannot be declared. But the population still holds the run fitted on A - a
+    declaration retires a vintage for later runs, it does not delete the runs that used it -
+    so reading one edge demanded a declaration that cannot be made, and the error named it.
+    """
+    register_training_run("etfs", _spec(model_based=SHA_A), case_dir=tmp_path)
+    declare_artifact_supersession(
+        "etfs", "model_based", sha256=SHA_B, supersedes_sha256=SHA_A, case_dir=tmp_path
+    )
+    register_training_run(
+        "etfs", _spec(model_based=SHA_B, config_name="ridge_wide"), case_dir=tmp_path
+    )
+
+    sha_c = "c" * 64
+    declare_artifact_supersession(
+        "etfs", "model_based", sha256=sha_c, supersedes_sha256=SHA_B, case_dir=tmp_path
+    )
+    register_training_run(
+        "etfs", _spec(model_based=sha_c, config_name="ridge_deep"), case_dir=tmp_path
+    )
+    assert _registered(tmp_path) == 3
+
+
+def test_a_chain_does_not_retire_a_vintage_outside_it(tmp_path: Path) -> None:
+    """The control: ancestry is followed, not assumed. A sha nobody declared stays refused."""
+    register_training_run("etfs", _spec(model_based=SHA_A), case_dir=tmp_path)
+    declare_artifact_supersession(
+        "etfs", "model_based", sha256=SHA_B, supersedes_sha256=SHA_A, case_dir=tmp_path
+    )
+    register_training_run(
+        "etfs", _spec(model_based=SHA_B, config_name="ridge_wide"), case_dir=tmp_path
+    )
+    # `d` replaces `c`, which no run was ever fitted on, so it retires nothing in this
+    # population and the run reading it is still joining two vintages.
+    register_training_run(
+        "etfs", _spec(model_based="c" * 64, label="fwd_ret_5d"), case_dir=tmp_path
+    )
+    declare_artifact_supersession(
+        "etfs", "model_based", sha256="d" * 64, supersedes_sha256="c" * 64, case_dir=tmp_path
+    )
+    with pytest.raises(ValueError, match="model_based"):
+        register_training_run(
+            "etfs", _spec(model_based="d" * 64, config_name="ridge_deep"), case_dir=tmp_path
+        )
+
+
 def test_another_label_is_compared_against_its_own_runs(tmp_path: Path) -> None:
     """The comparison is per label, because `label` names a different file for each one.
 
