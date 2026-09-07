@@ -1156,10 +1156,13 @@ def register_prediction_set(
             # consumer grouping a training run's checkpoints by eligibility splits one
             # contract into two and nothing says why (ml4t/agent-workspace#1065). Refusing
             # here is what makes the next rendering change arrive as an error naming its
-            # cause rather than as a quiet mis-grouping in a notebook.
+            # cause rather than as a quiet mis-grouping in a notebook. The stored digest
+            # is handed the keys it was taken over, so a row written before the rendering
+            # was stamped is identified by recomputing it rather than assumed to be old.
             require_comparable_key_digests(
                 (existing_coverage[1], coverage.expected_key_digest),
                 what=f"training run {training_hash} at split {split!r}",
+                expected_keys=expected_keys,
             )
 
     p_hash = prediction_hash_from_parts(
