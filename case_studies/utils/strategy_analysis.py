@@ -182,23 +182,169 @@ class HoldoutSelfBacktest:
         return self.backtest_hash is not None
 
 
+HoldoutRefitStatus = Literal["refit", "not_out_of_sample", "unattributable"]
+
+
+def holdout_refit_status(training_spec_json: str | None) -> HoldoutRefitStatus:
+    """What a training run's own specification says about how it was fitted.
+
+    Three answers, not two, and the third is why this exists. Read from the training
+    specification rather than from the prediction set's split, because the split says where
+    the predictions land and says nothing about what the model saw while fitting - a model
+    fitted on the validation folds can publish predictions over the holdout window, and that
+    is exactly the mistake the holdout exists to rule out.
+
+    ``refit``
+        The run's CV declares the holdout fold. This is a holdout evaluation.
+    ``not_out_of_sample``
+        The run records a CV split and it is not the holdout. Whatever it published over the
+        holdout window, it is not an out-of-sample result, and a row asserting one is worse
+        than a missing row: it is readable, quotable, and indistinguishable downstream from a
+        real evaluation.
+    ``unattributable``
+        The run records no CV split, so nothing can be concluded either way. Absence of
+        evidence is not evidence of the second case, and the holdout lineage is not a place
+        to assume - a caller that deletes on this answer deletes a result it cannot show is
+        wrong.
+    """
+    if not training_spec_json:
+        return "unattributable"
+    try:
+        cv = (json.loads(training_spec_json).get("computation") or {}).get("cv") or {}
+    except (TypeError, ValueError):
+        return "unattributable"
+    split = cv.get("split")
+    if split is None:
+        return "unattributable"
+    return "refit" if split == "holdout" else "not_out_of_sample"
+
+
 def training_run_fitted_for_the_holdout(training_spec_json: str | None) -> bool:
     """True when a training run's own CV declares the holdout fold.
 
     This is what separates a refit from a validation-fitted model scored on a later
-    window. It is read from the training specification rather than inferred from the
-    prediction set's split, because the split says where the predictions land and says
-    nothing about what the model saw while fitting - a model fitted on the validation
-    folds can publish predictions over the holdout window, and that is exactly the
-    mistake the holdout exists to rule out.
-
-    A run with no recorded specification answers False: it cannot be shown to have been
-    refitted, and the holdout lineage is not a place to assume.
+    window. See :func:`holdout_refit_status`, of which this is the two-valued reading: a
+    run that cannot be shown to have been refitted answers False, which is the right
+    default for a lineage lookup and the wrong one for deciding what to delete.
     """
-    if not training_spec_json:
-        return False
-    cv = (json.loads(training_spec_json).get("computation") or {}).get("cv") or {}
-    return cv.get("split") == "holdout"
+    return holdout_refit_status(training_spec_json) == "refit"
+
+
+def registered_holdout_generations(case_dir: str | Path) -> list[dict[str, Any]]:
+    """Every holdout prediction set in a registry, with what its specification says.
+
+    One implementation. This was copied into `etfs/18_holdout_predictions`,
+    `sp500_options/16_holdout_predictions` and
+    `us_firm_characteristics/15_holdout_predictions`, and the copies had already drifted:
+    two of them delete through the schema-derived cascade in `registry/maintenance.py` and
+    the third listed the child tables by hand, which is the version that aborts on a
+    registry holding a `cohort_metrics.leader_hash` row.
+
+    ``status`` is :func:`holdout_refit_status` on the training run behind each set.
+    ``checkpoint`` is part of the identity rather than a detail of it: one training run
+    publishes one prediction set per declared checkpoint, and moving the selection from one
+    checkpoint to another is a different configuration evaluated on the same window.
+    Identity on the training hash alone would read that as the same generation and let both
+    stand.
+    """
+    import sqlite3
+
+    db_path = Path(case_dir) / "run_log" / "registry.db"
+    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+        rows = conn.execute(
+            """
+            SELECT p.prediction_hash, p.training_hash, p.checkpoint_kind, p.checkpoint_value,
+                   t.config_name, t.spec_json
+            FROM prediction_sets p
+            JOIN training_runs t ON t.training_hash = p.training_hash
+            WHERE p.split = 'holdout'
+            ORDER BY p.prediction_hash
+            """
+        ).fetchall()
+    return [
+        {
+            "prediction_hash": prediction_hash,
+            "training_hash": training_hash,
+            "checkpoint": (checkpoint_kind, checkpoint_value),
+            "config_name": config_name,
+            "status": holdout_refit_status(training_spec_json),
+            "refitted": holdout_refit_status(training_spec_json) == "refit",
+        }
+        for (
+            prediction_hash,
+            training_hash,
+            checkpoint_kind,
+            checkpoint_value,
+            config_name,
+            training_spec_json,
+        ) in rows
+    ]
+
+
+@dataclass(frozen=True)
+class HoldoutGenerationsToRetire:
+    """What a holdout run finds already registered against its window, in three buckets.
+
+    Splitting them is the point. The rule that governs each is different, and the code this
+    replaces had only the first bucket - it filtered the registered generations on
+    ``refitted``, so a row that was NOT a refit was invisible to the refusal and invisible
+    to the deletion that follows it. Nothing owned removing one, and the note written when a
+    stale `us_firm_characteristics` row was removed by hand on 2026-08-30 said exactly that:
+    the next case study to reach the stage would accumulate the same second generation and
+    the same silence.
+    """
+
+    superseded: tuple[dict[str, Any], ...]
+    """Refits of a *different* configuration on the same window.
+
+    A second holdout evaluation, and replacing one is a research decision rather than
+    maintenance: deleting the rows does not undo having observed them. Whoever owns the
+    sweep decides, which is what the notebooks' ``REPLACE_HOLDOUT`` switch is for.
+    """
+
+    not_out_of_sample: tuple[dict[str, Any], ...]
+    """Rows whose training run records a CV split that is not the holdout.
+
+    These are not holdout evaluations at all - a validation-fitted model publishing over
+    the holdout window, which is the defect `29f13165` fixed. Removing one spends nothing,
+    because nothing out-of-sample was ever measured; leaving it is the harm, since it reads
+    downstream exactly like a real evaluation and whichever row resolves first becomes the
+    published number.
+    """
+
+    unattributable: tuple[dict[str, Any], ...]
+    """Rows whose training run records no CV split, so neither can be concluded.
+
+    Refused rather than deleted. A missing specification is not evidence that a run was not
+    refitted, and deleting on it would destroy a result that cannot be shown to be wrong.
+    """
+
+
+def holdout_generations_to_retire(
+    case_dir: str | Path,
+    *,
+    this_generation: tuple[str, tuple[Any, Any]],
+) -> HoldoutGenerationsToRetire:
+    """Divide what is already registered against the holdout window by what governs it.
+
+    ``this_generation`` is ``(training_hash, (checkpoint_kind, checkpoint_value))`` for the
+    run about to be registered; a generation equal to it is this run and is in no bucket.
+    """
+    superseded, not_out_of_sample, unattributable = [], [], []
+    for row in registered_holdout_generations(case_dir):
+        if (row["training_hash"], row["checkpoint"]) == this_generation:
+            continue
+        if row["status"] == "refit":
+            superseded.append(row)
+        elif row["status"] == "not_out_of_sample":
+            not_out_of_sample.append(row)
+        else:
+            unattributable.append(row)
+    return HoldoutGenerationsToRetire(
+        superseded=tuple(superseded),
+        not_out_of_sample=tuple(not_out_of_sample),
+        unattributable=tuple(unattributable),
+    )
 
 
 # What a holdout refit is allowed to change, and nothing else. Everything outside this set
