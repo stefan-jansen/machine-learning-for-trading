@@ -136,15 +136,30 @@ def _registered_artifact_shas(db, *, label: str) -> dict[str, set[str]]:
 
 
 def _declared_artifact_supersessions(db, *, artifact_name: str, sha256: str) -> set[str]:
-    """The shas *sha256* is declared to replace for *artifact_name*."""
-    return {
-        row[0]
-        for row in db.execute(
-            "SELECT supersedes_sha256 FROM artifact_supersessions "
-            "WHERE artifact_name = ? AND sha256 = ?",
-            (artifact_name, sha256),
-        )
-    }
+    """Every sha *sha256* is declared to replace for *artifact_name*, following the chain back.
+
+    Ancestry, not one edge. A second deliberate regeneration produces a chain - C replaces
+    B, which already replaced A - and the population still holds runs fitted on A, because
+    a declaration retires a vintage for future runs and does not delete the runs that used
+    it. Reading one edge would demand that C also declare it supersedes A, which
+    :func:`declare_artifact_supersession` refuses: A already names B as its successor, and a
+    sha has one. So the chain would be unregisterable and the error would name the
+    declaration that cannot be made.
+    """
+    predecessors: dict[str, set[str]] = {}
+    for successor, superseded in db.execute(
+        "SELECT sha256, supersedes_sha256 FROM artifact_supersessions WHERE artifact_name = ?",
+        (artifact_name,),
+    ):
+        predecessors.setdefault(str(successor), set()).add(str(superseded))
+    retired: set[str] = set()
+    frontier = [sha256]
+    while frontier:
+        for predecessor in predecessors.get(frontier.pop(), ()):
+            if predecessor not in retired:
+                retired.add(predecessor)
+                frontier.append(predecessor)
+    return retired
 
 
 def _enforce_input_artifact_vintage(db, spec: dict) -> None:
