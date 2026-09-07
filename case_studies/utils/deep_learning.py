@@ -1490,6 +1490,31 @@ def run_resolved_request(
     )
 
 
+def align_keys_to_published(
+    reconstructed: pl.DataFrame, published: pl.DataFrame, key_columns: list[str]
+) -> pl.DataFrame:
+    """Cast a reconstruction's key columns to the dtypes the published set carries.
+
+    The decision-time column reaches a published prediction set as UTC-aware microseconds:
+    `registry.store._timestamps_as_utc` relabels a naive column before the write, and the
+    parquet round-trip carries the unit. A reconstruction read back from checkpoint files
+    has been through neither. So where a case study's sequence predictions arrive naive -
+    fx_pairs, whose dates come from a numpy datetime64 axis through `flush_fold_predictions`
+    - `DataFrame.equals` compares Datetime(ns, None) against Datetime(us, "UTC") and reports
+    a difference between two frames holding the same instants, the same rows and the same
+    values. That is what refused fx_pairs' holdout on 2026-09-06.
+
+    Casting to the published dtype relabels rather than converting, which is what the writer
+    did, so this brings the reconstruction to the published contract without moving a value.
+    It is the same move as renaming the reader-facing entity column to `symbol`.
+    """
+    return reconstructed.with_columns(
+        pl.col(column).cast(published.schema[column])
+        for column in key_columns
+        if reconstructed.schema[column] != published.schema[column]
+    )
+
+
 def validate_locked_run(
     study: Study,
     spec: dict[str, Any],
@@ -1539,8 +1564,9 @@ def validate_locked_run(
     )
     if context.entity_col != "symbol":
         reconstructed = reconstructed.rename({context.entity_col: "symbol"})
-    reconstructed = reconstructed.sort("symbol", "timestamp", "fold")
     key_columns = ["symbol", "timestamp", "fold"]
+    reconstructed = align_keys_to_published(reconstructed, published, key_columns)
+    reconstructed = reconstructed.sort("symbol", "timestamp", "fold")
     value_columns = ["prediction", "actual"]
     if not reconstructed.select(key_columns).equals(
         published.select(key_columns)
