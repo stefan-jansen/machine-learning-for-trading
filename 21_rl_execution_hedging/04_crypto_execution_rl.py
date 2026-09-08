@@ -750,11 +750,12 @@ fig.show()
 # ## 9. Does the agent condition on what it was given?
 #
 # The state includes the premium index and the hours to the next settlement.
-# Whether the learned policy uses either is a question about its behaviour, and
-# it is answered by pooling every step of every evaluation episode and grouping
-# the execution rate by those two variables. This is descriptive: a difference
-# between the groups says the policy paces differently in them, and says nothing
-# about whether doing so was worth anything.
+# Pooling every step of every evaluation episode and grouping the execution rate
+# by those two variables shows how fast the policy traded in each group. Read it
+# as an association and nothing more: the execution rate also depends on the
+# inventory left, the horizon remaining and the participation cap, and hours
+# grouped by premium state differ in those too, so a gap between the bars is
+# consistent with a policy that never reads the premium at all.
 
 # %%
 PREMIUM_BAND_BPS = 5.0  # boundary between rich, neutral and cheap premium states
@@ -886,18 +887,27 @@ display(
     Markdown(f"""
 {profile_lines}
 
-**Pair the comparison, then check that pairing helped.** Each episode's shortfall is mostly
-what the price did over those twenty-four hours, which every strategy faced equally, so
-differencing per episode should remove most of it. Whether it does is a measurement, not an
-assumption: pairing narrows the interval only where the two arms move together, so both
-standard errors and the correlation between them are reported.
+**Match the windows, and say what matching does and does not remove.** Running every strategy
+on the same seeds means the difference between two of them is not a difference between the
+hours they were given. It is not a difference net of the price either: the schedules sell
+different quantities in different hours, so the difference still contains price movement
+weighted by those quantity differences, along with the modelled impact. What the paired
+difference measures is one schedule against another on matched windows, timing included.
 
 {paired_lines}
 
-**The agent does condition on the state it was given**, in contracts per hour: by premium
-state, {premium_line}; by funding proximity, {funding_line}. That the pace differs across
-these groups is a fact about the policy. Whether conditioning this way is worth anything is
-the paired difference above, and it is a separate question.
+Size each difference with its paired standard error, which carries the covariance between the
+arms whichever way it points. The independent-samples figure beside it shows how much the
+matching changed the precision.
+
+**The grouped rates are associations, and only associations.** In contracts per hour: by
+premium state, {premium_line}; by funding proximity, {funding_line}. A difference between the
+groups does not show the policy reading either feature. `shares_sold` is also driven by how
+much inventory is left, how much of the horizon remains, the participation cap and any forced
+remainder, and all four can differ across these groups in a policy that ignores the premium and
+the funding clock entirely - the premium is persistent, so hours grouped by it are not
+otherwise alike. Establishing that a feature is used takes a sensitivity check that varies it
+while holding the rest of the state fixed, or a policy retrained without it.
 
 **A forced-liquidation rate and a forced volume are different measurements.** A policy can
 end most of its episodes with an involuntary trade while unwinding a very small part of the

@@ -956,10 +956,12 @@ episode:
 
 {paired_lines}
 
-Pairing narrows the interval only where the two arms move together, so read each difference
-against the larger of its two standard errors. **{lowest_mean}** records the lowest mean over
-{EVAL_EPISODES} episodes, which on this evidence is not an ordering to carry out of the
-notebook.
+Size each difference with its paired standard error: the episodes are matched, so that figure
+already carries the covariance between the two arms. The independent-samples figure beside it
+shows what the matching bought, which is not guaranteed to be positive - matching narrows the
+interval when the arms move together and widens it when they move apart.
+**{lowest_mean}** records the lowest mean over {EVAL_EPISODES} episodes, which on this evidence
+is not an ordering to carry out of the notebook.
 
 **A schedule's cost and its shape are separate facts.** An even schedule puts
 {even_final_quarter:.0f}% of the order in the final quarter. A strategy that puts substantially

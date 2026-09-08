@@ -696,13 +696,15 @@ pl.DataFrame(
 #
 # The three algorithms were scored on the same list of seeds, so each pair of
 # reward series is matched episode by episode and the difference can be taken
-# within an episode. Whether that helps is not something to assume. Pairing
-# changes the variance of a difference by $-2\,\mathrm{cov}(a, b)$, so it
-# shrinks the standard error when the two arms move together and *widens* it
-# when they move against each other. Two policies that hold opposite positions
-# on the same price path have negatively correlated rewards, which is exactly
-# the case here. Both standard errors are therefore reported below, with the
-# correlation that separates them, rather than the paired one alone.
+# within an episode. The paired standard error that comes out of that difference
+# is the correct one to judge it by, because it carries the covariance between
+# the two arms whatever its sign. What it does *not* guarantee is a narrower
+# interval: pairing changes the variance of a difference by
+# $-2\,\mathrm{cov}(a, b)$, so matching helps when the arms move together and
+# hurts when they move against each other, and two policies holding opposite
+# positions on the same price path move against each other. The
+# independent-samples standard error is therefore reported alongside, not to be
+# used for inference but to make visible how much the matching changed.
 
 # %%
 switch_counts = {
@@ -747,10 +749,12 @@ the difference to each of the others can be taken episode by episode:
 
 {paired_lines}
 
-Compare each difference against the larger of its two standard errors before reading anything
-into it. Where the correlation is negative, the paired standard error is the wider of the two,
-which is the honest scale: policies sitting on opposite sides of the same price path disagree
-by more, episode to episode, than two independent draws would. None of these means is a claim
+The paired standard error is the one to size each difference with: the episodes are matched,
+so it already accounts for the covariance between the arms whichever way that covariance
+points. The independent-samples figure is beside it to show what the matching did. Where the
+correlation is negative - two policies sitting on opposite sides of the same price path -
+matching widens the interval rather than narrowing it, which is a fact about these policies
+worth seeing rather than a reason to use the other number. None of these means is a claim
 about which algorithm learned a better policy. What the mean reward cannot tell you at all is
 what each policy does:
 
