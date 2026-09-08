@@ -9,6 +9,7 @@ import pytest
 
 from case_studies.utils.artifact_quality import (
     coverage_against,
+    explain_column_gaps,
     explain_missing,
     flag_columns,
     profile_columns,
@@ -251,3 +252,85 @@ def test_an_entity_column_named_like_the_classification_does_not_collide():
     assert "where" in ex["classified"].columns
     assert ex["summary"]["where"].to_list() == ["trailing"]
     assert ex["summary"]["excess_keys"].item() == 0
+
+
+def _dense_panel_with_burnin(n_symbols: int, n: int, burnin: int) -> pl.DataFrame:
+    """A row at every key, and a fitted column that is null for its estimation window."""
+    symbols = [f"S{i}" for i in range(n_symbols)]
+    return pl.DataFrame(
+        {
+            "symbol": [s for s in symbols for _ in range(n)],
+            "timestamp": list(range(n)) * n_symbols,
+            "fitted": [None if t < burnin else 1.0 for _ in symbols for t in range(n)],
+        }
+    )
+
+
+def test_full_key_coverage_hides_a_column_that_is_null_for_a_fifth_of_the_panel():
+    """The stage-04 shape: coverage_against sees a row per key and cannot see the value.
+
+    A rolling fit writes its key and leaves the estimation window null. Key coverage is
+    100%, so the only instrument that reaches the shortfall is the per-column one.
+    """
+    frame = _dense_panel_with_burnin(5, 100, burnin=20)
+    coverage = coverage_against(
+        frame, frame.select("symbol", "timestamp"), keys=["symbol", "timestamp"]
+    )
+    assert coverage["summary"].row(0, named=True)["missing"] == 0
+
+    gaps = explain_column_gaps(frame, columns=["fitted"], entity="symbol", session="timestamp")
+    per_column = gaps["per_column"].row(0, named=True)
+    assert per_column["n_null"] == 100
+    assert per_column["coverage"] == pytest.approx(0.8)
+
+
+def test_a_declared_burn_in_empties_the_per_column_residual_and_an_interior_hole_does_not():
+    burn_in = _dense_panel_with_burnin(5, 100, burnin=20)
+    declared = {"fitted": {"leading": (20, "20-session estimation window")}}
+
+    explained = explain_column_gaps(
+        burn_in, columns=["fitted"], entity="symbol", session="timestamp", expected=declared
+    )
+    assert explained["residual"].height == 0
+    assert explained["summary"].row(0, named=True)["where"] == "leading"
+
+    holed = burn_in.with_columns(
+        pl.when(pl.col("timestamp").is_between(50, 69))
+        .then(None)
+        .otherwise(pl.col("fitted"))
+        .alias("fitted")
+    )
+    assert holed["fitted"].null_count() == burn_in["fitted"].null_count() + 100
+    scattered = explain_column_gaps(
+        holed, columns=["fitted"], entity="symbol", session="timestamp", expected=declared
+    )
+    assert scattered["residual"].height == 100
+    assert set(scattered["summary"]["where"]) == {"leading", "interior"}
+
+
+def test_each_column_is_declared_on_its_own_terms():
+    """Two families in one artifact lose different rows, so one budget cannot cover both."""
+    frame = _dense_panel_with_burnin(4, 60, burnin=10).with_columns(
+        pl.when(pl.col("timestamp") < 30).then(None).otherwise(2.0).alias("late_series")
+    )
+    gaps = explain_column_gaps(
+        frame,
+        columns=["fitted", "late_series"],
+        entity="symbol",
+        session="timestamp",
+        expected={
+            "fitted": {"leading": (10, "10-session estimation window")},
+            "late_series": {"leading": (30, "the series does not start until session 30")},
+        },
+    )
+    assert gaps["residual"].height == 0
+    assert set(gaps["summary"]["column"]) == {"fitted", "late_series"}
+
+    under_declared = explain_column_gaps(
+        frame,
+        columns=["fitted", "late_series"],
+        entity="symbol",
+        session="timestamp",
+        expected={"fitted": {"leading": (10, "10-session estimation window")}},
+    )
+    assert set(under_declared["residual"]["column"]) == {"late_series"}

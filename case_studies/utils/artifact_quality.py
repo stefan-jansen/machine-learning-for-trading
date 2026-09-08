@@ -244,6 +244,12 @@ def quality_report(
     return report
 
 
+#: Table width for every frame these renderers print. Polars defaults to 80 characters,
+#: which wraps a 19-column profile into an unreadable stack of fragments - the table is
+#: there to be read at a glance and at 80 it cannot be. Notebook output has the room.
+WIDE = 240
+
+
 def render_quality_report(report: dict, *, max_rows: int = 80) -> None:
     """Print a ``quality_report`` as a notebook reader should read it: shortfall first.
 
@@ -269,7 +275,11 @@ def render_quality_report(report: dict, *, max_rows: int = 80) -> None:
         if explained is not None and explained.height:
             print("where the missing keys sit, and what accounts for them:")
             with pl.Config(
-                tbl_rows=8, tbl_cols=9, fmt_str_lengths=64, tbl_hide_dataframe_shape=True
+                tbl_rows=8,
+                tbl_cols=9,
+                fmt_str_lengths=40,
+                tbl_width_chars=WIDE,
+                tbl_hide_dataframe_shape=True,
             ):
                 print(explained)
             undeclared = int(explained.filter(pl.col("why") == "not declared")["n_keys"].sum() or 0)
@@ -297,10 +307,18 @@ def render_quality_report(report: dict, *, max_rows: int = 80) -> None:
         print("no column crossed a threshold")
     else:
         print(f"{flags.height} column(s) to speak to:")
-        with pl.Config(tbl_rows=max_rows, tbl_cols=4, fmt_str_lengths=110):
+        with pl.Config(
+            tbl_rows=max_rows,
+            tbl_cols=4,
+            fmt_str_lengths=110,
+            tbl_width_chars=WIDE,
+            tbl_hide_dataframe_shape=True,
+        ):
             print(flags.select("column", "why", "rows", "n_null"))
 
-    with pl.Config(tbl_rows=max_rows, tbl_cols=14, fmt_str_lengths=28):
+    with pl.Config(
+        tbl_rows=max_rows, tbl_cols=20, tbl_width_chars=WIDE, tbl_hide_dataframe_shape=True
+    ):
         print(report["profile"])
 
 
@@ -443,3 +461,121 @@ def label_universe(
     if not frames:
         raise FileNotFoundError(f"no label artifact under {directory}; the universe is undefined")
     return pl.concat(frames).unique()
+
+
+def explain_column_gaps(
+    frame: pl.DataFrame,
+    *,
+    columns: Sequence[str],
+    entity: str | Sequence[str],
+    session: str,
+    expected: dict[str, dict[str, MissingExpectation]] | None = None,
+) -> dict[str, pl.DataFrame]:
+    """Where each column's nulls sit relative to the rows that column did produce.
+
+    ``coverage_against`` asks whether the stage wrote a row for a key. A stage that
+    writes one row per key and leaves the estimation window null answers that question
+    perfectly and still ships an artifact whose feature is absent for a tenth of the
+    panel, because the key is present and only the value is not. This asks the same
+    positional question of each column on its own: the keys where the column is null
+    are its missing set, the keys where it carries a value are what it produced, and
+    ``explain_missing`` classifies the difference. A fitted feature's burn-in and a hole
+    in the middle of a fitted series then read as the two different things they are.
+
+    Declaring per column is what makes the answer usable, because the families in one
+    artifact do not lose the same rows: a rolling model owes its burn-in, a
+    market-wide series owes everything before the series existed, and a spread against
+    a quoted surface owes every key the surface does not quote. ``expected`` therefore
+    maps a column name to the per-position declaration ``explain_missing`` takes. A
+    column with no entry is still measured; nothing is declared for it, so all of its
+    nulls land in the residual.
+    """
+    entity_cols = [entity] if isinstance(entity, str) else list(entity)
+    key_cols = [*entity_cols, session]
+    declared = expected or {}
+    summaries: list[pl.DataFrame] = []
+    residuals: list[pl.DataFrame] = []
+    per_column: list[dict[str, object]] = []
+    for column in columns:
+        produced = frame.filter(pl.col(column).is_not_null()).select(key_cols)
+        missing = frame.filter(pl.col(column).is_null()).select(key_cols)
+        per_column.append(
+            {
+                "column": column,
+                "rows": frame.height,
+                "n_null": missing.height,
+                "coverage": (frame.height - missing.height) / frame.height
+                if frame.height
+                else None,
+                "declared": column in declared,
+            }
+        )
+        if missing.height == 0:
+            continue
+        parts = explain_missing(
+            missing,
+            produced,
+            entity=entity_cols,
+            session=session,
+            expected=declared.get(column),
+        )
+        summaries.append(parts["summary"].with_columns(pl.lit(column).alias("column")))
+        if parts["residual"].height:
+            # explain_missing already carries an undeclared position here: its budget
+            # defaults to zero, so every entity in it is over budget and its keys are
+            # residual. Adding them again would double every unexplained null.
+            residuals.append(parts["residual"].with_columns(pl.lit(column).alias("column")))
+
+    summary = (
+        pl.concat(summaries).select("column", pl.exclude("column"))
+        if summaries
+        else pl.DataFrame(schema={"column": pl.String, "where": pl.String})
+    )
+    residual = (
+        pl.concat(residuals, how="diagonal_relaxed")
+        if residuals
+        else pl.DataFrame(schema={"column": pl.String})
+    )
+    return {
+        "per_column": pl.DataFrame(per_column),
+        "summary": summary,
+        "residual": residual,
+    }
+
+
+def render_column_gaps(gaps: dict[str, pl.DataFrame], *, max_rows: int = 60) -> None:
+    """Print ``explain_column_gaps`` the way a sign-off has to read it.
+
+    Per-column coverage first, because a column at 100% needs no further reading and a
+    column at 55% is the whole question. The positional breakdown second, for the
+    columns that lost anything. The residual last as a single number, so the sign-off
+    speaks to what no declaration accounts for rather than to a percentage.
+    """
+    per_column = gaps["per_column"]
+    dense = per_column.filter(pl.col("n_null") == 0)
+    print(f"{per_column.height} feature column(s), {dense.height} with a value at every key")
+    with pl.Config(
+        tbl_rows=max_rows, tbl_cols=5, tbl_width_chars=WIDE, tbl_hide_dataframe_shape=True
+    ):
+        print(per_column.filter(pl.col("n_null") > 0).sort("coverage"))
+
+    summary = gaps["summary"]
+    if summary.height:
+        print("where each column's nulls sit, and what accounts for them:")
+        with pl.Config(
+            tbl_rows=max_rows,
+            tbl_cols=10,
+            fmt_str_lengths=44,
+            tbl_width_chars=WIDE,
+            tbl_hide_dataframe_shape=True,
+        ):
+            print(summary)
+
+    residual = gaps["residual"]
+    if residual.height:
+        by_column = residual.group_by("column").len().sort("len", descending=True)
+        print(f"residual to explain: {residual.height:,} value(s) no declaration accounts for")
+        with pl.Config(tbl_rows=max_rows, tbl_hide_dataframe_shape=True):
+            print(by_column)
+    else:
+        print("residual to explain: none - every null sits where a declaration puts it")
