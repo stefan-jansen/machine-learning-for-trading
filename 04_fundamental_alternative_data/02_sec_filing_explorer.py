@@ -274,11 +274,10 @@ balance_df[["label", *[c for c in balance_df.columns if c[0].isdigit()]]].head(1
 # [`04_sec_xbrl_fundamentals`](04_sec_xbrl_fundamentals.ipynb) does.
 
 # %%
-income_df[
-    income_df["label"].str.contains(
-        r"net sales|total revenue|^revenue|net income", case=False, regex=True, na=False
-    )
-][["label", *period_cols]]
+TOP_AND_BOTTOM_LINE = r"^(net sales|net revenues?|total (net )?revenues?|revenues?|net income)$"
+income_df[income_df["label"].str.strip().str.match(TOP_AND_BOTTOM_LINE, case=False, na=False)][
+    ["label", *period_cols]
+]
 
 # %% [markdown]
 # ---
@@ -383,10 +382,18 @@ sales
 # ## Part 5: Form 13F institutional holdings
 #
 # An investment manager with more than one hundred million dollars in qualifying US equities
-# must report its holdings each quarter on Form 13F. The report covers long equity positions
-# only, it arrives up to forty-five days after the quarter it describes, and it says nothing
-# about shorts, derivatives or non-US listings. Within those limits it is the only public
-# record of what large managers hold.
+# must report its holdings each quarter on Form 13F. Three limits govern how the report can be
+# read. It covers long positions only, so a short book is invisible. It reaches only the
+# securities the SEC lists as reportable, which is US-listed equities and exchange-traded
+# options on them, and not foreign listings, cash or most debt. And it arrives up to forty-five
+# days after the quarter end, so the positions it names may already have been closed. Within
+# those limits it is the only public record of what large managers hold.
+#
+# The options are the part that catches a reader out. A reported row carries a `PutCall` field,
+# blank for stock and set to `PUT` or `CALL` for an option position, and the value of an option
+# row is the value of the underlying it controls rather than a shareholding. Summing the two
+# together produces a portfolio that does not exist, so the count below is worth reading before
+# anything is computed from the frame.
 
 # %%
 manager = Company(MANAGER_TICKER)
@@ -394,22 +401,28 @@ thirteenf_filings = manager.get_filings(form="13F-HR")
 latest_13f = thirteenf_filings.latest()
 holdings = latest_13f.obj()
 
+reported = pl.from_pandas(holdings.holdings).with_columns(
+    pl.col("PutCall").cast(pl.Utf8).fill_null("").str.strip_chars().alias("put_call")
+)
+
 print(f"13F-HR filings for {manager.name}: {len(thirteenf_filings)}")
 print(f"Report period: {holdings.report_period}")
 print(f"Reported value: ${holdings.total_value:,.0f}")
 print(f"Positions reported: {holdings.total_holdings}")
+print(f"Of which option positions: {(reported['put_call'] != '').sum()}")
 
 # %% [markdown]
 # ### Portfolio concentration
 #
 # Expressing each position as a share of the total reported value says how much of the
 # portfolio the largest holdings command, which is the first thing worth knowing about any
-# manager's book. Positions are aggregated by issuer first, so that two share classes of the
-# same company count once.
+# manager's book. Option rows are dropped so that the shares below are shares of a stock
+# portfolio, and positions are aggregated by issuer so that two share classes of the same
+# company count once.
 
 # %%
 concentration = (
-    pl.from_pandas(holdings.holdings)
+    reported.filter(pl.col("put_call") == "")
     .group_by("Issuer")
     .agg(pl.col("Value").sum())
     .with_columns((pl.col("Value") / pl.col("Value").sum() * 100).alias("pct_portfolio"))
@@ -512,8 +525,9 @@ for i, attachment in enumerate(latest_10k.attachments):
 #    on labels. Anything that has to hold across companies keys on the XBRL tag instead.
 # 4. A Form 4 is only as informative as its transaction code, because most of the volume in the
 #    form is compensation rather than a decision to buy or sell.
-# 5. A 13F reports long US equity positions with a lag of up to forty-five days, and omits
-#    shorts, derivatives and foreign listings. Read a concentration figure computed from it as a
-#    description of what was disclosed, not of what the manager held.
+# 5. A 13F reports long positions in reportable US securities with a lag of up to forty-five
+#    days. Shorts and foreign listings are absent; exchange-traded options are present and carry
+#    the value of the underlying they control, so a concentration figure has to separate them
+#    from stock. Read one as a description of what was disclosed, not of what the manager held.
 # 6. Both dates on a filing are available, and only the filing date is usable as an as-of
 #    timestamp for a backtest.
