@@ -371,12 +371,13 @@ def run_react_agent(
 # The agent chooses each turn: search again, or commit to a probability. What follows is the
 # recorded session, one line per turn.
 #
-# The recorded run does not reach a forecast. The model kept searching for evidence that the
-# 2026 rate path had already been settled, found reporting that argued both ways, and used all
-# five turns doing so. That is the ordinary failure of an agent under a budget, and it is why
-# `run_react_agent` returns an explicit no-answer value instead of a probability: a caller that
-# reads that value as a forecast would record a confident coin-flip where the agent said nothing.
-# The mock run at the end of the notebook takes the other branch and commits.
+# On the default replay path the run does not reach a forecast. The model kept searching for
+# evidence that the 2026 rate path had already been settled, found reporting that argued both
+# ways, and used every turn doing so. That is the ordinary failure of an agent under a budget,
+# and it is why `run_react_agent` returns an explicit no-answer value instead of a probability:
+# a caller that reads that value as a forecast would record a confident coin-flip where the
+# agent said nothing. The mock run at the end of the notebook takes the other branch and
+# commits.
 
 # %%
 if RUN_LIVE:
@@ -500,6 +501,7 @@ active_run = run if RUN_LIVE else pinned_run
 search_steps = [trace for trace in traces if trace.action == "search"]
 committed = any(trace.action == "forecast" for trace in traces)
 n_searches = len(search_steps)
+n_rejected = sum(1 for trace in traces if trace.action not in {"search", "forecast"})
 n_results = sum(len(trace.results) for trace in search_steps)
 n_market_price_prompts = sum(
     1
@@ -510,15 +512,16 @@ n_market_price_prompts = sum(
 outcome = (
     f"""committed to $p_{{\\text{{yes}}}}={p_yes:.2f}$, reasoning: *{rationale}*."""
     if committed
-    else f"""spent the whole {MAX_STEPS}-step budget on searches without ever emitting a """
-    f"""forecast action, so the loop returned its no-answer value of """
-    f"""$p_{{\\text{{yes}}}}={p_yes:.2f}$ and the note *{rationale}*. That value is the """
-    """absence of a forecast, not a 50/50 judgement, and a caller must branch on it."""
+    else f"""reached the {MAX_STEPS}-step budget without ever emitting a forecast action, """
+    f"""so the loop returned its no-answer value of $p_{{\\text{{yes}}}}={p_yes:.2f}$ """
+    f"""and the note *{rationale}*. That value is the absence of a forecast, not a 50/50 """
+    """judgement, and a caller must branch on it."""
 )
 display(
     Markdown(
-        f"""**What this run did**: {n_searches} searches returning {n_results} documents. """
-        f"""The agent then {outcome} """
+        f"""**What this run did**: {n_searches} of its turns were searches, returning """
+        f"""{n_results} documents, and {n_rejected} were replies rejected before they """
+        f"""reached a tool. The agent then {outcome} """
         f"""Its prompts carried the market-implied probability {n_market_price_prompts} """
         """times, so the market quote printed near the top of this notebook was withheld """
         """from the agent and is a reference for the reader only."""
