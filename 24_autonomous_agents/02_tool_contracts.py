@@ -130,9 +130,10 @@ print(f"Score:     {example.score}")
 # nothing. `RUN_LIVE = True` swaps in whichever provider has a key set, which for this chapter
 # means Tavily.
 #
-# The demonstration question asks whether NVIDIA beat its Q4 FY2025 earnings expectations. It
-# has a **cutoff date**: the last day a forecaster answering it would have been able to read
-# anything, which here is the day before the company reported.
+# The demonstration question asks whether NVIDIA beat its Q4 FY2025 earnings expectations, which
+# the company answered when it reported on 2025-02-26. The question carries a **cutoff date** of
+# 2025-02-20: the boundary the search tool enforces, dropping anything published on or after it,
+# so an agent answering the question reads only what existed before that day.
 
 # %%
 search = create_search_client(SEARCH_PROVIDER) if RUN_LIVE else MockSearchClient()
@@ -162,8 +163,9 @@ for r in results:
 # forecasting.
 #
 # `cutoff_date` is the guard. The client drops any result whose publication date is on or after
-# the cutoff, so what reaches the agent is what a forecaster could have read on the day. The
-# cutoff here is the question's own `cutoff_date`, 2025-02-20, the day before NVIDIA reported.
+# the cutoff, so what reaches the agent is dated strictly earlier than that day. The question's
+# own `cutoff_date` is 2025-02-20; NVIDIA reported on 2025-02-26, so the agent works from what
+# was published up to and including 2025-02-19, six days before the answer existed.
 
 # %%
 all_results = search.search("NVIDIA Q4 earnings", max_results=MAX_RESULTS)
