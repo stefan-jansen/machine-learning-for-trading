@@ -624,25 +624,29 @@ else:
 panel_disagreement = max(panel_probabilities) - min(panel_probabilities)
 gap_change = gaps[-1] - gaps[0]
 midpoint_move = midpoints[-1] - midpoints[0]
+midpoint_move = midpoints[-1] - midpoints[0]
 
-print(f"Panel disagreement before debate:    {panel_disagreement:.2f}")
-print(f"Bull-bear gap, first to last round:  {gaps[0]:.2f} -> {gaps[-1]:.2f}")
-print(f"Midpoint, first to last round:       {midpoints[0]:.2f} -> {midpoints[-1]:.2f}")
-
+print(f"Panel disagreement before debate:   {panel_disagreement:.2f}")
+print(f"Bull-bear gap, first to last round: {gaps[0]:.2f} -> {gaps[-1]:.2f}")
+print(f"Midpoint, first to last round:      {midpoints[0]:.2f} -> {midpoints[-1]:.2f}")
+print(f"Net midpoint move:                  {midpoint_move:+.2f}")
 if panel_disagreement < MIN_PANEL_DISAGREEMENT:
     print("\nThe panel had already agreed; the debate was not worth starting.")
 elif gap_change < -MIN_GAP_CLOSURE:
-    print("\nDisagreement fell: each side gave ground on the other's evidence.")
+    print(
+        "\nDisagreement is narrower at the end than at the start. Whether it narrowed "
+        "steadily or moved around on the way is in the per-round table above."
+    )
 elif gap_change > MIN_GAP_CLOSURE:
     print(
-        "\nDisagreement grew. Each round pushed the two sides further apart, which is what "
-        "happens when both find more support for the position they started from."
+        "\nDisagreement is wider at the end than at the start. The per-round table says "
+        "whether it widened throughout or only in the final round."
     )
 else:
     print(
-        "\nDisagreement is where it started. Both sides may still have moved - the midpoint "
-        "line says whether they did - but they moved together, so nothing was reconciled and "
-        "the aggregate should be reported with the open gap beside it."
+        "\nDisagreement ends within the tolerance of where it started, so the debate "
+        "reconciled nothing on net. The midpoint line says whether the two sides moved at "
+        "all, and the aggregate should be reported with the open gap beside it."
     )
 # %% [markdown]
 # ## Persisting the Full Run Trace
