@@ -68,7 +68,7 @@ from plotly.subplots import make_subplots
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 SEED = 42
@@ -216,7 +216,13 @@ fig_scale.update_layout(
     yaxis_title="SPY close, training-window standard deviations",
     showlegend=False,
 )
-fig_scale.show()
+show_plotly_with_alt(
+    fig_scale,
+    "A line chart of SPY's closing price expressed in training-window standard "
+    "deviations, running the length of the sample. Three shaded bands mark the "
+    "training, validation and held-back stretches in date order, and a horizontal "
+    "dashed line marks the highest value reached during training.",
+)
 
 # %% [markdown]
 # ## Building the training examples
@@ -569,7 +575,12 @@ fig_benchmark.update_layout(
     showlegend=False,
 )
 fig_benchmark.update_yaxes(rangemode="tozero")
-fig_benchmark.show()
+show_plotly_with_alt(
+    fig_benchmark,
+    "A bar chart of three forecasts - persistence and the two N-BEATS variants - "
+    "with each bar giving its mean absolute error as a multiple of persistence's, "
+    "and a dashed line at one marking persistence itself.",
+)
 
 # %% [markdown]
 # The dashed line is persistence, and a bar above it is a model that would have done
@@ -681,7 +692,12 @@ fig.update_xaxes(title_text="Forecast Step", row=3, col=1)
 fig.update_yaxes(title_text="Trend contribution ($)", row=1, col=1)
 fig.update_yaxes(title_text="Seasonal contribution ($)", row=2, col=1)
 fig.update_yaxes(title_text="SPY price ($)", row=3, col=1)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three stacked panels over the forecast horizon in days. The top panel plots the "
+    "summed trend blocks, the middle the summed seasonality blocks, and the bottom "
+    "the realised prices against the model's combined forecast.",
+)
 
 # %% [markdown]
 # ## What the blocks left behind
@@ -752,7 +768,13 @@ fig_bc.update_layout(
     title="One window before the blocks, and what they left of it",
     height=500,
 )
-fig_bc.show()
+show_plotly_with_alt(
+    fig_bc,
+    "Two stacked panels sharing a horizontal axis of position within the input "
+    "window. The upper panel plots the window of SPY closes the stack was given, in "
+    "dollars; the lower plots what remains after every block has subtracted its "
+    "backcast, on a standardized scale.",
+)
 
 # %% [markdown]
 # Read the two panels for scale and shape and stop there. The vertical axes differ, so
@@ -865,7 +887,12 @@ fig_sensitivity.update_layout(
     yaxis_title="Validation error relative to persistence",
     showlegend=False,
 )
-fig_sensitivity.show()
+show_plotly_with_alt(
+    fig_sensitivity,
+    "A line with four markers, plotting validation error as a multiple of "
+    "persistence against the number of history days supplied per forecast day. A "
+    "dashed line at one marks persistence.",
+)
 
 # %% [markdown]
 # The curve moves, which is the point: the ratio is a real setting and not a detail,
