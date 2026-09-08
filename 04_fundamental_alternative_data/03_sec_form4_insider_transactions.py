@@ -95,8 +95,19 @@ downloaded = sorted(f for t in tickers for f in (FORM4_DIR / t).rglob("*.xml"))
 
 for ticker in tickers:
     files = list((FORM4_DIR / ticker).rglob("*.xml"))
+    if not files:
+        # The downloader creates the directory before it fetches, so an empty one means the
+        # fetch found nothing or failed. Say so rather than reading a size off an empty list.
+        print(f"{ticker.upper()}: no filings downloaded")
+        continue
     sizes = sorted(f.stat().st_size / 1024 for f in files)
     print(f"{ticker.upper()}: {len(files)} filings, {sizes[0]:.1f}-{sizes[-1]:.1f} KB each")
+
+if not downloaded:
+    raise FileNotFoundError(
+        f"Ticker directories exist under {FORM4_DIR} but hold no XML filings. "
+        "Re-run data/equities/positioning/form4_download.py."
+    )
 
 # %% [markdown]
 # ---
@@ -276,7 +287,22 @@ for file_path in downloaded:
         }
     )
 
-df = pl.DataFrame(rows).with_columns(
+# Every column is declared. Polars infers a dtype from the first rows it sees, so a run whose
+# opening filings are all gifts would type `price` as null and then fail on the first priced
+# trade - a failure that depends on which filings were downloaded, not on the data being bad.
+TRADE_SCHEMA = {
+    "code": pl.Utf8,
+    "timestamp": pl.Date,
+    "shares": pl.Float64,
+    "price": pl.Float64,
+    "direction": pl.Utf8,
+    "issuer": pl.Utf8,
+    "owner": pl.Utf8,
+    "n_owners": pl.Int64,
+    "title": pl.Utf8,
+}
+
+df = pl.DataFrame(rows, schema=TRADE_SCHEMA).with_columns(
     pl.col("code").replace_strict(CODE_MAP, default="Unknown").alias("transaction_type")
 )
 accounting = pl.DataFrame(per_file)
