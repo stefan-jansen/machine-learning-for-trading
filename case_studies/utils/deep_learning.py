@@ -90,7 +90,14 @@ SEQUENCE_RUNNER_VERSION = 1
 # and skewing every other symbol's normalization on the way. It is now imputed at the training
 # mean. That is a different design matrix, not a rename, so a version-1 run and a run under the
 # corrected fill must not share a training identity.
-SEQUENCE_PREPARATION_VERSION = 2
+# 3: windows are laid out on the panel's expected periods rather than on the symbol's own row
+# order, so a period the symbol has no row for keeps its cell and is described by two channels
+# the model reads - `__observed__` and `__periods_since_observation__`. Eligibility went with it:
+# a window needs `min_observed_fraction` of its cells observed and no missing run longer than
+# `max_consecutive_gap`, where it previously needed every cell. Both the window contents and the
+# set of windows changed, so this is a different design matrix again. Direct `run_dl_cv` callers
+# register through `sequence_identity_params` and see the policy only through this number.
+SEQUENCE_PREPARATION_VERSION = 3
 SEQUENCE_STATE_VERSION = 1
 SEQUENCE_BACKEND_VERSIONS = {"darts": 1, "pytorch": 1}
 SEQUENCE_ARCHITECTURE_VERSIONS = {
