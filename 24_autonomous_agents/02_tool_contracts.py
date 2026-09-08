@@ -164,8 +164,8 @@ for r in results:
 #
 # `cutoff_date` is the guard. The client drops any result whose publication date is on or after
 # the cutoff, so what reaches the agent is dated strictly earlier than that day. The question's
-# own `cutoff_date` is 2025-02-20; NVIDIA reported on 2025-02-26, so the agent works from what
-# was published up to and including 2025-02-19, six days before the answer existed.
+# own `cutoff_date` is 2025-02-20 and NVIDIA reported on 2025-02-26, so the agent works from
+# what was published up to and including 2025-02-19 and the answer arrives a week later.
 
 # %%
 all_results = search.search("NVIDIA Q4 earnings", max_results=MAX_RESULTS)
