@@ -892,15 +892,17 @@ risk_off_drawdown = drawdown_path(risk_off_returns)
 trough_month = risk_off_drawdown.idxmin()
 peak_month = (1 + risk_off_returns).cumprod().loc[:trough_month].idxmax()
 
+restricted_drawdown = float(risk_off_drawdown.min())
 index_over_span = equity_returns.loc[peak_month:trough_month]
 index_drawdown = float(drawdown_path(index_over_span).min())
 display(
     Markdown(
         f"The restricted stream peaks in **{peak_month:%B %Y}** and reaches its low in "
         f"**{trough_month:%B %Y}**, a fall of "
-        f"**{risk_off_drawdown.min():.1%}** spread over "
+        f"**{abs(restricted_drawdown):.1%}** spread over "
         f"**{trough_month.year - peak_month.year} years**. Over the same span the equity "
-        f"index itself fell at most **{index_drawdown:.1%}** from its own high-water mark."
+        f"index itself fell at most **{abs(index_drawdown):.1%}** from its own high-water "
+        "mark."
     )
 )
 

@@ -558,23 +558,29 @@ style.show_with_alt(
 # because nothing forced it to agree, and it does not.
 
 # %%
-smallest_regime = str(regime_stats["months"].idxmin())
-smallest_span = regime_name[regime_name == smallest_regime].index
+ORDINALS = ["first", "second", "third", "fourth", "fifth", "sixth"]
+
+
+def rank_by_volatility(regime: str) -> str:
+    """Where a regime sits in the volatility ordering the panel is drawn in."""
+    return ORDINALS[regime_order.index(regime)]
+
+
+calmest_regime = str(regime_stats["annual_vol"].idxmin())
+loudest_regime = str(regime_stats["annual_vol"].idxmax())
+vol_spread = float(regime_stats["annual_vol"].max() - regime_stats["annual_vol"].min())
 deepest_month = aligned["drawdown"].idxmin()
 deepest_regime = str(aligned.loc[deepest_month, "regime"])
-vol_spread = float(regime_stats["annual_vol"].max() - regime_stats["annual_vol"].min())
+shallowest_regime = str(regime_stats["max_dd_pct"].idxmin())
 display(
     Markdown(
-        f"The smallest regime, **{smallest_regime}**, holds "
-        f"**{len(smallest_span)} months**, running from "
-        f"**{smallest_span.min():%B %Y}** to **{smallest_span.max():%B %Y}**, and the index "
-        f"was never more than "
-        f"**{regime_stats.loc[smallest_regime, 'max_dd_pct']:.0f}%** below its peak in any "
-        f"of them. The deepest reading of the whole panel, "
-        f"**{regime_stats['max_dd_pct'].max():.0f}%**, falls in "
-        f"**{deepest_month:%B %Y}**, which the naming rule calls **{deepest_regime}**. "
-        f"Across the four regimes the annualized volatility spans "
-        f"**{vol_spread:.0f} percentage points**."
+        f"Annualized volatility runs from **{calmest_regime}** to **{loudest_regime}**, a "
+        f"span of **{vol_spread:.0f} percentage points**. The deepest decline of the whole "
+        f"panel, **{regime_stats['max_dd_pct'].max():.0f}%**, falls in "
+        f"**{deepest_month:%B %Y}**, which the naming rule calls **{deepest_regime}** - the "
+        f"**{rank_by_volatility(deepest_regime)}** of the four by volatility. The shallowest "
+        f"decline belongs to **{shallowest_regime}**, the "
+        f"**{rank_by_volatility(shallowest_regime)}**."
     )
 )
 
