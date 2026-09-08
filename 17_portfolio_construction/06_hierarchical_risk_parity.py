@@ -338,9 +338,10 @@ plt.show()
 
 # %% [markdown]
 # Read the tree from the leaves upward. Two ETFs joined low down moved together over this
-# history. The height of a merge is the Ward criterion, the increase in within-cluster spread the
-# merge costs, so it rises as the two groups being joined become less alike; it is not itself the
-# correlation distance between them, which is what the leaves were measured on.
+# history. The height of a merge is SciPy's Ward distance, which is a monotone transformation of
+# the increase in within-cluster sum of squares the merge costs, so it rises as the two groups
+# being joined become less alike. It is not the correlation distance between them, which is what
+# the leaves were measured on.
 #
 # Only the leaf order survives into the allocation. Step 2 takes the left-to-right sequence this
 # tree implies and reorders the covariance matrix by it; step 3 then halves that sequence by

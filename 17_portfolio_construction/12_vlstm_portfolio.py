@@ -767,10 +767,11 @@ plt.show()
 # Read the left panel first. `positions_from_signal` multiplies its inverse-volatility scaling by
 # the signal, so the signal decides how much of the book is used at all. A distribution piled up
 # at zero is a network declining to take a position, and what results is a portfolio close to
-# flat - not the inverse-volatility benchmark, which needs comparable non-zero signals across the
-# assets to be recovered. A distribution that reaches the tanh bounds is a network taking a
-# position, and only then does the comparison against the inverse-volatility row measure two
-# allocations against each other rather than one against cash.
+# flat - not the inverse-volatility benchmark, which the layer would only reproduce if the
+# signals were equal and non-zero across the assets. Signals away from zero produce exposure in
+# proportion to their size, so the histogram is read for how much of its range the network uses
+# rather than for whether it saturates: a book built from signals around a half is half the size
+# of one built from signals at the bound, and both are allocations.
 #
 # The relative sizes within the book come from both terms at once: two assets with the same
 # signal are held in inverse proportion to their volatilities, and two with the same volatility
@@ -848,11 +849,14 @@ cost_df.round(2)
 #
 # One table of held-out metrics, one cost grid, and two diagnostics of what the network learned.
 #
-# The table compares the VLSTM against the same two baselines `11_dl_portfolio_allocation` uses,
-# on the same universe and the same test window. The two notebooks are not directly comparable
-# on their Sharpe columns, and the reason is the cost: `11` reports gross returns and deducts
-# nothing, while everything here is net of the one-way charge the loss was trained against. The
-# zero-cost row of the grid below is the one to read against `11`.
+# The table compares the VLSTM against equal weight and inverse volatility on the same universe
+# and the same test window that `11_dl_portfolio_allocation` uses. Two things stop the Sharpe
+# columns of the two notebooks being read against each other directly. `11` reports gross
+# returns and deducts nothing, while everything here is net of the one-way charge the loss was
+# trained against; the zero-cost row of the grid below removes that difference. The
+# inverse-volatility baselines also differ, because each notebook builds it from its own
+# volatility estimate - 21 sessions there, `VOL_LOOKBACK` sessions here - so even at zero cost
+# the two are not the same portfolio.
 #
 # The cost grid is the number to read before the table. It recomputes each allocator's Sharpe at
 # five cost levels using the weights already produced, so it says how much of any advantage is a

@@ -438,11 +438,18 @@ ax.set_title("Training Sharpe rises past validation Sharpe as the fit tightens")
 plt.show()
 
 # %% [markdown]
-# The two curves answer different questions. The training curve says how well the network fits
-# the window it is optimizing on, and it can be driven up indefinitely. The validation curve says
-# whether that fit carries to dates the optimizer never saw, and it is the one the epoch is
-# selected on. Where they separate is where further training is buying fit rather than
-# generalization.
+# The two curves are measured differently, and the difference is worth knowing before reading a
+# gap between them. `train_one_epoch` runs the whole training window as one batch, records the
+# portfolio returns from that forward pass, and then takes the optimizer step; the training
+# Sharpe plotted for an epoch is therefore the weights *before* that epoch's update, scored on
+# the training window. `evaluate_sharpe` runs after the step, on the validation window, with the
+# weights frozen. Two things separate the curves - the window and one update - so a gap between
+# them is not a clean measure of generalization on its own.
+#
+# What the pair is for is the shape over epochs. A training curve that keeps rising while the
+# validation curve flattens or turns down is the standard signal that further steps are fitting
+# the training window, and the checkpoint kept is the one at the validation peak rather than the
+# one at the last epoch.
 
 # %% [markdown]
 # ## 10. Out-of-Sample Evaluation
