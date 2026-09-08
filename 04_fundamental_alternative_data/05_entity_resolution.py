@@ -359,9 +359,15 @@ def fuzzy_match(
 # ### The labelled set everything is scored on
 #
 # The three stages are compared on one set of names with the right answer written down beside
-# each. Twelve rows, ten of which have a match in the reference list and two of which do not.
-# Without the two that have no match, precision cannot be measured at all: every match would be
-# either right or missing, and a matcher that says yes to everything would look perfect.
+# each. Twelve rows: ten name a company in the reference list, and two name companies that are
+# not in it at all.
+#
+# Both kinds of row are needed, and they measure different failures. A wrong match on one of the
+# ten costs precision, because an accepted match that names the wrong company is a false positive
+# whatever the query was. What the two unmatchable rows add is the only test of whether the
+# matcher can decline: every scorer here returns its nearest candidate for any input, so a name
+# with no answer will still come back with one, and nothing but a labelled non-match shows how
+# far the threshold has to sit above that.
 #
 # The `job_postings` column stands in for whatever the alternative data actually carries. It is
 # the reason the join is being attempted.
@@ -767,9 +773,10 @@ pl.DataFrame(
 # 2. Normalize before scoring. Legal suffixes and punctuation are shared by every name in a
 #    reference list, so leaving them in raises every score toward every candidate and compresses
 #    the difference the score is supposed to measure.
-# 3. Pick the acceptance threshold from a measurement on labelled examples, including examples
-#    with no correct answer. Without those, precision is unmeasurable and a matcher that accepts
-#    everything scores perfectly.
+# 3. Pick the acceptance threshold from a measurement on labelled examples, and include examples
+#    that have no correct answer. Every scorer returns its nearest candidate for any input, so
+#    those are what measure whether the threshold sits high enough to decline a name the
+#    reference list does not contain.
 # 4. A fuzzy score compares spelling and an embedding compares meaning, so the embedding recovers
 #    abbreviations and paraphrases that the fuzzy scorer cannot reach. It does not recover
 #    renames or subsidiaries, and its scores on those cases sit among the scores of its outright
