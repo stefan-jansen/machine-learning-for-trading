@@ -2506,15 +2506,10 @@ case_studies/sp500_equity_option_analytics/10_dl_patchtst:
       max_symbols: 10
   timeout: 600
 case_studies/sp500_equity_option_analytics/11_latent_factors:
-  # max_symbols is stated because a notebook that declares no reduction does not run unreduced:
-  # _collect_preview_reductions in tests/pm_helpers.py injects max_symbols: 5 as the fallback. At
-  # five names top_k_grid [5, 10, 20] has no realizable member - a long-short k drops when 2k
-  # exceeds the tradeable count - and 14_backtest refuses for every declared label. Ten is the
-  # smallest width that keeps k=5 (2*5 <= 10) and the quantile axis (n_assets >= 2*n_quantiles).
-  # ml4t/agent-workspace#1077.
-  parameters:
-    PREVIEW_REDUCTIONS:
-      max_symbols: 10
+  # No reduction, unlike its 11a-11e siblings. This notebook fits nothing and registers nothing:
+  # it reads the sibling `.py` files, extracts each MODEL_NAME, and refuses if that union differs
+  # from the latent_factors menu. A width parameter would be unread here, and declaring one in
+  # this file rather than in the parameters cell is what papermill drops silently.
   timeout: 600
 case_studies/sp500_equity_option_analytics/11a_pca:
   # The harness forces EXECUTION_TIER=preview and WORKSPACE for any notebook declaring both, and
