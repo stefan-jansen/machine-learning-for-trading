@@ -1519,12 +1519,15 @@ print("this notebook does not attribute the return difference to individual mech
 #    picking the top row would turn the holdout into a second selection window, and there would be
 #    nothing left to test the choice against.
 # 4. **The standard error in the table bounds one estimate, not a comparison.** It says how
-#    precisely each allocator's own Sharpe ratio is measured on this many observations. It does
-#    not say whether two of them differ: these four hold the same assets on the same dates from
-#    the same signal, so their errors move together, and the uncertainty of the gap between two
-#    correlated estimates is smaller than either individual error. Separating them takes a paired
-#    test on the difference series, which also has to carry the serial dependence daily returns
-#    have and this IID formula does not.
+#    precisely each allocator's own Sharpe ratio is measured on this many observations, and it
+#    does not say whether two of them differ. The uncertainty of a gap is
+#    $\text{Var}(S_1) + \text{Var}(S_2) - 2\,\text{Cov}(S_1, S_2)$, and these four allocators
+#    hold the same assets on the same dates from one signal, so that covariance term is not
+#    zero and the gap's uncertainty is not read off the two levels. Measuring it takes a paired
+#    block bootstrap: resample blocks of dates, recompute both Sharpe ratios on the same
+#    resampled dates, and read the distribution of their difference. Blocks rather than single
+#    days, because daily returns are serially dependent and the IID formula in the table does
+#    not carry that.
 # 5. **Turnover is the part of an allocator's cost the gross table hides.** A method that improves
 #    Sharpe while trading twice as much has not been shown to be better until the trading is
 #    priced, which Chapter 18 does.
