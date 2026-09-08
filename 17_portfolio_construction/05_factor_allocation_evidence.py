@@ -1120,15 +1120,17 @@ print(f"The same pair pooled across all VME asset classes: {everywhere_corr:+.2f
 #    which is what the cross-asset evidence adds: a relationship that holds in one market can be
 #    a property of that market, and one that holds in eight is harder to explain that way.
 #
-# 2. **Quality (QMJ) and low-volatility (BAB) against the market**: both are long-short, which
-#    means the dollars are balanced between the two legs and says nothing on its own about market
-#    exposure. Two legs of equal size but unequal market beta leave a net exposure, and BAB is
-#    built to have one: it buys low-beta assets levered up and shorts high-beta ones, so its
-#    construction targets a beta difference rather than a beta of zero. The correlations in the
-#    lower triangle say how much each co-moved with the market over this window. A correlation is
-#    not a beta - it is scaled by the two volatilities - so what these cells support is a
-#    statement about co-movement, and the regression that gives exposure is what
-#    `01_portfolio_metrics` runs on a return series.
+# 2. **Quality (QMJ) and low-volatility (BAB) against the market**: three properties are easy to
+#    run together and are not the same. *Long-short* says only that the portfolio holds both
+#    sides. *Dollar-neutral* says the two legs are equal in size. *Beta-neutral* says their market
+#    exposures cancel, which equal dollars do not deliver when the two legs have different betas.
+#    BAB is built for the third: it levers its low-beta leg up to a beta of one, de-levers the
+#    high-beta leg down to one, and holds them against each other, so its *estimated* net beta is
+#    zero by construction. Realized exposure can still differ, because those betas are estimated
+#    on past returns and move. The correlations in the lower triangle say how much each factor
+#    co-moved with the market over this window. A correlation is not a beta - it is scaled by the
+#    two volatilities - so these cells support a statement about co-movement, and the regression
+#    that gives exposure is what `01_portfolio_metrics` runs on a return series.
 
 # %% [markdown]
 # ---

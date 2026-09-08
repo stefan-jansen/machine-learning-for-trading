@@ -622,7 +622,7 @@ for panel_index, (ax, (metric, label)) in enumerate(zip(axes.flat, metric_specs,
         ax.yaxis.set_major_formatter(lambda value, _: f"{value:.0%}")
 
 fig.suptitle("Four measures of the same three sizing rules, on two panels")
-fig.legend(legend_handles, method_labels, loc="lower center", ncol=3)
+fig.legend(legend_handles, method_labels, loc="outside lower center", ncol=3)
 show_with_alt(
     fig,
     "Four panels comparing equal-weight, conformal and score-weighted sizing on the ETF and CME panels: annualized Sharpe, annualized return, maximum drawdown and mean one-way turnover, three grouped bars per case study in each panel.",

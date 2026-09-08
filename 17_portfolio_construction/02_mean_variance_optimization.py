@@ -1000,7 +1000,7 @@ fig = px.bar(
     color="Portfolio",
     barmode="group",
     color_discrete_sequence=ML4T_CATEGORICAL,
-    title="Only the expected-return optimizers concentrate their weight",
+    title="Both optimizers concentrate; the three heuristics hold everything",
 )
 
 # Add equal weight reference line
