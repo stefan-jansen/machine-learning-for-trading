@@ -414,11 +414,12 @@ print(f"Of which option positions: {(reported['put_call'] != '').sum()}")
 # %% [markdown]
 # ### Portfolio concentration
 #
-# Expressing each position as a share of the total reported value says how much of the
+# Expressing each position as a share of the reported stock value says how much of the
 # portfolio the largest holdings command, which is the first thing worth knowing about any
-# manager's book. Option rows are dropped so that the shares below are shares of a stock
-# portfolio, and positions are aggregated by issuer so that two share classes of the same
-# company count once.
+# manager's book. Option rows are dropped before the shares are computed, so the denominator
+# below is the value of the reported stock positions and not the filing's total; where a
+# manager reports options, the two differ. Positions are aggregated by issuer, so two share
+# classes of the same company count once.
 
 # %%
 concentration = (
@@ -451,11 +452,11 @@ fig = go.Figure(
 )
 fig.update_layout(
     title=dict(
-        text="A few issuers account for most of the reported 13F value"
+        text="A few issuers account for most of the reported stock value"
         f"<br><sup>{manager.name}, as reported for {holdings.report_period}; "
-        f"{N_TOP_HOLDINGS} largest issuers</sup>",
+        f"{N_TOP_HOLDINGS} largest issuers, option positions excluded</sup>",
     ),
-    xaxis_title="Share of reported 13F value (%)",
+    xaxis_title="Share of reported 13F stock value, options excluded (%)",
     xaxis=dict(range=[0, max(pct) * 1.12]),  # headroom for the outside data labels
     yaxis_title="",
     yaxis=dict(autorange="reversed"),  # largest position at the top
