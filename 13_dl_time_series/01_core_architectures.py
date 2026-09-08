@@ -64,7 +64,7 @@ from ml4t.diagnostic.metrics import cross_sectional_ic_series
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 # %% tags=["parameters"]
 SEED = 42
@@ -785,7 +785,13 @@ fig.suptitle(
     color=COLORS["blue"],
     fontweight="semibold",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "Four panels, one per architecture, each plotting mean squared error against "
+    "training epoch. Every panel carries a solid training curve and a dashed "
+    "validation curve on shared axes, so the epoch at which the two separate is "
+    "visible for each architecture.",
+)
 
 # %% [markdown]
 # ### Cost against error
@@ -814,7 +820,12 @@ add_message_title(
     "A costlier step buys no lower error here",
     subtitle="One forward pass, backward pass and weight update, timed on this machine",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "A scatter of four labelled points, one per architecture, with the time for a "
+    "single training step in milliseconds across the horizontal axis and mean "
+    "squared error on the held-back stretch up the vertical axis.",
+)
 
 # %% [markdown]
 # The horizontal spread is large and the vertical spread is small: the architectures
@@ -944,7 +955,13 @@ add_message_title(
 )
 axes[1].legend(frameon=False, fontsize="small")
 
-fig.show()
+show_with_alt(
+    fig,
+    "Two panels sharing a horizontal axis of window length in days. The left panel "
+    "plots the time for one training step for the fully connected network and the "
+    "LSTM; the right panel plots each one's training error as a solid line and its "
+    "validation error as a dashed line, on a logarithmic scale.",
+)
 
 # %% [markdown]
 # The two panels are the notebook's argument in one figure, and they say different
