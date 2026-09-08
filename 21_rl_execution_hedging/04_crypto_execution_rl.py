@@ -844,12 +844,30 @@ pl.DataFrame(
 # ## 11. Key takeaways
 
 # %%
-paired_lines = "\n".join(
-    f"- **{name}** minus **{REFERENCE_STRATEGY}**: {d.mean():+.2f} bps per episode, standard "
-    f"error {d.std(ddof=1) / np.sqrt(d.size):.2f}, a difference of "
-    f"{abs(d.mean()) / (d.std(ddof=1) / np.sqrt(d.size)):.1f} standard errors."
-    for name, d in paired.items()
-)
+
+
+def comparison_row(reference: str, other: str) -> str:
+    """One line comparing two arms, with the paired and unpaired standard errors side by side.
+
+    Pairing changes the variance of a difference by minus twice the covariance, so it narrows
+    the interval only when the two arms move together. Reporting both, with the correlation,
+    lets the reader see which of the two applies rather than take it on trust.
+    """
+    a = results[other]["shortfall_bps"]
+    b = results[reference]["shortfall_bps"]
+    difference = a - b
+    n = difference.size
+    paired_se = float(difference.std(ddof=1) / np.sqrt(n))
+    unpaired_se = float(np.sqrt(a.var(ddof=1) / n + b.var(ddof=1) / n))
+    correlation = float(np.corrcoef(a, b)[0, 1])
+    return (
+        f"- **{other}** minus **{reference}**: {difference.mean():+.2f} bps per episode. "
+        f"Paired standard error {paired_se:.2f}, treating the arms as independent "
+        f"{unpaired_se:.2f}; the two series correlate {correlation:+.2f}."
+    )
+
+
+paired_lines = "\n".join(comparison_row(REFERENCE_STRATEGY, name) for name in paired)
 profile_lines = "\n".join(
     f"- **{name}**: {results[name]['mean_bps']:.1f} bps mean shortfall, "
     f"{results[name]['final_quarter_share_pct']:.1f}% of the order in the final quarter, "
@@ -868,9 +886,11 @@ display(
     Markdown(f"""
 {profile_lines}
 
-**Pair the comparison, because the window dominates the cost.** Each episode's shortfall is
-mostly what the price did over those twenty-four hours, which every strategy faced equally.
-Differencing per episode removes it:
+**Pair the comparison, then check that pairing helped.** Each episode's shortfall is mostly
+what the price did over those twenty-four hours, which every strategy faced equally, so
+differencing per episode should remove most of it. Whether it does is a measurement, not an
+assumption: pairing narrows the interval only where the two arms move together, so both
+standard errors and the correlation between them are reported.
 
 {paired_lines}
 

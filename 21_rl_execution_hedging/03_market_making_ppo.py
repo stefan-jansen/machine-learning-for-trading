@@ -816,10 +816,11 @@ The threshold this notebook fixed in advance is {RESOLUTION_SIGMA:.0f} standard 
 was fixed in advance for a reason: with three baselines available, reading the ordering off
 whichever comparison came out largest would be a selection artefact.
 
-**Pair what you can pair.** Every strategy here trades the same price path in the same episode,
-and the episode-to-episode correlation between arms is high, so differencing per episode removes
-the path variance that would otherwise dominate the standard error. An unpaired comparison of
-the same two policies would need far more episodes to reach the same resolution.
+**Pair what you can pair, then check that pairing helped.** Every strategy here trades the
+same price path in the same episode, so the difference can be taken per episode. That narrows
+the standard error only when the two arms move together: the correlation between the learned
+policy and the reference rule is reported above with the gap, and it is what decides whether
+the paired interval is tighter than an unpaired one or wider.
 
 ### Known limitations
 
@@ -827,9 +828,11 @@ the same two policies would need far more episodes to reach the same resolution.
   or does not, with a probability that depends only on its distance from the mid and the
   imbalance, so nothing here captures queue position, which is most of the difficulty in real
   market making.
-- Adverse selection is modelled as a tilt in the fill probability, not as informed flow that
-  predicts the next price move. A maker in this simulator can be filled on the wrong side but
-  cannot be picked off systematically.
+- Adverse selection is present but crude. The order imbalance both raises the fill
+  probability on one side and pushes the next return in the same direction, so the maker is
+  systematically filled just before a move against the position it has taken. What is missing
+  is any informed participant: the imbalance is an exogenous mean-reverting series that knows
+  nothing, so no counterparty here trades because it has worked something out.
 - One PPO training run at one seed is one draw from a wide distribution. The sign of the gap
   above is a property of this run.
 - The price process has no reaction to the maker's own quotes, so the maker is a price taker in

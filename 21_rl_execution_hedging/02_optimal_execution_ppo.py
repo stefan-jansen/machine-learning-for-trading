@@ -910,10 +910,35 @@ pl.DataFrame(
 # %%
 even_final_quarter = 100 * (EXECUTION_HORIZON // 4) / EXECUTION_HORIZON
 lowest_mean = min(results, key=lambda name: results[name]["mean_bps"])
-mean_spread = max(r["mean_bps"] for r in results.values()) - min(
-    r["mean_bps"] for r in results.values()
+REFERENCE_STRATEGY = "TWAP"
+shortfall_by_strategy = {name: r["shortfall_bps"] for name, r in results.items()}
+
+
+def comparison_row(reference: str, other: str, values: dict, unit: str) -> str:
+    """One line comparing two arms, with the paired and unpaired standard errors side by side.
+
+    Pairing changes the variance of a difference by minus twice the covariance, so it narrows
+    the interval only when the two arms move together. Reporting both, with the correlation,
+    lets the reader see which of the two applies rather than take it on trust.
+    """
+    a, b = values[reference], values[other]
+    difference = a - b
+    n = difference.size
+    paired_se = float(difference.std(ddof=1) / np.sqrt(n))
+    unpaired_se = float(np.sqrt(a.var(ddof=1) / n + b.var(ddof=1) / n))
+    correlation = float(np.corrcoef(a, b)[0, 1])
+    return (
+        f"- **{other}** minus **{reference}**: {-difference.mean():+.2f} {unit} per episode. "
+        f"Paired standard error {paired_se:.2f}, treating the arms as independent "
+        f"{unpaired_se:.2f}; the two series correlate {correlation:+.2f}."
+    )
+
+
+paired_lines = "\n".join(
+    comparison_row(REFERENCE_STRATEGY, name, shortfall_by_strategy, "bps")
+    for name in STRATEGIES
+    if name != REFERENCE_STRATEGY
 )
-episode_std = float(np.mean([r["std_bps"] for r in results.values()]))
 profile_lines = "\n".join(
     f"- **{name}**: {results[name]['mean_bps']:.1f} bps mean shortfall, standard deviation "
     f"{results[name]['std_bps']:.1f} bps, {results[name]['final_quarter_share_pct']:.1f}% of the "
@@ -925,11 +950,16 @@ display(
     Markdown(f"""
 {profile_lines}
 
-**Compare dispersions before comparing means.** The three mean costs span
-{mean_spread:.1f} bps while a single strategy's cost varies by
-{episode_std:.1f} bps from one episode to the next. **{lowest_mean}** records the lowest mean
-here, and on a sample of {EVAL_EPISODES} paired episodes that ordering is not something to
-carry out of the notebook.
+**Size the difference, and say which standard error you sized it with.** Every strategy
+traded the same market paths, so the difference to the fixed schedule can be taken episode by
+episode:
+
+{paired_lines}
+
+Pairing narrows the interval only where the two arms move together, so read each difference
+against the larger of its two standard errors. **{lowest_mean}** records the lowest mean over
+{EVAL_EPISODES} episodes, which on this evidence is not an ordering to carry out of the
+notebook.
 
 **A schedule's cost and its shape are separate facts.** An even schedule puts
 {even_final_quarter:.0f}% of the order in the final quarter. A strategy that puts substantially

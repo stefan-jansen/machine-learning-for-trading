@@ -695,10 +695,14 @@ pl.DataFrame(
 # ## 6. Key takeaways
 #
 # The three algorithms were scored on the same list of seeds, so each pair of
-# reward series is matched episode by episode, and the difference can be taken
-# within an episode. That removes the market variation the two arms share, which
-# is most of the spread in either series on its own, and it is why a paired
-# standard error is much smaller than either algorithm's own standard deviation.
+# reward series is matched episode by episode and the difference can be taken
+# within an episode. Whether that helps is not something to assume. Pairing
+# changes the variance of a difference by $-2\,\mathrm{cov}(a, b)$, so it
+# shrinks the standard error when the two arms move together and *widens* it
+# when they move against each other. Two policies that hold opposite positions
+# on the same price path have negatively correlated rewards, which is exactly
+# the case here. Both standard errors are therefore reported below, with the
+# correlation that separates them, rather than the paired one alone.
 
 # %%
 switch_counts = {
@@ -710,17 +714,24 @@ distinct_positions = {
 }
 highest_mean = max(episode_rewards, key=lambda name: episode_rewards[name].mean())
 
-# Matched episode by episode: differencing removes the shared market variation.
-paired_gaps = {
-    name: episode_rewards[highest_mean] - episode_rewards[name]
-    for name in episode_rewards
-    if name != highest_mean
-}
+
+def comparison_row(reference: str, other: str) -> str:
+    """One line comparing two arms, with the paired and unpaired standard errors side by side."""
+    a, b = episode_rewards[reference], episode_rewards[other]
+    difference = a - b
+    n = difference.size
+    paired_se = float(difference.std(ddof=1) / np.sqrt(n))
+    unpaired_se = float(np.sqrt(a.var(ddof=1) / n + b.var(ddof=1) / n))
+    correlation = float(np.corrcoef(a, b)[0, 1])
+    return (
+        f"- **{reference}** minus **{other}**: {difference.mean():+.2f} per episode. "
+        f"Paired standard error {paired_se:.2f}, treating the arms as independent {unpaired_se:.2f}; "
+        f"the two reward series correlate {correlation:+.2f}."
+    )
+
+
 paired_lines = "\n".join(
-    f"- **{highest_mean}** minus **{name}**: {gap.mean():+.2f} per episode, standard error "
-    f"{gap.std(ddof=1) / np.sqrt(gap.size):.2f}, so a gap of "
-    f"{abs(gap.mean()) / (gap.std(ddof=1) / np.sqrt(gap.size)):.1f} standard errors."
-    for name, gap in paired_gaps.items()
+    comparison_row(highest_mean, name) for name in episode_rewards if name != highest_mean
 )
 behaviour_lines = "\n".join(
     f"- **{name}** used {distinct_positions[name]} of the three positions and changed position "
@@ -731,15 +742,17 @@ behaviour_lines = "\n".join(
 display(
     Markdown(f"""
 **Size a difference before reading it.** **{highest_mean}** reaches the highest mean reward
-over the {EVAL_EPISODES} held-out episodes. Because every algorithm was scored on the same
-seeds, the difference to each of the others can be taken episode by episode, which removes
-the market variation the arms share:
+over the {EVAL_EPISODES} held-out episodes. Every algorithm was scored on the same seeds, so
+the difference to each of the others can be taken episode by episode:
 
 {paired_lines}
 
-A gap of one or two standard errors is a gap this episode count cannot call, and none of these
-means is a claim about which algorithm learned a better policy. What the mean reward cannot
-tell you at all is what each policy does:
+Compare each difference against the larger of its two standard errors before reading anything
+into it. Where the correlation is negative, the paired standard error is the wider of the two,
+which is the honest scale: policies sitting on opposite sides of the same price path disagree
+by more, episode to episode, than two independent draws would. None of these means is a claim
+about which algorithm learned a better policy. What the mean reward cannot tell you at all is
+what each policy does:
 
 {behaviour_lines}
 
