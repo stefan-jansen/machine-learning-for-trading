@@ -16,7 +16,7 @@
 # %% [markdown]
 # # Macro-based regime detection
 #
-# **Chapter 1 · §1.4 Market Regimes: Change Is the Constant**
+# **Chapter 1 · §1.4 Keeping up with changing market regimes**
 #
 # **Docker image**: `ml4t`
 #
@@ -51,7 +51,7 @@
 #
 # ## Book reference
 #
-# Chapter 1, Section 1.4, "Market Regimes: Change Is the Constant". Figure 1.6 in the
+# Chapter 1, Section 1.4, "Keeping up with changing market regimes". Figure 1.6 in the
 # chapter is the regime-and-volatility panel drawn below.
 #
 # ## Prerequisites

@@ -16,7 +16,7 @@
 # %% [markdown]
 # # Factor-based regime detection
 #
-# **Chapter 1 · §1.4 Market Regimes: Change Is the Constant**
+# **Chapter 1 · §1.4 Keeping up with changing market regimes**
 #
 # **Docker image**: `ml4t`
 #
@@ -50,7 +50,7 @@
 #
 # ## Book reference
 #
-# Chapter 1, Section 1.4, "Market Regimes: Change Is the Constant". `macro_regimes` is the
+# Chapter 1, Section 1.4, "Keeping up with changing market regimes". `macro_regimes` is the
 # companion notebook and estimates regimes from macroeconomic indicators instead.
 #
 # ## Prerequisites
