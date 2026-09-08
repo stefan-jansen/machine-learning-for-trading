@@ -2591,31 +2591,39 @@ case_studies/sp500_equity_option_analytics/14_backtest:
   # earlier generation.
   #
   # The primary label is first, so the first run is what this entry did before.
+  #
+  # MAX_SYMBOLS is 21 on every one of them, from #850: backtest.sweep.top_k_grid
+  # declares [5, 10, 20] for every label here and the case study is long-only, so a
+  # scheme survives when k < n_assets. Three symbols realized none of them and the
+  # sweep ran a `6 predictions x 0 schemes` grid; six realizes only ew_top5.
+  # Twenty-one realizes all three, which is what the fixture declares, and the seeded
+  # predictions carry 27 symbols so the panel has the names
+  # (ml4t/agent-workspace#1084).
   invocations:
     - id: fwd_ret_5d
       parameters:
         LABEL: fwd_ret_5d
-        MAX_SYMBOLS: 3
+        MAX_SYMBOLS: 21
         TOP_K: 1
     - id: fwd_dir_5d
       parameters:
         LABEL: fwd_dir_5d
-        MAX_SYMBOLS: 3
+        MAX_SYMBOLS: 21
         TOP_K: 1
     - id: fwd_dir_10d
       parameters:
         LABEL: fwd_dir_10d
-        MAX_SYMBOLS: 3
+        MAX_SYMBOLS: 21
         TOP_K: 1
     - id: fwd_ret_10d
       parameters:
         LABEL: fwd_ret_10d
-        MAX_SYMBOLS: 3
+        MAX_SYMBOLS: 21
         TOP_K: 1
     - id: fwd_ret_risk_adj_5d
       parameters:
         LABEL: fwd_ret_risk_adj_5d
-        MAX_SYMBOLS: 3
+        MAX_SYMBOLS: 21
         TOP_K: 1
   timeout: 600
 case_studies/sp500_equity_option_analytics/15_portfolio_management:
