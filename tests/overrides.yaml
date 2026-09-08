@@ -2672,34 +2672,19 @@ case_studies/sp500_equity_option_analytics/15_portfolio_management:
         TOP_N_PREDICTIONS: 2
   timeout: 300
 case_studies/sp500_equity_option_analytics/17_costs:
-  # The same five labels as 14_backtest above, because this stage takes LABEL
-  # too and reads what the previous one registered for that label.
-  invocations:
-    - id: fwd_ret_5d
-      parameters:
-        LABEL: fwd_ret_5d
-        MAX_SYMBOLS: 5
-        TOP_N_COMBOS: 1
-    - id: fwd_dir_5d
-      parameters:
-        LABEL: fwd_dir_5d
-        MAX_SYMBOLS: 5
-        TOP_N_COMBOS: 1
-    - id: fwd_dir_10d
-      parameters:
-        LABEL: fwd_dir_10d
-        MAX_SYMBOLS: 5
-        TOP_N_COMBOS: 1
-    - id: fwd_ret_10d
-      parameters:
-        LABEL: fwd_ret_10d
-        MAX_SYMBOLS: 5
-        TOP_N_COMBOS: 1
-    - id: fwd_ret_risk_adj_5d
-      parameters:
-        LABEL: fwd_ret_risk_adj_5d
-        MAX_SYMBOLS: 5
-        TOP_N_COMBOS: 1
+  # One run, and no LABEL, unlike the three stages above it. This is the first stage
+  # after the selection: it opens the candidate set 16_risk_management froze, and prices
+  # the single configuration that set carries. That configuration is on one label, so the
+  # notebook treats an injected LABEL as a request and raises when it disagrees -
+  # "Costs price the configuration the selection names; running it under another label's
+  # contract would report a different strategy" (17_costs.py, the REQUESTED_LABEL guard).
+  #
+  # Fanning it out over the five labels 14/15/16 run is therefore four guaranteed
+  # failures and one pass, which is what #851 did and what CI run 34174124145 showed on
+  # main. The stages before the selection sweep every label; this one prices the winner.
+  parameters:
+    MAX_SYMBOLS: 5
+    TOP_N_COMBOS: 1
   timeout: 600
 case_studies/sp500_equity_option_analytics/16_risk_management:
   # The same five labels as 14_backtest above, because this stage takes LABEL
@@ -3599,21 +3584,18 @@ case_studies/us_firm_characteristics/12_portfolio_management:
         TOP_N_PREDICTIONS: 2
   timeout: 300
 case_studies/us_firm_characteristics/14_costs:
-  # The same three labels as 11_backtest above, because this stage takes LABEL
-  # too and reads what the previous one registered for that label.
-  invocations:
-    - id: fwd_ret_1m
-      parameters:
-        LABEL: fwd_ret_1m
-        MAX_SYMBOLS: 5
-    - id: fwd_class_1m
-      parameters:
-        LABEL: fwd_class_1m
-        MAX_SYMBOLS: 5
-    - id: fwd_ret_1m_win
-      parameters:
-        LABEL: fwd_ret_1m_win
-        MAX_SYMBOLS: 5
+  # One run, and no LABEL, unlike the three stages above it. Same reason as
+  # sp500_equity_option_analytics/17_costs: this stage sweeps the cost grid over the one
+  # configuration `resolve_solvent_carrier` carries forward. It reads the label off that
+  # carrier - `LABEL = carrier["label"]` at 14_costs.py:142, unconditional once the two
+  # differ - so an injected LABEL never reaches a decision.
+  #
+  # That makes a fan-out inert rather than red: #851 declared three and CI ran the same
+  # carrier three times, passing each. Two of the three were duplicates of the first, and
+  # a green tick on a run that could not have exercised its label is the coverage claim
+  # this file exists to keep honest.
+  parameters:
+    MAX_SYMBOLS: 5
   timeout: 600
 case_studies/us_firm_characteristics/13_risk_management:
   # The same three labels as 11_backtest above, because this stage takes LABEL
