@@ -457,6 +457,11 @@ show_with_alt(
 # score it on observations it never saw. `fit_extremization_exponent` does the search; the
 # separation is the caller's job and is the part that gets skipped.
 #
+# A grid search returns where it stopped. If the minimum lies outside the range searched, that
+# is the end of the range rather than a minimum, and the assertion below refuses the fit rather
+# than reporting a bound as an answer. [`09_evaluation_and_governance`](09_evaluation_and_governance.ipynb)
+# runs into exactly that case and shows what it costs an evaluation.
+#
 # The panel here is simulated, with the generating process visible: a true probability drawn
 # from a symmetric Beta, an outcome drawn against it, and a forecast that shrinks the true
 # probability toward even odds and adds noise. That shrinkage is the miscalibration the
@@ -478,6 +483,9 @@ test_forecasts = raw_forecasts[train_size:]
 test_outcomes = outcomes[train_size:]
 
 calibration_fit = fit_extremization_exponent(train_forecasts, train_outcomes)
+assert not calibration_fit.at_search_boundary, (
+    "the search stopped at an end of its range, so the exponent is a bound and not a minimum"
+)
 test_calibrated = [
     logodds_extremize(probability, calibration_fit.optimal_exponent)
     for probability in test_forecasts
@@ -489,6 +497,9 @@ test_improvement = (test_brier_before - test_brier_after) / test_brier_before
 print(f"Train observations: {len(train_forecasts)}")
 print(f"Test observations:  {len(test_forecasts)}")
 print(f"Fitted exponent a:  {calibration_fit.optimal_exponent:.3f}")
+print(
+    f"Searched range:     {calibration_fit.searched_range[0]} to {calibration_fit.searched_range[1]}"
+)
 print(f"Test Brier before:  {test_brier_before:.4f}")
 print(f"Test Brier after:   {test_brier_after:.4f}")
 print(f"Test improvement:   {test_improvement:.1%}")
