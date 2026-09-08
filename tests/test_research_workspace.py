@@ -1108,3 +1108,53 @@ def test_a_bare_label_read_keeps_the_tier_the_study_was_opened_at(
     # And naming the tier explicitly reaches the same artifact, so the default is a default
     # rather than a second behaviour.
     assert study.labels.get("fwd_ret_21d", execution_tier="preview").path == resolved
+
+
+def test_relative_preview_workspace_lands_outside_the_repository(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A bare workspace name used to resolve against the caller's cwd, which is the repo root.
+
+    Notebooks run from the repo root, so `WORKSPACE=smoke-1045` put a `config` symlink, a
+    `.preview/` tree and a 268K registry there, and `git status` offered all of it
+    (ml4t/agent-workspace#1053). A relative name now resolves against a declared preview root
+    instead, so nothing in `.gitignore` is load-bearing for it.
+    """
+    from utils.paths import REPO_ROOT as repo_root
+
+    release = _seed_release(tmp_path)
+    preview_root = tmp_path / "preview-root"
+    monkeypatch.setenv("ML4T_PREVIEW_ROOT", str(preview_root))
+    monkeypatch.chdir(repo_root)
+
+    study = open_study(
+        "etfs",
+        execution_tier=ExecutionTier.PREVIEW,
+        workspace="smoke-1045",
+        release_root=release,
+    )
+
+    assert study.output_root == (preview_root / "smoke-1045").resolve()
+    assert not (repo_root / "smoke-1045").exists(), (
+        "a relative workspace must not create anything in the checkout"
+    )
+
+
+def test_absolute_preview_workspace_is_taken_as_given(tmp_path: Path, monkeypatch) -> None:
+    """The drivers pass absolute paths (`smoke-chain.sh` defaults to the artifact store).
+
+    Redirecting those under the preview root would move every existing smoke workspace, so an
+    absolute path stays exactly where the caller put it.
+    """
+    release = _seed_release(tmp_path)
+    monkeypatch.setenv("ML4T_PREVIEW_ROOT", str(tmp_path / "unused-root"))
+    declared = tmp_path / "explicit" / "ws"
+
+    study = open_study(
+        "etfs",
+        execution_tier=ExecutionTier.PREVIEW,
+        workspace=declared,
+        release_root=release,
+    )
+
+    assert study.output_root == declared.resolve()
