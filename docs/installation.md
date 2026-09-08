@@ -153,21 +153,32 @@ Rosetta. Nothing else in the book needs this.
 git clone https://github.com/stefan-jansen/machine-learning-for-trading.git
 cd machine-learning-for-trading
 
-# 2. Copy environment template
+# 2. Copy the environment template. The defaults work as they are — nothing in
+#    it needs editing to start.
 cp .env.example .env
 
 # 3. Pull the pre-built image from Docker Hub
 docker compose pull ml4t
 
-# 4. Start Jupyter Lab
-docker compose up ml4t
-# Open http://localhost:8888
+# 4. Confirm the install: one PASS/FAIL line per component, exit 0 if ready
+docker compose run --rm ml4t python scripts/verify_installation.py
 
-# 5. Or run a notebook directly
-docker compose run --rm ml4t python 01_process_is_edge/factor_regimes.py
+# 5. Start Jupyter Lab. It keeps running in this terminal; leave it running.
+docker compose up ml4t
 ```
 
+Then open **http://localhost:8888** in your web browser. That is a browser
+address, not a command to type — and on Windows, open it in your normal Windows
+browser even though step 5 ran inside Ubuntu.
+
 **That's it.** No build step needed — Docker pulls the pre-built image (~12 GB on x86, ~3 GB on ARM64).
+
+To run a single notebook instead of opening Jupyter, name its `.py` — this one
+downloads the factor data it needs and takes a few minutes:
+
+```bash
+docker compose run --rm ml4t python 01_process_is_edge/factor_regimes.py
+```
 
 To build locally instead (if you prefer or need to modify the environment):
 
@@ -179,8 +190,9 @@ docker compose build ml4t    # ~45 min on x86, ~15 min on ARM64
 
 ## Verify Your Installation
 
-Before opening any notebook, run the one command that confirms every required
-library imports and the runtime is wired up correctly:
+This is step 4 of the Quick Start above, and the same command on either path. It
+is the one thing to run before opening a notebook: it confirms that every
+required library imports and that the runtime is wired up correctly.
 
 ```bash
 # Docker (recommended)
