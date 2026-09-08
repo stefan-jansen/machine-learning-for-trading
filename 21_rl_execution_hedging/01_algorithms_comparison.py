@@ -299,11 +299,13 @@ fig.show()
 # %% [markdown]
 # The autocorrelation of squared returns stays positive for tens of hours in
 # both series, which is the property the agents need their market to have. It
-# is also the only property this simulator claims: returns are drawn
-# independently around zero given the current variance, so there is no
-# predictable direction for a policy to find. Any consistent profit an agent
-# reports here comes from the volatility state, not from forecasting the sign
-# of the next move.
+# is also the only property this simulator has: given the current variance, the
+# next return is drawn around zero, so its expected value is zero whatever the
+# volatility state is. With a nonnegative trading cost on top, no policy in this
+# environment has a positive expected reward. A policy that ends an evaluation
+# above zero got there through sampling variation; what the volatility state can
+# genuinely change is the size of the exposure a policy takes and the cost it
+# pays for changing it, not the sign of what it earns.
 
 # %% [markdown]
 # ## 2. The trading environment
@@ -691,6 +693,12 @@ pl.DataFrame(
 
 # %% [markdown]
 # ## 6. Key takeaways
+#
+# The three algorithms were scored on the same list of seeds, so each pair of
+# reward series is matched episode by episode, and the difference can be taken
+# within an episode. That removes the market variation the two arms share, which
+# is most of the spread in either series on its own, and it is why a paired
+# standard error is much smaller than either algorithm's own standard deviation.
 
 # %%
 switch_counts = {
@@ -701,10 +709,18 @@ distinct_positions = {
     name: int(np.unique(traj["chosen_positions"]).size) for name, traj in trajectories.items()
 }
 highest_mean = max(episode_rewards, key=lambda name: episode_rewards[name].mean())
-spread = float(np.mean([r.std() for r in episode_rewards.values()]))
-mean_range = float(
-    max(r.mean() for r in episode_rewards.values())
-    - min(r.mean() for r in episode_rewards.values())
+
+# Matched episode by episode: differencing removes the shared market variation.
+paired_gaps = {
+    name: episode_rewards[highest_mean] - episode_rewards[name]
+    for name in episode_rewards
+    if name != highest_mean
+}
+paired_lines = "\n".join(
+    f"- **{highest_mean}** minus **{name}**: {gap.mean():+.2f} per episode, standard error "
+    f"{gap.std(ddof=1) / np.sqrt(gap.size):.2f}, so a gap of "
+    f"{abs(gap.mean()) / (gap.std(ddof=1) / np.sqrt(gap.size)):.1f} standard errors."
+    for name, gap in paired_gaps.items()
 )
 behaviour_lines = "\n".join(
     f"- **{name}** used {distinct_positions[name]} of the three positions and changed position "
@@ -714,11 +730,16 @@ behaviour_lines = "\n".join(
 
 display(
     Markdown(f"""
-**Read behaviour, not just reward.** On {EVAL_EPISODES} held-out episodes the three mean
-rewards span {mean_range:.2f}, against a within-algorithm standard deviation averaging
-{spread:.2f}. **{highest_mean}** reaches the highest mean, but a gap that small against a
-spread that large is not evidence that one algorithm learned a better policy on this
-environment. What the mean reward cannot tell you at all is what each policy does:
+**Size a difference before reading it.** **{highest_mean}** reaches the highest mean reward
+over the {EVAL_EPISODES} held-out episodes. Because every algorithm was scored on the same
+seeds, the difference to each of the others can be taken episode by episode, which removes
+the market variation the arms share:
+
+{paired_lines}
+
+A gap of one or two standard errors is a gap this episode count cannot call, and none of these
+means is a claim about which algorithm learned a better policy. What the mean reward cannot
+tell you at all is what each policy does:
 
 {behaviour_lines}
 

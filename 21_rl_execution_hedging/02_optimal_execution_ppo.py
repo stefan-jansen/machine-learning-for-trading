@@ -228,8 +228,12 @@ calibration_summary
 # the median hourly high-low range as a stand-in for the bid-ask spread, because
 # the hourly bars carry no quotes. The range over an hour is far wider than the
 # quoted spread on a market as liquid as BTC perpetuals, so every strategy here
-# pays a trading cost much larger than a real execution of this size would. The
-# ranking between strategies is unaffected, because all three pay the same.
+# pays a trading cost much larger than a real execution of this size would.
+# Every comparison below is conditional on that spread process: the spread
+# varies from step to step and across regimes, and the three schedules trade
+# different quantities at different steps, so their volume-weighted spread costs
+# are not the same number and a different spread process could order them
+# differently.
 #
 # **"Depth" is traded volume.** The same function uses median hourly volume as a
 # stand-in for the resting size on the book. That is why the stressed value is
@@ -339,17 +343,6 @@ fig = make_subplots(
     specs=[[{}], [{"secondary_y": True}]],
     vertical_spacing=0.12,
 )
-for row in sample_path.filter(pl.col("regime") == 1).iter_rows(named=True):
-    for r in (1, 2):
-        fig.add_vrect(
-            x0=row["step"] - 0.5,
-            x1=row["step"] + 0.5,
-            fillcolor=COLORS["amber"],
-            opacity=0.15,
-            line_width=0,
-            row=r,
-            col=1,
-        )
 fig.add_trace(
     go.Scatter(
         x=sample_path["step"],
@@ -381,6 +374,22 @@ fig.add_trace(
     col=1,
     secondary_y=True,
 )
+
+# The rectangles go on after the traces and below them: Plotly's default
+# `exclude_empty_subplots=True` drops a shape added to a subplot that holds no
+# trace yet, which silently removed the shading this figure's title promises.
+for stressed_step in sample_path.filter(pl.col("regime") == 1)["step"]:
+    for panel in (1, 2):
+        fig.add_vrect(
+            x0=stressed_step - 0.5,
+            x1=stressed_step + 0.5,
+            fillcolor=COLORS["amber"],
+            opacity=0.15,
+            line_width=0,
+            layer="below",
+            row=panel,
+            col=1,
+        )
 fig.update_yaxes(title_text="Price", row=1, col=1)
 fig.update_yaxes(title_text="Depth (shares)", row=2, col=1)
 fig.update_yaxes(title_text="Half-spread (bps)", row=2, col=1, secondary_y=True)
