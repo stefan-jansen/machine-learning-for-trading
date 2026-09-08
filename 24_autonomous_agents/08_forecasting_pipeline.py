@@ -421,24 +421,6 @@ def _blend_final_probability(
     return max(0.01, min(0.99, final_p)), final_confidence
 
 
-# %%
-def _blend_final_probability(
-    post_debate: float,
-    supervisor_artifact: SupervisorArtifact,
-) -> tuple[float, float]:
-    """Phase 4 → final: confidence-gated supervisor override. Returns (final_p, final_confidence)."""
-    final_p = post_debate
-    final_confidence = 0.5
-    if supervisor_artifact.p_yes is not None and supervisor_artifact.confidence == "high":
-        final_p = supervisor_artifact.p_yes
-        final_confidence = 0.8
-    elif supervisor_artifact.confidence == "medium":
-        if supervisor_artifact.p_yes is not None:
-            final_p = 0.6 * post_debate + 0.4 * supervisor_artifact.p_yes
-        final_confidence = 0.6
-    return max(0.01, min(0.99, final_p)), final_confidence
-
-
 # %% [markdown]
 # The execution helper composes the four phases and records their artifacts.
 # Keeping orchestration outside the class leaves the reader-facing class as a
@@ -666,12 +648,11 @@ summary_df
 # supervisor's reconciliation, including the disagreements it flagged, the clarifying searches
 # it ran, and the probability it returned. All of it is in the saved JSON, so this readout can
 # be rebuilt from disk with `RunTrace.load` long after the run.
+
 # %%
 r = results[0]
-display(
-    {"text/plain": (f"Question: {r.question.question}\n\n{show_agents(r.agents)}")},
-    raw=True,
-)
+print(f"Question: {r.question.question}\n")
+print(show_agents(r.agents))
 
 # %%
 print("── Aggregation ──")
@@ -809,11 +790,12 @@ print(f"\n({len(serialized)} records; the second has the same shape)")
 
 # %% [markdown]
 # The pipeline moves a probability through four stages and records where it went. What it does
-# not establish is that any stage improved the estimate: the aggregation credits the panel with
-# independence nobody measured, the debate on the contested question closed no ground, and the
-# supervisor's confidence label is its own assertion. Reading the stage-to-stage movement as
-# progressive refinement is the mistake this record exists to prevent, and it is why the
-# figures above show the path rather than only the endpoint.
+# not establish is that any stage improved the estimate. The aggregation credits the panel with
+# an independence nobody measured. The debate narrows the two sides by a few points on the
+# contested question, which is a smaller disagreement and not a more accurate one. The
+# supervisor's confidence label is its own assertion about itself. Reading the stage-to-stage
+# movement as progressive refinement is the mistake this record exists to prevent, and it is
+# why the figure above draws the whole path rather than the endpoint.
 
 # %%
 recession, rate_hike = results
