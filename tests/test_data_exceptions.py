@@ -161,3 +161,78 @@ def test_missing_dependency_is_import_error() -> None:
     """Callers catch ImportError to gate optional backends."""
     err = MissingDependencyError(package="x")
     assert isinstance(err, ImportError)
+
+
+class TestDataRootProvenance:
+    """The message must say which data root it looked under, and which of the three
+    sources set it. Without that, a reader whose data sits on another drive is told to
+    download 36G they already have, and nothing names the variable that would fix it.
+    """
+
+    @staticmethod
+    def _error_under(root: Path) -> str:
+        return str(
+            DataNotFoundError(
+                dataset_name="ETF Universe",
+                path=root / "etfs" / "market" / "etf_universe.parquet",
+                download_script="data/etfs/market/download.py",
+            )
+        )
+
+    def test_environment_variable_is_named_as_the_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("utils.config.ML4T_DATA_PATH", tmp_path)
+        monkeypatch.setattr("utils.config.REPO_ROOT", tmp_path / "repo")
+        monkeypatch.setenv("ML4T_DATA_PATH", str(tmp_path))
+
+        msg = self._error_under(tmp_path)
+
+        assert f"Data root: {tmp_path}" in msg
+        assert "Set by the ML4T_DATA_PATH environment variable." in msg
+
+    def test_dotenv_is_distinguished_from_the_environment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """utils.config loads .env into the environment, so a set variable alone does
+        not say which source won."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        data_root = tmp_path / "elsewhere"
+        (repo / ".env").write_text(f"ML4T_DATA_PATH={data_root}\n", encoding="utf-8")
+
+        monkeypatch.setattr("utils.config.ML4T_DATA_PATH", data_root)
+        monkeypatch.setattr("utils.config.REPO_ROOT", repo)
+        monkeypatch.setenv("ML4T_DATA_PATH", str(data_root))
+
+        assert "Set by ML4T_DATA_PATH in .env." in self._error_under(data_root)
+
+    def test_unset_variable_says_the_root_is_the_repository_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The wave-1 worktree state: data/ exists, holds no payload, nothing set."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        data_root = repo / "data"
+
+        monkeypatch.setattr("utils.config.ML4T_DATA_PATH", data_root)
+        monkeypatch.setattr("utils.config.REPO_ROOT", repo)
+        monkeypatch.delenv("ML4T_DATA_PATH", raising=False)
+
+        msg = self._error_under(data_root)
+
+        assert "ML4T_DATA_PATH is not set" in msg
+        assert "the repository's own data/ directory" in msg
+        assert "point ML4T_DATA_PATH at" in msg
+
+    def test_a_path_outside_the_data_root_gets_no_root_note(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Naming a root the missing file does not live under would mislead."""
+        monkeypatch.setattr("utils.config.ML4T_DATA_PATH", tmp_path / "root")
+        monkeypatch.setattr("utils.config.REPO_ROOT", tmp_path / "repo")
+        monkeypatch.setenv("ML4T_DATA_PATH", str(tmp_path / "root"))
+
+        msg = self._error_under(tmp_path / "somewhere-else")
+
+        assert "Data root:" not in msg
