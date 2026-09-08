@@ -2468,8 +2468,28 @@ case_studies/sp500_equity_option_analytics/06_linear:
   # labels x 16 configurations; it does not hold here, where the preview reduction cuts the
   # grid and the gbm run is the slower of the two in every case study measured. The tier is
   # the one-third line the raised entries elsewhere in this file state.
+  #
+  # The reduction is stated rather than left to the max_symbols: 5 that
+  # `_collect_preview_reductions` applies when an entry declares none, for the reason
+  # 08_tabular_dl gives below: a preview that reduces by default reduces invisibly, and the
+  # next reader of this entry cannot tell a deliberate universe cut from an absent one.
+  # Stating it changes nothing about what runs.
+  #
+  # Only the universe is cut, matching 08_tabular_dl. #560 removed a `MAX_FOLDS: 2` here and
+  # ml4t/agent-workspace#942 reads its absence as this preview running every fold on a budget
+  # priced for two. Measured on run 34271885198, the whole stage takes 26s of its 180s, so the
+  # fold axis is not what this budget is short of and a fold cut is not restored blind.
+  parameters:
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
   timeout: 120
 case_studies/sp500_equity_option_analytics/07_gbm:
+  # As 06_linear: the universe cut is stated rather than defaulted, and no fold reduction is
+  # invented for a case study whose sibling entries declare none. 26s of 180s on run
+  # 34271885198.
+  parameters:
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
   timeout: 180
 case_studies/sp500_equity_option_analytics/08_tabular_dl:
   # DEVICE and POPULATION_NAME travel together. The runner refuses to substitute a CPU
