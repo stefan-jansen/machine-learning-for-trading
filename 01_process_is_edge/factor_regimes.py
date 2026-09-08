@@ -57,7 +57,8 @@
 #
 # - Monthly return series and standardization (subtracting a mean, dividing by a standard
 #   deviation) so that series with different scales contribute comparably to a distance.
-# - The AQR Century of Factor Premia parquet under `data/aqr_factors/`. Download it with
+# - The AQR Century of Factor Premia dataset, which `AQRFactorProvider` reads from
+#   `data/factors/aqr` under `ML4T_DATA_PATH`. Fetch it with
 #   `uv run python data/factors/aqr_download.py` if it is missing.
 #
 # ## What this notebook establishes, and what it does not
@@ -594,17 +595,18 @@ def mark_events(ax: Axes, years: list[int]) -> None:
 
 # %%
 def plot_by_regime(ax: Axes, values: np.ndarray, in_risk_on: np.ndarray) -> None:
-    """Draw one line whose every segment takes the colour of the month it starts in.
+    """Draw one line whose every segment takes the colour of the month it ends in.
 
-    Colouring by masking each regime into its own line would drop the segment that spans a
-    transition, and would draw nothing at all for a one-month episode, which is most of
-    them here.
+    The segment from month t-1 to month t is the move month t produced, so month t's regime
+    is the one that colours it. Masking each regime into its own line instead would drop
+    every segment that spans a transition, and would draw nothing at all for a one-month
+    episode, which is most of them here.
     """
     y = np.asarray(values, dtype=float)
     points = np.column_stack([np.arange(len(y)), y]).reshape(-1, 1, 2)
     segments = np.concatenate([points[:-1], points[1:]], axis=1)
     drawable = np.isfinite(segments[:, :, 1]).all(axis=1)
-    colours = np.where(in_risk_on[:-1], COLORS["recede"], COLORS["blue"])
+    colours = np.where(in_risk_on[1:], COLORS["recede"], COLORS["blue"])
     ax.add_collection(LineCollection(segments[drawable], colors=colours[drawable], linewidths=1.2))
     finite = y[np.isfinite(y)]
     ax.set_xlim(0, len(y) - 1)

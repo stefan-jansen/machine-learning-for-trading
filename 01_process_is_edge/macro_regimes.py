@@ -58,8 +58,10 @@
 #
 # - `factor_regimes`, which introduces Gaussian mixture models, the silhouette score, and
 #   why a model fitted on the whole sample describes rather than predicts.
-# - The FRED panel under `data/macro/` and the S&P 500 daily series under
-#   `data/equities/sp500/`.
+# - The FRED panel, which `load_macro` reads. It needs a `FRED_API_KEY` and one run of
+#   `uv run python data/macro/download.py`; `data/macro/README.md` covers both.
+# - Daily S&P 500 index closes, which `load_sp500_index` reads. This one ships with the
+#   repository and needs no download.
 #
 # ## A caveat that applies to every number below
 #
