@@ -89,7 +89,7 @@ from case_studies.utils.backtest_loaders import (
     get_rebalance_step,
     load_backtest_prices_for,
 )
-from case_studies.utils.coverage import check_prediction_coverage
+from case_studies.utils.coverage import CoverageError, check_prediction_coverage
 from case_studies.utils.sweep_config import get_entry_schemes_for
 from utils.artifact_specs import load_setup_config
 from utils.paths import get_case_study_dir
@@ -416,22 +416,29 @@ def holding_slots(timeline: pl.DataFrame, step: int) -> list[int]:
     )
 
 
-def skipped_settlements(timeline: pl.DataFrame, step: int) -> int:
-    """How many settlements the panel holds that this grid carries no decision at.
+def skipped_settlements(timeline: pl.DataFrame) -> int:
+    """Settlements inside a fold's own span that the panel holds and this grid does not decide at.
 
     `holding_slots` returns the distinct advances, which says whether a gap exists and not how
     much of the panel it costs. This totals it, so a grid's sparsity is a number in the table
     rather than something a reader has to infer from a list of advances.
+
+    Counted as span minus decisions per fold, and deliberately not from the advances: summing
+    `advance - step` over consecutive pairs counts one missing settlement `step` times, so an
+    `fwd_ret_24h` grid at `step` 3 would report three times the hole it has. This takes no step
+    at all, because the question is how many panel settlements are absent, which the rebalance
+    cadence does not enter.
+
+    Interior to each fold. A fold's decisions beginning late or ending early is a different
+    claim, and the coverage report below is what makes it: those appear there as
+    `missing_sessions` against the declared window, which a span measured from the grid's own
+    first and last decision cannot see.
     """
     located = on_clock_dtype(timeline).join(CLOCK, on="timestamp", how="left")
-    advances = (
-        located.sort("fold", "slot")
-        .with_columns(pl.col("slot").shift(-step).over("fold").alias("exit"))
-        .drop_nulls("exit")
-        .select((pl.col("exit") - pl.col("slot") - step).alias("skipped"))
-        .get_column("skipped")
+    per_fold = located.group_by("fold").agg(
+        (pl.col("slot").max() - pl.col("slot").min() + 1 - pl.len()).alias("skipped")
     )
-    return int(advances.sum()) if advances.len() else 0
+    return int(per_fold.get_column("skipped").sum())
 
 
 def holding_periods(timeline: pl.DataFrame, step: int) -> list[timedelta]:
@@ -490,7 +497,7 @@ for label in labels:
                 # cross-sectional families. Non-zero for a sequence family wherever its lookback
                 # cannot be filled, which is a property of the panel and not of the model, and is
                 # printed here so a Sharpe compared across families is compared knowing it.
-                "panel_settlements_skipped": skipped_settlements(timeline, step),
+                "panel_settlements_skipped": skipped_settlements(timeline),
                 "first_decision": _utc(timeline.get_column("timestamp").min()),
                 "last_decision": _utc(timeline.get_column("timestamp").max()),
             }
@@ -570,9 +577,24 @@ coverage = [
     for label in labels
     for grid in decision_grids(label).iter_rows(named=True)
 ]
+# A declared gap policy explains one kind of gap and no other. `missing_sessions` is a family
+# predicting at fewer of the declared sessions than the panel holds, which is what a lookback
+# does; `missing_fold`, `undeclared_fold`, `out_of_window` and `unaccounted_window` are the fold
+# geometry being wrong, which no policy licenses and which the completeness check above cannot
+# catch - expected and actual keys agreeing on a wrong fold assignment satisfies it.
+EXPLAINED_BY_A_GAP_POLICY = frozenset({"missing_sessions"})
 for _grid, _gap_policy, _report in coverage:
     if _gap_policy is None:
         _report.raise_if_incomplete()
+        continue
+    unexplained = [gap for gap in _report.gaps if gap.kind not in EXPLAINED_BY_A_GAP_POLICY]
+    if unexplained:
+        raise CoverageError(
+            f"{_report.case_study}/{_report.label}/{_report.split} grid "
+            f"{_grid['decision_key_digest'][:12]} declares gap_policy {_gap_policy!r}, which "
+            f"explains a session a lookback cannot reach and nothing else; "
+            + "; ".join(str(gap) for gap in unexplained)
+        )
 pl.DataFrame(
     [
         {

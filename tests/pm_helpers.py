@@ -193,18 +193,24 @@ def _cuda_lightgbm_available() -> bool:
 
     The C library writes its `[LightGBM] [Fatal]` line straight to file descriptor 2, which
     no Python-level redirect reaches, so the descriptor itself is pointed at the null device
-    for the duration of the probe. A failure here is the answer, not an error to report.
+    for the duration of the probe. Descriptor 2 by number, not `sys.stderr.fileno()`: under
+    pytest's `--capture=sys` that attribute raises `UnsupportedOperation`, and under the
+    default fd capture it names the capture file rather than the stream the C library writes
+    to. A failure here is the answer, not an error to report.
     """
     try:
         import lightgbm as lgb
         import numpy as np
     except ImportError:
         return False
-    stderr_fd = sys.stderr.fileno()
-    saved = os.dup(stderr_fd)
+    try:
+        saved = os.dup(2)
+    except OSError:  # no descriptor 2 to borrow; the noise is not worth failing over
+        saved = None
     try:
         with open(os.devnull, "w") as devnull:
-            os.dup2(devnull.fileno(), stderr_fd)
+            if saved is not None:
+                os.dup2(devnull.fileno(), 2)
             try:
                 lgb.train(
                     {
@@ -220,8 +226,9 @@ def _cuda_lightgbm_available() -> bool:
             except Exception:  # noqa: BLE001 - any failure means the build cannot be used
                 return False
     finally:
-        os.dup2(saved, stderr_fd)
-        os.close(saved)
+        if saved is not None:
+            os.dup2(saved, 2)
+            os.close(saved)
     return True
 
 

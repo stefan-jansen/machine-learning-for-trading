@@ -1791,3 +1791,23 @@ def test_every_declared_capability_in_overrides_is_one_the_guard_knows() -> None
         names = [declared] if isinstance(declared, str) else list(declared)
         unknown = [n for n in names if n not in pm_helpers.GPU_CAPABILITIES]
         assert not unknown, f"{key} declares gpu: {declared!r}, unknown: {unknown}"
+
+
+def test_the_real_probe_runs_and_stays_quiet_under_pytest_capture(capfd) -> None:
+    """The probe redirects descriptor 2, and pytest is also holding it.
+
+    `sys.stderr.fileno()` raises `UnsupportedOperation` under `--capture=sys` and names the
+    capture file rather than the stream LightGBM writes to under the default `--capture=fd`,
+    so the probe takes descriptor 2 by number. Every other test here replaces the probe, which
+    would leave that exact interaction uncovered. This one calls it.
+    """
+    pm_helpers._cuda_lightgbm_available.cache_clear()
+    try:
+        assert isinstance(pm_helpers._cuda_lightgbm_available(), bool)
+        out, err = capfd.readouterr()
+        assert "LightGBM" not in err, f"the probe leaked its own failure to stderr: {err!r}"
+        # Descriptor 2 has to be a working descriptor afterwards, or every later test that
+        # writes to stderr fails somewhere far from here.
+        os.write(2, b"")
+    finally:
+        pm_helpers._cuda_lightgbm_available.cache_clear()
