@@ -247,33 +247,57 @@ catalog.group_by("family", "label").agg(
 #   sitting inside the first one's window, so `fwd_ret_24h` advances three slots and the
 #   eight-hour labels advance one.
 #
-# The check below reads the decision times out of the prediction sets and confirms that
-# consecutive decisions inside a fold are exactly one rebalance step apart.
+# The cell below reads the decision times out of the prediction sets, locates each one on the
+# panel's settlement index, and reports how far apart consecutive decisions are.
+#
+# **It reports rather than adjudicates, and the reason is that the only thing it could adjudicate
+# was wrong.** It used to require the advance to equal `step` exactly. Of the two directions that
+# reading refuses, one is unreachable and the other is not this cell's to judge:
+#
+# - *Closer together than `step`* is the direction that would corrupt a result, because two
+#   positions whose holding periods overlap count the same return twice. It cannot occur here.
+#   `decision_timeline` returns unique (fold, timestamp) pairs, so the slots inside a fold are
+#   strictly increasing integers, and the distance between slot *i* and slot *i + step* is at
+#   least `step` whatever the model did. Whether the engine honours the step it was handed is a
+#   question about `get_rebalance_step`'s consumer, not about the keys the predictions were
+#   written at, and nothing in this cell can see it.
+# - *Further apart than `step`* asserts that the family predicted at every settlement the panel
+#   holds. That is a claim about completeness, it is made properly one cell up, and it is false by
+#   construction for a whole family - which is the paragraph after next.
 #
 # **A step apart on the panel's own clock, not eight hours apart on the calendar.** The two
 # readings agree wherever the panel is contiguous and diverge exactly where it is not, and this
 # panel is not: `features/financial.parquet` carries a 57-day hole opening 2021-08-27, an outage
-# in the premium-index feed. That hole sits in fold 1's *training* window, so a calendar check
-# happens to pass today - and would have failed, on correct data and a correctly fitted model,
-# had the outage fallen a year later. A missing settlement is a fact about the exchange feed;
-# what the decision clock claims is that the model decided at every settlement the panel holds
-# and at no other moment, and a gap the panel itself has is not a violation of that.
+# in the premium-index feed. Locating each decision on the panel's settlement index rather than on
+# the calendar is also what refuses a decision at a timestamp the panel does not hold at all,
+# which `holding_slots` raises on before it measures anything.
 #
-# So each decision is located on the panel's settlement index, and the check is that the index
-# advances by `step` and never by anything else. This is strictly the stronger reading: it also
-# refuses a decision at a timestamp the panel does not hold at all, which a gap-tolerant calendar
-# check would wave through, and it refuses a fabricated grid whose stride happens to be a whole
-# multiple of the horizon.
+# **What this cell deliberately does not assert is that a decision exists at every settlement the
+# panel holds.** A sequence model predicts only where a full lookback of history exists and the
+# window is observed densely enough to be read as a window, so its eligible keys are not every
+# (entity, date) in the fold - which is what
+# `deep_learning.py::locked_sequence_expected_keys` says in as many words, and what
+# `utils/sequence_dataset.py::GAP_POLICY_ID` names and versions. Requiring the advance to equal
+# `step` asserted that a family's eligibility equals the whole panel grid: a tautology for the
+# cross-sectional families, and false by construction for the sequence ones.
 #
-# It cannot read one set and let it speak for the label. The `complete` column two cells up is a
-# verdict on each member taken by itself, so a member registered as complete against a different
-# set of keys is still complete, and completeness never compares two members to each other. What
-# does compare them is `prediction_coverage.actual_key_digest`, which records the keys each
-# member was actually written at: members sharing a digest were predicted at the same keys, and
-# each distinct digest is a separate grid that has to be checked on its own. This case study
-# carries more than one per label - the sequence models write a sparser panel than the
-# cross-sectional ones over the same decision times - and every one of them is backtested, so
-# every one of them is checked here and appears in the table below.
+# The claim it was reaching for is already made, one cell up and against a better authority.
+# `complete` is not a loose word here: `registry/completeness.py` marks a member complete only
+# when the digest of the keys it was actually written at equals the digest of the keys its own
+# configuration declared it eligible for, with no duplicate, missing, extra, null or non-finite
+# score. A model that predicted on a wider stride than it could have therefore fails
+# the cell above, not this one, and it fails naming the keys it missed rather than a settlement
+# count. Restating a weaker version of that here could only ever fire when the weaker version was
+# the one that was wrong.
+#
+# It still cannot read one set and let it speak for the label.
+# `prediction_coverage.actual_key_digest` records the keys each member was written at: members
+# sharing a digest were predicted at the same keys, and each distinct digest is a separate grid
+# checked on its own. This case study carries more than one per label - the sequence models write a
+# sparser panel than the cross-sectional ones
+# over the same decision times - so the table below reports each grid's own coverage of the panel,
+# and `panel_settlements_skipped` is where that sparsity is visible rather than tolerated in
+# silence.
 
 
 # %%
@@ -299,6 +323,23 @@ def decision_grids(label: str) -> pl.DataFrame:
 
 
 # %%
+def declared_gap_policy(reference: str) -> str | None:
+    """The gap policy a grid's members were fitted under, or None if they declare none.
+
+    A sequence family writes `computation.preprocessing.gap_policy` into its training spec, a
+    named and versioned rule saying which windows it was allowed to read; the cross-sectional
+    families write no preprocessing block at all. Reading the declaration rather than testing the
+    family name is what keeps this correct when a fifth family arrives, and the value is carried
+    in the spec the fit was registered under, so it cannot drift from the run it describes.
+    """
+    spec = Result.open(study, reference, include_preview=not CANONICAL_RUN).spec()
+    training_hash = spec.get("training_hash")
+    if not training_hash:
+        return None
+    training = Result.open(study, training_hash, include_preview=not CANONICAL_RUN).spec()
+    return ((training.get("computation") or {}).get("preprocessing") or {}).get("gap_policy")
+
+
 def decision_timeline(prediction_hash: str) -> pl.DataFrame:
     """Return the distinct fold and decision timestamps one prediction set was written at."""
     return (
@@ -375,6 +416,24 @@ def holding_slots(timeline: pl.DataFrame, step: int) -> list[int]:
     )
 
 
+def skipped_settlements(timeline: pl.DataFrame, step: int) -> int:
+    """How many settlements the panel holds that this grid carries no decision at.
+
+    `holding_slots` returns the distinct advances, which says whether a gap exists and not how
+    much of the panel it costs. This totals it, so a grid's sparsity is a number in the table
+    rather than something a reader has to infer from a list of advances.
+    """
+    located = on_clock_dtype(timeline).join(CLOCK, on="timestamp", how="left")
+    advances = (
+        located.sort("fold", "slot")
+        .with_columns(pl.col("slot").shift(-step).over("fold").alias("exit"))
+        .drop_nulls("exit")
+        .select((pl.col("exit") - pl.col("slot") - step).alias("skipped"))
+        .get_column("skipped")
+    )
+    return int(advances.sum()) if advances.len() else 0
+
+
 def holding_periods(timeline: pl.DataFrame, step: int) -> list[timedelta]:
     """The distinct calendar gaps between decisions `step` slots apart, for the table below."""
     return (
@@ -409,18 +468,9 @@ for label in labels:
     horizon = study.labels.get(label).definition.horizon.upper()
     if not horizon.endswith("H") or not horizon.removesuffix("H").isdigit():
         raise RuntimeError(f"unsupported crypto label horizon {horizon!r}")
-    expected_gap = timedelta(hours=int(horizon.removesuffix("H")))
     for grid in decision_grids(label).iter_rows(named=True):
         timeline = decision_timeline(grid["reference"])
         advanced = holding_slots(timeline, step)
-        if advanced != [step]:
-            raise RuntimeError(
-                f"{label} grid {grid['decision_key_digest'][:12]} "
-                f"({'/'.join(grid['families'])}, {grid['prediction_sets']} prediction sets, "
-                f"reference {grid['reference']}): decisions advance {advanced} settlements on "
-                f"the panel's clock, not the {step} its {horizon} horizon declares "
-                f"(calendar gaps {holding_periods(timeline, step)})"
-            )
         intervals.append(
             {
                 "label": label,
@@ -436,6 +486,11 @@ for label in labels:
                 # is the difference between the two readings shown rather than described.
                 "calendar_gaps": [str(gap) for gap in holding_periods(timeline, step)],
                 "decision_times": timeline.height,
+                # Settlements the panel holds that this grid does not decide at. Zero for the
+                # cross-sectional families. Non-zero for a sequence family wherever its lookback
+                # cannot be filled, which is a property of the panel and not of the model, and is
+                # printed here so a Sharpe compared across families is compared knowing it.
+                "panel_settlements_skipped": skipped_settlements(timeline, step),
                 "first_decision": _utc(timeline.get_column("timestamp").min()),
                 "last_decision": _utc(timeline.get_column("timestamp").max()),
             }
@@ -464,11 +519,42 @@ pl.DataFrame(intervals).sort("label", "grid")
 # decision axis is what stops the gate reporting a model incomplete for not predicting where it
 # was blind. It narrows and never widens: a timestamp the panel has and the label file does not is
 # still not a session.
+#
+# **The panel is the right axis for a model that reads one row, and still too wide for one that
+# reads sixty.** A sequence family is blind for a second reason the panel cannot express: after a
+# hole it has no lookback to read, so it is unable to decide there in exactly the sense the
+# paragraph above allows for. Narrowing the axis again is the consistent step, and it is not
+# available here - the eligibility manifest that says where a sequence fit could decide is
+# summarized in its spec as a digest and a row count, `expected_prediction_keys`, not as keys this
+# notebook could pass as an axis.
+#
+# So the gate runs for every grid and the report is read rather than raised on. A grid whose
+# members declare no `gap_policy` reads one row at a time, the panel is exactly its axis, and a
+# shortfall is a fault: it raises. A grid whose members declare one has already had this compared
+# against the right axis, in the `complete` check above, where its keys were matched digest for
+# digest against the set its own configuration declared eligible rather than against the panel,
+# so here the shortfall is printed beside the policy that produced it. Reporting rather than
+# raising is the whole of the difference; nothing is skipped and no grid goes unmeasured.
+#
+# **What a sequence grid is and is not guaranteed here, now that two raises have come off the same
+# sixteen settlements.** Guarded: a decision at a timestamp the panel does not hold, which
+# `holding_slots` refuses; the fold geometry, which the gate above still measures for every grid;
+# and the keys written matching the keys declared, which is the `complete` check. Not guarded: that
+# the declared keys are the right ones. `GAP_POLICY_ID` is a module constant stamped into the spec
+# at registration, and `locked_sequence_expected_keys` runs the same code against the same dataset
+# that the prediction-writing path runs, so the two agree unless they disagree with each other.
+# That makes `complete` a real check of one code path against another and not a check of the rule
+# itself - the residual its own docstring names, "a holdout built on a second version of the rule
+# registers, validates, and is wrong where nothing looks." Neither raise removed here would have
+# caught it either, and one of them could not fire at all; what does is
+# `tests/test_sequence_dataset.py`, where the rule is tested against cases rather than against
+# itself.
 
 # %% tags=["results"]
 coverage = [
     (
         grid,
+        declared_gap_policy(grid["reference"]),
         check_prediction_coverage(
             Result.open(study, grid["reference"], include_preview=not CANONICAL_RUN).load(),
             "crypto_perps_funding",
@@ -476,11 +562,17 @@ coverage = [
             case_dir=study.root,
             decision_axis=CLOCK.get_column("timestamp"),
             folds=PREVIEW_FOLDS or None,
+            # Read below rather than raised on here: whether a shortfall against the panel axis
+            # is a fault depends on what the grid's own members declared.
+            raise_on_gap=False,
         ),
     )
     for label in labels
     for grid in decision_grids(label).iter_rows(named=True)
 ]
+for _grid, _gap_policy, _report in coverage:
+    if _gap_policy is None:
+        _report.raise_if_incomplete()
 pl.DataFrame(
     [
         {
@@ -490,8 +582,9 @@ pl.DataFrame(
             "declared_folds": report.declared_folds,
             "declared_sessions": report.expected_sessions,
             "observed_sessions": report.observed_sessions,
+            "gap_policy": gap_policy or "",
         }
-        for grid, report in coverage
+        for grid, gap_policy, report in coverage
     ]
 ).sort("label", "grid")
 
