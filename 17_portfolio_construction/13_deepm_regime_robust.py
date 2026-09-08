@@ -33,7 +33,7 @@
 #   (equal weight, inverse volatility)
 # - Evaluate performance across crisis vs calm regimes
 #
-# **Book Reference**: Chapter 17, §17.8 (Deep Learning for Portfolio Construction)
+# **Book Reference**: Chapter 17, Section 17.8 (Deep Learning for Portfolio Construction)
 #
 # **Prerequisites**: `11_dl_portfolio_allocation` (differentiable Sharpe concept)
 
@@ -57,14 +57,13 @@ from deepm.graph import adjacency_to_attn_mask, build_macro_adjacency
 from deepm.inference import infer_risk_weights_rolling
 from deepm.model import DeepmPolicy
 from deepm.train import train_model
-from IPython.display import display
 from matplotlib.colors import ListedColormap
 from matplotlib.ticker import PercentFormatter
 from torch.utils.data import DataLoader
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
 # %% tags=["parameters"]
 # Production defaults - Papermill overrides for CI testing
@@ -214,7 +213,10 @@ ax.set_yticks(range(N_ASSETS))
 ax.set_yticklabels(panel.assets, fontsize=7)
 print(f"The macro prior keeps {graph_density:.0%} of the possible attention links.")
 ax.set_title("The macro prior blocks attention between unrelated asset classes")
-plt.show()
+show_with_alt(
+    fig,
+    "Binary matrix of the macro attention prior, assets on both axes, filled where an attention link is permitted and blank where the prior blocks it, with filled blocks along the asset-class groupings.",
+)
 
 # %% [markdown]
 # ## 5. Train/Validation/Test Split and Datasets
@@ -420,7 +422,10 @@ ax.set_ylabel("Pooled Sharpe")
 ax.set_title("Validation Sharpe is what the kept checkpoint is chosen on")
 ax.legend()
 
-plt.show()
+show_with_alt(
+    fig,
+    "Two panels against training iteration: the training objective on the left and the training and validation pooled Sharpe on the right, with a reference line at zero.",
+)
 
 # %% [markdown]
 # The left panel is the objective the loss negates, so higher is better and a rising trend is
@@ -659,7 +664,10 @@ ax.set_xlabel("Date")
 ax.set_ylabel("Cumulative Return")
 ax.set_title("Held-out growth of four allocators, net of the cost schedule")
 ax.legend()
-plt.show()
+show_with_alt(
+    fig,
+    "Four cumulative return paths over the holdout for the full DeePM policy, the no-SoftMin ablation, equal weight and inverse volatility, net of the per-asset cost schedule.",
+)
 
 # %% [markdown]
 # **Trading implication**: Read terminal wealth together with Sharpe and drawdown. A
@@ -807,7 +815,10 @@ ax.legend()
 
 # The figure was closed on creation so the inline backend would not render it between the
 # two cells that fill its panels; displaying it explicitly is what puts it on the page.
-display(fig)
+show_with_alt(
+    fig,
+    "Two stacked panels sharing a date axis: underwater curves for the two DeePM variants and equal weight on top, and SPY's trailing annualized volatility below, filled, with a dashed line at its median.",
+)
 
 # %% [markdown]
 # **Trading implication**: Drawdown shape matters as much as terminal Sharpe when allocator
@@ -821,9 +832,16 @@ display(fig)
 #
 # The held-out table is the aggregate comparison, net of the per-asset cost schedule the loss was
 # trained against. The regime table splits the same returns at the median of SPY's trailing
-# volatility and reports a Sharpe ratio on each side; the gap column is the quantity the SoftMin
-# penalty exists to compress, so it is the one to read the ablation on rather than the aggregate
-# Sharpe. The drawdown panel is the path behind both.
+# volatility and reports a Sharpe ratio on each side.
+#
+# Read that gap column as a diagnostic rather than as the objective's own score. SoftMin rewards
+# a higher Sharpe ratio in the training windows where it is lowest, and the windows it acts on
+# are consecutive blocks of the training period; it never sees SPY's volatility and never
+# penalizes a difference between these two regimes. A policy that improves the objective can
+# therefore widen the gap shown here. What the column tests is whether pushing up the weakest
+# training windows happened to produce a policy that also holds up in the volatile half of the
+# holdout, which is the claim the method is interesting for and not the one it optimizes. The
+# drawdown panel is the path behind both tables.
 #
 # Every one of these is a single training run at a single seed. Two networks differing only in
 # one loss term can land apart for reasons that have nothing to do with that term, and separating
@@ -855,5 +873,5 @@ display(fig)
 # like this one is affordable. The cross-case-study allocator comparison lives in Ch20
 # ([`05_portfolio_allocation`](../20_strategy_synthesis/05_portfolio_allocation.ipynb)).
 #
-# **Book**: §17.8 discusses the DeePM framework in detail, including
+# **Book**: Section 17.8 discusses the DeePM framework in detail, including
 # the SoftMin robust objective and its connection to regime adaptation.

@@ -27,7 +27,7 @@
 # - Compare frozen test-period risk, return, and concentration
 # - Reconcile a vectorized allocation with execution-aware daily targets
 #
-# **Book Reference**: Chapter 17, §17.7 (Comparing Allocator Performance)
+# **Book Reference**: Chapter 17, Section 17.7 (Comparing Allocator Performance)
 #
 # **Prerequisites**: `02_mean_variance_optimization`, `03_robust_optimization`
 
@@ -118,7 +118,7 @@ from sklearn.base import clone
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, ml4t_palette
+from utils.style import COLORS, ml4t_palette, show_plotly_with_alt
 
 # %% tags=["parameters"]
 # Production defaults - Papermill overrides for CI testing
@@ -629,7 +629,10 @@ fig.update_layout(
     yaxis_tickformat=".0%",
     height=500,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two efficient frontiers over the training window, mean-variance and CVaR, annualized volatility against annualized expected return, tracing similar but not identical curves.",
+)
 
 # %% [markdown]
 # The two curves are training diagnostics, not test performance. They show which allocations
@@ -1164,7 +1167,10 @@ fig.update_layout(
     height=500,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four growth-of-one-dollar paths over the test window for the three libraries' maximum-Sharpe allocations and for equal weight, the three optimized paths overlapping closely.",
+)
 
 # %% [markdown]
 # The risk-return map retains every configuration but uses color only for library identity.
@@ -1206,7 +1212,10 @@ fig.update_layout(
     yaxis_tickformat=".0%",
     height=500,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Scatter of fourteen frozen allocations plus the equal-weight benchmark, annualized volatility against annualized return, coloured by library, with several points from different libraries falling on top of each other.",
+)
 
 # %% [markdown]
 # Overlapping points reveal when API choice matters less than objective choice. The chart reports
@@ -1250,7 +1259,10 @@ fig.update_layout(
     height=620,
     margin=dict(l=150, r=80, t=90, b=60),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Heatmap of rank across five test metrics, one row per allocation and one column per metric, each cell labelled with its rank and shaded so higher ranks are darker.",
+)
 
 # %% [markdown]
 # An allocation ranking mid-table on every column is a different thing from one ranking first
@@ -1352,7 +1364,10 @@ fig.update_layout(
 )
 fig.update_xaxes(title_text="Count", row=1, col=1, rangemode="tozero")
 fig.update_xaxes(title_text="HHI (0 to 1)", row=1, col=2, rangemode="tozero")
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two horizontal-bar panels, one row per allocation: active position count on the left and the Herfindahl-Hirschman index on the right, with a dashed line marking the equal-weight index.",
+)
 
 # %% [markdown]
 # ## Part 5: Practical Considerations
@@ -1432,7 +1447,10 @@ fig.update_yaxes(
     row=1,
     col=2,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two bar panels: one-way turnover from equal weight with and without the turnover penalty, and the active position count of the maximum-Sharpe solution with and without L2 regularization.",
+)
 
 # %% [markdown]
 # ## API Ergonomics Comparison
@@ -1547,4 +1565,4 @@ display(
 # **Next**: [`09_allocator_comparison`](09_allocator_comparison.ipynb) extends the comparison
 # with explicit estimation-risk controls.
 #
-# **Book**: Chapter 17, §17.7 develops the controlled allocator comparison framework.
+# **Book**: Section 17.7 develops the controlled allocator comparison framework.

@@ -28,7 +28,8 @@
 # - Evaluate methods on Sharpe, drawdown, turnover, and stability
 # - Understand when allocation choice matters vs when signal dominates
 #
-# **Book Reference**: Chapter 17, §17.4 (Baseline allocators) and §17.7 (Comparing allocator performance)
+# **Book Reference**: Chapter 17, Section 17.4 (Defining Baseline Allocators) and Section 17.7
+# (Comparing Allocator Performance)
 #
 # **Prerequisites**: `02_mean_variance_optimization`, `06_hierarchical_risk_parity`
 # %% [markdown]
@@ -68,7 +69,7 @@ from case_studies.utils.backtest_loaders import compute_allocator_metrics
 from data import load_etfs
 from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, ml4t_diverging, ml4t_palette
+from utils.style import COLORS, ml4t_diverging, ml4t_palette, show_plotly_with_alt
 
 # %% tags=["parameters"]
 # Production defaults; Papermill overrides these values for CI testing
@@ -950,7 +951,10 @@ fig.update_layout(
     height=550,
     legend=dict(orientation="h", x=0, y=1.08),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four cumulative return paths over the holdout, one per allocation method, with the allocator chosen before the holdout drawn thicker.",
+)
 
 # %% [markdown]
 # **Finding**: Sustained curve separation, not short-lived spikes, is the evidence that one
@@ -982,7 +986,10 @@ fig.update_layout(
     height=400,
     yaxis_tickformat=".0%",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four underwater curves over the holdout, one per allocation method, all at or below zero.",
+)
 
 # %% [markdown]
 # **Trading implication**: Lower and shallower drawdowns can dominate small Sharpe differences
@@ -1027,7 +1034,10 @@ fig.update_layout(
     yaxis_title="Sharpe Ratio",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four rolling 252-day Sharpe ratios against date, crossing each other repeatedly, with reference lines at zero and one.",
+)
 
 # %% [markdown]
 # **Finding**: Rolling Sharpe is a persistence diagnostic. It does not by itself define a regime
@@ -1125,7 +1135,10 @@ fig.update_layout(
     yaxis_title="Relative Return",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three ratio curves against date, each optimized allocation's cumulative return divided by equal weight's, with a dashed line at parity.",
+)
 
 # %% [markdown]
 # **Trading implication**: Relative-performance drift below parity suggests keeping equal-weight

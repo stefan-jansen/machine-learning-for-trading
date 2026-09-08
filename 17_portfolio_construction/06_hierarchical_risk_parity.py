@@ -29,7 +29,8 @@
 # - Run walk-forward backtests comparing HRP to shrinkage MVO and to heuristic allocators, and
 #   read the ranking against the assets-to-observations ratio that decides when HRP helps
 #
-# **Book Reference**: Chapter 17, Section 17.6 (Hierarchical Risk Parity)
+# **Book Reference**: Chapter 17, Section 17.6 (Optimizing for Stability with Hierarchical Risk
+# Parity)
 #
 # **Prerequisites**: `02_mean_variance_optimization`, ETF price data
 
@@ -70,7 +71,7 @@ from case_studies.utils.registry.queries import load_prediction_index
 from data import load_etfs
 from utils.paths import get_case_study_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, add_message_title
+from utils.style import COLORS, add_message_title, show_plotly_with_alt, show_with_alt
 
 # %% tags=["parameters"]
 # Production defaults; Papermill overrides these values for CI testing
@@ -98,7 +99,7 @@ fallback_count: dict[str, int] = {}
 # is, not the thing that decides which response to use: conditioning also depends on how the assets
 # co-move, and a low $N/T$ over highly correlated assets can be worse conditioned than a higher one
 # over independent ones. A single window over one universe cannot establish when either allocator
-# helps in general; what section 12 shows is which did better here. See §17.6.
+# helps in general; what section 12 shows is which did better here. See Section 17.6.
 
 # %% [markdown]
 # ## 3. Data Acquisition
@@ -334,7 +335,10 @@ add_message_title(
     "ETF correlations separate defensive assets from the equity cluster",
     subtitle="Ward linkage on correlation distance, fixed 15-ETF teaching universe",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Dendrogram of fifteen ETFs on correlation distance, with the bond and gold funds joining low on one branch and the equity and sector funds on another.",
+)
 
 # %% [markdown]
 # Read the tree from the leaves upward. Two ETFs joined low down moved together over this
@@ -408,7 +412,10 @@ fig.update_yaxes(tickfont_size=10, automargin=True)
 fig.update_xaxes(title_text="ETF ticker", row=1, col=1)
 fig.update_xaxes(title_text="ETF ticker", row=1, col=2)
 fig.update_yaxes(title_text="ETF ticker", row=1, col=1)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two covariance heatmaps side by side, the original ordering on the left and the quasi-diagonal reordering on the right, in which the large values group into blocks along the diagonal.",
+)
 
 # %% [markdown]
 # ## 7. Compute HRP Weights
@@ -444,7 +451,10 @@ fig.update_layout(
     yaxis_title="Portfolio weight",
     yaxis_tickformat=".0%",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Bars of HRP weight per ETF, sorted from largest to smallest, with one bond fund holding the majority of the portfolio and the rest falling away sharply.",
+)
 
 # %% [markdown]
 # ### Where That Concentration Comes From
@@ -624,7 +634,10 @@ fig.update_layout(
     height=500,
     legend=dict(orientation="h", yanchor="bottom", y=1.02),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Grouped bars of portfolio weight per ETF for equal weight, inverse volatility, shrinkage minimum variance and HRP, with a dashed line at the equal-weight level.",
+)
 
 # %% [markdown]
 # ## 9. Walk-Forward Backtest with ML Predictions
@@ -1119,7 +1132,10 @@ fig.update_layout(
     yaxis_title="Growth of $1",
     height=500,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four growth-of-one-dollar paths from the walk-forward backtest, one per allocation method, staying close together throughout.",
+)
 
 # %% [markdown]
 # ## 10. The HRP series on its own terms
@@ -1205,7 +1221,10 @@ if not hrp_weights_hist.empty:
         yaxis_title="Weight",
         height=450,
     )
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Step lines of the six largest average HRP target weights against date, each holding flat between month-end decisions and jumping when the selected set changes.",
+    )
 else:
     print("No HRP weights available")
 

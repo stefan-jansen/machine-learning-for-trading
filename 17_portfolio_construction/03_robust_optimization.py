@@ -42,7 +42,7 @@
 # - Check whether an allocation fitted to a training drawdown actually has a shallow one later.
 #
 # ## Book reference
-# Chapter 17, Section 17.5 (mean-variance optimization and the Markowitz curse).
+# Chapter 17, Section 17.5 (Mean-Variance Optimization and the Markowitz Curse).
 #
 # ## Prerequisites
 #
@@ -80,7 +80,7 @@ from ml4t.diagnostic.evaluation import (
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, ml4t_diverging, ml4t_palette
+from utils.style import COLORS, ml4t_diverging, ml4t_palette, show_plotly_with_alt
 
 # %% [markdown]
 # Riskfolio-Lib reaches CVXPY through an interface that changed across CVXPY versions, so the
@@ -227,7 +227,10 @@ fig.update_layout(
     height=550,
     margin=dict(l=135, b=125, r=40),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Lower-triangle correlation heatmap of eleven ETFs over the training window, each cell labelled, with warm blocks within the equity funds and cooler values between equities and long Treasuries.",
+)
 
 # %% [markdown]
 # ## 3. Six allocations, and what each one has to estimate
@@ -411,7 +414,10 @@ fig.update_layout(
     height=470,
     margin=dict(l=130, b=120, r=40),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Heatmap of portfolio weight, one row per allocation method and one column per ETF, each cell labelled with its weight.",
+)
 
 # %%
 concentration_order = sorted(effective_n, key=effective_n.get)
@@ -436,7 +442,10 @@ fig.update_layout(
     showlegend=False,
     margin=dict(l=135, r=40),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Horizontal bars of effective positions per allocation method, sorted from the most concentrated to the least, with equal weight highlighted at the top of the range.",
+)
 
 # %%
 for name, positions in sorted(effective_n.items(), key=lambda item: item[1]):
@@ -515,7 +524,10 @@ fig.update_layout(
     height=500,
     legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01, bgcolor=COLORS["bg_light"]),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Six growth-of-one-dollar paths over the test window, one per frozen allocation, with risk parity and equal weight drawn thicker than the rest.",
+)
 
 # %% [markdown]
 # ## 7. Performance Comparison
@@ -713,7 +725,10 @@ fig.update_layout(
     height=440,
     legend=dict(bgcolor=COLORS["bg_light"]),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three growth-of-one-dollar paths for the frozen risk-parity allocation: vectorized, zero-cost engine and cost-aware engine.",
+)
 
 # %% [markdown]
 # Vectorized versus zero-cost differences reflect next-bar timing and engine mechanics.
@@ -772,7 +787,10 @@ fig.update_layout(
     margin=dict(l=75, r=85, t=80, b=65),
 )
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Scatter of the six allocations, test-period annualized volatility against annualized return, each point labelled with its method name.",
+)
 
 # %% [markdown]
 # The test window for every allocation fitted on the training window. The ordering describes this
@@ -830,7 +848,10 @@ fig.update_layout(
     height=450,
     legend=dict(bgcolor=COLORS["bg_light"]),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Six underwater curves over the test window, one per allocation, all at or below zero, with risk parity and equal weight emphasized.",
+)
 
 # %% [markdown]
 # Zero is each allocation's own running peak, so every curve is at or below it. The two lines
@@ -911,7 +932,10 @@ fig.update_layout(
     height=390,
     margin=dict(l=135, b=120, r=40),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Heatmap of percentage variance contribution, one row per allocation method and one column per ETF, with the risk-parity row nearly uniform across the assets and the other two rows concentrated.",
+)
 
 # %% [markdown]
 # Risk parity is checked against the same Ledoit-Wolf covariance that generated its
@@ -976,7 +1000,10 @@ fig.update_layout(
     height=450,
     legend=dict(bgcolor=COLORS["bg_light"]),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Six rolling 252-day Sharpe ratios against date, crossing each other repeatedly, with reference lines at zero and one.",
+)
 
 # %% [markdown]
 # Rolling estimates use a 252-trading-day window, a 126-observation minimum, daily

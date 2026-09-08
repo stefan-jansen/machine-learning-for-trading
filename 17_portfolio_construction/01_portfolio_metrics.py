@@ -78,7 +78,7 @@ from case_studies.utils.registry.queries import resolve_best_backtest_runs
 from data import load_etfs
 from utils.paths import get_case_study_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% [markdown]
 # Five settings decide what is analysed. `BACKTEST_HASH` left unset means the notebook picks the
@@ -373,7 +373,10 @@ fig.update_layout(
     height=450,
     legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three lines of rolling Sharpe ratio against date, over 21, 63 and 252 sessions. The 21-session line swings across the whole vertical range while the 252-session line stays within a narrow band.",
+)
 
 # %%
 # Plot rolling volatility (annualized)
@@ -397,7 +400,10 @@ fig.update_layout(
     yaxis_title="Volatility (%)",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three lines of annualized rolling volatility against date, over 21, 63 and 252 sessions, with the shortest window spiking far above the other two during market stress.",
+)
 
 # %% [markdown]
 # ## 5. Drawdown Analysis
@@ -479,7 +485,10 @@ fig.update_layout(
     yaxis_title="Drawdown (%)",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two underwater curves against date, the strategy filled to zero and the benchmark dashed, each showing the percentage below its own running peak.",
+)
 
 # %%
 # Drawdown distribution
@@ -496,7 +505,10 @@ fig.add_vline(
     annotation_text=f"Max DD: {metrics.max_drawdown * 100:.1f}%",
 )
 fig.update_layout(height=350, showlegend=False)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Histogram of the strategy's daily drawdown, concentrated near zero with a thin tail reaching the maximum drawdown marked by a vertical line.",
+)
 
 # %% [markdown]
 # ## 6. Monthly and Annual Returns
@@ -557,7 +569,10 @@ fig.update_layout(
     yaxis_title="Year",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Heatmap of monthly returns, years down the vertical axis and calendar months across, red for losses and green for gains, with each cell labelled.",
+)
 
 # %%
 # Annual returns comparison
@@ -595,7 +610,10 @@ fig.update_layout(
     barmode="group",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Grouped bars of annual return for the strategy and for SPY, one pair per calendar year.",
+)
 
 # %% [markdown]
 # ## 7. Benchmark-Relative Analysis
@@ -715,7 +733,10 @@ fig.update_layout(
     yaxis_title="Beta",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Rolling one-year beta against SPY plotted against date, with reference lines at one and zero.",
+)
 
 # %% [markdown]
 # ## 8. Risk Metrics (VaR, CVaR)
@@ -792,7 +813,10 @@ fig.update_layout(
     height=400,
     showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Histogram of daily strategy returns with vertical lines marking the 95% and 99% value at risk and the corresponding conditional value at risk further into the left tail.",
+)
 
 # %% [markdown]
 # ## 9. Event Analysis
@@ -880,7 +904,10 @@ if period_results:
         barmode="group",
         height=450,
     )
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Grouped bars of cumulative return for the strategy and the benchmark over five named stress and recovery windows.",
+    )
 
 # %% [markdown]
 # ## 10. Stability Analysis
@@ -935,7 +962,10 @@ fig.update_layout(
     yaxis_title="Cumulative Return",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Cumulative return against date with a fitted straight trend line overlaid, the two diverging where the path deviates from steady compounding.",
+)
 
 # %% [markdown]
 # ## 11. Full Performance Report
@@ -1075,20 +1105,33 @@ print(f"Alpha: {ts.alpha * 100:.2f}%  |  Beta: {ts.beta:.3f}  |  IR: {ts.informa
 # ships generic ones, and a title that states what the chart shows is worth more than a label.
 
 # %%
-for name in ["Cumulative Returns", "Drawdown", "Monthly Returns Heatmap"]:
-    if name in tear_sheet.figures:
-        fig = tear_sheet.figures[name]
-        dashboard_titles = {
-            "Cumulative Returns": "Compounding paths separate strategy from benchmark",
-            "Drawdown": "Drawdowns reveal the cost of the strategy's return path",
-            "Monthly Returns Heatmap": "Monthly returns spread widely around their average",
-        }
-        fig.update_layout(
-            title=dashboard_titles[name],
-            paper_bgcolor=COLORS["bg_light"],
-            plot_bgcolor=COLORS["bg_light"],
-        )
-        fig.show()
+dashboard_titles = {
+    "Cumulative Returns": "Compounding paths separate strategy from benchmark",
+    "Drawdown": "Drawdowns reveal the cost of the strategy's return path",
+    "Monthly Returns Heatmap": "Monthly returns spread widely around their average",
+}
+dashboard_alt = {
+    "Cumulative Returns": (
+        "Two cumulative return paths against date, the strategy and the SPY benchmark, "
+        "both compounding upward and separating over the sample."
+    ),
+    "Drawdown": (
+        "The strategy's underwater curve against date, at or below zero throughout, with "
+        "the deepest fall during the early-2020 window."
+    ),
+    "Monthly Returns Heatmap": (
+        "Heatmap of monthly return, years down the vertical axis and calendar months "
+        "across, coloured red for losses and green for gains."
+    ),
+}
+for name, title in dashboard_titles.items():
+    fig = tear_sheet.figures[name]
+    fig.update_layout(
+        title=title,
+        paper_bgcolor=COLORS["bg_light"],
+        plot_bgcolor=COLORS["bg_light"],
+    )
+    show_plotly_with_alt(fig, dashboard_alt[name])
 
 # %% [markdown]
 # ### Saving the dashboard as a file

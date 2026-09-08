@@ -51,7 +51,7 @@ from ml4t.diagnostic.metrics.ic_inference import compute_ic_hac_stats
 from ml4t.diagnostic.signal.signal_ic import extract_signal_ic_series
 
 from utils.paths import get_case_study_dir
-from utils.style import COLORS, FIGSIZE, add_message_title, ml4t_palette, zero_line
+from utils.style import COLORS, FIGSIZE, add_message_title, ml4t_palette, show_with_alt, zero_line
 
 # %% tags=["parameters"]
 # Production defaults - Papermill overrides for CI testing
@@ -363,7 +363,10 @@ add_message_title(
     "CME residual widths vary more around their median",
     subtitle="Finite-sample Mondrian widths; strictly prior, horizon-embargoed calibration",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Two step curves of the cumulative share of entity-fold conformal widths against width divided by the case study's own median, on a logarithmic horizontal axis, with a dashed line at the median. The CME curve is the flatter of the two.",
+)
 
 # %% [markdown]
 # ## 5. Allocation Rules
@@ -620,8 +623,10 @@ for panel_index, (ax, (metric, label)) in enumerate(zip(axes.flat, metric_specs,
 
 fig.suptitle("Four measures of the same three sizing rules, on two panels")
 fig.legend(legend_handles, method_labels, loc="lower center", ncol=3)
-fig.set_layout_engine("tight", rect=(0, 0.06, 1, 0.96))
-plt.show()
+show_with_alt(
+    fig,
+    "Four panels comparing equal-weight, conformal and score-weighted sizing on the ETF and CME panels: annualized Sharpe, annualized return, maximum drawdown and mean one-way turnover, three grouped bars per case study in each panel.",
+)
 
 # %% [markdown] tags=["results"]
 # ### What this run produced

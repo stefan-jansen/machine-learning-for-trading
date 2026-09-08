@@ -42,7 +42,7 @@
 #   be acted on.
 #
 # ## Book reference
-# Chapter 17, Section 17.4 (baseline allocators).
+# Chapter 17, Section 17.4 (Defining Baseline Allocators).
 #
 # ## Prerequisites
 #
@@ -72,7 +72,7 @@ from sympy import diff, log, pprint, series, solve, symbols
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, ml4t_palette
+from utils.style import COLORS, ml4t_palette, show_plotly_with_alt
 
 # %% tags=["parameters"]
 # Production defaults; Papermill overrides for CI testing
@@ -226,7 +226,10 @@ fig.update_layout(
     height=500,
     legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Five curves of expected growth rate against bet fraction, one per win probability, each rising to an interior peak marked with a diamond and then falling away steeply towards a bet fraction of one.",
+)
 
 # %% [markdown]
 # ### Simulating Wealth Paths
@@ -323,7 +326,10 @@ fig.update_layout(
     height=400,
     showlegend=True,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Five panels of simulated wealth on a logarithmic axis against trial number, at a quarter, a half, one, one and a half, and twice the Kelly fraction, the median path rising and the shaded percentile bands widening as the multiple grows.",
+)
 
 print(f"Optimal Kelly fraction: {kelly:.1%}")
 print(f"Terminal wealth after {n_trials:,} bets, from ${100:.0f}:")
@@ -398,7 +404,10 @@ fig.update_layout(
     yaxis_title="Probability",
     height=450,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four terminal log-wealth distributions after a hundred bets, at a half, one, one and a half and twice Kelly, the full-Kelly curve centred highest and the larger multiples spread wider and further left.",
+)
 
 # %% [markdown]
 # ## Part 2: Kelly for Continuous Returns (Single Asset)
@@ -461,7 +470,10 @@ fig.update_layout(
 )
 fig.add_vline(x=0, line_dash="dot", line_color=COLORS["neutral"])
 fig.add_hline(y=0, line_dash="dot", line_color=COLORS["neutral"])
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "The logarithm of one plus x against x, with four Taylor polynomials of increasing order overlaid, each tracking the curve near zero and departing from it further out.",
+)
 
 # %% [markdown]
 # ### Kelly Fraction for Market Returns
@@ -623,7 +635,10 @@ fig.update_layout(
     height=600,
     title="The same formula on rolling windows gives wildly different answers",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two stacked panels against date: rolling annualized return and volatility on top, and the Kelly fraction they imply below, which swings across a very wide range with a reference line at one.",
+)
 
 print("\nKelly Fraction Statistics:")
 print(f"  Mean: {np.mean(kelly_values):.1%}")
@@ -751,7 +766,10 @@ fig.update_layout(
     yaxis_tickformat=".0%",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Bars of the raw Kelly allocation per ETF, several of them far above the equal-weight reference line and some below zero.",
+)
 
 # %% [markdown]
 # ### Fractional Kelly for Risk Management
@@ -881,7 +899,10 @@ fig.update_layout(
     height=500,
     legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four growth-of-one-dollar paths on the test window at a quarter, a half and one times Kelly, and at equal weight, the leveraged paths swinging across orders of magnitude while equal weight stays near one.",
+)
 
 # %%
 fig = go.Figure()
@@ -906,7 +927,10 @@ fig.update_layout(
     yaxis_tickformat=".0%",
     height=450,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Scatter of the four allocations, annualized volatility against annualized return, marker size scaled by absolute Sharpe ratio, the full-Kelly point far out on the volatility axis and below zero on the return axis.",
+)
 
 # %% [markdown]
 # ## Part 4: What the derivation assumed

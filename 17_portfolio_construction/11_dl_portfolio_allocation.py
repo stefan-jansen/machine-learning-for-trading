@@ -36,7 +36,7 @@
 # - Compare against equal-weight and inverse-volatility baselines
 # - Assess cost sensitivity of the learned allocator
 #
-# **Book Reference**: Chapter 17, §17.8 (Deep Learning for Portfolio Construction)
+# **Book Reference**: Chapter 17, Section 17.8 (Deep Learning for Portfolio Construction)
 #
 # **Prerequisites**: `02_mean_variance_optimization`, `09_allocator_comparison`
 
@@ -58,7 +58,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
 # %% tags=["parameters"]
 # Production defaults - Papermill overrides for CI testing
@@ -435,7 +435,10 @@ ax.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.5)
 ax.set_xlabel("Epoch")
 ax.set_ylabel("Sharpe Ratio")
 ax.set_title("Training Sharpe rises past validation Sharpe as the fit tightens")
-plt.show()
+show_with_alt(
+    fig,
+    "Training and validation annualized Sharpe against epoch, the training curve rising steadily and the validation curve flatter and noisier, with a reference line at zero.",
+)
 
 # %% [markdown]
 # The two curves are measured differently, and the difference is worth knowing before reading a
@@ -549,10 +552,12 @@ results
 # and the evaluation metric are the same quantity measured on different dates - which makes the
 # gap between them a statement about generalization and nothing else.
 #
-# The comparison that matters is against the two baselines, because neither estimates anything a
-# sample can get wrong: equal weight reads no data at all, and inverse volatility reads only each
-# asset's own variance. A learned allocator has to beat those to have earned the machinery, and
-# the table says whether it did on these dates.
+# The comparison that matters is against the two baselines, because of how little each has to
+# estimate. Equal weight estimates nothing at all. Inverse volatility estimates one number per
+# asset, a rolling 21-session standard deviation, and no expected return and no correlation - so
+# it is exposed to sampling error, but only in the input that is easiest to measure. A learned
+# allocator estimates a whole policy from the same history, and it has to beat both of them to
+# have earned that. The table says whether it did on these dates.
 
 # %% [markdown]
 # ### Equity Curves
@@ -570,7 +575,10 @@ ax.set_xlabel("Test Window Index")
 ax.set_ylabel("Cumulative Return")
 ax.set_title("Simple allocators finish ahead of the held-out LSTM portfolio")
 ax.legend()
-plt.show()
+show_with_alt(
+    fig,
+    "Three cumulative return paths over the test windows for the LSTM portfolio, equal weight and inverse volatility.",
+)
 
 # %% [markdown]
 # **Trading implication**: If the LSTM curve only tracks heuristic baselines, a simpler allocator
@@ -608,7 +616,10 @@ ax.axhline(
     label=f"Equal weight ({1 / N_ASSETS:.1%})",
 )
 ax.legend()
-plt.show()
+show_with_alt(
+    fig,
+    "Bars of the LSTM's average test-period weight per ETF, sorted from largest to smallest, with a dashed line at the equal-weight level.",
+)
 
 # %% [markdown]
 # **Finding**: Persistent concentration in a small subset of ETFs indicates the model is learning
@@ -633,7 +644,10 @@ ax.set_xlabel("Test Window Index")
 ax.set_ylabel("Herfindahl Index")
 ax.set_title("Learned concentration stays above the equal-weight floor")
 ax.legend()
-plt.show()
+show_with_alt(
+    fig,
+    "The Herfindahl index of the LSTM's weights against test window index, with a dashed line at the equal-weight index below it throughout.",
+)
 
 # %% [markdown]
 # **Trading implication**: Higher concentration (HHI above equal-weight baseline) raises
@@ -695,4 +709,4 @@ print(f"Realized one-way turnover (bps-equivalent): {avg_turnover * 10_000:.1f} 
 # in front of the LSTM encoder; `13_deepm_regime_robust` then adds the SoftMin
 # regime-robust loss and macro graph prior on top of that pipeline.
 #
-# **Book**: §17.8 discusses the two-stage vs end-to-end tradeoff.
+# **Book**: Section 17.8 discusses the two-stage against end-to-end trade-off.

@@ -42,7 +42,7 @@
 #   does and does not establish.
 #
 # ## Book reference
-# Chapter 17, Section 17.4 (baseline allocators).
+# Chapter 17, Section 17.4 (Defining Baseline Allocators).
 #
 # ## Prerequisites
 #
@@ -85,7 +85,7 @@ from plotly.subplots import make_subplots
 from scipy import stats
 
 from utils import DATA_DIR
-from utils.style import COLORS, ml4t_diverging
+from utils.style import COLORS, ml4t_diverging, show_plotly_with_alt
 
 structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING))
 
@@ -371,7 +371,10 @@ fig.update_layout(
     height=500,
 )
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four growth-of-one-dollar paths on a logarithmic axis from the 1920s to the present, for the market, momentum, value and size factors, with recessions shaded.",
+)
 
 # %% [markdown]
 # ### What the wealth paths establish
@@ -463,7 +466,10 @@ fig.update_layout(
     legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
     height=500,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four growth-of-one-dollar paths on a logarithmic axis for the value, momentum, carry and defensive aggregates of the Century of Factor Premia data, all rising across the sample.",
+)
 
 # %% [markdown]
 # ---
@@ -745,7 +751,10 @@ fig.update_layout(
     height=450,
 )
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Bars of the Newey-West t-statistic on each factor's mean monthly return, with a dotted line at the conventional threshold of two and a dashed line at the discovery threshold of three; bars clearing the higher line are coloured.",
+)
 
 # %% [markdown]
 # ### Test the SMB decay claim directly
@@ -783,7 +792,10 @@ fig.update_layout(
     yaxis_title="Annualized mean return (%)",
     height=420,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two bars of annualized mean return for the size factor, before and from 1981, each labelled with its Newey-West t-statistic.",
+)
 
 # %%
 for period, period_stats in smb_period_stats.items():
@@ -969,7 +981,10 @@ fig.update_yaxes(title_text="Annualized Sharpe ratio", row=1, col=1)
 _ = fig.update_yaxes(title_text="Correlation", range=[-1, 1], row=1, col=2)
 
 # %%
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels by asset class: annualized Sharpe ratios for value and momentum side by side on the left, and their correlation on the right, every bar on the right below zero.",
+)
 
 # %%
 everywhere_corr = float(vme_df.loc[vme_df["Asset Class"] == "EVERYWHERE", "Val-Mom Corr"].iloc[0])
@@ -1085,7 +1100,10 @@ _ = fig.update_layout(
     yaxis_title="Factor",
 )
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Lower-triangle correlation heatmap of eight factors over their shared window, each cell labelled, on a diverging scale centred at zero.",
+)
 
 # %%
 print(
@@ -1102,11 +1120,15 @@ print(f"The same pair pooled across all VME asset classes: {everywhere_corr:+.2f
 #    which is what the cross-asset evidence adds: a relationship that holds in one market can be
 #    a property of that market, and one that holds in eight is harder to explain that way.
 #
-# 2. **Quality (QMJ) and low-volatility (BAB) against the market**: both are constructed to be
-#    long-short and therefore close to market-neutral by design. The correlations in the
-#    lower triangle say how close they came over this window. A correlation is not a beta, so
-#    what a reader can take from these cells is co-movement, not exposure - the regression that
-#    would give exposure is what `01_portfolio_metrics` runs on a return series.
+# 2. **Quality (QMJ) and low-volatility (BAB) against the market**: both are long-short, which
+#    means the dollars are balanced between the two legs and says nothing on its own about market
+#    exposure. Two legs of equal size but unequal market beta leave a net exposure, and BAB is
+#    built to have one: it buys low-beta assets levered up and shorts high-beta ones, so its
+#    construction targets a beta difference rather than a beta of zero. The correlations in the
+#    lower triangle say how much each co-moved with the market over this window. A correlation is
+#    not a beta - it is scaled by the two volatilities - so what these cells support is a
+#    statement about co-movement, and the regression that gives exposure is what
+#    `01_portfolio_metrics` runs on a return series.
 
 # %% [markdown]
 # ---
@@ -1194,7 +1216,10 @@ fig.update_layout(
     height=520,
     margin=dict(l=105, r=75, b=100),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Heatmap of cumulative factor return, one row per named crisis window and one column per factor, red for losses and blue for gains, with blank cells where a factor's history had not begun.",
+)
 
 # %% [markdown]
 # **Interpretation**: Crisis performance is where correlations and premia become
@@ -1338,7 +1363,10 @@ fig.update_layout(
     margin=dict(l=75, r=75, b=80),
     showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Scatter of eight factors, annualized volatility against annualized mean return, each point labelled, coloured by whether its t-statistic clears the discovery threshold.",
+)
 
 # %%
 print(f"Median value-momentum correlation across asset classes: {median_vme_corr:+.2f}")

@@ -33,7 +33,7 @@
 # - Train with a cost-aware pooled Sharpe loss on realized portfolio returns
 # - Compare VLSTM to the plain LSTM baseline (`11_dl_portfolio_allocation`) and heuristic allocators
 #
-# **Book reference**: Chapter 17, §17.8 (Deep Learning for Portfolio Construction)
+# **Book Reference**: Chapter 17, Section 17.8 (Deep Learning for Portfolio Construction)
 #
 # **Prerequisites**: `11_dl_portfolio_allocation`
 
@@ -56,7 +56,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
 # %% tags=["parameters"]
 # 0 = full ETF universe.
@@ -584,7 +584,10 @@ ax.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.5)
 ax.set_xlabel("Epoch")
 ax.set_ylabel("Pooled Sharpe")
 ax.set_title("The training curve keeps rising after validation Sharpe stops")
-plt.show()
+show_with_alt(
+    fig,
+    "Training and validation pooled Sharpe against epoch, the training curve continuing to rise after the validation curve flattens, with a reference line at zero.",
+)
 
 # %% [markdown]
 # ## 12. Out-of-Sample Evaluation
@@ -724,7 +727,10 @@ ax.set_xlabel("Test Window Index")
 ax.set_ylabel("Cumulative Return")
 ax.set_title("Held-out growth paths, net of the cost charged in the loss")
 ax.legend()
-plt.show()
+show_with_alt(
+    fig,
+    "Three cumulative return paths over the test windows for the VLSTM, equal weight and inverse volatility, net of the cost charged in the loss.",
+)
 
 # %% [markdown]
 # **Trading implication**: If the VLSTM curve does not clear both heuristics net of the
@@ -761,7 +767,10 @@ axes[1].set_title("Position changes cluster low with occasional rebalancing spik
 axes[0].legend(["Signal"], loc="upper right")
 axes[1].legend(["Mean abs change"], loc="upper right")
 
-plt.show()
+show_with_alt(
+    fig,
+    "Two panels: a histogram of the VLSTM's scalar signal across the tanh range on the left, and the mean absolute position change per test window on the right, low most of the time with occasional spikes.",
+)
 
 # %% [markdown]
 # Read the left panel first. `positions_from_signal` multiplies its inverse-volatility scaling by
@@ -809,7 +818,10 @@ print(
 )
 ax.set_title("Average variable-selection weight per input feature")
 ax.set_ylim(0, max(vsn_mean.max() * 1.2, 1.0 / len(feature_names) * 2))
-plt.show()
+show_with_alt(
+    fig,
+    "Bars of the average variable-selection weight for each of the five input features, against a uniform reference implied by the feature count.",
+)
 
 # %% [markdown]
 # **Finding**: A concentrated VSN distribution says the model reduced the effective
@@ -885,4 +897,4 @@ cost_df.round(2)
 #
 # **Next**: `13_deepm_regime_robust` adds regime-aware structure on top of this base.
 #
-# **Book**: §17.8 places this implementation alongside related portfolio encoders.
+# **Book**: Section 17.8 places this implementation alongside related portfolio encoders.
