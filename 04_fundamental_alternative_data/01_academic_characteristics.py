@@ -69,7 +69,7 @@
 # | **Features** | 46 firm characteristics, rank-normalized each month |
 # | **Returns** | Next-month excess returns, left in their original scale |
 # | **Period** | January 1967 to December 2016 |
-# | **Identifiers** | Anonymous integers; the numbering restarts in each split |
+# | **Identifiers** | Anonymous array positions; each split uses its own numbering |
 #
 # ## Data Construction (from paper Section III.A)
 #
@@ -123,8 +123,9 @@
 #   standard summary of how well a single signal orders stocks.
 # - **Excess return**: a return measured net of the risk-free rate. The `ret` column holds the
 #   excess return of the following month and is the quantity every model here predicts.
-# - **Anonymous identifier**: the `symbol` column is an integer standing in for a company whose
-#   name was removed. It links a firm's observations across months within one split.
+# - **Anonymous identifier**: the `symbol` column holds a firm's position on the axis of the
+#   array the authors published, which stands in for the company whose name was removed. It
+#   links a firm's observations across months within one split, and no further.
 #
 # ---
 
@@ -197,19 +198,32 @@ split_bounds = (
 split_bounds
 
 # %% [markdown]
-# The identifiers are drawn from a fresh numbering in each split, so the same integer in the
-# training and test periods refers to different companies. That is what the row counts above
-# and the pairwise overlap below establish: a firm can be followed from month to month inside
-# one split, and cannot be followed across a boundary.
+# ### What the identifier is, and how far it reaches
+#
+# The authors publish each split as its own array whose second axis runs over firms. A firm
+# keeps its position on that axis for the whole split, and that position is what
+# `download.py` writes as `symbol`. No mapping between the three arrays is published, so a
+# position in the training array and the same position in the test array are not known to be
+# the same company; the loader offsets the three numberings by a million each so that they
+# cannot be joined by accident.
+#
+# The useful half of that is measurable. If `symbol` were a row number rather than a firm, each
+# value would appear once. Counting the months each identifier appears in over the training
+# split shows what it actually is.
 
 # %%
-symbols_by_split = {
-    row["split"]: set(df.filter(pl.col("split") == row["split"])["symbol"].unique().to_list())
-    for row in split_bounds.iter_rows(named=True)
-}
-for left, right in [("train", "valid"), ("valid", "test"), ("train", "test")]:
-    shared = len(symbols_by_split[left] & symbols_by_split[right])
-    print(f"identifiers shared between {left} and {right}: {shared}")
+months_per_symbol = (
+    df.filter(pl.col("split") == "train").group_by("symbol").agg(pl.len().alias("months"))
+)
+n_train_months = df.filter(pl.col("split") == "train")["timestamp"].n_unique()
+
+print(f"Months in the training split: {n_train_months}")
+print(f"Identifiers in the training split: {len(months_per_symbol):,}")
+print(f"Median months per identifier: {months_per_symbol['months'].median():.0f}")
+print(f"Longest history: {months_per_symbol['months'].max()} months")
+print(
+    f"Share appearing in at least a year of months: {(months_per_symbol['months'] >= 12).mean():.1%}"
+)
 
 # %% [markdown]
 # ### How wide is the cross-section?
@@ -298,11 +312,29 @@ print(f"Characteristics checked: {len(feature_cols)}")
 print(f"Missing values among them: {df.select(feature_cols).null_count().to_numpy().sum()}")
 
 # %% [markdown]
-# Staying inside the interval is not the same as filling it evenly. A month in which many
-# stocks tie on a characteristic would pile them at one value and leave gaps elsewhere, and the
-# ranking would then be carrying less information than its range suggests. Every characteristic
-# is ranked by the same procedure, so one of them settles the question for all: the histogram
-# below counts every stock-month of book-to-market in the panel.
+# Staying inside the interval is not the same as filling it evenly. Wherever many stocks tie on
+# a characteristic, the ranking piles them at one value and leaves gaps elsewhere, and it is
+# then carrying less information than its range suggests. Ties depend on the raw variable, so
+# this has to be measured on each characteristic rather than argued from the procedure. Cutting
+# the interval into ten equal bins and comparing the fullest with the emptiest gives one number
+# per characteristic: at one they are equally full, and the further above one, the more the
+# values bunch.
+
+# %%
+DECILE_EDGES = np.linspace(-0.5, 0.5, 11)
+fill_ratios = {
+    feature: (lambda counts: counts.max() / counts.min())(
+        np.histogram(df[feature].to_numpy(), bins=DECILE_EDGES)[0]
+    )
+    for feature in feature_cols
+}
+least_even = max(fill_ratios, key=fill_ratios.get)
+print(f"Least evenly filled characteristic: {least_even}")
+print(f"Its fullest bin against its emptiest: {fill_ratios[least_even]:.4f}")
+
+# %% [markdown]
+# The measurement covers all 46; the histogram shows one of them, so that the flatness the
+# number reports has a shape a reader can recognize when they meet it on their own data.
 
 # %%
 fig = px.histogram(
@@ -560,18 +592,23 @@ fig.show()
 #
 # ## Section 6: What this panel supports
 #
-# The anonymization is the constraint that decides which questions this data can answer. Inside
-# a split, an identifier follows one firm from month to month, so anything that needs a firm's
-# own history - a fixed effect, a per-firm time series, a turnover calculation over a portfolio
-# held across months - is available. Across a split boundary the numbering restarts, so a
-# position cannot be carried from the training years into the test years, and a strategy cannot
-# be simulated end to end over the full fifty years.
+# The anonymization decides which questions this data can answer. Inside a split, an identifier
+# follows one firm from month to month, so anything that needs a firm's own history is
+# available: a fixed effect, a per-firm time series, or a portfolio held and rebalanced across
+# months. That last one is what `case_studies/us_firm_characteristics/11_backtest.py` does - it
+# ranks each month's cross-section on the model's prediction, weights the top and bottom names,
+# and compounds the realized excess returns those weights earned. A return-based backtest needs
+# weights and realized returns, and both are here.
 #
-# What is missing entirely is price. Without a price level there is no market capitalization to
-# weight a portfolio by, no spread to charge against a trade, and no way to convert a predicted
-# return into a position size in currency. That is why every question this panel answers is a
-# question about prediction accuracy, and why the trading questions in this book are answered
-# with the ETF, crypto and futures case studies, which ship prices.
+# Across a split boundary the identifiers are not comparable. The archive publishes no mapping
+# between the three arrays, so a position cannot be carried from the training years into the
+# test years and no strategy can be simulated end to end over the full fifty years.
+#
+# What is missing is price. Without one there is no market value to weight a portfolio by in
+# currency, no spread or depth to charge a trade against, and no way to say what a position
+# would have cost to enter. The case studies that ship prices are where execution and cost are
+# measured; what this panel supports is prediction, and the frictionless portfolio return that
+# a prediction implies.
 #
 # Used within those limits, the panel is the cleanest available benchmark for comparing model
 # families on identical data: the same 46 inputs, the same target, and the same date-ordered
