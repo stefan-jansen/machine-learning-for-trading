@@ -1489,6 +1489,12 @@ case_studies/crypto_perps_funding/11_causal_dml:
     # mapping: omitting max_samples would resolve the full population under a preview tier. The
     # pre-migration names CV_FOLDS, MAX_SAMPLES, MAX_SYMBOLS and N_PLACEBO reached nothing once
     # this notebook moved to PREVIEW_REDUCTIONS; their values are carried across here.
+    #
+    # max_symbols stays 5 while the fixture is 10, and unlike the caps on 01, 04 and 05 that is
+    # correct rather than stale. Those three cap a loader that feeds a ranked selection, so a cap
+    # under the fixture's width re-creates the concentration refusal ml4t/agent-workspace#1077
+    # fixed. This is a pooled DML fit and nothing downstream ranks it into a concentration, so
+    # halving the panel is a cost reduction that changes no feasibility question.
     LABEL: fwd_ret_8h
     PREVIEW_REDUCTIONS:
       max_samples: 5000
