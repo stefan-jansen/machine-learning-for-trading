@@ -52,6 +52,9 @@
 #
 # ## Prerequisites
 #
+# The COT reports are a free download. The price series joined in Part 4 is the S&P 500 ETF,
+# which ships with the book and needs nothing further.
+#
 # ```bash
 # python data/futures/positioning/cot_download.py                         # all products
 # python data/futures/positioning/cot_download.py --products ES,CL,GC     # this notebook's subset
@@ -71,7 +74,7 @@ import polars as pl
 from ml4t.data.cot import PRODUCT_MAPPINGS
 from plotly.subplots import make_subplots
 
-from data import load_cme_futures
+from data import load_etfs
 from data.futures.loader import load_cot
 from utils.style import COLORS
 
@@ -84,11 +87,12 @@ from utils.style import COLORS
 # %% tags=["parameters"]
 EQUITY_PRODUCT = "ES"  # E-mini S&P 500; the worked example throughout
 COMPARISON_PRODUCTS = ["ES", "CL", "GC"]  # equity index, energy, precious metal
+PRICE_PROXY = "SPY"  # ships with the book and trades the US equity calendar the E-mini does
 START_DATE = "2020-01-01"
 ZSCORE_WEEKS = 52  # one year of weekly reports
 EXTREME_Z = 2.0  # how many standard deviations counts as extreme positioning
 CHANGE_WINDOW_WEEKS = 26  # window the weekly-change threshold is measured over
-RELEASE_LAG_DAYS = 6  # Tuesday positions, published Friday; usable from the next Monday
+RELEASE_LAG_DAYS = 7  # Tuesday positions, published Friday; usable from the next Tuesday
 
 # %% [markdown]
 # ## 1. What is in a COT report
@@ -161,7 +165,12 @@ catalogue
 # interest, which is the market that actually carries the position. What makes that safe rather
 # than convenient is that the choice has to be *stable*: if the largest market changed from week
 # to week, the resulting series would be jumping between contracts and its week-over-week changes
-# would be fiction. The check for that is the open-interest series itself.
+# would be fiction.
+#
+# The loader carries no contract-market identifier, so stability cannot be read off directly.
+# What can be measured is the margin: how many times larger the kept market is than the one
+# dropped beside it. A margin that never narrows toward one makes a change of rank implausible,
+# which is evidence and not proof.
 
 
 # %%
@@ -183,22 +192,21 @@ print(f"Report dates: {raw_equity['report_date'].n_unique():,}")
 print(f"Rows after keeping the deepest market: {len(equity):,}")
 print(f"Reports covering: {equity['report_date'].min()} to {equity['report_date'].max()}")
 
-# %% [markdown]
-# If the deepest market were changing hands, the kept open-interest series would step by a large
-# multiple from one week to the next. The largest weekly move below is a market-wide change in
-# participation, not a change of contract.
-
 # %%
-open_interest_moves = equity.select(
-    "report_date",
-    "open_interest",
-    weekly_change=(pl.col("open_interest") / pl.col("open_interest").shift(1) - 1),
-).drop_nulls()
-print(
-    f"Largest weekly change in open interest: {open_interest_moves['weekly_change'].abs().max():.1%}"
+margins = (
+    raw_equity.group_by("report_date")
+    .agg(
+        pl.len().alias("markets"),
+        pl.col("open_interest").max().alias("deepest"),
+        pl.col("open_interest").min().alias("shallowest"),
+    )
+    .filter(pl.col("markets") > 1)
+    .with_columns(margin=pl.col("deepest") / pl.col("shallowest"))
 )
-print(f"Median weekly change: {open_interest_moves['weekly_change'].abs().median():.1%}")
-open_interest_moves.sort("weekly_change", descending=True).head(3)
+print(f"Report dates carrying more than one market: {len(margins):,}")
+print(f"Narrowest margin between the kept market and the next: {margins['margin'].min():.1f}x")
+print(f"Median margin: {margins['margin'].median():.1f}x")
+margins.sort("margin").head(3)
 
 # %% [markdown]
 # ### The columns
@@ -325,10 +333,18 @@ fig.show()
 # that had not been disclosed.
 #
 # The correction is the same as the macro one in the previous notebook: give every report the
-# date it became usable, and join on that. The lag used here is six days, taking Tuesday to the
-# following Monday, which is deliberately one day past the Friday release rather than exactly on
-# it. A same-day rule would have the strategy trading on a report published after that day's
-# close.
+# date it became usable, and join on that. The lag used here is seven days, taking Tuesday to
+# the following Tuesday. Two days of that are slack rather than schedule. One covers the Friday
+# release landing after the close, so a same-day rule would have the strategy trading on a
+# report it could not have read. The other covers the CFTC's own holiday policy, which pushes a
+# release to the next business day whenever a federal holiday falls inside the report week, so
+# some Friday releases arrive on the Monday.
+#
+# **This is a schedule bound rather than a recorded release date.** The downloaded reports carry
+# no publication timestamp, so the correction is an assumption about when each one appeared, made
+# deliberately late. Where a feed does carry release timestamps, join on those instead; where it
+# does not, a bound that is a day or two conservative costs a little signal and an aggressive one
+# costs the validity of the whole backtest.
 
 # %%
 equity = equity.with_columns(
@@ -337,19 +353,21 @@ equity = equity.with_columns(
 equity.select("report_date", "available_from", "lev_money_net", "lev_money_net_zscore").tail(5)
 
 # %% [markdown]
-# Joining onto prices is where the date does its work. The front-month continuous contract has a
-# row per trading session; a backward as-of join on `available_from` gives each session the most
-# recent report that had been published by then. On a Friday the session still carries the
-# previous week's report, and it picks up the new one on the following Monday.
+# Joining onto prices is where the date does its work. The price series used here is the S&P 500
+# ETF rather than the E-mini itself: the two track the same index, the ETF's sessions are the US
+# equity trading calendar an E-mini strategy trades on, and it ships with the book, whereas the
+# CME futures panel needs a paid market-data subscription. A backward as-of join on
+# `available_from` gives each session the most recent report that had been published by then, so
+# a session late in the week still carries the previous week's report until the new one clears
+# its lag.
 
 # %%
-front_month = (
-    load_cme_futures(products=[EQUITY_PRODUCT], start_date=START_DATE)
-    .filter(pl.col("tenor") == 0)
-    .select(session_date="session_date", close="adj_close")
+prices = (
+    load_etfs(symbols=[PRICE_PROXY], start_date=START_DATE)
+    .select(session_date="timestamp", close="close")
     .sort("session_date")
 )
-sessions = front_month.join_asof(
+sessions = prices.join_asof(
     equity.select("available_from", "report_date", "lev_money_net", "lev_money_net_zscore").sort(
         "available_from"
     ),
@@ -503,10 +521,35 @@ aligned.select(COMPARISON_PRODUCTS).corr().insert_column(
 # %% [markdown]
 # ## 7. Who takes the other side
 #
-# The three categories in a financial futures report sum, with the small non-reportable
-# category, to zero: every contract one category is long another is short. Plotting them
-# together shows how the market divides, and the table beneath measures the two properties the
-# chart only suggests.
+# Every contract one trader is long, another is short, so the net positions of all the report's
+# categories sum to zero. A financial futures report has five of them: the three plotted below
+# plus other reportables and non-reportables, and those two are large enough that the three alone
+# do not balance. The identity is worth measuring rather than asserting.
+
+# %%
+five_category_imbalance = equity.select(
+    (
+        pl.col("dealer_net")
+        + pl.col("asset_mgr_net")
+        + pl.col("lev_money_net")
+        + (pl.col("other_rept_long") - pl.col("other_rept_short"))
+        + pl.col("nonrept_net")
+    )
+    .abs()
+    .alias("imbalance")
+)
+three_category_residual = equity.select(
+    (pl.col("dealer_net") + pl.col("asset_mgr_net") + pl.col("lev_money_net"))
+    .abs()
+    .alias("residual")
+)
+print(
+    f"Largest imbalance across all five categories: {five_category_imbalance['imbalance'].max():,}"
+)
+print(
+    "Median size of what the three plotted categories leave over: "
+    f"{three_category_residual['residual'].median():,.0f}"
+)
 
 # %%
 categories_pd = equity.to_pandas()
@@ -556,11 +599,11 @@ category_profile
 
 # %% [markdown]
 # The table settles two things the chart leaves ambiguous. Asset managers hold a long position in
-# essentially every week, so their sign carries no information and only their size does. And the
-# category that moves most from week to week is not the speculative one: the dealers absorb what
-# the other two do, so their position is the residual and it is the most variable of the three.
-# A feature built on "how much did the speculators move" is therefore measuring something
-# narrower than "how much did positioning move".
+# every week of the sample, so their sign carries no information and only their size does. And
+# the category that moves most from week to week is not the speculative one but the dealers, who
+# stand between the others and absorb what they do. A feature built on "how much did the
+# speculators move" is therefore measuring a smaller part of the market's movement than its name
+# suggests, and the two categories left off the chart carry the rest.
 
 # %% [markdown]
 # ## Key Takeaways
@@ -579,6 +622,7 @@ category_profile
 #    usable and join on that, or the backtest trades on disclosures that had not been made.
 # 5. A threshold measured on a window that includes the observation it is judging is
 #    self-referential: the larger the move, the more it raises its own bar. Shift the window.
-# 6. The residual category is the most variable one. Dealers absorb what the other categories
-#    do, so a feature built only on speculative positioning measures less of the market's
-#    movement than it appears to.
+# 6. The intermediary category moves most. Dealers stand between the other participants and
+#    absorb what they do, so a feature built only on speculative positioning measures less of the
+#    market's movement than its name suggests. All five categories sum to zero; any three of them
+#    do not.
