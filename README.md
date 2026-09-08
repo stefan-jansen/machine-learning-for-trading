@@ -262,7 +262,7 @@ repository root**. New to the command line? Start with
 ```bash
 git clone https://github.com/stefan-jansen/machine-learning-for-trading.git
 cd machine-learning-for-trading
-cp .env.example .env
+cp .env.example .env   # the defaults work as-is; nothing in it needs editing to start
 ```
 
 Then pick one environment. **Option A, Docker**, carries every dependency and needs no compiler:
@@ -321,21 +321,33 @@ uv run python scripts/download_artifacts.py
 
 ### 3. Run notebooks
 
-Notebooks are paired [Jupytext](https://jupytext.readthedocs.io/) files, a `.py` source and a
-generated `.ipynb`. `uv sync` already installed Jupyter Lab.
+First confirm the install, with the one command that answers it. It prints a
+PASS or FAIL line per component and exits non-zero on any required failure:
 
 ```bash
-uv run python 01_process_is_edge/factor_regimes.py                # smoke test
-ML4T_DATA_PATH="${ML4T_DATA_PATH:-$PWD/data}" uv run jupyter lab  # local: open the URL it prints
-docker compose up -d ml4t                                         # Docker: same address
+uv run python scripts/verify_installation.py                     # Option B
+docker compose run --rm ml4t python scripts/verify_installation.py   # Option A
 ```
 
-Start Jupyter from the repository root. The `ML4T_DATA_PATH` prefix gives the loaders an absolute
-path, because Jupyter runs each notebook with its chapter folder as the working directory and the
-loaders would otherwise search inside that folder and report the datasets as missing. It keeps a
-value you have already exported and defaults to this repository's `data/`. See
-**[running notebooks](docs/running-notebooks.md)** for case-study pipelines, Papermill parameters,
-and the experiment workflow.
+Notebooks are paired [Jupytext](https://jupytext.readthedocs.io/) files, a `.py` source and a
+generated `.ipynb`. `uv sync` already installed Jupyter Lab. Start it from the repository root,
+on **one** of the two paths:
+
+```bash
+# Option B, local uv. Open the tokenized URL it prints, in full.
+ML4T_DATA_PATH="${ML4T_DATA_PATH:-$PWD/data}" uv run jupyter lab
+
+# Option A, Docker. Then open http://localhost:8888 in your browser — no token.
+docker compose up ml4t
+```
+
+The `ML4T_DATA_PATH` prefix on the local path gives the loaders an absolute path, because Jupyter
+runs each notebook with its chapter folder as the working directory and the loaders would otherwise
+search inside that folder and report the datasets as missing. It keeps a value you have already
+exported and defaults to this repository's `data/`. The Docker path needs no prefix: the compose
+file sets the variable inside the container. See
+**[running notebooks](docs/running-notebooks.md)** for the first-notebook walkthrough, case-study
+pipelines, Papermill parameters, and the experiment workflow.
 
 ### Docker images
 
