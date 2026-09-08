@@ -224,22 +224,30 @@ def create_sequences(data: np.ndarray, lookback: int, horizon: int):
 
 
 # %% [markdown]
-# ### Splitting in time, with a gap at each boundary
+# ### Splitting on dates, not on window counts
 #
-# The windows are cut into three consecutive stretches in calendar order, at the two
-# fractions `VALIDATION_START` and `TEST_START` declared in the parameters cell. The
-# first stretch is what the networks are fitted on. The second is scored after every
-# epoch but never trained on, so a training curve can be read against it. The third is
-# scored once, at the end; nothing in the notebook - not a weight, not a stopping
-# point, not a choice of architecture - is decided using it. The three sizes are
-# printed below rather than stated here, so they cannot drift from the fractions.
+# The three stretches are defined by **calendar position**, at the fractions
+# `VALIDATION_START` and `TEST_START` of the trading days in the sample. Each example
+# is placed by the day its target falls on: targets before the first boundary train
+# the networks, targets between the boundaries are scored after every epoch but never
+# trained on, and targets after the second boundary are scored once, at the end.
+# Nothing in the notebook - not a weight, not a stopping point, not a choice of
+# architecture - is decided using the third stretch.
 #
-# A naive cut at those fractions would leak. Window `i` reaches forward to position
-# `i + lookback + horizon - 1`, so the last few windows before a boundary contain days
-# that fall on the far side of it. Dropping the final `lookback + horizon - 1` windows
-# before each boundary - a **purge** - removes exactly the ones that reach across it.
-# The stretch boundaries themselves do not move; only the windows immediately before
-# them are discarded, so the later stretches keep every day they would otherwise have.
+# Anchoring on the target's date rather than on a fraction of the window count is what
+# makes the window-length sweep later in the notebook mean anything. A window of
+# `lookback` days cannot start until `lookback` days of history exist, so a longer
+# window yields fewer examples; cutting a fixed fraction of *those* would put the
+# validation stretch on different dates for every window length, and the sweep would
+# be comparing market periods rather than architectures. Placing every example by its
+# target date fixes the validation and test dates once, for all lengths.
+#
+# One gap is still needed. An example's target is a single day's return `HORIZON` days
+# after its window ends, so training stops `HORIZON` days short of the first
+# validation target: no day the network was fitted on lies within a forecast horizon
+# of the first day it is scored on. `first_target_pos` lets a caller start every
+# example set at the same date as well, which the sweep uses so that changing the
+# window length changes how much history each example sees and nothing else.
 
 
 # %%
@@ -250,28 +258,35 @@ def create_panel_sequences(
     horizon: int,
     val_start_fraction: float = VALIDATION_START,
     test_start_fraction: float = TEST_START,
+    first_target_pos: int | None = None,
 ) -> dict[str, np.ndarray]:
-    """Pool per-symbol windows into purged train / validation / test stretches."""
+    """Pool per-symbol windows into train / validation / test stretches fixed by date."""
     timestamps = returns_df["timestamp"].to_numpy()
-    purge = lookback + horizon - 1
-    parts: dict[str, list[np.ndarray]] = {k: [] for k in ("X_train", "y_train", "X_val", "y_val")}
-    parts |= {k: [] for k in ("X_test", "y_test", "test_dates", "test_symbols")}
+    n_days = len(timestamps)
+    val_start = int(n_days * val_start_fraction)
+    test_start = int(n_days * test_start_fraction)
+    earliest = lookback + horizon - 1
+    target_pos = np.arange(earliest, n_days)  # aligns element-wise with create_sequences
+    selectors = {
+        "train": (target_pos >= max(earliest, first_target_pos or earliest))
+        & (target_pos < val_start - horizon),
+        "val": (target_pos >= val_start) & (target_pos < test_start - horizon),
+        "test": target_pos >= test_start,
+    }
+    if any(sel.sum() == 0 for sel in selectors.values()):
+        raise ValueError(f"lookback {lookback}: a stretch came out empty")
+
+    parts: dict[str, list[np.ndarray]] = {
+        f"{axis}_{split}": [] for split in selectors for axis in ("X", "y")
+    }
+    parts |= {"test_dates": [], "test_symbols": []}
     for symbol in symbols:
         X_symbol, y_symbol = create_sequences(returns_df[symbol].to_numpy(), lookback, horizon)
-        val_start = int(len(X_symbol) * val_start_fraction)
-        test_start = int(len(X_symbol) * test_start_fraction)
-        train_end, val_end = val_start - purge, test_start - purge
-        if train_end <= 0 or val_end <= val_start:
-            raise ValueError(f"{symbol}: too few observations for a purged three-way split")
-        parts["X_train"].append(X_symbol[:train_end])
-        parts["y_train"].append(y_symbol[:train_end])
-        parts["X_val"].append(X_symbol[val_start:val_end])
-        parts["y_val"].append(y_symbol[val_start:val_end])
-        parts["X_test"].append(X_symbol[test_start:])
-        parts["y_test"].append(y_symbol[test_start:])
-        n_test = len(X_symbol) - test_start
-        parts["test_dates"].append(timestamps[np.arange(n_test) + test_start + purge])
-        parts["test_symbols"].append(np.full(n_test, symbol))
+        for split, sel in selectors.items():
+            parts[f"X_{split}"].append(X_symbol[sel])
+            parts[f"y_{split}"].append(y_symbol[sel])
+        parts["test_dates"].append(timestamps[target_pos[selectors["test"]]])
+        parts["test_symbols"].append(np.full(int(selectors["test"].sum()), symbol))
     return {name: np.concatenate(chunks) for name, chunks in parts.items()}
 
 
@@ -355,8 +370,8 @@ print(
     f"{len(splits['X_test']):,} held to the end"
 )
 print(
-    f"Purged at each boundary: {LOOKBACK + HORIZON - 1} windows per fund, "
-    f"the number that reach past it"
+    f"Held-back targets run {splits['test_dates'].min()} to {splits['test_dates'].max()}; "
+    f"training stops {HORIZON} trading day(s) short of each boundary"
 )
 
 # %% [markdown]
@@ -726,9 +741,10 @@ comparison_df
 # ### Reading the two loss curves
 #
 # One panel per architecture, all four on the same axes limits so the heights are
-# comparable. The solid line is the training error the network is minimising; the
-# dashed line is the same error on the validation windows, which no weight update
-# touched.
+# comparable, each showing per-epoch mean squared error on the pooled eight-fund
+# next-day return target. The solid line is the training error the network is
+# minimising; the dashed line is the same error on the validation windows, which no
+# weight update touched.
 #
 # Three readings are possible and all three appear below. Both lines falling together
 # means the network found structure that holds on days it has not seen. Both lines
@@ -761,10 +777,13 @@ for ax in axes[:, 0]:
     ax.set_ylabel("Mean squared error")
 axes.flat[0].legend(frameon=False, fontsize="small")
 
-add_message_title(
-    axes.flat[0],
+# The claim goes on the figure; each axes' left title already carries its architecture.
+fig.suptitle(
     "Training error falls furthest where validation error rises",
-    subtitle="Per-epoch mean squared error, pooled 8-fund next-day returns",
+    x=0.01,
+    ha="left",
+    color=COLORS["blue"],
+    fontweight="semibold",
 )
 fig.show()
 
@@ -825,6 +844,13 @@ fig.show()
 # Each length also gets a fitted pair scored on the validation stretch, so the second
 # question - whether the extra history is worth anything - is answered on the same
 # axis as the cost. Nothing selects a window length from either panel.
+#
+# Two things are held fixed so the sweep varies one thing. The validation dates are
+# already fixed by the date-anchored split. `SWEEP_FIRST_TARGET` fixes the other end:
+# every length starts its examples on the date the longest window can first reach, so
+# all four are fitted on the same days and the same number of examples. Without it the
+# shorter windows would train on several hundred extra examples each, and a difference
+# in error could be read as a difference in sample size.
 
 # %%
 scaling_architectures = [
@@ -836,8 +862,12 @@ scaling_results: dict[tuple[str, int], dict[str, float]] = {}
 scaling_batches: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
 
 # %%
+SWEEP_FIRST_TARGET = max(LOOKBACKS) + HORIZON - 1
+
 for lb in LOOKBACKS:
-    lb_splits = create_panel_sequences(returns, SYMBOLS, lb, HORIZON)
+    lb_splits = create_panel_sequences(
+        returns, SYMBOLS, lb, HORIZON, first_target_pos=SWEEP_FIRST_TARGET
+    )
     X_tr, y_tr = to_tensor(lb_splits["X_train"]), to_tensor(lb_splits["y_train"])
     X_va, y_va = to_tensor(lb_splits["X_val"]), to_tensor(lb_splits["y_val"])
     scaling_batches[lb] = (X_tr, y_tr)
