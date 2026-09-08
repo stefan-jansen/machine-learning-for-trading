@@ -3420,7 +3420,15 @@ case_studies/us_firm_characteristics/05_linear:
     # tests/pm_helpers.py, which only fires when the whole mapping is empty.
     PREVIEW_REDUCTIONS:
       folds: [0]
-      max_symbols: 5
+    # max_symbols is 20 to match 08a-08d, the only families that were not five
+    # wide. At five this stage registers a contender that 11_backtest cannot rank:
+    # top_k_grid [5, 10, 20, 50] is long-short, so k=5 needs 5 long and 5 short and
+    # every k held the whole cross-section. The job was green only while a
+    # twenty-wide family outranked this one - un-skipping 07_tabular_dl at five
+    # turned it red with nobody having changed the configuration
+    # (ml4t/agent-workspace#1077). The fixture panel is 12, so 20 is a passthrough
+    # and exactly one k is realizable: k=5, which is what setup.yaml already says.
+      max_symbols: 20
   # Measured 2026-08-27 with the reductions above: 88.7 s for the whole pytest
   # invocation, fixture seeding included, at load average 40.8 on 24 cores. No cell
   # approached the per-cell cap, so 120 s is kept rather than raised.
@@ -3434,7 +3442,10 @@ case_studies/us_firm_characteristics/06_gbm:
       checkpoint_interval: 10
       folds: [0]
       max_iterations: 20
-      max_symbols: 5
+      # 20 for the reason 05_linear records: at five this stage registers a contender
+      # 11_backtest cannot rank, and the job stayed green only while a twenty-wide
+      # family outranked it. The fixture panel is 12, so 20 is a passthrough.
+      max_symbols: 20
   # Measured the same way and at the same load: 172.9 s end to end. Kept at 180 s.
   timeout: 180
 case_studies/us_firm_characteristics/07_tabular_dl:
