@@ -39,7 +39,7 @@
 #
 # **Book reference**
 #
-# Chapter 9, Section 9.1 (Diagnostics and Stationarity Features).
+# Chapter 9, Section 9.1 (Diagnostics and stationarity features).
 #
 # **Prerequisites**
 #
