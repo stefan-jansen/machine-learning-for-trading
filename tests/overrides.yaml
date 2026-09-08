@@ -467,8 +467,25 @@
     N_TRIALS: 2
   timeout: 600
 12_gradient_boosting/07_hpo_comparison:
-  gpu: true
+  # No `gpu:`, because nothing here asks for a device: the source holds no occurrence of cuda,
+  # device_type, torch or gpu. It fits lightgbm, xgboost and catboost through optuna on whatever
+  # the machine has, and the flag it carried had no relation to why it is slow.
+  #
+  # It cannot be per-commit yet, and the reason is a defect in the notebook rather than a budget.
+  # Measured 2026-09-08 with the card hidden: 2,411s at its declared settings, and it did not
+  # finish. Its parameters cell declares `N_GRID_POINTS = 50` and `N_OPTUNA_TRIALS = 50` and the
+  # notebook reads neither - `pm_helpers.unusable_parameters` names both, "the notebook never
+  # reads it below the parameters cell". What it actually reads is `N_GRID = len(grid)` at line
+  # 200, derived rather than declared, plus `trial_budgets = [10, 25, 50, 75, N_GRID]` at 326,
+  # which runs five more studies. So there is no knob to turn from here: setting the two declared
+  # names reduces nothing, and a run at 6 and 6 took 617s and still timed out.
+  #
+  # `long_running: true` was never what excluded it - no workflow deselects that marker, so the
+  # GPU flag was the whole of it, and removing the flag without this would turn the chapter job
+  # red. Per-commit coverage waits on ml4t/agent-workspace#1101 giving the search a knob the
+  # notebook reads.
   long_running: true
+  tier: on_demand
   timeout: 2400
 12_gradient_boosting/08_shap_analysis:
   env:
@@ -481,7 +498,9 @@
   gpu: true
   timeout: 300
 12_gradient_boosting/11_conformal_gbm:
-  gpu: true
+  # No `gpu:`. This one is stronger than stale: line 229 passes `"device_type": "cpu"`, and
+  # the prose above it says GPU training can be faster but that this uses a fixed thread
+  # count. The declaration contradicted the notebook's own code.
   timeout: 900
 12_gradient_boosting/12_case_study_insights:
   timeout: 300
