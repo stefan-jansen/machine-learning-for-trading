@@ -100,9 +100,11 @@ FFD_THRESHOLD = 1e-4
 # $$w_0 = 1, \qquad w_k = -w_{k-1}\,\frac{d - k + 1}{k}$$
 #
 # For $d = 1$ this terminates after two terms and reproduces the ordinary difference. For
-# $d$ between zero and one it never terminates: the weights alternate in sign and decay,
-# so the transformed value at $t$ is a weighted sum reaching far into the past. That long
-# tail is the memory that ordinary differencing discards.
+# $d$ between zero and one it never terminates. After $w_0 = 1$ every weight is negative
+# and decays towards zero, so the transform is today's value minus a decaying weighted
+# average of the entire past. At $d = 1$ that average reduces to yesterday alone,
+# which is the ordinary difference; below one it spreads over hundreds of sessions, and
+# that spread is the memory ordinary differencing discards.
 #
 # In practice the tail is cut where the weights become negligible. `FFD_THRESHOLD` is
 # where: a weight smaller than this in magnitude is dropped, and the number of weights
@@ -114,9 +116,12 @@ FFD_THRESHOLD = 1e-4
 # ## The series
 #
 # One ETF panel, nine years of daily closes, and the transform is applied to **log**
-# prices throughout. Logs matter here: fractional differencing is a linear filter, so on
-# log prices its output is a weighted sum of log returns and its scale does not depend on
-# whether the price is near 50 or near 500.
+# prices throughout. Logs matter because the filter is linear: on log prices its output is
+# a weighted combination of log returns plus a small multiple of the log level, where a
+# multiple of the *price* would scale with the price itself. The residual level term does
+# not vanish, and it is the subject of the weight-sum section below: multiplying every
+# price by a constant shifts every output by the weight sum times the log of that
+# constant. Reduced dependence on the price scale, not independence from it.
 
 # %%
 all_etfs = load_etfs()
@@ -141,9 +146,13 @@ print(f"SPY: {spy.height:,} sessions ({spy['timestamp'].min()} to {spy['timestam
 #
 # Every weight sequence starts at $w_0 = 1$, so the differences between orders are all in
 # the tail. Plotting the magnitude of the weights on a log scale, with the first one
-# omitted because it is the same for every order, shows the decay rate directly: a lower
-# order keeps larger weights on more distant lags, and its window reaches further back
-# before the weights fall under the threshold.
+# omitted because it is the same for every order, shows the decay rate directly.
+#
+# Read it in two parts. At lag one the weight is exactly $-d$, so a higher order applies a
+# larger immediate correction and starts above the others. Within a few lags the ordering
+# reverses: a lower order decays more slowly, so its weights stay larger at distant lags
+# and reach the truncation threshold much later. The end of each line is where its window
+# closes.
 
 # %%
 D_GRID = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
@@ -175,7 +184,7 @@ for d, color in zip(D_GRID, d_shades):
     )
 
 fig.update_layout(
-    title="A lower order keeps larger weights on more distant lags",
+    title="A lower order decays more slowly, so its window reaches further back",
     xaxis_title="Lag in sessions",
     yaxis_title="Weight magnitude, log scale",
     yaxis=dict(type="log", exponentformat="power"),
@@ -183,9 +192,11 @@ fig.update_layout(
 show_plotly_with_alt(
     fig,
     "Six lines on a log vertical axis, one per fractional order, each showing the "
-    "magnitude of the weights against the lag they apply to. Every line falls away from "
-    "the left edge; the lines for the lower orders lie above the others throughout and "
-    "extend furthest to the right before ending at the truncation threshold.",
+    "magnitude of the weights against the lag they apply to. At the first lag the order "
+    "is reversed, with the highest fractional order highest on the axis, because that "
+    "weight is the order itself. The lines cross within the first few lags and then the "
+    "lower orders decay more slowly, running further to the right before ending where "
+    "the weights fall under the truncation threshold.",
 )
 
 # %% [markdown]
@@ -541,10 +552,10 @@ print(f"Smallest stationary order over the full sample, for comparison: {first_s
 
 # %% [markdown]
 # The order selected on the training cut need not match the one the full sample would
-# give, and here it does not. That is the mechanism working rather than failing: the
-# training cut is shorter and covers different years, so the smallest order that makes it
-# stationary is its own answer. A procedure that returned the full-sample answer from a
-# training cut would be reading data it was not given.
+# give, and on this sample it does not. Neither outcome tells you anything on its own:
+# two searches over the same grid can land on the same point for perfectly good reasons.
+# What makes a selection safe is which observations the procedure was allowed to read, not
+# whether its answer happens to agree with a search that read more.
 
 # %% [markdown]
 # ## The library helpers, and the convention they use
