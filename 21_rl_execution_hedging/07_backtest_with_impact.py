@@ -129,7 +129,10 @@ display(
 - **Evaluation window**: {EVALUATION_START_DATE} to {END_DATE}. Every reported return comes
   from here.
 - **Impact strengths**: coefficients {", ".join(f"{c:g}" for c in IMPACT_COEFFICIENTS)}, where
-  zero is the frictionless backtest and each larger value is a stronger square-root charge.
+  zero switches the impact model off and each larger value is a stronger square-root
+  charge. Commission and slippage are charged at every level, including zero, so the
+  zero-impact run is a backtest with ordinary trading costs and no impact rather than a
+  costless one.
 - **Cohorts**: {COHORT_SAMPLE} names drawn from those whose order is under
   {LIQUID_MAX_PARTICIPATION:.0%} of daily volume, and {COHORT_SAMPLE} from those whose order
   is over {THIN_MIN_PARTICIPATION:.0%} of it.
@@ -485,8 +488,8 @@ summary
 # the formation pool: one where the order is a small share of a day's volume,
 # one where it is more than a day's volume. Each name is run twice, once with no
 # impact and once at the strongest coefficient, and the question asked of each
-# pair is whether a profit in the frictionless run is still a profit once the
-# charge is applied.
+# pair is whether a profit without the impact charge is still a profit once the
+# charge is applied. Both runs pay the same commission and slippage.
 
 
 # %%
@@ -563,11 +566,12 @@ after selection and does not feed back into it.
 # ### The whole shift, not only the sign changes
 #
 # Counting sign changes throws away most of what the charge did. Each point
-# below is one sampled name: its frictionless return on the horizontal axis, its
-# return under the strongest impact charge on the vertical. A point on the
-# diagonal was untouched by the charge; the vertical distance below the diagonal
-# is what the charge cost. The lower-right quadrant holds the names the counts
-# above call sign changes.
+# below is one sampled name: its return with the impact model switched off on
+# the horizontal axis, its return under the strongest charge on the vertical.
+# Both axes already include commission and slippage, so the vertical distance
+# below the diagonal is impact alone. A point on the diagonal was untouched by
+# the charge, and the lower-right quadrant holds the names that go from a profit
+# to a loss.
 
 # %%
 fig = go.Figure()
@@ -723,17 +727,19 @@ display(
 {BOOK_USD:,.0f} USD order is {most_liquid["order_participation"]:.1%} of a day's volume in
 `{most_liquid["symbol"]}` and {thinnest["order_participation"]:.0%} of it in
 `{thinnest["symbol"]}`. Run through the same strategy over the same period, the strongest
-impact charge costs the first {most_liquid["erosion_high"]:.1%} of total return and the second
-{thinnest["erosion_high"]:.1%}. Nothing about the strategy differs between the two; only the
-volume available to absorb it does.
+impact charge takes {most_liquid["erosion_high"] * 100:.1f} percentage points off the first
+name's total return and {thinnest["erosion_high"] * 100:.1f} off the second. The strategy and
+the order are identical; what differs is the volume available to absorb the order, along with
+each name's own volatility and price path, which the impact model also reads.
 
-**The charge decides the sign, not just the magnitude, and it does so unevenly.** Of the
-{liquid_flip["n"]} liquid-cohort names profitable without impact, {liquid_flip["flips"]} are
-unprofitable with it ({liquid_flip["flip_rate"]:.0%}); of the {thin_flip["n"]} thin-cohort
-names, {thin_flip["flips"]} are ({thin_flip["flip_rate"]:.0%}). A frictionless backtest is not
-uniformly optimistic across a universe - it is far more optimistic about exactly the names
-whose results look best on paper, because the same thinness that inflates a paper return is
-what makes the order expensive.
+**The charge decides the sign, not only the magnitude.** Of the {liquid_flip["n"]}
+liquid-cohort names profitable with the impact model switched off, {liquid_flip["flips"]} are
+unprofitable with it on ({liquid_flip["flip_rate"]:.0%}); of the {thin_flip["n"]} thin-cohort
+names, {thin_flip["flips"]} are ({thin_flip["flip_rate"]:.0%}). A backtest that omits impact is
+therefore not uniformly optimistic: how much it overstates depends on where the order is sent.
+The two cohorts differ in more than participation - volatility, turnover and realised path vary
+with them - so this measures the gap between the cohorts as constructed rather than isolating
+liquidity as its cause.
 
 **Calibrate the cost model before the period it is applied to.** Each name's liquidity and
 volatility, and the screen that put it in the pool at all, come from bars ending
