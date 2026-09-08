@@ -116,8 +116,9 @@ CONVENTIONAL_T_THRESHOLD = 2.0
 # %% [markdown]
 # ## Initialize Data Providers
 #
-# The ml4t-data library provides comprehensive access to factor data from both
-# AQR Capital Management and Kenneth French's Data Library.
+# Two providers supply everything below: AQR Capital Management publishes the long-history and
+# cross-asset series as Excel workbooks, and Kenneth French's Data Library publishes the
+# three-, five- and six-factor US equity series.
 
 # %%
 try:
@@ -429,9 +430,10 @@ print(
 )
 
 # %% [markdown]
-# The four exact aggregate columns keep the comparison aligned with the narrative.
-# They combine the underlying stock-selection and macro sleeves rather than mixing
-# regions or showing multiple variants of the same factor.
+# The four columns selected are the all-asset-class aggregates, which combine each factor's
+# stock-selection and macro sleeves into one series. Taking those rather than the per-region
+# variants keeps four lines on the chart instead of forty, and keeps them comparable: each is the
+# same factor definition applied across the same set of markets.
 
 # %%
 fig = go.Figure()
@@ -466,23 +468,18 @@ fig.show()
 # %% [markdown]
 # ---
 #
-# ## Part 1 Summary: What We've Established (and What We Haven't)
+# ## Part 1 Summary: what a premium in the long history is evidence of
 #
-# **EXISTENCE EVIDENCE**
-# - Factor premia exist in long-history data predating their publication
-# - The data is less susceptible to post hoc window selection
-# - Multiple factors (value, momentum, carry, defensive) show positive premia
+# Value, momentum, carry and defensive all show positive premia in data reaching back to 1926,
+# most of which predates their publication. That makes the finding harder to explain as a window
+# chosen after the fact, which is the specific criticism the long history answers.
 #
-# **NOT YET ADDRESSED** (requires separate analysis):
-# - **Transaction costs**: Turnover, bid-ask spreads, market impact
-# - **Financing costs**: Short rebates, leverage financing, margin requirements
-# - **Capacity constraints**: How much capital can these strategies absorb?
-# - **Implementation drag**: Rebalancing timing, corporate actions, index changes
-#
-# **The gap between "evidence of premium" and "tradable strategy" is addressed in**:
-# - Chapter 16: Strategy Simulation (transaction cost modeling)
-# - Chapter 17: Portfolio Construction (leverage constraints)
-# - Chapter 18: Transaction Costs (market impact)
+# What it establishes is that the premium was there in the returns, gross. Four things stand
+# between a gross premium and a return an allocator receives, and none of them is measured in a
+# published research series: the turnover cost of holding the portfolio, the financing cost of
+# its short leg, the capacity at which its own trading moves the prices it trades, and the drag
+# from rebalancing timing and corporate actions. Chapter 16 models the first, and Chapter 18
+# measures the third.
 #
 # ---
 
@@ -778,7 +775,7 @@ fig = go.Figure(
 fig.add_hline(y=0, line_color=COLORS["neutral"], line_width=1)
 fig.update_layout(
     title=(
-        "SMB weakens after its 1981 publication"
+        "The size premium's two halves differ across its publication year"
         "<br><sup>Annualized mean monthly return; labels show Newey-West t-statistics; "
         "ex-post period split</sup>"
     ),
@@ -1079,7 +1076,7 @@ fig = go.Figure(
 # %%
 _ = fig.update_layout(
     title=(
-        "The value-momentum relationship survives pooling every factor together"
+        "Pairwise correlations among the factors, over their shared history"
         "<br><sup>Pairwise correlations over the window in which all factors have history</sup>"
     ),
     height=560,
@@ -1090,26 +1087,36 @@ _ = fig.update_layout(
 
 fig.show()
 
+# %%
+print(
+    "Value against momentum, US equity factors over the shared window: "
+    f"{corr_matrix.loc['HML', 'MOM']:+.2f}"
+)
+print(f"The same pair pooled across all VME asset classes: {everywhere_corr:+.2f}")
+
 # %% [markdown]
 # ### Key Correlation Insights
 #
-# 1. **Value vs. Momentum**: The French common-period estimate appears in the visible
-#    lower triangle. It is distinct from the stronger cross-asset VME estimates.
+# 1. **Value against momentum**: the two lines printed above the heatmap put the US equity
+#    estimate beside the cross-asset one. Both are negative and they are not the same number,
+#    which is what the cross-asset evidence adds: a relationship that holds in one market can be
+#    a property of that market, and one that holds in eight is harder to explain that way.
 #
-# 2. **Quality (QMJ) vs. Market**: QMJ has low market beta, providing defensive
-#    characteristics during equity downturns.
-#
-# 3. **Low-Vol (BAB) vs. Market**: BAB is designed to be market-neutral but may still
-#    have residual market exposure during extreme moves.
+# 2. **Quality (QMJ) and low-volatility (BAB) against the market**: both are constructed to be
+#    long-short and therefore close to market-neutral by design. The correlations in the
+#    lower triangle say how close they came over this window. A correlation is not a beta, so
+#    what a reader can take from these cells is co-movement, not exposure - the regression that
+#    would give exposure is what `01_portfolio_metrics` runs on a return series.
 
 # %% [markdown]
 # ---
 #
 # # Part 5: Crisis Performance: Who Provides "Crisis Alpha"?
 #
-# One of the most important questions for portfolio construction: **Which factors
-# perform well during market crises?** True "crisis alpha" - positive returns during
-# equity market drawdowns - is extremely valuable.
+# A factor that pays when the rest of the book is losing is worth more to an allocator than the
+# same premium earned in calm markets, because it is the one that lets the whole portfolio be
+# held through the episode. **Crisis alpha** is the name for a positive return during an equity
+# drawdown.
 #
 # These windows are selected ex post. They describe historical co-movement; they do
 # not establish that a factor will insure a future crisis.
@@ -1178,7 +1185,7 @@ fig = go.Figure(
 # %%
 fig.update_layout(
     title=(
-        "Trend following is the one factor that tends to pay in a crisis"
+        "Trend following was positive in most of these chosen windows"
         "<br><sup>Cumulative monthly returns over windows chosen after the fact; blanks predate "
         "a factor's history</sup>"
     ),
@@ -1320,7 +1327,7 @@ fig = go.Figure(
 )
 fig.update_layout(
     title=(
-        "BAB and QMJ lead the historical factor risk-return trade-off"
+        "Annualized return against volatility for eight published factors"
         "<br><sup>Published monthly factor returns; blue markers clear the discovery "
         "threshold; "
         "sample histories differ</sup>"
@@ -1392,8 +1399,9 @@ print(f"Crisis windows in which trend following was positive: {tsmom_positive} o
 # - The crisis windows and the pre- and post-publication split dates are chosen with knowledge of
 #   what happened. They describe; they do not test.
 #
-# **Next:** `08_library_comparison` compares implementations of the allocators these factors would
-# feed. Section 17.4 develops baseline allocators and factor diversification.
+# **Next:** [`06_hierarchical_risk_parity`](06_hierarchical_risk_parity.ipynb) builds an allocator
+# that reads the correlation structure above as a tree rather than inverting it. Section 17.4
+# develops baseline allocators and factor diversification.
 #
 # ## References
 #

@@ -86,9 +86,18 @@ TRADING_DAYS_PER_YEAR = 252
 # %% [markdown]
 # ## 2. Load Registered Predictions
 #
-# We load the best-IC GBM validation prediction set for each case study from
-# its registry. During publication verification, `ML4T_OUTPUT_DIR` points to the
+# For each case study, the GBM validation prediction set with the highest recorded IC is loaded
+# from its registry. During publication verification, `ML4T_OUTPUT_DIR` points to the
 # immutable teaching-registry overlay; readers can omit it to use their local run logs.
+
+# %% [markdown]
+# Both panels name their entity column `symbol`. That is a property of the prediction artifact
+# rather than of the case study: CME futures call the entity `product` in their labels and
+# features, and the training step writes the same product roots (`ES`, `CL`, `6E`, and so on)
+# under `symbol` when it records a prediction set.
+#
+# Selection is on the validation IC recorded in the registry, so everything measured below is
+# conditioned on that selection and is not a holdout estimate.
 
 # %%
 REGISTRY_ROOTS = {
@@ -96,13 +105,6 @@ REGISTRY_ROOTS = {
     "cme_futures": get_case_study_dir("cme_futures", create=False) / "run_log",
 }
 
-# Prediction panels carry one entity column, `symbol`, in every case study. That
-# is a property of the prediction artifact, not of the case study: CME futures
-# name their entity `product` in labels and features, and the training step
-# writes the same product roots (`ES`, `CL`, `6E`, ...) under `symbol` when it
-# records a prediction set. Selection is explicitly on the validation IC recorded
-# in the registry, so the results below are selection-conditioned validation
-# evidence, not a final holdout estimate.
 BEST_GBM = {
     "etfs": {"label": "fwd_ret_21d", "id_col": "symbol"},
     "cme_futures": {"label": "fwd_ret_5d", "id_col": "symbol"},
@@ -361,8 +363,7 @@ add_message_title(
     "CME residual widths vary more around their median",
     subtitle="Finite-sample Mondrian widths; strictly prior, horizon-embargoed calibration",
 )
-fig.tight_layout()
-fig.show()
+plt.show()
 
 # %% [markdown]
 # ## 5. Allocation Rules
@@ -617,10 +618,24 @@ for panel_index, (ax, (metric, label)) in enumerate(zip(axes.flat, metric_specs,
     if metric in {"ann_return", "max_drawdown"}:
         ax.yaxis.set_major_formatter(lambda value, _: f"{value:.0%}")
 
-fig.suptitle("Conformal sizing leads validation Sharpe in both panels")
+fig.suptitle("Four measures of the same three sizing rules, on two panels")
 fig.legend(legend_handles, method_labels, loc="lower center", ncol=3)
-fig.tight_layout(rect=(0, 0.06, 1, 0.96))
-fig.show()
+fig.set_layout_engine("tight", rect=(0, 0.06, 1, 0.96))
+plt.show()
+
+# %% [markdown] tags=["results"]
+# ### What this run produced
+#
+# Two panels, three sizing rules, four measures each - all printed in sections 6 and 7 and drawn
+# together in the four-panel figure. The three rules share one selection at every rebalance, so
+# any difference between them comes from the weights alone.
+#
+# Read the Sharpe panel against the turnover panel rather than on its own. A sizing rule that
+# improves Sharpe while turning over more has not been shown to be worth using: this comparison
+# is gross of the cost of that turnover, and Chapter 18 measures what it would take out. The two
+# case studies also differ in how strong the underlying signal is, which section 3 reports as a
+# HAC t-statistic on the mean IC - a sizing rule applied to a signal that does not rank returns
+# is rescaling noise, whatever its Sharpe ratio comes out at.
 
 # %% [markdown]
 # ## Key Takeaways
@@ -631,22 +646,24 @@ fig.show()
 #    labels are available before the next fold; the uncalibrated first fold is
 #    excluded rather than filled from the future.
 #
-# 2. **Conformal sizing leads equal weight on this selected validation panel.**
-#    Sharpe rises from 0.538 to 0.586 for ETFs and from 0.481 to 0.580 for CME
-#    futures. Maximum drawdown also improves by about three percentage points in
-#    each panel, although one-way turnover increases.
+# 2. **Inverse-width sizing is a bet on the residual dispersion being stable.** It puts more
+#    capital where the model's past residuals were narrow. That helps only if an entity whose
+#    residuals were narrow in the calibration window stays that way in the evaluation window;
+#    nothing in conformal prediction guarantees it, and the printed comparison is what says
+#    whether it held here.
 #
-# 3. **Width dispersion is necessary but not sufficient.** CME residual widths
-#    are more dispersed relative to their median, yet that variation does not
-#    translate into higher validation Sharpe. Uncertainty changes position size;
-#    it cannot manufacture predictive direction.
+# 3. **Width dispersion is necessary but not sufficient.** Inverse-width weights depart from
+#    equal weight only in proportion to how much the widths differ across entities, so a panel
+#    with tight dispersion cannot produce a materially different portfolio. Dispersion is what
+#    makes the rule able to act; it is not what makes the action pay. Uncertainty changes
+#    position size and cannot manufacture predictive direction.
 #
 # 4. **Treat these results as validation diagnostics.** The GBM was selected by
-#    validation IC from the same registry panel. A sealed holdout is required
-#    before interpreting any allocator ranking as final out-of-sample evidence.
+#    validation IC from the same registry panel. A holdout that no selection step has seen is
+#    required before any allocator ranking counts as out-of-sample evidence.
 #
-# **Next**: see [`09_allocator_comparison`](09_allocator_comparison.ipynb) for a
-# full controlled allocator comparison on the ETF universe.
+# **Next**: [`08_library_comparison`](08_library_comparison.ipynb) puts four allocation
+# libraries on the same problem and compares what each one produces.
 #
 # **Book**: Section 17.4 lists conformal-weighted allocation alongside the
 # inverse-volatility, score-weighted, and equal-weight baselines.

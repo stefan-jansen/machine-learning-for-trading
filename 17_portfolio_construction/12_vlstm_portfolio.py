@@ -43,10 +43,7 @@
 # %%
 """VLSTM allocator with TFT-style variable selection and volatility targeting."""
 
-import hashlib
 import os
-from datetime import UTC, datetime
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -58,7 +55,6 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 from data import load_etfs
-from utils.paths import get_chapter_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS
 
@@ -78,85 +74,18 @@ VOL_TARGET_ANN = 0.15  # Target annualized portfolio volatility.
 VOL_LOOKBACK = 63  # Rolling window for per-asset volatility estimate.
 TURNOVER_COST_BPS = 5.0  # One-way cost in the loss (basis points).
 COST_WEIGHT = 1.0  # Scales the turnover penalty in the loss.
-ALLOW_MODEL_CACHE = os.environ.get("ML4T_ALLOW_MODEL_CACHE", "0") == "1"
-USE_CACHED_MODEL_IF_AVAILABLE = ALLOW_MODEL_CACHE
-SAVE_TRAINED_MODEL_TO_CACHE = os.environ.get("ML4T_SAVE_MODEL_CACHE", "0") == "1"
-
-# %%
-OUTPUT_DIR = get_output_dir(17, "vlstm_portfolio")
-OUTPUT_DIR.mkdir(exist_ok=True)
-MODEL_CACHE_PATH = OUTPUT_DIR / "vlstm_portfolio_cache.pt"
-CANONICAL_OUTPUT_DIR = get_chapter_dir(17) / "output" / "vlstm_portfolio"
-CANONICAL_MODEL_CACHE_PATH = CANONICAL_OUTPUT_DIR / "vlstm_portfolio_cache.pt"
-CACHE_SCHEMA = "vlstm-v2-causal-exact-pooled"
 
 
 # %% [markdown]
-# Iterate unique cache candidate paths in priority order.
-
-
-# %%
-def iter_cache_candidates(*paths: Path):
-    """Yield unique cache paths in priority order."""
-    seen: set[Path] = set()
-    for path in paths:
-        resolved = path.resolve()
-        if resolved not in seen:
-            seen.add(resolved)
-            yield path
-
-
-# %% [markdown]
-# Validate that a cached state dict matches the current model layout before loading.
-
+# ### Determinism
+#
+# Two runs of the same code give the same weights only if every source of randomness is pinned.
+# `set_global_seeds` covers Python, NumPy and Torch; the cuDNN settings and the cuBLAS workspace
+# variable below cover the GPU kernels, which otherwise pick an algorithm by timing and so vary
+# between runs. Dropout is set to zero for the same reason: the pooled loss recomputes each chunk
+# in a second pass, and a stochastic layer would make the two passes disagree.
 
 # %%
-def state_dict_is_compatible(model: nn.Module, state_dict: dict) -> tuple[bool, str]:
-    """Return whether a cached state dict matches the current model layout."""
-    if not isinstance(state_dict, dict):
-        return False, "cache payload has no valid state_dict"
-    expected = model.state_dict()
-    if set(expected.keys()) != set(state_dict.keys()):
-        return False, "parameter keys differ"
-    for key, expected_tensor in expected.items():
-        cached_shape = getattr(state_dict[key], "shape", None)
-        if cached_shape != expected_tensor.shape:
-            return False, f"shape mismatch at {key}"
-    return True, ""
-
-
-# %% [markdown]
-# Bind cache reuse to ordered data, source, split, configuration, and tensor layout.
-
-
-# %%
-def stable_data_hash(frame: pd.DataFrame) -> str:
-    """Hash the ordered price panel, including its index and columns."""
-    digest = hashlib.sha256()
-    digest.update("|".join(frame.index.astype(str)).encode())
-    digest.update(b"\0")
-    digest.update("|".join(map(str, frame.columns)).encode())
-    digest.update(np.ascontiguousarray(frame.to_numpy()).tobytes())
-    return digest.hexdigest()
-
-
-# %%
-def cache_provenance_is_compatible(payload: dict) -> bool:
-    """Require exact learned-state provenance, not shape compatibility alone."""
-    return payload.get("provenance") == expected_cache_provenance
-
-
-# %%
-IN_TEST_OUTPUT_MODE = os.environ.get("ML4T_TEST_MODE") == "1"
-if IN_TEST_OUTPUT_MODE:
-    cache_exists = any(
-        path.exists()
-        for path in (iter_cache_candidates(MODEL_CACHE_PATH) if ALLOW_MODEL_CACHE else ())
-    )
-    if not cache_exists:
-        N_EPOCHS = min(N_EPOCHS, 20)
-        print(f"Bootstrap cache mode: N_EPOCHS reduced to {N_EPOCHS}")
-
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Device: {DEVICE}")
 
@@ -519,31 +448,6 @@ def pooled_sharpe(
 optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=N_EPOCHS)
 
-# %%
-expected_cache_provenance = {
-    "schema": CACHE_SCHEMA,
-    "source_py_blob": os.environ.get("ML4T_SOURCE_BLOB", ""),
-    "data_hash": stable_data_hash(prices),
-    "universe": list(UNIVERSE),
-    "split": [int(train_end), int(val_end)],
-    "seed": int(SEED),
-    "config": {
-        "epochs": int(N_EPOCHS),
-        "seq_len": int(SEQ_LEN),
-        "d_model": int(D_MODEL),
-        "lstm_hidden": int(LSTM_HIDDEN),
-        "dropout": float(DROPOUT),
-        "learning_rate": float(LR),
-        "weight_decay": float(WEIGHT_DECAY),
-        "batch_size": int(BATCH_SIZE),
-        "vol_target": float(VOL_TARGET_ANN),
-        "vol_lookback": int(VOL_LOOKBACK),
-        "cost_bps": float(TURNOVER_COST_BPS),
-        "cost_weight": float(COST_WEIGHT),
-    },
-    "state_shapes": {key: tuple(value.shape) for key, value in model.state_dict().items()},
-}
-
 
 # %% [markdown]
 # Recompute one predecessor endpoint at each chunk boundary so costs and their gradients
@@ -643,69 +547,26 @@ train_sharpes: list[float] = []
 val_sharpes: list[float] = []
 best_val = -float("inf")
 best_state: dict | None = None
-loaded_from_cache = False
 
-if USE_CACHED_MODEL_IF_AVAILABLE:
-    for cache_path in iter_cache_candidates(MODEL_CACHE_PATH, CANONICAL_MODEL_CACHE_PATH):
-        if not cache_path.exists():
-            continue
-        payload = torch.load(cache_path, map_location="cpu")
-        if isinstance(payload, dict) and "best_state" in payload:
-            if not cache_provenance_is_compatible(payload):
-                print(f"Skipping wrong-provenance cache at {cache_path}")
-                continue
-            ok, reason = state_dict_is_compatible(model, payload["best_state"])
-            if not ok:
-                print(f"Skipping incompatible cache at {cache_path}: {reason}")
-                continue
-            best_state = payload["best_state"]
-            train_sharpes = list(payload.get("train_sharpes", []))
-            val_sharpes = list(payload.get("val_sharpes", []))
-            best_val = float(payload.get("best_val_sharpe", float("nan")))
-            loaded_from_cache = True
-            print(f"Loaded cached model from {cache_path}")
-            break
+print(f"Training for {N_EPOCHS} epochs...")
+for epoch in range(1, N_EPOCHS + 1):
+    tr = train_one_epoch()
+    scheduler.step()
+    va = evaluate_pooled_sharpe(val_loader)
+    train_sharpes.append(tr)
+    val_sharpes.append(va)
 
-# %%
-if not loaded_from_cache:
-    print(f"Training for {N_EPOCHS} epochs (cache miss)...")
-    for epoch in range(1, N_EPOCHS + 1):
-        tr = train_one_epoch()
-        scheduler.step()
-        va = evaluate_pooled_sharpe(val_loader)
-        train_sharpes.append(tr)
-        val_sharpes.append(va)
+    if va > best_val:
+        best_val = va
+        best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
-        if va > best_val:
-            best_val = va
-            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-
-        if epoch % 25 == 0 or epoch == 1:
-            print(f"Epoch {epoch:3d} | Train SR: {tr:+.3f} | Val SR: {va:+.3f}")
-        progress_log = os.environ.get("ML4T_PROGRESS_LOG")
-        if progress_log and (epoch == 1 or epoch % 10 == 0):
-            with open(progress_log, "a", encoding="utf-8") as handle:
-                handle.write(
-                    f"{datetime.now(UTC).isoformat()} epoch={epoch} "
-                    f"train_sr={tr:+.6f} val_sr={va:+.6f}\n"
-                )
-
-# %%
-if SAVE_TRAINED_MODEL_TO_CACHE and not loaded_from_cache and best_state is not None:
-    payload = {
-        "best_state": best_state,
-        "train_sharpes": train_sharpes,
-        "val_sharpes": val_sharpes,
-        "best_val_sharpe": best_val,
-        "provenance": expected_cache_provenance,
-    }
-    torch.save(payload, MODEL_CACHE_PATH)
-    print(f"Saved trained model cache to {MODEL_CACHE_PATH}")
+    if epoch % 25 == 0 or epoch == 1:
+        print(f"Epoch {epoch:3d} | Train SR: {tr:+.3f} | Val SR: {va:+.3f}")
 
 if best_state is None:
-    raise RuntimeError("No model state available for evaluation.")
+    raise RuntimeError("Training produced no model state to evaluate.")
 
-print(f"\nBest validation Sharpe: {best_val:.3f}")
+print(f"Best validation Sharpe: {best_val:.3f}")
 
 # %% [markdown]
 # ## 11. Training Diagnostics
@@ -716,27 +577,14 @@ print(f"\nBest validation Sharpe: {best_val:.3f}")
 
 # %%
 fig, ax = plt.subplots(figsize=(10, 5))
-if train_sharpes and val_sharpes:
-    ax.plot(train_sharpes, label="Train", color=COLORS["blue"], alpha=0.8)
-    ax.plot(val_sharpes, label="Validation", color=COLORS["amber"], alpha=0.8)
-    ax.legend()
-else:
-    ax.text(
-        0.5,
-        0.5,
-        "Training history unavailable from cache",
-        ha="center",
-        va="center",
-        transform=ax.transAxes,
-    )
+ax.plot(train_sharpes, label="Train", color=COLORS["blue"], alpha=0.8)
+ax.plot(val_sharpes, label="Validation", color=COLORS["amber"], alpha=0.8)
+ax.legend()
 ax.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.5)
 ax.set_xlabel("Epoch")
 ax.set_ylabel("Pooled Sharpe")
-ax.set_title(
-    f"Validation Sharpe peaks at {best_val:.2f} before training reaches {train_sharpes[-1]:.1f}"
-)
-fig.tight_layout()
-fig.show()
+ax.set_title("The training curve keeps rising after validation Sharpe stops")
+plt.show()
 
 # %% [markdown]
 # ## 12. Out-of-Sample Evaluation
@@ -856,16 +704,10 @@ def _sharpe(r):
 vlstm_sharpe = _sharpe(vlstm_ret)
 ew_sharpe = _sharpe(eq_ret)
 iv_sharpe = _sharpe(iv_ret)
-_best_baseline = max(ew_sharpe, iv_sharpe)
-_verdict = (
-    "the zero-cost architectural edge does not survive this cost assumption"
-    if vlstm_sharpe <= _best_baseline
-    else "the architectural edge persists net of this cost assumption"
-)
-print(
-    f"At {TURNOVER_COST_BPS:.0f} bps cost, VLSTM Sharpe {vlstm_sharpe:.2f} vs "
-    f"EW {ew_sharpe:.2f} and IV {iv_sharpe:.2f}; {_verdict}."
-)
+print(f"Held-out Sharpe at the {TURNOVER_COST_BPS:.0f} bp one-way cost charged in the loss:")
+print(f"  VLSTM              {vlstm_sharpe:+.2f}")
+print(f"  Equal weight       {ew_sharpe:+.2f}")
+print(f"  Inverse volatility {iv_sharpe:+.2f}")
 
 # %% [markdown]
 # ### Equity Curves
@@ -878,18 +720,11 @@ for arr, label, color in [
     (iv_ret, "Inverse Volatility", COLORS["positive"]),
 ]:
     ax.plot(np.cumprod(1 + arr), label=label, color=color)
-sharpe_lookup = {
-    "VLSTM": vlstm_sharpe,
-    "Equal Weight": ew_sharpe,
-    "Inverse Volatility": iv_sharpe,
-}
-winner = max(sharpe_lookup, key=sharpe_lookup.get)
 ax.set_xlabel("Test Window Index")
 ax.set_ylabel("Cumulative Return")
-ax.set_title(f"{winner} leads held-out Sharpe at {sharpe_lookup[winner]:.2f} net of cost")
+ax.set_title("Held-out growth paths, net of the cost charged in the loss")
 ax.legend()
-fig.tight_layout()
-fig.show()
+plt.show()
 
 # %% [markdown]
 # **Trading implication**: If the VLSTM curve does not clear both heuristics net of the
@@ -912,7 +747,7 @@ signal_at_bounds = float(np.mean(np.abs(test_signal) > 0.9))
 axes[0].hist(test_signal.reshape(-1), bins=50, color=COLORS["blue"], alpha=0.8)
 axes[0].set_xlabel("VLSTM scalar signal $p_{i,t}$")
 axes[0].set_ylabel("Frequency")
-axes[0].set_title(f"{signal_at_bounds:.0%} of test signals sit near the tanh bounds")
+axes[0].set_title("Where the learned signal sits inside the tanh range")
 
 mean_position_change = np.abs(np.diff(vlstm_weights, axis=0)).mean(axis=1)
 axes[1].plot(
@@ -922,21 +757,22 @@ axes[1].plot(
 )
 axes[1].set_xlabel("Test Window Index")
 axes[1].set_ylabel("Mean Abs Position Change")
-axes[1].set_title(
-    f"95% of daily mean position changes stay below {np.quantile(mean_position_change, 0.95):.3f}"
-)
+axes[1].set_title("Position changes cluster low with occasional rebalancing spikes")
 axes[0].legend(["Signal"], loc="upper right")
 axes[1].legend(["Mean abs change"], loc="upper right")
 
-fig.tight_layout()
-fig.show()
+plt.show()
 
 # %% [markdown]
-# **Interpretation**: Signal concentration near zero indicates the vol-target is
-# dominating the actual exposure; a heavy-tailed signal distribution instead says the
-# network is expressing conviction and the final position is doing its job. Turnover
-# spikes that coincide with regime transitions are expected; persistent high turnover is
-# the implementation-cost risk flagged in the Saly-Kaufmann benchmark.
+# Read the left panel first. A signal distribution piled up at zero means the volatility-target
+# layer, not the network, is deciding the exposure - the scalar it is multiplying is near zero,
+# so what remains is the inverse-volatility scaling. A distribution that reaches the tanh bounds
+# means the network is taking a position, which is what makes the comparison against inverse
+# volatility informative rather than tautological.
+#
+# The right panel is where the cost lives. Occasional spikes as the signal changes sign are what
+# an allocator reacting to new information looks like; a level that stays high says the positions
+# are being churned every day, and section 15 prices what that would cost.
 
 # %% [markdown]
 # ## 14. Variable Selection Weights
@@ -960,12 +796,13 @@ ax.bar(feature_names, vsn_mean, color=COLORS["blue"])
 ax.legend(["Average VSN weight"], loc="upper right")
 ax.set_ylabel("Average VSN weight")
 top_feature = int(np.argmax(vsn_mean))
-ax.set_title(
-    f"{feature_names[top_feature]} receives {vsn_mean[top_feature]:.0%} of average VSN weight"
+print(
+    f"Largest average selection weight: {feature_names[top_feature]} at "
+    f"{vsn_mean[top_feature]:.1%}, against {1 / len(feature_names):.1%} under uniform selection."
 )
+ax.set_title("Average variable-selection weight per input feature")
 ax.set_ylim(0, max(vsn_mean.max() * 1.2, 1.0 / len(feature_names) * 2))
-fig.tight_layout()
-fig.show()
+plt.show()
 
 # %% [markdown]
 # **Finding**: A concentrated VSN distribution says the model reduced the effective
@@ -999,6 +836,26 @@ cost_df.round(2)
 
 # %% [markdown]
 # **Trading implication**: The cost grid reports only the assumptions computed in this notebook.
+
+# %% [markdown] tags=["results"]
+# ### What this run produced
+#
+# One table of held-out metrics, one cost grid, and two diagnostics of what the network learned.
+#
+# The table compares the VLSTM against the same two baselines `11_dl_portfolio_allocation` uses,
+# on the same universe and the same test window, so the difference between the two notebooks is
+# the architecture and the portfolio layer. Both charge the same one-way cost, the one the loss
+# was trained against.
+#
+# The cost grid is the number to read before the table. It recomputes each allocator's Sharpe at
+# five cost levels using the weights already produced, so it says how much of any advantage is a
+# property of the allocation and how much is a property of the cost assumed. A row that reorders
+# between 0 and 20 bps has not established an advantage; it has established one at a price.
+#
+# The signal histogram and the selection-weight bars say what the network is doing rather than
+# how it scored. A signal that never leaves the neighbourhood of zero and selection weights near
+# uniform would mean the two pieces of machinery this notebook adds are not being used, whatever
+# the Sharpe column says.
 
 # %% [markdown]
 # ## 16. Key Takeaways

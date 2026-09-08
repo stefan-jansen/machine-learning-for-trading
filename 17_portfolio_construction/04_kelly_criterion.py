@@ -71,7 +71,6 @@ from sklearn.covariance import LedoitWolf
 from sympy import diff, log, pprint, series, solve, symbols
 
 from data import load_etfs
-from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, ml4t_palette
 
@@ -220,7 +219,7 @@ for i, prob in enumerate(probabilities):
 
 # %%
 fig.update_layout(
-    title="A 55% win probability at even odds peaks at a 10% stake",
+    title="Growth peaks at an interior stake and falls away faster above it",
     xaxis_title="Bet Fraction (f)",
     yaxis_title="Expected Growth Rate",
     xaxis_tickformat=".0%",
@@ -326,10 +325,14 @@ fig.update_layout(
 )
 fig.show()
 
-print(f"\nOptimal Kelly fraction: {kelly:.1%}")
-print(
-    f"At 2x Kelly ({2 * kelly:.1%}), left-tail wealth dispersion and drawdown risk increase sharply"
-)
+print(f"Optimal Kelly fraction: {kelly:.1%}")
+print(f"Terminal wealth after {n_trials:,} bets, from ${100:.0f}:")
+for mult in kelly_multiples:
+    terminal = simulate_wealth_paths(common_outcomes, kelly * mult, odds)[-1]
+    p05, p50, p95 = np.percentile(terminal, [5, 50, 95])
+    print(
+        f"  {mult:>5.0%} Kelly   5th pct {p05:12,.2f}   median {p50:14,.2f}   95th pct {p95:16,.2f}"
+    )
 
 # %% [markdown]
 # ### Distribution of Terminal Wealth
@@ -468,7 +471,7 @@ fig.show()
 def kelly_fraction_continuous(
     mean_return: float, std_return: float, risk_free: float = 0.0
 ) -> float:
-    """Kelly fraction for normally distributed returns."""
+    """Kelly fraction from the second-order expansion of log wealth."""
     excess_return = mean_return - risk_free
     return excess_return / (std_return**2)
 
@@ -834,12 +837,20 @@ for name, pf_ret in portfolio_returns.items():
         }
     )
 
-metrics_df = pl.DataFrame(comparison_metrics).sort("sharpe", descending=True)
+metrics_df = pl.DataFrame(comparison_metrics).sort("gross_exposure", descending=True)
 metrics_df
 
 # %% [markdown]
-# Every frozen allocation remains above zero wealth over the test observations. This domain check is
-# necessary for geometric wealth and drawdown, but it does not rule out ruin on an unseen return.
+# The rows are ordered by gross exposure rather than by Sharpe ratio, because sorting this table
+# by Sharpe puts the allocation that lost the account at the top of it. That is not a quirk of the
+# sort: the Sharpe ratio divides a mean daily return by a daily standard deviation, and neither
+# term knows that the wealth path they were computed from went to nearly zero and could not have
+# been held. Read the `min_wealth_multiple` column, which is the lowest point the compounded path
+# reached, against the ratio beside it.
+#
+# Every path stays strictly above zero wealth over these observations, which is what makes the
+# logarithms and the drawdowns well defined. It is a statement about arithmetic, not about
+# survival, and it says nothing about a return worse than any in this window.
 
 # %%
 # Cumulative returns comparison
@@ -935,7 +946,9 @@ shrunk_cov = lw.covariance_ * 252
 
 kelly_shrunk = np.linalg.solve(shrunk_cov, annual_excess_returns)
 
-print("Kelly Allocation Comparison:")
+print(f"Total leverage (raw):    {np.abs(kelly_allocation).sum():.1%}")
+print(f"Total leverage (shrunk): {np.abs(kelly_shrunk).sum():.1%}")
+
 comparison = pl.DataFrame(
     {
         "symbol": assets,
@@ -943,19 +956,8 @@ comparison = pl.DataFrame(
         "kelly_shrunk": kelly_shrunk,
         "difference": kelly_allocation - kelly_shrunk,
     }
-)
-print(comparison.with_columns(pl.col(pl.Float64).round(3)))
-print(f"\nTotal leverage (raw):    {np.abs(kelly_allocation).sum():.1%}")
-print(f"Total leverage (shrunk): {np.abs(kelly_shrunk).sum():.1%}")
-
-# %%
-# Save results
-results = comparison.select("symbol", "kelly_raw", "kelly_shrunk").with_columns(
-    pl.lit(TRAIN_END).str.to_date().alias("train_end")
-)
-OUTPUT_DIR = get_output_dir(17, "kelly")
-results.write_parquet(OUTPUT_DIR / "kelly_allocations.parquet")
-print("Saved Kelly allocations to ch17_kelly/kelly_allocations.parquet")
+).with_columns(pl.col(pl.Float64).round(3))
+comparison
 
 # %% [markdown]
 # ## What the test window actually says
@@ -999,10 +1001,11 @@ print(
 #    produces a number, and nothing in it is bounded by the capital available. Any use of it in
 #    practice is the formula plus a leverage constraint, and the constraint is doing at least as
 #    much work as the formula.
-# 3. **Fractional Kelly is a cap, not a fix.** Taking a quarter of a forty-six-times solution
-#    leaves eleven times. The reason to use a fraction is that the inputs are estimated and the
-#    solution scales with the error in them; the reason it is not sufficient is that a fraction of
-#    an unbounded number is still unbounded.
+# 3. **Fractional Kelly is a cap, not a fix.** Scaling the solution scales the leverage with it,
+#    so a quarter of an unimplementable book is a quarter as unimplementable and no more. The
+#    reason to use a fraction is that the inputs are estimated and the solution scales with the
+#    error in them; the reason it is not sufficient is that a fraction of an unbounded number is
+#    still unbounded.
 # 4. **The single-asset rolling estimate is the honest picture of the input problem.** The same
 #    formula on the same instrument over rolling five-year windows swings across a range no
 #    position sizer could act on. That instability is the estimate, not the market.
@@ -1017,8 +1020,9 @@ print(
 #   rate, a leverage cap, or a liquidation rule changes every result in Part 3.
 # - Inputs are estimated once on the training window and frozen. A rolling re-estimate would change
 #   the position sizes continuously, and the rolling-Kelly section shows by how much.
-# - Returns are treated as normal, which is what makes the mean-over-variance approximation valid.
-#   Real returns have fat tails, and the tail is exactly where a leveraged position dies.
+# - The mean-over-variance form keeps the expansion of the logarithm only to the squared term. It
+#   is accurate while the leveraged returns entering that logarithm are small, and leverage is what
+#   makes them large, so the approximation is weakest exactly where it is being used hardest.
 # - The universe is a small set of funds selected because they exist today.
 #
 # **Next:** [`05_factor_allocation_evidence`](05_factor_allocation_evidence.ipynb) asks whether

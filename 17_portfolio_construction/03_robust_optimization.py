@@ -55,10 +55,6 @@
 # %%
 """Compare Riskfolio-Lib allocators with Ledoit-Wolf shrinkage, risk contributions, rolling Sharpe, and an execution bridge."""
 
-import warnings
-
-warnings.filterwarnings("ignore")
-
 import cvxpy.reductions.matrix_stuffing as cvxpy_matrix_stuffing
 import numpy as np
 import pandas as pd
@@ -204,7 +200,10 @@ heatmap_values = np.where(mask, np.nan, corr_values)
 heatmap_text = np.where(mask, "", np.round(corr_values, 2).astype(str))
 off_diagonal = corr_matrix.where(~np.eye(len(corr_matrix), dtype=bool)).stack()
 strongest_pair = off_diagonal.idxmax()
-strongest_corr = float(off_diagonal.max())
+print(
+    f"Most correlated pair: {ETF_UNIVERSE[strongest_pair[0]]} and "
+    f"{ETF_UNIVERSE[strongest_pair[1]]}, at {float(off_diagonal.max()):.2f}"
+)
 
 fig = go.Figure(
     data=go.Heatmap(
@@ -231,15 +230,14 @@ fig.update_layout(
 fig.show()
 
 # %% [markdown]
-# ## 3. Portfolio Optimization Setup
+# ## 3. Six allocations, and what each one has to estimate
 #
-# Riskfolio-Lib receives pandas only at its API boundary. Historical expected returns
-# and Ledoit-Wolf covariance are estimated on the training window; the hurdle is zero.
-
-# %% [markdown]
-# ## 4. Optimization Methods Comparison
+# All six are fitted on the training window and never see a test observation. Expected returns,
+# where a method needs them, are the training-window sample means; the covariance, where a method
+# needs one, is the Ledoit-Wolf shrunk estimate rather than the raw sample matrix. The hurdle rate
+# is zero throughout, so every Sharpe ratio below is a raw return-to-risk ratio.
 #
-# We compare six portfolio optimization approaches. The risk parity objective minimizes
+# The risk parity objective minimizes
 # the dispersion of risk contributions:
 #
 # $$\min_w \sum_{i=1}^{N} \left( w_i \cdot (\Sigma w)_i - \frac{w^\top \Sigma w}{N} \right)^2$$
@@ -247,12 +245,23 @@ fig.show()
 # where $(\Sigma w)_i$ is asset $i$'s marginal risk contribution. At optimality, each asset
 # contributes equally to portfolio variance.
 #
-# 1. **Mean-Variance (Max Sharpe)**
-# 2. **Minimum Variance**
-# 3. **Risk Parity (ERC)**
-# 4. **Hierarchical Risk Parity (HRP)**
-# 5. **Min CDaR** (tail-risk optimization)
-# 6. **Equal Weight (Benchmark)**
+# 1. **Mean-Variance (Max Sharpe)** needs both inputs: the expected-return vector and the
+#    covariance.
+# 2. **Minimum Variance** needs the covariance only.
+# 3. **Risk Parity**, also called equal risk contribution, needs the covariance only.
+# 4. **Hierarchical Risk Parity (HRP)** needs the covariance only, and reads it as a tree of
+#    correlation clusters rather than inverting it. `06_hierarchical_risk_parity` builds it from
+#    parts; here it is one more allocator in the comparison.
+# 5. **Min CDaR** needs neither. **Conditional drawdown at risk** is the average of the worst
+#    drawdowns a return path went through - the tail of the drawdown distribution rather than of
+#    the return distribution - and minimizing it works directly on the realized path, not on a
+#    covariance estimate.
+# 6. **Equal Weight** needs nothing at all, and is the benchmark the other five have to beat.
+#
+# Riskfolio-Lib names an objective by a pair of strings, a risk measure and what to do with it, so
+# the table below is the translation from four of those six into the calls that produce them.
+# Hierarchical risk parity takes a different entry point and equal weight needs no solver, so both
+# are handled separately in the function underneath.
 
 
 # %%
@@ -280,12 +289,6 @@ OPTIMIZATION_SPECS = {
         ),
     },
 }
-
-
-# %% [markdown]
-# Riskfolio-Lib names each objective by a pair of strings - a risk measure and what to do with
-# it - so the table below is the translation from the six methods named above into the calls that
-# produce them.
 
 
 # %%
@@ -505,8 +508,6 @@ for col in cumulative.columns:
         )
     )
 
-final_growth = cumulative.iloc[-1]
-growth_leader = str(final_growth.idxmax())
 fig.update_layout(
     title="Every weight here was fixed before the window it is scored on",
     xaxis_title="Date",
@@ -703,6 +704,8 @@ for label, column in bridge_columns.items():
 annual_cost_gap = (
     bridge_stats["Zero-cost engine"].annual_return - bridge_stats["Cost-aware engine"].annual_return
 )
+print(f"Annualized return given up to commission and slippage: {annual_cost_gap:.2%}")
+
 fig.update_layout(
     title="What the declared trading costs take out of the same allocation",
     xaxis_title="Date",
@@ -807,8 +810,21 @@ for col in drawdowns.columns:
 
 max_drawdowns = drawdowns.min()
 shallowest_name = str(max_drawdowns.idxmax())
+deepest_name = str(max_drawdowns.idxmin())
+returns_by_name = {
+    row["portfolio"]: row["annual_return"] for row in metrics_df.iter_rows(named=True)
+}
+print(
+    f"Shallowest fall: {shallowest_name} at {max_drawdowns[shallowest_name]:.1%}, "
+    f"annualized return {returns_by_name[shallowest_name]:.2%}"
+)
+print(
+    f"Deepest fall:    {deepest_name} at {max_drawdowns[deepest_name]:.1%}, "
+    f"annualized return {returns_by_name[deepest_name]:.2%}"
+)
+
 fig.update_layout(
-    title="The shallowest fall belongs to the allocation that earned least",
+    title="Shallower drawdowns are bought with return, not gained for free",
     xaxis_title="Date",
     yaxis_title="Drawdown (%)",
     height=450,
@@ -817,10 +833,10 @@ fig.update_layout(
 fig.show()
 
 # %% [markdown]
-# Zero is each allocation's own running peak, so every curve is at or below it. Read it against
-# the Sharpe column above and the trade is plain: the allocation with the shallowest fall is also
-# the one that earned least, and the one that earned most fell furthest. Nothing here is free, and
-# which end of that trade a holder wants is not a question the data answers.
+# Zero is each allocation's own running peak, so every curve is at or below it. The two lines
+# printed above the chart pair each extreme with what it returned, which is the comparison to
+# make: an allocation is not better for falling less if the reason it fell less is that it held
+# less of what moved. Which end of that trade a holder wants is not a question the data answers.
 
 # %% [markdown]
 # ## 9. Risk Contribution Analysis
@@ -870,6 +886,11 @@ if not np.allclose(rc_table["Risk Parity"].sum(), 100.0, atol=1e-6):
 rc_values = rc_table.to_numpy().T
 target_contribution = 100 / len(SYMBOLS)
 rp_max_deviation = float(np.abs(rc_table["Risk Parity"].to_numpy() - target_contribution).max())
+print(
+    f"Risk parity's target share is {target_contribution:.2f}% per asset; its largest deviation "
+    f"from that target in sample is {rp_max_deviation:.2f} percentage points."
+)
+
 fig = go.Figure(
     data=go.Heatmap(
         z=rc_values,

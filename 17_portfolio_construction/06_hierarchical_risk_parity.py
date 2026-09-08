@@ -337,57 +337,9 @@ add_message_title(
 plt.show()
 
 # %% [markdown]
-# ### The hierarchy the algorithm builds
-
-
-# %%
-def plotly_dendrogram(link, labels, title="Asset Hierarchy"):
-    """Create interactive dendrogram with Plotly."""
-    # Get dendrogram coordinates
-    dn = dendrogram(link, labels=labels, no_plot=True)
-
-    # Create traces
-    traces = []
-    for i in range(len(dn["icoord"])):
-        traces.append(
-            go.Scatter(
-                x=dn["icoord"][i],
-                y=dn["dcoord"][i],
-                mode="lines",
-                line=dict(color=COLORS["blue"], width=1.5),
-                hoverinfo="skip",
-            )
-        )
-
-    # Create figure
-    fig = go.Figure(data=traces)
-
-    # Add labels at bottom
-    fig.update_layout(
-        title=title,
-        xaxis=dict(
-            tickmode="array",
-            tickvals=list(range(5, 10 * len(labels), 10)),
-            ticktext=[labels[i] for i in dn["leaves"]],
-            tickangle=45,
-            title="ETF",
-        ),
-        yaxis_title="Correlation Distance",
-        height=500,
-        showlegend=False,
-    )
-
-    return fig
-
-
-# %% [markdown]
-
-# %%
-labels = [ETF_UNIVERSE.get(s, s) for s in returns.columns]
-fig = plotly_dendrogram(
-    link, labels, "ETF correlations form distinct defensive and equity branches"
-)
-fig.show()
+# Read the tree from the leaves upward. Two ETFs joined low down moved together over this history;
+# the height at which two branches merge is the correlation distance between them. That height is
+# what step 2 uses to order the assets and what step 3 splits on.
 
 # %% [markdown]
 # ## 6. Quasi-Diagonal Covariance Matrix
@@ -987,8 +939,6 @@ for name in portfolio_returns.columns:
         }
     )
 
-# %% [markdown]
-
 # %%
 metrics_df = pd.DataFrame(metrics_list)
 metrics_df = metrics_df[
@@ -1155,10 +1105,8 @@ for col, color in zip(
 
 fig.add_hline(y=1.0, line_dash="dot", line_color=COLORS["neutral"])
 
-best_method = metrics_df.loc[metrics_df["Sharpe Ratio"].idxmax(), "Method"]
-
 fig.update_layout(
-    title=f"{best_method} leads gross Sharpe in the allocation comparison",
+    title="Four allocators over the same monthly selection, gross of costs",
     xaxis_title="Date",
     yaxis_title="Growth of $1",
     height=500,
@@ -1276,17 +1224,20 @@ print(f"HRP rank by Sharpe: {int(ranked.index[ranked['Method'] == 'HRP'][0]) + 1
 print(f"Assets: {n_assets}   estimation window: 252 days   assets selected each month: 5")
 
 # %% [markdown] tags=["results"]
-# HRP ranks last. That is the result, and the reason for it is specific.
+# The ranking printed above splits the four allocators by how much of the covariance each one
+# uses, and the reason is specific.
 #
 # The argument for HRP is that inverting a noisy covariance matrix amplifies estimation error.
 # The argument has force when the estimate is badly under-determined, which means when the number
 # of assets approaches or exceeds the number of observations. This comparison is the opposite
 # case: five selected assets estimated over 252 daily observations. At that ratio the sample
 # covariance is well conditioned, its inverse is not dominated by noise, and Ledoit-Wolf shrinkage
-# cleans up what error remains. HRP uses the correlations only to order the assets and choose the
-# splits; the weights themselves come from variances. It therefore declines to solve for the
-# covariance-optimal allocation, and here it is paying that price to avoid an ill-conditioning
-# problem that this estimate does not have.
+# cleans up what error remains - so the allocator that does invert it comes out ahead of the one
+# that declines to. HRP in turn comes out ahead of inverse volatility and equal weight, which use
+# no correlation information at all: it reads the correlations to order the assets and choose the
+# splits, and takes the weights from variances alone. The ordering across the four is therefore
+# the ordering of how much of the second moment each allocator is willing to use, which is the
+# ordering to expect precisely when the estimate is good enough to use.
 #
 # The turnover column refuses a second common claim. Clustering is often described as producing
 # more stable allocations; here HRP turns over more than equal weight and more than inverse
@@ -1355,5 +1306,5 @@ else:
 #    and become effective on the next bar; the execution bridge shows what commissions and
 #    slippage do to the vectorized result.
 #
-# **Next**: Continue with [`09_allocator_comparison`](09_allocator_comparison.ipynb) for a
-# controlled comparison under common signal and execution assumptions.
+# **Next**: [`07_conformal_position_sizing`](07_conformal_position_sizing.ipynb) sizes positions
+# from the width of a prediction interval rather than from a covariance matrix.

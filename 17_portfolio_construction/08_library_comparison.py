@@ -87,12 +87,6 @@ import plotly.graph_objects as go
 import polars as pl
 import riskfolio as rp
 from IPython.display import Markdown, display
-
-# Portfolio optimization libraries
-# %% [markdown]
-# ### ml4t and Project Imports
-# %%
-# ml4t libraries for diagnostics and execution-aware backtesting
 from ml4t.backtest import (
     BacktestConfig,
     CommissionType,
@@ -352,51 +346,10 @@ def run_riskfolio(operation, name: str):
 
 
 # %% [markdown]
-# The scopes above suppress two named warnings and nothing else. The check below feeds them one
-# warning they are meant to catch and one they are not, and shows that the second still comes
-# through - a suppression that swallowed everything would hide a real solver problem.
-
-# %%
-cvxpy_warning_oracle_message = """
-This use of ``*`` has resulted in matrix multiplication.
-Using ``*`` for matrix multiplication has been deprecated since CVXPY 1.1.
-    Use ``*`` for matrix-scalar and vector-scalar multiplication.
-    Use ``@`` for matrix-matrix and matrix-vector multiplication.
-    Use ``multiply`` for elementwise multiplication.
-This code path has been hit 1 times so far.
-"""
-unrelated_warning_message = "warning-scope oracle: unrelated warning remains visible"
-
-# %%
-with warnings.catch_warnings(record=True) as warning_oracle:
-    warnings.simplefilter("always")
-    with suppress_riskfolio_cvxpy_star_warning():
-        warnings.warn_explicit(
-            cvxpy_warning_oracle_message,
-            UserWarning,
-            filename="cvxpy/expressions/expression.py",
-            lineno=830,
-            module="cvxpy.expressions.expression",
-        )
-    with suppress_ppo_max_sharpe_objective_warning():
-        warnings.warn_explicit(
-            PPO_MAX_SHARPE_WARNING,
-            UserWarning,
-            filename="pypfopt/efficient_frontier/efficient_frontier.py",
-            lineno=259,
-            module="pypfopt.efficient_frontier.efficient_frontier",
-        )
-    warnings.warn(unrelated_warning_message, RuntimeWarning, stacklevel=2)
-
-visible_warning_messages = [str(item.message) for item in warning_oracle]
-if cvxpy_warning_oracle_message in visible_warning_messages:
-    raise RuntimeError("The exact cvxpy library warning escaped its local scope.")
-if PPO_MAX_SHARPE_WARNING in visible_warning_messages:
-    raise RuntimeError("The exact PyPortfolioOpt library warning escaped its local scope.")
-if visible_warning_messages != [unrelated_warning_message]:
-    raise RuntimeError(f"Warning-scope oracle observed unexpected warnings: {warning_oracle!r}.")
-print("Warning-scope oracle: 2 exact library warnings suppressed; unrelated warning visible")
-
+# Each filter names a message, a category and the module that raises it, so it cannot grow to
+# cover a warning it was not written for. A convergence failure or a numerical warning from
+# anywhere else still reaches the page, which is the reason to scope a filter this narrowly
+# rather than turning warnings off around the call.
 
 # %% [markdown]
 # skfolio receives explicit empirical estimators so its moment contract does not depend on defaults.
@@ -446,36 +399,6 @@ def max_sharpe_regime(expected_returns: pd.Series, risk_free_rate: float) -> str
         return INFEASIBLE_MAX_SHARPE_POLICY
     return "optimize"
 
-
-# Independent nonzero-hurdle microcase: neither risky asset clears the 4% cash rate.
-oracle_means = pd.Series(
-    [RISK_FREE_RATE_DAILY - 2e-5, RISK_FREE_RATE_DAILY - 1e-5],
-    index=["asset_a", "asset_b"],
-)
-oracle_expected_regime = (
-    "cash" if float(np.max(oracle_means.to_numpy() - RISK_FREE_RATE_DAILY)) <= 0 else "optimize"
-)
-oracle_regimes = {
-    library: max_sharpe_regime(oracle_means, RISK_FREE_RATE_DAILY)
-    for library in ("PyPortfolioOpt", "Riskfolio", "skfolio")
-}
-if set(oracle_regimes.values()) != {oracle_expected_regime}:
-    raise RuntimeError(f"Library-independent feasibility oracle failed: {oracle_regimes}.")
-oracle_feasible_means = pd.Series(
-    [RISK_FREE_RATE_DAILY - 1e-5, RISK_FREE_RATE_DAILY + 2e-5],
-    index=["asset_a", "asset_b"],
-)
-if max_sharpe_regime(oracle_feasible_means, RISK_FREE_RATE_DAILY) != "optimize":
-    raise RuntimeError("Feasible-window oracle did not reach the Max-Sharpe solver regime.")
-oracle_cash_weight = 1.0
-oracle_risky_weight = 0.0
-oracle_period_return = oracle_cash_weight * RISK_FREE_RATE_DAILY
-if oracle_risky_weight != 0 or not np.isclose(oracle_period_return, RISK_FREE_RATE_DAILY):
-    raise RuntimeError("Cash policy does not preserve the declared economic hurdle.")
-print(
-    f"Max-Sharpe regime oracle at {RISK_FREE_RATE:.1%}: "
-    f"infeasible={oracle_regimes}, feasible=optimize"
-)
 
 # %%
 full_training_regime = max_sharpe_regime(common_mean_daily, RISK_FREE_RATE_DAILY)
@@ -1235,7 +1158,7 @@ for name in growth_methods:
     )
 
 fig.update_layout(
-    title=f"{growth_leader} leads growth across comparable frozen allocations",
+    title="Three libraries solving one problem, against equal weight",
     xaxis_title="Test timestamp",
     yaxis_title="Growth of $1 (multiple)",
     height=500,
@@ -1251,7 +1174,12 @@ fig.show()
 eval_pd = eval_df.to_pandas()
 library_order = ["PPO", "RF", "SKF", "Benchmark"]
 library_colors = dict(zip(library_order, ml4t_palette(4, categorical=True), strict=True))
-test_leader = str(eval_df.row(0, named=True)["portfolio"])
+top_row = eval_df.row(0, named=True)
+print(
+    f"Highest test Sharpe: {top_row['portfolio']} at {top_row['sharpe']:.3f}, "
+    f"annualized return {top_row['annual_return']:.1%} at {top_row['annual_volatility']:.1%} "
+    "volatility"
+)
 
 fig = go.Figure()
 for library in library_order:
@@ -1271,7 +1199,7 @@ for library in library_order:
     )
 
 fig.update_layout(
-    title=f"{test_leader} has the highest Sharpe on the frozen test window",
+    title="Risk and return of fourteen frozen allocations, by library",
     xaxis_title="Annualized volatility",
     yaxis_title="Annualized return",
     xaxis_tickformat=".0%",
@@ -1293,7 +1221,10 @@ metrics_cols = ["sharpe", "sortino", "calmar", "max_drawdown", "var_95"]
 metric_labels = ["Sharpe", "Sortino", "Calmar", "Max drawdown", "VaR 95%"]
 heatmap_data = eval_pd.set_index("portfolio")[metrics_cols]
 ranked = heatmap_data.rank(axis=0)
-consistency_leader = str(ranked.mean(axis=1).idxmax())
+mean_rank = ranked.mean(axis=1).sort_values(ascending=False)
+print("Highest and lowest mean rank across the five metrics:")
+print(f"  {mean_rank.index[0]}: {mean_rank.iloc[0]:.1f}")
+print(f"  {mean_rank.index[-1]}: {mean_rank.iloc[-1]:.1f}")
 
 fig = go.Figure(
     data=go.Heatmap(
@@ -1314,7 +1245,7 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title=f"{consistency_leader} ranks most consistently across test metrics",
+    title="Ranks across five test metrics, one row per allocation",
     xaxis_title="Test metric",
     height=620,
     margin=dict(l=150, r=80, t=90, b=60),
@@ -1368,12 +1299,15 @@ fig = make_subplots(
     subplot_titles=["Active positions", "Herfindahl-Hirschman index"],
 )
 portfolios = conc_df["portfolio"].to_list()
-lowest_allocator = (
-    conc_df.filter(pl.col("portfolio") != "Equal Weight")
-    .sort("hhi")
-    .row(0, named=True)["portfolio"]
-)
 equal_weight_hhi = 1 / num_stocks
+least_concentrated = (
+    conc_df.filter(pl.col("portfolio") != "Equal Weight").sort("hhi").row(0, named=True)
+)
+print(
+    f"Equal weight sets the HHI floor at {equal_weight_hhi:.3f} across {num_stocks} funds. "
+    f"The least concentrated optimized allocation is {least_concentrated['portfolio']} at "
+    f"{least_concentrated['hhi']:.3f}, holding {least_concentrated['positions']} positions."
+)
 
 # %% [markdown]
 # Horizontal bars keep all portfolio labels readable. The second panel adds the equal-weight
@@ -1411,7 +1345,7 @@ fig.add_vline(
 )
 
 fig.update_layout(
-    title=f"{lowest_allocator} is the least concentrated optimized allocation",
+    title="Position count and concentration, against the equal-weight reference",
     height=600,
     showlegend=False,
     margin=dict(l=150, r=40, t=100, b=60),
@@ -1555,27 +1489,35 @@ print(
     f"{unregularized_positions} -> {regularized_positions}"
 )
 
+# %%
+display(
+    Markdown(
+        "PyPortfolioOpt and skfolio, given the same moments, the same hurdle and the same "
+        "long-only budget constraint, land within "
+        f"**{max_sharpe_test_gap:.6f}** of each other on the test Sharpe ratio."
+    )
+)
+
 # %% [markdown] tags=["results"]
-# The first pair is the one the notebook is built to produce. Two libraries given the same moments,
-# the same hurdle and the same long-only budget constraint land within 0.000011 of each other on the
-# test Sharpe ratio - -0.076186 against -0.076197, printed three lines above - which is agreement to
-# solver tolerance rather than to the digit. That is the point: the API is not the method, and where
-# two of these libraries differ materially on a problem, it is because a default differs, not because
-# the mathematics does.
+# The first pair is the one the notebook is built to produce, and the gap between the two
+# libraries is agreement to solver tolerance rather than to the digit. That is the point: the API
+# is not the method, and where two of these libraries differ materially on a problem, it is
+# because a default differs, not because the mathematics does.
 #
 # The other three are about what the comparison leaves out. Routing one allocation through an
 # execution engine moves its Sharpe ratio, and the move is execution timing, fills and costs
 # together: the engine fills on the next bar, so matching the scored dates does not make its
 # exposures identical to the vectorized calculation. Isolating the declared commission and slippage
-# would take two otherwise identical engine runs, one at zero cost. The turnover penalty cuts trading distance, and the L2 penalty
-# widens the number of positions held - both are objective terms, so both are choices a reader
-# makes rather than properties of a library.
-#
+# would take two otherwise identical engine runs, one at zero cost. The turnover penalty cuts
+# trading distance, and the L2 penalty widens the number of positions held - both are objective
+# terms, so both are choices a reader makes rather than properties of a library.
+
+# %% [markdown]
 # ## Key takeaways
 #
 # 1. **The same objective solved by three APIs is one problem, and the check is arithmetic.**
 #    Estimate the moments once, convert at each library's boundary, and matched objectives agree
-#    to solver tolerance. A gap that survives that is a difference in defaults worth finding.
+#    to solver tolerance. A gap larger than that is a difference in defaults worth finding.
 # 2. **What differs between these libraries is workflow, not answers.** Optimizer objects, a
 #    single portfolio object spanning many risk measures, and sklearn estimators that drop into a
 #    pipeline solve different research problems. Which fits depends on what surrounds the

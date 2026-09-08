@@ -46,9 +46,7 @@
 # %%
 """Deep Learning for Portfolio Optimization - train a differentiable Sharpe-maximizing neural network allocator."""
 
-import hashlib
 import os
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -59,7 +57,6 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
 from data import load_etfs
-from utils.paths import get_chapter_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS
 
@@ -70,95 +67,11 @@ N_EPOCHS = 200
 SEQ_LEN = 63  # ~3 months lookback
 HIDDEN_DIM = 64
 SEED = 42
-# Cache use is opt-in so a clean production run cannot silently reuse a stale checkpoint.
-USE_CACHED_MODEL_IF_AVAILABLE = os.environ.get("ML4T_ALLOW_MODEL_CACHE", "0") == "1"
-SAVE_TRAINED_MODEL_TO_CACHE = os.environ.get("ML4T_SAVE_MODEL_CACHE", "0") == "1"
-ML4T_SOURCE_BLOB = os.environ.get("ML4T_SOURCE_BLOB", "")
-if (USE_CACHED_MODEL_IF_AVAILABLE or SAVE_TRAINED_MODEL_TO_CACHE) and (
-    len(ML4T_SOURCE_BLOB) != 40
-    or any(c not in "0123456789abcdef" for c in ML4T_SOURCE_BLOB.lower())
-):
-    raise RuntimeError("ML4T_SOURCE_BLOB must be a 40-hex identity when cache is enabled")
-
-# %%
-OUTPUT_DIR = get_output_dir(17, "dl_portfolio_allocation")
-OUTPUT_DIR.mkdir(exist_ok=True)
-MODEL_CACHE_PATH = OUTPUT_DIR / "lstm_portfolio_cache.pt"
-CANONICAL_OUTPUT_DIR = get_chapter_dir(17) / "output" / "dl_portfolio_allocation"
-if SAVE_TRAINED_MODEL_TO_CACHE:
-    CANONICAL_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-CANONICAL_MODEL_CACHE_PATH = CANONICAL_OUTPUT_DIR / "lstm_portfolio_cache.pt"
 
 # %% [markdown]
-# ### Cache Search Order
-#
-# Training is expensive, so the notebook checks both the notebook-local output
-# directory and the canonical chapter cache before retraining.
-
-
-# %%
-def iter_cache_candidates(*paths: Path):
-    """Yield unique cache paths in priority order."""
-    seen: set[Path] = set()
-    for path in paths:
-        resolved = path.resolve()
-        if resolved not in seen:
-            seen.add(resolved)
-            yield path
-
-
-# %% [markdown]
-# ### Checkpoint Compatibility
-#
-# Cached weights are reused only when both parameter names and tensor shapes
-# match the current model definition.
-
-
-# %%
-def state_dict_is_compatible(model: nn.Module, state_dict: dict) -> tuple[bool, str]:
-    """Return whether a cached state dict matches the current model layout."""
-    if not isinstance(state_dict, dict):
-        return False, "cache payload has no valid state_dict"
-
-    expected = model.state_dict()
-    expected_keys = set(expected.keys())
-    got_keys = set(state_dict.keys())
-    if expected_keys != got_keys:
-        missing = sorted(expected_keys - got_keys)
-        extra = sorted(got_keys - expected_keys)
-        parts = []
-        if missing:
-            parts.append(f"missing keys: {missing[:3]}")
-        if extra:
-            parts.append(f"unexpected keys: {extra[:3]}")
-        return False, "; ".join(parts)
-
-    mismatch = next(
-        (
-            f"{key} expected {tuple(expected_tensor.shape)} got "
-            f"{tuple(cached_shape) if cached_shape is not None else None}"
-            for key, expected_tensor in expected.items()
-            if (cached_shape := getattr(state_dict[key], "shape", None)) != expected_tensor.shape
-        ),
-        None,
-    )
-    if mismatch:
-        return False, f"shape mismatch ({mismatch})"
-
-    return True, ""
-
-
-# %% [markdown]
-# Cache provenance must match every input that can change learned weights.
-
-
-# %%
-def cache_provenance_is_compatible(payload: dict) -> bool:
-    return payload.get("provenance") == expected_cache_provenance
-
-
-# %% [markdown]
-# One-way turnover counts half the absolute change for fully invested weights.
+# One-way turnover counts half the absolute change for fully invested weights: a book that
+# sells one position entirely and buys another in its place has changed weights by two in
+# absolute terms and has traded once.
 
 
 # %%
@@ -167,36 +80,14 @@ def one_way_turnover(delta):
 
 
 # %% [markdown]
-# The stable data identity binds index order, universe order, and price values.
-
-
-# %%
-def stable_data_hash(frame):
-    h = hashlib.sha256()
-    h.update("|".join(frame.index.astype(str)).encode())
-    h.update(b"\0")
-    h.update("|".join(map(str, frame.columns)).encode())
-    h.update(np.ascontiguousarray(frame.to_numpy()).tobytes())
-    return h.hexdigest()
-
-
-# %% [markdown]
-# ### Test-Output Bootstrap Guard
+# ### Determinism
 #
-# In Papermill runs the first pass may not have a cached checkpoint yet, so we
-# temporarily shorten training just enough to build the initial cache artifact.
+# Training a network twice on the same data gives the same weights only if every source of
+# randomness is pinned. `set_global_seeds` covers Python, NumPy and Torch; the two cuDNN
+# settings and the cuBLAS workspace variable below cover the GPU kernels, which otherwise
+# choose an algorithm by timing and so vary run to run.
 
 # %%
-IN_TEST_OUTPUT_MODE = os.environ.get("ML4T_TEST_MODE") == "1"
-if IN_TEST_OUTPUT_MODE:
-    cache_exists = any(
-        path.exists()
-        for path in iter_cache_candidates(MODEL_CACHE_PATH, CANONICAL_MODEL_CACHE_PATH)
-    )
-    if not cache_exists:
-        N_EPOCHS = min(N_EPOCHS, 20)
-        print(f"Bootstrap cache mode: N_EPOCHS reduced to {N_EPOCHS}")
-
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Device: {DEVICE}")
 
@@ -457,12 +348,6 @@ def annualized_sharpe(returns_tensor, annualization=252.0):
     return float((annualization**0.5) * returns_tensor.mean() / (returns_tensor.std() + 1e-8))
 
 
-def pooled_sharpe_oracle(returns_tensor):
-    """Independent direct pooled-Sharpe calculation used by the Gate-0 oracle."""
-    values = returns_tensor.detach().cpu().numpy().reshape(-1)
-    return float(np.sqrt(252.0) * values.mean() / (values.std() + 1e-8))
-
-
 # %% [markdown]
 # ### One-Epoch Update
 
@@ -516,104 +401,48 @@ train_sharpes = []
 val_sharpes = []
 best_val_sharpe = -np.inf
 best_state = None
-loaded_from_cache = False
-expected_cache_provenance = {
-    "source_py_blob": os.environ.get("ML4T_SOURCE_BLOB", ""),
-    "data_hash": stable_data_hash(prices),
-    "universe": list(UNIVERSE),
-    "split": [int(train_end), int(val_end)],
-    "seed": int(SEED),
-    "config": {"epochs": int(N_EPOCHS), "seq_len": int(SEQ_LEN), "hidden": int(HIDDEN_DIM)},
-}
 
-if USE_CACHED_MODEL_IF_AVAILABLE:
-    for cache_path in iter_cache_candidates(MODEL_CACHE_PATH, CANONICAL_MODEL_CACHE_PATH):
-        if not cache_path.exists():
-            continue
-        cache_payload = torch.load(cache_path, map_location="cpu")
-        if isinstance(cache_payload, dict) and "best_state" in cache_payload:
-            if not cache_provenance_is_compatible(cache_payload):
-                print(f"Skipping cache at {cache_path}: provenance metadata missing")
-                continue
-            candidate_state = cache_payload["best_state"]
-            is_compatible, reason = state_dict_is_compatible(model, candidate_state)
-            if not is_compatible:
-                print(f"Skipping incompatible cache at {cache_path}: {reason}")
-                continue
-            best_state = candidate_state
-            train_sharpes = list(cache_payload.get("train_sharpes", []))
-            val_sharpes = list(cache_payload.get("val_sharpes", []))
-            best_val_sharpe = float(cache_payload.get("best_val_sharpe", np.nan))
-            loaded_from_cache = True
-            print(f"Loaded cached model from {cache_path}")
-            break
+print(f"Training for {N_EPOCHS} epochs...")
+for epoch in range(1, N_EPOCHS + 1):
+    train_sr = train_one_epoch(train_loader, model, optimizer)
+    train_sharpes.append(train_sr)
+    scheduler.step()
 
-# %%
-if not loaded_from_cache:
-    print(f"Training for {N_EPOCHS} epochs (cache miss)...")
-    for epoch in range(1, N_EPOCHS + 1):
-        train_sr = train_one_epoch(train_loader, model, optimizer)
-        train_sharpes.append(train_sr)
-        scheduler.step()
+    val_sr = evaluate_sharpe(val_loader, model)
+    val_sharpes.append(val_sr)
 
-        val_sr = evaluate_sharpe(val_loader, model)
-        val_sharpes.append(val_sr)
+    if val_sr > best_val_sharpe:
+        best_val_sharpe = val_sr
+        best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
-        if val_sr > best_val_sharpe:
-            best_val_sharpe = val_sr
-            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-
-        if epoch % 25 == 0 or epoch == 1:
-            print(f"Epoch {epoch:3d} | Train SR: {train_sr:+.3f} | Val SR: {val_sr:+.3f}")
-
-# %%
-if SAVE_TRAINED_MODEL_TO_CACHE and not loaded_from_cache and best_state is not None:
-    cache_payload = {
-        "best_state": best_state,
-        "train_sharpes": train_sharpes,
-        "val_sharpes": val_sharpes,
-        "best_val_sharpe": best_val_sharpe,
-        "provenance": expected_cache_provenance,
-    }
-    torch.save(cache_payload, MODEL_CACHE_PATH)
-    print(f"Saved trained model cache to {MODEL_CACHE_PATH}")
-    if MODEL_CACHE_PATH.resolve() != CANONICAL_MODEL_CACHE_PATH.resolve():
-        torch.save(cache_payload, CANONICAL_MODEL_CACHE_PATH)
-        print(f"Saved trained model cache to {CANONICAL_MODEL_CACHE_PATH}")
+    if epoch % 25 == 0 or epoch == 1:
+        print(f"Epoch {epoch:3d} | Train SR: {train_sr:+.3f} | Val SR: {val_sr:+.3f}")
 
 if best_state is None:
-    raise RuntimeError("No model state available for evaluation.")
+    raise RuntimeError("Training produced no model state to evaluate.")
 
-print(f"\nBest validation Sharpe: {best_val_sharpe:.3f}")
+print(f"Best validation Sharpe: {best_val_sharpe:.3f}")
 
 # %% [markdown]
 # ## 9. Training Diagnostics
 
 # %%
 fig, ax = plt.subplots(figsize=(10, 5))
-if train_sharpes and val_sharpes:
-    ax.plot(train_sharpes, label="Train", color=COLORS["blue"], alpha=0.7)
-    ax.plot(val_sharpes, label="Validation", color=COLORS["amber"], alpha=0.7)
-    ax.legend()
-else:
-    ax.text(
-        0.5,
-        0.5,
-        "Training history unavailable from cache",
-        ha="center",
-        va="center",
-        transform=ax.transAxes,
-    )
+ax.plot(train_sharpes, label="Train", color=COLORS["blue"], alpha=0.7)
+ax.plot(val_sharpes, label="Validation", color=COLORS["amber"], alpha=0.7)
+ax.legend()
 ax.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.5)
 ax.set_xlabel("Epoch")
 ax.set_ylabel("Sharpe Ratio")
-ax.set_title(f"Validation Sharpe peaks at {best_val_sharpe:.2f} across {len(val_sharpes)} epochs")
-fig.tight_layout()
-fig.show()
+ax.set_title("Training Sharpe rises past validation Sharpe as the fit tightens")
+plt.show()
 
 # %% [markdown]
-# **Finding**: Cache-first execution eliminates repeated training cost when the architecture and
-# data pipeline are unchanged, while preserving a retrain path for fresh experiments.
+# The two curves answer different questions. The training curve says how well the network fits
+# the window it is optimizing on, and it can be driven up indefinitely. The validation curve says
+# whether that fit carries to dates the optimizer never saw, and it is the one the epoch is
+# selected on. Where they separate is where further training is buying fit rather than
+# generalization.
 
 # %% [markdown]
 # ## 10. Out-of-Sample Evaluation
@@ -708,10 +537,15 @@ results = pd.DataFrame(
 results
 
 # %% [markdown]
-# **Finding**: The LSTM portfolio achieves the lowest volatility and drawdown but a lower
-# Sharpe ratio than both baselines, indicating it learned a conservative allocation that
-# does not compensate for its reduced return. Validating end-to-end allocators against
-# simple heuristics is essential before deploying added complexity.
+# Read the four columns together rather than ranking on the Sharpe column. The loss the network
+# minimized is the negative Sharpe ratio of its own training window, so the training objective
+# and the evaluation metric are the same quantity measured on different dates - which makes the
+# gap between them a statement about generalization and nothing else.
+#
+# The comparison that matters is against the two baselines, because neither estimates anything a
+# sample can get wrong: equal weight reads no data at all, and inverse volatility reads only each
+# asset's own variance. A learned allocator has to beat those to have earned the machinery, and
+# the table says whether it did on these dates.
 
 # %% [markdown]
 # ### Equity Curves
@@ -729,8 +563,7 @@ ax.set_xlabel("Test Window Index")
 ax.set_ylabel("Cumulative Return")
 ax.set_title("Simple allocators finish ahead of the held-out LSTM portfolio")
 ax.legend()
-fig.tight_layout()
-fig.show()
+plt.show()
 
 # %% [markdown]
 # **Trading implication**: If the LSTM curve only tracks heuristic baselines, a simpler allocator
@@ -760,7 +593,7 @@ avg_weights = pd.Series(test_weights.mean(axis=0), index=UNIVERSE).sort_values(a
 fig, ax = plt.subplots(figsize=(12, 5))
 avg_weights.plot(kind="bar", ax=ax, color=COLORS["blue"])
 ax.set_ylabel("Average Weight")
-ax.set_title(f"{avg_weights.index[0]} receives the largest mean LSTM allocation")
+ax.set_title("The learned allocation is far from equal weight")
 ax.axhline(
     1.0 / N_ASSETS,
     color=COLORS["positive"],
@@ -768,8 +601,7 @@ ax.axhline(
     label=f"Equal weight ({1 / N_ASSETS:.1%})",
 )
 ax.legend()
-fig.tight_layout()
-fig.show()
+plt.show()
 
 # %% [markdown]
 # **Finding**: Persistent concentration in a small subset of ETFs indicates the model is learning
@@ -792,10 +624,9 @@ ax.axhline(
 )
 ax.set_xlabel("Test Window Index")
 ax.set_ylabel("Herfindahl Index")
-ax.set_title(f"Mean LSTM concentration is {hhi.mean() / (1 / N_ASSETS):.1f}x equal weight")
+ax.set_title("Learned concentration stays above the equal-weight floor")
 ax.legend()
-fig.tight_layout()
-fig.show()
+plt.show()
 
 # %% [markdown]
 # **Trading implication**: Higher concentration (HHI above equal-weight baseline) raises
@@ -823,14 +654,30 @@ print(f"Realized one-way turnover (bps-equivalent): {avg_turnover * 10_000:.1f} 
 # bps-equivalent one-way trade size; Chapter 18 attaches an explicit cost model and
 # compares the deployable Sharpe of this allocator against the simpler baselines.
 
+# %% [markdown] tags=["results"]
+# ### What this run produced
+#
+# Three rows, one test window, three allocators over the same dates and the same funds. The LSTM
+# row is the one the network produced; the other two need no fitting at all and are what its
+# added machinery has to beat.
+#
+# Two numbers below the table qualify it. The concentration series says how far from equal weight
+# the network chose to sit, which is what its return and volatility are bought with, and the
+# realized turnover says how much trading the weights imply. Neither the training loss nor this
+# table charges for that trading: Chapter 18 does, and until it is charged the Sharpe column is
+# a paper figure.
+
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **End-to-end optimization is feasible but not free**: The LSTM directly maximizes
-#    Sharpe without intermediate predictions, yet it underperforms simple heuristics
-#    on this ETF universe - lower volatility and drawdown come at the cost of return.
-# 2. **Simplicity is the point**: The entire model is ~50 lines of PyTorch.
-#    The differentiable Sharpe loss is the innovation, not the architecture.
+# 1. **End-to-end optimization removes a step, not the estimation problem.** The network never
+#    forecasts a return, so there is no prediction to be wrong; what it estimates instead is the
+#    allocation directly, from the same noisy history, and the comparison against equal weight and
+#    inverse volatility is what says whether that trade paid on this universe.
+# 2. **The loss is the contribution, not the architecture.** An LSTM with one layer and a linear
+#    head is the smallest network that can read a sequence, and it is deliberately small: what
+#    makes the method work is that the Sharpe ratio is differentiable in the weights, so
+#    backpropagation can optimize it directly.
 # 3. **Realized turnover is computed from half the absolute weight change**: cost
 #    stress lives in Ch18, but the LSTM trained without an explicit cost-aware
 #    loss can produce substantial turnover; comparable baselines are not claimed here.

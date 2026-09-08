@@ -347,14 +347,11 @@ print(f"Correlation stats: Mean={lower_tri.mean():.3f}, Std={lower_tri.std():.3f
 
 # %%
 condition_number = np.linalg.cond(geometry_cov)
-print(f"Condition number: {condition_number:.1f}")
-
-if condition_number < 100:
-    print("-> Well-conditioned matrix (stable optimization)")
-elif condition_number < 1000:
-    print("-> Moderately conditioned (acceptable for optimization)")
-else:
-    print("-> Ill-conditioned (consider regularization)")
+print(f"Condition number: {condition_number:,.0f}")
+print(
+    "A relative error of 1% in the covariance can therefore appear as a relative error of "
+    f"{condition_number / 100:,.0f}% in its inverse."
+)
 
 # %%
 # The covariance eigenvalue spectrum shows why inversion would be unstable.
@@ -386,7 +383,17 @@ fig.show()
 # %% [markdown]
 # ## Simulate Random Portfolios
 #
-# Generate random portfolio weights using the Dirichlet distribution to visualize the feasible region (the "Markowitz Bullet").
+# Before solving for an optimal portfolio, it helps to see the set of portfolios that are
+# available at all. Drawing long-only weight vectors at random and plotting each one's risk
+# against its return fills in that set, whose characteristic shape gives it the name
+# *Markowitz bullet*.
+#
+# The **Dirichlet distribution** is the natural way to draw them: it produces vectors of
+# non-negative numbers that sum to one, which is exactly the long-only fully-invested
+# constraint. Its concentration parameter decides how spread out the draws are. A large value
+# puts almost every draw near equal weight and fills in only the middle of the region; the
+# small value used below draws portfolios that put most of their weight on a few assets, which
+# is what reaches the edges of the region where the frontier is.
 
 
 # %%
@@ -399,7 +406,9 @@ def simulate_portfolios(
     """Simulate random long-only portfolios using a Dirichlet distribution."""
     n_assets = len(returns)
 
-    # Generate weights (small alpha = concentrated, large alpha = uniform)
+    # Concentration 0.05, well below 1, puts most of each draw's weight on a few assets and
+    # so reaches the corners of the feasible set; at 1.0 the draws would be uniform over the
+    # simplex and cluster near equal weight.
     alpha = np.full(n_assets, 0.05)
     weights = dirichlet(alpha=alpha, size=n_portfolios)
 
@@ -501,7 +510,12 @@ print(f"Simulated Min Vol:    Return={min_vol[1]:.2%}, Vol={min_vol[0]:.2%}, SR=
 # %% [markdown]
 # ## Portfolio Optimization
 #
-# Now we solve for optimal portfolios using scipy.optimize.
+# The random cloud found good portfolios by sampling; solving for them finds the optimum
+# exactly. Both named solutions below are constrained optimizations over the same weight
+# vector: long-only, so no weight goes below zero, and fully invested, so they sum to one.
+# `scipy.optimize.minimize` with the SLSQP method handles both constraints directly, which is
+# why the problem is posed to it rather than solved in closed form - the closed-form Markowitz
+# solution allows short positions and this one does not.
 
 
 # %%
@@ -758,11 +772,11 @@ metrics_df
 
 # %% [markdown]
 # **Interpretation**: This table gives a first read on the return/risk trade-off across
-# strategies. Notice that Min Volatility can have a negative Sharpe when the optimized
-# return falls below the risk-free rate -- the optimizer minimizes variance without
-# regard to the hurdle rate. Equal Risk Contribution (ERC) produces weights that differ
-# from Inverse Vol because it accounts for cross-asset correlations, not just standalone
-# volatility.
+# strategies. Min Volatility carries a negative Sharpe ratio whenever its return falls below
+# the hurdle, which is not a failure of the solver: minimizing variance takes no view on
+# whether the result clears a rate, so nothing in its objective prevents it. Equal Risk
+# Contribution and Inverse Vol differ because the first accounts for cross-asset correlations
+# and the second reads only each asset's own volatility.
 
 # %% [markdown]
 # ## Efficient Frontier
@@ -916,7 +930,6 @@ for name, weights in geometry_portfolios.items():
     )
 
 # %%
-# %%
 fig.update_layout(
     title="In-sample optimization concentrates at the frontier extremes",
     xaxis_title="Annualized Volatility",
@@ -968,7 +981,7 @@ fig = px.bar(
     color="Portfolio",
     barmode="group",
     color_discrete_sequence=ML4T_CATEGORICAL,
-    title="Expected-return optimization concentrates in two ETFs",
+    title="Only the expected-return optimizers concentrate their weight",
 )
 
 # Add equal weight reference line
@@ -1402,7 +1415,7 @@ for label, column in {
         line=dict(color=bridge_colors[label]),
     )
 fig.update_layout(
-    title="Timing explains more of the bridge than trading costs",
+    title="Frozen targets trade little, so timing outweighs cost here",
     xaxis_title="Date",
     yaxis_title="Growth of $1",
     height=420,
