@@ -50,7 +50,7 @@ DEVICE: str = ""
 
 SEQUENCE_CONFIGS = ("nlinear", "lstm_h64", "patchtst")
 POPULATION_NAME: str = ""
-SUPERSEDES_POPULATION: str = "fd45f829a576"
+SUPERSEDES_POPULATION: str = ""
 
 # %% [markdown]
 # ### The device the population was fitted on

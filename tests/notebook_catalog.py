@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from tests.pm_helpers import collect_chapter_notebooks, get_overrides
+from tests.pm_helpers import collect_chapter_notebooks, declares_parameters, get_overrides
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = REPO_ROOT / ".claude" / "work" / "notebook_testing" / "catalog.sqlite"
@@ -250,13 +250,13 @@ def _classify_entry(
     if any(k in haystack for k in HEAVY_KEYWORDS):
         return "heavy", "serial_heavy", 0, 3
 
-    if chapter is not None and chapter <= 6 and not overrides.get("parameters"):
+    if chapter is not None and chapter <= 6 and not declares_parameters(overrides):
         return "light", "parallel_light", 1, 1
 
     if chapter is not None and chapter <= 10:
         return "medium", "parallel_medium", 1, 2
 
-    if overrides.get("parameters"):
+    if declares_parameters(overrides):
         return "medium", "parallel_medium", 1, 2
 
     return "heavy", "serial_heavy", 0, 3
@@ -267,7 +267,7 @@ def _default_timeout(overrides: dict) -> int:
 
 
 def _parameter_source(overrides: dict, has_parameters_cell: bool) -> str:
-    if overrides.get("parameters"):
+    if declares_parameters(overrides):
         return "papermill"
     if has_parameters_cell:
         return "none"

@@ -1,0 +1,455 @@
+"""Relabeling stored fold ids onto the chronological numbering, without refitting."""
+
+from __future__ import annotations
+
+import copy
+import json
+from pathlib import PurePosixPath
+
+import polars as pl
+import pytest
+
+from case_studies.utils.artifact_digest import value_digest
+from case_studies.utils.registry.fold_renumbering import (
+    FoldRenumberRefusal,
+    RenumberPlan,
+    TrainingRemap,
+    cohort_member_digest,
+    derive_fold_permutation,
+    plan_fold_renumbering,
+    remap_json_document,
+    remap_relative_path,
+    remap_training_spec,
+    spec_fold_reference_paths,
+)
+from case_studies.utils.registry.specs import training_hash_from_spec
+
+NEWEST_FIRST = [
+    {
+        "fold": 0,
+        "train_start": "2005-03-31 00:00:00",
+        "train_end": "2014-12-31 00:00:00",
+        "val_start": "2015-02-27 00:00:00",
+        "val_end": "2015-12-31 00:00:00",
+    },
+    {
+        "fold": 1,
+        "train_start": "2004-04-30 00:00:00",
+        "train_end": "2014-02-28 00:00:00",
+        "val_start": "2014-03-31 00:00:00",
+        "val_end": "2015-01-30 00:00:00",
+    },
+    {
+        "fold": 2,
+        "train_start": "2003-05-30 00:00:00",
+        "train_end": "2013-03-28 00:00:00",
+        "val_start": "2013-04-30 00:00:00",
+        "val_end": "2014-02-28 00:00:00",
+    },
+]
+
+
+def _eligible_keys(folds: list[dict]) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "symbol": [f"S{index}" for index, _ in enumerate(folds)],
+            "timestamp": [fold["val_start"][:10] for fold in folds],
+            "fold": [fold["fold"] for fold in folds],
+        }
+    ).with_columns(pl.col("timestamp").str.to_date())
+
+
+def _spec(folds: list[dict]) -> dict:
+    keys = _eligible_keys(folds)
+    return {
+        "identity_version": 3,
+        "resolved_spec_schema": "ml4t.resolved-spec/v1",
+        "family": "linear",
+        "label": "fwd_ret_1m",
+        "seed": 42,
+        "execution_tier": "canonical",
+        "config_name": "ridge",
+        "computation": {
+            "cv": {
+                "folds": copy.deepcopy(folds),
+                "identity": value_digest(pl.DataFrame(folds)),
+                "request": {"source": "case_study_default"},
+            },
+            "expected_prediction_keys": {
+                "digest": value_digest(keys, ("symbol", "timestamp", "fold")),
+                "n_rows": keys.height,
+                "n_folds": len(folds),
+            },
+            "model": {
+                "class": "Ridge",
+                "effective_params_by_fold": {
+                    str(fold["fold"]): {"alpha": float(fold["fold"])} for fold in folds
+                },
+            },
+            "numerics": {"precision": "float64", "seed": 42},
+        },
+    }
+
+
+def test_permutation_reverses_a_newest_first_fold_list() -> None:
+    assert derive_fold_permutation(NEWEST_FIRST) == {0: 2, 1: 1, 2: 0}
+
+
+def test_permutation_refuses_a_fold_id_set_with_a_gap() -> None:
+    # A preview that ran folds 0 and 2 cannot be ranked into contiguous ids: the window it
+    # skipped still exists, so position in the surviving list is not the new id.
+    partial = [NEWEST_FIRST[0], {**NEWEST_FIRST[2], "fold": 2}]
+    with pytest.raises(FoldRenumberRefusal, match="not 0..n-1"):
+        derive_fold_permutation(partial)
+
+
+def test_permutation_refuses_two_folds_sharing_a_window() -> None:
+    duplicated = [NEWEST_FIRST[0], {**NEWEST_FIRST[0], "fold": 1}]
+    with pytest.raises(FoldRenumberRefusal, match="share the window"):
+        derive_fold_permutation(duplicated)
+
+
+def test_relative_path_keeps_the_padding_each_producer_wrote() -> None:
+    permutation = {0: 9, 8: 1, 9: 0}
+    assert remap_relative_path(PurePosixPath("models/fold_0.joblib"), permutation) == PurePosixPath(
+        "models/fold_9.joblib"
+    )
+    # `fold_08` and `fold_3` both occur inside one registry, so normalizing the width here
+    # would leave a reader globbing for the shape its producer wrote.
+    assert remap_relative_path(
+        PurePosixPath("models/cfg/fold_08/epoch_0050.pt"), permutation
+    ) == PurePosixPath("models/cfg/fold_01/epoch_0050.pt")
+
+
+def test_relative_path_renames_the_candidate_directory_named_by_the_training_hash() -> None:
+    assert remap_relative_path(
+        PurePosixPath("models/aaaaaaaaaaaa/fold_0/epoch_0050.pt"),
+        {0: 1},
+        {"aaaaaaaaaaaa": "bbbbbbbbbbbb"},
+    ) == PurePosixPath("models/bbbbbbbbbbbb/fold_1/epoch_0050.pt")
+
+
+def test_json_remap_moves_fold_ids_and_leaves_epoch_keys_alone() -> None:
+    document = {
+        "fold_id": 0,
+        "checkpoint_metrics": {"0": {"ic": 0.1}, "25": {"ic": 0.2}},
+        "files": {"fold_0.joblib": "digest-a", "fold_1.joblib": "digest-b"},
+        "nested": [{"fold": 1, "config": "aaaaaaaaaaaa"}],
+    }
+    remapped = remap_json_document(
+        document, {0: 1, 1: 0}, identity_renames={"aaaaaaaaaaaa": "bbbbbbbbbbbb"}
+    )
+    assert remapped["fold_id"] == 1
+    # Keyed by checkpoint, not by fold: a rule that moved every small-integer key would
+    # silently rewrite these.
+    assert remapped["checkpoint_metrics"] == document["checkpoint_metrics"]
+    assert remapped["files"] == {"fold_1.joblib": "digest-a", "fold_0.joblib": "digest-b"}
+    assert remapped["nested"] == [{"fold": 0, "config": "bbbbbbbbbbbb"}]
+
+
+def test_json_remap_refuses_a_fold_id_outside_the_permutation() -> None:
+    with pytest.raises(FoldRenumberRefusal, match="outside the permutation"):
+        remap_json_document({"fold": 7}, {0: 1, 1: 0})
+
+
+def test_spec_scan_finds_the_fold_keyed_dict_a_name_search_misses() -> None:
+    spec = _spec(NEWEST_FIRST)
+    spec["computation"]["task"] = {
+        "imbalance": {"effective_class_weights_by_fold": {"0": [1.0], "1": [1.0], "2": [1.0]}}
+    }
+    paths = spec_fold_reference_paths(spec, [0, 1, 2])
+    # Neither of these carries "fold" in a value; both are found by the key-set rule.
+    assert "$.computation.task.imbalance.effective_class_weights_by_fold" in paths
+    assert "$.computation.model.effective_params_by_fold" in paths
+
+
+def test_remap_moves_the_identity_and_every_value_derived_from_the_folds() -> None:
+    spec = _spec(NEWEST_FIRST)
+    permutation = derive_fold_permutation(NEWEST_FIRST)
+    target = remap_training_spec(spec, permutation, eligible_keys=_eligible_keys(NEWEST_FIRST))
+    computation = target["computation"]
+    assert [fold["fold"] for fold in computation["cv"]["folds"]] == [0, 1, 2]
+    # Fold 0 is now the earliest window rather than the most recent one.
+    assert computation["cv"]["folds"][0]["val_end"] == "2014-02-28 00:00:00"
+    assert computation["cv"]["identity"] == value_digest(pl.DataFrame(computation["cv"]["folds"]))
+    assert computation["cv"]["identity"] != spec["computation"]["cv"]["identity"]
+    assert (
+        computation["expected_prediction_keys"]["digest"]
+        != spec["computation"]["expected_prediction_keys"]["digest"]
+    )
+    # The parameters fitted on the 2013 window are still the parameters of that window.
+    assert computation["model"]["effective_params_by_fold"]["0"] == {"alpha": 2.0}
+    assert training_hash_from_spec(target) != training_hash_from_spec(spec)
+
+
+def test_remap_refuses_a_spec_whose_stored_cv_identity_does_not_reproduce() -> None:
+    spec = _spec(NEWEST_FIRST)
+    spec["computation"]["cv"]["identity"] = "0" * 16
+    with pytest.raises(FoldRenumberRefusal, match="cv.identity does not reproduce"):
+        remap_training_spec(
+            spec, derive_fold_permutation(NEWEST_FIRST), eligible_keys=_eligible_keys(NEWEST_FIRST)
+        )
+
+
+def test_remap_refuses_a_prediction_frame_that_is_not_the_one_the_digest_covers() -> None:
+    spec = _spec(NEWEST_FIRST)
+    wrong = _eligible_keys(NEWEST_FIRST).with_columns(pl.lit("Z").alias("symbol"))
+    with pytest.raises(FoldRenumberRefusal, match="does not reproduce from the prediction frame"):
+        remap_training_spec(spec, derive_fold_permutation(NEWEST_FIRST), eligible_keys=wrong)
+
+
+def test_remap_refuses_when_anything_outside_the_fold_fields_moved() -> None:
+    spec = _spec(NEWEST_FIRST)
+    permutation = derive_fold_permutation(NEWEST_FIRST)
+    original = remap_training_spec.__globals__["_strip_fold_bearing"]
+    seen: list[int] = []
+
+    def _drop_seed(candidate):
+        reduced = original(candidate)
+        # Stand in for a spec whose non-fold content differs between source and target: the
+        # first call is the source and the second the target, so they disagree by construction
+        # rather than by whatever the allocator happened to do.
+        seen.append(1)
+        reduced["computation"]["numerics"]["seed"] = len(seen)
+        return reduced
+
+    remap_training_spec.__globals__["_strip_fold_bearing"] = _drop_seed
+    try:
+        with pytest.raises(FoldRenumberRefusal, match="differs outside its fold-bearing fields"):
+            remap_training_spec(spec, permutation, eligible_keys=_eligible_keys(NEWEST_FIRST))
+    finally:
+        remap_training_spec.__globals__["_strip_fold_bearing"] = original
+
+
+def test_cohort_member_digest_matches_the_one_the_registry_stores() -> None:
+    # Duplicated rather than imported, so this is what stops the copy drifting.
+    from case_studies.utils.uncertainty import cohort_member_digest as stored
+
+    members = ["cc", "aa", "bb", "aa"]
+    assert cohort_member_digest(members) == stored(members)
+
+
+def test_plan_refuses_a_registry_whose_stored_hash_does_not_reproduce(tmp_path) -> None:
+    import sqlite3
+
+    from case_studies.utils.registry.store import _open_registry
+
+    case_dir = tmp_path / "case"
+    (case_dir / "run_log").mkdir(parents=True)
+    _open_registry(case_dir).close()
+    spec = _spec(NEWEST_FIRST)
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        db.execute(
+            "INSERT INTO training_runs (training_hash, family, label, config_name, spec_json, "
+            "created_at, identity_version, execution_tier) VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "deadbeefdead",
+                spec["family"],
+                spec["label"],
+                spec["config_name"],
+                json.dumps(spec),
+                "2026-01-01T00:00:00+00:00",
+                3,
+                "canonical",
+            ),
+        )
+    plan = plan_fold_renumbering(case_dir)
+    assert plan.remaps == []
+    assert any("does not reproduce" in refusal for refusal in plan.refusals)
+
+
+def test_relative_path_renames_a_snapshot_named_by_its_prediction_hash() -> None:
+    # `_snapshots/<date>-<name>/<prediction_hash>.conformal_widths.parquet` leads with the
+    # identity rather than being a directory named by it, so a rule that matched only whole
+    # components would carry a retired hash into the migrated tree.
+    assert remap_relative_path(
+        PurePosixPath("_snapshots/2026-08-30-widths/aaaaaaaaaaaa.conformal_widths.parquet"),
+        {0: 1},
+        {"aaaaaaaaaaaa": "bbbbbbbbbbbb"},
+    ) == PurePosixPath("_snapshots/2026-08-30-widths/bbbbbbbbbbbb.conformal_widths.parquet")
+
+
+def test_the_no_fold_sentinel_survives_a_renumber() -> None:
+    # `conformal.py` writes fold_id -1 for a holdout row that belongs to no fold. Permuting it
+    # would turn "no fold" into a fold id, and refusing it would block the migration over a
+    # convention the registry declares.
+    assert remap_json_document({"fold_id": -1, "fold": 0}, {0: 1, 1: 0}) == {
+        "fold_id": -1,
+        "fold": 1,
+    }
+
+
+def test_stored_fold_ids_move_and_the_sentinel_stays(tmp_path) -> None:
+    """The registry's own fold_id columns, including a row that belongs to no fold.
+
+    Written against a database rather than the pure helper because the bug it pins was in the
+    two-pass update: the offset that avoids a primary-key collision is added unconditionally
+    and removed only from values at or above it, so a sentinel of -1 came back as 999999.
+    """
+    import sqlite3
+
+    from case_studies.utils.registry.fold_renumbering import _renumber_fold_ids
+    from case_studies.utils.registry.store import _open_registry
+
+    case_dir = tmp_path / "case"
+    (case_dir / "run_log").mkdir(parents=True)
+    _open_registry(case_dir).close()
+    spec = _spec(NEWEST_FIRST)
+    permutation = derive_fold_permutation(NEWEST_FIRST)
+    remap = TrainingRemap(
+        source_hash="aaaaaaaaaaaa",
+        target_hash="bbbbbbbbbbbb",
+        permutation=permutation,
+        target_spec=spec,
+        prediction_map={"cccccccccccc": "dddddddddddd"},
+    )
+    plan = RenumberPlan(case_study="case", case_dir=case_dir, remaps=[remap])
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        for fold_id in (0, 1, 2, -1):
+            db.execute(
+                "INSERT INTO fold_metrics (prediction_hash, fold_id, computed_at, ic) "
+                "VALUES (?,?,?,?)",
+                # Keyed by the identity the rows still carry: fold ids are renumbered before
+                # the identities are renamed, so this runs against the pre-migration hash.
+                ("cccccccccccc", fold_id, "2026-01-01T00:00:00+00:00", float(fold_id)),
+            )
+        _renumber_fold_ids(db, plan)
+        db.commit()
+        moved = dict(db.execute("SELECT ic, fold_id FROM fold_metrics").fetchall())
+    # Each row keeps its measurement and takes the id its window now carries; -1 keeps its own.
+    assert moved == {0.0: 2, 1.0: 1, 2.0: 0, -1.0: -1}
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_the_key_digest_is_recomputed_under_the_rendering_that_produced_it(legacy) -> None:
+    """Both renderings a stored coverage digest can have been taken under.
+
+    `completeness` normalizes a temporal key to microsecond UTC before rendering it; rows
+    registered before that carry a plain string cast. Recomputing under the wrong one would
+    move the digest for a reason that has nothing to do with the fold ids.
+    """
+    from case_studies.utils.registry.fold_renumbering import _prediction_key_frame
+
+    frame = pl.DataFrame(
+        {"symbol": [1, 2], "timestamp": ["2016-01-29", "2016-01-29"], "fold": [0, 1]}
+    ).with_columns(pl.col("timestamp").str.to_date())
+    rendered = _prediction_key_frame(frame, legacy=legacy)
+    assert rendered.columns == ["symbol", "timestamp", "fold_id"]
+    assert rendered["timestamp"].to_list() == (
+        ["2016-01-29", "2016-01-29"] if legacy else ["2016-01-29 00:00:00.000000"] * 2
+    )
+
+
+def _coverage_registry(tmp_path, *, legacy: bool):
+    """A registry holding one prediction, its coverage row, and its parquet on disk."""
+    import sqlite3
+
+    from case_studies.utils.artifact_digest import value_digest
+    from case_studies.utils.registry.fold_renumbering import _prediction_key_frame
+    from case_studies.utils.registry.store import _open_registry
+
+    case_dir = tmp_path / "case"
+    (case_dir / "run_log").mkdir(parents=True)
+    _open_registry(case_dir).close()
+    frame = pl.DataFrame(
+        {
+            "symbol": [1, 2, 3],
+            "timestamp": ["2016-01-29", "2016-02-29", "2016-03-31"],
+            "fold": [0, 1, 2],
+            "prediction": [0.1, 0.2, 0.3],
+        }
+    ).with_columns(pl.col("timestamp").str.to_date())
+    for name, folds in (("old", [0, 1, 2]), ("new", [2, 1, 0])):
+        directory = case_dir / "run_log" / "predictions" / f"{name}aaaaaaaaa"
+        directory.mkdir(parents=True)
+        frame.with_columns(pl.Series("fold", folds)).write_parquet(
+            directory / "predictions.parquet"
+        )
+    keys = _prediction_key_frame(frame, legacy=legacy)
+    stored = value_digest(keys, tuple(keys.columns))
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        db.execute(
+            "INSERT INTO prediction_coverage (prediction_hash, expected_key_digest, "
+            "actual_key_digest, n_expected, n_actual, n_duplicates, n_missing, n_extra, "
+            "n_null, n_non_finite, n_folds_expected, n_folds_actual, schema_json, "
+            "artifact_digest, status) VALUES (?,?,?,3,3,0,0,0,0,0,3,3,'{}',?,'complete')",
+            ("newaaaaaaaaa", stored, stored, value_digest(frame)),
+        )
+    return case_dir, stored
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_coverage_digests_are_rewritten_under_the_rendering_they_were_taken_under(
+    tmp_path, legacy
+) -> None:
+    import sqlite3
+
+    from case_studies.utils.artifact_digest import value_digest
+    from case_studies.utils.registry.fold_renumbering import (
+        _prediction_key_frame,
+        _rewrite_prediction_coverage,
+    )
+
+    case_dir, stored = _coverage_registry(tmp_path, legacy=legacy)
+    run_log = case_dir / "run_log"
+    plan = RenumberPlan(
+        case_study="case",
+        case_dir=case_dir,
+        remaps=[
+            TrainingRemap(
+                source_hash="aaaaaaaaaaaa",
+                target_hash="bbbbbbbbbbbb",
+                permutation={0: 2, 1: 1, 2: 0},
+                target_spec={},
+                prediction_map={"oldaaaaaaaaa": "newaaaaaaaaa"},
+            )
+        ],
+    )
+    with sqlite3.connect(run_log / "registry.db") as db:
+        renderings = _rewrite_prediction_coverage(db, plan, run_log, run_log)
+        db.commit()
+        row = db.execute(
+            "SELECT expected_key_digest, actual_key_digest, artifact_digest "
+            "FROM prediction_coverage WHERE prediction_hash = 'newaaaaaaaaa'"
+        ).fetchone()
+
+    assert renderings == ({"current": 0, "legacy": 1} if legacy else {"current": 1, "legacy": 0})
+    migrated = pl.read_parquet(run_log / "predictions" / "newaaaaaaaaa" / "predictions.parquet")
+    keys = _prediction_key_frame(migrated, legacy=legacy)
+    expected = value_digest(keys, tuple(keys.columns))
+    assert row[0] == row[1] == expected != stored
+    assert row[2] == value_digest(migrated)
+
+
+def test_coverage_rewrite_refuses_a_digest_that_reproduces_under_neither_rendering(
+    tmp_path,
+) -> None:
+    import sqlite3
+
+    from case_studies.utils.registry.fold_renumbering import _rewrite_prediction_coverage
+
+    case_dir, _ = _coverage_registry(tmp_path, legacy=True)
+    run_log = case_dir / "run_log"
+    with sqlite3.connect(run_log / "registry.db") as db:
+        db.execute(
+            "UPDATE prediction_coverage SET expected_key_digest = ?, actual_key_digest = ?",
+            ("0" * 16, "0" * 16),
+        )
+    plan = RenumberPlan(
+        case_study="case",
+        case_dir=case_dir,
+        remaps=[
+            TrainingRemap(
+                source_hash="aaaaaaaaaaaa",
+                target_hash="bbbbbbbbbbbb",
+                permutation={0: 2, 1: 1, 2: 0},
+                target_spec={},
+                prediction_map={"oldaaaaaaaaa": "newaaaaaaaaa"},
+            )
+        ],
+    )
+    with (
+        sqlite3.connect(run_log / "registry.db") as db,
+        pytest.raises(FoldRenumberRefusal, match="coverage digests do not reproduce"),
+    ):
+        _rewrite_prediction_coverage(db, plan, run_log, run_log)

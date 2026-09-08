@@ -213,7 +213,9 @@ def predictions_without_coverage(case_dir: Path, hashes: Iterable[str]) -> set[s
     return wanted - covered
 
 
-def prediction_members_in_force(study) -> tuple[frozenset[str] | None, list[str]]:
+def prediction_members_in_force(
+    study, case_dir: Path | None = None
+) -> tuple[frozenset[str] | None, list[str]]:
     """Every prediction set the registry's populations currently publish, and the notes to print.
 
     A downstream sweep does not name the families it draws from - it ranks whatever is
@@ -249,23 +251,30 @@ def prediction_members_in_force(study) -> tuple[frozenset[str] | None, list[str]
         superseded_members_at,
     )
 
-    names = sorted(published_population_names_at(study.root))
+    # The registry this study reads, which is `study.root` only at canonical tier: a preview
+    # keeps `root` pointing at the case directory and writes elsewhere, so asking it returns the
+    # canonical populations. A preview then filters its own prediction sets against 866 hashes
+    # none of which it holds, and reports "No predictions found" on a registry with 247 of them
+    # - the state this function documents as returning None. `declared_population_members` takes
+    # the directory for the same reason; this took the study alone. Measured 2026-09-06.
+    root = case_dir if case_dir is not None else study.root
+    names = sorted(published_population_names_at(root))
     if not names:
         return None, [
-            f"{study.root} publishes no official populations, so no supersession filter is "
+            f"{root} publishes no official populations, so no supersession filter is "
             "applied: the candidate pool rests on catalog admissibility alone."
         ]
     published: set[str] = set()
     for name in names:
         published.update(OfficialPopulation.one(study, name=name).members)
-    members = frozenset(published - superseded_members_at(study.root))
+    members = frozenset(published - superseded_members_at(root))
 
     # A population is written down before its members are fitted, so being in force is not
     # evidence of having finished. Every caller here ranks what comes back and selects from the
     # ranking, and an unfinished member is scored over the folds it managed - a shorter window
     # is an easier window, so the error runs toward the top of the ranking. Refusing is the only
     # safe answer: there is no way to rank around a member without saying the pool changed.
-    short = incompletely_registered_predictions(study.root, members)
+    short = incompletely_registered_predictions(root, members)
     if short:
         named = ", ".join(f"{member}: {why}" for member, why in sorted(short.items())[:5])
         raise RuntimeError(

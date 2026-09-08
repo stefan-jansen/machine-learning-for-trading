@@ -45,10 +45,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 try:
-    from tests.pm_helpers import get_overrides, run_notebook
+    from tests.pm_helpers import get_overrides, invocations_for, run_notebook
     from tests.preset_patches import _patch_presets_for_testing, _trim_label_configs
 except ModuleNotFoundError:
-    from pm_helpers import get_overrides, run_notebook
+    from pm_helpers import get_overrides, invocations_for, run_notebook
     from preset_patches import _patch_presets_for_testing, _trim_label_configs
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -321,29 +321,35 @@ def main():
                 continue
 
             timeout = overrides.get("timeout", 300)
-            parameters = overrides.get("parameters", {})
 
-            print(f"  {stage}: running...", end="", flush=True)
-            start = time.time()
+            # Every invocation the entry declares, not the first. A notebook CI runs once
+            # per label has to be generated once per label too, or the fixture carries rows
+            # for one label while the job consuming it exercises five - and the four that
+            # find nothing fail on the fixture rather than on the notebook. Each is its own
+            # line in the summary, so a generation that produced four of five says which.
+            for run in invocations_for(overrides, key=str(rel_path)):
+                named = stage if run.id is None else f"{stage}[{run.id}]"
+                print(f"  {named}: running...", end="", flush=True)
+                start = time.time()
 
-            result = run_notebook(
-                py_path=notebook,
-                parameters=parameters,
-                timeout=timeout,
-                output_dir=output_dir,
-                research_preview=False,
-            )
+                result = run_notebook(
+                    py_path=notebook,
+                    parameters=run.parameters,
+                    timeout=timeout,
+                    output_dir=output_dir,
+                    research_preview=False,
+                )
 
-            elapsed = time.time() - start
+                elapsed = time.time() - start
 
-            if result["status"] == "ok":
-                print(f" OK ({elapsed:.0f}s)")
-                results[f"{cs}::{stage}"] = OK
-            else:
-                print(f" FAILED ({elapsed:.0f}s)")
-                print(f"    Error: {result['error']}")
-                results[f"{cs}::{stage}"] = FAILED
-                cs_failed = True
+                if result["status"] == "ok":
+                    print(f" OK ({elapsed:.0f}s)")
+                    results[f"{cs}::{named}"] = OK
+                else:
+                    print(f" FAILED ({elapsed:.0f}s)")
+                    print(f"    Error: {result['error']}")
+                    results[f"{cs}::{named}"] = FAILED
+                    cs_failed = True
 
     total_elapsed = time.time() - total_start
 

@@ -25,6 +25,7 @@ import yaml
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.registry.store import _open_registry
 from case_studies.utils.sweep_config import get_entry_schemes_for, load_sweep
+from tests.pm_helpers import invocations_for
 
 CASE_STUDY = "us_firm_characteristics"
 REPO_ROOT = Path(__file__).parent.parent
@@ -49,19 +50,25 @@ def test_the_ci_universe_admits_an_entry_scheme_for_every_declared_label():
 
     This is the assertion that fails on the pre-#1075 tree: `MAX_SYMBOLS: 5` against a
     `top_k_grid` of [5, 10, 20, 50] yields zero schemes for every label.
+
+    Read per invocation rather than off one `parameters` block. The notebook now runs
+    once per declared label, each with its own `LABEL` and its own universe cap, so the
+    question this asks - can THIS run realize a concentration - is asked of the pair the
+    run is actually given. `tests/test_invocation_fanout.py` is what holds those runs to
+    the declared labels; here they are taken as given and each is checked.
     """
-    max_symbols = _overrides()[SWEEPING_NOTEBOOK]["parameters"]["MAX_SYMBOLS"]
-    labels = _declared_labels()
-    assert labels, "no top_k_grid declared; this test is guarding nothing"
-    empty = {
-        label: get_entry_schemes_for(CASE_STUDY, label, max_symbols, long_short=True)
-        for label in labels
-    }
-    starved = sorted(label for label, schemes in empty.items() if not schemes)
+    runs = invocations_for(_overrides()[SWEEPING_NOTEBOOK], key=SWEEPING_NOTEBOOK)
+    assert _declared_labels(), "no top_k_grid declared; this test is guarding nothing"
+    starved = {}
+    for run in runs:
+        label = run.parameters.get("LABEL") or _declared_labels()[0]
+        max_symbols = run.parameters["MAX_SYMBOLS"]
+        if not get_entry_schemes_for(CASE_STUDY, label, max_symbols, long_short=True):
+            starved[label] = max_symbols
     assert not starved, (
-        f"MAX_SYMBOLS={max_symbols} leaves no feasible entry scheme for {starved}. "
-        f"The sweep would register nothing and every section after it would read an "
-        f"empty registry."
+        f"no feasible entry scheme for {sorted(starved)} at the universe cap each run "
+        f"declares ({starved}). The sweep would register nothing and every section after "
+        f"it would read an empty registry."
     )
 
 

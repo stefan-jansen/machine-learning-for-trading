@@ -111,6 +111,8 @@ from utils.style import COLORS, FIGSIZE, add_message_title
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "sp500_equity_option_analytics"
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
 LABEL = ""
 MAX_SYMBOLS = 0
 MAX_RISK_VARIANTS = 0
@@ -124,6 +126,20 @@ TOP_N_COMBOS = None
 # parameter wins; otherwise the case study's own declaration does.
 
 # %%
+# A preview run reads and registers in a smoke chain's own workspace, under `.preview/<case>`,
+# and `open_study` is what activates that root. Activation rewrites `ML4T_OUTPUT_DIR` for the
+# rest of the process, so it has to happen before the first `get_case_study_dir` rather than
+# beside the registry read further down: `CASE_DIR` has to already answer for the workspace.
+_preview_study = None
+if EXECUTION_TIER == "preview":
+    if not WORKSPACE:
+        raise ValueError("preview execution requires WORKSPACE")
+    _preview_study = open_study(
+        CASE_STUDY_ID,
+        execution_tier="preview",
+        workspace=WORKSPACE,
+        entry_point="16_risk_management",
+    )
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 REGISTRY_DB = CASE_DIR / "run_log" / "registry.db"
 bt_config = get_backtest_config(CASE_STUDY_ID)
@@ -164,8 +180,12 @@ print(f"Case study: {CASE_STUDY_ID}; label: {RISK_LABEL}; selected lineages: {TO
 # `run_log` are symlinks: true in a maintainer worktree, false in every clean clone and CI run.
 # `CASE_DIR` is already the directory this notebook resolved, including under a preview, so
 # asking it directly answers for the registry the rest of the notebook reads.
-_study = Study.at(CASE_DIR, case_study=CASE_STUDY_ID, entry_point="16_risk_management")
-_members, _population_notes = prediction_members_in_force(_study)
+_study = (
+    _preview_study
+    if _preview_study is not None
+    else Study.at(CASE_DIR, case_study=CASE_STUDY_ID, entry_point="16_risk_management")
+)
+_members, _population_notes = prediction_members_in_force(_study, CASE_DIR)
 for _note in _population_notes:
     print(_note)
 CURRENT_MEMBERS = _members
@@ -440,32 +460,49 @@ SUPERSEDES_RISK_POPULATIONS: dict[str, str] = {}
 
 _risk_plan = None
 try:
-    _risk_writable = open_study(CASE_STUDY_ID, entry_point="16_risk_management")
+    _risk_writable = (
+        _preview_study
+        if _preview_study is not None
+        else open_study(CASE_STUDY_ID, entry_point="16_risk_management")
+    )
 except PermissionError as exc:
     print(f"Not recording the risk plan here: {exc}")
 else:
-    if _risk_writable.root != CASE_DIR:
+    # A preview's `root` stays the case directory while its writes go to the workspace, so
+    # the registry this run writes is `storage_root` for its tier. At canonical the two are
+    # identical and the guard is exactly as strict as before.
+    if _risk_writable.storage_root(EXECUTION_TIER) != CASE_DIR:
         raise RuntimeError(
             f"16 ran its sweep against {CASE_DIR} but opened a study rooted at "
             f"{_risk_writable.root}. Recording the plan there would describe a registry this "
             "run did not write."
         )
-    _risk_plan = OfficialPopulation.create(
-        _risk_writable,
-        name=RISK_POPULATION,
-        member_kind="backtest",
-        members=[plan["backtest_hash"] for plan in plans],
-        supersedes=population_supersedes(
+    if EXECUTION_TIER != "canonical":
+        # `OfficialPopulation.create` refuses a preview, and rightly: a published population is
+        # a durable claim about what this case study publishes, and a preview is discarded with
+        # its workspace. The risk sweep still executes and still registers. `_risk_plan` stays
+        # None, which the attestation below already tests for.
+        print(
+            f"{EXECUTION_TIER} tier: the risk sweep executes and registers, and publishes no "
+            f"official population under {RISK_POPULATION}."
+        )
+    else:
+        _risk_plan = OfficialPopulation.create(
             _risk_writable,
             name=RISK_POPULATION,
-            declared=SUPERSEDES_RISK_POPULATIONS.get(RISK_POPULATION),
-        ),
-    )
-    # Before any member executes; see `sweep_attestation_name`.
-    _attempt = open_sweep_attempt(_risk_writable, _risk_plan, UPSTREAM_PLANS)
-    print(
-        f"Risk plan {RISK_POPULATION}: {_risk_plan.hash}, {len(plans)} planned, attempt {_attempt}"
-    )
+            member_kind="backtest",
+            members=[plan["backtest_hash"] for plan in plans],
+            supersedes=population_supersedes(
+                _risk_writable,
+                name=RISK_POPULATION,
+                declared=SUPERSEDES_RISK_POPULATIONS.get(RISK_POPULATION),
+            ),
+        )
+        # Before any member executes; see `sweep_attestation_name`.
+        _attempt = open_sweep_attempt(_risk_writable, _risk_plan, UPSTREAM_PLANS)
+        print(
+            f"Risk plan {RISK_POPULATION}: {_risk_plan.hash}, {len(plans)} planned, attempt {_attempt}"
+        )
 
 # %%
 failures = []
@@ -793,7 +830,11 @@ try:
         raise PermissionError(
             "the sweep plans reported above are not all complete for the predictions in force"
         )
-    writable = open_study(CASE_STUDY_ID, entry_point="16_risk_management")
+    writable = (
+        _preview_study
+        if _preview_study is not None
+        else open_study(CASE_STUDY_ID, entry_point="16_risk_management")
+    )
 except PermissionError as exc:
     holdout_candidates = None
     print(
@@ -808,7 +849,10 @@ else:
     # root other than the one they will be read back from - which is how a member that is
     # complete at freeze time is incomplete at read time. Refusing is better than writing a set
     # nobody reads.
-    if writable.root != CASE_DIR:
+    # A preview's `root` stays the case directory while its writes go to the workspace, so
+    # the registry this run writes is `storage_root` for its tier. At canonical the two are
+    # identical and the guard is exactly as strict as before.
+    if writable.storage_root(EXECUTION_TIER) != CASE_DIR:
         raise RuntimeError(
             f"16 resolved its candidate field from {CASE_DIR} but opened a study rooted at "
             f"{writable.root}. Freezing here would write the set where the holdout notebooks "

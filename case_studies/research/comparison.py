@@ -409,21 +409,64 @@ class CandidateSet:
         return tuple(Result.open(self.study, result_hash) for result_hash in selected)
 
     def _ranked_validation_hashes(self) -> tuple[str, ...]:
+        """Order this set's members by validation Sharpe, ties broken by identity.
+
+        A null Sharpe used to mean one thing - the run was not measured - and the
+        height check below refusing the whole set was the whole of the right answer.
+        The ruin stop (ml4t/agent-workspace#920) gave it a second meaning: a path
+        whose equity reaches zero registers sharpe, sortino, calmar, omega, stability
+        and tail_ratio as null on purpose, because ranking a bankrupt path is what
+        that issue exists to prevent. So the refusal began firing on the case it was
+        built to protect.
+
+        The `ruin` column separates the two, and a ruined member has to survive the
+        filter rather than merely sort late: the check below counts rows against
+        members, so a member dropped by the filter rejects the set exactly as before.
+
+        * ``ruin = 1.0`` - bankrupt. Last, ahead of nothing, never selected by
+          `best_validation_sharpe`. It does not disqualify the set: a sweep with one
+          bankrupt member and eleven solvent ones has a good ranking of the eleven.
+        * null Sharpe, no ruin flag - not measured. Refused, as before.
+
+        A registry written before #920 has no `ruin` column at all, which is not the
+        same as having no bankrupt member; there the null test stands as the whole
+        rule, which is what it was when those rows were written.
+
+        `rank_by_validation_sharpe` in `cme_futures/research_workflow.py` applies this
+        same rule on the preview path, and the two have to keep agreeing.
+        """
         if self.member_kind != "backtest":
             raise ValueError("validation Sharpe ranking requires backtest members")
+        table = self.study.backtests.table()
+        ruined = (
+            (pl.col("ruin") == 1.0).fill_null(False) if "ruin" in table.columns else pl.lit(False)  # noqa: FBT003
+        )
         rows = (
-            self.study.backtests.table()
-            .filter(
+            table.filter(
                 pl.col("backtest_hash").is_in(self.members)
                 & (pl.col("split") == "validation")
                 & (pl.col("execution_tier") == "canonical")
                 & pl.col("stage").is_in(["signal", "allocation", "risk_overlay"])
-                & pl.col("sharpe").is_not_null()
+                & (pl.col("sharpe").is_not_null() | ruined)
             )
-            .sort("sharpe", "backtest_hash", descending=[True, False])
+            .with_columns(ruined.alias("_ruined"))
+            .sort(
+                "_ruined",
+                "sharpe",
+                "backtest_hash",
+                descending=[False, True, False],
+                nulls_last=True,
+            )
         )
         if rows.height != len(self.members):
             raise ValueError("candidate set contains an ineligible selection member")
+        if rows.height and bool(rows.get_column("_ruined").all()):
+            # Ordering a bankrupt member last protects the selection only while something
+            # solvent is ahead of it. `best_validation_sharpe` takes the head
+            # unconditionally, so a set whose members all went bankrupt would hand back a
+            # bankrupt selection - the outcome #920 exists to prevent, reached through the
+            # fix for it. There is nothing here to select.
+            raise ValueError("candidate set has no solvent member to select")
         if any(not Result.open(self.study, member_hash).complete for member_hash in self.members):
             raise ValueError("candidate set contains an incomplete selection member")
         return tuple(rows.get_column("backtest_hash"))
