@@ -1285,13 +1285,37 @@ case_studies/cme_futures/07_gbm:
   # Measured the same way and at the same load: 172.9 s end to end. Kept at 180 s.
   timeout: 180
 case_studies/cme_futures/08_tabular_dl:
-  gpu: true
-    # BATCH_SIZE, MAX_FOLDS, MAX_SYMBOLS, N_EPOCHS and LOOKBACK were the pre-migration knobs.
-    # This notebook plans through the shared catalog and reads none of them, so setting them
-    # reduced nothing while the override file said it had. The CI fixture is the reduction here.
+  # BATCH_SIZE, MAX_FOLDS, MAX_SYMBOLS, N_EPOCHS and LOOKBACK were the pre-migration knobs.
+  # This notebook plans through the shared catalog and reads none of them, so setting them
+  # reduced nothing while the override file said it had. The CI fixture is the reduction here.
+  # Runs on the CPU in CI (ml4t/agent-workspace#1064). `gpu: true` skipped it on every runner
+  # without a card, which is every CI runner, so this stage had no coverage at all.
+  #
+  # 29.6 s, measured 2026-09-07 on four cores (`taskset -c 0-3`) with CUDA hidden, against
+  # test-data 2c068b5a and the `max_symbols: 5` that `_collect_preview_reductions` injects when
+  # an entry declares no reduction. Four dedicated cores on this workstation are an
+  # approximation of a four-core runner and not the same machine, so 300 is kept as a budget
+  # with an order of magnitude of room rather than sized to the measurement. Re-base it on the
+  # first green `cs-cme_futures` runs, which is where the percentages elsewhere in this file
+  # come from.
+  # DEVICE and POPULATION_NAME travel together, as in the etfs DL blocks: the device is inside
+  # the training identity, so a CPU run declares a different member set and must name its own
+  # population rather than publish into the canonical one. Pairing them also keeps
+  # `tests/generate_intermediates.py --no-skip-dl` working, which reads this file with
+  # `research_preview=False` and so reaches the guard in canonical mode.
+  parameters:
+    DEVICE: cpu
+    POPULATION_NAME: cme_futures-tabular_dl-preview
   timeout: 300
 case_studies/cme_futures/09_dl_lstm:
-  gpu: true
+  # DEVICE and POPULATION_NAME travel together, as in the etfs DL blocks: the device is inside
+  # the training identity, so a CPU run declares a different member set and must name its own
+  # population rather than publish into the canonical one. Pairing them also keeps
+  # `tests/generate_intermediates.py --no-skip-dl` working, which reads this file with
+  # `research_preview=False` and so reaches the guard in canonical mode.
+  parameters:
+    DEVICE: cpu
+    POPULATION_NAME: cme_futures-deep_learning-preview
     # BATCH_SIZE, MAX_FOLDS, MAX_SYMBOLS, N_EPOCHS and LOOKBACK were the pre-migration knobs.
     # This notebook plans through the shared catalog and reads none of them, so setting them
     # reduced nothing while the override file said it had.
@@ -1318,7 +1342,22 @@ case_studies/cme_futures/09_dl_lstm:
     # parameters cell declares both EXECUTION_TIER and WORKSPACE, which this one does.
     # Enabling CPU coverage needs a DEVICE parameter and nothing else, and that is queued
     # behind the pending 09 refit rather than done here.
-  timeout: 300
+    #
+    # The DEVICE parameter now exists (ml4t/agent-workspace#1064) and this runs on the CPU.
+    # 90.1 s, measured 2026-09-07 on four cores (`taskset -c 0-3`) with CUDA hidden, against
+    # test-data 2c068b5a and the same `max_symbols: 5` the 542 s figure above was taken at.
+    # The two are the same work: 542/90 is 6.0, which is the contention factor the workstation
+    # was carrying when that run was timed, recorded in the `10a_pca` entry below. Neither is a
+    # CI number. 600 rather than 300 because the two measurements of this notebook differ by
+    # 6x for reasons outside it, and a budget that only clears the uncontended one is a budget
+    # sized to the luckier reading. Re-base on the first green `cs-cme_futures` runs.
+    #
+    # Re-measured at 137.7 s after #857 rebuilt the sequence windows on the calendar, which is
+    # the change a reader would suspect of slowing this down. It did not: 08_tabular_dl is
+    # tabular, never enters `sequence_dataset.py`, and moved 29.6 -> 45.7 s in the same run.
+    # Both ratios are 1.53, so the whole run was that much more contended and the sequence path
+    # costs what it did. The budget is unchanged.
+  timeout: 600
 case_studies/cme_futures/10_latent_factors:
   timeout: 180
 case_studies/cme_futures/10a_pca:
@@ -1802,8 +1841,16 @@ case_studies/etfs/11b_ipca:
   # idle, did not fit in 120s loaded, and passed at 300.
   timeout: 780
 case_studies/etfs/11_latent_factors:
-  gpu: true
-  timeout: 900
+  # No `gpu: true`. This notebook fits nothing: it reads the family's declared labels and its
+  # model menu and prints who publishes what, and its own header says so - "What it writes:
+  # nothing. This notebook fits no model, registers no run and opens no holdout." It imports
+  # ast, re, yaml and polars, and no torch. The flag was costing coverage for a card the
+  # notebook never asks for (ml4t/agent-workspace#1064).
+  #
+  # 5.7 s with CUDA hidden, measured 2026-09-07 against test-data 2c068b5a. The 900 s it carried
+  # was sized for a fit this notebook does not do; 180 is thirty times the measurement and still
+  # leaves the number somewhere to move. Re-base on the first green `cs-etfs` runs.
+  timeout: 180
 case_studies/etfs/11c_conditional_autoencoder:
   # Un-skipped when 11e moved onto the research boundary (ml4t/agent-workspace#991).
   # The skip_reason these three carried - "TEMPORARY: DL training 300s timeout under
@@ -3411,13 +3458,18 @@ case_studies/us_firm_characteristics/06_gbm:
   # Measured the same way and at the same load: 172.9 s end to end. Kept at 180 s.
   timeout: 180
 case_studies/us_firm_characteristics/07_tabular_dl:
-  # setup.yaml pins modeling.tabular_dl.device: cuda, and resolve_torch_device
-  # refuses to silently downgrade an explicit device. So this notebook cannot run
-  # on the CPU runner, and running it there is what the GPU-first rule forbids.
-  # Sibling us_equities_panel/08_tabular_dl passes on CPU only because that case
-  # study pins no tabular_dl device.
-  gpu: true
+  # setup.yaml pins modeling.tabular_dl.device: cuda, and resolve_torch_device still refuses to
+  # silently downgrade an explicit device. What changed is that the notebook now takes a DEVICE
+  # parameter, so the downgrade is requested rather than substituted, and a run that requests one
+  # must name its own population (ml4t/agent-workspace#1064). 18.3 s at the `max_symbols: 20`
+  # below, measured 2026-09-08 on four cores (`taskset -c 0-3`) with CUDA hidden, against
+  # test-data 2c068b5a. Widening it from 5 cost 0.6 s, because the price panel is 12 and the
+  # fit is dominated by fixed cost at either width. Four dedicated cores here approximate a
+  # four-core runner rather than equal one, so 300 keeps room rather than tracking the
+  # measurement. Re-base on the first green `cs-us_firm_characteristics` runs.
   parameters:
+    DEVICE: cpu
+    POPULATION_NAME: us_firm_characteristics-tabular_dl-preview
     # BATCH_SIZE, MAX_FOLDS, MAX_SYMBOLS and N_EPOCHS were the pre-migration knobs and the
     # migrated notebook binds none of them, so `unusable_parameters` flags all four - the
     # folding in `_collect_preview_reductions` happens after that check reads this file, not
@@ -3438,9 +3490,14 @@ case_studies/us_firm_characteristics/07_tabular_dl:
     # `_resolve_tabm_config` has loaded the patched preset. An earlier version of this entry
     # asked for 50 epochs at an interval of 25, which buys the same two checkpoints for
     # twenty-five times the training.
+    # 20, not 5, and the number is load-bearing now that this stage actually runs. At 5 its
+    # predictions win the validation ranking with a cross-section smaller than every k in
+    # backtest.sweep.top_k_grid ([5, 10, 20, 50]), and 11_backtest refuses the whole sweep:
+    # a long-short k of 5 needs 10 tradeable names. 20 is what 08a, 08b, 08c and 08d already
+    # declare, and the price panel caps it at 12 (ml4t/agent-workspace#1064).
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 5
+      max_symbols: 20
   timeout: 300
 case_studies/us_firm_characteristics/08_latent_factors:
   # No longer GPU: the index fits nothing. It reads the declared menu, reads each execution
@@ -3487,18 +3544,35 @@ case_studies/us_firm_characteristics/08a_ipca:
       folds: [0, 1]
       max_symbols: 20
   timeout: 300
-# 08b is genuinely GPU: a Torch conditional autoencoder that trains, and its chapter
-# counterpart 14_latent_factors/06_conditional_autoencoder is already gpu: true.
 case_studies/us_firm_characteristics/08b_conditional_autoencoder:
-  gpu: true
+  # Runs on the CPU in CI (ml4t/agent-workspace#1064): the notebook takes a DEVICE parameter and
+  # a run on any device other than the declared one must name its own population. Measured
+  # 2026-09-07 on four cores (`taskset -c 0-3`) with CUDA hidden, against test-data 2c068b5a.
+  # Four dedicated cores on this workstation approximate a four-core runner rather than equal
+  # one, so the budgets below carry room rather than tracking the seconds. Re-base them on the
+  # first green `cs-us_firm_characteristics` runs, which is where the percentages elsewhere in
+  # this file come from.
+  # 15.5 s.
   parameters:
+    DEVICE: cpu
+    POPULATION_NAME: us_firm_characteristics-cae-preview
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
       max_symbols: 20
   timeout: 300
 case_studies/us_firm_characteristics/08c_stochastic_discount_factor:
-  gpu: true
+  # Runs on the CPU in CI (ml4t/agent-workspace#1064): the notebook takes a DEVICE parameter and
+  # a run on any device other than the declared one must name its own population. Measured
+  # 2026-09-07 on four cores (`taskset -c 0-3`) with CUDA hidden, against test-data 2c068b5a.
+  # Four dedicated cores on this workstation approximate a four-core runner rather than equal
+  # one, so the budgets below carry room rather than tracking the seconds. Re-base them on the
+  # first green `cs-us_firm_characteristics` runs, which is where the percentages elsewhere in
+  # this file come from.
+  # 140.7 s, the slowest of the four. 600 rather than 300: 2x is thin for the one member whose
+  # phase budgets are reduced here rather than by preset_patches.py.
   parameters:
+    DEVICE: cpu
+    POPULATION_NAME: us_firm_characteristics-sdf-preview
     # SDF is the one latent member `preset_patches.py` does not reduce. Its patch sets `n_epochs`
     # and `checkpoint_interval`, and SDF reads neither: `_expected_latent_checkpoints` builds its
     # surface from `n_epochs_unc`, `n_epochs_cond` and `checkpoint_epochs`. So a CI run trained
@@ -3510,10 +3584,19 @@ case_studies/us_firm_characteristics/08c_stochastic_discount_factor:
       n_epochs_cond: 2
       n_epochs_moment: 1
       n_epochs_unc: 2
-  timeout: 300
+  timeout: 600
 case_studies/us_firm_characteristics/08d_supervised_autoencoder:
-  gpu: true
+  # Runs on the CPU in CI (ml4t/agent-workspace#1064): the notebook takes a DEVICE parameter and
+  # a run on any device other than the declared one must name its own population. Measured
+  # 2026-09-07 on four cores (`taskset -c 0-3`) with CUDA hidden, against test-data 2c068b5a.
+  # Four dedicated cores on this workstation approximate a four-core runner rather than equal
+  # one, so the budgets below carry room rather than tracking the seconds. Re-base them on the
+  # first green `cs-us_firm_characteristics` runs, which is where the percentages elsewhere in
+  # this file come from.
+  # 23.0 s.
   parameters:
+    DEVICE: cpu
+    POPULATION_NAME: us_firm_characteristics-sae-preview
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
       max_symbols: 20
