@@ -226,3 +226,111 @@ def prune_stale_training_runs(case_dir: Path) -> dict:
         "deleted": deleted,
         "example": {"training_hash": example_hash, "absent_pins": stale[example_hash]},
     }
+
+
+#: The tables a prediction set carries with it. Ordered parent first so a re-insert
+#: never writes a child before the row its foreign key names.
+_PREDICTION_TABLES: tuple[tuple[str, str], ...] = (
+    ("training_runs", "training_hash"),
+    ("prediction_sets", "prediction_hash"),
+    ("prediction_metrics", "prediction_hash"),
+    ("prediction_coverage", "prediction_hash"),
+    ("fold_metrics", "prediction_hash"),
+)
+
+
+def _table_columns(db: sqlite3.Connection, table: str) -> list[str]:
+    return [row[1] for row in db.execute(f"PRAGMA table_info({table})")]
+
+
+def capture_backed_prediction_rows(db_path: Path, case_dir: Path) -> dict:
+    """The registry rows describing prediction artifacts this fixture actually ships.
+
+    A re-sample rewrites the registry from production and leaves ``run_log/predictions/``
+    alone, so every artifact a generation wrote loses the row that named it: 6 directories
+    on etfs, 10 on fx_pairs, 39 on sp500_equity_option_analytics, all addressable by
+    nothing afterwards (ml4t/agent-workspace#1081). Captured before the rewrite and put
+    back after, these rows keep the fixture's own artifacts reachable.
+
+    Returns ``{table: (columns, rows)}``, empty when there is no registry yet.
+    """
+    if not db_path.is_file():
+        return {}
+    shipped = (
+        {entry.name for entry in (case_dir / "run_log" / "predictions").iterdir() if entry.is_dir()}
+        if (case_dir / "run_log" / "predictions").is_dir()
+        else set()
+    )
+    if not shipped:
+        return {}
+    db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        tables = _existing_tables(db)
+        if "prediction_sets" not in tables:
+            return {}
+        prediction_hashes: set[str] = set()
+        training_hashes: set[str] = set()
+        for batch in _in_batches(sorted(shipped)):
+            marks = ",".join("?" * len(batch))
+            for prediction_hash, training_hash in db.execute(
+                "SELECT prediction_hash, training_hash FROM prediction_sets "
+                f"WHERE prediction_hash IN ({marks})",
+                batch,
+            ):
+                prediction_hashes.add(str(prediction_hash))
+                training_hashes.add(str(training_hash))
+        if not prediction_hashes:
+            return {}
+        keys = {"training_hash": training_hashes, "prediction_hash": prediction_hashes}
+        captured: dict = {}
+        for table, column in _PREDICTION_TABLES:
+            if table not in tables:
+                continue
+            columns = _table_columns(db, table)
+            rows: list[tuple] = []
+            for batch in _in_batches(sorted(keys[column])):
+                marks = ",".join("?" * len(batch))
+                rows.extend(db.execute(f"SELECT * FROM {table} WHERE {column} IN ({marks})", batch))
+            if rows:
+                captured[table] = (columns, rows, column, sorted(keys[column]))
+        return captured
+    finally:
+        db.close()
+
+
+def restore_backed_prediction_rows(db_path: Path, captured: dict) -> dict[str, int]:
+    """Put captured rows back, replacing whatever the rebuilt registry holds for them.
+
+    Replace rather than ignore: where production also carries the hash, its metrics
+    describe the production artifact, and the file the fixture ships is the subsample.
+    The row that names a shipped artifact has to be the one measured against it.
+    """
+    if not captured or not db_path.is_file():
+        return {}
+    db = sqlite3.connect(str(db_path))
+    restored: dict[str, int] = {}
+    try:
+        tables = _existing_tables(db)
+        for table, _ in _PREDICTION_TABLES:
+            if table not in captured or table not in tables:
+                continue
+            columns, rows, key_column, keys = captured[table]
+            present = set(_table_columns(db, table))
+            shared = [name for name in columns if name in present]
+            if not shared:
+                continue
+            for batch in _in_batches(keys):
+                marks = ",".join("?" * len(batch))
+                db.execute(f"DELETE FROM {table} WHERE {key_column} IN ({marks})", batch)
+            index = {name: position for position, name in enumerate(columns)}
+            quoted = ",".join(f'"{name}"' for name in shared)
+            marks = ",".join("?" * len(shared))
+            db.executemany(
+                f"INSERT INTO {table} ({quoted}) VALUES ({marks})",
+                [tuple(row[index[name]] for name in shared) for row in rows],
+            )
+            restored[table] = len(rows)
+        db.commit()
+    finally:
+        db.close()
+    return restored

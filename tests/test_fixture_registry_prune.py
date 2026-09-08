@@ -15,9 +15,11 @@ import polars as pl
 import pytest
 
 from tests.fixture_registry import (
+    capture_backed_prediction_rows,
     delete_training_runs,
     pinned_input_shas,
     prune_stale_training_runs,
+    restore_backed_prediction_rows,
     sha256_file,
     shipped_artifact_shas,
     stale_training_runs,
@@ -223,3 +225,84 @@ def test_pruning_is_idempotent(case_dir):
 )
 def test_the_prune_happens_before_the_first_stage_that_registers(tmp_path, stem, registers):
     assert registers_training_runs(tmp_path / f"{stem}.py") is registers
+
+
+def test_a_resample_keeps_the_rows_that_name_a_shipped_artifact(case_dir):
+    """A rebuild from production must not strand the artifacts a generation wrote.
+
+    `sample_registry_for_tests.py` unlinks the registry and rebuilds it from production
+    while leaving `run_log/predictions/` in place, so without this every artifact the
+    generator produced loses the only row that names it - 39 such directories on
+    `sp500_equity_option_analytics` (ml4t/agent-workspace#1081).
+    """
+    (case_dir / "run_log" / "predictions" / "p_local").mkdir(parents=True)
+    (case_dir / "run_log" / "predictions" / "p_local" / "predictions.parquet").write_bytes(b"")
+    db_path = case_dir / "run_log" / "registry.db"
+    db = _connect(case_dir)
+    db.execute("INSERT INTO training_runs VALUES ('t_local','fwd_ret_1d','{}')")
+    db.execute("INSERT INTO prediction_sets VALUES ('p_local','t_local','validation')")
+    db.execute("INSERT INTO prediction_metrics VALUES ('p_local', 0.5)")
+    db.commit()
+    db.close()
+
+    captured = capture_backed_prediction_rows(db_path, case_dir)
+
+    # The rebuild: the registry is replaced by one carrying production's rows only.
+    db_path.unlink()
+    db = _connect(case_dir)
+    db.executescript(SCHEMA)
+    db.execute("INSERT INTO training_runs VALUES ('t_prod','fwd_ret_1d','{}')")
+    db.execute("INSERT INTO prediction_sets VALUES ('p_prod','t_prod','validation')")
+    db.commit()
+    db.close()
+
+    restore_backed_prediction_rows(db_path, captured)
+
+    db = _connect(case_dir)
+    assert sorted(r[0] for r in db.execute("SELECT prediction_hash FROM prediction_sets")) == [
+        "p_local",
+        "p_prod",
+    ]
+    assert db.execute(
+        "SELECT ic_mean FROM prediction_metrics WHERE prediction_hash='p_local'"
+    ).fetchone() == (0.5,)
+    db.close()
+
+
+def test_a_restored_row_replaces_the_production_row_for_the_same_hash(case_dir):
+    """Where both registries carry the hash, the row measured on the shipped file wins.
+
+    Production's metrics describe the production artifact; the fixture ships a subsample.
+    Keeping production's row would leave the fixture claiming 2104 IC days for a parquet
+    holding 66 (ml4t/agent-workspace#286).
+    """
+    (case_dir / "run_log" / "predictions" / "p").mkdir(parents=True)
+    db_path = case_dir / "run_log" / "registry.db"
+    db = _connect(case_dir)
+    db.execute("INSERT INTO training_runs VALUES ('t','fwd_ret_1d','{}')")
+    db.execute("INSERT INTO prediction_sets VALUES ('p','t','validation')")
+    db.execute("INSERT INTO prediction_metrics VALUES ('p', 0.5)")
+    db.commit()
+    db.close()
+    captured = capture_backed_prediction_rows(db_path, case_dir)
+
+    db_path.unlink()
+    db = _connect(case_dir)
+    db.executescript(SCHEMA)
+    db.execute("INSERT INTO training_runs VALUES ('t','fwd_ret_1d','{}')")
+    db.execute("INSERT INTO prediction_sets VALUES ('p','t','validation')")
+    db.execute("INSERT INTO prediction_metrics VALUES ('p', 9.9)")
+    db.commit()
+    db.close()
+
+    restore_backed_prediction_rows(db_path, captured)
+    db = _connect(case_dir)
+    assert db.execute(
+        "SELECT ic_mean FROM prediction_metrics WHERE prediction_hash='p'"
+    ).fetchone() == (0.5,)
+    assert db.execute("SELECT COUNT(*) FROM prediction_sets").fetchone()[0] == 1
+    db.close()
+
+
+def test_capturing_from_a_fixture_with_no_prediction_directories_returns_nothing(case_dir):
+    assert capture_backed_prediction_rows(case_dir / "run_log" / "registry.db", case_dir) == {}

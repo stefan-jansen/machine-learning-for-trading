@@ -30,6 +30,14 @@ import sqlite3
 import sys
 from pathlib import Path
 
+try:
+    from tests.fixture_registry import (
+        capture_backed_prediction_rows,
+        restore_backed_prediction_rows,
+    )
+except ModuleNotFoundError:  # standalone, like generate_intermediates.py
+    from fixture_registry import capture_backed_prediction_rows, restore_backed_prediction_rows
+
 REPO_ROOT = Path(__file__).parent.parent
 CODE_CS_DIR = REPO_ROOT / "case_studies"
 
@@ -201,6 +209,13 @@ def sample_registry(cs_id: str, intermediates_dir: Path = DEFAULT_INTERMEDIATES_
     dst_dir.mkdir(parents=True, exist_ok=True)
     dst_db = dst_dir / "registry.db"
 
+    # The rows that name an artifact this fixture ships, read before the rewrite that
+    # would drop them. `run_log/predictions/` is deliberately not removed below - a
+    # generation writes those artifacts and nothing else does - so rebuilding the
+    # registry from production alone leaves each of them addressable by nothing: every
+    # reader resolves a prediction by hash out of the registry (ml4t/agent-workspace#1081).
+    backed = capture_backed_prediction_rows(dst_db, intermediates_dir / cs_id)
+
     # Remove old DB to start fresh. The artifact dirs go too: they are keyed by
     # backtest_hash, so a re-sample that changes hashes would otherwise leave the
     # previous generation's directories behind alongside the new ones.
@@ -217,6 +232,9 @@ def sample_registry(cs_id: str, intermediates_dir: Path = DEFAULT_INTERMEDIATES_
             dst.close()
     finally:
         src.close()
+
+    restored = restore_backed_prediction_rows(dst_db, backed)
+    stats["fixture_rows_restored"] = sum(restored.values())
 
     sampled = stats.pop("sampled_hashes", set())
     artifacts = _copy_backtest_artifacts(src_db.parent, dst_dir, sampled)
@@ -1018,6 +1036,7 @@ def main() -> int:
         ]:
             print(f"  {table:30s} {stats.get(table, 0):>6}")
         print(f"  {'backtest artifact dirs':30s} {stats.get('backtest_artifact_dirs', 0):>6}")
+        print(f"  {'fixture rows restored':30s} {stats.get('fixture_rows_restored', 0):>6}")
         print(f"  {'file size (KB)':30s} {stats['file_size_kb']:>6}")
         missing_dir = stats.get("backtest_artifacts_missing_dir", 0)
         missing_returns = stats.get("backtest_artifacts_missing_returns", 0)
