@@ -18,458 +18,427 @@
 #
 # **Chapter 4: Fundamental and Alternative Data**
 # **Docker image**: `ml4t`
-# **Section Reference**: See Section 4.4 for alternative data evaluation concepts
+# **Section Reference**: Section 4.4 (Understanding Alternative Data)
 #
 # ## Purpose
 #
-# Digital assets provide unprecedented transparency: all transactions are public and verifiable.
-# This "radical transparency" enables analysis of protocol metrics and ecosystem health that
-# would be impossible in traditional markets. This notebook demonstrates how to source and
-# analyze **DeFi Total Value Locked (TVL)** as an on-chain fundamental indicator.
+# A public blockchain records every transaction, so a quantity that would be a trade secret in
+# any other market is simply readable: how much capital is deposited in each lending pool,
+# exchange and vault. Summed across the protocols on a chain, that is **total value locked**,
+# and it is the closest thing decentralized finance has to a fundamental.
+#
+# It is also a good specimen for the question this section of the chapter is about, which is not
+# "what does this dataset measure" but "is it worth integrating". This notebook takes the
+# obvious hypothesis - that capital flowing into DeFi precedes a rising ether price - and tries
+# to measure it. Most of the work turns out to be establishing how little the available data can
+# say, which is the usual outcome of an honest alternative-data evaluation and the reason the
+# evaluation happens before the integration.
 #
 # ## Learning Objectives
 #
 # After completing this notebook, you will be able to:
-# - Understand TVL as a fundamental metric for DeFi protocols
-# - Load real TVL data from DeFi Llama (free, no API key)
-# - Load ETH prices via CoinGecko (via ml4t-data)
-# - Calculate on-chain features for trading strategies
-# - Analyze TVL's relationship with crypto returns
 #
-# ## Data Sources (All Free)
+# - Define total value locked and say what it does and does not measure.
+# - Load a chain-level TVL history and a matched price series, and identify which of the two
+#   bounds the window you can study.
+# - Show a composition breakdown against the true total rather than against the subset you
+#   selected.
+# - Turn a level into momentum and regime features, and state the window each is measured over.
+# - Test whether a signal predicts a forward return, and correct the test for the overlap that
+#   forward returns create.
+# - Count the independent observations behind a result, and decide from that count whether the
+#   result can be acted on.
 #
-# | Source | Metrics | API |
-# |--------|---------|-----|
-# | **DeFi Llama** | TVL by chain, protocol, category | `api.llama.fi/` |
-# | **CoinGecko** | ETH/BTC prices via ml4t-data | `CoinGeckoProvider` |
+# ## Prerequisites
+#
+# Both feeds are free and are cached locally by one downloader, so the notebook does no
+# network access:
+#
+# ```bash
+# python data/crypto/onchain/download.py --dataset defillama
+# python data/crypto/onchain/download.py --dataset coingecko
+# ```
 #
 # ## Cross-References
 #
-# - **Upstream**: Free public APIs (no paid data required!)
-# - **Downstream**: Chapter 8 crypto features, Chapter 12 crypto models
-# - **Related**: `07_macro_data_alignment.py` (traditional macro alignment)
-# - **Evaluation**: `11_defi_tvl_evaluation.py` (alt data due diligence)
+# - **Related**: [`07_macro_data_alignment`](07_macro_data_alignment.ipynb) (the same publication-timing discipline on macro series)
+# - **Downstream**: [`11_defi_tvl_evaluation`](11_defi_tvl_evaluation.ipynb) (the full due-diligence framework applied to this dataset)
 #
 # ## Key Concepts
 #
-# - **TVL (Total Value Locked)**: Assets deposited in DeFi protocols
-# - **Chain TVL**: Aggregate value locked on a blockchain (Ethereum, Solana, etc.)
-# - **Protocol TVL**: Value locked in specific protocols (Aave, Uniswap, etc.)
-# - **TVL/Market Cap**: Valuation ratio for crypto ecosystems
+# - **Total value locked (TVL)**: the dollar value of the crypto assets deposited in a chain's
+#   decentralized finance protocols, valued at current prices.
+# - **Chain TVL**: that figure for one blockchain. **Protocol TVL** is the same for one
+#   application.
+# - **Forward return**: the return realized over a stated window *after* the date a signal is
+#   observed, which is the quantity a signal has to predict to be worth anything.
+# - **Overlapping windows**: consecutive forward returns computed over a window longer than the
+#   sampling interval share most of their days, so consecutive observations are not independent
+#   draws and a test that assumes they are overstates its own significance.
 
 # %%
 """On-Chain Fundamentals: DeFi TVL as Alternative Data - source and analyze DeFi TVL for crypto trading signals."""
 
-import warnings
-
-warnings.filterwarnings("ignore")
-
+import plotly.express as px
 import plotly.graph_objects as go
 import polars as pl
+import statsmodels.api as sm
 from plotly.subplots import make_subplots
 
 from data import load_coingecko_ohlcv, load_defillama_chain_tvl
-from utils.style import COLORS  # activates the ml4t Plotly template on import
-
-print("On-Chain Fundamentals: DeFi TVL Analysis")
-
-
-# %% tags=["parameters"]
-# Production defaults - Papermill injects overrides for CI
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% [markdown]
-# ---
+# The forward horizon is the setting that decides what is being tested. Thirty days asks whether
+# TVL predicts a month of ether returns, which is the horizon the conventional story is told at;
+# it is also what creates the overlap Part 6 has to correct for, since the series is daily.
+
+# %% tags=["parameters"]
+CHAINS = ["Ethereum", "Solana", "BSC", "Arbitrum"]  # the four largest by TVL
+FORWARD_DAYS = 30  # the return horizon the signal is tested against
+MOMENTUM_DAYS = 30  # the window TVL growth is measured over
+ZSCORE_DAYS = 90  # the window a TVL level is judged unusual against
+REGIME_Z = 1.0  # standard deviations from the mean that separate the three regimes
+RECENT_DAYS = 30  # the trailing window the composition breakdown averages over
+
+# %% [markdown]
+# ## 1. What total value locked measures
 #
-# ## Section 1: Understanding DeFi TVL
+# When someone deposits ether into a lending protocol, the deposit sits in a smart contract
+# whose balance anyone can read. TVL is the sum of those balances across a chain's protocols,
+# converted to dollars at current prices.
 #
-# **Total Value Locked (TVL)** measures the aggregate value of crypto assets deposited
-# in decentralized finance protocols. It serves as a fundamental metric for:
+# Two properties follow from that definition and both matter for how the number can be read.
+# It is a **stock**, not a flow: it does not distinguish new capital arriving from existing
+# deposits appreciating, so a chain whose TVL doubled while its native token doubled has
+# attracted nothing. And it is **denominated in dollars while being held in crypto**, so it
+# falls when prices fall whether or not anyone withdrew.
 #
-# - **Ecosystem health**: Higher TVL = more capital deployed = stronger ecosystem
-# - **Protocol adoption**: TVL growth indicates user/capital inflows
-# - **Yield opportunities**: TVL often correlates with yield farming activity
-# - **Risk appetite**: TVL drawdowns often precede broader crypto corrections
-#
-# ### Why TVL Matters for Trading - Working Hypotheses
-#
-# The mapping below is the conventional starting story; Sections 7 and 8
-# put each hypothesis under empirical scrutiny over the joined window.
+# The conventional readings below are the ones a data vendor's pitch deck offers. They are
+# hypotheses, and Part 6 tests one of them.
 #
 # | Pattern | Conventional reading |
 # |---------|----------------------|
-# | TVL growth > ETH growth | Capital inflows; bullish DeFi sentiment |
-# | TVL decline + ETH stable | Risk-off; capital exiting DeFi |
-# | TVL spike | New yield opportunities or protocol launches |
-# | TVL crash | Exploit, liquidations, or market panic |
+# | TVL growing faster than the ether price | Capital arriving rather than deposits appreciating |
+# | TVL falling while the price holds | Capital leaving; risk appetite falling |
+# | A TVL spike | A new protocol or a yield opportunity pulling deposits in |
+# | A TVL collapse | An exploit, a cascade of liquidations, or a general panic |
 
 # %% [markdown]
-# ---
+# ## 2. The TVL history
 #
-# ## Section 2: Load DeFi TVL from DeFi Llama
-#
-# TVL snapshots come from the canonical downloader, which caches the
-# DeFi Llama feeds as parquet so this notebook is entirely offline once
-# the data is on disk:
-#
-# ```bash
-# python data/crypto/onchain/download.py --dataset defillama
-# ```
-#
-# The loaders raise `DataNotFoundError` with the exact command if the
-# file is missing, so there is no hidden network or synthetic-data
-# fallback - if a chain is not on disk, the reader knows exactly what
-# to run.
+# DeFi Llama publishes the series free and it goes back to the start of the sector. Seeing its
+# full length first matters, because the joined panel later in this notebook is a small fraction
+# of it and the reason is worth knowing before the results are read.
 
 # %%
-total_tvl = load_defillama_chain_tvl("total").with_columns(
-    (pl.col("tvl_usd") / 1e9).alias("tvl_bn")
+total_tvl = (
+    load_defillama_chain_tvl("total").sort("timestamp").with_columns(tvl_bn=pl.col("tvl_usd") / 1e9)
 )
-print(f"Total TVL data: {total_tvl.shape}")
-print(f"Date range: {total_tvl['timestamp'].min()} → {total_tvl['timestamp'].max()}")
-total_tvl.tail(5)
+print(f"Observations: {len(total_tvl):,}")
+print(f"History: {total_tvl['timestamp'].min()} to {total_tvl['timestamp'].max()}")
+print(f"Highest level reached: ${total_tvl['tvl_bn'].max():.0f}bn")
+total_tvl.tail(3)
 
 # %%
-# Per-chain TVL (Ethereum, Solana, BSC, Arbitrum by default)
-chains = ["Ethereum", "Solana", "BSC", "Arbitrum"]
-chain_tvls = []
-for chain in chains:
-    df = load_defillama_chain_tvl(chain).rename({"tvl_usd": f"tvl_{chain.lower()}"})
-    chain_tvls.append(df)
-    print(f"  {chain}: {len(df):,} observations")
-
-chain_data = chain_tvls[0]
-for df in chain_tvls[1:]:
-    chain_data = chain_data.join(df, on="timestamp", how="full", coalesce=True)
-chain_data = chain_data.sort("timestamp").fill_null(0)
-print(f"\nChain TVL data: {chain_data.shape}")
-chain_data.tail(5)
-
-# %% [markdown]
-# ---
-#
-# ## Section 3: Load ETH Prices via CoinGecko
-#
-# We use `ml4t-data`'s CoinGeckoProvider for consistent, reliable price data.
-
-# %%
-# ETH prices come from the same canonical downloader
-# (python data/crypto/onchain/download.py --dataset coingecko).
-# Free-tier window is the trailing 365 days - re-run the downloader to
-# refresh. For longer history, use a provider with a paid tier.
-# CoinGecko's free tier appends a live intraday snapshot for the current
-# day on top of that day's 00:00 daily bar, so the final calendar day can
-# arrive twice. Collapse to one row per day (keep the most recent snapshot)
-# before anything downstream joins or computes on it.
-eth_prices = load_coingecko_ohlcv("ethereum").unique(
-    subset="timestamp", keep="last", maintain_order=True
+fig = px.line(
+    total_tvl.to_pandas(),
+    x="timestamp",
+    y="tvl_bn",
+    title="DeFi's capital base grew, collapsed, and rebuilt over eight years",
+    labels={"timestamp": "Date", "tvl_bn": "Total value locked (USD billions)"},
+    color_discrete_sequence=[COLORS["blue"]],
 )
-print(f"ETH prices: {eth_prices.shape}")
-print(f"Window: {eth_prices['timestamp'].min()} → {eth_prices['timestamp'].max()}")
+fig.update_layout(height=380)
+show_plotly_with_alt(
+    fig,
+    "Line chart of total value locked across all DeFi from 2017 to 2026, near zero until 2020, "
+    "rising steeply to a peak at the end of 2021, falling by about four fifths into late 2023, "
+    "and recovering to roughly half the peak since.",
+)
 
 # %% [markdown]
-# ---
+# ### Which chains hold it
 #
-# ## Section 4: Merge TVL and Price Data
-#
-# The CoinGecko free-tier window of 365 trailing days bounds the joined
-# dataset. The TVL series itself goes back to 2017 - substituting a paid
-# price feed (or the longer Binance / Kraken history loaded in
-# `02_crypto_perps_funding`) extends the analysis to the full TVL history.
+# Chain-level series let the total be decomposed. The four loaded here are the largest, and the
+# breakdown below measures them against the **total** rather than against each other, so that
+# the share held by everything else is visible rather than assumed away.
 
 # %%
-combined = (
+chain_tvl = {}
+for chain in CHAINS:
+    series = load_defillama_chain_tvl(chain).sort("timestamp")
+    chain_tvl[chain] = series
+    print(f"{chain}: {len(series):,} observations from {series['timestamp'].min()}")
+
+# %%
+recent_total = float(total_tvl.tail(RECENT_DAYS)["tvl_bn"].mean())
+composition = pl.DataFrame(
+    [
+        {
+            "chain": chain,
+            "tvl_bn": float(series.tail(RECENT_DAYS)["tvl_usd"].mean()) / 1e9,
+        }
+        for chain, series in chain_tvl.items()
+    ]
+).sort("tvl_bn", descending=True)
+composition = pl.concat(
+    [
+        composition,
+        pl.DataFrame(
+            {"chain": ["All other chains"], "tvl_bn": [recent_total - composition["tvl_bn"].sum()]}
+        ),
+    ]
+).with_columns(share=pl.col("tvl_bn") / recent_total)
+composition
+
+# %%
+fig = px.bar(
+    composition.to_pandas(),
+    x="share",
+    y="chain",
+    orientation="h",
+    title="One chain holds more than all the others together",
+    labels={"share": f"Share of total value locked, {RECENT_DAYS}-day average", "chain": ""},
+    color_discrete_sequence=[COLORS["blue"]],
+)
+fig.update_layout(height=320, xaxis_tickformat=".0%", yaxis=dict(categoryorder="total ascending"))
+show_plotly_with_alt(
+    fig,
+    "Horizontal bar chart of each chain's share of total value locked over the trailing thirty "
+    "days. The largest bar is longer than the other four combined, and the residual bar for all "
+    "remaining chains is the second longest.",
+)
+
+# %% [markdown]
+# ## 3. The price series, and what bounds the study
+#
+# Testing whether TVL predicts returns needs a price. CoinGecko's free tier serves the trailing
+# 365 days and no more, so the joined panel is one year long however far back the TVL series
+# reaches. That is not a detail: it is the constraint that decides what this notebook can
+# conclude, and Part 6 comes back to it.
+#
+# The free tier also appends a live intraday snapshot on top of the current day's midnight bar,
+# so the last calendar day can arrive twice. Collapsing to the most recent row per day is done
+# before anything joins to it.
+
+# %%
+eth = load_coingecko_ohlcv("ethereum").unique(subset="timestamp", keep="last", maintain_order=True)
+print(f"Price observations: {len(eth):,}")
+print(f"Window: {eth['timestamp'].min()} to {eth['timestamp'].max()}")
+print(
+    f"TVL history that window discards: {(eth['timestamp'].min() - total_tvl['timestamp'].min()).days:,} days"
+)
+
+# %%
+panel = (
     total_tvl.join(
-        eth_prices.rename({"price_usd": "eth_price", "volume_usd": "eth_volume"}),
+        eth.rename({"price_usd": "eth_price", "volume_usd": "eth_volume"}),
         on="timestamp",
         how="inner",
     )
-    .join(
-        chain_data.with_columns(pl.col("timestamp").cast(pl.Date)),
-        on="timestamp",
-        how="left",
-    )
-    .fill_null(strategy="forward")
+    .sort("timestamp")
+    .select("timestamp", "tvl_bn", "eth_price", "eth_volume")
 )
-
-print(f"Combined dataset: {combined.shape}, columns: {combined.columns}")
-combined.tail(5)
-
-# %% [markdown]
-# ---
-#
-# ## Section 5: Visualize TVL and ETH Price Relationship
+print(
+    f"Joined panel: {len(panel):,} rows, {panel['timestamp'].min()} to {panel['timestamp'].max()}"
+)
+panel.tail(3)
 
 # %%
-# Plot TVL vs ETH price
 fig = make_subplots(
     rows=2,
     cols=1,
     shared_xaxes=True,
     vertical_spacing=0.1,
-    subplot_titles=("Total DeFi TVL", "ETH Price"),
-    row_heights=[0.5, 0.5],
+    subplot_titles=("Total value locked", "Ether price"),
 )
-
 fig.add_trace(
     go.Scatter(
-        x=combined["timestamp"],
-        y=combined["tvl_bn"],
-        name="TVL ($B)",
+        x=panel["timestamp"],
+        y=panel["tvl_bn"],
         line=dict(color=COLORS["blue"]),
         fill="tozeroy",
-        fillcolor="rgba(10, 22, 40, 0.15)",
+        fillcolor="rgba(10, 22, 40, 0.15)",  # translucent COLORS["blue"]
+        name="TVL",
     ),
     row=1,
     col=1,
 )
-
 fig.add_trace(
     go.Scatter(
-        x=combined["timestamp"],
-        y=combined["eth_price"],
-        name="ETH Price",
-        line=dict(color=COLORS["amber"]),
+        x=panel["timestamp"], y=panel["eth_price"], line=dict(color=COLORS["amber"]), name="ETH"
     ),
     row=2,
     col=1,
 )
-
-fig.update_layout(
-    title="DeFi TVL and ETH price rose and fell together over the trailing year",
-    height=600,
-    showlegend=True,
+fig.update_yaxes(title_text="USD billions", row=1, col=1)
+fig.update_yaxes(title_text="USD", row=2, col=1)
+fig.update_layout(height=560, showlegend=False, title="TVL and the ether price move together")
+show_plotly_with_alt(
+    fig,
+    "Two stacked panels over the joined one-year window: total value locked and the ether price. "
+    "The two lines rise and fall at the same times, which is what a dollar-denominated stock of "
+    "crypto assets does.",
 )
-fig.update_yaxes(title_text="TVL (Billions USD)", row=1, col=1)
-fig.update_yaxes(title_text="ETH Price (USD)", row=2, col=1)
-fig.show()
-
-# %%
-chain_cols = [
-    c for c in combined.columns if c.startswith("tvl_") and c not in {"tvl_bn", "tvl_usd"}
-]
-recent = combined.filter(pl.col("timestamp") > pl.col("timestamp").max() - pl.duration(days=30))
-# Proper display names (acronyms like BSC survive .title(), which would print "Bsc").
-chain_names = {c.lower(): c for c in chains}
-chain_totals = {
-    chain_names.get(col.replace("tvl_", ""), col.replace("tvl_", "").title()): recent[col].mean()
-    / 1e9
-    for col in chain_cols
-}
-
-fig = go.Figure(
-    data=[
-        go.Pie(
-            labels=list(chain_totals.keys()),
-            values=list(chain_totals.values()),
-            hole=0.4,
-            marker=dict(
-                colors=[COLORS["blue"], COLORS["amber"], COLORS["copper"], COLORS["slate"]]
-            ),
-        )
-    ]
-)
-fig.update_layout(title="Ethereum Dominates DeFi TVL - Trailing 30-Day Average")
-fig.show()
 
 # %% [markdown]
-# ---
-#
-# ## Section 6: Create On-Chain Trading Features
-
-
-# %%
-def create_tvl_features(df: pl.DataFrame) -> pl.DataFrame:
-    """Compute TVL momentum, valuation, and regime features."""
-    return df.with_columns(
-        pl.col("tvl_bn").pct_change(7).alias("tvl_growth_7d"),
-        pl.col("tvl_bn").pct_change(30).alias("tvl_growth_30d"),
-        pl.col("tvl_bn").pct_change(90).alias("tvl_growth_90d"),
-        pl.col("tvl_bn").rolling_mean(7).alias("tvl_ma7"),
-        pl.col("tvl_bn").rolling_mean(30).alias("tvl_ma30"),
-        (
-            (pl.col("tvl_bn") - pl.col("tvl_bn").rolling_mean(90))
-            / pl.col("tvl_bn").rolling_std(90)
-        ).alias("tvl_zscore"),
-        pl.col("eth_price").pct_change(7).alias("eth_return_7d"),
-        pl.col("eth_price").pct_change(30).alias("eth_return_30d"),
-    ).with_columns(
-        (pl.col("tvl_bn") / pl.col("eth_price")).alias("tvl_price_ratio"),
-        (pl.col("tvl_growth_30d") - pl.col("eth_return_30d")).alias("tvl_eth_spread"),
-        # Warm-up rows without a valid 90-day z-score stay null (unclassified),
-        # never fall through to "neutral"; the regime aggregation excludes them.
-        pl.when(pl.col("tvl_zscore").is_null())
-        .then(pl.lit(None, dtype=pl.String))
-        .when(pl.col("tvl_zscore") > 1.0)
-        .then(pl.lit("expansion"))
-        .when(pl.col("tvl_zscore") < -1.0)
-        .then(pl.lit("contraction"))
-        .otherwise(pl.lit("neutral"))
-        .alias("tvl_regime"),
-    )
-
-
-features = create_tvl_features(combined)
-print(f"Features created: {len(features.columns)} columns")
-
-features.select(
-    "timestamp",
-    "tvl_bn",
-    "eth_price",
-    "tvl_growth_30d",
-    "eth_return_30d",
-    "tvl_eth_spread",
-    "tvl_regime",
-).tail(10)
+# The two lines moving together is the first thing to be careful about. TVL is a dollar value of
+# crypto holdings, so it mechanically follows the price of those holdings. Any test of whether
+# TVL predicts the price has to work with a quantity that is not simply the price again, which
+# is why the features below are growth rates and z-scores rather than levels.
 
 # %% [markdown]
-# ---
+# ## 4. Features
 #
-# ## Section 7: Analyze TVL as a Trading Signal
-#
-# Does TVL momentum predict future ETH returns?
+# Three quantities, each with the window it is measured over stated in its name. Growth over the
+# momentum window; the level as a z-score against a longer window, which is what makes "high" or
+# "low" mean something; and the regime label that z-score falls into.
 
 # %%
-# Calculate forward returns
-analysis = features.with_columns(
-    [
-        pl.col("eth_return_30d").shift(-30).alias("fwd_eth_return_30d"),
-        pl.col("eth_return_7d").shift(-7).alias("fwd_eth_return_7d"),
-    ]
-).filter(pl.col("fwd_eth_return_30d").is_not_null())
+features = panel.with_columns(
+    tvl_growth=pl.col("tvl_bn").pct_change(MOMENTUM_DAYS),
+    eth_return=pl.col("eth_price").pct_change(MOMENTUM_DAYS),
+    tvl_zscore=(pl.col("tvl_bn") - pl.col("tvl_bn").rolling_mean(ZSCORE_DAYS))
+    / pl.col("tvl_bn").rolling_std(ZSCORE_DAYS),
+).with_columns(
+    # A row without a full z-score window is unclassified rather than neutral: pooling the
+    # warm-up into the middle band would put a hundred days of "no measurement" into a bucket
+    # the analysis then reads as a measurement.
+    tvl_regime=pl.when(pl.col("tvl_zscore").is_null())
+    .then(pl.lit(None, dtype=pl.String))
+    .when(pl.col("tvl_zscore") > REGIME_Z)
+    .then(pl.lit("expansion"))
+    .when(pl.col("tvl_zscore") < -REGIME_Z)
+    .then(pl.lit("contraction"))
+    .otherwise(pl.lit("neutral"))
+)
+features.select("timestamp", "tvl_bn", "tvl_growth", "tvl_zscore", "tvl_regime").tail(5)
 
-# Regime analysis
-regime_returns = (
-    analysis.filter(pl.col("tvl_regime").is_not_null())
+# %% [markdown]
+# ## 5. The forward return
+#
+# The quantity a signal has to predict is the return *after* it is observed. Shifting the
+# trailing return back by its own window turns it into the return over the days that follow each
+# date, which is the only construction that puts the signal before the outcome.
+
+# %%
+tested = features.with_columns(forward_return=pl.col("eth_return").shift(-FORWARD_DAYS)).drop_nulls(
+    ["tvl_growth", "forward_return"]
+)
+
+print(f"Rows with both a signal and a forward return: {len(tested):,}")
+print(f"Signal dates: {tested['timestamp'].min()} to {tested['timestamp'].max()}")
+
+# %% [markdown]
+# ## 6. Testing the hypothesis, and counting the evidence
+#
+# The regime table is the obvious first cut: average the forward return within each regime and
+# compare. It is also where an alternative-data evaluation most often goes wrong, because the
+# table looks like evidence and is not yet.
+
+# %%
+by_regime = (
+    tested.drop_nulls("tvl_regime")
     .group_by("tvl_regime")
     .agg(
-        pl.col("fwd_eth_return_30d").mean().alias("avg_fwd_return"),
-        pl.col("fwd_eth_return_30d").std().alias("std_fwd_return"),
-        pl.len().alias("n_obs"),
-        (pl.col("fwd_eth_return_30d") > 0).mean().alias("win_rate"),
+        pl.len().alias("days"),
+        pl.col("forward_return").mean().alias("mean_forward_return"),
+        pl.col("forward_return").std().alias("std_forward_return"),
     )
-    .sort("avg_fwd_return", descending=True)
-)
-
-regime_returns
-
-# %%
-# Visualize regime returns
-fig = go.Figure(
-    data=[
-        go.Bar(
-            x=regime_returns["tvl_regime"],
-            y=regime_returns["avg_fwd_return"],
-            text=[f"{r:.1%}" if r is not None else "N/A" for r in regime_returns["avg_fwd_return"]],
-            textposition="auto",
-            # Color by the sign of the average forward return (green = positive, red = negative)
-            marker_color=[
-                COLORS["positive"] if (r is not None and r > 0) else COLORS["negative"]
-                for r in regime_returns["avg_fwd_return"]
-            ],
-        )
-    ]
-)
-
-fig.update_layout(
-    title="Depressed-TVL (Contraction) Regime Precedes the Best Forward ETH Return",
-    xaxis_title="TVL Regime (90-day z-score)",
-    yaxis_title="Average Forward 30-Day Return",
-    yaxis_tickformat=".1%",
-    height=400,
-)
-fig.show()
-
-# %% [markdown]
-# The empirical regime ranking cuts against the naive narrative in
-# Section 1. Only rows with a valid 90-day z-score enter the table, so the
-# first ~90 warm-up days (no z-score yet) are excluded rather than pooled
-# into the neutral band. Over the trailing year on disk, the **contraction**
-# regime, TVL more than one standard deviation *below* its 90-day mean,
-# precedes the best average forward 30-day ETH return; the stretched
-# **expansion** regime (more than one standard deviation above the mean)
-# precedes a negative return; and the **neutral** middle band trails both.
-# Two readings are consistent with this:
-#
-# 1. **Mean-reversion in TVL.** A depressed z-score marks capital that has
-#    already left DeFi and tends to rebuild, so it precedes recovery,
-#    whereas a stretched z-score above +1 is more likely to revert than to
-#    extend and drags forward returns with it.
-# 2. **Sample-window dependence.** The CoinGecko free-tier window covers a
-#    single 365-day slice with overlapping 30-day forward horizons, so the
-#    regime buckets are far from independent; longer histories with paid
-#    feeds are needed before this pattern can be treated as a stable signal.
-#
-# Either way, the qualitative table in Section 1 ("TVL growth → bullish")
-# is a starting hypothesis, not a verified result, and the IC analysis in
-# the next cell quantifies the linear version of this relationship.
-
-# %%
-ic = (
-    analysis.filter(
-        pl.col("tvl_growth_30d").is_not_null() & pl.col("fwd_eth_return_30d").is_not_null()
+    .with_columns(
+        # Consecutive forward returns share all but one of their days, so the number of
+        # independent windows a bucket holds is its day count divided by the horizon.
+        independent_windows=(pl.col("days") / FORWARD_DAYS).round(1)
     )
-    .select(pl.corr("tvl_growth_30d", "fwd_eth_return_30d"))
-    .item()
+    .sort("mean_forward_return", descending=True)
 )
-band = "moderate" if abs(ic) > 0.1 else "weak" if abs(ic) > 0.05 else "negligible"
-print(f"IC(TVL growth → forward 30d ETH return) = {ic:+.3f}  ({band} linear signal)")
-
-# %% [markdown]
-# ---
-#
-# ## Section 8: Summary Statistics
-#
-# A compact summary of TVL level, dispersion, and recent dynamics over the
-# joined window, plus the latest reading.
+by_regime
 
 # %%
-features.select(
-    pl.col("tvl_bn").min().round(1).alias("tvl_min_bn"),
-    pl.col("tvl_bn").max().round(1).alias("tvl_max_bn"),
-    pl.col("tvl_bn").mean().round(1).alias("tvl_mean_bn"),
-    pl.col("tvl_bn").std().round(1).alias("tvl_std_bn"),
-    (pl.col("tvl_growth_30d").mean() * 100).round(2).alias("avg_30d_growth_pct"),
-    (pl.col("tvl_eth_spread").mean() * 100).round(2).alias("avg_tvl_eth_spread_pct"),
+fig = px.bar(
+    by_regime.to_pandas(),
+    x="tvl_regime",
+    y="mean_forward_return",
+    error_y=by_regime.with_columns(
+        se=pl.col("std_forward_return") / (pl.col("independent_windows") ** 0.5)
+    )["se"].to_list(),
+    title="The error bars are wider than the differences between the regimes",
+    labels={
+        "tvl_regime": f"TVL regime, {ZSCORE_DAYS}-day z-score",
+        "mean_forward_return": f"Mean {FORWARD_DAYS}-day forward return",
+    },
+    color_discrete_sequence=[COLORS["blue"]],
 )
-
-# %%
-features.tail(1).select(
-    "timestamp",
-    pl.col("tvl_bn").round(1).alias("tvl_bn"),
-    pl.col("eth_price").round(0).alias("eth_price"),
-    "tvl_regime",
+fig.update_layout(height=400, yaxis_tickformat=".0%")
+show_plotly_with_alt(
+    fig,
+    "Bar chart of the mean forward ether return in each of the three TVL regimes, with error "
+    "bars scaled by the number of independent windows in each bucket. Every error bar spans "
+    "zero and overlaps the other bars.",
 )
 
 # %% [markdown]
-# ---
+# The error bars are what the table alone does not show. Each bucket holds a few hundred daily
+# rows and a handful of independent thirty-day windows, so the standard error of each mean is
+# larger than the distance between the means. Nothing in the ordering of those three bars can be
+# distinguished from the ordering three coin flips would produce.
 #
+# ### The same question as a regression
+#
+# The linear version is a regression of the forward return on TVL growth. Its uncorrected
+# t-statistic assumes each daily observation is an independent draw, which the overlap makes
+# false; the Newey-West correction widens the standard error by the amount of serial dependence
+# actually present, and the lag is set one short of the horizon because that is how far the
+# overlap reaches.
+
+# %%
+signal = tested["tvl_growth"].to_numpy()
+outcome = tested["forward_return"].to_numpy()
+design = sm.add_constant(signal)
+
+naive = sm.OLS(outcome, design).fit()
+corrected = sm.OLS(outcome, design).fit(cov_type="HAC", cov_kwds={"maxlags": FORWARD_DAYS - 1})
+
+print(
+    f"Correlation between TVL growth and the forward return: {tested.select(pl.corr('tvl_growth', 'forward_return')).item():+.3f}"
+)
+print(f"Slope: {naive.params[1]:+.3f}")
+print(f"t-statistic assuming independent days: {naive.tvalues[1]:+.2f}")
+print(f"t-statistic with the overlap corrected: {corrected.tvalues[1]:+.2f}")
+print(f"Independent thirty-day windows in the sample: {len(tested) / FORWARD_DAYS:.0f}")
+
+# %% [markdown]
+# Both statistics are small, and the correction moves the smaller one toward zero. The reason is
+# in the last line: a year of daily observations of a thirty-day forward return is about ten
+# independent windows, and ten observations cannot establish a relationship of this size whatever
+# the daily row count suggests.
+#
+# **What binds is the price feed, not the TVL series.** DeFi Llama publishes eight years of TVL
+# for free; the free price tier serves one. Extending the study needs a longer price history,
+# which the exchange feeds in Chapter 2 provide, and that is the change that would make this
+# question answerable rather than any refinement of the signal.
+
+# %% [markdown]
 # ## Key Takeaways
 #
-# 1. **DeFi Llama supplies a free, multi-year TVL panel.** The total
-#    series spans 2017-09-27 to the current date; per-chain coverage
-#    starts at each chain's launch (Solana 2021, Arbitrum 2021, BSC 2020).
-# 2. **The price feed is the binding constraint.** CoinGecko's free tier
-#    caps history at 365 days, so the joined panel reduces to one
-#    trailing year. Longer studies require a paid feed or an exchange
-#    OHLCV history.
-# 3. **Ethereum still dominates trailing-30-day chain TVL share**, with
-#    Solana, BSC, and Arbitrum sharing the remainder.
-# 4. **Naive "expansion = bullish" framing is empirically backwards over
-#    this window.** Among rows with a valid 90-day z-score, the depressed
-#    -1σ contraction regime precedes the best forward 30-day ETH return
-#    while the stretched +1σ expansion regime precedes a negative one; the
-#    linear IC of TVL growth vs forward returns is small and positive
-#    (about +0.07). Treat the regime table in Section 1 as a hypothesis
-#    template, not a verified rule.
-# 5. **TVL belongs in the feature set, not the conclusion.** It is one
-#    cross-asset signal - combine with price-based momentum, funding,
-#    and macro features before drawing trading conclusions.
+# 1. Total value locked is a dollar-denominated stock of crypto assets, so it moves with the
+#    prices of those assets by construction. A test of whether it predicts price has to be built
+#    on growth or on a standardized level, never on the level itself.
+# 2. Show a composition against the true total. Four chains plotted against each other will
+#    always fill the chart, whatever share of the market they actually hold.
+# 3. A forward return sampled daily over a thirty-day horizon gives thirty overlapping
+#    observations of each window. The row count is not the sample size, and the number that
+#    matters is the row count divided by the horizon.
+# 4. Correct the test for that overlap before reading it. The Newey-West standard error is the
+#    standard correction and it needs a lag at least as long as the overlap; here it moves an
+#    already-weak statistic closer to zero.
+# 5. A regime table with three buckets and a few independent windows in each will always produce
+#    an ordering. Put the standard error on the chart and the ordering usually stops being
+#    interesting.
+# 6. The binding constraint on an alternative-data study is often not the alternative data. Here
+#    the free TVL history is eight years and the free price history is one, so the price feed
+#    decides what can be concluded.
 #
-# ## Next Steps
-#
-# - `11_defi_tvl_evaluation.py` - formal alpha/decay/cost evaluation of
-#   TVL signals, mapped to the Chapter 4 alt-data framework.
-# - Chapter 8 - feature engineering for crypto including on-chain
-#   composite scores.
-# - Chapter 12 - gradient-boosted models that ingest TVL features for
-#   crypto trading.
+# **Next**: [`11_defi_tvl_evaluation`](11_defi_tvl_evaluation.ipynb) applies the chapter's full
+# due-diligence framework - signal, quality, legal risk and cost - to this same dataset.
