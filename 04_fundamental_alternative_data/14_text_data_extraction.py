@@ -1,11 +1,12 @@
 # ---
 # jupyter:
 #   jupytext:
+#     cell_metadata_filter: tags,-all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -800,11 +801,13 @@ print("  save_text_dataset(text_dataset, 'data/sec_text_data.parquet')")
 # what the synthetic example produced earlier in the notebook.
 #
 # The SEC requires a real User-Agent identity for every request and
-# blocks placeholder addresses. Set `EDGAR_IDENTITY` in your environment
-# to `"Your Name your.email@domain.com"` before running this section:
+# blocks placeholder addresses. It is not an API key and there is nothing
+# to sign up for: put your own name and email on the `EDGAR_IDENTITY` line
+# of the `.env` file in the repository root, then restart this notebook's
+# kernel so it is read.
 #
-# ```bash
-# export EDGAR_IDENTITY="Jane Doe jane@example.org"
+# ```
+# EDGAR_IDENTITY=Jane Doe jane@example.org
 # ```
 #
 # The fetch is read-only, rate-limited by edgartools, and typically
@@ -814,10 +817,16 @@ print("  save_text_dataset(text_dataset, 'data/sec_text_data.parquet')")
 edgar_identity = os.environ.get("EDGAR_IDENTITY")
 if not edgar_identity:
     raise RuntimeError(
-        "EDGAR_IDENTITY environment variable is not set. The SEC requires a "
-        "real User-Agent (name + email) for every EDGAR request and blocks "
-        "placeholder addresses. Set it before running this section, e.g. "
-        '`export EDGAR_IDENTITY="Jane Doe jane@example.org"`.'
+        "EDGAR_IDENTITY is not set. The SEC requires a real User-Agent - your "
+        "name and email - on every EDGAR request, and blocks placeholder "
+        "addresses. It is not an API key and there is nothing to sign up for.\n"
+        "Put your own name and email on the EDGAR_IDENTITY line of the .env "
+        "file in the repository root:\n"
+        "    EDGAR_IDENTITY=Jane Doe jane@example.org\n"
+        ".env is read once, when the process starts, so then restart this "
+        "notebook's kernel (Kernel -> Restart Kernel). On the Docker path, stop "
+        "Jupyter Lab and run `docker compose up ml4t` again - `docker compose "
+        "restart` keeps the environment the container was created with."
     )
 set_identity(edgar_identity)
 

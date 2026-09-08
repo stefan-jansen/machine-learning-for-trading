@@ -153,21 +153,32 @@ Rosetta. Nothing else in the book needs this.
 git clone https://github.com/stefan-jansen/machine-learning-for-trading.git
 cd machine-learning-for-trading
 
-# 2. Copy environment template
+# 2. Copy the environment template. The defaults work as they are — nothing in
+#    it needs editing to start.
 cp .env.example .env
 
 # 3. Pull the pre-built image from Docker Hub
 docker compose pull ml4t
 
-# 4. Start Jupyter Lab
-docker compose up ml4t
-# Open http://localhost:8888
+# 4. Confirm the install: one PASS/FAIL line per component, exit 0 if ready
+docker compose run --rm ml4t python scripts/verify_installation.py
 
-# 5. Or run a notebook directly
-docker compose run --rm ml4t python 01_process_is_edge/factor_regimes.py
+# 5. Start Jupyter Lab. It keeps running in this terminal; leave it running.
+docker compose up ml4t
 ```
 
+Then open **http://localhost:8888** in your web browser. That is a browser
+address, not a command to type — and on Windows, open it in your normal Windows
+browser even though step 5 ran inside Ubuntu.
+
 **That's it.** No build step needed — Docker pulls the pre-built image (~12 GB on x86, ~3 GB on ARM64).
+
+To run a single notebook instead of opening Jupyter, name its `.py` — this one
+downloads the factor data it needs and takes a few minutes:
+
+```bash
+docker compose run --rm ml4t python 01_process_is_edge/factor_regimes.py
+```
 
 To build locally instead (if you prefer or need to modify the environment):
 
@@ -179,8 +190,9 @@ docker compose build ml4t    # ~45 min on x86, ~15 min on ARM64
 
 ## Verify Your Installation
 
-Before opening any notebook, run the one command that confirms every required
-library imports and the runtime is wired up correctly:
+This is step 4 of the Quick Start above, and the same command on either path. It
+is the one thing to run before opening a notebook: it confirms that every
+required library imports and that the runtime is wired up correctly.
 
 ```bash
 # Docker (recommended)
@@ -201,18 +213,37 @@ missing piece; see [Troubleshooting](#troubleshooting) below.
 
 ### Ubuntu / Linux
 
-```bash
-# Install Docker
-curl -fsSL https://get.docker.com | sudo sh
-sudo usermod -aG docker $USER
-# Log out and back in for group membership
+Three steps, and the middle one is not a command. Do them in order.
 
-# Verify
-docker run --rm hello-world
-docker compose version
-```
+1. **Install Docker Engine and add yourself to the `docker` group.** Both lines
+   need `sudo`, so you will be asked for your password:
+   ```bash
+   curl -fsSL https://get.docker.com | sudo sh
+   sudo usermod -aG docker $USER
+   ```
 
-If Docker Compose is missing: `sudo apt install docker-compose-plugin`
+2. **Log out of your desktop session and log back in.** This is a required step,
+   not a suggestion, and nothing prompts you for it. Group membership is read
+   when a session starts, so the shell you just typed in still does not have it;
+   `newgrp docker` fixes only that one shell. Skipping this is the most common
+   Linux install failure, and it does not read like one — every later `docker`
+   command fails with `permission denied while trying to connect to the docker
+   API`, which names the socket rather than the group you have not picked up yet.
+
+3. **Verify, in a terminal opened after logging back in:**
+   ```bash
+   docker run --rm hello-world
+   docker compose version
+   ```
+   `hello-world` must print "Hello from Docker!" and `docker compose version`
+   must print a version rather than an error before you continue. If
+   `docker compose` is not found at all, install the plugin:
+   `sudo apt install docker-compose-plugin`.
+
+**Docker Desktop for Linux is a different product** and you do not need it. The
+`get.docker.com` script above installs Docker Engine, which is what the compose
+file uses. If you already run Docker Desktop, keep it — the commands are the
+same.
 
 ### Windows 11 (WSL2)
 
@@ -325,30 +356,80 @@ real hardware before every release. Two things still want Docker on that machine
 [Py312 Image](#py312-image-specific-notebooks), and Chapter 2's storage benchmarks, which compare
 databases that run as containers. Everything else is `uv`.
 
-```bash
-xcode-select --install                        # compiler, if you do not have it already
-brew install libomp                           # OpenMP runtime; LightGBM will not import without it.
-                                              # Needs Homebrew - see the prerequisites section above
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.local/bin/env                   # puts uv on PATH in this shell
-git clone https://github.com/stefan-jansen/machine-learning-for-trading.git
-cd machine-learning-for-trading
-cp .env.example .env
-uv sync
-```
+Everything below is typed into **Terminal** (Applications → Utilities →
+Terminal). Two of the steps are not commands that finish when the prompt comes
+back, so run them in order rather than pasting the block at once.
+
+1. **Install the Xcode command-line tools**, if `xcode-select -p` does not
+   already print a path:
+   ```bash
+   xcode-select --install
+   ```
+   This **opens a dialog window** and returns to the prompt immediately, while
+   the download continues in the background. Click *Install*, accept the
+   licence, and **wait for the dialog to say it is done** — several minutes.
+   Running the next steps before it finishes leaves you with no compiler and a
+   `uv sync` that stops on `error: command 'c++' failed`. When
+   `xcode-select -p` prints `/Library/Developer/CommandLineTools`, continue.
+
+2. **Install Homebrew**, if `brew --version` does not already print one. A fresh
+   macOS does not ship it, and `brew install` below needs it:
+   ```bash
+   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+   eval "$(/opt/homebrew/bin/brew shellenv)"   # /usr/local/bin/brew on Intel
+   ```
+   The installer asks for your password and then **prints PATH instructions
+   rather than applying them**; the `eval` line is what it asks you to run, and
+   it puts `brew` on `PATH` in this shell only.
+
+3. **Install the OpenMP runtime.** macOS does not ship it and the Xcode tools do
+   not install it, so without it the environment builds cleanly and Chapter 12
+   stops at its first import with
+   `Library not loaded: @rpath/libomp.dylib`:
+   ```bash
+   brew install libomp
+   ```
+
+4. **Install `uv`, clone, and build the environment:**
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   source $HOME/.local/bin/env    # the installer's own line; puts uv on PATH here and now
+   git clone https://github.com/stefan-jansen/machine-learning-for-trading.git
+   cd machine-learning-for-trading
+   cp .env.example .env           # defaults work as-is; nothing in it needs editing to start
+   uv sync                        # ~300 packages, about 11 GB; twelve compile from source
+   ```
+
+5. **Verify**, with the one command that gives a PASS or a FAIL:
+   ```bash
+   uv run python scripts/verify_installation.py
+   ```
 
 **Intel Macs: Docker is the only local option.** PyTorch publishes no macOS x86_64 wheel, so the
 `uv` path cannot be made to work on that hardware. The `ml4t` image is amd64 and runs, so:
 
-1. Install Docker Desktop from [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/),
-   choosing the **Intel chip** download. Give it 4+ CPUs, 8+ GB memory and 64+ GB disk in
-   Settings → Resources, and note that the image plus data wants about 17 GB of that disk.
-2. Clone and pull:
+1. **Download and install Docker Desktop.** This is a Mac application you
+   download in your web browser — not a command. Open
+   [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/),
+   choose the **Intel chip** download, and run the installer. Give it 4+ CPUs,
+   8+ GB memory and 64+ GB disk in Settings → Resources; the image plus data
+   wants about 17 GB of that disk.
+2. **Start Docker Desktop and wait for it**, then check in Terminal that the
+   engine is up before going on. `docker version` must print a **Server**
+   section, not just a Client one:
+   ```bash
+   docker version
+   ```
+3. **Clone and pull:**
    ```bash
    git clone https://github.com/stefan-jansen/machine-learning-for-trading.git
    cd machine-learning-for-trading
-   cp .env.example .env
+   cp .env.example .env           # defaults work as-is; nothing in it needs editing to start
    docker compose pull ml4t
+   ```
+4. **Verify:**
+   ```bash
+   docker compose run --rm ml4t python scripts/verify_installation.py
    ```
 
 If that machine is tight on memory or disk, a Linux box or a cloud instance is the more
@@ -577,6 +658,11 @@ docker compose exec ml4t plotly_get_chrome -y
 
 Docker is recommended because it guarantees a consistent environment. But if you prefer a local Python setup — for faster iteration, IDE integration, or GPU access without container overhead — [uv](https://docs.astral.sh/uv/) handles everything from Python installation through dependency resolution.
 
+**On Windows this section is the Ubuntu terminal, not PowerShell.** WSL2 *is* the
+Linux path, so every command below is typed there. Installing `uv` into Windows
+Python is unsupported and the dependency set does not resolve on it — see
+[Platform Support](#platform-support).
+
 ### What uv Does
 
 `uv` is a fast Python package manager written in Rust. It replaces `pip`, `venv`, `pip-tools`, and `pyenv` in a single tool. When you run `uv sync`, it:
@@ -595,7 +681,6 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # The installer puts uv in ~/.local/bin, which your current shell does not know about
 # yet. Load it now rather than opening a new terminal:
 source $HOME/.local/bin/env        # sh, bash, zsh;  env.fish for fish
-# Windows PowerShell: powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 # Clone and enter the repository (about 0.9 GB of history)
 git clone https://github.com/stefan-jansen/machine-learning-for-trading.git
@@ -611,8 +696,8 @@ cp .env.example .env
 # API keys are optional and only needed for specific datasets later —
 # see data/README.md when a chapter asks for one.
 
-# Verify
-uv run python -c "import polars, torch, lightgbm; print('Ready')"
+# Verify — the one PASS/FAIL gate, same script on both paths
+uv run python scripts/verify_installation.py
 
 # Start Jupyter Lab, from the repo root, and open the URL it prints
 ML4T_DATA_PATH="${ML4T_DATA_PATH:-$PWD/data}" uv run jupyter lab
