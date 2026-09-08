@@ -170,9 +170,13 @@ for date, label in [
     ("2022-03-16", "First increase of the cycle"),
     ("2023-07-26", "Last increase of the cycle"),
 ]:
+    # An event outside the window this chart opens on has nothing to point at.
+    at_date = yields_pd.loc[yields_pd["timestamp"].astype(str) == date, "dgs2"]
+    if at_date.empty:
+        continue
     fig.add_annotation(
         x=date,
-        y=float(yields_pd.loc[yields_pd["timestamp"].astype(str) == date, "dgs2"].iloc[0]),
+        y=float(at_date.iloc[0]),
         text=label,
         showarrow=True,
         arrowhead=2,
@@ -241,8 +245,12 @@ for date, label in [
     ("2020-03-16", "COVID crash"),
     ("2023-03-13", "Silicon Valley Bank fails"),
 ]:
-    peak = float(vix_pd.loc[vix_pd["timestamp"].astype(str) == date, "vixcls"].iloc[0])
-    fig.add_annotation(x=date, y=peak, text=label, showarrow=True, arrowhead=2, ax=0, ay=-30)
+    at_date = vix_pd.loc[vix_pd["timestamp"].astype(str) == date, "vixcls"]
+    if at_date.empty:
+        continue
+    fig.add_annotation(
+        x=date, y=float(at_date.iloc[0]), text=label, showarrow=True, arrowhead=2, ax=0, ay=-30
+    )
 fig.update_layout(
     title="Volatility spikes are brief; the index spends most of its life low",
     xaxis_title="Date",
@@ -397,11 +405,16 @@ fig.show()
 #
 # ### Why forward fill, and what it costs
 #
-# Carrying the last released value forward is the only fill that is safe for a backtest, because
-# it is the only one that uses no information from after the date it fills. Interpolating between
-# two monthly readings puts a value on the tenth of the month that was computed from the reading
-# published on the thirtieth, so a model trained on it has read the future. Any smoother, any
-# seasonal adjustment applied across the gap, and any backward fill has the same defect.
+# The test a fill has to pass is not which method it uses; it is which observations the value on
+# a date was computed from. Carrying the last released value forward passes because it reads
+# only what was already out. So does any trailing calculation on released values - an average of
+# the last three releases, an exponentially weighted mean, a forecast fitted on history alone.
+#
+# What fails is anything that reaches forward. Interpolating between two monthly readings puts a
+# value on the tenth of the month computed partly from the reading published on the thirtieth.
+# A backward fill does it outright. A centred moving average takes half its window from the
+# future, and a seasonal adjustment estimated over the whole sample takes its factors from
+# every year in it, including the ones after the date being adjusted.
 #
 # What forward fill costs is that the panel says nothing about *when* the value it carries became
 # known. The unemployment rate for March is published in early April, so a row dated 15 March
@@ -516,9 +529,10 @@ fig.show()
 #    forward-filled. Counting how often the value changes recovers a lower bound on each source's
 #    release clock, which is enough to sort daily from weekly from monthly, and is short of the
 #    true count wherever consecutive releases print the same rounded number.
-# 3. Forward fill is the only safe fill for a backtest, because it uses no information from after
-#    the date it fills. Interpolation, smoothing and backward fill all read the future, and none
-#    of them will announce that they did.
+# 3. What makes a fill safe is that the value on a date was computed only from observations
+#    already released by that date. Forward fill qualifies, and so does any trailing average or
+#    causal forecast. Interpolation, backward fill, a centred window and a whole-sample seasonal
+#    adjustment all reach forward, and none of them will announce that they did.
 # 4. Forward fill still leaves the release lag unhandled: the value it carries on a given date is
 #    often one the market had not yet been told. That is a separate correction and it is where
 #    the next notebook starts.
