@@ -51,7 +51,7 @@
 #
 # ## Book reference
 #
-# Section 21.4, *Application I: Optimal Trade Execution*.
+# Section 21.4, *Application I - Optimal trade execution*.
 #
 # ## Prerequisites
 #
@@ -91,7 +91,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 import utils  # noqa: F401  - sets the Plotly renderer so figures carry a static PNG
 from data import load_crypto_perps, load_crypto_premium
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 SYMBOL = "BTCUSDT"  # the one contract the order is executed in
@@ -315,7 +315,10 @@ fig.update_layout(
     ),
     height=760,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three stacked panels over the whole hourly panel, with a dashed vertical line at the boundary between the training bars and the evaluation bars: the open price, the premium index in basis points around a dotted zero line, and hourly traded volume.",
+)
 
 # %% [markdown]
 # ## 3. The environment
@@ -627,7 +630,10 @@ fig.update_layout(
     ),
     height=460,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels. Left: a box per strategy over the per-episode implementation shortfall in basis points. Right: the mean paired difference to the fixed schedule for the other two strategies, as markers with one standard error either side, against a dashed line at zero.",
+)
 
 # %% [markdown]
 # ## 7. The shape of each schedule
@@ -704,7 +710,10 @@ fig.update_layout(
     height=900,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four stacked panels averaged over the evaluation episodes and shown by hour of the execution window: contracts executed per hour and contracts still unsold, one line per strategy; the average premium index over the same windows on a single dotted line; and cumulative implementation shortfall per strategy.",
+)
 
 # %% [markdown]
 # ## 8. Forced liquidation, and how to read it
@@ -744,7 +753,10 @@ fig.update_layout(
     height=460,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Grouped bars per strategy giving the percentage of episodes that ended with a forced trade, the percentage of the order unwound involuntarily, and the percentage traded in the final quarter of the horizon, against a dotted line at the even-pace share of a quarter.",
+)
 
 # %% [markdown]
 # ## 9. Does the agent condition on what it was given?
@@ -820,7 +832,10 @@ fig.update_layout(
     height=440,
     showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two bar panels of the learned policy's average execution rate in contracts per hour, the left grouped by premium state and the right by proximity to a funding settlement, each bar labelled with the number of pooled steps behind it.",
+)
 
 # %% [markdown]
 # ## 10. Summary

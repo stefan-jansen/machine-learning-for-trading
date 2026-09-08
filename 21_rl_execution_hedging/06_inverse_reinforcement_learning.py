@@ -55,8 +55,8 @@
 #
 # ## Book reference
 #
-# Section 21.7, *Inverse Reinforcement Learning: Learning from Observed
-# Behaviour*.
+# Section 21.7, *Inverse reinforcement learning - Learning from observed
+# behavior*.
 #
 # ## Prerequisites
 #
@@ -88,7 +88,7 @@ from rl_environments import ExecutionEnv
 
 import utils  # noqa: F401  - sets the Plotly renderer so figures carry a static PNG
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 TOTAL_SHARES = 5_000  # size of the parent order the expert liquidates
@@ -330,7 +330,10 @@ fig.update_layout(
     title="The demonstrations both methods are fitted to",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels describing the expert demonstrations. Left: the mean pacing action at each step, flat at the even-pace reference until the final step, where the conversion returns its maximum. Right: a histogram of the implementation shortfall each demonstration episode produced.",
+)
 
 # %% [markdown]
 # ## 2. Behaviour cloning
@@ -984,7 +987,10 @@ fig.update_xaxes(title_text="Feature", tickangle=35, row=1, col=2)
 fig.update_yaxes(title_text="Mean Log Likelihood", row=1, col=1)
 fig.update_yaxes(title_text="Weight", row=1, col=2)
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels. Left: the maximum-entropy log likelihood against iteration number. Right: overlaid bars giving each method's inferred weight on each of the eight reward features.",
+)
 
 # %% [markdown]
 # ## 5. What the inferred rewards imply as policies
@@ -1133,7 +1139,10 @@ fig.update_layout(
 )
 fig.update_xaxes(range=[0.0, 1.0])
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Grouped, normalised histograms of the pacing actions taken by the expert and by each of the two reward-derived policies, over the pace range from zero to one.",
+)
 
 # %% [markdown]
 # ### Cost of every policy on the same episodes
@@ -1159,7 +1168,10 @@ fig.update_layout(
     yaxis_title="Implementation shortfall (bps of arrival notional)",
     height=440,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A box per policy over the per-episode implementation shortfall in basis points, the expert drawn darker than the four fitted policies.",
+)
 
 # %% [markdown]
 # ## 6. Key takeaways

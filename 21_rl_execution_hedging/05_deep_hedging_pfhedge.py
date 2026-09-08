@@ -57,7 +57,7 @@
 #
 # ## Book reference
 #
-# Section 21.6, *Application III: Deep Hedging for Derivatives*.
+# Section 21.6, *Application III - Deep hedging for derivatives*.
 #
 # ## Prerequisites
 #
@@ -102,7 +102,7 @@ from pfhedge.nn import (
 
 import utils  # noqa: F401  - sets the Plotly renderer so figures carry a static PNG
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(
@@ -311,7 +311,10 @@ fig.update_layout(
     ),
     height=430,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels of sixty simulated Heston paths over the option's life, drawn against days to expiry. Left: price paths in units of the initial spot, with a dashed line at the strike. Right: the realised volatility of the same paths, fanning out from a dashed line at its long-run level.",
+)
 
 # %% [markdown]
 # ## 3. One P&L convention, checked two ways
@@ -632,7 +635,10 @@ fig.update_layout(
     yaxis_title="Expected shortfall (units of initial spot)",
     height=380,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A single line of the from-scratch hedger's training loss, the expected shortfall of the training paths' profit and loss, against the epoch number.",
+)
 
 # %% [markdown]
 # ## 7. A value-based baseline
@@ -779,7 +785,10 @@ fig.update_layout(
     height=480,
     legend=dict(orientation="h", yanchor="bottom", y=1.06, xanchor="right", x=1),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "One empirical cumulative distribution curve per hedging method over the terminal profit and loss of the evaluation paths, with a dotted horizontal line at the objective's tail probability.",
+)
 
 # %% [markdown]
 # ### The same distributions as boxes
@@ -807,7 +816,10 @@ fig.update_layout(
     height=460,
     showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A box per hedging method over the terminal profit and loss of every evaluation path, with the mean marked.",
+)
 
 # %% [markdown]
 # ### The statistics
@@ -905,7 +917,10 @@ fig.update_layout(
     height=680,
     legend=dict(orientation="h", yanchor="bottom", y=1.03, xanchor="right", x=1),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two stacked panels over one evaluation path. Top: the price against a dashed line at the strike. Bottom: the position each of the five hedging methods held over each interval.",
+)
 
 # %% [markdown]
 # ## 10. Key takeaways

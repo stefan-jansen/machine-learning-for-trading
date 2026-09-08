@@ -53,7 +53,7 @@
 #
 # ## Book reference
 #
-# Section 21.5, *Application II: Market Making*.
+# Section 21.5, *Application II - Market making*.
 #
 # ## Prerequisites
 #
@@ -91,7 +91,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 import utils  # noqa: F401  - sets the Plotly renderer so figures carry a static PNG
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 CALIBRATION_SYMBOL = "BTCUSDT"  # symbol the volatility process is fitted to
@@ -308,7 +308,10 @@ fig.update_layout(
     title="One simulated episode: price, volatility and order imbalance",
     height=700,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three stacked panels over one 500-step episode: the simulated mid price, the conditional volatility driving it, and the mean-reverting order imbalance oscillating around zero.",
+)
 
 # %% [markdown]
 # ## 3. Train the PPO agent
@@ -627,7 +630,10 @@ def plot_wealth_comparison(results: dict, all_gaps: dict) -> go.Figure:
 
 
 # %%
-plot_wealth_comparison(results, all_gaps).show()
+show_plotly_with_alt(
+    plot_wealth_comparison(results, all_gaps),
+    "Two panels. Left: a box per strategy over the liquidated wealth of each evaluation episode, the learned policy filled darker than the three fixed rules. Right: the mean paired wealth gap to each fixed rule as a marker with one standard error either side, against a dashed line at zero.",
+)
 
 # %%
 gap_range = "; ".join(
@@ -723,7 +729,10 @@ fig.update_layout(
     title="Inventory, quote offset and wealth over one episode",
     height=720,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three stacked panels over one episode under the learned policy: units of inventory held, the quote centre's offset from the mid in basis points, and marked wealth.",
+)
 
 # %% [markdown]
 # ## 7. The inventory response
@@ -790,7 +799,10 @@ fig.update_layout(
     yaxis_title="Average quote centre offset (bps)",
     height=420,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A bar per inventory bucket giving the average quote-centre offset in basis points for quotes posted while holding that inventory, pooled over the evaluation episodes, against a dotted line at zero offset.",
+)
 
 # %% [markdown]
 # ## 8. Key takeaways

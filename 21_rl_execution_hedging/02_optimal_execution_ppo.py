@@ -54,7 +54,7 @@
 #
 # ## Book reference
 #
-# Section 21.4, *Application I: Optimal Trade Execution*.
+# Section 21.4, *Application I - Optimal trade execution*.
 #
 # ## Prerequisites
 #
@@ -94,7 +94,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 
 import utils  # noqa: F401  - sets the Plotly renderer so figures carry a static PNG
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 CALIBRATION_SYMBOL = "BTCUSDT"  # symbol the simulator's market parameters are fitted to
@@ -399,7 +399,10 @@ fig.update_layout(
     height=600,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two stacked panels over one sixty-step episode, with the stressed steps shaded: the mid price on top, and below it the available depth against a dashed half-spread on a second axis.",
+)
 
 # %% [markdown]
 # ## 3. Two fixed schedules to compare against
@@ -813,7 +816,10 @@ fig.update_layout(
     height=760,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three stacked panels averaged over the evaluation episodes, one line per strategy: shares executed per step with a shaded tenth-to-ninetieth-percentile band, shares still unsold, and cumulative implementation shortfall in dollars.",
+)
 
 # %% [markdown]
 # ## 7. Cost, and where in the horizon it was incurred
@@ -844,7 +850,10 @@ fig.update_layout(
     showlegend=False,
     height=460,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A box per strategy over the per-episode implementation shortfall in basis points, with every episode drawn as a point beside its box.",
+)
 
 # %% [markdown]
 # ### Where the volume sits
@@ -883,7 +892,10 @@ fig.update_layout(
     height=440,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Grouped bars per strategy giving the share of the parent order traded in the final quarter of the horizon and on the last step alone, against a dotted line at the even-pace share of a quarter.",
+)
 
 # %% [markdown]
 # ## 8. Summary

@@ -47,7 +47,7 @@
 #
 # ## Book reference
 #
-# Section 21.3, *Core Algorithms: From DQN to Actor-Critic*.
+# Section 21.3, *Core algorithms - From DQN to actor-critic*.
 #
 # ## Prerequisites
 #
@@ -87,7 +87,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 
 import utils  # noqa: F401  - sets the Plotly renderer so figures carry a static PNG
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 CALIBRATION_SYMBOL = "BTCUSDT"  # perpetual-futures symbol the GARCH model is fitted to
@@ -294,7 +294,10 @@ fig.update_layout(
     height=420,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels. Left: a 24-hour rolling standard deviation of hourly BTCUSDT returns over the sample, showing long quiet stretches broken by clusters of high volatility. Right: the autocorrelation of squared returns at lags of one to forty-eight hours for the market data and for one simulated GARCH path, both staying well above zero across the whole range.",
+)
 
 # %% [markdown]
 # The autocorrelation of squared returns stays positive for tens of hours in
@@ -542,7 +545,10 @@ fig.update_layout(
     yaxis_title="Episode reward",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A bar per algorithm giving its mean reward over the held-out evaluation episodes, with a whisker of one standard deviation of the per-episode rewards. The whiskers are long relative to the differences between the bar heights.",
+)
 
 # %% [markdown]
 # ## 5. What the policies actually do
@@ -634,7 +640,10 @@ fig.update_layout(
     height=800,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three stacked panels sharing a step axis, one line per algorithm on the same episode: net asset value starting at one, the position earning each step's return between minus one and plus one, and cumulative reward.",
+)
 
 # %% [markdown]
 # ### The distribution of chosen positions
@@ -668,7 +677,10 @@ fig.update_layout(
     barmode="group",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Grouped bars counting how many steps of one episode each algorithm spent short, flat and long.",
+)
 
 # %% [markdown]
 # ### Trajectory summary

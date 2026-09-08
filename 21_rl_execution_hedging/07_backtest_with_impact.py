@@ -51,8 +51,8 @@
 #
 # ## Book reference
 #
-# Sections 21.4, *Application I: Optimal Trade Execution*, and 21.8, *The
-# Simulation-to-Reality Gap*.
+# Sections 21.4, *Application I - Optimal trade execution*, and 21.8, *The
+# simulation-to-reality gap*.
 #
 # ## Prerequisites
 #
@@ -80,7 +80,7 @@ from plotly.subplots import make_subplots
 import utils  # noqa: F401  - sets the Plotly renderer so figures carry a static PNG
 from data import load_us_equities
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # polars emits a repeating FutureWarning from its own deprecations here and it
 # says nothing about this run. Convergence, overflow and invalid-value warnings
@@ -608,7 +608,10 @@ fig.update_layout(
     height=520,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A scatter of one point per sampled name, its total return with the impact model switched off on the horizontal axis against its return under the strongest impact charge on the vertical, coloured by liquidity cohort. A dashed diagonal marks a charge of zero, and dotted lines mark zero on each axis.",
+)
 
 # %% [markdown]
 # ## Visualize Impact Across the Liquidity Spectrum
@@ -711,7 +714,10 @@ def plot_impact_spectrum(spectrum_results: pl.DataFrame, summary: pl.DataFrame) 
 
 # %%
 fig = plot_impact_spectrum(spectrum_results, summary)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels against order participation on a logarithmic axis. Left: net total return for each of the five selected names, one line per impact coefficient, with a dotted line at zero return. Right: the return erosion at the strongest impact coefficient for the same five names.",
+)
 
 # %% [markdown]
 # ## Key takeaways
