@@ -404,13 +404,15 @@ display(break_features.dropna(how="all").head(10))
 # $$M_t = \frac{1}{\hat{\sigma}\sqrt{h}} \sum_{i=t-h+1}^{t} (x_i - \bar{x}_{\text{burn-in}})$$
 #
 # Because the sum has a fixed number of terms, its value depends only on the last $h$
-# observations and it cannot grow without limit. That is the whole difference from CUSUM,
-# and it is worth being precise about what it does and does not buy. A **temporary**
-# excursion leaves the statistic once the window has slid past it, which is what makes
-# MOSUM readable for the next event and useful for dating one. A **permanent** shift of
-# size $\Delta$ does not go away: once the window holds only post-shift observations the
-# statistic settles at $\Delta\sqrt{h}/\hat{\sigma}$ and stays there. It returns to zero
-# only when the mean returns to the reference.
+# observations: each arrival pushes one observation out of the window. That is the whole
+# difference from CUSUM, and it is worth being precise about what it does and does not
+# buy. A **temporary** excursion leaves the statistic once the window has slid past it,
+# which is what makes MOSUM readable for the next event and useful for dating one. A
+# **permanent** shift of size $\Delta$ does not go away, but it also stops accumulating:
+# the expected value of the statistic moves to $\Delta\sqrt{h}/\hat{\sigma}$ and stays
+# there while the statistic itself keeps fluctuating around it. A mean that keeps moving
+# keeps moving the statistic, so a fixed window bounds what a *constant* shift can do to
+# it, not what any shift can.
 
 # %%
 BURN_IN = 252  # sessions used to estimate the reference mean and scale
@@ -481,8 +483,9 @@ show_with_alt(
 # The two panels show the trade the choice is between. CUSUM keeps every deviation, so a
 # shift moves the statistic permanently and a second shift is then read against a baseline
 # the first one moved; the excursions in 2008 and 2020 never come back. MOSUM holds only
-# what is inside its window, so it is bounded and stays readable for the next event, at
-# the cost of being blind to a drift too gradual to register across $h$ observations. It
+# what is inside its window, so a shift it has fully absorbed stops adding to it and the
+# statistic stays readable for the next event, at the cost of being blind to a drift too
+# gradual to register across $h$ observations. It
 # comes back to zero here because the average return after each crisis is close to the
 # burn-in average again, not because the statistic forgets a permanent shift.
 #
@@ -520,12 +523,16 @@ show_with_alt(
 # in. That is exactly why one of the five families measures dependence and none of the
 # other four would catch it.
 #
-# Holding the spread fixed while the dependence changes takes care in the generator. A
-# first-order autoregressive series with coefficient $\phi$ and unit-variance innovations
-# has marginal variance $1/(1-\phi^2)$, so raising $\phi$ raises the spread as well and
-# the example would no longer isolate dependence. Scaling the innovations by
-# $\sqrt{1-\phi^2}$ fixes the marginal variance at one on both sides of the boundary, and
-# keeping $\phi$ below one keeps both halves stationary.
+# Holding the spread fixed while the dependence changes takes care in the generator, in
+# three places. A first-order autoregressive series with coefficient $\phi$ and
+# unit-variance innovations has marginal variance $1/(1-\phi^2)$, so raising $\phi$ would
+# raise the spread too: scaling the innovations by $\sqrt{1-\phi^2}$ fixes the marginal
+# variance at one on both sides. Keeping $\phi$ below one keeps both halves stationary.
+# And the recursion runs once through the whole series, starting from a draw with the
+# stationary variance rather than from zero, because a series restarted at zero has
+# variance $1 - \phi^{2i}$ at step $i$: starting each half separately would put a variance
+# transient at exactly the boundary being tested, which is the thing the example is
+# supposed not to contain.
 
 # %%
 N_EXAMPLES = 200
@@ -553,17 +560,13 @@ def generate_break_series(
         after = before[-1] + magnitude * 0.01 * (steps[mid:] - steps[mid])
         return np.concatenate([before, after]) + rng.randn(n) * 0.5
     if break_type == "autocorr_shift":
-
-        def ar1(length: int, phi: float) -> np.ndarray:
-            values = np.zeros(length)
-            innovation_scale = np.sqrt(1 - phi**2)
-            for i in range(1, length):
-                values[i] = phi * values[i - 1] + innovation_scale * rng.randn()
-            return values
-
-        return np.concatenate(
-            [ar1(mid, AR_PHI_BEFORE), ar1(n - mid, AR_PHI_BEFORE + 0.35 * magnitude)]
-        )
+        phi_after = AR_PHI_BEFORE + 0.35 * magnitude
+        values = np.zeros(n)
+        values[0] = rng.randn()
+        for i in range(1, n):
+            phi = AR_PHI_BEFORE if i < mid else phi_after
+            values[i] = phi * values[i - 1] + np.sqrt(1 - phi**2) * rng.randn()
+        return values
 
     msg = f"Unknown break_type: {break_type}"
     raise ValueError(msg)
