@@ -260,6 +260,37 @@ def get_output_dir(
     return output_dir
 
 
+def require_chapter_inputs(inputs: dict[Path, str]) -> None:
+    """Refuse to continue when an input an earlier notebook produces is absent.
+
+    Chapter outputs are gitignored (`.gitignore`: `*/output/`), so a fresh clone or a
+    fresh worktree has none of them. A notebook that substitutes defaults instead runs
+    to completion, reports no error, and writes a page with no figures on it - the
+    provenance stamp applies and the commit hooks pass, so the empty page is
+    committable. Raising here is what turns that into a stop.
+
+    Args:
+        inputs: Each required path mapped to the notebook stem that produces it.
+
+    Raises:
+        FileNotFoundError: Naming every missing path and the notebook to run for it.
+    """
+    missing = [(path, producer) for path, producer in inputs.items() if not path.exists()]
+    if not missing:
+        return
+
+    print("\n  Missing inputs produced by earlier notebooks in this chapter:\n")
+    for path, producer in missing:
+        print(f"    {display_path(path)}  (run {producer} first)")
+    print("\n  These are chapter outputs, which are gitignored, so a fresh clone or")
+    print("  worktree has none of them until the producing notebooks have run.\n")
+
+    raise FileNotFoundError(
+        "Missing chapter inputs: "
+        + ", ".join(f"{display_path(path)} (from {producer})" for path, producer in missing)
+    )
+
+
 def get_case_study_source_dir(strategy_id: str) -> Path:
     """Get the source-controlled case study directory, preferring sibling dev assets."""
     dev_case_dir = REPO_ROOT.parent / "dev" / "case_studies" / strategy_id

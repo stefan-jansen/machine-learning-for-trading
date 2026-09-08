@@ -1509,6 +1509,75 @@ def test_injected_parameters_strips_every_preview_prefixed_name_on_a_canonical_r
     assert not leaked, f"canonical injection carries preview-only parameters: {leaked}"
 
 
+def test_injected_parameters_strips_the_device_and_the_name_that_carries_it() -> None:
+    """DEVICE and POPULATION_NAME are preview-only for a DL entry, and neither takes the prefix.
+
+    A DL notebook takes the device as an ordinary parameter, so the override file spells it
+    `DEVICE`, and `generate_intermediates.py` reads that same entry with `research_preview=False`.
+    Injected there the pair does not fail: the notebook publishes a real population under the
+    preview name and reports success, and `cme_futures` then resolves `MODEL_POPULATION_NAMES`
+    against a fixture where the canonical name was never written.
+    """
+    parameters = {"DEVICE": "cpu", "POPULATION_NAME": "cme_futures-tabular_dl-preview"}
+    resolved = injected_parameters(
+        Path("case_studies/cme_futures/08_tabular_dl.py"),
+        parameters,
+        None,
+        research_preview=False,
+    )
+    # `resolved or None`: nothing survives the strip, so papermill injects no parameters cell
+    # and the notebook keeps its own declared defaults - cuda, and the canonical population.
+    assert resolved is None
+    assert parameters["DEVICE"] == "cpu", "the caller's entry must not be mutated"
+
+    kept = injected_parameters(
+        Path("case_studies/cme_futures/08_tabular_dl.py"),
+        {"DEVICE": "cpu", "SUPERSEDES_POPULATION": "8c2c87299a47"},
+        None,
+        research_preview=False,
+    )
+    assert kept == {"SUPERSEDES_POPULATION": "8c2c87299a47"}
+
+
+def test_injected_parameters_keeps_a_population_name_that_carries_no_device() -> None:
+    """The strip is keyed on DEVICE, so it does not reach a name meant canonically.
+
+    `fx_pairs` 13-16 declare `research_preview: false` because they need the canonical tier, and
+    `fx_pairs:preflight` so that tier does not publish the real population. That is the entry
+    `tests/test_case_studies.py` runs, not one the fixture generator alone sees, and removing the
+    name would put a CI run back on the canonical population it was written to stay off.
+    """
+    parameters = {"POPULATION_NAME": "fx_pairs:preflight", "TOP_K": 2}
+    assert (
+        injected_parameters(
+            Path("case_studies/fx_pairs/13_backtest.py"),
+            parameters,
+            None,
+            research_preview=False,
+        )
+        == parameters
+    )
+
+
+def test_no_entry_pairs_a_device_with_a_canonical_ci_run() -> None:
+    """The strip above is sound only while DEVICE means "this entry runs under the preview tier".
+
+    Every entry that declares DEVICE leaves `research_preview` at its default, so the canonical
+    branch of `injected_parameters` is reached for it by `generate_intermediates.py` and by
+    nothing else. An entry that declared both would be a canonical run CI performs, and the strip
+    would silently take its device and its population name away.
+    """
+    entries = yaml.safe_load((REPO_ROOT / "tests/overrides.yaml").read_text())
+    paired = [
+        key
+        for key, entry in entries.items()
+        if isinstance(entry, dict)
+        and "DEVICE" in (entry.get("parameters") or {})
+        and entry.get("research_preview") is False
+    ]
+    assert not paired, f"DEVICE on an entry CI runs canonically: {paired}"
+
+
 def test_injected_parameters_keeps_everything_else_on_a_canonical_run() -> None:
     parameters = {"MAX_SYMBOLS": 5, "TOP_K": 2}
     assert (

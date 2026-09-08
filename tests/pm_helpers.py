@@ -1099,6 +1099,31 @@ def resolved_registry_path(
 # `model_based.regime` declares. So `unusable_parameters` takes the path as an argument.
 TRANSLATION_TARGET = "PREVIEW_REDUCTIONS"
 
+# The device override, and the population name that exists only to carry it. Neither takes the
+# `PREVIEW_` prefix, because a preview run reads them as the ordinary parameters they are.
+#
+# They are stripped together and only as a pair, keyed on `DEVICE`. A CPU fit of a population
+# declared on CUDA is a different computation - the device is inside the training identity - so
+# the notebooks refuse to publish the canonical population from one, and the entry answers that
+# by naming a population of its own. The name is downstream of the device override: drop the
+# device and the reason for the name goes with it.
+#
+# Keying on `DEVICE` is what keeps this off the entries that mean a population name canonically.
+# `fx_pairs` 13-16 declare `research_preview: false` and need `fx_pairs:preflight` on the run
+# `tests/test_case_studies.py` performs, and `us_equities_panel` 06 and 07 name one without a
+# device. None of those declares `DEVICE`, and no entry declares `DEVICE` beside
+# `research_preview: false` - `test_no_entry_pairs_a_device_with_a_canonical_ci_run` fails if one
+# ever does, because the strip would then reach a canonical run that CI performs rather than only
+# the fixture generator.
+#
+# Leaving the pair in does not fail loudly, which is why it is worth stripping. A canonical run
+# carrying both publishes a real population under the preview name and reports success:
+# `cme_futures/research_workflow.py` resolves `MODEL_POPULATION_NAMES` with
+# `OfficialPopulation.one`, which raises on a name nothing wrote, so
+# `generate_intermediates.py --through-stage 12 --no-skip-dl` would build a fixture whose own
+# `12_model_analysis` cannot read it.
+DEVICE_SCOPED_NAMES = ("DEVICE", "POPULATION_NAME")
+
 # The third element is every reduction name that states the same quantity. A translated default
 # is dropped when the notebook's own mapping already carries one of them, because two consumers
 # read this mapping and they do not spell the fold count the same way: the model families take
@@ -1177,13 +1202,21 @@ def injected_parameters(
     ``test_injected_parameters_keeps_everything_else_on_a_canonical_run`` pins. Deciding this
     properly means reading which names a notebook's own canonical branch refuses, or marking
     the entry in the override file; both are design changes that belong with whoever owns the
-    preview contract. What is here covers every ``PREVIEW_``-prefixed name and nothing else.
+    preview contract.
+
+    What is here covers every ``PREVIEW_``-prefixed name, plus ``DEVICE_SCOPED_NAMES`` - and
+    those only for an entry that declares ``DEVICE``, which is what confines them to the
+    entries where the population name exists to carry the device. ``MAX_SYMBOLS`` stays out
+    for the reason above: it is a legitimate canonical parameter elsewhere.
     """
     if research_preview:
         return research_preview_parameters(py_path, parameters, output_dir)
     resolved = dict(parameters or {})
     for name in [key for key in resolved if key.startswith("PREVIEW_")]:
         resolved.pop(name)
+    if "DEVICE" in resolved:
+        for name in DEVICE_SCOPED_NAMES:
+            resolved.pop(name, None)
     # Declining the preview tier must NOT decline the isolated workspace. They are two
     # decisions and this flag used to collapse them: false left WORKSPACE at the
     # notebook's declared "", `open_study` took the `workspace=None` branch

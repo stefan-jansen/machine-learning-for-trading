@@ -94,6 +94,8 @@ PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
 SUPERSEDES_POPULATION: str = ""
+# The device to fit on. Empty means the one declared in config/setup.yaml.
+DEVICE: str = ""
 
 # %%
 study = open_study(
@@ -150,16 +152,27 @@ if narrows_declared_catalog(study, "tabular_dl", configs) and not POPULATION_NAM
 # result of the same configuration are different computations and get different hashes. The runner
 # refuses a device the machine does not have rather than falling back to one it does: silently
 # substituting the fallback would publish a differently computed result under a declaration that
-# says otherwise. A reader without an NVIDIA card sets `device: cpu` here and gets their own
-# identities, which is the honest answer rather than a matching one.
+# says otherwise. A reader without an NVIDIA card passes `DEVICE="cpu"` and gets their own
+# identities, which is the honest answer rather than a matching one. Because those identities are
+# not the declared population's, the same rule as above applies: a run on any device other than
+# the declared one must publish under its own `POPULATION_NAME`.
 
 # %%
 setup = yaml.safe_load(
     (get_case_study_dir("us_firm_characteristics") / "config" / "setup.yaml").read_text()
 )
 execution_settings = setup["modeling"]["tabular_dl"]
+PUBLISHED_DEVICE = str(execution_settings["device"])
+device = DEVICE or PUBLISHED_DEVICE
+
+if device != PUBLISHED_DEVICE and not POPULATION_NAME:
+    raise ValueError(
+        f"this run fits on device {device!r} rather than the declared {PUBLISHED_DEVICE!r}, so "
+        "it cannot publish the canonical population; pass POPULATION_NAME to give it its own"
+    )
+
 overrides = {
-    "device": str(execution_settings["device"]),
+    "device": device,
     "num_threads": int(execution_settings["num_threads"]),
 }
 overrides
