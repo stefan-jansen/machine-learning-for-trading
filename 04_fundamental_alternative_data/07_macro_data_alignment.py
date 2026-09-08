@@ -77,7 +77,7 @@ from data.macro.loader import load_macro_initial_release
 
 # Importing utils.style registers and activates the ML4T Plotly template
 # (palette, fonts, backgrounds) as the repo-wide default.
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% [markdown]
 # Two settings decide what the notebook shows rather than how it computes. The charts open in
@@ -290,7 +290,10 @@ fig = px.line(
     labels={"timestamp": "Date", "cpi": "CPI index level", "panel": ""},
 )
 fig.update_layout(height=420, legend=dict(orientation="h", y=1.02, yanchor="bottom"))
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two staircase lines of the CPI index level from 2020, one from the panel as shipped and one re-dated to publication. They have the same shape and the published line steps up about six weeks later at every step.",
+)
 
 # %% [markdown]
 # The two lines are the same staircase offset horizontally, and the offset is the whole point.
@@ -440,7 +443,10 @@ fig.update_layout(
     title_text="The three series the regime classifications are cut from",
     showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three stacked panels sharing a time axis from 2020: the ten-year minus two-year Treasury spread with a zero line, the unemployment rate as published, and the VIX with a rule at twenty.",
+)
 
 # %%
 regime_columns = [c for c in features.columns if c.endswith("_regime")]
@@ -465,7 +471,10 @@ fig = px.bar(
     labels={"share": "Share of days since the window opened", "classification": ""},
 )
 fig.update_layout(height=320, xaxis_tickformat=".0%")
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Horizontal stacked bars, one per regime classification, showing the share of days each regime label held. Every classification is split across several labels and none is filled by a single one.",
+)
 
 # %% [markdown]
 # ## 6. The second look-ahead: revisions

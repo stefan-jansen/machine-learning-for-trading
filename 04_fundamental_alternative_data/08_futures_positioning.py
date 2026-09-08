@@ -76,7 +76,7 @@ from plotly.subplots import make_subplots
 
 from data import load_etfs
 from data.futures.loader import load_cot
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% [markdown]
 # Four settings decide what the notebook measures. The z-score window is the one that changes an
@@ -316,7 +316,10 @@ fig.update_layout(
     title="Leveraged money is net short the E-mini in almost every week",
     showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two stacked panels sharing a time axis: leveraged money's net position in contracts, filled to a zero line and below it throughout, and the same position as a z-score against the trailing year with shaded bands beyond plus and minus two.",
+)
 
 # %% [markdown]
 # The two panels are the same data and answer different questions. The upper one says the
@@ -496,7 +499,10 @@ fig.update_layout(
     title="Positioning extremes rarely line up across asset classes",
     showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three stacked panels sharing a time axis, one per product, each showing the speculative category's positioning z-score with shaded bands beyond plus and minus two. The shaded excursions in the three panels fall in different weeks.",
+)
 
 # %% [markdown]
 # Reading three panels for coincidence is a job for a number rather than an eye. Correlating the
@@ -577,7 +583,10 @@ fig.update_layout(
     yaxis_title="Net contracts",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Line chart of the net position of three trader categories over time. The asset manager line stays above zero throughout while the leveraged money and dealer lines stay below it.",
+)
 
 # %%
 category_profile = pl.DataFrame(

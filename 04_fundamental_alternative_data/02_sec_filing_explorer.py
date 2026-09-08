@@ -98,7 +98,7 @@ from edgar import Company, find, get_filings, set_identity
 
 # Importing utils.style registers and activates the ML4T Plotly template
 # (house palette, fonts, gridlines) so figures inherit the book style.
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% [markdown]
 # ### The filers this notebook reads, and why each was chosen
@@ -463,7 +463,10 @@ fig.update_layout(
     margin=dict(l=160, r=40, t=70, b=55),  # room for long issuer names
     height=430,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Horizontal bar chart of the ten largest issuers in the reported 13F stock portfolio as a share of its total value, sorted with the largest at the top and the three biggest picked out in amber. The first three bars together take up more of the axis than the remaining seven.",
+)
 
 # %% [markdown]
 # ---

@@ -140,7 +140,7 @@ from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_ser
 
 from data import load_firm_characteristics
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, ml4t_diverging
+from utils.style import COLORS, ml4t_diverging, show_plotly_with_alt
 
 # Importing utils.style registers and activates the ML4T Plotly template
 # (palette, gridlines, fonts) repo-wide; px/go figures below inherit its colorway.
@@ -257,7 +257,10 @@ for boundary, label in [(valid_start, "Validation"), (test_start, "Test")]:
         showarrow=False,
         font=dict(color=COLORS["neutral"]),
     )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Line chart of the number of stocks in each monthly cross-section from 1967 to 2016, rising from about four hundred to a peak near two thousand eight hundred in the mid-2000s and easing to about nineteen hundred by the end. Two dashed vertical rules mark the validation and test split boundaries.",
+)
 
 # %% [markdown]
 # ---
@@ -345,7 +348,10 @@ fig = px.histogram(
     title="Ranking spreads a characteristic evenly across the interval",
     labels={"BEME": "BEME (book-to-market, cross-sectionally ranked)", "count": "Stock-months"},
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Histogram of every stock-month of the cross-sectionally ranked book-to-market characteristic, flat across the whole interval from minus one-half to plus one-half.",
+)
 
 # %% [markdown]
 # ---
@@ -387,7 +393,10 @@ fig.update_layout(
     height=900,
     xaxis_tickangle=-45,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Correlation heatmap of the 46 firm characteristics on a diverging scale fixed between minus one and one, showing square blocks of high correlation along the diagonal where characteristics built from the same accounting inputs group together.",
+)
 
 # %% [markdown]
 # The blocks in the heatmap are easier to act on as a list. The pairs below are the ones whose
@@ -502,7 +511,10 @@ fig = px.bar(
 )
 fig.update_layout(xaxis_tickangle=-45, height=520)
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"])
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Bar chart of each characteristic's mean monthly rank correlation with the next month's return, sorted from most positive to most negative and coloured by sign. Every bar is small in absolute terms, with momentum and value at the positive end and volatility and short-term reversal at the negative one.",
+)
 
 # %% [markdown]
 # The correction for serial correlation is worth seeing directly. Each point below is one
@@ -537,7 +549,10 @@ fig.add_shape(
 for threshold in (-2, 2):
     fig.add_hline(y=threshold, line_dash="dot", line_color=COLORS["neutral"])
 fig.update_layout(height=520)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Scatter of each characteristic's Newey-West-corrected t-statistic against its uncorrected one, with a dashed diagonal for equality and dotted rules at plus and minus two. Points lie close to the diagonal and fall on both sides of it.",
+)
 
 # %% [markdown]
 # ---
@@ -585,7 +600,10 @@ fig = px.histogram(
     opacity=0.6,
     barmode="overlay",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Overlaid density histograms of next-month excess returns for the training, validation and test splits, clipped to plus and minus sixty percent. The later splits are visibly wider and lower-peaked than the training split.",
+)
 
 # %% [markdown]
 # ---

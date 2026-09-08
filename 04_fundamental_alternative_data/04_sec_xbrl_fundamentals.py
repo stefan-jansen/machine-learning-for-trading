@@ -127,7 +127,7 @@ import polars as pl
 from data import load_sec_xbrl_fundamentals
 
 # Importing utils.style registers and activates the ML4T Plotly template
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% [markdown]
 # The as-of demonstration in Part 4 needs a date to be run for. Any date inside the panel's
@@ -256,7 +256,10 @@ fig.update_layout(
     height=600,
     width=800,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Heatmap of company against calendar quarter, shaded where total assets were reported and annotated with the number of filings in each cell. Almost every cell is filled, with a scattering of blanks and a few cells holding two filings.",
+)
 
 # A cell counts once however many rows sit in it. Some hold two - an original filing and an
 # amendment that maps to the same calendar quarter, which is where a "2" in the grid comes
@@ -325,7 +328,10 @@ fig.update_layout(
     height=420,
     width=800,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Histogram of the number of days between a fiscal quarter end and the filing that reported it, with a dashed rule at the median. A tall cluster sits near one month and a long thin tail runs out past a year.",
+)
 
 # %% [markdown]
 # ## 4. Querying two time dimensions at once

@@ -37,7 +37,7 @@ This section broadens the idea of fundamentals beyond equities and shows that th
 - [`07_macro_data_alignment`](07_macro_data_alignment.ipynb) — Macroeconomic data presents unique challenges for trading models: different release cadences (monthly CPI, weekly claims, quarterly GDP), revision histories, and the critical requirement of point-in-time correctness. This notebook demonstrates how to align multi-frequency macro data for daily trading models using pre-downloaded FRED data.
 - [`08_futures_positioning`](08_futures_positioning.ipynb) — This notebook demonstrates how to access CFTC Commitment of Traders (COT) data for tracking institutional positioning in futures markets. COT reports provide weekly snapshots of trader positioning, offering valuable sentiment signals for futures trading strategies and contrarian indicators.
 
-### 4.4 Alternative Data: From Evaluation to Integration
+### 4.4 Understanding Alternative Data
 
 This section reframes alternative data as an acquisition and engineering decision, not a buzzword category. It gives a concrete due-diligence framework around incremental signal, data quality, legal risk, and operational cost, and makes clear that many datasets fail not because they are uninteresting but because they are not defensible, reproducible, or deployable. Readers should care because most alternative-data mistakes are expensive and predictable.
 
@@ -47,7 +47,7 @@ This section reframes alternative data as an acquisition and engineering decisio
 - [`12_kalshi_prediction_markets`](12_kalshi_prediction_markets.ipynb) — Kalshi is the first CFTC-regulated prediction market in the US, offering binary contracts on economic, market, and policy events. This notebook loads real Kalshi OHLCV data and demonstrates how to build event probability indicators for ML feature engineering and regime detection.
 - [`13_polymarket_prediction_markets`](13_polymarket_prediction_markets.ipynb) — Polymarket is the world's largest prediction market by trading volume, operating on the Polygon blockchain with USDC settlement. This notebook loads pre-downloaded Polymarket OHLCV data from the centralized data pipeline and compares it with the Kalshi data from the previous notebook to illustrate cross-platform differences in liquidity, pricing, and market structure.
 
-### 4.5 Case Study: Text Data for NLP Features
+### 4.5 Using Text Data for NLP Features
 
 This section provides a concrete pipeline for turning SEC filing text into a model-ready corpus. It focuses on document selection, section extraction, cleaning, and PIT-correct storage, deliberately stopping short of featurization so the engineering foundation is clear before later NLP chapters build on it. Its significance is that text features only become credible once the extraction and storage layer is auditable and time-correct.
 

@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -73,7 +73,7 @@ import polars as pl
 from plotly.subplots import make_subplots
 
 from data import load_macro, load_macro_metadata
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% [markdown]
 # Every chart below the first covers a recent window rather than the whole history, because the
@@ -190,7 +190,10 @@ fig.update_layout(
     height=400,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Line chart of the two-year and ten-year Treasury yields from 2020, both starting near zero, rising steeply through 2022 and 2023 to around five percent, and easing afterwards. Two annotations mark the first and last policy increases of the cycle.",
+)
 
 # %% [markdown]
 # ## 4. The VIX
@@ -259,7 +262,10 @@ fig.update_layout(
     showlegend=False,
     margin=dict(r=140),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Filled line chart of the VIX from 2020, with dashed rules at twenty and thirty. The series spends most of its length below twenty, with brief tall spikes annotated at the COVID crash and the failure of Silicon Valley Bank.",
+)
 
 # %% [markdown]
 # ## 5. The yield curve spread, and checking a derived column
@@ -337,7 +343,10 @@ fig.update_layout(
     height=400,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Line chart of the ten-year minus two-year Treasury spread from 2020, crossing below the zero line in mid-2022 and staying below it into 2024, with the negative region shaded.",
+)
 
 # %% [markdown]
 # ## 6. Mixed frequencies, and why the row counts do not show them
@@ -390,7 +399,10 @@ fig = px.bar(
     log_x=True,
 )
 fig.update_layout(height=620, yaxis=dict(categoryorder="total ascending"))
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Horizontal bar chart, on a logarithmic axis, of how often each series changes value per year, coloured by its published frequency. The bars separate into distinct groups matching daily, weekly, monthly and quarterly publication.",
+)
 
 # %% [markdown]
 # The bars separate into groups that match the metadata's `native_frequency` without being told
@@ -518,7 +530,10 @@ fig.update_layout(
     title_text="Yields, curve inversion and volatility track one tightening cycle",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three stacked panels sharing a time axis from 2020: Treasury yields, the ten-year minus two-year spread with a zero line, and the VIX with a rule at twenty.",
+)
 
 # %% [markdown]
 # ## Key Takeaways

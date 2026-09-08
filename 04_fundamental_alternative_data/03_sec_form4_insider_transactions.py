@@ -69,7 +69,10 @@ import polars as pl
 from plotly.subplots import make_subplots
 
 from utils import DATA_DIR
-from utils.style import COLORS  # importing utils.style activates the ml4t Plotly template
+from utils.style import (  # importing utils.style activates the ml4t Plotly template
+    COLORS,
+    show_plotly_with_alt,
+)
 
 # %% tags=["parameters"]
 # One subdirectory per ticker, written by data/equities/positioning/form4_download.py.
@@ -398,7 +401,10 @@ fig.update_layout(
     showlegend=False,
     height=340,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two horizontal bar panels sharing a category axis of transaction types, ordered by share volume. The left panel counts trades and the right counts shares, and the type leading the right panel is far down the left one.",
+)
 
 # %% [markdown]
 # ---
@@ -458,7 +464,10 @@ fig.update_layout(
     height=360,
     margin=dict(l=210),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Horizontal bar chart of the value of priced open-market trades for each insider and direction, with purchases in amber and sales in slate. A single purchase bar is longer than all the sale bars together.",
+)
 
 # %% [markdown]
 # ---

@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -86,7 +86,7 @@ from rapidfuzz import process as rprocess
 
 # Importing utils.style registers and activates the ML4T Plotly template
 # (palette, gridlines, fonts) repo-wide; the figures below inherit its colorway.
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% [markdown]
 # The acceptance threshold is the one setting in this notebook that decides an outcome. Part 5
@@ -513,7 +513,10 @@ fig.update_layout(
     yaxis_range=[0, 1.05],
     height=420,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Line chart of precision, recall and F1 against the fuzzy acceptance threshold. Precision holds at one across most of the range and falls sharply at the low end; recall is a descending staircase as the threshold rises.",
+)
 
 # %% [markdown]
 # Two features of that curve are worth naming, because they are what a threshold can and cannot
@@ -636,7 +639,10 @@ if embedding_model is not None:
         height=340,
         margin=dict(l=200),
     )
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Strip plot of cosine similarity for every query, split into three rows by whether the match was correct, wrong, or had no correct answer. The correct and wrong points overlap along the horizontal axis.",
+    )
 
 # %% [markdown]
 # The correct matches and the wrong ones overlap on the horizontal axis. Any cutoff that admits
