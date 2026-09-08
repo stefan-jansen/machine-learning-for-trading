@@ -2721,6 +2721,24 @@ case_studies/sp500_equity_option_analytics/14_backtest:
         TOP_K: 1
   timeout: 600
 case_studies/sp500_equity_option_analytics/15_portfolio_management:
+  # 21, matching 14_backtest, so one chain reads one universe. Before this the four
+  # label-taking stages read 21, 6, 5 and 5: the sweep backtested 21 symbols and the
+  # pricing and risk stages then read a 5-symbol panel, which is not the panel the
+  # backtests were run on. That is accretion rather than a considered set - #850 raised
+  # exactly one of the four.
+  #
+  # 21 is #850's number and the reason is its own: top_k_grid declares [5, 10, 20] for
+  # every label and the case study is long-only, so a scheme survives when k < n_assets.
+  # 21 realizes all three; 6 realizes only ew_top5.
+  #
+  # Unverified, and stated so it is checked rather than assumed: this case study's model
+  # stages inject max_symbols 5 (06_linear and 07_gbm take the harness default), so if
+  # the sweep ranks predictions those stages produced, its ranked cross-section is 5 and
+  # raising the chain alone realizes nothing - the same shape as us_firm_characteristics
+  # above. Raising them here is not the answer 41 was there:
+  # 11d_stochastic_discount_factor measured 665s at 5 symbols on CI run 34157373964, so
+  # four times the universe is a job of its own. If the PR run shows the sweep still
+  # empty, that is the finding, and it belongs with ml4t/agent-workspace#1084.
   # The same five labels as 14_backtest above, because this stage takes LABEL
   # too and reads what the previous one registered for that label.
   invocations:
@@ -2730,7 +2748,7 @@ case_studies/sp500_equity_option_analytics/15_portfolio_management:
         # top_k_grid starts at 5, so a cap of 5 empties the grid and the sweep registers
         # nothing; the fixture's seeded allocation rows then hide it downstream. This case
         # study is long-only, so 6 realizes top_k=5 in full.
-        MAX_SYMBOLS: 6
+        MAX_SYMBOLS: 21
         TOP_N_PREDICTIONS: 2
     - id: fwd_dir_5d
       parameters:
@@ -2738,7 +2756,7 @@ case_studies/sp500_equity_option_analytics/15_portfolio_management:
         # top_k_grid starts at 5, so a cap of 5 empties the grid and the sweep registers
         # nothing; the fixture's seeded allocation rows then hide it downstream. This case
         # study is long-only, so 6 realizes top_k=5 in full.
-        MAX_SYMBOLS: 6
+        MAX_SYMBOLS: 21
         TOP_N_PREDICTIONS: 2
     - id: fwd_dir_10d
       parameters:
@@ -2746,7 +2764,7 @@ case_studies/sp500_equity_option_analytics/15_portfolio_management:
         # top_k_grid starts at 5, so a cap of 5 empties the grid and the sweep registers
         # nothing; the fixture's seeded allocation rows then hide it downstream. This case
         # study is long-only, so 6 realizes top_k=5 in full.
-        MAX_SYMBOLS: 6
+        MAX_SYMBOLS: 21
         TOP_N_PREDICTIONS: 2
     - id: fwd_ret_10d
       parameters:
@@ -2754,7 +2772,7 @@ case_studies/sp500_equity_option_analytics/15_portfolio_management:
         # top_k_grid starts at 5, so a cap of 5 empties the grid and the sweep registers
         # nothing; the fixture's seeded allocation rows then hide it downstream. This case
         # study is long-only, so 6 realizes top_k=5 in full.
-        MAX_SYMBOLS: 6
+        MAX_SYMBOLS: 21
         TOP_N_PREDICTIONS: 2
     - id: fwd_ret_risk_adj_5d
       parameters:
@@ -2762,7 +2780,7 @@ case_studies/sp500_equity_option_analytics/15_portfolio_management:
         # top_k_grid starts at 5, so a cap of 5 empties the grid and the sweep registers
         # nothing; the fixture's seeded allocation rows then hide it downstream. This case
         # study is long-only, so 6 realizes top_k=5 in full.
-        MAX_SYMBOLS: 6
+        MAX_SYMBOLS: 21
         TOP_N_PREDICTIONS: 2
   timeout: 300
 case_studies/sp500_equity_option_analytics/17_costs:
@@ -2776,8 +2794,13 @@ case_studies/sp500_equity_option_analytics/17_costs:
   # Fanning it out over the five labels 14/15/16 run is therefore four guaranteed
   # failures and one pass, which is what #851 did and what CI run 34174124145 showed on
   # main. The stages before the selection sweep every label; this one prices the winner.
+  #
+  # 21, matching the three stages above and #850's number, is the reason this entry is in
+  # this PR at all: it prices the configuration the sweep selected, so it has to load the
+  # panel that sweep ran on. At 5 it read a five-symbol panel and priced a strategy that
+  # was ranked on twenty-one.
   parameters:
-    MAX_SYMBOLS: 5
+    MAX_SYMBOLS: 21
     TOP_N_COMBOS: 1
   timeout: 600
 case_studies/sp500_equity_option_analytics/16_risk_management:
@@ -2788,31 +2811,31 @@ case_studies/sp500_equity_option_analytics/16_risk_management:
       parameters:
         LABEL: fwd_ret_5d
         MAX_RISK_VARIANTS: 3
-        MAX_SYMBOLS: 5
+        MAX_SYMBOLS: 21
         TOP_N_COMBOS: 1
     - id: fwd_dir_5d
       parameters:
         LABEL: fwd_dir_5d
         MAX_RISK_VARIANTS: 3
-        MAX_SYMBOLS: 5
+        MAX_SYMBOLS: 21
         TOP_N_COMBOS: 1
     - id: fwd_dir_10d
       parameters:
         LABEL: fwd_dir_10d
         MAX_RISK_VARIANTS: 3
-        MAX_SYMBOLS: 5
+        MAX_SYMBOLS: 21
         TOP_N_COMBOS: 1
     - id: fwd_ret_10d
       parameters:
         LABEL: fwd_ret_10d
         MAX_RISK_VARIANTS: 3
-        MAX_SYMBOLS: 5
+        MAX_SYMBOLS: 21
         TOP_N_COMBOS: 1
     - id: fwd_ret_risk_adj_5d
       parameters:
         LABEL: fwd_ret_risk_adj_5d
         MAX_RISK_VARIANTS: 3
-        MAX_SYMBOLS: 5
+        MAX_SYMBOLS: 21
         TOP_N_COMBOS: 1
   timeout: 600
 case_studies/sp500_equity_option_analytics/18_holdout_predictions:
@@ -3428,6 +3451,27 @@ case_studies/us_firm_characteristics/04_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/us_firm_characteristics/05_linear:
+  # 41 symbols, and the number is derived. This case study is long-short and declares
+  # backtest.sweep.top_k_grid [5, 10, 20, 50], so a concentration k needs 2k disjoint
+  # names: 10, 20, 40 and 100. At 41 the first three are realizable and k=50 is not,
+  # because two disjoint legs of fifty need 101 names.
+  #
+  # **us_firm_characteristics therefore realizes three of the four concentrations it
+  # declares.** The fourth needs a 101-symbol universe, which the fixture could supply -
+  # its fold artifacts carry 200 - at an estimated +17 minutes on a job that runs 8m57s,
+  # because 08a_ipca alone is 114.9s at 20 symbols and scales with rows. 41 costs an
+  # estimated +5.5 minutes and buys k=20. The ladder is on ml4t/agent-workspace#1075.
+  #
+  # The model stages carry it, not just the backtest chain. They are what bounds the
+  # ranked cross-section: `get_entry_schemes_for` filters against the width of the
+  # predictions a sweep ranks, so leaving these at 5 while raising 11-14 would repair the
+  # chain against a universe its inputs never produce, and the sweep would still register
+  # nothing. That is the state this case study was in, and the proximate polars error it
+  # produced is what #1075 fixed.
+  #
+  # 04_evaluation and 09_causal_dml stay at 5: neither feeds the prediction population
+  # 11_backtest ranks. 05_linear reads its configs from the shared catalog rather than
+  # from the evaluation artifact.
   # 120s is measured here, not copied. Slowest of 5 green `cs-us_firm_characteristics` runs of
   # .github/workflows/test.yml sampled 2026-09-04: 13.9s, 12% of the budget, against
   # 16.8s for the gbm sibling on its 180. The premise that the linear stage does more work
@@ -3444,7 +3488,7 @@ case_studies/us_firm_characteristics/05_linear:
     # tests/pm_helpers.py, which only fires when the whole mapping is empty.
     PREVIEW_REDUCTIONS:
       folds: [0]
-      max_symbols: 5
+      max_symbols: 41
   # Measured 2026-08-27 with the reductions above: 88.7 s for the whole pytest
   # invocation, fixture seeding included, at load average 40.8 on 24 cores. No cell
   # approached the per-cell cap, so 120 s is kept rather than raised.
@@ -3458,7 +3502,7 @@ case_studies/us_firm_characteristics/06_gbm:
       checkpoint_interval: 10
       folds: [0]
       max_iterations: 20
-      max_symbols: 5
+      max_symbols: 41
   # Measured the same way and at the same load: 172.9 s end to end. Kept at 180 s.
   timeout: 180
 case_studies/us_firm_characteristics/07_tabular_dl:
@@ -3494,14 +3538,19 @@ case_studies/us_firm_characteristics/07_tabular_dl:
     # `_resolve_tabm_config` has loaded the patched preset. An earlier version of this entry
     # asked for 50 epochs at an interval of 25, which buys the same two checkpoints for
     # twenty-five times the training.
-    # 20, not 5, and the number is load-bearing now that this stage actually runs. At 5 its
-    # predictions win the validation ranking with a cross-section smaller than every k in
-    # backtest.sweep.top_k_grid ([5, 10, 20, 50]), and 11_backtest refuses the whole sweep:
-    # a long-short k of 5 needs 10 tradeable names. 20 is what 08a, 08b, 08c and 08d already
-    # declare, and the price panel caps it at 12 (ml4t/agent-workspace#1064).
+    # 41, and the number is load-bearing now that #855 makes this stage actually run. At 5
+    # its predictions win the validation ranking with a cross-section smaller than every k
+    # in backtest.sweep.top_k_grid ([5, 10, 20, 50]), and 11_backtest refuses the whole
+    # sweep: a long-short k of 5 needs 10 tradeable names.
+    #
+    # #855 set this to 20 on the reasoning that 20 is what 08a-08d declare and that the
+    # price panel caps it at 12 (ml4t/agent-workspace#1064). Both halves move on this
+    # branch: 08a-08d are raised to 41 here, and 11_backtest's panel goes to 41 with them,
+    # so 20 would now be the one model stage narrower than the chain that ranks it - the
+    # defect this branch exists to remove, reintroduced at a single entry.
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 20
+      max_symbols: 41
   timeout: 300
 case_studies/us_firm_characteristics/08_latent_factors:
   # No longer GPU: the index fits nothing. It reads the declared menu, reads each execution
@@ -3546,7 +3595,7 @@ case_studies/us_firm_characteristics/08a_ipca:
     # and it would put the preview's hands on a production declaration.
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 20
+      max_symbols: 41
   timeout: 300
 case_studies/us_firm_characteristics/08b_conditional_autoencoder:
   # Runs on the CPU in CI (ml4t/agent-workspace#1064): the notebook takes a DEVICE parameter and
@@ -3562,7 +3611,7 @@ case_studies/us_firm_characteristics/08b_conditional_autoencoder:
     POPULATION_NAME: us_firm_characteristics-cae-preview
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 20
+      max_symbols: 41
   timeout: 300
 case_studies/us_firm_characteristics/08c_stochastic_discount_factor:
   # Runs on the CPU in CI (ml4t/agent-workspace#1064): the notebook takes a DEVICE parameter and
@@ -3584,7 +3633,7 @@ case_studies/us_firm_characteristics/08c_stochastic_discount_factor:
     # described. The three phase budgets are named here because nothing else reduces them.
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 20
+      max_symbols: 41
       n_epochs_cond: 2
       n_epochs_moment: 1
       n_epochs_unc: 2
@@ -3603,7 +3652,7 @@ case_studies/us_firm_characteristics/08d_supervised_autoencoder:
     POPULATION_NAME: us_firm_characteristics-sae-preview
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 20
+      max_symbols: 41
   timeout: 300
 case_studies/us_firm_characteristics/09_causal_dml:
   parameters:
@@ -3647,7 +3696,7 @@ case_studies/us_firm_characteristics/11_backtest:
         # nothing, and section 3 read an empty registry (ml4t/agent-workspace#1075). Twelve
         # admits ew_top5 and matches 12_portfolio_management, so the two notebooks sweep the
         # same universe.
-        MAX_SYMBOLS: 12
+        MAX_SYMBOLS: 41
         TOP_K: 2
     - id: fwd_class_1m
       parameters:
@@ -3661,7 +3710,7 @@ case_studies/us_firm_characteristics/11_backtest:
         # nothing, and section 3 read an empty registry (ml4t/agent-workspace#1075). Twelve
         # admits ew_top5 and matches 12_portfolio_management, so the two notebooks sweep the
         # same universe.
-        MAX_SYMBOLS: 12
+        MAX_SYMBOLS: 41
         TOP_K: 2
     - id: fwd_ret_1m_win
       parameters:
@@ -3675,7 +3724,7 @@ case_studies/us_firm_characteristics/11_backtest:
         # nothing, and section 3 read an empty registry (ml4t/agent-workspace#1075). Twelve
         # admits ew_top5 and matches 12_portfolio_management, so the two notebooks sweep the
         # same universe.
-        MAX_SYMBOLS: 12
+        MAX_SYMBOLS: 41
         TOP_K: 2
   timeout: 300
 case_studies/us_firm_characteristics/12_portfolio_management:
@@ -3690,7 +3739,7 @@ case_studies/us_firm_characteristics/12_portfolio_management:
         # study is long-short, and signals.py caps each side at n_assets // 2, so a cap of 6
         # would register rows labelled top_k=5 that trade 3 names per side. The fixture holds
         # 200 symbols, so 12 realizes the concentration the row claims.
-        MAX_SYMBOLS: 12
+        MAX_SYMBOLS: 41
         TOP_N_PREDICTIONS: 2
     - id: fwd_class_1m
       parameters:
@@ -3700,7 +3749,7 @@ case_studies/us_firm_characteristics/12_portfolio_management:
         # study is long-short, and signals.py caps each side at n_assets // 2, so a cap of 6
         # would register rows labelled top_k=5 that trade 3 names per side. The fixture holds
         # 200 symbols, so 12 realizes the concentration the row claims.
-        MAX_SYMBOLS: 12
+        MAX_SYMBOLS: 41
         TOP_N_PREDICTIONS: 2
     - id: fwd_ret_1m_win
       parameters:
@@ -3710,7 +3759,7 @@ case_studies/us_firm_characteristics/12_portfolio_management:
         # study is long-short, and signals.py caps each side at n_assets // 2, so a cap of 6
         # would register rows labelled top_k=5 that trade 3 names per side. The fixture holds
         # 200 symbols, so 12 realizes the concentration the row claims.
-        MAX_SYMBOLS: 12
+        MAX_SYMBOLS: 41
         TOP_N_PREDICTIONS: 2
   timeout: 300
 case_studies/us_firm_characteristics/14_costs:
@@ -3724,8 +3773,12 @@ case_studies/us_firm_characteristics/14_costs:
   # carrier three times, passing each. Two of the three were duplicates of the first, and
   # a green tick on a run that could not have exercised its label is the coverage claim
   # this file exists to keep honest.
+  #
+  # 41, matching the three stages above, for the reason spelled out on 11_backtest: the
+  # carrier this stage prices was ranked on a 41-symbol panel, so pricing it against a
+  # five-symbol one reports costs for a strategy that was never run.
   parameters:
-    MAX_SYMBOLS: 5
+    MAX_SYMBOLS: 41
   timeout: 600
 case_studies/us_firm_characteristics/13_risk_management:
   # The same three labels as 11_backtest above, because this stage takes LABEL
@@ -3735,19 +3788,19 @@ case_studies/us_firm_characteristics/13_risk_management:
       parameters:
         LABEL: fwd_ret_1m
         MAX_RISK_VARIANTS: 3
-        MAX_SYMBOLS: 5
+        MAX_SYMBOLS: 41
         TOP_N_COMBOS: 1
     - id: fwd_class_1m
       parameters:
         LABEL: fwd_class_1m
         MAX_RISK_VARIANTS: 3
-        MAX_SYMBOLS: 5
+        MAX_SYMBOLS: 41
         TOP_N_COMBOS: 1
     - id: fwd_ret_1m_win
       parameters:
         LABEL: fwd_ret_1m_win
         MAX_RISK_VARIANTS: 3
-        MAX_SYMBOLS: 5
+        MAX_SYMBOLS: 41
         TOP_N_COMBOS: 1
   timeout: 600
 case_studies/us_firm_characteristics/15_holdout_predictions:
