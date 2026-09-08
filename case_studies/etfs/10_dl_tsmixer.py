@@ -51,6 +51,7 @@ from case_studies.research import (
     load_model_configs,
     model_requests,
     open_study,
+    population_supersedes,
     primary_label,
     resolved_model_plan,
     run_model_population,
@@ -291,7 +292,7 @@ execution, population = run_model_population(
     study,
     resolved,
     population_name=population_name,
-    supersedes=SUPERSEDES_POPULATION or None,
+    supersedes=population_supersedes(study, name=population_name, declared=SUPERSEDES_POPULATION),
 )
 
 reused = sum(1 for item in execution.diagnostics if item.get("reused"))

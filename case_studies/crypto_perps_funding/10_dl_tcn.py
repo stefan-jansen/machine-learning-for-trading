@@ -101,14 +101,15 @@ from case_studies.crypto_perps_funding.research_workflow import (
     plan_specs,
     run_model_plan,
 )
+from case_studies.research import population_supersedes
 
 # %% tags=["parameters"]
 EXECUTION_TIER = "canonical"
-SUPERSEDES_POPULATION: str = "ee303a0e10e2"
+SUPERSEDES_POPULATION: str = "1b444ce334d4"
 # The generation of this notebook's own checkpoint population that this run replaces, if any.
 # Distinct from SUPERSEDES_POPULATION above, which is the case-wide official model population:
 # the two are separate declarations and a refit can move either without moving the other.
-SUPERSEDES_MODEL_POPULATION: str = ""
+SUPERSEDES_MODEL_POPULATION: str = "ee303a0e10e2"
 WORKSPACE = os.environ.get("ML4T_OUTPUT_DIR", "")
 LABELS = REGRESSION_LABELS
 PREVIEW_REDUCTIONS = {}
@@ -131,7 +132,14 @@ OVERRIDES = {"device": "cuda"}
 # %%
 study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 official_population = (
-    freeze_official_model_population(study, supersedes=SUPERSEDES_POPULATION or None)
+    freeze_official_model_population(
+        study,
+        supersedes=population_supersedes(
+            study,
+            name="crypto-validation-predictions-v1",
+            declared=SUPERSEDES_POPULATION,
+        ),
+    )
     if EXECUTION_TIER == "canonical"
     else None
 )
@@ -188,7 +196,11 @@ if official_population is not None:
 # %% tags=["results"]
 execution = run_model_plan(
     plan,
-    supersedes=SUPERSEDES_MODEL_POPULATION or None,
+    supersedes=population_supersedes(
+        study,
+        name="crypto-tcn-validation-predictions-v1",
+        declared=SUPERSEDES_MODEL_POPULATION,
+    ),
     population_name="crypto-tcn-validation-predictions-v1"
     if EXECUTION_TIER == "canonical"
     else None,

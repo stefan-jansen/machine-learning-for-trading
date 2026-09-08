@@ -103,6 +103,7 @@ from case_studies.cme_futures.research_workflow import (
     run_official_model_catalog,
     run_resolved_model_requests,
 )
+from case_studies.research import population_supersedes
 
 # %% tags=["parameters"]
 EXECUTION_TIER = "canonical"
@@ -187,7 +188,11 @@ if EXECUTION_TIER == "canonical":
         requests,
         population_name="cme_futures-deep_learning-validation-v1",
         resolved_requests=resolved,
-        supersedes=SUPERSEDES_POPULATION,
+        supersedes=population_supersedes(
+            study,
+            name="cme_futures-deep_learning-validation-v1",
+            declared=SUPERSEDES_POPULATION,
+        ),
     )
 else:
     if WORKSPACE is None or not PREVIEW_REDUCTIONS:
