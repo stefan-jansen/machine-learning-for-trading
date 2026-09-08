@@ -240,17 +240,17 @@ pl.DataFrame(
         "aggregate": [r.extremized_probability for _, _, r in panel_results],
     }
 )
-
 # %% [markdown]
-# Identical aggregates from panels a reader would treat very differently. That is not a bug in
-# the implementation: the exchangeable model the formula comes from assumes one correlation for
-# every pair, and under that assumption the spread carries no information the mean does not.
-# It is a limit on what the formula can be asked. If the spread should change the answer, it
-# has to enter somewhere else - through a dependence model estimated from the panel, or through
-# a rule that reads the distribution rather than its mean. Spread is not wasted meanwhile:
+# Identical aggregates from panels a reader would treat very differently. The rule reads three
+# inputs - the mean, the panel size, and the assumed correlation - and the spread is not one of
+# them, so this is a limit on what the formula can be asked rather than a claim that dispersion
+# carries nothing. If the spread should change the answer, it has to enter somewhere else:
+# through a dependence model estimated from the panel, or through a rule that reads the
+# distribution instead of its mean. Spread is not wasted meanwhile:
 # [`07_adversarial_debate`](07_adversarial_debate.ipynb) uses a split panel as the trigger for
 # making the agents argue, which is a use for dispersion that does not require putting it in
 # the aggregation.
+
 # %% [markdown]
 # ## Platt Scaling: Post-Hoc Calibration
 #
@@ -497,11 +497,15 @@ plt.show()
 
 # %% [markdown]
 # The improvement is small, and on this data it should be. The forecasts were simulated by
-# shrinking a known probability toward even odds, so a single exponent is exactly the right
-# correction and the noise added on top of it is not correctable at all. What the comparison
-# establishes is the procedure: fit on one panel, freeze, score on another. Read the same
-# numbers off a fit evaluated on its own training observations and they say nothing, because
-# the exponent was chosen to make them look that way.
+# shrinking each probability linearly toward even odds and adding noise. A log-odds exponent
+# does not invert a linear shrinkage: it can only be the single exponent that minimizes Brier
+# score across the range, closer at some probabilities than at others, and the added noise is
+# not correctable at all. So the fit is an approximate correction to an approximate
+# description of the miscalibration, which is the ordinary case.
+#
+# What the comparison establishes is the procedure: fit on one panel, freeze, score on another.
+# Read the same two numbers off a fit evaluated on its own training observations and they say
+# nothing, because the exponent was chosen to make them look that way.
 
 # %% [markdown]
 # ## How Many Agents Are Worth Running
