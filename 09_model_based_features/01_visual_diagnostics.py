@@ -257,7 +257,7 @@ def run_stationarity_tests(series: pd.Series, name: str) -> dict:
     elif not adf_rejects and kpss_rejects:
         reading = "unit root (both agree)"
     elif adf_rejects and kpss_rejects:
-        reading = "stationary around a trend"
+        reading = "the two tests disagree"
     else:
         reading = "sample does not settle it"
 
@@ -335,8 +335,8 @@ display(pd.DataFrame(consensus_rows))
 # differently rather than measuring different things. The joint matrix keeps a
 # disagreement as a disagreement and hands it back for diagnosis; the consensus label
 # has no such case and reports whichever way the majority went. The label is the more
-# convenient of the two and the less informative, so read it alongside the individual
-# test results in `summary_df` rather than in place of them.
+# convenient of the two and the less informative, so read it alongside the per-test
+# statistics in the `stationarity` table above rather than in place of them.
 
 # %% [markdown]
 # ## Autocorrelation: what the past says about the future
