@@ -156,6 +156,16 @@ def _iter_notebooks() -> list[Path]:
             continue
         if p.name.startswith("_executed_"):
             continue
+        # `nb-run.sh` writes `.<stem>.build.<pid>.ipynb` and `.<stem>.papermill.<pid>.ipynb`
+        # beside the notebook it is running and deletes them on exit. They belong to that run,
+        # not to the working tree this script fixes, and a concurrent run in the same directory
+        # deletes one between this walk and the read below. On 2026-09-08 that raced four
+        # teaching notebooks at once: a healthy `12_kalshi_prediction_markets` run printed a
+        # `FileNotFoundError` naming `11_defi_tvl_evaluation`'s build file, the sweep died
+        # before sanitizing kalshi's own outputs, and the run still exited 0 with the notebook
+        # no longer matching its stamp.
+        if p.name.startswith("."):
+            continue
         if p in ignored:
             continue
         out.append(p)
@@ -322,7 +332,15 @@ def main() -> int:
     dirty: list[tuple[Path, int]] = []
     blocked: list[tuple[Path, str]] = []
     for nb in targets:
-        raw = nb.read_text(encoding="utf-8")
+        try:
+            raw = nb.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            # Only reachable for a path that existed during the walk and is gone now, which
+            # means another process owns it. Skipping one such file is right; failing the whole
+            # sweep leaves every notebook after it in the sort order unsanitized.
+            if args.notebooks:
+                raise
+            continue
         new, n, skipped = sanitize_notebook(raw)
         blocked += [(nb.relative_to(REPO_ROOT), s) for s in skipped]
         if n:
