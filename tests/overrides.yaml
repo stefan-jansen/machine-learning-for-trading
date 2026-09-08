@@ -3443,10 +3443,12 @@ case_studies/us_firm_characteristics/07_tabular_dl:
   # setup.yaml pins modeling.tabular_dl.device: cuda, and resolve_torch_device still refuses to
   # silently downgrade an explicit device. What changed is that the notebook now takes a DEVICE
   # parameter, so the downgrade is requested rather than substituted, and a run that requests one
-  # must name its own population (ml4t/agent-workspace#1064). 17.7 s, measured 2026-09-07 on four
-  # cores (`taskset -c 0-3`) with CUDA hidden, against test-data 2c068b5a; four dedicated cores
-  # here approximate a four-core runner rather than equal one, so 300 keeps room rather than
-  # tracking the measurement. Re-base on the first green `cs-us_firm_characteristics` runs.
+  # must name its own population (ml4t/agent-workspace#1064). 18.3 s at the `max_symbols: 20`
+  # below, measured 2026-09-08 on four cores (`taskset -c 0-3`) with CUDA hidden, against
+  # test-data 2c068b5a. Widening it from 5 cost 0.6 s, because the price panel is 12 and the
+  # fit is dominated by fixed cost at either width. Four dedicated cores here approximate a
+  # four-core runner rather than equal one, so 300 keeps room rather than tracking the
+  # measurement. Re-base on the first green `cs-us_firm_characteristics` runs.
   parameters:
     DEVICE: cpu
     POPULATION_NAME: us_firm_characteristics-tabular_dl-preview
@@ -3470,9 +3472,14 @@ case_studies/us_firm_characteristics/07_tabular_dl:
     # `_resolve_tabm_config` has loaded the patched preset. An earlier version of this entry
     # asked for 50 epochs at an interval of 25, which buys the same two checkpoints for
     # twenty-five times the training.
+    # 20, not 5, and the number is load-bearing now that this stage actually runs. At 5 its
+    # predictions win the validation ranking with a cross-section smaller than every k in
+    # backtest.sweep.top_k_grid ([5, 10, 20, 50]), and 11_backtest refuses the whole sweep:
+    # a long-short k of 5 needs 10 tradeable names. 20 is what 08a, 08b, 08c and 08d already
+    # declare, and the price panel caps it at 12 (ml4t/agent-workspace#1064).
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 5
+      max_symbols: 20
   timeout: 300
 case_studies/us_firm_characteristics/08_latent_factors:
   # No longer GPU: the index fits nothing. It reads the declared menu, reads each execution
