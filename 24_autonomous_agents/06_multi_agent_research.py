@@ -25,8 +25,9 @@
 # This notebook runs three copies of the agent from
 # [`04_research_agent`](04_research_agent.ipynb) on one question, in parallel, and looks at
 # what came back. Nothing distinguishes the three except their identifiers, which is the point:
-# whatever spread appears comes from the searches each one chose and what the search API
-# returned that day, not from roles or settings assigned to them.
+# no roles, no settings, nothing assigned to make them differ. Two things can still make them
+# differ anyway - the model samples its replies, and each agent's searches return different
+# documents - and this run separates neither.
 #
 # **What this run establishes, and what it does not.** The numbers below are one live capture
 # (`claude-sonnet-4`, Tavily search) taken on 2026-06-09 and replayed by default, so the
@@ -113,8 +114,9 @@ NEYMAN_CORRELATION = 0.3
 #
 # All three agents share one model client and one search client. Each gets a distinct
 # `agent_id` and nothing else: the same prompt, the same tools, the same sampling temperature.
-# Whatever they end up disagreeing about comes from which searches they chose and what the
-# search API returned, not from any difference built into them.
+# Nothing is built in to make them disagree. Two channels remain open: the model's own
+# sampling, and the different documents each agent's searches return. The timelines below show
+# the second; nothing here separates the two.
 #
 # The question is `CHAPTER_CLEAR_QUESTION` from `agent_fixtures.py`, *"Will the US enter a
 # recession by the end of 2026?"*, carrying the prediction-market probability recorded on
@@ -568,9 +570,9 @@ print(replay_llm_calls(agent_0_calls, content_chars=600))
 # ## Key Takeaways
 #
 # 1. **Identical agents diverge, and that is the panel's entire value.** Nothing distinguishes
-#    these three: same prompt, same tools, same client, same sampling temperature. What differs
-#    is which searches each one chose and what the search API returned, and that is enough for
-#    three different answers to one question.
+#    these three: same prompt, same tools, same client, same sampling temperature. Three
+#    different answers come out anyway, from the model's sampling and from what each agent's
+#    searches returned, in proportions this run does not separate.
 # 2. **A panel is only worth aggregating if its members are worth aggregating separately.**
 #    Read the timelines before the aggregate. Agents converging by different routes is evidence;
 #    agents pulling identical documents and reasoning in step is one agent run three times, and
