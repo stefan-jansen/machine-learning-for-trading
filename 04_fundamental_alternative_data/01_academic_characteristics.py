@@ -22,19 +22,30 @@
 #
 # ## Purpose
 #
-# This notebook introduces the Chen-Pelger-Zhu (2020) academic dataset, which provides
-# a standardized benchmark for comparing ML models in asset pricing. With ~1.2M stock-month
-# observations and 46 firm characteristics, this anonymized dataset enables reproducible
-# research without requiring WRDS access.
+# Research on machine learning for asset pricing is hard to reproduce because the underlying
+# firm data usually sits behind a WRDS subscription. Chen, Pelger and Zhu (2021) removed that
+# barrier by publishing the panel they used: fifty years of monthly US equity observations,
+# each carrying 46 firm characteristics and the return earned over the following month, with
+# company names and CRSP identifiers stripped out. This notebook reads that panel, shows what
+# is in it, and measures how strongly each characteristic lines up with next-month returns.
+#
+# It is the reference dataset for the `us_firm_characteristics` case study, so the shape,
+# the split boundaries and the normalization conventions established here are the ones every
+# model in that case study inherits.
 #
 # ## Learning Objectives
 #
 # After completing this notebook, you will be able to:
-# - Load and explore the Chen-Pelger-Zhu academic dataset
-# - Understand the 46 firm characteristics and their categories
-# - Recognize the cross-sectional rank normalization applied to features
-# - Understand the train/valid/test split methodology
-# - Know the limitations (no asset IDs = no backtesting possible)
+#
+# - Load the published panel and report how many stocks it covers in each month of its history.
+# - Read the 46 characteristics as eight economic groups, and say which quantity each group measures.
+# - Confirm that a cross-sectional rank normalization has been applied, by checking the range
+#   each characteristic occupies.
+# - Measure the information coefficient - the rank correlation between a characteristic and the
+#   return that follows it - one month at a time, and average it over the training period.
+# - Correct the significance test on that average for the serial correlation between adjacent
+#   months, and say how far the correction moves it.
+# - State what the anonymous identifiers in this panel allow and what they rule out.
 #
 # ## Cross-References
 #
@@ -55,19 +66,18 @@
 # |-----------|-------|
 # | **Paper** | "Deep Learning in Asset Pricing" (Chen, Pelger, Zhu, 2021) |
 # | **Repository** | https://github.com/jasonzy121/Deep_Learning_Asset_Pricing |
-# | **Observations** | ~1.2M stock-months |
-# | **Features** | 46 firm characteristics (rank-normalized) |
-# | **Returns** | Next-month excess returns (raw, not normalized) |
-# | **Period** | 1967-2016 (50 years) |
-# | **Identifiers** | **None** (fully anonymized) |
+# | **Features** | 46 firm characteristics, rank-normalized each month |
+# | **Returns** | Next-month excess returns, left in their original scale |
+# | **Period** | January 1967 to December 2016 |
+# | **Identifiers** | Anonymous integers; the numbering restarts in each split |
 #
 # ## Data Construction (from paper Section III.A)
 #
 # ### Stock Universe
-# - Source: All securities on CRSP (~31,000 stocks)
+# - Source: All securities on CRSP
 # - Only stocks with all 46 characteristics available are included
-# - This removes predominantly small-cap stocks with missing data
-# - The released dataset contains ~2,000 stocks per month on average
+# - That requirement removes predominantly small-cap stocks with missing data
+# - The released panel covers roughly two thousand stocks in a typical month
 #
 # ### 46 Firm Characteristics
 # Characteristics are sourced from:
@@ -89,39 +99,43 @@
 # - Monthly variables: Updated end of month for use in next month
 # - All from CRSP/Compustat accounting data or CRSP past returns
 #
-# ### 178 Macroeconomic Time Series
-# 1. 124 from FRED-MD database (McCracken and Ng, 2016)
-# 2. 46 cross-sectional medians of firm characteristics
-# 3. 8 equity premium predictors from Welch and Goyal (2007)
+# ### Macroeconomic companion series
+# The paper pairs the firm panel with 178 macroeconomic time series: 124 from the FRED-MD
+# database (McCracken and Ng, 2016), 46 cross-sectional medians of the firm characteristics
+# themselves, and 8 equity-premium predictors from Welch and Goyal (2007). Conditional models
+# such as the stochastic discount factor GAN of Chapter 14 use them as state variables. They
+# are distributed separately from the firm panel; assemble them from the paper repository and
+# join on `timestamp`.
 #
 # ### Cross-Sectional Rank Normalization
-# Following Kelly, Pruitt, Su (2019), Kozak, Nagel, Santosh (2020):
-# - Each characteristic ranked cross-sectionally each month
-# - Converted to quantiles in [-0.5, +0.5] range
-# - Handles different scales and reduces outlier impact
+# Following Kelly, Pruitt, Su (2019) and Kozak, Nagel, Santosh (2020), each characteristic is
+# ranked across all stocks within a month and the ranks are mapped onto the interval
+# $\left[-\frac{1}{2}, +\frac{1}{2}\right]$. Two consequences matter for everything below.
+# Every characteristic then occupies the same range whatever its raw units were, so a
+# price-to-book ratio and a turnover rate enter a model on equal footing. And because the
+# ranking keeps only the ordering, an extreme raw value becomes an extreme rank rather than an
+# extreme number, which bounds the influence any one stock can have on a fitted coefficient.
 #
 # ## Key Concepts
 #
-# - **Cross-sectional rank normalization**: Features scaled to [-0.5, +0.5] each month
-# - **Next-month return prediction**: `ret` is the raw excess return to be predicted (not normalized)
-# - **No asset identifiers**: Individual stocks cannot be tracked over time
+# - **Information coefficient (IC)**: the rank correlation, within one month's cross-section,
+#   between a characteristic and the return realized over the month that follows. It is the
+#   standard summary of how well a single signal orders stocks.
+# - **Excess return**: a return measured net of the risk-free rate. The `ret` column holds the
+#   excess return of the following month and is the quantity every model here predicts.
+# - **Anonymous identifier**: the `symbol` column is an integer standing in for a company whose
+#   name was removed. It links a firm's observations across months within one split.
 #
 # ---
 
 # %%
-"""Chen-Pelger-Zhu Academic Asset Pricing Dataset — explore anonymized firm characteristics for ML benchmarking."""
-
-import warnings
-
-warnings.filterwarnings("ignore")
-
-from datetime import datetime
+"""Chen-Pelger-Zhu Academic Asset Pricing Dataset - explore anonymized firm characteristics for ML benchmarking."""
 
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import polars as pl
-import statsmodels.api as sm
+from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 
 from data import load_firm_characteristics
 from utils.reproducibility import set_global_seeds
@@ -131,8 +145,15 @@ from utils.style import COLORS, ml4t_diverging
 # (palette, gridlines, fonts) repo-wide; px/go figures below inherit its colorway.
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
+# Production defaults - Papermill injects overrides for CI
 SEED = 42
+# The panel's label is the return of the single month that follows, so consecutive monthly
+# ICs are built from returns that do not overlap. The HAC lag selection below is told so.
+LABEL_HORIZON_MONTHS = 1
+# Two characteristics are treated as redundant when the magnitude of their correlation
+# reaches this level; it is the threshold used to list pairs in Section 3, not a modelling
+# decision, and lowering it lengthens the list rather than changing any fitted result.
+REDUNDANCY_THRESHOLD = 0.5
 
 # %%
 set_global_seeds(SEED)
@@ -140,81 +161,103 @@ set_global_seeds(SEED)
 # %% [markdown]
 # ---
 #
-# ## Section 1: Data Overview
+# ## Section 1: What is in the panel
 #
-# The Chen-Pelger-Zhu dataset provides a clean, standardized benchmark for comparing
-# ML approaches to return prediction. All features are cross-sectionally rank-normalized
-# each month, eliminating scale differences and reducing outlier impact.
+# The published file holds one row per stock and month. Alongside the 46 characteristics it
+# carries `ret`, the excess return of the following month, `split`, the train/validation/test
+# label assigned by the authors, and `symbol`, the anonymous integer identifier.
 
 # %%
-# Load full dataset with split labels
 df = load_firm_characteristics(split="all")
 
-print(f"Total observations: {len(df):,}")
-print(f"Columns: {len(df.columns)}")
-df.columns
+ID_COLS = ["symbol", "timestamp", "ret", "split"]
+feature_cols = [c for c in df.columns if c not in ID_COLS]
+
+print(f"Rows: {len(df):,}")
+print(f"Characteristics: {len(feature_cols)}")
+print(f"Distinct anonymous identifiers: {df['symbol'].n_unique():,}")
+
+# %% [markdown]
+# The authors split the history by date rather than at random, which is the only split that
+# respects the arrow of time: a model is fitted on the earliest years, tuned on the middle
+# ones, and judged on the most recent. The boundaries below are read from the file rather
+# than assumed, because every figure in this notebook marks them.
 
 # %%
-# Check date range and split distribution
-date_stats = df.group_by("split").agg(
-    pl.col("timestamp").min().alias("start"),
-    pl.col("timestamp").max().alias("end"),
-    pl.len().alias("n_obs"),
-)
-date_stats.sort("start")
-
-# %%
-# Observations per month
-monthly_counts = (
-    df.group_by("timestamp")
-    .len()
-    .sort("timestamp")
-    .with_columns(
-        pl.col("timestamp").dt.year().alias("year"),
+split_bounds = (
+    df.group_by("split")
+    .agg(
+        pl.col("timestamp").min().alias("start"),
+        pl.col("timestamp").max().alias("end"),
+        pl.len().alias("n_obs"),
+        pl.col("symbol").n_unique().alias("n_stocks"),
     )
+    .sort("start")
 )
+split_bounds
 
-print("\nObservations per month:")
-print(f"  Min: {monthly_counts['len'].min()}")
-print(f"  Max: {monthly_counts['len'].max()}")
-print(f"  Mean: {monthly_counts['len'].mean():.0f}")
+# %% [markdown]
+# The identifiers are drawn from a fresh numbering in each split, so the same integer in the
+# training and test periods refers to different companies. That is what the row counts above
+# and the pairwise overlap below establish: a firm can be followed from month to month inside
+# one split, and cannot be followed across a boundary.
 
-# Plot observations over time
+# %%
+symbols_by_split = {
+    row["split"]: set(df.filter(pl.col("split") == row["split"])["symbol"].unique().to_list())
+    for row in split_bounds.iter_rows(named=True)
+}
+for left, right in [("train", "valid"), ("valid", "test"), ("train", "test")]:
+    shared = len(symbols_by_split[left] & symbols_by_split[right])
+    print(f"identifiers shared between {left} and {right}: {shared}")
+
+# %% [markdown]
+# ### How wide is the cross-section?
+#
+# The number of stocks available in a given month decides how much a cross-sectional statistic
+# computed on that month can be trusted, and it moves a great deal over fifty years. The
+# vertical rules mark the two split boundaries read above.
+
+# %%
+monthly_counts = df.group_by("timestamp").len().sort("timestamp")
+
+valid_start = split_bounds.filter(pl.col("split") == "valid")["start"].item()
+test_start = split_bounds.filter(pl.col("split") == "test")["start"].item()
+
 fig = px.line(
     monthly_counts.to_pandas(),
     x="timestamp",
     y="len",
-    title="Coverage peaked at ~2,800 stocks in 2005, then eased to ~1,900 by 2016",
-    labels={"len": "Stocks in cross-section", "timestamp": "Date"},
+    title="Coverage rises through the 1990s, peaks in the mid-2000s, then thins",
+    labels={"len": "Stocks in the cross-section", "timestamp": "Month"},
     color_discrete_sequence=[COLORS["blue"]],
 )
-# Split boundaries (train | valid | test), drawn in the neutral palette color
-fig.add_vline(x=datetime(1990, 1, 1), line_dash="dash", line_color=COLORS["neutral"])
-fig.add_vline(x=datetime(2000, 1, 1), line_dash="dash", line_color=COLORS["neutral"])
-fig.add_annotation(
-    x=datetime(1990, 1, 1),
-    y=2800,
-    text="Valid",
-    showarrow=False,
-    font=dict(color=COLORS["neutral"]),
-)
-fig.add_annotation(
-    x=datetime(2000, 1, 1), y=2800, text="Test", showarrow=False, font=dict(color=COLORS["neutral"])
-)
+for boundary, label in [(valid_start, "Validation"), (test_start, "Test")]:
+    fig.add_vline(x=boundary, line_dash="dash", line_color=COLORS["neutral"])
+    fig.add_annotation(
+        x=boundary,
+        y=1.0,
+        yref="paper",
+        yanchor="bottom",
+        text=label,
+        showarrow=False,
+        font=dict(color=COLORS["neutral"]),
+    )
 fig.show()
 
 # %% [markdown]
 # ---
 #
-# ## Section 2: Characteristic Taxonomy
+# ## Section 2: The characteristic taxonomy
 #
-# The 46 firm characteristics span multiple categories that capture different dimensions
-# of stock behavior: valuation, profitability, investment, momentum, risk, and market metrics.
-#
-# All characteristics are cross-sectionally rank-normalized each month to values in [-0.5, +0.5].
+# The 46 columns are not 46 independent ideas. They fall into eight groups, each measuring one
+# economic quantity in several ways: how cheap a firm is relative to its accounting value, how
+# profitable it is, how fast it is growing its asset base, how its price has moved recently,
+# how volatile it is, how easily it trades, how much debt it carries, and how efficiently it
+# turns assets into sales. Grouping them is what makes the correlation structure in Section 3
+# and the information coefficients in Section 4 readable.
 
 # %%
-# Define characteristic categories
 CHARACTERISTIC_CATEGORIES = {
     "Valuation": ["BEME", "E2P", "S2P", "CF2P", "D2P", "A2ME", "Q"],
     "Profitability": ["ROA", "ROE", "PROF", "OP", "PM", "PCM", "NI", "RNA"],
@@ -226,70 +269,88 @@ CHARACTERISTIC_CATEGORIES = {
     "Other": ["ATO", "CTO", "SGA2S"],
 }
 
-# Print category summary
-print("Characteristic Categories:")
-print("=" * 60)
-total = 0
+CATEGORY_OF = {
+    feature: category
+    for category, features in CHARACTERISTIC_CATEGORIES.items()
+    for feature in features
+}
+
+assert set(CATEGORY_OF) == set(feature_cols), "every characteristic belongs to exactly one group"
+
 for category, features in CHARACTERISTIC_CATEGORIES.items():
-    print(f"\n{category} ({len(features)} features):")
-    print(f"  {', '.join(features)}")
-    total += len(features)
-print(f"\nTotal: {total} characteristics")
+    print(f"{category} ({len(features)}): {', '.join(features)}")
+
+# %% [markdown]
+# ### Checking that the ranks were applied
+#
+# The normalization described in the preamble makes a claim the data can be held to: every
+# characteristic, in every month, occupies the same bounded range. The check is the smallest
+# and largest value any of the 46 columns reaches anywhere in the panel. Reading it also
+# confirms that nothing is missing, which matters because the authors admitted only stocks
+# with a complete set of characteristics.
 
 # %%
-# Distribution of each characteristic (confirming rank normalization)
-feature_cols = [c for c in df.columns if c not in ["timestamp", "ret", "split"]]
+lowest = min(df.select(feature_cols).min().row(0))
+highest = max(df.select(feature_cols).max().row(0))
+print(f"Lowest value reached by any characteristic: {lowest:.3f}")
+print(f"Highest value reached by any characteristic: {highest:.3f}")
+print(f"Characteristics checked: {len(feature_cols)}")
+print(f"Missing values among them: {df.select(feature_cols).null_count().to_numpy().sum()}")
 
-# Compute statistics efficiently using Polars - no loops needed
-sample_features = feature_cols[:10]
-stats_df = df.select(sample_features).describe()
-stats_df.filter(pl.col("statistic").is_in(["min", "max", "mean", "std"]))
+# %% [markdown]
+# Staying inside the interval is not the same as filling it evenly. A month in which many
+# stocks tie on a characteristic would pile them at one value and leave gaps elsewhere, and the
+# ranking would then be carrying less information than its range suggests. Every characteristic
+# is ranked by the same procedure, so one of them settles the question for all: the histogram
+# below counts every stock-month of book-to-market in the panel.
+
+# %%
+fig = px.histogram(
+    df.select("BEME").to_pandas(),
+    x="BEME",
+    nbins=100,
+    color_discrete_sequence=[COLORS["blue"]],
+    title="Ranking spreads a characteristic evenly across the interval",
+    labels={"BEME": "BEME (book-to-market, cross-sectionally ranked)", "count": "Stock-months"},
+)
+fig.show()
 
 # %% [markdown]
 # ---
 #
-# ## Section 3: Correlation Structure
+# ## Section 3: Correlation structure
 #
-# Understanding correlations between characteristics helps identify redundant features
-# and understand the factor structure in the data.
+# Characteristics built from overlapping accounting inputs move together. Two measures of
+# volatility computed over different windows, or two valuation ratios sharing a denominator,
+# carry much of the same information, and a linear model fitted on both splits the coefficient
+# between them arbitrarily. Measuring the redundancy first is what tells you whether the model
+# you reach for later needs to handle it.
+#
+# Because each month is normalized on its own, pooling every stock-month into one correlation
+# measures how the characteristics co-vary within a cross-section, which is the relevant
+# question here, rather than how their levels drift over the decades.
 
 # %%
-# Compute correlation matrix
-corr_data = df.select(feature_cols).to_numpy()
-corr_matrix = np.corrcoef(corr_data, rowvar=False)
+corr_matrix = np.corrcoef(df.select(feature_cols).to_numpy(), rowvar=False)
 
-# Find highly correlated pairs
-high_corr_pairs = []
-for i in range(len(feature_cols)):
-    for j in range(i + 1, len(feature_cols)):
-        if abs(corr_matrix[i, j]) > 0.5:
-            high_corr_pairs.append(
-                {
-                    "feature_1": feature_cols[i],
-                    "feature_2": feature_cols[j],
-                    "correlation": corr_matrix[i, j],
-                }
-            )
-
-high_corr_df = pl.DataFrame(high_corr_pairs).sort("correlation", descending=True)
-high_corr_df
-
-# %%
-# Correlation heatmap on the ML4T diverging scale (negative -> neutral -> positive)
-_div = ml4t_diverging()
 fig = go.Figure(
     data=go.Heatmap(
         z=corr_matrix,
         x=feature_cols,
         y=feature_cols,
-        colorscale=[[0.0, _div[0]], [0.5, _div[1]], [1.0, _div[2]]],
+        colorscale=[
+            [0.0, ml4t_diverging()[0]],
+            [0.5, ml4t_diverging()[1]],
+            [1.0, ml4t_diverging()[2]],
+        ],
         zmid=0,
         zmin=-1,
         zmax=1,
+        colorbar=dict(title="Correlation"),
     )
 )
 fig.update_layout(
-    title="Volatility and valuation form the densest correlation clusters",
+    title="Characteristics form correlated blocks, so the 46 are far from independent",
     width=1000,
     height=900,
     xaxis_tickangle=-45,
@@ -297,119 +358,169 @@ fig.update_layout(
 fig.show()
 
 # %% [markdown]
-# ---
-#
-# ## Section 4: Predictive Relationships
-#
-# The key question: how do characteristics relate to next-month returns?
-# These Information Coefficients (ICs) measure the predictive power of each feature.
-
-# %% [markdown]
-# We compute monthly cross-sectional ICs (one rank correlation per month) and
-# average across months — the Fama-MacBeth template. The naive t-statistic on
-# this series assumes monthly ICs are i.i.d., but adjacent months share
-# slow-moving common factors that induce autocorrelation. The reported
-# significance test uses Newey-West (HAC) standard errors on the time series
-# of monthly ICs; for comparison we also keep the i.i.d. t-statistic.
+# The blocks in the heatmap are easier to act on as a list. The pairs below are the ones whose
+# correlation reaches the redundancy threshold declared in the parameters cell, ordered from
+# most positive to most negative.
 
 # %%
-# Step 1: Compute IC (correlation with returns) for each characteristic, per month.
-# Sort by timestamp before dropping it: the Newey-West HAC t-stat below reads this
-# as a time series, so the monthly ICs must be in chronological order. group_by emits
-# groups in a non-deterministic order, which would scramble the autocovariance the HAC
-# correction is built on (and make the t-stat non-reproducible run to run).
-monthly_ics = (
-    df.group_by("timestamp")
-    .agg([pl.corr(col, "ret").alias(col) for col in feature_cols])
-    .sort("timestamp")
-    .drop("timestamp")
-)
-
-# Step 2: Compute mean IC, i.i.d. t-stat, and Newey-West HAC t-stat across months
-n_months = len(monthly_ics)
-# Newey-West lag selection: floor(4 * (T/100)^(2/9)); ~6 for monthly series of
-# this length. Use 12 to be conservative against the annual cycle in factor returns.
-nw_maxlags = 12
-ic_stats = []
-for col in feature_cols:
-    ic_values = monthly_ics[col].to_numpy()
-    ic_values = ic_values[~np.isnan(ic_values)]  # constant-feature months
-    mean_ic = float(np.mean(ic_values))
-    std_ic = float(np.std(ic_values, ddof=1))
-    t_stat_iid = mean_ic / (std_ic / np.sqrt(len(ic_values)))
-    # HAC t-stat: regress IC_t on a constant with Newey-West covariance.
-    nw = sm.OLS(ic_values, np.ones(len(ic_values))).fit(
-        cov_type="HAC", cov_kwds={"maxlags": nw_maxlags}
-    )
-    t_stat_nw = float(nw.tvalues[0])
-    ic_stats.append(
+upper = np.triu_indices_from(corr_matrix, k=1)
+redundant_pairs = (
+    pl.DataFrame(
         {
-            "feature": col,
-            "IC": mean_ic,
-            "IC_std": std_ic,
-            "t_stat_iid": t_stat_iid,
-            "t_stat_NW": t_stat_nw,
-            "abs_IC": abs(mean_ic),
+            "feature_1": [feature_cols[i] for i in upper[0]],
+            "feature_2": [feature_cols[j] for j in upper[1]],
+            "correlation": corr_matrix[upper],
+        }
+    )
+    .filter(pl.col("correlation").abs() >= REDUNDANCY_THRESHOLD)
+    .sort("correlation", descending=True)
+)
+print(f"Pairs at or above |{REDUNDANCY_THRESHOLD}|: {len(redundant_pairs)}")
+redundant_pairs
+
+# %% [markdown]
+# ---
+#
+# ## Section 4: How each characteristic relates to next-month returns
+#
+# The information coefficient answers one question per month: if you had ordered every stock in
+# the cross-section by this characteristic, how well would that ordering have matched the order
+# of the returns that followed? Rank correlation is the right measure because only the ordering
+# is meaningful once the characteristic has been ranked, and because a single extreme return
+# then moves the statistic by one rank rather than by its full magnitude. Averaging the monthly
+# values gives the characteristic's average ordering power, which is the Fama-MacBeth template.
+#
+# **Everything in this section is computed on the training split alone.** Ranking
+# characteristics by how well they predicted returns is a selection decision, and a selection
+# decision taken over the validation and test years leaks those years into every model built on
+# the ranking, including the ones fitted in Chapters 11 and 12. The panel ships with the split
+# labels so that the line can be drawn here.
+
+# %%
+train = df.filter(pl.col("split") == "train")
+train_returns = train.select("symbol", "timestamp", pl.col("ret").alias("forward_return"))
+
+print(f"Training months: {train['timestamp'].n_unique()}")
+print(f"Training rows: {len(train):,}")
+
+# %% [markdown]
+# ### The two significance tests, and why they differ
+#
+# A t-statistic on the average of the monthly ICs divides that average by the standard error of
+# the mean, and computing the standard error that way assumes each month is an independent draw.
+# The months are not independent: slow-moving common factors keep a characteristic in or out of
+# favour for stretches at a time, so a run of positive ICs is followed by more positive ICs more
+# often than chance allows. Newey and West's estimator widens the standard error by the amount
+# of that serial correlation, using a lag window chosen from the length of the series.
+#
+# `compute_ic_hac_stats` reports both: the corrected t-statistic and the uncorrected one, so the
+# gap between them is visible rather than asserted.
+
+# %%
+ic_rows = []
+for feature in feature_cols:
+    ic_series = cross_sectional_ic_series(
+        train.select("symbol", "timestamp", pl.col(feature).alias("prediction")),
+        train_returns,
+        date_col="timestamp",
+        entity_col="symbol",
+        method="spearman",
+    )
+    stats = compute_ic_hac_stats(ic_series, ic_col="ic", label_horizon=LABEL_HORIZON_MONTHS)
+    ic_rows.append(
+        {
+            "feature": feature,
+            "category": CATEGORY_OF[feature],
+            "IC": stats["mean_ic"],
+            "t_stat_HAC": stats["t_stat"],
+            "t_stat_naive": stats["naive_t_stat"],
+            "hac_lags": stats["effective_lags"],
         }
     )
 
-ic_df = pl.DataFrame(ic_stats).sort("IC", descending=True)
-
-print(
-    f"Cross-sectional IC across {n_months} monthly cross-sections "
-    f"(|t_NW| > 2 ≈ significant; Newey-West with {nw_maxlags} lags):"
-)
+ic_df = pl.DataFrame(ic_rows).sort("IC", descending=True)
 ic_df
 
+# %% [markdown]
+# Plotted in the order above, the ICs show two things at once: how small the largest of them is,
+# and that the characteristics at the two ends of the range are the ones a reader of the factor
+# literature would expect there.
+
 # %%
-# Visualize ICs by category
-ic_with_category = []
-for row in ic_df.iter_rows(named=True):
-    category = "Other"
-    for cat, features in CHARACTERISTIC_CATEGORIES.items():
-        if row["feature"] in features:
-            category = cat
-            break
-    ic_with_category.append({**row, "category": category})
-
-ic_cat_df = pl.DataFrame(ic_with_category).with_columns(
-    pl.when(pl.col("IC") > 0)
-    .then(pl.lit("Positive predictor"))
-    .otherwise(pl.lit("Negative predictor"))
-    .alias("Direction")
-)
-
-# 8 characteristic categories exceed the ML4T palette's distinct-color budget, so
-# color encodes the sign of the relationship (the point of the figure); the x-axis
-# names the individual characteristic.
 fig = px.bar(
-    ic_cat_df.to_pandas(),
+    ic_df.with_columns(
+        pl.when(pl.col("IC") > 0)
+        .then(pl.lit("Ranks with the return"))
+        .otherwise(pl.lit("Ranks against the return"))
+        .alias("Direction")
+    ).to_pandas(),
     x="feature",
     y="IC",
     color="Direction",
     color_discrete_map={
-        "Positive predictor": COLORS["blue"],
-        "Negative predictor": COLORS["copper"],
+        "Ranks with the return": COLORS["blue"],
+        "Ranks against the return": COLORS["copper"],
     },
-    category_orders={"Direction": ["Positive predictor", "Negative predictor"]},
-    title="Short-term reversal and 12-month momentum carry the largest single-characteristic ICs",
-    labels={"IC": "Information Coefficient", "feature": "Characteristic"},
+    category_orders={"Direction": ["Ranks with the return", "Ranks against the return"]},
+    title="No single characteristic carries a large information coefficient",
+    labels={
+        "IC": "Mean monthly rank correlation with next-month return",
+        "feature": "Characteristic",
+    },
 )
-fig.update_layout(xaxis_tickangle=-45, height=500)
+fig.update_layout(xaxis_tickangle=-45, height=520)
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"])
+fig.show()
+
+# %% [markdown]
+# The correction for serial correlation is worth seeing directly. Each point below is one
+# characteristic, placed by its uncorrected t-statistic and its corrected one. Points on the
+# diagonal are unaffected by the correction; points pulled toward the horizontal centre line
+# have had their significance reduced by it. The dotted rules sit at the conventional
+# two-standard-error threshold, so a point between them fails that test on the corrected
+# statistic.
+
+# %%
+t_limit = float(np.ceil(max(ic_df["t_stat_naive"].abs().max(), ic_df["t_stat_HAC"].abs().max())))
+fig = px.scatter(
+    ic_df.to_pandas(),
+    x="t_stat_naive",
+    y="t_stat_HAC",
+    hover_name="feature",
+    color_discrete_sequence=[COLORS["blue"]],
+    title="Correcting for month-to-month persistence moves t-statistics both ways",
+    labels={
+        "t_stat_naive": "t-statistic assuming independent months",
+        "t_stat_HAC": "t-statistic with Newey-West correction",
+    },
+)
+fig.add_shape(
+    type="line",
+    x0=-t_limit,
+    y0=-t_limit,
+    x1=t_limit,
+    y1=t_limit,
+    line=dict(color=COLORS["neutral"], dash="dash"),
+)
+for threshold in (-2, 2):
+    fig.add_hline(y=threshold, line_dash="dot", line_color=COLORS["neutral"])
+fig.update_layout(height=520)
 fig.show()
 
 # %% [markdown]
 # ---
 #
-# ## Section 5: Return Distribution
+# ## Section 5: The return distribution
 #
-# The target variable `ret` represents next-month excess returns. Unlike the
-# characteristics, returns are **not** rank-normalized — they remain in their
-# original scale, as required for economic interpretation of predictions.
+# The characteristics were ranked; `ret` was not. It stays in its original scale because a
+# prediction of it has to be readable as a return, which is what makes the loss function of a
+# model fitted on this panel comparable to an economic quantity.
+#
+# Monthly equity returns have far heavier tails than a normal distribution, and the tails grow
+# heavier in the later decades of this sample. The table gives the moments; the figure gives
+# the shape.
 
 # %%
-# Return statistics by split
 return_stats = df.group_by("split").agg(
     pl.col("ret").mean().alias("mean"),
     pl.col("ret").std().alias("std"),
@@ -418,24 +529,27 @@ return_stats = df.group_by("split").agg(
     pl.col("ret").quantile(0.25).alias("q25"),
     pl.col("ret").quantile(0.75).alias("q75"),
 )
-return_stats
+return_stats.sort("split")
+
+# %% [markdown]
+# The histogram below is drawn as a density rather than a count, because the three splits hold
+# very different numbers of rows and raw counts would compare their sizes instead of their
+# shapes. The horizontal axis is clipped at plus and minus sixty percent: the largest returns in
+# the panel run to many multiples of that, and leaving them in the frame compresses every bar
+# into a single spike. The `max` column in the table above is where the full range is reported.
 
 # %%
-# Return distribution
-sample_size = min(100_000, len(df))
-# Clip to +/-60% so the distribution shape is visible; a few extreme outliers
-# (max next-month return ~+1900% in the valid split) otherwise flatten every bar
-# into a single spike at zero and hide the very widening the figure is about.
 fig = px.histogram(
-    df.sample(n=sample_size, seed=SEED).to_pandas(),  # Convert for Plotly compatibility
+    df.select("ret", "split").to_pandas(),
     x="ret",
     color="split",
+    histnorm="probability density",
     nbins=120,
     range_x=[-0.6, 0.6],
     category_orders={"split": ["train", "valid", "test"]},
     color_discrete_sequence=[COLORS["blue"], COLORS["amber"], COLORS["copper"]],
-    title="Return distributions widen after 1990 as the cross-section expands",
-    labels={"ret": "Next-month return", "count": "Frequency"},
+    title="Next-month returns are more dispersed in the later splits",
+    labels={"ret": "Next-month excess return (clipped at +/-60%)", "split": "Split"},
     opacity=0.6,
     barmode="overlay",
 )
@@ -444,61 +558,51 @@ fig.show()
 # %% [markdown]
 # ---
 #
-# ## Section 6: Macro Indicators (Optional Companion Data)
+# ## Section 6: What this panel supports
 #
-# The Chen-Pelger-Zhu paper pairs the firm characteristics with 178 macroeconomic
-# time series — 124 from FRED-MD (McCracken and Ng, 2016), 46 cross-sectional
-# medians of firm characteristics, and 8 equity-premium predictors from Welch and
-# Goyal (2007). Conditional models such as SDF-GAN (Ch14) consume them as state
-# variables.
+# The anonymization is the constraint that decides which questions this data can answer. Inside
+# a split, an identifier follows one firm from month to month, so anything that needs a firm's
+# own history - a fixed effect, a per-firm time series, a turnover calculation over a portfolio
+# held across months - is available. Across a split boundary the numbering restarts, so a
+# position cannot be carried from the training years into the test years, and a strategy cannot
+# be simulated end to end over the full fifty years.
 #
-# The shipped academic parquet contains characteristics + returns only; macro
-# columns ship separately. Calling `include_macro=True` is a no-op against the
-# shipped file. To assemble the macro panel for conditional models, follow the
-# instructions in the original paper repository
-# (https://github.com/jasonzy121/Deep_Learning_Asset_Pricing) and merge on
-# `timestamp`.
-
-# %%
-df_with_macro = load_firm_characteristics(split="all", include_macro=True)
-macro_cols = [c for c in df_with_macro.columns if c.startswith("macro_")]
-print(f"macro_* columns in shipped dataset: {len(macro_cols)}")
-
-# %% [markdown]
-# ---
+# What is missing entirely is price. Without a price level there is no market capitalization to
+# weight a portfolio by, no spread to charge against a trade, and no way to convert a predicted
+# return into a position size in currency. That is why every question this panel answers is a
+# question about prediction accuracy, and why the trading questions in this book are answered
+# with the ETF, crypto and futures case studies, which ship prices.
 #
-# ## Section 7: Limitations and Use Cases
-#
-# ### What This Dataset IS Good For
-#
-# 1. **Benchmarking ML models**: Compare linear, tree, and neural network approaches
-# 2. **Hyperparameter optimization studies**: Large sample size enables thorough HPO
-# 3. **Reproducible research**: No WRDS access required
-# 4. **Educational purposes**: Clean, standardized dataset for learning
-#
-# ### What This Dataset IS NOT Good For
-#
-# 1. **Backtesting strategies**: No asset identifiers = cannot track stocks over time
-# 2. **Portfolio construction**: Cannot form portfolios without knowing which returns belong together
-# 3. **Transaction cost analysis**: No price levels, only normalized returns
-# 4. **Fundamental analysis**: Characteristics are anonymized and normalized
-#
-# ### Key Insight
-#
-# This dataset answers: **"Can ML predict cross-sectional return variation from characteristics?"**
-#
-# It does NOT answer: **"Can this prediction be monetized in practice?"**
-#
-# For practical trading strategies, see the ETF, Crypto, and Futures case studies
-# throughout this book.
+# Used within those limits, the panel is the cleanest available benchmark for comparing model
+# families on identical data: the same 46 inputs, the same target, and the same date-ordered
+# split for every model, so a difference in measured accuracy is a difference between the
+# models rather than between their datasets.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. The Chen-Pelger-Zhu dataset provides a clean benchmark for comparing ML models in asset pricing.
-# 2. Cross-sectional rank normalization places every characteristic in $[-0.5, +0.5]$, which removes scale differences and tames outliers.
-# 3. Single-characteristic ICs are small ($|\bar{\rho}| \le 0.04$) but several remain significant after Newey-West correction for autocorrelation in the monthly IC series ($|t_{\text{NW}}| > 5$ for the leading signals — SUV, ST_REV, NI, BEME, r12_2).
-# 4. Strong within-category correlations (e.g., $|\rho| > 0.8$ between BEME / Q / A2ME) motivate regularised linear models and tree ensembles that handle collinearity natively.
-# 5. **Limitation**: no asset identifiers — this dataset supports prediction-accuracy studies, not backtesting.
+# 1. Cross-sectional rank normalization puts every characteristic on the same bounded scale each
+#    month, which removes the units and caps the influence of any single extreme observation.
+#    It also discards the levels, so nothing computed from this panel can speak to how expensive
+#    the market was in a given year.
+# 2. Characteristics arrive in correlated blocks, because several of them are built from the
+#    same accounting inputs. Fitting an unregularized linear model on all 46 splits coefficients
+#    arbitrarily within a block; regularization and tree ensembles are the standard answers, and
+#    Chapters 11 and 12 apply both to this panel.
+# 3. Single-characteristic information coefficients are small in absolute terms. That is the
+#    normal state of a cross-sectional equity signal and it is why the case study fits models on
+#    all 46 jointly rather than trading any one of them.
+# 4. Averaging monthly ICs and testing the average as if the months were independent overstates
+#    significance, because a characteristic stays in favour for stretches. Report the
+#    Newey-West-corrected statistic, and check how far it moved before drawing a conclusion from
+#    either.
+# 5. Evaluating characteristics on the training split alone is not a formality. Any ranking
+#    computed over the whole history has already read the test years, and a model built on that
+#    ranking inherits the leak.
 #
-# **Next**: See `case_studies/us_firm_characteristics/` for ML models applied to this data.
+# **Known limitations**: the panel carries no prices and no company names; identifiers are not
+# comparable across the three splits; and the requirement that all 46 characteristics be present
+# tilts the universe away from small caps, so coverage is not a random sample of CRSP.
+#
+# **Next**: `case_studies/us_firm_characteristics/` fits linear, tree and neural models to this
+# panel.
