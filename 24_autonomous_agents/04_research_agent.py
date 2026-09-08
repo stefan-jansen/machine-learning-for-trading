@@ -187,9 +187,11 @@ def build_step_prompt(
 #
 # That is a statement about the probability's position, not about the evidence behind it. An
 # agent that read forty documents and concluded the question is genuinely balanced scores zero;
-# an agent that read one and asserted near-certainty scores one. The measure is here because it
-# is uniform and cheap, and [`09_evaluation_and_governance`](09_evaluation_and_governance.ipynb)
-# replaces it with calibration measured against resolved outcomes, which is the real answer.
+# is uniform and cheap. What would answer the question instead is calibration: whether
+# probabilities stated at seventy percent come true about seventy percent of the time.
+# [`09_evaluation_and_governance`](09_evaluation_and_governance.ipynb) builds that arithmetic
+# and runs it on synthetic inputs, because measuring it for real needs forecasts recorded
+# before their questions resolved, which no capture in this chapter has.
 
 
 # %% [markdown]
@@ -667,8 +669,9 @@ audit_df
 # `AgentState` is mechanical: each search step becomes one evidence item holding its query and
 # its results, and the retrieval time is the moment the run was captured.
 #
-# The gates run here as a report rather than as a veto, because a check that has never been
-# allowed to speak is a check nobody has read.
+# The gates run here as a report rather than as a veto, and one of the three turns out to be
+# asking a question this reconstruction cannot answer, which is worth as much as the two that
+# work.
 
 # %%
 run_captured_at = datetime.now() if RUN_LIVE else datetime.fromisoformat(pinned_run.created_at)
@@ -698,27 +701,27 @@ for trace in artifact.traces:
 
 for gate in run_quality_gates(gated_state, as_of=run_captured_at):
     print(f"  [{'PASS' if gate.passed else 'FAIL'}] {gate.gate_name}: {gate.reason}")
-
 # %% [markdown]
-# Two of the three refuse the run, for different reasons.
+# Freshness passes and consistency reports that there is no cutoff to enforce, which is a
+# statement about the question rather than a defect in the run. `CHAPTER_CONTESTED_QUESTION`
+# carries `cutoff_date=""` because it was open when it was captured: it asks about the rest of
+# 2026, so no document available on the day could have held the answer and no date needs
+# excluding. The gate having nothing to check is the correct outcome. It has teeth on the
+# resolved questions in `agent_fixtures.py`, each of which carries a cutoff, and reading past
+# one is how a forecasting result gets faked.
 #
-# **Coverage** fails because every one of the agent's searches asked what is happening now. It
-# never looked for how often the Federal Reserve has raised rates from a hold, so its
-# probability has no historical anchor and rests entirely on current commentary. Nothing in the
-# system prompt asks for one, which is where the fix belongs: a coverage contract has to be
-# told to the agent, not only checked after it has finished.
+# Coverage is a different matter, and its failure says more about the adapter than about the
+# agent. Every item above is tagged `search_results`, because a trace records what the agent
+# searched for and not what kind of evidence it decided each result was. The coverage gate asks
+# for a `base_rate` item and cannot find one, and it could not have found one however well the
+# agent had researched. Reading that as "the agent skipped the base rate" would be reading a
+# limitation of the reconstruction as a finding about the run.
 #
-# **Consistency** reports that there is no cutoff date to enforce, which is a statement about
-# the question rather than a defect in the run. `CHAPTER_CONTESTED_QUESTION` was open when it
-# was captured: it asks about the rest of 2026, so no evidence available on the day could have
-# contained the answer and no date needs excluding. The gate has nothing to check, and saying
-# so is the correct outcome. It has teeth on the resolved panel that
-# [`09_evaluation_and_governance`](09_evaluation_and_governance.ipynb) scores, where every
-# question carries a cutoff and reading past it is how a forecasting result gets faked.
-#
-# Neither refusal makes the artifact worthless, and that is the reason the gates report rather
-# than veto here. What they do is put the run's two weaknesses in the record beside its
-# probability, so a reader weighing the forecast can see what it was built on.
+# This is the argument [`03_state_and_memory`](03_state_and_memory.ipynb) makes, arriving from
+# the other direction: evidence type is a judgement made while gathering, and a record written
+# afterwards from a trace cannot recover it. An agent that is going to be gated on coverage has
+# to write its state as it goes, classifying each result as it arrives, rather than have the
+# classification inferred from a log at the end.
 
 # %% [markdown]
 # ## Agent Summary Format
@@ -855,9 +858,10 @@ else:
 # 3. **A derived field is only as good as its definition, and most of these are crude.**
 #    Extremity is not confidence and volume is not quality. They are useful because they are
 #    cheap, uniform across agents, and inspectable; they are not estimates.
-# 4. **An agent that ran out of turns did not forecast.** `forecast_produced` is what keeps its
-#    fallback probability out of the average, and it is the field to check before reading
-#    `p_yes` from any artifact.
+# 4. **An agent that ran out of turns did not forecast.** `forecast_produced` says which of the
+#    two a `p_yes` is, and it is the field to read before that probability enters any average.
+#    A fallback value counted as an opinion is the quietest way a panel gets pulled toward even
+#    odds by an agent that never spoke.
 # 5. **One class, many agents.** The same `ResearchAgent` with a different id and a different
 #    sampling temperature is the whole mechanism behind the multi-agent system:
 #    [`06_multi_agent_research`](06_multi_agent_research.ipynb) runs several,
