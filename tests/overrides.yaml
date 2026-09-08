@@ -1339,6 +1339,12 @@ case_studies/cme_futures/09_dl_lstm:
     # CI number. 600 rather than 300 because the two measurements of this notebook differ by
     # 6x for reasons outside it, and a budget that only clears the uncontended one is a budget
     # sized to the luckier reading. Re-base on the first green `cs-cme_futures` runs.
+    #
+    # Re-measured at 137.7 s after #857 rebuilt the sequence windows on the calendar, which is
+    # the change a reader would suspect of slowing this down. It did not: 08_tabular_dl is
+    # tabular, never enters `sequence_dataset.py`, and moved 29.6 -> 45.7 s in the same run.
+    # Both ratios are 1.53, so the whole run was that much more contended and the sequence path
+    # costs what it did. The budget is unchanged.
   timeout: 600
 case_studies/cme_futures/10_latent_factors:
   timeout: 180
