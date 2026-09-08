@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -144,7 +144,7 @@ set_global_seeds(SEED)
 # Instantiate all four models with default parameters
 models = {
     "NoImpact": NoImpact(),
-    "LinearImpact": LinearImpact(coefficient=0.1, permanent_fraction=0.5),
+    "LinearImpact": LinearImpact(coefficient=0.1),
     "SquareRootImpact": SquareRootImpact(
         coefficient=IMPACT_COEFFICIENT, volatility=SCENARIO_VOLATILITY
     ),

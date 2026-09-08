@@ -89,8 +89,12 @@
   skip_reason: "Requires 01_itch_parser output (raw ITCH binary pipeline) \u2014 tested locally"
   timeout: 300
 03_market_microstructure/06_itch_intraday_patterns:
+  skip: true
+  skip_reason: "Requires 05_itch_trading_activity's chapter outputs, and 05 is itself skipped \u2014 tested locally"
   timeout: 300
 03_market_microstructure/07_itch_stylized_facts:
+  skip: true
+  skip_reason: "Requires 05_itch_trading_activity's chapter outputs, and 05 is itself skipped \u2014 tested locally"
   timeout: 300
 03_market_microstructure/08_databento_lob_reconstruction:
   timeout: 300

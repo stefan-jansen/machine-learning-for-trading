@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -64,7 +64,8 @@ import matplotlib.pyplot as plt
 import polars as pl
 import seaborn as sns
 
-from utils.paths import display_path, get_output_dir
+from data import load_nasdaq_itch
+from utils.paths import display_path, get_output_dir, require_chapter_inputs
 
 sns.set_style("whitegrid")
 
@@ -78,18 +79,15 @@ MAX_SYMBOLS = 0  # 0 = all
 # All ITCH-related outputs under a single chapter directory
 NASDAQ_ITCH_OUTPUT = get_output_dir(3, "nasdaq_itch")
 
-# Input: Parsed messages from notebook 01
-MESSAGE_DIR = NASDAQ_ITCH_OUTPUT / "messages"
+# Input: Parsed messages from notebook 01, which writes them under the data root - the
+# same place 04, 05 and 07 read them from.
+MESSAGE_DIR = load_nasdaq_itch(get_base_path=True)
 
 # Input: Trade summary from notebook 05 (trading_activity_overview)
 TRADING_ACTIVITY_DIR = NASDAQ_ITCH_OUTPUT / "trading_activity"
 
 print(f"Input directory (messages): {display_path(MESSAGE_DIR)}")
 print(f"Input directory (trade summary): {display_path(TRADING_ACTIVITY_DIR)}")
-
-if not MESSAGE_DIR.exists():
-    print(f"\nWARNING: Message directory not found: {display_path(MESSAGE_DIR)}")
-    print("   Run 01_itch_parser first.")
 
 # %% [markdown]
 # ## 2. Load Trade Data
@@ -106,52 +104,47 @@ if not MESSAGE_DIR.exists():
 TRADE_SUMMARY_PATH = TRADING_ACTIVITY_DIR / "trade_summary.parquet"
 TRADES_PATH = TRADING_ACTIVITY_DIR / "trades.parquet"
 
+# Substituting well-known tickers for the ones this dataset actually traded would let
+# the notebook finish with nothing to plot, so stop instead and say what is missing.
+require_chapter_inputs(
+    {
+        MESSAGE_DIR: "01_itch_parser",
+        TRADE_SUMMARY_PATH: "05_itch_trading_activity",
+        TRADES_PATH: "05_itch_trading_activity",
+    }
+)
+
 # Load trade summary for ticker selection
-if TRADE_SUMMARY_PATH.exists():
-    trade_summary = pl.read_parquet(TRADE_SUMMARY_PATH)
-    # Sort explicitly by value to ensure correct selection
-    trade_summary = trade_summary.sort("total_value", descending=True)
-    # Gate the low-liquidity tier on a minimum number of trades so the
-    # comparison panel is not degenerate (single-trade tickers produce
-    # collapsed price/volume axes that obscure the intraday shape).
-    MIN_TRADES_LOW = 500
-    trade_col = next(
-        (c for c in ("trade_count", "n_trades", "total_trades") if c in trade_summary.columns),
-        None,
-    )
-    if trade_col is None:
-        # Fallback: use top half by total_value if no trade-count column.
-        active_summary = trade_summary.head(len(trade_summary) // 2)
-    else:
-        active_summary = trade_summary.filter(pl.col(trade_col) >= MIN_TRADES_LOW)
-    num_syms = len(active_summary)
-    high_sym = active_summary["ticker"][0]  # highest value, still traded
-    mid_sym = active_summary["ticker"][num_syms // 2]  # middle of active band
-    low_sym = active_summary["ticker"][-1]  # lowest value above min-activity floor
-    print(
-        f"Loaded trade summary: {len(trade_summary)} tickers; {num_syms} above min-activity floor"
-    )
+trade_summary = pl.read_parquet(TRADE_SUMMARY_PATH)
+# Sort explicitly by value to ensure correct selection
+trade_summary = trade_summary.sort("total_value", descending=True)
+# Gate the low-liquidity tier on a minimum number of trades so the
+# comparison panel is not degenerate (single-trade tickers produce
+# collapsed price/volume axes that obscure the intraday shape).
+MIN_TRADES_LOW = 500
+trade_col = next(
+    (c for c in ("trade_count", "n_trades", "total_trades") if c in trade_summary.columns),
+    None,
+)
+if trade_col is None:
+    # No trade-count column: fall back to the top half by traded value.
+    active_summary = trade_summary.head(len(trade_summary) // 2)
 else:
-    # Fallback to common symbols if no summary available
-    high_sym, mid_sym, low_sym = "AAPL", "INTC", "UGA"
-    print(f"Trade summary not found at {TRADE_SUMMARY_PATH}")
-    print("Using fallback symbols (run 05_itch_trading_activity first for best results)")
+    active_summary = trade_summary.filter(pl.col(trade_col) >= MIN_TRADES_LOW)
+num_syms = len(active_summary)
+high_sym = active_summary["ticker"][0]  # highest value, still traded
+mid_sym = active_summary["ticker"][num_syms // 2]  # middle of active band
+low_sym = active_summary["ticker"][-1]  # lowest value above min-activity floor
+print(f"Loaded trade summary: {len(trade_summary)} tickers; {num_syms} above min-activity floor")
 
 # Load canonical trades (single source of truth for trade extraction)
-if TRADES_PATH.exists():
-    all_trades = pl.read_parquet(TRADES_PATH)
-    data_available = True
-    print(f"Loaded canonical trades: {len(all_trades):,} trades")
-    if "msg_type" in all_trades.columns:
-        msg_breakdown = all_trades.group_by("msg_type").len().sort("msg_type")
-        print("  Message type breakdown:")
-        for row in msg_breakdown.iter_rows():
-            print(f"    {row[0]}: {row[1]:>12,}")
-else:
-    all_trades = None
-    data_available = MESSAGE_DIR.exists()
-    print(f"Canonical trades not found at {TRADES_PATH}")
-    print("Run 05_itch_trading_activity first to generate trades.parquet")
+all_trades = pl.read_parquet(TRADES_PATH)
+print(f"Loaded canonical trades: {len(all_trades):,} trades")
+if "msg_type" in all_trades.columns:
+    msg_breakdown = all_trades.group_by("msg_type").len().sort("msg_type")
+    print("  Message type breakdown:")
+    for row in msg_breakdown.iter_rows():
+        print(f"    {row[0]}: {row[1]:>12,}")
 
 print("\nSelected tickers for analysis:")
 print(f"  High liquidity:   {high_sym}")
@@ -270,19 +263,16 @@ def plot_intraday_bars(trades_df: pl.DataFrame, ticker: str, freq: str = "5m") -
 
 
 # %%
-if data_available and all_trades is not None:
-    print(f"High-Volume Ticker: {high_sym}")
-    plot_intraday_bars(all_trades, high_sym, freq="5m")
+print(f"High-Volume Ticker: {high_sym}")
+plot_intraday_bars(all_trades, high_sym, freq="5m")
 
 # %%
-if data_available and all_trades is not None:
-    print(f"Medium-Volume Ticker: {mid_sym}")
-    plot_intraday_bars(all_trades, mid_sym, freq="5m")
+print(f"Medium-Volume Ticker: {mid_sym}")
+plot_intraday_bars(all_trades, mid_sym, freq="5m")
 
 # %%
-if data_available and all_trades is not None:
-    print(f"Low-Volume Ticker: {low_sym}")
-    plot_intraday_bars(all_trades, low_sym, freq="15m")  # Longer bars for sparse data
+print(f"Low-Volume Ticker: {low_sym}")
+plot_intraday_bars(all_trades, low_sym, freq="15m")  # Longer bars for sparse data
 
 
 # %% [markdown]
@@ -348,74 +338,68 @@ def compute_intraday_pattern(
 
 
 # %%
-if data_available and all_trades is not None:
-    # Get top 20 liquid tickers for pattern analysis
-    if TRADE_SUMMARY_PATH.exists():
-        top_tickers = trade_summary.head(20)["ticker"].to_list()
-    else:
-        # Fallback to well-known liquid tickers
-        top_tickers = ["AAPL", "MSFT", "AMZN", "GOOGL", "META", "NVDA", "TSLA", "AMD"]
+# Get top 20 liquid tickers for pattern analysis
+top_tickers = trade_summary.head(20)["ticker"].to_list()
 
-    pattern_df = compute_intraday_pattern(all_trades, top_tickers, freq="30m")
+pattern_df = compute_intraday_pattern(all_trades, top_tickers, freq="30m")
 
-    if len(pattern_df) > 0:
-        # Aggregate across tickers
-        hourly_pattern = (
-            pattern_df.group_by("time_slot")
-            .agg(
-                [
-                    pl.col("vol_pct").mean().alias("avg_vol_pct"),
-                    pl.col("vol_pct").std().alias("std_vol_pct"),
-                    pl.col("trade_count").mean().alias("avg_trades"),
-                ]
-            )
-            .sort("time_slot")
+if len(pattern_df) > 0:
+    # Aggregate across tickers
+    hourly_pattern = (
+        pattern_df.group_by("time_slot")
+        .agg(
+            [
+                pl.col("vol_pct").mean().alias("avg_vol_pct"),
+                pl.col("vol_pct").std().alias("std_vol_pct"),
+                pl.col("trade_count").mean().alias("avg_trades"),
+            ]
         )
+        .sort("time_slot")
+    )
 
-        # Filter to regular trading hours (9:30-16:00)
-        hourly_pattern = hourly_pattern.filter(
-            (pl.col("time_slot") >= 9.5) & (pl.col("time_slot") <= 16)
-        )
+    # Filter to regular trading hours (9:30-16:00)
+    hourly_pattern = hourly_pattern.filter(
+        (pl.col("time_slot") >= 9.5) & (pl.col("time_slot") <= 16)
+    )
 
 # %%
-if data_available and all_trades is not None:
-    # Plot U-shape
-    times = hourly_pattern["time_slot"].to_numpy()
-    vol_pct = hourly_pattern["avg_vol_pct"].to_numpy() * 100
-    vol_std = hourly_pattern["std_vol_pct"].to_numpy() * 100
-    trades = hourly_pattern["avg_trades"].to_numpy()
+# Plot U-shape
+times = hourly_pattern["time_slot"].to_numpy()
+vol_pct = hourly_pattern["avg_vol_pct"].to_numpy() * 100
+vol_std = hourly_pattern["std_vol_pct"].to_numpy() * 100
+trades = hourly_pattern["avg_trades"].to_numpy()
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    # Volume U-shape
-    axes[0].fill_between(times, vol_pct - vol_std, vol_pct + vol_std, alpha=0.3, color="steelblue")
-    axes[0].plot(times, vol_pct, color="steelblue", linewidth=2, marker="o")
-    axes[0].set_xlabel("Time of Day (hour)")
-    axes[0].set_ylabel("Share of Daily Volume (%)")
-    axes[0].set_title("Volume concentrates at the open and close")
-    axes[0].axhline(100 / len(times), color="red", linestyle="--", label="Uniform distribution")
-    axes[0].legend()
-    axes[0].set_xlim(9.5, 16)
+# Volume U-shape
+axes[0].fill_between(times, vol_pct - vol_std, vol_pct + vol_std, alpha=0.3, color="steelblue")
+axes[0].plot(times, vol_pct, color="steelblue", linewidth=2, marker="o")
+axes[0].set_xlabel("Time of Day (hour)")
+axes[0].set_ylabel("Share of Daily Volume (%)")
+axes[0].set_title("Volume concentrates at the open and close")
+axes[0].axhline(100 / len(times), color="red", linestyle="--", label="Uniform distribution")
+axes[0].legend()
+axes[0].set_xlim(9.5, 16)
 
-    # Trade count pattern
-    axes[1].bar(times, trades, width=0.4, alpha=0.7, color="steelblue")
-    axes[1].set_xlabel("Time of Day (hour)")
-    axes[1].set_ylabel("Average Trade Count (per 30min)")
-    axes[1].set_title("Trade frequency mirrors the volume U-shape")
-    axes[1].set_xlim(9.5, 16)
+# Trade count pattern
+axes[1].bar(times, trades, width=0.4, alpha=0.7, color="steelblue")
+axes[1].set_xlabel("Time of Day (hour)")
+axes[1].set_ylabel("Average Trade Count (per 30min)")
+axes[1].set_title("Trade frequency mirrors the volume U-shape")
+axes[1].set_xlim(9.5, 16)
 
-    sns.despine()
-    plt.tight_layout()
-    plt.show()
+sns.despine()
+plt.tight_layout()
+plt.show()
 
-    # Print statistics
-    print("Intraday Volume Distribution:")
-    print(f"  First 30min (9:30-10:00): {vol_pct[0]:.1f}% of daily volume")
-    print(f"  Midday (12:00-12:30):     {vol_pct[len(vol_pct) // 2]:.1f}% of daily volume")
-    print(f"  Last 30min (15:30-16:00): {vol_pct[-1]:.1f}% of daily volume")
-    print(
-        f"  Open/Close ratio to midday: {(vol_pct[0] + vol_pct[-1]) / (2 * vol_pct[len(vol_pct) // 2]):.1f}x"
-    )
+# Print statistics
+print("Intraday Volume Distribution:")
+print(f"  First 30min (9:30-10:00): {vol_pct[0]:.1f}% of daily volume")
+print(f"  Midday (12:00-12:30):     {vol_pct[len(vol_pct) // 2]:.1f}% of daily volume")
+print(f"  Last 30min (15:30-16:00): {vol_pct[-1]:.1f}% of daily volume")
+print(
+    f"  Open/Close ratio to midday: {(vol_pct[0] + vol_pct[-1]) / (2 * vol_pct[len(vol_pct) // 2]):.1f}x"
+)
 
 
 # %% [markdown]
