@@ -18,614 +18,567 @@
 #
 # **Chapter 4: Fundamental and Alternative Data**
 # **Docker image**: `ml4t`
-# **Section Reference**: See Section 4.3 for cross-asset fundamentals concepts
+# **Section Reference**: Section 4.3 (Fundamentals Across the Asset-Class Spectrum)
 #
 # ## Purpose
 #
-# This notebook demonstrates how to access CFTC Commitment of Traders (COT) data
-# for tracking institutional positioning in futures markets. COT reports provide
-# weekly snapshots of trader positioning, offering valuable sentiment signals for
-# futures trading strategies and contrarian indicators.
+# In a futures market every long position is somebody's short, so the aggregate is always zero
+# and tells you nothing. What is informative is *who* is on each side. The Commodity Futures
+# Trading Commission requires any trader holding more than a reporting threshold to disclose
+# their positions weekly, sorts them into categories by what kind of firm they are, and publishes
+# the totals for free in the Commitment of Traders report.
+#
+# That gives a weekly picture of how each kind of participant is positioned: which way the hedge
+# funds lean, whether the physical producers are hedged more than usual, and where the dealers
+# are absorbing the other side. This notebook loads those reports, turns raw contract counts into
+# a comparable measure of how unusual the current positioning is, attaches the date the report
+# became public, and joins it onto futures prices at that date rather than at the date it
+# describes.
 #
 # ## Learning Objectives
 #
 # After completing this notebook, you will be able to:
-# - Understand COT report structure and trader categories
-# - Fetch COT data for futures products using ml4t-data
-# - Calculate net positioning and z-scores
-# - Identify extreme positioning for contrarian signals
-# - Combine COT with price data for strategy features
+#
+# - Name the trader categories in each of the two report formats and say which kind of firm
+#   each one holds.
+# - Load a product's report history and resolve the several CFTC contract markets that share one
+#   product code down to the one that carries the position.
+# - Turn a net contract count into a rolling z-score, and say what window it is measured against.
+# - Compute the date a report became public and join it onto a daily price series at that date,
+#   so that every session reads only reports already published.
+# - Build a contrarian signal from extreme positioning and a change signal from a weekly move,
+#   with the threshold for the change measured on prior weeks only.
+# - Compare positioning extremes across asset classes and say whether they arrive together.
+#
+# ## Prerequisites
+#
+# ```bash
+# python data/futures/positioning/cot_download.py                         # all products
+# python data/futures/positioning/cot_download.py --products ES,CL,GC     # this notebook's subset
+# ```
 #
 # ## Cross-References
 #
 # - **Upstream**: `data/futures/positioning/cot_download.py` (CFTC COT reports, weekly, free)
-# - **Downstream**: Chapter 8 `futures_features.py`, Chapter 16 futures strategies
-# - **Related**: `macro_data_alignment.py` (macro timing signals)
-#
-# ## Why COT Data Matters
-#
-# COT data is **free** and provides unique insight into:
-# - **Institutional positioning**: What are hedge funds/asset managers doing?
-# - **Commercial hedging**: Are producers/consumers unusual in their hedging?
-# - **Crowd behavior**: Are speculators too extreme (contrarian signal)?
-#
-# ---
+# - **Downstream**: `08_financial_features/03_structural_cross_instrument_features.py` (sentiment features)
+# - **Related**: [`07_macro_data_alignment`](07_macro_data_alignment.ipynb) (the same publication-date correction on macro series)
 
 # %%
-"""Futures Positioning: CFTC Commitment of Traders Analysis — track institutional positioning for contrarian signals."""
+"""Futures Positioning: CFTC Commitment of Traders Analysis - track institutional positioning for contrarian signals."""
 
-import warnings
-
-warnings.filterwarnings("ignore")
-
-
-# Visualization
 import plotly.graph_objects as go
 import polars as pl
+from ml4t.data.cot import PRODUCT_MAPPINGS
 from plotly.subplots import make_subplots
 
+from data import load_cme_futures
+from data.futures.loader import load_cot
 from utils.style import COLORS
 
+# %% [markdown]
+# Four settings decide what the notebook measures. The z-score window is the one that changes an
+# answer: at fifty-two weekly reports it asks how unusual today's positioning is against the
+# past year, which is short enough to adapt to a changed regime and long enough that a single
+# quarter cannot move the mean far.
+
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
-
-
-# %%
-def keep_largest_contract(df: pl.DataFrame) -> pl.DataFrame:
-    """Drop duplicate (product, report_date) rows.
-
-    The CFTC publishes both 'Futures Only' and 'Combined Futures+Options'
-    panels for each product; the bulk downloader writes both into the
-    same parquet, leaving two rows per report_date. The combined panel
-    has materially larger open interest and is the canonical series used
-    for positioning analysis — keep that one.
-    """
-    return (
-        df.sort(["product", "report_date", "open_interest"], descending=[False, False, True])
-        .unique(subset=["product", "report_date"], keep="first")
-        .sort("report_date")
-    )
-
+EQUITY_PRODUCT = "ES"  # E-mini S&P 500; the worked example throughout
+COMPARISON_PRODUCTS = ["ES", "CL", "GC"]  # equity index, energy, precious metal
+START_DATE = "2020-01-01"
+ZSCORE_WEEKS = 52  # one year of weekly reports
+EXTREME_Z = 2.0  # how many standard deviations counts as extreme positioning
+CHANGE_WINDOW_WEEKS = 26  # window the weekly-change threshold is measured over
+RELEASE_LAG_DAYS = 6  # Tuesday positions, published Friday; usable from the next Monday
 
 # %% [markdown]
-# ---
+# ## 1. What is in a COT report
 #
-# ## Section 1: Understanding COT Reports
+# Positions are recorded as of the close on **Tuesday** and published on **Friday afternoon**.
+# The report gives, for each trader category, the number of contracts held long and the number
+# held short. The difference is the category's **net position**: positive means the category is
+# collectively long.
 #
-# The CFTC publishes weekly COT reports, showing positions as of Tuesday. Reports are
-# generally released Friday at **3:30 PM ET** (with holiday delays). For daily-bar
-# backtests, a conservative approach is to treat the information as usable from the
-# next trading day (+6 calendar days from Tuesday).
+# The CFTC publishes two formats, and which one a product gets depends on what it is.
 #
-# There are two main report formats relevant for trading:
+# | Format | Products | Categories |
+# |--------|----------|------------|
+# | Traders in Financial Futures | Equity index, rates, currencies | Dealers, asset managers, leveraged money, other reportables, non-reportables |
+# | Disaggregated | Physical commodities | Producers and merchants, swap dealers, managed money, other reportables |
 #
-# ### Report Types
+# The category names differ but the roles line up. **Dealers** and **swap dealers** are
+# intermediaries: they take the other side of what their clients want and hedge the residue.
+# **Asset managers** are long-only institutions whose positions move with allocation decisions
+# rather than with views on the next few weeks. **Leveraged money** and **managed money** are
+# hedge funds and commodity trading advisors, the participants who take directional risk
+# deliberately and who unwind it quickly. **Producers and merchants** hedge physical inventory,
+# which is why a commodity's commercial category is read as informed about that commodity.
 #
-# | Report | Coverage | Key Categories |
-# |--------|----------|----------------|
-# | **TFF** (Traders in Financial Futures) | Financial futures | Dealers, Asset Managers, Leveraged Money |
-# | **Disaggregated** | Commodity futures | Commercials, Managed Money, Swap Dealers |
-#
-# ### Trader Categories
-#
-# **Financial Futures (TFF):**
-# - **Dealers/Intermediaries**: Banks, swap dealers (market makers)
-# - **Asset Managers**: Pension funds, mutual funds (institutional)
-# - **Leveraged Money**: Hedge funds, CTAs (speculators)
-# - **Other Reportables**: Other large traders
-# - **Non-Reportables**: Small traders (retail)
-#
-# **Commodity Futures (Disaggregated):**
-# - **Commercials (Producer/Merchant)**: Physical commodity hedgers
-# - **Swap Dealers**: Financial intermediaries
-# - **Managed Money**: Hedge funds, CTAs
-# - **Other Reportables**: Other large traders
-#
-# ### Key Insight
-#
-# **Commercials** hedge their physical exposure (informed), while **Speculators**
-# (Leveraged Money, Managed Money) bet on direction. Extreme speculator positioning
-# often precedes reversals.
-
-# %% [markdown]
-# ---
-#
-# ## Section 2: ml4t-data COT Module
+# The reading that follows from this is that an extreme in the speculative category is worth
+# attention: hedge funds crowded on one side have no one left to buy from, and the position has
+# to be unwound eventually.
 
 # %%
-from ml4t.data.cot import PRODUCT_MAPPINGS
-
-from data.futures.loader import load_cot
-
-print(f"Supported products: {len(PRODUCT_MAPPINGS)}")
-
-# %%
-categories = {
-    "Equity Index": ["ES", "NQ", "RTY", "YM"],
+covered = {
+    "Equity index": ["ES", "NQ", "RTY", "YM"],
     "Currency": ["6E", "6J", "6B", "6C", "6A"],
-    "Interest Rate": ["ZN", "ZB", "ZF", "ZT"],
+    "Interest rate": ["ZN", "ZB", "ZF", "ZT"],
     "Energy": ["CL", "NG", "RB", "HO"],
     "Metals": ["GC", "SI", "HG", "PL"],
     "Agricultural": ["ZC", "ZW", "ZS", "ZM", "ZL"],
     "Crypto": ["BTC", "ETH"],
     "Volatility": ["VX"],
 }
-
-for category, products in categories.items():
-    available = [p for p in products if p in PRODUCT_MAPPINGS]
-    print(f"{category}:")
-    for p in available:
-        info = PRODUCT_MAPPINGS[p]
-        print(f"  {p:5}  {info.description}  ({info.report_type[:4]})")
-    print()
-
-# %% [markdown]
-# ---
-#
-# ## Section 3: Loading COT Data
-#
-# COT data is downloaded by ``data/futures/positioning/cot_download.py`` into
-# ``$ML4T_DATA_PATH/futures/positioning/cot/{PRODUCT}.parquet`` and loaded here via
-# ``load_cot()``.
-
-# %%
-es_cot = keep_largest_contract(
-    load_cot(products=["ES"], start_date="2020-01-01", end_date="2024-12-31")
+catalogue = pl.DataFrame(
+    [
+        {
+            "asset_class": asset_class,
+            "product": product,
+            "description": PRODUCT_MAPPINGS[product].description
+            if product in PRODUCT_MAPPINGS
+            else None,
+            "report_format": PRODUCT_MAPPINGS[product].report_type
+            if product in PRODUCT_MAPPINGS
+            else None,
+        }
+        for asset_class, products in covered.items()
+        for product in products
+    ]
 )
-
-print(f"Shape: {es_cot.shape}")
-print(f"Date range: {es_cot['report_date'].min()} to {es_cot['report_date'].max()}")
-print(f"Columns: {es_cot.columns}")
-es_cot.head()
-
+print(f"Products the downloader maps: {len(PRODUCT_MAPPINGS)}")
+print(f"Of the ones listed here, unmapped: {catalogue['description'].is_null().sum()}")
+catalogue
 
 # %% [markdown]
-# ### COT Data Columns
+# ## 2. Loading a product, and the duplicate rows
 #
-# | Column | Description | Signal |
-# |--------|-------------|--------|
-# | `open_interest` | Total contracts outstanding | Liquidity, conviction |
-# | `lev_money_long` | Hedge fund long positions | Speculator sentiment |
-# | `lev_money_short` | Hedge fund short positions | Speculator sentiment |
-# | `lev_money_net` | Long - Short | Net speculator positioning |
-# | `asset_mgr_net` | Asset manager net | Institutional positioning |
-# | `dealer_net` | Dealer net | Market maker flow |
-
-# %%
-cl_cot = keep_largest_contract(
-    load_cot(products=["CL"], start_date="2020-01-01", end_date="2024-12-31")
-)
-# Disaggregated reports use `managed_money_*` instead of `lev_money_*`;
-# standardize for downstream analysis.
-cl_cot = cl_cot.with_columns(pl.col("managed_money_net").alias("lev_money_net"))
-
-print(f"Shape: {cl_cot.shape}")
-print(f"Columns (note different categories): {cl_cot.columns}")
-cl_cot.head()
-
-# %% [markdown]
-# ---
+# The CFTC reports on **contract markets**, not on the ticker a trader thinks in. Several
+# distinct contract markets map to one product code: the E-mini S&P 500 shares its code with a
+# smaller related contract, and crude oil with more than one delivery specification. The
+# downloader writes them all, so a product's history has more than one row on many report dates.
 #
-# ## Section 4: Positioning Analysis
-#
-# Calculate z-scores to identify extreme positioning.
+# Leaving them in would double-count the position and make any statistic over the series
+# meaningless. The rule used here is to keep, on each date, the row with the largest open
+# interest, which is the market that actually carries the position. What makes that safe rather
+# than convenient is that the choice has to be *stable*: if the largest market changed from week
+# to week, the resulting series would be jumping between contracts and its week-over-week changes
+# would be fiction. The check for that is the open-interest series itself.
 
 
 # %%
-def calculate_positioning_zscore(
-    df: pl.DataFrame,
-    net_column: str,
-    window: int = 52,  # 1 year of weekly data
-) -> pl.DataFrame:
-    """
-    Calculate z-score of net positioning.
-
-    Z-scores help identify when positioning is extreme relative to history:
-    - Z > 2: Very bullish (potentially overbought)
-    - Z < -2: Very bearish (potentially oversold)
-    """
-    return df.with_columns(
-        [
-            pl.col(net_column).rolling_mean(window).alias(f"{net_column}_mean"),
-            pl.col(net_column).rolling_std(window).alias(f"{net_column}_std"),
-        ]
-    ).with_columns(
-        [
-            # Z-score with guard against zero std
-            pl.when(pl.col(f"{net_column}_std") > 0)
-            .then((pl.col(net_column) - pl.col(f"{net_column}_mean")) / pl.col(f"{net_column}_std"))
-            .otherwise(0.0)
-            .alias(f"{net_column}_zscore"),
-        ]
+def keep_deepest_market(reports: pl.DataFrame) -> pl.DataFrame:
+    """One row per report date: the contract market carrying the most open interest."""
+    return (
+        reports.sort(["product", "report_date", "open_interest"], descending=[False, False, True])
+        .unique(subset=["product", "report_date"], keep="first")
+        .sort("report_date")
     )
 
 
 # %%
-es_with_zscore = calculate_positioning_zscore(es_cot, "lev_money_net")
+raw_equity = load_cot(products=[EQUITY_PRODUCT], start_date=START_DATE)
+equity = keep_deepest_market(raw_equity)
 
-extreme_long = es_with_zscore.filter(pl.col("lev_money_net_zscore") > 2)
-extreme_short = es_with_zscore.filter(pl.col("lev_money_net_zscore") < -2)
-
-print(f"Extreme Long readings (z > 2):  {len(extreme_long)}")
-print(f"Extreme Short readings (z < -2): {len(extreme_short)}")
-es_with_zscore.select(["report_date", "lev_money_net", "lev_money_net_zscore"]).tail(10)
+print(f"Rows as downloaded: {len(raw_equity):,}")
+print(f"Report dates: {raw_equity['report_date'].n_unique():,}")
+print(f"Rows after keeping the deepest market: {len(equity):,}")
+print(f"Reports covering: {equity['report_date'].min()} to {equity['report_date'].max()}")
 
 # %% [markdown]
-# ---
+# If the deepest market were changing hands, the kept open-interest series would step by a large
+# multiple from one week to the next. The largest weekly move below is a market-wide change in
+# participation, not a change of contract.
+
+# %%
+open_interest_moves = equity.select(
+    "report_date",
+    "open_interest",
+    weekly_change=(pl.col("open_interest") / pl.col("open_interest").shift(1) - 1),
+).drop_nulls()
+print(
+    f"Largest weekly change in open interest: {open_interest_moves['weekly_change'].abs().max():.1%}"
+)
+print(f"Median weekly change: {open_interest_moves['weekly_change'].abs().median():.1%}")
+open_interest_moves.sort("weekly_change", descending=True).head(3)
+
+# %% [markdown]
+# ### The columns
 #
-# ## Section 5: Visualizing Positioning
+# The loader derives a net column for each category, which is the only column most analysis uses.
+#
+# | Column | What it holds |
+# |--------|---------------|
+# | `open_interest` | Contracts outstanding across all traders |
+# | `lev_money_long`, `lev_money_short` | Hedge fund positions, gross |
+# | `lev_money_net` | Hedge funds long minus short |
+# | `asset_mgr_net` | Asset managers long minus short |
+# | `dealer_net` | Dealers long minus short |
+#
+# A commodity's report uses `managed_money_net` for the speculative category rather than
+# `lev_money_net`, which is a naming difference and not a difference in what is measured, so the
+# comparison in Part 6 renames it.
 
 # %%
-# Visualize leveraged money positioning
-es_pd = es_with_zscore.to_pandas()
+equity.select("report_date", "open_interest", "dealer_net", "asset_mgr_net", "lev_money_net").tail(
+    5
+)
+
+# %% [markdown]
+# ## 3. From contracts to something comparable
+#
+# A net position of two hundred thousand contracts means nothing on its own. It is large or
+# small only against how large that category's position usually is, and open interest grows over
+# the years, so even the same number means something different a decade apart. The standard
+# correction is a rolling z-score: how many standard deviations today's net position sits from
+# its own average over the last year.
+#
+# Two details decide what the number means. The window is counted in **reports**, and reports are
+# weekly, so fifty-two of them is a year. And the window ends on the current report, which is
+# available at the moment the score is computed, so including it introduces no look-ahead; it
+# only means a single extreme reading pulls its own mean slightly toward itself.
+
 
 # %%
-# Build both panels in a SINGLE cell (feedback_split_cell_figure_bug):
-# splitting the figure across cells produced a top-panel-only intermediate.
+def add_positioning_zscore(reports: pl.DataFrame, net_column: str, window: int) -> pl.DataFrame:
+    """Add the rolling z-score of `net_column` over the trailing `window` reports."""
+    mean = pl.col(net_column).rolling_mean(window)
+    std = pl.col(net_column).rolling_std(window)
+    return reports.with_columns(
+        # A window in which the position never moved has no scale to measure against, so the
+        # score is undefined rather than zero: zero would read as "exactly average".
+        pl.when(std > 0)
+        .then((pl.col(net_column) - mean) / std)
+        .otherwise(None)
+        .alias(f"{net_column}_zscore")
+    )
+
+
+# %%
+equity = add_positioning_zscore(equity, "lev_money_net", ZSCORE_WEEKS)
+scored = equity.drop_nulls("lev_money_net_zscore")
+
+print(f"Reports with a z-score, once the window has filled: {len(scored):,} of {len(equity):,}")
+print(f"Reports above +{EXTREME_Z}: {(scored['lev_money_net_zscore'] > EXTREME_Z).sum()}")
+print(f"Reports below -{EXTREME_Z}: {(scored['lev_money_net_zscore'] < -EXTREME_Z).sum()}")
+equity.select("report_date", "lev_money_net", "lev_money_net_zscore").tail(5)
+
+# %%
+equity_pd = equity.to_pandas()
+
 fig = make_subplots(
     rows=2,
     cols=1,
     subplot_titles=(
-        "E-mini S&P 500: Leveraged Money Net Positioning",
-        "Positioning Z-Score (52-week rolling)",
+        "Leveraged money net position, in contracts",
+        f"The same position as a z-score against the trailing {ZSCORE_WEEKS} reports",
     ),
     row_heights=[0.6, 0.4],
     vertical_spacing=0.12,
+    shared_xaxes=True,
 )
-
-# Net positioning
 fig.add_trace(
     go.Scatter(
-        x=es_pd["report_date"],
-        y=es_pd["lev_money_net"],
+        x=equity_pd["report_date"],
+        y=equity_pd["lev_money_net"],
         mode="lines",
-        name="Lev Money Net",
         line=dict(color=COLORS["blue"], width=1.5),
         fill="tozeroy",
-        fillcolor="rgba(10, 22, 40, 0.15)",
+        fillcolor="rgba(10, 22, 40, 0.15)",  # translucent COLORS["blue"]
     ),
     row=1,
     col=1,
 )
-
-# Zero line
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], row=1, col=1)
-
-# Z-score with color bands
 fig.add_trace(
     go.Scatter(
-        x=es_pd["report_date"],
-        y=es_pd["lev_money_net_zscore"],
+        x=equity_pd["report_date"],
+        y=equity_pd["lev_money_net_zscore"],
         mode="lines",
-        name="Z-Score",
         line=dict(color=COLORS["slate"], width=2),
     ),
     row=2,
     col=1,
 )
-
-# Add shaded extreme zones
-fig.add_hrect(y0=2, y1=4, fillcolor=COLORS["negative"], opacity=0.1, row=2, col=1)
-fig.add_hrect(y0=-4, y1=-2, fillcolor=COLORS["positive"], opacity=0.1, row=2, col=1)
-
-# Extreme thresholds
-fig.add_hline(y=2, line_dash="dot", line_color=COLORS["negative"], row=2, col=1)
-fig.add_hline(y=-2, line_dash="dot", line_color=COLORS["positive"], row=2, col=1)
+fig.add_hrect(y0=EXTREME_Z, y1=4, fillcolor=COLORS["negative"], opacity=0.1, row=2, col=1)
+fig.add_hrect(y0=-4, y1=-EXTREME_Z, fillcolor=COLORS["positive"], opacity=0.1, row=2, col=1)
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], row=2, col=1)
-
+fig.update_yaxes(title_text="Net contracts", row=1, col=1)
+fig.update_yaxes(title_text="Standard deviations", row=2, col=1)
 fig.update_layout(
     height=600,
-    title="Hedge funds held persistently net-short E-mini S&P 500 positioning after 2022",
+    title="Leveraged money is net short the E-mini in almost every week",
     showlegend=False,
 )
-fig.update_yaxes(title_text="Net Contracts", row=1, col=1)
-fig.update_yaxes(title_text="Z-Score", row=2, col=1)
 fig.show()
 
 # %% [markdown]
-# ---
-#
-# ## Section 6: COT-Based Trading Signals
-#
-# COT data can generate several types of signals:
-#
-# ### Signal Types
-#
-# | Signal | Description | Typical Use |
-# |--------|-------------|-------------|
-# | **Contrarian** | Fade extreme positioning | Z-score > 2 = sell signal |
-# | **Momentum** | Follow smart money | Commercials positioning |
-# | **Divergence** | Commercial vs Speculator | When they disagree |
-# | **Extreme Change** | Rapid positioning shift | Large weekly change |
-
-
-# %%
-def add_pit_available_date(df: pl.DataFrame, report_date_col: str = "report_date") -> pl.DataFrame:
-    """
-    Add a conservative point-in-time availability date for COT.
-
-    COT positions are as of Tuesday and are generally released Friday at 3:30 PM ET,
-    with holiday delays. For daily-bar backtests, a conservative approximation is to
-    treat the data as available on the next business day after the release week.
-
-    If you model intraday timestamps, store a datetime availability timestamp instead.
-
-    Args:
-        df: DataFrame with report_date column
-        report_date_col: Name of the report date column
-
-    Returns:
-        DataFrame with available_date column added
-    """
-    return df.with_columns(
-        # Conservative: Tuesday -> next Monday (+6 days) ensures we never use Friday same-day.
-        # Adjust this policy based on your backtest timestamp resolution.
-        (pl.col(report_date_col) + pl.duration(days=6)).alias("available_date")
-    )
-
+# The two panels are the same data and answer different questions. The upper one says the
+# position is short and roughly how short; the lower one says whether it is unusually so. A
+# position that is short every week is not a signal, and the z-score is what turns a level into
+# one.
 
 # %% [markdown]
-# ### Generate COT-Based Signals
-# Compute contrarian and large-change signals from speculator positioning z-scores.
-
-
-# %%
-def generate_cot_signals(df: pl.DataFrame, speculator_net: str = "lev_money_net") -> pl.DataFrame:
-    """
-    Generate COT-based trading signals.
-
-    Note: For backtesting, use available_date (not report_date) to avoid lookahead bias.
-    """
-    # Add PIT-correct available_date
-    df = add_pit_available_date(df)
-
-    # Calculate z-score
-    df = calculate_positioning_zscore(df, speculator_net)
-
-    # Generate signals
-    return df.with_columns(
-        [
-            # Contrarian signal: extreme positioning suggests reversal
-            pl.when(pl.col(f"{speculator_net}_zscore") > 2)
-            .then(pl.lit(-1))
-            .when(pl.col(f"{speculator_net}_zscore") < -2)
-            .then(pl.lit(1))
-            .otherwise(pl.lit(0))
-            .alias("contrarian_signal"),
-            # Week-over-week positioning change
-            pl.col(speculator_net).diff().alias(f"{speculator_net}_change"),
-        ]
-    ).with_columns(
-        [
-            # Large change signal (>1 std dev of changes)
-            pl.when(
-                pl.col(f"{speculator_net}_change")
-                > pl.col(f"{speculator_net}_change").rolling_std(26)
-            )
-            .then(pl.lit(1))
-            .when(
-                pl.col(f"{speculator_net}_change")
-                < -pl.col(f"{speculator_net}_change").rolling_std(26)
-            )
-            .then(pl.lit(-1))
-            .otherwise(pl.lit(0))
-            .alias("large_change_signal"),
-        ]
-    )
-
-
-# %%
-es_signals = generate_cot_signals(es_cot)
-contrarian_counts = es_signals.group_by("contrarian_signal").len().sort("contrarian_signal")
-contrarian_counts
-
-# %% [markdown]
-# Recent signals — for backtesting always join on `available_date` (+6 days), not the
-# Tuesday `report_date`, so signals never use information published after the bar.
-
-# %%
-es_signals.select(
-    [
-        "report_date",
-        "available_date",
-        "lev_money_net",
-        "lev_money_net_zscore",
-        "contrarian_signal",
-        "large_change_signal",
-    ]
-).tail(10)
-
-# %% [markdown]
-# ---
+# ## 4. When the report becomes usable
 #
-# ## Section 6.1: Multi-Product Positioning Comparison
+# The report describes Tuesday and is published on Friday afternoon, after the close in most
+# markets a US-hours strategy trades. Anything that reads it on its Tuesday date is reading a
+# number three days before it existed, and a strategy backtested that way trades on positions
+# that had not been disclosed.
 #
-# Comparing positioning across products reveals cross-asset sentiment.
+# The correction is the same as the macro one in the previous notebook: give every report the
+# date it became usable, and join on that. The lag used here is six days, taking Tuesday to the
+# following Monday, which is deliberately one day past the Friday release rather than exactly on
+# it. A same-day rule would have the strategy trading on a report published after that day's
+# close.
 
 # %%
-gc_cot = keep_largest_contract(
-    load_cot(products=["GC"], start_date="2020-01-01", end_date="2024-12-31")
+equity = equity.with_columns(
+    available_from=pl.col("report_date").dt.offset_by(f"{RELEASE_LAG_DAYS}d")
 )
-gc_cot = gc_cot.with_columns(pl.col("managed_money_net").alias("lev_money_net"))
-print(f"Shape: {gc_cot.shape}")
+equity.select("report_date", "available_from", "lev_money_net", "lev_money_net_zscore").tail(5)
 
-# Calculate z-scores for all products
-es_z = calculate_positioning_zscore(es_cot, "lev_money_net")
-cl_z = calculate_positioning_zscore(cl_cot, "lev_money_net")
-gc_z = calculate_positioning_zscore(gc_cot, "lev_money_net")
+# %% [markdown]
+# Joining onto prices is where the date does its work. The front-month continuous contract has a
+# row per trading session; a backward as-of join on `available_from` gives each session the most
+# recent report that had been published by then. On a Friday the session still carries the
+# previous week's report, and it picks up the new one on the following Monday.
 
 # %%
-# Create multi-product comparison
-fig = make_subplots(
-    rows=3,
-    cols=1,
-    subplot_titles=(
-        "E-mini S&P 500 (ES) - Equity Index",
-        "Crude Oil (CL) - Energy",
-        "Gold (GC) - Precious Metals",
+front_month = (
+    load_cme_futures(products=[EQUITY_PRODUCT], start_date=START_DATE)
+    .filter(pl.col("tenor") == 0)
+    .select(session_date="session_date", close="adj_close")
+    .sort("session_date")
+)
+sessions = front_month.join_asof(
+    equity.select("available_from", "report_date", "lev_money_net", "lev_money_net_zscore").sort(
+        "available_from"
     ),
+    left_on="session_date",
+    right_on="available_from",
+    strategy="backward",
+)
+
+print(f"Trading sessions: {len(sessions):,}")
+print(f"Sessions with no report yet published: {sessions['report_date'].is_null().sum()}")
+print(
+    "Median age of the attached report, in days: "
+    f"{int((sessions['session_date'] - sessions['report_date']).dt.total_days().median())}"
+)
+sessions.tail(8)
+
+# %% [markdown]
+# The median age of the attached report is what the join costs: on any given session the newest
+# available positioning is about a week old, and that is a property of the data rather than
+# something the pipeline can improve.
+
+# %% [markdown]
+# ## 5. Two signals, and one threshold that has to be measured carefully
+#
+# A **contrarian** signal fades an extreme: the signal is short when the speculative category is
+# crowded long, and long when it is crowded short. A **change** signal reacts to the size of a weekly
+# move rather than the level, on the reading that a large repositioning matters whatever the
+# starting point.
+#
+# The change signal needs a threshold for what counts as large, and the natural one is the
+# standard deviation of recent weekly changes. That standard deviation has to be measured on
+# weeks *before* the one being tested. A rolling window ending on the current week includes the
+# very change it is judging, which drags the threshold toward whatever value it is being compared
+# with and makes a genuinely large move harder to flag the larger it is.
+
+
+# %%
+def add_signals(reports: pl.DataFrame, net_column: str) -> pl.DataFrame:
+    """Add a contrarian signal from the z-score and a change signal from the weekly move."""
+    weekly_change = pl.col(net_column).diff()
+    # Shifted by one report, so the threshold is built from weeks strictly before this one.
+    prior_change_std = weekly_change.rolling_std(CHANGE_WINDOW_WEEKS).shift(1)
+    return reports.with_columns(
+        weekly_change=weekly_change,
+        change_threshold=prior_change_std,
+        contrarian_signal=pl.when(pl.col(f"{net_column}_zscore") > EXTREME_Z)
+        .then(pl.lit(-1))
+        .when(pl.col(f"{net_column}_zscore") < -EXTREME_Z)
+        .then(pl.lit(1))
+        .otherwise(pl.lit(0)),
+    ).with_columns(
+        change_signal=pl.when(pl.col("weekly_change") > pl.col("change_threshold"))
+        .then(pl.lit(1))
+        .when(pl.col("weekly_change") < -pl.col("change_threshold"))
+        .then(pl.lit(-1))
+        .otherwise(pl.lit(0))
+    )
+
+
+# %%
+signalled = add_signals(equity, "lev_money_net")
+signalled.group_by("contrarian_signal").len().sort("contrarian_signal")
+
+# %%
+signalled.select(
+    "report_date",
+    "available_from",
+    "lev_money_net",
+    "lev_money_net_zscore",
+    "weekly_change",
+    "change_threshold",
+    "contrarian_signal",
+    "change_signal",
+).tail(8)
+
+# %% [markdown]
+# ## 6. Do positioning extremes arrive together?
+#
+# A contrarian rule applied across several products is only diversifying if the products reach
+# their extremes at different times. If speculative positioning were crowded in equities, energy
+# and metals in the same weeks, the rule would be one bet in three places.
+
+# %%
+SPECULATIVE_COLUMN = {"ES": "lev_money_net", "CL": "managed_money_net", "GC": "managed_money_net"}
+
+scored_products = {}
+for product in COMPARISON_PRODUCTS:
+    reports = keep_deepest_market(load_cot(products=[product], start_date=START_DATE))
+    column = SPECULATIVE_COLUMN[product]
+    scored_products[product] = add_positioning_zscore(
+        reports.with_columns(speculative_net=pl.col(column)), "speculative_net", ZSCORE_WEEKS
+    )
+    print(f"{product}: {len(reports):,} reports, speculative category read from {column!r}")
+
+# %%
+fig = make_subplots(
+    rows=len(COMPARISON_PRODUCTS),
+    cols=1,
+    subplot_titles=[
+        f"{p} - {PRODUCT_MAPPINGS[p].description}" if p in PRODUCT_MAPPINGS else p
+        for p in COMPARISON_PRODUCTS
+    ],
     vertical_spacing=0.08,
     shared_xaxes=True,
 )
-
-for i, (df, name, color) in enumerate(
-    [
-        (es_z.to_pandas(), "ES", COLORS["blue"]),
-        (cl_z.to_pandas(), "CL", COLORS["amber"]),
-        (gc_z.to_pandas(), "GC", COLORS["slate"]),
-    ],
-    1,
+for row, (product, color) in enumerate(
+    zip(COMPARISON_PRODUCTS, [COLORS["blue"], COLORS["amber"], COLORS["slate"]], strict=True), 1
 ):
-    # Z-score line
+    frame = scored_products[product].to_pandas()
     fig.add_trace(
         go.Scatter(
-            x=df["report_date"],
-            y=df["lev_money_net_zscore"],
+            x=frame["report_date"],
+            y=frame["speculative_net_zscore"],
             mode="lines",
-            name=f"{name} Z-Score",
             line=dict(color=color, width=1.5),
         ),
-        row=i,
+        row=row,
         col=1,
     )
-
-    # Extreme bands
-    fig.add_hrect(y0=2, y1=4, fillcolor=COLORS["negative"], opacity=0.1, row=i, col=1)
-    fig.add_hrect(y0=-4, y1=-2, fillcolor=COLORS["positive"], opacity=0.1, row=i, col=1)
-    fig.add_hline(y=2, line_dash="dot", line_color=COLORS["negative"], opacity=0.5, row=i, col=1)
-    fig.add_hline(y=-2, line_dash="dot", line_color=COLORS["positive"], opacity=0.5, row=i, col=1)
-    fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], opacity=0.5, row=i, col=1)
-
-# %%
+    fig.add_hrect(y0=EXTREME_Z, y1=4, fillcolor=COLORS["negative"], opacity=0.1, row=row, col=1)
+    fig.add_hrect(y0=-4, y1=-EXTREME_Z, fillcolor=COLORS["positive"], opacity=0.1, row=row, col=1)
+    fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], opacity=0.5, row=row, col=1)
+fig.update_yaxes(title_text="Standard deviations", range=[-4, 4])
 fig.update_layout(
     height=700,
-    title="Speculator positioning extremes rarely line up across asset classes",
+    title="Positioning extremes rarely line up across asset classes",
     showlegend=False,
 )
-fig.update_yaxes(title_text="Z-Score", range=[-4, 4])
 fig.show()
 
-# %%
-latest = es_cot.sort("report_date").tail(1)
-print(f"Latest Report: {latest['report_date'][0]}")
-print("Net Positions by Trader Category:")
-print(f"  Leveraged Money (Hedge Funds):  {latest['lev_money_net'][0]:>12,}")
-print(f"  Asset Managers (Institutions):  {latest['asset_mgr_net'][0]:>12,}")
-print(f"  Dealers (Market Makers):        {latest['dealer_net'][0]:>12,}")
+# %% [markdown]
+# Reading three panels for coincidence is a job for a number rather than an eye. Correlating the
+# three z-score series on the report dates they share says how much a rule applied to all three
+# is really one bet.
 
 # %%
-# Visualize trader categories over time
-es_pd = es_cot.to_pandas()
+aligned = None
+for product in COMPARISON_PRODUCTS:
+    column = scored_products[product].select(
+        "report_date", pl.col("speculative_net_zscore").alias(product)
+    )
+    aligned = column if aligned is None else aligned.join(column, on="report_date", how="inner")
+aligned = aligned.drop_nulls()
+
+print(f"Report dates all three products share: {len(aligned):,}")
+# `corr` returns a square frame with no row labels, so the product names are put back on.
+aligned.select(COMPARISON_PRODUCTS).corr().insert_column(
+    0, pl.Series("product", COMPARISON_PRODUCTS)
+)
+
+# %% [markdown]
+# ## 7. Who takes the other side
+#
+# The three categories in a financial futures report sum, with the small non-reportable
+# category, to zero: every contract one category is long another is short. Plotting them
+# together shows how the market divides, and the table beneath measures the two properties the
+# chart only suggests.
+
+# %%
+categories_pd = equity.to_pandas()
 
 fig = go.Figure()
-
-fig.add_trace(
-    go.Scatter(
-        x=es_pd["report_date"],
-        y=es_pd["lev_money_net"],
-        mode="lines",
-        name="Leveraged Money",
-        line=dict(color=COLORS["blue"], width=2),
+for column, label, color in [
+    ("lev_money_net", "Leveraged money (hedge funds)", COLORS["blue"]),
+    ("asset_mgr_net", "Asset managers (institutions)", COLORS["copper"]),
+    ("dealer_net", "Dealers (intermediaries)", COLORS["amber"]),
+]:
+    fig.add_trace(
+        go.Scatter(
+            x=categories_pd["report_date"],
+            y=categories_pd[column],
+            mode="lines",
+            name=label,
+            line=dict(color=color, width=2),
+        )
     )
-)
-fig.add_trace(
-    go.Scatter(
-        x=es_pd["report_date"],
-        y=es_pd["asset_mgr_net"],
-        mode="lines",
-        name="Asset Managers",
-        line=dict(color=COLORS["copper"], width=2),
-    )
-)
-fig.add_trace(
-    go.Scatter(
-        x=es_pd["report_date"],
-        y=es_pd["dealer_net"],
-        mode="lines",
-        name="Dealers",
-        line=dict(color=COLORS["amber"], width=2),
-    )
-)
-
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"])
-
 fig.update_layout(
     height=450,
-    title="Asset managers stay net long E-mini S&P 500 while dealers hold the offsetting short",
-    xaxis_title="Report Date",
-    yaxis_title="Net Contracts",
+    title="Asset managers are long every week; the rest of the market is short",
+    xaxis_title="Report date",
+    yaxis_title="Net contracts",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
 )
 fig.show()
 
-# %% [markdown]
-# **Key Observations:**
-# - **Leveraged Money** (hedge funds) shows the most volatility and tends to be trend-following
-# - **Asset Managers** are smoother, reflecting longer-term institutional allocations
-# - **Dealers** often take the opposite side (market making), providing liquidity
-# - When all categories align, it can signal crowded positioning
-
-# %% [markdown]
-# ---
-#
-# ## Section 7: ml4t-data Feature Generation
-#
-# The ml4t-data library provides utilities to combine COT with price data.
-
 # %%
-sample_features = es_signals.select(
+category_profile = pl.DataFrame(
     [
-        "report_date",
-        "available_date",
-        "lev_money_net_zscore",
-        "contrarian_signal",
-        "large_change_signal",
+        {
+            "category": label,
+            "share_of_weeks_net_long": (equity[column] > 0).mean(),
+            "median_net_position": int(equity[column].median()),
+            "weekly_change_std": int(equity[column].diff().std()),
+        }
+        for column, label in [
+            ("lev_money_net", "Leveraged money"),
+            ("asset_mgr_net", "Asset managers"),
+            ("dealer_net", "Dealers"),
+        ]
     ]
-).with_columns(
-    [
-        # Additional features
-        pl.col("lev_money_net_zscore").shift(1).alias("zscore_lag1"),
-        (pl.col("lev_money_net_zscore") - pl.col("lev_money_net_zscore").shift(1)).alias(
-            "zscore_momentum"
-        ),
-    ]
-)
-sample_features.tail(10)
+).sort("weekly_change_std", descending=True)
+category_profile
 
 # %% [markdown]
-# ---
+# The table settles two things the chart leaves ambiguous. Asset managers hold a long position in
+# essentially every week, so their sign carries no information and only their size does. And the
+# category that moves most from week to week is not the speculative one: the dealers absorb what
+# the other two do, so their position is the residual and it is the most variable of the three.
+# A feature built on "how much did the speculators move" is therefore measuring something
+# narrower than "how much did positioning move".
+
+# %% [markdown]
+# ## Key Takeaways
 #
-# ## Section 8: Summary
-#
-# ### Key Takeaways
-#
-# 1. **COT data is free** and provides unique institutional positioning insight
-# 2. **Two report types**: TFF (financial) and Disaggregated (commodities)
-# 3. **Z-scores** identify extreme positioning for contrarian signals
-# 4. **Commercials vs Speculators**: Track the "smart money"
-# 5. **Release lag**: Report date is Tuesday, released Friday 3:30 PM - use +6 day lag for daily backtests!
-#
-# ### Using CoT in the book
-#
-# Download (one-time, writes per-product parquets to ``$ML4T_DATA_PATH/futures/positioning/cot/``):
-#
-# ```bash
-# python data/futures/positioning/cot_download.py                         # all products, 2020–current
-# python data/futures/positioning/cot_download.py --products ES,CL,GC,ZN  # subset
-# python data/futures/positioning/cot_download.py --start-year 2010       # longer history
-# ```
-#
-# Load in a notebook:
-#
-# ```python
-# from data.futures.loader import load_cot
-#
-# es_cot = load_cot(products=["ES"], start_date="2020-01-01", end_date="2024-12-31")
-# all_cot = load_cot()  # everything available locally
-# ```
-#
-# ### Integration with Book
-#
-# - **Chapter 8**: COT as sentiment feature for financial feature engineering
-# - **Chapter 16**: Futures strategy using positioning signals
-# - **Chapter 19**: COT in portfolio risk monitoring
+# 1. A COT report is free, weekly, and the only public record of who holds a futures market's
+#    open interest. Its value is in the split between categories, since the aggregate net
+#    position is zero by construction.
+# 2. A product code covers several CFTC contract markets, so a downloaded history has duplicate
+#    report dates. Resolve them by a stated rule and check that the rule is stable over time; a
+#    series that alternates between contract markets has week-over-week changes that mean
+#    nothing.
+# 3. A raw net position is not comparable across time or products. A rolling z-score over a
+#    stated number of reports is, and the window has to be named in reports rather than in days,
+#    because the reports are the grid.
+# 4. Positions are as of Tuesday and published on Friday. Attach the date the report became
+#    usable and join on that, or the backtest trades on disclosures that had not been made.
+# 5. A threshold measured on a window that includes the observation it is judging is
+#    self-referential: the larger the move, the more it raises its own bar. Shift the window.
+# 6. The residual category is the most variable one. Dealers absorb what the other categories
+#    do, so a feature built only on speculative positioning measures less of the market's
+#    movement than it appears to.
