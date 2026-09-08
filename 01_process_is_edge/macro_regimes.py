@@ -169,14 +169,22 @@ print(f"Covering {macro_raw[DATE_COL].min():%Y-%m-%d} to {macro_raw[DATE_COL].ma
 
 # %%
 metadata = load_macro_metadata().to_pandas().set_index("series")
-inventory = metadata.loc[
-    [c for c in macro_raw.columns if c != DATE_COL], ["description", "native_frequency", "formula"]
-].rename(
-    columns={
-        "description": "Series",
-        "native_frequency": "Published",
-        "formula": "Derived as",
-    }
+
+# Reindex rather than select: the metadata file is maintained beside the data file and can
+# fall behind it, and a column it does not describe should appear in this table saying so
+# rather than stopping the notebook or vanishing from it.
+inventory = (
+    metadata.reindex([c for c in macro_raw.columns if c != DATE_COL])[
+        ["description", "native_frequency", "formula"]
+    ]
+    .rename(
+        columns={
+            "description": "Series",
+            "native_frequency": "Published",
+            "formula": "Derived as",
+        }
+    )
+    .fillna({"Series": "not described in the metadata file", "Published": "unknown"})
 )
 inventory["Derived as"] = inventory["Derived as"].fillna("-")
 inventory.index.name = "Column"
@@ -200,6 +208,13 @@ inventory
 
 # %%
 CORE_SERIES = ["unrate", "dff", "t10y2y", "cpiaucsl"]
+
+missing = [c for c in CORE_SERIES if c not in macro_raw.columns]
+if missing:
+    raise ValueError(
+        f"The FRED panel is missing {missing}, which the core model is built on. "
+        "Re-run data/macro/download.py; data/macro/README.md lists what it fetches."
+    )
 
 # %% [markdown]
 # ### From daily rows to a monthly panel
@@ -816,23 +831,40 @@ display(
 # %% [markdown]
 # ### What the filter let through
 #
-# Nothing in that assembly asked what the columns are, and the metadata table at the top of
-# the notebook says what got in. Nine of the columns are Treasury yields at maturities from
-# one to thirty years, which move almost as one series. `YIELD_CURVE_SLOPE` is defined as the
-# ten-year yield minus the two-year, which is the definition of `t10y2y`, already in the
-# panel - the same spread enters twice under two names. Nominal and real GDP are both
-# present, published quarterly, so each repeats its value for three months at a time. And
-# three price indices enter as levels, which is the treatment the core panel rejected for one
-# of them.
+# Nothing in that assembly asked what the columns are, and the metadata table at the top of the
+# notebook says what got in: Treasury yields at maturities from one to thirty years, which move
+# almost as one series; a derived column whose formula is the ten-year yield minus the two-year,
+# which is the definition of a series already in the panel under its own name; nominal and real
+# GDP, published quarterly, so each repeats a value for three months at a time; and three price
+# indices entering as levels, which is the treatment the core panel rejected for one of them.
+#
+# Two of those are checkable without reading the metadata at all. Columns holding the same
+# series differ by nothing anywhere in the panel, and a series published quarterly and carried
+# forward to a monthly grid is unchanged from the previous month in two months out of three.
+
 
 # %%
-duplicate_check = (extended_df["t10y2y"] - extended_df["YIELD_CURVE_SLOPE"]).abs().max()
-gdp_distinct = int(extended_df["gdp"].round(6).nunique())
+def duplicate_pairs(frame: pd.DataFrame, tolerance: float = 1e-9) -> list[tuple[str, str]]:
+    """Column pairs that hold the same standardized series to within *tolerance*."""
+    columns = list(frame.columns)
+    return [
+        (a, b)
+        for i, a in enumerate(columns)
+        for b in columns[i + 1 :]
+        if float((frame[a] - frame[b]).abs().max()) < tolerance
+    ]
+
+
+# %%
+duplicates = duplicate_pairs(extended_df)
+carried_forward = (extended_df.diff() == 0).mean().sort_values(ascending=False)
+stalest = str(carried_forward.index[0])
 display(
     Markdown(
-        f"The largest gap between `t10y2y` and `YIELD_CURVE_SLOPE` anywhere in the panel is "
-        f"**{duplicate_check:.1e}** after standardization, and nominal GDP takes "
-        f"**{gdp_distinct} distinct values** across **{len(extended_df)} monthly rows**."
+        f"Comparing every pair of columns finds **{len(duplicates)}** holding the same "
+        f"standardized series: {', '.join(f'`{a}` and `{b}`' for a, b in duplicates) or 'none'}. "
+        f"The column that repeats itself most is `{stalest}`, unchanged from the month before "
+        f"in **{carried_forward.iloc[0]:.0%}** of the panel."
     )
 )
 
