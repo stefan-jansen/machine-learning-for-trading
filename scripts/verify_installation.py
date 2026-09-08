@@ -632,7 +632,7 @@ def check_optional():
     check_import(cat, "clickhouse_connect", "clickhouse-connect (db-benchmark extra)")
     check_import(cat, "influxdb_client", "influxdb-client (db-benchmark extra)")
     # Live trading
-    check_import(cat, "ib_async", "ib_insync/ib_async (live extra)")
+    check_import(cat, "ib_async", "ib_async (live extra)")
     check_import(cat, "alpaca", "alpaca-py (live extra)")
     # Feast / MLOps
     check_import(cat, "feast", "feast (mlops extra)")
