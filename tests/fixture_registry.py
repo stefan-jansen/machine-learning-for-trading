@@ -334,3 +334,170 @@ def restore_backed_prediction_rows(db_path: Path, captured: dict) -> dict[str, i
     finally:
         db.close()
     return restored
+
+
+#: The column carrying the realized outcome, in both conventions the fixture ships.
+TARGET_COLUMNS = ("actual", "y_true")
+ENTITY_COLUMNS = ("symbol", "product")
+
+
+def panel_signature(frame, entity: str) -> tuple:
+    """What makes two prediction artifacts the same cross-section.
+
+    Height, entities and timestamps - not the scores, which differ by construction, and
+    not the target, which is what a caller then checks agrees. Identifiers are
+    stringified because they are only ever compared for equality and a column carrying
+    nulls raises in ``sorted()``.
+    """
+    return (
+        frame.height,
+        tuple(sorted(map(str, frame[entity].unique().to_list()))),
+        tuple(map(str, frame["timestamp"].unique().sort().to_list())),
+    )
+
+
+def choose_reference_panel(by_signature: dict, hash_of=lambda entry: entry[0]) -> tuple:
+    """The panel a ``(split, label)`` group is seeded onto: most artifacts, then largest.
+
+    Ties break on the lowest hash so the choice comes out the same on every
+    regeneration. ``tests/fixtures/seed_results.py`` seeds its synthetic sets onto this
+    panel, which is what makes them joinable with the copied artifacts rather than only
+    with each other - so the rule has one implementation and both callers read it.
+
+    *by_signature* maps a :func:`panel_signature` to its entries; *hash_of* reads the
+    prediction hash out of one, because the two callers carry an entry as a tuple and as
+    a mapping. Returns the winning ``(signature, entries)`` pair.
+    """
+    return min(
+        by_signature.items(),
+        key=lambda item: (-len(item[1]), -item[0][0], hash_of(item[1][0])),
+    )
+
+
+def prediction_panels(case_dir: Path) -> dict:
+    """Per ``(split, label)``, the distinct cross-sections this fixture ships for it.
+
+    ``us_equities_panel`` ``(validation, fwd_ret_1d)`` ships two: four ``gbm`` artifacts
+    over 8 symbols storing the target as ``Float32``, and three ``linear`` ones over 56
+    storing it as ``Float64``. They share 5,212 of 16,744 keys and disagree on the
+    realized target by 2.6e-08 there, which is 260x the 1e-10 that
+    ``14_latent_factors/09_case_study_insights::paired_daily_ic`` rejects a pair at
+    (ml4t/agent-workspace#288). Which one a notebook lands on is decided by registry
+    metrics, so this returns the panels and what separates them rather than a verdict.
+
+    Returns ``{(split, label): {"panels": [...], "cross_panel_target_gap": float|None}}``
+    where each panel carries its hashes, entity count, target dtype and a frame.
+    """
+    import polars as pl
+
+    db_path = case_dir / "run_log" / "registry.db"
+    predictions = case_dir / "run_log" / "predictions"
+    if not db_path.is_file() or not predictions.is_dir():
+        return {}
+    db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = db.execute(
+            "SELECT ps.prediction_hash, ps.split, tr.label, tr.family FROM prediction_sets ps "
+            "JOIN training_runs tr ON tr.training_hash = ps.training_hash"
+        ).fetchall()
+    finally:
+        db.close()
+
+    groups: dict = {}
+    for prediction_hash, split, label, family in rows:
+        parquet = predictions / str(prediction_hash) / "predictions.parquet"
+        if parquet.is_file():
+            groups.setdefault((split, label), []).append((str(prediction_hash), family, parquet))
+
+    result: dict = {}
+    for key, members in sorted(groups.items(), key=lambda item: (str(item[0][0]), str(item[0][1]))):
+        by_signature: dict = {}
+        for prediction_hash, family, parquet in sorted(members):
+            frame = pl.read_parquet(parquet)
+            entity = next((name for name in ENTITY_COLUMNS if name in frame.columns), None)
+            target = next((name for name in TARGET_COLUMNS if name in frame.columns), None)
+            if entity is None or target is None or "timestamp" not in frame.columns:
+                continue
+            keyed = frame.select([entity, "timestamp", target]).rename(
+                {entity: "entity", target: "target"}
+            )
+            by_signature.setdefault(panel_signature(frame, entity), []).append(
+                {
+                    "prediction_hash": prediction_hash,
+                    "family": family,
+                    "entities": frame[entity].n_unique(),
+                    "target_dtype": str(frame.schema[target]),
+                    "frame": keyed,
+                }
+            )
+        if not by_signature:
+            continue
+        reference_signature, _ = choose_reference_panel(
+            by_signature, hash_of=lambda entry: entry["prediction_hash"]
+        )
+        panels = []
+        for signature, entries in by_signature.items():
+            panels.append(
+                {
+                    "hashes": [entry["prediction_hash"] for entry in entries],
+                    "families": sorted({entry["family"] for entry in entries}),
+                    "entities": entries[0]["entities"],
+                    "target_dtypes": sorted({entry["target_dtype"] for entry in entries}),
+                    "is_reference": signature == reference_signature,
+                    "entries": entries,
+                }
+            )
+        result[key] = {"panels": panels, "cross_panel_target_gap": _cross_panel_gap(panels)}
+    return result
+
+
+def _cross_panel_gap(panels: list) -> float | None:
+    """The largest target disagreement between two panels, over the keys they share."""
+    import itertools
+
+    import polars as pl
+
+    worst: float | None = None
+    for left, right in itertools.combinations(panels, 2):
+        a = left["entries"][0]["frame"].with_columns(
+            pl.col("timestamp").cast(pl.Datetime("us")).dt.replace_time_zone(None)
+        )
+        b = right["entries"][0]["frame"].with_columns(
+            pl.col("timestamp").cast(pl.Datetime("us")).dt.replace_time_zone(None)
+        )
+        joined = a.join(b, on=["entity", "timestamp"], how="inner")
+        if joined.is_empty():
+            continue
+        gap = float(
+            (joined["target"].cast(pl.Float64) - joined["target_right"].cast(pl.Float64))
+            .abs()
+            .max()
+        )
+        worst = gap if worst is None else max(worst, gap)
+    return worst
+
+
+def within_panel_target_gap(panel: dict) -> float:
+    """The largest target disagreement between artifacts of one cross-section.
+
+    Zero is the only acceptable value: these artifacts carry the same keys, so a
+    non-zero gap means two of them are scored against different outcomes while every
+    breadth and key check passes.
+    """
+    import polars as pl
+
+    entries = panel["entries"]
+    worst = 0.0
+    for other in entries[1:]:
+        joined = entries[0]["frame"].join(other["frame"], on=["entity", "timestamp"], how="inner")
+        if joined.is_empty():
+            continue
+        worst = max(
+            worst,
+            float(
+                (joined["target"].cast(pl.Float64) - joined["target_right"].cast(pl.Float64))
+                .abs()
+                .max()
+            ),
+        )
+    return worst
