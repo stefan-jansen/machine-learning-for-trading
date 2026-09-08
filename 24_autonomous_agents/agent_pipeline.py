@@ -202,6 +202,18 @@ class CalibrationResult:
     brier_before: float
     brier_after: float
     improvement_pct: float
+    searched_range: tuple[float, float] = (0.5, 3.0)
+
+    @property
+    def at_search_boundary(self) -> bool:
+        """True when the search stopped at an end of its range.
+
+        The minimum is then outside the range searched, so `optimal_exponent` is
+        where the search ran out rather than where the score bottoms out, and
+        reading it as the best exponent overstates what was established.
+        """
+        low, high = self.searched_range
+        return self.optimal_exponent <= low or self.optimal_exponent >= high
 
 
 def fit_extremization_exponent(
@@ -247,6 +259,7 @@ def fit_extremization_exponent(
         brier_before=round(brier_before, 4),
         brier_after=round(best_brier, 4),
         improvement_pct=round(improvement, 1),
+        searched_range=exponent_range,
     )
 
 
