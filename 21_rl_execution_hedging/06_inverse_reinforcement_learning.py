@@ -235,6 +235,10 @@ def collect_expert_trajectories(
                 "states": np.array(traj_states),
                 "actions": np.array(traj_actions),
                 "total_shortfall": env.total_cost,
+                # The arrival price is the first price of the episode's own path,
+                # which is one return away from `initial_price` and different in
+                # every episode, so each shortfall is normalised by its own.
+                "arrival_notional": env.arrival_price * env.total_shares,
             }
         )
 
@@ -248,10 +252,8 @@ def collect_expert_trajectories(
 # %%
 print(f"Collecting {N_EXPERT_TRAJECTORIES} expert trajectories...")
 expert_data = collect_expert_trajectories(env, twap_policy, n_trajectories=N_EXPERT_TRAJECTORIES)
-expert_shortfalls_bps = (
-    np.array([t["total_shortfall"] for t in expert_data["trajectories"]])
-    / (INITIAL_PRICE * TOTAL_SHARES)
-    * 10_000
+expert_shortfalls_bps = np.array(
+    [t["total_shortfall"] / t["arrival_notional"] * 10_000 for t in expert_data["trajectories"]]
 )
 expert_mean_bps = float(expert_shortfalls_bps.mean())
 expert_std_bps = float(expert_shortfalls_bps.std())
@@ -261,9 +263,10 @@ display(
 {N_EXPERT_TRAJECTORIES} episodes give **{len(expert_data["states"]):,}** state-action pairs, each
 state a {expert_data["states"].shape[1]}-element observation. The recorded actions span
 {expert_data["actions"].min():.3f} to {expert_data["actions"].max():.3f} on the environment's
-pacing scale, where {0.5:.1f} is the even-pace reference: TWAP is not a constant action, because
-holding the quantity fixed while the remaining inventory and the remaining steps both fall means
-the pace multiplier has to move.
+pacing scale, and they take only two values. The expert asks for exactly the reference quantity,
+`remaining / remaining steps`, so the pace multiplier is one and the action that encodes it is
+the midpoint of the range at every step. On the last step the conversion returns its maximum,
+because the horizon step sells whatever is left whatever the action says.
 
 The expert's own cost over these episodes averages {expert_mean_bps:.1f} basis points of arrival
 notional, with a standard deviation of {expert_std_bps:.1f} basis points.
@@ -275,8 +278,15 @@ notional, with a standard deviation of {expert_std_bps:.1f} basis points.
 #
 # The pacing action the expert takes is what both methods below are fitted to,
 # so it is worth seeing before anything is fitted. The left panel is the mean
-# action at each step across the demonstrations; the right is the distribution
-# of episode costs the rule produced.
+# action at each step; the right is the distribution of episode costs.
+#
+# The left panel is the harder half of the inference problem drawn. The expert's
+# action is the reference pace at every step and the conversion's maximum on the
+# last one, so the demonstrations carry two distinct actions and no variation
+# that any state variable could explain. What varies across the demonstrations
+# is the market the constant action was taken in. A reward inferred from this
+# has almost nothing to separate the features by, which is the setting in which
+# non-identifiability stops being a caveat and starts being the result.
 
 # %%
 expert_action_matrix = np.vstack([traj["actions"] for traj in expert_data["trajectories"]])
@@ -406,7 +416,7 @@ print(f"  NN     - Train MSE: {nn_train_mse:.6f}, Test MSE: {nn_test_mse:.6f}")
 # %%
 def evaluate_policy(action_fn, env, episode_seeds: list[int]) -> dict:
     """Evaluate an action function on a fixed list of common episode seeds."""
-    shortfalls = []
+    shortfalls_bps = []
     action_histories = []
 
     for episode_seed in episode_seeds:
@@ -417,18 +427,13 @@ def evaluate_policy(action_fn, env, episode_seeds: list[int]) -> dict:
         while not done:
             action = float(np.clip(action_fn(obs), 0, 1))
             actions.append(action)
-            obs, reward, terminated, truncated, info = env.step(np.array([action]))
+            obs, _, terminated, truncated, _ = env.step(np.array([action]))
             done = terminated or truncated
 
-        shortfalls.append(env.total_cost)
+        shortfalls_bps.append(env.total_cost / (env.arrival_price * env.total_shares) * 10_000)
         action_histories.append(actions)
 
-    return {
-        "mean_shortfall": np.mean(shortfalls),
-        "std_shortfall": np.std(shortfalls),
-        "shortfalls": shortfalls,
-        "action_histories": action_histories,
-    }
+    return {"shortfalls_bps": np.array(shortfalls_bps), "action_histories": action_histories}
 
 
 # Evaluate BC policies
@@ -442,12 +447,10 @@ bc_nn_results = evaluate_policy(
     lambda obs: bc_nn.predict(obs.reshape(1, -1))[0], env, evaluation_seeds
 )
 
-NOTIONAL = INITIAL_PRICE * TOTAL_SHARES
-
 
 def shortfall_bps(result: dict) -> np.ndarray:
-    """Per-episode implementation shortfall, in basis points of arrival notional."""
-    return np.asarray(result["shortfalls"]) / NOTIONAL * 10_000
+    """Per-episode implementation shortfall, in basis points of that episode's arrival notional."""
+    return result["shortfalls_bps"]
 
 
 print("Mean shortfall over the evaluation seeds, in basis points of arrival notional:")
@@ -1006,11 +1009,15 @@ def reward_from_weights(state: np.ndarray, action: float, weights: np.ndarray) -
 # behavior-cloning policies on the same evaluation seeds.
 
 # %% [markdown]
-# The maximum-entropy fit gives a distribution over actions rather than one
-# action, so the diagnostic policy takes the expectation of that distribution
-# over a grid. The temperature is the same one the maximum-entropy model
-# assumes: a lower value concentrates the distribution on the highest-reward
-# action, a higher one spreads it out.
+# The maximum-entropy fit produces a reward, not a policy: its distribution is
+# over complete trajectories, and turning that into an action at a single state
+# would mean solving the control problem the reward defines. The diagnostic
+# below does something cheaper and separate - it scores a grid of actions at the
+# current state under the inferred reward, softmaxes those scores at a
+# temperature chosen here rather than inherited from the fit, and takes the
+# expectation. A lower temperature concentrates the choice on the
+# highest-scoring action; a higher one spreads it out. Read what follows as what
+# the reward prefers one step at a time.
 
 
 # %%
@@ -1034,29 +1041,8 @@ def evaluate_reward_policy(
     env: ExecutionEnv,
     episode_seeds: list[int],
 ) -> dict:
-    shortfalls = []
-    action_histories = []
-
-    for episode_seed in episode_seeds:
-        obs, _ = env.reset(seed=episode_seed)
-        done = False
-        actions = []
-
-        while not done:
-            action = action_fn(obs, weights)
-            actions.append(action)
-            obs, _, terminated, truncated, _ = env.step(np.array([action]))
-            done = terminated or truncated
-
-        shortfalls.append(env.total_cost)
-        action_histories.append(actions)
-
-    return {
-        "mean_shortfall": np.mean(shortfalls),
-        "std_shortfall": np.std(shortfalls),
-        "shortfalls": shortfalls,
-        "action_histories": action_histories,
-    }
+    """Run one reward-derived policy over the common evaluation seeds."""
+    return evaluate_policy(lambda obs: action_fn(obs, weights), env, episode_seeds)
 
 
 # %%
@@ -1203,8 +1189,15 @@ fig.show()
 # episodes is dominated by where the price happened to go, so it is a small
 # number with a large standard error and can sit either side of zero; a ratio
 # built on it would move with the denominator's noise rather than with the
-# policies. The difference is paired by seed, which removes the shared price
-# path, and it is reported with its own standard error.
+# policies.
+#
+# The difference is taken within an episode, which matches the market shocks the
+# two policies faced. It does not net the price out of the comparison: the
+# policies sell different quantities at different steps, so the difference
+# retains the price movement weighted by those quantity differences, and the
+# environment's permanent impact depends on what each policy traded. What the
+# paired figure measures is one schedule against another on matched markets,
+# timing and impact included.
 
 
 # %%
