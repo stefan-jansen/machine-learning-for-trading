@@ -1298,12 +1298,24 @@ case_studies/cme_futures/08_tabular_dl:
   # with an order of magnitude of room rather than sized to the measurement. Re-base it on the
   # first green `cs-cme_futures` runs, which is where the percentages elsewhere in this file
   # come from.
+  # DEVICE and POPULATION_NAME travel together, as in the etfs DL blocks: the device is inside
+  # the training identity, so a CPU run declares a different member set and must name its own
+  # population rather than publish into the canonical one. Pairing them also keeps
+  # `tests/generate_intermediates.py --no-skip-dl` working, which reads this file with
+  # `research_preview=False` and so reaches the guard in canonical mode.
   parameters:
     DEVICE: cpu
+    POPULATION_NAME: cme_futures-tabular_dl-preview
   timeout: 300
 case_studies/cme_futures/09_dl_lstm:
+  # DEVICE and POPULATION_NAME travel together, as in the etfs DL blocks: the device is inside
+  # the training identity, so a CPU run declares a different member set and must name its own
+  # population rather than publish into the canonical one. Pairing them also keeps
+  # `tests/generate_intermediates.py --no-skip-dl` working, which reads this file with
+  # `research_preview=False` and so reaches the guard in canonical mode.
   parameters:
     DEVICE: cpu
+    POPULATION_NAME: cme_futures-deep_learning-preview
     # BATCH_SIZE, MAX_FOLDS, MAX_SYMBOLS, N_EPOCHS and LOOKBACK were the pre-migration knobs.
     # This notebook plans through the shared catalog and reads none of them, so setting them
     # reduced nothing while the override file said it had.

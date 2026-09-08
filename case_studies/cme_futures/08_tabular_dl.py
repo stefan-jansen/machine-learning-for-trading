@@ -111,6 +111,9 @@ PREVIEW_REDUCTIONS: dict = {}
 SUPERSEDES_POPULATION: str | None = None
 # The device to fit on. Empty means the device this population was published on.
 DEVICE: str = ""
+# The population this run publishes into. Empty publishes the canonical one, which a run
+# on another device may not do.
+POPULATION_NAME: str = ""
 
 # %% [markdown]
 # ## Declared requests
@@ -140,19 +143,21 @@ DEVICE: str = ""
 # A network trained on a GPU and the same network trained on a CPU accumulate their sums in
 # different orders and reach different weights, so the device is part of what the fitted model is
 # and enters the computation's identity rather than sitting beside it. `PUBLISHED_DEVICE` is the
-# device this population was fitted on, and the canonical tier accepts no other: a reader without
-# an NVIDIA card sets `DEVICE="cpu"`, which is only allowed under a preview tier, whose workspace
-# is discarded and whose rows are excluded from the catalog the backtest reads.
+# device this population was fitted on, and the canonical population accepts no other: a reader
+# without an NVIDIA card sets `DEVICE="cpu"` and passes a `POPULATION_NAME` to fit the same grid
+# into a population of its own, whose rows are excluded from the catalog the backtest reads.
 
 # %%
 PUBLISHED_DEVICE = "cuda"
 device = DEVICE or PUBLISHED_DEVICE
-if device != PUBLISHED_DEVICE and EXECUTION_TIER == "canonical":
+if device != PUBLISHED_DEVICE and not POPULATION_NAME:
     raise ValueError(
         f"this run fits on device {device!r}, which is not the {PUBLISHED_DEVICE!r} this "
-        f"population was published on, so it cannot publish the canonical population; run it "
-        f"under a preview tier to fit the same grid on {device!r}"
+        f"population was published on, so it cannot publish the canonical population; pass "
+        f"POPULATION_NAME to give it its own"
     )
+
+population_name = POPULATION_NAME or "cme_futures-tabular_dl-validation-v1"
 
 study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE)
 requests = model_request_catalog("tabular_dl", labels=ALL_LABELS)
@@ -200,7 +205,7 @@ if EXECUTION_TIER == "canonical":
     execution, population = run_official_model_catalog(
         study,
         requests,
-        population_name="cme_futures-tabular_dl-validation-v1",
+        population_name=population_name,
         resolved_requests=resolved,
         supersedes=SUPERSEDES_POPULATION,
     )
