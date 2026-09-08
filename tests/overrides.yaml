@@ -1352,7 +1352,7 @@ case_studies/cme_futures/11_causal_dml:
     # carried across here, where they arrive.
     PREVIEW_REDUCTIONS:
       max_samples: 5000
-      max_symbols: 5
+      max_symbols: 10
       n_folds: 2
       n_placebo: 25
   timeout: 300
@@ -1420,39 +1420,36 @@ case_studies/crypto_perps_funding/01_feasibility_analysis:
   parameters:
     # No START_DATE: the notebook already declares 2020-01-01, which is the data start, so an
     # override there narrows nothing. MAX_SYMBOLS is read by the loader and stays live.
-    MAX_SYMBOLS: 5
+    MAX_SYMBOLS: 10
   timeout: 120
 case_studies/crypto_perps_funding/02_labels:
   parameters:
-    # No MAX_SYMBOLS: the CI fixture is already only 5 symbols, and the baseline IC needs a
-    # cross-section per settlement to rank at all. The fixture is the reduction. The notebook
-    # now reads both parameters, so a value set here takes effect.
+    # No MAX_SYMBOLS: the CI fixture is ten perpetuals against production's nineteen, and the
+    # baseline IC needs a cross-section per settlement to rank at all. The fixture is the
+    # reduction. The notebook now reads both parameters, so a value set here takes effect.
     START_DATE: '2000-01-01'
   timeout: 120
 case_studies/crypto_perps_funding/03_financial_features:
   timeout: 120
-# max_symbols stays 5 here, and unlike the other three case studies raising it would change
-# nothing: the whole crypto fixture is five perpetuals. `data/crypto/market/perps_1h.parquet`,
-# `premium_index_8h.parquet` and `funding_rate.parquet` each carry exactly the five symbols
-# `tests/create_test_data.py:CRYPTO_SYMBOLS` names, measured 2026-09-07 on
-# ml4t/third-edition-test-data 63a9e4e, and every seeded feature and fold artifact under
-# `intermediates/crypto_perps_funding` carries the same five. This case study declares
-# top_k_grid [3, 5, 10] and is long-short, so its smallest concentration needs 2 x 3 = 6 names
-# and no cap written here can produce a sixth. `cs-crypto_perps_funding` therefore fails at
-# 13_backtest with "no concentration declared ... can be realized", which is
-# ml4t/agent-workspace#989's cause stated rather than the twelve zero-trade backtests it used
-# to register silently. Widening it means widening the fixture, which regenerates
-# `intermediates/crypto_perps_funding` and is the coupling create_test_data.py's crypto header
-# records as ml4t/agent-workspace#970.
+# max_symbols is 10 here because the fixture is ten perpetuals, and the cap has to match it
+# rather than sit under it. It read 5 until 2026-09-07 and no value written here could have
+# helped: the whole crypto fixture was five names, so this case study's long-short
+# `top_k_grid [3, 5, 10]` had no member whose two disjoint legs fit, and
+# `cs-crypto_perps_funding` failed at 13_backtest with "no concentration declared ... can be
+# realized". That was ml4t/agent-workspace#1077, fixed by widening
+# `tests/create_test_data.py:CRYPTO_SYMBOLS` and regenerating
+# `intermediates/crypto_perps_funding` against it - the coupling create_test_data.py's crypto
+# header records, and the reason a cap here is set to the fixture's width and not below it.
+# Setting it below ten would reproduce the same refusal at whatever width it named.
 case_studies/crypto_perps_funding/04_model_based_features:
   parameters:
     HMM_N_RESTARTS: 1
-    MAX_SYMBOLS: 5
+    MAX_SYMBOLS: 10
     MIN_TRAIN_BARS: 10
   timeout: 300
 case_studies/crypto_perps_funding/05_evaluation:
   parameters:
-    MAX_SYMBOLS: 5
+    MAX_SYMBOLS: 10
   timeout: 300
 case_studies/crypto_perps_funding/06_linear:
   # 120s is measured here, not copied. Slowest of 5 green `cs-crypto_perps_funding` runs of
@@ -2069,8 +2066,12 @@ case_studies/fx_pairs/19_strategy_analysis:
 #
 # etfs and cme_futures are raised in this same file because their seeded folds are already
 # wide - 55-56 and 30 - so a model-stage cap selects from them. nasdaq and
-# crypto_perps_funding are the two whose folds were generated at 5, and both need the fixture
-# regenerated rather than an override (ml4t/agent-workspace#1077).
+# crypto_perps_funding were the two whose folds were generated at 5, and both needed the
+# fixture regenerated rather than an override (ml4t/agent-workspace#1077). crypto is done:
+# CRYPTO_SYMBOLS carries ten and `intermediates/crypto_perps_funding` was regenerated against
+# them. nasdaq is not, and its widening is blocked on ml4t/agent-workspace#1019 - its feature
+# panel is already 98.8 MB against GitHub's 100 MB per-file limit, so widening the panel has
+# to answer that first.
 case_studies/nasdaq100_microstructure/01_feasibility_analysis:
   parameters:
     MAX_SYMBOLS: 5
