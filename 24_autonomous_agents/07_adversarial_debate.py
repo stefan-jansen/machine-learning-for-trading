@@ -81,7 +81,7 @@ from agent_research import ResearchAgent, format_agent_summary, parse_json
 from agent_schemas import AgentForecastArtifact, DebateArtifact, DebateRound
 from agent_tools import create_search_client
 
-from utils.style import COLORS, add_message_title
+from utils.style import COLORS, add_message_title, show_with_alt
 
 # %% [markdown]
 # ## Settings
@@ -562,8 +562,13 @@ y_min = min(bear_probs + bull_probs + [agg_p])
 y_max = max(bear_probs + bull_probs + [agg_p])
 pad = max(0.05, (y_max - y_min) * 0.15)
 ax.set_ylim(max(0.0, y_min - pad), min(1.0, y_max + pad))
-fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    f"Line chart over {len(rounds_x)} debate rounds. The bull line runs from "
+    f"{bull_probs[0]:.0%} to {bull_probs[-1]:.0%} and the bear line from {bear_probs[0]:.0%} "
+    f"to {bear_probs[-1]:.0%}, with the shaded band between them going from {gaps[0]:.0%} to "
+    f"{gaps[-1]:.0%} wide. A dotted line marks the pre-debate aggregate at {agg_p:.0%}.",
+)
 
 # %% [markdown]
 # A closing gap is the productive case: each side gives ground on the other's strongest point,

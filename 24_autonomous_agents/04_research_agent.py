@@ -34,7 +34,8 @@
 #   keep the second out of any average
 # - Read a saved run record and reproduce a forecast made months earlier with no API calls
 #
-# **Book Reference**: Chapter 24, Section 24.6 (Core Project: The Research Agent)
+# **Book Reference**: Chapter 24, Section 24.6 (Designing the research agent at the heart of
+# the pipeline)
 #
 # **Prerequisites**: [`01_react_reasoning`](01_react_reasoning.ipynb) (providers),
 # [`02_tool_contracts`](02_tool_contracts.ipynb) (tools),
@@ -75,7 +76,7 @@ from agent_tools import (
     format_search_results,
 )
 
-from utils.style import COLORS, add_message_title, format_pct_axis
+from utils.style import COLORS, add_message_title, format_pct_axis, show_with_alt
 
 # %% [markdown]
 # ## Settings
@@ -799,8 +800,12 @@ add_message_title(
     subtitle="Same question, prompts and tools; 2026-06-09 capture, "
     "search results carry no publication dates",
 )
-fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    f"Bar chart of two agent forecasts for the same question: {pair[0].agent_id} at "
+    f"{pair[0].p_yes:.0%} and {pair[1].agent_id} at {pair[1].p_yes:.0%}, "
+    f"{abs(pair[0].p_yes - pair[1].p_yes):.0%} apart.",
+)
 
 # %% [markdown]
 # The two rationales disagree about the level of the policy rate itself, not only about where
@@ -880,5 +885,5 @@ else:
 # **Next**: [`05_aggregation_math`](05_aggregation_math.ipynb) is the arithmetic for combining
 # several such probabilities into one.
 #
-# **Book**: Section 24.6 discusses agent design patterns, including the trade-off
-# between agent complexity and forecast calibration.
+# **Book**: Section 24.6 discusses agent design patterns, including the trade-off between
+# agent complexity and forecast calibration.

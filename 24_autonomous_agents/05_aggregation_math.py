@@ -62,7 +62,14 @@ from agent_pipeline import (
 )
 
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, FIGSIZE, add_message_title, format_pct_axis, ml4t_palette
+from utils.style import (
+    COLORS,
+    FIGSIZE,
+    add_message_title,
+    format_pct_axis,
+    ml4t_palette,
+    show_with_alt,
+)
 
 # %% [markdown]
 # ## Settings
@@ -206,8 +213,14 @@ add_message_title(
 axes[1].legend()
 axes[1].axhline(mean_p, color=COLORS["neutral"], linestyle="--", alpha=0.6)
 format_pct_axis(axes[1])
-fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Two panels. On the left, the diversity factor against the number of forecasters for five "
+    "assumed correlations: the independent curve keeps rising while the correlated ones flatten "
+    "early. On the right, the aggregate probability against the assumed correlation for four "
+    "panel sizes, with the mean forecast held fixed: every curve falls toward the unextremized "
+    f"mean of {mean_p:.0%} as the assumed correlation rises.",
+)
 
 # %% [markdown]
 # The left panel is the diminishing return: each additional forecaster adds less than the last,
@@ -306,8 +319,13 @@ add_message_title(ax, "Parameter a controls compression or extremization")
 ax.legend(loc="upper left")
 ax.set_aspect("equal")
 format_pct_axis(ax, axis="both")
-fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Four Platt scaling curves plotted against the identity diagonal on a square axis. The "
+    "curve for an exponent below one bows toward the middle of the range, compressing "
+    "probabilities toward even odds; the curves for exponents above one bow toward the corners, "
+    "pushing probabilities out to the ends.",
+)
 
 # %% [markdown]
 # Above one the curve bows away from the diagonal and probabilities move toward the ends;
@@ -416,8 +434,13 @@ add_message_title(ax, "Log-odds scaling preserves symmetry around 50%")
 ax.legend(loc="upper left")
 ax.set_aspect("equal")
 format_pct_axis(ax, axis="both")
-fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Four log-odds transformation curves plotted against the identity diagonal on a square "
+    "axis. Exponents above one bow away from the diagonal toward the corners, exponents below "
+    "one bow toward the middle, and every curve passes through even odds, so the family is "
+    "symmetric about that point.",
+)
 
 # %% [markdown]
 # The curves are the same family as Platt's, and the parameterisation is the one worth keeping:
@@ -492,8 +515,12 @@ add_message_title(
     "A calibration fitted on one panel carries to another",
     subtitle="Exponent fit on the training observations only, then frozen",
 )
-fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    f"Two bars of Brier score on the held-out panel: {test_brier_before:.3f} for the raw "
+    f"forecasts and {test_brier_after:.3f} after the fitted exponent is applied. Lower is "
+    "better.",
+)
 
 # %% [markdown]
 # The improvement is small, and on this data it should be. The forecasts were simulated by
@@ -556,8 +583,13 @@ add_message_title(
     subtitle=r"Effective size is $d^2$; for fixed ρ > 0 it approaches 1/ρ",
 )
 ax.legend()
-fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Line chart of effective panel size against the number of agents run, for three assumed "
+    "correlations. A dashed diagonal marks the independent case where the two are equal. Each "
+    "curve rises steeply for the first few agents and then flattens well below the diagonal, "
+    "each against a ceiling set by its own assumed correlation rather than by the agent count.",
+)
 
 # %% [markdown]
 # Effective size rises steeply for the first few agents and then flattens against a ceiling

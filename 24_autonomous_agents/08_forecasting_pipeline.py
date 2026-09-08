@@ -39,8 +39,8 @@
 # - Read a stage-by-stage probability path and see which stage moved the answer
 # - Record a run in a form a scoring pipeline could later consume
 #
-# **Book Reference**: Chapter 24, Sections 24.7 (complete pipeline) and 24.8
-# (Production: persistence and replay)
+# **Book Reference**: Chapter 24, Sections 24.7 (Multi-agent forecasting systems) and 24.9
+# (Preparing for production)
 #
 # **Prerequisites**: [`04_research_agent`](04_research_agent.ipynb),
 # [`05_aggregation_math`](05_aggregation_math.ipynb),
@@ -83,7 +83,7 @@ from agent_tools import (
 )
 from IPython.display import Markdown, display
 
-from utils.style import COLORS, add_message_title
+from utils.style import COLORS, add_message_title, show_with_alt
 
 # %% [markdown]
 # ## Settings
@@ -742,9 +742,15 @@ add_message_title(
     subtitle="Market price shown first as the agents' starting context, not a stage",
 )
 ax.legend(loc="best")
-fig.tight_layout()
-plt.show()
-plt.show()
+show_with_alt(
+    fig,
+    "Line chart of probability against pipeline stage, one line per question, running from "
+    f"the market price through the {N_AGENTS} research agents to the aggregate, the debate "
+    "midpoint, the supervisor and the final blend. The recession line runs from "
+    f"{results[0].question.current_market_price:.0%} to {results[0].final_probability:.0%} and "
+    f"the rate-hike line from {results[1].question.current_market_price:.0%} to "
+    f"{results[1].final_probability:.0%}.",
+)
 
 # %% [markdown]
 # ## Token use
@@ -839,5 +845,5 @@ display(
 # scoring rules, calibration curves and security controls a pipeline like this needs before
 # anyone acts on it.
 #
-# **Book**: Sections 24.7-24.8 cover the complete pipeline architecture and
-# production deployment considerations.
+# **Book**: Section 24.7 covers the pipeline architecture and section 24.9 the production
+# considerations that follow from it.

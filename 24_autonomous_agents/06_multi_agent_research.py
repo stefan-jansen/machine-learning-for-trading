@@ -74,7 +74,7 @@ from agent_schemas import AgentForecastArtifact
 from agent_tools import create_search_client
 from IPython.display import Markdown, display
 
-from utils.style import COLORS, add_message_title, format_pct_axis
+from utils.style import COLORS, add_message_title, format_pct_axis, show_with_alt
 
 # %% [markdown]
 # ## Settings
@@ -268,8 +268,12 @@ add_message_title(
     subtitle="Three agents, same prompt, tools and temperature; 2026-06-09 capture",
 )
 ax.legend(loc="upper left")
-fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    f"Bar chart of {len(probabilities)} agent forecasts, ranging from {min(probabilities):.0%} "
+    f"to {max(probabilities):.0%}, with a dashed line at the {question.current_market_price:.0%} "
+    "market price that every agent was shown.",
+)
 
 # %% [markdown]
 # ## Reading the Agents, Not the Aggregate
@@ -425,8 +429,14 @@ add_message_title(
     subtitle="Same three forecasts throughout; the mean is the unextremized baseline",
 )
 ax.legend(loc="lower right")
-fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Line chart of the aggregate probability against the assumed pairwise correlation, from "
+    f"independent to nearly identical. The unweighted Neyman aggregate falls from "
+    f"{correlation_df['neyman'][0]:.0%} to {correlation_df['neyman'][-1]:.0%} as the assumed "
+    f"correlation rises, converging on the unextremized mean of {simple_mean:.0%}. The "
+    "confidence-weighted variant tracks it closely.",
+)
 
 # %% [markdown]
 # At the independent end the panel is credited with three observations and the aggregate is
