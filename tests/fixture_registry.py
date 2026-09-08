@@ -501,3 +501,54 @@ def within_panel_target_gap(panel: dict) -> float:
             ),
         )
     return worst
+
+
+def unbacktested_populations(case_dir: Path) -> list[dict]:
+    """Populations in this fixture whose members carry no signal backtest.
+
+    A population scopes what `14_backtest` ranks: with one in force the notebook reads
+    `explorer.best(stage="signal", prediction_hashes=members)`, and with none it reads
+    unscoped. So a fixture that publishes a population and no backtests for its members
+    gives that read nothing, and before public #849 the first thing to touch the empty
+    frame was a division. That is how it arrived: a stage-08 regeneration created two
+    populations over 30 fresh prediction sets while every backtest in the fixture
+    referenced predictions from two weeks earlier, and the next CI run divided by zero
+    (ml4t/agent-workspace#1086).
+
+    Generation cannot avoid it - the model stages declare a population and the backtest
+    stages are numbers 14 and up, which `--through-stage 8` never reaches - so what a
+    generation owes is to say it left the fixture in that state rather than to let the
+    next CI run discover it.
+    """
+    db_path = case_dir / "run_log" / "registry.db"
+    if not db_path.is_file():
+        return []
+    db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        tables = _existing_tables(db)
+        if not {"official_populations", "official_population_members"} <= tables:
+            return []
+        rows = db.execute(
+            "SELECT p.population_hash, p.name, COUNT(m.member_hash) FROM official_populations p "
+            "LEFT JOIN official_population_members m ON m.population_hash = p.population_hash "
+            "GROUP BY p.population_hash, p.name"
+        ).fetchall()
+        unbacked = []
+        for population_hash, name, members in rows:
+            if not members:
+                continue
+            backtested = 0
+            if "backtest_runs" in tables:
+                backtested = db.execute(
+                    "SELECT COUNT(DISTINCT m.member_hash) FROM official_population_members m "
+                    "JOIN backtest_runs b ON b.prediction_hash = m.member_hash "
+                    "WHERE m.population_hash = ? AND b.stage = 'signal'",
+                    (population_hash,),
+                ).fetchone()[0]
+            if not backtested:
+                unbacked.append(
+                    {"name": name, "population_hash": population_hash, "members": members}
+                )
+        return unbacked
+    finally:
+        db.close()

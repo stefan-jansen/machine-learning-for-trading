@@ -45,11 +45,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 try:
-    from tests.fixture_registry import prune_stale_training_runs
+    from tests.fixture_registry import prune_stale_training_runs, unbacktested_populations
     from tests.pm_helpers import get_overrides, invocations_for, run_notebook
     from tests.preset_patches import _patch_presets_for_testing, _trim_label_configs
 except ModuleNotFoundError:
-    from fixture_registry import prune_stale_training_runs
+    from fixture_registry import prune_stale_training_runs, unbacktested_populations
     from pm_helpers import get_overrides, invocations_for, run_notebook
     from preset_patches import _patch_presets_for_testing, _trim_label_configs
 
@@ -281,6 +281,16 @@ def main():
     results = {}
     total_start = time.time()
 
+    # Which populations the fixture already carried, so the summary can name the ones
+    # this run added rather than every one it finds.
+    populations_before = {
+        cs: {
+            population["population_hash"]
+            for population in unbacktested_populations(output_dir / cs)
+        }
+        for cs in case_studies
+    }
+
     for cs in case_studies:
         cs_dir = REPO_ROOT / "case_studies" / cs
         if not cs_dir.exists():
@@ -396,6 +406,39 @@ def main():
 
     total_elapsed = time.time() - total_start
 
+    # A population whose members carry no backtest is what `14_backtest` reads as an
+    # empty ranking, and before public #849 what it read as `ZeroDivisionError`. The
+    # model stages declare the population and the backtest stages are numbers 14 and up,
+    # so `--through-stage 8` cannot avoid leaving one; what it can do is say so, rather
+    # than let the next CI run be the thing that reports it fifteen minutes after the
+    # fixture was committed (ml4t/agent-workspace#1086).
+    # Only the ones this run added. Eight of the nine committed fixtures already ship a
+    # population in that state, so listing all of them on every run would be noise; a
+    # run creating one is the event that landed test-data 4db8572f.
+    unbacked = {}
+    for cs in case_studies:
+        added = [
+            population
+            for population in unbacktested_populations(output_dir / cs)
+            if population["population_hash"] not in populations_before.get(cs, set())
+        ]
+        if added:
+            unbacked[cs] = added
+    if unbacked:
+        print(f"\n{'=' * 60}")
+        print("This run published a population with no backtested member")
+        print(f"{'=' * 60}")
+        print("  `14_backtest` scopes its baseline ranking to the members in force, so it")
+        print("  has nothing to rank against this fixture and refuses. The backtest stages")
+        print("  are numbers 14 and up, which this run did not reach. Either run them into")
+        print("  the fixture, or do not commit these populations.")
+        for cs, populations in sorted(unbacked.items()):
+            for population in populations:
+                print(
+                    f"  {cs}: {population['name']} "
+                    f"({population['members']} member(s), 0 backtested)"
+                )
+
     # Summary
     print(f"\n{'=' * 60}")
     print(f"Summary ({total_elapsed:.0f}s total)")
@@ -457,6 +500,10 @@ def main():
         "total_seconds": round(total_elapsed),
         "size_mb": round(total_bytes / 1e6, 1),
         "size_mb_by_case_study": sizes,
+        "populations_with_no_backtested_member": {
+            cs: [population["name"] for population in populations]
+            for cs, populations in sorted(unbacked.items())
+        },
     }
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
