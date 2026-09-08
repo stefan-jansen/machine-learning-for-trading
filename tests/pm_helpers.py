@@ -1162,6 +1162,93 @@ def _collect_preview_reductions(parameters: dict) -> dict:
     return resolved
 
 
+def _is_canonical_tier_test(node: ast.expr) -> bool:
+    """Is this the `EXECUTION_TIER == "canonical"` comparison itself?"""
+    return (
+        isinstance(node, ast.Compare)
+        and isinstance(node.left, ast.Name)
+        and node.left.id == "EXECUTION_TIER"
+        and len(node.ops) == 1
+        and isinstance(node.ops[0], ast.Eq)
+        and isinstance(node.comparators[0], ast.Constant)
+        and node.comparators[0].value == "canonical"
+    )
+
+
+def _refused_by_guard(test: ast.expr) -> frozenset[str]:
+    """Names a guard refuses, or nothing if the guard is a requirement rather than a refusal.
+
+    A refusal reads `if A or B or C: raise` - every operand a bare name, so the guard fires when
+    any of them is truthy, which is to say when the caller supplied one. A requirement reads
+    `if not X or len(X) != len(set(X)): raise`, and fires when the caller did NOT supply one.
+    They sit side by side in the same canonical branch (`16_backtest.py` has both), and reading
+    the second as a refusal would strip `PREDICTION_SET_NAMES` - a parameter the canonical run
+    needs. Any `not`, comparison or call in an operand marks the guard as the second kind.
+    """
+    operands = (
+        test.values if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or) else [test]
+    )
+    names: set[str] = set()
+    for operand in operands:
+        if not isinstance(operand, ast.Name):
+            return frozenset()
+        names.add(operand.id)
+    return frozenset(names)
+
+
+def canonically_refused_parameters(py_path: Path) -> frozenset[str]:
+    """Parameters this notebook's own canonical branch raises on, read from its source.
+
+    Preview-only-ness is a property of the notebook, not of the name. The `PREVIEW_` prefix
+    covers most of it by convention, but `MAX_SYMBOLS` carries no prefix and is a preview-only
+    reduction for `us_equities_panel` 16 through 19 while being a legitimate canonical parameter
+    elsewhere - so it can be neither stripped globally nor left in. The notebook already answers
+    the question in the only place that can: `if EXECUTION_TIER == "canonical": if ... raise`.
+    This reads that answer instead of restating it in a list here, which is the same reason the
+    prefix replaced the fourteen-name list it grew out of.
+
+    Both guard shapes in the fleet are handled - the nested `if EXECUTION_TIER == "canonical":`
+    with the refusal inside it, and the flattened `if EXECUTION_TIER == "canonical" and (...)`.
+    The result is intersected with what the parameters cell declares, so a local aggregate like
+    `preview_filters` drops out; the `PREVIEW_`-prefixed names behind it are stripped by prefix
+    anyway, and the aggregate is not a parameter anyone can pass.
+    """
+    source = py_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(py_path))
+    cells = _percent_cell_bounds(source)
+    tagged = [cell for cell in cells if PARAMETERS_CELL_MARKER in cell[0]]
+    if not tagged:
+        return frozenset()
+    declared = {
+        name for name, line in _top_level_bindings(tree) if tagged[-1][1] <= line <= tagged[-1][2]
+    }
+
+    refused: set[str] = set()
+
+    def walk(node: ast.AST, in_canonical: bool) -> None:
+        if isinstance(node, ast.If):
+            here, inner = in_canonical, node.test
+            if isinstance(node.test, ast.BoolOp) and isinstance(node.test.op, ast.And):
+                rest = [v for v in node.test.values if not _is_canonical_tier_test(v)]
+                if len(rest) < len(node.test.values):
+                    here = True
+                inner = rest[0] if len(rest) == 1 else None
+            elif _is_canonical_tier_test(node.test):
+                here, inner = True, None
+            if here and inner is not None and any(isinstance(s, ast.Raise) for s in node.body):
+                refused.update(_refused_by_guard(inner))
+            for statement in node.body:
+                walk(statement, here)
+            for statement in node.orelse:
+                walk(statement, in_canonical)
+            return
+        for child in ast.iter_child_nodes(node):
+            walk(child, in_canonical)
+
+    walk(tree, False)
+    return frozenset(refused & declared)
+
+
 def injected_parameters(
     py_path: Path,
     parameters: dict | None,
@@ -1193,27 +1280,30 @@ def injected_parameters(
     ``generate_intermediates.py``'s default ``--through-stage 8``. A higher stage bound, or
     the same guard added to an earlier notebook, reaches it.
 
-    **The prefix narrows the gap; it does not close it.** Preview-only-ness is a property of
-    the notebook, not of the name. ``MAX_SYMBOLS`` carries no prefix and is a preview-only
-    reduction for ``us_equities_panel`` 16 through 19, whose canonical branch refuses it
-    (``16_backtest.py:99``) while ``tests/overrides.yaml`` declares it for all four - so a
-    canonical run of those still fails on its first cell. It cannot be added to the strip
-    either: elsewhere it is a legitimate canonical parameter, which
-    ``test_injected_parameters_keeps_everything_else_on_a_canonical_run`` pins. Deciding this
-    properly means reading which names a notebook's own canonical branch refuses, or marking
-    the entry in the override file; both are design changes that belong with whoever owns the
-    preview contract.
+    **The prefix narrows the gap and the notebook closes it.** Preview-only-ness is a property
+    of the notebook, not of the name. ``MAX_SYMBOLS`` carries no prefix and is a preview-only
+    reduction for ``us_equities_panel`` 16 through 19, whose canonical branch refuses it, while
+    being a legitimate canonical parameter for 57 other entries - which
+    ``test_injected_parameters_keeps_everything_else_on_a_canonical_run`` pins. So it can be
+    neither stripped by name nor left in, and no list here can decide it. Only the notebook can,
+    and it already does: ``canonically_refused_parameters`` reads the refusal out of the
+    notebook's own ``EXECUTION_TIER == "canonical"`` guard. Naming the four here instead would
+    have gone stale the same way the fourteen ``PREVIEW_`` names did.
 
-    What is here covers every ``PREVIEW_``-prefixed name, plus ``DEVICE_SCOPED_NAMES`` - and
-    those only for an entry that declares ``DEVICE``, which is what confines them to the
-    entries where the population name exists to carry the device. ``MAX_SYMBOLS`` stays out
-    for the reason above: it is a legitimate canonical parameter elsewhere.
+    What is here covers every ``PREVIEW_``-prefixed name, whatever the notebook's own guard
+    refuses, and ``DEVICE_SCOPED_NAMES`` - the last only for an entry that declares ``DEVICE``,
+    which is what confines them to the entries where the population name exists to carry the
+    device. The device pair stays separate rather than folding into the guard read: no notebook
+    refuses ``DEVICE`` or ``POPULATION_NAME``, because a canonical run of a CPU-fitted population
+    is wrong for a reason the notebook expresses by refusing to publish, not by raising.
     """
     if research_preview:
         return research_preview_parameters(py_path, parameters, output_dir)
     resolved = dict(parameters or {})
     for name in [key for key in resolved if key.startswith("PREVIEW_")]:
         resolved.pop(name)
+    for name in canonically_refused_parameters(py_path):
+        resolved.pop(name, None)
     if "DEVICE" in resolved:
         for name in DEVICE_SCOPED_NAMES:
             resolved.pop(name, None)

@@ -16,6 +16,7 @@ from tests.pm_helpers import (
     TIER_ON_DEMAND,
     TIER_PER_COMMIT,
     TIER_WEEKLY,
+    canonically_refused_parameters,
     check_kernel_routing,
     collect_chapter_notebooks,
     current_test_tier,
@@ -1589,6 +1590,76 @@ def test_injected_parameters_keeps_everything_else_on_a_canonical_run() -> None:
         )
         == parameters
     )
+
+
+def test_canonical_run_drops_a_parameter_the_notebook_itself_refuses() -> None:
+    """MAX_SYMBOLS carries no PREVIEW_ prefix and is preview-only for these four notebooks.
+
+    Their canonical branch raises on it, so passing it through was a guaranteed failure on the
+    notebook's first cell. It cannot be added to the prefix strip either - the entry above pins
+    it as a legitimate canonical parameter elsewhere - so the only place that can answer is the
+    notebook, and this reads its answer.
+    """
+    for stem in ("16_backtest", "17_portfolio_management", "18_risk_management", "19_costs"):
+        py_path = REPO_ROOT / f"case_studies/us_equities_panel/{stem}.py"
+        assert "MAX_SYMBOLS" in canonically_refused_parameters(py_path), stem
+        resolved = injected_parameters(py_path, {"MAX_SYMBOLS": 5}, None, research_preview=False)
+        # An empty injection is returned as None - papermill is handed nothing rather than an
+        # empty mapping - so the contract here is that the notebook receives no parameter at all.
+        assert not resolved, f"{stem} still receives a parameter it raises on"
+
+
+def test_a_requirement_guard_is_not_read_as_a_refusal() -> None:
+    """`16_backtest` refuses MAX_SYMBOLS and requires PREDICTION_SET_NAMES in the same branch.
+
+    Both are `if ...: raise` inside `if EXECUTION_TIER == "canonical":`. Reading the second as a
+    refusal would strip the names the canonical run needs, so the two shapes have to be told
+    apart: a refusal is a bare disjunction of names, a requirement negates or compares them.
+    """
+    refused = canonically_refused_parameters(
+        REPO_ROOT / "case_studies/us_equities_panel/16_backtest.py"
+    )
+    assert "MAX_SYMBOLS" in refused
+    assert "PREDICTION_SET_NAMES" not in refused
+
+
+def test_the_flattened_and_guard_shape_is_read_too() -> None:
+    """Two shapes express the same refusal and both are in the fleet.
+
+    `cme_futures/13_backtest` nests the refusal inside `if EXECUTION_TIER == "canonical":`;
+    `sp500_options/13_portfolio_management` flattens it into a single `and`. Reading only the
+    nested one would leave the flattened notebooks unprotected.
+    """
+    assert canonically_refused_parameters(
+        REPO_ROOT / "case_studies/sp500_options/13_portfolio_management.py"
+    ) == {"PREVIEW_LABELS", "PREVIEW_MAX_BASELINE_CONFIGS"}
+    assert canonically_refused_parameters(
+        REPO_ROOT / "case_studies/cme_futures/13_backtest.py"
+    ) == {"PREVIEW_LABELS", "PREVIEW_MAX_PREDICTIONS"}
+
+
+def test_no_override_entry_declares_a_parameter_its_notebook_refuses_canonically() -> None:
+    """The fleet-wide statement, so a new entry cannot reintroduce this silently.
+
+    A name in this position does not fail loudly on the preview path - it reduces, correctly -
+    and fails on the canonical path only when a run reaches that notebook. `us_equities_panel`
+    16 through 19 sit above `generate_intermediates.py`'s default `--through-stage 8`, which is
+    why four of them sat here unnoticed.
+    """
+    entries = yaml.safe_load((REPO_ROOT / "tests/overrides.yaml").read_text())
+    leaked = {}
+    for key, entry in entries.items():
+        if not isinstance(entry, dict):
+            continue
+        declared = set(entry.get("parameters") or {})
+        py_path = REPO_ROOT / f"{key}.py"
+        if not declared or not py_path.exists():
+            continue
+        resolved = injected_parameters(py_path, entry["parameters"], None, research_preview=False)
+        refused = canonically_refused_parameters(py_path) & set(resolved or {})
+        if refused:
+            leaked[key] = sorted(refused)
+    assert not leaked, f"canonical injection carries names the notebook raises on: {leaked}"
 
 
 def test_injected_parameters_keeps_preview_reductions_under_the_preview_tier(
