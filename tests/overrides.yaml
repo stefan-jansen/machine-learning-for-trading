@@ -849,18 +849,27 @@
 19_risk_management/04_factor_exposure:
   timeout: 300
 19_risk_management/05_trade_shap_diagnostics:
-  gpu: true
+  # `GPU_DEVICE = "cuda"` at line 80, passed as `device_type` at 222 and asserted at 231.
+  # That needs a LightGBM built with -DUSE_CUDA=1, which the PyPI wheel this repo's lockfile
+  # resolves is not; torch seeing a card says nothing about it. ml4t/agent-workspace#862.
+  gpu: lightgbm_cuda
   timeout: 300
 19_risk_management/06_stress_testing:
   timeout: 300
 19_risk_management/07_drift_detection:
-  gpu: true
+  # Both, and separately: `device_type="cuda"` at line 306 needs the CUDA LightGBM build,
+  # and lines 223-226 read `torch.cuda.get_device_name` directly. It runs only where both
+  # are present.
+  gpu: [torch, lightgbm_cuda]
   timeout: 300
 19_risk_management/08_ml_exit_signals:
-  gpu: true
+  # `LGB_DEVICE = "cuda"` at line 64, passed as `device_type` at 303 and read back at 449.
+  gpu: lightgbm_cuda
   timeout: 300
 19_risk_management/09_deep_hedging:
-  gpu: true
+  # torch alone: it refuses at line 105 unless CUDA is available and calls
+  # `torch.cuda.set_device(0)`. No LightGBM here.
+  gpu: torch
   parameters:
     BATCH_SIZE: 64
     N_EPOCHS: 5

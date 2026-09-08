@@ -1713,3 +1713,81 @@ def test_a_model_mapping_without_a_fold_count_still_gets_one(tmp_path: Path) -> 
         research_preview=True,
     )
     assert resolved["PREVIEW_REDUCTIONS"]["folds"] == [0, 1]
+
+
+# --- gpu_skip_reason -------------------------------------------------------------------------
+#
+# `gpu:` names a capability, not a wish for a card. The two in use are checked differently and a
+# machine can have one without the other: this repo's lockfile resolves the PyPI LightGBM wheel,
+# which is built without `-DUSE_CUDA=1`, so a box with an NVIDIA card satisfies `torch` and not
+# `lightgbm_cuda`. Checking torch for a LightGBM notebook let four Ch19 notebooks run and fail at
+# `fit()` instead of skipping - ml4t/agent-workspace#862.
+
+
+def _capabilities(monkeypatch, *, torch_cuda: bool, lightgbm_cuda: bool) -> None:
+    """Present a machine with the named capabilities, whatever this one has."""
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: torch_cuda)),
+    )
+    # Already replaced by an earlier call in the same test, so the cache may be gone.
+    clear = getattr(pm_helpers._cuda_lightgbm_available, "cache_clear", None)
+    if clear is not None:
+        clear()
+    monkeypatch.setattr(pm_helpers, "_cuda_lightgbm_available", lambda: lightgbm_cuda)
+
+
+def test_no_gpu_declaration_never_skips(monkeypatch) -> None:
+    _capabilities(monkeypatch, torch_cuda=False, lightgbm_cuda=False)
+    assert pm_helpers.gpu_skip_reason({}) is None
+    assert pm_helpers.gpu_skip_reason({"gpu": False}) is None
+
+
+def test_gpu_true_still_means_torch(monkeypatch) -> None:
+    """The spelling that predates capabilities keeps its meaning."""
+    _capabilities(monkeypatch, torch_cuda=True, lightgbm_cuda=False)
+    assert pm_helpers.gpu_skip_reason({"gpu": True}) is None
+    _capabilities(monkeypatch, torch_cuda=False, lightgbm_cuda=True)
+    assert "torch reports no CUDA device" in pm_helpers.gpu_skip_reason({"gpu": True})
+
+
+def test_a_lightgbm_notebook_skips_where_only_torch_has_a_card(monkeypatch) -> None:
+    """The #862 machine: an NVIDIA card, and a LightGBM that cannot use it."""
+    _capabilities(monkeypatch, torch_cuda=True, lightgbm_cuda=False)
+    reason = pm_helpers.gpu_skip_reason({"gpu": "lightgbm_cuda"})
+    assert reason is not None and "no CUDA build" in reason
+
+
+def test_a_torch_notebook_runs_where_only_torch_has_a_card(monkeypatch) -> None:
+    """The same machine must not skip a notebook that only ever asks torch."""
+    _capabilities(monkeypatch, torch_cuda=True, lightgbm_cuda=False)
+    assert pm_helpers.gpu_skip_reason({"gpu": "torch"}) is None
+
+
+def test_a_notebook_naming_both_needs_both(monkeypatch) -> None:
+    _capabilities(monkeypatch, torch_cuda=True, lightgbm_cuda=True)
+    assert pm_helpers.gpu_skip_reason({"gpu": ["torch", "lightgbm_cuda"]}) is None
+    _capabilities(monkeypatch, torch_cuda=True, lightgbm_cuda=False)
+    assert pm_helpers.gpu_skip_reason({"gpu": ["torch", "lightgbm_cuda"]}) is not None
+    _capabilities(monkeypatch, torch_cuda=False, lightgbm_cuda=True)
+    assert pm_helpers.gpu_skip_reason({"gpu": ["torch", "lightgbm_cuda"]}) is not None
+
+
+def test_an_unknown_capability_is_refused_rather_than_ignored(monkeypatch) -> None:
+    """A typo must not read as "no GPU needed" and let the notebook run anywhere."""
+    _capabilities(monkeypatch, torch_cuda=False, lightgbm_cuda=False)
+    with pytest.raises(ValueError, match="cude"):
+        pm_helpers.gpu_skip_reason({"gpu": "cude"})
+
+
+def test_every_declared_capability_in_overrides_is_one_the_guard_knows() -> None:
+    """A `gpu:` value nothing implements would raise at collection, one notebook at a time."""
+    overrides = yaml.safe_load((REPO_ROOT / "tests/overrides.yaml").read_text())
+    for key, entry in overrides.items():
+        declared = (entry or {}).get("gpu")
+        if not declared or declared is True:
+            continue
+        names = [declared] if isinstance(declared, str) else list(declared)
+        unknown = [n for n in names if n not in pm_helpers.GPU_CAPABILITIES]
+        assert not unknown, f"{key} declares gpu: {declared!r}, unknown: {unknown}"
