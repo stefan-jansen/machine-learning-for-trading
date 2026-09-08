@@ -45,9 +45,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 try:
+    from tests.fixture_registry import prune_stale_training_runs
     from tests.pm_helpers import get_overrides, invocations_for, run_notebook
     from tests.preset_patches import _patch_presets_for_testing, _trim_label_configs
 except ModuleNotFoundError:
+    from fixture_registry import prune_stale_training_runs
     from pm_helpers import get_overrides, invocations_for, run_notebook
     from preset_patches import _patch_presets_for_testing, _trim_label_configs
 
@@ -160,6 +162,21 @@ def discover_stages(cs_dir: Path, through_stage: int, skip_dl: bool) -> list[Pat
         stages.append(notebook)
 
     return stages
+
+
+# The pipeline stages: the ones that build the artifacts a training run pins by
+# sha256. Everything after them registers runs fitted on those artifacts. The boundary
+# is read from the stem rather than from the stage number because it is not the same
+# number in every case study - `us_firm_characteristics` has no model-based stage and
+# starts registering at `05_linear`, where the other eight start at `06_linear`.
+PIPELINE_STAGE_STEMS = re.compile(
+    r"\d{2}_(feasibility_analysis|labels|financial_features|model_based_features|evaluation)$"
+)
+
+
+def registers_training_runs(notebook: Path) -> bool:
+    """Whether this stage registers training runs, rather than building their inputs."""
+    return PIPELINE_STAGE_STEMS.match(notebook.stem) is None
 
 
 # Outcomes a stage can end a generation run with. `incomplete` is the one this
@@ -285,6 +302,7 @@ def main():
         print(f"{'=' * 60}")
 
         cs_failed = False
+        pruned = False
         for notebook in stages:
             stage = notebook.stem
 
@@ -292,6 +310,31 @@ def main():
                 print(f"  {stage}: NOT RUN (an earlier stage did not complete)")
                 results[f"{cs}::{stage}"] = NOT_RUN
                 continue
+
+            # The last moment at which the fixture's own artifacts are final and nothing
+            # has been registered against them yet. Stages 01-05 have just rewritten
+            # `features/` and `labels/`, so any training run in the registry pinning an
+            # older vintage describes a population this fixture no longer holds - and the
+            # vintage guard refuses to let the stage about to run join it, which is what
+            # stopped `06_linear` for sp500_options and us_equities_panel on 2026-09-07
+            # (ml4t/agent-workspace#1082).
+            if not pruned and registers_training_runs(notebook):
+                pruned = True
+                summary = prune_stale_training_runs(output_dir / cs)
+                dropped = summary.get("training_runs_pruned", 0)
+                if dropped:
+                    example = summary["example"]
+                    pins = ", ".join(
+                        f"{name}={sha[:12]}" for name, sha in example["absent_pins"].items()
+                    )
+                    rows = ", ".join(
+                        f"{table} {count}" for table, count in sorted(summary["deleted"].items())
+                    )
+                    print(
+                        f"  pruned {dropped} training run(s) fitted on artifacts this fixture "
+                        f"no longer ships (e.g. {example['training_hash'][:12]} pinned {pins})"
+                    )
+                    print(f"    rows removed: {rows}")
 
             rel_path = notebook.relative_to(REPO_ROOT).with_suffix("")
             overrides = get_overrides(str(rel_path))
