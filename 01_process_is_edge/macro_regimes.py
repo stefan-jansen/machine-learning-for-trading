@@ -14,66 +14,75 @@
 # ---
 
 # %% [markdown]
-# # Macro-Based Regime Detection
+# # Macro-based regime detection
 #
 # **Chapter 1 · §1.4 Market Regimes: Change Is the Constant**
 #
 # **Docker image**: `ml4t`
 #
-# ## Purpose
+# `factor_regimes` estimated regimes from what the factors themselves earned. This notebook
+# asks whether the same partition can be recovered from outside the market, using
+# macroeconomic series published by the Federal Reserve Bank of St. Louis through its FRED
+# database: unemployment, the policy rate, the shape of the yield curve and inflation.
 #
-# Demonstrates unsupervised learning for market regime detection using macroeconomic
-# indicators from FRED, paired with S&P 500 volatility and drawdown for validation.
+# The appeal of macro inputs is that they are not returns. A regime estimated from returns
+# is at risk of restating the volatility it was fitted on; one estimated from the labour
+# market and the rate environment is a statement about conditions, which can then be
+# checked against what the equity market did. That check is the second half of this
+# notebook, and it is what separates a regime model that has found something from one that
+# has partitioned the calendar.
 #
-# ## Learning Objectives
+# ## Learning objectives
 #
-# - Cluster monthly macro indicators with GMM, K-Means, and hierarchical methods.
-# - Validate macro clusters against realized equity volatility and drawdown.
-# - Compare a four-indicator core view to an extended FRED panel.
-# - Use PCA preprocessing to filter noise before clustering.
+# By the end of this notebook you will be able to:
 #
-# ## Book Reference
+# - Turn irregularly published economic series into an aligned monthly panel without
+#   letting a later release inform an earlier month.
+# - Explain why a series that trends has to enter a clustering as a rate of change rather
+#   than as a level, and recognise the failure that follows from ignoring it.
+# - Attach economic names to unnamed clusters through a stated rule, and say what the rule
+#   assumes.
+# - Check estimated regimes against realized equity volatility and drawdown, and read the
+#   result including the case where a regime holds too few months to support a claim.
+# - Judge a clustering by whether it recovers recurring conditions rather than by its
+#   separation score, and show why the two can point in opposite directions.
 #
-# Section 1.4 of Chapter 1, "Market Regimes: Change Is the Constant" — macro-regime
-# follow-up to `factor_regimes.py`. Figure 1.6 in the chapter is generated here.
+# ## Book reference
+#
+# Chapter 1, Section 1.4, "Market Regimes: Change Is the Constant". Figure 1.6 in the
+# chapter is the regime-and-volatility panel drawn below.
 #
 # ## Prerequisites
 #
-# - Familiarity with monthly time-series resampling and standardization.
-# - Conceptual exposure to mixture models, K-Means, and dendrograms.
-# - FRED panel and S&P 500 daily series materialized via `data/macro/` and
-#   `data/equities/sp500/` loaders.
+# - `factor_regimes`, which introduces Gaussian mixture models, the silhouette score, and
+#   why a model fitted on the whole sample describes rather than predicts.
+# - The FRED panel under `data/macro/` and the S&P 500 daily series under
+#   `data/equities/sp500/`.
 #
-# ## Structure
+# ## A caveat that applies to every number below
 #
-# 1. **Core Analysis (4 indicators)** — UNRATE, DFF, T10Y2Y, CPIAUCSL → CPI YoY.
-# 2. **Extended Analysis** — full FRED panel (after coverage filtering) for a richer
-#    but noisier view of economic conditions.
-# 3. **Comparison** — silhouette scores across core, extended, and PCA-reduced models.
-#
-# ## Key Insight
-#
-# Macro regimes line up with distinct *volatility* environments more cleanly than they
-# line up with average returns. This makes macro indicators useful for risk management
-# (anticipating volatility shifts) rather than return prediction.
+# FRED serves the latest revision of each series. Unemployment, industrial production and
+# the price indices are all restated after their first publication, sometimes substantially,
+# so the value this notebook reads for a month in 2008 is not the value anyone could see in
+# 2008. That is acceptable here because the labels are descriptive and nothing acts on them.
+# A strategy would have to read `load_macro_initial_release`, which serves the value as it
+# stood at each date, and would also have to wait out the publication lag - the
+# unemployment rate for a month is released in the first days of the next one.
 
 # %% [markdown]
-# ## Imports
+# ## Setup
 
 # %%
-"""Macro-Based Regime Detection — unsupervised regime detection using FRED macro indicators."""
+"""Macro-based regime detection - clustering FRED indicators and validating against the S&P 500."""
 
 from __future__ import annotations
 
-import warnings
-
-warnings.filterwarnings("ignore")
-
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
 import seaborn as sns
+from IPython.display import Markdown, display
+from matplotlib import pyplot as plt
 from matplotlib.gridspec import GridSpec
 from scipy.cluster.hierarchy import cophenet, dendrogram, linkage
 from scipy.spatial.distance import pdist
@@ -83,930 +92,966 @@ from sklearn.metrics import silhouette_score
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler, scale
 
-from data import load_macro, load_sp500_index
+import utils.style as style
+from data import load_macro, load_macro_metadata, load_sp500_index
 from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
 
+COLORS = style.COLORS
+
 # %% tags=["parameters"]
-# Production defaults (Papermill overrides for testing)
+# Production defaults (Papermill overrides these when the test suite runs the notebook)
 SEED = 42
 
 # %% [markdown]
-# ## Configuration
+# ### Settings, and what each one decides
+#
+# `SEED` fixes every estimator's random start, which is what makes the cluster numbering
+# and the figures reproduce.
+#
+# `N_REGIMES` is the number of clusters fitted throughout. Four is taken from the Two Sigma
+# study this notebook follows, which reports four regimes over an eighteen-factor panel. It
+# is a choice, not a result: `factor_regimes` shows how the model-selection criteria are
+# compared when the count is being decided rather than inherited.
+#
+# `PANEL_START` is the first month the panel is allowed to contain. The FRED file begins in
+# 2000, and the series used here are all quoted from that point, so the bound is set two
+# years later for the same reason a rolling statistic drops its warm-up: the year-over-year
+# inflation rate needs twelve prior months before it exists.
+#
+# `MAX_MISSING_SHARE` is how much of a series may be unquoted before it is dropped from the
+# extended panel. `MIN_COPHENETIC` is the level above which a dendrogram is usually taken to
+# summarise its distance matrix faithfully; it is a convention, quoted here so the number
+# the notebook computes has something to be read against.
 
 # %%
+N_REGIMES = 4
+PANEL_START = pl.datetime(2002, 1, 1)
+MAX_MISSING_SHARE = 0.5
+MIN_COPHENETIC = 0.7
+MONTHS_PER_YEAR = 12
+ROLLING_VOL_MONTHS = 12
+DATE_COL = "timestamp"
+
 OUTPUT_DIR = get_output_dir(1, "macro_regimes")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 set_global_seeds(SEED)
 
-DATE_COL = "timestamp"
-
 # %% [markdown]
-# ## Helper Function
+# ## The FRED panel
 #
-# Reusable function for regime visualization. Both GMM and K-Means results
-# use the same heatmap format for easy comparison.
-
-
-# %%
-def plot_regime_heatmap(
-    assignments: np.ndarray,
-    dates: pd.DatetimeIndex,
-    title: str,
-    n_regimes: int = 4,
-    is_probability: bool = True,
-    figsize: tuple = (14, 4),
-) -> None:
-    """
-    Plot regime assignments as a heatmap.
-
-    Parameters
-    ----------
-    assignments : np.ndarray
-        Either probability matrix (n_samples, n_regimes) for GMM
-        or hard labels (n_samples,) for K-Means
-    dates : pd.DatetimeIndex
-        Dates corresponding to each sample
-    title : str
-        Plot title
-    n_regimes : int
-        Number of regimes
-    is_probability : bool
-        True if assignments are probabilities, False for hard labels
-    figsize : tuple
-        Figure size
-    """
-    fig, ax = plt.subplots(figsize=figsize, layout="tight")
-
-    # Convert hard labels to one-hot if needed
-    if not is_probability:
-        one_hot = np.zeros((len(assignments), n_regimes))
-        one_hot[np.arange(len(assignments)), assignments] = 1
-        data = one_hot
-    else:
-        data = assignments
-
-    im = ax.imshow(data.T, aspect="auto", cmap="Blues", vmin=0, vmax=1)
-
-    # X-axis: years
-    years = [pd.Timestamp(ts).year for ts in dates]
-    year_ticks = [j for j, y in enumerate(years) if j == 0 or years[j - 1] != y]
-    year_labels = [str(years[j]) for j in year_ticks]
-    ax.set_xticks(year_ticks[::2])
-    ax.set_xticklabels(year_labels[::2], fontsize=9)
-
-    # Y-axis: regimes
-    ax.set_yticks(range(n_regimes))
-    ax.set_yticklabels([f"Regime {i + 1}" for i in range(n_regimes)])
-    ax.set_ylabel("Regime")
-    ax.set_xlabel("Year")
-    ax.set_title(title, fontsize=12)
-
-    cbar = plt.colorbar(im, ax=ax, shrink=0.8)
-    cbar.set_label("Probability" if is_probability else "Assignment")
-    plt.show()
-
-
-# %% [markdown]
-# ---
-#
-# # Load FRED Macro Data
-#
-# We load all available FRED macro indicators once, then select subsets for analysis.
-# The dataset includes ~17 series after filtering for data quality.
-
-# %% [markdown]
-# ## Load Full Dataset
+# The loader returns one wide frame with a daily date index and one column per series.
+# Series that are not published daily carry their most recent value forward, so the file has
+# no gaps to interpolate and the frequency a series was actually observed at has to be read
+# from its metadata rather than from the column.
 
 # %%
 macro_raw = load_macro()
+if macro_raw[DATE_COL].dtype == pl.Date:
+    macro_raw = macro_raw.with_columns(pl.col(DATE_COL).cast(pl.Datetime))
 
-# group_by_dynamic requires Datetime, not Date
-if macro_raw["timestamp"].dtype == pl.Date:
-    macro_raw = macro_raw.with_columns(pl.col("timestamp").cast(pl.Datetime))
-
-print(f"Loaded FRED macro data: {macro_raw.shape}")
-print(f"Date range: {macro_raw['timestamp'].min()} to {macro_raw['timestamp'].max()}")
-print(f"Available series: {[c for c in macro_raw.columns if c != 'timestamp']}")
+print(f"FRED panel: {macro_raw.height} rows, {macro_raw.width - 1} series")
+print(f"Covering {macro_raw[DATE_COL].min():%Y-%m-%d} to {macro_raw[DATE_COL].max():%Y-%m-%d}")
 
 # %% [markdown]
-# ## Available Indicators
+# ### What the panel holds
 #
-# | Category | Series | Description |
-# |----------|--------|-------------|
-# | **Labor** | UNRATE | Unemployment rate (%) |
-# | **Interest Rates** | DFF | Federal Funds effective rate (%) |
-# | | T10Y2Y | 10Y-2Y Treasury spread (yield curve) |
-# | | T10YIE | 10Y breakeven inflation |
-# | **Prices** | CPIAUCSL | Consumer Price Index |
-# | | CPILFESL | Core CPI (ex food & energy) |
-# | **Volatility** | VIXCLS | VIX volatility index |
-# | **Credit** | BAMLHE00EHYIEY | High yield spread |
-# | **Housing** | CSUSHPISA | Case-Shiller home price index |
-# | **Money** | M2SL | M2 money supply |
-#
-# For the **Core Analysis**, we use only 4 fundamental macro indicators.
-
-# %% [markdown]
-# ---
-#
-# # Core Analysis: 4 Macro Indicators
-#
-# We use four indicators that reflect real economic conditions:
-#
-# - **UNRATE**: Unemployment rate - labor market health
-# - **DFF**: Federal Funds rate - monetary policy stance
-# - **T10Y2Y**: Yield curve slope - recession signal
-# - **CPIAUCSL → cpi_yoy**: CPI year-over-year inflation rate (not the level, which trends upward)
-
-# %% [markdown]
-# ## Select Core Indicators
+# The metadata companion says what each column is, how often the source publishes it, and
+# whether it is an observed series or one this repository derives from others. Both facts
+# matter downstream: a quarterly series entering a monthly clustering repeats each value
+# three times, and a derived column can duplicate a series that is already in the panel
+# under its own name.
 
 # %%
-# Core 4 indicators (case-insensitive matching)
-CORE_INDICATORS = ["unrate", "dff", "t10y2y", "cpiaucsl"]
-
-macro_columns = macro_raw.columns
-core_cols = []
-col_name_map = {}
-
-for indicator in CORE_INDICATORS:
-    for col in macro_columns:
-        if col.lower() == indicator:
-            core_cols.append(col)
-            col_name_map[col] = indicator
-            break
-
-print(f"Core indicators selected: {len(core_cols)}/{len(CORE_INDICATORS)}")
-for col in core_cols:
-    print(f"  {col} -> {col_name_map[col]}")
+metadata = load_macro_metadata().to_pandas().set_index("series")
+inventory = metadata.loc[
+    [c for c in macro_raw.columns if c != DATE_COL], ["description", "native_frequency", "formula"]
+].rename(
+    columns={
+        "description": "Series",
+        "native_frequency": "Published",
+        "formula": "Derived as",
+    }
+)
+inventory["Derived as"] = inventory["Derived as"].fillna("-")
+inventory.index.name = "Column"
+inventory
 
 # %% [markdown]
-# ## Resample to Monthly
+# ## Four indicators that describe conditions
+#
+# The core model uses four series, each standing for one thing a reader can name:
+#
+# - **UNRATE**, the unemployment rate, for the state of the labour market.
+# - **DFF**, the effective federal funds rate, for the stance of monetary policy.
+# - **T10Y2Y**, the ten-year Treasury yield minus the two-year, for the shape of the yield
+#   curve. A negative value means short-dated debt yields more than long-dated debt, an
+#   inversion that has preceded most post-war US recessions.
+# - **CPIAUCSL**, the consumer price index, for inflation - entered as a rate of change,
+#   for the reason given below.
+#
+# Four is few enough that every cluster can be described in a sentence, which is the point
+# of a regime label. The extended panel later in the notebook is the counter-experiment.
+
+# %%
+CORE_SERIES = ["unrate", "dff", "t10y2y", "cpiaucsl"]
+
+# %% [markdown]
+# ### From daily rows to a monthly panel
+#
+# `group_by_dynamic` cuts the daily frame into calendar months and `last()` takes the final
+# observation inside each. Labelling each window by its right edge is what keeps the panel
+# honest: the window covering January is stamped 1 February, so the row carries only
+# observations from January and nothing dated later reaches it.
 
 # %%
 macro_monthly = (
-    macro_raw.select([DATE_COL] + core_cols)
+    macro_raw.select([DATE_COL, *CORE_SERIES])
     .sort(DATE_COL)
     .group_by_dynamic(DATE_COL, every="1mo", label="right")
-    .agg([pl.col(c).last() for c in core_cols])
-    # Forward-fill carries last observation through release lags; the small
-    # backward-fill catches any leading nulls in early months. The latter
-    # introduces a one-period look-ahead at the panel boundary — acceptable
-    # for a regime-detection demo, not for a backtested strategy.
-    .fill_null(strategy="forward")
-    .fill_null(strategy="backward")
-    .drop_nulls(subset=core_cols)
+    .agg([pl.col(c).last() for c in CORE_SERIES])
+    .drop_nulls(subset=CORE_SERIES)
+    .filter(pl.col(DATE_COL) >= PANEL_START)
 )
 
-# Filter to 2002+ where most FRED series have good coverage
-if macro_monthly.height > 0:
-    min_date = macro_monthly[DATE_COL].min()
-    if min_date is not None and str(min_date) < "2002-01-01":
-        macro_monthly = macro_monthly.filter(pl.col(DATE_COL) >= pl.datetime(2002, 1, 1))
-
-print(f"Monthly data: {macro_monthly.height} months")
-if macro_monthly.height > 0:
-    print(f"Date range: {macro_monthly[DATE_COL].min()} to {macro_monthly[DATE_COL].max()}")
+print(f"Monthly rows: {macro_monthly.height}")
+print(f"Covering {macro_monthly[DATE_COL].min():%Y-%m} to {macro_monthly[DATE_COL].max():%Y-%m}")
 
 # %% [markdown]
-# ## Standardize for Clustering
+# ### Why the price index enters as a rate, not a level
+#
+# The consumer price index rises almost every month of the sample. Clustering on the level
+# would put every early month in one cluster and every late month in another, because that
+# is the largest source of variance in the column, and the resulting partition would be a
+# statement about the calendar rather than about inflation. The year-over-year percentage
+# change removes the trend and leaves the quantity a reader means by inflation: how much
+# prices rose over the past twelve months. Taking it costs the first twelve months of the
+# panel, which is why the panel starts a year after `PANEL_START`.
+#
+# The other three series are already rates and need no such treatment. All four are then
+# standardized, so that unemployment measured in percentage points and the yield spread
+# measured in the same unit but with a quarter of the spread contribute comparably to the
+# distances the clustering works on.
 
 # %%
-if macro_monthly.height > 0:
-    macro_df = macro_monthly.select(core_cols).to_pandas()
-    macro_df.columns = [col_name_map.get(c, c) for c in macro_df.columns]
-    macro_df.index = macro_monthly[DATE_COL].to_pandas()
+macro_df = macro_monthly.select(CORE_SERIES).to_pandas()
+macro_df.index = pd.DatetimeIndex(macro_monthly[DATE_COL].to_pandas())
+macro_df["cpi_yoy"] = macro_df["cpiaucsl"].pct_change(MONTHS_PER_YEAR) * 100
+macro_df = macro_df.drop(columns=["cpiaucsl"]).dropna()
 
-    # Convert CPI level to YoY percentage change — the level is non-stationary
-    # and would make the clustering capture "early vs recent" rather than
-    # "inflationary vs non-inflationary"
-    macro_df["cpi_yoy"] = macro_df["cpiaucsl"].pct_change(12) * 100
-    macro_df = macro_df.drop(columns=["cpiaucsl"]).dropna()
+macro_scaled = StandardScaler().fit_transform(macro_df)
 
-    macro_scaled = StandardScaler().fit_transform(macro_df)
-
-    print("Core Indicator Statistics (raw):")
-    print(macro_df.describe().round(2))
-else:
-    macro_df = pd.DataFrame()
-    macro_scaled = np.array([])
+PANEL_FIRST_YEAR = macro_df.index.min().year
+PANEL_LAST_YEAR = macro_df.index.max().year
+print(f"Clustering panel: {len(macro_df)} months, {PANEL_FIRST_YEAR} to {PANEL_LAST_YEAR}")
 
 # %% [markdown]
-# ## Fit GMM with 4 Regimes
+# ### The four series before anything is fitted
+#
+# The table reports each series in its own units over the clustering panel. Read the spread
+# between the quartiles against the range: the policy rate spans the whole distance from the
+# zero bound to above five percent, and the unemployment rate is tight around its median
+# with one extreme excursion. Those shapes are what the mixture is about to partition.
 
 # %%
-if len(macro_df) > 0:
-    n_macro_regimes = 4
-    gmm_macro = GaussianMixture(
-        n_components=n_macro_regimes,
-        covariance_type="full",
-        random_state=SEED,
-        n_init=10,
-        reg_covar=1e-6,
-    )
-    gmm_macro.fit(macro_scaled)
-    macro_labels = gmm_macro.predict(macro_scaled)
-    macro_probs = gmm_macro.predict_proba(macro_scaled)
-
-    macro_silhouette = silhouette_score(macro_scaled, macro_labels)
-    print(f"Macro regime silhouette score (n={n_macro_regimes}): {macro_silhouette:.3f}")
-else:
-    macro_labels = np.array([])
-    macro_probs = np.array([])
+UNITS = {
+    "unrate": "Unemployment rate (%)",
+    "dff": "Fed funds rate (%)",
+    "t10y2y": "10Y minus 2Y Treasury (percentage points)",
+    "cpi_yoy": "CPI, change over 12 months (%)",
+}
+macro_df.rename(columns=UNITS).describe().T.style.format("{:.2f}")
 
 # %% [markdown]
-# We use 4 regimes to match the Two Sigma approach. The silhouette score measures
-# cluster separation — higher is better, with values above 0.25 indicating
-# reasonable structure. Unlike factor_regimes, we skip BIC/AIC model selection here
-# because the goal is interpretability (matching known economic phases), not
-# statistical optimality.
-
-# %% [markdown]
-# ## Regime Characteristics
+# ## Fit the mixture
+#
+# The same estimator as `factor_regimes`: a full-covariance Gaussian mixture, restarted ten
+# times from different initializations, keeping the fit with the highest likelihood.
 
 # %%
-if len(macro_df) > 0:
-    regime_chars = macro_df.copy()
-    regime_chars["regime"] = macro_labels
-    regime_means = regime_chars.groupby("regime").mean()
+gmm_core = GaussianMixture(
+    n_components=N_REGIMES,
+    covariance_type="full",
+    random_state=SEED,
+    n_init=10,
+    reg_covar=1e-6,
+)
+gmm_core.fit(macro_scaled)
+core_labels = gmm_core.predict(macro_scaled)
+core_probabilities = gmm_core.predict_proba(macro_scaled)
+core_silhouette = float(silhouette_score(macro_scaled, core_labels))
 
-    print("Regime Characteristics (mean values):")
-    print(regime_means.round(2))
-else:
-    regime_means = pd.DataFrame()
+print(f"Core model silhouette: {core_silhouette:.3f}")
 
 # %% [markdown]
-# ## Assign Interpretive Labels
+# ### What the clusters contain
+#
+# The mixture returns numbers. The table below is what those numbers mean: the average of
+# each indicator over the months assigned to each cluster, in the original units.
+
+# %%
+cluster_means = macro_df.groupby(core_labels).mean()
+cluster_means.index.name = "Cluster"
+cluster_means.rename(columns=UNITS).style.format("{:.2f}")
+
+# %% [markdown]
+# ### Naming the clusters
+#
+# A cluster number is not a regime name, and the names have to come from somewhere the
+# model cannot supply. The rule below reads each cluster's average indicators and applies
+# the first description that fits, in a fixed order. Both the ordering and the thresholds
+# are judgements about the post-2002 US economy, chosen so that each name means what a
+# reader expects: high unemployment is a crisis whatever the rate environment; high
+# unemployment with the policy rate at the floor is the aftermath rather than the crisis
+# itself; a high policy rate with a flat curve is a tightening cycle.
+#
+# The rule is stated in one place so that it can be argued with. A different reader would
+# set different thresholds and get different names over the same partition, and that is the
+# honest situation: the clustering is estimated, the naming is asserted.
 
 
 # %%
-def create_regime_labels(chars: pd.DataFrame) -> dict[int, str]:
-    """Create short, descriptive labels based on economic characteristics.
-
-    Uses a priority cascade on cluster-mean values. Thresholds are approximate
-    and tuned for the 2002-2025 US macro environment.
-    """
-    labels = {}
-    for regime in chars.index:
-        c = chars.loc[regime]
-        if c["unrate"] > 10:
-            labels[regime] = "Crisis"
-        elif c["unrate"] > 6 and c["dff"] < 0.5:
-            labels[regime] = "Recovery"
-        elif c["dff"] > 3 and c["t10y2y"] < 0.5:
-            labels[regime] = "Tightening"
-        elif c["cpi_yoy"] > 4:
-            labels[regime] = "Inflation"
-        elif c["unrate"] < 5 and c["dff"] < 2:
-            labels[regime] = "Expansion"
+def name_clusters(means: pd.DataFrame) -> dict[int, str]:
+    """Attach an economic description to each cluster from its average indicators."""
+    names: dict[int, str] = {}
+    for cluster in means.index:
+        row = means.loc[cluster]
+        if row["unrate"] > 10:
+            names[cluster] = "Crisis"
+        elif row["unrate"] > 6 and row["dff"] < 0.5:
+            names[cluster] = "Recovery"
+        elif row["dff"] > 3 and row["t10y2y"] < 0.5:
+            names[cluster] = "Tightening"
+        elif row["cpi_yoy"] > 4:
+            names[cluster] = "Inflation"
+        elif row["unrate"] < 5 and row["dff"] < 2:
+            names[cluster] = "Expansion"
         else:
-            labels[regime] = "Transition"
-
-    # Ensure unique labels
-    seen = {}
-    for r, label in list(labels.items()):
-        if label in seen:
-            if chars.loc[r, "unrate"] > chars.loc[seen[label], "unrate"]:
-                labels[r] = f"{label} (High Unemp.)"
-            else:
-                labels[seen[label]] = f"{label} (High Unemp.)"
-        seen[label] = r
-    return labels
+            names[cluster] = "Transition"
+    return names
 
 
 # %%
-if len(regime_means) > 0:
-    regime_labels_map = create_regime_labels(regime_means)
-    print("Assigned Regime Labels:")
-    for regime, label in sorted(regime_labels_map.items()):
-        print(f"  Cluster {regime}: {label}")
-else:
-    regime_labels_map = {}
+cluster_names = name_clusters(cluster_means)
+if len(set(cluster_names.values())) != len(cluster_names):
+    raise ValueError(f"Two clusters received the same name: {cluster_names}")
+
+regime_name = pd.Series(
+    [cluster_names[label] for label in core_labels], index=macro_df.index, name="regime"
+)
+ordered_names = [cluster_names[cluster] for cluster in cluster_means.index]
+pd.DataFrame(
+    {"Name": ordered_names, "Months": regime_name.value_counts()[ordered_names].to_numpy()},
+    index=cluster_means.index,
+)
 
 # %% [markdown]
-# ## Macro Regimes and Market Volatility
+# ## Do the regimes correspond to anything the market did?
 #
-# **Key insight**: Macro regimes coincide with different VOLATILITY environments,
-# even when return patterns are less clear.
+# The clustering has seen no market data at all. If the four groups are picking up real
+# conditions rather than an arbitrary carve-up of a four-dimensional cloud, then equity
+# returns should behave differently inside them, and the difference should be in the
+# direction economic reasoning predicts.
 #
-# **Implication**: Macro regime indicators are useful for RISK MANAGEMENT
-# (anticipating volatility shifts) rather than RETURN PREDICTION.
-
-# %% [markdown]
-# ### Load S&P 500 for Validation
+# The S&P 500 daily series is resampled to month-end closes and aligned to the macro panel.
+# The macro rows are stamped at the right edge of the month they summarise, so the nearest
+# month-end close within five days is the close of the month whose data the row carries.
 
 # %%
-sp500_raw = load_sp500_index().to_pandas()
-sp500_raw["timestamp"] = pd.to_datetime(sp500_raw["timestamp"])
-sp500_raw = sp500_raw.set_index("timestamp")
+sp500 = load_sp500_index().to_pandas()
+sp500[DATE_COL] = pd.to_datetime(sp500[DATE_COL])
+sp500 = sp500.set_index(DATE_COL)
 
-sp500_monthly = sp500_raw["close"].resample("ME").last().to_frame()
+sp500_monthly = sp500["close"].resample("ME").last().to_frame()
 sp500_monthly["returns"] = sp500_monthly["close"].pct_change()
-sp500_df = sp500_monthly
 
-print(
-    f"Loaded S&P 500 for validation: {len(sp500_df)} months, "
-    f"{sp500_df.index.min().date()} to {sp500_df.index.max().date()}"
+aligned = sp500_monthly.reindex(macro_df.index, method="nearest", tolerance=pd.Timedelta("5D"))
+if aligned["close"].isna().any():
+    raise ValueError("A macro month found no S&P 500 close within five days")
+
+print(f"Aligned {len(aligned)} months of S&P 500 closes to the macro panel")
+
+# %% [markdown]
+# ### Two statistics per regime, and what each one is
+#
+# **Annualized volatility** is the standard deviation of the monthly returns of the months
+# assigned to a regime, multiplied by the square root of twelve. It describes the months in
+# that regime and nothing else.
+#
+# **Maximum drawdown** is taken differently, and the difference matters. The running peak is
+# computed over the whole index, in calendar order, and each month's decline from that peak
+# is measured; the number reported for a regime is the deepest such decline observed in one
+# of its months. It is therefore the worst point of the index reached while conditions were
+# in that regime, not the drawdown of a portfolio held only during it. A regime that occupies
+# few months can miss a trough that fell just outside it, and one does below.
+
+# %%
+aligned["regime"] = regime_name.to_numpy()
+aligned["drawdown"] = aligned["close"] / aligned["close"].cummax() - 1
+
+regime_stats = aligned.groupby("regime").agg(
+    months=("returns", "count"),
+    monthly_std=("returns", "std"),
+    worst_drawdown=("drawdown", "min"),
+)
+regime_stats["annual_vol"] = regime_stats["monthly_std"] * np.sqrt(MONTHS_PER_YEAR) * 100
+regime_stats["max_dd_pct"] = -regime_stats["worst_drawdown"] * 100
+regime_stats = regime_stats.sort_values("annual_vol")
+regime_order = regime_stats.index.tolist()
+
+regime_stats[["months", "annual_vol", "max_dd_pct"]].rename(
+    columns={
+        "months": "Months",
+        "annual_vol": "Annualized volatility (%)",
+        "max_dd_pct": "Deepest index drawdown reached (%)",
+    }
+).style.format(
+    {"Annualized volatility (%)": "{:.1f}", "Deepest index drawdown reached (%)": "{:.1f}"}
 )
 
 # %% [markdown]
-# ### Compute Regime Statistics
-
-# %%
-if len(macro_df) > 0 and sp500_df is not None:
-    events = {2008: "GFC", 2020: "COVID", 2022: "Inflation"}
-
-    sp500_aligned = sp500_df.reindex(macro_df.index, method="nearest", tolerance=pd.Timedelta("5D"))
-    sp500_aligned["regime"] = macro_labels
-    sp500_aligned["regime_label"] = [regime_labels_map[r] for r in macro_labels]
-    sp500_aligned["peak"] = sp500_aligned["close"].cummax()
-    sp500_aligned["drawdown"] = (sp500_aligned["close"] - sp500_aligned["peak"]) / sp500_aligned[
-        "peak"
-    ]
-    sp500_aligned["volatility"] = sp500_aligned["returns"].rolling(12).std() * np.sqrt(12)
-
-    regime_stats_fig = sp500_aligned.groupby("regime_label").agg(
-        {"returns": ["mean", "std", "count"], "drawdown": "min", "volatility": "mean"}
-    )
-    regime_stats_fig.columns = ["mean_ret", "std_ret", "months", "max_dd", "avg_vol"]
-    regime_stats_fig["annual_vol"] = regime_stats_fig["std_ret"] * np.sqrt(12) * 100
-    regime_stats_fig["max_dd_pct"] = -regime_stats_fig["max_dd"] * 100
-
-    regime_stats_fig = regime_stats_fig.sort_values("annual_vol", ascending=True)
-    regime_order = regime_stats_fig.index.tolist()
-    n_regimes_fig = len(regime_order)
-
-    print("Regime Statistics (sorted by volatility):")
-    print(regime_stats_fig[["months", "annual_vol", "max_dd_pct"]].round(1))
-
-# %% [markdown]
-# ### Regime Timeline with Market Validation
-
-
-# %%
-def plot_regime_timeline_validation():
-    """Plot regime swim lanes with volatility and drawdown validation bars."""
-    if len(macro_df) > 0 and sp500_df is not None:
-        years = [pd.Timestamp(ts).year for ts in macro_df.index]
-        n_months = len(macro_df)
-
-        year_ticks = []
-        year_labels_fig = []
-        for j, year in enumerate(years):
-            if j == 0 or years[j - 1] != year:
-                if year % 4 == 0:
-                    year_ticks.append(j)
-                    year_labels_fig.append(str(year))
-
-        fig = plt.figure(figsize=(14, 6))
-        gs = GridSpec(
-            n_regimes_fig, 4, figure=fig, width_ratios=[3.5, 1, 1, 0.05], wspace=0.12, hspace=0.08
-        )
-
-        swimlane_axes = [fig.add_subplot(gs[i, 0]) for i in range(n_regimes_fig)]
-        vol_axes = [fig.add_subplot(gs[i, 1]) for i in range(n_regimes_fig)]
-        dd_axes = [fig.add_subplot(gs[i, 2]) for i in range(n_regimes_fig)]
-
-        # Grayscale-friendly palette (distinct in B&W print)
-        # Ordered from light to dark to match volatility ordering
-        REGIME_COLORS = ["#e0e0e0", "#a0a0a0", "#606060", "#202020"]
-        colors = REGIME_COLORS[:n_regimes_fig]
-
-        for i, regime_label in enumerate(regime_order):
-            raw_regime = [r for r, lbl in regime_labels_map.items() if lbl == regime_label][0]
-            mask = macro_labels == raw_regime
-            stats = regime_stats_fig.loc[regime_label]
-            color = colors[i]
-
-            ax_swim = swimlane_axes[i]
-            for j in range(n_months - 1):
-                if mask[j]:
-                    ax_swim.axvspan(j, j + 1, color=color, alpha=0.85)
-
-            ax_swim.set_xlim(0, n_months)
-            ax_swim.set_ylim(0, 1)
-            ax_swim.set_yticks([])
-            ax_swim.set_ylabel(regime_label, fontsize=9, rotation=0, ha="right", va="center")
-
-            if i < n_regimes_fig - 1:
-                ax_swim.set_xticks([])
-            else:
-                ax_swim.set_xticks(year_ticks)
-                ax_swim.set_xticklabels(year_labels_fig, fontsize=8)
-                ax_swim.set_xlabel("Year", fontsize=9)
-
-            for event_year, event_label in events.items():
-                try:
-                    idx = next(j for j, y in enumerate(years) if y == event_year)
-                    ax_swim.axvline(x=idx, color="black", linestyle="-", alpha=0.3, linewidth=0.8)
-                    if i == 0:
-                        ax_swim.annotate(
-                            event_label,
-                            xy=(idx, 1.25),
-                            xycoords=("data", "axes fraction"),
-                            ha="center",
-                            fontsize=7,
-                            color="black",
-                            fontweight="bold",
-                        )
-                except StopIteration:
-                    pass
-
-            ax_vol = vol_axes[i]
-            vol_val = stats["annual_vol"]
-            ax_vol.barh([0], [vol_val], color=color, height=0.6, edgecolor="black", linewidth=0.5)
-            ax_vol.set_xlim(0, 22)
-            ax_vol.set_ylim(-0.5, 0.5)
-            ax_vol.set_yticks([])
-            ax_vol.text(
-                vol_val + 0.3,
-                0,
-                f"{vol_val:.0f}%",
-                ha="left",
-                va="center",
-                fontsize=9,
-                fontweight="bold",
-            )
-
-            if i == 0:
-                ax_vol.set_title("Volatility\n(ann. %)", fontsize=9, fontweight="bold")
-            if i < n_regimes_fig - 1:
-                ax_vol.set_xticks([])
-            else:
-                ax_vol.set_xticks([0, 10, 20])
-                ax_vol.tick_params(labelsize=7)
-
-            ax_dd = dd_axes[i]
-            dd_val = stats["max_dd_pct"]
-            ax_dd.barh([0], [dd_val], color=color, height=0.6, edgecolor="black", linewidth=0.5)
-            ax_dd.set_xlim(0, 60)
-            ax_dd.set_ylim(-0.5, 0.5)
-            ax_dd.set_yticks([])
-            ax_dd.text(
-                dd_val + 1,
-                0,
-                f"{dd_val:.0f}%",
-                ha="left",
-                va="center",
-                fontsize=9,
-                fontweight="bold",
-            )
-
-            if i == 0:
-                ax_dd.set_title("Max\nDrawdown", fontsize=9, fontweight="bold")
-            if i < n_regimes_fig - 1:
-                ax_dd.set_xticks([])
-            else:
-                ax_dd.set_xticks([0, 20, 40, 60])
-                ax_dd.tick_params(labelsize=7)
-
-        start_year = macro_df.index.min().year
-        end_year = macro_df.index.max().year
-        fig.suptitle(
-            f"Macro Regimes and Market Volatility ({start_year}-{end_year})",
-            fontsize=11,
-            fontweight="bold",
-            y=0.98,
-        )
-
-        fig.text(
-            0.5,
-            0.02,
-            "Regimes from: Unemployment, Fed Funds Rate, Yield Curve (10Y-2Y), CPI  |  Sorted by volatility",
-            ha="center",
-            fontsize=8,
-            style="italic",
-            color="#505050",
-        )
-
-        plt.show()
-
-
-plot_regime_timeline_validation()
-
-# %% [markdown]
-# ### Persist Figure 1.6 inputs
+# ### The regime panel
 #
-# The publication-quality version of Figure 1.6 is rendered by
-# `book/01_process_is_edge/figures/scripts/generate_figure_1_6_macro_regimes_volatility.py`.
-# That script reads the arrays persisted below so the book build does not
-# re-fit the clustering pipeline.
+# One row per regime, ordered by the volatility of the months it holds. The left panel shows
+# when each regime was in force, with three dated episodes marked; the two right panels are
+# the statistics above, so the ordering of the bars can be read against the pattern of the
+# bands. This is the panel that appears as Figure 1.6.
 
 # %%
-if len(macro_df) > 0 and sp500_df is not None:
-    ARTIFACT_DIR = OUTPUT_DIR / "figure_1_6"
-    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
-    annual_vol_by_regime = regime_stats_fig.loc[regime_order, "annual_vol"].to_numpy(dtype=float)
-    max_dd_by_regime = regime_stats_fig.loc[regime_order, "max_dd_pct"].to_numpy(dtype=float)
-    np.savez(
-        ARTIFACT_DIR / "inputs.npz",
-        dates=macro_df.index.astype("datetime64[ns]").astype("int64"),
-        macro_labels=np.asarray(macro_labels, dtype=np.int64),
-        regime_order=np.asarray(regime_order, dtype=object),
-        raw_regime_for_order=np.asarray(
-            [
-                next(r for r, lbl in regime_labels_map.items() if lbl == label)
-                for label in regime_order
-            ],
-            dtype=np.int64,
-        ),
-        annual_vol=annual_vol_by_regime,
-        max_dd_pct=max_dd_by_regime,
-        event_years=np.asarray(list(events.keys()), dtype=np.int64),
-        event_labels=np.asarray(list(events.values()), dtype=object),
-        start_year=np.int64(macro_df.index.min().year),
-        end_year=np.int64(macro_df.index.max().year),
-    )
+EVENTS = {2008: "Global financial crisis", 2020: "COVID-19", 2022: "Inflation"}
+REGIME_SHADES = [COLORS["recede"], COLORS["copper"], COLORS["amber"], COLORS["blue"]]
 
-# %% [markdown]
-# ### Key Insight Summary
 
 # %%
-insight_table = (
-    regime_stats_fig.loc[regime_order, ["months", "annual_vol", "max_dd_pct"]]
-    .rename(
-        columns={
-            "months": "Months",
-            "annual_vol": "Annual vol (%)",
-            "max_dd_pct": "Max drawdown (%)",
-        }
-    )
-    .round(1)
+def year_ticks(dates: pd.DatetimeIndex, every: int) -> tuple[list[int], list[str]]:
+    """Positions and labels for the first month of every *every*-th year."""
+    years = dates.year.tolist()
+    ticks = [j for j, y in enumerate(years) if y % every == 0 and (j == 0 or years[j - 1] != y)]
+    return ticks, [str(years[j]) for j in ticks]
+
+
+# %%
+def draw_regime_row(ax, occupied: np.ndarray, colour: str, label: str) -> None:
+    """Shade the months a regime was in force across one full-width row."""
+    for j in np.flatnonzero(occupied):
+        ax.axvspan(j, j + 1, color=colour)
+    ax.set_xlim(0, len(occupied))
+    ax.set_ylim(0, 1)
+    ax.set_yticks([])
+    ax.set_ylabel(label, rotation=0, ha="right", va="center")
+
+
+# %%
+def draw_stat_bar(ax, value: float, colour: str, limit: float, heading: str | None) -> None:
+    """Draw one horizontal bar with its value written at the end."""
+    ax.barh([0], [value], color=colour, height=0.6)
+    ax.set_xlim(0, limit)
+    ax.set_ylim(-0.5, 0.5)
+    ax.set_yticks([])
+    ax.text(value + limit * 0.02, 0, f"{value:.0f}%", ha="left", va="center", fontsize=8)
+    if heading:
+        ax.set_title(heading, fontsize=8)
+
+
+# %%
+def mark_events(ax, dates: pd.DatetimeIndex, label_them: bool) -> None:
+    """Draw a rule at the first month of each dated episode, labelling it on the top row."""
+    for event_year, event_label in EVENTS.items():
+        position = next((j for j, y in enumerate(dates.year) if y == event_year), None)
+        if position is None:
+            continue
+        ax.axvline(x=position, color=COLORS["neutral"], alpha=0.35, linewidth=0.8)
+        if label_them:
+            ax.annotate(
+                event_label,
+                xy=(position, 1.3),
+                xycoords=("data", "axes fraction"),
+                ha="center",
+                fontsize=6,
+                color=COLORS["neutral"],
+            )
+
+
+# %%
+def draw_panel_row(fig, grid, i: int, regime: str, first: bool, last: bool) -> None:
+    """Draw one regime's timeline row and its two statistic bars."""
+    shade = REGIME_SHADES[i]
+    ax_band = fig.add_subplot(grid[i, 0])
+    draw_regime_row(ax_band, regime_name.to_numpy() == regime, shade, regime)
+    mark_events(ax_band, macro_df.index, label_them=first)
+    if last:
+        ax_band.set_xticks(ticks)
+        ax_band.set_xticklabels(tick_labels, fontsize=7)
+        ax_band.set_xlabel("Year")
+    else:
+        ax_band.set_xticks([])
+
+    stats = regime_stats.loc[regime]
+    heading = ("Annualized\nvolatility", "Deepest index\ndrawdown") if first else (None, None)
+    draw_stat_bar(fig.add_subplot(grid[i, 1]), stats["annual_vol"], shade, 25, heading[0])
+    draw_stat_bar(fig.add_subplot(grid[i, 2]), stats["max_dd_pct"], shade, 70, heading[1])
+
+
+# %%
+ticks, tick_labels = year_ticks(macro_df.index, every=4)
+n_rows = len(regime_order)
+
+fig = plt.figure(figsize=(style.PAGE_WIDTH, 0.85 * n_rows + 1.4))
+grid = GridSpec(n_rows, 3, figure=fig, width_ratios=[3.5, 1, 1], wspace=0.15, hspace=0.15)
+
+for i, regime in enumerate(regime_order):
+    draw_panel_row(fig, grid, i, regime, first=(i == 0), last=(i == n_rows - 1))
+
+fig.suptitle(
+    "Ordering the macro regimes by volatility does not order them by drawdown",
+    fontsize=10,
+    ha="left",
+    x=0.02,
 )
-insight_table
+fig.text(
+    0.5,
+    0.0,
+    "Regimes from unemployment, the fed funds rate, the 10Y-2Y spread and 12-month CPI change",
+    ha="center",
+    fontsize=7,
+    color=COLORS["neutral"],
+)
+style.show_with_alt(
+    fig,
+    "Four stacked timeline rows, one per regime, beside two columns of horizontal bars for "
+    "annualized volatility and the deepest index drawdown. The volatility bars grow "
+    "steadily down the rows while the drawdown bars do not follow the same order.",
+)
 
 # %% [markdown]
-# ## Correlation Heatmap
+# ### Reading the panel honestly
+#
+# The volatility ordering is what the panel was sorted on, so it is monotone by
+# construction and says nothing on its own. The drawdown column is the informative one,
+# because nothing forced it to agree, and it does not.
 
 # %%
-if len(macro_df) > 0:
-    fig, ax = plt.subplots(figsize=(8, 6), layout="tight")
-    sns.heatmap(
-        macro_df.corr(),
-        annot=True,
-        fmt=".2f",
-        cmap="RdBu_r",
-        center=0,
-        ax=ax,
-        square=True,
+smallest_regime = str(regime_stats["months"].idxmin())
+smallest_span = regime_name[regime_name == smallest_regime].index
+deepest_month = aligned["drawdown"].idxmin()
+deepest_regime = str(aligned.loc[deepest_month, "regime"])
+vol_spread = float(regime_stats["annual_vol"].max() - regime_stats["annual_vol"].min())
+display(
+    Markdown(
+        f"The smallest regime, **{smallest_regime}**, holds "
+        f"**{len(smallest_span)} months**, running from "
+        f"**{smallest_span.min():%B %Y}** to **{smallest_span.max():%B %Y}**, and the index "
+        f"was never more than "
+        f"**{regime_stats.loc[smallest_regime, 'max_dd_pct']:.0f}%** below its peak in any "
+        f"of them. The deepest reading of the whole panel, "
+        f"**{regime_stats['max_dd_pct'].max():.0f}%**, falls in "
+        f"**{deepest_month:%B %Y}**, which the naming rule calls **{deepest_regime}**. "
+        f"Across the four regimes the annualized volatility spans "
+        f"**{vol_spread:.0f} percentage points**."
     )
-    ax.set_title("Macro Indicator Correlations", fontsize=12)
-    plt.show()
+)
 
 # %% [markdown]
-# **Interpretation**: Unemployment moves *with* the 10y-2y spread (positive
-# correlation ~0.70): when the labour market deteriorates, the curve typically
-# steepens as the Fed cuts the front end. The Fed Funds rate moves *against*
-# the spread (correlation ~−0.73): hiking cycles flatten or invert the curve.
-# CPI YoY is largely orthogonal to the other three — inflation regimes can
-# coexist with both recession and expansion. These pairwise correlations show
-# why a single indicator is a noisy regime signal and motivate joint clustering.
+# The two lines above are the check earning its place, and both of them cut against the
+# regime story rather than for it.
+#
+# The cluster the rule names Crisis is the handful of months in which unemployment averaged
+# above ten percent, and by the time unemployment reached that level the equity market had
+# already fallen and turned. The market's own worst point lands in a different cluster
+# entirely - one whose name, assigned from the policy rate and the unemployment rate, reads
+# as the aftermath. Neither name is a mistake in the rule; both are the same fact about the
+# data, which is that the labour market registers a shock the market has already priced.
+#
+# A statistic computed on four months is an anecdote whatever it says, and the volatility
+# spread across the four regimes is a few percentage points. Regimes estimated from
+# macroeconomic conditions do separate equity volatility, and they separate it weakly. A
+# reader should hold that conclusion at the strength these numbers support rather than at the
+# strength the idea invites, and the notebook has to report the small cell rather than
+# quietly drop it for being small.
+#
+# The lag is structural, not a property of this sample. Unemployment is measured over a month
+# and published in the next; prices move on expectations of the same conditions. Macro
+# regimes are therefore evidence about the environment a portfolio is already in, not a
+# signal about the one it is heading into, which is the use Section 1.4 argues for.
 
 # %% [markdown]
-# ---
+# ### Figure 1.6 inputs
 #
-# # Extended Analysis: All FRED Indicators
-#
-# Now we expand beyond the 4 core indicators to use all available FRED series
-# (~17 indicators after quality filtering). This provides a richer but noisier
-# view of economic conditions.
-
-# %% [markdown]
-# ## Prepare Full Dataset
-#
-# Using the same data loaded at the start, we now select ALL series with
-# sufficient data coverage (< 50% missing).
+# The print version of Figure 1.6 is drawn by
+# `book/01_process_is_edge/figures/scripts/generate_figure_1_6_macro_regimes_volatility.py`
+# in the book repository, which reads the arrays written below rather than re-fitting the
+# clustering.
 
 # %%
-# Use the already-loaded macro_raw data
-value_cols_full = [c for c in macro_raw.columns if c != DATE_COL]
+ARTIFACT_DIR = OUTPUT_DIR / "figure_1_6"
+ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+np.savez(
+    ARTIFACT_DIR / "inputs.npz",
+    dates=macro_df.index.astype("datetime64[ns]").astype("int64"),
+    macro_labels=np.asarray(core_labels, dtype=np.int64),
+    regime_order=np.asarray(regime_order, dtype=object),
+    raw_regime_for_order=np.asarray(
+        [next(c for c, name in cluster_names.items() if name == regime) for regime in regime_order],
+        dtype=np.int64,
+    ),
+    annual_vol=regime_stats.loc[regime_order, "annual_vol"].to_numpy(dtype=float),
+    max_dd_pct=regime_stats.loc[regime_order, "max_dd_pct"].to_numpy(dtype=float),
+    event_years=np.asarray(list(EVENTS), dtype=np.int64),
+    event_labels=np.asarray(list(EVENTS.values()), dtype=object),
+    start_year=np.int64(PANEL_FIRST_YEAR),
+    end_year=np.int64(PANEL_LAST_YEAR),
+)
 
-macro_monthly_full = (
+# %% [markdown]
+# ## How the four indicators move together
+#
+# A clustering on four correlated inputs is not a clustering in four independent
+# directions, so the correlations are worth seeing before the extended panel raises the
+# question at a larger scale. Only one triangle is drawn: the matrix is symmetric and the
+# other half carries no additional information. The scale is fixed to the full range a
+# correlation can take, so the colours mean the same thing here as in any other correlation
+# figure in the book.
+
+# %%
+correlations = macro_df.rename(columns=UNITS).corr()
+
+fig, ax = plt.subplots(figsize=style.FIGSIZE["single_tall"])
+sns.heatmap(
+    correlations,
+    mask=style.upper_triangle_mask(correlations),
+    annot=True,
+    fmt=".2f",
+    cmap=style.ml4t_diverging(),
+    vmin=-1,
+    vmax=1,
+    center=0,
+    square=True,
+    linewidths=0.5,
+    cbar_kws={"shrink": 0.7, "label": "Correlation"},
+    ax=ax,
+)
+ax.set_xlabel("")
+ax.set_ylabel("")
+style.add_message_title(
+    ax,
+    "No pair of the four indicators is close to independent",
+    subtitle="Pearson correlation over the clustering panel",
+)
+style.show_with_alt(
+    fig,
+    "A lower-triangular correlation heatmap of four macro indicators on a red-to-blue scale "
+    "fixed between minus one and one. The unemployment rate and the yield spread are "
+    "strongly positive, the fed funds rate is strongly negative against the yield spread, "
+    "and inflation is moderately negative against unemployment.",
+)
+
+# %% [markdown]
+# Unemployment and the yield spread move together, and the fed funds rate moves against the
+# spread. Both are the same mechanism seen from two sides: the Federal Reserve cuts the
+# short rate when the labour market weakens, which pulls the front of the curve down and
+# steepens the spread, and it raises the short rate when the economy runs hot, which flattens
+# or inverts it. Inflation is the least entangled of the four and is still not independent of
+# them.
+#
+# That is the case for clustering jointly rather than thresholding one series at a time. Any
+# single indicator tells the same story as its neighbours plus its own noise; the joint model
+# reads all four positions at once, which is how it can separate the tightening cycle from
+# the recovery even though both involve an unusual short rate.
+
+# %% [markdown]
+# ## The counter-experiment: every series in the panel
+#
+# The core model uses four series chosen for what they mean. The obvious question is whether
+# adding the rest of the file would do better, and the obvious way to answer it is to fit the
+# same mixture to everything and compare the separation scores.
+#
+# That comparison is the trap this section exists to spring. The extended panel is assembled
+# with no judgement at all beyond a coverage filter, which is exactly how such a panel is
+# usually built.
+
+# %%
+value_columns = [c for c in macro_raw.columns if c != DATE_COL]
+monthly_full = (
     macro_raw.sort(DATE_COL)
     .group_by_dynamic(DATE_COL, every="1mo", label="right")
-    .agg([pl.col(c).last() for c in value_cols_full])
-    .filter(pl.col(DATE_COL) >= pl.datetime(2002, 1, 1))
+    .agg([pl.col(c).last() for c in value_columns])
+    .filter(pl.col(DATE_COL) >= PANEL_START)
 )
 
-# Identify columns with >50% missing, exclude market price columns
-total_rows = macro_monthly_full.height
-null_fractions = {
-    col: macro_monthly_full.select(pl.col(col).is_null().sum()).item() / total_rows
-    for col in value_cols_full
+missing_share = {
+    column: monthly_full.select(pl.col(column).is_null().sum()).item() / monthly_full.height
+    for column in value_columns
 }
-# Exclude columns with too much missing data and market price columns (SP500)
-exclude_cols = {"sp500", "SP500"}
-good_cols = [col for col, frac in null_fractions.items() if frac < 0.5 and col not in exclude_cols]
+kept_columns = [c for c, share in missing_share.items() if share <= MAX_MISSING_SHARE]
 
-macro_clean_full = (
-    macro_monthly_full.select([DATE_COL] + good_cols).fill_null(strategy="forward").drop_nulls()
+extended_pl = monthly_full.select([DATE_COL, *kept_columns]).drop_nulls()
+extended_df = extended_pl.select(kept_columns).to_pandas()
+extended_df.index = pd.DatetimeIndex(extended_pl[DATE_COL].to_pandas())
+extended_df = extended_df.apply(scale)
+
+display(
+    Markdown(
+        f"The coverage filter keeps **{len(kept_columns)} of {len(value_columns)}** series, "
+        f"and dropping the months in which any of them is unquoted leaves "
+        f"**{len(extended_df)} months**, the same window as the core panel."
+    )
 )
 
-macro_data_full = macro_clean_full.select(good_cols).to_pandas()
-macro_data_full.index = macro_clean_full[DATE_COL].to_pandas()
-macro_data_full = macro_data_full.apply(scale)
-
-print(f"Extended dataset: {macro_data_full.shape[0]} months, {macro_data_full.shape[1]} series")
-print(f"Series used: {list(macro_data_full.columns)}")
-
 # %% [markdown]
-# ## Visualize All Series
+# ### What the filter let through
+#
+# Nothing in that assembly asked what the columns are, and the metadata table at the top of
+# the notebook says what got in. Nine of the columns are Treasury yields at maturities from
+# one to thirty years, which move almost as one series. `YIELD_CURVE_SLOPE` is defined as the
+# ten-year yield minus the two-year, which is the definition of `t10y2y`, already in the
+# panel - the same spread enters twice under two names. Nominal and real GDP are both
+# present, published quarterly, so each repeats its value for three months at a time. And
+# three price indices enter as levels, which is the treatment the core panel rejected for one
+# of them.
 
 # %%
-n_cols = min(len(macro_data_full.columns), 20)
-n_rows = (n_cols + 4) // 5
-n_plot_cols = min(5, n_cols)
+duplicate_check = (extended_df["t10y2y"] - extended_df["YIELD_CURVE_SLOPE"]).abs().max()
+gdp_distinct = int(extended_df["gdp"].round(6).nunique())
+display(
+    Markdown(
+        f"The largest gap between `t10y2y` and `YIELD_CURVE_SLOPE` anywhere in the panel is "
+        f"**{duplicate_check:.1e}** after standardization, and nominal GDP takes "
+        f"**{gdp_distinct} distinct values** across **{len(extended_df)} monthly rows**."
+    )
+)
 
+# %% [markdown]
+# ### The series, drawn
+#
+# Every kept column standardized and plotted on shared axes. The point of the small multiples
+# is the shape of each panel, not its level: how many of them are the same line.
+
+# %%
+n_columns = 5
+n_rows_grid = int(np.ceil(len(extended_df.columns) / n_columns))
 fig, axes = plt.subplots(
-    nrows=n_rows, ncols=n_plot_cols, figsize=(16, 2 * n_rows), sharex=True, sharey=True
+    n_rows_grid,
+    n_columns,
+    figsize=(style.PAGE_WIDTH, 0.85 * n_rows_grid + 0.6),
+    sharex=True,
+    sharey=True,
 )
-axes = axes.flatten() if n_rows > 1 else [axes] if n_cols == 1 else axes
+for ax, column in zip(axes.flat, extended_df.columns):
+    ax.plot(extended_df.index, extended_df[column], color=COLORS["blue"], linewidth=0.7)
+    ax.set_title(column, fontsize=6)
+    ax.tick_params(labelsize=5)
+for ax in axes.flat[len(extended_df.columns) :]:
+    ax.set_visible(False)
 
-for i, ax in enumerate(axes[:n_cols]):
-    if i < len(macro_data_full.columns):
-        macro_data_full.iloc[:, i].plot(ax=ax, color="steelblue", linewidth=0.8)
-        ax.set_title(macro_data_full.columns[i], fontsize=9)
-        ax.tick_params(axis="both", labelsize=7)
-    else:
-        ax.set_visible(False)
-
-for i in range(n_cols, len(axes)):
-    axes[i].set_visible(False)
-
-sns.despine()
-start_yr = macro_data_full.index.min().year
-end_yr = macro_data_full.index.max().year
-fig.suptitle(f"FRED Macro Series - Standardized ({start_yr}-{end_yr})", fontsize=12, y=1.02)
-plt.show()
-
-# %% [markdown]
-# **Interpretation**: The visibly regime-bearing series are VIX (sharp spikes
-# in 2008 and 2020), ICSA initial claims (same crisis peaks), DFF (regime
-# shifts during hiking cycles), and the yield-curve spread T10Y2Y (recession
-# warnings ahead of 2008 and 2020). Slow-moving series (housing, monetary
-# aggregates) carry less regime information. Clustering will lean heavily on
-# the high-variance subset.
-
-# %% [markdown]
-# ## Hierarchical Clustering
-#
-# Cluster the correlation matrix to reveal indicator groupings.
-
-# %%
-# clustermap manages its own gridspec; disable constrained_layout to avoid
-# matplotlib colorbar/engine-switch errors under non-interactive backends.
-with plt.rc_context({"figure.constrained_layout.use": False}):
-    fig = sns.clustermap(macro_data_full.corr(), cmap="RdBu_r", center=0, figsize=(10, 10))
-    fig.fig.suptitle("FRED Indicator Correlations (Hierarchical Clustering)", y=1.02)
-    plt.show()
-
-# %% [markdown]
-# **Interpretation**: Four blocks emerge: a labour/yield-curve block
-# (CIVPART, UNRATE, T10Y2Y), a stress block (VIX, ICSA, high-yield spread), a
-# growth/price-level block (INDPRO, CPI, M2), and a short-rate block
-# (DFF, T10YIE). Most off-diagonal correlations are modest in magnitude, and
-# the dendrogram's high cophenetic correlation confirms that this block
-# structure is genuinely hierarchical.
-
-# %% [markdown]
-# ## Comparing GMM and K-Means
-#
-# Both methods identify 4 regimes. The key difference:
-# - **GMM**: Soft assignments with probabilities (uncertainty quantified)
-# - **K-Means**: Hard assignments (each month belongs to exactly one regime)
-
-# %% [markdown]
-# ### Fit Both Models
-
-# %%
-n_regimes_full = 4
-
-# GMM
-gmm_full = GaussianMixture(
-    n_components=n_regimes_full,
-    covariance_type="full",
-    random_state=SEED,
-    n_init=10,
-    reg_covar=1e-6,
+fig.suptitle(
+    "Slow trends dominate the panel; only the VIX and claims spike",
+    fontsize=10,
+    ha="left",
+    x=0.02,
 )
-gmm_full.fit(macro_data_full)
-gmm_probs_full = gmm_full.predict_proba(macro_data_full)
-gmm_labels_full = gmm_full.predict(macro_data_full)
-
-# K-Means
-kmeans_full = KMeans(n_clusters=n_regimes_full, random_state=SEED, n_init=10)
-kmeans_labels_full = kmeans_full.fit_predict(macro_data_full)
-
-print(f"GMM silhouette: {silhouette_score(macro_data_full, gmm_labels_full):.3f}")
-print(f"K-Means silhouette: {silhouette_score(macro_data_full, kmeans_labels_full):.3f}")
-
-# %% [markdown]
-# ### GMM Regime Probabilities
-
-# %%
-plot_regime_heatmap(
-    gmm_probs_full,
-    macro_data_full.index,
-    f"GMM Regime Probabilities ({start_yr}-{end_yr})",
-    n_regimes=n_regimes_full,
-    is_probability=True,
+style.show_with_alt(
+    fig,
+    "A grid of small standardized time-series panels sharing their axes. Several rise "
+    "steadily from one end of the window to the other, the Treasury yields move together "
+    "in broad waves, and only the VIX and initial jobless claims show sharp isolated "
+    "spikes against an otherwise flat line.",
 )
 
 # %% [markdown]
-# ### K-Means Regime Assignments
+# ### How much independent variation is left
+#
+# Principal component analysis puts a number on the redundancy the figure shows. Each
+# component is the direction of greatest remaining variance, and the cumulative share says
+# how much of the panel's total variation the first few directions account for.
 
 # %%
-plot_regime_heatmap(
-    kmeans_labels_full,
-    macro_data_full.index,
-    f"K-Means Regime Assignments ({start_yr}-{end_yr})",
-    n_regimes=n_regimes_full,
-    is_probability=False,
+pca = PCA(n_components=min(10, extended_df.shape[1]))
+reduced = pca.fit_transform(extended_df)
+
+explained = pd.DataFrame(
+    {
+        "Component": [f"PC{i + 1}" for i in range(pca.n_components_)],
+        "Share of variance": pca.explained_variance_ratio_,
+        "Cumulative": np.cumsum(pca.explained_variance_ratio_),
+    }
+).set_index("Component")
+explained.style.format("{:.1%}")
+
+# %%
+two_component_share = float(explained["Cumulative"].iloc[1])
+display(
+    Markdown(
+        f"Two directions account for **{two_component_share:.0%}** of the variance across "
+        f"**{extended_df.shape[1]} columns**."
+    )
 )
 
 # %% [markdown]
-# ## Agglomerative Clustering
+# ### Which columns each direction is made of
 #
-# Hierarchical clustering on observations (not features) shows how months group together.
-
-# %% [markdown]
-# ### Linkage Matrix
-
-# %%
-Z_full = linkage(macro_data_full, "ward")
-pairwise_dist = pdist(macro_data_full)
-c, _ = cophenet(Z_full, pairwise_dist)
-
-print(f"Cophenetic correlation: {c:.3f}")
-
-# %% [markdown]
-# **Note**: The cophenetic correlation measures how faithfully the dendrogram
-# preserves the original pairwise distances; good dendrograms score above 0.7.
-# Here it reaches 0.71, so the Ward-linkage tree is a reliable summary of the
-# indicator distance structure — the block grouping above reflects real
-# hierarchy rather than an artefact of the linkage choice.
-
-# %% [markdown]
-# ### Dendrogram
+# The share of variance says how much a direction carries; the loadings say what it is. Each
+# column below lists the four series with the largest absolute weight in that component,
+# heaviest first.
 
 # %%
-fig, ax = plt.subplots(figsize=(16, 5))
-# no_labels=True since the point of this figure is the cophenetic-correlation
-# summary in the title, not per-observation identity.
-dendrogram(Z_full, orientation="top", no_labels=True, ax=ax)
-ax.set_title(f"Ward Linkage Dendrogram | Cophenetic Correlation: {c:.2f}", fontsize=12)
-ax.set_ylabel("Distance")
-sns.despine()
-plt.show()
+loadings = pd.DataFrame(pca.components_.T, index=extended_df.columns, columns=explained.index)
+pd.DataFrame(
+    {
+        component: loadings[component].abs().sort_values(ascending=False).index[:4].tolist()
+        for component in explained.index[:4]
+    },
+    index=[f"Heaviest {i + 1}" for i in range(4)],
+)
 
 # %% [markdown]
-# ## PCA Preprocessing
+# The leading direction is the trend the small multiples showed, and the second is the level
+# of the long end of the Treasury curve. Neither is a regime. The series that move when
+# conditions break - the VIX, initial jobless claims - do not appear until the third and
+# fourth components, which between them carry a small share of the variance. A mixture fitted
+# on this panel is therefore fitted mostly on where in the sample a month sits, which is what
+# the episode count is about to show.
+
+# %% [markdown]
+# ## Fit the same models to the extended panel
 #
-# Reduce dimensionality before clustering to filter noise.
-
-# %% [markdown]
-# ### Fit PCA
-
-# %%
-n_pca = min(10, macro_data_full.shape[1])
-pca = PCA(n_components=n_pca)
-reduced = pca.fit_transform(macro_data_full)
-
-print("Cumulative Explained Variance:")
-cumvar = pd.Series(pca.explained_variance_ratio_).cumsum()
-for i, v in enumerate(cumvar):
-    print(f"  PC{i + 1}: {v:.1%}")
-
-# %% [markdown]
-# ### GMM on PCA-Reduced Data
+# A mixture and a k-means partition, both at the same cluster count as the core model, plus a
+# mixture on the ten leading principal components to see whether reducing the redundancy
+# changes the answer.
 
 # %%
+gmm_extended = GaussianMixture(
+    n_components=N_REGIMES, covariance_type="full", random_state=SEED, n_init=10, reg_covar=1e-6
+).fit(extended_df)
+extended_labels = gmm_extended.predict(extended_df)
+extended_probabilities = gmm_extended.predict_proba(extended_df)
+
+kmeans_labels = KMeans(n_clusters=N_REGIMES, random_state=SEED, n_init=10).fit_predict(extended_df)
+
 gmm_pca = GaussianMixture(
-    n_components=n_regimes_full,
-    covariance_type="full",
-    random_state=SEED,
-    n_init=10,
-    reg_covar=1e-6,
-)
-gmm_pca.fit(reduced)
-pca_probs = gmm_pca.predict_proba(reduced)
+    n_components=N_REGIMES, covariance_type="full", random_state=SEED, n_init=10, reg_covar=1e-6
+).fit(reduced)
 pca_labels = gmm_pca.predict(reduced)
 
-print(f"GMM on PCA silhouette: {silhouette_score(reduced, pca_labels):.3f}")
+comparison = pd.DataFrame(
+    {
+        "Model": [
+            f"Core, {len(CORE_SERIES)} chosen series",
+            f"Extended, {extended_df.shape[1]} series",
+            "Extended, 10 principal components",
+            f"Extended, {extended_df.shape[1]} series, k-means",
+        ],
+        "Silhouette": [
+            core_silhouette,
+            silhouette_score(extended_df, extended_labels),
+            silhouette_score(reduced, pca_labels),
+            silhouette_score(extended_df, kmeans_labels),
+        ],
+    }
+).set_index("Model")
+comparison.style.format("{:.3f}")
+
+# %% [markdown]
+# ### The score says the extended panel is better. Look at what it bought.
+#
+# An **episode** is a maximal run of consecutive months carrying the same label. Counting
+# them separates a model that recovers recurring conditions from one that has cut the sample
+# into consecutive blocks: a condition that recurs produces many episodes and revisits
+# earlier labels, while a chronological cut produces exactly as many episodes as it has
+# clusters and never returns to one.
+
 
 # %%
-plot_regime_heatmap(
-    pca_probs,
-    macro_data_full.index,
-    f"GMM Regime Probabilities (PCA-reduced, {start_yr}-{end_yr})",
-    n_regimes=n_regimes_full,
-    is_probability=True,
+def episode_count(labels: np.ndarray) -> int:
+    """Number of maximal runs of consecutive months sharing a label."""
+    return int(np.sum(np.diff(labels) != 0)) + 1
+
+
+episodes = pd.DataFrame(
+    {
+        "Model": [
+            f"Core, {len(CORE_SERIES)} chosen series",
+            f"Extended, {extended_df.shape[1]} series",
+        ],
+        "Clusters": [N_REGIMES, N_REGIMES],
+        "Episodes": [episode_count(core_labels), episode_count(extended_labels)],
+    }
+).set_index("Model")
+episodes
+
+# %%
+extended_episodes = episode_count(extended_labels)
+core_episodes = episode_count(core_labels)
+display(
+    Markdown(
+        f"The extended model splits {len(extended_df)} months into **{extended_episodes} "
+        f"episodes** from **{N_REGIMES} clusters**, against **{core_episodes}** for the core "
+        "model."
+    )
 )
 
 # %% [markdown]
-# ---
+# An extended model with as many episodes as clusters has assigned every month to the
+# cluster of its neighbours and never revisited an earlier one. It has partitioned the
+# calendar into consecutive eras. That is what the trending levels put into the panel - three
+# price indices, two GDP series, money stock, payrolls - and it is precisely the failure the
+# core panel avoided by taking a rate of change instead of a level. The silhouette score
+# rewards it, because consecutive eras of a trending panel are far apart in the space the
+# score measures distance in.
 #
-# # Comparison: 4 Indicators vs Extended Dataset
-#
-# How do results differ between the simple (4-indicator) and extended approaches?
+# The lesson generalises past this dataset. A separation score answers "are these groups far
+# apart", and a regime model has to answer "would this label have told me something the next
+# time conditions like these arrived". Nothing forces those two questions to have the same
+# answer, and a panel assembled without judgement is where they come apart.
 
 # %% [markdown]
-# ## Visual Comparison
+# ### The two partitions, drawn
 #
-# Side-by-side heatmaps showing regime probabilities from both approaches.
+# Assignment probabilities from both mixtures over the same months. Darker means the model
+# was more confident the month belonged to that cluster.
+
 
 # %%
-# Create side-by-side comparison (if both datasets available)
-if len(macro_probs) > 0 and len(gmm_probs_full) > 0:
-    fig, axes = plt.subplots(2, 1, figsize=(14, 6))
-
-    # Panel 1: Core 4 indicators
-    ax1 = axes[0]
-    im1 = ax1.imshow(macro_probs.T, aspect="auto", cmap="Blues", vmin=0, vmax=1)
-    years_core = [pd.Timestamp(ts).year for ts in macro_df.index]
-    year_ticks_core = [j for j, y in enumerate(years_core) if j == 0 or years_core[j - 1] != y]
-    year_labels_core = [str(years_core[j]) for j in year_ticks_core]
-    ax1.set_xticks(year_ticks_core[::2])
-    ax1.set_xticklabels(year_labels_core[::2], fontsize=8)
-    ax1.set_yticks(range(n_macro_regimes))
-    ax1.set_yticklabels([f"Regime {i + 1}" for i in range(n_macro_regimes)])
-    ax1.set_title(f"Core 4 Indicators (Silhouette: {macro_silhouette:.3f})", fontsize=11)
-
-    # Panel 2: Extended dataset
-    ax2 = axes[1]
-    im2 = ax2.imshow(gmm_probs_full.T, aspect="auto", cmap="Blues", vmin=0, vmax=1)
-    years_ext = macro_data_full.index.year.tolist()
-    year_ticks_ext = [j for j, y in enumerate(years_ext) if j == 0 or years_ext[j - 1] != y]
-    year_labels_ext = [str(years_ext[j]) for j in year_ticks_ext]
-    ax2.set_xticks(year_ticks_ext[::2])
-    ax2.set_xticklabels(year_labels_ext[::2], fontsize=8)
-    ax2.set_yticks(range(n_regimes_full))
-    ax2.set_yticklabels([f"Regime {i + 1}" for i in range(n_regimes_full)])
-    ax2.set_xlabel("Year")
-    ext_sil = silhouette_score(macro_data_full, gmm_labels_full)
-    ax2.set_title(
-        f"Extended {macro_data_full.shape[1]} Indicators (Silhouette: {ext_sil:.3f})", fontsize=11
+def plot_assignment_heatmap(probabilities: np.ndarray, dates: pd.DatetimeIndex, claim: str) -> None:
+    """Draw per-month cluster assignment probabilities as a heatmap."""
+    fig, ax = plt.subplots(figsize=style.FIGSIZE["single_wide"])
+    image = ax.imshow(probabilities.T, aspect="auto", cmap="Blues", vmin=0, vmax=1)
+    positions, labels = year_ticks(dates, every=4)
+    ax.set_xticks(positions)
+    ax.set_xticklabels(labels)
+    ax.set_yticks(range(probabilities.shape[1]))
+    ax.set_yticklabels([f"Cluster {i}" for i in range(probabilities.shape[1])])
+    ax.set_xlabel("Year")
+    fig.colorbar(image, ax=ax, shrink=0.8, label="Assignment probability")
+    style.add_message_title(ax, claim)
+    style.show_with_alt(
+        fig,
+        "A heatmap with one row per cluster and one column per month, shaded by assignment "
+        "probability.",
     )
 
-    fig.suptitle(
-        "GMM Regime Comparison: Core vs Extended Indicators", fontsize=12, fontweight="bold"
-    )
-    plt.show()
-else:
-    print("Comparison visualization skipped - insufficient data")
-
-# %% [markdown]
-# ## Quantitative Comparison
 
 # %%
-core_sil = macro_silhouette if len(macro_df) > 0 else float("nan")
-extended_sil = silhouette_score(macro_data_full, gmm_labels_full)
-pca_sil = silhouette_score(reduced, pca_labels)
+plot_assignment_heatmap(
+    core_probabilities, macro_df.index, "The core model returns to conditions it has seen before"
+)
 
-silhouette_compare = pd.DataFrame(
-    {
-        "Model": [
-            "Core (4 indicators)",
-            f"Extended ({macro_data_full.shape[1]} indicators)",
-            "Extended + PCA",
-        ],
-        "Silhouette": [core_sil, extended_sil, pca_sil],
-    }
-).set_index("Model")
-
-if core_sil > extended_sil:
-    interpretation = "Core 4 indicators provide cleaner separation; additional series add noise."
-else:
-    interpretation = (
-        "Extended indicators provide better separation; the broader panel captures "
-        "meaningful economic variation despite added noise."
-    )
-print(interpretation)
-silhouette_compare.style.format("{:.3f}")
+# %%
+plot_assignment_heatmap(
+    extended_probabilities, extended_df.index, "The extended model never returns to a cluster"
+)
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Clustering the indicators rather than the months
 #
-# - **Macro indicators line up with realised volatility**: The four regimes' mean
-#   annualised volatility runs from 12.0% (Expansion, 77 months) to 16.0% (Crisis,
-#   4 months), with Tightening at 15.0% and Recovery at 15.2%. The Crisis cell
-#   covers only 4 months on this 2003-2026 panel, so the 16.0% figure is an
-#   anecdotal upper bound rather than a regime-level statistic.
-# - **Extended indicators improve cluster quality**: The 25-indicator model achieves
-#   higher silhouette (0.42) than the 4-indicator model (0.25), but the core model
-#   is more interpretable — the trade-off depends on the use case.
-# - **Hierarchical structure is genuine**: A cophenetic correlation of 0.71, above the
-#   0.7 quality bar, means the dendrogram faithfully represents the indicator distance
-#   structure rather than imposing an arbitrary tree.
-# - **Use rates, not levels**: We use CPI year-over-year change rather than the CPI level,
-#   because clustering on a trending level would capture "early vs late" rather than
-#   "inflationary vs non-inflationary."
-# - **GMM vs K-Means**: Similar performance (silhouette 0.42 vs 0.45), but GMM provides
-#   probability assignments that quantify regime uncertainty.
+# Everything so far has grouped months. The same machinery can group the columns instead,
+# which answers a different question: which indicators carry the same information? Ward
+# linkage builds a tree by repeatedly merging the two groups whose merger adds least to the
+# within-group variance.
 #
-# **Book reference**: §1.4 of Chapter 1 frames these regimes as inputs to risk
-# management — exposure caps, hedging triggers, and de-risking rules — rather than
-# as return forecasts. Figure 1.6 in the chapter is the macro-regime panel rendered
-# above.
+# The **cophenetic correlation** measures how well such a tree preserves the distances it was
+# built from. For each pair of items it reads the height at which the tree first joins them,
+# and correlates those heights against the original pairwise distances. A tree that scores
+# near one is a faithful summary of the distance matrix; one that scores low has imposed a
+# hierarchy the data does not have.
+#
+# Two trees are built below and they answer different questions, so their cophenetic
+# correlations are not interchangeable. The first is over the columns and is what the block
+# structure in the figure refers to. The second is over the months.
+
+# %%
+column_distances = pdist(extended_df.T)
+column_linkage = linkage(column_distances, method="ward")
+column_cophenetic, _ = cophenet(column_linkage, column_distances)
+
+month_distances = pdist(extended_df)
+month_linkage = linkage(month_distances, method="ward")
+month_cophenetic, _ = cophenet(month_linkage, month_distances)
+
+display(
+    Markdown(
+        f"Cophenetic correlation is **{column_cophenetic:.2f}** for the tree over the "
+        f"indicators and **{month_cophenetic:.2f}** for the tree over the months, against a "
+        f"conventional bar of {MIN_COPHENETIC}."
+    )
+)
+
+# %%
+fig, ax = plt.subplots(figsize=style.FIGSIZE["single_tall"])
+dendrogram(
+    column_linkage,
+    labels=extended_df.columns.tolist(),
+    orientation="right",
+    ax=ax,
+    color_threshold=0,
+    link_color_func=lambda _: COLORS["neutral"],
+)
+ax.set_xlabel("Ward linkage distance")
+ax.tick_params(axis="y", labelsize=6)
+style.add_message_title(
+    ax,
+    "The two names for the same spread merge first, at zero distance",
+    subtitle="Ward linkage over the standardized indicator columns",
+)
+style.show_with_alt(
+    fig,
+    "A horizontal dendrogram of the panel's columns. One pair joins at the left edge with "
+    "no visible branch length; the Treasury maturities and the trending level series form "
+    "two further groups, and the VIX and initial claims stand apart until the last merge.",
+)
+
+# %%
+first_merge_distance = float(column_linkage[0, 2])
+merged_first = [extended_df.columns[int(i)] for i in column_linkage[0, :2]]
+display(
+    Markdown(
+        f"The first merge the tree makes is `{merged_first[0]}` with `{merged_first[1]}`, at "
+        f"a distance of **{first_merge_distance:.1e}**."
+    )
+)
+
+# %% [markdown]
+# A merge at zero distance is two copies of one column, and the tree finds it before it
+# considers anything else. Above that the panel resolves into groups a reader can name: the
+# series that only trend, the short and medium Treasury yields, the curve-shape series
+# alongside unemployment, and - joining last, at the greatest distance - the VIX and initial
+# jobless claims. That last pair is the only part of the panel that moves on the timescale a
+# crisis moves on, which is why the principal components leave it until third and fourth
+# place while spending the first two on trend and on the level of long rates.
+#
+# What the tree does not do is choose the panel. It says which columns duplicate each other;
+# which of a duplicated pair to keep is decided on grounds the data cannot supply - what the
+# column means, and whether it is published in time to be read when a decision has to be
+# made.
+
+# %% [markdown]
+# ## Key takeaways
+#
+# - **Level or rate is the first decision, not a preprocessing detail.** A trending column
+#   entering a clustering makes elapsed time the dominant direction of variance, and the
+#   partition that comes back is a partition of the calendar wearing economic names.
+# - **A separation score is not a validation.** Silhouette answers whether the groups are far
+#   apart in the space they were fitted in. Whether the groups mean anything is a separate
+#   question, and counting episodes - does the model ever return to a cluster? - is a cheap
+#   way to ask it.
+# - **More series is not more information.** Nine Treasury maturities, a spread stored twice,
+#   and two GDP measures are one panel with a few directions in it, which principal components
+#   and the linkage tree both report directly.
+# - **Attaching names to clusters is an assertion.** The mixture supplies a partition; every
+#   economic name in this notebook comes from a threshold rule written by hand, and a
+#   different rule would rename the same partition.
+# - **Validate a regime model against something it never saw.** These regimes were fitted
+#   without any market data, so equity volatility and drawdown are an independent check, and
+#   the check is what surfaced a cluster too small to support the name it was given.
+#
+# **Known limitations.** FRED serves revised values, so no number here was available on the
+# date it is attached to; the mixture has no transition structure and no notion of time, so
+# nothing prefers a month to keep its neighbour's label; the panel starts in 2002 and holds
+# one severe recession, one pandemic and one inflation episode, which is not enough
+# repetitions of any condition to estimate how often it recurs; and the naming rule's
+# thresholds were set for the post-2002 US economy and would not transfer to another country
+# or another era.
+#
+# **Next**: Chapter 1 closes on what a research process needs to survive changes like these.
+# Walk-forward estimation, which is what turns a descriptive regime label into one a strategy
+# could act on, is introduced from Chapter 6.
