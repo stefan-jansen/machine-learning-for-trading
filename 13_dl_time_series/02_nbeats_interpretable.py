@@ -18,27 +18,42 @@
 #
 # **Docker image**: `ml4t-gpu`
 #
-# This notebook implements the N-BEATS architecture from scratch in PyTorch,
-# focusing on its interpretable configuration that decomposes forecasts into
-# trend and seasonality components.
+# `01_core_architectures` ended on a cost: a network that walks a window one step at a
+# time pays for the walk and, on that data, bought nothing with it. N-BEATS is the
+# first of the chapter's answers. It never walks the window. It reads the whole thing
+# at once through stacked fully connected blocks, and it constrains what each block is
+# allowed to say, so that the forecast comes out already separated into a slow trend
+# and a repeating cycle rather than as one opaque number.
 #
-# **Learning Objectives**:
-# - Implement N-BEATS block structure with doubly-residual connections
-# - Understand the interpretable basis functions (polynomial trend, Fourier seasonality)
-# - Visualize decomposed forecast components
-# - Compare interpretable vs. generic configurations
+# The notebook builds the architecture from parts, fits it to SPY closing prices, and
+# then does two things the architecture invites. It reads the trend and the cycle off
+# the fitted model separately, which is the payoff for constraining the blocks. And it
+# scores the forecast against the crudest rule available - repeat today's price - which
+# is the comparison a flexible architecture has to win before its structure has earned
+# anything.
 #
-# **Book Reference**: Chapter 13, Section 13.2 (Decomposition: N-BEATS).
+# **Learning objectives**:
+# - Build an N-BEATS block: a fully connected stack that emits two vectors, one
+#   reconstructing its input and one predicting ahead, and understand why subtracting
+#   the first from the input is what makes a stack of them work.
+# - Constrain a block's output to a polynomial or to a sum of sine waves, and read the
+#   resulting forecast as a trend part and a cyclical part you can plot separately.
+# - Fit the constrained and the unconstrained variants on the same data and say what
+#   the constraint costs and what it buys.
+# - Score both against repeating the last price, and measure how far outside its
+#   training range a trending price series puts the days you are asking about.
+#
+# **Book Reference**: Chapter 13, Section 13.2 (N-BEATS and explicit decomposition).
 # Based on Oreshkin et al. (2020), *N-BEATS: Neural Basis Expansion Analysis
 # for Interpretable Time Series Forecasting*.
 #
-# **Prerequisites**: ETF price data (via `load_etfs()` canonical loader)
+# **Prerequisites**: `01_core_architectures`; ETF price data via the `load_etfs()`
+# canonical loader.
 
 # %%
 """Interpretable Forecasting with N-BEATS - trend and seasonality decomposition."""
 
 import os
-import warnings
 from datetime import datetime
 
 import numpy as np
@@ -54,8 +69,6 @@ from plotly.subplots import make_subplots
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS
-
-warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 SEED = 42
@@ -84,10 +97,20 @@ torch.backends.cudnn.deterministic = True
 # CUDA, or hardware versions can still shift the final decimals.
 
 # %% [markdown]
-# ## Data Preparation
+# ## Data preparation
 #
-# N-BEATS operates on univariate time series. We use SPY close prices
-# to demonstrate trend and seasonality decomposition.
+# N-BEATS forecasts one series at a time, so the notebook uses one: the closing price
+# of SPY, the exchange-traded fund tracking the S&P 500. Prices rather than returns,
+# because a trend and a seasonal cycle are properties of a level and mostly vanish when
+# a series is differenced - and a trend is half of what the interpretable configuration
+# is built to expose.
+#
+# That choice has a cost, and the notebook measures it rather than assuming it away.
+# A network's weights are fitted to inputs on a particular numerical scale, so the
+# prices are standardised - shifted and divided so the training window has mean zero
+# and standard deviation one. The shift and the scale are computed on the training
+# window alone; using the whole series would let the network's input scaling carry
+# information about how high prices eventually went.
 
 # %%
 etf_df = load_etfs()
@@ -103,29 +126,106 @@ spy_data = (
 prices = spy_data["close"].to_numpy().astype(np.float32)
 timestamps = spy_data["timestamp"].to_numpy()
 
-# Fixed forecast-origin boundaries keep every lookback comparison on the same
-# calendar windows. Sequences whose targets straddle a boundary are purged.
+# Boundaries are positions in the price series, so every lookback below is scored on
+# the same calendar dates. A sequence belongs to the partition its target falls in.
 n_sequences = len(prices) - LOOKBACK - HORIZON + 1
-train_seq_end = int(n_sequences * 0.70)
-val_seq_end = int(n_sequences * 0.85)
-train_target_cutoff = LOOKBACK + train_seq_end
-val_target_cutoff = LOOKBACK + val_seq_end
+train_target_cutoff = LOOKBACK + int(n_sequences * 0.70)
+val_target_cutoff = LOOKBACK + int(n_sequences * 0.85)
 
-# The training target ends before train_target_cutoff. Its exclusive boundary
-# is therefore also the latest safe observation for fitted normalization.
+# Every training target lies strictly before train_target_cutoff, so that boundary is
+# also the last observation the normalization is allowed to read.
 price_mean = prices[:train_target_cutoff].mean()
 price_std = prices[:train_target_cutoff].std()
 prices_norm = (prices - price_mean) / price_std
 
-print(f"SPY data: {len(prices)} observations")
-print(f"Date range: {timestamps[0]} to {timestamps[-1]}")
-print(f"Normalization fit on prices[:{train_target_cutoff}] (training window only)")
-
+print(f"SPY: {len(prices)} closes, {timestamps[0]} to {timestamps[-1]}")
+print(
+    f"Standardized on the first {train_target_cutoff} closes, "
+    f"which end {timestamps[train_target_cutoff - 1]}"
+)
 
 # %% [markdown]
-# ## Create Sequences
+# ### Where the three partitions sit on the standardized scale
 #
-# N-BEATS takes a lookback window as input and produces a forecast horizon.
+# The figure below is the one to look at before any result in this notebook. It draws
+# the standardized price with the three partitions shaded, and marks the highest value
+# the training window ever reached.
+#
+# A stationary series would wander across that line in every partition. This one does
+# not: SPY trends, so the later partitions sit above the earlier one on a scale fitted
+# to the earlier one. The printed summary gives the ranges. What it says is that the
+# network is asked to forecast from inputs it has no example of - not unusual inputs,
+# but values outside the interval it saw at all - and a fully connected network given
+# an input beyond its training range extrapolates whatever its last layer's slope
+# happens to be.
+#
+# This is not a flaw in N-BEATS and it does not go away with a bigger network. It is a
+# property of standardising a trending level with one shift and one scale for the whole
+# series. Two standard remedies exist and both appear elsewhere in this chapter:
+# normalise inside each window instead of globally, which is exactly what N-Linear does
+# in `03_great_debate`, or difference the series into returns, which is what every
+# other notebook in the chapter forecasts. Keep it in mind when reading the errors
+# below - and it is the reason the benchmark to beat is a rule that carries the level
+# forward rather than one that predicts it.
+
+# %%
+partitions = {
+    "Training": (0, train_target_cutoff),
+    "Validation": (train_target_cutoff, val_target_cutoff),
+    "Held back": (val_target_cutoff, len(prices)),
+}
+train_max_z = float(prices_norm[:train_target_cutoff].max())
+for name, (lo, hi) in partitions.items():
+    z = prices_norm[lo:hi]
+    print(
+        f"{name:11s} ${prices[lo:hi].min():6.0f}-${prices[lo:hi].max():6.0f}  "
+        f"standardized {z.min():+5.2f} to {z.max():+5.2f}"
+    )
+print(f"\nTraining window never exceeded {train_max_z:+.2f} on the standardized scale.")
+
+# %%
+fig_scale = go.Figure()
+for (name, (lo, hi)), shade in zip(partitions.items(), [0.0, 0.06, 0.12], strict=True):
+    fig_scale.add_vrect(
+        x0=timestamps[lo],
+        x1=timestamps[hi - 1],
+        fillcolor=COLORS["neutral"],
+        opacity=shade,
+        line_width=0,
+        annotation_text=name,
+        annotation_position="top left",
+    )
+fig_scale.add_trace(
+    go.Scatter(
+        x=timestamps,
+        y=prices_norm,
+        name="SPY, standardized",
+        line=dict(color=COLORS["blue"]),
+    )
+)
+fig_scale.add_hline(
+    y=train_max_z,
+    line_dash="dash",
+    line_color=COLORS["copper"],
+    annotation_text="highest value seen in training",
+    annotation_position="bottom right",
+)
+fig_scale.update_layout(
+    title="Every held-back day lies above anything the network was fitted on",
+    xaxis_title="Date",
+    yaxis_title="SPY close, training-window standard deviations",
+    showlegend=False,
+)
+fig_scale.show()
+
+# %% [markdown]
+# ## Building the training examples
+#
+# One example pairs a `LOOKBACK`-day window of standardized prices with the
+# `HORIZON` days that follow it. Unlike `01_core_architectures`, where the target was a
+# single day, the target here is the whole path: N-BEATS emits `HORIZON` numbers at
+# once rather than being applied repeatedly, which is what lets a polynomial or a sine
+# wave describe the forecast as a shape.
 
 
 # %%
@@ -398,13 +498,19 @@ print(f"  Parameters: {n_params_g:,}")
 nbeats_g = train_nbeats(nbeats_g, X_train, y_train, X_val, y_val, EPOCHS, BATCH_SIZE)
 
 # %% [markdown]
-# ## Evaluation
+# ## Scoring against the crudest rule available
 #
-# A persistence forecast repeats the last observed price through the horizon.
-# It is the minimum credible benchmark for a price-level model: a flexible
-# architecture has not earned its complexity unless it improves on that rule.
-# We report RMSE in training-window standard deviations and the MAE ratio to
-# persistence. A ratio above 1 means the model is worse than persistence.
+# **Persistence** is the forecast that says tomorrow's price, and every price out to
+# the end of the horizon, equals today's. It has no parameters and reads nothing but
+# the last observation. It is also hard to beat on a price series, because a price
+# moves little from one day to the next relative to how much it moves over a decade,
+# and it is the benchmark a flexible architecture has to clear before its structure has
+# demonstrated anything at all.
+#
+# Two figures are reported. Root mean squared error is in training-window standard
+# deviations, the units the network works in. The second column divides each model's
+# mean absolute error by persistence's, so persistence sits at one and anything above
+# it is a model doing worse than repeating the last number it was given.
 
 # %%
 X_test_t = torch.FloatTensor(X_test).to(DEVICE)
@@ -437,13 +543,9 @@ comparison_df = pl.DataFrame(
     }
 )
 
-model_ratios = comparison_df.filter(pl.col("Model") != "Persistence")["MAE / persistence"]
-benchmark_title = (
-    "Both N-BEATS variants trail persistence on the SPY holdout"
-    if (model_ratios > 1).all()
-    else "At least one N-BEATS variant improves on persistence"
-)
+comparison_df
 
+# %%
 fig_benchmark = go.Figure(
     go.Bar(
         x=comparison_df["Model"].to_list(),
@@ -453,43 +555,71 @@ fig_benchmark = go.Figure(
         textposition="outside",
     )
 )
-fig_benchmark.add_hline(y=1.0, line_dash="dash", line_color=COLORS["neutral"])
+fig_benchmark.add_hline(
+    y=1.0,
+    line_dash="dash",
+    line_color=COLORS["neutral"],
+    annotation_text="persistence",
+    annotation_position="right",
+)
 fig_benchmark.update_layout(
-    title=benchmark_title,
+    title="A forecast with no parameters sets the line to clear",
     xaxis_title="Forecast",
-    yaxis_title="MAE relative to persistence (x)",
+    yaxis_title="Mean absolute error relative to persistence",
     showlegend=False,
 )
 fig_benchmark.update_yaxes(rangemode="tozero")
 fig_benchmark.show()
 
 # %% [markdown]
-# **Interpretation**: the persistence line at 1.0 is the relevant floor. In
-# this single SPY holdout, neither neural model clears it, although the generic
-# variant is closer. The former price-level rank correlation was near one even
-# for persistence because adjacent SPY levels share a trend; it was therefore
-# not evidence of forecast skill and has been removed. This experiment supports
-# the decomposition lesson, not a trading-performance claim.
+# The dashed line is persistence, and a bar above it is a model that would have done
+# better predicting no change at all. Read that against the standardized-scale figure
+# near the top: the days being forecast lie outside the range the network was fitted
+# on, so the network is extrapolating on every one of them while persistence, which
+# carries the last observed level forward, is unaffected by where that level sits.
+#
+# What this does and does not license. It does not license a statement about which
+# architecture forecasts prices better in general - it is one series, one split, one
+# horizon, and a normalization the section above already identified as unsuited to a
+# trending level. What it does license is the discipline: a benchmark that costs
+# nothing goes into every comparison, because without it a plausible-looking error is
+# uninterpretable, and the interesting property of N-BEATS here is not its accuracy but
+# what the next section can read out of it.
 
 # %% [markdown]
-# ## Component Decomposition
+# ## Reading the forecast apart
 #
-# The key advantage of N-BEATS-I: we can examine which blocks contribute
-# trend vs. seasonality to the forecast.
+# This is what the constrained basis was for. The model's forecast is the sum of every
+# block's forecast, and the first `N_BLOCKS` blocks can only emit polynomials while the
+# rest can only emit sums of sine waves. Adding up each group separately therefore
+# splits the prediction into a slow component and a repeating one, and both are
+# quantities you can plot rather than a layer's activations you can only stare at.
+#
+# The generic variant has no such split. Its blocks emit arbitrary vectors, so the sum
+# is a forecast and the parts are nothing in particular. That difference, not the error
+# column above, is what the interpretable configuration is bought with.
+#
+# One window is shown. Any window would do to illustrate the mechanism; the middle of
+# the held-back stretch is picked so the date is stated rather than chosen for how the
+# picture came out.
 
 # %%
-# Extract block-level forecasts for a sample
 sample_idx = len(X_test) // 2
+sample_date = timestamps[val_target_cutoff + sample_idx]
 block_preds = [bf[sample_idx].cpu().numpy() for bf in block_forecasts_i]
 
-# First N_BLOCKS are trend, last N_BLOCKS are seasonality
+# Blocks were appended trend-first, so the split matches the construction order.
 trend_forecast = sum(block_preds[:N_BLOCKS])
 seasonal_forecast = sum(block_preds[N_BLOCKS:])
+print(f"Window forecasting the {HORIZON} days from {sample_date}")
 
 # %% [markdown]
-# **Denormalization**: The trend component gets the mean added back (it captures
-# the price level), while seasonality is zero-centered (periodic deviations around
-# the trend). The combined forecast = Trend + Seasonality in original price space.
+# Putting the components back on the dollar scale takes some care, because the two
+# halves mean different things. The trend carries the price level, so undoing the
+# standardization needs both the scale and the shift. The seasonal part is a deviation
+# around that level, already centred on zero, so it needs the scale only - adding the
+# training mean to it would move a wiggle of a few dollars up to the price of SPY and
+# make the panel unreadable.
 
 # %%
 trend_denorm = trend_forecast * price_std + price_mean
@@ -554,14 +684,15 @@ fig.update_yaxes(title_text="SPY price ($)", row=3, col=1)
 fig.show()
 
 # %% [markdown]
-# ## Backcast Visualization
+# ## What the blocks left behind
 #
-# The backcast represents what each block has "understood" about the input.
-# The residual (input minus backcast) is passed to the next block, forcing
-# progressively finer pattern extraction.
+# Each block emits a backcast alongside its forecast: its own account of the input it
+# was given. The stack subtracts that account before handing the input on, so every
+# block after the first sees only what its predecessors could not describe. Running the
+# same window through block by block and keeping the final leftover shows how much of
+# the input the whole stack managed to account for, and what shape the rest has.
 
 # %%
-# Compute block-level backcasts for the same test sample
 sample_input = torch.FloatTensor(X_test[sample_idx : sample_idx + 1]).to(DEVICE)
 nbeats_i.eval()
 
@@ -573,9 +704,8 @@ with torch.no_grad():
         backcasts.append(backcast.cpu().numpy().flatten())
         residual = residual - backcast
 
-# Denormalize the input back to price level; the residual stays in z-score
-# units because adding the training-window mean would shift "structure not yet
-# captured" onto the price scale and conflate it with the input curve.
+# The input goes back to dollars; the leftover stays standardized, because it is not a
+# price and adding the training mean to it would put it on the price axis.
 input_denorm = X_test[sample_idx] * price_std + price_mean
 residual_z = residual.cpu().numpy().flatten()
 
@@ -585,8 +715,8 @@ fig_bc = make_subplots(
     rows=2,
     cols=1,
     subplot_titles=[
-        "Original input (price level)",
-        "Final residual (z-score, training-window stats)",
+        "The window the stack was given",
+        "What every block together could not describe",
     ],
     shared_xaxes=True,
     vertical_spacing=0.12,
@@ -597,43 +727,59 @@ fig_bc.add_trace(
 fig_bc.add_trace(
     go.Scatter(x=x_back, y=residual_z, name="Final residual", line=dict(dash="dot")), row=2, col=1
 )
-fig_bc.update_xaxes(title_text="Lookback Step", row=2, col=1)
-fig_bc.update_yaxes(title_text="Price ($)", row=1, col=1)
-fig_bc.update_yaxes(title_text="Residual (z)", row=2, col=1)
+fig_bc.update_xaxes(title_text="Day of the input window", row=2, col=1)
+fig_bc.update_yaxes(title_text="SPY close ($)", row=1, col=1)
+fig_bc.update_yaxes(title_text="Leftover, standardized", row=2, col=1)
 fig_bc.update_layout(
-    title="Six blocks reduce the input but leave visible residual structure",
+    title="The stack shrinks the window without flattening it",
     height=500,
 )
 fig_bc.show()
 
 # %% [markdown]
-# **Interpretation**: the final residual is smaller than the normalized input,
-# but it is neither centered at zero nor visually structureless. A backcast is
-# what the fitted blocks chose to explain; it is not a guarantee that the
-# remainder is white noise. The remaining pattern cautions against treating the
-# displayed trend and seasonality as a complete economic decomposition.
+# The leftover is much smaller than the window it came from, which is the stack working
+# as designed. What it is not is featureless: it neither sits on zero nor looks like
+# noise, and whatever shape remains is structure that no polynomial and no sum of five
+# sine waves could take on.
+#
+# That is worth stating plainly because the decomposition figure invites the opposite
+# reading. A backcast is what a fitted block *chose* to describe under the constraint it
+# was given, not a statement that the input contains a trend and a cycle and nothing
+# else. The trend panel above is the model's trend, in the model's sense of the word.
+# Treating it as the market's would be reading a modelling artefact as an economic
+# finding, and the leftover here is the evidence that the two are not the same.
 
 # %% [markdown]
-# ## Lookback Sensitivity
+# ## How much history to give it
 #
-# N-BEATS is sensitive to the lookback-to-horizon ratio. Too short a lookback
-# starves the decomposition of context; very long lookbacks can introduce noise.
-# This is a validation-set model-selection diagnostic. All candidates use the
-# same target-date boundaries, and the sealed test window is not touched.
+# `LOOKBACK` and `HORIZON` are the two settings that decide the shape of the problem,
+# and their ratio is the one that matters: how many days of history the model is given
+# per day it has to predict. Too few and a polynomial has almost nothing to fit a
+# curvature to; too many and most of the window is history the target has no relation
+# to, which the basis will fit anyway.
+#
+# There is no way to reason to the right ratio, so it is measured. Four values are
+# fitted and scored **on the validation windows** - the ones held aside for exactly
+# this. The held-back stretch is not touched here, and it must not be: a ratio chosen
+# by looking at it would make every later number a report on a choice already made
+# using the same data.
+#
+# Two things are held fixed so the comparison is about the ratio. The target dates are
+# the same for every candidate, because the boundaries were fixed in the price series
+# rather than as a fraction of each candidate's own sequence count. And every candidate
+# starts its training examples on the date the longest window can first reach, so a
+# difference in error cannot be a difference in how many examples the model saw.
 
 # %%
 lookback_values = [20, 40, 60, 120]
+sweep_first_target = max(lookback_values) + HORIZON - 1
 sensitivity_results = []
 
 for lb in lookback_values:
-    pm_s = prices[:train_target_cutoff].mean()
-    ps_s = prices[:train_target_cutoff].std()
-    prices_norm_s = (prices - pm_s) / ps_s
-
-    X_s, y_s = create_univariate_sequences(prices_norm_s, lb, HORIZON)
+    X_s, y_s = create_univariate_sequences(prices_norm, lb, HORIZON)
     target_start_s = np.arange(lb, len(prices) - HORIZON + 1)
     target_end_s = target_start_s + HORIZON - 1
-    train_mask_s = target_end_s < train_target_cutoff
+    train_mask_s = (target_start_s >= sweep_first_target) & (target_end_s < train_target_cutoff)
     val_mask_s = (target_start_s >= train_target_cutoff) & (target_end_s < val_target_cutoff)
 
     set_global_seeds(SEED)
@@ -668,14 +814,14 @@ for lb in lookback_values:
         }
     )
     print(
-        f"  Lookback={lb} (ratio={lb / HORIZON:.1f}): "
-        f"validation RMSE={rmse_s:.4f}, MAE/persistence={mae_ratio_s:.2f}x"
+        f"  {lb} days of history per {HORIZON}-day forecast "
+        f"({lb / HORIZON:.0f} to 1), {train_mask_s.sum()} training windows: "
+        f"validation RMSE {rmse_s:.4f}, {mae_ratio_s:.2f}x persistence"
     )
 
 sensitivity_df = pl.DataFrame(sensitivity_results)
-best_lookback = sensitivity_df.sort("Validation MAE / persistence").row(0, named=True)
-all_trail_persistence = (sensitivity_df["Validation MAE / persistence"] > 1).all()
 
+# %%
 fig_sensitivity = go.Figure(
     go.Scatter(
         x=sensitivity_df["Ratio"].to_list(),
@@ -687,41 +833,64 @@ fig_sensitivity = go.Figure(
         textposition="top center",
     )
 )
-fig_sensitivity.add_hline(y=1.0, line_dash="dash", line_color=COLORS["neutral"])
+fig_sensitivity.add_hline(
+    y=1.0,
+    line_dash="dash",
+    line_color=COLORS["neutral"],
+    annotation_text="persistence",
+    annotation_position="right",
+)
 fig_sensitivity.update_layout(
-    title=(
-        f"A {best_lookback['Lookback']}-day lookback comes closest, but none beats persistence"
-        if all_trail_persistence
-        else f"Validation favors a {best_lookback['Lookback']}-day lookback"
-    ),
-    xaxis_title="Lookback / forecast-horizon ratio (x)",
-    yaxis_title="Validation MAE relative to persistence (x)",
+    title="How much history per forecast day changes the error",
+    xaxis_title="Days of history per forecast day",
+    yaxis_title="Validation error relative to persistence",
     showlegend=False,
 )
 fig_sensitivity.show()
 
 # %% [markdown]
-# **Finding**: lookback length changes the validation error, but this sweep is
-# selection evidence rather than a final performance estimate. Persistence is
-# the reference line, and the chart makes clear whether added temporal context
-# helps enough to clear that elementary forecast. The fixed calendar boundaries
-# ensure the candidates face the same validation dates.
+# The curve moves, which is the point: the ratio is a real setting and not a detail,
+# and a number picked without measuring it is a guess. What the curve is not is a
+# performance estimate. It is a comparison among candidates, scored on the windows kept
+# for comparing candidates, and every value on it will be a little optimistic for
+# exactly that reason - four models were fitted and their scores are all on the page.
+# That is what the held-back stretch is preserved for, and why nothing in this section
+# reads it.
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **Doubly-residual architecture**: Each block refines the input residual AND
-#    accumulates its forecast contribution
-# 2. **Interpretable decomposition**: Polynomial trend + Fourier seasonality stacks
-#    produce human-readable components
-# 3. **Generic mode**: Learns arbitrary basis functions, potentially more accurate
-#    but loses interpretability
-# 4. **No feature engineering**: N-BEATS works directly on the raw price series;
-#    that makes persistence the essential benchmark for forecast accuracy
-# 5. **Lookback-to-horizon ratio**: Performance is sensitive to this ratio;
-#    validation comparison must keep target dates fixed and the test set sealed
+# 1. **A backcast is what makes a stack of blocks more than a wider network.** Each
+#    block subtracts its own account of the input before passing it on, so the next
+#    block sees only the part that is still unexplained and cannot spend its capacity
+#    re-describing what has already been described. The forecasts add up; the inputs
+#    shrink.
+# 2. **Constraining what a block may output is what buys interpretability.** A block
+#    that can only emit a polynomial produces something you can call a trend and defend
+#    the name of; a block that can emit any vector produces a forecast whose parts mean
+#    nothing separately. The constraint is a choice with a price, and the two variants
+#    fitted here are what let you see the price.
+# 3. **The components are the model's, not the market's.** The leftover after every
+#    block has run is neither zero nor featureless, which is the direct evidence that
+#    the trend and cycle panels are a decomposition the architecture was told to
+#    produce rather than one the data was found to contain.
+# 4. **Standardizing a trending level puts the forecast outside the training range.**
+#    Every held-back day here sits above every day the network was fitted on, measured
+#    at the top of the notebook. A network asked to extrapolate does so with whatever
+#    slope its last layer happens to have. Normalize inside the window, as
+#    `03_great_debate`'s N-Linear does, or forecast returns, as the rest of the chapter
+#    does - but an error measured in a setup like this says more about the setup than
+#    about the architecture.
+# 5. **A benchmark with no parameters belongs in every comparison.** Persistence costs
+#    nothing to compute and turns an error that could mean anything into an error you
+#    can act on.
 #
-# **Caveat**: Results on a single equity index (SPY) are not generalizable -
-# benchmark on your specific dataset before drawing architecture conclusions.
+# **Known limitations.** One series, one horizon, one chronological split, one seed,
+# and no hyperparameter search beyond the ratio sweep. The Fourier basis is fixed at
+# five harmonics over the forecast window, which can only represent cycles that fit
+# inside it, and daily equity prices have no strong periodicity for it to find. The
+# ratio sweep is validation evidence and carries the optimism of having chosen from
+# four candidates.
 #
-# **Next**: See `03_great_debate` for the Linear vs. Transformer controversy.
+# **Next**: `03_great_debate` puts architectures of this kind against linear baselines
+# that fit in a single matrix, on the comparison that reset the field's expectations.
