@@ -1272,8 +1272,16 @@ jobs:
   test-chapters:
     name: ${{ matrix.name }}
     timeout-minutes: 60
-    needs: [lint, changes]
-    if: needs.changes.outputs.chapter_matrix != '[]'
+    needs: [lint, changes, build-image-candidate]
+    # `always()` is needed because build-image-candidate is skipped whenever the commit
+    # does not move what the image installs, and a skipped dependency skips its
+    # dependents. lint and changes are then checked explicitly, so this gate is exactly
+    # as strict as the `needs:` list it replaces.
+    if: >-
+      always()
+      && needs.lint.result == 'success'
+      && needs.changes.result == 'success'
+      && needs.changes.outputs.chapter_matrix != '[]'
 
     strategy:
       fail-fast: false
@@ -1281,8 +1289,6 @@ jobs:
         include: ${{ fromJSON(needs.changes.outputs.chapter_matrix) }}
 
     runs-on: ubuntu-latest
-    container:
-      image: ml4t/ml4t:latest
 
     steps:
       # secrets.TEST_DATA_DEPLOY_KEY is not exposed to a pull_request from a fork,
@@ -1312,18 +1318,6 @@ jobs:
             echo "have_key=" >> "$GITHUB_OUTPUT"
             echo "::notice::No test-data deploy key in this context, which is a fork pull request. This job checked out no test data and executed no notebook, so it asserts nothing about this change; the notebooks run on the branch once it is merged."
           fi
-      - name: Install git (for checkout inside container)
-        if: steps.reach.outputs.have_key
-        run: |
-          # A transient apt mirror failure used to kill the whole job.
-          for attempt in 1 2 3; do
-            apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null && exit 0
-            echo "apt-get failed (attempt $attempt of 3); retrying in $((attempt * 15))s"
-            sleep $((attempt * 15))
-          done
-          echo "::error::apt-get could not install git after three attempts"
-          exit 1
-
       - uses: actions/checkout@v6
         if: steps.reach.outputs.have_key
 
@@ -1336,23 +1330,30 @@ jobs:
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
 
-      # This job executes notebooks inside the PUBLISHED image, which drifts from
-      # uv.lock the moment the lock moves and has no way to carry a candidate built
-      # from this commit: `container:` is resolved before any step runs. So when the
-      # lock has moved and the image has not, every notebook here runs against a
-      # dependency set the repository does not declare - and it does not fail in a way
-      # that says so. On #787, which moved ml4t-diagnostic to 0.1.4, it surfaced as
-      # thirteen fold-ordering errors inside cme_futures and a red ch26, none of which
-      # names the environment.
+      - name: Resolve the image this commit declares
+        id: image
+        if: steps.reach.outputs.have_key
+        uses: ./.github/actions/resolve-ml4t-image
+        with:
+          candidate-result: ${{ needs.build-image-candidate.result }}
+
+      # This job used to execute notebooks in whatever `ml4t/ml4t:latest` happened to
+      # hold, because a job-level `container:` is resolved before any step runs and so
+      # could not name an image this run produced. A commit that moved uv.lock was then
+      # measured in the environment it replaced: on #787, which moved ml4t-diagnostic to
+      # 0.1.4, that surfaced as thirteen fold-ordering errors inside cme_futures and a
+      # red ch26, none of which names the environment as the cause.
       #
-      # The guard cannot make the job pass; nothing can until the image is rebuilt from
-      # a landed lock. What it does is put the reason first, so the failure reads as
-      # "this image is not the environment this commit declares" rather than as a
-      # numerical defect in a notebook. That distinction cost four rounds of
-      # investigation the last time it was missing.
+      # The image is a step-level choice now, so a lock bump is measured in the image
+      # built from the same commit and this check is a guard against drift rather than a
+      # standing report of it.
       - name: The image's installed distributions match uv.lock
         if: steps.reach.outputs.have_key
-        run: python .github/scripts/check_env_matches_lock.py
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -w "$GITHUB_WORKSPACE" \
+            "${{ steps.image.outputs.ref }}" \
+            python .github/scripts/check_env_matches_lock.py
       - name: Seed case study intermediates
         if: steps.reach.outputs.have_key
         run: |
@@ -1385,9 +1386,18 @@ jobs:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: |
           FILTER="${TEST_FILTER_INPUT:-$MATRIX_FILTER}"
-          python -m pytest tests/test_chapter_notebooks.py \
-            -v --tb=short \
-            -k "$FILTER"
+          mkdir -p "$ML4T_OUTPUT_DIR"
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            -v "$ML4T_OUTPUT_DIR:$ML4T_OUTPUT_DIR" \
+            -w "$GITHUB_WORKSPACE" \
+            -e PYTHONPATH -e ML4T_DATA_PATH -e ML4T_OUTPUT_DIR \
+            -e MPLBACKEND -e PLOTLY_RENDERER \
+            -e FRED_API_KEY \
+            "${{ steps.image.outputs.ref }}" \
+            python -m pytest tests/test_chapter_notebooks.py \
+              -v --tb=short \
+              -k "$FILTER"
 
   # ---------------------------------------------------------------------------
   # Case study pipeline tests — inside Docker (ml4t/ml4t:latest)
@@ -1395,8 +1405,16 @@ jobs:
   test-case-studies:
     name: cs-${{ matrix.case-study }}
     timeout-minutes: 90
-    needs: [lint, changes]
-    if: needs.changes.outputs.case_matrix != '[]'
+    needs: [lint, changes, build-image-candidate]
+    # `always()` is needed because build-image-candidate is skipped whenever the commit
+    # does not move what the image installs, and a skipped dependency skips its
+    # dependents. lint and changes are then checked explicitly, so this gate is exactly
+    # as strict as the `needs:` list it replaces.
+    if: >-
+      always()
+      && needs.lint.result == 'success'
+      && needs.changes.result == 'success'
+      && needs.changes.outputs.case_matrix != '[]'
 
     strategy:
       fail-fast: false
@@ -1404,8 +1422,6 @@ jobs:
         include: ${{ fromJSON(needs.changes.outputs.case_matrix) }}
 
     runs-on: ubuntu-latest
-    container:
-      image: ml4t/ml4t:latest
 
     steps:
       # secrets.TEST_DATA_DEPLOY_KEY is not exposed to a pull_request from a fork,
@@ -1435,18 +1451,6 @@ jobs:
             echo "have_key=" >> "$GITHUB_OUTPUT"
             echo "::notice::No test-data deploy key in this context, which is a fork pull request. This job checked out no test data and executed no notebook, so it asserts nothing about this change; the notebooks run on the branch once it is merged."
           fi
-      - name: Install git
-        if: steps.reach.outputs.have_key
-        run: |
-          # A transient apt mirror failure used to kill the whole job.
-          for attempt in 1 2 3; do
-            apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null && exit 0
-            echo "apt-get failed (attempt $attempt of 3); retrying in $((attempt * 15))s"
-            sleep $((attempt * 15))
-          done
-          echo "::error::apt-get could not install git after three attempts"
-          exit 1
-
       - uses: actions/checkout@v6
         if: steps.reach.outputs.have_key
 
@@ -1459,23 +1463,30 @@ jobs:
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
 
-      # This job executes notebooks inside the PUBLISHED image, which drifts from
-      # uv.lock the moment the lock moves and has no way to carry a candidate built
-      # from this commit: `container:` is resolved before any step runs. So when the
-      # lock has moved and the image has not, every notebook here runs against a
-      # dependency set the repository does not declare - and it does not fail in a way
-      # that says so. On #787, which moved ml4t-diagnostic to 0.1.4, it surfaced as
-      # thirteen fold-ordering errors inside cme_futures and a red ch26, none of which
-      # names the environment.
+      - name: Resolve the image this commit declares
+        id: image
+        if: steps.reach.outputs.have_key
+        uses: ./.github/actions/resolve-ml4t-image
+        with:
+          candidate-result: ${{ needs.build-image-candidate.result }}
+
+      # This job used to execute notebooks in whatever `ml4t/ml4t:latest` happened to
+      # hold, because a job-level `container:` is resolved before any step runs and so
+      # could not name an image this run produced. A commit that moved uv.lock was then
+      # measured in the environment it replaced: on #787, which moved ml4t-diagnostic to
+      # 0.1.4, that surfaced as thirteen fold-ordering errors inside cme_futures and a
+      # red ch26, none of which names the environment as the cause.
       #
-      # The guard cannot make the job pass; nothing can until the image is rebuilt from
-      # a landed lock. What it does is put the reason first, so the failure reads as
-      # "this image is not the environment this commit declares" rather than as a
-      # numerical defect in a notebook. That distinction cost four rounds of
-      # investigation the last time it was missing.
+      # The image is a step-level choice now, so a lock bump is measured in the image
+      # built from the same commit and this check is a guard against drift rather than a
+      # standing report of it.
       - name: The image's installed distributions match uv.lock
         if: steps.reach.outputs.have_key
-        run: python .github/scripts/check_env_matches_lock.py
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -w "$GITHUB_WORKSPACE" \
+            "${{ steps.image.outputs.ref }}" \
+            python .github/scripts/check_env_matches_lock.py
       - name: Seed case study intermediates
         if: steps.reach.outputs.have_key
         run: |
@@ -1484,14 +1495,6 @@ jobs:
             cp -r test-data/intermediates/* $ML4T_OUTPUT_DIR/
             echo "Seeded $(du -sh $ML4T_OUTPUT_DIR | cut -f1) of intermediates"
           fi
-
-      # ml4t/ml4t:latest only bakes in pytest + pytest-timeout (envs/ml4t/Dockerfile);
-      # pytest-rerunfailures lives in the dev extra, which this image doesn't install.
-      # Without it, overrides.yaml's `reruns:` key (tests/conftest.py) silently adds no
-      # retry marker, so a notebook marked flaky just fails outright here.
-      - name: Install pytest-rerunfailures
-        if: steps.reach.outputs.have_key
-        run: pip install --no-cache-dir "pytest-rerunfailures>=15.0"
 
       - name: Run pipeline (${{ matrix.case-study }})
         if: steps.reach.outputs.have_key
@@ -1502,9 +1505,26 @@ jobs:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: |
           FILTER="${TEST_FILTER_INPUT:-$MATRIX_CASE_STUDY}"
-          python -m pytest tests/test_case_studies.py \
-            -v --tb=short \
-            -k "$FILTER"
+          mkdir -p "$ML4T_OUTPUT_DIR"
+          # The image bakes in pytest + pytest-timeout only (envs/ml4t/Dockerfile);
+          # pytest-rerunfailures lives in the dev extra it does not install. Without it
+          # overrides.yaml's `reruns:` key (tests/conftest.py) adds no retry marker and a
+          # notebook marked flaky fails outright. It is installed inside the run
+          # container rather than in a step of its own, because a step now runs on the
+          # runner and would install it where the notebooks do not execute.
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            -v "$ML4T_OUTPUT_DIR:$ML4T_OUTPUT_DIR" \
+            -w "$GITHUB_WORKSPACE" \
+            -e PYTHONPATH -e ML4T_DATA_PATH -e ML4T_OUTPUT_DIR \
+            -e MPLBACKEND -e PLOTLY_RENDERER \
+            -e FRED_API_KEY -e "FILTER=$FILTER" \
+            "${{ steps.image.outputs.ref }}" \
+            bash -c '
+              set -e
+              pip install --no-cache-dir "pytest-rerunfailures>=15.0"
+              python -m pytest tests/test_case_studies.py -v --tb=short -k "$FILTER"
+            '
 
   # ---------------------------------------------------------------------------
   # Py312 Docker image (Python 3.12: gensim, signatory, esig, tfcausalimpact,
@@ -1589,16 +1609,27 @@ jobs:
   # ---------------------------------------------------------------------------
   test-neo4j:
     timeout-minutes: 30
-    needs: [lint, changes]
-    if: needs.changes.outputs.run_neo4j == 'true'
+    needs: [lint, changes, build-image-candidate]
+    # `always()` is needed because build-image-candidate is skipped whenever the commit
+    # does not move what the image installs, and a skipped dependency skips its
+    # dependents. lint and changes are then checked explicitly, so this gate is exactly
+    # as strict as the `needs:` list it replaces.
+    if: >-
+      always()
+      && needs.lint.result == 'success'
+      && needs.changes.result == 'success'
+      && needs.changes.outputs.run_neo4j == 'true'
 
     runs-on: ubuntu-latest
-    container:
-      image: ml4t/ml4t:latest
-      env:
-        NEO4J_URI: bolt://neo4j:7687
-        NEO4J_USER: neo4j
-        NEO4J_PASSWORD: password
+
+    # `bolt://neo4j:7687` resolved only because the job container shared GitHub's
+    # per-job network with the service. The notebooks now run under `docker run
+    # --network host`, so they reach the service on the port it publishes to the
+    # runner and the name the service is registered under stops mattering.
+    env:
+      NEO4J_URI: bolt://localhost:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: password
 
     services:
       neo4j:
@@ -1642,18 +1673,6 @@ jobs:
             echo "have_key=" >> "$GITHUB_OUTPUT"
             echo "::notice::No test-data deploy key in this context, which is a fork pull request. This job checked out no test data and executed no notebook, so it asserts nothing about this change; the notebooks run on the branch once it is merged."
           fi
-      - name: Install git
-        if: steps.reach.outputs.have_key
-        run: |
-          # A transient apt mirror failure used to kill the whole job.
-          for attempt in 1 2 3; do
-            apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null && exit 0
-            echo "apt-get failed (attempt $attempt of 3); retrying in $((attempt * 15))s"
-            sleep $((attempt * 15))
-          done
-          echo "::error::apt-get could not install git after three attempts"
-          exit 1
-
       - uses: actions/checkout@v6
         if: steps.reach.outputs.have_key
 
@@ -1666,24 +1685,49 @@ jobs:
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
 
-      # Same reason as the two notebook jobs above: this runs in the published image,
-      # which cannot carry a candidate built from this commit.
+      - name: Resolve the image this commit declares
+        id: image
+        if: steps.reach.outputs.have_key
+        uses: ./.github/actions/resolve-ml4t-image
+        with:
+          candidate-result: ${{ needs.build-image-candidate.result }}
+
+      # Same as the two notebook jobs above: the image is a step-level choice, so a
+      # commit that moves uv.lock is measured in the image built from that commit.
       - name: The image's installed distributions match uv.lock
         if: steps.reach.outputs.have_key
-        run: python .github/scripts/check_env_matches_lock.py
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -w "$GITHUB_WORKSPACE" \
+            "${{ steps.image.outputs.ref }}" \
+            python .github/scripts/check_env_matches_lock.py
       - name: Run Ch23 Knowledge Graph notebooks (pipeline order)
         if: steps.reach.outputs.have_key
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
-          # Run in dependency order: upstream notebooks generate data for downstream
-          python -m pytest tests/test_docker_notebooks.py -v --tb=short \
-            -k "08_8k_event_extraction" && \
-          python -m pytest tests/test_docker_notebooks.py -v --tb=short \
-            -k "02_supply_chain_kg_construction" && \
-          python -m pytest tests/test_docker_notebooks.py -v --tb=short \
-            -k "07_dynamic_kg_temporal or 03_graph_rag_qa or 05_institutional_holdings_kg \
-                or 09_knowledge_graph_features"
+          mkdir -p "$ML4T_OUTPUT_DIR"
+          # --network host so the notebooks reach the neo4j service on the port it
+          # publishes to the runner. The job no longer shares GitHub's per-job network,
+          # which is what `bolt://neo4j:7687` depended on.
+          docker run --rm --network host \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            -v "$ML4T_OUTPUT_DIR:$ML4T_OUTPUT_DIR" \
+            -w "$GITHUB_WORKSPACE" \
+            -e PYTHONPATH -e ML4T_DATA_PATH -e ML4T_OUTPUT_DIR \
+            -e MPLBACKEND -e PLOTLY_RENDERER \
+            -e NEO4J_URI -e NEO4J_USER -e NEO4J_PASSWORD \
+            "${{ steps.image.outputs.ref }}" \
+            bash -c '
+              # Dependency order: upstream notebooks generate data for downstream ones.
+              python -m pytest tests/test_docker_notebooks.py -v --tb=short \
+                -k "08_8k_event_extraction" && \
+              python -m pytest tests/test_docker_notebooks.py -v --tb=short \
+                -k "02_supply_chain_kg_construction" && \
+              python -m pytest tests/test_docker_notebooks.py -v --tb=short \
+                -k "07_dynamic_kg_temporal or 03_graph_rag_qa or 05_institutional_holdings_kg \
+                    or 09_knowledge_graph_features"
+            '
 
   # ---------------------------------------------------------------------------
   # Benchmark Docker image (Ch02 storage benchmarks + database services)
