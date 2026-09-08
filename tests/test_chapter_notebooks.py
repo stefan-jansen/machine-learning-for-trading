@@ -31,6 +31,7 @@ from tests.pm_helpers import (
     get_tier,
     missing_required_env,
     run_notebook,
+    sole_invocation,
 )
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -103,7 +104,10 @@ def test_chapter_notebook(notebook_path, populated_data_dir, seeded_output_dir):
             pytest.skip("GPU required but torch not installed")
 
     timeout = overrides.get("timeout", 300)
-    parameters = overrides.get("parameters", {})
+    # A chapter notebook is one run. `sole_invocation` raises rather than silently taking
+    # the first if an entry ever declares several, because running one of five and
+    # reporting the notebook as exercised is the failure this grammar exists to prevent.
+    parameters = sole_invocation(overrides, key=str(rel_path)).parameters
 
     # Data layer notebooks expect to run from their own directory (for config.yaml)
     notebook_cwd = notebook_path.parent if "data/" in str(rel_path) else None

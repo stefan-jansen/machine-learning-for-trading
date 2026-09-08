@@ -26,6 +26,7 @@ from tests.pm_helpers import (
     missing_required_env,
     research_preview_parameters,
     resolved_registry_path,
+    unreachable_declared_parameters,
     unusable_parameters,
 )
 
@@ -400,21 +401,49 @@ def test_every_declared_parameter_reaches_its_notebook(
     756-session burn-in `model_based.regime` declares, leaving 19 declared features
     entirely missing from its design matrix.
     """
-    unreachable = {
-        key: unusable
-        for key, value in overrides.items()
-        if isinstance(value, dict) and isinstance(value.get("parameters"), dict)
-        for unusable in [
-            unusable_parameters(
-                REPO_ROOT / f"{key}.py",
-                value["parameters"],
-                research_preview=research_preview,
-            )
-        ]
-        if unusable
-    }
+    assert unreachable_declared_parameters(overrides, research_preview=research_preview) == {}
 
-    assert unreachable == {}
+
+def test_an_entry_whose_shape_is_not_understood_is_refused_rather_than_skipped() -> None:
+    """The sweep above filtered on `isinstance(value.get("parameters"), dict)`.
+
+    Anything else - a list, a string, a key it did not know - was dropped from the sweep
+    rather than failed by it, and a dropped entry returns the same empty dict as one that
+    was checked and found clean. That is the shape of every defect this repository spent
+    2026-09-07 finding: a guard in a branch a parameter skipped, a CI gate counting
+    failures where an absent check reads as a pass, a fixture asserting a grid it could
+    not realize. A check that cannot fire is worse than no check, because it reports.
+
+    Every entry here declares a real parameter that `case_studies/etfs/06_linear` cannot
+    take, so a sweep that examines them fails and a sweep that skips them passes.
+    """
+    for shape in (
+        {"parameters": ["NOT_A_MAPPING"]},
+        {"parameters": {"NOT_DECLARED_ANYWHERE": 1}, "invocations": [{"id": "a"}]},
+        {"invocations": {"id": "a", "parameters": {"NOT_DECLARED_ANYWHERE": 1}}},
+        {"invocations": [{"parameters": {"NOT_DECLARED_ANYWHERE": 1}}]},
+        {"invocations": [{"id": "a", "parameters": {"NOT_DECLARED_ANYWHERE": 1}, "timeout": 5}]},
+    ):
+        with pytest.raises((TypeError, ValueError)):
+            unreachable_declared_parameters(
+                {"case_studies/etfs/06_linear": shape}, research_preview=True
+            )
+
+
+def test_a_named_invocation_is_swept_like_any_other_parameter_block() -> None:
+    """And the name it reports is the run's, not only the notebook's."""
+    unreachable = unreachable_declared_parameters(
+        {
+            "case_studies/etfs/06_linear": {
+                "invocations": [
+                    {"id": "reachable", "parameters": {"MAX_FOLDS": 2}},
+                    {"id": "unreachable", "parameters": {"NOT_DECLARED_ANYWHERE": 1}},
+                ]
+            }
+        },
+        research_preview=True,
+    )
+    assert list(unreachable) == ["case_studies/etfs/06_linear[unreachable]"]
 
 
 def _accepted_reduction_fields() -> tuple[set[str], set[str]]:

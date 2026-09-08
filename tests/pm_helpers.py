@@ -1493,3 +1493,154 @@ def collect_chapter_notebooks(repo_root: Path, chapter_range: range) -> list[Pat
             notebooks.append(notebook)
 
     return notebooks
+
+
+# ---------------------------------------------------------------------------
+# One overrides entry, one or several parameterised runs
+# ---------------------------------------------------------------------------
+
+
+class Invocation(NamedTuple):
+    """One parameterised execution of one notebook.
+
+    ``id`` is ``None`` for an entry that declares a single unnamed run, which is
+    every entry that predates this grammar, and a short label otherwise. It ends up
+    in the pytest test id, so a failure names which run failed rather than only
+    which notebook.
+    """
+
+    id: str | None
+    parameters: dict
+
+
+def invocations_for(entry: dict, *, key: str = "<entry>") -> list[Invocation]:
+    """Every parameterised run an overrides entry asks for.
+
+    Two shapes. The common one is a single `parameters` mapping, which is one run and
+    the whole of what this file expressed before::
+
+        case_studies/etfs/06_linear:
+          parameters: {MAX_FOLDS: 2}
+
+    The other is `invocations`, a list naming several runs of one notebook::
+
+        case_studies/etfs/14_backtest:
+          invocations:
+            - id: fwd_ret_5d
+              parameters: {LABEL: fwd_ret_5d}
+            - id: fwd_ret_21d
+              parameters: {LABEL: fwd_ret_21d}
+
+    which exists because three case studies take their label as a parameter and
+    declare several - `etfs` two, `us_firm_characteristics` three,
+    `sp500_equity_option_analytics` five - while the runner could only execute a
+    notebook once. A chain that exercises one label of five asserts nothing about
+    the other four, and "every declared label carries rankable validation backtests"
+    is a condition those case studies have to meet.
+
+    **Raises rather than returning something plausible for a shape it does not
+    recognise.** The check this feeds used to filter on
+    `isinstance(entry.get("parameters"), dict)`, so an entry written in any other
+    shape was silently dropped from it - not failed, dropped - and a dropped entry is
+    indistinguishable from a passing one. Refusing loudly is the point of the
+    function existing rather than each caller reading the key itself.
+    """
+    if not isinstance(entry, dict):
+        raise TypeError(f"{key}: an overrides entry must be a mapping, got {type(entry).__name__}")
+
+    declared = entry.get("invocations")
+    parameters = entry.get("parameters")
+
+    if declared is None:
+        if parameters is None:
+            return [Invocation(None, {})]
+        if not isinstance(parameters, dict):
+            raise TypeError(
+                f"{key}: `parameters` must be a mapping of names to values, got "
+                f"{type(parameters).__name__}. Several runs of one notebook are declared "
+                f"under `invocations`, not by making this a list."
+            )
+        return [Invocation(None, parameters)]
+
+    if parameters is not None:
+        raise ValueError(
+            f"{key}: declares both `parameters` and `invocations`. Everything a run needs "
+            f"goes in its own entry under `invocations`, so that what each run was given is "
+            f"readable in one place."
+        )
+    if not isinstance(declared, list) or not declared:
+        raise TypeError(f"{key}: `invocations` must be a non-empty list, got {declared!r}")
+
+    seen: list[str] = []
+    out: list[Invocation] = []
+    for position, item in enumerate(declared):
+        where = f"{key}: invocations[{position}]"
+        if not isinstance(item, dict):
+            raise TypeError(f"{where}: must be a mapping with `id` and `parameters`")
+        unknown = set(item) - {"id", "parameters"}
+        if unknown:
+            raise ValueError(
+                f"{where}: unknown key(s) {sorted(unknown)}. An invocation carries only its "
+                f"`id` and its `parameters`; anything that applies to every run of the "
+                f"notebook - timeout, skip, requires_stage - belongs on the entry."
+            )
+        run_id = item.get("id")
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise ValueError(f"{where}: needs a non-empty string `id`; it names the run in CI")
+        if run_id in seen:
+            raise ValueError(f"{where}: duplicate id {run_id!r}; ids identify a run in a failure")
+        run_parameters = item.get("parameters")
+        if run_parameters is None:
+            run_parameters = {}
+        if not isinstance(run_parameters, dict):
+            raise TypeError(f"{where}: `parameters` must be a mapping, got {run_parameters!r}")
+        seen.append(run_id)
+        out.append(Invocation(run_id, run_parameters))
+    return out
+
+
+def sole_invocation(entry: dict, *, key: str = "<entry>") -> Invocation:
+    """The one run this entry declares, for a caller that can only execute one.
+
+    Raises when the entry declares several rather than quietly running the first,
+    which would report a notebook as exercised on a parameter set nobody chose.
+    """
+    runs = invocations_for(entry, key=key)
+    if len(runs) > 1:
+        raise ValueError(
+            f"{key}: declares {len(runs)} invocations ({', '.join(r.id or '?' for r in runs)}), "
+            f"and this caller executes a notebook once. Teach it to iterate "
+            f"`invocations_for` rather than picking one."
+        )
+    return runs[0]
+
+
+def declares_parameters(entry: dict, *, key: str = "<entry>") -> bool:
+    """Whether any run of this notebook is given parameters at all."""
+    return any(run.parameters for run in invocations_for(entry, key=key))
+
+
+def unreachable_declared_parameters(
+    overrides: dict, *, research_preview: bool
+) -> dict[str, dict[str, str]]:
+    """Every declared parameter name papermill cannot inject, over every invocation.
+
+    Keyed by `<notebook>` for a single-run entry and `<notebook>[<id>]` for one run of
+    several, so the failure names the run rather than only the notebook. Entries whose
+    shape `invocations_for` does not recognise raise out of here rather than being
+    skipped: a sweep that silently omits an entry reports the same empty dict as one
+    that checked it and found nothing wrong.
+    """
+    unreachable: dict[str, dict[str, str]] = {}
+    for key, entry in overrides.items():
+        if not isinstance(entry, dict):
+            continue
+        for run in invocations_for(entry, key=key):
+            if not run.parameters:
+                continue
+            unusable = unusable_parameters(
+                REPO_ROOT / f"{key}.py", run.parameters, research_preview=research_preview
+            )
+            if unusable:
+                unreachable[key if run.id is None else f"{key}[{run.id}]"] = unusable
+    return unreachable

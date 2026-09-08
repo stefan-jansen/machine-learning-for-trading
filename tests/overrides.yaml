@@ -1853,24 +1853,72 @@ case_studies/etfs/13_model_analysis:
 # Timeouts are raised across the block rather than kept: every stage below now sees 24 funds
 # where it saw 5, and the previous budgets were measured against the narrower panel.
 case_studies/etfs/14_backtest:
+  # Two invocations, one per label this case study declares in
+  # backtest.sweep.top_k_grid, and the same two on each of the four stages that
+  # take LABEL as a parameter: 14_backtest, 15_portfolio_management,
+  # 16_risk_management and 17_costs.
+  #
+  # The notebook falls back to bt_config.primary_label when LABEL is empty, so before
+  # this it ran once and the second was never exercised - while
+  # 17_costs and 20_strategy_analysis assert that every declared label carries rankable
+  # validation backtests. A chain that runs one label of two does not test that
+  # claim; it passes or fails on whether the fixture happens to carry rows from an
+  # earlier generation.
+  #
+  # The primary label is first, so the first run is what this entry did before.
+  invocations:
+    - id: fwd_ret_21d
+      parameters:
+        LABEL: fwd_ret_21d
+    - id: fwd_ret_5d
+      parameters:
+        LABEL: fwd_ret_5d
   timeout: 900
 case_studies/etfs/15_portfolio_management:
-  parameters:
-    TOP_N_PREDICTIONS: 2
+  # The same two labels as 14_backtest above, because this stage takes LABEL
+  # too and reads what the previous one registered for that label.
+  invocations:
+    - id: fwd_ret_21d
+      parameters:
+        LABEL: fwd_ret_21d
+        TOP_N_PREDICTIONS: 2
+    - id: fwd_ret_5d
+      parameters:
+        LABEL: fwd_ret_5d
+        TOP_N_PREDICTIONS: 2
   timeout: 600
 case_studies/etfs/16_risk_management:
+  # The same two labels as 14_backtest above, because this stage takes LABEL
+  # too and reads what the previous one registered for that label.
+  invocations:
+    - id: fwd_ret_21d
+      parameters:
+        LABEL: fwd_ret_21d
+        MAX_RISK_VARIANTS: 2
+        TOP_N_COMBOS: 2
+    - id: fwd_ret_5d
+      parameters:
+        LABEL: fwd_ret_5d
+        MAX_RISK_VARIANTS: 2
+        TOP_N_COMBOS: 2
   # MAX_RISK_VARIANTS bounds the overlay sweep, which is the cell that dominates this notebook,
   # and it bounds work rather than the cross-section - which is why it stays while MAX_SYMBOLS
   # goes. Scoping the baselines to live prediction sets had already put that cell over the
   # per-cell cap once: measured at loads 34-41, the unbounded sweep passed 4/4 before the
   # scoping and 1/3 after.
-  parameters:
-    MAX_RISK_VARIANTS: 2
-    TOP_N_COMBOS: 2
   timeout: 600
 case_studies/etfs/17_costs:
-  parameters:
-    TOP_N_COMBOS: 2
+  # The same two labels as 14_backtest above, because this stage takes LABEL
+  # too and reads what the previous one registered for that label.
+  invocations:
+    - id: fwd_ret_21d
+      parameters:
+        LABEL: fwd_ret_21d
+        TOP_N_COMBOS: 2
+    - id: fwd_ret_5d
+      parameters:
+        LABEL: fwd_ret_5d
+        TOP_N_COMBOS: 2
   timeout: 600
 case_studies/etfs/18_holdout_predictions:
   # Canonical, not preview. `reconstruct_locked_model_request` refuses any spec whose
@@ -2530,28 +2578,155 @@ case_studies/sp500_equity_option_analytics/12_causal_dml:
 case_studies/sp500_equity_option_analytics/13_model_analysis:
   timeout: 300
 case_studies/sp500_equity_option_analytics/14_backtest:
-  parameters:
-    MAX_SYMBOLS: 3
-    TOP_K: 1
+  # Five invocations, one per label this case study declares in
+  # backtest.sweep.top_k_grid, and the same five on each of the four stages that
+  # take LABEL as a parameter: 14_backtest, 15_portfolio_management,
+  # 16_risk_management and 17_costs.
+  #
+  # The notebook falls back to bt_config.primary_label when LABEL is empty, so before
+  # this it ran once and the other four were never exercised at all - while
+  # 17_costs and 20_strategy_analysis assert that every declared label carries rankable
+  # validation backtests. A chain that runs one label of five does not test that
+  # claim; it passes or fails on whether the fixture happens to carry rows from an
+  # earlier generation.
+  #
+  # The primary label is first, so the first run is what this entry did before.
+  invocations:
+    - id: fwd_ret_5d
+      parameters:
+        LABEL: fwd_ret_5d
+        MAX_SYMBOLS: 3
+        TOP_K: 1
+    - id: fwd_dir_5d
+      parameters:
+        LABEL: fwd_dir_5d
+        MAX_SYMBOLS: 3
+        TOP_K: 1
+    - id: fwd_dir_10d
+      parameters:
+        LABEL: fwd_dir_10d
+        MAX_SYMBOLS: 3
+        TOP_K: 1
+    - id: fwd_ret_10d
+      parameters:
+        LABEL: fwd_ret_10d
+        MAX_SYMBOLS: 3
+        TOP_K: 1
+    - id: fwd_ret_risk_adj_5d
+      parameters:
+        LABEL: fwd_ret_risk_adj_5d
+        MAX_SYMBOLS: 3
+        TOP_K: 1
   timeout: 600
 case_studies/sp500_equity_option_analytics/15_portfolio_management:
-  parameters:
-    # top_k_grid starts at 5, so a cap of 5 empties the grid and the sweep registers
-    # nothing; the fixture's seeded allocation rows then hide it downstream. This case
-    # study is long-only, so 6 realizes top_k=5 in full.
-    MAX_SYMBOLS: 6
-    TOP_N_PREDICTIONS: 2
+  # The same five labels as 14_backtest above, because this stage takes LABEL
+  # too and reads what the previous one registered for that label.
+  invocations:
+    - id: fwd_ret_5d
+      parameters:
+        LABEL: fwd_ret_5d
+        # top_k_grid starts at 5, so a cap of 5 empties the grid and the sweep registers
+        # nothing; the fixture's seeded allocation rows then hide it downstream. This case
+        # study is long-only, so 6 realizes top_k=5 in full.
+        MAX_SYMBOLS: 6
+        TOP_N_PREDICTIONS: 2
+    - id: fwd_dir_5d
+      parameters:
+        LABEL: fwd_dir_5d
+        # top_k_grid starts at 5, so a cap of 5 empties the grid and the sweep registers
+        # nothing; the fixture's seeded allocation rows then hide it downstream. This case
+        # study is long-only, so 6 realizes top_k=5 in full.
+        MAX_SYMBOLS: 6
+        TOP_N_PREDICTIONS: 2
+    - id: fwd_dir_10d
+      parameters:
+        LABEL: fwd_dir_10d
+        # top_k_grid starts at 5, so a cap of 5 empties the grid and the sweep registers
+        # nothing; the fixture's seeded allocation rows then hide it downstream. This case
+        # study is long-only, so 6 realizes top_k=5 in full.
+        MAX_SYMBOLS: 6
+        TOP_N_PREDICTIONS: 2
+    - id: fwd_ret_10d
+      parameters:
+        LABEL: fwd_ret_10d
+        # top_k_grid starts at 5, so a cap of 5 empties the grid and the sweep registers
+        # nothing; the fixture's seeded allocation rows then hide it downstream. This case
+        # study is long-only, so 6 realizes top_k=5 in full.
+        MAX_SYMBOLS: 6
+        TOP_N_PREDICTIONS: 2
+    - id: fwd_ret_risk_adj_5d
+      parameters:
+        LABEL: fwd_ret_risk_adj_5d
+        # top_k_grid starts at 5, so a cap of 5 empties the grid and the sweep registers
+        # nothing; the fixture's seeded allocation rows then hide it downstream. This case
+        # study is long-only, so 6 realizes top_k=5 in full.
+        MAX_SYMBOLS: 6
+        TOP_N_PREDICTIONS: 2
   timeout: 300
 case_studies/sp500_equity_option_analytics/17_costs:
-  parameters:
-    MAX_SYMBOLS: 5
-    TOP_N_COMBOS: 1
+  # The same five labels as 14_backtest above, because this stage takes LABEL
+  # too and reads what the previous one registered for that label.
+  invocations:
+    - id: fwd_ret_5d
+      parameters:
+        LABEL: fwd_ret_5d
+        MAX_SYMBOLS: 5
+        TOP_N_COMBOS: 1
+    - id: fwd_dir_5d
+      parameters:
+        LABEL: fwd_dir_5d
+        MAX_SYMBOLS: 5
+        TOP_N_COMBOS: 1
+    - id: fwd_dir_10d
+      parameters:
+        LABEL: fwd_dir_10d
+        MAX_SYMBOLS: 5
+        TOP_N_COMBOS: 1
+    - id: fwd_ret_10d
+      parameters:
+        LABEL: fwd_ret_10d
+        MAX_SYMBOLS: 5
+        TOP_N_COMBOS: 1
+    - id: fwd_ret_risk_adj_5d
+      parameters:
+        LABEL: fwd_ret_risk_adj_5d
+        MAX_SYMBOLS: 5
+        TOP_N_COMBOS: 1
   timeout: 600
 case_studies/sp500_equity_option_analytics/16_risk_management:
-  parameters:
-    MAX_RISK_VARIANTS: 3
-    MAX_SYMBOLS: 5
-    TOP_N_COMBOS: 1
+  # The same five labels as 14_backtest above, because this stage takes LABEL
+  # too and reads what the previous one registered for that label.
+  invocations:
+    - id: fwd_ret_5d
+      parameters:
+        LABEL: fwd_ret_5d
+        MAX_RISK_VARIANTS: 3
+        MAX_SYMBOLS: 5
+        TOP_N_COMBOS: 1
+    - id: fwd_dir_5d
+      parameters:
+        LABEL: fwd_dir_5d
+        MAX_RISK_VARIANTS: 3
+        MAX_SYMBOLS: 5
+        TOP_N_COMBOS: 1
+    - id: fwd_dir_10d
+      parameters:
+        LABEL: fwd_dir_10d
+        MAX_RISK_VARIANTS: 3
+        MAX_SYMBOLS: 5
+        TOP_N_COMBOS: 1
+    - id: fwd_ret_10d
+      parameters:
+        LABEL: fwd_ret_10d
+        MAX_RISK_VARIANTS: 3
+        MAX_SYMBOLS: 5
+        TOP_N_COMBOS: 1
+    - id: fwd_ret_risk_adj_5d
+      parameters:
+        LABEL: fwd_ret_risk_adj_5d
+        MAX_RISK_VARIANTS: 3
+        MAX_SYMBOLS: 5
+        TOP_N_COMBOS: 1
   timeout: 600
 case_studies/sp500_equity_option_analytics/18_holdout_predictions:
   # Not reducible. `reconstruct_locked_request` refuses anything but the canonical tier at
@@ -3323,38 +3498,137 @@ case_studies/us_firm_characteristics/09_causal_dml:
 case_studies/us_firm_characteristics/10_model_analysis:
   timeout: 300
 case_studies/us_firm_characteristics/11_backtest:
-  parameters:
-    # The sweep's entry schemes come from backtest.sweep.top_k_grid, which for every
-    # us_firm_characteristics label is [5, 10, 20, 50]. `get_entry_schemes_for` drops a
-    # scheme when k >= n_assets (that is the whole universe, i.e. the equal-weight
-    # benchmark) and, long-short, when 2k > n_assets, because the two legs must be
-    # disjoint. So the smallest declared scheme needs ten symbols, and at MAX_SYMBOLS: 5
-    # every member of the grid was filtered out: the sweep ran a 19 x 0 grid, registered
-    # nothing, and section 3 read an empty registry (ml4t/agent-workspace#1075). Twelve
-    # admits ew_top5 and matches 12_portfolio_management, so the two notebooks sweep the
-    # same universe.
-    MAX_SYMBOLS: 12
-    TOP_K: 2
+  # Three invocations, one per label this case study declares in
+  # backtest.sweep.top_k_grid, and the same three on each of the four stages that
+  # take LABEL as a parameter: 11_backtest, 12_portfolio_management,
+  # 13_risk_management and 14_costs.
+  #
+  # The notebook falls back to bt_config.primary_label when LABEL is empty, so before
+  # this it ran once and the other two were never exercised - while
+  # 14_costs and 17_strategy_analysis assert that every declared label carries rankable
+  # validation backtests. A chain that runs one label of three does not test that
+  # claim; it passes or fails on whether the fixture happens to carry rows from an
+  # earlier generation.
+  #
+  # The primary label is first, so the first run is what this entry did before.
+  invocations:
+    - id: fwd_ret_1m
+      parameters:
+        LABEL: fwd_ret_1m
+        # The sweep's entry schemes come from backtest.sweep.top_k_grid, which for every
+        # us_firm_characteristics label is [5, 10, 20, 50]. `get_entry_schemes_for` drops a
+        # scheme when k >= n_assets (that is the whole universe, i.e. the equal-weight
+        # benchmark) and, long-short, when 2k > n_assets, because the two legs must be
+        # disjoint. So the smallest declared scheme needs ten symbols, and at MAX_SYMBOLS: 5
+        # every member of the grid was filtered out: the sweep ran a 19 x 0 grid, registered
+        # nothing, and section 3 read an empty registry (ml4t/agent-workspace#1075). Twelve
+        # admits ew_top5 and matches 12_portfolio_management, so the two notebooks sweep the
+        # same universe.
+        MAX_SYMBOLS: 12
+        TOP_K: 2
+    - id: fwd_class_1m
+      parameters:
+        LABEL: fwd_class_1m
+        # The sweep's entry schemes come from backtest.sweep.top_k_grid, which for every
+        # us_firm_characteristics label is [5, 10, 20, 50]. `get_entry_schemes_for` drops a
+        # scheme when k >= n_assets (that is the whole universe, i.e. the equal-weight
+        # benchmark) and, long-short, when 2k > n_assets, because the two legs must be
+        # disjoint. So the smallest declared scheme needs ten symbols, and at MAX_SYMBOLS: 5
+        # every member of the grid was filtered out: the sweep ran a 19 x 0 grid, registered
+        # nothing, and section 3 read an empty registry (ml4t/agent-workspace#1075). Twelve
+        # admits ew_top5 and matches 12_portfolio_management, so the two notebooks sweep the
+        # same universe.
+        MAX_SYMBOLS: 12
+        TOP_K: 2
+    - id: fwd_ret_1m_win
+      parameters:
+        LABEL: fwd_ret_1m_win
+        # The sweep's entry schemes come from backtest.sweep.top_k_grid, which for every
+        # us_firm_characteristics label is [5, 10, 20, 50]. `get_entry_schemes_for` drops a
+        # scheme when k >= n_assets (that is the whole universe, i.e. the equal-weight
+        # benchmark) and, long-short, when 2k > n_assets, because the two legs must be
+        # disjoint. So the smallest declared scheme needs ten symbols, and at MAX_SYMBOLS: 5
+        # every member of the grid was filtered out: the sweep ran a 19 x 0 grid, registered
+        # nothing, and section 3 read an empty registry (ml4t/agent-workspace#1075). Twelve
+        # admits ew_top5 and matches 12_portfolio_management, so the two notebooks sweep the
+        # same universe.
+        MAX_SYMBOLS: 12
+        TOP_K: 2
   timeout: 300
 case_studies/us_firm_characteristics/12_portfolio_management:
-  parameters:
-    # top_k_grid starts at 5, so a cap of 5 empties the grid and the sweep registers
-    # nothing; the fixture's seeded allocation rows then hide it downstream. This case
-    # study is long-short, and signals.py caps each side at n_assets // 2, so a cap of 6
-    # would register rows labelled top_k=5 that trade 3 names per side. The fixture holds
-    # 200 symbols, so 12 realizes the concentration the row claims.
-    MAX_SYMBOLS: 12
-    TOP_N_PREDICTIONS: 2
+  # The same three labels as 11_backtest above, because this stage takes LABEL
+  # too and reads what the previous one registered for that label.
+  invocations:
+    - id: fwd_ret_1m
+      parameters:
+        LABEL: fwd_ret_1m
+        # top_k_grid starts at 5, so a cap of 5 empties the grid and the sweep registers
+        # nothing; the fixture's seeded allocation rows then hide it downstream. This case
+        # study is long-short, and signals.py caps each side at n_assets // 2, so a cap of 6
+        # would register rows labelled top_k=5 that trade 3 names per side. The fixture holds
+        # 200 symbols, so 12 realizes the concentration the row claims.
+        MAX_SYMBOLS: 12
+        TOP_N_PREDICTIONS: 2
+    - id: fwd_class_1m
+      parameters:
+        LABEL: fwd_class_1m
+        # top_k_grid starts at 5, so a cap of 5 empties the grid and the sweep registers
+        # nothing; the fixture's seeded allocation rows then hide it downstream. This case
+        # study is long-short, and signals.py caps each side at n_assets // 2, so a cap of 6
+        # would register rows labelled top_k=5 that trade 3 names per side. The fixture holds
+        # 200 symbols, so 12 realizes the concentration the row claims.
+        MAX_SYMBOLS: 12
+        TOP_N_PREDICTIONS: 2
+    - id: fwd_ret_1m_win
+      parameters:
+        LABEL: fwd_ret_1m_win
+        # top_k_grid starts at 5, so a cap of 5 empties the grid and the sweep registers
+        # nothing; the fixture's seeded allocation rows then hide it downstream. This case
+        # study is long-short, and signals.py caps each side at n_assets // 2, so a cap of 6
+        # would register rows labelled top_k=5 that trade 3 names per side. The fixture holds
+        # 200 symbols, so 12 realizes the concentration the row claims.
+        MAX_SYMBOLS: 12
+        TOP_N_PREDICTIONS: 2
   timeout: 300
 case_studies/us_firm_characteristics/14_costs:
-  parameters:
-    MAX_SYMBOLS: 5
+  # The same three labels as 11_backtest above, because this stage takes LABEL
+  # too and reads what the previous one registered for that label.
+  invocations:
+    - id: fwd_ret_1m
+      parameters:
+        LABEL: fwd_ret_1m
+        MAX_SYMBOLS: 5
+    - id: fwd_class_1m
+      parameters:
+        LABEL: fwd_class_1m
+        MAX_SYMBOLS: 5
+    - id: fwd_ret_1m_win
+      parameters:
+        LABEL: fwd_ret_1m_win
+        MAX_SYMBOLS: 5
   timeout: 600
 case_studies/us_firm_characteristics/13_risk_management:
-  parameters:
-    MAX_RISK_VARIANTS: 3
-    MAX_SYMBOLS: 5
-    TOP_N_COMBOS: 1
+  # The same three labels as 11_backtest above, because this stage takes LABEL
+  # too and reads what the previous one registered for that label.
+  invocations:
+    - id: fwd_ret_1m
+      parameters:
+        LABEL: fwd_ret_1m
+        MAX_RISK_VARIANTS: 3
+        MAX_SYMBOLS: 5
+        TOP_N_COMBOS: 1
+    - id: fwd_class_1m
+      parameters:
+        LABEL: fwd_class_1m
+        MAX_RISK_VARIANTS: 3
+        MAX_SYMBOLS: 5
+        TOP_N_COMBOS: 1
+    - id: fwd_ret_1m_win
+      parameters:
+        LABEL: fwd_ret_1m_win
+        MAX_RISK_VARIANTS: 3
+        MAX_SYMBOLS: 5
+        TOP_N_COMBOS: 1
   timeout: 600
 case_studies/us_firm_characteristics/15_holdout_predictions:
   skip: true

@@ -13,7 +13,10 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests.pm_helpers import parameters_cell_names, unusable_parameters
+from tests.pm_helpers import (
+    parameters_cell_names,
+    unreachable_declared_parameters,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SMOKE = yaml.safe_load((REPO_ROOT / "tests" / "smoke.yaml").read_text())
@@ -194,13 +197,7 @@ def test_every_declared_parameter_reaches_its_notebook() -> None:
     that read neither, so runs described as reduced ran in full. A smoke configuration that
     misses this way is worse: the run passes, quickly, and proves nothing about the notebook.
     """
-    unreachable = {
-        key: unusable_parameters(REPO_ROOT / f"{key}.py", entry["parameters"])
-        for key, entry in SMOKE.items()
-        if entry.get("parameters")
-        and unusable_parameters(REPO_ROOT / f"{key}.py", entry["parameters"])
-    }
-    assert unreachable == {}
+    assert unreachable_declared_parameters(SMOKE, research_preview=True) == {}
 
 
 def _allowed_reduction_fields(key: str) -> set[str] | None:

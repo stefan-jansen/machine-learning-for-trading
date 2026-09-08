@@ -28,6 +28,7 @@ from tests.pm_helpers import (
     current_test_tier,
     get_overrides,
     get_tier,
+    invocations_for,
     missing_required_env,
     run_notebook,
     stage_sort_key,
@@ -68,10 +69,25 @@ CASE_STUDIES = [
 
 
 def _collect_case_study_tests():
-    """Collect all case study pipeline notebooks as (case_study, stage, path) tuples.
+    """Collect case study pipeline runs as (case_study, stage, path, invocation) tuples.
 
     Auto-discovers files matching ^\\d{2}[a-z]?_ in each case study directory,
     sorted numerically. Skips helper files (starting with _).
+
+    One notebook is one run unless `tests/overrides.yaml` declares several under
+    `invocations`, in which case each becomes its own test - its own timeout, its own
+    pass or fail, and its id in the test id, so a failure names the run. Three case
+    studies take their label as a parameter and declare more than one, and a chain that
+    exercises one label of five asserts nothing about the other four.
+
+    The expansion happens here rather than inside the test because a loop inside one
+    test would give the whole notebook one timeout and one verdict, and would report
+    five label runs as a single line whichever of them failed.
+
+    Ordering stays stage-major: every invocation of stage 14 runs before any invocation
+    of stage 15. That is what a per-label chain needs - `15_portfolio_management`
+    selects what `14_backtest` registered for its own label - and the stage-major order
+    satisfies it for every label at once rather than per chain.
     """
     tests = []
     for cs in CASE_STUDIES:
@@ -85,23 +101,33 @@ def _collect_case_study_tests():
             if not STAGE_RE.match(notebook.name):
                 continue
             stage = notebook.stem  # e.g., "06_linear" or "11a_pca"
-            tests.append((cs, stage, notebook))
+            key = str(notebook.relative_to(REPO_ROOT).with_suffix(""))
+            for invocation in invocations_for(get_overrides(key), key=key):
+                tests.append((cs, stage, notebook, invocation))
 
     return tests
 
 
 CASE_STUDY_TESTS = _collect_case_study_tests()
 
-print(f"Found {len(CASE_STUDY_TESTS)} case study pipeline notebooks to test")
+# Spelled out rather than left to pytest, which renders a Path as `notebook_path146` and a
+# NamedTuple as `invocation7` - positions in a collection order, which change when a notebook
+# is added. `-k <case study>` is how the cs-* jobs select their matrix cell, and it matches
+# against this string.
+CASE_STUDY_IDS = [
+    f"{cs}-{stage}" + (f"-{run.id}" if run.id else "") for cs, stage, _, run in CASE_STUDY_TESTS
+]
+
+print(f"Found {len(CASE_STUDY_TESTS)} case study pipeline runs to test")
 
 
 @pytest.mark.parametrize(
-    "case_study,stage,notebook_path",
+    "case_study,stage,notebook_path,invocation",
     CASE_STUDY_TESTS,
-    ids=lambda *args: None,  # Custom IDs below
+    ids=CASE_STUDY_IDS,
 )
 def test_case_study_pipeline(
-    case_study, stage, notebook_path, populated_data_dir, seeded_output_dir
+    case_study, stage, notebook_path, invocation, populated_data_dir, seeded_output_dir
 ):
     """Execute a case study pipeline stage via Papermill.
 
@@ -180,11 +206,10 @@ def test_case_study_pipeline(
             pytest.skip("GPU required but torch not installed")
 
     timeout = overrides.get("timeout", 300)
-    parameters = overrides.get("parameters", {})
 
     result = run_notebook(
         py_path=notebook_path,
-        parameters=parameters,
+        parameters=invocation.parameters,
         timeout=timeout,
         output_dir=seeded_output_dir,
         data_dir=populated_data_dir,
@@ -192,12 +217,19 @@ def test_case_study_pipeline(
     )
 
     if result["status"] != "error":
+        # Keyed by stage rather than by invocation, and `requires_stage` reads it the same
+        # way. That is sufficient rather than approximate: collection is stage-major, so
+        # every invocation of a producer stage has run before any invocation of a consumer,
+        # and `test_a_required_stage_offers_every_invocation_its_dependant_declares` holds
+        # the two fan-outs to the same ids. A prerequisite that has to name one particular
+        # run would need more than this, and nothing declares one.
         _STAGES_RUN_HERE.add((case_study, stage))
 
     if result["status"] == "error":
+        named = stage if invocation.id is None else f"{stage}[{invocation.id}]"
         pytest.fail(
             f"\n{'=' * 70}\n"
-            f"Pipeline failed: {case_study}::{stage}\n"
+            f"Pipeline failed: {case_study}::{named}\n"
             f"{'=' * 70}\n"
             f"Error: {result['error']}\n"
             f"{'=' * 70}\n"
