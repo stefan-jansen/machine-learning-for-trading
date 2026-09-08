@@ -3483,6 +3483,12 @@ case_studies/us_firm_characteristics/05_linear:
   # a wider cross-section is not established here; what is established is that the number
   # this ladder was priced from does not hold.
   #
+  # Both runs skipped 07_tabular_dl, 08b, 08c and 08d, so those figures price a job with
+  # four model stages absent. #855 makes all four run, and this branch declares 41 on
+  # every one of them, so the next run measures a different job and these numbers do not
+  # carry forward to it. They are kept because what they establish is about 08a_ipca's
+  # direction, not about the job total.
+  #
   # The model stages carry it, not just the backtest chain. They are what bounds the
   # ranked cross-section: `get_entry_schemes_for` filters against the width of the
   # predictions a sweep ranks, so leaving these at 5 while raising 11-14 would repair the
