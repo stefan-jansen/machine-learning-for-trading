@@ -337,9 +337,16 @@ add_message_title(
 plt.show()
 
 # %% [markdown]
-# Read the tree from the leaves upward. Two ETFs joined low down moved together over this history;
-# the height at which two branches merge is the correlation distance between them. That height is
-# what step 2 uses to order the assets and what step 3 splits on.
+# Read the tree from the leaves upward. Two ETFs joined low down moved together over this
+# history. The height of a merge is the Ward criterion, the increase in within-cluster spread the
+# merge costs, so it rises as the two groups being joined become less alike; it is not itself the
+# correlation distance between them, which is what the leaves were measured on.
+#
+# Only the leaf order survives into the allocation. Step 2 takes the left-to-right sequence this
+# tree implies and reorders the covariance matrix by it; step 3 then halves that sequence by
+# count at every level, without consulting the heights again. The halves it forms therefore need
+# not be the clusters the tree draws, which is what section 7 traces through the first two
+# splits.
 
 # %% [markdown]
 # ## 6. Quasi-Diagonal Covariance Matrix

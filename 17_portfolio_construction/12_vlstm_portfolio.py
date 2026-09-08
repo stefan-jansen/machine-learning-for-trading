@@ -764,11 +764,17 @@ axes[1].legend(["Mean abs change"], loc="upper right")
 plt.show()
 
 # %% [markdown]
-# Read the left panel first. A signal distribution piled up at zero means the volatility-target
-# layer, not the network, is deciding the exposure - the scalar it is multiplying is near zero,
-# so what remains is the inverse-volatility scaling. A distribution that reaches the tanh bounds
-# means the network is taking a position, which is what makes the comparison against inverse
-# volatility informative rather than tautological.
+# Read the left panel first. `positions_from_signal` multiplies its inverse-volatility scaling by
+# the signal, so the signal decides how much of the book is used at all. A distribution piled up
+# at zero is a network declining to take a position, and what results is a portfolio close to
+# flat - not the inverse-volatility benchmark, which needs comparable non-zero signals across the
+# assets to be recovered. A distribution that reaches the tanh bounds is a network taking a
+# position, and only then does the comparison against the inverse-volatility row measure two
+# allocations against each other rather than one against cash.
+#
+# The relative sizes within the book come from both terms at once: two assets with the same
+# signal are held in inverse proportion to their volatilities, and two with the same volatility
+# in proportion to their signals.
 #
 # The right panel is where the cost lives. Occasional spikes as the signal changes sign are what
 # an allocator reacting to new information looks like; a level that stays high says the positions
