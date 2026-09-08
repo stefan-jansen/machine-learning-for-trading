@@ -686,11 +686,29 @@ fig.show()
 # %% [markdown]
 # ## What the blocks left behind
 #
-# Each block emits a backcast alongside its forecast: its own account of the input it
-# was given. The stack subtracts that account before handing the input on, so every
-# block after the first sees only what its predecessors could not describe. Running the
-# same window through block by block and keeping the final leftover shows how much of
-# the input the whole stack managed to account for, and what shape the rest has.
+# Each block emits a backcast alongside its forecast, and the stack subtracts it before
+# handing the input to the next block. Running one window through block by block and
+# keeping the leftover shows what the chain of subtractions did to it.
+#
+# Two things about that leftover have to be said before the picture, because the
+# picture invites two wrong readings and the reasons are visible in `forward` above.
+#
+# **The backcasts were never fitted to reconstruct anything.** The loss is the squared
+# error of the *forecast*; there is no reconstruction term. A backcast gets a gradient
+# only through its effect on what later blocks receive, so it is shaped to make the
+# forecast better, not to explain the input. The leftover is therefore not the part of
+# the window that a polynomial and five sine waves are unable to represent - it is
+# whatever these particular backcasts, trained for a different purpose, happened to
+# leave. Nothing guarantees it is small, and nothing makes a pattern in it evidence
+# about the basis.
+#
+# **The last block's backcast head is not trained at all.** Follow it: block six's
+# backcast is subtracted into `residual`, and `residual` after the final iteration is
+# returned to nobody and read by nothing. No path connects it to the loss, so its
+# weights hold their initial random values for the whole of training and its
+# subtraction is arbitrary. That is a property of stacking blocks under a forecast-only
+# objective, not a bug in this implementation, and it is why the last subtraction in
+# the figure below should be read as noise rather than as the stack's final refinement.
 
 # %%
 sample_input = torch.FloatTensor(X_test[sample_idx : sample_idx + 1]).to(DEVICE)
@@ -731,23 +749,24 @@ fig_bc.update_xaxes(title_text="Day of the input window", row=2, col=1)
 fig_bc.update_yaxes(title_text="SPY close ($)", row=1, col=1)
 fig_bc.update_yaxes(title_text="Leftover, standardized", row=2, col=1)
 fig_bc.update_layout(
-    title="The stack shrinks the window without flattening it",
+    title="One window before the blocks, and what they left of it",
     height=500,
 )
 fig_bc.show()
 
 # %% [markdown]
-# The leftover is much smaller than the window it came from, which is the stack working
-# as designed. What it is not is featureless: it neither sits on zero nor looks like
-# noise, and whatever shape remains is structure that no polynomial and no sum of five
-# sine waves could take on.
+# Read the two panels for scale and shape and stop there. The vertical axes differ, so
+# the comparison the figure supports is what the subtractions did to this window, not a
+# measurement of how much of it was explained - and with the last backcast untrained,
+# part of what is drawn is a random projection of a random head.
 #
-# That is worth stating plainly because the decomposition figure invites the opposite
-# reading. A backcast is what a fitted block *chose* to describe under the constraint it
-# was given, not a statement that the input contains a trend and a cycle and nothing
-# else. The trend panel above is the model's trend, in the model's sense of the word.
-# Treating it as the market's would be reading a modelling artefact as an economic
-# finding, and the leftover here is the evidence that the two are not the same.
+# The reason to look anyway is that it disciplines how the decomposition figure above
+# should be read. The trend panel is the model's trend, in the sense the polynomial
+# constraint gives that word: it is what a block was *allowed* to say while helping the
+# forecast. It is not a finding that SPY's price contains a cubic trend and a
+# ten-day cycle. Interpretable here means the output has named parts you can plot, and
+# that is genuinely more than a generic block offers - it is not a claim that the parts
+# are the market's.
 
 # %% [markdown]
 # ## How much history to give it
@@ -861,19 +880,22 @@ fig_sensitivity.show()
 # ## Key takeaways
 #
 # 1. **A backcast is what makes a stack of blocks more than a wider network.** Each
-#    block subtracts its own account of the input before passing it on, so the next
-#    block sees only the part that is still unexplained and cannot spend its capacity
-#    re-describing what has already been described. The forecasts add up; the inputs
-#    shrink.
+#    block subtracts its own account of the input before passing it on, so successive
+#    blocks work on different things rather than all re-fitting the same window. The
+#    subtraction is trained only through its effect on the forecast, though - there is
+#    no reconstruction term in the loss, and the final block's backcast reaches nothing
+#    at all, so it keeps its initial weights. Check where a component is connected to
+#    the loss before reading anything into it.
 # 2. **Constraining what a block may output is what buys interpretability.** A block
 #    that can only emit a polynomial produces something you can call a trend and defend
 #    the name of; a block that can emit any vector produces a forecast whose parts mean
 #    nothing separately. The constraint is a choice with a price, and the two variants
 #    fitted here are what let you see the price.
-# 3. **The components are the model's, not the market's.** The leftover after every
-#    block has run is neither zero nor featureless, which is the direct evidence that
-#    the trend and cycle panels are a decomposition the architecture was told to
-#    produce rather than one the data was found to contain.
+# 3. **The components are the model's, not the market's.** The trend and cycle panels
+#    show what a block was allowed to say while helping the forecast, under a loss that
+#    scores the forecast and nothing else. Read them as named, plottable parts of an
+#    output - which a generic block does not give you - and not as a claim that the
+#    series is a cubic trend plus a ten-day cycle.
 # 4. **Standardizing a trending level puts the forecast outside the training range.**
 #    Every held-back day here sits above every day the network was fitted on, measured
 #    at the top of the notebook. A network asked to extrapolate does so with whatever
