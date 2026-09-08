@@ -105,23 +105,30 @@ PRICE_SYMBOL = "SPY"  # the price series the macro features are joined onto in P
 # next section, from the series' release frequency. Writing the lag this way rather than as a
 # distance from the stamp is what keeps a monthly series from appearing four weeks early: the
 # Bureau of Labor Statistics publishes the employment report for a month on the first Friday of
-# the month after, which is six days past the period end and about thirty-six days past the
-# stamp FRED puts on it.
+# the month after, which is at most seven days past the period end and about thirty-six days past
+# the stamp FRED puts on it.
+#
+# **These are schedule bounds, not recorded release dates.** A release schedule that says "the
+# first Friday" or "around the middle of the month" gives a range, so each lag below is set at
+# the late end of its range: the panel is then a few days conservative rather than occasionally
+# a day early, and a day early is the failure that matters. What removes the approximation
+# entirely is the vintage date attached to each observation in an archive, which is what Part 6
+# uses; this panel does not carry one.
 
 # %%
 RELEASE_LAGS = {
-    "icsa": 5,  # weekly claims, Thursday for the week ending the previous Saturday
-    "walcl": 1,  # Fed H.4.1, Thursday for the Wednesday balance sheet
-    "unrate": 6,  # employment situation, first Friday after the month
-    "payems": 6,
-    "civpart": 6,
-    "cpiaucsl": 13,  # CPI, around the middle of the following month
-    "cpilfesl": 13,
-    "indpro": 16,  # industrial production, G.17
-    "m2sl": 24,  # money stock, H.6
-    "pcepi": 28,  # personal income and outlays
-    "gdp": 26,  # GDP advance estimate, around four weeks after the quarter
-    "gdpc1": 26,
+    "icsa": 5,  # weekly claims: Thursday, for the week ending the previous Saturday. Exact.
+    "walcl": 2,  # Fed H.4.1: Thursday afternoon, for the Wednesday balance sheet
+    "unrate": 7,  # employment situation: the first Friday after the month, so 1 to 7 days
+    "payems": 7,
+    "civpart": 7,
+    "cpiaucsl": 18,  # CPI: between the 10th and the 15th of the following month
+    "cpilfesl": 18,
+    "indpro": 18,  # industrial production, G.17: around the 15th to 17th
+    "m2sl": 28,  # money stock, H.6: the fourth Tuesday
+    "pcepi": 31,  # personal income and outlays: near the end of the following month
+    "gdp": 31,  # GDP advance estimate: the last week of the month after the quarter
+    "gdpc1": 31,
 }
 # Daily market series carry no lag: the value for a date is published that evening.
 DAILY_SERIES = [
@@ -185,25 +192,32 @@ first_changes
 # loop that is easy to get subtly wrong at period boundaries.
 
 
+# %% [markdown]
+# The stamp of an observation is the date the forward fill starts carrying its value, so the
+# dates on which a column changes are its stamps. Recovering them that way rather than from a
+# calendar bucket is what gets the weekly series right: their stamps fall on the weekday the
+# agency chose, Saturday for claims and Wednesday for the balance sheet, and not on any boundary
+# a calendar library would pick. A release that repeats the previous value leaves no change to
+# find; since the value is identical and was already public, the panel this builds is the same
+# either way.
+
+
 # %%
 def published_observations(panel: pl.DataFrame, series: str, frequency: str, lag: int):
     """One row per release of `series`: its reference period, and the date it was published."""
-    every = {"weekly": "1w", "monthly": "1mo", "quarterly": "1q"}[frequency]
-    offset = {"weekly": "1w", "monthly": "1mo", "quarterly": "1q"}[frequency]
     observations = (
-        panel.select("timestamp", pl.col(series).alias("value"))
+        panel.select(pl.col("timestamp").alias("stamped_on"), pl.col(series).alias("value"))
         .drop_nulls()
-        .group_by_dynamic("timestamp", every=every)
-        .agg(pl.col("value").first())
-        .rename({"timestamp": "period_start"})
+        .filter(pl.col("value").ne_missing(pl.col("value").shift(1)))
     )
+    period_length = {"monthly": "1mo", "quarterly": "1q"}.get(frequency)
     return observations.with_columns(
-        # A weekly series is already stamped at the end of its week, so its period end is the
-        # stamp itself; a monthly or quarterly one is stamped at the start and runs to the day
-        # before the next period begins.
-        period_end=pl.col("period_start")
-        if frequency == "weekly"
-        else pl.col("period_start").dt.offset_by(offset).dt.offset_by("-1d"),
+        # A weekly series is stamped at the end of the week it covers, so its period is already
+        # closed on the stamp. A monthly or quarterly one is stamped at the start of its period
+        # and runs to the day before the next one begins.
+        period_end=pl.col("stamped_on")
+        if period_length is None
+        else pl.col("stamped_on").dt.offset_by(period_length).dt.offset_by("-1d"),
     ).with_columns(published_on=pl.col("period_end").dt.offset_by(f"{lag}d"))
 
 
@@ -214,7 +228,7 @@ def published_observations(panel: pl.DataFrame, series: str, frequency: str, lag
 
 # %%
 cpi_releases = published_observations(macro, "cpiaucsl", "monthly", RELEASE_LAGS["cpiaucsl"])
-cpi_releases.filter(pl.col("period_start").dt.year() == 2024).head(4)
+cpi_releases.filter(pl.col("stamped_on").dt.year() == 2024).head(4)
 
 # %% [markdown]
 # The as-of join then rebuilds the daily column. Every series that is published on a lag is
@@ -292,12 +306,12 @@ for series, lag in RELEASE_LAGS.items():
         {
             "series": series,
             "frequency": frequency,
-            "median_days_period_start_to_publication": int(
-                (releases["published_on"] - releases["period_start"]).dt.total_days().median()
+            "median_days_stamp_to_publication": int(
+                (releases["published_on"] - releases["stamped_on"]).dt.total_days().median()
             ),
         }
     )
-pl.DataFrame(staleness).sort("median_days_period_start_to_publication", descending=True)
+pl.DataFrame(staleness).sort("median_days_stamp_to_publication", descending=True)
 
 # %% [markdown]
 # ## 4. Features, with windows counted on the grid they name
@@ -473,14 +487,51 @@ revisable = [c for c in initial.columns if c != "timestamp" and c in macro.colum
 vintages = initial.select("timestamp", *revisable).join(
     macro.select("timestamp", *revisable), on="timestamp", how="inner", suffix="_current"
 )
+
+
+def revision_episodes(frame: pl.DataFrame, column: str) -> pl.DataFrame:
+    """The distinct revisions of `column`, one row each, from two forward-filled panels.
+
+    Both panels carry each value forward over weekends and holidays, so a single revised
+    Friday reading shows up as three differing panel dates. Consecutive differing dates that
+    carry the same pair of values are one revision, and are collapsed here.
+    """
+    differing = (
+        frame.select(
+            "timestamp",
+            first_published=pl.col(column),
+            current=pl.col(f"{column}_current"),
+        )
+        .with_columns(revision=pl.col("first_published") - pl.col("current"))
+        .filter(pl.col("revision").abs() > 1e-9)
+        .sort("timestamp")
+    )
+    if differing.is_empty():
+        return differing.with_columns(episode=pl.lit(None, dtype=pl.Int64))
+    # A new episode starts wherever the differing dates are not consecutive, or the pair of
+    # values changes.
+    breaks = ((pl.col("timestamp") - pl.col("timestamp").shift(1)).dt.total_days() > 1) | pl.col(
+        "revision"
+    ).ne_missing(pl.col("revision").shift(1))
+    return (
+        differing.with_columns(episode=breaks.fill_null(True).cum_sum())
+        .group_by("episode")
+        .agg(
+            pl.col("timestamp").min().alias("observation_date"),
+            pl.col("first_published").first(),
+            pl.col("current").first(),
+            pl.col("revision").first(),
+        )
+        .sort("observation_date")
+    )
+
+
 revision_summary = pl.DataFrame(
     [
         {
             "series": column,
-            "observations_compared": len(vintages),
-            "observations_revised": int(
-                ((vintages[column] - vintages[f"{column}_current"]).abs() > 1e-9).sum()
-            ),
+            "panel_dates_compared": len(vintages),
+            "revisions": len(revision_episodes(vintages, column)),
             "largest_revision": float(
                 (vintages[column] - vintages[f"{column}_current"]).abs().max()
             ),
@@ -503,28 +554,9 @@ revision_summary
 # chart below shows where the two vintages of the ten-year yield actually part company.
 
 # %%
-gap = (
-    vintages.select(
-        "timestamp",
-        (pl.col("dgs10") - pl.col("dgs10_current")).alias("revision"),
-    )
-    .filter(pl.col("revision").abs() > 1e-9)
-    .sort("timestamp")
-)
-print(f"Observation dates on which the 10-year yield was revised: {len(gap)}")
-fig = px.bar(
-    gap.to_pandas(),
-    x="timestamp",
-    y="revision",
-    title="The 10-year yield is revised rarely, and not by a rounding error",
-    labels={
-        "timestamp": "Observation date",
-        "revision": "First published minus current (percentage points)",
-    },
-    color_discrete_sequence=[COLORS["copper"]],
-)
-fig.update_layout(height=380)
-fig.show()
+gap = revision_episodes(vintages, "dgs10")
+print(f"Times the 10-year yield has been revised since the archive begins: {len(gap)}")
+gap
 
 # %% [markdown]
 # ## 7. Joining macro onto prices
@@ -570,5 +602,6 @@ combined.select(
 # 5. Publication date and vintage are two separate corrections, and doing the first does not do
 #    the second. Even daily market rates are revised after the fact, and any rule with a
 #    threshold in it can fire on the revised series and not on the released one.
-# 6. Join prices onto macro rather than macro onto prices. The macro panel has a row for every
-#    calendar day and will otherwise manufacture trading days that never existed.
+# 6. Put the price series on the left of the join and attach the macro columns to it. The macro
+#    panel has a row for every calendar day, so a join with the macro panel on the left produces
+#    weekend and holiday rows that were never trading days.
