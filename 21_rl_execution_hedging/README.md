@@ -28,38 +28,42 @@ This section translates financial trading problems into the language RL needs: s
 
 This section gives readers the practical algorithm map rather than a full RL survey. It explains why discrete-action problems can use value-based methods like DQN, while most realistic financial control tasks require actor-critic methods that handle continuous actions. The section also adds useful depth by introducing risk-sensitive variants and clarifying the practical trade-off between stability, sample efficiency, and action-space flexibility.
 
-- [`algorithms_comparison`](01_algorithms_comparison.ipynb) — This notebook compares value-based (DQN), on-policy actor-critic (PPO), and actor-critic baseline (A2C) algorithms on a simple trading environment. Uses synthetic data.
+- [`algorithms_comparison`](01_algorithms_comparison.ipynb) — Trains DQN, PPO and A2C on one trading environment with the same interaction budget and scores them on the same episodes. The point is that a single average reward cannot tell you whether a policy is trading or has collapsed onto one position, and that the distribution of chosen actions can. The return process is a GARCH(1,1) model fitted to hourly BTCUSDT bars.
 
 ### 21.4 Application I: Optimal Trade Execution
 
 This section presents execution as the cleanest institutional RL use case. It frames the problem around implementation shortfall, timing risk, and market impact, then positions RL as a dynamic alternative to fixed schedules like TWAP and Almgren-Chriss when liquidity and volatility vary over time. The key reader takeaway is not that RL wins outright, but that any claim of improvement depends heavily on simulator realism, reward design, and careful benchmarking.
 
-- [`optimal_execution_ppo`](02_optimal_execution_ppo.ipynb) — This notebook implements a PPO-based agent for optimal trade execution, demonstrating how RL learns to minimize implementation shortfall by adapting execution to market conditions.
-- [`crypto_execution_rl`](04_crypto_execution_rl.ipynb) — This notebook demonstrates reinforcement learning for optimal execution using real crypto data from perpetual futures markets. Unlike other notebooks in this chapter that use synthetic data, this one applies RL concepts to actual market data.
+- [`optimal_execution_ppo`](02_optimal_execution_ppo.ipynb) — Trains a PPO agent to pace a liquidation and compares it against TWAP and an Almgren-Chriss schedule on identical simulated paths, with the paired differences and their standard errors. Says which of the simulator's parameters were fitted to market data, which are proxies, and which are the calibration's clamp.
+- [`crypto_execution_rl`](04_crypto_execution_rl.ipynb) — Replays recorded hourly perpetual-futures bars instead of a simulated path, so the agent's state can carry the perpetual-spot premium and the hours to the next funding settlement. Builds the panel so every feature a decision uses comes from bars that had closed, and separates training from reported episodes by date.
 
 ### 21.5 Application II: Market Making
 
 This section shows why market making is a natural RL problem: quoting decisions must continuously balance spread capture, inventory risk, and adverse selection. The classical Avellaneda-Stoikov benchmark gives readers a principled reference point, while the RL framing shows how adaptive quoting can respond to richer market states without fully specified analytical assumptions. The section works best as an illustration of learned inventory-aware behavior rather than a claim that the learned policy already dominates analytical baselines.
 
-- [`market_making_ppo`](03_market_making_ppo.ipynb) — Implements a PPO market-making agent that learns inventory-aware quote placement (skew and spread) against reservation-price baselines. Uses GARCH-calibrated synthetic data.
+- [`market_making_ppo`](03_market_making_ppo.ipynb) — Trains a PPO agent to choose a quote skew and a spread width against three reservation-price rules that already encode the inventory response, so the comparison asks what learning the response adds to writing it down. Fills arrive with a probability that falls with distance from the mid, which is where the spread-versus-fill-rate trade-off comes from.
 
 ### 21.6 Application III: Deep Hedging for Derivatives
 
 This section reframes hedging from exact replication toward friction-aware risk control. It explains why transaction costs, discrete rebalancing, and model misspecification weaken classical delta hedging, and why deep hedging becomes interesting when the objective is explicitly a risk measure of terminal P&L. The comparison with Whalley-Wilmott, tabular Q-learning, and delta hedging is valuable because it teaches readers how to interpret learned hedging results cautiously rather than assuming that neural methods automatically outperform classical benchmarks.
 
-- [`deep_hedging_pfhedge`](05_deep_hedging_pfhedge.ipynb) — This notebook demonstrates the Deep Hedging framework for derivative risk management, learning hedging policies that control tail risk under transaction costs. Uses synthetic data.
+- [`deep_hedging_pfhedge`](05_deep_hedging_pfhedge.ipynb) — Hedges a short call under discrete rebalancing and proportional costs, where exact replication is impossible and the question becomes which P&L distribution to accept. Compares five hedges on identical Heston paths: Black-Scholes delta, Whalley-Wilmott, a `pfhedge` deep hedger, the same idea written from scratch, and a tabular Q-learner.
 
 ### 21.7 Inverse Reinforcement Learning: Learning from Observed Behavior
 
 This section broadens the chapter from optimizing known rewards to inferring objectives from observed behavior. It usefully distinguishes inverse RL from behavior cloning and shows why reward inference can sometimes generalize more meaningfully than direct imitation. Its main value for readers is conceptual: it opens a path from imitation to objective discovery while also making clear that identifiability, demonstration quality, and model assumptions sharply limit what can really be inferred.
 
-- [`inverse_reinforcement_learning`](06_inverse_reinforcement_learning.ipynb) — This notebook demonstrates Inverse Reinforcement Learning (IRL) for inferring trading objectives from observed expert behavior. We show: Uses synthetic data.
+- [`inverse_reinforcement_learning`](06_inverse_reinforcement_learning.ipynb) — Runs the arrow backwards: given a record of what a trader did, what objective would make those actions sensible? Compares behaviour cloning against two reward-inference methods on demonstrations from a rule whose objective is already known, so the inferred reward can be checked rather than believed.
 
 ### 21.8 The Simulation-to-Reality Gap
 
-This is the chapter's governing cautionary section. It argues that non-stationarity, impact reflexivity, latency, poor fill assumptions, and reward hacking are the real barriers to deploying financial RL, not merely choosing the right algorithm. By emphasizing simulator fidelity, offline RL, off-policy evaluation, staged deployment, and governance, the section turns the chapter from a collection of promising applications into a more credible guide to what would have to be true for RL to work in practice. ### Summary The chapter's real message is not that reinforcement learning has solved trading, but that it is most credible when used for sequential control problems with well-defined economic objectives and when evaluated under realistic assumptions. Its strongest contribution is the combination of application case studies with disciplined skepticism about benchmarks, simulation design, and deployment risk.
+This is the chapter's governing cautionary section. It argues that non-stationarity, impact reflexivity, latency, poor fill assumptions, and reward hacking are the real barriers to deploying financial RL, not merely choosing the right algorithm. By emphasizing simulator fidelity, offline RL, off-policy evaluation, staged deployment, and governance, the section turns the chapter from a collection of promising applications into a more credible guide to what would have to be true for RL to work in practice.
 
-- [`backtest_with_impact`](07_backtest_with_impact.ipynb) — This notebook demonstrates how market impact models affect strategy performance, revealing why RL execution agents are essential for large orders. Uses synthetic data.
+### Summary
+
+The chapter's message is that reinforcement learning is most credible for sequential control problems with well-defined economic objectives, evaluated under realistic assumptions. Its contribution is the combination of application case studies with disciplined skepticism about benchmarks, simulation design, and deployment risk.
+
+- [`backtest_with_impact`](07_backtest_with_impact.ipynb) — Runs one momentum strategy and one dollar order across real US equity names spanning the liquidity range, under four strengths of a square-root impact model. Measures how much of a paper return the impact charge removes, and how often it is the difference between a profit and a loss, separately for a liquid cohort and a thin one.
 
 ## Running the Notebooks
 
@@ -81,7 +85,7 @@ uv run pytest tests/test_notebooks.py -v -k "21_rl_execution_hedging"
 - **Tuomas Haarnoja et al.** (2018). [Soft Actor-Critic: Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor](https://doi.org/10.48550/arXiv.1801.01290).
 - **Yadh Hafsi and Edoardo Vittori** (2025). [Optimal Execution with Reinforcement Learning](https://doi.org/10.48550/arXiv.2411.06389).
 - **Igor Halperin** (2019). [QLBS: Q-Learner in the Black-Scholes(-Merton) Worlds](https://doi.org/10.48550/arXiv.1712.04609).
-- **Ben Hambly et al.** (2023). [](https://doi.org/10.1111/mafi.12382). *Mathematical Finance*.
+- **Ben Hambly et al.** (2023). [Recent advances in reinforcement learning in finance](https://doi.org/10.1111/mafi.12382). *Mathematical Finance*.
 - **Hado van Hasselt et al.** (2015). [Deep Reinforcement Learning with Double Q-learning](https://doi.org/10.48550/arXiv.1509.06461).
 - **Jonathan Ho and Stefano Ermon** (2016). [Generative Adversarial Imitation Learning](https://doi.org/10.48550/arXiv.1606.03476).
 - **Petter N. Kolm and Gordon Ritter** (2019). [Modern Perspectives on Reinforcement Learning in Finance](https://doi.org/10.2139/ssrn.3449401).
