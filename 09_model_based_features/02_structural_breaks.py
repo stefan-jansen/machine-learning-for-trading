@@ -82,7 +82,7 @@ from ml4t.engineer.features.statistics import (
 from ml4t.engineer.logging import setup_logging
 from scipy import stats
 from scipy.spatial.distance import jensenshannon
-from sklearn.metrics import roc_auc_score, roc_curve
+from sklearn.metrics import roc_curve
 from sklearn.model_selection import cross_val_predict, cross_val_score
 
 from data import load_etfs
@@ -350,11 +350,15 @@ def causal_break_features(series: np.ndarray, index: pd.DatetimeIndex) -> pd.Dat
                 row["level_shift_usd"] = after.mean() - before.mean()
         rows.append(row)
 
-    return pd.DataFrame(rows).set_index("timestamp")
+    refits = pd.DataFrame(rows).set_index("timestamp")
+    # A refit answers for every session until the next one, so the quarterly rows are
+    # carried forward onto the session index. Sessions before the first refit stay empty:
+    # nothing had been fitted yet, and filling them backwards would invent a value.
+    return refits.reindex(index, method="ffill")
 
 
 break_features = causal_break_features(prices, dates)
-display(break_features.head(10))
+display(break_features.dropna(how="all").head(10))
 
 # %% [markdown]
 # Read the first rows against the retrospective figure above and the difference is
@@ -365,6 +369,13 @@ display(break_features.head(10))
 # that morning. `level_shift_usd` is in the units of the series it was measured on, which
 # for an unadjusted price level means the same shift is a different number in 2008 and in
 # 2024; a model reading it across the whole sample wants it scaled.
+#
+# `breaks_in_lookback` is comparable across refits and not comparable with the count from
+# the full-sample fit above. The penalty is the log of the sample size times the variance
+# of the series being segmented, so it is denominated in the variance of whatever window
+# it was computed on. Every refit here reads the same number of sessions, which is what
+# makes the column readable over time; the full-sample fit priced a break against nineteen
+# years of variance and therefore bought far fewer of them.
 #
 # Two properties of this construction are worth carrying to any other refitted feature.
 # The columns are step functions between refits, so a model reading them daily sees the
@@ -392,9 +403,14 @@ display(break_features.head(10))
 #
 # $$M_t = \frac{1}{\hat{\sigma}\sqrt{h}} \sum_{i=t-h+1}^{t} (x_i - \bar{x}_{\text{burn-in}})$$
 #
-# It peaks while the shift is inside the window and returns to zero once the window has
-# passed the break, which is what makes it useful for dating a break rather than only
-# detecting one.
+# Because the sum has a fixed number of terms, its value depends only on the last $h$
+# observations and it cannot grow without limit. That is the whole difference from CUSUM,
+# and it is worth being precise about what it does and does not buy. A **temporary**
+# excursion leaves the statistic once the window has slid past it, which is what makes
+# MOSUM readable for the next event and useful for dating one. A **permanent** shift of
+# size $\Delta$ does not go away: once the window holds only post-shift observations the
+# statistic settles at $\Delta\sqrt{h}/\hat{\sigma}$ and stays there. It returns to zero
+# only when the mean returns to the reference.
 
 # %%
 BURN_IN = 252  # sessions used to estimate the reference mean and scale
@@ -462,11 +478,13 @@ show_with_alt(
 )
 
 # %% [markdown]
-# The two panels show the trade the choice is between. CUSUM never forgets, so a shift
-# leaves a permanent level change in the statistic and a second shift is read against a
-# baseline the first one moved. MOSUM forgets everything older than its window, so it
-# returns to zero and remains readable for the next break, at the cost of being blind to a
-# drift too gradual to register inside one window.
+# The two panels show the trade the choice is between. CUSUM keeps every deviation, so a
+# shift moves the statistic permanently and a second shift is then read against a baseline
+# the first one moved; the excursions in 2008 and 2020 never come back. MOSUM holds only
+# what is inside its window, so it is bounded and stays readable for the next event, at
+# the cost of being blind to a drift too gradual to register across $h$ observations. It
+# comes back to zero here because the average return after each crisis is close to the
+# burn-in average again, not because the statistic forgets a permanent shift.
 #
 # The bandwidth is the same trade at a smaller scale: a short window reacts sooner and
 # crosses a threshold more often on noise alone, a long one is steadier and later. Neither
@@ -501,11 +519,19 @@ show_with_alt(
 # alters no level, no spread and no distribution, only the order the same values arrive
 # in. That is exactly why one of the five families measures dependence and none of the
 # other four would catch it.
+#
+# Holding the spread fixed while the dependence changes takes care in the generator. A
+# first-order autoregressive series with coefficient $\phi$ and unit-variance innovations
+# has marginal variance $1/(1-\phi^2)$, so raising $\phi$ raises the spread as well and
+# the example would no longer isolate dependence. Scaling the innovations by
+# $\sqrt{1-\phi^2}$ fixes the marginal variance at one on both sides of the boundary, and
+# keeping $\phi$ below one keeps both halves stationary.
 
 # %%
 N_EXAMPLES = 200
 SERIES_LENGTH = 500
 BREAK_TYPES = ["mean_shift", "var_shift", "trend_shift", "autocorr_shift"]
+AR_PHI_BEFORE = 0.2  # the coefficient before the boundary; after it rises with magnitude
 
 
 def generate_break_series(
@@ -527,13 +553,17 @@ def generate_break_series(
         after = before[-1] + magnitude * 0.01 * (steps[mid:] - steps[mid])
         return np.concatenate([before, after]) + rng.randn(n) * 0.5
     if break_type == "autocorr_shift":
-        before = np.zeros(mid)
-        for i in range(1, mid):
-            before[i] = 0.2 * before[i - 1] + rng.randn()
-        after = np.zeros(n - mid)
-        for i in range(1, n - mid):
-            after[i] = (0.2 + magnitude * 0.5) * after[i - 1] + rng.randn()
-        return np.concatenate([before, after])
+
+        def ar1(length: int, phi: float) -> np.ndarray:
+            values = np.zeros(length)
+            innovation_scale = np.sqrt(1 - phi**2)
+            for i in range(1, length):
+                values[i] = phi * values[i - 1] + innovation_scale * rng.randn()
+            return values
+
+        return np.concatenate(
+            [ar1(mid, AR_PHI_BEFORE), ar1(n - mid, AR_PHI_BEFORE + 0.35 * magnitude)]
+        )
 
     msg = f"Unknown break_type: {break_type}"
     raise ValueError(msg)
@@ -886,14 +916,13 @@ ax.set_xlabel("False positive rate")
 ax.set_ylabel("True positive rate")
 ax.set_title("Out-of-fold separation")
 
-fig.suptitle("The detector separates the constructed breaks almost perfectly")
+fig.suptitle("Constructed breaks are easy; the score belongs to the construction")
 show_with_alt(
     fig,
     "Two panels. Left: a horizontal bar chart of the fifteen most-split feature columns, "
     "led by the absolute-value t-test at the widest window and by the autocorrelation of "
-    "the window after the boundary. Right: the out-of-fold ROC curve, which rises almost "
-    "immediately to the top left corner and runs flat along the top, far above the "
-    "diagonal chance line.",
+    "the window after the boundary. Right: the out-of-fold ROC curve, which rises to the "
+    "top left corner and runs flat along the top, far above the diagonal chance line.",
 )
 
 # %% [markdown]
