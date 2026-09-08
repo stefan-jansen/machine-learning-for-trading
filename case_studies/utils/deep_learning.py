@@ -61,6 +61,8 @@ from case_studies.utils.registry.store import (
 )
 from case_studies.utils.runtime import cpu_seconds
 from case_studies.utils.sequence_dataset import (
+    GAP_MASK_FEATURES,
+    GAP_POLICY_ID,
     FoldSequenceDataset,
     collate_with_metadata,
     materialize_store_metadata,
@@ -541,6 +543,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
             "input_chunk_length": sequence_identity["input_chunk_length"],
             "output_chunk_length": sequence_identity["output_chunk_length"],
         }
+        sequence_feature_names = tuple(mds.feature_names)
     else:
         expected = sequence_validation_keys(
             dataset_pd,
@@ -560,16 +563,21 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         preprocessing = {
             "class": "fold_train_standardization",
             "calendar_id": calendar_id,
-            "gap_policy": "exclude_windows_crossing_missing_expected_periods",
+            "gap_policy": GAP_POLICY_ID,
             "lookback": lookback,
         }
+        # The observation mask and the staleness count are inputs the model
+        # reads, so they are declared alongside the features they qualify
+        # rather than appended inside the loader. Darts presets forecast whole
+        # series through their own windowing and never see them.
+        sequence_feature_names = (*mds.feature_names, *GAP_MASK_FEATURES)
     checkpoints = declared_epoch_checkpoints(
         int(config.get("n_epochs", 100)), int(config.get("checkpoint_interval", 5))
     )
     computation = {
         "label_artifact": {"digest": label_ref.digest, "name": label_ref.name},
         "feature_artifacts": mds.input_lineage["artifacts"],
-        "feature_names": list(mds.feature_names),
+        "feature_names": list(sequence_feature_names),
         "task": {
             "type": "regression",
             "class_values": [],
@@ -630,7 +638,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         dataset_pd=dataset_pd,
         splits=tuple(splits),
         config=config,
-        feature_names=tuple(mds.feature_names),
+        feature_names=tuple(sequence_feature_names),
         label_col=mds.label_col,
         date_col=mds.date_col,
         entity_col=entity_col,
@@ -774,10 +782,11 @@ def locked_sequence_expected_keys(
     manifest against the rule that wrote it, so a holdout built on a second version of the rule
     registers, validates, and is wrong where nothing looks.
 
-    A sequence model predicts only where a full lookback of history exists and no window
-    crosses a missing expected period, so these keys are not every (entity, date) in the fold.
-    That rule lives in `sequence_validation_keys` and `darts_validation_keys`, which the
-    validation path calls, and this calls them rather than restating what they do.
+    A sequence model predicts only where a full lookback of history exists and the window
+    is observed densely enough to be read as a window, so these keys are not every
+    (entity, date) in the fold. That rule lives in `sequence_validation_keys` and
+    `darts_validation_keys`, which the validation path calls, and this calls them rather
+    than restating what they do.
     """
     config = inputs.config
     mds = inputs.mds
@@ -960,6 +969,7 @@ def reconstruct_locked_request(
             "input_chunk_length": input_data_spec["input_chunk_length"],
             "output_chunk_length": input_data_spec["output_chunk_length"],
         }
+        sequence_feature_names = tuple(mds.feature_names)
     else:
         input_data_spec = {
             "input_data_spec": mds.input_lineage,
@@ -969,14 +979,15 @@ def reconstruct_locked_request(
         expected_preprocessing = {
             "class": "fold_train_standardization",
             "calendar_id": preprocessing["calendar_id"],
-            "gap_policy": "exclude_windows_crossing_missing_expected_periods",
+            "gap_policy": GAP_POLICY_ID,
             "lookback": lookback,
         }
+        sequence_feature_names = (*mds.feature_names, *GAP_MASK_FEATURES)
     validate_locked_expected_keys(spec, expected)
     expected_inputs = {
         "label_artifact": {"digest": label_ref.digest, "name": label_ref.name},
         "feature_artifacts": mds.input_lineage["artifacts"],
-        "feature_names": list(mds.feature_names),
+        "feature_names": list(sequence_feature_names),
         "task": {
             "type": "regression",
             "class_values": [],
@@ -994,7 +1005,7 @@ def reconstruct_locked_request(
         dataset_pd=dataset_pd,
         splits=(split,),
         config=config,
-        feature_names=tuple(mds.feature_names),
+        feature_names=tuple(sequence_feature_names),
         label_col=mds.label_col,
         date_col=mds.date_col,
         entity_col=mds.entity_cols[0],
@@ -2338,6 +2349,22 @@ def run_dl_cv(
 
         train_ds = FoldSequenceDataset(train_store)
         val_ds = FoldSequenceDataset(val_store, include_metadata=True)
+
+        # The architecture's input width is a property of what the loader
+        # actually produced, not of what the caller declared. The store appends
+        # the observation mask and the staleness count to the data features, so
+        # a caller that counted only the latter would build a model narrower
+        # than its own batches and fail inside the first forward pass with a
+        # shape error that names neither the mask nor the caller.
+        store_width = int(train_store.features[0].shape[1])
+        if n_features != store_width:
+            declared = [name for name in feature_names if name not in GAP_MASK_FEATURES]
+            if n_features != len(declared):
+                raise ValueError(
+                    f"n_features={n_features} matches neither the declared data features "
+                    f"({len(declared)}) nor the sequence store's width ({store_width})"
+                )
+            n_features = store_width
 
         n_train_seq = len(train_ds)
         n_val_seq = len(val_ds)

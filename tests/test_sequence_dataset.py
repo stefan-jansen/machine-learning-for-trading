@@ -276,7 +276,7 @@ def test_backwards_compatible_without_val_start():
         )
 
 
-def test_sequence_windows_do_not_span_missing_entity_periods():
+def test_window_time_axis_is_regular_across_a_missing_entity_period():
     from case_studies.utils.sequence_dataset import prepare_fold_sequence_stores
 
     df, train_mask, val_mask, val_start_ts, _ = _synthetic_fold_df(
@@ -311,7 +311,7 @@ def test_sequence_windows_do_not_span_missing_entity_periods():
         assert np.all(np.diff(positions) == 1)
 
 
-def test_fixed_cadence_windows_do_not_span_missing_panel_periods():
+def test_window_time_axis_is_regular_across_a_missing_panel_bar():
     from case_studies.utils.sequence_dataset import prepare_fold_sequence_stores
 
     dates = pd.date_range("2021-01-01", periods=100, freq="8h", tz="UTC")
@@ -597,3 +597,165 @@ def test_an_infinity_does_not_reach_the_training_statistics():
     )
     for feats in train_store.features:
         assert np.all(np.isfinite(feats)), "a non-finite value survived normalization"
+
+
+def _panel_with_missing(dates, symbol_gaps, *, feature_names=("feat0",)):
+    """Panel over `dates`; `symbol_gaps` maps a symbol to the dates it lacks."""
+    rows = [
+        {
+            "symbol": symbol,
+            "timestamp": timestamp,
+            "y": float(i % 7) - 3.0,
+            **{name: float(i) + j for j, name in enumerate(feature_names)},
+        }
+        for symbol, gaps in symbol_gaps.items()
+        for i, timestamp in enumerate(dates)
+        if timestamp not in gaps
+    ]
+    return pd.DataFrame(rows)
+
+
+def _train_store(df, *, lookback, val_start, feature_names=("feat0",), **kwargs):
+    from case_studies.utils.sequence_dataset import prepare_fold_sequence_stores
+
+    train_store, _, _ = prepare_fold_sequence_stores(
+        df,
+        train_mask=df["timestamp"] < val_start,
+        val_mask=df["timestamp"] >= val_start,
+        feature_names=list(feature_names),
+        label_col="y",
+        date_col="timestamp",
+        entity_col="symbol",
+        lookback=lookback,
+        val_start=val_start,
+        **kwargs,
+    )
+    return train_store
+
+
+def test_a_window_survives_a_single_absent_period_and_records_it():
+    """One absent session no longer discards the next `lookback` windows.
+
+    The old rule rejected every window crossing an absent period, so a symbol
+    missing 4% of its sessions lost most of its windows. The window now keeps a
+    cell for the absent period and marks it unobserved.
+    """
+    dates = pd.date_range("2021-01-01", periods=200, freq="B")
+    gap = dates[100]
+    df = _panel_with_missing(dates, {"S0": {gap}, "S1": set()})
+    lookback = 20
+    store = _train_store(df, lookback=lookback, val_start=dates[180])
+
+    s0 = store.entities.index("S0")
+    windows_spanning_gap = [
+        int(end)
+        for sym, end in zip(store.symbol_idx, store.end_idx, strict=True)
+        if int(sym) == s0
+        and store.timestamps[s0][int(end) - lookback] <= gap <= store.timestamps[s0][int(end)]
+    ]
+    assert windows_spanning_gap, "no accepted window spans the absent session"
+
+    observed_channel = store.features[s0][:, -2]
+    gap_cell = int(np.searchsorted(store.timestamps[s0], np.datetime64(gap, "ns")))
+    assert observed_channel[gap_cell] == 0.0, "the absent cell is not marked unobserved"
+    assert observed_channel.sum() == len(observed_channel) - 1, (
+        "cells other than the absent session were marked unobserved"
+    )
+
+
+def test_a_window_missing_more_than_the_declared_fraction_is_rejected():
+    """A window whose observed share falls below the floor is not eligible."""
+    dates = pd.date_range("2021-01-01", periods=200, freq="B")
+    lookback = 20
+    # Three absent sessions inside any window covering them: 17/20 = 0.85 < 0.90.
+    gaps = {dates[100], dates[102], dates[104]}
+    df = _panel_with_missing(dates, {"S0": gaps, "S1": set()})
+    store = _train_store(df, lookback=lookback, val_start=dates[180])
+
+    s0 = store.entities.index("S0")
+    stamps = store.timestamps[s0]
+    for sym, end in zip(store.symbol_idx, store.end_idx, strict=True):
+        if int(sym) != s0:
+            continue
+        end = int(end)
+        covered = sum(
+            1 for g in gaps if stamps[end - lookback] <= np.datetime64(g, "ns") < stamps[end]
+        )
+        assert covered < 3, (
+            f"window ending {stamps[end]} covers all three absent sessions "
+            "and should have failed the observed-fraction floor"
+        )
+
+
+def test_one_long_outage_is_rejected_where_the_same_count_scattered_is_not():
+    """The consecutive bound is what the fraction floor cannot express.
+
+    At lookback 60 a 0.90 floor admits six absent cells. Six scattered absences
+    are a thinly quoted symbol; six in a row is an outage, and the model would
+    read a sixth of the window as one continuous fabrication.
+    """
+    dates = pd.date_range("2021-01-01", periods=400, freq="B")
+    lookback = 60
+    run = set(dates[200:206])  # six consecutive
+    scattered = {dates[200], dates[210], dates[220], dates[230], dates[240], dates[250]}
+
+    outage = _train_store(
+        _panel_with_missing(dates, {"S0": run, "S1": set()}),
+        lookback=lookback,
+        val_start=dates[380],
+    )
+    thin = _train_store(
+        _panel_with_missing(dates, {"S0": scattered, "S1": set()}),
+        lookback=lookback,
+        val_start=dates[380],
+    )
+
+    def spanning(store, absent):
+        sid = store.entities.index("S0")
+        stamps = store.timestamps[sid]
+        first = np.datetime64(min(absent), "ns")
+        last = np.datetime64(max(absent), "ns")
+        return sum(
+            1
+            for sym, end in zip(store.symbol_idx, store.end_idx, strict=True)
+            if int(sym) == sid and stamps[int(end) - lookback] <= first and last < stamps[int(end)]
+        )
+
+    assert spanning(outage, run) == 0, "a six-period outage was admitted"
+    assert spanning(thin, scattered) > 0, (
+        "six scattered absences were rejected; the fraction floor admits them"
+    )
+
+
+def test_staleness_counts_periods_since_the_last_real_observation():
+    dates = pd.date_range("2021-01-01", periods=200, freq="B")
+    gaps = {dates[100], dates[101]}
+    df = _panel_with_missing(dates, {"S0": gaps, "S1": set()})
+    store = _train_store(df, lookback=20, val_start=dates[180])
+
+    s0 = store.entities.index("S0")
+    stamps = store.timestamps[s0]
+    staleness = store.features[s0][:, -1]
+    first_gap = int(np.searchsorted(stamps, np.datetime64(dates[100], "ns")))
+    assert staleness[first_gap - 1] == 0.0
+    assert staleness[first_gap] == 1.0
+    assert staleness[first_gap + 1] == 2.0
+    assert staleness[first_gap + 2] == 0.0, "staleness did not reset on the next real row"
+
+
+def test_no_prediction_is_emitted_at_an_inserted_cell():
+    """Inserted cells exist to keep the time axis regular, never to be scored."""
+    dates = pd.date_range("2021-01-01", periods=200, freq="B")
+    gaps = {dates[100], dates[140]}
+    df = _panel_with_missing(dates, {"S0": gaps, "S1": set()})
+    store = _train_store(df, lookback=20, val_start=dates[180])
+
+    s0 = store.entities.index("S0")
+    absent = {np.datetime64(g, "ns") for g in gaps}
+    scored = {
+        store.timestamps[s0][int(end)]
+        for sym, end in zip(store.symbol_idx, store.end_idx, strict=True)
+        if int(sym) == s0
+    }
+    assert scored, "S0 produced no windows at all"
+    assert not (scored & absent), f"windows are scored at inserted cells {sorted(scored & absent)}"
