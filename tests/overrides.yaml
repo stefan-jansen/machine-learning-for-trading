@@ -1459,12 +1459,36 @@ case_studies/crypto_perps_funding/06_linear:
   # labels x 16 configurations; it does not hold here, where the preview reduction cuts the
   # grid and the gbm run is the slower of the two in every case study measured. The tier is
   # the one-third line the raised entries elsewhere in this file state.
+  #
+  # max_symbols is stated here, and it is stated at the fixture's full width on purpose. A
+  # notebook that declares no reduction at all does not run unreduced: _collect_preview_reductions
+  # in tests/pm_helpers.py injects `max_symbols: 5` as the fallback, because a preview run that
+  # reduces nothing is a canonical run wearing the wrong tier. That fallback is what kept
+  # `cs-crypto_perps_funding` red after the fixture was widened to ten perpetuals - the price
+  # panel 13_backtest loads is uncapped, but the predictions it ranks came from this stage at
+  # five names, so `top_k_grid [3, 5, 10]` still had no member whose two disjoint legs fit
+  # (a long-short k drops when 2k exceeds the tradeable count). Widening the fixture without
+  # displacing the fallback fixes the panel and not the cross-section.
+  parameters:
+    PREVIEW_REDUCTIONS:
+      max_symbols: 10
   timeout: 120
 case_studies/crypto_perps_funding/07_gbm:
+  # Same fallback, same reason as 06_linear above: without an explicit reduction this stage
+  # registers five-name prediction sets and 13_backtest cannot realize any declared k.
+  parameters:
+    PREVIEW_REDUCTIONS:
+      max_symbols: 10
   timeout: 180
 case_studies/crypto_perps_funding/08_tabular_dl:
   gpu: true
   parameters:
+    # Stated for the reason 06_linear records: LABELS is not a reduction, so without this the
+    # harness fallback would fit five names here too. These three skip in CI for want of a GPU,
+    # so the width only shows on a machine that has one - which is where it would otherwise
+    # register a population narrower than the fixture and than its own siblings.
+    PREVIEW_REDUCTIONS:
+      max_symbols: 10
     # BATCH_SIZE, MAX_FOLDS, MAX_SYMBOLS and N_EPOCHS were the pre-migration knobs. This notebook
     # now plans through the shared catalog and reads none of them, so setting them reduced nothing
     # and CI ran the full population believing it had not. LABELS is what it reads.
@@ -1474,12 +1498,24 @@ case_studies/crypto_perps_funding/08_tabular_dl:
 case_studies/crypto_perps_funding/09_dl_lstm:
   gpu: true
   parameters:
+    # Stated for the reason 06_linear records: LABELS is not a reduction, so without this the
+    # harness fallback would fit five names here too. These three skip in CI for want of a GPU,
+    # so the width only shows on a machine that has one - which is where it would otherwise
+    # register a population narrower than the fixture and than its own siblings.
+    PREVIEW_REDUCTIONS:
+      max_symbols: 10
     LABELS:
     - fwd_ret_8h
   timeout: 180
 case_studies/crypto_perps_funding/10_dl_tcn:
   gpu: true
   parameters:
+    # Stated for the reason 06_linear records: LABELS is not a reduction, so without this the
+    # harness fallback would fit five names here too. These three skip in CI for want of a GPU,
+    # so the width only shows on a machine that has one - which is where it would otherwise
+    # register a population narrower than the fixture and than its own siblings.
+    PREVIEW_REDUCTIONS:
+      max_symbols: 10
     LABELS:
     - fwd_ret_8h
   timeout: 180
