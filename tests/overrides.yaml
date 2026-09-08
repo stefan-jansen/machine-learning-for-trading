@@ -2531,7 +2531,13 @@ case_studies/sp500_equity_option_analytics/13_model_analysis:
   timeout: 300
 case_studies/sp500_equity_option_analytics/14_backtest:
   parameters:
-    MAX_SYMBOLS: 3
+    # backtest.sweep.top_k_grid declares [5, 10, 20] for every label here, and the case
+    # study is long-only, so a scheme survives when k < n_assets. Three symbols realized
+    # none of them and the sweep ran a `6 predictions x 0 schemes` grid; six realizes only
+    # ew_top5. Twenty-one realizes all three, which is what the fixture declares, and the
+    # seeded predictions carry 27 symbols so the panel has the names
+    # (ml4t/agent-workspace#1084).
+    MAX_SYMBOLS: 21
     TOP_K: 1
   timeout: 600
 case_studies/sp500_equity_option_analytics/15_portfolio_management:
