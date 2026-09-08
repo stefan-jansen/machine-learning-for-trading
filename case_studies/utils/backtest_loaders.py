@@ -40,6 +40,12 @@ import numpy as np
 import polars as pl
 import yaml
 
+from case_studies.utils.coverage import (
+    BACKTEST_COVERAGE_MINIMUM,
+    CoverageError,
+    check_prediction_cross_section,
+    feature_panel_keys,
+)
 from case_studies.utils.notebook_contracts import degenerate_prediction_sql
 from case_studies.utils.registry import model_source
 from case_studies.utils.signals import build_target_weights
@@ -123,6 +129,11 @@ class BacktestPredictions:
     date_range: tuple[str, str]
     sources: dict[str, int] = field(default_factory=dict)  # {family: n_rows}
     registry_entries: list[dict] = field(default_factory=list)
+    # Prediction sets withheld for covering too little of the cross-section they were
+    # offered. Never empty silently: a notebook that backtests these has to print them,
+    # because a family disappearing from a leaderboard is otherwise indistinguishable
+    # from a family that was never fitted.
+    coverage_exclusions: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -348,7 +359,8 @@ def _load_registry_prediction_frames(
     model_families: list[str],
     split: str,
     best_only: bool,
-) -> tuple[list[pl.DataFrame], dict[str, int], list[dict]]:
+    minimum_coverage: float | None = None,
+) -> tuple[list[pl.DataFrame], dict[str, int], list[dict], list[dict]]:
     # Use the new registry at run_log/registry.db (SSOT since registry redesign)
     db_path = case_dir / "run_log" / "registry.db"
     if not db_path.exists():
@@ -399,6 +411,18 @@ def _load_registry_prediction_frames(
     frames: list[pl.DataFrame] = []
     sources: dict[str, int] = {}
     entries: list[dict] = []
+    excluded: list[dict] = []
+
+    # A prediction set that covers a fraction of the cross-section is not a weaker result
+    # than a complete peer, it is a different experiment, and ranking the two against each
+    # other is what let `deep_learning` compete in `sp500_equity_option_analytics` while
+    # never scoring 262 of 549 symbols. The measurement is charged against what the feature
+    # panels offered rather than against the label, so a family is refused for rows it lost
+    # and never for rows it was not given - see `coverage.feature_panel_keys`. Same shape
+    # and same place as the degenerate-prediction exclusion in the query above.
+    achievable_panel = None
+    if minimum_coverage is not None and split != "all":
+        achievable_panel = feature_panel_keys(case_dir)
 
     for row_tuple in rows:
         row = dict(zip(col_names, row_tuple, strict=False))
@@ -421,6 +445,43 @@ def _load_registry_prediction_frames(
 
         source = model_source(family, row.get("config_name"))
         run_split = row.get("split", "validation")
+
+        if minimum_coverage is not None and run_split in ("validation", "holdout"):
+            try:
+                report = check_prediction_cross_section(
+                    raw,
+                    case_study_id,
+                    label,
+                    split=run_split,
+                    case_dir=case_dir,
+                    input_panel=achievable_panel,
+                    source=source,
+                )
+            except CoverageError as exc:
+                # A check that cannot run must not read as a pass: the set is held out and
+                # the reason travels with it, rather than being admitted unmeasured.
+                excluded.append(
+                    {
+                        "hash": prediction_hash,
+                        "family": family,
+                        "source": source,
+                        "coverage": None,
+                        "reason": f"coverage could not be evaluated: {exc}",
+                    }
+                )
+                continue
+            if report.accountable_coverage < minimum_coverage:
+                excluded.append(
+                    {
+                        "hash": prediction_hash,
+                        "family": family,
+                        "source": source,
+                        "coverage": report.accountable_coverage,
+                        "reason": report.summary(),
+                    }
+                )
+                continue
+
         if split == "all" and run_split == "holdout":
             source = f"{source}/holdout"
         normalized = _normalize_predictions(raw, source, case_study_id)
@@ -445,7 +506,7 @@ def _load_registry_prediction_frames(
             }
         )
 
-    return frames, sources, entries
+    return frames, sources, entries, excluded
 
 
 def _load_cme_front_month_targets(case_dir: Path, label: str) -> pl.DataFrame | None:
@@ -522,6 +583,7 @@ def load_backtest_predictions(
     best_only: bool = True,
     split: str = "validation",
     use_registry: bool | None = None,  # Deprecated — registry is always primary
+    minimum_coverage: float | None = BACKTEST_COVERAGE_MINIMUM,
 ) -> BacktestPredictions:
     """Load and normalize prediction artifacts for backtesting.
 
@@ -537,6 +599,10 @@ def load_backtest_predictions(
         best_only: If True, select best model per family. If False, return all.
         split: Which prediction split to load: "validation", "holdout", or "all".
         use_registry: Deprecated — ignored. Registry is always used.
+        minimum_coverage: Share of the achievable ``(symbol, timestamp)`` grid a
+            prediction set must carry to be backtested. ``None`` disables the check,
+            which is for a caller that wants to *report* the shortfall rather than act
+            on it - a diagnostic notebook, not a backtest.
 
     Returns:
         BacktestPredictions with normalized [timestamp, symbol, y_score, y_true,
@@ -562,17 +628,26 @@ def load_backtest_predictions(
     )
 
     # --- Primary source: registry-backed content-addressed runs ---
-    frames, sources, registry_entries = _load_registry_prediction_frames(
+    frames, sources, registry_entries, coverage_exclusions = _load_registry_prediction_frames(
         case_study_id=case_study_id,
         case_dir=case_dir,
         label=label,
         model_families=model_families,
         split=split,
         best_only=best_only,
+        minimum_coverage=minimum_coverage,
     )
 
     if not frames:
         msg = f"No predictions found for {case_study_id}/{label} in families {model_families}"
+        if coverage_exclusions:
+            withheld = "\n".join(
+                f"  {row['source']}: {row['reason'].splitlines()[0]}" for row in coverage_exclusions
+            )
+            msg += (
+                f"; {len(coverage_exclusions)} prediction set(s) were withheld for covering "
+                f"less than {minimum_coverage:.1%} of the cross-section offered to them:\n{withheld}"
+            )
         raise FileNotFoundError(msg)
 
     predictions = pl.concat(frames, how="diagonal_relaxed")
@@ -635,6 +710,7 @@ def load_backtest_predictions(
         date_range=date_range,
         sources=sources,
         registry_entries=registry_entries,
+        coverage_exclusions=coverage_exclusions,
     )
 
 

@@ -32,6 +32,7 @@ __all__ = [
     "flag_columns",
     "profile_columns",
     "quality_report",
+    "render_quality_report",
 ]
 
 #: Quantiles reported for every numeric column. The outer pair is what makes a
@@ -223,3 +224,41 @@ def quality_report(
         )
     report["name"] = name
     return report
+
+
+def render_quality_report(report: dict, *, max_rows: int = 80) -> None:
+    """Print a ``quality_report`` as a notebook reader should read it: shortfall first.
+
+    Coverage leads because it is the question the other tables cannot answer - a frame
+    whose every column profiles cleanly is still wrong if it is a tenth of the universe.
+    The flags come next as the shortlist a sign-off has to speak to, and the full profile
+    last, so nothing is hidden but nothing has to be scanned to find the problem.
+    """
+    print(f"=== {report['name']} ===")
+
+    summary = report.get("coverage_summary")
+    if summary is not None:
+        row = summary.row(0, named=True)
+        share = "n/a" if row["coverage"] is None else f"{row['coverage']:.2%}"
+        print(
+            f"coverage {share}: {row['produced']:,} of {row['expected']:,} declared keys, "
+            f"{row['missing']:,} missing, {row['unexpected']:,} unexpected"
+        )
+        missing = report.get("coverage_missing")
+        if missing is not None and missing.height:
+            entity = missing.columns[0]
+            per_entity = missing.group_by(entity).len().sort("len", descending=True)
+            print(f"  {per_entity.height} of the declared {entity}s are short; worst:")
+            with pl.Config(tbl_rows=10, tbl_hide_dataframe_shape=True):
+                print(per_entity.head(10))
+
+    flags = report["flags"]
+    if flags.height == 0:
+        print("no column crossed a threshold")
+    else:
+        print(f"{flags.height} column(s) to speak to:")
+        with pl.Config(tbl_rows=max_rows, tbl_cols=4, fmt_str_lengths=110):
+            print(flags.select("column", "why", "rows", "n_null"))
+
+    with pl.Config(tbl_rows=max_rows, tbl_cols=14, fmt_str_lengths=28):
+        print(report["profile"])
