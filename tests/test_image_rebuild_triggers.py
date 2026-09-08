@@ -236,31 +236,69 @@ def test_a_broken_candidate_fails_the_required_check():
     assert "exit 1" in str(guard.get("run", "")), f"{guard.get('name')} does not fail the job"
 
 
-def _jobs_in_the_published_ml4t_image() -> dict[str, dict]:
-    """Jobs whose `container:` is `ml4t/ml4t:latest`, keyed by job name.
+# The jobs that execute in the ml4t image and must therefore check it against the
+# lock. Named rather than only discovered, because both ways of reaching that image
+# are structural: a job-level `container:`, or a step that resolves the image and
+# runs `docker run`. A restructuring that moved a job out of both forms would empty
+# a purely discovered set and leave the tests below asserting nothing, which is how
+# this test previously stopped covering the three notebook jobs.
+JOBS_THAT_RUN_IN_THE_ML4T_IMAGE = frozenset(
+    {"test-unit-image", "test-chapters", "test-case-studies", "test-neo4j"}
+)
 
-    Only that image. `ml4t-py312` and `ml4t-benchmark` install their own dependency
-    sets on top of a constraint derived from the root lock, so their installed
-    distributions legitimately differ from it and the guard below does not apply.
+
+def _jobs_in_the_published_ml4t_image() -> dict[str, dict]:
+    """Jobs that execute in `ml4t/ml4t`, keyed by job name.
+
+    Two shapes count. A job-level `container:` pins the published image before any
+    step runs. A step-level `docker run` against the reference the
+    `resolve-ml4t-image` action produces runs either the published image or a
+    candidate built from this commit, which is what lets a lock bump be measured in
+    the environment it declares.
+
+    Only the ml4t image. `ml4t-py312` and `ml4t-benchmark` install their own
+    dependency sets on top of a constraint derived from the root lock, so their
+    installed distributions legitimately differ from it and the guard below does not
+    apply.
     """
     workflow = yaml.safe_load(TEST_WORKFLOW.read_text(encoding="utf-8"))
     out = {}
     for name, spec in workflow["jobs"].items():
         container = spec.get("container")
         image = container.get("image") if isinstance(container, dict) else container
-        if image == "ml4t/ml4t:latest":
+        steps = spec.get("steps") or []
+        # Either shape of step-level resolution: the shared composite action, or the
+        # inline resolve test-unit-image carries. Both end in a `docker run` against
+        # `steps.image.outputs.ref`, which is what actually names the image.
+        resolves = any(
+            "resolve-ml4t-image" in str(step.get("uses", ""))
+            or "steps.image.outputs.ref" in str(step.get("run", ""))
+            for step in steps
+        )
+        if image == "ml4t/ml4t:latest" or resolves:
             out[name] = spec
     return out
 
 
-def test_every_job_in_the_published_image_checks_it_against_the_lock():
-    """A `container:` cannot carry an image built from the commit under test.
+def test_the_guarded_set_is_the_set_that_runs_in_the_image():
+    """The two tests below assert over a discovered set, so an empty one proves nothing.
 
-    GitHub resolves it before any step runs, so these jobs get the published image
-    whatever the lock says - and unlike `test-unit-image` they cannot be pointed at a
-    candidate without restructuring them to `docker run`. The guard cannot make them
-    pass on a lock-changing commit; nothing can until the image is rebuilt from a
-    landed lock. What it does is make the failure say which of the two is wrong.
+    Both filter that set and assert the filter caught nothing. If the discovery stops
+    matching - as it did when these jobs moved from `container:` to `docker run` - the
+    set empties, both tests pass, and the coverage they exist for is gone with no
+    failure anywhere. Pinning the expected membership is what makes that a red test
+    rather than a silent one.
+    """
+    assert set(_jobs_in_the_published_ml4t_image()) == JOBS_THAT_RUN_IN_THE_ML4T_IMAGE
+
+
+def test_every_job_in_the_published_image_checks_it_against_the_lock():
+    """Every job that runs in the ml4t image checks that image against the lock.
+
+    These jobs choose their image at the step, so a commit that moves the lock is
+    measured in an image built from that commit. The guard is what catches the case
+    that remains: an image that is not what the lock declares, whether because the
+    candidate was not built or because the published image has drifted.
 
     Without it the drift arrives as arithmetic. On the commit that moved
     ml4t-diagnostic to 0.1.4 it surfaced as thirteen fold-ordering errors inside
