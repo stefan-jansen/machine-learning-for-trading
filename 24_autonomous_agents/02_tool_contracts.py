@@ -18,18 +18,22 @@
 #
 # **Docker image**: `ml4t`
 #
-# This notebook teaches the **SearchClient protocol**, real web search integration
-# via Tavily, provenance enrichment, and domain policy enforcement. In the AIA
-# Forecaster, search is the agent's only tool, so its contract determines what
-# evidence the agent can access and how trustworthy its outputs are.
+# An agent is only as good as what its tools return. In the forecasting system this chapter
+# builds, search is the single tool, so its contract decides what evidence can reach the model,
+# whether that evidence could have been read on the day being forecast, and whether a claim in
+# the final rationale can be traced back to a document. This notebook writes that contract and
+# the controls that sit on top of it.
 #
 # **Learning Objectives**:
-# - Understand the `SearchClient` protocol that abstracts search providers
-# - Execute web searches and inspect `SearchResult` objects
-# - Filter dated search results at a cutoff and identify undated evidence
-# - Configure domain allowlists and blocklists for source control
-# - Translate tool schemas to Anthropic and OpenAI formats
-# - Inspect the execution audit trail for debugging and compliance
+# - Define a search tool behind a protocol so the provider can be replaced without touching
+#   the agent
+# - Filter results at a cutoff date so an agent scored on a resolved question cannot read the
+#   answer, and separate the undated results the filter cannot rule on
+# - Restrict which publishers an agent may read, and record in the execution log how much
+#   evidence the policy removed
+# - Render one tool definition into the Anthropic and OpenAI schema formats
+# - Read an execution log to see what a run actually called, as distinct from what the model
+#   said it was doing
 #
 # **Book Reference**: Chapter 24, Section 24.4 (Tool Integration: Contracts, Controls,
 # and Context Engineering)
@@ -41,11 +45,8 @@
 """Tool Contracts and Provenance: search protocol, audit trails, and domain policy."""
 
 import json
-import warnings
 from datetime import date
 from urllib.parse import urlparse
-
-warnings.filterwarnings("ignore")
 
 import polars as pl
 from agent_fixtures import get_demo_question
@@ -55,21 +56,37 @@ from agent_tools import (
     SEARCH_TOOL,
     MockSearchClient,
     ToolExecutor,
+    apply_domain_policy,
     create_search_client,
     format_search_results,
 )
+from IPython.display import display
+
+# %% [markdown]
+# ## Settings
+#
+# `RUN_LIVE` left at `False` uses the deterministic mock search client, so the notebook runs
+# offline and prints the same results everywhere. Set it to `True`, with `TAVILY_API_KEY` set,
+# to issue real queries.
+#
+# `SEARCH_PROVIDER` is empty so the factory picks whichever provider has a key; it is read only
+# on the live path.
+#
+# `MAX_RESULTS` caps how many documents one search returns. Five is the working default for the
+# agents in this chapter: enough for a claim to appear in more than one place, few enough that
+# a handful of searches still fits in a context window.
 
 # %% tags=["parameters"]
 RUN_LIVE = False
-SEARCH_PROVIDER = ""  # live path only; empty selects an available provider
+SEARCH_PROVIDER = ""
 MAX_RESULTS = 5
 
 # %% [markdown]
 # ## The SearchClient Protocol
 #
-# The AIA Forecaster uses a single tool: **web search**. The `SearchClient` protocol
-# abstracts the provider, whether Tavily (real web search), a mock (deterministic
-# for CI), or a future provider like Brave or SerpAPI.
+# The agent built in this chapter has one tool: web search. Every provider that can serve it,
+# whether Tavily, a deterministic mock, or something added later, is reached through one method
+# signature:
 #
 # ```python
 # class SearchClient(Protocol):
@@ -78,14 +95,19 @@ MAX_RESULTS = 5
 #     ) -> list[SearchResult]: ...
 # ```
 #
-# The key design: a single method that returns structured `SearchResult` objects,
-# with optional point-in-time filtering via `cutoff_date`.
+# Two things in that signature are worth more than the abstraction itself. It returns typed
+# `SearchResult` objects rather than a provider's raw JSON, so nothing downstream depends on a
+# vendor's field names. And `cutoff_date` is in the contract rather than bolted on afterwards,
+# which is what makes point-in-time filtering the tool's job instead of every caller's.
 
 # %% [markdown]
-# ### SearchResult structure
+# ### What a result carries
 #
-# Every search result carries provenance metadata: title, URL, snippet, published
-# date, and relevance score. This enables downstream quality checks and audit trails.
+# A `SearchResult` records where the evidence came from as well as what it says. **Provenance**
+# is that origin record: the URL identifies the publisher and lets a claim be traced back to
+# the page it came from, and `published` is the date the filtering below depends on. `score` is
+# the provider's own relevance ranking, which orders results and says nothing about whether
+# they are true.
 
 # %%
 example = SearchResult(
@@ -101,15 +123,19 @@ print(f"Published: {example.published}")
 print(f"Score:     {example.score}")
 
 # %% [markdown]
-# ## Search Execution
+# ## Running a Search
 #
-# The default path forces the deterministic mock client. Set `RUN_LIVE=True` to
-# opt into provider auto-detection and possible Tavily calls.
+# The default path uses `MockSearchClient`, whose results are a fixed dictionary in
+# `agent_tools.py`, so this notebook produces the same output on every machine and costs
+# nothing. `RUN_LIVE = True` swaps in whichever provider has a key set, which for this chapter
+# means Tavily.
+#
+# The demonstration question asks whether NVIDIA beat its Q4 FY2025 earnings expectations. It
+# has a **cutoff date**: the last day a forecaster answering it would have been able to read
+# anything, which here is the day before the company reported.
 
 # %%
 search = create_search_client(SEARCH_PROVIDER) if RUN_LIVE else MockSearchClient()
-if not RUN_LIVE:
-    assert isinstance(search, MockSearchClient)
 print(f"Provider: {type(search).__name__}\n")
 
 question = get_demo_question()
@@ -129,43 +155,42 @@ for r in results:
 # %% [markdown]
 # ## Point-in-Time Filtering
 #
-# When `cutoff_date` is provided, the search client filters out results published
-# on or after that date. This prevents **lookahead bias** when publication metadata
-# is available: the agent only sees dated information from before the cutoff.
+# The question above asks about an event that has already resolved, which is the only kind of
+# question a forecasting agent can be scored on. It is also the kind that is trivially easy to
+# get right by accident: search the open web today for "did NVIDIA beat Q4 FY2025 earnings" and
+# the first result answers it. An agent evaluated that way is measuring the search index, not
+# forecasting.
 #
-# Without this, a backtesting agent could "cheat" by reading post-resolution news.
+# `cutoff_date` is the guard. The client drops any result whose publication date is on or after
+# the cutoff, so what reaches the agent is what a forecaster could have read on the day. The
+# cutoff here is the question's own `cutoff_date`, 2025-02-20, the day before NVIDIA reported.
 
 # %%
-# Search WITHOUT cutoff: all results returned
 all_results = search.search("NVIDIA Q4 earnings", max_results=MAX_RESULTS)
-print(f"Without cutoff: {len(all_results)} results")
+print(f"Retrieved with no cutoff: {len(all_results)}")
 for r in all_results:
     print(f"  [{r.published or '?'}] {r.title}")
 
 print()
 
-# Use an earlier synthetic cutoff so the fixture visibly exercises the filter.
-filter_demo_cutoff = date(2025, 2, 19)
-filtered_results = search.search(
-    "NVIDIA Q4 earnings",
-    max_results=MAX_RESULTS,
-    cutoff_date=filter_demo_cutoff,
-)
-print(f"With demonstration cutoff ({filter_demo_cutoff}): {len(filtered_results)} results")
-for r in filtered_results:
+pit_results = search.search("NVIDIA Q4 earnings", max_results=MAX_RESULTS, cutoff_date=cutoff)
+print(f"Retrieved with cutoff {cutoff}: {len(pit_results)}")
+for r in pit_results:
     print(f"  [{r.published or '?'}] {r.title}")
 
 # %% [markdown]
-# **Finding**: The cutoff filter removes results with known publication dates on or
-# after the cutoff. Undated evidence needs a separate validation policy before a
-# historical evaluation can call it point-in-time safe.
-
-# %% [markdown]
-# ### Undated evidence remains unverified
+# ### A result with no date is not a result before the cutoff
 #
-# Search APIs do not always return a publication date. The tool contract retains such
-# results because it cannot prove they are post-cutoff. A strict historical evaluation
-# should partition them explicitly rather than count them as verified evidence.
+# Search APIs return a publication date when the page carries one, and often it does not. The
+# filter above can only exclude what it can date, so an undated result passes the cutoff by
+# default: the client keeps it because it cannot prove the page is too recent, not because it
+# has established that the page is old enough.
+#
+# That default is the right one for a live run, where excluding every undated page would throw
+# away most of the web. It is the wrong one for a scored historical evaluation, where an
+# undated page is an unbounded hindsight risk. So the two have to be counted separately, and
+# the evaluation decides what to do with the second group rather than inheriting the tool's
+# choice. The cell below adds one undated result to the filtered set and partitions it.
 
 # %%
 undated = SearchResult(
@@ -175,34 +200,38 @@ undated = SearchResult(
     published=None,
     score=0.75,
 )
-cutoff_candidates = [*filtered_results, undated]
+cutoff_candidates = [*pit_results, undated]
 verified_pre_cutoff = [
     result
     for result in cutoff_candidates
-    if result.published and date.fromisoformat(result.published) < filter_demo_cutoff
+    if result.published and date.fromisoformat(result.published) < cutoff
 ]
 unverified_dates = [result for result in cutoff_candidates if not result.published]
 
-print(f"Verified pre-cutoff: {len(verified_pre_cutoff)}")
-print(f"Unverified dates:    {len(unverified_dates)}")
-assert len(unverified_dates) == 1
+print(f"Dated and verified before the cutoff: {len(verified_pre_cutoff)}")
+print(f"Undated, provenance unverified:       {len(unverified_dates)}")
 
 # %% [markdown]
 # ## Formatting Results for the Agent
 #
-# Search results are formatted as structured text before being fed back to the LLM
-# as a tool message. This format includes title, URL, snippet, and published date.
+# Results reach the model as text in a tool message, so the formatting is part of the contract
+# too. `format_search_results` numbers each result and puts the title, URL, snippet and
+# publication date on their own lines. The URL and the date are there so the model can weigh a
+# primary source against a blog and recent reporting against stale reporting, and so that a
+# quote in the final rationale can be traced back to the document it came from.
 
 # %%
-formatted = format_search_results(filtered_results)
+formatted = format_search_results(pit_results)
 print(formatted[:500])
 
 # %% [markdown]
 # ## Execution Audit Trail
 #
-# The `ToolExecutor` wraps the search client with logging. Every call is recorded
-# independently of the agent's reasoning trace, capturing what *actually* executed,
-# with timing and provenance.
+# `ToolExecutor` wraps the search client and records every call: the query, whether it
+# succeeded, how long it took, and which client served it. That record is kept apart from the
+# agent's reasoning trace on purpose. The reasoning trace is what the model said it was doing;
+# the execution log is what happened. Debugging a bad forecast usually starts with the
+# difference between them.
 
 # %%
 executor = ToolExecutor(search=search)
@@ -223,60 +252,39 @@ pl.DataFrame(
 )
 
 # %% [markdown]
-# **Observation**: The audit records status and elapsed time for every call. Live
-# latency depends on the provider and network, so the trace supports measurement
-# without embedding a machine-specific timing claim.
+# The elapsed times round to zero because the mock client returns from a dictionary in memory.
+# Against a live provider the same column carries the network round trip, which is where an
+# agent spends most of its wall-clock time and where a per-call timeout has to be set.
 
 # %% [markdown]
-# ## Domain Policy Enforcement
+# ## Source Policy
 #
-# The Tavily search client supports domain allowlists and blocklists. This controls
-# which sources the agent can access, which supports evidence-quality controls.
+# Which publishers an agent may read is a research decision, not a prompt detail. An allowlist
+# names the domains whose reporting counts as evidence; a blocklist names the ones that do not.
+# `apply_domain_policy` in `agent_tools.py` implements both, matching on the registered domain
+# and its subdomains after stripping a leading `www.`, so `reuters.com` also covers
+# `uk.reuters.com`. The blocklist is applied first, then the allowlist.
+#
+# `DEFAULT_ALLOWED_DOMAINS` is the chapter's starting set: wire services, financial newspapers,
+# and the primary sources whose numbers the others report on.
 
 # %%
-assert len(DEFAULT_ALLOWED_DOMAINS) == 11, "DEFAULT_ALLOWED_DOMAINS count drifted"
 pl.DataFrame({"allowed_domain": sorted(DEFAULT_ALLOWED_DOMAINS)})
 
-# %% [markdown]
-# ### Domain-policy function
-#
-# A small policy function applies host-domain allowlists and blocklists, including
-# subdomains.
-
-
-# %%
-def apply_domain_policy(
-    items: list[SearchResult],
-    *,
-    allowed: set[str] | None = None,
-    blocked: set[str] | None = None,
-) -> list[SearchResult]:
-    """Drop results whose host is outside `allowed`, or within `blocked`."""
-
-    def matches(host: str, domain: str) -> bool:
-        domain = domain.lower().lstrip(".")
-        return host == domain or host.endswith(f".{domain}")
-
-    keep: list[SearchResult] = []
-    for result in items:
-        host = (urlparse(result.url).hostname or "").lower().removeprefix("www.")
-        if blocked and any(matches(host, domain) for domain in blocked):
-            continue
-        if allowed and not any(matches(host, domain) for domain in allowed):
-            continue
-        keep.append(result)
-    return keep
-
 
 # %% [markdown]
-# ### Observable enforcement
+# ### Enforcement is post-retrieval
 #
-# Policy enforcement here is **post-retrieval**: the search provider returns
-# whatever matches the query, and the agent's tool layer filters results
-# whose host is not on the allowlist or belongs to a blocked domain before
-# handing them back. The fixture below seeds a mock
-# search whose results contain a `reddit.com` URL alongside a `wsj.com`
-# URL; instantiate two policies and watch the blocked one disappear.
+# The filter runs on results, not on queries: the provider returns whatever matches, and the
+# tool layer drops what the policy excludes before the agent sees it. That ordering has a cost,
+# since a blocked document was still retrieved, and one advantage that matters more, which is
+# that the policy holds whatever the model asks for. A model instructed in its prompt to avoid
+# social media occasionally reads it anyway; a host filtered here never reaches the model at
+# all.
+#
+# The three results below span a wire service, a paywalled newspaper, and a message board.
+# Running the same set through an allowlist of financial publishers and through a blocklist of
+# social sites shows what each policy keeps.
 
 # %%
 mixed_results = [
@@ -303,23 +311,42 @@ mixed_results = [
     ),
 ]
 
+financial_only = {"reuters.com", "wsj.com", "ft.com", "bloomberg.com"}
+social = {"reddit.com", "twitter.com", "x.com"}
 
-financial_only = apply_domain_policy(
-    mixed_results, allowed={"reuters.com", "wsj.com", "ft.com", "bloomberg.com"}
-)
-no_social = apply_domain_policy(mixed_results, blocked={"reddit.com", "twitter.com"})
+policies = {
+    "raw retrieval": mixed_results,
+    "allowlist (financial)": apply_domain_policy(mixed_results, allowed=financial_only),
+    "blocklist (social)": apply_domain_policy(mixed_results, blocked=social),
+}
 
-pl.DataFrame(
-    {
-        "policy": ["raw retrieval", "allowlist (financial)", "blocklist (social)"],
-        "n_results": [len(mixed_results), len(financial_only), len(no_social)],
-        "hosts_kept": [
-            ", ".join(urlparse(r.url).netloc for r in mixed_results),
-            ", ".join(urlparse(r.url).netloc for r in financial_only),
-            ", ".join(urlparse(r.url).netloc for r in no_social),
-        ],
-    }
-)
+with pl.Config(fmt_str_lengths=80, tbl_rows=20):
+    display(
+        pl.DataFrame(
+            {
+                "policy": [name for name, kept in policies.items() for _ in mixed_results],
+                "host": [urlparse(r.url).hostname for _ in policies for r in mixed_results],
+                "kept": [r in kept for kept in policies.values() for r in mixed_results],
+            }
+        )
+    )
+
+# %% [markdown]
+# ### The same policy inside the executor
+#
+# Passing the sets to `ToolExecutor` applies them to every search the agent makes, and the
+# execution log records how many results the policy removed. That count is what an auditor
+# reads: it says the agent was denied evidence, and how much, rather than leaving a short
+# result list looking like a thin day for the query.
+
+# %%
+policed = ToolExecutor(search=search, blocked_domains={"nasdaq.com"})
+policed_results = policed.execute_search("NVIDIA Q4 earnings", max_results=MAX_RESULTS)
+
+print(f"Returned to the agent: {len(policed_results)}")
+print(f"Log preview:           {policed.execution_log[0].result_preview}")
+for r in policed_results:
+    print(f"  {urlparse(r.url).hostname}  {r.title}")
 
 # %% [markdown]
 # ## Tool Schema Translation
@@ -356,32 +383,48 @@ print(json.dumps(SEARCH_TOOL.to_openai_schema(), indent=2))
 # provider-specific schema mismatches.
 
 # %% [markdown]
-# ## Disabled Search (Graceful Degradation)
+# ## When the Tool Is Unavailable
 #
-# When search is disabled (e.g., in an air-gapped environment), the `ToolExecutor`
-# logs the attempt with status "disabled" and returns an empty result list.
+# An agent deployed inside a network with no outbound access, or run while a provider is down,
+# still has to do something. `ToolExecutor` treats an absent client as a logged outcome rather
+# than an exception: the call is recorded with status `disabled` and returns no results, so the
+# agent's loop continues and the record shows why the evidence is missing. An exception here
+# would abort the run and leave nothing to audit.
 
 # %%
 disabled_executor = ToolExecutor(search=None)
 empty = disabled_executor.execute_search("test query")
 print(f"Results when disabled: {len(empty)}")
-print(f"Log entry: {disabled_executor.execution_log[0].status}")
+print(f"Log entry status:      {disabled_executor.execution_log[0].status}")
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **SearchClient protocol** abstracts the provider, so the same agent code works with
-#    Tavily, mock, or any future search API
-# 2. **Point-in-time filtering** removes results with known dates on or after the
-#    cutoff; undated results remain unverified and need an explicit policy
-# 3. **Domain policies** restrict which sources the agent can access, supporting
-#    evidence-quality and compliance controls
-# 4. **Schema translation** renders tool definitions to both Anthropic and OpenAI
-#    formats from a single source of truth
-# 5. **Audit trails** log every search call with timing, status, and provenance
+# 1. **The tool contract decides what the agent can know.** Everything downstream, the forecast
+#    included, is a function of what search returned, so the contract is worth as much design
+#    attention as the prompt.
+# 2. **A publication-date filter is what separates a backtest from a demonstration.** Without
+#    it an agent evaluated on a resolved question reads the answer.
+# 3. **A result with no date is not a result before the cutoff.** Keep the two apart in the
+#    record and decide the policy explicitly; silently counting undated evidence as
+#    point-in-time safe is how a hindsight-free claim goes wrong.
+# 4. **Enforce source policy in the tool layer rather than the prompt.** A model asked not to read
+#    social media sometimes reads it anyway; a host that never reaches the model cannot.
+# 5. **The execution log is the record of what ran**, separate from the model's account of what
+#    it was doing. When those two disagree, the log is the one to trust.
+# 6. **One tool definition, rendered per provider.** The schema differences between Anthropic
+#    and OpenAI are mechanical, and a single `ToolDefinition` keeps them from becoming two
+#    sources of truth that drift.
 #
-# **Next**: [`03_state_and_memory`](03_state_and_memory.ipynb), which covers explicit
-# agent state, quality gates, and checkpoint/replay for reproducibility.
+# **Known limitations of what is built here.** Source policy runs after retrieval, so a blocked
+# document was still fetched and paid for; a provider-side domain filter is cheaper where the
+# API offers one. The allowlist is a list of publishers, which is a crude proxy for evidence
+# quality: a syndicated wire story on an allowed domain and the same story on a blocked one are
+# the same evidence. Nothing here deduplicates results that repeat one underlying source, so an
+# agent can mistake five copies of one story for five independent confirmations.
 #
-# **Book**: Section 24.4 covers tool contract design, MCP (Model Context Protocol),
-# and sandboxing patterns.
+# **Next**: [`03_state_and_memory`](03_state_and_memory.ipynb) makes the agent's state explicit
+# so a run can be checkpointed, replayed, and gated on evidence quality.
+#
+# **Book**: Section 24.4 covers tool contract design, the Model Context Protocol, and
+# sandboxing patterns.
