@@ -48,7 +48,13 @@ import json
 from datetime import date, datetime, timedelta
 
 from agent_fixtures import get_demo_question
-from agent_schemas import AgentState, QualityGateResult
+from agent_schemas import (
+    AgentState,
+    check_consistency_gate,
+    check_coverage_gate,
+    check_freshness_gate,
+    run_quality_gates,
+)
 
 # %% [markdown]
 # ## Settings
@@ -69,23 +75,31 @@ RUN_ID = "ch24-state-demo"
 
 # %%
 as_of = datetime.fromisoformat(AS_OF_ISO)
+
 # %% [markdown]
-# ## Why the Message History Is Not Enough
+# ## Why a Trace Is Not State
 #
-# The default place for an agent's state is the conversation: the model is handed everything it
-# has said and been told, and that transcript is the memory. It works while the run is
-# happening and leaves nothing usable afterwards. Four things a research process needs are all
-# unavailable from a transcript:
+# [`01_react_reasoning`](01_react_reasoning.ipynb) already writes a durable record: `RunTrace`
+# saves the question, every prompt and reply, and every search result into a JSON file, and
+# that file is what the replay path reads back. So the run is reproducible, and a reader can
+# see exactly what happened.
 #
-# - **Audit.** Which documents did the agent actually read? A transcript contains them as prose
-#   inside prompts, not as records something can query.
-# - **Replay.** Re-running from the middle means reconstructing the exact prompt sequence.
-# - **Detection.** Nothing in a transcript says the evidence was thin or three weeks old.
-# - **Comparison.** Two runs are two conversations, and no diff over them is meaningful.
+# What that record cannot do is participate in the run. It is written at the end, from the
+# outside, and holds the model's conversation rather than the agent's own conclusions. Four
+# things a research process needs are all still missing:
 #
-# The alternative is to keep the state the process depends on in a typed record the agent
-# writes to, alongside the conversation rather than inside it. The conversation stays the
-# model's working surface; the record is what everything else reads.
+# - **A place for derived knowledge.** The evidence the agent judged relevant, the questions it
+#   has not resolved, what it has decided so far. None of that is a prompt or a reply.
+# - **Something to check before answering.** A gate has to read a structured account of the
+#   evidence, not a transcript, and it has to run while the agent can still act on it.
+# - **A resumption point.** A conversation log replays a run; it does not let one continue from
+#   the middle with a changed setting.
+# - **A comparable object.** Two runs are two conversations, and no diff over prose is a
+#   measurement. Two `AgentState` records diff field by field.
+#
+# So the trace and the state are different artifacts with different jobs, and this chapter
+# keeps both: `RunTrace` is what the run looked like from outside, `AgentState` is what the
+# agent knew from inside.
 
 # %% [markdown]
 # ## The AgentState Schema
@@ -256,39 +270,6 @@ for item in state.evidence:
 # enough that a single search cannot.
 
 
-# %%
-def check_coverage_gate(
-    state: AgentState,
-    min_items: int = 3,
-    required_types: list[str] | None = None,
-) -> QualityGateResult:
-    """Check that evidence covers the required types and meets the minimum count."""
-    required_types = required_types or ["search_results", "base_rate"]
-    present_types = {item["type"] for item in state.evidence}
-    missing = set(required_types) - present_types
-
-    if missing:
-        return QualityGateResult(
-            gate_name="coverage",
-            passed=False,
-            reason=f"Missing evidence types: {', '.join(sorted(missing))}",
-            details={"required": required_types, "present": sorted(present_types)},
-        )
-    if len(state.evidence) < min_items:
-        return QualityGateResult(
-            gate_name="coverage",
-            passed=False,
-            reason=f"Only {len(state.evidence)} evidence items (need {min_items})",
-            details={"count": len(state.evidence), "min_required": min_items},
-        )
-    return QualityGateResult(
-        gate_name="coverage",
-        passed=True,
-        reason=f"{len(state.evidence)} items covering {len(present_types)} types",
-        details={"count": len(state.evidence), "types": sorted(present_types)},
-    )
-
-
 # %% [markdown]
 # ### Freshness gate
 #
@@ -302,45 +283,6 @@ def check_coverage_gate(
 # A timestamp in the future is treated as a failure rather than as maximal freshness. It means
 # the clock, the fixture or the checkpoint is wrong, and a gate that reads it as fresh would
 # pass a run precisely when its record cannot be trusted.
-
-
-# %%
-def check_freshness_gate(
-    state: AgentState,
-    *,
-    as_of: datetime,
-    max_age_hours: int = 24,
-) -> QualityGateResult:
-    """Check that no evidence is older than the allowed window."""
-    stale_items = []
-
-    for item in state.evidence:
-        ts_str = item.get("timestamp", "")
-        try:
-            ts = datetime.fromisoformat(ts_str)
-            age = as_of - ts
-            if age < timedelta(0):
-                stale_items.append({"type": item["type"], "age_hours": "future"})
-            elif age > timedelta(hours=max_age_hours):
-                stale_items.append(
-                    {"type": item["type"], "age_hours": round(age.total_seconds() / 3600, 1)}
-                )
-        except (ValueError, TypeError):
-            stale_items.append({"type": item["type"], "age_hours": "unknown"})
-
-    if stale_items:
-        return QualityGateResult(
-            gate_name="freshness",
-            passed=False,
-            reason=f"{len(stale_items)} evidence items exceed {max_age_hours}h age limit",
-            details={"stale_items": stale_items, "max_age_hours": max_age_hours},
-        )
-    return QualityGateResult(
-        gate_name="freshness",
-        passed=True,
-        reason=f"All evidence within {max_age_hours}h window",
-        details={"max_age_hours": max_age_hours, "item_count": len(state.evidence)},
-    )
 
 
 # %% [markdown]
@@ -358,89 +300,21 @@ def check_freshness_gate(
 # arrives from fixtures, from checkpoints, and from tools written after the filter was.
 
 # %% [markdown]
-# One parser handles the cutoff and every result date, so a date that the cutoff comparison
-# would accept cannot be one a result comparison rejects.
-
-
-# %%
-def parse_iso_date(value: str) -> date | None:
-    """Parse an ISO date, returning None for missing or malformed values."""
-    try:
-        return date.fromisoformat(value)
-    except (TypeError, ValueError):
-        return None
-
-
-# %% [markdown]
-# The gate walks every result in every evidence item and collects each failure rather than
-# stopping at the first, so one run reports the full extent of the contamination.
-
-
-# %%
-def check_consistency_gate(state: AgentState) -> QualityGateResult:
-    issues = []
-    cutoff = parse_iso_date(state.cutoff_date)
-    if cutoff is None:
-        return QualityGateResult(
-            gate_name="consistency",
-            passed=False,
-            reason="Cutoff date is missing or invalid",
-            details={"cutoff_date": state.cutoff_date},
-        )
-
-    for item in state.evidence:
-        content = item.get("content", {})
-        if isinstance(content, dict):
-            for r in content.get("results", []):
-                pub = r.get("published", "")
-                if not pub:
-                    issues.append(f"Missing publication date: '{r.get('title', '')[:50]}'")
-                    continue
-                published = parse_iso_date(pub)
-                if published is None:
-                    issues.append(f"Invalid publication date: '{r.get('title', '')[:50]}'")
-                    continue
-                if published >= cutoff:
-                    issues.append(
-                        f"Post-cutoff result: '{r.get('title', '')[:50]}' "
-                        f"(published {published}, cutoff {cutoff})"
-                    )
-
-    if issues:
-        return QualityGateResult(
-            gate_name="consistency",
-            passed=False,
-            reason=f"{len(issues)} cutoff violations found",
-            details={"issues": issues},
-        )
-    return QualityGateResult(
-        gate_name="consistency",
-        passed=True,
-        reason="All result dates precede the cutoff",
-        details={"checks_run": ["date_presence", "date_parse", "cutoff_enforcement"]},
-    )
-
+# The three functions live in `agent_schemas.py` beside `AgentState` itself, so the agent in
+# [`04_research_agent`](04_research_agent.ipynb) checks its evidence against exactly the
+# definitions demonstrated here. One parser handles the cutoff and every result date, so a date
+# the cutoff comparison would accept cannot be one a result comparison rejects, and each gate
+# collects every failure rather than stopping at the first, so one run reports the full extent
+# of the problem.
 
 # %% [markdown]
 # ### Running the gates
 #
-# The three run independently and their outcomes are stored on the state, so a checkpoint
-# carries not only the evidence but the judgement made about it. Nothing here decides what to
-# do on a failure: that is the calling policy's decision, and
-# [`04_research_agent`](04_research_agent.ipynb) is where it is made.
-
-
-# %%
-def run_quality_gates(state: AgentState, *, as_of: datetime) -> list[QualityGateResult]:
-    """Run all quality gates and store results in state."""
-    gates = [
-        check_coverage_gate(state),
-        check_freshness_gate(state, as_of=as_of),
-        check_consistency_gate(state),
-    ]
-    state.quality_gates = gates
-    return gates
-
+# `run_quality_gates` runs the three, stores the outcomes on the state, and returns them, so a
+# checkpoint carries not only the evidence but the judgement made about it. What to do on a
+# failure is the caller's decision, not the gate's:
+# [`04_research_agent`](04_research_agent.ipynb) runs these same three over a finished agent
+# run and reports what they say about it.
 
 # %%
 gates = run_quality_gates(state, as_of=as_of)
@@ -452,6 +326,7 @@ for g in gates:
 
 all_passed = all(g.passed for g in gates)
 print(f"\nAll gates passed: {all_passed}")
+
 # %% [markdown]
 # All three pass. The run gathered both required evidence types across three records, it
 # retrieved them at the declared as-of time, and every document it read was published before
