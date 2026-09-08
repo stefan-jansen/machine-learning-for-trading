@@ -226,10 +226,20 @@ show_with_alt(
 # |:--|:--|:--|
 # | rejects | does not reject | stationary; both tests agree |
 # | does not reject | rejects | a unit root; both tests agree |
-# | rejects | rejects | no unit root, but the level moves: stationary around a trend, so remove the trend |
+# | rejects | rejects | the two disagree; diagnose before transforming |
 # | does not reject | does not reject | the sample does not settle it |
 #
 # Both tests are read at the conventional five percent level.
+#
+# The third row is the one that needs care. Both tests here are run with a constant and
+# no trend term, so a double rejection is not by itself evidence of a trend; it says the
+# two tests are pointing in opposite directions, and three things produce that. The
+# series may be stationary around a deterministic trend that neither specification
+# includes, in which case refitting both with a trend term settles it. It may contain a
+# structural break, which shifts the level without any trend and which `02_structural_breaks`
+# locates. Or the sample may simply be one where both tests are inaccurate at their
+# nominal size, which happens when the series is strongly persistent without having a
+# unit root. Diagnose which before transforming anything.
 
 
 # %%
@@ -322,11 +332,11 @@ display(pd.DataFrame(consensus_rows))
 # two-thirds, because a majority of three is always at least two.
 #
 # Where the two tables disagree about a series, they are counting the same votes
-# differently rather than contradicting each other. The joint matrix treats an ADF
-# rejection alongside a KPSS rejection as a specific diagnosis, a level that moves with a
-# trend. The consensus label has no such case: it counts one non-stationary vote against
-# two stationary ones and reports the majority. Both readings say the same thing about
-# what to do next, which is to remove the trend before using the level.
+# differently rather than measuring different things. The joint matrix keeps a
+# disagreement as a disagreement and hands it back for diagnosis; the consensus label
+# has no such case and reports whichever way the majority went. The label is the more
+# convenient of the two and the less informative, so read it alongside the individual
+# test results in `summary_df` rather than in place of them.
 
 # %% [markdown]
 # ## Autocorrelation: what the past says about the future
@@ -610,10 +620,12 @@ print(f"Jarque-Bera p-value:             {dist_result.jarque_bera_result.p_value
 print(f"Consistent with a normal:        {dist_result.is_normal}")
 
 # %% [markdown]
-# Excess kurtosis this far above zero is why a normal-errors model understates how often
-# a large move happens, and it is the reason the GARCH specifications in
-# `08_garch_volatility` are fitted with Student-t rather than normal innovations, and why
-# a value-at-risk figure computed from a normal quantile is not the one to use.
+# Excess kurtosis this far above zero is why a model that assumes normal errors
+# understates how often a large move happens, and why a value-at-risk figure read off a
+# normal quantile is not the one to use. It does not disappear once volatility is
+# modelled: `08_garch_volatility` fits GARCH with normal innovations and then plots the
+# standardized residuals against a normal, where the tails are still too heavy. Heavier
+# innovation distributions such as Student-t are the response to what is left over.
 
 # %% [markdown]
 # ## ARCH effects: the formal test
