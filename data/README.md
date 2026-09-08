@@ -323,8 +323,9 @@ every chapter.
 
 On the local `uv` path, `.env` reaches a notebook because importing `utils`
 loads it; a value you change there takes effect at the next kernel restart. On
-the Docker path Compose reads `.env` when the container starts, so change it
-before `docker compose up ml4t`, or restart the container afterwards.
+the Docker path Compose reads `.env` when it *creates* the container, so stop
+Jupyter Lab and run `docker compose up ml4t` again. `docker compose restart`
+does not pick up the new value.
 
 ---
 

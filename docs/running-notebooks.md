@@ -575,9 +575,11 @@ they are empty, and neither is mentioned anywhere in the install path.
 
 A `.env` edit reaches a notebook at the next kernel restart on the local path
 (**Kernel → Restart Kernel**, because `.env` is read once when the kernel
-starts). On the Docker path Compose reads `.env` when the container starts, so
-edit it before `docker compose up ml4t`, or `docker compose restart ml4t`
-afterwards.
+starts). On the Docker path Compose reads `.env` when it creates the container,
+so stop Jupyter Lab (`Ctrl-C` in the terminal running it) and run
+`docker compose up ml4t` again. **`docker compose restart` is not enough** —
+verified: it restarts the existing container with the environment it was created
+with, and the old value is still there.
 
 Some datasets do require an API key (also set in `.env`):
 - **OANDA** (FX pairs): Free API key from [oanda.com](https://www.oanda.com/)
