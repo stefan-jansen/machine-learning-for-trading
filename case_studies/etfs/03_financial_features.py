@@ -57,6 +57,11 @@ from ml4t.engineer.features.volatility import bollinger_bands, natr
 from ml4t.engineer.features.volume import obv
 
 from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.artifact_quality import (
+    label_universe,
+    quality_report,
+    render_quality_report,
+)
 from case_studies.utils.feature_engineering import (
     EPS,
     assert_values_agree,
@@ -874,6 +879,101 @@ print(f"{len(feature_cols)} features, {len(features):,} rows, {features['symbol'
 print(f"{features['timestamp'].min()} to {features['timestamp'].max()}, digest {record['digest']}")
 print(f"{len(set(clusters.values()))} redundancy clusters")
 
+# %% [markdown]
+# ## What the matrix holds, and what it owes
+#
+# Two questions about the file this stage just wrote. The first is what is in each column - nulls,
+# how much sits at exactly zero, how far the extreme values are from the body, whether anything is
+# constant. A threshold crossed there asks for a sentence of explanation and settles nothing on
+# its own: a 45% null share is a defect in a price and expected in a 252-session family on a fund
+# with three years of history.
+#
+# The second is the question a null count cannot reach. **Coverage is measured against the keys
+# the labels declare, not against the rows this matrix happens to hold.** A matrix emitting a
+# thousand rows where a million were owed carries no nulls at all and is wrong; nothing inside it
+# can say so, because the missing rows are not there to be counted. The labels are the right
+# reference because a `(symbol, timestamp)` carrying a label and no feature row is one no model can
+# be asked to score - it is lost to every family at once, before any of them is fitted.
+#
+# And a shortfall against that reference is not by itself a defect, so the matrix declares where
+# it is entitled to be short before the number is printed. Two mechanisms decide it and only one
+# of them is a window. The null policy keeps a row when the six-month risk-adjusted return has
+# warmed up, which costs `sharpe_126d`'s window. **The eligibility gate costs far more, and it
+# costs a different amount per fund**: it is annual and admits a fund only for the years it
+# cleared, so a fund that listed early and grew slowly loses years at the front, one that lost
+# liquidity mid-life loses a stretch out of the middle, and one that never cleared loses
+# everything. None of that is a session count, so the declaration below names the mechanism
+# without pretending to bound it, and the check after it is what makes the declaration worth
+# having: every missing key is tested against the fund-years the gate actually admitted.
+
+# %%
+LEADING_BUDGET = WINDOWS["volatility"][2]
+print(f"warmup budget {LEADING_BUDGET} sessions = the sharpe_126d window the null policy keeps on")
+
+report = quality_report(
+    features,
+    name="financial features",
+    key_columns=["symbol", "timestamp"],
+    expected=label_universe(CASE_DIR, keys=["symbol", "timestamp"]),
+    keys=["symbol", "timestamp"],
+    entity="symbol",
+    session="timestamp",
+    expected_missing={
+        "leading": (
+            None,
+            "the eligibility gate's first admitted year, then the 126-session warmup",
+        ),
+        "interior": (None, "a year the eligibility gate did not admit"),
+        "trailing": (None, "a year the eligibility gate did not admit"),
+        "absent": (None, "a fund the eligibility gate never admitted"),
+    },
+)
+render_quality_report(report)
+
+# %% [markdown]
+# Four declarations, one mechanism, and one check for all four. A key is owed a feature row only
+# when the gate admitted that fund for that key's year *and* the warmup has passed inside it; every
+# other missing key is the gate, wherever in a fund's life it happens to fall. Testing it against
+# the gate's own table is the whole point - the shape of the loss looks like four different
+# problems and is one.
+
+# %%
+admitted = eligibility.select("symbol", pl.col("eligible_year").alias("_year"))
+missing = report["missing_classified"].with_columns(pl.col("timestamp").dt.year().alias("_year"))
+outside = missing.join(admitted, on=["symbol", "_year"], how="anti")
+print(
+    f"of {missing.height:,} missing keys, {outside.height:,} "
+    f"({outside.height / missing.height:.2%}) fall in a fund-year the gate did not admit"
+)
+inside = missing.join(admitted, on=["symbol", "_year"], how="semi")
+if inside.height:
+    per_fund = inside.group_by("symbol").len().sort("len", descending=True)
+    print(
+        f"  {inside.height:,} key(s) across {per_fund.height} fund(s) sit in an admitted year; "
+        f"worst fund short {per_fund['len'].max()} session(s), median {int(per_fund['len'].median())}"
+    )
+
+# %% [markdown]
+# ### Sign-off
+#
+# **Coverage is 85.93% - 404,500 of the 470,162 keys the labels declare - and every one of the
+# 66,132 missing keys falls in a fund-year the eligibility gate did not admit.** Not most of them,
+# and not most of them after a warmup is subtracted: all of them. The gate is annual, so a fund
+# enters the matrix in the first year it cleared and leaves in any year it did not, and the shape
+# that produces looks like four separate problems until it is tested against the gate's own table -
+# 46,795 keys before a fund's first feature row, 10,319 inside eleven funds' spans, 3,992 after
+# five funds' last row, and one fund with no row at all. One mechanism, four positions, nothing
+# else.
+#
+# The 126-session warmup the null policy applies is real but almost invisible here, because the
+# gate has already removed the stretch it would have taken: a fund is admitted from a year in which
+# it was already liquid, by which point its six-month window has long since filled. That is why the
+# budget is printed and then not needed, and it is worth seeing rather than assuming - a warmup
+# that *was* biting would show as keys inside an admitted year, and there are none.
+#
+# **470 keys carry a feature row and no label**, the mirror case, at 0.1% of the matrix. A feature
+# row with no label is never joined, so it is carried rather than dropped.
+#
 # %% [markdown]
 # ## Key takeaways
 #

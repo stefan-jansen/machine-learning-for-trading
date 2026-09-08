@@ -1063,12 +1063,29 @@ BACKTEST_COVERAGE_MINIMUM = 0.98
 
 
 def feature_panel_keys(case_dir: Path | str) -> pl.DataFrame | None:
-    """The ``(entity, session)`` pairs the case study's feature panels offer, unioned.
+    """The ``(entity, session)`` pairs every one of the case study's feature panels offers.
 
-    This is the ceiling every family shares: a pair carrying a label but no feature row
-    is one no model was in a position to score, and charging it to the models hides the
-    families that lost rows they were given. Returns ``None`` when the case study has no
-    ``features/`` directory, which leaves the caller measuring against the label alone.
+    This is the ceiling the model families share: a pair carrying a label but no feature
+    row is one no model was in a position to score, and charging it to the models hides
+    the families that lost rows they were given. Returns ``None`` when the case study has
+    no ``features/`` directory, which leaves the caller measuring against the label alone.
+
+    **Intersected, not unioned**, because `load_modeling_dataset` joins the panels and a
+    key present in only one of them survives no join. Measured 2026-09-08 on the first
+    registered `gbm` validation set of each case study, which is a family that loses no
+    rows of its own:
+
+        case study                       union    intersection
+        crypto_perps_funding            92.51%         100.00%
+        etfs                            94.77%         100.00%
+        sp500_equity_option_analytics   79.42%         100.00%
+        sp500_options                   99.74%         100.00%
+        cme_futures                    100.00%         100.00%
+
+    The union reads a complete family as short by up to 20%, and a threshold set against
+    it would refuse every prediction set in three of the seven case studies for a
+    shortfall no model caused. The intersection resolves to exactly 100% for a family
+    that delivered everything, which is what makes a threshold near 1.0 meaningful.
     """
     directory = Path(case_dir) / "features"
     panels = sorted(directory.glob("*.parquet")) if directory.is_dir() else []
@@ -1093,4 +1110,7 @@ def feature_panel_keys(case_dir: Path | str) -> pl.DataFrame | None:
         )
     if not frames:
         return None
-    return pl.concat(frames).unique()
+    offered = frames[0]
+    for frame in frames[1:]:
+        offered = offered.join(frame, on=["entity", "session"], how="semi")
+    return offered

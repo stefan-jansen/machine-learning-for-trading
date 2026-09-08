@@ -292,7 +292,107 @@ def prediction_members_in_force(
         if uncovered
         else []
     )
+
+    # The registry check above asks whether a completeness row exists. This asks whether the
+    # artifact is actually there, across the symbol axis that `ic_n_days` cannot see. A
+    # member that scores a fraction of the cross-section is dropped from the pool rather
+    # than ranked in it, for the reason the unfinished-member refusal above gives: a
+    # narrower sample is an easier one, so the error runs toward the top of the ranking.
+    # Dropped rather than refused, because unlike an unfinished run this is a property of
+    # the model and the pool is still rankable without it - but never silently, so the note
+    # names every member and its shortfall.
+    short = undercovered_prediction_members(root, members)
+    if short:
+        members = frozenset(members - short.keys())
+        listed = "; ".join(
+            f"{member} {reason.splitlines()[0]}" for member, reason in sorted(short.items())[:5]
+        )
+        more = f" (+{len(short) - 5} more)" if len(short) > 5 else ""
+        notes.append(
+            f"{len(short):,} member(s) were dropped from the candidate pool for covering less "
+            f"than the cross-section their feature panels offered them: {listed}{more}"
+        )
+    if not members:
+        raise RuntimeError(
+            f"every member of the populations in force at {root} was dropped for incomplete "
+            f"cross-sectional coverage ({len(short)} of them). There is nothing left to rank, "
+            "and ranking the survivors of a universe filter against each other would not be a "
+            f"comparison. Reasons:\n" + "\n".join(sorted(short.values()))
+        )
     return members, notes
+
+
+def undercovered_prediction_members(
+    root: Path,
+    members: Iterable[str],
+    *,
+    minimum: float | None = None,
+) -> dict[str, str]:
+    """Which in-force members cover too little of the cross-section they were offered.
+
+    ``full_coverage_prediction_sql`` above asks the same kind of question and asks it
+    relatively: keep the rows whose ``ic_n_days`` ties the maximum for their family and
+    label. A shortfall that moves every candidate the same way is invisible to it, and a
+    shortfall along the *symbol* axis is invisible to it twice over, because
+    ``ic_n_days`` counts decision dates. A family that scores every date for half the
+    universe ties the maximum and ranks against families that scored all of it.
+
+    This reads the artifacts instead: for each member, the delivered ``(symbol,
+    timestamp)`` pairs against the ones its label declares, narrowed to the ones the
+    feature panels offered so a family is charged for what it lost and not for what it
+    was never given. Returns ``{hash: reason}`` for the members that fall short, empty
+    when every member is whole.
+
+    A member whose coverage cannot be evaluated is returned as short rather than passed,
+    which is the rule ``coverage.py`` states about itself.
+    """
+    # Imported here, not at module scope: `coverage` imports `_first_present` and
+    # `_is_finite` from this module, so a top-level import closes the cycle.
+    from case_studies.utils.coverage import (
+        BACKTEST_COVERAGE_MINIMUM,
+        CoverageError,
+        check_prediction_cross_section,
+        feature_panel_keys,
+    )
+
+    threshold = BACKTEST_COVERAGE_MINIMUM if minimum is None else minimum
+    root = Path(root)
+    db_path = root / "run_log" / "registry.db"
+    wanted = list(members)
+    if not wanted or not db_path.is_file():
+        return {}
+
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
+        placeholders = ",".join("?" * len(wanted))
+        rows = db.execute(
+            f"""SELECT p.prediction_hash, p.split, t.label, t.family, t.config_name, t.case_study
+                FROM prediction_sets p JOIN training_runs t ON t.training_hash = p.training_hash
+                WHERE p.prediction_hash IN ({placeholders})""",
+            wanted,
+        ).fetchall()
+
+    panel = feature_panel_keys(root)
+    short: dict[str, str] = {}
+    for phash, split, label, family, config, case_study in rows:
+        path = root / "run_log" / "predictions" / phash / "predictions.parquet"
+        if not path.is_file():
+            continue
+        try:
+            report = check_prediction_cross_section(
+                pl.read_parquet(path),
+                case_study,
+                label,
+                split=split,
+                case_dir=root,
+                input_panel=panel,
+                source=f"{family}/{config}",
+            )
+        except CoverageError as exc:
+            short[phash] = f"coverage could not be evaluated: {exc}"
+            continue
+        if report.accountable_coverage < threshold:
+            short[phash] = report.summary()
+    return short
 
 
 def full_coverage_prediction_sql(

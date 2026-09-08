@@ -63,6 +63,7 @@ from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_ser
 from ml4t.diagnostic.splitters.calendar import TradingCalendar
 
 from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.artifact_quality import quality_report, render_quality_report
 from case_studies.utils.label_diagnostics import effective_sample_size, panel_autocorrelation
 from data import load_fx_pairs
 from utils.artifact_specs import resolve_label_horizon
@@ -658,6 +659,72 @@ for label_name, horizon in HORIZONS.items():
         f"\n  consumed by  {readers[label_name]}"
     )
 
+# %% [markdown]
+# ## What the labels hold, and what they owe
+#
+# Two questions about the files this stage just wrote, and the rows that are there answer only
+# one of them. The first is what is in each column - nulls, how much sits at exactly zero, how far
+# the extreme values are from the body, whether anything is constant. A threshold crossed there
+# asks for a sentence and settles nothing on its own.
+#
+# The second is coverage, and it needs a denominator that is not the labels themselves. **The
+# reference is `prices`** - every session a pair actually quoted, which is the set a forward
+# return could in principle have been computed on. Comparing one label to the other two would hide
+# any session where all three are absent together; comparing them to the price panel cannot.
+#
+# A percentage alone decides nothing, so each label declares where it is entitled to be short
+# before the number is printed. A forward return owes no value in the last `horizon` sessions of a
+# pair's history, because the price that resolves it is past the end of the sample, and the three
+# horizons here differ by a factor of twenty-one, so they should cost visibly different amounts.
+# The count is per pair. What the sign-off then answers for is the residual: keys missing inside
+# a pair's own span, where no horizon explains them.
+
+# %%
+expected_keys = prices.select(["symbol", "timestamp"]).unique()
+print(
+    f"price panel: {expected_keys.height:,} quoted (symbol, session) keys across "
+    f"{expected_keys['symbol'].n_unique()} pairs and "
+    f"{expected_keys['timestamp'].n_unique()} sessions\n"
+)
+for label_name in LABEL_NAMES:
+    written = labels_df.select(["symbol", "timestamp", label_name]).drop_nulls()
+    render_quality_report(
+        quality_report(
+            written,
+            name=label_name,
+            key_columns=["symbol", "timestamp"],
+            expected=expected_keys,
+            keys=["symbol", "timestamp"],
+            entity="symbol",
+            session="timestamp",
+            expected_missing={
+                "trailing": (
+                    HORIZONS[label_name],
+                    f"{HORIZONS[label_name]}-session forward window past the end of the sample",
+                )
+            },
+        )
+    )
+    print()
+
+# %% [markdown]
+# ### Sign-off
+#
+# **All three labels are complete, and the shortfall is the horizon and nothing else.** The price
+# panel offers 77,480 quoted keys across 20 pairs and 3,874 sessions. `fwd_ret_1d` reaches 99.97%,
+# `fwd_ret_5d` 99.87% and `fwd_ret_21d` 99.46%; every missing key sits after a pair's last session,
+# every one of the 20 pairs loses exactly its label's horizon, and no pair spends more. **Nothing
+# is missing that a mechanism does not account for, and nothing is emitted that the panel does not
+# have.** The three percentages stand in the ratio 1:5:21, which is the horizons themselves: a
+# longer hold costs proportionally more history at the end of the sample, and reading that off the
+# table is the cheapest available check that the three labels were built the same way.
+#
+# **No column crossed a distribution threshold in any of the three.** None is constant, none
+# carries a non-finite value, and none concentrates at zero - all three conditions are flagged
+# unconditionally above and none fires. A forward currency return at daily frequency is almost
+# never exactly zero and carries a heavy tail; nothing is winsorized here, and how a model handles
+# the tail is a modelling choice made in the model stages.
+#
 # %% [markdown]
 # ## Key takeaways
 #

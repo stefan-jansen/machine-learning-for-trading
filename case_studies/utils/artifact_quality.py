@@ -24,12 +24,15 @@ Polars in, polars out. Pandas only if a caller is at a visualization boundary.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 
 import polars as pl
 
 __all__ = [
     "coverage_against",
+    "explain_missing",
     "flag_columns",
+    "label_universe",
     "profile_columns",
     "quality_report",
     "render_quality_report",
@@ -202,11 +205,23 @@ def quality_report(
     expected: pl.DataFrame | None = None,
     keys: Sequence[str] | None = None,
     rules: dict[str, float] | None = None,
+    entity: str | Sequence[str] | None = None,
+    session: str | None = None,
+    expected_missing: dict[str, MissingExpectation] | None = None,
 ) -> dict[str, pl.DataFrame]:
-    """Profile, flags and (when an expected universe is given) coverage, in one call.
+    """Profile, flags, coverage and (when the shortfall is declared) its explanation.
 
-    Returns the three frames rather than printing them, so the notebook decides how
-    to display each and writes its own sign-off around them.
+    ``entity`` and ``session`` name the two axes of the key; ``entity`` takes a sequence where
+    the entity is compound, as it is for an option contract keyed by underlying and instrument or
+    a futures curve keyed by product and position. Given them, the missing
+    keys are classified by ``explain_missing`` and ``expected_missing`` declares which
+    positions a mechanism accounts for, so the report distinguishes a shortfall that is
+    the design from one that is a defect. Without them the report still carries the
+    coverage counts, and the notebook is left asserting a percentage is acceptable
+    without saying what produced it.
+
+    Returns the frames rather than printing them, so the notebook decides how to
+    display each and writes its own sign-off around them.
     """
     profile = profile_columns(frame, key_columns=key_columns)
     report: dict[str, pl.DataFrame] = {
@@ -214,14 +229,17 @@ def quality_report(
         "flags": flag_columns(profile, rules=rules),
     }
     if expected is not None:
-        report.update(
-            {
-                f"coverage_{part}": value
-                for part, value in coverage_against(
-                    frame, expected, keys=keys or list(key_columns)
-                ).items()
-            }
-        )
+        coverage = coverage_against(frame, expected, keys=keys or list(key_columns))
+        report.update({f"coverage_{part}": value for part, value in coverage.items()})
+        if entity is not None and session is not None and coverage["missing"].height:
+            explanation = explain_missing(
+                coverage["missing"],
+                frame,
+                entity=entity,
+                session=session,
+                expected=expected_missing,
+            )
+            report.update({f"missing_{part}": value for part, value in explanation.items()})
     report["name"] = name
     return report
 
@@ -231,8 +249,11 @@ def render_quality_report(report: dict, *, max_rows: int = 80) -> None:
 
     Coverage leads because it is the question the other tables cannot answer - a frame
     whose every column profiles cleanly is still wrong if it is a tenth of the universe.
-    The flags come next as the shortlist a sign-off has to speak to, and the full profile
-    last, so nothing is hidden but nothing has to be scanned to find the problem.
+    Where the shortfall has been classified, the explanation prints next to it and the
+    residual is stated as its own number, because "76% coverage" and "76% coverage, all
+    of it a declared 252-session estimation burn-in, nothing unexplained" are the same
+    percentage and different findings. Flags come next as the shortlist a sign-off has
+    to speak to, and the full profile last.
     """
     print(f"=== {report['name']} ===")
 
@@ -244,13 +265,32 @@ def render_quality_report(report: dict, *, max_rows: int = 80) -> None:
             f"coverage {share}: {row['produced']:,} of {row['expected']:,} declared keys, "
             f"{row['missing']:,} missing, {row['unexpected']:,} unexpected"
         )
-        missing = report.get("coverage_missing")
-        if missing is not None and missing.height:
-            entity = missing.columns[0]
-            per_entity = missing.group_by(entity).len().sort("len", descending=True)
-            print(f"  {per_entity.height} of the declared {entity}s are short; worst:")
-            with pl.Config(tbl_rows=10, tbl_hide_dataframe_shape=True):
-                print(per_entity.head(10))
+        explained = report.get("missing_summary")
+        if explained is not None and explained.height:
+            print("where the missing keys sit, and what accounts for them:")
+            with pl.Config(
+                tbl_rows=8, tbl_cols=9, fmt_str_lengths=64, tbl_hide_dataframe_shape=True
+            ):
+                print(explained)
+            undeclared = int(explained.filter(pl.col("why") == "not declared")["n_keys"].sum() or 0)
+            excess = int(explained["excess_keys"].sum() or 0)
+            over = int(explained["entities_over"].sum() or 0)
+            print(
+                f"residual to explain: {undeclared:,} key(s) in positions no mechanism was "
+                f"declared for, and {excess:,} spent past a declared budget by {over} entities"
+            )
+        else:
+            missing = report.get("coverage_missing")
+            if missing is not None and missing.height:
+                # Every key dimension, not the first one. A shortfall concentrated in a
+                # few entities and one falling on whole timestamps are different defects
+                # - a universe restriction against a feed outage - and reporting only the
+                # column written first shows one and hides the other.
+                for key in missing.columns:
+                    per_key = missing.group_by(key).len().sort("len", descending=True)
+                    print(f"  {per_key.height} distinct {key} values are short; worst:")
+                    with pl.Config(tbl_rows=8, tbl_hide_dataframe_shape=True):
+                        print(per_key.head(8))
 
     flags = report["flags"]
     if flags.height == 0:
@@ -262,3 +302,144 @@ def render_quality_report(report: dict, *, max_rows: int = 80) -> None:
 
     with pl.Config(tbl_rows=max_rows, tbl_cols=14, fmt_str_lengths=28):
         print(report["profile"])
+
+
+#: What a declared expectation looks like: how many sessions per entity the mechanism
+#: is allowed to cost, and the mechanism's name. ``None`` for the budget means the
+#: mechanism has no per-entity ceiling worth stating - an entity absent from the
+#: universe for its whole life, say - and the position is then explained but unbounded.
+MissingExpectation = tuple[int | None, str]
+
+
+def explain_missing(
+    missing: pl.DataFrame,
+    produced: pl.DataFrame,
+    *,
+    entity: str | Sequence[str],
+    session: str,
+    expected: dict[str, MissingExpectation] | None = None,
+) -> dict[str, pl.DataFrame]:
+    """Split the missing keys into the ones a mechanism accounts for and the residual.
+
+    A coverage percentage on its own decides nothing. A stage whose features need a
+    year of history before they resolve, against a five-year sample, owes no row for
+    the first fifth of it and is complete at 80%; a stage losing the same fraction
+    scattered through the middle of every symbol's quoted range is broken at the same
+    number. The two are told apart by *where* the key sits relative to what the entity
+    did produce, so that is what this classifies:
+
+    ``leading``
+        Before the entity's first produced row. A lookback, a burn-in, an estimation
+        window, or a listing date later than the sample start.
+    ``trailing``
+        After its last produced row. A forward label's horizon running off the end of
+        the sample, or a delisting.
+    ``interior``
+        Inside the entity's own produced span, with rows on both sides. No window
+        length explains one of these.
+    ``absent``
+        The entity produced no row at all. A universe restriction, and the case a
+        percentage misleads on hardest: it reads as thin coverage of everything rather
+        than no coverage of some.
+
+    ``expected`` declares the mechanism per position and the sessions per entity it may
+    cost: ``{"trailing": (10, "10-session forward label horizon")}``. A position with no
+    entry is unexplained in full. An entity spending more than its budget contributes
+    its keys to ``residual`` and its excess to the summary, and that is what a sign-off
+    speaks to - the rest is design, which is what declaring it says.
+    """
+    entity_cols = [entity] if isinstance(entity, str) else list(entity)
+    span = produced.group_by(entity_cols).agg(
+        pl.col(session).min().alias("_first"),
+        pl.col(session).max().alias("_last"),
+    )
+    classified = (
+        missing.join(span, on=entity_cols, how="left")
+        .with_columns(
+            pl.when(pl.col("_first").is_null())
+            .then(pl.lit("absent"))
+            .when(pl.col(session) < pl.col("_first"))
+            .then(pl.lit("leading"))
+            .when(pl.col(session) > pl.col("_last"))
+            .then(pl.lit("trailing"))
+            .otherwise(pl.lit("interior"))
+            .alias("where")
+        )
+        .drop("_first", "_last")
+    )
+
+    declared = expected or {}
+    per_entity = classified.group_by([*entity_cols, "where"]).len().rename({"len": "sessions"})
+    rows: list[dict[str, object]] = []
+    residual_frames: list[pl.DataFrame] = []
+    for position in ("absent", "leading", "interior", "trailing"):
+        part = per_entity.filter(pl.col("where") == position)
+        if part.height == 0:
+            continue
+        budget, why = declared.get(position, (0, "not declared"))
+        over = part.filter(pl.col("sessions") > budget) if budget is not None else part.head(0)
+        excess = int((over["sessions"] - budget).sum()) if budget is not None and over.height else 0
+        rows.append(
+            {
+                "where": position,
+                "n_keys": int(part["sessions"].sum()),
+                "n_entities": part.height,
+                "sessions_p50": float(part["sessions"].median()),
+                "sessions_max": int(part["sessions"].max()),
+                "budget": budget,
+                "entities_over": over.height,
+                "excess_keys": excess,
+                "why": why,
+            }
+        )
+        if over.height:
+            residual_frames.append(
+                classified.filter(pl.col("where") == position).join(
+                    over.select(entity_cols), on=entity_cols, how="semi"
+                )
+            )
+
+    residual = pl.concat(residual_frames) if residual_frames else classified.head(0)
+    return {
+        "classified": classified,
+        "per_entity": per_entity,
+        "summary": pl.DataFrame(rows) if rows else pl.DataFrame(schema={"where": pl.String}),
+        "residual": residual,
+    }
+
+
+def label_universe(
+    case_dir: Path | str,
+    *,
+    labels: Sequence[str] | None = None,
+    keys: Sequence[str] = ("symbol", "timestamp"),
+) -> pl.DataFrame:
+    """The distinct keys the case study's labels declare, as an ``expected`` frame.
+
+    This is what a feature stage owes a row for: a key carrying a label and no feature
+    row is one no model can be asked to score. Reading it here rather than trusting the
+    stage's own inputs is the whole point - a panel can be internally consistent, carry
+    no nulls, and still be missing a fifth of the universe the labels declare.
+
+    ``labels`` names the artifacts to union; the default is every parquet in
+    ``labels/``. A row is counted whether or not its label value is null, because a
+    stage does not know which labels a later stage will filter on.
+
+    No dtype coercion happens here or in ``coverage_against``. A label artifact keying
+    ``timestamp`` as ``Date`` against a feature panel keying it as ``Datetime`` is a real
+    disagreement, and casting it away is how a frame reports full coverage of nothing.
+    """
+    directory = Path(case_dir) / "labels"
+    paths = (
+        [directory / f"{name}.parquet" for name in labels]
+        if labels is not None
+        else sorted(directory.glob("*.parquet"))
+    )
+    frames = [
+        pl.scan_parquet(path).select(list(keys)).unique().collect()
+        for path in paths
+        if path.is_file()
+    ]
+    if not frames:
+        raise FileNotFoundError(f"no label artifact under {directory}; the universe is undefined")
+    return pl.concat(frames).unique()

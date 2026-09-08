@@ -154,3 +154,25 @@ def test_a_set_whose_coverage_cannot_be_evaluated_is_withheld_not_admitted(wide_
     assert [entry["family"] for entry in entries] == ["gbm"]
     assert "could not be evaluated" in excluded[0]["reason"]
     assert excluded[0]["coverage"] is None
+
+
+def test_a_key_only_one_panel_offers_is_not_achievable(case_dir):
+    """The panels are intersected because `load_modeling_dataset` joins them.
+
+    Unioned, a key present in `financial` and absent from `model_based` counts as offered,
+    and a family that delivered everything the join could produce reads as short. Measured
+    across the seven case studies, that gap was up to 20 points and would have refused
+    every prediction set in three of them for a shortfall no model caused.
+    """
+    features = case_dir / "features"
+    features.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        [{"timestamp": ts, "symbol": sym, "x": 1.0} for ts in SESSIONS for sym in UNIVERSE]
+    ).write_parquet(features / "financial.parquet")
+    pl.DataFrame(
+        [{"timestamp": ts, "symbol": sym, "z": 1.0} for ts in SESSIONS for sym in ("AAA", "BBB")]
+    ).write_parquet(features / "model_based.parquet")
+
+    _, _, entries, excluded = _load(case_dir, 0.98)
+    assert excluded == []
+    assert sorted(entry["family"] for entry in entries) == ["deep_learning", "gbm"]
