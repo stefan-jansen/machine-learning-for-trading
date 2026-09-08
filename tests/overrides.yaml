@@ -2731,14 +2731,25 @@ case_studies/sp500_equity_option_analytics/15_portfolio_management:
   # every label and the case study is long-only, so a scheme survives when k < n_assets.
   # 21 realizes all three; 6 realizes only ew_top5.
   #
-  # Unverified, and stated so it is checked rather than assumed: this case study's model
-  # stages inject max_symbols 5 (06_linear and 07_gbm take the harness default), so if
-  # the sweep ranks predictions those stages produced, its ranked cross-section is 5 and
-  # raising the chain alone realizes nothing - the same shape as us_firm_characteristics
-  # above. Raising them here is not the answer 41 was there:
-  # 11d_stochastic_discount_factor measured 665s at 5 symbols on CI run 34157373964, so
-  # four times the universe is a job of its own. If the PR run shows the sweep still
-  # empty, that is the finding, and it belongs with ml4t/agent-workspace#1084.
+  # **Raising the chain alone realizes nothing here, and that is now measured rather
+  # than predicted.** This case study's model stages inject max_symbols 5 (06_linear and
+  # 07_gbm take the harness default), and the sweep ranks the predictions those stages
+  # produced, so the ranked cross-section stays 5 however wide the price panel is.
+  # 14_backtest fails on all five labels with "top_k_grid[...] = [5, 10, 20] is empty
+  # after filtering against 5 tradeable names (price panel 21, ranked cross-section 5)",
+  # identically on main at 92ce81b2 and on this branch at c14ffeb9. The panel moved; the
+  # cross-section did not.
+  #
+  # So 15, 16 and 17 do not run at all - they fail downstream of 14 - and the 21 here is
+  # a declaration lining the chain up with 14_backtest rather than something CI
+  # exercises. It stays because a chain reading two universes is wrong whether or not
+  # the first stage gets far enough to show it.
+  #
+  # Raising the model stages is not the answer 41 was in us_firm_characteristics:
+  # 11d_stochastic_discount_factor measured 673.0s at 5 symbols on this branch's run
+  # (649.8s on main at the same commit range), which is 43% of the whole job, so four
+  # times the universe is a job of its own. The finding belongs with
+  # ml4t/agent-workspace#1084 and is not chased with a wider number here.
   # The same five labels as 14_backtest above, because this stage takes LABEL
   # too and reads what the previous one registered for that label.
   invocations:
@@ -3457,10 +3468,20 @@ case_studies/us_firm_characteristics/05_linear:
   # because two disjoint legs of fifty need 101 names.
   #
   # **us_firm_characteristics therefore realizes three of the four concentrations it
-  # declares.** The fourth needs a 101-symbol universe, which the fixture could supply -
-  # its fold artifacts carry 200 - at an estimated +17 minutes on a job that runs 8m57s,
-  # because 08a_ipca alone is 114.9s at 20 symbols and scales with rows. 41 costs an
-  # estimated +5.5 minutes and buys k=20. The ladder is on ml4t/agent-workspace#1075.
+  # declares.** The fourth needs a 101-symbol universe, which the fixture could supply:
+  # its fold validation artifacts carry 200 entities, measured on test-data 1ea74a26,
+  # which is what CI checks out. The ladder is on ml4t/agent-workspace#1075.
+  #
+  # 41 was estimated at +5.5 minutes, from 08a_ipca at 114.9s on 20 symbols scaling with
+  # rows. **Measured, it costs nothing: the job went 359.32s to 344.23s.** Per stage,
+  # against main at 92ce81b2 and this branch at c14ffeb9, both cs-us_firm_characteristics:
+  # the 11-14 chain costs +21.3s for 12 -> 41, 05_linear and 06_gbm cost +3.6s for 5 -> 41,
+  # and 08a_ipca went 124.7s to 75.9s - 48.8s faster on twice the universe, while every
+  # other stage moved 0.5-4.4s the other way. So the estimate had both the size and the
+  # sign of the dominant term wrong, and the 101-symbol rung cannot be priced by scaling
+  # it. Whether 08a's speedup is IPCA's alternating fit converging in fewer iterations on
+  # a wider cross-section is not established here; what is established is that the number
+  # this ladder was priced from does not hold.
   #
   # The model stages carry it, not just the backtest chain. They are what bounds the
   # ranked cross-section: `get_entry_schemes_for` filters against the width of the
