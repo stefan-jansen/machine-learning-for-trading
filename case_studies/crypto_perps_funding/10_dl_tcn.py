@@ -104,7 +104,7 @@ from case_studies.crypto_perps_funding.research_workflow import (
 
 # %% tags=["parameters"]
 EXECUTION_TIER = "canonical"
-SUPERSEDES_POPULATION: str = ""
+SUPERSEDES_POPULATION: str = "ee303a0e10e2"
 # The generation of this notebook's own checkpoint population that this run replaces, if any.
 # Distinct from SUPERSEDES_POPULATION above, which is the case-wide official model population:
 # the two are separate declarations and a refit can move either without moving the other.

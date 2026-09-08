@@ -111,7 +111,7 @@ PREVIEW_REDUCTIONS: dict = {}
 # The population hash this run replaces, read from the registry and set by a person. A
 # first population takes None; a re-run whose membership has changed is refused without
 # the hash it supersedes, and the refusal names the value required.
-SUPERSEDES_POPULATION: str | None = None
+SUPERSEDES_POPULATION: str | None = "8c2c87299a47"
 
 # %% [markdown]
 # ## Declared requests

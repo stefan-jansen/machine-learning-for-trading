@@ -85,7 +85,7 @@ EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 POPULATION_NAME = ""
-SUPERSEDES_POPULATION: str = ""
+SUPERSEDES_POPULATION: str = "af58ce93d6d2"
 DEVICE: str = ""
 
 # %%
