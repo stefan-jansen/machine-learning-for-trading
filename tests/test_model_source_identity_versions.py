@@ -15,10 +15,13 @@ from case_studies.utils.latent_factors import adapter as latent_adapter
 from case_studies.utils.registry import training_hash_from_spec
 
 PINNED_SEQUENCE_RUNNER = 1
-# 2 since #767 (174154ad) corrected where the sequence path fills a missing feature. The pin
-# moves with the version deliberately: it exists to make a bump a decision someone writes down,
-# not to prevent one.
-PINNED_SEQUENCE_PREPARATION = 2
+# 2 since #767 (174154ad) corrected where the sequence path fills a missing feature. 3 since
+# #1090: sequence windows are laid out on the panel's expected periods instead of on a symbol's
+# own row order, an absent period keeps its cell and is described by two declared features, and
+# eligibility became two measured bounds where it had been an undeclared zero tolerance. Both the
+# contents of a window and the set of windows changed. The pin moves with the version
+# deliberately: it exists to make a bump a decision someone writes down, not to prevent one.
+PINNED_SEQUENCE_PREPARATION = 3
 PINNED_SEQUENCE_STATE = 1
 PINNED_TABM_RUNNER = 1
 PINNED_TABM_STATE = 1
@@ -54,9 +57,11 @@ def test_sequence_identity_is_declared_and_architecture_scoped() -> None:
         {"library": "darts", "params": {"architecture": "tsmixer"}}
     )
 
+    # Literals, not the pins above: the duplication is the guard. A bump has to be written
+    # down in both places, so it cannot ride along with an unrelated edit to one of them.
     assert nlinear == {
         "sequence_runner": 1,
-        "sequence_preparation": 2,
+        "sequence_preparation": 3,
         "sequence_state": 1,
         "backend": "pytorch/v1",
         "architecture": "nlinear/v1",

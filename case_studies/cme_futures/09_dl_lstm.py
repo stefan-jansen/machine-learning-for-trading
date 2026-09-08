@@ -103,6 +103,7 @@ from case_studies.cme_futures.research_workflow import (
     run_official_model_catalog,
     run_resolved_model_requests,
 )
+from case_studies.research import population_supersedes
 
 # %% tags=["parameters"]
 EXECUTION_TIER = "canonical"
@@ -111,7 +112,7 @@ PREVIEW_REDUCTIONS: dict = {}
 # The population hash this run replaces, read from the registry and set by a person. A
 # first population takes None; a re-run whose membership has changed is refused without
 # the hash it supersedes, and the refusal names the value required.
-SUPERSEDES_POPULATION: str | None = None
+SUPERSEDES_POPULATION: str | None = "8c2c87299a47"
 
 # %% [markdown]
 # ## Declared requests
@@ -187,7 +188,11 @@ if EXECUTION_TIER == "canonical":
         requests,
         population_name="cme_futures-deep_learning-validation-v1",
         resolved_requests=resolved,
-        supersedes=SUPERSEDES_POPULATION,
+        supersedes=population_supersedes(
+            study,
+            name="cme_futures-deep_learning-validation-v1",
+            declared=SUPERSEDES_POPULATION,
+        ),
     )
 else:
     if WORKSPACE is None or not PREVIEW_REDUCTIONS:
