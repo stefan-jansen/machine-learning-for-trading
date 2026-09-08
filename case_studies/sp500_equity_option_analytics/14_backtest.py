@@ -44,12 +44,9 @@
 
 import sqlite3
 import time
-import warnings
 
 import matplotlib.pyplot as plt
 import polars as pl
-
-warnings.filterwarnings("ignore")
 
 from case_studies.research import (
     OfficialPopulation,

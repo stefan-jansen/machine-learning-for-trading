@@ -50,7 +50,6 @@
 """Ch16 backtest and equal-weight baseline for US Firm Characteristics."""
 
 import time
-import warnings
 from collections import Counter
 from itertools import cycle
 
@@ -58,7 +57,6 @@ import polars as pl
 
 from utils.style import COLORS, add_message_title, apply_ml4t_style
 
-warnings.filterwarnings("ignore")
 apply_ml4t_style()
 
 from case_studies.research import open_study

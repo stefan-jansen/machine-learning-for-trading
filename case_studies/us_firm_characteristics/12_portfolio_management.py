@@ -49,14 +49,9 @@
 """US Firm Characteristics: Portfolio: Allocator Sweep."""
 
 import time
-import warnings
 from collections import Counter
 
 import polars as pl
-
-from utils.style import COLORS, add_message_title, show_with_alt
-
-warnings.filterwarnings("ignore")
 
 from case_studies.research import open_study
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
@@ -75,6 +70,7 @@ from case_studies.utils.sweep_config import (
     get_top_n_predictions,
 )
 from utils.paths import get_case_study_dir
+from utils.style import COLORS, add_message_title, show_with_alt
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_firm_characteristics"

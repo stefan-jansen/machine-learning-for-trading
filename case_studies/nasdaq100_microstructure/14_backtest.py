@@ -42,11 +42,8 @@
 
 import sqlite3
 import time
-import warnings
 
 import polars as pl
-
-warnings.filterwarnings("ignore")
 
 from case_studies.research import prediction_rows_at, superseded_members_at
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
