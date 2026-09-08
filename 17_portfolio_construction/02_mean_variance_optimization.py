@@ -349,8 +349,12 @@ print(f"Correlation stats: Mean={lower_tri.mean():.3f}, Std={lower_tri.std():.3f
 condition_number = np.linalg.cond(geometry_cov)
 print(f"Condition number: {condition_number:,.0f}")
 print(
-    "A relative error of 1% in the covariance can therefore appear as a relative error of "
-    f"{condition_number / 100:,.0f}% in its inverse."
+    "To first order this is the factor by which a relative error in the covariance can be "
+    "amplified in its inverse."
+)
+print(
+    "A bound this large is not a prediction that the error grows that much; it is a statement "
+    "that nothing in the matrix stops it."
 )
 
 # %%

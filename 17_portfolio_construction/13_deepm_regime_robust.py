@@ -57,6 +57,7 @@ from deepm.graph import adjacency_to_attn_mask, build_macro_adjacency
 from deepm.inference import infer_risk_weights_rolling
 from deepm.model import DeepmPolicy
 from deepm.train import train_model
+from IPython.display import display
 from matplotlib.colors import ListedColormap
 from matplotlib.ticker import PercentFormatter
 from torch.utils.data import DataLoader
@@ -417,10 +418,14 @@ ax.legend()
 plt.show()
 
 # %% [markdown]
-# The left panel is the quantity the optimizer is minimizing, so it should improve
-# monotonically or the learning rate is wrong. The right panel is the one that decides when to
-# stop: the training Sharpe can keep rising while the validation Sharpe flattens, and the
-# checkpoint kept is the one at the validation peak rather than the last iteration.
+# The left panel is the objective the loss negates, so higher is better and a rising trend is
+# what training is supposed to produce. It is recorded on each evaluation minibatch rather than
+# on the whole training window, so it moves around from point to point; the trend is the signal
+# and a single dip is not.
+#
+# The right panel is what decides when to stop. The training Sharpe can keep rising while the
+# validation Sharpe flattens, and the checkpoint kept is the one at the validation peak rather
+# than the one at the last iteration.
 
 # %% [markdown]
 # ## 9. Ablation Study
@@ -792,7 +797,9 @@ ax.set_xlabel("Date")
 ax.set_title("The regime split is the median of SPY's own trailing volatility")
 ax.legend()
 
-plt.show()
+# The figure was closed on creation so the inline backend would not render it between the
+# two cells that fill its panels; displaying it explicitly is what puts it on the page.
+display(fig)
 
 # %% [markdown]
 # **Trading implication**: Drawdown shape matters as much as terminal Sharpe when allocator

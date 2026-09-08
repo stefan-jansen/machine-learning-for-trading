@@ -843,9 +843,10 @@ cost_df.round(2)
 # One table of held-out metrics, one cost grid, and two diagnostics of what the network learned.
 #
 # The table compares the VLSTM against the same two baselines `11_dl_portfolio_allocation` uses,
-# on the same universe and the same test window, so the difference between the two notebooks is
-# the architecture and the portfolio layer. Both charge the same one-way cost, the one the loss
-# was trained against.
+# on the same universe and the same test window. The two notebooks are not directly comparable
+# on their Sharpe columns, and the reason is the cost: `11` reports gross returns and deducts
+# nothing, while everything here is net of the one-way charge the loss was trained against. The
+# zero-cost row of the grid below is the one to read against `11`.
 #
 # The cost grid is the number to read before the table. It recomputes each allocator's Sharpe at
 # five cost levels using the weights already produced, so it says how much of any advantage is a
