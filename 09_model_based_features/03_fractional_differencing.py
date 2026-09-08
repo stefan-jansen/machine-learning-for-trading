@@ -148,11 +148,13 @@ print(f"SPY: {spy.height:,} sessions ({spy['timestamp'].min()} to {spy['timestam
 # the tail. Plotting the magnitude of the weights on a log scale, with the first one
 # omitted because it is the same for every order, shows the decay rate directly.
 #
-# Read it in two parts. At lag one the weight is exactly $-d$, so a higher order applies a
-# larger immediate correction and starts above the others. Within a few lags the ordering
-# reverses: a lower order decays more slowly, so its weights stay larger at distant lags
-# and reach the truncation threshold much later. The end of each line is where its window
-# closes.
+# Read it in two parts. At lag one the weight is exactly $-d$, so a higher order applies
+# the larger immediate correction and starts above the others. Every pair of lines then
+# crosses, because a lower order decays more slowly and its weights end up larger at
+# distant lags, but they cross at very different places: widely separated orders swap
+# within the first ten or twenty lags, while two neighbouring low orders stay close and
+# swap only after hundreds. The end of each line is where its window closes, and that
+# ordering does not reverse anywhere.
 
 # %%
 D_GRID = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
@@ -192,11 +194,12 @@ fig.update_layout(
 show_plotly_with_alt(
     fig,
     "Six lines on a log vertical axis, one per fractional order, each showing the "
-    "magnitude of the weights against the lag they apply to. At the first lag the order "
-    "is reversed, with the highest fractional order highest on the axis, because that "
-    "weight is the order itself. The lines cross within the first few lags and then the "
-    "lower orders decay more slowly, running further to the right before ending where "
-    "the weights fall under the truncation threshold.",
+    "magnitude of the weights against the lag they apply to. At the first lag the highest "
+    "fractional order sits highest, because that weight is the order itself. The lines "
+    "then cross, the widely separated orders within the first tens of lags and the "
+    "neighbouring low orders only far to the right, after which the lower orders lie "
+    "above. Each line ends where its weights fall under the truncation threshold, and the "
+    "lower the order the further right that is.",
 )
 
 # %% [markdown]
