@@ -21,6 +21,7 @@ import yaml
 
 from case_studies.utils.registry.specs import IDENTITY_VERSION
 from case_studies.utils.registry.store import _open_registry
+from tests.fixture_registry import choose_reference_panel, panel_signature
 
 REPO_ROOT = Path(__file__).parent.parent.parent
 CS_ROOT = REPO_ROOT / "case_studies"
@@ -882,20 +883,11 @@ def _reference_panels(cs_dir: Path, hash_rows: list, survives, _pl) -> dict:
             entity = next((c for c in ENTITY_COLUMN_CANDIDATES if c in frame.columns), None)
             if entity is None or not {"timestamp", "actual"} <= set(frame.columns):
                 continue
-            # Only ever compared for equality, so stringifying the identifiers is
-            # enough and keeps a column carrying nulls from raising in sorted().
-            signature = (
-                frame.height,
-                tuple(sorted(map(str, frame[entity].unique().to_list()))),
-                tuple(map(str, frame["timestamp"].unique().sort().to_list())),
-            )
+            signature = panel_signature(frame, entity)
             by_signature.setdefault(signature, []).append((p_hash, frame, entity))
         if not by_signature:
             continue
-        _, entries = min(
-            by_signature.items(),
-            key=lambda item: (-len(item[1]), -item[0][0], item[1][0][0]),
-        )
+        _, entries = choose_reference_panel(by_signature)
         _, frame, entity = entries[0]
         panels[key] = _subsampled_panel(frame, entity, _pl)
     return panels
