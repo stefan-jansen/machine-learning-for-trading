@@ -729,8 +729,12 @@ comparison_df
 # one eight-fund panel on a target with almost no signal, and it is not a reason to
 # prefer one of these architectures over another. Next-day returns are close to
 # unpredictable, so squared error is minimised largely by predicting near the average,
-# and the daily ranking correlations sit close enough to zero that the differences
-# between them are within what a different seed or a different eight funds would move.
+# and the ranking correlations are small. Whether any gap between them is real is a
+# question this notebook gives no way to answer: there is one split, one seed, and no
+# interval around any of these averages. Establishing that a difference in ranking
+# correlation is more than sampling noise takes repeated splits and a standard error on
+# each average, which is what Chapter 6's walk-forward procedure and the case-study
+# notebooks are for.
 #
 # The cost column is the one that carries information, because it measures a property
 # of the architecture rather than an accident of this sample: a network that walks the
