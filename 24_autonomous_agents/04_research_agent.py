@@ -756,8 +756,9 @@ print(format_agent_summary(artifact))
 # question, same prompts, same search tool, same model. The two probabilities below come apart
 # anyway, which is the observation the rest of the chapter is built on. Where that variation
 # comes from - which documents each search returned, and the model's own sampling - is not
-# identified here; [`06_multi_agent_research`](06_multi_agent_research.ipynb) varies
-# temperature deliberately to find out.
+# identified here, and [`06_multi_agent_research`](06_multi_agent_research.ipynb) does not
+# identify it either; what that notebook does is run enough copies for the spread to be worth
+# looking at.
 
 # %%
 if RUN_LIVE:
@@ -862,8 +863,8 @@ else:
 #    two a `p_yes` is, and it is the field to read before that probability enters any average.
 #    A fallback value counted as an opinion is the quietest way a panel gets pulled toward even
 #    odds by an agent that never spoke.
-# 5. **One class, many agents.** The same `ResearchAgent` with a different id and a different
-#    sampling temperature is the whole mechanism behind the multi-agent system:
+# 5. **One class, many agents.** The same `ResearchAgent` with nothing changed but its id is
+#    the whole mechanism behind the multi-agent system:
 #    [`06_multi_agent_research`](06_multi_agent_research.ipynb) runs several,
 #    [`07_adversarial_debate`](07_adversarial_debate.ipynb) makes them argue, and
 #    [`08_forecasting_pipeline`](08_forecasting_pipeline.ipynb) wires the stages together.
