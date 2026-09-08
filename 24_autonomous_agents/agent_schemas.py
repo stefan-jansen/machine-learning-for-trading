@@ -251,11 +251,14 @@ class QualityGateResult:
 class AgentState:
     """Explicit agent state for checkpoint/replay.
 
-    Captures everything the agent knows at a point in time,
-    separate from the LLM's context window.
+    Holds what the agent has established at a point in the run, separate from
+    the LLM's context window: the question and its cutoff, the evidence
+    gathered, the tool calls that gathered it, the quality-gate verdicts, and
+    whether synthesis has run. `to_json` / `from_json` round-trip the whole
+    record, which is what makes a run resumable and an ablation cheap.
     """
 
-    ticker: str = ""
+    question: str = ""
     cutoff_date: str = ""
     run_id: str = field(default_factory=lambda: uuid4().hex[:12])
     evidence: list[dict] = field(default_factory=list)
@@ -274,7 +277,7 @@ class AgentState:
         data = json.loads(json_str)
         quality_gates = [QualityGateResult(**item) for item in data.get("quality_gates", [])]
         return cls(
-            ticker=data.get("ticker", ""),
+            question=data.get("question", ""),
             cutoff_date=data.get("cutoff_date", ""),
             run_id=data.get("run_id", uuid4().hex[:12]),
             evidence=data.get("evidence", []),
