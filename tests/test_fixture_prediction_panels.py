@@ -123,11 +123,20 @@ CREATE TABLE prediction_metrics (prediction_hash TEXT PRIMARY KEY, ic_mean_daily
 
 
 def _panelled_case(tmp_path, artifacts):
-    """A case study shipping *artifacts*: (hash, family, symbols, targets, ic)."""
+    """A case study shipping *artifacts*: (hash, family, symbols, targets, ic).
+
+    Under an intermediates root of its own, not directly under ``tmp_path``. The
+    fixture-wide checks take the root and walk every case study in it, and
+    ``tmp_path.parent`` is the session-wide temp directory pytest shares with every
+    other test - so passing that root made this test read whatever another test had
+    just written, which in CI was a deliberately truncated parquet from
+    ``test_fixture_registry_prune.py`` and a `ComputeError` here.
+    """
     import datetime
 
     import polars as pl
 
+    tmp_path = tmp_path / "intermediates" / "case_study"
     (tmp_path / "run_log").mkdir(parents=True)
     db = sqlite3.connect(str(tmp_path / "run_log" / "registry.db"))
     db.executescript(SCHEMA)
