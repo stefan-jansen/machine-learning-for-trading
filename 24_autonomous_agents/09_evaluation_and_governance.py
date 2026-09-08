@@ -26,7 +26,7 @@
 # **Learning Objectives**:
 # - Compute Brier score, log score, ECE, and sharpness
 # - Build reliability-bin diagrams without treating them as empirical evidence
-# - Demonstrate `find_optimal_d` on synthetic arithmetic inputs
+# - Demonstrate `fit_extremization_exponent` on synthetic arithmetic inputs
 # - Compare aggregation and transform formulas on the same synthetic panel
 # - Implement the Warden proxy pattern for tool-call authorization
 # - Demonstrate fail-closed handling of detected prompt injection payloads
@@ -55,7 +55,7 @@ from agent_observability import TRACES_DIR, RunTrace
 from agent_pipeline import (
     brier_score,
     expected_calibration_error,
-    find_optimal_d,
+    fit_extremization_exponent,
     log_score,
     logodds_extremize,
     neyman_extremize,
@@ -300,18 +300,18 @@ plt.show()
 # %% [markdown]
 # ## In-sample transform fit
 #
-# `find_optimal_d` chooses a logit-scaling parameter on the complete synthetic
+# `fit_extremization_exponent` chooses a logit-scaling parameter on the complete synthetic
 # panel. The before/after values demonstrate optimization arithmetic only.
 
 # %%
-cal_result = find_optimal_d(predictions, outcomes)
-print(f"Optimal d:        {cal_result.optimal_d:.3f}")
+cal_result = fit_extremization_exponent(predictions, outcomes)
+print(f"Optimal d:        {cal_result.optimal_exponent:.3f}")
 print(f"Brier (before):   {cal_result.brier_before:.4f}")
 print(f"Brier (after):    {cal_result.brier_after:.4f}")
 print(f"Improvement:      {cal_result.improvement_pct:.1f}%")
 
 # Apply the fitted transform
-transformed_preds = [logodds_extremize(p, cal_result.optimal_d) for p in predictions]
+transformed_preds = [logodds_extremize(p, cal_result.optimal_exponent) for p in predictions]
 cal_brier = brier_score(transformed_preds, outcomes)
 print(f"\nIn-sample transformed Brier: {cal_brier:.4f} (from {model_brier:.4f})")
 
@@ -333,9 +333,9 @@ def _leave_one_out_transform(
     for held_out in range(len(forecasts)):
         train_p = [p for i, p in enumerate(forecasts) if i != held_out]
         train_y = [y for i, y in enumerate(resolved) if i != held_out]
-        fitted = find_optimal_d(train_p, train_y)
-        fold_d.append(fitted.optimal_d)
-        transformed.append(logodds_extremize(forecasts[held_out], fitted.optimal_d))
+        fitted = fit_extremization_exponent(train_p, train_y)
+        fold_d.append(fitted.optimal_exponent)
+        transformed.append(logodds_extremize(forecasts[held_out], fitted.optimal_exponent))
     return transformed, fold_d
 
 
