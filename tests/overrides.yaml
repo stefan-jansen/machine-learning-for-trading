@@ -2421,8 +2421,26 @@ case_studies/sp500_equity_option_analytics/06_linear:
   # labels x 16 configurations; it does not hold here, where the preview reduction cuts the
   # grid and the gbm run is the slower of the two in every case study measured. The tier is
   # the one-third line the raised entries elsewhere in this file state.
+  # max_symbols is stated because a notebook that declares no reduction does not run unreduced:
+  # _collect_preview_reductions in tests/pm_helpers.py injects max_symbols: 5 as the fallback. At
+  # five names top_k_grid [5, 10, 20] has no realizable member - a long-short k drops when 2k
+  # exceeds the tradeable count - and 14_backtest refuses for every declared label. Ten is the
+  # smallest width that keeps k=5 (2*5 <= 10) and the quantile axis (n_assets >= 2*n_quantiles).
+  # ml4t/agent-workspace#1077.
+  parameters:
+    PREVIEW_REDUCTIONS:
+      max_symbols: 10
   timeout: 120
 case_studies/sp500_equity_option_analytics/07_gbm:
+  # max_symbols is stated because a notebook that declares no reduction does not run unreduced:
+  # _collect_preview_reductions in tests/pm_helpers.py injects max_symbols: 5 as the fallback. At
+  # five names top_k_grid [5, 10, 20] has no realizable member - a long-short k drops when 2k
+  # exceeds the tradeable count - and 14_backtest refuses for every declared label. Ten is the
+  # smallest width that keeps k=5 (2*5 <= 10) and the quantile axis (n_assets >= 2*n_quantiles).
+  # ml4t/agent-workspace#1077.
+  parameters:
+    PREVIEW_REDUCTIONS:
+      max_symbols: 10
   timeout: 180
 case_studies/sp500_equity_option_analytics/08_tabular_dl:
   # DEVICE and POPULATION_NAME travel together. The runner refuses to substitute a CPU
@@ -2448,7 +2466,7 @@ case_studies/sp500_equity_option_analytics/08_tabular_dl:
     DEVICE: cpu
     POPULATION_NAME: sp500_equity_option_analytics-tabular_dl-preview
     PREVIEW_REDUCTIONS:
-      max_symbols: 5
+      max_symbols: 10
   timeout: 300
 case_studies/sp500_equity_option_analytics/09_dl_lstm:
   # DEVICE and POPULATION_NAME travel together, as in 08_tabular_dl above: the device is
@@ -2476,7 +2494,7 @@ case_studies/sp500_equity_option_analytics/09_dl_lstm:
     DEVICE: cpu
     POPULATION_NAME: sp500_equity_option_analytics-sequence-preview
     PREVIEW_REDUCTIONS:
-      max_symbols: 5
+      max_symbols: 10
   timeout: 600
 case_studies/sp500_equity_option_analytics/10_dl_patchtst:
   # Same reasoning as 09_dl_lstm, and the same measured outcome on CPU. Its own population
@@ -2485,9 +2503,18 @@ case_studies/sp500_equity_option_analytics/10_dl_patchtst:
     DEVICE: cpu
     POPULATION_NAME: sp500_equity_option_analytics-patchtst-preview
     PREVIEW_REDUCTIONS:
-      max_symbols: 5
+      max_symbols: 10
   timeout: 600
 case_studies/sp500_equity_option_analytics/11_latent_factors:
+  # max_symbols is stated because a notebook that declares no reduction does not run unreduced:
+  # _collect_preview_reductions in tests/pm_helpers.py injects max_symbols: 5 as the fallback. At
+  # five names top_k_grid [5, 10, 20] has no realizable member - a long-short k drops when 2k
+  # exceeds the tradeable count - and 14_backtest refuses for every declared label. Ten is the
+  # smallest width that keeps k=5 (2*5 <= 10) and the quantile axis (n_assets >= 2*n_quantiles).
+  # ml4t/agent-workspace#1077.
+  parameters:
+    PREVIEW_REDUCTIONS:
+      max_symbols: 10
   timeout: 600
 case_studies/sp500_equity_option_analytics/11a_pca:
   # The harness forces EXECUTION_TIER=preview and WORKSPACE for any notebook declaring both, and
@@ -2496,7 +2523,7 @@ case_studies/sp500_equity_option_analytics/11a_pca:
   # return panel, so the fixture's cross-section bounds nothing the way it does for IPCA below.
   parameters:
     PREVIEW_REDUCTIONS:
-      max_symbols: 5
+      max_symbols: 10
   timeout: 300
 case_studies/sp500_equity_option_analytics/11b_ipca:
   # IPCA estimates a 45-characteristic Gamma from the cross-section. Production
@@ -2543,7 +2570,7 @@ case_studies/sp500_equity_option_analytics/11b_ipca:
   # still does the numerical work described above.
   parameters:
     PREVIEW_REDUCTIONS:
-      max_symbols: 5
+      max_symbols: 10
       n_factors: 2
   reruns: 2
   timeout: 600
@@ -2562,7 +2589,7 @@ case_studies/sp500_equity_option_analytics/11c_conditional_autoencoder:
     DEVICE: cpu
     POPULATION_NAME: sp500_equity_option_analytics-cae-preview
     PREVIEW_REDUCTIONS:
-      max_symbols: 5
+      max_symbols: 10
   timeout: 600
 
 case_studies/sp500_equity_option_analytics/11d_stochastic_discount_factor:
@@ -2575,7 +2602,7 @@ case_studies/sp500_equity_option_analytics/11d_stochastic_discount_factor:
     DEVICE: cpu
     POPULATION_NAME: sp500_equity_option_analytics-sdf-preview
     PREVIEW_REDUCTIONS:
-      max_symbols: 5
+      max_symbols: 10
       n_epochs_unc: 2
       n_epochs_moment: 2
       n_epochs_cond: 4
@@ -2594,7 +2621,7 @@ case_studies/sp500_equity_option_analytics/11e_supervised_autoencoder:
     DEVICE: cpu
     POPULATION_NAME: sp500_equity_option_analytics-sae-preview
     PREVIEW_REDUCTIONS:
-      max_symbols: 5
+      max_symbols: 10
   timeout: 900
 
 case_studies/sp500_equity_option_analytics/12_causal_dml:
