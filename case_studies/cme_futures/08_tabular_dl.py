@@ -109,6 +109,8 @@ PREVIEW_REDUCTIONS: dict = {}
 # first population takes None; a re-run whose membership has changed is refused without
 # the hash it supersedes, and the refusal names the value required.
 SUPERSEDES_POPULATION: str | None = None
+# The device to fit on. Empty means the device this population was published on.
+DEVICE: str = ""
 
 # %% [markdown]
 # ## Declared requests
@@ -131,19 +133,34 @@ SUPERSEDES_POPULATION: str | None = None
 # **TabM runs on the GPU, and the request says so rather than inheriting it.** With no override the
 # shared adapter falls back to a literal `"cuda"` written in `case_studies/utils/tabular_dl.py`, and
 # `resolve_torch_device` raises `CUDA was requested but is unavailable` rather than quietly moving
-# the fit to the CPU. A CUDA device is therefore a hard requirement of this population, declared two
-# layers below the notebook: without one these configurations cannot be reproduced at all. Naming it
-# in the request puts that requirement where a reader meets it. The resolved specification hash is
-# the same with the override as without, so this states what the published run already did.
+# the fit to the CPU. Naming it in the request puts that requirement where a reader meets it. The
+# resolved specification hash is the same with the override as without, so this states what the
+# published run already did.
+#
+# A network trained on a GPU and the same network trained on a CPU accumulate their sums in
+# different orders and reach different weights, so the device is part of what the fitted model is
+# and enters the computation's identity rather than sitting beside it. `PUBLISHED_DEVICE` is the
+# device this population was fitted on, and the canonical tier accepts no other: a reader without
+# an NVIDIA card sets `DEVICE="cpu"`, which is only allowed under a preview tier, whose workspace
+# is discarded and whose rows are excluded from the catalog the backtest reads.
 
 # %%
+PUBLISHED_DEVICE = "cuda"
+device = DEVICE or PUBLISHED_DEVICE
+if device != PUBLISHED_DEVICE and EXECUTION_TIER == "canonical":
+    raise ValueError(
+        f"this run fits on device {device!r}, which is not the {PUBLISHED_DEVICE!r} this "
+        f"population was published on, so it cannot publish the canonical population; run it "
+        f"under a preview tier to fit the same grid on {device!r}"
+    )
+
 study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE)
 requests = model_request_catalog("tabular_dl", labels=ALL_LABELS)
 resolved = resolve_model_requests(
     study,
     requests,
     execution_tier=EXECUTION_TIER,
-    overrides={"device": "cuda"},
+    overrides={"device": device},
     preview_reductions=PREVIEW_REDUCTIONS,
 )
 universe = product_universe_table()
