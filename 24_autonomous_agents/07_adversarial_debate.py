@@ -566,12 +566,16 @@ fig.tight_layout()
 plt.show()
 
 # %% [markdown]
-# A closing gap is the productive case: each side takes on the other's strongest point and
-# gives ground, and the final midpoint carries information that averaging the research agents
-# could not have produced. A gap that stays open means both sides read the same evidence and
-# drew opposite conclusions from it, and the midpoint then reports the width of the
-# disagreement rather than a sharpened forecast. The two look identical in a single blended
-# number, which is why the trajectory is worth drawing before the blend is computed.
+# A closing gap is the productive case: each side gives ground on the other's strongest point,
+# and the final midpoint carries a reconciliation that averaging the research agents could not
+# have produced. A gap that stays the same width means nothing was reconciled, whether or not
+# both sides moved - they can drift together, which shifts the midpoint while leaving the
+# disagreement exactly as wide as it was.
+#
+# So the midpoint on its own says nothing about how much the two sides disagree. A pair of
+# forecasts far apart and a pair close together have the same midpoint whenever they are
+# centred on the same point. Disagreement is the gap, which is what the shaded band draws, and
+# a midpoint reported without it hides how much of the question is unsettled.
 
 # %% [markdown]
 # ## Folding the Debate Back In
@@ -619,23 +623,27 @@ else:
 # %%
 panel_disagreement = max(panel_probabilities) - min(panel_probabilities)
 gap_change = gaps[-1] - gaps[0]
-blend_shift = abs(blended - pre_debate)
+midpoint_move = midpoints[-1] - midpoints[0]
 
-print(f"Panel disagreement before debate: {panel_disagreement:.2f}")
-print(f"Bull-bear gap, first to last round: {gaps[0]:.2f} -> {gaps[-1]:.2f}")
-print(f"Blend shift from the aggregate:   {blend_shift:.2f}")
+print(f"Panel disagreement before debate:    {panel_disagreement:.2f}")
+print(f"Bull-bear gap, first to last round:  {gaps[0]:.2f} -> {gaps[-1]:.2f}")
+print(f"Midpoint, first to last round:       {midpoints[0]:.2f} -> {midpoints[-1]:.2f}")
 
 if panel_disagreement < MIN_PANEL_DISAGREEMENT:
     print("\nThe panel had already agreed; the debate was not worth starting.")
 elif gap_change < -MIN_GAP_CLOSURE:
-    print("\nThe gap closed: the two sides took on each other's evidence.")
+    print("\nDisagreement fell: each side gave ground on the other's evidence.")
+elif gap_change > MIN_GAP_CLOSURE:
+    print(
+        "\nDisagreement grew. Each round pushed the two sides further apart, which is what "
+        "happens when both find more support for the position they started from."
+    )
 else:
     print(
-        "\nThe gap held. Both sides finished where they started, so the blended number is a "
-        "mechanical adjustment rather than an update, and the aggregate and the open gap "
-        "should be reported together."
+        "\nDisagreement is where it started. Both sides may still have moved - the midpoint "
+        "line says whether they did - but they moved together, so nothing was reconciled and "
+        "the aggregate should be reported with the open gap beside it."
     )
-
 # %% [markdown]
 # ## Persisting the Full Run Trace
 #
