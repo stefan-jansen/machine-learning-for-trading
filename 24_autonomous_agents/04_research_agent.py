@@ -18,34 +18,34 @@
 #
 # **Docker image**: `ml4t`
 #
-# This notebook is the **core project** of Chapter 24's first half. It combines the
-# provider abstraction (NB01), search tools (NB02), and state/quality gates (NB03)
-# into a complete `ResearchAgent` that produces probability forecasts with
-# structured metadata.
-#
-# The shared `agent_research.py` module carries the same validated parser and
-# control-flow contract for NB06-NB08. This notebook exposes that contract step
-# by step for inspection.
+# The first three notebooks built the pieces separately: a model client, a search tool with a
+# cutoff and a source policy, and a state record with gates over it. This notebook assembles
+# them into one object that takes a question and returns a probability with everything behind
+# it attached, which is the unit every later notebook in the chapter operates on.
 #
 # **Learning Objectives**:
-# - Build a complete ReAct-based research agent with structured output
-# - Extract heuristic metadata: confidence, sentiment, key findings, evidence quality
-# - Track token usage for cost analysis
-# - Produce an `AgentForecastArtifact` with full provenance
+# - Assemble a model client, a search tool and a turn budget into one agent that answers a
+#   question end to end
+# - Parse and validate a model reply that arrives fenced, prefixed, or in the wrong shape, and
+#   return it for correction instead of failing
+# - Derive confidence, sentiment, evidence class and key findings from a forecast in code, so
+#   that every agent's metadata is produced the same way
+# - Tell an agent that committed to a probability apart from one that ran out of turns, and
+#   keep the second out of any average
+# - Read a saved run record and reproduce a forecast made months earlier with no API calls
 #
 # **Book Reference**: Chapter 24, Section 24.6 (Core Project: The Research Agent)
 #
-# **Prerequisites**: NB01 (providers), NB02 (tools), NB03 (state/gates).
+# **Prerequisites**: [`01_react_reasoning`](01_react_reasoning.ipynb) (providers),
+# [`02_tool_contracts`](02_tool_contracts.ipynb) (tools),
+# [`03_state_and_memory`](03_state_and_memory.ipynb) (state and gates).
 
 # %%
 """The Research Agent: ReAct loop with structured output extraction."""
 
 import re
-import warnings
 from dataclasses import dataclass, field
-from datetime import date
-
-warnings.filterwarnings("ignore")
+from datetime import date, datetime
 
 import matplotlib.pyplot as plt
 import polars as pl
@@ -58,21 +58,15 @@ from agent_observability import (
     trace_llm,
 )
 from agent_providers import ChatMessage, LLMClient, TokenUsage, create_llm_client
-from agent_research import (
-    extract_confidence as _shared_extract_confidence,
-)
-from agent_research import (
-    parse_json as _shared_parse_json,
-)
-from agent_research import (
-    validate_action as _shared_validate_action,
-)
+from agent_research import extract_confidence, parse_json, validate_action
 from agent_schemas import (
     AgentForecastArtifact,
+    AgentState,
     AgentTrace,
     EvidenceQuality,
     ForecastQuestion,
     Sentiment,
+    run_quality_gates,
 )
 from agent_tools import (
     SearchClient,
@@ -83,15 +77,23 @@ from agent_tools import (
 
 from utils.style import COLORS, add_message_title, format_pct_axis
 
+# %% [markdown]
+# ## Settings
+#
+# `RUN_LIVE` left at `False` replays the pinned 2026-06-09 capture named below: the notebook
+# reloads that saved run and makes no API calls, so the agent's output is fixed and matches the
+# chapter's discussion of it. `True` forecasts a current question against live search, which
+# costs money and will not reproduce these values.
+#
+# `MAX_STEPS` is the turn budget, as in
+# [`01_react_reasoning`](01_react_reasoning.ipynb). `MAX_SEARCH_RESULTS` caps how many
+# documents one search returns; five keeps a handful of searches inside the context window.
+# `LLM_PROVIDER` is empty so the factory picks whichever provider has a key, and is read only
+# on the live path.
+
 # %% tags=["parameters"]
-# RUN_LIVE=False (the default) replays the pinned 2026-06-09 trace named below:
-# the notebook reloads that saved run and makes no API calls, so the agent
-# outputs are stable and match the chapter. Set RUN_LIVE=True (with API keys) to
-# forecast a current question live; that path will not match the pinned capture.
 RUN_LIVE = False
 PINNED_TRACE = "04_research_agent_20260609T141730Z_b694ab4d0453.json"
-
-# empty = auto-detect; "mock" for CI (live path only)
 LLM_PROVIDER = ""
 MAX_STEPS = 5
 MAX_SEARCH_RESULTS = 5
@@ -99,9 +101,11 @@ MAX_SEARCH_RESULTS = 5
 # %% [markdown]
 # ## Prompt Templates
 #
-# The system prompt and step prompt define the agent's behavior. They are shown
-# inline so readers can see exactly how the LLM is instructed. These are the same
-# prompts used by the chapter's forecasting implementation.
+# The system prompt fixes the agent's role and its two hard constraints: emit valid JSON, and
+# do not go looking for the market's own price. The second matters for evaluation. An agent
+# that reads the prediction market it is being scored against is copying, and the copy will
+# score well, so the constraint is stated to the model and then verified against the saved
+# prompts further down rather than trusted.
 
 # %%
 AGENT_SYSTEM_PROMPT = """\
@@ -144,53 +148,48 @@ def build_step_prompt(
 
 
 # %% [markdown]
-# ## JSON Parsing
+# ## Parsing and Validating the Model's Reply
 #
-# LLMs sometimes wrap JSON in markdown code blocks or add trailing text.
-# The shared parser accepts exactly one JSON object, including fenced output,
-# and converts decoder failures or non-object JSON into an explicit parse-failure
-# action. Repeated failures reach the step-budget sentinel.
-
-
-# %%
-def parse_json(raw: str) -> dict:
-    """Delegate JSON-object parsing to the shared research-agent contract."""
-    return _shared_parse_json(raw)
+# A model told to emit JSON emits JSON most of the time. The rest of the time it wraps the
+# object in a markdown fence, adds a sentence of explanation before it, or returns something
+# well-formed that is not an action. All three are ordinary, none is an error condition, and
+# an agent that crashes on them is an agent that cannot be run unattended.
+#
+# `parse_json` accepts exactly one JSON object, fenced or bare, and turns anything else into an
+# explicit parse-failure action. `validate_action` then checks the object against the two
+# documented schemas: a search needs a non-empty string query, a forecast needs a finite
+# numeric `p_yes` and a string rationale, and probabilities are clamped to $[0, 1]$ before
+# anything acts on them. A reply failing either check costs a turn and is returned to the model
+# for correction.
+#
+# Both come from `agent_research.py` rather than being written here, because every agent in the
+# chapter has to reject the same shapes the same way: a parser that differs between notebooks
+# is a source of disagreement that looks like a difference of judgement.
 
 
 # %% [markdown]
-# ### Action validation
+# ## Derived Fields
 #
-# Search requires a nonempty string query. Forecast requires finite numeric
-# `p_yes`, string rationale, and, when present, finite numeric confidence.
-# Probabilities and confidence are normalized to $[0, 1]$ before execution.
-
-
-# %%
-def validate_action(action: dict) -> tuple[str, dict | None]:
-    """Delegate schema validation to the shared research-agent contract."""
-    return _shared_validate_action(action)
-
+# The model returns a probability and a rationale. Everything else on the artifact is computed
+# from those two by the functions below. Keeping the derivation in code rather than asking the
+# model for it means every agent's metadata is produced the same way, which is what makes
+# agents comparable; it also means the fields are exactly as good as their definitions, and
+# several of these definitions are crude on purpose. They are labelled as heuristics wherever
+# they are printed.
 
 # %% [markdown]
-# ## Rich Output Extraction
+# ### Confidence
 #
-# After the agent produces a forecast, we extract additional metadata from the
-# raw LLM output. Confidence, sentiment, and evidence quality are transparent
-# heuristics, not calibrated estimates.
-
-# %% [markdown]
-# ### Confidence extraction
+# When the model volunteers a `confidence` field it is used, clamped to $[0, 1]$. Otherwise
+# confidence is taken as distance from even odds,
+# $\text{confidence} = 2\,\lvert p_{\text{yes}} - \tfrac{1}{2} \rvert$, which is zero at
+# even odds and one at either certainty.
 #
-# If the forecast JSON includes a `confidence` field, we use it directly (clamped
-# to $[0, 1]$). Otherwise, we compute an extremity heuristic:
-# $\text{confidence} = 2 \cdot |p_{\text{yes}} - 0.5|$.
-
-
-# %%
-def extract_confidence(action: dict) -> float:
-    """Delegate bounded confidence extraction to the shared contract."""
-    return _shared_extract_confidence(action)
+# That is a statement about the probability's position, not about the evidence behind it. An
+# agent that read forty documents and concluded the question is genuinely balanced scores zero;
+# an agent that read one and asserted near-certainty scores one. The measure is here because it
+# is uniform and cheap, and [`09_evaluation_and_governance`](09_evaluation_and_governance.ipynb)
+# replaces it with calibration measured against resolved outcomes, which is the real answer.
 
 
 # %% [markdown]
@@ -359,6 +358,7 @@ class _LoopResult:
 
     p_yes: float = 0.5
     rationale: str = ""
+    forecast_produced: bool = False
     raw_action: dict = field(default_factory=dict)
     traces: list[AgentTrace] = field(default_factory=list)
     total_tokens: TokenUsage = field(default_factory=TokenUsage)
@@ -378,6 +378,7 @@ def _assemble_artifact(agent, result: _LoopResult) -> AgentForecastArtifact:
         p_yes=result.p_yes,
         rationale=result.rationale,
         traces=result.traces,
+        forecast_produced=result.forecast_produced,
         confidence=extract_confidence(result.raw_action),
         sentiment=extract_sentiment(result.p_yes),
         key_findings=extract_key_findings(result.rationale),
@@ -432,10 +433,14 @@ def _run_research_loop(
             result.p_yes, result.rationale, result.raw_action = _handle_forecast_step(
                 action, result.traces, step, response
             )
+            result.forecast_produced = True
             break
         else:
             _handle_unknown_step(action_type, response, messages, result.traces, step)
     else:
+        # The budget ran out with no forecast action. result.p_yes keeps its initial
+        # value; forecast_produced stays False so nothing downstream reads it as a
+        # judgement.
         result.rationale = "Max steps reached without forecast"
         result.traces.append(AgentTrace(step=agent.max_steps, action="forced_default"))
 
@@ -445,9 +450,10 @@ def _run_research_loop(
 # %% [markdown]
 # ## The ResearchAgent Class
 #
-# The class owns the LLM, search executor, and iteration budget. Its `run()` method
-# delegates to the explicit loop above. `agent_research.py` mirrors this behavior
-# for downstream imports.
+# The class owns three things and no logic: the model client, the tool executor, and the two
+# budgets. `run()` hands them to the loop above. `agent_research.py` carries the same agent for
+# the notebooks that import it rather than rebuild it, which is why the pieces are laid out
+# separately here: this is the one notebook where the contract is read rather than called.
 
 
 # %%
@@ -484,18 +490,19 @@ class ResearchAgent:
 # %% [markdown]
 # ## Running the Research Agent
 #
-# We run the agent on the pinned `CHAPTER_CONTESTED_QUESTION` from
-# `agent_fixtures.py` (*"Will the Federal Reserve hike rates in 2026?"*, where
-# the saved rationales point in opposite directions) and inspect the artifact.
-# The whole forecasting arc forecasts this same pinned question (NB07 debates it,
-# NB08 runs it through the full pipeline, NB10 ports it across frameworks); NB06
-# uses the companion `CHAPTER_CLEAR_QUESTION`, a one-directional question on which
-# the agents instead agree. The numbers are a timestamped live capture
-# (provider `claude-sonnet-4`, Tavily search, 2026-06-09). By default the notebook
-# *replays* that pinned run (`RUN_LIVE = False`): it reloads the saved artifacts
-# and raw conversation and makes no API calls, so the outputs are stable. Set
-# `RUN_LIVE = True` (with `ANTHROPIC_API_KEY` and `TAVILY_API_KEY`) to forecast a
-# current question live, which will not reproduce the pinned values.
+# The question is `CHAPTER_CONTESTED_QUESTION` from `agent_fixtures.py`: *"Will the Federal
+# Reserve hike rates in 2026?"*. It is contested in the specific sense that matters here, which
+# is that two runs of the same agent reach opposite conclusions on it, so it is the question
+# the chapter uses wherever disagreement is the subject.
+# [`07_adversarial_debate`](07_adversarial_debate.ipynb) makes agents argue about it and
+# [`08_forecasting_pipeline`](08_forecasting_pipeline.ipynb) runs the full pipeline on it.
+# [`06_multi_agent_research`](06_multi_agent_research.ipynb) uses the companion
+# `CHAPTER_CLEAR_QUESTION` instead, where the agents agree, so the two can be compared.
+#
+# On the default path the notebook replays the pinned capture rather than calling anything:
+# provider `claude-sonnet-4`, Tavily search, recorded 2026-06-09. Setting `RUN_LIVE = True`
+# with `ANTHROPIC_API_KEY` and `TAVILY_API_KEY` forecasts a current question instead, and will
+# not reproduce the values below.
 
 # %%
 if RUN_LIVE:
@@ -534,9 +541,15 @@ print(f"Search: {search_name}")
 print(f"Question: {question.question}\n")
 
 # %% [markdown]
-# ### Pinned trace contract
+# ### What the pinned trace does and does not establish
 #
-# The default path asserts the exact saved-run shape and its provenance limitations.
+# The replay is a recording of one live run, which makes it reproducible and does not make it a
+# backtest. Three properties of the recording are worth asserting rather than assuming, because
+# each one bounds what a claim about this run can say: the file is the one this notebook
+# expects, none of its 40 search results carries a publication date, and none of the prompts
+# ever contained the market's own probability. The first is bookkeeping; the second means
+# nothing here can show the agent read only what was knowable on the day; the third means the
+# agent's forecast is independent of the market quote it is later compared against.
 
 # %%
 if not RUN_LIVE:
@@ -551,29 +564,27 @@ if not RUN_LIVE:
     assert len(replay_results) == 40
     assert all(result.published is None for result in replay_results)
     assert not any("MARKET IMPLIED PROBABILITY" in str(call) for call in pinned_run.llm_calls)
-
-# %% [markdown]
-# The replay is a saved live capture, not a historical backtest. Its 40 search
-# results have no publication dates, and the saved prompts contain no market-price
-# field. The trace can reproduce the recorded model interaction but cannot establish
-# point-in-time source availability.
+    print(f"Pinned trace: {len(replay_results)} search results, none carrying a publication date")
 
 # %% [markdown]
 # ## Inspecting the Forecast Artifact
 #
-# The `AgentForecastArtifact` records the probability, rationale, evidence trail,
-# and configured metadata fields.
+# One object holds everything the run produced. The first three fields are what the model
+# committed to; the rest were computed from them by the extraction functions above, and are
+# labelled as heuristics wherever they are printed so that a derived class is never read as a
+# measurement.
 
 # %%
 print("=== Forecast ===")
-print(f"Agent:       {artifact.agent_id}")
-print(f"p(YES):      {artifact.p_yes:.2f}")
-print(f"Confidence heuristic: {artifact.confidence:.2f}")
-print(f"Sentiment heuristic:  {artifact.sentiment.value}")
-print(f"Evidence volume class: {artifact.evidence_quality.value}")
-print(f"Queries:     {artifact.search_queries_made}")
-print(f"Sources:     {artifact.sources_consulted}")
-print(f"Tokens:      {artifact.token_usage.total_tokens:,}")
+print(f"Agent:                  {artifact.agent_id}")
+print(f"Produced a forecast:    {artifact.forecast_produced}")
+print(f"p(YES):                 {artifact.p_yes:.2f}")
+print(f"Confidence heuristic:   {artifact.confidence:.2f}")
+print(f"Sentiment heuristic:    {artifact.sentiment.value}")
+print(f"Evidence volume class:  {artifact.evidence_quality.value}")
+print(f"Searches:               {artifact.search_queries_made}")
+print(f"Documents read:         {artifact.sources_consulted}")
+print(f"Tokens:                 {artifact.token_usage.total_tokens:,}")
 
 # %%
 print(f"\nRationale:\n{artifact.rationale[:400]}")
@@ -596,7 +607,7 @@ if artifact.uncertainties:
 # from `agent_observability` renders the whole run in order: each query, the
 # documents it returned (title, date, URL, and a snippet), and the forecast with
 # the untruncated rationale. This is the per-agent observability view reused
-# across NB06-NB08.
+# across the multi-agent notebooks that follow.
 
 # %%
 print(show_agent_timeline(artifact))
@@ -604,13 +615,14 @@ print(show_agent_timeline(artifact))
 # %% [markdown]
 # ## Tool Execution Audit
 #
-# The executor's independent log captures timing and provenance for every
-# search call. Rendering it as a Polars DataFrame puts the query / status /
-# duration in three sortable columns rather than a hand-aligned string
-# table: the same audit data, in a form that downstream analysis code can
-# read without parsing. (A live run also records per-call `duration_ms`; the
-# replay path reconstructs the same query/status/result-count audit from the
-# saved traces, since wall-clock timing is not part of the persisted record.)
+# The timeline above is assembled from the agent's own traces, which is the model's account of
+# the run. `ToolExecutor` keeps a second, independent record of what it was actually asked to
+# do. On a live run that log carries a per-call `duration_ms`; the pinned trace does not
+# persist wall-clock timing, because a duration measured on one machine reproduces on no other,
+# so the replay path rebuilds the query, status and result count from the saved traces instead.
+#
+# A table rather than aligned text: the same three fields, in a form that sorts, filters and
+# joins without anyone parsing a string.
 
 # %%
 if RUN_LIVE:
@@ -648,9 +660,70 @@ else:
 audit_df
 
 # %% [markdown]
+# ## Gating the Finished Run
+#
+# [`03_state_and_memory`](03_state_and_memory.ipynb) defined three checks over an agent's
+# evidence, and this is the run they were defined for. Turning the artifact's traces into an
+# `AgentState` is mechanical: each search step becomes one evidence item holding its query and
+# its results, and the retrieval time is the moment the run was captured.
+#
+# The gates run here as a report rather than as a veto, because a check that has never been
+# allowed to speak is a check nobody has read.
+
+# %%
+run_captured_at = datetime.now() if RUN_LIVE else datetime.fromisoformat(pinned_run.created_at)
+
+gated_state = AgentState(
+    question=question.question,
+    cutoff_date=question.cutoff_date,
+    run_id=artifact.agent_id,
+)
+for trace in artifact.traces:
+    if trace.action != "search":
+        continue
+    gated_state.evidence.append(
+        {
+            "type": "search_results",
+            "source": "web_search",
+            "timestamp": run_captured_at.isoformat(),
+            "query": trace.query or "",
+            "content": {
+                "results": [
+                    {"title": r.title, "url": r.url, "published": r.published}
+                    for r in trace.results
+                ]
+            },
+        }
+    )
+
+for gate in run_quality_gates(gated_state, as_of=run_captured_at):
+    print(f"  [{'PASS' if gate.passed else 'FAIL'}] {gate.gate_name}: {gate.reason}")
+
+# %% [markdown]
+# Two of the three refuse the run, for different reasons.
+#
+# **Coverage** fails because every one of the agent's searches asked what is happening now. It
+# never looked for how often the Federal Reserve has raised rates from a hold, so its
+# probability has no historical anchor and rests entirely on current commentary. Nothing in the
+# system prompt asks for one, which is where the fix belongs: a coverage contract has to be
+# told to the agent, not only checked after it has finished.
+#
+# **Consistency** reports that there is no cutoff date to enforce, which is a statement about
+# the question rather than a defect in the run. `CHAPTER_CONTESTED_QUESTION` was open when it
+# was captured: it asks about the rest of 2026, so no evidence available on the day could have
+# contained the answer and no date needs excluding. The gate has nothing to check, and saying
+# so is the correct outcome. It has teeth on the resolved panel that
+# [`09_evaluation_and_governance`](09_evaluation_and_governance.ipynb) scores, where every
+# question carries a cutoff and reading past it is how a forecasting result gets faked.
+#
+# Neither refusal makes the artifact worthless, and that is the reason the gates report rather
+# than veto here. What they do is put the run's two weaknesses in the record beside its
+# probability, so a reader weighing the forecast can see what it was built on.
+
+# %% [markdown]
 # ## Agent Summary Format
 #
-# When multiple agents run in parallel (NB06), their outputs are summarized
+# When several agents run in parallel, their forecasts are summarized
 # for the supervisor and debate stages. This is the format used downstream.
 
 
@@ -674,13 +747,14 @@ def format_agent_summary(a: AgentForecastArtifact) -> str:
 print(format_agent_summary(artifact))
 
 # %% [markdown]
-# ## Running Multiple Agents
+# ## Two Agents, One Question
 #
-# A preview of the multi-agent notebooks: the same agent class with different
-# IDs produced different forecasts in this pinned capture. NB06 uses the same
-# class on a different question and records a narrower spread. Comparing two
-# traces shows the observed contrast, but it does not identify whether question
-# framing, retrieval, or model sampling caused it.
+# The same class with a different id gives a second sample. Nothing else differs: same
+# question, same prompts, same search tool, same model. The two probabilities below come apart
+# anyway, which is the observation the rest of the chapter is built on. Where that variation
+# comes from - which documents each search returned, and the model's own sampling - is not
+# identified here; [`06_multi_agent_research`](06_multi_agent_research.ipynb) varies
+# temperature deliberately to find out.
 
 # %%
 if RUN_LIVE:
@@ -691,45 +765,45 @@ else:
     # Replay: the pinned trace's second saved agent is this preview run.
     artifact_b = replayed_artifacts[1]
 
-print(f"Agent 0: p_yes={artifact.p_yes:.2f}, confidence={artifact.confidence:.2f}")
-print(f"Agent 1: p_yes={artifact_b.p_yes:.2f}, confidence={artifact_b.confidence:.2f}")
-probability_gap = abs(artifact.p_yes - artifact_b.p_yes)
-print(f"\nDifference: {probability_gap:.2f}")
+pair = [artifact, artifact_b]
+
+for a in pair:
+    print(f"{a.agent_id}: confidence={a.confidence:.2f}, sentiment={a.sentiment.value}")
+print(f"Both produced a forecast: {all(a.forecast_produced for a in pair)}")
 
 # %% [markdown]
-# The shared probability scale makes the observed disagreement immediately visible.
-# These are two saved model outputs, not estimates with statistical error bars.
+# Both agents committed to a probability, so both are comparable. Reading their
+# `forecast_produced` flags before comparing is the habit that stops a run which never
+# forecast from entering an average as an opinion of exactly even odds.
 
 # %%
-agent_labels = [artifact.agent_id, artifact_b.agent_id]
-agent_probabilities = [artifact.p_yes, artifact_b.p_yes]
-
 fig, ax = plt.subplots()
 bars = ax.bar(
-    agent_labels,
-    agent_probabilities,
+    [a.agent_id for a in pair],
+    [a.p_yes for a in pair],
     color=[COLORS["blue"], COLORS["copper"]],
     width=0.58,
 )
-ax.bar_label(bars, labels=[f"{value:.0%}" for value in agent_probabilities], padding=3)
-ax.set_xlabel("Research Agent")
-ax.set_ylabel("Probability of a 2026 Fed Rate Hike")
-ax.set_ylim(0, max(agent_probabilities) + 0.10)
+ax.bar_label(bars, labels=[f"{a.p_yes:.0%}" for a in pair], padding=3)
+ax.set_xlabel("Research agent")
+ax.set_ylabel("Probability of a 2026 Fed rate hike")
+ax.set_ylim(0, max(a.p_yes for a in pair) + 0.10)
 format_pct_axis(ax)
 add_message_title(
     ax,
-    f"Pinned agents disagree by {probability_gap:.0%}",
-    subtitle="Two 2026-06-09 forecasts; search-result publication dates unavailable",
+    "Two runs of one agent land on opposite sides of even odds",
+    subtitle="Same question, prompts and tools; 2026-06-09 capture, "
+    "search results carry no publication dates",
 )
 fig.tight_layout()
-fig.show()
 plt.show()
 
 # %% [markdown]
-# **Interpretation**: The pinned agents differ materially. Their rationales cite
-# conflicting policy-rate levels, and none of the 40 saved search results has a
-# publication date. The trace therefore demonstrates observable disagreement and
-# the need for provenance checks; it does not identify the cause of the gap.
+# The two rationales disagree about the level of the policy rate itself, not only about where
+# it is going, which means at least one of them read something wrong. Neither agent's evidence
+# carries a publication date, so neither can be checked against what was knowable on the day.
+# A single agent gives no way to notice any of this: the disagreement is the diagnostic, and it
+# only exists once there is more than one run to compare.
 
 # %% [markdown]
 # ## Persisting the Run Trace
@@ -738,7 +812,7 @@ plt.show()
 # around each agent hold the raw conversation. `RunTrace.capture` bundles both:
 # the question, both agents' artifacts, and every prompt/response, into one JSON
 # record under `forecast_traces/`, the same auditable format the multi-agent
-# notebooks (NB06-NB08) write. Reload it with `RunTrace.load` to inspect the saved
+# notebooks write. Reload it with `RunTrace.load` to inspect the saved
 # inputs and outputs, which is what the default `RUN_LIVE = False` path
 # does above. A live run writes a fresh trace here; the default replay run reports
 # the pinned trace it loaded rather than overwriting it.
@@ -771,19 +845,35 @@ else:
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **ResearchAgent** combines the ReAct loop with structured output extraction;
-#    heuristic confidence, sentiment, evidence quality, and uncertainty fields
-#    accompany the forecast
-# 2. **Structured artifacts**: `AgentForecastArtifact` records the configured run fields:
-#    probability, reasoning, traces, and token usage
-# 3. **Bounded parsing**: invalid JSON becomes an explicit failure action; production
-#    systems still need retry and abstention policy
-# 4. **Reusable**: This class is the building block for multi-agent (NB06),
-#    debate (NB07), and full pipeline (NB08) notebooks
-# 5. **Token tracking**: Every LLM call is metered for cost analysis
+# 1. **The artifact is the deliverable, not the number.** A probability with no record of what
+#    was searched, what came back, and how many turns it took cannot be audited, compared, or
+#    debugged. Everything the rest of this chapter does - aggregating, debating, scoring - reads
+#    the artifact, not the model.
+# 2. **Separate what the model said from what was derived from it.** `p_yes` and the rationale
+#    come from the model; confidence, sentiment, key findings and evidence class are functions
+#    computed over them. Mixing the two makes an arithmetic transform look like a judgement.
+# 3. **A derived field is only as good as its definition, and most of these are crude.**
+#    Extremity is not confidence and volume is not quality. They are useful because they are
+#    cheap, uniform across agents, and inspectable; they are not estimates.
+# 4. **An agent that ran out of turns did not forecast.** `forecast_produced` is what keeps its
+#    fallback probability out of the average, and it is the field to check before reading
+#    `p_yes` from any artifact.
+# 5. **One class, many agents.** The same `ResearchAgent` with a different id and a different
+#    sampling temperature is the whole mechanism behind the multi-agent system:
+#    [`06_multi_agent_research`](06_multi_agent_research.ipynb) runs several,
+#    [`07_adversarial_debate`](07_adversarial_debate.ipynb) makes them argue, and
+#    [`08_forecasting_pipeline`](08_forecasting_pipeline.ipynb) wires the stages together.
 #
-# **Next**: [`05_aggregation_math`](05_aggregation_math.ipynb), the mathematical
-# foundation for combining probability estimates.
+# **Known limitations of what is built here.** Confidence is derived from how far the
+# probability sits from even odds, so a well-evidenced coin-flip is reported as maximally
+# unconfident and a hallucinated near-certainty as maximally sure. Evidence quality counts
+# documents and queries and reads nothing, so twenty copies of one wire story score as high.
+# Key findings are whatever the model happened to format as a list. And a single agent gives
+# one sample: nothing here bounds how much of the probability is the evidence and how much is
+# this run's sampling.
+#
+# **Next**: [`05_aggregation_math`](05_aggregation_math.ipynb) is the arithmetic for combining
+# several such probabilities into one.
 #
 # **Book**: Section 24.6 discusses agent design patterns, including the trade-off
 # between agent complexity and forecast calibration.
