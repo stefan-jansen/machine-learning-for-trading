@@ -1233,11 +1233,14 @@ print(f"Assets: {n_assets}   estimation window: 252 days   assets selected each 
 # case: five selected assets estimated over 252 daily observations. At that ratio the sample
 # covariance is well conditioned, its inverse is not dominated by noise, and Ledoit-Wolf shrinkage
 # cleans up what error remains - so the allocator that does invert it comes out ahead of the one
-# that declines to. HRP in turn comes out ahead of inverse volatility and equal weight, which use
-# no correlation information at all: it reads the correlations to order the assets and choose the
-# splits, and takes the weights from variances alone. The ordering across the four is therefore
-# the ordering of how much of the second moment each allocator is willing to use, which is the
-# ordering to expect precisely when the estimate is good enough to use.
+# that declines to.
+#
+# HRP is not covariance-free, and section 4 says why. It reads the correlations to build the tree
+# and order the assets, and each split then compares its two halves on their cluster variances,
+# which `cluster_variance` computes as $w^\top \Sigma w$ over the block - so the off-diagonal
+# entries reach the weights. What HRP never does is invert the matrix, and that is the property
+# it is chosen for: it returns weights whatever the conditioning, where inversion does not.
+# Inverse volatility and equal weight read no off-diagonal information at all.
 #
 # The turnover column refuses a second common claim. Clustering is often described as producing
 # more stable allocations; here HRP turns over more than equal weight and more than inverse

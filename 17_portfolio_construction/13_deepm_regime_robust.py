@@ -317,6 +317,11 @@ model = DeepmPolicy(
 )
 model.to(DEVICE)
 
+# Keep the initial weights. The ablation in section 9 is constructed after this model has
+# trained, by which point the random stream has moved on, so building it fresh would give it
+# a different starting point and the comparison would carry two changes rather than one.
+initial_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+
 n_params = sum(p.numel() for p in model.parameters())
 print(f"DeePM parameters: {n_params:,}")
 
@@ -391,7 +396,7 @@ ax.plot(
 )
 ax.set_xlabel("Iteration")
 ax.set_ylabel("Objective (higher = better)")
-ax.set_title("The training objective the optimizer is minimizing")
+ax.set_title("The training objective, which the loss negates and so maximizes")
 ax.legend()
 
 ax = axes[1]
@@ -452,6 +457,9 @@ model_no_softmin = DeepmPolicy(
     adjacency_mask=attn_mask_tensor,
     cfg=model_cfg,
 )
+# Start from the weights the full model started from, so the only difference between the two
+# runs is the SoftMin term in the loss.
+model_no_softmin.load_state_dict(initial_state)
 model_no_softmin.to(DEVICE)
 
 nosm_cfg = TrainingConfig(
@@ -842,9 +850,10 @@ display(fig)
 #    block or the Directed Delay would need one training run each, and Wood, Roberts and Zohren
 #    (2026) report those.
 #
-# **Next**: Chapter 18 prices the trading that every allocator in this chapter implies, which is
-# the cost the Sharpe columns here are gross of. The cross-case-study allocator comparison lives
-# in Ch20 ([`05_portfolio_allocation`](../20_strategy_synthesis/05_portfolio_allocation.ipynb)).
+# **Next**: Chapter 18 replaces the flat per-asset schedule charged here with cost models that
+# respond to order size, spread and market impact, which is what decides whether a turnover level
+# like this one is affordable. The cross-case-study allocator comparison lives in Ch20
+# ([`05_portfolio_allocation`](../20_strategy_synthesis/05_portfolio_allocation.ipynb)).
 #
 # **Book**: §17.8 discusses the DeePM framework in detail, including
 # the SoftMin robust objective and its connection to regime adaptation.
