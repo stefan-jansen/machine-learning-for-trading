@@ -94,6 +94,7 @@ import polars as pl
 import structlog
 from IPython.display import Markdown, display
 from matplotlib.axes import Axes
+from matplotlib.collections import LineCollection
 from matplotlib.colors import ListedColormap
 from ml4t.data.providers import AQRFactorProvider
 from ml4t.diagnostic.metrics import sharpe_ratio
@@ -239,10 +240,12 @@ coverage.style.format({"Mean (% / month)": "{:.2f}", "Std (% / month)": "{:.2f}"
 # missing observation recovered - it is an invented one, and a mixture model would treat it
 # as evidence for a cluster.
 #
-# The nine series are then standardized to zero mean and unit variance. Without that step
-# the equity market series, whose monthly standard deviation is several times a long-short
-# strategy's, would dominate every distance and the clustering would be a partition of
-# equity returns alone.
+# The nine series are then standardized to zero mean and unit variance. The coverage table
+# above shows why: the widest series in the panel has several times the monthly standard
+# deviation of the narrowest, and a Euclidean distance is dominated by whichever coordinate
+# moves furthest. Standardizing puts every series on the same footing, so the partition
+# reflects the direction the panel moved in rather than which column happened to be measured
+# on the largest scale.
 
 # %%
 factors_pl = aqr_raw.select(["timestamp", *FACTOR_COLUMNS]).sort("timestamp").drop_nulls()
@@ -372,7 +375,7 @@ selection.style.format(
 # %% [markdown]
 # ### Reading the three criteria against each other
 #
-# The bars below carry the same three columns. Both information criteria are drawn on a
+# The bars below draw three of the table's columns. Both information criteria are drawn on a
 # zoomed vertical axis, because the differences between candidate models are small relative
 # to their level and would be invisible on a scale that started at zero; the silhouette
 # panel is drawn on its natural scale, which includes zero.
@@ -517,8 +520,8 @@ style.show_with_alt(
 # more finely speckled than the one above it. A mixture has no notion of time and nothing in
 # it prefers a month to keep its neighbour's label, so there is no mechanism by which more
 # clusters could produce longer stretches. That absence is the reason the last section of
-# this notebook points at a hidden Markov model, which supplies exactly the mechanism this
-# one lacks.
+# the section on how long the regimes last points at a hidden Markov model, which supplies
+# exactly the mechanism this one lacks.
 
 # %% [markdown]
 # ## The two-cluster model: risk-on and risk-off
@@ -590,6 +593,25 @@ def mark_events(ax: Axes, years: list[int]) -> None:
 
 
 # %%
+def plot_by_regime(ax: Axes, values: np.ndarray, in_risk_on: np.ndarray) -> None:
+    """Draw one line whose every segment takes the colour of the month it starts in.
+
+    Colouring by masking each regime into its own line would drop the segment that spans a
+    transition, and would draw nothing at all for a one-month episode, which is most of
+    them here.
+    """
+    y = np.asarray(values, dtype=float)
+    points = np.column_stack([np.arange(len(y)), y]).reshape(-1, 1, 2)
+    segments = np.concatenate([points[:-1], points[1:]], axis=1)
+    drawable = np.isfinite(segments[:, :, 1]).all(axis=1)
+    colours = np.where(in_risk_on[:-1], COLORS["recede"], COLORS["blue"])
+    ax.add_collection(LineCollection(segments[drawable], colors=colours[drawable], linewidths=1.2))
+    finite = y[np.isfinite(y)]
+    ax.set_xlim(0, len(y) - 1)
+    ax.set_ylim(finite.min() * 0.9, finite.max() * 1.1)
+
+
+# %%
 fig, (ax_band, ax_equity) = plt.subplots(
     2, 1, figsize=style.FIGSIZE["dual_v"], height_ratios=[1, 2], sharex=True
 )
@@ -602,10 +624,8 @@ ax_band.set_ylim(-0.5, 1.5)
 mark_events(ax_band, factors_df.index.year.tolist())
 
 cumulative = (1 + equity_returns).cumprod()
-positions = np.arange(len(cumulative))
-for cluster, colour in ((risk_on_cluster, COLORS["recede"]), (risk_off_cluster, COLORS["blue"])):
-    masked = np.where(labels_2 == cluster, cumulative.to_numpy(), np.nan)
-    ax_equity.plot(positions, masked, color=colour, linewidth=1.2)
+in_risk_on = labels_2 == risk_on_cluster
+plot_by_regime(ax_equity, cumulative.to_numpy(), in_risk_on)
 ax_equity.set_yscale("log")
 ax_equity.set_ylabel("Growth of 1 unit invested (log scale)")
 ax_equity.set_xlabel("Year")
@@ -658,9 +678,7 @@ ax_band.set_yticks([0, 1])
 ax_band.set_yticklabels(["Risk-off", "Risk-on"])
 ax_band.set_ylim(-0.5, 1.5)
 
-for cluster, colour in ((risk_on_cluster, COLORS["recede"]), (risk_off_cluster, COLORS["blue"])):
-    masked = np.where(labels_2 == cluster, rolling_vol.to_numpy() * 100, np.nan)
-    ax_vol.plot(positions, masked, color=colour, linewidth=1.2)
+plot_by_regime(ax_vol, rolling_vol.to_numpy() * 100, in_risk_on)
 for regime, colour in (("Risk-on", COLORS["copper"]), ("Risk-off", COLORS["amber"])):
     ax_vol.axhline(
         rolling_vol_by_regime.loc[regime, "Mean (%)"],
@@ -772,11 +790,14 @@ style.show_with_alt(
 annualized_by_regime.T.style.format("{:+.1f}")
 
 # %% [markdown]
-# The two long-short strategies named for safety, carry and defensive, are the ones that
-# stop paying when conditions deteriorate. That is the shape a reader should take away:
-# a strategy's average return over a full sample says nothing about whether it will be there
-# in the environment a portfolio needs it in, and the only way to find out is to condition
-# on the environment and look.
+# The two strategies a calm market reads as safe income - carry, which collects a yield
+# spread, and defensive, which is long low-risk assets - are the ones that stop paying when
+# conditions deteriorate. Value and bonds go the other way and earn more.
+#
+# A strategy's average return over a full sample therefore says nothing about whether it
+# will be there in the environment a portfolio needs it in. Finding out means conditioning
+# on the environment and looking, which is what makes a regime label worth estimating even
+# when nothing can act on it.
 
 # %% [markdown]
 # ## Regime statistics
@@ -882,11 +903,15 @@ display(
 )
 
 # %% [markdown]
-# Nobody lived through the first of those two numbers. It is the arithmetic of a stream that
-# keeps every month the market was falling and discards the ones in which it recovered, so it
-# accumulates the losses of a century of separate episodes into one uninterrupted decline.
-# The statistic is not wrong - it is the correct drawdown of the object it was computed on -
-# but the object is a construction of this notebook, and a reader who takes it for a crash
+# Nobody lived through the first of those two numbers. The risk-off months are selected by
+# the mixture's assignment, not by the sign of the equity return, so the stream holds gains
+# as well as losses - its average monthly return is positive. What it does not hold is the
+# months in between, and closing those gaps puts a loss from one decade immediately beside a
+# loss from the next, with none of the recovery that separated them. Compounded, decades of
+# separate episodes read as one uninterrupted decline.
+#
+# The statistic is not wrong; it is the correct drawdown of the object it was computed on.
+# But the object is a construction of this notebook, and a reader who takes it for a crash
 # has been misled by a table that never said which object it meant.
 #
 # That is the general form: a conditional statistic inherits the assumptions of the
@@ -944,7 +969,9 @@ display(
 # A model built to be acted on would be built differently. It would carry a transition
 # structure that makes staying in a regime more likely than leaving it - a hidden Markov
 # model is the standard choice - and it would be fitted forward in time so that each
-# month's label used only the months before it. Chapter 9 introduces both.
+# month's label used only the months before it. `09_model_based_features/11_hmm_regimes`
+# builds the first, and `09_model_based_features/13_regime_as_feature` turns the result into
+# a feature a model downstream can read.
 
 # %% [markdown]
 # ## Key takeaways
