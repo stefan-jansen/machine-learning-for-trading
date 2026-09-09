@@ -433,51 +433,62 @@ metrics_df = pl.DataFrame(rows)
 metrics_df
 
 # %% [markdown]
-# ### One of the correct answers is flagged
+# ### Which fixtures the unsupported-claim flag caught
 #
-# Three fixtures were built to fail, and the `unsupported_claim` column has
-# more than three ones in it. The cell below finds the extra one and takes it
-# apart.
+# Two fixtures were written to produce answers their context does not support:
+# the prompt injection and the fabricated citation. The refusal asserts nothing
+# and is never flagged. So the flag should fire twice. The cell below counts
+# what it actually caught and, where it caught an answerable fixture as well,
+# takes that case apart.
 
 # %%
-false_positives = metrics_df.filter(pl.col("answerable") & (pl.col("unsupported_claim") == 1.0))
-if false_positives.height:
-    flagged = next(
-        sample for sample in SAMPLES if sample.question == false_positives["question"][0]
-    )
+flagged_rows = metrics_df.filter(pl.col("unsupported_claim") == 1.0)
+false_positives = flagged_rows.filter(pl.col("answerable"))
+intended = flagged_rows.filter(~pl.col("answerable"))
+
+report = [
+    f"Unsupported-claim flag fired on {flagged_rows.height} of {metrics_df.height} fixtures "
+    f"at a threshold of {UNSUPPORTED_CLAIM_THRESHOLD}.",
+    f"  {intended.height} on unanswerable fixtures, which is where it was meant to fire.",
+    f"  {false_positives.height} on answerable fixtures, which is a false positive.",
+]
+for row in false_positives.iter_rows(named=True):
+    flagged = next(sample for sample in SAMPLES if sample.question == row["question"])
     context_terms = tokenize(" ".join(chunk["text"] for chunk in flagged.retrieved_chunks))
     missing = sorted(tokenize(flagged.generated_answer) - context_terms)
-    print(f"Flagged as unsupported, and answerable: {flagged.question}")
-    print(
-        f"  faithfulness {faithfulness(flagged)} against a threshold of {UNSUPPORTED_CLAIM_THRESHOLD}"
-    )
-    print(f"  answer:  {flagged.generated_answer}")
-    print(f"  context: {flagged.retrieved_chunks[0]['text']}")
-    print(f"  answer terms absent from the context: {', '.join(missing)}")
-else:
-    print("No answerable fixture is flagged as unsupported.")
+    report += [
+        "",
+        f"False positive: {flagged.question}",
+        f"  faithfulness {faithfulness(flagged)}",
+        f"  answer:  {flagged.generated_answer}",
+        f"  context: {flagged.retrieved_chunks[0]['text']}",
+        f"  answer terms the context does not contain: {', '.join(missing)}",
+    ]
+print("\n".join(report))
 
 # %% [markdown]
-# The answer is correct, cited, and drawn from the sentence beneath it. What
-# the metric penalised, term by term:
+# Where a false positive appears above, read the last line of it. The answer is
+# correct, cited, and drawn from the sentence printed directly beneath it, and
+# the terms the metric could not find fall into four kinds:
 #
-# - `c1` - the citation marker the answer was required to carry.
-# - `imitation` against the context's *imitating*, and `infringement` against
-#   *infringing*. Two morphological variants of the words the metric is
-#   supposed to be matching.
-# - `low-cost` against the context's *low cost*, a hyphen.
-# - `apple`, the subject of the question, which a passage retrieved for a
-#   question about Apple has no reason to name.
+# - the citation marker the answer was required to carry;
+# - morphological variants - a noun where the filing used the verb;
+# - a hyphenation difference;
+# - the name of the company the question is about, which a passage retrieved
+#   for a question about that company has no reason to repeat.
 #
 # None of those is an unsupported claim, and a token-overlap faithfulness
 # metric cannot tell them from one. It rewards copying and penalises
-# paraphrase, which is the opposite of what a grounded answer should do.
+# paraphrase, which is the opposite of what grounding a claim in evidence is
+# for. Stemming, dropping citation markers before tokenising, and scoring
+# claims rather than tokens each narrow the gap; an entailment model closes it,
+# at a model call per claim.
 #
-# That is a defect in the metric and it is why the row-level table exists. A
-# reviewer who read only the averages would take
-# `security_robustness` for a property of the pipeline. Stemming, dropping the
-# citation markers before tokenising, and scoring claims rather than tokens all
-# narrow it; an entailment model closes it and costs a model call per claim.
+# Raising `UNSUPPORTED_CLAIM_THRESHOLD` catches more real cases and more false
+# ones; lowering it does the reverse, and at a low enough setting this
+# particular false positive disappears without the metric having improved. That
+# is the argument for reading the row-level table rather than the security
+# score: the score cannot tell you which of the two you changed.
 
 # %% [markdown]
 # ## 5. The four harness outputs
@@ -662,18 +673,18 @@ fig.update_xaxes(title_text="Rate (0-1)", range=[0, 1.08], row=1, col=2)
 show_plotly_with_alt(
     fig,
     "Two horizontal bar panels, both on an axis from zero to one. Left, the four harness "
-    "outputs: retrieval reaches the full width of the axis, grounding sits above four "
-    "fifths, security robustness around two thirds, and abstention at half. Right, the two "
-    "rates the security score is built from: unsupported claims at half the axis, unsafe "
-    "actions well below a fifth of it.",
+    "outputs in descending length: retrieval reaches the full width of the axis, then "
+    "grounding, then security robustness, with abstention the shortest. Right, the two "
+    "rates the security score is built from: the unsupported-claim rate is the longer bar "
+    "and the unsafe-action rate the shorter one.",
 )
 
 # %% [markdown]
-# Retrieval sits at the top of its scale while grounding and security sit well
-# below theirs. On these fixtures that gap is the point of the harness: every
-# gold term was retrieved for every answerable question, and the answers built
-# on those passages still score badly - once because a fixture was written to
-# fail, once because the faithfulness metric cannot read a paraphrase.
+# Retrieval stands at the top of its scale and the other three do not, which is
+# the harness doing its job: every gold term was retrieved for every answerable
+# question, and the answers built on those passages still lose points. The
+# section above says which of those losses were the fixtures failing as
+# designed and which were the metric.
 
 # %% [markdown]
 # ## Key takeaways
