@@ -723,11 +723,12 @@ if not conformal_df.is_empty():
     show_with_alt(
         fig,
         "A scatter with one labelled point per case study: empirical coverage on the vertical "
-        "axis against mean interval width on the horizontal, the width expressed as a fraction of "
-        "the calibration fold's return standard deviation on a logarithmic scale. A dashed "
-        "horizontal line marks the nominal coverage level, so vertical distance from it is the "
-        "calibration error, and each point is shaded by the absolute size of that error against a "
-        "colour bar.",
+        "axis against mean interval width on the horizontal, on a logarithmic scale, the width "
+        "divided by the standard deviation of the outcomes over the same evaluated rows so that "
+        "case studies trading different return magnitudes stay comparable. A dashed horizontal "
+        "line marks the nominal coverage level, so vertical distance from it is the calibration "
+        "error, and each point is shaded by the absolute size of that error against a colour "
+        "bar.",
     )
 
 # %%
