@@ -410,9 +410,11 @@ print(
 )
 
 # %% [markdown]
-# A symbol that fails can be moved one step up the grid, which is a decision about that
-# symbol rather than a search over the sample. What it must not be moved to is whatever
-# order happens to pass on the data used to test the model.
+# The table above runs its test on each symbol's whole sample, so it describes the panel
+# and must not select for it. A symbol that fails may be moved one step up the grid, but
+# the diagnostic that triggers the move has to be computed on training observations alone.
+# Run on the full sample it is the evaluation period choosing the parameter, and a single
+# predetermined step is still a step the test data asked for.
 
 # %% [markdown]
 # ## The output a model reads

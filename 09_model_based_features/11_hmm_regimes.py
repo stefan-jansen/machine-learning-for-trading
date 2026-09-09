@@ -803,14 +803,14 @@ print(
 # %%
 shared = frame.index.intersection(indicator_frame.index)
 model_stressed = frame.loc[shared, "filtered_stressed"] > 0.5
-classifier_bearish = indicator_frame.loc[shared, "classification"] == -1
+classifier_range_bound = indicator_frame.loc[shared, "classification"] == -1
 
 print(f"Sessions the model calls stressed: {model_stressed.mean():.1%}")
-print(f"Sessions the classifier calls bearish or range-bound: {classifier_bearish.mean():.1%}")
-print(f"Sessions where the two agree: {(model_stressed == classifier_bearish).mean():.1%}")
-joint = float((model_stressed & classifier_bearish).mean())
-independent = float(model_stressed.mean() * classifier_bearish.mean())
-print(f"Stressed and bearish together: {joint:.1%}")
+print(f"Sessions the classifier calls range-bound: {classifier_range_bound.mean():.1%}")
+print(f"Sessions where the two agree: {(model_stressed == classifier_range_bound).mean():.1%}")
+joint = float((model_stressed & classifier_range_bound).mean())
+independent = float(model_stressed.mean() * classifier_range_bound.mean())
+print(f"Stressed and range-bound together: {joint:.1%}")
 print(f"What independence would give: {independent:.1%}")
 print(f"Ratio of the two: {joint / independent:.2f}")
 
@@ -820,13 +820,16 @@ print(f"Ratio of the two: {joint / independent:.2f}")
 # means almost nothing.
 #
 # The last three lines are the ones with content, and they are worth reading twice. The two
-# labels co-occur *less* often than they would if they were unrelated. Whatever the model's
-# stressed state is picking up, it is not the same thing as the classifier's bearish label,
-# and the intuition that high volatility and a falling price go together does not survive
-# contact with these two definitions of them.
+# labels co-occur *less* often than they would if they were unrelated.
+#
+# The classifier's -1 is worth naming precisely before that number is read: it is the
+# range-bound class, fired when the ADX and choppiness rules agree that price is going
+# nowhere, and it says nothing about direction. So the two labels being mutually exclusive
+# is what their definitions predict rather than a discovery: a stressed session is one with
+# large moves and a range-bound one is a session without them.
 #
 # That is a reason to carry both rather than either. One says how large the moves are and
-# the other says which way they are going; a conditioning rule usually wants each
+# the other says whether they are going anywhere; a conditioning rule usually wants each
 # separately, and a single label that has collapsed them into one is the thing to avoid.
 
 # %% [markdown]

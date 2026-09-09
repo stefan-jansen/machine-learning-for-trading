@@ -228,9 +228,11 @@ print(f"Order suggested from the correlogram: {suggestion.suggested_arima_order}
 # How fast that happens depends on the fitted persistence rather than on stationarity
 # alone, so the demonstration below prints the first and last forecasts and the spread
 # across the whole test period, against the spread of the returns the column is meant to
-# track. A column whose variation is three orders of magnitude below its target's carries
-# essentially nothing about it, and one that reaches an exactly constant vector has no rank
-# correlation at all.
+# track. Scale by itself settles nothing: a forecast equal to the target divided by a
+# thousand would rank the sessions exactly as the target does. What matters is where the
+# variation sits. After a handful of steps this forecast repeats one number, so the little
+# variation it has is confined to the first few sessions of the block, and any ordering it
+# supplies over the block is decided by those.
 
 # %%
 static_fit = ARIMA(train["returns"], order=(1, 0, 0)).fit()
@@ -375,9 +377,10 @@ print(f"Grid fits that did not converge: {(~grid['converged']).sum()} of {len(gr
 # the return it was trying to predict. The **information coefficient** is the rank
 # correlation between the two.
 #
-# A rank correlation needs a column that varies, so the multi-step forecast has no entry
-# here: its rank correlation is undefined by construction, which is the point the previous
-# section made.
+# A rank correlation needs a column that varies across the sessions it is scored over. The
+# multi-step forecast repeats one number after its first few, so a coefficient computed for
+# it would rest on a handful of sessions at the start of the block. It is left out for that
+# reason, not because the correlation cannot be computed.
 
 # %%
 scored_rows = []
@@ -555,15 +558,17 @@ show_plotly_with_alt(
 # | fitted order | the grid's lowest-AIC order, chosen on the training block alone | yes |
 # | residual | the realized return minus the one-step forecast, which is what a volatility model reads next | yes |
 #
-# The multi-step forecast is deliberately not on the list. It is constant after a few steps,
-# so it carries no information at any session and no rank correlation is defined for it.
+# The multi-step forecast is deliberately not on the list. It repeats one number after its
+# first few steps, so any score over the test block rests on those few sessions rather than
+# on the block.
 
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. **A forecast is a column, and a column has to vary.** A multi-step forecast from a
-#    stationary model decays to the unconditional mean, which makes it constant, which makes
-#    it useless whatever the model's accuracy.
+# 1. **A forecast is a column, and a column has to vary where it is scored.** A multi-step
+#    forecast from a stationary model decays to the unconditional mean within a few steps,
+#    so almost every session it covers carries the same number whatever the model's
+#    accuracy.
 # 2. **One-step-ahead is a horizon, not a parameter policy.** Filtering under fixed
 #    parameters and refitting on an expanding window are both causal and differ in cost and
 #    in whether the parameters follow the data. What is not causal is refitting on a window

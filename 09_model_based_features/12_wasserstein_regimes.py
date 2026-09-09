@@ -823,7 +823,11 @@ print(f"Windows per cluster after it: {np.bincount(index_labels[n_train_windows:
 #   taken. No costs and no slippage are charged.
 #
 # Compounding only the sessions inside a regime, which is the easier thing to write, splices
-# out the gaps and produces a drawdown belonging to no position anyone could hold.
+# out the gaps. The deepest drawdown is the same either way: the same returns compound in
+# the same order and only the flat stretches go. What changes is anything measured per unit
+# of time. The mean and volatility are annualized over fewer sessions than the rule was
+# exposed to, and a drawdown that took two years to climb out of is reported as though it
+# took one.
 
 # %%
 SESSIONS_PER_YEAR = 252
