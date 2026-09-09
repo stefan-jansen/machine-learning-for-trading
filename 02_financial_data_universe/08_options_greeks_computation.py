@@ -1079,8 +1079,7 @@ tick_sensitivity = _tick_sample.select("mid_price", "time_value").with_columns(
 )
 
 tick_by_time_value = (
-    tick_sensitivity.drop_nulls("tick_iv_width")
-    .with_columns(
+    tick_sensitivity.with_columns(
         pl.when(pl.col("time_value") < 0.05)
         .then(pl.lit("under 5 cents"))
         .when(pl.col("time_value") < 1.0)
@@ -1090,21 +1089,28 @@ tick_by_time_value = (
     )
     .group_by("time_value_bucket")
     .agg(
-        pl.len().alias("n"),
+        pl.len().alias("attempted"),
+        pl.col("tick_iv_width").is_null().sum().alias("no_solve_at_one_end"),
         pl.col("tick_iv_width").median().alias("median_iv_span_of_one_tick"),
     )
-    .sort("median_iv_span_of_one_tick")
+    .sort("median_iv_span_of_one_tick", nulls_last=True)
 )
-print("Volatility spanned by one tick of price uncertainty:")
+print("Volatility spanned by one tick of price uncertainty.")
+print("`no_solve_at_one_end` counts options where a perturbed price could not be inverted at")
+print("all: below intrinsic value, or outside the solver's bracket. The medians are over the")
+print("rest, so they describe options where both endpoints solved and understate the thin")
+print("bucket, whose hardest cases are the ones that drop out.")
 tick_by_time_value
 
 # %% [markdown]
-# One tick is worth orders of magnitude more volatility on the thin options than on the rest.
-# On those rows the quote simply does not determine a volatility to any useful precision, and
-# two implementations disagreeing there are not giving different answers to the same question -
-# they are answering one the price leaves open.
+# One tick is worth orders of magnitude more volatility on the thin options than on the rest,
+# and that is a lower bound on the effect rather than a measurement of it: the options where a
+# perturbed price cannot be inverted at all are counted separately, and they are concentrated
+# in the same bucket. On those rows the quote does not determine a volatility to any useful
+# precision, so two implementations disagreeing there are not giving different answers to the
+# same question - they are answering one the price leaves open.
 #
-# The vendor reached the same conclusion first, and the next cell shows it did.
+# The vendor's rows show a related pattern, measured next.
 
 # %%
 _by_code = (
@@ -1121,10 +1127,16 @@ _by_code
 
 # %% [markdown]
 # Options with almost no time value are many times rarer among the rows the vendor solved
-# directly than among the rest. The `iv_convergence` code and the time-value threshold are two
-# ways of naming the same set of contracts: the ones whose price does not pin down a
-# volatility. The vendor did not fail to solve those quotes so much as decline to pretend it
-# had.
+# directly than among the rest. That is an association between the two filters, and it is
+# strong, but it is not an identity: the codes in `07_sp500_options_eda` cover several distinct
+# fallback conditions - a bid near zero, a price at intrinsic value, a solve that did not
+# converge - and thin time value is only one route into them. Nothing here establishes which
+# condition applied to a given row, or what the vendor intended by it.
+#
+# So the two filters are not interchangeable and the notebook does not treat them as such. It
+# uses `iv_convergence`, which is the vendor's own record of how each number was produced, and
+# reports the time-value association as a measured pattern that helps explain why such a record
+# is needed.
 #
 # What follows for practice is a filter, not a fix. An implied volatility recovered from a
 # near-worthless option is not a measurement and should not become a feature. Filtering on
@@ -1235,11 +1247,13 @@ show_plotly_with_alt(
 #    numbers nobody had solved. Filtering on `iv_convergence` first leaves close agreement on
 #    every row.
 #
-# 7. **The vendor's convergence code is a time-value filter under another name.** Options with
-#    almost no time value are two orders of magnitude rarer among the rows solved directly than
-#    among the rest, and one tick of price uncertainty spans tens of times more volatility on
-#    those options than on the rest. Their prices do not determine a volatility, and the code
-#    is the vendor declining to pretend otherwise.
+# 7. **Thin time value and the vendor's fallback codes go together, without being the same
+#    test.** Options with almost no time value are two orders of magnitude rarer among the rows
+#    solved directly than among the rest, and one tick of price uncertainty spans tens of times
+#    more volatility on those options. The association is strong and the mechanism is clear,
+#    but the codes cover several distinct conditions and nothing here says which applied to a
+#    given row. Use `iv_convergence`, which is the vendor's record of what it did, rather than
+#    a time-value threshold standing in for it.
 #
 # 8. **Greeks are local sensitivities.** The charts show delta steepening and gamma peaking near
 #    the money as expiration approaches, which is also the regime where the Black-Scholes

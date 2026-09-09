@@ -115,7 +115,14 @@ print(
 
 # %%
 def select_constant_maturity_straddle(raw_options: pl.DataFrame) -> pl.DataFrame:
-    """Select the 'best' 30D ATM straddle per day from raw option chains."""
+    """Select each day's ATM straddle: one call and one put on the SAME strike and expiration.
+
+    Ranking the two legs independently and joining them on the date alone does not produce a
+    straddle. It produces whichever call and whichever put each sat closest to the target, and
+    when those differ the result is a strangle or a diagonal - priced, tracked and rolled as
+    though it were a single instrument. The legs are therefore paired on strike and expiration
+    first, and the ranking is applied to the pair.
+    """
     opts = raw_options.with_columns(
         pl.col("delta").abs().alias("abs_delta"),
         ((pl.col("ask") - pl.col("bid")) / pl.col("mid_price").clip(lower_bound=0.01)).alias(
@@ -130,19 +137,9 @@ def select_constant_maturity_straddle(raw_options: pl.DataFrame) -> pl.DataFrame
         & pl.col("abs_delta").is_between(TARGET_DELTA - DELTA_TOL, TARGET_DELTA + DELTA_TOL)
     )
 
-    def _best_leg(df: pl.DataFrame, cp: str) -> pl.DataFrame:
-        leg = df.filter(pl.col("call_put") == cp)
-        leg = leg.with_columns((pl.col("abs_delta") - TARGET_DELTA).abs().alias("_dd"))
-        return (
-            leg.with_columns(pl.col("_dd").rank("ordinal").over("date").alias("_rank"))
-            .filter(pl.col("_rank") == 1)
-            .drop(["_rank", "_dd"])
-        )
-
-    call_cols = [
-        "date",
-        "strike",
-        "expiration",
+    key = ["date", "strike", "expiration"]
+    calls = filtered.filter(pl.col("call_put") == "C").select(
+        *key,
         "days_to_maturity",
         "underlying_price",
         pl.col("mid_price").alias("call_mid"),
@@ -150,24 +147,32 @@ def select_constant_maturity_straddle(raw_options: pl.DataFrame) -> pl.DataFrame
         pl.col("ask").alias("call_ask"),
         pl.col("delta").alias("call_delta"),
         pl.col("theta").alias("call_theta"),
-    ]
-    put_cols = [
-        "date",
+        pl.col("abs_delta").alias("call_abs_delta"),
+    )
+    puts = filtered.filter(pl.col("call_put") == "P").select(
+        *key,
         pl.col("mid_price").alias("put_mid"),
         pl.col("bid").alias("put_bid"),
         pl.col("ask").alias("put_ask"),
         pl.col("delta").alias("put_delta"),
         pl.col("theta").alias("put_theta"),
-    ]
-    calls = _best_leg(filtered, "C").select(call_cols)
-    puts = _best_leg(filtered, "P").select(put_cols)
+    )
+
+    # An inner join on the full key is what makes this a straddle: a strike and expiration
+    # survive only if BOTH legs are quoted and pass the filters there.
+    pairs = calls.join(puts, on=key, how="inner").with_columns(
+        (pl.col("call_mid") + pl.col("put_mid")).alias("instr_mid"),
+        (pl.col("call_theta") + pl.col("put_theta")).alias("instr_theta"),
+        (pl.col("call_delta") + pl.col("put_delta")).alias("instr_delta"),
+        (pl.col("call_abs_delta") - TARGET_DELTA).abs().alias("_delta_gap"),
+        (pl.col("days_to_maturity") - sum(DTE_WINDOW) / 2).abs().alias("_dte_gap"),
+    )
+
     return (
-        calls.join(puts, on="date", how="inner")
-        .with_columns(
-            (pl.col("call_mid") + pl.col("put_mid")).alias("instr_mid"),
-            (pl.col("call_theta") + pl.col("put_theta")).alias("instr_theta"),
-            (pl.col("call_delta") + pl.col("put_delta")).alias("instr_delta"),
-        )
+        pairs.sort(["date", "_delta_gap", "_dte_gap", "strike"])
+        .group_by("date")
+        .first()
+        .drop(["_delta_gap", "_dte_gap"])
         .sort("date")
     )
 
@@ -263,29 +268,35 @@ roll_summary
 
 # %% [markdown]
 # The split is the result, and only one of the three groups is positive. Expiration changes
-# carry a large positive mean; days when only the strike moved are negative, as are days when
-# nothing changed. The whole of the upward phantom lives in the expiration changes.
+# carry a large positive mean. Days when only the strike moved and days when nothing changed
+# are close to each other and both negative, which is ordinary time decay showing through.
 #
-# That is what the mechanism predicts for the positive side. Moving to a later expiration buys
-# back the time value that decay had removed, and the series records the difference as a return
-# no position earned. Moving to a neighbouring strike at the same expiration exchanges one
-# contract for a similar one, with no time value to reset, so nothing pushes those days upward.
+# That is what the mechanism predicts. Moving to a later expiration buys back the time value
+# decay had removed, and the series records the difference as a return no position earned.
+# Moving to a neighbouring strike at the same expiration exchanges one contract for a very
+# similar one, with essentially no time value to reset - so those days behave like days on
+# which nothing happened, because in the relevant sense nothing did.
 #
-# They are not identical to unchanged days either - the strike-move group is the more negative
-# of the two - so a strike change is not free of construction effects. But it does not
-# manufacture the positive return that motivates this whole notebook, and lumping all 184
-# changes into one "roll day" average blends a large positive effect with two negative ones and
-# reports a figure that describes none of the three.
+# Lumping all the changes into a single "roll day" average blends one large positive effect
+# with two indistinguishable negative ones and reports a figure describing none of the three.
+# It would also imply that two thirds of the changes were contaminating the series, when the
+# measurement says they are not.
 #
 # The futures analogue is roll yield, and the difference is one of degree that becomes a
 # difference in kind. A quarterly futures roll contributes a small adjustment four times a
 # year. This series reselects on most days, so the phantom component is not an occasional
 # correction to an otherwise sound return stream - it is a large part of the stream.
 #
-# **A note on sign, because everything below depends on it.** The returns here are written from
-# the point of view of a short straddle: positive means the premium fell, which is a profit for
-# a seller. That is the strategy the case study builds towards, and it is the opposite of the
-# convention a long position would use.
+# **A note on sign, because everything below depends on it.** Every return in this notebook is
+# the return of the *instrument*: today's price over yesterday's, minus one. Positive means the
+# straddle got more expensive.
+#
+# That is the long convention, and it is used here for every series without exception, because
+# a price series and its returns should mean the same thing in every section. The case study
+# this feeds sells straddles rather than buying them, and a seller's P&L before costs is the
+# negation of what is printed below. Keeping the negation in one place, applied by the reader
+# who needs it, is safer than flipping the sign in some sections and not others - which is
+# exactly the error this notebook previously contained.
 
 # %% [markdown]
 # ### The sawtooth
@@ -376,17 +387,33 @@ show_plotly_with_alt(
 )
 
 # %% [markdown]
+# %% [markdown]
+# Run lengths below come from the contract identity itself. Encoding runs of an "unchanged"
+# flag instead drops the first observation of every contract - identities A, B, B, B give two
+# unchanged flags although B is held for three days - and understates every holding period by
+# exactly one.
+
 # %%
 _dte = cm_straddles["days_to_maturity"]
 _delta_dte = (_dte - _dte.shift(1)).drop_nulls()
-_same = cm_straddles["change_kind"] == "same contract"
-_runs = _same.rle()
+_held_runs = (
+    cm_straddles.select("strike", "expiration")
+    .with_columns(
+        (
+            (pl.col("strike") != pl.col("strike").shift(1))
+            | (pl.col("expiration") != pl.col("expiration").shift(1))
+        )
+        .fill_null(True)
+        .cum_sum()
+        .alias("spell")
+    )
+    .group_by("spell")
+    .agg(pl.len().alias("days"))
+)
 print(f"Days to expiration stays within {_dte.min()} and {_dte.max()} all year")
 print(f"  it falls on {(_delta_dte < 0).sum()} days and rises on {(_delta_dte > 0).sum()}")
-print(
-    f"  longest stretch holding one contract: {_runs.struct['len'].filter(_runs.struct['value']).max()} days"
-)
-print(f"  mean days between contract changes: {len(cm_straddles) / max(n_rolls, 1):.2f}")
+print(f"  longest stretch holding one contract: {_held_runs['days'].max()} days")
+print(f"  mean stretch: {_held_runs['days'].mean():.2f} days")
 
 # %% [markdown]
 # The teeth of the sawtooth are much finer than the description usually attached to one. Days
@@ -407,7 +434,7 @@ print(f"  mean days between contract changes: {len(cm_straddles) / max(n_rolls, 
 # day $t$, exit the **same contract** at mid on day $t + h$. This requires
 # looking up that specific contract in the raw option chain $h$ days later.
 #
-# $$r_{same} = \frac{P_{entry}^{mid}(K, T) - P_{exit}^{mid}(K, T)}{P_{entry}^{mid}(K, T)}$$
+# $$r_{same} = \frac{P_{exit}^{mid}(K, T) - P_{entry}^{mid}(K, T)}{P_{entry}^{mid}(K, T)}$$
 #
 # where $(K, T)$ identifies the specific strike and expiration.
 
@@ -523,9 +550,8 @@ same_contract = same_contract.with_columns(
     (pl.col("call_exit_mid") + pl.col("put_exit_mid")).alias("exit_mid"),
 )
 
-# Same-contract return (short straddle: positive = profitable)
 same_contract = same_contract.with_columns(
-    ((pl.col("entry_mid") - pl.col("exit_mid")) / pl.col("entry_mid")).alias("same_contract_ret"),
+    ((pl.col("exit_mid") - pl.col("entry_mid")) / pl.col("entry_mid")).alias("same_contract_ret"),
 )
 
 # How many lookups succeeded?
@@ -547,7 +573,7 @@ print(f"Exit prices found: {found} / {len(same_contract)} ({found / len(same_con
 naive_rets = cm_straddles.with_columns(
     pl.col("instr_mid").shift(-HOLDING_PERIOD).alias("naive_exit"),
 ).with_columns(
-    ((pl.col("instr_mid") - pl.col("naive_exit")) / pl.col("instr_mid")).alias("naive_ret"),
+    ((pl.col("naive_exit") - pl.col("instr_mid")) / pl.col("instr_mid")).alias("naive_ret"),
 )
 
 # Align for comparison
@@ -565,7 +591,7 @@ print(f"Paired observations: {len(comparison):,}")
 
 naive_vs_same = pl.DataFrame(
     {
-        "metric": ["mean_return", "std", "median_return", "pct_positive_short"],
+        "metric": ["mean_return", "std", "median_return", "pct_positive"],
         "naive_chained": [
             comparison["naive_ret"].mean(),
             comparison["naive_ret"].std(),
@@ -749,21 +775,23 @@ print(f"  return the held contract actually earned:          {adj_roll['held_ret
 # %%
 _zeroed_total = (1 + adjusted["zeroed_daily_ret"].fill_null(0.0)).product() - 1
 _held_total = (1 + adjusted["held_daily_ret"].fill_null(0.0)).product() - 1
-print(f"Cumulative return over {DEMO_YEAR}, short straddle:")
-print(f"  zeroing roll-day returns:        {_zeroed_total:+.1%}")
+print(f"Cumulative return of holding the straddle long over {DEMO_YEAR}:")
+print(f"  zeroing roll-day returns:         {_zeroed_total:+.1%}")
 print(f"  using the held contract's return: {_held_total:+.1%}")
-print(f"  difference: {_held_total - _zeroed_total:+.1%} of starting capital")
+print(f"  the two series differ by:         {_held_total - _zeroed_total:+.1%}")
+print("A seller of the straddle earns the negation of these, before any costs.")
 
 # %% [markdown]
-# The two constructions do not merely differ in magnitude. Over this single year they disagree
-# about whether the strategy made or lost money: one reports a large loss and the other a large
-# gain, on the same contracts, the same days and the same prices. Only the roll-day convention
-# separates them.
+# The two series part company by tens of percentage points of cumulative return over a single
+# year, from the same contracts, the same days and the same prices. Only the roll-day
+# convention separates them. On a series whose stated purpose is to be backtested, that is the
+# difference between two materially different answers about the same strategy.
 #
-# Zeroing is the more conservative-looking choice and it is not the safer one. It deletes the
-# P&L of most of the sample, because on this series the contract changes on the majority of
-# days, and the deleted days were profitable on average - so the deletion is not noise, it is a
-# one-sided subtraction repeated a hundred and eighty times.
+# Zeroing is the more conservative-looking choice and it is not the safer one. It deletes a
+# real return on most of the sample, because the contract changes on the majority of days, and
+# the deleted returns do not average to zero - so it is a one-sided subtraction repeated on the
+# majority of observations, not noise that cancels. Here it makes the instrument look worse
+# than it was.
 #
 # The general form of the error is worth naming, because it is not specific to straddles. A
 # roll is two facts at once - the instrument changed, and the market moved - and an adjustment
@@ -863,18 +891,16 @@ show_plotly_with_alt(
 
 # %%
 adjusted = adjusted.with_columns(
-    pl.col("instr_mid").shift(-1).alias("raw_entry"),
-    pl.col("instr_mid").shift(-(1 + HOLDING_PERIOD)).alias("raw_exit"),
+    pl.col("instr_mid").shift(-HOLDING_PERIOD).alias("raw_exit"),
 ).with_columns(
-    ((pl.col("raw_entry") - pl.col("raw_exit")) / pl.col("raw_entry")).alias("naive_fwd_ret"),
+    ((pl.col("raw_exit") - pl.col("instr_mid")) / pl.col("instr_mid")).alias("naive_fwd_ret"),
 )
 
 # Continuous-adjusted
 adjusted = adjusted.with_columns(
-    pl.col("price_held").shift(-1).alias("adj_entry"),
-    pl.col("price_held").shift(-(1 + HOLDING_PERIOD)).alias("adj_exit"),
+    pl.col("price_held").shift(-HOLDING_PERIOD).alias("adj_exit"),
 ).with_columns(
-    ((pl.col("adj_entry") - pl.col("adj_exit")) / pl.col("adj_entry")).alias("cont_fwd_ret"),
+    ((pl.col("adj_exit") - pl.col("price_held")) / pl.col("price_held")).alias("cont_fwd_ret"),
 )
 
 # Merge with same-contract returns
@@ -933,9 +959,9 @@ three_way
 # 4. **Zeroing roll-day returns deletes real P&L.** On a roll day you held yesterday's
 #    contract, and it moved; that move is a return, not a transaction. The held contract is
 #    recoverable from the raw chain on every roll day here, and over a single year the two
-#    reconstructions disagree about the *sign* of the strategy's return - a large loss against
-#    a large gain, from the same prices. The days zeroing discards were profitable on average,
-#    so the error is one-sided and it compounds. The continuous series should take the held
+#    reconstructions differ by tens of percentage points of cumulative return from identical
+#    prices. The discarded returns do not average to zero, so the error is one-sided and it
+#    compounds over the majority of the sample. The continuous series should take the held
 #    contract's return.
 #
 # 5. **Roll costs are transaction costs, not returns.** The bid-ask actually crossed to switch
