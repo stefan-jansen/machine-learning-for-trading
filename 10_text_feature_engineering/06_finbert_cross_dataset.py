@@ -303,10 +303,14 @@ print(f"FinMarBa, zero-shot: accuracy {accuracy:.1%}, macro F1 {f1:.3f}, n={len(
 print(f"Always answering the majority class: accuracy {majority_rate:.1%}")
 
 # %% [markdown]
-# The matrix says which way the errors run, which a single accuracy cannot. The row is what
-# the market did after the headline and the column is the model's reading of it, so an
-# off-diagonal cell is a case where the two disagreed - and the shape of that disagreement is
-# what tells you whether the model is confused or is answering a different question.
+# The matrix says which way the disagreements run, which a single accuracy cannot. The row is
+# what the market did after the headline and the column is the model's reading of it, so each
+# off-diagonal cell counts one kind of disagreement and the grid shows whether they are
+# spread evenly or concentrated in particular classes.
+#
+# It cannot say why they disagree. The same counts would arise from a model that is unsure
+# and from one answering a different question, and nothing in a table of counts separates
+# those. What settles it here is the label definition printed earlier, not this figure.
 
 # %%
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
@@ -364,8 +368,11 @@ show_with_alt(
 #    argues for fine-tuning on headlines. Read correctly, it argues for deciding whether you
 #    want a model of what text says or a model of what prices do next, because they are
 #    different models and only one of them is trained here.
-# 5. **The confusion matrix carries the evidence a scalar cannot.** Which way the errors run
-#    distinguishes a model that is unsure from one that is answering a question nobody asked.
+# 5. **A confusion matrix shows where the disagreement sits, not what causes it.** It is
+#    worth reading for which classes agree and which do not, and it cannot tell you whether a
+#    model is unsure or is answering a different question. Only the labels' provenance does
+#    that, and measuring this model's sentiment performance would need sentiment annotations
+#    on these headlines, which no one has made.
 
 # %%
 output_dir = get_chapter_dir(10) / "output" / "finbert_cross_dataset"
