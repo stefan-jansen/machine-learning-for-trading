@@ -27,6 +27,19 @@ UTC = UTC
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
+#
+# Keep prose out of the SQL below. SQLite stores a table's CREATE text verbatim in
+# `sqlite_master` and re-parses it on `ALTER TABLE ... DROP COLUMN`; a trailing `--`
+# comment inside the statement makes that re-parse fail with "incomplete input", so a
+# comment written for the next reader breaks a migration years later. Explain a column
+# here, or above the migration that adds it.
+#
+# `prediction_metrics.direction_label_error` says why `direction_label` is NULL when a
+# direction sibling was declared and scoring against it still did not land - a NULL that
+# otherwise reads identically to "this label declares no sibling". It is declared rather
+# than left to `_upsert_wide_metrics`'s auto-add, which types a new column from the first
+# value it sees: on a healthy registry that is the None a successful run writes, which
+# would make the column REAL and put every later message in a numeric one.
 
 REGISTRY_SCHEMA_SQL = """\
 CREATE TABLE IF NOT EXISTS training_runs (
@@ -96,7 +109,8 @@ CREATE TABLE IF NOT EXISTS prediction_metrics (
     ic_mean REAL, ic_std REAL, ic_t REAL, n_folds REAL,
     pct_positive REAL, task_type TEXT,
     accuracy REAL, balanced_accuracy REAL, auc_roc REAL, auc_pr REAL,
-    log_loss REAL, brier_score REAL
+    log_loss REAL, brier_score REAL,
+    direction_label_error TEXT
 );
 
 CREATE TABLE IF NOT EXISTS fold_metrics (
@@ -854,6 +868,20 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
         db, "candidate_sets", "supersedes_hash"
     ):
         db.execute("ALTER TABLE candidate_sets ADD COLUMN supersedes_hash TEXT")
+
+    # Additive and outside every hash: registry columns reach no specification, so this
+    # moves no identity and invalidates no registered row. It exists because a NULL
+    # `direction_label` carried two opposite meanings - "no direction sibling is declared
+    # for this label", which `fwd_ret_24h` legitimately produces in every family, and "one
+    # is declared and scoring against it failed", which every `deep_learning` run in
+    # `crypto_perps_funding` produced for months while the only trace was a warning in a
+    # papermill log the harness deletes on success. Declared explicitly for the type: the
+    # auto-add in `_upsert_wide_metrics` would infer REAL from the None a healthy run
+    # writes first.
+    if "prediction_metrics" in tables and not _table_has_column(
+        db, "prediction_metrics", "direction_label_error"
+    ):
+        db.execute("ALTER TABLE prediction_metrics ADD COLUMN direction_label_error TEXT")
 
     # The share of treatment rows the block permutation could not move. It is computed on
     # every fit and warned about, and the warning only fires when the fit executes, so a
