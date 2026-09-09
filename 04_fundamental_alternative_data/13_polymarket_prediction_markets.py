@@ -1,319 +1,426 @@
+# ---
+# jupyter:
+#   jupytext:
+#     cell_metadata_filter: tags,-all
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.19.3
+#   kernelspec:
+#     display_name: Python 3 (ipykernel)
+#     language: python
+#     name: python3
+# ---
+
 # %% [markdown]
-# # Polymarket Prediction Markets: High-Liquidity Crypto Event Contracts
+# # Polymarket Prediction Markets: Crypto-Settled Event Contracts
 #
 # **Chapter 4: Fundamental and Alternative Data**
 # **Docker image**: `ml4t`
+# **Section Reference**: Section 4.4 (Understanding Alternative Data)
 #
 # ## Purpose
 #
-# Polymarket is the world's largest prediction market by trading volume, operating
-# on the Polygon blockchain with USDC settlement. This notebook loads pre-downloaded
-# Polymarket OHLCV data from the centralized data pipeline and compares it with the
-# Kalshi data from the previous notebook to illustrate cross-platform differences in
-# liquidity, pricing, and market structure. An optional live API demo is available
-# for interactive use but disabled by default for automated runs.
+# The previous notebook read the regulated prediction market. This one reads the other kind.
+# Polymarket runs on the Polygon blockchain, settles in a dollar stablecoin rather than dollars,
+# imposes no position limit, and lists whatever its users ask for. It is reported to carry far
+# more volume than the regulated venue, which Part 5 explains this feed cannot confirm, and it is
+# not available to US persons.
+#
+# The pair is worth studying together because the differences between them are the differences
+# that matter when sourcing any alternative dataset from a venue rather than a vendor: who is
+# allowed to trade there decides who sets the price, and what the venue lists decides what
+# questions its data can answer.
 #
 # ## Learning Objectives
 #
 # After completing this notebook, you will be able to:
-# - Understand Polymarket contract structure and crypto mechanics
-# - Load and explore pre-downloaded Polymarket OHLCV data
-# - Compare Polymarket vs Kalshi on overlapping markets (Fed rate decisions)
-# - Build implied probability indicators from prediction market OHLCV
+#
+# - State the structural differences between a regulated and an unregulated prediction market,
+#   and say which of them affect the data rather than the trading.
+# - Establish how many markets, bars and dates a snapshot actually contains before computing
+#   anything from it.
+# - Recognize a threshold ladder on either venue, and check the monotonicity it has to satisfy.
+# - Explain why the volume fields of two venues cannot be compared, and what can be compared
+#   instead.
+# - Build the same probability features on both venues, and read them against the sample size.
+#
+# ## Prerequisites
+#
+# ```bash
+# python data/prediction_markets/download.py
+# ```
 #
 # ## Cross-References
 #
-# - **Upstream**: `data/prediction_markets/download.py` (batch downloads)
-# - **Downstream**: Chapter 8 event features, macro regime indicators
-# - **Related**: [`12_kalshi_prediction_markets`](12_kalshi_prediction_markets.ipynb) (CFTC-regulated alternative)
+# - **Upstream**: `data/prediction_markets/download.py`
+# - **Related**: [`12_kalshi_prediction_markets`](12_kalshi_prediction_markets.ipynb) (the CFTC-regulated venue)
 
 # %%
 """Polymarket Prediction Markets - compare crypto-based event contracts with Kalshi for ML feature engineering."""
 
-import re
-import warnings
-
-warnings.filterwarnings("ignore")
-
+import plotly.express as px
 import plotly.graph_objects as go
 import polars as pl
 from plotly.subplots import make_subplots
 
 from data.prediction_markets.loader import load_kalshi, load_polymarket
 from utils.paths import get_output_dir
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
-# Production defaults - Papermill injects overrides for CI
-LIVE = False
-
-# %% [markdown]
-# ## 1. Polymarket Contract Structure
-#
-# Polymarket uses conditional tokens on the Polygon blockchain.
-# Each market has YES and NO outcome tokens that trade against USDC.
-#
-# | Feature | Description |
-# |---------|-------------|
-# | **Settlement** | USDC (stablecoin) |
-# | **Position Limit** | None |
-# | **Trading** | 24/7 |
-# | **Fees** | Maker rebates, taker fees (~1-2%) |
-# | **Min Order** | ~$1 |
-#
-# ### Polymarket vs Kalshi
-#
-# | Aspect | Polymarket | Kalshi |
-# |--------|------------|--------|
-# | **Regulation** | Unregulated | CFTC-regulated |
-# | **Liquidity** | Higher | Lower |
-# | **US Access** | Restricted | Yes |
-# | **Settlement** | USDC (crypto) | USD (fiat) |
-# | **Position Limits** | None | \$25,000 |
-
-# %% [markdown]
-# ## 2. Load Polymarket Data
-#
-# We load pre-downloaded OHLCV data produced by
-# `data/prediction_markets/download.py`. This keeps Chapter 4 notebooks aligned
-# with the centralized data workflow used elsewhere in the book.
+CONFIDENT_PROBABILITY = 0.2  # a contract within this of zero or one is treated as settled
+LIVE = False  # set True to query the live Polymarket market list; off for reproducible runs
 
 # %%
-df = load_polymarket()
-
-print(f"Loaded {len(df):,} observations across {df['symbol'].n_unique()} markets")
-print(f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
-
-df.group_by("symbol").len().rename({"len": "days"}).sort("symbol")
-
+OUTPUT_DIR = get_output_dir(4, "polymarket")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # %% [markdown]
-# ## 3. Contract Universe
+# ## 1. The two venues
 #
-# The downloaded dataset contains daily OHLCV bars for curated, non-political
-# Polymarket contracts. The `close` price is the implied probability of the YES
-# outcome. We summarize the downloaded universe before comparing it with Kalshi.
+# Both list binary contracts whose price is a probability. Everything else about them differs,
+# and the differences fall into two groups.
+#
+# | | Polymarket | Kalshi |
+# |---|---|---|
+# | Regulator | None | Commodity Futures Trading Commission |
+# | Settlement asset | USDC, a dollar stablecoin | US dollars |
+# | Position limit | None | Twenty-five thousand dollars per contract |
+# | Available to US persons | No | Yes |
+# | Listing | User-proposed, broad | Exchange-defined, narrower |
+#
+# The first four rows are about **who can trade and how much**, and they decide whose views the
+# price aggregates. A venue closed to US persons prices a US interest-rate decision using the
+# opinions of everyone except the people closest to it, which is a selection effect, not a
+# defect, and one to keep in mind before treating either price as the market's view.
+#
+# The last row is about **what gets listed**, and it decides which questions the data can answer
+# at all. It is also the row most often overstated, as Part 3 shows.
 
+# %% [markdown]
+# ## 2. What the snapshot contains
+#
+# The downloader ships a small, reproducible sample rather than a live query, so the first thing
+# to establish is how small. Every statement later in this notebook is bounded by these three
+# numbers.
 
 # %%
-# Map every contract into the four trading-relevant buckets the chapter
-# discusses (monetary_policy, crypto, commodities, geopolitics) using a
-# native polars regex chain - no Python UDF. The inference takes
-# precedence over the loader's coarser provider category (e.g. an
-# "economics" Fed-rate contract maps to monetary_policy here) so that
-# the cross-platform Fed comparison below picks it up. Anything that
-# doesn't match falls back to the provider category, then to "other".
-slug = pl.col("symbol").str.to_lowercase().str.replace_all("-", " ")
-inferred_category = (
-    pl.when(slug.str.contains(r"\b(fed|interest rate|fomc|inflation|cpi|gdp)\b"))
-    .then(pl.lit("monetary_policy"))
-    .when(slug.str.contains(r"\b(bitcoin|btc|ethereum|eth|crypto|solana)\b"))
-    .then(pl.lit("crypto"))
-    .when(slug.str.contains(r"\b(crude oil|gold|s&p|nasdaq|spy|stock)\b"))
-    .then(pl.lit("commodities"))
-    .when(slug.str.contains(r"\b(iran|china|russia|war|ceasefire|ukraine)\b"))
-    .then(pl.lit("geopolitics"))
-    .otherwise(None)
+poly = load_polymarket().sort("symbol", "timestamp")
+print(f"Rows: {len(poly)}")
+print(f"Markets: {poly['symbol'].n_unique()}")
+print(
+    f"Dates: {poly['timestamp'].n_unique()}, {poly['timestamp'].min()} to {poly['timestamp'].max()}"
 )
+print(f"Categories: {', '.join(sorted(poly['category'].unique()))}")
 
-df = df.with_columns(
-    pl.coalesce(inferred_category, pl.col("category"), pl.lit("other")).alias("market_category"),
-    (pl.col("high") - pl.col("low")).alias("intraday_range"),
-    (pl.col("close") - 0.5).abs().alias("conviction"),
-    ((pl.col("close") > 0.8) | (pl.col("close") < 0.2)).cast(pl.Int8).alias("high_confidence"),
-)
-
-contracts = (
-    df.group_by(["symbol", "market_category"])
+# %%
+latest = (
+    poly.sort("timestamp")
+    .group_by("symbol")
     .agg(
-        pl.col("close").first().alias("initial_prob"),
-        pl.col("close").last().alias("latest_prob"),
-        pl.col("volume").sum().alias("total_volume"),
-        pl.col("intraday_range").mean().alias("avg_intraday_range"),
-        pl.col("timestamp").min().alias("first_date"),
-        pl.col("timestamp").max().alias("last_date"),
-        pl.len().alias("observations"),
+        pl.col("category").last(),
+        pl.col("close").last().alias("probability"),
+        pl.col("volume").sum().alias("price_points"),
+        pl.len().alias("bars"),
     )
-    .sort("total_volume", descending=True)
+    .sort("probability", descending=True)
 )
-contracts
-
-# %% [markdown]
-# The centralized download focuses on curated, non-political contracts with
-# useful history. This is a better fit for reproducible notebook execution than
-# querying whatever happens to be live on Polymarket at run time.
-
-# %% [markdown]
-# ## 4. Categorizing Markets
-#
-# We compare the downloaded Polymarket markets by broad event category.
+latest
 
 # %%
-category_stats = (
-    contracts.group_by("market_category")
-    .agg(
-        pl.len().alias("n_markets"),
-        pl.col("total_volume").sum().alias("total_volume"),
-        pl.col("avg_intraday_range").mean().alias("avg_intraday_range"),
-        pl.col("latest_prob").mean().alias("avg_latest_prob"),
-    )
-    .sort("total_volume", descending=True)
-)
-category_stats
+print(f"Markets appearing on both dates: {(latest['bars'] == 2).sum()}")
+print(f"Markets appearing on one date only: {(latest['bars'] == 1).sum()}")
 
 # %% [markdown]
-# ## 5. Implied Probability Distribution
-#
-# The closing price is the market's implied probability of the event occurring.
-# We visualize the latest contract probabilities across the downloaded universe.
+# A snapshot in which most markets appear once and none appears more than twice is a smoke test,
+# not a history. It is enough to read a cross-section of prices and to compare the two venues'
+# structure; it is not enough to compute a distribution, a volatility, or anything else that needs
+# a series. The sections below stay inside that limit and say where it binds.
 
 # %%
-valid_prices = contracts.filter(pl.col("latest_prob").is_not_null())
-
-fig = go.Figure()
-
-fig.add_trace(
-    go.Histogram(
-        x=valid_prices["latest_prob"].to_list(),
-        nbinsx=20,
-        marker_color=COLORS["blue"],
-        opacity=0.8,
-    )
+fig = px.scatter(
+    latest.with_columns(
+        label=pl.col("symbol").str.replace(":YES", "").str.slice(0, 44)
+    ).to_pandas(),
+    x="probability",
+    y="label",
+    color="category",
+    title="Almost every listed market is priced at one end of the range",
+    labels={"probability": "Implied probability", "label": "", "category": "Category"},
+)
+fig.update_layout(height=460, xaxis_tickformat=".0%", xaxis_range=[-0.05, 1.05], margin=dict(l=300))
+show_plotly_with_alt(
+    fig,
+    "Dot plot of every market in the snapshot against its implied probability, coloured by "
+    "category. The points cluster hard against both ends of the axis with almost nothing in the "
+    "middle.",
 )
 
-fig.update_layout(
-    title=dict(
-        text="Downloaded Polymarket contracts cluster at near-consensus 0 or 1",
-        y=0.95,
-    ),
-    xaxis_title="Latest Implied Probability",
-    yaxis_title="Number of Contracts",
-    xaxis=dict(tickformat=".0%", range=[0, 1.05]),
-    height=450,
-    margin=dict(t=90, b=60, l=60, r=40),
-)
-
-fig.show()
+# %% [markdown]
+# The gap in the middle of that axis is the normal state of a prediction market and it is worth
+# understanding before building anything on one. A contract only sits near even odds while the
+# question is genuinely open; most listed questions are either already decided by events or were
+# never close. A feature built on "the market's probability" is therefore a feature that is
+# informative on a small and shifting subset of the listed universe, and the rest of the time it
+# is reporting a settled fact.
 
 # %% [markdown]
-# Contracts near 0 or 1 reflect near-consensus outcomes. The contracts between
-# 0.2 and 0.8 are where genuine uncertainty exists and where prediction market
-# signals are typically most useful for feature engineering.
-
-# %% [markdown]
-# ## 6. Volume vs Intraday Range
+# ## 3. Both venues price ladders
 #
-# In the current snapshot, the downloaded universe has 1-2 daily bars per
-# market, so per-contract total volume is essentially constant across rows
-# (the sum-of-bars proxy clusters in a narrow band) and the corresponding
-# scatter degenerates into a vertical strip. Rather than ship a misleading
-# visual, we report the same information as a table: contracts ranked by
-# average intraday range within each category. When the downloader window
-# is widened (more bars per market), the scatter regains its usual
-# volume-vs-volatility spread.
+# The obvious way to describe the difference between the two venues is that Kalshi lists a ladder
+# of rate thresholds and Polymarket lists individual event bets. The snapshot refutes it: several
+# of these markets ask whether Bitcoin is above each of a series of levels on the same date,
+# which is the same construction as Kalshi's rate ladder applied to a different underlying.
+
+# %% [markdown]
+# Two things have to match before a set of contracts is a ladder rather than a collection.
+# They must resolve on the **same terms** - a Bitcoin level on 2 May and the same level on
+# 31 May are different questions - and they must be priced on the **same date**, since a
+# comparison across dates measures the market moving rather than the shape of the distribution.
+# The ticker carries the resolution term, so both conditions can be enforced rather than assumed.
 
 # %%
-category_colors = {
-    "monetary_policy": COLORS["amber"],
-    "crypto": COLORS["slate"],
-    "technology": COLORS["copper"],
-    "science": COLORS["positive"],
-    "commodities": COLORS["blue"],
-    "geopolitics": COLORS["negative"],
-    "other": COLORS["neutral"],
-}
+LADDER_TICKER = r"(?i)^BITCOIN-ABOVE-(?<threshold_k>\d+)K-ON-(?<resolves>[A-Z]+-\d+)"
 
-contracts.select(
-    "symbol",
-    "market_category",
-    "total_volume",
-    "avg_intraday_range",
-).sort("avg_intraday_range", descending=True).head(10)
-
-# %% [markdown]
-# High-volume, high-range contracts are the ones where new information moved
-# probabilities meaningfully - the natural candidates for event features or
-# cross-platform comparison.
-
-# %% [markdown]
-# ## 7. Probability Evolution
-#
-# The downloaded OHLCV data lets us inspect how probability evolved through
-# time for the most active contracts.
-
-# %%
-# Pick the three contracts whose probability moved most over the snapshot
-# (largest |latest_prob - initial_prob|). Picking by total_volume can land
-# on contracts that flat-lined near 0 or 1 across both available bars,
-# producing a near-blank chart.
-movers = (
-    contracts.with_columns(
-        (pl.col("latest_prob") - pl.col("initial_prob")).abs().alias("abs_move"),
-    )
-    .filter(pl.col("latest_prob").is_not_null() & pl.col("initial_prob").is_not_null())
-    .sort("abs_move", descending=True)
-    .head(3)
+candidates = (
+    poly.with_columns(parsed=pl.col("symbol").str.extract_groups(LADDER_TICKER))
+    .unnest("parsed")
+    .drop_nulls("threshold_k")
+    .with_columns(pl.col("threshold_k").cast(pl.Int64))
 )
-top_contracts = movers["symbol"].to_list()
-
-fig = go.Figure()
-palette = [COLORS["blue"], COLORS["amber"], COLORS["copper"]]
-
-for sym, color in zip(top_contracts, palette, strict=False):
-    data = df.filter(pl.col("symbol") == sym).sort("timestamp").to_pandas()
-    label = sym[:50] + "..." if len(sym) > 50 else sym
-    fig.add_trace(
-        go.Scatter(
-            x=data["timestamp"],
-            y=data["close"],
-            mode="lines+markers",
-            name=label,
-            line=dict(color=color, width=2),
+if candidates.is_empty():
+    ladder = candidates.select("symbol", "threshold_k", "resolves", "timestamp", "close")
+    breaks = ladder
+    print("No threshold ladder in this snapshot.")
+else:
+    # The resolution term and date with the most contracts is the one worth drawing.
+    # Ties on contract count are broken by the most recent date and then by the resolution
+    # term, so the same group is chosen on every run over the same input.
+    best = (
+        candidates.group_by("resolves", "timestamp")
+        .len()
+        .sort(["len", "timestamp", "resolves"], descending=[True, True, False])
+        .row(0, named=True)
+    )
+    ladder = (
+        candidates.filter(
+            (pl.col("resolves") == best["resolves"]) & (pl.col("timestamp") == best["timestamp"])
         )
+        .sort("threshold_k")
+        .select("symbol", "threshold_k", "resolves", "timestamp", "close")
     )
-
-fig.update_layout(
-    title=dict(
-        text="Top-mover Polymarket contracts stayed near 0 over the 24-hour snapshot",
-        y=0.97,
-    ),
-    xaxis_title="Date",
-    yaxis_title="Implied Probability",
-    yaxis=dict(tickformat=".0%", range=[0, 1.05]),
-    height=500,
-    margin=dict(t=160, b=60, l=60, r=40),
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
-)
-
-fig.show()
-
-# %% [markdown]
-# The snapshot bundled with the book covers a 24-hour window with one or two
-# daily bars per contract, so the trajectories appear close to flat: the
-# downloader is configured for a reproducible smoke test, not a long history.
-# Widen the window via the downloader's `--max-markets-per-category` and
-# `--search-results-per-query` flags to surface multi-week histories. The
-# most informative contracts are those that both moved materially and stayed
-# away from the trivial 0 or 1 endpoints for part of the sample.
-
-# %% [markdown]
-# ## 8. Optional Live Market Discovery Demo
-#
-# The main notebook path should use the centralized downloads. For interactive
-# exploration, set `LIVE=True` via papermill or in the notebook to inspect the
-# current Polymarket market universe without affecting routine test runs.
+    breaks = ladder.filter(pl.col("close").diff() > 0)
+    print(f"Contracts resolving on {best['resolves']}, priced {best['timestamp']}: {len(ladder)}")
+    print(f"Places where a higher threshold's bid exceeds a lower threshold's: {len(breaks)}")
+ladder
 
 # %%
-live_snapshot = None
+fig = px.line(
+    ladder.to_pandas(),
+    x="threshold_k",
+    y="close",
+    markers=True,
+    title="An unregulated venue prices the same ladder shape as a regulated one",
+    labels={
+        "threshold_k": "Bitcoin price threshold (thousands of USD)",
+        "close": "Probability the price is above the threshold",
+    },
+    color_discrete_sequence=[COLORS["amber"]],
+)
+fig.update_layout(height=380, yaxis_tickformat=".0%", yaxis_range=[-0.02, 1.05])
+show_plotly_with_alt(
+    fig,
+    "Line chart with markers of the probability Bitcoin exceeds each listed price threshold on a "
+    "single date, falling from near certainty at the lowest threshold to almost nothing at the "
+    "highest, with the steep fall between the second and third.",
+)
 
+# %% [markdown]
+# The curve has the same shape as the Fed ladder in the previous notebook and the same constraint
+# holds: a higher threshold cannot be priced above a lower one. What differs between the venues is
+# not the mechanism but the subject. Kalshi's ladders are on the outcomes its regulator has
+# approved, which in practice means economic releases and policy decisions; Polymarket's are on
+# whatever its users proposed, which in this snapshot means crypto prices, a space launch and a
+# central bank appointment.
+
+# %% [markdown]
+# ## 4. The same event on both venues
+#
+# Both list contracts on Federal Reserve decisions, which is the one place a direct comparison is
+# available. The comparison is still not like for like, and the reason is instructive.
+
+# %%
+kalshi = load_kalshi()
+kalshi_latest = (
+    kalshi.sort("timestamp")
+    .group_by("symbol")
+    .agg(
+        pl.col("close").last().alias("probability"),
+        pl.col("volume").sum().alias("volume_contracts"),
+    )
+    .with_columns(threshold=pl.col("symbol").str.split("-T").list.last().cast(pl.Float64))
+    .sort("threshold")
+)
+poly_fed = latest.filter(
+    pl.col("symbol").str.contains(r"(?i)fed|powell|interest-rate|shelton")
+).sort("probability", descending=True)
+
+print(f"Kalshi rate contracts: {len(kalshi_latest)}")
+print(f"Polymarket policy contracts: {len(poly_fed)}")
+
+# %%
+fig = make_subplots(
+    rows=1,
+    cols=2,
+    subplot_titles=("Kalshi: one meeting's rate thresholds", "Polymarket: separate policy events"),
+    horizontal_spacing=0.35,
+)
+fig.add_trace(
+    go.Bar(
+        x=kalshi_latest["probability"],
+        y=[f"above {t}%" for t in kalshi_latest["threshold"]],
+        orientation="h",
+        marker_color=COLORS["blue"],
+        text=[f"{p:.0%}" for p in kalshi_latest["probability"]],
+        textposition="outside",
+        cliponaxis=False,
+    ),
+    row=1,
+    col=1,
+)
+fig.add_trace(
+    go.Bar(
+        x=poly_fed["probability"],
+        y=[s.replace(":YES", "").replace("-", " ").title()[:38] for s in poly_fed["symbol"]],
+        orientation="h",
+        marker_color=COLORS["amber"],
+        text=[f"{p:.1%}" for p in poly_fed["probability"]],
+        textposition="outside",
+        cliponaxis=False,
+    ),
+    row=1,
+    col=2,
+)
+fig.update_xaxes(range=[0, 1.15], tickformat=".0%", title_text="Implied probability", row=1, col=1)
+# A download configured for other categories can leave the policy subset empty, in which case
+# there is no maximum to scale by and the right thing is a default range rather than a crash.
+poly_ceiling = 1.0 if poly_fed.is_empty() else float(poly_fed["probability"].max()) * 1.5
+fig.update_xaxes(
+    range=[0, poly_ceiling],
+    tickformat=".1%",
+    title_text="Implied probability, own scale",
+    row=1,
+    col=2,
+)
+fig.update_layout(height=440, showlegend=False, margin=dict(l=170, r=90))
+show_plotly_with_alt(
+    fig,
+    "Two horizontal bar panels on separate probability scales. The left panel's bars span nearly "
+    "the whole range; the right panel's all sit within a few percent of zero, which is why the "
+    "scales are not shared.",
+)
+
+# %% [markdown]
+# The two panels carry separate scales deliberately. Kalshi's ladder spans the whole probability
+# range because a ladder always does: some threshold is nearly certain and some is nearly
+# impossible. Polymarket's policy contracts are all tail events in this snapshot, so a shared axis
+# would compress them to invisibility and would also suggest a like-for-like comparison that does
+# not exist. These are different questions about the same institution, not two prices for one
+# contract.
+#
+# Where the venues do list the same question, the difference between their prices is the
+# interesting quantity, and it is a measure of who is allowed to trade rather than of who is
+# right. That comparison needs both venues to list a genuinely identical contract, which this
+# snapshot does not contain.
+
+# %% [markdown]
+# ## 5. One of these columns is not a volume
+#
+# Both feeds carry a column called `volume`, and reading the providers rather than the column
+# names is what settles what they hold. Kalshi's is contracts traded, which is a volume. The
+# Polymarket loader builds its bars from a price history that carries no size at all, and fills
+# the column with **the number of price observations in the day** - the provider's own comment
+# calls it a proxy. It is a sampling frequency, and it rises when the price is quoted often, not
+# when size changes hands.
+
+# %%
+pl.DataFrame(
+    {
+        "venue": ["Polymarket", "Kalshi"],
+        "column_total": [float(poly["volume"].sum()), float(kalshi["volume"].sum())],
+        "what_it_counts": ["price observations in the bar", "contracts traded"],
+        "is_a_volume": [False, True],
+        "bars": [len(poly), len(kalshi)],
+    }
+)
+
+# %% [markdown]
+# No comparison of trading activity across these two feeds is available, and the honest response
+# is to say so rather than to divide one total by the other. Polymarket does publish a traded
+# volume per market, on the market metadata the live path in Part 7 fetches; it is simply not in
+# the bars. A column name is a claim like any other, and this is the cheapest kind of defect to
+# inherit: everything downstream still runs, and every number it produces is about something
+# else.
+
+# %% [markdown]
+# ## 6. Features
+#
+# The features are the same ones the previous notebook built, which is the point: a probability
+# path is a probability path whatever venue quoted it, and a pipeline that ingests both wants one
+# feature definition rather than two.
+#
+# **Conviction** is how far the price sits from even odds. **Extreme** flags the contracts priced
+# close to zero or one. Neither says the question is settled: a contract at one percent has the
+# whole range above it, and the events that move a market most are the ones it had written off.
+# What the flag does is separate the contracts whose price carries information about a live
+# question from those where a change would be news in itself, and a strategy handles the two
+# differently rather than ignoring either.
+
+# %%
+features = poly.select(
+    "timestamp",
+    "symbol",
+    "category",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    conviction=(pl.col("close") - 0.5).abs(),
+    extreme=(
+        (pl.col("close") > 1 - CONFIDENT_PROBABILITY) | (pl.col("close") < CONFIDENT_PROBABILITY)
+    ).cast(pl.Int8),
+    intraday_range=pl.col("high") - pl.col("low"),
+)
+print(f"Rows: {len(features)}")
+print(f"Rows flagged extreme: {int(features['extreme'].sum())}")
+print(f"Rows with any intraday range: {int((features['intraday_range'] > 0).sum())}")
+features.head(8)
+
+# %% [markdown]
+# Every row is flagged extreme, which is the dot plot from Part 2 restated as a column. On a
+# universe where that is true of everything, the flag separates nothing and the conviction feature
+# is nearly constant. Neither is a defect in the definition; both are the snapshot telling you
+# that a feature needs markets spread across the probability range, and that selecting them is the
+# first step rather than an afterthought.
+
+# %% [markdown]
+# ## 7. Querying the live venue
+#
+# Everything above reads the shipped snapshot, which is what makes this notebook reproducible.
+# Setting `LIVE` true instead queries the exchange for its current market list, which is the right
+# path for exploration and the wrong one for a notebook that has to run the same way twice.
+
+# %%
 if LIVE:
     from ml4t.data.providers.polymarket import PolymarketProvider
 
     provider = PolymarketProvider()
     live_markets = provider.list_markets(active=True, closed=False, limit=200)
     provider.close()
-
-    live_snapshot = pl.DataFrame(
+    live = pl.DataFrame(
         {
             "slug": [m.get("slug", "") for m in live_markets],
             "question": [m.get("question", "")[:80] for m in live_markets],
@@ -321,349 +428,39 @@ if LIVE:
             "liquidity": [float(m.get("liquidity", 0)) for m in live_markets],
         }
     ).sort("volume", descending=True)
-
-    print(f"LIVE=True: fetched {len(live_snapshot)} active Polymarket markets")
+    print(f"Active markets returned: {len(live)}")
 else:
-    print("LIVE=False: skipping live Polymarket API demo")
+    live = None
+    print("LIVE is false; reading the shipped snapshot only.")
 
-live_snapshot.head(10) if live_snapshot is not None else None
-
-# %% [markdown]
-# ## 9. Fed Rate Markets - Cross-Platform Comparison
-#
-# Both Polymarket and Kalshi offer binary contracts on Federal Reserve
-# rate decisions. This creates a natural cross-platform comparison. We
-# load the Kalshi OHLCV data from disk (see notebook 12) and compare it
-# with downloaded Polymarket monetary-policy contracts.
-
-# %%
-kalshi_df = load_kalshi()
-
-print(f"Kalshi: {len(kalshi_df):,} observations, {kalshi_df['symbol'].n_unique()} contracts")
-print(f"Date range: {kalshi_df['timestamp'].min()} to {kalshi_df['timestamp'].max()}")
-
-# %%
-fed_markets = contracts.filter(pl.col("market_category") == "monetary_policy")
-
-print(f"Polymarket Fed/Macro markets: {len(fed_markets)}")
-
-fed_markets.select("symbol", "latest_prob", "total_volume", "avg_intraday_range")
+live.head(10) if live is not None else None
 
 # %% [markdown]
-# ## 10. Two Ways to Trade the Fed: Kalshi Ladder vs Polymarket Events
-#
-# The two platforms cover Fed policy very differently, and the contrast is the
-# point. Kalshi offers many threshold contracts per FOMC meeting (rate above
-# 0.25%, 2.25%, 3.75%, ...), which together form a full implied-probability
-# *distribution* over rate outcomes - so its prices span roughly 1% to 95%.
-# Polymarket's Fed markets are instead a handful of *discrete event* bets
-# (a 25bp cut after the June meeting, Powell out as chair, Shelton confirmed),
-# and in this snapshot every one is a low-probability tail event under 5%. That
-# is why the panels below use separate x-scales: forcing them onto one axis would
-# render the Polymarket bets invisible and imply a false like-for-like comparison.
+# ## 8. Saving the feature panel
 
 # %%
-kalshi_latest = (
-    kalshi_df.sort("timestamp")
-    .group_by("symbol")
-    .agg(
-        pl.col("close").last().alias("kalshi_prob"),
-        pl.col("volume").sum().alias("kalshi_volume"),
-        pl.col("timestamp").max().alias("last_date"),
-    )
-    .sort("symbol")
-)
-kalshi_latest
-
-
-# %%
-def _short_kalshi_label(sym: str) -> str:
-    # KXFED-27APR-T0.25 -> "Apr'27 >=0.25%"
-    parts = sym.split("-")
-    meeting = parts[1] if len(parts) > 1 else sym
-    thr = parts[-1][1:] if parts[-1].startswith("T") else ""
-    m = re.match(r"(\d{2})([A-Z]{3})", meeting)
-    stem = f"{m.group(2).title()}'{m.group(1)}" if m else meeting
-    return f"{stem} ≥{thr}%" if thr else stem
-
-
-def _short_poly_label(sym: str) -> str:
-    # Turn a Polymarket slug into a short, distinct human label.
-    s = sym.replace(":YES", "")
-    up = s.upper()
-    m = re.search(
-        r"(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*-(?:\d{1,2}-)?(\d{4})", up
-    )
-    when = f" ({m.group(1).title()} '{m.group(2)[2:]})" if m else ""
-    bps = re.search(r"(\d+)-BPS", up)
-    if "DECREASE" in up:
-        return f"Cut {bps.group(1)}bps{when}" if bps else f"Rate cut{when}"
-    if "INCREASE" in up:
-        return f"Hike {bps.group(1)}bps{when}" if bps else f"Rate hike{when}"
-    if "POWELL" in up and "OUT" in up:
-        return f"Powell out{when}"
-    if "SHELTON" in up:
-        return "Shelton as chair"
-    words = s.replace("-", " ").split()
-    return " ".join(w.title() for w in words[:4]) + ("…" if len(words) > 4 else "")
-
-
-# Horizontal bars so the long market names read cleanly on the y-axis. The two
-# platforms are NOT the same contract: Kalshi is a granular rate-threshold ladder
-# (a full distribution, ~1-95%); Polymarket's Fed markets are a handful of discrete
-# tail-event bets, all well under 5% here - so each panel gets its own x-scale with
-# explicit probability labels rather than a shared axis that would hide them.
-fig = make_subplots(
-    rows=1,
-    cols=2,
-    subplot_titles=(
-        "Kalshi: rate-threshold ladder",
-        "Polymarket: discrete event bets",
-    ),
-    horizontal_spacing=0.30,
-)
-
-kalshi_data = kalshi_latest.sort("kalshi_prob").to_pandas()
-fig.add_trace(
-    go.Bar(
-        x=kalshi_data["kalshi_prob"],
-        y=[_short_kalshi_label(s) for s in kalshi_data["symbol"]],
-        orientation="h",
-        marker_color=COLORS["blue"],
-        text=[f"{p:.0%}" for p in kalshi_data["kalshi_prob"]],
-        textposition="outside",
-        cliponaxis=False,
-    ),
-    row=1,
-    col=1,
-)
-fig.update_xaxes(range=[0, 1.12], tickformat=".0%", title_text="Implied probability", row=1, col=1)
-
-if not fed_markets.is_empty():
-    fed_data = (
-        fed_markets.filter(pl.col("latest_prob").is_not_null()).sort("latest_prob").to_pandas()
-    )
-    poly_max = float(fed_data["latest_prob"].max())
-    fig.add_trace(
-        go.Bar(
-            x=fed_data["latest_prob"],
-            y=[_short_poly_label(s) for s in fed_data["symbol"]],
-            orientation="h",
-            marker_color=COLORS["amber"],
-            text=[f"{p:.1%}" for p in fed_data["latest_prob"]],
-            textposition="outside",
-            cliponaxis=False,
-        ),
-        row=1,
-        col=2,
-    )
-    fig.update_xaxes(
-        range=[0, poly_max * 1.4],
-        tickformat=".1%",
-        title_text="Implied probability (own scale)",
-        row=1,
-        col=2,
-    )
-
-fig.update_layout(
-    title=dict(
-        text="Kalshi prices a full rate ladder; Polymarket lists a few low-probability Fed bets",
-        y=0.97,
-    ),
-    height=460,
-    showlegend=False,
-    margin=dict(t=90, b=60, l=150, r=80),
-)
-
-fig.show()
-
-# %% [markdown]
-# Kalshi's threshold structure (rate above X%) provides a richer view of the
-# probability distribution over rate outcomes. Polymarket tends to structure
-# the same underlying event as separate yes/no questions. Both encode similar
-# information, but with different contract designs.
-
-# %% [markdown]
-# ## 11. Volume Comparison
-#
-# Both datasets expose provider-specific volume fields. The absolute units are
-# not directly comparable, but relative activity still helps identify which
-# contracts matter most within each platform.
-
-# %% [markdown]
-# Polymarket reports volume as USDC notional traded on the bar; Kalshi
-# reports daily contract count. The two are not directly comparable and
-# the table below should be read column-by-column to rank contracts
-# within each provider, not as a cross-provider volume ratio.
-
-# %%
-pl.DataFrame(
-    {
-        "provider": ["Polymarket (Fed)", "Kalshi (all KXFED)"],
-        "volume": [
-            fed_markets["total_volume"].sum(),
-            kalshi_df["volume"].sum(),
-        ],
-        "unit": ["USDC notional (sum of bars)", "contracts (daily OHLCV sum)"],
-    }
-)
-
-# %%
-fed_markets.select("symbol", "total_volume", "avg_intraday_range").sort(
-    "total_volume", descending=True
-)
-
-# %% [markdown]
-# Within each platform, the busiest contracts tend to be the most informative
-# because they aggregate more views and move more cleanly in response to new
-# information.
-
-# %% [markdown]
-# ## 12. Event Indicators for ML
-#
-# The downloaded OHLCV data supports simple event features: implied probability,
-# conviction, intraday range, and a high-confidence flag.
-
-# %%
-features = df.select(
-    [
-        "timestamp",
-        "symbol",
-        pl.col("market_category").alias("category"),
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "intraday_range",
-        "conviction",
-        "high_confidence",
-    ]
-)
-
-print(f"Feature matrix: {features.shape}")
-
-features.select(
-    "timestamp",
-    "symbol",
-    "close",
-    "conviction",
-    "high_confidence",
-    "intraday_range",
-    "category",
-).head(15)
-
-# %%
-fig = make_subplots(
-    rows=1,
-    cols=2,
-    subplot_titles=("Conviction by Category", "Intraday Range"),
-    horizontal_spacing=0.15,
-)
-
-# Iterate over the categories actually present in the snapshot (ordered by
-# market count) so every downloaded bucket appears - hard-coding a fixed
-# list silently drops categories like technology and science that the
-# regex/loader inference surfaces.
-present_categories = (
-    features.group_by("category").len().sort("len", descending=True)["category"].to_list()
-)
-
-for cat in present_categories:
-    subset = features.filter(pl.col("category") == cat)
-    if subset.is_empty():
-        continue
-    color = category_colors.get(cat, COLORS["neutral"])
-
-    fig.add_trace(
-        go.Box(
-            y=subset["conviction"].to_list(),
-            name=cat.replace("_", " ").title(),
-            marker_color=color,
-        ),
-        row=1,
-        col=1,
-    )
-
-    fig.add_trace(
-        go.Box(
-            y=subset["intraday_range"].to_list(),
-            name=cat.replace("_", " ").title(),
-            marker_color=color,
-            showlegend=False,
-        ),
-        row=1,
-        col=2,
-    )
-
-fig.update_yaxes(title_text="Conviction (|p - 0.5|)", row=1, col=1)
-fig.update_yaxes(title_text="Intraday Range", tickformat=".1%", row=1, col=2)
-
-fig.update_layout(
-    title=dict(text="ML Feature Distributions by Market Category", y=0.98),
-    height=550,
-    legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5),
-    margin=dict(t=100, b=130, l=60, r=40),
-)
-for ann in fig.layout.annotations:
-    ann.update(y=1.05)
-
-fig.show()
-
-# %% [markdown]
-# Across this snapshot every category sits close to full conviction: prices
-# cluster near 0 or 1, so `|p - 0.5|` stays near 0.5 for essentially all
-# contracts and the high-confidence flag is set on every row. The categories
-# separate on intraday range instead - crypto contracts move the most within
-# a bar, while monetary-policy, technology, and science contracts are nearly
-# static. That intraday dispersion is where ML-driven signals are most likely
-# to live.
-
-# %% [markdown]
-# ## 13. Data Quality Assessment
-
-# %%
-quality = (
-    features.group_by("category")
-    .agg(
-        pl.len().alias("n_markets"),
-        pl.col("volume").mean().alias("avg_volume"),
-        pl.col("intraday_range").mean().alias("avg_intraday_range"),
-        pl.col("conviction").mean().alias("avg_conviction"),
-        pl.col("high_confidence").mean().alias("pct_high_confidence"),
-    )
-    .sort("avg_volume", descending=True)
-)
-quality
-
-# %% [markdown]
-# ## 14. Save Enriched Data
-
-# %%
-output_dir = get_output_dir(4, "polymarket")
-output_dir.mkdir(parents=True, exist_ok=True)
-
-output_file = output_dir / "polymarket_features.parquet"
+output_file = OUTPUT_DIR / "polymarket_features.parquet"
 features.write_parquet(output_file)
-
-print(f"Saved {len(features)} Polymarket feature rows to {output_file}")
+print(f"Wrote {len(features)} rows to {output_file}")
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Centralized data path**: This notebook now uses the shared
-#    `data/prediction_markets/download.py` pipeline by default, matching the
-#    broader book workflow
+# 1. The structural differences between the two venues are about who may trade and what gets
+#    listed. The first is a selection effect on the price - a venue closed to US persons prices a
+#    US policy decision without the people closest to it - and the second decides which questions
+#    the data can answer.
+# 2. The listing difference is easy to overstate. Both venues price threshold ladders, and both
+#    ladders have to be monotone in the threshold. The mechanism is shared; the subjects differ.
+# 3. Read the provider before trusting a column name. Kalshi's `volume` is contracts traded;
+#    Polymarket's is a count of price observations, because the bars are built from a price
+#    history with no size in it. Nothing errors when the two are compared, and the answer is
+#    about neither.
+# 4. Most listed contracts are priced as near-settled almost all of the time. Selecting the
+#    markets with an open question is the first step in using this data, not a refinement of it.
+# 5. Establish the snapshot's size before computing on it. Two bars per market over two days
+#    supports a cross-section and a structural comparison, and supports no statement about how
+#    anything moved.
 #
-# 2. **Downloaded OHLCV is enough for modeling**: Probability level, conviction,
-#    and intraday range are available without hitting the live API during notebook runs
-#
-# 3. **Optional live demo remains available**: Set `LIVE=True` for an interactive
-#    market-discovery demo when current Polymarket snapshots are the point
-#
-# 4. **Complementary platforms**: Kalshi provides richer threshold structure,
-#    while Polymarket adds a broader crypto-native event universe. Using both
-#    gives a more complete view
-#
-# **Previous**: See [`12_kalshi_prediction_markets`](12_kalshi_prediction_markets.ipynb) for OHLCV time series
-# analysis using pre-downloaded Kalshi data.
+# **Previous**: [`12_kalshi_prediction_markets`](12_kalshi_prediction_markets.ipynb) reads the
+# regulated venue and its rate ladder in full.
