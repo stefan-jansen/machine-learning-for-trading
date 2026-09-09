@@ -36,7 +36,7 @@ separate answer.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -963,6 +963,7 @@ def check_prediction_cross_section(
     case_dir: Path | None = None,
     decision_axis: pl.Series | None = None,
     input_panel: pl.DataFrame | None = None,
+    folds: Collection[int] | None = None,
     minimum: float | None = None,
 ) -> CrossSectionReport:
     """Measure a prediction set against the ``(entity, session)`` grid the label declares.
@@ -980,6 +981,14 @@ def check_prediction_cross_section(
     An entity absent from every fold and one missing its first weeks produce the same
     percentage and are different failures, so ``never_scored`` and ``partially_scored``
     are reported apart.
+
+    ``folds`` is the fold axis the run was asked to produce, and it is not derivable from
+    the case study: ``declared_sessions`` reads the fold windows from the configuration,
+    which lists every configured fold whatever the run did. A run that fitted a subset is
+    then charged for folds it was never asked to produce, and reads at the ratio of the two
+    counts however complete it is. Pass the folds the run declares and the shortfall is
+    measured inside them; the symbol axis is untouched, so a family that lost names within
+    the folds it ran is still charged for them.
     """
     scored = _scored_rows(predictions, case_study=case_study, label=label, split=split)
     entity_col = _entity_column(scored.columns, where=f"{source} frame")
@@ -993,6 +1002,15 @@ def check_prediction_cross_section(
     want = declared_cross_section(
         case_study, label, split=split, case_dir=case_dir, decision_axis=decision_axis
     )
+    if folds is not None:
+        kept = sorted(folds)
+        want = want.filter(pl.col("fold").is_in(pl.Series(kept, dtype=pl.Int64).implode()))
+        if want.is_empty():
+            raise CoverageError(
+                f"{case_study}/{label}/{split}: the run declares fold(s) {kept} and the "
+                "configuration declares none of them, so the cross-section is empty and "
+                "coverage cannot be evaluated"
+            )
     delivered = want.join(got, on=["entity", "session"], how="semi")
     missing = want.join(got, on=["entity", "session"], how="anti")
 

@@ -11,11 +11,15 @@ Two things this file pins, both of which shipped broken because nothing exercise
 - the SQL runs at all. It selected `t.case_study`, which `training_runs` does not have, so
   every call with a member to check raised `sqlite3.OperationalError` and every call with
   nothing to check returned `{}` - the shape that reads as "checked, all fine".
-- a member is charged against what its own run declared scoreable, not against the raw
-  feature panel. Measured on sp500_equity_option_analytics: 143 of 947 members in force
-  carry 65% of the panel's keys and 100% of their own, because a sequence model cannot
-  score a window shorter than its lookback. Charging them the panel drops the whole
-  deep-learning half of the pool for the window builder working as specified.
+- a member is charged against the feature panel and not against its own declaration.
+  Measured on sp500_equity_option_analytics: `deep_learning` carries 65.0% of the panel and
+  never scores 262 of 548 symbols, while `linear`, `gbm` and `tabular_dl` carry 100.0% and
+  miss one. It delivers every key it declared, because the declaration is where those 262
+  went, so charging a member its own declaration reports the whole deep-learning half whole.
+
+What the panel is not the denominator for is a run that was handed less than the panel. The
+fold axis comes from the run's spec, and a member registered at a reduced tier is reported
+unmeasured rather than dropped - the two classes at the end of this file.
 """
 
 from __future__ import annotations
@@ -29,7 +33,10 @@ import polars as pl
 import pytest
 
 from case_studies.utils import coverage as coverage_module
-from case_studies.utils.notebook_contracts import undercovered_prediction_members
+from case_studies.utils.notebook_contracts import (
+    _reduced_tier_members,
+    undercovered_prediction_members,
+)
 
 WHOLE = "aaaa11112222"
 SHORT = "bbbb33334444"
@@ -82,16 +89,21 @@ def _register(
     *,
     delivered: int,
     declared: int | None,
+    folds: list[int] | None = None,
+    tier: str | None = None,
 ) -> None:
     """Write one member with ``delivered`` prediction rows and a declared expectation."""
     spec = {"computation": {}}
     if declared is not None:
         spec["computation"]["expected_prediction_keys"] = {"n_rows": declared}
+    if folds is not None:
+        spec["computation"]["cv"] = {"folds": [{"fold": fold} for fold in folds]}
     with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
         db.execute(
-            "INSERT INTO training_runs (training_hash, family, label, config_name, spec_json) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (f"t-{member}", "deep_learning", "fwd_ret_5d", "lstm_h64", json.dumps(spec)),
+            "INSERT INTO training_runs "
+            "(training_hash, family, label, config_name, spec_json, execution_tier) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (f"t-{member}", "deep_learning", "fwd_ret_5d", "lstm_h64", json.dumps(spec), tier),
         )
         db.execute(
             "INSERT INTO prediction_sets VALUES (?, ?, ?)",
@@ -209,3 +221,114 @@ class TestAMemberIsChargedAgainstTheFeaturePanel:
         _register(case_dir, UNDECLARED, delivered=100, declared=None)
         reported = undercovered_prediction_members(case_dir, [UNDECLARED], case_study="x")
         assert "coverage could not be evaluated" in reported[UNDECLARED]
+
+
+class TestTheRunSDeclaredFoldsReachTheCoverageCall:
+    """The fold axis is the run's, not the configuration's.
+
+    `declared_sessions` reads fold windows from `setup.yaml`, which lists every configured
+    fold whatever the run was asked to do, so a run that fitted a subset reads at the ratio
+    of the two counts however complete it is. `test_cross_section_coverage.py` pins what the
+    narrowing does to a measurement; this pins that the gate reads the folds out of the spec
+    and hands them over.
+    """
+
+    @staticmethod
+    def _capture(monkeypatch) -> list:
+        seen: list = []
+
+        def fake(frame, case_study, label, **kwargs):
+            seen.append(kwargs.get("folds"))
+            return SimpleNamespace(accountable_coverage=1.0, summary=lambda: "")
+
+        monkeypatch.setattr(coverage_module, "check_prediction_cross_section", fake)
+        return seen
+
+    def test_a_declared_fold_list_is_passed_through(self, case_dir, monkeypatch) -> None:
+        seen = self._capture(monkeypatch)
+        _register(case_dir, WHOLE, delivered=200, declared=200, folds=[0])
+        undercovered_prediction_members(case_dir, [WHOLE], case_study="x")
+        assert seen == [(0,)]
+
+    def test_the_list_is_deduplicated_and_ordered(self, case_dir, monkeypatch) -> None:
+        """A spec is a record, not an input: it can repeat a fold or list them out of order."""
+        seen = self._capture(monkeypatch)
+        _register(case_dir, WHOLE, delivered=200, declared=200, folds=[2, 0, 2])
+        undercovered_prediction_members(case_dir, [WHOLE], case_study="x")
+        assert seen == [(0, 2)]
+
+    def test_a_spec_that_declares_no_folds_narrows_nothing(self, case_dir, monkeypatch) -> None:
+        """`None`, not `()`: a spec making no claim leaves the configuration in charge.
+
+        An empty tuple would narrow the cross-section to nothing and report every member
+        unevaluable, which is the opposite of what silence means.
+        """
+        seen = self._capture(monkeypatch)
+        _register(case_dir, WHOLE, delivered=200, declared=200)
+        undercovered_prediction_members(case_dir, [WHOLE], case_study="x")
+        assert seen == [None]
+
+    @pytest.mark.parametrize(
+        "spec_json",
+        ["", "not json", '{"computation": {"cv": []}}', '{"computation": {"cv": {"folds": {}}}}'],
+    )
+    def test_an_unreadable_spec_narrows_nothing(self, case_dir, monkeypatch, spec_json) -> None:
+        seen = self._capture(monkeypatch)
+        _register(case_dir, WHOLE, delivered=200, declared=200)
+        with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+            db.execute(
+                "UPDATE training_runs SET spec_json = ? WHERE training_hash = ?",
+                (spec_json, f"t-{WHOLE}"),
+            )
+        undercovered_prediction_members(case_dir, [WHOLE], case_study="x")
+        assert seen == [None]
+
+
+class TestAReducedRunIsNotChargedTheCanonicalPanel:
+    """A preview symlinks `features` and `labels` from the canonical case directory.
+
+    So the panel it would be charged against holds the full universe while the run was
+    handed a fraction of it. Measured 2026-09-09 on
+    `~/ml4t/artifacts/smoke/etfs/.preview/etfs`: 247 members over a 100-ETF panel, reduced
+    to between five and eight names. Every one reads short, the pool empties and
+    `declared_population_members` raises "nothing left to rank" - the smoke run this program
+    takes before every stage fails on runs that did what they were told.
+
+    The tier and not the spec, because `input_data_spec` carries `max_symbols` for `linear`,
+    `gbm` and `tabular_dl` and is `{files, input_digest, version}` for `deep_learning` and
+    `latent_factors`, which declares no universe. Reading the reduction from the spec would
+    measure three families and skip two, and adding a universe key to the other two would
+    rewrite `computation`, which is hashed whole.
+    """
+
+    def test_a_preview_member_is_reported_rather_than_measured(self, case_dir) -> None:
+        _register(case_dir, SHORT, delivered=1, declared=200, tier="preview")
+        reported = _reduced_tier_members(case_dir, [SHORT])
+        assert set(reported) == {SHORT}
+        assert "reduced universe" in reported[SHORT]
+
+    def test_a_canonical_member_is_left_to_the_coverage_check(self, case_dir) -> None:
+        _register(case_dir, WHOLE, delivered=200, declared=200, tier="canonical")
+        assert _reduced_tier_members(case_dir, [WHOLE]) == {}
+
+    def test_a_row_with_no_tier_is_canonical(self, case_dir) -> None:
+        """That is what the column meant before it existed, and old rows carry NULL."""
+        _register(case_dir, WHOLE, delivered=200, declared=200)
+        assert _reduced_tier_members(case_dir, [WHOLE]) == {}
+
+    def test_nothing_to_check_is_not_evidence_of_anything(self, case_dir) -> None:
+        assert _reduced_tier_members(case_dir, []) == {}
+
+    def test_a_preview_member_would_otherwise_be_dropped(self, case_dir, monkeypatch) -> None:
+        """The half of the claim the tier rule exists for: without it, this member goes.
+
+        `undercovered_prediction_members` does not read the tier - the caller filters first -
+        so a preview member reaching it is judged like any other and reported short.
+        """
+
+        def fake(frame, case_study, label, **kwargs):
+            return SimpleNamespace(accountable_coverage=0.08, summary=lambda: "8% of the panel")
+
+        monkeypatch.setattr(coverage_module, "check_prediction_cross_section", fake)
+        _register(case_dir, SHORT, delivered=1, declared=200, tier="preview")
+        assert set(undercovered_prediction_members(case_dir, [SHORT], case_study="x")) == {SHORT}

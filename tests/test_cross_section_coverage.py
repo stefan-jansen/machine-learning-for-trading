@@ -160,3 +160,67 @@ def test_a_frame_with_no_entity_column_cannot_read_as_a_pass(case_dir):
     frame = _predictions().drop("symbol")
     with pytest.raises(CoverageError, match="no entity column"):
         check_prediction_cross_section(frame, "cs", LABEL, case_dir=case_dir)
+
+
+class TestTheFoldAxisComesFromTheRun:
+    """A run can declare fewer folds than the configuration lists.
+
+    `declared_sessions` reads the fold windows out of `setup.yaml`, which lists every
+    configured fold whatever the run was asked to do, so a run that fitted a subset reads
+    at the ratio of the two counts however complete it is - one fold of two here is 50%,
+    and a member that far short is dropped from the pool that ranks it. The shape that
+    produces it is `splits[:MAX_FOLDS]`, which ml4t/agent-workspace#1076 finds in three
+    case studies.
+
+    The narrowing is on the fold axis alone. Within the folds a run declares, the symbol
+    axis is still the panel's, so a family that lost names is still charged for them.
+    """
+
+    FOLD_0 = [ts for ts in SESSIONS if ts.day <= 10]
+
+    def test_without_the_run_s_folds_a_one_fold_run_reads_half(self, case_dir):
+        report = check_prediction_cross_section(
+            _predictions(sessions=self.FOLD_0),
+            "cs",
+            LABEL,
+            case_dir=case_dir,
+            source="deep_learning/lstm_h64",
+        )
+        assert report.expected == len(UNIVERSE) * len(SESSIONS)
+        assert report.accountable_coverage == pytest.approx(0.5)
+
+    def test_declaring_fold_0_makes_the_same_run_whole(self, case_dir):
+        report = check_prediction_cross_section(
+            _predictions(sessions=self.FOLD_0),
+            "cs",
+            LABEL,
+            case_dir=case_dir,
+            folds=[0],
+            source="deep_learning/lstm_h64",
+        )
+        assert report.expected == len(UNIVERSE) * len(self.FOLD_0)
+        assert report.accountable_coverage == pytest.approx(1.0)
+        assert report.complete
+
+    def test_a_symbol_dropped_inside_a_declared_fold_is_still_charged(self, case_dir):
+        """The narrowing must not excuse the shortfall it exists to measure."""
+        report = check_prediction_cross_section(
+            _predictions(symbols=("AAA", "BBB"), sessions=self.FOLD_0),
+            "cs",
+            LABEL,
+            case_dir=case_dir,
+            folds=[0],
+            source="deep_learning/lstm_h64",
+        )
+        assert report.accountable_coverage == pytest.approx(2 / 3)
+        assert report.never_scored == ("CCC",)
+
+    def test_declaring_a_fold_the_configuration_does_not_have_is_refused(self, case_dir):
+        with pytest.raises(CoverageError, match="declares fold"):
+            check_prediction_cross_section(
+                _predictions(sessions=self.FOLD_0),
+                "cs",
+                LABEL,
+                case_dir=case_dir,
+                folds=[7],
+            )

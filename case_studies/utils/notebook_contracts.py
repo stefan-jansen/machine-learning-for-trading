@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterable
 from contextlib import closing
@@ -301,7 +302,18 @@ def prediction_members_in_force(
     # Dropped rather than refused, because unlike an unfinished run this is a property of
     # the model and the pool is still rankable without it - but never silently, so the note
     # names every member and its shortfall.
-    short = undercovered_prediction_members(root, members, case_study=study.case_study)
+    # A run registered at a reduced tier has no denominator here, so it is neither measured
+    # nor dropped. Reported, because a member that went unchecked and one that passed are
+    # different states and the note is the only place that difference is visible.
+    reduced = _reduced_tier_members(root, members)
+    if reduced:
+        notes.append(
+            f"{len(reduced):,} of {len(members):,} members were not measured for "
+            f"cross-sectional coverage: {sorted(reduced.values())[0]}. They are ranked."
+        )
+    short = undercovered_prediction_members(
+        root, [member for member in members if member not in reduced], case_study=study.case_study
+    )
     if short:
         members = frozenset(members - short.keys())
         listed = "; ".join(
@@ -320,6 +332,82 @@ def prediction_members_in_force(
             f"comparison. Reasons:\n" + "\n".join(sorted(short.values()))
         )
     return members, notes
+
+
+def _reduced_tier_members(
+    case_dir: Path | str,
+    members: Iterable[str],
+) -> dict[str, str]:
+    """Members registered at a reduced tier, whose coverage has no denominator here.
+
+    ``undercovered_prediction_members`` charges a member against the case study's feature
+    panel, and a reduced run was not offered that panel. ``Study.activate`` symlinks
+    ``features`` and ``labels`` from the canonical case directory into the preview
+    workspace, so both read the full universe while the run was handed a fraction of it.
+    Measured 2026-09-09 on ``~/ml4t/artifacts/smoke/etfs/.preview/etfs``: 247 members, a
+    100-ETF panel, and reductions from ``max_symbols: 8`` down to five names. Charged
+    against the panel every one reads short, all 247 are dropped and the pool raises
+    "nothing left to rank" - the smoke run this program takes before every stage fails on
+    runs that did exactly what they were told.
+
+    **The tier and not the spec.** ``input_data_spec`` carries ``max_symbols`` and
+    ``symbols`` for ``linear``, ``gbm`` and ``tabular_dl``, and for ``deep_learning`` and
+    ``latent_factors`` it is a different shape entirely - ``{files, input_digest, version}``
+    - which declares no universe at all. Reading the reduction out of the spec would
+    therefore measure three families and silently skip two, and giving those two a universe
+    key would rewrite ``computation``, which is hashed whole, and re-price every run they
+    have ever registered. ``execution_tier`` is on the training row, is already part of what
+    a reduced run declares about itself, and is true for every family.
+
+    Returned so the caller can say these went unmeasured, and not returned as short: short
+    means the run lost rows it was given, and a reduced run was never given them. A row with
+    no tier is canonical - that is what the column meant before it was added.
+    """
+    case_dir = Path(case_dir)
+    db_path = case_dir / "run_log" / "registry.db"
+    wanted = list(members)
+    if not wanted or not db_path.is_file():
+        return {}
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
+        placeholders = ",".join("?" * len(wanted))
+        rows = db.execute(
+            f"""SELECT p.prediction_hash, t.execution_tier
+                FROM prediction_sets p JOIN training_runs t ON t.training_hash = p.training_hash
+                WHERE p.prediction_hash IN ({placeholders})""",
+            wanted,
+        ).fetchall()
+    return {
+        phash: (
+            f"registered at execution tier {tier!r}, which is offered a reduced universe "
+            "while the feature panel beside it is the canonical one"
+        )
+        for phash, tier in rows
+        if tier is not None and tier != "canonical"
+    }
+
+
+def _declared_folds(spec_json: str | None) -> tuple[int, ...] | None:
+    """The fold indices a training spec says it ran, or ``None`` when it says nothing.
+
+    ``None`` and not an empty tuple: a spec that carries no ``computation.cv.folds`` makes
+    no claim about its fold axis, and the caller must then fall back to the configuration
+    rather than measure against nothing.
+    """
+    if not spec_json:
+        return None
+    try:
+        cv = json.loads(spec_json).get("computation", {}).get("cv", {})
+    except (TypeError, ValueError):
+        return None
+    declared = cv.get("folds") if isinstance(cv, dict) else None
+    if not isinstance(declared, list):
+        return None
+    indices = [
+        int(entry["fold"])
+        for entry in declared
+        if isinstance(entry, dict) and isinstance(entry.get("fold"), int)
+    ]
+    return tuple(sorted(set(indices))) or None
 
 
 def undercovered_prediction_members(
@@ -370,7 +458,7 @@ def undercovered_prediction_members(
         # Selecting it here raised `sqlite3.OperationalError` on every populated registry,
         # which is every call that had anything to check.
         rows = db.execute(
-            f"""SELECT p.prediction_hash, p.split, t.label, t.family, t.config_name
+            f"""SELECT p.prediction_hash, p.split, t.label, t.family, t.config_name, t.spec_json
                 FROM prediction_sets p JOIN training_runs t ON t.training_hash = p.training_hash
                 WHERE p.prediction_hash IN ({placeholders})""",
             wanted,
@@ -403,9 +491,17 @@ def undercovered_prediction_members(
     # This is the denominator `load_backtest_predictions` already uses for the same
     # question, and the two must agree or the pool admits members the backtest then
     # refuses, which surfaces as "no rankable validation backtests" three stages later.
+    # The fold axis comes from the run's own spec, not from the configuration.
+    # `declared_sessions` reads the fold windows out of `config/setup.yaml`, which lists
+    # every configured fold whatever the run was asked to do, so a run that fitted a subset
+    # is charged for the folds it was never asked to produce. Every canonical run today
+    # declares the full list and the narrowing is a no-op on them; the shape that makes it
+    # fire is `splits[:MAX_FOLDS]`, which ml4t/agent-workspace#1076 finds in three case
+    # studies. The symbol axis stays on the panel, so a family that lost names inside the
+    # folds it ran is still charged for them.
     panel = feature_panel_keys(root)
     short: dict[str, str] = {}
-    for phash, split, label, family, config in rows:
+    for phash, split, label, family, config, spec_json in rows:
         path = root / "run_log" / "predictions" / phash / "predictions.parquet"
         if not path.is_file():
             continue
@@ -418,6 +514,7 @@ def undercovered_prediction_members(
                 split=split,
                 case_dir=root,
                 input_panel=panel,
+                folds=_declared_folds(spec_json),
                 source=f"{family}/{config}",
             )
         except CoverageError as exc:
