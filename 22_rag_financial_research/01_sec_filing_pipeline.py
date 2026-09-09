@@ -93,6 +93,7 @@ FORM_TYPE = "10-K"  # annual reports; the loader also serves 10-Q and 8-K
 UNIVERSE = "sp100"  # the symbol universe the corpus was downloaded for
 ANCHOR_TERM = "supplier"  # the word the download searches for to place the excerpt
 ANCHOR_WINDOW_CHARS = 12_000  # width of the excerpt taken around the first occurrence
+ANCHOR_LEAD_CHARS = 3_000  # characters of lead-in kept before the occurrence
 FALLBACK_WINDOW_CHARS = 15_000  # width of the excerpt taken when there is no occurrence
 
 # %% [markdown]
@@ -267,61 +268,72 @@ document.
 # | no occurrence, filing longer than 35,000 characters | characters 20,000 through 35,000 | 15,000 |
 # | no occurrence, filing shorter than that | the opening | up to 15,000 |
 #
-# Which rule fired is not recorded against the row, but each one leaves a
-# signature in the text that survived it, so the corpus can be asked directly.
+# Which rule fired is not recorded against the row. One of the three leaves a
+# signature in the text that survived it, and the other two do not - which is
+# itself worth measuring rather than assuming.
+#
+# One measurement detail decides whether the check below works at all. Polars
+# `str.find` reports a **byte** offset, and this text carries typographic quotes
+# and currency signs, so a byte offset drifts past the character position it
+# should report wherever the preceding text is not pure ASCII, which is most of
+# these filings. The download slices Python strings, which count
+# characters, so the check measures the character length of the text that
+# precedes the first occurrence.
 
 # %%
+lowered = pl.col("text").str.to_lowercase()
 filings = filings.with_columns(
-    pl.col("text").str.to_lowercase().str.find(ANCHOR_TERM).alias("anchor_offset")
+    pl.when(lowered.str.contains(ANCHOR_TERM, literal=True))
+    .then(lowered.str.split(ANCHOR_TERM).list.first().str.len_chars())
+    .otherwise(None)
+    .alias("anchor_offset")
 )
 anchored = filings.filter(pl.col("anchor_offset").is_not_null())
 unanchored = filings.filter(pl.col("anchor_offset").is_null())
 fallback = unanchored.filter(pl.col("text_length") == FALLBACK_WINDOW_CHARS)
 opening = unanchored.filter(pl.col("text_length") != FALLBACK_WINDOW_CHARS)
-anchor_offset_max = int(anchored["anchor_offset"].max())
-anchored_at_width = anchored.filter(pl.col("text_length") == ANCHOR_WINDOW_CHARS).height
+at_lead = anchored.filter(pl.col("anchor_offset") == ANCHOR_LEAD_CHARS).height
+before_lead = anchored.filter(pl.col("anchor_offset") < ANCHOR_LEAD_CHARS).height
+after_lead = anchored.filter(pl.col("anchor_offset") > ANCHOR_LEAD_CHARS).height
 anchored_share = anchored.height / filings.height
 
 display(
     Markdown(f"""
-The three rules account for all {filings.height:,} rows, and each count is a separate check:
+**{anchored.height}** of the {filings.height:,} excerpts contain the word "{ANCHOR_TERM}", and
+where it sits is not incidental. In **{at_lead}** of them the first occurrence is at character
+{ANCHOR_LEAD_CHARS:,} exactly - the lead-in the download keeps. In the other {before_lead} it
+comes earlier, which is what happens when the filing's own first occurrence falls inside the
+first {ANCHOR_LEAD_CHARS:,} characters and the window has nowhere to start but the beginning.
 
-- **{anchored.height}** excerpts contain the word "{ANCHOR_TERM}", and in none of them does the
-  first occurrence fall later than character **{anchor_offset_max:,}** of a window
-  {ANCHOR_WINDOW_CHARS:,} characters wide. That is the anchor. Of these,
-  {anchored_at_width} are exactly {ANCHOR_WINDOW_CHARS:,} characters and the other
-  {anchored.height - anchored_at_width} are shorter because the filing ended inside the window.
-- **{fallback.height}** contain no occurrence and are exactly {FALLBACK_WINDOW_CHARS:,}
-  characters long, which is the width of the mid-document fallback.
-- **{opening.height}** contain no occurrence and are shorter than that: short filings kept
-  from their opening.
+**{after_lead}** sit later than character {ANCHOR_LEAD_CHARS:,}, and that is the number that
+can fail: any excerpt above it would be one the window was not placed on.
 
 So for **{anchored_share:.0%}** of this corpus the stored text is the filing's discussion of
 its suppliers and the pages around it. Not the annual report, and not its opening pages.
 """)
 )
 
+# %% [markdown]
+# ### The other two rules cannot be told apart
+
 # %%
-fig = go.Figure(
-    go.Histogram(
-        x=anchored["anchor_offset"].to_list(),
-        marker_color=COLORS["amber"],
-        xbins=dict(start=0, end=anchor_offset_max + 100, size=100),
-    )
-)
-fig.update_layout(
-    title="The excerpt starts a fixed distance before its first supplier mention",
-    xaxis_title='Offset of the first "supplier" within the stored excerpt (characters)',
-    yaxis_title="Filings",
-    height=400,
-)
-show_plotly_with_alt(
-    fig,
-    'A histogram of where the word "supplier" first appears inside each stored excerpt, in '
-    "hundred-character bins. One bar at three thousand characters carries almost the whole "
-    "corpus, a much shorter bar stands immediately to its right, and a handful of bars trail "
-    "off towards four thousand. Two single filings sit far to the left, near two hundred and "
-    "near fifteen hundred characters.",
+display(
+    Markdown(f"""
+The remaining **{filings.height - anchored.height}** excerpts contain no occurrence of
+"{ANCHOR_TERM}" anywhere. **{fallback.height}** of them are exactly
+{FALLBACK_WINDOW_CHARS:,} characters long and **{opening.height}** are shorter.
+
+Which rule produced the {FALLBACK_WINDOW_CHARS:,}-character group cannot be established from
+this corpus. That length is what the mid-document rule always returns, and it is also what
+the opening rule returns for any filing between {FALLBACK_WINDOW_CHARS:,} and 35,000
+characters. Telling them apart needs the full filing, and the corpus stores the excerpt
+instead.
+
+Name that rather than work around it. A pipeline that transforms a document should record the
+transform: one column holding which rule fired would turn this from an inference into a
+lookup, and would let a retrieval system downstream tell a supplier passage from a slice taken
+out of the middle of a document. Nothing in the stored corpus carries that column.
+""")
 )
 
 # %% [markdown]
@@ -392,8 +404,9 @@ normally, so a coverage hole surfaces as a confident, wrong answer rather than a
 The check is a group-by, and it costs nothing next to the cost of not doing it.
 
 **Know what the corpus is an extract of, and what chose the extract.** For
-{anchored_share:.0%} of these documents the stored text is a {ANCHOR_WINDOW_CHARS:,}-character
-window starting 3,000 characters before the filing's first mention of suppliers, so every
+{anchored_share:.0%} of these documents the stored text is a window of at most
+{ANCHOR_WINDOW_CHARS:,} characters, taken from {ANCHOR_LEAD_CHARS:,} characters before the
+filing's first mention of suppliers, so every
 retrieval result later in the chapter is measured over supply-chain prose rather than over
 annual reports. That does not invalidate the comparisons, which all run on the same text - it
 says what they are comparisons of.
