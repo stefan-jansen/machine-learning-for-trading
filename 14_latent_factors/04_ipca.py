@@ -41,7 +41,8 @@
 # **Evaluation contract**: the synthetic characteristics at $t$ generate only
 # $r_{t+1}$. The structural model uses 349 training pairs, followed by a
 # one-period embargo and 150 evaluation pairs. The evaluation window is a
-# teaching demonstration, not a sealed final holdout or a model-selection set.
+# teaching demonstration: it is neither a holdout kept untouched for a final
+# measurement nor a set used to choose between models.
 #
 # **Prerequisite**: [`01_pca_equity_sectors`](01_pca_equity_sectors.ipynb)
 #
@@ -75,6 +76,7 @@ from utils.style import (
     add_message_title,
     ml4t_diverging,
     ml4t_palette,
+    show_with_alt,
     zero_line,
 )
 
@@ -130,8 +132,14 @@ for x_pos in (3.75, 7.75):
         xytext=(x_pos, 1.75),
         arrowprops={"arrowstyle": "->", "color": COLORS["amber"], "lw": 1.5},
     )
-add_message_title(ax, "Conditional factor models separate structure from forecasting")
-plt.show()
+add_message_title(ax, "The three stages of a conditional factor model")
+show_with_alt(
+    fig,
+    "A schematic of three labelled boxes left to right joined by arrows. Stage 1 fits "
+    "the loading matrix and the realized factor history; Stage 2 forecasts the next "
+    "factor premium; Stage 3 maps that forecast back to assets through the current "
+    "betas. The middle box is highlighted.",
+)
 
 # %% [markdown]
 # ## 2. Alternating least squares
@@ -364,10 +372,17 @@ axes[0].set_ylabel("Characteristic index")
 fig.colorbar(image, ax=axes, label="Orthonormal loading coefficient", shrink=0.82)
 add_message_title(
     axes[0],
-    "ALS recovers the known loading subspace",
-    subtitle=f"Minimum principal-angle cosine: {principal_cosines.min():.3f}",
+    "Known and estimated loading matrices, side by side",
+    subtitle="Both shown after aligning the estimate to the known basis",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Two heatmaps side by side on one colour scale, characteristic index on the vertical "
+    "axis and latent direction on the horizontal. The left is the known loading matrix "
+    "the data was generated from; the right is the estimate after alignment. A shared "
+    "colour bar gives the orthonormal loading coefficient.",
+)
+print(f"Minimum principal-angle cosine between the two subspaces: {principal_cosines.min():.3f}")
 
 # %% [markdown]
 # ## 5. Stage 2: one-step factor forecasts
@@ -537,7 +552,8 @@ for index, (name, forecast) in enumerate(factor_forecasts.items()):
 # %% [markdown]
 # The zero-return benchmark is deliberately hard to beat when latent premia
 # are independent draws with mean zero. The IC intervals show whether any
-# apparent cross-sectional ordering survives time-series uncertainty.
+# apparent cross-sectional ordering is larger than the time-series uncertainty
+# around it.
 
 # %%
 names = [result["name"] for result in forecast_results]
@@ -547,19 +563,25 @@ lower = np.array([result["ci_low"] for result in forecast_results])
 upper = np.array([result["ci_high"] for result in forecast_results])
 colors = ml4t_palette(len(names), categorical=True)
 
-fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True)
+fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True, constrained_layout=True)
 axes[0].bar(names, ratios, color=colors)
 zero_line(axes[0], at=1.0)
 axes[0].set_ylabel("MSE ratio vs zero")
-add_message_title(axes[0], "Factor timing does not improve the zero-return benchmark")
+add_message_title(axes[0], "Test MSE relative to the zero-return forecast")
 
 errors = np.vstack([means - lower, upper - means])
 axes[1].errorbar(names, means, yerr=errors, fmt="o", color=COLORS["blue"], capsize=4)
 zero_line(axes[1])
 axes[1].set_ylabel("Mean rank IC")
 axes[1].set_xlabel("Walk-forward Stage 2 forecaster")
-add_message_title(axes[1], "Every HAC interval includes zero")
-plt.show()
+add_message_title(axes[1], "Mean rank IC with its HAC interval")
+show_with_alt(
+    fig,
+    "Two stacked panels sharing a horizontal axis of Stage 2 forecaster. The upper is a "
+    "bar chart of each forecaster's test MSE as a ratio to the zero-return forecast, "
+    "with a dashed line at one. The lower plots each forecaster's mean rank IC as a "
+    "point with a HAC interval, against a dashed line at zero.",
+)
 
 # %% [markdown]
 # ## 7. Factor-count sensitivity
@@ -616,14 +638,14 @@ k_ic = np.array([result["mean_ic"] for result in k_results])
 k_low = np.array([result["ci_low"] for result in k_results])
 k_high = np.array([result["ci_high"] for result in k_results])
 
-fig, axes = plt.subplots(3, 1, figsize=FIGSIZE["grid_3x2"], sharex=True)
+fig, axes = plt.subplots(3, 1, figsize=FIGSIZE["grid_3x2"], sharex=True, constrained_layout=True)
 axes[0].plot(k_values, train_mse, marker="o", color=COLORS["blue"])
 axes[0].set_ylabel("Training MSE")
-add_message_title(axes[0], "Extra factors keep reducing in-sample reconstruction error")
+add_message_title(axes[0], "Training MSE against assumed factor count")
 axes[1].plot(k_values, k_ratios, marker="o", color=COLORS["amber"])
 zero_line(axes[1], at=1.0)
 axes[1].set_ylabel("MSE ratio vs zero")
-add_message_title(axes[1], "Lower reconstruction error does not create forecastability")
+add_message_title(axes[1], "Test MSE relative to zero, against assumed factor count")
 axes[2].errorbar(
     k_values,
     k_ic,
@@ -635,8 +657,14 @@ axes[2].errorbar(
 zero_line(axes[2])
 axes[2].set_ylabel("Mean rank IC")
 axes[2].set_xlabel("Assumed factor count K")
-add_message_title(axes[2], "IC uncertainty spans zero throughout the sensitivity range")
-plt.show()
+add_message_title(axes[2], "Mean rank IC with its HAC interval, by factor count")
+show_with_alt(
+    fig,
+    "Three stacked panels sharing a horizontal axis of assumed factor count. The top "
+    "plots training MSE, the middle test MSE as a ratio to the zero-return forecast "
+    "against a dashed line at one, and the bottom mean rank IC as points with HAC "
+    "intervals against a dashed line at zero.",
+)
 
 # %% [markdown]
 # ## 8. Takeaways
