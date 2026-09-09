@@ -103,19 +103,30 @@ set_global_seeds(SEED)
 # %% [markdown]
 # ## The data
 #
-# SPY daily bars with two derived series: the log return and a rolling standard deviation
-# of it. Both go into the model, because a regime that differs only in volatility is
-# invisible to a model that reads returns alone at daily frequency, where the mean is
-# almost unidentifiable.
+# SPY daily bars with three derived series: the log return, a rolling standard deviation of
+# it, and a long moving average of the price. The first two are what the model reads; the
+# moving average is one of the two rules in Part 1.
+#
+# A Gaussian model reading returns alone can already separate states that differ only in
+# variance, because two emissions with the same mean and different variances are two
+# different distributions. So that is not why the volatility column is here. It is here for
+# what it is: a summary of the last month rather than of one session, which makes the state
+# inferred at each session a statement about recent history and not about the latest return.
+#
+# The frame keeps only sessions where all three are defined, which puts the first session
+# one moving-average window after the data begins. That window is the price of the rule in
+# Part 1: over those sessions the moving average is missing, and a comparison against a
+# missing value is false rather than missing, so a frame that kept them would report them as
+# sessions the price was not below its average.
 
 # %%
 VOLATILITY_WINDOW = 21
+TREND_WINDOW = 200  # sessions in the long moving average: about ten months
 SESSIONS_PER_YEAR = 252
 
 spy = (
     load_etfs(symbols=["SPY"])
     .select(["timestamp", "open", "high", "low", "close", "volume"])
-    .filter(pl.col("timestamp") >= pl.lit(START_DATE).str.to_date())
     .filter(pl.col("timestamp") <= pl.lit(END_DATE).str.to_date())
     .sort("timestamp")
     .with_columns(
@@ -123,14 +134,17 @@ spy = (
         volatility=pl.col("close").log().diff().rolling_std(VOLATILITY_WINDOW)
         * 100
         * np.sqrt(SESSIONS_PER_YEAR),
+        moving_average=pl.col("close").rolling_mean(TREND_WINDOW),
     )
     .drop_nulls()
+    .filter(pl.col("timestamp") >= pl.lit(START_DATE).str.to_date())
 )
 
 frame = spy.to_pandas().set_index("timestamp")
 frame.index = pd.DatetimeIndex(frame.index)
 
 print(f"SPY: {len(frame):,} sessions, {frame.index.min().date()} to {frame.index.max().date()}")
+print(f"Sessions with a missing derived value: {int(frame.isna().sum().sum())}")
 
 # %% [markdown]
 # # Part 1: what a rule can do without estimating anything
@@ -150,7 +164,6 @@ print(f"SPY: {len(frame):,} sessions, {frame.index.min().date()} to {frame.index
 
 # %%
 VOLATILITY_INDEX_THRESHOLD = 20  # the conventional line between calm and stressed
-TREND_WINDOW = 200  # sessions in the moving average: about ten months
 
 macro = load_macro().select(["timestamp", "vixcls"]).drop_nulls().rename({"vixcls": "vix"})
 vix = macro.to_pandas().set_index("timestamp")
@@ -158,7 +171,6 @@ vix.index = pd.DatetimeIndex(vix.index)
 
 frame = frame.join(vix, how="left").ffill()
 frame["stressed_by_index"] = (frame["vix"] > VOLATILITY_INDEX_THRESHOLD).astype(int)
-frame["moving_average"] = frame["close"].rolling(TREND_WINDOW).mean()
 frame["below_average"] = (frame["close"] < frame["moving_average"]).astype(int)
 
 print(
