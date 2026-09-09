@@ -426,11 +426,12 @@ catalog.select(
 # backtest whatever subset of names does resolve. A missing name is a silently narrower strategy
 # chain, which is the failure the named-set design exists to prevent.
 #
-# The diagnostic subset is bounded on purpose. `15` holds every diagnostic member's prediction
-# frame in memory at once and correlates them pairwise, so the cost is quadratic in members. The
-# full grid is sixteen configurations on each of three labels; `ols` is the unpenalized baseline
-# every penalized configuration is a shrinkage of, which makes it the one that means something on
-# its own.
+# The diagnostic subset is bounded hard, and the reason is arithmetic. `15` loads every diagnostic
+# member's raw prediction frame and holds them all while it joins them pairwise; one frame on this
+# panel is 7.2 million rows and about 225 MB in memory. So the set is one member per label and
+# family: the diagnostic configuration at its last checkpoint. Here that is `ols`, the unpenalized
+# baseline every penalized configuration is a shrinkage of, and a linear model has one fitted
+# state, so its last checkpoint is its only one.
 #
 # Only an unnarrowed canonical run publishes. The guard on `narrows_declared_catalog` above already
 # refuses to publish the canonical *population* from a narrowed run; the same condition governs the
@@ -446,7 +447,14 @@ if is_published_population:
             label_rows,
             name=f"us-equities-{label_name}-linear-v1",
         )
-        diagnostic_rows = label_rows.filter(pl.col("config_name").is_in(DIAGNOSTIC_CONFIG_NAMES))
+        diagnostic_rows = label_rows.filter(
+            pl.col("config_name").is_in(DIAGNOSTIC_CONFIG_NAMES)
+            # `.fill_null(True)` covers a family that publishes no checkpoint value at all, where
+            # the comparison is null rather than false and would otherwise empty the frame.
+            & (
+                pl.col("checkpoint_value") == pl.col("checkpoint_value").max().over("config_name")
+            ).fill_null(True)
+        )
         if diagnostic_rows.height == 0:
             raise ValueError(
                 f"no {label_value} rows for diagnostic configurations {DIAGNOSTIC_CONFIG_NAMES}"

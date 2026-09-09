@@ -378,7 +378,6 @@ add_message_title(
     "Whether the recurrent network was still learning when training stopped",
     subtitle="Out-of-sample information coefficient against epoch, one line per configuration",
 )
-fig.tight_layout()
 # The alt text counts rather than asserts: whether a curve turns over is the question the figure
 # exists to answer, and a line described as peaking when it does not is a claim the data refutes.
 _peaks = (
@@ -436,11 +435,22 @@ execution_diagnostics = pl.DataFrame(execution.diagnostics)
 execution_diagnostics
 
 # %% [markdown]
-# ## 6. Naming the set the later notebooks open
+# ## 6. Naming the sets the later notebooks open
 #
-# A canonical default CUDA run freezes every returned LSTM prediction row under a stable name. The
-# same bounded family set supplies raw diagnostics because this notebook has one published
-# configuration. Preview and customized canonical requests do not publish an official set.
+# A canonical default CUDA run freezes what it produced under two stable names, and preview or
+# customized canonical requests publish neither.
+#
+# The first name is the **full set**: every prediction row this run returned, which
+# [`16_backtest`](16_backtest.ipynb) backtests member by member.
+#
+# The second is the **bounded diagnostic set**, and it is bounded hard.
+# [`15_model_analysis`](15_model_analysis.ipynb) loads every diagnostic member's raw prediction
+# frame and holds them all while it joins them pairwise; one frame on this panel is 7.2 million
+# rows and about 225 MB in memory, so a set that grew with the checkpoint count would not fit
+# beside the other seven families'. The bound is the last checkpoint of each published
+# configuration - one member here, because the menu declares one LSTM configuration. The
+# epoch dimension is still read, in the learning-curve figure above, which is drawn from registry
+# metrics rather than from raw frames.
 
 # %% tags=["results"]
 set_rows = []
@@ -457,12 +467,28 @@ if is_published_population:
         execution.catalog_rows,
         name=f"us-equities-{label_name}-lstm-v1",
     )
+    diagnostic_rows = execution.catalog_rows.filter(
+        # `.fill_null(True)` covers a family that publishes no checkpoint value at all, where the
+        # comparison is null rather than false and would otherwise empty the frame.
+        (
+            pl.col("checkpoint_value") == pl.col("checkpoint_value").max().over("config_name")
+        ).fill_null(True)
+    )
+    diagnostic_set = study.predictions.freeze(
+        diagnostic_rows,
+        name=f"us-equities-{label_name}-lstm-diagnostics-v1",
+    )
     set_rows = [
         {
-            "role": "backtest and diagnostic population",
+            "role": "backtest population",
             "set_name": full_set.name,
             "members": len(full_set.members),
-        }
+        },
+        {
+            "role": "bounded diagnostics",
+            "set_name": diagnostic_set.name,
+            "members": len(diagnostic_set.members),
+        },
     ]
 compatible_sets = pl.DataFrame(
     set_rows,
@@ -471,9 +497,10 @@ compatible_sets = pl.DataFrame(
 compatible_sets
 
 # %% [markdown]
-# `15_model_analysis.py` reopens the named set for descriptive analysis. `16_backtest.py` passes
-# every catalog row directly to the shared backtest runner. Model metrics do not choose a
-# configuration or checkpoint.
+# `15_model_analysis` reopens both names: the full set to confirm the run filled every member it
+# promised, and the diagnostic set to read raw predictions. `16_backtest` passes every full-set
+# catalog row to the shared backtest runner. Neither the metrics here nor the ones there choose a
+# configuration or a checkpoint; selection is on validation backtest Sharpe in `16_backtest`.
 
 # %% [markdown]
 # ## What to notice

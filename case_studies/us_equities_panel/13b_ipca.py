@@ -353,9 +353,13 @@ execution_diagnostics
 # times, so a run that overrode a parameter, narrowed the labels or ran under the preview tier
 # keeps its rows and publishes no name.
 #
-# These sets are small enough to be compared prediction by prediction, which is why
-# [`15_model_analysis`](15_model_analysis.ipynb) does not need a separate bounded subset for
-# them the way it does for the larger grids.
+# Each label gets two names, the same pair every other model notebook publishes: a **full set**
+# that [`16_backtest`](16_backtest.ipynb) backtests member by member, and a **bounded diagnostic
+# set** that [`15_model_analysis`](15_model_analysis.ipynb) loads raw predictions for. Here the
+# two hold the same single member, because this family declares one configuration and fits it
+# once rather than checkpointing it, so there is nothing to bound away. The two names still exist
+# so that every family is opened the same way downstream; the registry stores one set and binds
+# both names to it.
 
 # %% tags=["results"]
 set_rows = []
@@ -365,16 +369,28 @@ is_published_population = (
 if is_published_population:
     for selected_label in selected_labels:
         label_name = selected_label.replace("_", "-")
-        result_set = study.predictions.freeze(
-            execution.catalog_rows.filter(pl.col("label") == selected_label),
+        label_rows = execution.catalog_rows.filter(pl.col("label") == selected_label)
+        full_set = study.predictions.freeze(
+            label_rows,
             name=f"us-equities-{label_name}-ipca-v1",
         )
-        set_rows.append(
-            {
-                "role": "backtest and diagnostic population",
-                "set_name": result_set.name,
-                "members": len(result_set.members),
-            }
+        diagnostic_set = study.predictions.freeze(
+            label_rows,
+            name=f"us-equities-{label_name}-ipca-diagnostics-v1",
+        )
+        set_rows.extend(
+            [
+                {
+                    "role": "backtest population",
+                    "set_name": full_set.name,
+                    "members": len(full_set.members),
+                },
+                {
+                    "role": "bounded diagnostics",
+                    "set_name": diagnostic_set.name,
+                    "members": len(diagnostic_set.members),
+                },
+            ]
         )
 compatible_sets = pl.DataFrame(
     set_rows,
@@ -383,9 +399,11 @@ compatible_sets = pl.DataFrame(
 compatible_sets
 
 # %% [markdown]
-# `15_model_analysis.py` reopens the named label sets for descriptive analysis. `16_backtest.py`
-# passes every catalog row directly to the shared backtest runner. Predictive metrics do not choose
-# a configuration or checkpoint.
+# `15_model_analysis` reopens both names per label: the full set to confirm the run filled every
+# member it promised, and the diagnostic set to read raw predictions. `16_backtest` passes every
+# full-set catalog row to the shared backtest runner. Neither the metrics here nor the ones there
+# choose a configuration or a checkpoint; selection is on validation backtest Sharpe in
+# `16_backtest`.
 
 # %% [markdown]
 # ## What to notice

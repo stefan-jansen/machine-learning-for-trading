@@ -127,10 +127,11 @@ PREVIEW_CHECKPOINT_INTERVAL = 0
 #   **`CONFIG_OVERRIDES`** changes one named configuration, taking precedence. An override moves a
 #   training identity, so an overridden run registers beside the published one rather than
 #   replacing it.
-# - **`DIAGNOSTIC_CONFIG_NAMES`** names the small subset [`15_model_analysis`](15_model_analysis.ipynb)
-#   compares predictions across. It is bounded on purpose: that comparison holds every member's
-#   prediction frame in memory at once and correlates them pairwise, so its cost grows with the
-#   square of the membership.
+# - **`DIAGNOSTIC_CONFIG_NAMES`** names the configuration [`15_model_analysis`](15_model_analysis.ipynb)
+#   reads raw predictions for. It is bounded hard: that comparison loads every diagnostic member's
+#   prediction frame and holds them all while it joins them pairwise, and one frame on this panel
+#   is 7.2 million rows and about 225 MB in memory. The frozen set below is the named
+#   configuration at its last epoch checkpoint - one member for this label and family.
 # - **`EXECUTION_TIER`** is `canonical` or `preview`. A canonical run fits the whole panel on every
 #   fold at the published epoch schedule. A preview run has to declare at least one reduction, and
 #   its results carry that reduction in their identity so they can never be compared against
@@ -414,8 +415,16 @@ if is_published_population:
         execution.catalog_rows,
         name=f"us-equities-{label_name}-tabular-dl-v1",
     )
+    diagnostic_rows = execution.catalog_rows.filter(
+        pl.col("config_name").is_in(DIAGNOSTIC_CONFIG_NAMES)
+        # `.fill_null(True)` covers a family that publishes no checkpoint value at all, where the
+        # comparison is null rather than false and would otherwise empty the frame.
+        & (
+            pl.col("checkpoint_value") == pl.col("checkpoint_value").max().over("config_name")
+        ).fill_null(True)
+    )
     diagnostic_set = study.predictions.freeze(
-        execution.catalog_rows.filter(pl.col("config_name").is_in(DIAGNOSTIC_CONFIG_NAMES)),
+        diagnostic_rows,
         name=f"us-equities-{label_name}-tabular-dl-diagnostics-v1",
     )
     set_rows = [

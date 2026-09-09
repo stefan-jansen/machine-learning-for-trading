@@ -369,10 +369,14 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # backtest whatever subset of names does resolve. A missing name is a silently narrower strategy
 # chain, which is the failure the named-set design exists to prevent.
 #
-# The diagnostic subset is bounded on purpose. `15` holds every diagnostic member's prediction
-# frame in memory at once and correlates them pairwise, so the cost is quadratic in members - and
-# the full set here is one row per configuration *per checkpoint*, which is larger again than the
-# linear grid. `default_mse` is the untuned starting point the leaf and objective sweeps vary from.
+# The diagnostic subset is bounded hard, and the reason is arithmetic. `15` loads every diagnostic
+# member's raw prediction frame and holds them all while it joins them pairwise; one frame on this
+# panel is 7.2 million rows and about 225 MB in memory. So the set is one member per label and
+# family: the diagnostic configuration at its last checkpoint. `default_mse` is that configuration
+# here - the untuned starting point the leaf and objective sweeps vary from - and its last
+# checkpoint is the state a reader would compare against another family's finished fit. The
+# checkpoint dimension is not lost by bounding it away: the learning curves above are where it is
+# read, and they are drawn from registry metrics rather than from raw frames.
 #
 # Only an unnarrowed canonical run publishes. The guard on `narrows_declared_catalog` above already
 # refuses to publish the canonical *population* from a narrowed run; the same condition governs the
@@ -437,7 +441,14 @@ if is_published_population:
             label_rows,
             name=f"us-equities-{label_name}-gbm-v1",
         )
-        diagnostic_rows = label_rows.filter(pl.col("config_name").is_in(DIAGNOSTIC_CONFIG_NAMES))
+        diagnostic_rows = label_rows.filter(
+            pl.col("config_name").is_in(DIAGNOSTIC_CONFIG_NAMES)
+            # `.fill_null(True)` covers a family that publishes no checkpoint value at all, where
+            # the comparison is null rather than false and would otherwise empty the frame.
+            & (
+                pl.col("checkpoint_value") == pl.col("checkpoint_value").max().over("config_name")
+            ).fill_null(True)
+        )
         if diagnostic_rows.height == 0:
             raise ValueError(
                 f"no {label_value} rows for diagnostic configurations {DIAGNOSTIC_CONFIG_NAMES}"

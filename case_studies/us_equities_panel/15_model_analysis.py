@@ -143,15 +143,15 @@ DIAGNOSTIC_SET_NAMES = [
     "us-equities-fwd-ret-5d-gbm-diagnostics-v1",
     "us-equities-fwd-ret-21d-gbm-diagnostics-v1",
     "us-equities-fwd-ret-1d-tabular-dl-diagnostics-v1",
-    "us-equities-fwd-ret-1d-nlinear-v1",
-    "us-equities-fwd-ret-1d-lstm-v1",
-    "us-equities-fwd-ret-1d-tsmixer-v1",
-    "us-equities-fwd-ret-1d-pca-v1",
-    "us-equities-fwd-ret-1d-ipca-v1",
-    "us-equities-fwd-ret-5d-pca-v1",
-    "us-equities-fwd-ret-5d-ipca-v1",
-    "us-equities-fwd-ret-21d-pca-v1",
-    "us-equities-fwd-ret-21d-ipca-v1",
+    "us-equities-fwd-ret-1d-nlinear-diagnostics-v1",
+    "us-equities-fwd-ret-1d-lstm-diagnostics-v1",
+    "us-equities-fwd-ret-1d-tsmixer-diagnostics-v1",
+    "us-equities-fwd-ret-1d-pca-diagnostics-v1",
+    "us-equities-fwd-ret-1d-ipca-diagnostics-v1",
+    "us-equities-fwd-ret-5d-pca-diagnostics-v1",
+    "us-equities-fwd-ret-5d-ipca-diagnostics-v1",
+    "us-equities-fwd-ret-21d-pca-diagnostics-v1",
+    "us-equities-fwd-ret-21d-ipca-diagnostics-v1",
 ]
 CAUSAL_LABELS = ["fwd_ret_1d"]
 
@@ -175,6 +175,15 @@ if EXECUTION_TIER == "canonical":
     ):
         if not names or len(names) != len(set(names)):
             raise ValueError(f"{field} must contain unique names")
+    # A diagnostic name that is also a prediction name is a family with no bounded set, filled in
+    # with the full one. Sections 4 to 6 then load the whole population's raw prediction frames
+    # while the prose says they read a bounded subset. Checked here rather than after the sets are
+    # opened, because it is a statement about the two lists and needs nothing from the registry.
+    shared_names = sorted(set(DIAGNOSTIC_SET_NAMES) & set(PREDICTION_SET_NAMES))
+    if shared_names:
+        raise ValueError(
+            f"these names are declared as both the full and the bounded set: {shared_names}"
+        )
     study = Study.open(CASE_STUDY_ID)
 elif EXECUTION_TIER == "preview":
     if not preview_filters or PREVIEW_MAX_PREDICTIONS < 1 or PREVIEW_MAX_DIAGNOSTICS < 1:
@@ -251,11 +260,6 @@ if EXECUTION_TIER == "canonical":
         for declared_set in prediction_sets
         for member in declared_set.members
     }
-    diagnostic_set_by_member = {
-        member: declared_set.name
-        for declared_set in diagnostic_sets
-        for member in declared_set.members
-    }
     if len(prediction_members) != len(set(prediction_members)):
         raise ValueError("full prediction sets overlap")
     if len(diagnostic_members) != len(set(diagnostic_members)):
@@ -283,6 +287,17 @@ if EXECUTION_TIER == "canonical":
         if len(matching_full_sets) != 1:
             raise ValueError(
                 f"{diagnostic_set.hash} resolved {len(matching_full_sets)} matching full sets"
+            )
+        # `<=` above finds the full set this bounded one came from; it does not establish that
+        # any bounding happened, because a set is a subset of itself. Where the full set holds
+        # more than one member, the bounded one has to be strictly smaller. Where it holds one -
+        # a family that declares one configuration and does not checkpoint it - there is nothing
+        # to bound and the two coincide, which is why this is not a flat proper-subset test.
+        full_members = set(matching_full_sets[0].members)
+        if len(full_members) > 1 and set(diagnostic_set.members) == full_members:
+            raise ValueError(
+                f"{diagnostic_set.name} bounds nothing: it is all {len(full_members)} members of "
+                f"{matching_full_sets[0].name}"
             )
 
 # %% tags=["results"]
@@ -329,9 +344,6 @@ if EXECUTION_TIER == "preview":
         for row in preview_selection.iter_rows(named=True)
     }
     prediction_set_by_member = dict(preview_group_by_member)
-    diagnostic_set_by_member = {
-        member: preview_group_by_member[member] for member in diagnostic_members
-    }
     set_rows = [
         {
             "role": role,
@@ -531,7 +543,6 @@ add_message_title(
     "Read the cloud, not the point: several hundred candidates per column",
     subtitle="Left, each candidate's mean daily IC; right, the half-width of its HAC interval",
 )
-fig.tight_layout()
 # The alt text counts rather than asserts: whether any family's cloud clears zero is a fact about
 # the frame, and a panel described as separating the families when it does not is a claim the data
 # refutes.
@@ -559,7 +570,11 @@ show_with_alt(
 # The fold summaries below separate them.
 #
 # This is where raw predictions are read rather than registry metrics, which is why it runs over
-# the bounded diagnostic subset rather than the whole population.
+# the bounded diagnostic subset rather than the whole population. Each model notebook publishes
+# that subset as one member per label and family - its diagnostic configuration at its last
+# checkpoint - and the bound is arithmetic rather than taste. One prediction frame on this panel
+# is 7.2 million rows and about 225 MB held in memory, every diagnostic frame is resident at once
+# because Section 5 joins them pairwise, and the full population is several hundred members.
 
 # %% tags=["results"]
 KEYS = ["symbol", "timestamp", "fold_id"]
@@ -624,15 +639,30 @@ fold_ic
 # names in the same order. A portfolio holding both would then be taking one bet at twice the
 # size, which is the failure this section exists to catch.
 #
+# Every pair drawn from the same label is compared, which pairs the families against each other:
+# a label fixes what the models were predicting and which folds they were scored on, so two
+# results under it are answering the same question and their orderings can be set side by side.
+# Pairs that cross labels are not compared, because a one-day and a twenty-one-day forward return
+# are different questions and a correlation between them measures nothing.
+#
 # The comparison is made only on the observations both results actually cover, one date at a time,
 # and averaged over dates. Two things are checked before any correlation is computed: that the
 # join is one-to-one, because a join that quietly multiplies rows makes two models look more alike
 # than they are, and that both artifacts carry the same realized return for every shared
 # observation, because if they disagree about what happened they are not comparable at all.
+#
+# Coverage differs between families and the frame says by how much. A sequence model scores only
+# the stock-dates where sixty consecutive sessions were available, so it covers fewer rows than a
+# model on the flat table, and `n_shared_rows` is what a reader checks before reading a
+# correlation as a statement about the whole panel.
 
 # %% tags=["results"]
 correlation_rows = []
 diagnostic_hashes = list(diagnostic_members)
+label_by_member = {
+    row["prediction_hash"]: row["label"]
+    for row in catalog.select("prediction_hash", "label").iter_rows(named=True)
+}
 
 
 def prediction_display_id(prediction_hash):
@@ -678,13 +708,27 @@ def summarize_prediction_pair(left_hash, right_hash):
 
 
 # %% tags=["results"]
+# `left_index + 1` rather than `left_index`: a result against itself correlates at one on every
+# date and answers nothing.
 for left_index, left_hash in enumerate(diagnostic_hashes):
-    for right_hash in diagnostic_hashes[left_index:]:
-        if diagnostic_set_by_member[left_hash] != diagnostic_set_by_member[right_hash]:
+    for right_hash in diagnostic_hashes[left_index + 1 :]:
+        if label_by_member[left_hash] != label_by_member[right_hash]:
             continue
         correlation_rows.append(summarize_prediction_pair(left_hash, right_hash))
 
-correlations = pl.DataFrame(correlation_rows).sort("left", "right")
+# The schema is declared so that a run whose diagnostic members share no label - a preview holding
+# one - produces an empty frame with columns rather than a frame with none, which `sort` would
+# raise on.
+correlations = pl.DataFrame(
+    correlation_rows,
+    schema={
+        "left": pl.String,
+        "right": pl.String,
+        "mean_daily_correlation": pl.Float64,
+        "n_shared_rows": pl.Int64,
+        "n_decision_dates": pl.Int64,
+    },
+).sort("left", "right")
 correlations
 
 # %% [markdown]
