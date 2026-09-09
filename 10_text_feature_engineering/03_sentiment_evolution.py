@@ -543,8 +543,8 @@ show_with_alt(
     "the annotated class down the side and the predicted class across the bottom, all three "
     "on the same color scale. The neutral diagonal cell dominates every panel. The negative "
     "row differs most between panels: in the first two a large share of it sits away from the "
-    "diagonal, and in the third almost all of it is on the diagonal. Every panel loses a "
-    "similar number of the positive row into the neutral column.",
+    "diagonal, and in the third almost all of it is on the diagonal. Every panel loses part "
+    "of the positive row into the neutral column.",
 )
 
 # %%
