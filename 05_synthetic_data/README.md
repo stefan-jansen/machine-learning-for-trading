@@ -1,6 +1,6 @@
 # Chapter 5: Synthetic Financial Data
 
-The chapter explains why backtests are fragile even before any generative model enters the picture. Because strategy research is adaptive and path-limited, strong in-sample results may simply reflect favorable history and repeated search. The section then motivates synthetic data as a way to expand robustness analysis beyond one realized market path, while anchoring the discussion in the stylized facts that any useful generator must preserve.
+Financial research has one realized price path and a research process that searches it repeatedly, which is enough on its own to make a backtest fragile. This chapter asks what it would take to generate more paths worth trusting: what a generator has to preserve, how to tell whether it did, and what the answer costs in privacy and in effort. It works through classical simulation baselines, GANs, diffusion models and LLM-based tabular generation, and it holds each of them to the same evaluation, because the validation protocol matters more here than the choice of architecture.
 
 ## Learning Objectives
 
@@ -16,38 +16,42 @@ The chapter explains why backtests are fragile even before any generative model 
 
 This section explains why backtests are fragile even before any generative model enters the picture. Because strategy research is adaptive and path-limited, strong in-sample results may simply reflect favorable history and repeated search. The section then motivates synthetic data as a way to expand robustness analysis beyond one realized market path, while anchoring the discussion in the stylized facts that any useful generator must preserve.
 
-### 5.2 Classical Simulation Baselines
+### 5.2 Evaluating Synthetic Financial Data
+
+This section sets the standard the rest of the chapter is measured against, which is why it comes before any generator. Synthetic data can look plausible and still be unusable, because the structure that matters in finance sits in rare events, in shifts in dependence, and in conditional dynamics rather than at the centre of the distribution. It introduces the three criteria the chapter uses throughout - fidelity, utility and privacy - and the fact that they trade off against one another rather than improving together.
+
+### 5.3 Classical Simulation Baselines
 
 This section gives the chapter intellectual discipline. Rather than jumping straight to deep generators, it shows that bootstrap methods, GBM, jump-diffusion, mean reversion, Heston, and GARCH remain important baselines because they are interpretable, sample-efficient, and easier to validate. Readers should care because these methods define the benchmark a learned generator ought to beat on the diagnostics that actually matter.
 
-- [`00_classical_simulation`](00_classical_simulation.ipynb) — synthetic financial data, building the foundation for the learned generative models that follow. Uses etfs data.
+- [`00_classical_simulation`](00_classical_simulation.ipynb) — Simulates return paths from GBM, jump diffusion, mean reversion, Heston and GARCH, and resamples real returns with the IID, block and stationary bootstraps, then measures which of them reproduce fat tails and volatility clustering. These are the baselines a learned generator has to beat. Uses ETF data.
 
-### 5.3 Generative Model Taxonomy
+### 5.4 Generative Model Taxonomy
 
 This section provides the conceptual map for the rest of the chapter. It distinguishes discriminative from generative modeling and positions VAEs, GANs, diffusion models, and LLM-based tabular generators as alternative ways to learn joint distributions rather than hand-specify them. Its value is orientation: readers can see early that architecture choice is really about preserving the structure their downstream use case needs.
 
-### 5.4 GANs for Financial Time Series
+### 5.5 GANs for Financial Time Series
 
 This is the chapter's most differentiated model survey. It moves from the basic adversarial setup to finance-specific variants such as TimeGAN, Tail-GAN, Sig-CWGAN, and GT-GAN, showing how each responds to a concrete weakness of vanilla GANs: temporal structure, tail risk, path fidelity, or irregular timestamps. The section matters because it teaches readers not to ask which GAN is best in general, but which inductive bias matches the task and its failure modes.
 
 - [`01_timegan`](01_timegan.ipynb) — This notebook implements TimeGAN (Yoon, Jarrett & van der Schaar, NeurIPS 2019), the foundational architecture for synthetic financial time series generation. Uses multi_stock_data, state_dict, us_equities data.
 - [`02_tailgan_tail_risk`](02_tailgan_tail_risk.ipynb) — This notebook implements Tail-GAN (Cont, Xu, and Zhang 2022), a GAN architecture that uses differentiable sorting to preserve tail risk characteristics (VaR, ES) in synthetic financial scenarios. Uses etf_returns, etfs, state_dict data.
-- [`03_sigcwgan_signatures`](03_sigcwgan_signatures.ipynb) — > Docker required: This notebook uses signatory and esig, which are x86-only > packages not included in the default environment. Run with: > `bash > docker compose --profile py312 run --rm py312 python 05_synthetic_data/03_sigcwgan_signatures.py > ` Uses sp500_log_returns, state_dict data.
+- [`03_sigcwgan_signatures`](03_sigcwgan_signatures.ipynb) — Builds the unconditional Sig-Wasserstein GAN, which replaces the learned discriminator with an analytic distance between expected path signatures, and explains how the conditional Sig-CWGAN extends it. Uses S&P 500 log returns. Needs the `py312` profile; see the callout at the end of this file.
 - [`04_gtgan_irregular`](04_gtgan_irregular.ipynb) — This notebook implements a GT-GAN-inspired model (based on Jeon et al., NeurIPS 2022) using Neural ODEs to handle time series with naturally irregular timestamps. Uses Chapter 3 NVDA dollar bars (Databento bar sampling).
 
-### 5.5 Diffusion Models for Financial Time Series
+### 5.6 Diffusion Models for Financial Time Series
 
 This section presents diffusion models as a strong, often more stable alternative to adversarial training. It explains the denoising framework, why diffusion can fit financial return structure, how conditional guidance supports regime-aware stress testing, and why Diffusion-TS is a useful reference design for sequential financial data. Readers should care because this is the chapter's clearest candidate for a general-purpose learned generator, but one that still demands careful validation and use-case alignment.
 
 - [`05_diffusion_ts`](05_diffusion_ts.ipynb) — This notebook implements Diffusion-TS (Yuan & Qiao, ICLR 2024), a diffusion model that decomposes the denoising prediction into trend (polynomial regression) and seasonal (Fourier basis) components. This interpretable structure encourages the model to separate slow drift from periodic patterns, analogous to classical STL decomposition but learned end-to-end within the diffusion framework.
 
-### 5.6 LLMs for Structured Financial Data
+### 5.7 LLMs for Structured Financial Data
 
 This section extends the synthetic-data discussion beyond return series to mixed-type financial tables. By introducing serialization, the GReaT workflow, and constraint-based postprocessing, it shows where LLMs can be practical for credit, customer, and fundamental data. The key takeaway is pragmatic: LLMs can model heterogeneous schemas well, but they bring new risks around invalid rows, numerical fidelity, and privacy leakage.
 
 - [`06_llm_tabular_great`](06_llm_tabular_great.ipynb) — This notebook implements GReaT (Generate Realistic Tabular Data) using the actual be-great library to generate synthetic financial tabular data with LLMs. Uses etf_tabular_data, etfs, from_dir data.
 
-### 5.7 The Fidelity-Utility-Privacy Framework
+### 5.8 Applying the Fidelity-Utility-Privacy Framework
 
 This is the chapter's methodological center of gravity. It argues that validation matters more than architecture and organizes evaluation around fidelity, utility, and privacy, with TSTR as the main task-based benchmark and leakage or DP checks as privacy controls. This section matters because it turns synthetic data from a modeling curiosity into something readers can govern and assess in a research workflow.
 
