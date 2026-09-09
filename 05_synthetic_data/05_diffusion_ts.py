@@ -1670,8 +1670,12 @@ show_with_alt(
 #
 # Do not read a population claim off ten sampled paths, in either direction. The real
 # panel is one draw of ten sequences and can easily be calmer than the sample it came
-# from. The volatility distributions plotted further down compare the full populations,
-# and that is the figure to weigh.
+# from. The statistical tests above - the KS statistics and the correlation error -
+# are the population comparison for these unconditional samples.
+#
+# Not the regime histograms further down: those plot `regime_samples`, generated
+# separately under classifier guidance and without the variance rescaling applied here,
+# so they measure conditional generation and say nothing about `synthetic_sequences`.
 
 # %%
 # Trend + Seasonal decomposition visualization (Matplotlib, vertically stacked)
@@ -2131,8 +2135,8 @@ for regime_id in range(n_active_regimes):
 #
 # **Scale tuning**: a higher guidance scale buys more regime separation and costs more
 # variance. The per-regime settings are declared in `guidance_settings` in the config
-# cell, where the majority class is deliberately steered less hard than a naive reading
-# would suggest, to keep the minority class from collapsing onto extreme volatility.
+# cell, where the minority class is deliberately steered less hard than the majority
+# one, to keep it from collapsing onto extreme volatility.
 
 # %% [markdown]
 # Historical and generated sequences side by side, one row per regime. Every panel
@@ -2200,9 +2204,9 @@ show_with_alt(
 # historical counterparts.
 #
 # Ten paths per panel is too thin a sample to conclude from, which is what the next
-# figure is for: it compares the full volatility distributions per regime, where the
-# separation the guidance is meant to produce either shows up or does not. Read that
-# one before deciding what this one means.
+# figure is for: it compares the full volatility distributions of these same
+# regime-conditional samples, where the separation the guidance is meant to produce
+# either shows up or does not. Read that one before deciding what this one means.
 #
 # One thing this figure does show that a distribution cannot: the generated paths widen
 # from left to right, and the historical ones do not. Volatility that grows with
