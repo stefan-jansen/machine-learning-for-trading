@@ -1667,21 +1667,23 @@ for col in range(2):
 fig.suptitle("Real vs synthetic sample paths (asset 0)", fontsize=12)
 show_with_alt(
     fig,
-    "Four panels sharing a vertical scale by column: real daily returns and their "
-    "cumulative sum on the top row, synthetic on the bottom. The real daily returns "
-    "stay in a narrow band and their cumulative paths all drift mildly upward. The "
-    "synthetic daily returns swing several times wider, including one deep downward "
-    "spike, and their cumulative paths fan out both above and below zero.",
+    "Four panels of ten overlaid paths each, sharing a vertical scale by column so the "
+    "two rows can be compared directly: real daily returns on the top left with their "
+    "cumulative sum on the top right, and the synthetic equivalents below them. Each "
+    "panel has a dashed line at zero, and the cumulative panels start every path at "
+    "zero and follow it across the window.",
 )
 
 # %% [markdown]
 # **Interpretation**: ten windows drawn at random from each, on a shared scale per
-# column. Compare the spread rather than any individual line.
+# column. Compare how far the two rows spread, in the daily returns and in what those
+# returns accumulate to, rather than tracking any individual line.
 #
 # Do not read a population claim off ten paths, in either direction: ten windows are a
 # thin sample, and the real ones overlap each other, so they carry less independent
-# information than ten separate lines suggest. The statistical tests above - the KS statistics and the correlation error -
-# are the population comparison for these unconditional samples.
+# information than ten separate lines suggest. The statistical tests above - the KS
+# statistics and the correlation error - are the population comparison for these
+# unconditional samples.
 #
 # Not the regime histograms further down: those plot `regime_samples`, generated
 # separately under classifier guidance and without the variance rescaling applied here,
