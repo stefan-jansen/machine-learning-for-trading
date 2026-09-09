@@ -238,11 +238,23 @@ print(
 #
 # The helper takes flat arrays so the Transformers and the ridge baseline go through
 # exactly the same scoring path.
+#
+# A date's IC is undefined when a model predicts the same number for every fund on it:
+# the predicted ranks are all tied and there is nothing to correlate. The library
+# returns `NaN` for such a date, and polars treats `NaN` and null as different values,
+# so `drop_nulls` alone leaves it in place and one of them makes the whole mean `NaN`.
+# Both are filtered here, and the table below reports how many dates each mean was
+# taken over, so a model that ties often is visible rather than hidden behind an
+# average over whichever dates happened to survive.
 
 
 # %%
 def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
-    """Mean cross-sectional Spearman IC across dates."""
+    """Mean cross-sectional Spearman IC over the dates where it is defined.
+
+    Returns the mean and the defined/total date counts. Filters both null and NaN,
+    since polars `drop_nulls` leaves NaN in place.
+    """
     pred_df = pl.DataFrame({"timestamp": dates, "symbol": syms, "prediction": y_pred})
     ret_df = pl.DataFrame({"timestamp": dates, "symbol": syms, "forward_return": y_true})
     ic_per_date = cross_sectional_ic_series(
@@ -253,8 +265,9 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
         date_col="timestamp",
         entity_col="symbol",
     )
-    ic_clean = ic_per_date.drop_nulls("ic")
-    return float(ic_clean["ic"].mean()) if ic_clean.height else float("nan")
+    defined = ic_per_date.filter(pl.col("ic").is_not_null() & pl.col("ic").is_not_nan())
+    mean_ic = float(defined["ic"].mean()) if defined.height else float("nan")
+    return {"ic": mean_ic, "n_defined": defined.height, "n_total": ic_per_date.height}
 
 
 # %% [markdown]
@@ -523,7 +536,7 @@ results = {}
 for name, pred in [("PatchTST", pred_patch), ("iTransformer", pred_itrans), ("Ridge", pred_ridge)]:
     mse = np.mean((pred - y_test) ** 2)
     ic = cross_sectional_ic_mean(y_test, pred, test_dates, test_symbols)
-    results[name] = {"mse": mse, "ic": ic}
+    results[name] = {"mse": mse, **ic}
 
 zero_mse = float(np.mean(y_test**2))
 for result in results.values():
@@ -534,6 +547,7 @@ summary_df = pl.DataFrame(
         {
             "Model": name,
             "Mean daily rank IC": round(r["ic"], 4),
+            "Dates IC defined on": f"{r['n_defined']} of {r['n_total']}",
             "Test MSE": round(float(r["mse"]), 6),
             "MSE / zero forecast": round(float(r["mse_ratio"]), 3),
         }

@@ -199,11 +199,23 @@ print(
 # Mean cross-sectional Spearman IC by date - TCN evaluation is on cross-asset
 # ranking, not pooled point error, so the same date/entity-aware metric used in
 # `01_core_architectures` and `04_transformers` is the right comparison anchor.
+#
+# A date's IC is undefined when a model predicts the same number for every fund on
+# it: the predicted ranks are all tied and there is nothing to correlate. The library
+# returns `NaN` for such a date, and polars treats `NaN` and null as different values,
+# so `drop_nulls` alone leaves it in place and one of them makes the whole mean `NaN`.
+# Both are filtered here, and the count of dates the mean was actually taken over is
+# printed beside it, so a model that ties often is visible rather than averaged over
+# whichever dates happened to survive.
 
 
 # %%
 def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
-    """Mean cross-sectional Spearman IC across dates."""
+    """Mean cross-sectional Spearman IC over the dates where it is defined.
+
+    Returns the mean and the defined/total date counts. Filters both null and NaN,
+    since polars `drop_nulls` leaves NaN in place.
+    """
     pred_df = pl.DataFrame({"timestamp": dates, "symbol": syms, "prediction": y_pred})
     ret_df = pl.DataFrame({"timestamp": dates, "symbol": syms, "forward_return": y_true})
     ic_per_date = cross_sectional_ic_series(
@@ -214,8 +226,9 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
         date_col="timestamp",
         entity_col="symbol",
     )
-    ic_clean = ic_per_date.drop_nulls("ic")
-    return float(ic_clean["ic"].mean()) if ic_clean.height else float("nan")
+    defined = ic_per_date.filter(pl.col("ic").is_not_null() & pl.col("ic").is_not_nan())
+    mean_ic = float(defined["ic"].mean()) if defined.height else float("nan")
+    return {"ic": mean_ic, "n_defined": defined.height, "n_total": ic_per_date.height}
 
 
 # %% [markdown]
@@ -417,11 +430,13 @@ with torch.no_grad():
     y_pred = model(X_test_t).cpu().numpy()
 
 test_mse = np.mean((y_pred - y_test) ** 2)
-test_ic = cross_sectional_ic_mean(y_test, y_pred, test_dates, test_symbols)
+tcn_ic = cross_sectional_ic_mean(y_test, y_pred, test_dates, test_symbols)
+test_ic = tcn_ic["ic"]
 
 print("\nTCN Test Results:")
 print(f"  MSE: {test_mse:.6f}")
-print(f"  Spearman IC: {test_ic:.4f}")
+print(f"  Spearman IC: {test_ic:.4f}", end="")
+print(f"  (defined on {tcn_ic['n_defined']} of {tcn_ic['n_total']} test dates)")
 
 # %% [markdown]
 # ## Ridge Baseline Comparison
@@ -439,12 +454,14 @@ ridge.fit(X_train_scaled, y_train)
 y_ridge_pred = ridge.predict(X_test_scaled)
 
 ridge_mse = np.mean((y_ridge_pred - y_test) ** 2)
-ridge_ic = cross_sectional_ic_mean(y_test, y_ridge_pred, test_dates, test_symbols)
+ridge_ic_result = cross_sectional_ic_mean(y_test, y_ridge_pred, test_dates, test_symbols)
+ridge_ic = ridge_ic_result["ic"]
 zero_mse = float(np.mean(y_test**2))
 
 print("\nRidge Baseline Results:")
 print(f"  MSE: {ridge_mse:.6f}")
-print(f"  Spearman IC: {ridge_ic:.4f}")
+print(f"  Spearman IC: {ridge_ic:.4f}", end="")
+print(f"  (defined on {ridge_ic_result['n_defined']} of {ridge_ic_result['n_total']} test dates)")
 
 # %% [markdown]
 # ## The convolutional network against the linear baseline
