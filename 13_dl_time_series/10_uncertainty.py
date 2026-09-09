@@ -57,6 +57,10 @@
 # %%
 """Prediction Uncertainty - implement MC Dropout and Deep Ensembles for confidence estimation."""
 
+import os
+
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
@@ -93,7 +97,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
 
 set_global_seeds(SEED)
-# Extra determinism flags for CUDA training in this notebook
+torch.use_deterministic_algorithms(True)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
@@ -127,6 +131,19 @@ print(
 
 # %% [markdown]
 # ## Sequence Creation and Temporal Split
+#
+# Two housekeeping steps before the split, both of which affect what the models see.
+#
+# NaN and infinite feature values are replaced with zero. The features are already
+# standardized returns and a NaN here means a missing observation at a series
+# boundary, so zero is the standardized mean rather than an invented value;
+# forward-filling would carry a value across a gap, which is a look-ahead in panel
+# data. The count is printed so a large number cannot pass unnoticed.
+#
+# The rows are then put in one canonical order, by date and then symbol. The sequence
+# builder pools assets in whatever order the frame yields them, and that order is not
+# fixed between runs - which changes which examples land in which mini-batch, and with
+# it every number below, seeds notwithstanding.
 
 # %%
 X, y, timestamps, symbols = create_sequences_multi_asset(
@@ -138,12 +155,15 @@ X, y, timestamps, symbols = create_sequences_multi_asset(
     symbol_col=mds.entity_cols[0],
 )
 
-# Replace NaN/inf with zero - acceptable here because features are already
-# standardized returns where NaN typically indicates missing data at series
-# boundaries. Forward-fill is an alternative but risks lookahead in panel data.
 n_nan = np.isnan(X).sum() + np.isinf(X).sum()
-X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
-y = np.nan_to_num(y, nan=0.0).astype(np.float32)
+
+# One canonical row order, by date then symbol, so mini-batch composition does not
+# depend on the order the sequence builder happened to pool assets in.
+sequence_order = np.lexsort((symbols.astype(str), timestamps))
+X = np.nan_to_num(X[sequence_order], nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+y = np.nan_to_num(y[sequence_order], nan=0.0).astype(np.float32)
+timestamps = timestamps[sequence_order]
+symbols = symbols[sequence_order]
 
 print(f"Sequences: {X.shape[0]:,}, shape: {X.shape}")
 print(f"NaN/inf values replaced with 0: {n_nan:,}")

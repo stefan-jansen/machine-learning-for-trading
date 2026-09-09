@@ -184,7 +184,10 @@ def prepare_univariate_contexts(
 ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, np.ndarray]:
     """Sliding-window contexts of `feature_col` paired with `target_col` per symbol."""
     contexts, targets_list, dates_list, symbols_list = [], [], [], []
-    for symbol in df.select(symbol_col).unique().to_series().to_list():
+    # sorted(), not unique() alone: polars does not order the result of unique(), so
+    # the pooled row order - and with it every mini-batch the LSTM sees - would differ
+    # between runs with the seeds unchanged.
+    for symbol in sorted(df.select(symbol_col).unique().to_series().to_list()):
         sym_df = df.filter(pl.col(symbol_col) == symbol).sort(date_col)
         if len(sym_df) < context_length + 1:
             continue
