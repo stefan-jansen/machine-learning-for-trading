@@ -582,9 +582,19 @@ es_daily.select(
 # %% [markdown]
 # ## 5. Validate Aggregation
 #
-# Check that daily aggregation is correct:
-# - Bar counts should be ~23 per session (23-hour trading day)
-# - OHLC relationships should hold (Low ≤ Open/Close ≤ High)
+# Two things are worth measuring on the daily frame, and they establish different things.
+#
+# The **bar count per session** is genuinely informative: it is the number of hourly bars that
+# went into each daily bar, and its distribution says which sessions were short and why.
+#
+# The **OHLC invariants** are not. Every daily price here is selected from an hourly price
+# rather than computed from several: the open is the session's first open, the close its last
+# close, the high the maximum of the hourly highs and the low the minimum of the hourly lows.
+# So if each hourly bar satisfies low ≤ open, close ≤ high, the daily bar inherits it - the
+# minimum over the session is at or below the first bar's own low, which is at or below its
+# open. The check below cannot detect a bad aggregation. What it can detect is an hourly bar
+# that arrived broken, or a later edit that replaces a selection with an arithmetic. Because
+# the relation is exact rather than approximate, any breach at all is a finding.
 
 # %%
 bar_counts = daily.group_by("bar_count").len().sort("bar_count")
@@ -636,11 +646,11 @@ ohlc_check = daily.with_columns(
     ]
 )
 
-print("OHLC Invariant Check:")
+print(f"OHLC invariants over {len(ohlc_check):,} daily bars:")
 for col in ["low_le_open", "low_le_close", "high_ge_open", "high_ge_close"]:
-    pct = ohlc_check[col].mean() * 100
-    status = "[OK]" if pct > 99.9 else "[FAIL]"
-    print(f"  {status} {col}: {pct:.2f}%")
+    breaches = int((~ohlc_check[col]).sum())
+    status = "[OK]" if breaches == 0 else "[FAIL]"
+    print(f"  {status} {col}: {breaches} breaches")
 
 # %% [markdown]
 # ## 6. Coverage Summary
@@ -742,8 +752,11 @@ es_nq_2024.head(10)
 #    full trading day; the shorter ones are holidays, partial days, and deferred tenors thin
 #    enough to stop printing. The distribution is worth drawing rather than summarising,
 #    because the tail is the part that needs explaining.
-# 5. **Aggregation can create invariant breaks that the hourly bars did not have**, so the
-#    daily frame is checked after it is built rather than inheriting the hourly result.
+# 5. **A check that cannot fail is not a check.** The daily OHLC invariants follow from the
+#    aggregation being four selections rather than four calculations, so they hold for any
+#    valid hourly input. Running them is still worth the line, because they catch a broken
+#    input bar or a future edit that computes where it used to select - but the section says
+#    which of those it would be finding, rather than implying the aggregation is on trial.
 #
 # ## Next Steps
 #
