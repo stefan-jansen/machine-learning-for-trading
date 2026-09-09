@@ -611,13 +611,25 @@ print(f"Prediction K-S p-value: {prediction_ks.pvalue:.4f}")
 
 # %% [markdown]
 # Read the two together. The feature with the largest stability index says which input moved
-# most; the prediction-side index says whether that movement reached the model's output.
+# most; the prediction-side index says whether a movement of that size reached the model's
+# output.
 #
-# The interesting case is when they disagree. A feature that crosses the watch threshold while
-# the prediction distribution sits still means the model was not leaning on that feature much,
-# which is worth knowing and is not an emergency. Predictions moving while every feature looks
-# stable is the alarming direction: the inputs the monitor watches are not the ones that changed,
-# and the cause is upstream of them.
+# Both indices are computed one variable at a time, on its own marginal distribution, and that
+# bounds what a disagreement between them can mean. A feature crossing the watch threshold with
+# the prediction distribution unmoved is consistent with the model weighting that feature
+# lightly, and equally with two features moving in ways that cancel in the output. Predictions
+# moving while every monitored feature looks stable is the more urgent direction, and it is not
+# by itself evidence of an upstream cause: it also happens when the relationships *between*
+# stable features change, which no one-feature-at-a-time comparison can see.
+#
+# The two comparisons also use different reference periods, because the artifacts allow nothing
+# else. Feature values exist before the holdout, so their reference is the model's last
+# validation window; predictions exist only inside the holdout, so their baseline is its first
+# `LOOKBACK_DAYS` sessions. Only the direction of the two movements is comparable, not their
+# size.
+#
+# So a disagreement is a list of things to check - feature dependence, how sensitive the model
+# is to each input, and whether anything upstream changed - and not one of them on its own.
 
 
 # %% [markdown]

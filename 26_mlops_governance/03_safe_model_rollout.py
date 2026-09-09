@@ -414,10 +414,18 @@ historical_ic_context[["role", "model", "mean_daily_spearman_ic"]]
 # ## 3. Run the candidate without capital
 #
 # The shadow window is the first `SHADOW_SESSIONS` sessions both models cover in the rollout
-# year. A score formed after the close on session $t$ is paired with `fwd_ret_1d`, the return
-# from $t$ to $t+1$, so what is being scored is a decision acted on at the next session's open
-# rather than at the close the score was formed from. A same-bar pairing would credit the model
-# with a price it could not have traded at.
+# year. A score formed after the close on session $t$ is paired with `fwd_ret_1d`, which
+# `02_labels` builds as the forward return between *adjusted closes*, so the score is scored
+# against the move from that close to the next one. Nothing is scored against the bar it was
+# formed from, which is the pairing that would credit a model with a price it could not have
+# traded at.
+#
+# The mismatch worth naming is at the other end. The case study decides at a close and enters
+# at the next open, and a close-to-close label includes the overnight move that a next-open
+# entry does not capture. The returns below therefore sit above what such a book earns, by
+# whatever the overnight gaps contributed over these sessions. It is a statement about the
+# level and not about the comparison: both models are scored the same way, so the difference
+# the gate reads is unaffected.
 
 
 # %%
