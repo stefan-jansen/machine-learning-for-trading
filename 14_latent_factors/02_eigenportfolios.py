@@ -526,10 +526,13 @@ print(f"Correlation(PC1, Equal-Weight Market): {market_corr:.4f}")
 print(f"PC1 variance explained: {explained_var[0]:.1%}")
 
 # %% [markdown]
-# The correlation printed above is the whole question for this section: it says how much
-# of the first eigenportfolio is the equal-weight market and how much is something the
-# equal-weight portfolio does not already give you. Read it before reading any
-# interpretation of PC1 elsewhere in the notebook.
+# The correlation printed above is the whole question for this section: it says how
+# closely the first eigenportfolio's return series and the equal-weight market's move
+# together. It is a measure of linear association and not a decomposition - it does not
+# split the eigenportfolio into a market part and a remainder, and squaring it would
+# give the shared variance share of a single-predictor regression, which is a different
+# quantity again. Read it before reading any interpretation of PC1 elsewhere in the
+# notebook.
 #
 # Whatever it says, a PCA loading is a common-factor exposure and not a CAPM beta. Beta
 # is defined against a prespecified market portfolio and estimated by regression; this
@@ -1006,7 +1009,7 @@ axes[0].set_ylabel("Eigenvalue (log scale)")
 axes[0].legend()
 add_message_title(
     axes[0],
-    "Eigenvalue spectrum against the Bai-Ng informed edge",
+    "Eigenvalue spectrum against the BBP-informed noise edge",
     subtitle="Top 20 eigenvalues; blue retained, amber above edge but beyond the five-factor cap",
 )
 axes[1].bar(
