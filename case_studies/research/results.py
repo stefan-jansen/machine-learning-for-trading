@@ -752,5 +752,21 @@ class ResultsCatalog:
                 partial.append((result_hash, reason))
         return partial
 
-    def open(self, result_hash: str, *, include_preview: bool = False) -> Result:
+    def open(self, result_hash: str, *, include_preview: bool | None = None) -> Result:
+        """Resolve a hash out of this study's registry, in this study's own tier.
+
+        `include_preview` defaults to the study's `execution_tier`, not to False. Every
+        caller arrives here with a hash it read out of *this* study's registry, so under a
+        preview study that hash lives in the preview registry and nowhere else. A fixed
+        False sent all of them to search canonical and released only, and
+        `open_selection_field`'s live ranking raised KeyError on the first member it had
+        just ranked. `declare_official_population` had already worked around it by passing
+        True at its own call site; deciding it here covers the three that had not.
+
+        Under a canonical study the default is False exactly as before, and even when it is
+        True `Result.open` appends the preview root *after* canonical and released, so a
+        hash that resolves canonically still resolves canonically.
+        """
+        if include_preview is None:
+            include_preview = self.study.execution_tier is ExecutionTier.PREVIEW
         return Result.open(self.study, result_hash, include_preview=include_preview)
