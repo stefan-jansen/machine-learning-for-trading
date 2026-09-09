@@ -83,7 +83,7 @@ from arch import arch_model
 from arch.bootstrap import IIDBootstrap, MovingBlockBootstrap, StationaryBootstrap
 from ml4t.data.providers import SyntheticProvider
 from plotly.subplots import make_subplots
-from scipy.stats import kurtosis, skew
+from scipy.stats import kurtosis, norm, skew
 from statsmodels.tsa.stattools import acf
 
 from data import load_etfs
@@ -372,10 +372,12 @@ def simulate_jump_diffusion(
 # %% [markdown]
 # ### Jump-Diffusion Simulation
 #
-# Simulate crash-only jumps: a jump intensity of five per year, and a mean log
-# jump size that is negative, so each jump is a drop on average. The compensator
-# is computed from those same parameters rather than retyped, so changing one
-# cannot leave the printed diagnostic describing a different model.
+# Simulate jumps with a negative mean log size, so the jump distribution is
+# tilted downward without being one-sided: log jump sizes are Gaussian, so a
+# minority of jumps are still upward, and the cell prints that share rather than
+# leaving the reader to infer it. The compensator is computed from the same
+# parameters rather than retyped, so changing one cannot leave the printed
+# diagnostic describing a different model.
 
 # %%
 JD_MU, JD_SIGMA = 0.08, 0.15
@@ -394,7 +396,9 @@ jd_returns = np.diff(np.log(jd_prices))
 
 k = np.exp(JD_MU_JUMP + 0.5 * JD_SIGMA_JUMP**2) - 1
 print(f"Jump-Diffusion simulation: {len(jd_prices)} prices")
-print(f"Mean jump size: {np.exp(JD_MU_JUMP) - 1:.2%}; intensity {JD_LAMBDA:.0f} per year")
+upward_jump_share = 1 - norm.cdf(0, loc=JD_MU_JUMP, scale=JD_SIGMA_JUMP)
+print(f"Mean jump size: {k:.2%} (median {np.exp(JD_MU_JUMP) - 1:.2%})")
+print(f"Upward jumps: {upward_jump_share:.1%}; intensity {JD_LAMBDA:.0f} per year")
 print(f"Jump compensator k: {k:.4f} (subtracted from drift)")
 print(f"Annualized return: {jd_returns.mean() * 252:.2%}")
 print(f"Annualized volatility: {jd_returns.std() * np.sqrt(252):.2%}")
@@ -407,7 +411,7 @@ print(f"Excess kurtosis: {kurtosis(jd_returns, fisher=True, bias=False):.4f} (> 
 # The provider's `gbm_jump` model is **not** the model above. It exposes only
 # `annual_return` and `annual_volatility`; the jump process is fixed internally
 # at five jumps per year with a **zero-mean** jump size. Symmetric jumps produce
-# fat tails without skew, while the crash-only jumps above produce both. The
+# fat tails without skew, while the downward-tilted jumps above produce both. The
 # printed skewness shows the difference, and it is the reason to implement the
 # jump process yourself when the asymmetry is the point.
 
@@ -420,7 +424,7 @@ provider_jd_returns = np.diff(np.log(df["close"].to_numpy()))
 
 print(f"SyntheticProvider gbm_jump: {len(df)} bars")
 print(f"  skewness, provider (zero-mean jumps):  {skew(provider_jd_returns):+.3f}")
-print(f"  skewness, from scratch (down-jumps):   {skew(jd_returns):+.3f}")
+print(f"  skewness, from scratch (negative mean): {skew(jd_returns):+.3f}")
 
 # %% [markdown]
 # ## Mean-Reversion (Ornstein-Uhlenbeck)
@@ -1320,6 +1324,37 @@ for a in fat_tailed:
     print(f"  {a:15s} {row}")
 
 # %% [markdown]
+# ### Volatility Clustering in the Same Populations
+#
+# Fat tails and volatility clustering are separate properties, and so far only
+# the first has been measured. Summarize clustering the same way the bootstrap
+# section does — the sum of the autocorrelations of squared returns over the
+# first `n_lags` lags — and read it against GBM, whose returns are independent
+# by construction and whose spread is therefore the null.
+
+# %%
+CLUSTER_LAGS = 20
+
+
+def clustering_statistic(prices: np.ndarray) -> float:
+    """Summed autocorrelation of squared log-returns over the first lags."""
+    return float(acf(np.diff(np.log(prices)) ** 2, nlags=CLUSTER_LAGS, fft=True)[1:].sum())
+
+
+clustering = {
+    name: np.array([clustering_statistic(path) for path in paths])
+    for name, paths in path_populations.items()
+}
+clustering_gbm_p95 = np.percentile(clustering["GBM"], 95)
+spy_clustering = clustering_statistic(spy_close)
+
+print(f"Summed ACF of squared returns over lags 1-{CLUSTER_LAGS}, {N_PATHS} paths per model")
+print(f"SPY over the same statistic: {spy_clustering:.2f}\n")
+for name, values in clustering.items():
+    share = float((values > clustering_gbm_p95).mean())
+    print(f"  {name:15s} median {np.median(values):6.3f}   above GBM p95: {share:6.1%}")
+
+# %% [markdown]
 # **What the comparison establishes.** Three models generate excess kurtosis and
 # they order the same way in every pairwise comparison: jump-diffusion above
 # GARCH above Heston. Jump-diffusion is the clearest, exceeding GBM's 95th
@@ -1332,6 +1367,18 @@ for a in fat_tailed:
 # percentile at about the rate chance alone would produce. Its visibly narrower
 # price range comes from the lower volatility it was parameterized with and from
 # the pull toward equilibrium, neither of which is a tail property.
+#
+# On clustering the split is different and cleaner. GBM, mean-reversion and
+# jump-diffusion all sit at the GBM null rate: jumps arrive independently, so
+# adding them fattens the tails without making one volatile day predict the
+# next. Heston and GARCH both clear the null on the large majority of paths,
+# which is what a mean-reverting variance process and a variance recursion are
+# for, and GARCH does so on every path and at roughly three times Heston's
+# median. Both remain well below SPY's own value on this statistic.
+#
+# So the two properties order the models differently. Jump-diffusion has the
+# heaviest tails and no clustering at all; GARCH has the most clustering and the
+# second-heaviest tails; Heston has both, more weakly than GARCH on each.
 #
 # For risk work: GBM and mean-reversion put no more weight in the tails than a
 # Gaussian, so VaR and ES computed from them understate tail loss by
@@ -1779,11 +1826,11 @@ print(
 #
 # | Method | Excess kurtosis above Gaussian | Volatility clustering | Beyond history |
 # |--------|-------------------------------|-----------------------|----------------|
-# | GBM | No, by construction | None | Yes |
-# | Jump-Diffusion | Yes, and the only clear separation measured here | None; jumps are i.i.d. | Yes |
-# | Mean-Reversion | No | None; the dependence is negative autocorrelation in returns, not in squared returns | Yes |
-# | Heston | Yes, overlapping with GARCH | Yes, from mean-reverting variance | Yes |
-# | GARCH | Yes, overlapping with Heston | Yes, from the variance recursion | Yes |
+# | GBM | No, by construction | None; this row is the null both columns are read against | Yes |
+# | Jump-Diffusion | Yes, the heaviest measured here | None; jumps arrive independently | Yes |
+# | Mean-Reversion | No | None; its dependence is negative autocorrelation in returns, not in squared returns | Yes |
+# | Heston | Yes, below GARCH | Yes, on most paths, from mean-reverting variance | Yes |
+# | GARCH | Yes, above Heston | Yes, on every path and the strongest measured | Yes |
 # | IID Bootstrap | Inherits the sample's | None retained | No |
 # | Block Bootstrap | Inherits the sample's | About two thirds retained | No |
 # | Stationary Bootstrap | Inherits the sample's | About two thirds retained, slightly more than fixed blocks | No |
@@ -1796,10 +1843,12 @@ print(
 # 2. **Bootstrap methods** reproduce the empirical marginal distribution, fat
 #    tails included, without any distributional assumption, and cannot produce a
 #    return larger than the largest one observed.
-# 3. **No classical model here captures both stylized facts at a magnitude these
-#    runs can separate.** The jump model separates on tails and has no
-#    clustering; Heston and GARCH have clustering and excess kurtosis but their
-#    kurtosis ranges overlap each other across 200 paths.
+# 3. **Heston and GARCH capture both stylized facts; the jump model captures
+#    only one.** Measured against GBM as the null, jump-diffusion has the
+#    heaviest tails and no volatility clustering whatever, while Heston and
+#    GARCH clear the null on both properties, GARCH more strongly on each. What
+#    the runs do not support is any model here reaching SPY's own level: both
+#    remain well short of it on the clustering statistic.
 # 4. **Drift compensation** (jump-diffusion) and **full truncation** (Heston) are
 #    implementation details that change what is simulated, not stylistic choices;
 #    without the compensator the requested drift is not the realized drift, and
