@@ -324,8 +324,8 @@ class Study:
         entry_point: str | None = None,
     ) -> Study:
         """Open the canonical generated-artifact links for maintainer regeneration."""
-        _refuse_incidental_regeneration(release_root)
         release_root = _resolve_release_root(release_root)
+        _refuse_incidental_regeneration(release_root)
         case_dir = release_root / "case_studies" / case_study
         if not case_dir.is_dir():
             raise FileNotFoundError(f"Unknown released case study: {case_dir}")
@@ -486,8 +486,8 @@ class Study:
         return CausalRequest.from_request(self, request)
 
 
-def _refuse_incidental_regeneration(release_root: str | Path | None) -> None:
-    """Refuse the in-place production path when a test harness is in control.
+def _refuse_incidental_regeneration(release_root: Path) -> None:
+    """Refuse the in-place production path when a test runner is in control.
 
     `Study.regenerate` writes through the generated-artifact symlinks, so in a maintainer
     worktree it writes `~/ml4t/artifacts/case_studies/<cs>/run_log/registry.db` - the published
@@ -500,21 +500,23 @@ def _refuse_incidental_regeneration(release_root: str | Path | None) -> None:
     reaching canonical storage. This is the direction that had no counterpart.
     `require_writable` is not it: the production study is writable by design.
 
-    The discriminator is `release_root`, not pytest alone. Every test that legitimately
-    regenerates seeds its own release tree and passes it -
-    `test_regeneration_writes_through_resolved_directory_symlinks` and its two siblings do
-    exactly that - while the destructive call is the one that takes the default and resolves to
-    the real repository. So an explicit root is always allowed and the default is refused only
-    under a test runner, which cannot fire on a production run.
+    The discriminator is the **resolved** root, not how it arrived. Testing whether the caller
+    passed one is what the first version of this did, and it was dead on the only path that
+    matters: `open_study` resolves the default before calling `Study.regenerate`, so the
+    argument is never None by the time it lands here and the guard returned every time. Every
+    test that legitimately regenerates seeds its own release tree under `tmp_path` and is
+    therefore not this repository; a call that resolves to the checkout itself under a test
+    runner is the destructive one, whichever entry point it came through.
     """
-    if release_root is not None:
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
         return
-    if os.environ.get("PYTEST_CURRENT_TEST"):
-        raise PermissionError(
-            "canonical in-place regeneration is refused under a test runner: it writes the "
-            "published registry through the generated-artifact symlinks. Pass an explicit "
-            "release_root, or open a workspace with open_study(workspace=...)."
-        )
+    if release_root != default_release_root():
+        return
+    raise PermissionError(
+        "canonical in-place regeneration is refused under a test runner: it writes the "
+        "published registry through the generated-artifact symlinks. Seed a release tree and "
+        "pass release_root, or open a workspace with open_study(workspace=...)."
+    )
 
 
 def _resolve_preview_workspace(workspace: str | Path) -> Path:

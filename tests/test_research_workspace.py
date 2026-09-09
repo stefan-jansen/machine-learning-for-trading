@@ -1178,3 +1178,10 @@ def test_regeneration_refuses_the_default_release_root_under_a_test_runner(
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_regeneration_refuses::call")
     with pytest.raises(PermissionError, match="canonical in-place regeneration is refused"):
         Study.regenerate("etfs")
+
+    # Through the entry point a notebook actually uses. `open_study` resolves the default
+    # release root before calling `Study.regenerate`, so a guard that asks whether the caller
+    # passed one is dead here while looking correct at the other call site. That is what the
+    # first version of this guard did, and only this assertion catches it.
+    with pytest.raises(PermissionError, match="canonical in-place regeneration is refused"):
+        open_study("etfs")
