@@ -27,7 +27,9 @@
 # series into tokens and runs a T5 encoder-decoder over them, and **TinyTimeMixer**
 # (IBM Granite), a small mixing architecture in the family `06_tsmixer` builds. They
 # are scored against two models fitted on this panel: an LSTM and a penalised linear
-# map on the same context windows.
+# map. All four read the same thing - one feature column, `CONTEXT_LENGTH` days of it
+# - so the input is held fixed and what differs is whether the model was fitted here
+# and what it was asked to produce.
 #
 # **What the comparison actually asks.** The zero-shot models forecast the context
 # series itself for `PREDICTION_LENGTH` steps, and the mean of that path is used as a
@@ -120,9 +122,10 @@ print(f"Epochs: {EPOCHS}")
 # %% [markdown]
 # ## Data Loading
 #
-# ETF features and labels from the case study pipeline. The foundation models read a
-# univariate context - one feature column - while the LSTM and ridge baselines read
-# the multivariate feature set.
+# ETF features and labels from the case study pipeline. Every model in this notebook
+# reads the same univariate context - one feature column, `CONTEXT_LENGTH` days long.
+# The eight columns selected here are used to decide which rows are complete, not as
+# model inputs.
 
 # %%
 mds = load_dl_dataset("etfs")
@@ -446,12 +449,10 @@ if _ttm_loaded:
 # %% [markdown]
 # ## LSTM Baseline (Task-Specific Training)
 #
-# A small LSTM trained from scratch on this panel. It is the comparison that gives the
-# zero-shot scores a scale: a few tens of thousands of weights fitted on the data at
-# hand, against tens of millions fitted on a corpus that does not include it. Note
-# that it also reads the full multivariate feature set, where the zero-shot models
-# read one column, so the two differ in what they see as well as in how they were
-# fitted.
+# A small LSTM trained from scratch on this panel, reading the same univariate context
+# the zero-shot models were given. It is what gives those scores a scale: a few tens of
+# thousands of weights fitted on the data at hand, against tens of millions fitted on a
+# corpus that does not include it. Unlike them, it is trained on the label directly.
 
 
 # %%
@@ -598,9 +599,11 @@ results_df
 # **Four design choices bound what this can say**, and each of them is a place where
 # published work does something else:
 #
-# - **One feature.** The zero-shot models see a single column, because
-#   first-generation Chronos and TTM are univariate. The LSTM and ridge baselines see
-#   the multivariate feature set. That difference alone could produce the gap.
+# - **One feature, for everybody.** All four models read a single column, because
+#   first-generation Chronos and TTM are univariate and the baselines are held to the
+#   same input. That makes the comparison fair on inputs and narrow on evidence: a
+#   panel of eight momentum horizons is what the rest of this section uses, and none
+#   of it is available to any model here.
 # - **First-generation models.** Chronos-2 and Moirai-MoE accept multivariate inputs
 #   and exogenous covariates; neither is run here.
 # - **Zero-shot only.** In-context learning, parameter-efficient fine-tuning and
@@ -615,23 +618,39 @@ results_df
 # claim about foundation models on financial data is not something one split of one
 # panel with one feature can support.
 
+
 # %%
-_zero_shot = [("Chronos", chronos_ic) for ok in [CHRONOS_SUCCESS] if ok] + [
-    ("TTM", ttm_ic) for ok in [TTM_SUCCESS] if ok
-]
-_fitted = [("LSTM", lstm_ic), ("Ridge", ridge_ic)]
-_worst_fitted = min(v for _, v in _fitted)
-_best_zero_shot = max((v for _, v in _zero_shot), default=float("-nan"))
-_separated = bool(_zero_shot) and _worst_fitted > _best_zero_shot
+def _scored(candidates):
+    """Keep the (name, IC) pairs that ran and produced a finite score."""
+    return [(name, ic) for name, ic, ok in candidates if ok and np.isfinite(ic)]
+
+
+_zero_shot = _scored([("Chronos", chronos_ic, CHRONOS_SUCCESS), ("TTM", ttm_ic, TTM_SUCCESS)])
+_fitted = _scored([("LSTM", lstm_ic, True), ("Ridge", ridge_ic, True)])
+
+
+def _verdict(zero_shot, fitted):
+    """Say how the two groups of scores sit relative to each other."""
+    if not zero_shot or not fitted:
+        missing = "no zero-shot model" if not zero_shot else "neither fitted model"
+        return f"Comparing the groups needs both, and {missing} produced a finite score."
+    if min(v for _, v in fitted) > max(v for _, v in zero_shot):
+        return "Every model fitted on this panel scores above every zero-shot one."
+    if min(v for _, v in zero_shot) > max(v for _, v in fitted):
+        return "Every zero-shot model scores above every model fitted on this panel."
+    return "The two groups overlap, so neither leads the other outright."
+
+
+_incomplete = len(_zero_shot) < 2 or len(_fitted) < 2
 display(
     Markdown(
         "On this run the zero-shot models score "
-        + ", ".join(f"{n} {v:+.4f}" for n, v in _zero_shot)
+        + (", ".join(f"{n} {v:+.4f}" for n, v in _zero_shot) or "nothing that ran")
         + ", and the models fitted on this panel score "
-        + ", ".join(f"{n} {v:+.4f}" for n, v in _fitted)
-        + ". Every fitted model is above every zero-shot one." * _separated
-        + " The two groups overlap on this run, so the ordering below is not clean."
-        * (not _separated)
+        + (", ".join(f"{n} {v:+.4f}" for n, v in _fitted) or "nothing that ran")
+        + ". "
+        + _verdict(_zero_shot, _fitted)
+        + (" At least one model is missing from that comparison." if _incomplete else "")
         + " The ridge fit is deterministic; the LSTM is GPU-trained with fixed seeds and"
         " its IC moves slightly between runs, so read the separation rather than the"
         " decimals."
@@ -748,10 +767,12 @@ show_with_alt(
 # 2. **The parameter counts are read off the loaded objects.** Model cards round, and
 #    the count that matters is the one in memory. Chronos-t5-small carries far more
 #    weight than either fitted baseline, which is worth seeing next to the scores.
-# 3. **The comparison is not like-for-like, and saying so is part of the result.**
-#    One side sees one feature and no fitting; the other sees eight features and is
-#    fitted on this panel. Any gap has at least those two explanations before it has
-#    an architectural one.
+# 3. **The input is held fixed; the objective is not.** All four models read the same
+#    univariate context, so the gap is not about what they saw. It is about what they
+#    were asked for: the fitted models predict the label, and the zero-shot models
+#    forecast the context series over a horizon that is not the label's, with the mean
+#    of that path pressed into service as a ranking score. That is the difference to
+#    name before reaching for an architectural one.
 # 4. **Pretraining is its own leakage channel.** A standard temporal split governs
 #    what the model was *fitted* on here, and says nothing about what it was
 #    *pretrained* on. If a pretraining corpus overlaps the evaluation period, a
