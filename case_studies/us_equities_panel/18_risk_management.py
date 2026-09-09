@@ -33,16 +33,17 @@
 #
 # **An overlay only ever removes.** It cannot enter a position the strategy did not take, so it
 # can only cut a loss short or cut a gain short, and which of the two it does more of is exactly
-# what the sweep measures. Fourteen controls are declared across the three kinds, spanning stops
-# from 3% to 15% and trailing stops from 1% to 20%, so the sweep says how the effect moves with the
-# threshold rather than whether one chosen threshold helped.
+# what the sweep measures. Fourteen controls are declared across the three kinds, each kind swept
+# from its tightest declared threshold to its loosest, so the sweep says how the effect moves with
+# the threshold rather than whether one chosen threshold helped.
 #
 # **The thing to check first is whether the overlays changed anything at all.** A control that
 # never fires returns the unprotected book unchanged in every digit, and so does a control that was
 # declared in one shape and read by the engine in another. One result cannot tell those apart: both
-# produce a row identical to the book it was laid on. Fourteen different rules, spanning a 3% stop
-# to a 40-bar time exit, all declining to act on one book and agreeing to the last digit would be
-# the second and not the first, and it would read on the page as a finding about risk control.
+# produce a row identical to the book it was laid on. Fourteen different rules, spanning the
+# tightest declared stop to the longest declared time exit, all declining to act on one book and
+# agreeing to the last digit would be the second and not the first, and it would read on the page
+# as a finding about risk control.
 #
 # So the results section compares each overlay against the strategy it was laid on rather than
 # reporting its performance alone. **A difference proves the control acted; matching statistics
@@ -205,13 +206,15 @@ if eligible.is_empty() or not ineligible.is_empty():
 # both the strategy and the control vary cannot say whether a difference came from the rule or from
 # the book it was applied to.
 
-# %% tags=["results"]
-# Prices are cached by (label, warmup), not once per label. A strategy's identity digests the
+#
+# **Prices are cached by label and warmup, not once per label.** A strategy's identity digests the
 # price frame it was handed, and the allocator underneath each overlay needs a different amount of
 # history before it can decide anything - none for the ones reading only the predictions, a
 # volatility window for the per-stock ones, a longer lookback for the ones estimating a covariance
 # matrix. So each member has to receive the frame its own warmup implies, and the cache key is
 # what keeps that true while loading each distinct frame once.
+
+# %% tags=["results"]
 _price_cache: dict[tuple[str, int], object] = {}
 
 
@@ -479,6 +482,11 @@ execution_diagnostics
 # ranking only the last of them would exclude an un-overlaid book that was better than every
 # overlaid one. [`19_costs`](19_costs.ipynb) derives its pool from the same stage sequence for the
 # same reason.
+#
+# **The freeze is also the comparability check.** Nothing is declared comparable, so
+# `CandidateSet.create` requires every field of the protocol to be identical across the members:
+# two rows that measured their Sharpe on different folds are not two rankings of one thing, and
+# this is what refuses to freeze them together.
 
 # %% tags=["results"]
 completed_risk = study.backtests.table(include_preview=True).filter(
@@ -492,15 +500,27 @@ if (
     or completed_risk.filter(pl.col("sharpe").is_null() | ~pl.col("sharpe").is_finite()).height
 ):
     raise RuntimeError("The risk catalog is incomplete or mis-staged")
-# Did the overlay change anything? Each result is compared against the strategy it was laid on, on
-# the two axes the catalog carries: the trade count and the Sharpe. A row that differs on either
-# acted - there is no other way for the numbers to move. A row identical on both moved neither of
-# the two statistics compared here - which is weaker than "changed nothing", since two
-# different return paths can share a Sharpe and a trade count while differing in total return or in
-# drawdown, and weaker still than "never fired": a stop can close a position the next rebalance
-# would have closed anyway, replacing one exit with an earlier one and leaving the count where it
-# was. What would settle whether a control fired is a per-control trigger count, which the backtest
-# does not surface into the catalog today.
+
+# %% [markdown]
+# **Did the overlay change anything?** Each result is compared against the strategy it was laid on,
+# on the two axes the catalog carries: the trade count and the Sharpe. A row that differs on either
+# acted, because there is no other way for those numbers to move.
+#
+# A row identical on both moved neither of the two statistics compared here, and that is a weaker
+# statement than it looks. It is weaker than "changed nothing", because two different return paths
+# can share a Sharpe and a trade count while differing in total return or in drawdown. It is weaker
+# still than "never fired", because a stop can close a position the next rebalance would have
+# closed anyway, replacing one exit with an earlier one and leaving the count where it was. What
+# would settle whether a control fired is a per-control trigger count, and the backtest does not
+# surface one into the catalog today.
+#
+# **So there are three outcomes here, not two.** A row is CHANGED when either comparison is true,
+# because one difference is enough to establish the control acted. It is UNCHANGED only when both
+# are false and both were comparable. Anything else is UNKNOWN: a comparison that could not be made
+# is not evidence of sameness, and collapsing it into one would manufacture the signature this
+# check exists to detect.
+
+# %% tags=["results"]
 overlay_effect = (
     completed_risk.select("label", "backtest_hash", "sharpe", "num_trades")
     .join(
@@ -531,10 +551,6 @@ overlay_effect = (
     .select("label", "risk", "num_trades", "source_num_trades", "trades_moved", "sharpe_moved")
     .sort("label", "risk")
 )
-# Three outcomes, not two. A row is CHANGED when either comparison is true, because one difference
-# is enough to establish the control acted. It is UNCHANGED only when both are false and both were
-# comparable. Anything else is UNKNOWN - a comparison that could not be made is not evidence of
-# sameness, and collapsing it into one would manufacture the signature this check exists to detect.
 _changed = overlay_effect.get_column("trades_moved").fill_null(False) | overlay_effect.get_column(
     "sharpe_moved"
 ).fill_null(False)
@@ -562,10 +578,6 @@ set_rows = []
 if EXECUTION_TIER == "canonical":
     for label in completed_risk.get_column("label").unique().sort().to_list():
         label_name = label.replace("_", "-")
-        # Nothing is declared comparable, so every field of the protocol has to be identical
-        # across the members. That is the guard: two rows that measured their Sharpe on different
-        # folds are not two rankings of one thing, and this is what refuses to freeze them
-        # together.
         result_set = study.backtests.freeze(
             completed_risk.filter(pl.col("label") == label),
             name=f"us-equities-{label_name}-risk-overlay-v1",
@@ -634,10 +646,8 @@ control_axes = {
     control["name"]: (control["type"], float(control.get("threshold", control.get("bars"))))
     for control in get_position_risk_controls(CASE_STUDY_ID)
 }
-# The Sharpe of the strategy each label's overlays were laid on, which is the line they have to
-# clear. Asserted rather than assumed to be one per label: `top_n` is read from the sweep
-# configuration, and a label carrying two sources would need two reference lines, not one drawn
-# from whichever row a dict happened to keep.
+# One source per label is asserted rather than assumed: `top_n` comes from the sweep
+# configuration, and a label with two sources needs two reference lines.
 _sources_per_label = selected_sources.group_by("label").len()
 if (_sources_per_label.get_column("len") != 1).any():
     raise ValueError(
@@ -755,7 +765,8 @@ show_with_alt(
 # trigger count would settle the first, and the backtest does not surface one today.
 #
 # **An overlay can only remove, so it reshapes a return distribution rather than shifting it.** It
-# truncates the left tail by closing losers early and truncates the right by closing winners early,
+# truncates the left tail by closing losing positions early and truncates the right by closing
+# profitable ones early,
 # and which effect dominates is a property of how the strategy's returns actually arrive. A book
 # whose gains come from a few positions running a long way is one an early exit hurts.
 #

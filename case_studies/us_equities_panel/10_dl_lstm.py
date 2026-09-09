@@ -118,7 +118,7 @@ PREVIEW_MAX_TRAIN_SEQUENCES = 0
 # The menu at `config/training/{label}.yaml` lists the sequence configurations declared for a
 # label, and this notebook takes the ones whose architecture is `lstm`. Each name resolves to a
 # preset holding the full parameter set - here a 60-session lookback, 100 epochs, a checkpoint
-# every 5, and a dropout of 0.1.
+# every 5, and dropout on the hidden units. The frame below prints the resolved values.
 #
 # What each setting a run may pass decides:
 #

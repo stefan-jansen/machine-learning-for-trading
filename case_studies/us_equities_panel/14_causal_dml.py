@@ -40,10 +40,10 @@
 # not explain, regressed on the part of the treatment they do not explain. Whatever the confounders
 # accounted for has been taken out of both sides before the effect is estimated.
 #
-# **"Double" is why machine learning is safe here.** Using a flexible model to remove a confounder
-# would normally bias the estimate, because the model's own error leaks into what is left.
-# Residualising *both* sides and estimating from the two residual series is what cancels that
-# leakage to first order.
+# **"Double" is why machine learning is safe here.** A flexible model fitted to a confounder makes
+# its own error, and that error is left behind in whatever the model does not explain. Residualising
+# *both* sides and estimating the effect from the two residual series cancels that leakage to first
+# order; residualising one side and regressing on the raw other does not.
 #
 # **The nuisance models are fitted walk-forward with an embargo**, the same way every predictive
 # model in this case study is. A confounder model fitted on the whole sample would have removed
@@ -259,7 +259,8 @@ resolved_table
 # made on the same sample rather than on samples that differ. **`confounding_bias_pct`** is the
 # gap between the two, `naive_effect` minus `dml_effect`, as a percentage of the adjusted
 # estimate's magnitude. It is the size of what the three declared confounders were accounting for,
-# measured against what survives them. A large value says the confounders mattered; it says
+# measured against what remains once they are taken out. A large value says the confounders
+# mattered; it says
 # nothing about whether a fourth one is missing.
 
 # %%
@@ -353,8 +354,8 @@ show_with_alt(
 # own in [`15_model_analysis`](15_model_analysis.ipynb) rather than placed beside the predictive
 # results.
 #
-# **The interesting outcome is not necessarily a large effect.** A predictive relation that
-# survives conditioning on the confounders and a causal estimate near zero are both informative:
+# **The interesting outcome is not necessarily a large effect.** A predictive relation that persists
+# after conditioning on the confounders and a causal estimate near zero are both informative:
 # the first says momentum carries something the three confounders do not, the second says the
 # association may be something they do carry.
 #

@@ -130,16 +130,19 @@ MAX_SYMBOLS = 0
 # un-overlaid cost curve to a strategy that has an overlay, and Chapter 20 then describes a
 # different strategy from the one it names.
 
-# %%
-# Every stage a strategy can be carried forward from: the backtest sequence without its
-# terminal stage. Derived from `STAGE_SEQUENCE` so a stage added there reaches this pool
-# without anyone remembering to come here.
-PRE_COST_STAGES = tuple(stage for stage in STAGE_SEQUENCE if stage != "cost_sensitivity")
-
-declared_set_names = [*BASELINE_SET_NAMES, *ALLOCATION_SET_NAMES, *RISK_SET_NAMES]
+# %% [markdown]
+# **The pool is every stage a strategy can be carried forward from**, which is the backtest
+# sequence without its own terminal stage. It is derived from `STAGE_SEQUENCE` rather than listed,
+# so a stage added there reaches this pool without anyone remembering to come here.
+#
 # Both tiers resolve the study through `open_study`. It reads the labels, features and earlier
 # results in place and redirects only writes, so a preview run sweeps the same inputs a canonical
 # one does and cannot publish over it.
+
+# %%
+PRE_COST_STAGES = tuple(stage for stage in STAGE_SEQUENCE if stage != "cost_sensitivity")
+
+declared_set_names = [*BASELINE_SET_NAMES, *ALLOCATION_SET_NAMES, *RISK_SET_NAMES]
 if EXECUTION_TIER == "canonical":
     if PREVIEW_LABELS or PREVIEW_MAX_SOURCE_ROWS or PREVIEW_MAX_COST_VALUES or MAX_SYMBOLS:
         raise ValueError("Canonical execution cannot declare preview reductions")
@@ -228,14 +231,16 @@ if eligible.is_empty() or not ineligible.is_empty():
 # or a confidence band across configurations is computed over a single row, so all three coincide.
 # That is a property of the shortlist size rather than a finding about stability.
 
-# %% tags=["results"]
-# Prices are cached per label AND per warmup, not once per label. A strategy records the digest of
-# exactly the price frame it was handed, and allocators need different amounts of history before
+#
+# **Prices are cached per label and per warmup, not once per label.** A strategy records the digest
+# of exactly the price frame it was handed, and allocators need different amounts of history before
 # their first decision: none for the simple weighting methods, a volatility window for
-# inverse-volatility and risk parity, a longer lookback for the mean-variance ones. Handing every
-# member of a label one frame long enough for the greediest of them would record a digest that
-# nothing recomputing at a member's own warmup can reproduce, and the later notebooks and the
-# holdout evaluation both check exactly that.
+# inverse-volatility and risk parity, a longer lookback for the mean-variance ones. A single frame
+# long enough for the greediest of them would record a digest that nothing recomputing at a
+# member's own warmup can reproduce, and the later notebooks and the holdout evaluation both check
+# exactly that.
+
+# %% tags=["results"]
 _price_cache: dict[tuple[str, int], object] = {}
 
 
@@ -374,12 +379,8 @@ def plan_cost_member(label, prices, cost_request, source_row):
     source_spec = json.loads(source_row["spec_json"])
     signal = dict(source_spec["strategy"]["signal"])
     allocation = source_spec["strategy"].get("allocation")
-    # Every block the source strategy carries has to be carried into the re-priced one, and the
-    # risk block is the one that is easy to lose: it is absent from a signal-stage or an
-    # allocation-stage source, `plan_backtests` and `run_backtests` both default it to None, and
-    # a strategy re-priced without its overlay produces a cost curve for a different strategy
-    # under the overlaid one's name. That is the same defect as excluding risk_overlay from the
-    # pool, arriving from the other side, so it is asserted rather than assumed below.
+    # A risk block is absent from a signal- or allocation-stage source and defaults to None in
+    # both planners, so a re-priced overlay could silently lose it. Asserted below.
     risk = source_spec["strategy"].get("risk")
     if source_row["stage"] == "risk_overlay" and not risk:
         raise ValueError(
@@ -539,6 +540,11 @@ execution_diagnostics
 # [`20_strategy_analysis`](20_strategy_analysis.ipynb) opens. These rows describe a strategy that
 # was already chosen, so they stay out of the pool anything selects from - a cost row winning a
 # selection would mean the cost assumption picked the strategy.
+#
+# **The freeze is also the comparability check.** No comparison contract is declared, which makes
+# every field of the protocol required-constant: two members that disagree on their
+# cross-validation design measured their Sharpe on different folds, so ranking them is not a
+# comparison, and this is the only thing that checks it.
 
 # %% tags=["results"]
 set_rows = []
@@ -556,10 +562,6 @@ if (
 if EXECUTION_TIER == "canonical":
     for label in completed.get_column("label").unique().sort().to_list():
         label_name = label.replace("_", "-")
-        # No comparison contract is declared, which makes every protocol field
-        # required-constant. That is the guard rather than an omission: two members that disagree
-        # on their cross-validation design measured their Sharpe on different folds, so ranking
-        # them is not a comparison, and this is the only thing that checks it.
         result_set = study.backtests.freeze(
             completed.filter(pl.col("label") == label),
             name=f"us-equities-{label_name}-cost-sensitivity-v1",
@@ -670,7 +672,8 @@ show_with_alt(
 # panel, which is where a broad long-short book holds a large share of its names, so an ordering
 # that holds under one is not thereby established under the other.
 #
-# **Where a curve crosses zero is a break-even, not a verdict on tradability.** It says what
+# **Where a curve crosses zero is a break-even, and it does not say the strategy is tradable.**
+# It says what
 # uniform friction this strategy could absorb before the validation Sharpe went negative. Real
 # friction is not uniform: it varies by name, by size, by time of day, and it grows with the
 # position relative to what the stock trades. A strategy whose break-even sits far above any

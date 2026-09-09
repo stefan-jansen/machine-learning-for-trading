@@ -507,9 +507,9 @@ compatible_sets
 # what a stock shares with the panel, so where it ranks the cross-section well, the ranking is
 # coming from common movement rather than from anything specific to a name.
 #
-# **The loadings belong to the stocks that were there.** A loading is fitted per stock, so a stock
-# with no training history in a fold has none, and a stock whose character changes over a decade
-# keeps the one it was fitted with. [`13b_ipca`](13b_ipca.ipynb) is the answer to both, and the
+# **A loading is fitted per stock, on the stocks a fold had.** A stock with no training history in
+# a fold gets none, and a stock whose character changes over a decade keeps the loading it was
+# fitted with. [`13b_ipca`](13b_ipca.ipynb) is the answer to both, and the
 # comparison between the two is what the pair is for.
 #
 # **Known limitations.** The factor count is declared rather than searched, so nothing here says

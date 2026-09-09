@@ -175,10 +175,9 @@ if EXECUTION_TIER == "canonical":
     ):
         if not names or len(names) != len(set(names)):
             raise ValueError(f"{field} must contain unique names")
-    # A diagnostic name that is also a prediction name is a family with no bounded set, filled in
-    # with the full one. Sections 4 to 6 then load the whole population's raw prediction frames
-    # while the prose says they read a bounded subset. Checked here rather than after the sets are
-    # opened, because it is a statement about the two lists and needs nothing from the registry.
+    # A name in both lists is a family with no bounded set, filled in with the full one, so
+    # Sections 4 to 6 would load the whole population. Checked here because it is a statement
+    # about the two lists and needs nothing from the registry.
     shared_names = sorted(set(DIAGNOSTIC_SET_NAMES) & set(PREDICTION_SET_NAMES))
     if shared_names:
         raise ValueError(
@@ -288,11 +287,9 @@ if EXECUTION_TIER == "canonical":
             raise ValueError(
                 f"{diagnostic_set.hash} resolved {len(matching_full_sets)} matching full sets"
             )
-        # `<=` above finds the full set this bounded one came from; it does not establish that
-        # any bounding happened, because a set is a subset of itself. Where the full set holds
-        # more than one member, the bounded one has to be strictly smaller. Where it holds one -
-        # a family that declares one configuration and does not checkpoint it - there is nothing
-        # to bound and the two coincide, which is why this is not a flat proper-subset test.
+        # `<=` above finds which full set this one came from and establishes no bounding, since
+        # a set is a subset of itself. A family publishing one member has nothing to bound, so
+        # the strict test applies only where the full set holds more than one.
         full_members = set(matching_full_sets[0].members)
         if len(full_members) > 1 and set(diagnostic_set.members) == full_members:
             raise ValueError(
@@ -710,8 +707,7 @@ def summarize_prediction_pair(left_hash, right_hash):
 
 
 # %% tags=["results"]
-# `left_index + 1` rather than `left_index`: a result against itself correlates at one on every
-# date and answers nothing.
+# `left_index + 1`: a result against itself correlates at one on every date.
 for left_index, left_hash in enumerate(diagnostic_hashes):
     for right_hash in diagnostic_hashes[left_index + 1 :]:
         if label_by_member[left_hash] != label_by_member[right_hash]:
@@ -734,7 +730,7 @@ correlations = pl.DataFrame(
 correlations
 
 # %% [markdown]
-# ## 6. How wide the uncertainty is, and whether the width holds up
+# ## 6. How wide the uncertainty is, and whether the width is calibrated
 #
 # The width measured here is the one the `conformal_weighted` allocator sizes positions with:
 # calibrated per symbol on every absolute residual known at `t - h`, where `h` is that label's
@@ -859,7 +855,7 @@ set_table.filter(pl.col("role") == "strategy handoff")
 # **An average over dates needs an interval that knows the dates are not independent.** A
 # five-session forward return measured every session shares four of its five days with the next
 # one. Treating those as independent observations makes an interval too narrow and a t-statistic
-# too large, on every model equally, so the ranking survives and the significance does not.
+# too large, on every model equally, so the ordering is unaffected and the significance is not.
 #
 # **A mean IC and a stable IC are different claims.** Averaging across folds hides which folds
 # contributed, and a configuration that ranks well in one window and not at all in the others has

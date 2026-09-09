@@ -41,10 +41,10 @@
 # one number the notebook predicts. There is no nonlinearity, no recurrence and no attention
 # anywhere in it.
 #
-# It is here as the control the two notebooks after it have to beat. A recurrent network and a
-# mixing architecture are both far more expressive, and expressiveness is only worth its cost if
-# it buys something a linear map on a normalised window did not already have. Running the
-# elaborate models without this one would leave no way to tell a good result from an easy one.
+# It is here as the control the two notebooks after it are read against. A recurrent network and a
+# mixing architecture are both far more expressive, and expressiveness is only worth its cost if it
+# buys something a linear map on a normalised window did not already have. This number is what
+# tells a good result from an easy one.
 #
 # **The subtract-and-add-back is the whole of the normalisation, and on price-derived features it
 # matters.** A feature that drifts makes a model reading raw levels spend its capacity tracking
@@ -123,7 +123,7 @@ PREVIEW_MAX_TRAIN_SEQUENCES = 0
 # The menu at `config/training/{label}.yaml` lists the sequence configurations declared for a
 # label, and this notebook takes the ones whose architecture is `nlinear`. Each name resolves to a
 # preset holding the full parameter set - here a 60-session lookback, 100 epochs, a checkpoint
-# every 5, and a dropout of 0.1.
+# every 5, and dropout on the hidden units. The frame below prints the resolved values.
 #
 # What each setting a run may pass decides:
 #

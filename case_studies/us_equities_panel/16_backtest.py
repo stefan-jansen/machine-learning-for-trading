@@ -35,7 +35,8 @@
 # **Every member of every model population is backtested, not a shortlist.** A model that ranked
 # poorly on information coefficient is still run, because ranking accuracy and strategy
 # performance are different questions - a model can order the cross-section well and trade so much
-# that nothing survives turnover, or rank indifferently and hold a book that does. Selecting on
+# that turnover consumes the whole of it, or rank indifferently and hold a book that does not.
+# Selecting on
 # the ranking measure before backtesting would decide the second question with the answer to the
 # first.
 #
@@ -404,6 +405,11 @@ execution_diagnostics
 #
 # One frozen set per label, under a name the later notebooks open by. Only an unnarrowed canonical
 # run publishes one, because a name must not mean two different member sets at two different times.
+#
+# **The freeze is also the comparability check.** Nothing is declared comparable, so
+# `CandidateSet.create` requires every field of the protocol to be identical across the members:
+# two rows that measured their Sharpe on different folds are not two rankings of one thing, and
+# this is what refuses to freeze them together.
 
 # %% tags=["results"]
 set_rows = []
@@ -421,10 +427,6 @@ if (
 if EXECUTION_TIER == "canonical":
     for label in completed.get_column("label").unique().sort().to_list():
         label_name = label.replace("_", "-")
-        # Nothing is declared comparable, so every field of the protocol has to be identical
-        # across the members. That is the guard: two rows that measured their Sharpe on different
-        # folds are not two rankings of one thing, and this is what refuses to freeze them
-        # together.
         result_set = study.backtests.freeze(
             completed.filter(pl.col("label") == label),
             name=f"us-equities-{label_name}-baseline-v1",
@@ -492,7 +494,8 @@ show_with_alt(
 # **A ranking and a strategy are not the same thing, and this is where they separate.** Every model
 # was scored on how well it ordered the cross-section. What it earns depends on that order *and*
 # on how often the order changes, because every change is a trade. A model can rank well and turn
-# its book over so fast that nothing survives, and the previous notebooks had no way to see it.
+# its book over so fast that turnover consumes what the ranking earned, and the previous notebooks
+# had no way to see it.
 #
 # **Equal weight is what makes the comparison about the models.** Nothing here estimates anything
 # from the data beyond the predictions themselves, so a difference between two rows is a difference

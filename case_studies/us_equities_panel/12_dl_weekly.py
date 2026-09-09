@@ -179,7 +179,7 @@ PYTORCH_SAVE_DIR.mkdir(parents=True, exist_ok=True)
 DARTS_SAVE_DIR.mkdir(parents=True, exist_ok=True)
 
 # %% [markdown]
-# ## Load and Subsample to Weekly Frequency
+# ## Subsampling the panel to a Friday grid
 #
 # The daily features and labels are subsampled to Fridays, so `fwd_ret_5d` becomes a
 # one-step-ahead target: each row's window runs to about the next row's date.
@@ -197,9 +197,9 @@ DARTS_SAVE_DIR.mkdir(parents=True, exist_ok=True)
 # The printed distribution is what says how far, and it is worth reading rather than assuming,
 # because the length of an overlap is the size of the dependence it introduces.
 #
-# This is worth describing rather than removing: sampling every fifth session instead would close
-# the overlap exactly and replace it with a grid that drifts across weekdays and a cadence nobody
-# trades.
+# The overlap is described rather than removed because the alternative that closes it exactly -
+# sampling every fifth session - drifts across weekdays and produces a cadence nobody trades. A
+# Friday grid is a week as a trader keeps it, and the price of that is the overlap counted above.
 #
 # What it costs is the mechanical autocorrelation an overlapping window induces, on the share of
 # weeks the cell reports. That share is small enough to leave the one-step formulation intact and
@@ -208,11 +208,17 @@ DARTS_SAVE_DIR.mkdir(parents=True, exist_ok=True)
 # Non-overlap would not buy independence in any case. Returns cluster in volatility and share
 # a market factor across the cross-section, so what non-overlap removes is the correlation the
 # construction itself imposes, not the dependence in the data.
+#
+# The cell below counts how often each case occurs. Each Friday's window closes on the fifth
+# session after that Friday, and the question is where that session falls relative to the next
+# one. Zero is an exact fit;
+# a positive distance is an overlap of that many sessions; a negative one means the window closed
+# before the next Friday, which happens when that Friday is itself a holiday and the label file
+# carries no row for it. The whole distribution is reported rather than a single count, because
+# the size of an overlap is the size of the dependence it introduces. The session index comes
+# from the label file, so this is a statement about the data this notebook reads.
 
 # %% tags=["results"]
-# Counted rather than asserted. Each Friday's window closes on the fifth session after it, and
-# the question is where that session falls relative to the next Friday. Reading the session
-# index off the label file is what keeps this a statement about the data the notebook uses.
 _sessions = (
     pl.scan_parquet(CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet")
     .select("timestamp")
@@ -224,11 +230,6 @@ _sessions = (
 )
 _position = {session: index for index, session in enumerate(_sessions)}
 _fridays = [session for session in _sessions if session.weekday() == 4]
-# The distance, in sessions, between where a Friday's window closes and the next Friday. Zero is
-# an exact fit; positive is an overlap of that many sessions; negative means the window closed
-# before the next Friday, which happens when that Friday is itself a holiday and the label file
-# carries no row for it. The distribution is what gets reported, because the size of an overlap
-# is the thing that matters and a single count cannot carry it.
 _gaps: dict[int, int] = {}
 for _this_friday, _next_friday in zip(_fridays, _fridays[1:]):
     _close_index = _position[_this_friday] + LABEL_HORIZON_SESSIONS
@@ -251,8 +252,27 @@ print("  distance in sessions from the close to the next Friday, and how often:"
 for _gap in sorted(_gaps):
     print(f"    {_gap:+d}: {_gaps[_gap]:,}")
 
+# %% [markdown]
+# The three parquet files are filtered to Fridays before anything is joined, because the full
+# daily join does not fit in memory on this panel.
+#
+# **`model_based.parquet` is keyed on `(symbol, timestamp)` alone.** Every estimate behind it is
+# bounded by a refit schedule rather than by a fold, so a stock-session carries one value whichever
+# fold reads it and the join multiplies nothing. Both properties are asserted rather than assumed:
+# a repeated key would fan every weekly observation out to one row per duplicate and leave the
+# sequence builder no fold it could form, which surfaces as "No valid folds created" several cells
+# later, a long way from the join that caused it.
+#
+# **The temporal columns are named in `feature_names`.** `prepare_fold_sequence_stores` builds its
+# `use_cols` from that list, so a column joined here and left out of it would be dropped again and
+# the model would train on the financial features alone without saying so.
+#
+# **A capped universe takes the stocks with the most rows**, ties broken by name. A sequence model
+# needs history - a stock that lists part-way through a fold contributes no complete lookback
+# window to it - and this is the rule every reduced notebook in the case study applies, so a capped
+# run here selects the same universe as a capped run elsewhere.
+
 # %%
-# Load only weekly rows before materializing joins. The full daily join OOM-kills the kernel.
 print("Loading weekly features...")
 weekly_filter = pl.col("timestamp").dt.weekday() == 5
 
@@ -270,15 +290,6 @@ mb = (
 )
 print(f"  Weekly model-based features: {mb.shape[0]:,} rows, {mb.shape[1]} cols")
 
-# model_based.parquet is keyed on (symbol, timestamp): every estimate behind it is bounded by a
-# refit schedule rather than by a fold, so a symbol-session carries one value whichever fold reads
-# it and the join is a plain left join that multiplies nothing. `temporal_by_fold` is therefore
-# None, which is what `load_modeling_dataset` passes on this shape too.
-#
-# The key's uniqueness is asserted rather than assumed. A repeat would fan every weekly
-# observation out to one row per duplicate, leave duplicate timestamps per symbol, and give
-# the sequence builder no fold it could form - which surfaces as "No valid folds created"
-# several cells later, a long way from the join that caused it.
 assert mb.select("symbol", "timestamp").is_duplicated().sum() == 0, (
     "model_based.parquet repeats a symbol and timestamp; the sequence builder would see "
     "duplicate dates per symbol and create no folds"
@@ -292,10 +303,6 @@ feat_cols = [c for c in feat.columns if c not in ("symbol", "timestamp")]
 temporal_feature_names = [c for c in mb.columns if c not in ("symbol", "timestamp")]
 temporal_by_fold = None
 features = feat.join(mb, on=["symbol", "timestamp"], how="left")
-# prepare_fold_sequence_stores builds `use_cols` from feature_names, so a temporal column absent
-# from this list is joined and then immediately dropped - the model would train on the financial
-# features alone and report nothing about it. load_modeling_dataset carries its temporal names in
-# feature_names for the same reason.
 feature_names = feat_cols + temporal_feature_names
 print(
     f"  Base features: {features.shape[0]:,} rows, {len(feat_cols)} financial "
@@ -313,11 +320,6 @@ dataset = features.join(labels, on=["symbol", "timestamp"], how="inner")
 del feat, mb, features, labels
 gc.collect()
 
-# A capped universe takes the stocks with the most rows, ties broken by name. Taking the
-# alphabetically first names instead would select on the spelling of a ticker rather than on how
-# much history it carries, and a sequence model needs history: a stock that lists part-way through
-# a fold contributes no complete lookback window to it. This is the rule every reduced notebook in
-# the case study applies, so a capped run here selects the same universe as a capped run elsewhere.
 if MAX_SYMBOLS > 0:
     dataset = reduce_to_top_entities(dataset, "symbol", MAX_SYMBOLS)
     print(f"  Filtered to {MAX_SYMBOLS} symbols: {dataset.shape[0]:,} rows")
@@ -331,7 +333,7 @@ del dataset
 gc.collect()
 
 # %% [markdown]
-# ## Create Walk-Forward CV Splits
+# ## The walk-forward folds this run is scored on
 #
 # The folds are the case study's own, resolved from the label file through
 # `modeling_fold_boundaries` - the call [`04_model_based_features`](04_model_based_features.ipynb)
@@ -436,12 +438,14 @@ for name, record in INPUT_LINEAGE["artifacts"].items():
 # What comes out is used as a ranking signal across stocks on a date, not as a return forecast to
 # be believed at face value, which is why the scoring below is a rank correlation.
 
+# The two architectures are the ones [`09_dl_nlinear`](09_dl_nlinear.ipynb) and
+# [`10_dl_lstm`](10_dl_lstm.ipynb) fit, under a weekly schedule: twelve weekly observations rather
+# than sixty daily ones, and fifty epochs rather than a hundred. They keep the daily presets' names
+# because they are the same architectures, and the registry keeps the two apart anyway - the
+# lookback, the epoch count and the input lineage all sit inside the training identity, so a weekly
+# `lstm_h64` and a daily one are different rows.
+
 # %%
-# The two architectures are the ones 09_dl_nlinear and 10_dl_lstm fit, under a weekly schedule:
-# twelve weekly observations rather than sixty daily ones, and fifty epochs rather than a hundred.
-# They keep the daily presets' names because they are the same architectures, and the registry
-# keeps the two apart anyway - the lookback, the epoch count and the input lineage are all inside
-# the training identity, so a weekly `lstm_h64` and a daily one are different rows.
 pytorch_configs = []
 for name, arch in [("lstm_h64", "lstm"), ("nlinear", "nlinear")]:
     cfg = {
@@ -711,11 +715,11 @@ all_results.append(
 results_df = pl.DataFrame(all_results).sort("ic", descending=True).rename({"ic": "best_ic"})
 display(results_df)
 
+# The daily families are read through the registry's own accessors. The three tables this needs
+# are exactly what `load_training_runs`, `load_prediction_sets` and `load_prediction_metrics`
+# return, and `ic_mean_daily` is the mean the metrics table already holds.
+
 # %%
-# The daily families through the registry's own accessors rather than a hand-written join: the
-# three tables this needs are exactly what `load_training_runs`, `load_prediction_sets` and
-# `load_prediction_metrics` return, and `ic_mean_daily` is the mean the metrics table already
-# holds. A join written here would be a fourth copy of a schema that lives in one place.
 daily_runs = [
     frame
     for family in ("linear", "gbm", "tabular_dl")

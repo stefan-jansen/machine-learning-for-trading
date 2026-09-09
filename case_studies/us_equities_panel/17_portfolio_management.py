@@ -35,17 +35,16 @@
 #   here.
 # - **From each stock's own volatility.** `inverse_vol` puts less into a stock that moves more, so
 #   each position contributes a similar amount of variation rather than a similar amount of money.
-#   `risk_parity` as implemented here is the same idea with a steeper exponent - weight
-#   proportional to one over volatility raised to 1.5 - which approximates equal risk contribution
-#   without estimating how the stocks move together.
+#   `risk_parity` as implemented here is the same idea with a steeper exponent on volatility,
+#   which approximates equal risk contribution without estimating how the stocks move together.
 # - **From how the stocks move together.** `mvo_ledoit_wolf` and `hrp` read a covariance matrix, so
 #   they alone can tell that two names which always move together are one bet held twice. That is
 #   the property none of the rules above can see, and it is the one that has to be estimated. These
 #   two need history before they can decide anything, and how much is declared per allocator rather
 #   than assumed.
 #
-# **Equal weight is excluded here, and not because it lost.** It is the baseline every row is
-# measured against, and re-running it would produce the identical backtest under a new name.
+# **Equal weight is excluded here because its backtest already exists.** It is the baseline every
+# row is measured against, and [`16_backtest`](16_backtest.ipynb) ran it.
 #
 # **A shortlist is taken first, and that is a real decision.** Applying every allocator to every
 # member of the whole model population would multiply an already large grid by seven. So the
@@ -122,10 +121,12 @@ MAX_SYMBOLS = 0
 # The equal-weight sets are opened and checked complete. Everything below changes one thing about
 # them, so a gap here would silently narrow what the allocator comparison is made over.
 
-# %%
+# %% [markdown]
 # Both tiers resolve the study through `open_study`. It reads the labels and features in place and
 # redirects only writes, so a preview run scores the same inputs a canonical one does and cannot
 # publish over it.
+
+# %%
 if EXECUTION_TIER == "canonical":
     if PREVIEW_LABELS or PREVIEW_MAX_BASELINE_ROWS or PREVIEW_MAX_ALLOCATORS or MAX_SYMBOLS:
         raise ValueError("Canonical execution cannot declare preview reductions")
@@ -250,17 +251,19 @@ shortlist.select(
 # **The history each allocator needs is declared per allocator, not shared.** The methods that read
 # a covariance matrix cannot decide anything until they have enough bars to estimate one, and the
 # amount differs between them - the mean-variance method here declares a longer window than the
-# others because shrinkage on a matrix estimated from too few observations collapses toward its
-# target and hands back something close to equal weight under a different name. Giving every
-# allocator the longest window instead would change what the cheap ones are measured on.
+# others because shrinkage on a matrix estimated from too few observations pulls it all the way to
+# its target and hands back something close to equal weight under a different name. Each allocator
+# therefore declares the history it needs, and is measured on that.
 
-# %%
-# Prices are cached by (label, warmup), not once per label. Each allocator needs a different
+# %% [markdown]
+# **Prices are cached by label and warmup, not once per label.** Each allocator needs a different
 # amount of history before it can decide anything - none for the ones that read only the
 # predictions, a volatility window for the per-stock ones, a longer lookback for the ones that
-# estimate a covariance matrix - and the frame a member was handed is digested into its identity.
-# So the frame has to be the one that member's own warmup implies, and the cache key is what keeps
-# it that way while still loading each distinct frame once.
+# estimate a covariance matrix - and the price frame a member was handed is digested into that
+# member's identity. So the frame has to be the one that member's own warmup implies, and the
+# cache key is what keeps it that way while still loading each distinct frame once.
+
+# %%
 _price_cache: dict[tuple[str, int], object] = {}
 
 
@@ -448,6 +451,11 @@ execution_diagnostics
 #
 # One frozen set per label, published only by an unnarrowed canonical run, for the reason
 # [`16_backtest`](16_backtest.ipynb) gives.
+#
+# **The freeze is also the comparability check.** Nothing is declared comparable, so
+# `CandidateSet.create` requires every field of the protocol to be identical across the members:
+# two rows that measured their Sharpe on different folds are not two rankings of one thing, and
+# this is what refuses to freeze them together.
 
 # %% tags=["results"]
 set_rows = []
@@ -465,10 +473,6 @@ if (
 if EXECUTION_TIER == "canonical":
     for label in completed.get_column("label").unique().sort().to_list():
         label_name = label.replace("_", "-")
-        # Nothing is declared comparable, so every field of the protocol has to be identical
-        # across the members. That is the guard: two rows that measured their Sharpe on different
-        # folds are not two rankings of one thing, and this is what refuses to freeze them
-        # together.
         result_set = study.backtests.freeze(
             completed.filter(pl.col("label") == label),
             name=f"us-equities-{label_name}-allocation-v1",

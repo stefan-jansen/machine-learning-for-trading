@@ -104,12 +104,14 @@ if validation_set.member_kind != "backtest":
 # than a union of them. `feature_artifacts` and `cv` are allowed to vary: within a label the funnel
 # ranks model families against each other, and they do not share a feature lineage.
 
-# %% tags=["results"]
-# One label, many families. `label_artifact` must be constant across the set - that is what makes
+#
+# One label, many families. `label_artifact` has to be constant across the set - that is what makes
 # the ranking a within-label one - while `feature_artifacts` and `cv` may vary, because the funnel
-# ranks model families against each other and they do not share a feature lineage: latent_factors
-# builds feature_artifacts from input_lineage["files"] and the rest from ["artifacts"]. Requiring
-# all three constant would reject every set the funnel actually produces.
+# ranks model families against each other and they do not share a feature lineage: `latent_factors`
+# builds `feature_artifacts` from `input_lineage["files"]` and the rest from `["artifacts"]`.
+# Requiring all three constant would reject every set the funnel actually produces.
+
+# %% tags=["results"]
 CONSTANT_IDENTITY_FIELDS = {"label_artifact"}
 comparable_fields = set(validation_set.comparison_contract.get("comparable_fields", ()))
 varying_identity_fields = CONSTANT_IDENTITY_FIELDS & comparable_fields
@@ -267,10 +269,8 @@ if not required_selection_metrics <= set(selection_evidence.columns) or any(
 selection_evidence = selection_evidence.sort(["sharpe", "backtest_hash"], descending=[True, False])
 if selected_validation.hash not in selection_evidence["backtest_hash"].to_list():
     raise ValueError("the selected configuration is not among the candidates this table describes")
-# The table is ordered by the stored Sharpe, which is descriptive. Where its first row is not the
-# selected configuration, the two orderings disagree and saying so is the point of showing the
-# table: the stored column compares configurations over whatever span each one priced, and the
-# selection compares them over the span they share.
+# The stored Sharpe orders the table; the selection ordered over the shared span. Where the two
+# disagree the line below says so.
 if selection_evidence["backtest_hash"][0] != selected_validation.hash:
     print(
         f"stored-Sharpe order leads with {selection_evidence['backtest_hash'][0]}; the selected configuration "
@@ -335,14 +335,20 @@ if holdout_training.hash == selected_training.hash:
         "the holdout carries the validation training identity, which means it was not refitted"
     )
 
-# The resolver matches on the declared configuration - family, config name, label, checkpoint -
-# and on the strategy specification. That is enough to find the replay and not enough to prove it
-# is the SAME configuration: a refit under changed feature artifacts or changed model parameters
-# keeps its config_name and would match. So the derived specification is rebuilt here from the
-# selected validation spec and its identity compared against the one the holdout registered
-# under. The training hash covers the feature lineage, the model parameters and the CV interval,
-# so agreement is the whole claim rather than a sample of it. Disagreement means the holdout on
-# file answers a different question from the one the validation selection asked.
+# %% [markdown]
+# **Finding the holdout replay is not the same as proving it is the same configuration.** The
+# resolver matches on the declared configuration - family, configuration name, label, checkpoint -
+# and on the strategy specification, and a refit under changed feature artifacts or changed model
+# parameters keeps its configuration name and would match all of that.
+#
+# So the specification the holdout should have been fitted under is rebuilt here from the selected
+# validation specification, and its identity is compared against the one the holdout actually
+# registered under. That hash covers the feature lineage, the model parameters and the
+# cross-validation interval, so agreement is the whole claim rather than a sample of it.
+# Disagreement means the holdout on file answers a different question from the one the validation
+# selection asked.
+
+# %% tags=["results"]
 expected_holdout_spec = build_holdout_training_spec(
     study,
     selected_training.spec(),
