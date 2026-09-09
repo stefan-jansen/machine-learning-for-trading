@@ -128,18 +128,18 @@ for cs, data in synthesis.items():
         positive_ic.add(cs)
 stages.append(("Positive IC", positive_ic))
 
-# Gate 2: Positive validation Sharpe (carrier signal-stage SR > 0).
-# Uses the carrier's validation ML Sharpe (`backtest.ml_sharpe`), not
+# Gate 2: Positive validation Sharpe (the selection's signal-stage SR > 0).
+# Uses the selected configuration's validation ML Sharpe (`backtest.ml_sharpe`), not
 # `risk.baseline_sharpe` — the latter is null for case studies whose risk
 # stage is not applicable (sp500_options HTM, us_firm vectorized, nasdaq
 # before the ensemble cost/risk pass), which would drop them at the
-# validation gate even though their carrier validation Sharpe is positive.
+# validation gate even though their selected configuration's validation Sharpe is positive.
 positive_val_sharpe = set()
 for cs in positive_ic:
     bt = synthesis[cs]["pipeline_summary"].get("backtest", {})
     val_sr = bt.get("ml_sharpe")
     # Validation applies to every case study; drop only on a genuine
-    # non-positive carrier Sharpe (FX Pairs, val −0.004).
+    # non-positive selection Sharpe (FX Pairs, val −0.004).
     if val_sr is None or val_sr > 0:
         positive_val_sharpe.add(cs)
 stages.append(("Val Sharpe > 0", positive_val_sharpe))
@@ -178,7 +178,7 @@ stages.append(("Holdout SR > 0", holdout_passing))
 all_gates_pass = set()
 for cs in holdout_passing:
     if cs == NASDAQ_ID:
-        # The fixed carrier is positive on point estimate, but both corrected
+        # The fixed configuration is positive on point estimate, but both corrected
         # validation and holdout intervals cross zero. Broad cost and risk grids
         # are also deferred to v3.1, so it cannot clear the evidence gate.
         continue
@@ -565,7 +565,7 @@ for cs, data in synthesis.items():
         and ho_sharpe > 0
         and costs.get("survives_costs", False)
         and cs != "sp500_options"  # Known evidence issue: spread overwhelms signal
-        and cs != NASDAQ_ID  # Fixed-carrier intervals cross zero; broad grids deferred
+        and cs != NASDAQ_ID  # Fixed-configuration intervals cross zero; broad grids deferred
     )
 
     structural_rows.append(
@@ -678,7 +678,7 @@ for row in evidence_df.iter_rows(named=True):
 # NASDAQ-100 is the bounded exception in this release: its ensemble was fixed
 # before holdout scoring as diversification under overlapping validation
 # uncertainty. The corrected positive linear holdout is a comparator only and
-# cannot be used to reselect the carrier or describe the ensemble as an ex-post
+# cannot be used to reselect the selected configuration or describe the ensemble as an ex-post
 # rescue.
 
 # %% [markdown]

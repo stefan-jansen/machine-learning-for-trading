@@ -461,7 +461,9 @@ for ax, (name, r) in zip(axes, results.items(), strict=False):
         yticklabels=labels,
         ax=ax,
     )
-    ax.set_title(f"{name}\nAcc: {r['accuracy']:.1%}")
+    # The accuracy is in the comparison table this cell prints, not in the title, which
+    # would otherwise have to be re-read against the matrix on every re-run.
+    ax.set_title(name)
     ax.set_xlabel("Predicted")
     ax.set_ylabel("Actual")
 

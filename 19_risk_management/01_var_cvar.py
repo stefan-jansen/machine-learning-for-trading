@@ -1281,12 +1281,13 @@ print(
 
 # %% tags=["results"]
 high_low_cvar_ratio = high_vol_stats["cvar"] / low_vol_stats["cvar"]
+rolling_cvar_var_ratio = np.mean(rolling_cvar) / np.mean(rolling_var)
 display(
     Markdown(
         f"Across {N_DAYS:,} sessions, {best_result['method']} VaR came closest to its exception "
         f"budget, with an exception ratio of {best_result['exception_ratio']:.2f} and Kupiec "
         f"$p={best_result['kupiec_pvalue']:.3f}$. Rolling CVaR averaged "
-        f"{np.mean(rolling_cvar) / np.mean(rolling_var):.2f} times rolling VaR. Conditioning on "
+        f"{rolling_cvar_var_ratio:.2f} times rolling VaR. Conditioning on "
         f"the volatility state raised CVaR by a factor of {high_low_cvar_ratio:.1f} between the "
         f"calmest and most stressed terciles. The equal-weight basket removed "
         f"{port_var_result['cvar_benefit']:.1%} of the weighted stand-alone CVaR. "

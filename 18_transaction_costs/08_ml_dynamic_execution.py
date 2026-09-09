@@ -651,6 +651,10 @@ rl_wins_vwap = paired_scores.filter(pl.col("RL") < pl.col("VWAP")).height
 rl_wins_twap = paired_scores.filter(pl.col("RL") < pl.col("TWAP")).height
 rl_minus_vwap = paired_scores["RL"] - paired_scores["VWAP"]
 rl_minus_twap = paired_scores["RL"] - paired_scores["TWAP"]
+vwap_median = rl_minus_vwap.median()
+vwap_q25, vwap_q75 = rl_minus_vwap.quantile(0.25), rl_minus_vwap.quantile(0.75)
+twap_median = rl_minus_twap.median()
+twap_q25, twap_q75 = rl_minus_twap.quantile(0.25), rl_minus_twap.quantile(0.75)
 summary_by_strategy = {row["strategy"]: row for row in summary.to_dicts()}
 
 display(
@@ -661,10 +665,10 @@ display(
         f"{summary_by_strategy['TWAP']['mean_score']:.2f} for TWAP. "
         f"On paired sessions, RL is lower than VWAP in {rl_wins_vwap}/{n_test_sessions} "
         f"and lower than TWAP in {rl_wins_twap}/{n_test_sessions}. The median RL-minus-VWAP "
-        f"difference is {rl_minus_vwap.median():+.2f} bps "
-        f"(IQR {rl_minus_vwap.quantile(0.25):+.2f} to {rl_minus_vwap.quantile(0.75):+.2f}); "
-        f"against TWAP it is {rl_minus_twap.median():+.2f} bps "
-        f"(IQR {rl_minus_twap.quantile(0.25):+.2f} to {rl_minus_twap.quantile(0.75):+.2f}). "
+        f"difference is {vwap_median:+.2f} bps "
+        f"(IQR {vwap_q25:+.2f} to {vwap_q75:+.2f}); "
+        f"against TWAP it is {twap_median:+.2f} bps "
+        f"(IQR {twap_q25:+.2f} to {twap_q75:+.2f}). "
         f"These summaries describe this historical holdout; they are not a deployment guarantee."
     )
 )

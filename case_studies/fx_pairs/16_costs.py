@@ -76,6 +76,7 @@ from case_studies.research import (
     plan_backtests,
     population_supersedes,
     research_name,
+    reuse_disclosure,
     run_backtests,
     superseded_members,
 )
@@ -101,14 +102,14 @@ SEED = 42
 RUN_SWEEP = True
 FORCE_REBACKTEST = False
 POPULATION_NAME = ""
-SUPERSEDES_COST_BACKTESTS: str = "9bde35fd49cb"
+SUPERSEDES_COST_BACKTESTS: str = "35d4105736ac"
 # The same rule the populations follow: a candidate set is immutable under its name, so a rebuilt
 # upstream generation must name the set it replaces. Keyed by the full set name, which is what the
 # refusal prints. `15_risk_management` states the reasoning once.
 SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
-    "fx_pairs:fwd_ret_1d:pre-cost-strategies": "f00c76cb8eac",
-    "fx_pairs:fwd_ret_5d:pre-cost-strategies": "44a36cb15c0f",
-    "fx_pairs:fwd_ret_21d:pre-cost-strategies": "dd42622a6c5b",
+    "fx_pairs:fwd_ret_1d:pre-cost-strategies": "ee2af90bd92d",
+    "fx_pairs:fwd_ret_5d:pre-cost-strategies": "0dd7094fba15",
+    "fx_pairs:fwd_ret_21d:pre-cost-strategies": "33b207f0a1f6",
 }
 
 # %% [markdown]
@@ -586,7 +587,7 @@ for job in cost_jobs:
 
 served = run_status.count("reused")
 print(
-    f"Cost siblings: {len(cost_results) - served} computed, {served} served from the registry, "
+    f"Cost siblings: {reuse_disclosure(len(cost_results) - served, served)}, "
     f"{len(cost_results)} in the population"
 )
 

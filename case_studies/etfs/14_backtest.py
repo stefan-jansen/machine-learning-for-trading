@@ -62,7 +62,7 @@ import warnings
 import plotly.graph_objects as go
 import polars as pl
 
-from case_studies.research import open_study, split_unpublished_members
+from case_studies.research import open_study, reuse_disclosure, split_unpublished_members
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
@@ -435,8 +435,8 @@ for i, pred_row in enumerate(pred_index.iter_rows(named=True)):
 
 elapsed = time.time() - started
 print(
-    f"\nSweep complete in {elapsed:.0f}s: {len(results) - served} computed, "
-    f"{served + skipped} served from the registry, {len(failures)} failed"
+    f"\nSweep complete in {elapsed:.0f}s: "
+    f"{reuse_disclosure(len(results) - served, served + skipped, len(failures))}"
 )
 
 # %%

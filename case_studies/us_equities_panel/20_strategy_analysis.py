@@ -266,14 +266,14 @@ if not required_selection_metrics <= set(selection_evidence.columns) or any(
 
 selection_evidence = selection_evidence.sort(["sharpe", "backtest_hash"], descending=[True, False])
 if selected_validation.hash not in selection_evidence["backtest_hash"].to_list():
-    raise ValueError("the selected carrier is not among the candidates this table describes")
-# The table is ordered by the stored Sharpe, which is descriptive. Where its first row is not
-# the carrier, the two orderings disagree and saying so is the point of showing the table: the
-# stored column compares configurations over whatever span each one priced, and the selection
-# compares them over the span they share.
+    raise ValueError("the selected configuration is not among the candidates this table describes")
+# The table is ordered by the stored Sharpe, which is descriptive. Where its first row is not the
+# selected configuration, the two orderings disagree and saying so is the point of showing the
+# table: the stored column compares configurations over whatever span each one priced, and the
+# selection compares them over the span they share.
 if selection_evidence["backtest_hash"][0] != selected_validation.hash:
     print(
-        f"stored-Sharpe order leads with {selection_evidence['backtest_hash'][0]}; the carrier "
+        f"stored-Sharpe order leads with {selection_evidence['backtest_hash'][0]}; the selected configuration "
         f"is {selected_validation.hash}, selected over the sessions every candidate prices"
     )
 selection_evidence

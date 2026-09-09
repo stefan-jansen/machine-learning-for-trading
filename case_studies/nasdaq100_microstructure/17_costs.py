@@ -128,13 +128,13 @@ if excluded_families(CASE_STUDY_ID):
 # behaves around them before the two recovery levers — the screen and the cadence — are
 # applied.
 #
-# **The pool is every stage a carrier can come from, not just `allocation`.** A risk overlay
-# is a strategy in its own right: `16_risk_management` registers it at `stage='risk_overlay'`
-# with its own Sharpe, and it is a candidate to carry the case study. Pricing only the
-# allocation rows would put a cost curve in the chapter for a strategy the case study does
-# not select whenever an overlay outranks its own parent, which is the ordinary case - four
-# of the seven completed case studies have a `risk_overlay` as their rank-1 validation
-# carrier. The stages come from `STAGE_SEQUENCE` rather than a tuple typed here, so the pool
+# **The pool is every stage a selected configuration can come from, not just `allocation`.** A risk
+# overlay is a strategy in its own right: `16_risk_management` registers it at
+# `stage='risk_overlay'` with its own Sharpe, and it is a candidate to carry the case study.
+# Pricing only the allocation rows would put a cost curve in the chapter for a strategy the case
+# study does not select whenever an overlay outranks its own parent, which is the ordinary case -
+# four of the seven completed case studies have a `risk_overlay` as their rank-1 validation
+# configuration. The stages come from `STAGE_SEQUENCE` rather than a tuple typed here, so the pool
 # cannot drift from the library when a stage is added.
 #
 # `cost_sensitivity` is the one member excluded, because that is the stage this notebook
@@ -180,7 +180,7 @@ def _on_canonical_universe(frame: pl.DataFrame) -> pl.DataFrame:
 
 
 def resolve_pre_cost_runs(top_n: int) -> pl.DataFrame:
-    """The highest-Sharpe validation runs across every stage a carrier may come from.
+    """The highest-Sharpe validation runs across every stage a selected configuration may come from.
 
     Each stage is asked for its whole ranked list and the pool is sorted afterwards, rather
     than taking `top_n` from each and merging them: truncating first lets one stage's leader
@@ -236,7 +236,7 @@ else:
             initial_cash=bt_config.initial_cash,
         )
         alloc = strategy_view(spec).get("allocation", {}).get("method", "equal_weight")
-        # The stage is printed because it is the thing that changed: a `risk_overlay` carrier
+        # The stage is printed because it is the thing that changed: a `risk_overlay` configuration
         # and its `allocation` parent share a prediction hash, so nothing else in this line
         # distinguishes the overlaid run from the un-overlaid one it was built on.
         print(
@@ -356,7 +356,8 @@ explorer = BacktestExplorer(CASE_STUDY_ID)
 
 # %% [markdown]
 # **The curve is scoped to the rows this run just registered.** `cost_sensitivity()` unscoped
-# returns every row the stage has ever held - previous carriers, superseded generations, and
+# returns every row the stage has ever held - configurations selected earlier, superseded
+# generations, and
 # the full-universe rows section 4 registers on purpose. Plotting those together produces one
 # line per allocator drawn through several strategies at once, which is not a Sharpe-versus-cost
 # curve for anything. `backtest_explorer.cost_sensitivity`'s own docstring names this case study
@@ -504,10 +505,11 @@ from case_studies.utils.registry import read_predictions
 db_path = CASE_DIR / "run_log" / "registry.db"
 conn = sqlite3.connect(str(db_path))
 cur = conn.cursor()
-# The universe predicate is the same statement section 1 makes about the carrier pool, and it
-# has to be made again here: this query picks its own row. Without it the cadence exhibit - the
-# publication finding of this notebook - is built on whichever signal row ranks highest, which
-# is the full-universe variant `setup.yaml` excludes from canonical candidacy whenever it wins.
+# The universe predicate is the same statement section 1 makes about the selected configuration
+# pool, and it has to be made again here: this query picks its own row. Without it the cadence
+# exhibit - the publication finding of this notebook - is built on whichever signal row ranks
+# highest, which is the full-universe variant `setup.yaml` excludes from canonical candidacy
+# whenever it wins.
 cur.execute(
     """
 SELECT br.prediction_hash, tr.family, tr.config_name, bm.sharpe

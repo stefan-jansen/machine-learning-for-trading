@@ -65,6 +65,7 @@ from case_studies.research import (
     plan_backtests,
     population_supersedes,
     research_name,
+    reuse_disclosure,
     run_backtests,
     superseded_members,
 )
@@ -91,7 +92,7 @@ SEED = 42
 RUN_SWEEP = True
 FORCE_REBACKTEST = False
 POPULATION_NAME = ""
-SUPERSEDES_RISK_BACKTESTS: str = "e0008ac8b3e5"
+SUPERSEDES_RISK_BACKTESTS: str = "df20d72ab319"
 # A candidate set is immutable under its name, exactly as a population is, so a rebuilt upstream
 # generation has to name the set it replaces. Keyed by the full set name because that is what the
 # refusal prints: pasting back the name it names is the obvious thing to try, and it has to work.
@@ -102,7 +103,7 @@ SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
     "fx_pairs:fwd_ret_1d:pre-risk-strategies": "d966caa61faf",
     "fx_pairs:fwd_ret_5d:pre-risk-strategies": "fde7af05fff6",
     "fx_pairs:fwd_ret_21d:pre-risk-strategies": "ff269dc95622",
-    "fx_pairs:holdout-candidates": "09e171a0dfaa",
+    "fx_pairs:holdout-candidates": "bf21ae4c9070",
 }
 
 # %% [markdown]
@@ -520,7 +521,7 @@ for job in risk_jobs:
 
 served = run_status.count("reused")
 print(
-    f"Risk overlays: {len(risk_results) - served} computed, {served} served from the registry, "
+    f"Risk overlays: {reuse_disclosure(len(risk_results) - served, served)}, "
     f"{len(risk_results)} in the population"
 )
 
