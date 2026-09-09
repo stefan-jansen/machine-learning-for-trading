@@ -684,17 +684,18 @@ show_with_alt(
 # *level* of the conditional volatility, which is the column to keep.
 #
 # The boundary at one is a different matter, and the panel reaches it. Be precise about what
-# fails there. The conditional variance recursion is still well defined: given a starting
-# value it produces one number per session, and a one-step forecast from it is finite. What
-# stops existing is the *unconditional* variance, $\omega/(1-\alpha-\beta)$, the level the
-# recursion would settle at if nothing further happened. At persistence one there is no such
-# level: a shock is never forgotten, the half-life is infinite, and the estimate wanders
-# instead of reverting.
+# fails there, because it is narrower than it sounds. The conditional variance recursion is
+# well defined at any persistence: given a starting value it produces one number per
+# session, and the forecast $h$ steps ahead is finite for every finite $h$. What
+# $\omega/(1-\alpha-\beta)$ is, is the limit those forecasts approach as the horizon grows,
+# and that limit exists only while the persistence is below one. At exactly one the expected
+# forecast grows without settling anywhere: each further step adds $\omega$ and nothing pulls
+# it back.
 #
-# So a fit on that boundary does not invalidate the conditional volatility column. What it
-# invalidates is every statement about a long-run level, including the long-run volatility
-# in the table earlier in this notebook, and any forecast far enough ahead that mean
-# reversion is doing the work.
+# So a fit on that boundary does not invalidate the conditional volatility column, and does
+# not invalidate a one-step forecast either. What it invalidates is every statement about a
+# long-run level, including this notebook's own long-run volatility figure and its
+# half-life, and any forecast far enough ahead that mean reversion was doing the work.
 
 # %% [markdown]
 # ## The features this notebook produces
