@@ -109,12 +109,8 @@
 19_risk_management/01_var_cvar.py
 19_risk_management/02_exit_strategies.py
 20_strategy_synthesis/00_holdout_predictions.py
-20_strategy_synthesis/02_feature_evaluation.py
 20_strategy_synthesis/03_signal_quality.py
 20_strategy_synthesis/04_signal_to_strategy.py
-20_strategy_synthesis/05_portfolio_allocation.py
-20_strategy_synthesis/06_cost_survival.py
-20_strategy_synthesis/07_regime_risk.py
 22_rag_financial_research/01_sec_filing_pipeline.py
 22_rag_financial_research/03_hybrid_retrieval.py
 22_rag_financial_research/04_ragas_evaluation.py

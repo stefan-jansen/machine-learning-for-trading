@@ -36,14 +36,10 @@
 # %%
 """Ch20 Feature Evaluation — cross-case-study triage ledger comparison."""
 
-import warnings
-
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from IPython.display import Markdown, display
-
-warnings.filterwarnings("ignore")
 
 from case_studies.utils.analytics import CASE_STUDY_IDS, SHORT_NAMES, load_triage_ledger
 from utils.paths import REPO_ROOT, get_chapter_dir
