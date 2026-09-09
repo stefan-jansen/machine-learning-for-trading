@@ -1012,13 +1012,18 @@ add_message_title(
     "Eigenvalue spectrum against the BBP-informed noise edge",
     subtitle="Top 20 eigenvalues; blue retained, amber above edge but beyond the five-factor cap",
 )
+# Linear axis from zero, not the log scale the panel above uses. Two bars whose ratio is
+# small render as a large visual difference on a log axis that does not start at zero,
+# and the reader has no way to see that from the bars.
 axes[1].bar(
     ["Sample", "Two-stage"],
     [standard_condition, two_stage_condition],
     color=[COLORS["neutral"], COLORS["blue"]],
 )
-axes[1].set_yscale("log")
-axes[1].set_ylabel("Covariance condition number (log scale)")
+axes[1].set_ylim(0, 1.15 * max(standard_condition, two_stage_condition))
+axes[1].set_ylabel("Covariance condition number")
+for x, value in enumerate([standard_condition, two_stage_condition]):
+    axes[1].text(x, value, f"{value:,.0f}", ha="center", va="bottom")
 add_message_title(
     axes[1],
     "Covariance condition number, sample against two-stage",
@@ -1029,8 +1034,9 @@ show_with_alt(
     "Two stacked panels. The upper is a bar chart of the leading eigenvalues on a logarithmic "
     "axis against component number, coloured by whether the component is retained, with a dashed "
     "horizontal line at the informed edge. The lower is a two-bar chart comparing the covariance "
-    "condition number of the sample estimate against the two-stage estimate, also on a "
-    "logarithmic axis.",
+    "condition number of the sample estimate against the two-stage estimate, on a linear "
+    "axis from zero with each bar labelled with its value, so the bars' relative heights "
+    "are the ratio between them.",
 )
 
 # %% [markdown]
