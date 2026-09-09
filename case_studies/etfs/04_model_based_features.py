@@ -73,7 +73,6 @@
 
 import multiprocessing
 import os
-import warnings
 from concurrent.futures import ProcessPoolExecutor
 
 import matplotlib.pyplot as plt
@@ -109,8 +108,6 @@ from utils.modeling import resolve_label_buffer, resolve_label_horizon
 from utils.paths import REPO_ROOT, display_path, get_case_study_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, show_with_alt
-
-warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 # Production defaults. Papermill overrides these for the reduced continuous-integration run.
