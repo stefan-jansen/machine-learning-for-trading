@@ -637,12 +637,16 @@ print(f"  (defined on {ridge_ic_result['n_defined']} of {ridge_ic_result['n_tota
 # reported because acting on a forecast uses the ordering while fitting one minimises
 # the squared error.
 #
-# The baseline is fitted on the *same pixels*, reduced by PCA and mapped linearly to
-# the label. That is deliberate: it holds the encoding fixed on both sides, so a
-# difference between the bars is attributable to the convolutional structure rather
-# than to the GASF and MTF transformation. Neither bar says anything about whether the
-# encoding was worth doing - that comparison would need a model fitted on the raw
-# window, which the earlier notebooks in this section supply.
+# The baseline starts from the *same pixels*, reduces them to `n_components` principal
+# components and maps those linearly to the label. Holding the encoding fixed on both
+# sides is what makes the two comparable at all, but it does not isolate convolution:
+# the two pipelines also differ in how many inputs they see, in whether the map is
+# linear, and in how each is fitted and penalised. Read the bars as two pipelines
+# built on one encoding, not as a measurement of what convolution contributed.
+#
+# Neither bar says anything about whether the encoding itself was worth doing. That
+# would need a model fitted on the raw window, which the earlier notebooks in this
+# section supply.
 
 # %%
 model_names = ["Image CNN", "Ridge + PCA"]
@@ -737,10 +741,13 @@ show_plotly_with_alt(
 #    loop over windows and materialised in full, which is a preprocessing cost and a
 #    memory cost that feeding the raw sequence to a recurrent or attention model does
 #    not incur.
-# 5. **The baseline holds the encoding fixed.** Ridge on the same PCA-reduced pixels
-#    isolates the convolutional structure. Whether the encoding itself was worth doing
-#    is a different question, answered by comparing against a model on the raw window
-#    rather than by either bar here.
+# 5. **One encoding, two pipelines - and that is all the comparison is.** Both models
+#    start from the same images, which is what makes them comparable, but they differ
+#    in more than convolution: the ridge sees `n_components` principal components
+#    rather than every pixel, fits a linear map, and is penalised and solved
+#    differently. Attributing the gap to any single one of those differences would be
+#    reading past the experiment. Whether the encoding itself was worth doing is a
+#    further question again, and needs a model fitted on the raw window.
 #
 # **Known limitations.** One feature, one chronological split, one label horizon, one
 # seed, and a sample capped by the encoding cost. Deterministic PyTorch algorithms, a
