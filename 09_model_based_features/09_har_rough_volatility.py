@@ -127,28 +127,54 @@ print(
 # And the bars cover 09:30 to 16:00 only, so the sum below is the variance of the trading
 # session. What happens between one session's close and the next one's open is a separate
 # quantity, measured separately here.
+#
+# Two orderings in the cell below are load-bearing. The session's open and close come from
+# the unfiltered bars, because differencing to get minute returns drops each session's
+# first bar; an open read from the differenced frame is the second minute's price, and the
+# overnight return would then swallow the opening minute. And the previous close is taken
+# before any session is dropped for incompleteness, with the sessions that follow a dropped
+# one removed afterwards, so that every overnight return spans exactly one gap. On a
+# reduced test fixture, which keeps separated blocks of sessions, that gap can otherwise be
+# weeks long.
 
 # %%
-intraday = (
+boundaries = (
+    minute_bars.group_by("date")
+    .agg(
+        session_open=pl.col("first_trade_price").first(),
+        session_close=pl.col("last_trade_price").last(),
+        bars=pl.len(),
+    )
+    .sort("date")
+)
+
+variances = (
     minute_bars.with_columns(minute_return=pl.col("last_trade_price").log().diff().over("date"))
     .drop_nulls(subset=["minute_return"])
     .group_by("date")
-    .agg(
-        intraday_variance=pl.col("minute_return").pow(2).sum(),
-        bars=pl.len(),
-        session_open=pl.col("first_trade_price").first(),
-        session_close=pl.col("last_trade_price").last(),
-    )
-    .sort("date")
-    .filter(pl.col("bars") >= MINIMUM_BARS_PER_SESSION)
-    .with_columns(
-        overnight_return=(pl.col("session_open") / pl.col("session_close").shift(1)).log(),
-        close_to_close_return=(pl.col("session_close") / pl.col("session_close").shift(1)).log(),
-    )
-    .drop_nulls()
+    .agg(minute_variance=pl.col("minute_return").pow(2).sum())
 )
 
-print(f"Complete sessions: {intraday.height:,} of {minute_bars['date'].n_unique()}")
+intraday = (
+    boundaries.join(variances, on="date", how="left")
+    .with_columns(
+        previous_close=pl.col("session_close").shift(1),
+        previous_bars=pl.col("bars").shift(1),
+    )
+    .with_columns(
+        session_return=(pl.col("session_close") / pl.col("session_open")).log(),
+        overnight_return=(pl.col("session_open") / pl.col("previous_close")).log(),
+        close_to_close_return=(pl.col("session_close") / pl.col("previous_close")).log(),
+    )
+    .filter(
+        (pl.col("bars") >= MINIMUM_BARS_PER_SESSION)
+        & (pl.col("previous_bars") >= MINIMUM_BARS_PER_SESSION)
+    )
+    .drop_nulls()
+    .sort("date")
+)
+
+print(f"Sessions with a complete session before them: {intraday.height:,} of {boundaries.height}")
 
 # %% [markdown]
 # ## The first trap: these prices are not adjusted
@@ -178,58 +204,69 @@ clean = intraday.filter(pl.col("close_to_close_return").abs() <= IMPLAUSIBLE_RET
 # %% [markdown]
 # ## The second trap: a session is not a day
 #
-# With the split session removed, the three quantities below should reconcile. The
-# variance of a close-to-close return is the variance of the overnight move plus the
-# variance of the session that follows it, plus twice their covariance. If the intraday
-# measurement is sound, adding the overnight component to it should land close to the
-# close-to-close variance computed directly, and the remaining gap is that covariance.
+# A close-to-close return is the overnight move plus the session that follows it, exactly,
+# because both are logarithms. So the identity below holds term by term with no
+# approximation:
+#
+# $$\mathbb{E}[r_{cc}^2] = \mathbb{E}[r_{on}^2] + \mathbb{E}[r_{oc}^2]
+#   + 2\,\mathbb{E}[r_{on} r_{oc}]$$
+#
+# where $r_{oc}$ is the **aggregate** open-to-close return of the session. That is not the
+# same quantity as the realized variance measured from minute bars: the realized variance
+# is the sum of squared minute returns and the aggregate is the square of their sum, so
+# they differ by every cross-product between minutes. Both are reported below, separately,
+# because they answer different questions and conflating them is how a decomposition comes
+# out looking exact when it is not.
 
 # %%
-intraday_variance = float(clean["intraday_variance"].mean())
-overnight_variance = float((clean["overnight_return"] ** 2).mean())
-close_to_close_variance = float((clean["close_to_close_return"] ** 2).mean())
 annualize = np.sqrt(SESSIONS_PER_YEAR)
+
+overnight_variance = float((clean["overnight_return"] ** 2).mean())
+session_aggregate_variance = float((clean["session_return"] ** 2).mean())
+cross_product = float((clean["overnight_return"] * clean["session_return"]).mean())
+close_to_close_variance = float((clean["close_to_close_return"] ** 2).mean())
+realized_variance = float(clean["minute_variance"].mean())
 
 display(
     pd.DataFrame(
         [
+            {"term": "overnight, squared", "value": overnight_variance},
+            {"term": "session open to close, squared", "value": session_aggregate_variance},
+            {"term": "twice their cross-product", "value": 2 * cross_product},
             {
-                "component": "trading session, measured from minute bars",
-                "annualized volatility": np.sqrt(intraday_variance) * annualize,
+                "term": "the three added",
+                "value": overnight_variance + session_aggregate_variance + 2 * cross_product,
             },
-            {
-                "component": "overnight, close to next open",
-                "annualized volatility": np.sqrt(overnight_variance) * annualize,
-            },
-            {
-                "component": "the two added, as a volatility",
-                "annualized volatility": np.sqrt(intraday_variance + overnight_variance)
-                * annualize,
-            },
-            {
-                "component": "close to close, computed directly",
-                "annualized volatility": np.sqrt(close_to_close_variance) * annualize,
-            },
+            {"term": "close to close, squared", "value": close_to_close_variance},
         ]
     )
 )
 print(
-    "Share of the daily variance that happens overnight: "
-    f"{overnight_variance / (intraday_variance + overnight_variance):.1%}"
+    f"Share of the daily square that happens overnight: {overnight_variance / close_to_close_variance:.1%}"
 )
+print(f"Session variance minute by minute: {np.sqrt(realized_variance) * annualize:.4f} annualized")
 print(
-    "Gap between the sum and the direct figure, in variance: "
-    f"{(intraday_variance + overnight_variance) / close_to_close_variance - 1:+.1%}"
+    "Session variance from the aggregate open-to-close return: "
+    f"{np.sqrt(session_aggregate_variance) * annualize:.4f} annualized"
 )
+print(f"Ratio of the two: {realized_variance / session_aggregate_variance:.3f}")
 
 # %% [markdown]
-# The two land within a few percent of each other in variance, and the small gap is the
-# covariance term the decomposition leaves out. So the measurement is sound, and the share
-# printed above says the overnight component is a large fraction of the total rather than a
-# rounding error, for a symbol whose market is open six and a half hours out of
-# twenty-four. Any
-# comparison between an intraday measurement and a daily estimator has to account for it,
-# and a strategy holding overnight is exposed to a risk that no intraday measurement sees.
+# The identity closes to the last digit, which it must; what it buys is the size of each
+# term. The overnight square is a large fraction of the daily square for a symbol whose
+# market is open six and a half hours out of twenty-four, and the cross-product is small
+# beside the other two, so the two components are close to uncorrelated.
+#
+# The last ratio is the separate question. Summing squared minute returns and squaring the
+# aggregate open-to-close return are two estimates of the same session's variance and they
+# do not agree: the minute-by-minute sum picks up movement that reverses before the close
+# and the aggregate does not. Neither is wrong, and which one a model wants depends on
+# whether reversals inside a session are risk it is exposed to. A position held through the
+# session sees the aggregate; one traded inside it sees the sum.
+#
+# Either way, a comparison between an intraday measurement and a daily estimator has to
+# account for the overnight term, and a strategy holding overnight is exposed to a risk no
+# intraday measurement sees.
 
 # %%
 fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True)
@@ -238,7 +275,7 @@ sessions = clean["date"].to_list()
 ax = axes[0]
 ax.plot(
     sessions,
-    clean["intraday_variance"].sqrt() * annualize,
+    clean["minute_variance"].sqrt() * annualize,
     linewidth=0.7,
     color=COLORS["blue"],
     label="Trading session",
@@ -258,7 +295,7 @@ ax.legend(fontsize=7)
 ax = axes[1]
 ax.plot(
     sessions,
-    (clean["intraday_variance"].sqrt() * annualize).rolling_mean(ROLLING_WINDOW),
+    (clean["minute_variance"].sqrt() * annualize).rolling_mean(ROLLING_WINDOW),
     linewidth=1,
     color=COLORS["blue"],
     label="Trading session",
@@ -290,14 +327,19 @@ show_with_alt(
 #
 # Ranking estimators by accuracy needs a target measured the same way, and the section
 # above is the reason there is not one here: the intraday measurement covers the session
-# and every daily estimator covers something else. What can be compared without a target is
-# **efficiency**, which is the property Chapter 8 claims for the range-based estimators:
-# for the same underlying volatility, a more efficient estimator scatters less around it.
+# and every daily estimator covers something else.
 #
-# The measurement below is that scatter. Each estimator is computed per session on the ETF
-# panel's adjusted daily bars, and its dispersion is taken around its own twenty-session
-# average, so a common movement in the underlying volatility cancels and what is left is
-# the estimator's own noise.
+# What is measured below instead is each estimator's **dispersion around its own trailing
+# average**, session by session on the ETF panel's adjusted daily bars. Be clear about what
+# that is and is not. It is not the estimator's sampling error: the underlying volatility
+# genuinely moves within twenty sessions, so real movement is in the number, and the
+# trailing average in the denominator carries the estimator's own noise as well. Nor are
+# the four measuring the same interval, since the close-to-close estimator spans a session
+# boundary and the other three do not.
+#
+# What it does show is how jagged each column would be if a model read it, which is a
+# property of the column rather than of the estimator, and is the thing that decides
+# whether a feature needs smoothing before use.
 
 
 # %%
@@ -351,7 +393,7 @@ efficiency = pd.DataFrame(
         {
             "estimator": name,
             "mean, annualized": per_session[name].mean(),
-            "dispersion around its own average": float(
+            "dispersion around its trailing average": float(
                 (per_session[name] / per_session[name].rolling_mean(ROLLING_WINDOW))
                 .drop_nulls()
                 .std()
@@ -360,7 +402,7 @@ efficiency = pd.DataFrame(
         }
         for name in ESTIMATORS
     ]
-).sort_values("dispersion around its own average")
+).sort_values("dispersion around its trailing average")
 display(efficiency)
 
 # %%
@@ -386,18 +428,18 @@ show_with_alt(
 )
 
 # %% [markdown]
-# Two things separate the four, and they are different properties. The dispersion column
-# ranks them on noise, which is what "more efficient" means and what the range-based
-# estimators are for: reading the high and the low uses information a close-to-close return
-# throws away, so the same underlying volatility produces a steadier estimate. The
-# close-to-close column also counts the sessions it estimates at zero, which is what a
-# session that closed where it opened looks like to an estimator that reads nothing else.
+# The close-to-close column is the one that separates from the rest, on both of the
+# quantities reported. It is the most dispersed around its own average, and it is the only
+# one that puts a non-trivial number of sessions at zero: a session that closed where it
+# opened has no close-to-close movement to read, whatever happened in between. Reading the
+# high and the low is what removes that failure, and Chapter 8 is where the efficiency of
+# each formula is derived rather than measured.
 #
 # The mean column ranks them on level, and there the ordering says nothing about which is
-# right. Each estimator assumes something about the process, they measure overlapping but
-# different windows of the day, and this notebook has no target to check any of them
-# against. Read the level as a scale each estimator carries, and never mix two of them in
-# the same feature without rescaling.
+# right. Each formula assumes something about the process, they cover different parts of
+# the day, and this notebook has no target to check any of them against. Read the level as
+# a scale each estimator carries, and never mix two of them in one feature without
+# rescaling.
 
 # %% [markdown]
 # ## The library's versions, and the one that sees the gap
@@ -519,16 +561,22 @@ display(har.select(["timestamp", *HORIZONS, "target"]).tail(3))
 # %% [markdown]
 # ## Fitting it, and correcting the standard errors
 #
-# The regression is ordinary least squares, and its ordinary standard errors are wrong
-# here for a reason built into the model. The weekly regressor is an average of five
-# sessions and the monthly one an average of twenty-two, so consecutive rows share most of
-# their inputs and the residuals are serially correlated by construction. Standard errors
-# computed as though the rows were independent are too small, and every t-statistic
-# computed from them is too large.
+# The regression is ordinary least squares. Its textbook standard errors assume the
+# residuals are homoscedastic and serially uncorrelated, and neither assumption is safe on
+# a volatility series: volatility is heteroscedastic almost by definition, and a
+# misspecified dynamic leaves autocorrelation behind in the residuals.
 #
-# **Newey-West** standard errors correct for that by estimating the covariance of the
-# residuals over a number of lags rather than assuming it is zero. The number of lags has
-# to reach at least as far as the overlap, which here is the longest horizon.
+# Note what the overlapping regressors do and do not imply. The weekly and monthly
+# regressors are rolling averages, so consecutive rows share most of their inputs; that
+# makes the *regressors* correlated across rows, which ordinary least squares handles.
+# It does not by itself make the *residuals* correlated: a correctly specified model of
+# this shape can have independent innovations. So overlap is a reason to check rather than
+# a proof of a problem.
+#
+# The check is below, and it is the residual autocorrelation itself. **Newey-West**
+# standard errors are then used as protection against whatever is found, over a lag
+# window set to the longest horizon in the model, which is where any dependence the
+# regressors' overlap could induce would reach.
 
 # %%
 NEWEY_WEST_LAGS = max(HORIZONS.values())
@@ -558,19 +606,32 @@ display(
         }
     )
 )
+residual_autocorrelation = [
+    float(pd.Series(har_fit.resid).autocorr(lag=lag)) for lag in (1, 5, NEWEY_WEST_LAGS)
+]
 print(f"R-squared: {har_fit.rsquared:.4f}")
+print(
+    "Residual autocorrelation at lags 1, 5 and "
+    f"{NEWEY_WEST_LAGS}: " + ", ".join(f"{value:+.3f}" for value in residual_autocorrelation)
+)
 print(
     "Ratio of the two standard errors, by coefficient: "
     + ", ".join(f"{name} {ratio:.2f}" for name, ratio in (har_fit.bse / plain_fit.bse).items())
 )
 
 # %% [markdown]
-# The two sets of standard errors differ by the ratio printed above, and every t-statistic
-# moves with them. Nothing about the coefficients changed; what changed is how much
-# confidence the fit reports in them, and the uncorrected version reports more than the
-# data supports. This is the same correction the overlapping forward windows in
-# `07_arima_features` needed and did not get, and it is worth making a habit of: any
-# regressor built as a rolling average of its own history has it.
+# The residual autocorrelations printed above say whether the correction was needed, and
+# the ratio of the two standard errors says how much it cost. Nothing about the
+# coefficients changed; what changed is how much confidence the fit reports in them.
+#
+# Read the two together, because there are three cases and only one of them is the one
+# people expect. Autocorrelation near zero and standard errors that barely move would say
+# the textbook version was fine. Autocorrelation with a matching change in the standard
+# errors would be the case the overlap story predicts. And autocorrelation near zero with
+# standard errors that move a great deal is the third case: the correction was needed, and
+# what it corrected was heteroscedasticity rather than dependence between rows. Which case
+# this fit is in is in the two numbers above, and it is not the one the overlap story would
+# have predicted.
 #
 # The coefficients themselves are the reason to fit HAR rather than GARCH. Each one is the
 # weight the model puts on one horizon, so their relative sizes say which horizon is
@@ -1231,9 +1292,11 @@ print(
 # 2. **HAR is a linear regression, and that is its advantage.** Three lagged averages track
 #    realized volatility about as closely as a fitted GARCH does, and unlike GARCH each
 #    coefficient is readable as the weight one horizon carries.
-# 3. **Regressors built from rolling averages need Newey-West standard errors.** The
-#    weekly and monthly regressors overlap by construction, so the residuals are correlated
-#    and the uncorrected standard errors are too small.
+# 3. **Overlapping regressors are a reason to check the residuals, not a proof they are
+#    correlated.** A correctly specified model can have independent innovations despite
+#    rolling-average regressors. Measure the residual autocorrelation, and use Newey-West
+#    standard errors as protection against it and against the heteroscedasticity a
+#    volatility series has anyway.
 # 4. **Two models forecasting differently-measured targets cannot be ranked by their
 #    errors.** Report the mean of each forecast next to the mean of the target, and read
 #    the correlation, which the level difference does not touch.
