@@ -437,7 +437,7 @@ for name, record in INPUT_LINEAGE["artifacts"].items():
 #
 # What comes out is used as a ranking signal across stocks on a date, not as a return forecast to
 # be believed at face value, which is why the scoring below is a rank correlation.
-
+#
 # The two architectures are the ones [`09_dl_nlinear`](09_dl_nlinear.ipynb) and
 # [`10_dl_lstm`](10_dl_lstm.ipynb) fit, under a weekly schedule: twelve weekly observations rather
 # than sixty daily ones, and fifty epochs rather than a hundred. They keep the daily presets' names

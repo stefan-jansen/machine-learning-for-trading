@@ -231,7 +231,7 @@ if eligible.is_empty() or not ineligible.is_empty():
 # **Because one configuration is kept per label, some summaries have no width.** A median, a range
 # or a confidence band across configurations is computed over a single row, so all three coincide.
 # That is a property of the shortlist size rather than a finding about stability.
-
+#
 #
 # **Prices are cached per label and per warmup, not once per label.** A strategy records the digest
 # of exactly the price frame it was handed, and allocators need different amounts of history before

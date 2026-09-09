@@ -210,7 +210,7 @@ if eligible.is_empty() or not ineligible.is_empty():
 # **Sweeping overlays across several strategies at once would confound the two.** A table in which
 # both the strategy and the control vary cannot say whether a difference came from the rule or from
 # the book it was applied to.
-
+#
 #
 # **Prices are cached by label and warmup, not once per label.** A strategy's identity digests the
 # price frame it was handed, and the allocator underneath each overlay needs a different amount of
