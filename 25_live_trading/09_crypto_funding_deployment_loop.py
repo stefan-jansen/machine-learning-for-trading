@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     cell_metadata_filter: tags,-all
 #     formats: py:percent,ipynb
 #     text_representation:
 #       extension: .py
