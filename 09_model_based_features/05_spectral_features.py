@@ -183,8 +183,15 @@ SCALE_LABELS = {
 
 decomposition = wavelet_decompose(returns, DEFAULT_WAVELET, DECOMPOSITION_LEVELS)
 
+# %% [markdown]
+# The panels below and the variance chart after them read fastest scale first, so the
+# scales are listed in that order explicitly. Sorting the component names alphabetically
+# would put the slowest one first, because `A` precedes `D`.
+
 # %%
-ordered_scales = sorted(decomposition)
+ordered_scales = [f"D{level}" for level in range(1, DECOMPOSITION_LEVELS + 1)] + [
+    f"A{DECOMPOSITION_LEVELS}"
+]
 fig, axes = plt.subplots(len(ordered_scales) + 1, 1, figsize=FIGSIZE["grid_3x2"], sharex=True)
 
 axes[0].plot(sessions, returns, linewidth=0.3, alpha=0.7, color=COLORS["neutral"])
@@ -341,6 +348,12 @@ display(pd.DataFrame(proxy_rows))
 # the window, so it lands between zero and one and can be compared across window lengths.
 # Without that division a longer window has more frequencies to spread across and scores
 # higher for that reason alone.
+#
+# One detail of the transform has to be handled where the power is summed. A real series
+# pairs every frequency with its negative, and `rfft` returns each pair once; the constant
+# term has no partner, and at an even window length neither does the fastest frequency. So
+# the fastest bin is half-weighted at even window lengths, which is what makes the total
+# equal the window's own energy whatever the window length is.
 
 
 # %%
@@ -362,6 +375,8 @@ def rolling_fft_features(
     for t in range(window, n):
         segment = signal[t - window : t]
         power = np.abs(np.fft.rfft(segment - segment.mean())) ** 2
+        if window % 2 == 0:
+            power[-1] *= 0.5  # the unpaired fastest bin; see the note above the function
         total = power[1:].sum()
         if total <= 0:
             continue
@@ -397,21 +412,35 @@ covered = fft_out["valid"]
 # total power of a segment equals the sum of its squared deviations from its own mean, so
 # the spectral energy of a window is that window's variance multiplied by a constant that
 # depends only on the window length. It carries no frequency information at all.
+#
+# The check is run at two window lengths, one odd and one even, because the identity is
+# where the Nyquist bin has to be handled: a real transform pairs each frequency with its
+# negative, and at an even window length the fastest frequency has no partner, so counting
+# it at full weight puts a data-dependent term into the total.
 
 # %%
-window_variance = trailing(returns, FFT_WINDOW, np.var)
-both = covered & ~np.isnan(window_variance)
-ratio = fft_out["spectral_energy"][both] / window_variance[both]
-print(
-    "Correlation between spectral energy and the window variance: "
-    f"{np.corrcoef(fft_out['spectral_energy'][both], window_variance[both])[0, 1]:.6f}"
-)
-print(f"Their ratio: {ratio.mean():,.1f}, and it varies by {ratio.std():.2e} across the sample")
-print(f"Half the squared window length, for comparison: {FFT_WINDOW**2 / 2:,.1f}")
+parseval_rows = []
+for window in [FFT_WINDOW, FFT_WINDOW + 1]:
+    energy = rolling_fft_features(returns, window, TARGET_PERIODS)["spectral_energy"]
+    variance = trailing(returns, window, np.var)
+    usable = ~np.isnan(energy) & ~np.isnan(variance)
+    ratio = energy[usable] / variance[usable]
+    parseval_rows.append(
+        {
+            "window": window,
+            "length": "odd" if window % 2 else "even",
+            "correlation with the variance": np.corrcoef(energy[usable], variance[usable])[0, 1],
+            "mean ratio": ratio.mean(),
+            "spread of the ratio": ratio.std(),
+            "half the squared window": window**2 / 2,
+        }
+    )
+display(pd.DataFrame(parseval_rows))
 
 # %% [markdown]
-# The correlation is one and the ratio is a constant, so a model given both spectral energy
-# and rolling variance is given the same column twice. Keep whichever is cheaper and reach
+# The correlation is one at both window lengths and the ratio is the same constant, half
+# the squared window length, so a model given both spectral energy and rolling variance is
+# given the same column twice. Keep whichever is cheaper and reach
 # for the spectrum when the question is about *which* frequencies, which the other three
 # columns answer and this one cannot.
 #
@@ -491,9 +520,11 @@ show_with_alt(
 # ## Energy at calendar periods
 #
 # The alternative to asking where the peak is is asking how much power sits at periods you
-# care about in advance. Each series below is the power in the three frequency bins around
-# a weekly, monthly and quarterly cycle, divided by the total in that window so the three
-# are comparable and neither follows the volatility level.
+# care about in advance. `energy_period_*` returns the raw power in the three frequency
+# bins around a named period, which scales with the volatility of the window like any other
+# power. The figure divides each by the window's total, which is what makes the three
+# comparable to each other and independent of the volatility level; a model reading the raw
+# columns has to do the same division or it is reading volatility three times.
 
 # %%
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
@@ -724,7 +755,7 @@ display(ic_df)
 # | `spectral_entropy` | how evenly power is spread across frequencies, scaled to its maximum | yes |
 # | `dominant_period` | the period of the strongest oscillation in the window | yes |
 # | `low_freq_ratio` | the share of power in the two slowest oscillations the window resolves | yes |
-# | `energy_period_*` | the power near a named calendar period, as a share of the window's total | yes |
+# | `energy_period_*` | the raw power in the bins around a named calendar period | yes |
 # | wavelet components | the series split by time scale | **no**, the transform reads the whole series |
 #
 # `spectral_energy` is deliberately absent. It is the window variance rescaled, and a
