@@ -787,7 +787,8 @@ show_plotly_with_alt(
 )
 
 # %% [markdown]
-# **Interpretation**: read the two matrices against the same colour scale. The real one
+# **Interpretation**: this figure is about the generator trained above, at the budget
+# this notebook spends. Read the two matrices against the same colour scale. The real one
 # is mostly pale, because these features are only weakly correlated with each other. The
 # synthetic one is saturated almost everywhere off the diagonal, every pair sitting at
 # one end of the scale or the other.
@@ -816,9 +817,30 @@ show_plotly_with_alt(
 epsilon_values = [1.0, 5.0, 10.0, 50.0]
 tradeoff_results = []
 
+
+def collapse_diagnostics(sample: np.ndarray) -> dict:
+    """Two numbers that separate a spread-out sample from a collapsed one.
+
+    A generator that has collapsed onto a low-dimensional set makes each feature close
+    to a deterministic function of the others, which shows up as off-diagonal
+    correlations near one and as a handful of singular values carrying all the variance.
+    Neither is visible in a distance between two correlation matrices.
+    """
+    corr = np.corrcoef(sample, rowvar=False)
+    off_diagonal = ~np.eye(corr.shape[0], dtype=bool)
+    centered = sample - sample.mean(axis=0)
+    variance = np.linalg.svd(centered, compute_uv=False) ** 2
+    share = np.cumsum(variance) / variance.sum()
+    return {
+        "mean_abs_offdiag_corr": float(np.abs(corr[off_diagonal]).mean()),
+        "dims_for_99pct_variance": int(np.searchsorted(share, 0.99) + 1),
+    }
+
+
 print("\n" + "=" * 60)
 print("PRIVACY-UTILITY TRADE-OFF ANALYSIS")
 print("=" * 60)
+print(f"Real data, for reference: {collapse_diagnostics(real_data[:1000])}")
 
 for eps in epsilon_values:
     print(f"\n--- Testing ε = {eps} ---")
@@ -842,7 +864,7 @@ for eps in epsilon_values:
     # Evaluate
     synth = generate_samples(gen, 1000)
     q = evaluate_quality(real_data[:1000], synth)
-    tradeoff_results.append({"epsilon": eps, **q})
+    tradeoff_results.append({"epsilon": eps, **q, **collapse_diagnostics(synth)})
 
 # %%
 # Plot trade-off
@@ -892,7 +914,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Two line panels against the privacy budget on a categorical axis. Mean difference "
+    "Two line panels against the privacy budget on a logarithmic axis. Mean difference "
     "starts high at the tightest budget, falls sharply to the next one, and is then "
     "nearly flat across the looser budgets. Correlation distance moves within a narrow "
     "range and is not monotonic: it rises, drops to its lowest point, then rises again.",
@@ -916,10 +938,14 @@ show_plotly_with_alt(
 # Separating the moderate budgets would take several independent runs at each, averaged.
 #
 # One caution carried forward from the correlation matrices: both measures here are
-# summaries, and the correlation distance in particular stays in a narrow range across
-# the sweep while the synthetic correlation structure is degenerate at every budget. A
-# flat curve is evidence that this metric does not separate these settings, not evidence
-# that the settings are equally good.
+# summaries of a difference, and a difference between two correlation matrices cannot
+# say whether either of them describes a real spread. That is why the sweep also prints
+# `mean_abs_offdiag_corr` and `dims_for_99pct_variance` per budget, with the real data's
+# values above them for reference. Compare each budget's pair against the real one: an
+# off-diagonal correlation near one, or almost all the variance in a couple of
+# directions, is a generator that has collapsed rather than one that is merely noisy.
+# Where that is what the numbers show, a flat correlation-distance curve says the metric
+# does not separate these settings, not that the settings are equally good.
 #
 # In regulated settings - sharing client trading data, say - a ceiling on the privacy
 # budget is often imposed regardless of where the utility optimum falls.
