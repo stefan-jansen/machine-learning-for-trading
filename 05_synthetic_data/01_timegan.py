@@ -60,11 +60,13 @@
 # stylistic preference. Every module here ends in a sigmoid, so the generator can
 # only emit values in $[0, 1]$, and the inputs are min-max scaled to that range
 # using statistics fitted on the training period. Price levels trend, so a later
-# holdout period leaves the range the scaler was fitted on, and a TSTR score
-# computed against such a holdout measures the representation rather than the
-# generator. Log returns are stationary enough that the holdout stays inside the
-# fitted range. Both halves of that claim are measured below rather than
-# asserted.
+# holdout period leaves the range the scaler was fitted on. A TSTR score computed
+# against such a holdout is then measuring predictive utility across a severe
+# shift in support — the synthetic training data cannot go above one, most of the
+# holdout targets do — which confounds any reading of it as a statement about
+# temporal fidelity. Log returns are stationary enough that the holdout stays
+# inside the fitted range, removing the confound. Both halves of that are
+# measured below rather than asserted.
 #
 # ## References
 #
@@ -912,21 +914,28 @@ print(f"\nSaved to {CHECKPOINT_DIR}/")
 # produced it. What is fixed is how to read them.
 #
 # **Discriminative accuracy** trains a classifier to tell real sequences from
-# synthetic ones. Its target is chance, not zero: a value near one half means the
-# classifier cannot separate them, and higher means it can. Note that it is
-# bounded below by chance in the same way, so a value far below one half would
-# indicate a broken evaluation rather than an excellent generator.
+# synthetic ones and reports its held-out accuracy. The benchmark is chance, one
+# half, not zero: a value near one half means the classifier cannot separate the
+# two, and higher means it can. Held-out accuracy is not bounded below by chance,
+# so a value well under one half is possible and is not a better result — it
+# points at sampling variation, a classifier that failed to generalize, or a
+# shift between the two sets. A substantial departure in either direction is
+# something to investigate rather than to report.
 #
 # **The TSTR/TRTR ratio** divides the error of a predictor trained on synthetic
 # data by the error of the same predictor trained on real data, both scored on
 # the real holdout. Its target is one, meaning synthetic data substitutes for
 # real without loss; above one means it is worse.
 #
-# The ratio is only interpretable because the holdout lies inside the range the
-# generator can emit, which the assertion in the normalization section enforces.
-# The cell before the data load shows what the same construction does to price
-# levels, where no holdout sequence is fully in range at all, so a ratio computed
-# there would have been reporting the representation.
+# The predictor's output layer is linear and unbounded, so it can predict outside
+# the generator's range and the ratio does not become meaningless when the
+# holdout leaves it. What it becomes is confounded. On price levels the synthetic
+# training data is confined to $[0, 1]$ while most holdout targets sit above one,
+# as the cell before the data load shows, and a ratio measured across that gap
+# cannot separate a generator that missed the temporal structure from targets
+# that left the support the synthetic data covers. Working in returns keeps the
+# holdout inside the fitted range, which the assertion in the normalization
+# section enforces, so the ratio is answering one question rather than two.
 #
 # ### Limitations
 #
