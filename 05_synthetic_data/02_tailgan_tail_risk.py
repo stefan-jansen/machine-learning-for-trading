@@ -17,7 +17,7 @@
 # # Tail-GAN: Learning to Generate Tail-Risk Preserving Scenarios
 #
 # **Chapter 5: Synthetic Data Generation**
-# **Section Reference**: Section 5.4 (GANs for Time Series)
+# **Section Reference**: Section 5.5 (GANs for Time Series)
 #
 # **Docker image**: `ml4t-gpu`
 #
@@ -44,14 +44,14 @@
 #
 # ## Book Reference
 #
-# Section 5.4 discusses how Tail-GAN targets specific risk metrics rather
+# Section 5.5 discusses how Tail-GAN targets specific risk metrics rather
 # than general distributional matching, filling a gap left by TimeGAN.
 #
 # ## Prerequisites
 #
 # Requires ETF data. The generator clamps outputs to [-1, 1], so returns are
-# scaled by their maximum magnitude (mapped to 0.95) to keep the full tail
-# inside the clamp without saturation.
+# divided by their largest absolute value to keep the full tail inside the clamp
+# without saturating it.
 
 # %%
 """Tail-GAN: Tail-risk preserving scenario generation (Cont et al., 2022)."""
@@ -59,7 +59,10 @@
 import warnings
 from pathlib import Path
 
-warnings.filterwarnings("ignore")
+# Two libraries warn on import paths this notebook does not control. Suppressed by
+# category and module so a warning from the notebook's own code still surfaces.
+warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
+warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -73,7 +76,7 @@ from plotly.subplots import make_subplots
 from data import load_etfs
 from utils.paths import get_chapter_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, plot_fidelity_comparison
+from utils.style import COLORS, plot_fidelity_comparison, show_plotly_with_alt, show_with_alt
 
 # %% tags=["parameters"]
 N_EPOCHS = 3000
@@ -83,7 +86,11 @@ N_COLS = 100  # Time steps per scenario
 N_STRATEGIES = 32  # Number of portfolio strategies
 N_SCENARIO_MULTIPLIER = 10  # Multiplier for number of scenarios (batch_size * this)
 RETRAIN = False  # Set True to force retraining even if checkpoint exists
-SEED = 1  # Seed pinned to preserve §5.4 prose numbers (VaR 22.5% / ES 21.0%)
+SEED = 1  # Seed pinned to preserve the §5.5 prose numbers (VaR 22.5% / ES 21.0%)
+
+# The generator clamps to [-1, 1]; the largest absolute return maps here, leaving a
+# small margin so the extremes stay reachable rather than saturating at the clamp.
+MAX_SCALED_RETURN = 0.95
 
 # %%
 set_global_seeds(SEED)
@@ -151,9 +158,12 @@ print(f"Epochs: {CONFIG['n_epochs']}, Batch size: {CONFIG['batch_size']}")
 #
 # We use ETF returns and create portfolio strategies to generate PnL scenarios.
 #
-# **Important**: Returns are scaled to fit the generator's [-1, 1] output range.
-# We use a conservative scaling factor to keep most returns well within bounds
-# while preserving tail structure.
+# **Important**: the generator clamps its output to [-1, 1], so any scaled input
+# beyond that range can never be reproduced - fatal for a *tail* model whose whole
+# purpose is to match the extremes. Scaling divides by the largest absolute return,
+# mapping it just inside the clamp, so the entire empirical support including both
+# tails stays reachable. The bulk of returns then sits well within the range,
+# leaving the outer part of it for the tail the model is built to learn.
 
 
 # %%
@@ -186,15 +196,9 @@ def load_etf_returns() -> tuple[np.ndarray, float]:
     n_assets = CONFIG["n_rows"]
     data = pivot.select(pivot.columns[:n_assets]).to_numpy()
 
-    # Scale returns into the generator's [-1, 1] output range WITHOUT saturation.
-    # The generator clamps its output to [-1, 1], so any scaled input beyond that
-    # range can never be reproduced -- fatal for a *tail* model whose whole purpose
-    # is to match the extremes. Map the largest-magnitude return to 0.95 (small
-    # margin), which keeps the full empirical support -- including the tail -- inside
-    # the clamp. The bulk of returns then sits well within [-1, 1] (the 99th
-    # percentile of |return| lands around 0.23 here), leaving the outer range for the
-    # tail the model is built to learn.
-    scale_factor = np.abs(data).max() / 0.95
+    # Map the largest-magnitude return to MAX_SCALED_RETURN so the whole empirical
+    # support stays inside the generator's clamp (see the markdown above).
+    scale_factor = np.abs(data).max() / MAX_SCALED_RETURN
     scaled_data = data / scale_factor
 
     print(f"Loaded returns: {data.shape} (days x assets)")
@@ -796,11 +800,8 @@ def generate_synthetic(
     return synthetic.cpu().numpy()
 
 
-# Re-seed immediately before sampling so the synthetic scenarios (and the VaR/ES
-# numbers below) are identical whether the model was just trained or loaded from a
-# checkpoint. Training consumes the global RNG, so without this the evaluation would
-# depend on which path ran -- a reader training from scratch and one reloading a
-# saved model would otherwise see different tail-risk errors.
+# Training consumes the global RNG, so re-seed before sampling: without this the
+# tail-risk numbers would differ between a reader who trains and one who reloads.
 set_global_seeds(SEED)
 
 n_synthetic = len(scenarios)
@@ -814,7 +815,7 @@ print(f"Shape: {synthetic_scenarios.shape}")
 # %% [markdown]
 # ## 14. Evaluation
 #
-# ### 14.1 Fidelity: Visual Comparison with PCA and t-SNE
+# ### Fidelity: visual comparison with PCA and t-SNE
 #
 # We project both real and synthetic scenarios into 2D to assess whether the
 # generator covers the same regions of the data manifold.
@@ -827,16 +828,33 @@ fig = plot_fidelity_comparison(
     n_samples=1000,
     flatten_method="mean",  # Average across assets for visualization
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Two scatter panels comparing real and synthetic scenarios after averaging across "
+    "assets. In the PCA projection the synthetic points form a small dense cluster at "
+    "the origin while the real points spread much further in both components, with "
+    "several real outliers far to the left. In the t-SNE projection the synthetic "
+    "points again concentrate near the centre and the real points form a much wider "
+    "surrounding cloud. The synthetic cloud is contained within the real one rather "
+    "than covering it.",
+)
 
 # %% [markdown]
-# **Interpretation**: Overlapping point clouds confirm that synthetic scenarios occupy
-# the same region of feature space as real data. Gaps would indicate missing regimes.
-# However, Tail-GAN's primary objective is tail risk preservation (below), not
-# distributional matching -- slight visual differences are acceptable if VaR/ES align.
+# **Interpretation**: the synthetic cloud sits *inside* the real one rather than on
+# top of it. In both projections the generator's scenarios concentrate near the
+# centre while the real scenarios spread well beyond them, so the generator is
+# under-dispersed in this averaged view and does not reach the regimes that produce
+# the extreme real points.
+#
+# Read this figure with its own caveat, though: `flatten_method="mean"` averages each
+# scenario across assets before projecting, which discards the cross-asset structure
+# and shrinks whatever it plots. It is a coarse view of coverage, not the quantity
+# Tail-GAN optimises. The tail-risk metrics below operate on portfolio PnL and are
+# the ones that speak to the model's actual objective - which is why a generator that
+# looks under-dispersed here can still overstate tail severity there.
 
 # %% [markdown]
-# ### 14.2 Tail Risk Metrics
+# ### Tail risk metrics
 #
 # Both real and synthetic scenarios are in scaled space, so relative error
 # comparison is valid. We also report unscaled VaR/ES for interpretability.
@@ -916,15 +934,50 @@ print(f"  Synthetic mean: {synth_es_mean:.6f}")
 print(f"  Relative error: {es_re:.1f}%")
 
 # %% [markdown]
-# **Interpretation**: VaR relative error of ~22% and ES error of ~21% show the
-# generator captures the broad tail structure but over-states it by roughly a
-# fifth - reasonable for a compact pedagogical model, not production-grade.
-# Because returns are now scaled by their maximum magnitude (§ data loading), the
-# full empirical tail sits inside the generator's [-1, 1] range, so this residual
-# error is a genuine distributional mismatch rather than the clamp truncating the
-# tail. ES error tracks VaR error because Expected Shortfall depends on the
-# conditional mean below VaR. Points near the 45-degree line in the scatter plots
-# below show the gap is systematic across strategies, not a single outlier.
+# The two errors above compare *averages* across strategies, so a strategy the
+# generator overstates can be cancelled by one it understates. The aggregate is the
+# number the book quotes, but it is not evidence that any individual strategy is
+# matched. Measure the per-strategy agreement separately before reading the scatter
+# plots below.
+
+# %%
+real_vars_arr = np.asarray(real_vars)
+synth_vars_arr = np.asarray(synth_vars)
+real_ess_arr = np.asarray(real_ess)
+synth_ess_arr = np.asarray(synth_ess)
+
+var_per_strategy_re = np.abs(synth_vars_arr - real_vars_arr) / np.abs(real_vars_arr) * 100
+es_per_strategy_re = np.abs(synth_ess_arr - real_ess_arr) / np.abs(real_ess_arr) * 100
+
+print("=" * 60)
+print("PER-STRATEGY AGREEMENT")
+print("=" * 60)
+print(f"\nStrategies: {CONFIG['n_strategies']}")
+print(
+    f"\nVaR  correlation (real vs synthetic): {np.corrcoef(real_vars_arr, synth_vars_arr)[0, 1]:.3f}"
+)
+print(f"ES   correlation (real vs synthetic): {np.corrcoef(real_ess_arr, synth_ess_arr)[0, 1]:.3f}")
+print(f"\nVaR  median |relative error| per strategy: {np.median(var_per_strategy_re):.1f}%")
+print(f"ES   median |relative error| per strategy: {np.median(es_per_strategy_re):.1f}%")
+print(
+    f"\nStrategies where synthetic VaR is more negative than real: "
+    f"{(synth_vars_arr < real_vars_arr).mean():.0%}"
+)
+print(
+    f"Strategies where synthetic ES  is more negative than real: "
+    f"{(synth_ess_arr < real_ess_arr).mean():.0%}"
+)
+
+# %% [markdown]
+# **Interpretation**: both synthetic means printed above are more negative than
+# their real counterparts, so the generator captures the broad shape of the tail
+# but overstates its severity - reasonable for a compact pedagogical model, not
+# production-grade. Because the scaling maps the largest absolute return just
+# inside the clamp, the full empirical tail is reachable, so the residual error is
+# a genuine distributional mismatch and not the clamp truncating the tail. The two
+# relative errors are close because Expected Shortfall is the conditional mean
+# below VaR, so a displaced VaR moves ES with it. The scatter plots below show
+# whether the gap is systematic across strategies or driven by a few outliers.
 
 # %% [markdown]
 # ## 15. Visualization
@@ -1005,7 +1058,25 @@ fig.update_yaxes(title_text="Loss", row=1, col=2)
 fig.update_yaxes(title_text="Synthetic VaR", row=2, col=1)
 fig.update_yaxes(title_text="Synthetic ES", row=2, col=2)
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four panels. Top left, discriminator loss oscillates sharply for the first "
+    "thousand epochs, then damps and settles slightly below zero. Top right, "
+    "generator loss spikes early, then flattens and stays nearly constant for the "
+    "remaining epochs. Bottom left and bottom right plot synthetic against real VaR "
+    "and ES per strategy with a dashed 45-degree reference line; in both panels the "
+    "points scatter widely on both sides of the line rather than clustering along "
+    "it, so individual strategies are matched loosely in both directions.",
+)
+
+# %% [markdown]
+# **Interpretation**: both losses flatten well before the last epoch, so training has
+# converged in the sense that neither network is still moving - which says nothing
+# about whether it converged to a good generator. The two scatter panels answer that,
+# and the per-strategy numbers printed above quantify what they show: the correlation
+# and the median per-strategy error are the honest summary, and the aggregate relative
+# error is flattered by cancellation between strategies the model overstates and
+# strategies it understates.
 
 # %% [markdown]
 # ## 16. Results Summary
@@ -1028,13 +1099,18 @@ print(f"ES relative error: {es_re:.1f}%")
 #    computation, making tail risk metrics trainable loss components
 # 2. **Constraint projection**: Hard projection onto $W \cdot v \leq e$ ensures
 #    the discriminator's VaR/ES estimates remain economically consistent
-# 3. **Tail risk preservation**: The generator learns to match real tail
-#    distributions rather than just marginal statistics
-# 4. **Scaling matters**: The generator's clamped [-1, 1] output requires
+# 3. **Tail risk preservation**: training on a tail-risk objective gets the
+#    *aggregate* VaR and ES into the right neighbourhood, which general-purpose
+#    distributional matching does not do on its own
+# 4. **An aggregate can hide the disagreement it averages**: the mean VaR and ES
+#    across strategies agree far better than any individual strategy does, because
+#    strategies the generator overstates cancel strategies it understates. Read the
+#    per-strategy correlation and median error before quoting the headline number
+# 5. **Scaling matters**: The generator's clamped [-1, 1] output requires
 #    careful input scaling to preserve tail structure without saturation
 #
 # **Next**: See `03_sigcwgan_signatures` for a signature-based approach that
 # eliminates the adversarial discriminator entirely.
 #
-# **Book**: Section 5.4 compares Tail-GAN's targeted risk approach with
+# **Book**: Section 5.5 compares Tail-GAN's targeted risk approach with
 # general-purpose distributional matching.
