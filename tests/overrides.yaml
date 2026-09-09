@@ -1641,15 +1641,16 @@ case_studies/etfs/01_feasibility_analysis:
   timeout: 120
 case_studies/etfs/02_labels:
   parameters:
-    # No MAX_SYMBOLS: the CI fixture is already only 24 ETFs, and stage 03 needs at least
-    # 10 non-null labels per date to accumulate an IC series at all. Reducing here starves
-    # it. The fixture is the reduction; MIN_SYMBOLS_FOR_DISPERSION keeps its production 10.
+    # No MAX_SYMBOLS: the fixture is itself the reduction, and stage 03 needs at least 10
+    # non-null labels per date to accumulate an IC series at all, so reducing here starves
+    # it. MIN_SYMBOLS_FOR_DISPERSION keeps its production 10. The fixture carries 56 ETFs
+    # (ml4t/third-edition-test-data 2a6833f6), not the 24 this comment claimed.
     START_DATE: '2000-01-01'
   timeout: 120
 case_studies/etfs/03_financial_features:
   timeout: 300
 case_studies/etfs/04_model_based_features:
-  # No MAX_SYMBOLS, for the reason 02_labels gives: the CI fixture is already only 24
+  # No MAX_SYMBOLS, for the reason 02_labels gives: the CI fixture is already only 56
   # ETFs, so it IS the reduction. Cutting to 5 on top of it made every downstream
   # backtest degenerate rather than fast. etfs declares top_k_grid [5, 10, 20] against a
   # 24-fund price panel, so all three schemes pass the feasibility filter - but the
@@ -1735,9 +1736,13 @@ case_studies/etfs/09_dl_lstm:
   # DEVICE and POPULATION_NAME travel together, as in 08_tabular_dl: the device is inside the
   # training identity, so a CPU run declares a different member set and must name its own
   # population rather than publish into the canonical one.
-  # max_symbols is 5 to match 04_model_based_features for the reason 11a_pca states below: the
-  # boundary validates the fold-specific temporal artifact against the CV splits, and the 6 the
-  # pre-conversion block carried put fold 0 validation at 93.5%, under the 95% floor.
+  # max_symbols is 6 for the reason the case-study header above derives: at 5 every declared
+  # entry scheme is dropped and the sweep registers nothing. The block used to say 5 "to match
+  # 04_model_based_features" and to blame a 93.5% fold 0 coverage on the 6 - both wrong.
+  # 04 declares no max_symbols at all, so there is nothing to match, and 11a_pca records that
+  # the 93.5% came from running the FULL fixture universe against an artifact built at 5, not
+  # from any value of this cap. The boundary still validates the temporal artifact against the
+  # CV splits, and 6 clears the 95% MIN_TEMPORAL_DATE_COVERAGE floor on green cs-etfs runs.
   parameters:
     DEVICE: cpu
     POPULATION_NAME: etfs-lstm-preview
@@ -1756,7 +1761,7 @@ case_studies/etfs/10_dl_tsmixer:
   # No max_symbols, and that is the fix for ml4t/agent-workspace#988. This block carried
   # `max_symbols: 5` "to match 04_model_based_features" - a justification that stopped holding
   # when 04's own cap was removed, so the reduction went on cutting the cross-section to five
-  # while the temporal artifact it fits against covered the fixture's twenty-four. Darts TSMixer
+  # while the temporal artifact it fits against covered the whole fixture. Darts TSMixer
   # diverged on the mismatch: the registration guard refused predictions at a per-fold dispersion
   # ratio of 286 (score std 10.588 against a target std of 0.037), and #988 measured that
   # restoring the pre-conversion LOOKBACK of 22 made it four times worse at 1285. Neither the
@@ -1765,9 +1770,9 @@ case_studies/etfs/10_dl_tsmixer:
   # takes the chain green: measured 2026-08-31 in the container, stages 01-10, 10 passed in
   # 288.70s, with this notebook inside its 180s cap.
   #
-  # 09_dl_lstm, 11a_pca and 11b_ipca keep max_symbols: 5 and pass with it. Their blocks state the
-  # same "must match 04" rule, which is no longer true of any of them; it is left in place there
-  # because what those three need is a coverage floor they currently clear, not agreement with 04.
+  # 09_dl_lstm, 11a_pca and 11b_ipca declare max_symbols: 6 and pass with it. Their blocks used to
+  # state the same "must match 04" rule; 04 declares no cap, so it was corrected in place rather
+  # than left standing. What those three need is a coverage floor they currently clear.
   parameters:
     DEVICE: cpu
     POPULATION_NAME: etfs-tsmixer-preview
@@ -1798,11 +1803,13 @@ case_studies/etfs/10a_dl_nlinear:
       folds: [0, 1]
   timeout: 180
 case_studies/etfs/11a_pca:
-  # max_symbols must match 04_model_based_features, which builds the temporal
-  # artifact these notebooks validate against. With no reduction they ran on the
-  # full fixture universe while the artifact covered 5 symbols, so the CV splits
-  # spanned dates the artifact never saw and fold 0 validation came out at 93.5%,
-  # just under the 95% floor in MIN_TEMPORAL_DATE_COVERAGE.
+  # max_symbols has to clear the MIN_TEMPORAL_DATE_COVERAGE floor against the temporal
+  # artifact 04_model_based_features builds. With no reduction at all these notebooks ran
+  # on the full fixture universe while the artifact covered 5 symbols, so the CV splits
+  # spanned dates the artifact never saw and fold 0 validation came out at 93.5%, just
+  # under the 95% floor. This used to read "must match 04_model_based_features"; 04
+  # declares no max_symbols, so there is nothing to match, and the value is the 6 the
+  # case-study header derives.
   # A reduced run declares a different member set than the canonical population,
   # so it names its own.
   parameters:
@@ -1812,10 +1819,12 @@ case_studies/etfs/11a_pca:
       max_symbols: 6
   timeout: 300
 case_studies/etfs/11b_ipca:
-  # max_symbols must match 04_model_based_features for the same reason as 11a,
-  # which leaves IPCA five funds to fit a 71-characteristic Gamma on. At the
-  # production n_factors=5 that is 355 parameters against five assets a date and
-  # the ALS does not identify. Measured on this fixture at the declared
+  # max_symbols clears the coverage floor for the same reason as 11a, and at 6 leaves
+  # IPCA six funds to fit a 71-characteristic Gamma on. At the production n_factors=5
+  # that is 355 parameters against a handful of assets a date and the ALS does not
+  # identify. The per-fold K measurements below were taken when this block declared 5;
+  # they are what chose n_factors=1 and have not been re-measured at 6. Measured at the
+  # declared
   # max_iter=100, per fold: K=5 fails on both folds (110.0s, 113.6s), K=3 fails
   # on both (55.7s, 57.0s), K=2 converges on fold 0 in 21.8s and fails on fold 1
   # at 42.0s, K=1 converges on both in 0.6s and 0.8s. The times are the tell -

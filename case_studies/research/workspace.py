@@ -485,6 +485,26 @@ class Study:
         return CausalRequest.from_request(self, request)
 
 
+def _resolve_preview_workspace(workspace: str | Path) -> Path:
+    """Place a relative preview workspace outside the checkout.
+
+    A preview writes a registry, a `config` symlink and a `.preview/` tree under whatever it is
+    given. Notebooks run from the repo root, so resolving a bare name against the caller's cwd
+    puts all of that in the repo root: five absolute symlinks and a 268K registry reached a
+    branch that way on 2026-09-06. An absolute path is the caller's own choice and is taken as
+    given; a relative one is resolved against a root that is not the repository, so no
+    `.gitignore` rule has to be load-bearing for it.
+    """
+    path = Path(workspace).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    declared = os.environ.get("ML4T_PREVIEW_ROOT")
+    base = (
+        Path(declared).expanduser() if declared else Path.home() / "ml4t" / "artifacts" / "preview"
+    )
+    return (base / path).resolve()
+
+
 def open_study(
     case_study: str,
     *,
@@ -515,7 +535,7 @@ def open_study(
 
     if workspace is None:
         raise ValueError("preview execution requires an explicit workspace")
-    workspace = Path(workspace).expanduser().resolve()
+    workspace = _resolve_preview_workspace(workspace)
     case_dir = release_root / "case_studies" / case_study
     generated = tuple(case_dir / name for name in ("features", "labels", "run_log"))
     linked = all(path.is_symlink() for path in generated)
