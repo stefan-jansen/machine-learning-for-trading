@@ -18,21 +18,30 @@
 #
 # **Docker image**: `ml4t-gpu`
 #
-# This notebook compares foundational neural network architectures for return
-# prediction: MLP, 1D-CNN, LSTM, and GRU. We evaluate training efficiency versus
-# predictive accuracy on pooled single-ETF sequences to understand the tradeoffs
-# that motivated newer architectures like N-BEATS and Transformers.
+# Four neural networks read the same input - the last sixty daily returns of one
+# exchange-traded fund - and each predicts that fund's return on the next day. They
+# differ only in how they consume the window. A fully connected network flattens it
+# into one long vector. A one-dimensional convolution slides a small filter along it.
+# An LSTM and a GRU walk it one day at a time, carrying a running summary forward.
+# That last habit is what this notebook measures: walking a window step by step costs
+# compute that grows with the window, and whether it buys any accuracy is the question
+# the rest of the chapter works on.
 #
-# **Learning Objectives**:
-# - Implement MLP, CNN, LSTM, and GRU forecasting models in PyTorch
-# - Compare training time versus predictive accuracy (Spearman IC)
-# - Demonstrate LSTM's sequential bottleneck via sequence-length scaling
-# - Establish baselines for comparison with modern architectures
+# **Learning objectives**:
+# - Build a fully connected network, a one-dimensional convolution, an LSTM and a GRU
+#   in PyTorch over one shared input, so that architecture is the only thing that
+#   differs between them.
+# - Read a training-loss curve against the error the same network makes on days it was
+#   not trained on, so a falling training curve is not mistaken for a better forecast.
+# - Time one training step for each network in milliseconds, and put that cost beside
+#   the error each one reaches.
+# - Watch that cost change as the input window is lengthened, and see why a network
+#   that walks the window scales differently from one that reads it all at once.
 #
-# **Book Reference**: Chapter 13, Section 13.1 (The Recurrent Paradigm and Its Discontents).
+# **Book Reference**: Chapter 13, Section 13.1 (Recurrent networks and their limits).
 # See Hochreiter and Schmidhuber (1997) for the original LSTM formulation.
 #
-# **Prerequisites**: ETF price data (via `load_etfs()` canonical loader)
+# **Prerequisites**: ETF price data (via the `load_etfs()` canonical loader).
 
 # %%
 """Core Deep Learning Architectures - compare MLP, CNN, LSTM, and GRU for return prediction."""
@@ -44,7 +53,6 @@ import os
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 import time
-import warnings
 from datetime import datetime
 
 import matplotlib.pyplot as plt
@@ -56,9 +64,7 @@ from ml4t.diagnostic.metrics import cross_sectional_ic_series
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import add_message_title
-
-warnings.filterwarnings("ignore")
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 # %% tags=["parameters"]
 SEED = 42
@@ -70,24 +76,36 @@ BATCH_SIZE = 32
 SYMBOLS = ["SPY", "QQQ", "IWM", "EFA", "EEM", "TLT", "GLD", "USO"]
 START_DATE = "2015-01-01"
 LOOKBACKS = [30, 60, 120, 240]
+VALIDATION_START = 0.65
+TEST_START = 0.80
 
 # %% [markdown]
-# ## Reproducibility
+# ## Getting the same numbers twice
 #
-# GPU training is not bitwise-deterministic by default: a fixed seed controls a
-# model's random choices, but not the order in which parallel CUDA kernels sum
-# floating-point values, and that order can shift between runs. We enable
-# PyTorch's strict deterministic mode and re-seed before each model, so trained
-# parameters and accuracy metrics reproduce exactly on this machine regardless
-# of training order. Torch *inference* is already deterministic; only training
-# needs this. Results on a different GPU (or with this configuration removed)
-# will differ slightly. Elapsed-time measurements remain sensitive to hardware
-# and load, so only their broad ranking and scaling pattern carry the argument.
+# Fixing a seed is not enough to make GPU training repeat exactly. A seed fixes the
+# random choices - which weights the network starts from, which order the windows are
+# shuffled into - but a GPU adds a batch of floating-point numbers by splitting the sum
+# across thousands of cores and combining the pieces, and the order in which those
+# pieces arrive can differ between two runs of the same code. Floating-point addition
+# is not associative, so a different order gives a very slightly different sum, and
+# fifty epochs of very slightly different sums end in a visibly different model.
+#
+# `torch.use_deterministic_algorithms(True)` tells PyTorch to refuse any operation
+# without a fixed-order implementation and to use the fixed-order variant everywhere
+# one exists. `CUBLAS_WORKSPACE_CONFIG`, set at the top of the notebook before the
+# first CUDA call, is what makes those variants available for the matrix
+# multiplications. `seed_all` re-asserts both and re-seeds, and it is called
+# immediately before each network is built so that all four start from the same
+# stream, whatever ran before them.
+#
+# What this buys is repetition on one machine with one build of PyTorch. A different
+# GPU will give slightly different numbers, and timings are not covered at all - those
+# depend on what else the machine is doing.
 
 
 # %%
 def seed_all(seed: int = SEED) -> None:
-    """Seed Python/NumPy/Torch and re-assert strict deterministic execution."""
+    """Seed Python/NumPy/Torch and re-assert fixed-order execution."""
     set_global_seeds(seed)
     torch.use_deterministic_algorithms(True, warn_only=False)
     torch.backends.cudnn.deterministic = True
@@ -101,12 +119,32 @@ print(f"Using device: {DEVICE}")
 seed_all(SEED)
 
 # %% [markdown]
-# ## Data Acquisition
+# ## The data
 #
-# We use ETF close prices from the case study pipeline, converting to daily returns.
-# Eight ETFs span equities, bonds, commodities, and international markets. The
-# architecture comparison pools univariate sequences from all eight ETFs so the
-# result is not driven by one SPY-only split.
+# The inputs are daily closing prices for eight exchange-traded funds, each of which
+# tracks a broad basket rather than a single company. They are chosen to span very
+# different sources of risk - US large caps, US small caps, developed and emerging
+# markets outside the US, long-dated Treasuries, gold and crude oil - so that a result
+# reported below is not a property of one market. A price is converted to a daily
+# **return**, the fractional change from the previous close, because returns are
+# roughly comparable in size across funds trading at very different price levels, and
+# a network trained on raw prices would mostly learn each fund's price level.
+#
+# The eight are held fixed for the whole period. All eight already existed and traded
+# throughout, so no fund enters or leaves the sample and nothing here depends on
+# knowing which funds survived.
+
+# %%
+EXPOSURE = {
+    "SPY": "US large-cap equity",
+    "QQQ": "US large-cap growth equity",
+    "IWM": "US small-cap equity",
+    "EFA": "Developed non-US equity",
+    "EEM": "Emerging-market equity",
+    "TLT": "Long-dated US Treasuries",
+    "GLD": "Gold",
+    "USO": "Crude oil",
+}
 
 # %%
 etf_df = load_etfs()
@@ -125,22 +163,54 @@ returns = close_wide.with_columns(
     [pl.col(c).pct_change().alias(c) for c in feature_cols]
 ).drop_nulls()
 
-print(f"Data: {returns.shape[0]} days, {len(feature_cols)} ETFs")
-print(f"Date range: {returns['timestamp'][0]} to {returns['timestamp'][-1]}")
+# %% [markdown]
+# ### What the eight funds look like
+#
+# A row per fund: what it is exposed to, and the annualised standard deviation of its
+# daily returns over the sample - daily standard deviation scaled by $\sqrt{252}$,
+# the number of trading days in a year. The spread across that column is the point.
+# Crude oil moves several times as much per day as long-dated Treasuries, and the
+# same network, trained the same way, sees both. The date range and the number of
+# trading days are shared: the wide-format table above keeps only dates on which all
+# eight funds traded, so every fund contributes the same days.
+
+# %%
+profile = pl.DataFrame(
+    {
+        "Symbol": SYMBOLS,
+        "Exposure": [EXPOSURE[s] for s in SYMBOLS],
+        "Annualised volatility (%)": [
+            round(float(returns[s].std()) * np.sqrt(252) * 100, 1) for s in SYMBOLS
+        ],
+    }
+)
+print(
+    f"{returns.height} trading days shared by all {len(SYMBOLS)} funds, "
+    f"{returns['timestamp'][0]} to {returns['timestamp'][-1]}"
+)
+profile
 
 # %% [markdown]
-# ## Sequence Construction
+# ## Turning the return series into training examples
 #
-# Each input is a lookback window of daily returns for one ETF. The target is the
-# ETF's **next-day return** - a deliberately noisy single-step objective aligned with
-# the direct return-prediction tasks used throughout the book. Pooling sequences from
-# all eight ETFs ensures the result is not driven by one symbol's split.
+# One training example is a **window**: the previous `LOOKBACK` daily returns of one
+# fund, paired with that fund's return `HORIZON` days later. Sliding the window
+# forward one day at a time turns each fund's return series into thousands of
+# overlapping examples, and stacking all eight funds gives one pooled set. Pooling is
+# deliberate - a single network is fitted to all eight rather than one network per
+# fund, so the comparison below is not decided by whichever fund happened to be easy.
+#
+# The target is the next day's return. Next-day returns are close to unpredictable,
+# and that is the point: an objective with almost no signal keeps the notebook's
+# attention on what the architectures cost rather than on which one wins.
 
 # %% [markdown]
-# ### Univariate sequence builder
+# ### Sliding one window along one fund
 #
-# Slides a `lookback`-length window over one ETF's return series and pairs each
-# window with the realised return `horizon` steps ahead.
+# `create_sequences` takes one fund's return series and returns the stack of windows
+# and the matching targets. Window `i` covers positions `i` through `i + lookback - 1`
+# and its target sits at `i + lookback + horizon - 1`, so no window ever contains its
+# own target.
 
 
 # %%
@@ -154,12 +224,30 @@ def create_sequences(data: np.ndarray, lookback: int, horizon: int):
 
 
 # %% [markdown]
-# ### Panel pooling and chronological split
+# ### Splitting on dates, not on window counts
 #
-# Applies the per-symbol builder to each ETF and locates the 80/20 boundary in
-# calendar order. It then purges the training samples whose feature or label
-# support reaches the first test window. Test dates stay fixed while the final
-# `lookback + horizon - 1` candidate training samples are excluded.
+# The three stretches are defined by **calendar position**, at the fractions
+# `VALIDATION_START` and `TEST_START` of the trading days in the sample. Each example
+# is placed by the day its target falls on: targets before the first boundary train
+# the networks, targets between the boundaries are scored after every epoch but never
+# trained on, and targets after the second boundary are scored once, at the end.
+# Nothing in the notebook - not a weight, not a stopping point, not a choice of
+# architecture - is decided using the third stretch.
+#
+# Anchoring on the target's date rather than on a fraction of the window count is what
+# makes the window-length sweep later in the notebook mean anything. A window of
+# `lookback` days cannot start until `lookback` days of history exist, so a longer
+# window yields fewer examples; cutting a fixed fraction of *those* would put the
+# validation stretch on different dates for every window length, and the sweep would
+# be comparing market periods rather than architectures. Placing every example by its
+# target date fixes the validation and test dates once, for all lengths.
+#
+# One gap is still needed. An example's target is a single day's return `HORIZON` days
+# after its window ends, so training stops `HORIZON` days short of the first
+# validation target: no day the network was fitted on lies within a forecast horizon
+# of the first day it is scored on. `first_target_pos` lets a caller start every
+# example set at the same date as well, which the sweep uses so that changing the
+# window length changes how much history each example sees and nothing else.
 
 
 # %%
@@ -168,51 +256,63 @@ def create_panel_sequences(
     symbols: list[str],
     lookback: int,
     horizon: int,
-    split_fraction: float = 0.8,
-):
-    """Create purged chronological train/test splits, then pool symbols."""
+    val_start_fraction: float = VALIDATION_START,
+    test_start_fraction: float = TEST_START,
+    first_target_pos: int | None = None,
+) -> dict[str, np.ndarray]:
+    """Pool per-symbol windows into train / validation / test stretches fixed by date."""
     timestamps = returns_df["timestamp"].to_numpy()
-    train_X, train_y, test_X, test_y = [], [], [], []
-    test_dates_list, test_symbols_list = [], []
+    n_days = len(timestamps)
+    val_start = int(n_days * val_start_fraction)
+    test_start = int(n_days * test_start_fraction)
+    earliest = lookback + horizon - 1
+    target_pos = np.arange(earliest, n_days)  # aligns element-wise with create_sequences
+    selectors = {
+        "train": (target_pos >= max(earliest, first_target_pos or earliest))
+        & (target_pos < val_start - horizon),
+        "val": (target_pos >= val_start) & (target_pos < test_start - horizon),
+        "test": target_pos >= test_start,
+    }
+    if any(sel.sum() == 0 for sel in selectors.values()):
+        raise ValueError(f"lookback {lookback}: a stretch came out empty")
+
+    parts: dict[str, list[np.ndarray]] = {
+        f"{axis}_{split}": [] for split in selectors for axis in ("X", "y")
+    }
+    parts |= {"test_dates": [], "test_symbols": []}
     for symbol in symbols:
-        series = returns_df[symbol].to_numpy()
-        X_symbol, y_symbol = create_sequences(series, lookback, horizon)
-        split_idx = int(len(X_symbol) * split_fraction)
-        purge_size = lookback + horizon - 1
-        train_end = split_idx - purge_size
-        if train_end <= 0:
-            raise ValueError("Not enough observations for the requested purge")
-        train_X.append(X_symbol[:train_end])
-        train_y.append(y_symbol[:train_end])
-        test_X.append(X_symbol[split_idx:])
-        test_y.append(y_symbol[split_idx:])
-        n_test = len(X_symbol) - split_idx
-        target_offsets = np.arange(n_test) + split_idx + lookback + horizon - 1
-        test_dates_list.append(timestamps[target_offsets])
-        test_symbols_list.append(np.full(n_test, symbol))
-    return (
-        np.concatenate(train_X),
-        np.concatenate(train_y),
-        np.concatenate(test_X),
-        np.concatenate(test_y),
-        np.concatenate(test_dates_list),
-        np.concatenate(test_symbols_list),
-    )
+        X_symbol, y_symbol = create_sequences(returns_df[symbol].to_numpy(), lookback, horizon)
+        for split, sel in selectors.items():
+            parts[f"X_{split}"].append(X_symbol[sel])
+            parts[f"y_{split}"].append(y_symbol[sel])
+        parts["test_dates"].append(timestamps[target_pos[selectors["test"]]])
+        parts["test_symbols"].append(np.full(int(selectors["test"].sum()), symbol))
+    return {name: np.concatenate(chunks) for name, chunks in parts.items()}
 
 
 # %% [markdown]
-# ### Cross-sectional IC helper
+# ### Scoring a forecast: the information coefficient
 #
-# Computes the cross-sectional Spearman rank correlation between predicted and
-# realised returns across symbols on each date, then averages over the dates where
-# it is defined. `min_obs=5` keeps dates with as few as 5 ETFs out of 8 - the
-# library default of 10 would discard every date in this 8-symbol panel. On a date
-# where a model outputs the *same* value for every symbol, the ranks are tied and
-# the correlation is undefined; `cross_sectional_ic_series` returns that as a float
-# `NaN`. We exclude those dates from the average and separately report the
-# **coverage** (how many dates had a defined IC), so a model that ties on many
-# dates is flagged rather than hidden. This matters because polars `drop_nulls`
-# does *not* drop `NaN`, so a single tied date would otherwise poison the mean.
+# Squared error says how far a prediction is from the realised return. It does not say
+# whether the prediction was useful, because a trader acts on the ordering: buy the
+# funds predicted to do best, avoid the ones predicted to do worst. The
+# **information coefficient**, or IC, measures that ordering directly. On each date,
+# rank the eight funds by prediction, rank them again by what they actually returned,
+# and take the correlation between the two sets of ranks - the Spearman rank
+# correlation. It is `+1` when the predicted order is exactly right, `-1` when it is
+# exactly reversed, and `0` when the prediction carries no ordering information. The
+# notebook then averages that daily figure over the test dates.
+#
+# Two settings matter. `min_obs=5` scores a date on which at least five of the eight
+# funds are present; the library's default of ten would discard every date in an
+# eight-fund panel. And on a date where a network predicts the *same* number for all
+# eight, the predicted ranks are all tied, the correlation has nothing to correlate,
+# and the library returns `NaN`. Those dates are dropped from the average and counted
+# separately as **coverage**, so a network that ties often is visible rather than
+# hidden behind an average taken over whichever dates happened to survive. The drop
+# has to test for `NaN` explicitly: polars treats `NaN` and null as different values,
+# and `drop_nulls` leaves `NaN` in place, where a single one would make the mean
+# `NaN` as well.
 
 
 # %%
@@ -243,37 +343,60 @@ def cross_sectional_ic(y_true, y_pred, dates, symbols):
     return {"ic": mean_ic, "n_defined": n_defined, "n_total": n_total}
 
 
-# %%
-X_train, y_train, X_test, y_test, test_dates, test_symbols = create_panel_sequences(
-    returns, SYMBOLS, LOOKBACK, HORIZON
-)
+# %% [markdown]
+# ### Building the three stretches
+#
+# PyTorch wants a tensor shaped `(examples, time steps, features)`; there is one
+# feature here, the return, so the window gains a trailing axis of length one.
 
-X_train_t = torch.FloatTensor(X_train).unsqueeze(-1).to(DEVICE)
-y_train_t = torch.FloatTensor(y_train).unsqueeze(-1).to(DEVICE)
-X_test_t = torch.FloatTensor(X_test).unsqueeze(-1).to(DEVICE)
-y_test_t = torch.FloatTensor(y_test).unsqueeze(-1).to(DEVICE)
+
+# %%
+def to_tensor(array: np.ndarray) -> torch.Tensor:
+    """Move one array of windows or targets onto the compute device."""
+    return torch.FloatTensor(array).unsqueeze(-1).to(DEVICE)
+
+
+# %%
+splits = create_panel_sequences(returns, SYMBOLS, LOOKBACK, HORIZON)
+test_dates, test_symbols = splits["test_dates"], splits["test_symbols"]
+
+X_train_t, y_train_t = to_tensor(splits["X_train"]), to_tensor(splits["y_train"])
+X_val_t, y_val_t = to_tensor(splits["X_val"]), to_tensor(splits["y_val"])
+X_test_t, y_test_t = to_tensor(splits["X_test"]), to_tensor(splits["y_test"])
 
 print(
-    f"Pooled ETF sequences: X_train {X_train.shape}, X_test {X_test.shape} "
-    f"| Train: {len(X_train)}, Test: {len(X_test)} | Purge per symbol: "
-    f"{LOOKBACK + HORIZON - 1}"
+    f"Windows of {LOOKBACK} days pooled over {len(SYMBOLS)} funds: "
+    f"{len(splits['X_train']):,} for training, {len(splits['X_val']):,} for watching, "
+    f"{len(splits['X_test']):,} held to the end"
+)
+print(
+    f"Held-back targets run {splits['test_dates'].min()} to {splits['test_dates'].max()}; "
+    f"training stops {HORIZON} trading day(s) short of each boundary"
 )
 
 # %% [markdown]
-# ## Model Definitions
+# ## The four networks
 #
-# Four architectures with comparable parameter counts for fair comparison.
-# The MLP flattens the sequence; the CNN applies same-padded temporal
-# convolutions over the lookback window (no look-ahead, but the right half of
-# the kernel is padded rather than masked - see `05_tcn` for a strictly causal
-# variant); the LSTM and GRU process steps sequentially - the key bottleneck
-# discussed in Section 13.1.
+# All four take the same window and return one number. What differs is how the window
+# is consumed, and each choice carries a different assumption about where the useful
+# structure in a return series is.
+#
+# They are **not** matched on size. Each is written the way its architecture is
+# normally written at `HIDDEN_SIZE` units, and the parameter counts that fall out of
+# that differ several-fold; the counts are printed with the results so the cost figures
+# can be read against them. Equalising the counts would mean shrinking the recurrent
+# networks to sizes nobody uses, which would answer a question the chapter is not
+# asking.
 
 # %% [markdown]
-# ### MLP Baseline
+# ### The fully connected network
 #
-# Flattens the lookback window into a single vector. Fully parallel - no
-# sequential dependency between time steps.
+# The window is flattened into a single vector of `lookback` numbers and passed
+# through three fully connected layers. Flattening throws away the fact that the
+# numbers are ordered in time: position 3 and position 47 are just two input slots,
+# and the network has to learn any relation between them from data. In exchange, every
+# input is available at once, so the whole forward pass is a handful of matrix
+# multiplications and nothing waits for anything else.
 
 
 # %%
@@ -294,10 +417,21 @@ class MLPForecaster(nn.Module):
 
 
 # %% [markdown]
-# ### 1D-CNN
+# ### The one-dimensional convolution
 #
-# Applies convolutions along the time axis. Captures local patterns within the
-# kernel window and processes all positions in parallel.
+# A **convolution** slides a short filter - here three days wide - along the window and
+# records what it finds at each position. The same filter is reused everywhere, so a
+# pattern the network learns to recognise on day 5 is recognised on day 50 without
+# being learned again, which is what makes a convolution far smaller than a fully
+# connected layer over the same input. Every position is filtered independently, so
+# the whole slide happens at once.
+#
+# `padding=1` keeps the output the same length as the input by adding a zero at each
+# end. That means the filter centred on the last day reads a padded slot to its right
+# rather than a future return - no future information enters - but a filter centred
+# earlier does see days after its centre. That is harmless here, because the whole
+# window already lies in the past of the target. `05_tcn` builds the strictly causal
+# version, where each position sees only what precedes it.
 
 
 # %%
@@ -319,11 +453,23 @@ class CNNForecaster(nn.Module):
 
 
 # %% [markdown]
-# ### LSTM
+# ### The LSTM
 #
-# The hidden state at time $t$ depends on $t{-}1$, creating $O(T)$ sequential
-# computation. This is the bottleneck discussed in Section 13.1 - the architecture
-# cannot leverage GPU parallelism across time steps.
+# A **recurrent** network walks the window one day at a time, carrying a vector called
+# the hidden state from step to step. At day $t$ it combines the day's return with the
+# hidden state produced at day $t-1$, and writes a new hidden state; the prediction is
+# read off the state after the last day. The **long short-term memory** network, or
+# LSTM, is the standard version of this idea: alongside the hidden state it keeps a
+# second vector, the cell state, and learns three small gates that decide what to add
+# to it, what to erase from it, and how much of it to expose. The gates are what let it
+# hold information across dozens of steps, where a plain recurrent network loses it.
+#
+# The design has one consequence this notebook measures. Step $t$ cannot start until
+# step $t-1$ has finished, so a window of $T$ days takes $T$ dependent operations no
+# matter how much hardware is available. A GPU is fast because it runs thousands of
+# arithmetic operations simultaneously, and a chain of dependent steps is exactly the
+# shape it cannot accelerate. Section 13.1 is where the chapter argues this from the
+# architecture; the timing below is where the notebook measures it.
 
 
 # %%
@@ -339,11 +485,14 @@ class LSTMForecaster(nn.Module):
 
 
 # %% [markdown]
-# ### GRU
+# ### The GRU
 #
-# The Gated Recurrent Unit merges the LSTM's forget and input gates into a single
-# update gate, reducing parameter count. It shares the same $O(T)$ sequential
-# dependency but trains faster on smaller datasets due to fewer parameters.
+# The **gated recurrent unit**, or GRU, is a lighter recurrent design. It drops the
+# separate cell state and merges the LSTM's forget and input gates into one update
+# gate, which leaves it with fewer weights to learn per step. Fewer weights often
+# means it fits a small dataset with less trouble than an LSTM. What it does not
+# change is the walk: it still processes the window one day at a time, so it carries
+# the same dependency between steps.
 
 
 # %%
@@ -359,49 +508,83 @@ class GRUForecaster(nn.Module):
 
 
 # %% [markdown]
-# ## Training Loop
+# ## Training, and watching two losses at once
+#
+# One pass over the training windows is an **epoch**; the loop below runs `EPOCHS` of
+# them, shuffling the windows each time and updating the weights on batches of
+# `BATCH_SIZE`. The quantity being minimised is the mean squared error between
+# prediction and realised return.
+#
+# At the end of every epoch the same error is also computed on the validation
+# stretch, which no weight update has seen. Recording both is what makes the loss
+# curve readable. Training error falls whenever the network finds structure in the
+# training windows, and a return series offers plenty of structure that is specific to
+# the days it happened on - a network with enough capacity will fit it, and doing so
+# improves nothing about a later day. Validation error is what says whether a fall in
+# training error meant anything. Nothing is selected on the validation figure here:
+# every network trains for the full `EPOCHS` and the curve is read, not acted on.
 
 
 # %%
-def train_model(model, X_train, y_train, epochs, batch_size, model_name):
-    """Train a model in place and return its per-epoch loss history."""
+def evaluate_mse(model, X, y) -> float:
+    """Mean squared error of the model on one stretch, with no weight update."""
+    model.eval()
+    with torch.no_grad():
+        return float(nn.functional.mse_loss(model(X), y).item())
+
+
+# %%
+def train_model(model, X_train, y_train, epochs, batch_size, model_name, X_val=None, y_val=None):
+    """Train a model in place; return its per-epoch training and validation losses."""
     model.to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     criterion = nn.MSELoss()
     n_samples = len(X_train)
-    loss_history = []
+    history: dict[str, list[float]] = {"train": [], "val": []}
     for epoch in range(epochs):
         model.train()
-        epoch_loss = 0.0
-        n_batches = 0
+        epoch_loss, n_batches = 0.0, 0
         indices = torch.randperm(n_samples, device=DEVICE)
         for i in range(0, n_samples, batch_size):
             batch_idx = indices[i : i + batch_size]
             optimizer.zero_grad()
-            predictions = model(X_train[batch_idx])
-            loss = criterion(predictions, y_train[batch_idx])
+            loss = criterion(model(X_train[batch_idx]), y_train[batch_idx])
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item()
             n_batches += 1
-        avg_loss = epoch_loss / n_batches
-        loss_history.append(avg_loss)
+        train_loss = epoch_loss / n_batches
+        history["train"].append(train_loss)
+        if X_val is not None:
+            history["val"].append(evaluate_mse(model, X_val, y_val))
         if (epoch + 1) % 10 == 0 or epoch == 0:
-            print(f"{model_name} Epoch {epoch + 1}/{epochs}: Loss = {avg_loss:.6f}")
-    return loss_history
+            tail = f", validation {history['val'][-1]:.6f}" if history["val"] else ""
+            print(f"{model_name} epoch {epoch + 1}/{epochs}: training {train_loss:.6f}{tail}")
+    return history
 
 
 # %% [markdown]
-# ### Measuring compute cost robustly
+# ### Timing one training step
 #
-# Total training wall-clock is a poor efficiency metric on a shared GPU: a busy
-# neighbour inflates it unpredictably, and on these tiny batches per-epoch time is
-# dominated by Python and launch overhead rather than the architecture's compute.
-# Instead we microbenchmark a single forward+backward step on a fixed batch: warm
-# up to absorb allocation and kernel initialization, then report the **minimum**
-# over many timed reps using CUDA events. This reduces sensitivity to transient
-# delays but does not eliminate hardware or load effects. Interpret only the
-# broad architecture ranking and scaling pattern.
+# Total training time is a poor measure of what an architecture costs. Anything else
+# running on the same GPU inflates it, and at `BATCH_SIZE` of 32 much of each epoch is
+# spent in Python launching work rather than doing it, which flatters and penalises
+# architectures unequally.
+#
+# What is timed instead is a single training step - one forward pass, one backward
+# pass, one weight update - on a fixed batch of `BENCH_BATCH` windows. The first
+# `warmup` steps are discarded, because the first call into a GPU kernel pays for
+# memory allocation and kernel compilation that no later call repeats. The step is
+# then run `repeats` times and the **fastest** of those is reported. Taking the
+# minimum rather than the mean is deliberate: the true cost of the step is a floor,
+# and everything that moves a measurement above it - a scheduler preemption, another
+# process - only adds. On a GPU the timing uses CUDA events rather than the wall
+# clock, because a GPU call returns to Python before the work finishes and a wall
+# clock would time the queueing, not the arithmetic.
+#
+# The result still depends on the machine. Read the ordering between architectures and
+# how it changes with window length; do not read the milliseconds as a property of the
+# architecture.
 
 
 # %%
@@ -447,14 +630,14 @@ def benchmark_step(model, x, y, repeats: int = 100, warmup: int = 20) -> float:
 
 
 # %% [markdown]
-# ## Model Comparison
+# ## Running the comparison
 #
-# Train all four architectures on the same data and compare efficiency versus accuracy.
+# The dictionary below holds constructors rather than built models. Each is called
+# inside the loop, immediately after re-seeding, so all four start from weights drawn
+# from the same seeded stream and none of them inherits a state left behind by
+# whichever architecture was trained before it.
 
 # %%
-# Constructors, not instances: we re-seed and build each model inside the loop so
-# every architecture starts from the same seeded initialization, independent of
-# the order in which the models are trained.
 model_builders = {
     "MLP": lambda: MLPForecaster(LOOKBACK, HIDDEN_SIZE),
     "CNN": lambda: CNNForecaster(LOOKBACK, HIDDEN_SIZE),
@@ -466,7 +649,7 @@ results = {}
 
 
 # %% [markdown]
-# ### Fit and evaluate each architecture
+# ### Fit each architecture, then score it on the held-back stretch
 
 # %%
 for name, build in model_builders.items():
@@ -475,7 +658,7 @@ for name, build in model_builders.items():
     n_params = sum(p.numel() for p in model.parameters())
     print(f"\nTraining {name} ({n_params:,} parameters)...")
 
-    loss_history = train_model(model, X_train_t, y_train_t, EPOCHS, BATCH_SIZE, name)
+    history = train_model(model, X_train_t, y_train_t, EPOCHS, BATCH_SIZE, name, X_val_t, y_val_t)
 
     model.eval()
     with torch.no_grad():
@@ -490,14 +673,16 @@ for name, build in model_builders.items():
         "ic": ic_info["ic"],
         "ic_coverage": (ic_info["n_defined"], ic_info["n_total"]),
         "n_params": n_params,
-        "loss_history": loss_history,
+        "history": history,
     }
 
 # %% [markdown]
-# ### Benchmark observed step cost
+# ### Time a step for each architecture
 #
-# Timing runs after every accuracy model is fitted, so measurement cannot alter a
-# later model's GPU execution path. Each benchmark uses a fresh seeded model.
+# Timing runs only after every network has been fitted, so a benchmark cannot change
+# the GPU state a later fit runs in. Each timing uses a freshly seeded network of the
+# same architecture rather than the trained one, because a trained network and an
+# untrained one do the same arithmetic per step.
 
 # %%
 for name, build in model_builders.items():
@@ -507,7 +692,21 @@ for name, build in model_builders.items():
     results[name]["step_ms"] = benchmark_step(bench_model, X_train_t[:n_bench], y_train_t[:n_bench])
 
 # %% [markdown]
-# ## Results Summary
+# ## What each architecture cost and what it produced
+#
+# One row per architecture. **Parameters** is how many weights it has to learn.
+# **Step time** is the timed training step from above. **Test MSE** is the squared
+# error on the final stretch, which is also the quantity that was minimised.
+# **IC** is the average daily ranking correlation defined earlier, and
+# **IC coverage** counts the test dates on which it was defined at all - a network
+# that predicts one number for all eight funds has no ordering to score that day, and
+# a coverage figure well below the total says the average beside it was taken over a
+# subset chosen by the network's own behaviour.
+#
+# The two error columns answer different questions and can disagree. A network can
+# have the lower squared error because it predicts closer to zero every day, while
+# ranking the funds no better than chance; another can rank slightly better while
+# sitting further from the realised values. Read them together.
 
 # %%
 comparison_df = pl.DataFrame(
@@ -517,11 +716,7 @@ comparison_df = pl.DataFrame(
             "Parameters": r["n_params"],
             "Step time (ms)": round(r["step_ms"], 3),
             "Test MSE": round(r["mse"], 6),
-            # IC is undefined on dates where predictions tie across symbols; if a
-            # model has no defined date at all, show "undefined" not a bare NaN.
-            "Spearman IC": "undefined" if np.isnan(r["ic"]) else f"{r['ic']:.4f}",
-            # Dates where the IC was defined vs total - low coverage means the
-            # model ties its cross-section often and the IC is on a biased subset.
+            "IC": "undefined" if np.isnan(r["ic"]) else f"{r['ic']:.4f}",
             "IC coverage": f"{r['ic_coverage'][0]}/{r['ic_coverage'][1]}",
         }
         for name, r in results.items()
@@ -530,228 +725,319 @@ comparison_df = pl.DataFrame(
 comparison_df
 
 # %% [markdown]
-# **Interpretation**: On this single split the point-forecast error (Test MSE) is
-# nearly identical across the four architectures, and every cross-sectional
-# Spearman IC is small - next-day returns are essentially unpredictable at this
-# horizon, so a model that minimises MSE does so mostly by predicting close to the
-# mean. The estimates vary around zero, and the **IC coverage** column adds an
-# important qualification: the CNN emits the *same* value for all eight ETFs on
-# some test dates, so its IC is defined on only a subset, while the MLP, LSTM, and
-# GRU rank the cross-section on every date. None of these single-split ICs is a
-# basis for selection. The informative and robust difference is therefore in
-# **efficiency**, not accuracy: recurrent models (LSTM, GRU) carry more parameters
-# and update their hidden state sequentially, while the MLP and CNN process the
-# window in parallel. Treat this as an efficiency demonstration, not model
-# selection for a production strategy.
+# Whatever the ordering in the two error columns turns out to be, it is one split of
+# one eight-fund panel on a target with almost no signal, and it is not a reason to
+# prefer one of these architectures over another. Next-day returns are close to
+# unpredictable, so squared error is minimised largely by predicting near the average,
+# and the ranking correlations are small. Whether any gap between them is real is a
+# question this notebook gives no way to answer: there is one split, one seed, and no
+# interval around any of these averages. Establishing that a difference in ranking
+# correlation is more than sampling noise takes repeated splits and a standard error on
+# each average, which is what Chapter 6's walk-forward procedure and the case-study
+# notebooks are for.
+#
+# The cost column is the one that carries information, because it measures a property
+# of the architecture rather than an accident of this sample: a network that walks the
+# window one day at a time has to do work that a network reading it all at once does
+# not. The rest of the notebook pursues that column.
+
+# %% [markdown]
+# ### Reading the two loss curves
+#
+# One panel per architecture, all four on the same axes limits so the heights are
+# comparable, each showing per-epoch mean squared error on the pooled eight-fund
+# next-day return target. The solid line is the training error the network is
+# minimising; the dashed line is the same error on the validation windows, which no
+# weight update touched.
+#
+# Three readings are possible and all three appear below. Both lines falling together
+# means the network found structure that holds on days it has not seen. Both lines
+# flat means it found nothing and settled for predicting near the average - on a
+# next-day return target that is the honest outcome, not a failure. The solid line
+# falling while the dashed line **rises** means the network is fitting the training
+# days themselves, and every epoch after the dashed line turns is making the forecast
+# worse while the number being minimised keeps improving. That last shape is why the
+# second curve is worth its one forward pass per epoch: nothing in the training loss
+# distinguishes it from the first.
 
 # %%
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+fig, axes = plt.subplots(2, 2, figsize=FIGSIZE["grid_2x2"], sharex=True, sharey=True)
 
-# Left: Training loss curves
-for name, r in results.items():
-    axes[0].plot(r["loss_history"], label=name)
-axes[0].set_xlabel("Epoch")
-axes[0].set_ylabel("MSE loss")
-add_message_title(
-    axes[0],
-    "MLP keeps cutting training loss",
-    subtitle="recurrent and CNN losses plateau early (MSE, 8-ETF next-day returns)",
+for ax, (name, r) in zip(axes.flat, results.items(), strict=True):
+    epochs_axis = range(1, len(r["history"]["train"]) + 1)
+    ax.plot(epochs_axis, r["history"]["train"], color=COLORS["blue"], label="Training")
+    ax.plot(
+        epochs_axis,
+        r["history"]["val"],
+        color=COLORS["amber"],
+        linestyle="--",
+        label="Validation",
+    )
+    ax.set_title(name, loc="left", fontsize="small")
+
+for ax in axes[-1]:
+    ax.set_xlabel("Epoch")
+for ax in axes[:, 0]:
+    ax.set_ylabel("Mean squared error")
+axes.flat[0].legend(frameon=False, fontsize="small")
+
+# The claim goes on the figure; each axes' left title already carries its architecture.
+fig.suptitle(
+    "Training error falls furthest where validation error rises",
+    x=0.01,
+    ha="left",
+    color=COLORS["blue"],
+    fontweight="semibold",
 )
-axes[0].legend()
+show_with_alt(
+    fig,
+    "Four panels, one per architecture, each plotting mean squared error against "
+    "training epoch. Every panel carries a solid training curve and a dashed "
+    "validation curve on shared axes, so the epoch at which the two separate is "
+    "visible for each architecture.",
+)
 
-# Right: Per-step compute vs. test MSE scatter. MSE (the training objective) is
-# always defined, whereas the cross-sectional IC is undefined on dates where a
-# model's predictions tie across symbols - so MSE gives the robust
-# efficiency-vs-error view here. The x-axis is the microbenchmarked per-step time
-# (lower variance than total wall-clock, but still hardware/load-sensitive).
+# %% [markdown]
+# ### Cost against error
+#
+# The scatter puts the timed step on the horizontal axis and the error on the final
+# stretch on the vertical one, so an architecture sitting far to the right has to
+# justify itself by sitting low. Squared error is used rather than the ranking
+# correlation because it is defined on every date, whereas the correlation is not.
+
+# %%
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+
 for name, r in results.items():
-    axes[1].scatter(r["step_ms"], r["mse"], s=100, zorder=5)
-    axes[1].annotate(
+    ax.scatter(r["step_ms"], r["mse"], s=60, color=COLORS["blue"], zorder=5)
+    ax.annotate(
         name,
         (r["step_ms"], r["mse"]),
         textcoords="offset points",
         xytext=(0, -14 if name == "LSTM" else 10),
         ha="center",
     )
-axes[1].set_xlabel("Per-step time (ms)")
-axes[1].set_ylabel("Test MSE")
+ax.set_xlabel("Time for one training step (ms)")
+ax.set_ylabel("Mean squared error on the held-back stretch")
 add_message_title(
-    axes[1],
-    "Similar error, very different cost",
-    subtitle="Test MSE vs per-step forward+backward time (RTX 3090)",
+    ax,
+    "A costlier step buys no lower error here",
+    subtitle="One forward pass, backward pass and weight update, timed on this machine",
+)
+show_with_alt(
+    fig,
+    "A scatter of four labelled points, one per architecture, with the time for a "
+    "single training step in milliseconds across the horizontal axis and mean "
+    "squared error on the held-back stretch up the vertical axis.",
 )
 
-fig.tight_layout()
-fig.show()
+# %% [markdown]
+# The horizontal spread is large and the vertical spread is small: the architectures
+# separate on what a step costs far more clearly than on what it achieves. On a target
+# this close to unpredictable that is the expected outcome, and it is the useful one -
+# a step that costs several times as much has to be earning something, and here there
+# is nothing on the vertical axis for it to earn. The rest of Chapter 13 is largely a
+# search for architectures that keep the accuracy while dropping the walk.
 
 # %% [markdown]
-# **Finding**: The four architectures reach nearly the same test error at very
-# different per-step compute costs - the recurrent models buy no measurable
-# accuracy for their heavier step. On an essentially unpredictable next-day target
-# that is the expected outcome; the lesson is that sequential computation is a cost
-# to be justified, which motivates the search for architectures that match this
-# accuracy with parallel computation.
-
-# %% [markdown]
-# ## Sequence-Length Scaling
+# ## Lengthening the window
 #
-# The LSTM's $O(T)$ sequential dependency means per-step compute grows with
-# sequence length, while the MLP processes any length in parallel (flattened).
-# This experiment trains both at increasing lookback windows (for the IC panel) and
-# microbenchmarks a single forward+backward step at each setting. Taking the
-# minimum reduces transient delays but does not make timing load-invariant, so the
-# broad scaling pattern matters more than exact milliseconds. This is the core
-# limitation from Section 13.1.
+# The step timings above were all taken at one window length. The claim they are meant
+# to support is about how that cost behaves as the window grows, and one length cannot
+# show it. So the fully connected network and the LSTM are rebuilt at each length in
+# `LOOKBACKS` and timed again.
+#
+# The two should grow differently, for reasons visible in the code rather than in the
+# measurement. The LSTM's weights do not depend on the window at all - it applies the
+# same step to each day - so a longer window buys it no parameters and costs it
+# proportionally more dependent steps. The fully connected network has the opposite
+# shape: its first layer has one weight per input day, so a longer window makes that
+# one matrix multiplication bigger, and a bigger matrix multiplication is work a GPU
+# spreads across its cores. What the panel below measures is whether the two costs
+# behave as those two shapes predict.
+#
+# Each length also gets a fitted pair scored on the validation stretch, so the second
+# question - whether the extra history is worth anything - is answered on the same
+# axis as the cost. Nothing selects a window length from either panel.
+#
+# Two things are held fixed so the sweep varies one thing. The validation dates are
+# already fixed by the date-anchored split. `SWEEP_FIRST_TARGET` fixes the other end:
+# every length starts its examples on the date the longest window can first reach, so
+# all four are fitted on the same days and the same number of examples. Without it the
+# shorter windows would train on several hundred extra examples each, and a difference
+# in error could be read as a difference in sample size.
 
 # %%
-lookbacks = LOOKBACKS
+scaling_architectures = [
+    ("MLP", MLPForecaster, lambda lb: {"lookback": lb, "hidden_size": HIDDEN_SIZE}),
+    ("LSTM", LSTMForecaster, lambda _lb: {"hidden_size": HIDDEN_SIZE}),
+]
 
-scaling_results = {}
-scaling_batches = {}
+scaling_results: dict[tuple[str, int], dict[str, float]] = {}
+scaling_batches: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
 
-for lb in lookbacks:
-    X_tr_np, y_tr_np, X_te_np, y_te_np, test_dates_lb, test_symbols_lb = create_panel_sequences(
-        returns, SYMBOLS, lb, HORIZON
+# %%
+SWEEP_FIRST_TARGET = max(LOOKBACKS) + HORIZON - 1
+
+for lb in LOOKBACKS:
+    lb_splits = create_panel_sequences(
+        returns, SYMBOLS, lb, HORIZON, first_target_pos=SWEEP_FIRST_TARGET
     )
-
-    X_tr = torch.FloatTensor(X_tr_np).unsqueeze(-1).to(DEVICE)
-    y_tr = torch.FloatTensor(y_tr_np).unsqueeze(-1).to(DEVICE)
-    X_te = torch.FloatTensor(X_te_np).unsqueeze(-1).to(DEVICE)
-    y_te = torch.FloatTensor(y_te_np).unsqueeze(-1).to(DEVICE)
+    X_tr, y_tr = to_tensor(lb_splits["X_train"]), to_tensor(lb_splits["y_train"])
+    X_va, y_va = to_tensor(lb_splits["X_val"]), to_tensor(lb_splits["y_val"])
     scaling_batches[lb] = (X_tr, y_tr)
 
-    for arch_name, ModelCls, kwargs in [
-        ("MLP", MLPForecaster, {"lookback": lb, "hidden_size": HIDDEN_SIZE}),
-        ("LSTM", LSTMForecaster, {"hidden_size": HIDDEN_SIZE}),
-    ]:
+    for arch_name, ModelCls, kwargs_for in scaling_architectures:
         seed_all(SEED)
-        model = ModelCls(**kwargs)
-        train_model(model, X_tr, y_tr, EPOCHS, BATCH_SIZE, f"{arch_name}-{lb}")
-
-        model.eval()
-        with torch.no_grad():
-            preds = model(X_te).cpu().numpy().flatten()
-            acts = y_te.cpu().numpy().flatten()
-        ic_val = cross_sectional_ic(acts, preds, test_dates_lb, test_symbols_lb)["ic"]
-        scaling_results[(arch_name, lb)] = {"ic": ic_val}
+        model = ModelCls(**kwargs_for(lb))
+        history = train_model(
+            model, X_tr, y_tr, EPOCHS, BATCH_SIZE, f"{arch_name}-{lb}", X_va, y_va
+        )
+        scaling_results[(arch_name, lb)] = {
+            "train_mse": history["train"][-1],
+            "val_mse": history["val"][-1],
+        }
 
 # %% [markdown]
-# ### Benchmark each sequence shape
+# ### Time a step at each window length
 #
-# Fresh models keep the timing pass separate from the accuracy fits above.
+# As before, the timing uses freshly seeded networks so it runs after every fit rather
+# than between them.
 
 # %%
-for lb in lookbacks:
+for lb in LOOKBACKS:
     X_tr, y_tr = scaling_batches[lb]
-    for arch_name, ModelCls, kwargs in [
-        ("MLP", MLPForecaster, {"lookback": lb, "hidden_size": HIDDEN_SIZE}),
-        ("LSTM", LSTMForecaster, {"hidden_size": HIDDEN_SIZE}),
-    ]:
+    for arch_name, ModelCls, kwargs_for in scaling_architectures:
         seed_all(SEED)
-        model = ModelCls(**kwargs)
+        model = ModelCls(**kwargs_for(lb))
         n_bench = min(BENCH_BATCH, len(X_tr))
         scaling_results[(arch_name, lb)]["time"] = benchmark_step(
             model, X_tr[:n_bench], y_tr[:n_bench]
         )
 
 # %%
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+fig, axes = plt.subplots(1, 2, figsize=FIGSIZE["dual_h_tall"])
 
-for arch in ["MLP", "LSTM"]:
-    lbs = [lb for lb in lookbacks if (arch, lb) in scaling_results]
-    times = [scaling_results[(arch, lb)]["time"] for lb in lbs]
-    ics = [scaling_results[(arch, lb)]["ic"] for lb in lbs]
+for arch, color in (("MLP", COLORS["blue"]), ("LSTM", COLORS["amber"])):
+    axes[0].plot(
+        LOOKBACKS,
+        [scaling_results[(arch, lb)]["time"] for lb in LOOKBACKS],
+        "o-",
+        color=color,
+        label=arch,
+    )
+    axes[1].plot(
+        LOOKBACKS,
+        [scaling_results[(arch, lb)]["train_mse"] for lb in LOOKBACKS],
+        "o-",
+        color=color,
+        label=arch,
+    )
+    axes[1].plot(
+        LOOKBACKS,
+        [scaling_results[(arch, lb)]["val_mse"] for lb in LOOKBACKS],
+        "o--",
+        color=color,
+    )
 
-    axes[0].plot(lbs, times, "o-", label=arch)
-    axes[1].plot(lbs, ics, "o-", label=arch)
-
-axes[0].set_xlabel("Lookback window (days)")
-axes[0].set_ylabel("Per-step time (ms)")
+axes[0].set_xlabel("Window length (days)")
+axes[0].set_ylabel("Time for one training step (ms)")
 add_message_title(
     axes[0],
-    "LSTM time grows with lookback; MLP remains lower",
-    subtitle="Min per-step forward+backward time vs lookback (RTX 3090)",
+    "Walking the window costs more as it lengthens",
+    subtitle="Timed on this machine",
 )
-axes[0].legend()
+axes[0].legend(frameon=False, fontsize="small")
 
-axes[1].set_xlabel("Lookback window (days)")
-axes[1].set_ylabel("Spearman IC")
+axes[1].set_yscale("log")
+axes[1].set_xlabel("Window length (days)")
+axes[1].set_ylabel("Mean squared error, log scale")
 add_message_title(
     axes[1],
-    "Predictive accuracy versus lookback window",
-    subtitle="Spearman IC, pooled 8-ETF next-day returns",
+    "The extra history is fitted, not learned",
+    subtitle="Training (solid) against validation (dashed) error after the last epoch",
 )
-axes[1].legend()
+axes[1].legend(frameon=False, fontsize="small")
 
-fig.tight_layout()
-fig.show()
-
-# %% [markdown]
-# **Finding**: LSTM per-step time rises more quickly with lookback length because
-# its hidden state is updated one step at a time - the $O(T)$ recurrence. The MLP is
-# less sequentially constrained: it flattens longer windows into a larger input
-# vector, so its growth comes from a bigger first-layer matmul rather than from
-# step-by-step recurrence. The IC plot is noisy, reinforcing that this notebook is
-# an architecture demonstration rather than a validated trading model.
-#
-# **Limitation**: This uses a single 80/20 temporal split, not walk-forward
-# validation. Section 13.7 covers proper evaluation methodology.
+show_with_alt(
+    fig,
+    "Two panels sharing a horizontal axis of window length in days. The left panel "
+    "plots the time for one training step for the fully connected network and the "
+    "LSTM; the right panel plots each one's training error as a solid line and its "
+    "validation error as a dashed line, on a logarithmic scale.",
+)
 
 # %% [markdown]
-# ## sktime Alternative
+# The two panels are the notebook's argument in one figure, and they say different
+# things about the same lengthening.
 #
-# High-level APIs like sktime wrap these architectures in a unified
-# `fit()`/`predict()` interface, reducing the training loop above to a few lines.
-# This is useful for rapid prototyping before committing to a custom implementation.
+# On the left, the cost of a step rises with the window for the network that walks it,
+# while the network that reads the window at once absorbs the same lengthening far more
+# cheaply - a wider first layer is one larger matrix multiplication, not more dependent
+# steps.
 #
-# **Dependency note**: sktime's neural forecasters require `neuralforecast`, which
-# depends on `ray` - and ray does not yet support Python 3.14
-# ([ray-project/ray#56434](https://github.com/ray-project/ray/issues/56434)).
-# Once ray adds 3.14 wheels, run `uv pip install neuralforecast` and uncomment
-# the sktime demo cell below.
-
-# %%
-# import pandas as pd
-# from sktime.forecasting.neuralforecast import NeuralForecastLSTM
+# On the right, the two curves for each architecture separate rather than descend
+# together. A longer window gives the fully connected network more input slots and
+# therefore more capacity to fit the training days exactly, and its training error
+# drops accordingly; the validation error it is supposed to predict does not follow.
+# The recurrent network keeps the same weights however long the window is, so it has no
+# extra capacity to spend and both of its curves stay flat. Neither architecture turns
+# the extra history into a better forecast. The distance between a training curve and
+# its validation curve is the part of the drop that was never real, and reading the
+# left panel without the right one would price compute against exactly that.
 #
-# symbol = SYMBOLS[0]
-# spy_prices = close_wide.select(["timestamp", symbol]).to_pandas()
-# spy_prices = spy_prices.set_index("timestamp")[symbol].dropna()
-#
-# split = int(len(spy_prices) * 0.8)
-# y_train_sk = spy_prices.iloc[:split]
-# y_test_sk = spy_prices.iloc[split : split + HORIZON]
-#
-# forecaster = NeuralForecastLSTM(
-#     freq="B",
-#     input_size=LOOKBACK,
-#     max_steps=EPOCHS * 5,
-#     encoder_hidden_size=HIDDEN_SIZE,
-# )
-# forecaster.fit(y_train_sk)
-# y_pred_sk = forecaster.predict(fh=list(range(1, HORIZON + 1)))
-#
-# mae_sk = float(np.mean(np.abs(y_test_sk.values - y_pred_sk.values)))
-# print(f"sktime NeuralForecastLSTM MAE: {mae_sk:.4f}")
+# **What this does not establish.** One chronological cut of one eight-fund panel says
+# nothing durable about which architecture forecasts better on financial data. Chapter
+# 6 sets out the walk-forward procedure needed to make a claim of that kind, and the
+# case-study notebooks apply it.
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **The objective is deliberately simple and noisy**: pooled univariate ETF
-#    sequences predict next-day returns, so every cross-sectional IC is small and
-#    within noise of zero - and a model whose predictions tie across symbols on a
-#    date has no defined IC there (watch the IC-coverage column). Accuracy is not
-#    what separates these models here.
-# 2. **Parallel architectures train efficiently** because the MLP and CNN can process
-#    all time steps simultaneously, while recurrent models update hidden state
-#    sequentially.
-# 3. **IC is not a basis for model selection** on this single illustrative split.
-#    Case-study notebooks use walk-forward validation and richer feature sets for
-#    publication-grade comparisons.
-# 4. **Sequence-length scaling** confirms the $O(T)$ bottleneck: the LSTM's per-step
-#    time grows steeply with lookback, while the MLP is less sequentially
-#    constrained (its growth comes from a larger first-layer matmul, not recurrence).
-# 5. These tradeoffs motivated N-BEATS (parallelizable decomposition) and Transformers
-#    (parallelizable attention), explored in subsequent notebooks.
+# 1. **Compare architectures on one input and one training procedure.** Everything in
+#    this notebook - the windows, the split, the optimiser, the number of epochs, the
+#    seed - is shared, so a difference between two rows of the results table is a
+#    difference between two architectures rather than between two experiments. Setting
+#    that up is most of the work, and skipping it is how architecture comparisons come
+#    to disagree with each other.
+# 2. **Record a validation error beside the training error from the first run.** A
+#    training curve alone cannot distinguish a network that is learning from one that
+#    is memorising, and both look like progress. The second curve costs one forward
+#    pass per epoch.
+# 3. **Place each example by the date of its target, and embargo the horizon.** The
+#    boundary that decides an example's partition is the one its target falls on, not
+#    the one its window starts on. An input window reaching back across a boundary is
+#    not leakage - at decision time the model has that history. What leaks is a
+#    training target resolved by days the model is later scored on, so training stops
+#    `HORIZON` days short of the first validation target. Nothing warns about either
+#    choice: the model trains, the score is computed, and a wrong one is quietly
+#    optimistic.
+# 4. **Time one step, not the whole run.** Total training time on shared hardware
+#    measures the neighbours as much as the architecture. A warmed-up, repeated,
+#    minimum-of-many single step is comparable between architectures and stable enough
+#    to compare across window lengths.
+# 5. **Sequential and parallel architectures scale differently in the window length,
+#    for a reason in the code.** A recurrent network applies the same step per day, so
+#    a longer window is more dependent steps and no more parameters. A fully connected
+#    network turns a longer window into a wider first layer, which is one larger matrix
+#    multiplication. Chapter 13's later architectures are attempts to keep a recurrent
+#    network's view of the sequence without paying for the walk: N-BEATS through
+#    decomposition (`02_nbeats_interpretable`), attention through parallel comparison
+#    of every pair of positions (`04_transformers`).
+# 6. **More capacity and more input are not more information.** The same lengthening
+#    that gives a fully connected network more parameters gives it more room to fit the
+#    training days and no more signal to find, and the two error curves separate
+#    accordingly. On a target with as little structure as a next-day return, the
+#    architecture that cannot grow with the window is the one whose training error stays
+#    honest.
 #
-# **Next**: See `02_nbeats_interpretable` for the N-BEATS decomposition approach.
+# **Known limitations.** One chronological split of eight funds, one target horizon,
+# one seed, and no hyperparameter search: nothing here establishes which architecture
+# forecasts better, and the ranking correlations are far too small to try. Timing is a
+# property of this machine and this PyTorch build; the ordering and the scaling
+# survive a change of hardware, the milliseconds do not. And a rank correlation taken
+# over eight funds is a coarse instrument: one fund changing place moves it a long way,
+# so the daily figures are noisy even before the averaging.
+#
+# **Next**: `02_nbeats_interpretable` builds the first architecture designed to keep
+# the accuracy without the walk.
