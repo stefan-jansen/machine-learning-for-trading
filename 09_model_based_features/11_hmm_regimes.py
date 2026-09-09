@@ -755,8 +755,9 @@ show_with_alt(
     "Four stacked panels sharing a time axis. The top draws the SPY close. Below it, three "
     "filled series: a binary flag from the volatility index, and the filtered probabilities "
     "from the hidden Markov model and the switching model. All three fill in during 2008, "
-    "2011, 2020 and 2022, with the two model-based series switching more often and more "
-    "briefly than the index flag.",
+    "2011, 2020 and 2022, with the switching model changing state far more often than "
+    "either of the others and the hidden Markov model holding a state for long blocks "
+    "while the index flag flickers within them.",
 )
 
 # %% [markdown]

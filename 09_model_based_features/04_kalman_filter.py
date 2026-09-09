@@ -559,8 +559,9 @@ show_with_alt(
     fig,
     "Two stacked panels covering the sessions the refits reach. The top plots how far each "
     "level estimate sits from the close: the filter stays within a few dollars of zero "
-    "throughout while the moving average swings much further either side, most widely "
-    "during 2022. The bottom plots the two trend estimates in standard-deviation units: "
+    "throughout while the moving average swings much further either side, its largest "
+    "single excursion at the start of 2020 and its widest run of them through 2022. The "
+    "bottom plots the two trend estimates in standard-deviation units: "
     "the rolling regression slope crosses zero repeatedly while the filter slope is much "
     "smoother and stays on one side for long stretches.",
 )

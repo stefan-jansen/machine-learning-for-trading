@@ -262,9 +262,9 @@ show_with_alt(
     fig,
     "Two stacked panels, each drawing the SPY closing price over the sample with vertical "
     "dashed lines at the detected breaks. The upper panel, from PELT under a penalty, "
-    "carries eight lines, none of them before 2012 and three of them after 2020. The lower "
-    "panel, from binary segmentation, carries four lines spread across the second half of "
-    "the sample. Neither panel marks the 2008 trough or the 2020 drop.",
+    "carries eight lines, none of them before 2012 and four of them after 2020. The lower "
+    "panel, from binary segmentation, carries four lines, the earliest in 2014. Neither "
+    "panel marks the 2008 trough or the 2020 drop.",
 )
 
 # %% [markdown]
@@ -1028,9 +1028,9 @@ add_message_title(
 show_with_alt(
     fig,
     "A horizontal bar chart of six SPY windows ordered by the probability the detector "
-    "assigns them. All but one bar reach the right-hand edge at close to certainty, "
-    "including two of the three quiet mid-year dates, and a single bar sits at the far "
-    "left near zero.",
+    "assigns them. Four bars reach the right-hand edge at close to certainty, one of them "
+    "a quiet mid-year date; a fifth stops just short of the edge; and the last is too "
+    "short to see.",
 )
 
 # %%

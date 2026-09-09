@@ -261,7 +261,8 @@ if family_rows:
         figure,
         "A grouped bar chart with one group per model family and one bar per case study inside "
         "it, showing how many columns each market contributed to each family. Most groups are "
-        "occupied by a few markets rather than all of them.",
+        "occupied by a few markets rather than all of them, and three families - bayesian, "
+        "har and hurst - carry no bars at all.",
     )
 
 # %% [markdown]

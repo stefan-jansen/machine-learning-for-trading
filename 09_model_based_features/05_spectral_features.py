@@ -208,7 +208,8 @@ show_with_alt(
     "Below it, one panel per scale from the fastest to the slowest: the fast panels look "
     "like the return series itself and carry most of its amplitude, and each successive "
     "panel is smoother and smaller, with the slowest panel a gentle wave close to zero. "
-    "Every panel widens sharply in early 2020.",
+    "Every panel but the slowest widens sharply in early 2020, and the slowest makes its "
+    "largest excursion there.",
 )
 
 # %% [markdown]

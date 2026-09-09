@@ -622,7 +622,8 @@ show_with_alt(
     fig,
     "Three stacked panels sharing a time axis. The top draws the realized volatility and "
     "the median forecast inside a shaded interval that widens where volatility is high. "
-    "The middle draws the forecast standard deviation on the log scale, a series that rises "
+    "The middle draws the forecast standard deviation on the log scale, which drifts down "
+    "across the sample with a small step up at each refit rather than rises "
     "and falls over the sample. The bottom draws the ratio of the interval's upper end to "
     "its lower end, which stays within a narrow band throughout.",
 )

@@ -463,8 +463,9 @@ show_with_alt(
     fig,
     "Four volatility estimators for the same symbol, each averaged over twenty sessions and "
     "drawn over the whole sample. All four rise and fall together at the same dates and are "
-    "separated by a roughly constant vertical offset, with the close-to-close series the "
-    "lowest and the range-based ones above it.",
+    "sit almost on top of one another, with the close-to-close series the noisiest and "
+    "reaching the highest peaks and the three range-based ones tighter and a little "
+    "below it there.",
 )
 
 # %% [markdown]

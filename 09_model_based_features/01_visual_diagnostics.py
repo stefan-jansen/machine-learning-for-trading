@@ -416,7 +416,7 @@ show_with_alt(
     fig,
     "Four panels for SPY daily returns. Upper left: the daily series with a 21-session "
     "rolling mean that stays close to zero. Upper right: a quantile-quantile plot against "
-    "the normal that bends away from the reference line at both ends. Bottom left and "
+    "the normal that bends away from the reference line at both ends. Lower left and "
     "right: the ACF and PACF, whose bars sit near zero at every lag with a handful "
     "reaching just past the confidence band.",
 )

@@ -372,7 +372,8 @@ show_with_alt(
     "which track each other closely and separate during the sharpest falls. Top right draws "
     "the standardized residuals against dashed lines at plus and minus two, with excursions "
     "well beyond them. Bottom left is a quantile plot of those residuals against a normal, "
-    "bending away from the line at both ends. Bottom right is the autocorrelation of the "
+    "bending well away from the line in the lower tail and only slightly above it in the "
+    "upper. Bottom right is the autocorrelation of the "
     "squared residuals, whose bars sit close to zero at every lag.",
 )
 
@@ -585,9 +586,10 @@ show_with_alt(
     "exponentially weighted volatility estimate: all three rise and fall together, the "
     "GARCH one updates daily and is the most jagged, the realized one is smoothed over its "
     "own window, and the exponentially weighted one is the smoothest and comes down from a "
-    "spike most slowly. The middle shows the volatility of volatility, spiking at the same "
-    "dates. The bottom is a filled percentile rank cycling between zero and one hundred and "
-    "reaching both ends repeatedly.",
+    "spike most slowly. The middle shows the volatility of volatility, which spikes often "
+    "and reaches its highest points on dates the top panel does not. The bottom is a "
+    "filled percentile rank, blank for the first year while its ranking window fills and "
+    "then cycling between zero and one hundred, reaching both ends repeatedly.",
 )
 
 # %% [markdown]
@@ -669,12 +671,13 @@ ax.annotate(
 )
 ax.set_xlabel("Persistence, alpha plus beta")
 ax.set_ylabel("Symbols")
-ax.set_title("Volatility persistence sits just below one across the whole panel")
+ax.set_title("Volatility persistence clusters just below one, and one fit reaches it")
 show_with_alt(
     fig,
     "A histogram of the persistence parameter across every fitted symbol in the panel, with "
     "a dashed line at one. The mass sits in a narrow band just below the line, with a short "
-    "tail reaching down and nothing above it.",
+    "tail reaching down, a single symbol in the bin that touches the line, and nothing "
+    "past it.",
 )
 
 # %% [markdown]

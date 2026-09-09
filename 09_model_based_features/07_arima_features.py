@@ -514,7 +514,8 @@ show_plotly_with_alt(
     figure,
     "A histogram of the information coefficient across every scored symbol in the panel, "
     "with a dashed line at zero. The distribution is broad and centred close to the line, "
-    "with symbols on both sides and no clear separation from zero.",
+    "with symbols on both sides and no clear separation from zero, and one symbol far out "
+    "to the right of the rest.",
 )
 
 # %% [markdown]
