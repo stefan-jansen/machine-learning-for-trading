@@ -490,7 +490,7 @@ trainer = Trainer(
     args=training_args,
     train_dataset=tokenized_dataset["train"],
     eval_dataset=tokenized_dataset["test"],
-    tokenizer=tokenizer,
+    processing_class=tokenizer,
     data_collator=data_collator,
     compute_metrics=compute_metrics,
 )
@@ -636,7 +636,9 @@ for sentence in test_sentences:
 # the distribution say something about span length rather than about frequency.
 #
 # Predicted counts alone would also not answer the question the chart implies. The true
-# labels are already in hand, so both go on the axis.
+# labels are already in hand, so both go on the axis - and on this data the two bars in each
+# pair coincide, which is the overlap counted after the split showing up in the output rather
+# than a separate result.
 
 # %%
 predictions = trainer.predict(tokenized_dataset["test"])
@@ -687,9 +689,9 @@ show_with_alt(
     fig,
     "A grouped bar chart with one pair of bars per entity type, the left bar of each pair "
     "counting the entities in the test labels and the right bar counting those the model "
-    "predicted. Within every pair the two bars are the same height or very close to it, and "
-    "the types differ from one another in height far more than the two bars within any pair "
-    "differ from each other.",
+    "predicted. The two bars in each pair are indistinguishable in height, so the chart reads "
+    "as five single bars of differing heights rather than as a comparison, and the types "
+    "differ from one another by up to a factor of three.",
 )
 
 # %% [markdown]
