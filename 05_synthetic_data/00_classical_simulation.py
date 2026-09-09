@@ -1766,8 +1766,9 @@ fig.update_layout(
 show_plotly_with_alt(
     fig,
     "Autocorrelation of squared returns against lag for the original SPY series "
-    "and three bootstrap resamples; the IID resample sits at zero across all "
-    "lags while the block and stationary resamples track the original.",
+    "and three bootstrap resamples; all four start at one by definition at lag "
+    "zero, after which the IID resample drops to zero while the block and "
+    "stationary resamples stay close to the original.",
 )
 
 # %% [markdown]
