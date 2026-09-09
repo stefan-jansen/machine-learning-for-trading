@@ -8,52 +8,64 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.19.3
 #   kernelspec:
-#     display_name: Python 3 (ipykernel)
+#     display_name: Python 3
 #     language: python
 #     name: python3
 # ---
 
 # %% [markdown]
-# # Panel Features: Pairwise and Cross-Sectional Transforms
+# # Panel Features
+#
+# **Chapter 9 | Section 9.6**
 #
 # **Docker image**: `ml4t`
 #
-# This notebook demonstrates panel-level temporal features: pairwise
-# relationships (cointegration, Kalman hedge ratios, O-U half-life) and
-# cross-sectional transforms (ranking, relative features, universe
-# aggregation).
+# Every feature so far has been computed from one series. This notebook computes features that
+# need two or more, and they come in two shapes that have almost nothing to do with each other
+# beyond both requiring a panel.
 #
-# Panel features matter because temporal features computed in isolation
-# (volatility, momentum, regime probabilities) gain signal when placed
-# in cross-sectional context — a 25% conditional volatility means
-# different things for a utility stock and a biotech.
+# A **pairwise** feature reads two price series and asks whether a combination of them is
+# stationary when neither is. That is the cointegration question, and its output is a spread, a
+# hedge ratio, and a speed of reversion.
 #
-# **Learning Objectives**:
-# - Rank temporal features cross-sectionally for relative positioning
-# - Compute relative temporal features (vs. sector, vs. market)
-# - Test for cointegration using Engle-Granger and Johansen methods
-# - Estimate dynamic hedge ratios with Kalman filter
-# - Compute Ornstein-Uhlenbeck half-life for mean-reversion speed
+# A **cross-sectional** feature reads one quantity across many assets on the same date and
+# replaces its level with its position among them. An annualised volatility of a quarter means
+# one thing for a Treasury fund and another for an energy fund, and a rank says which of the
+# two a reader is looking at without needing to know.
 #
-# **Book Reference**: Chapter 9, Section 9.6 (Cross-Sectional and Panel Features)
+# **Learning objectives**
 #
-# **Prerequisites**: `04_kalman_filter` for Kalman filter mechanics,
-# `11_hmm_regimes` for regime features used in universe aggregation.
+# - Test a pair for cointegration two ways and read what it means when the two disagree.
+# - Estimate a hedge ratio that changes over time with a Kalman filter, and see where it
+#   differs from the single number a full-sample regression gives.
+# - Estimate a mean-reversion half-life on a first block and use it to size the window a
+#   trading signal is computed over, so the window length is not chosen with future data.
+# - Convert a temporal feature into a cross-sectional rank and a benchmark-relative value, and
+#   say which of the two a downstream model wants.
+# - Aggregate a per-asset regime measure across a universe without ranking each asset against
+#   its own future.
+#
+# **Book reference**
+#
+# Chapter 9, Section 9.6 (Cross-sectional and panel features).
+#
+# **Prerequisites**
+#
+# `04_kalman_filter` for the recursion the hedge ratio uses. `11_hmm_regimes` for the regime
+# measures the last section aggregates.
+
+# %% [markdown]
+# ## Setup
 
 # %%
-"""Panel Features — pairwise and cross-sectional transforms for multi-asset temporal features."""
+"""Panel features - cointegrated pairs, cross-sectional ranks and universe aggregates."""
 
 import warnings
-
-warnings.filterwarnings("ignore", category=FutureWarning)
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
-
-# Kalman filter for dynamic hedge ratio
-from filterpy.kalman import KalmanFilter
 from IPython.display import display
 from ml4t.engineer.features.cross_asset import (
     beta_to_market,
@@ -62,916 +74,835 @@ from ml4t.engineer.features.cross_asset import (
     rolling_correlation,
 )
 from sklearn.linear_model import LinearRegression
-
-# Cointegration tests
 from statsmodels.tsa.stattools import adfuller, coint
 from statsmodels.tsa.vector_ar.vecm import coint_johansen
 
 from data import load_etfs
-from utils.paths import get_case_study_dir
+from utils.style import COLORS, FIGSIZE, show_with_alt
+
+with warnings.catch_warnings():
+    # filterpy carries an invalid escape sequence in a docstring, which Python reports the first
+    # time it byte-compiles the module and never again. Nothing about the filter is affected.
+    warnings.simplefilter("ignore", SyntaxWarning)
+    from filterpy.kalman import KalmanFilter
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
-MAX_SYMBOLS = 0  # 0 = all symbols
 START_DATE = "2015-01-01"
 END_DATE = "2024-12-31"
+MAX_SYMBOLS = 0  # zero loads every symbol in the universe
+SIGNIFICANCE = 0.05
+TRAIN_FRACTION = 0.5
+ENTRY_THRESHOLD = 2.0
+MINIMUM_LOOKBACK = 20
+MINIMUM_SESSIONS = 252
+CORRELATION_WINDOW = 60
+COINTEGRATION_WINDOW = 120
+FEATURE_WINDOW = 60
+REGIME_WINDOW = 252
+SESSIONS_PER_YEAR = 252
 
 # %% [markdown]
-# ## Load Data
+# ## The universe
 #
-# We use ETF pairs from the ETF Universe dataset to demonstrate pairs trading.
-# Classic cointegrated pairs include:
-# - **GLD/SLV** - Gold vs Silver (precious metals)
-# - **XLE/USO** - Energy sector vs Crude Oil
-# - **QQQ/SMH** - Nasdaq 100 vs Semiconductors (tech exposure)
+# The ETF universe, because a pair needs two series whose relationship has a reason behind it
+# and exchange-traded funds come with the reason written on them. The pair used through the
+# first half is an energy sector fund against a crude oil fund, and the fallback pair for a
+# reduced fixture is two broad equity funds.
 
 # %%
-# Load ETF universe data
-etf_data = load_etfs()
-if MAX_SYMBOLS > 0:
-    symbols = etf_data["symbol"].unique().sort().to_list()[:MAX_SYMBOLS]
-    etf_data = etf_data.filter(pl.col("symbol").is_in(symbols))
-
-# Filter date range
-etf_data = etf_data.filter(
+universe = load_etfs().filter(
     pl.col("timestamp").is_between(pl.lit(START_DATE).str.to_date(), pl.lit(END_DATE).str.to_date())
 )
+if MAX_SYMBOLS > 0:
+    kept = universe["symbol"].unique().sort().to_list()[:MAX_SYMBOLS]
+    universe = universe.filter(pl.col("symbol").is_in(kept))
 
-# Define pairs to test for cointegration
-# Primary pair: XLE/USO (energy sector vs crude oil) with structural relationship
-# Fallback pair: SPY/QQQ (available in all datasets for testing)
-available_symbols = etf_data["symbol"].unique().to_list()
-if "XLE" in available_symbols and "USO" in available_symbols:
-    PAIR_Y = "XLE"  # Energy Sector ETF
-    PAIR_X = "USO"  # Crude Oil ETF
-else:
-    # Fallback to symbols available in test fixtures
-    print("Using fallback pair SPY/QQQ (XLE/USO not available)")
-    PAIR_Y = "SPY"
-    PAIR_X = "QQQ"
+available = set(universe["symbol"].unique().to_list())
+DEPENDENT, INDEPENDENT = ("XLE", "USO") if {"XLE", "USO"} <= available else ("SPY", "QQQ")
 
-# Extract prices for the pair
+
+def pair_frame(dependent: str, independent: str) -> pd.DataFrame:
+    """Closing prices of two symbols on the sessions both traded, indexed by date."""
+    columns = []
+    for symbol, name in ((dependent, "dependent"), (independent, "independent")):
+        columns.append(
+            universe.filter(pl.col("symbol") == symbol)
+            .select(["timestamp", "close"])
+            .rename({"close": name})
+            .sort("timestamp")
+        )
+    joined = columns[0].join(columns[1], on="timestamp", how="inner").drop_nulls()
+    frame = joined.to_pandas().set_index("timestamp")
+    frame.index = pd.DatetimeIndex(frame.index)
+    return frame
+
+
+pair = pair_frame(DEPENDENT, INDEPENDENT)
+train_end = int(len(pair) * TRAIN_FRACTION)
+
+print(f"Universe: {len(available)} symbols, {universe.height:,} rows")
+print(f"Pair: {DEPENDENT} against {INDEPENDENT}, {len(pair):,} shared sessions")
+print(f"Sessions used to estimate before any signal is taken: {train_end:,}")
+display(pair.tail(3))
+
+# %% [markdown]
+# ## Two tests for one question
+#
+# Two price series are **cointegrated** when some fixed combination of them is stationary even
+# though neither of them is. That is a stronger statement than correlation and a different one:
+# two series can move together every day and drift apart without limit over years, and it is
+# the drift that decides whether a spread between them comes back.
+#
+# The two standard tests reach the question differently. **Engle-Granger** regresses one series
+# on the other and tests the residual for a unit root, so it takes one of the two as the
+# dependent variable and gives a different answer if the roles are swapped. **Johansen** treats
+# the pair as a system and tests how many stationary combinations exist, which is symmetric in
+# the two series and extends past two of them.
+#
+# Both are run on the whole sample here, and that is the correct thing for what they are being
+# used for. Whether a pair is worth trading is a question asked before any trading, out of the
+# history available at that point; the answer is not a feature and does not enter a design
+# matrix. What must not use the whole sample is anything the signal below reads.
+
 # %%
-pair_y = (
-    etf_data.filter(pl.col("symbol") == PAIR_Y)
-    .select(["timestamp", "close"])
-    .rename({"close": "Y"})
-    .sort("timestamp")
+statistic, p_value, _ = coint(pair["dependent"], pair["independent"], trend="c")[:3]
+
+johansen = coint_johansen(pair[["dependent", "independent"]].to_numpy(), det_order=0, k_ar_diff=1)
+trace_statistics = johansen.lr1
+critical_values = johansen.cvt[:, 1]
+johansen_rejects = bool(trace_statistics[0] > critical_values[0])
+johansen_vector = johansen.evec[:, 0]
+
+display(
+    pd.DataFrame(
+        [
+            {
+                "test": "Engle-Granger",
+                "statistic": statistic,
+                "threshold": np.nan,
+                "p value": p_value,
+                "rejects no cointegration": bool(p_value < SIGNIFICANCE),
+            },
+            {
+                "test": "Johansen, no stationary combination",
+                "statistic": trace_statistics[0],
+                "threshold": critical_values[0],
+                "p value": np.nan,
+                "rejects no cointegration": johansen_rejects,
+            },
+            {
+                "test": "Johansen, at most one",
+                "statistic": trace_statistics[1],
+                "threshold": critical_values[1],
+                "p value": np.nan,
+                "rejects no cointegration": bool(trace_statistics[1] > critical_values[1]),
+            },
+        ]
+    ).set_index("test")
 )
 
-pair_x = (
-    etf_data.filter(pl.col("symbol") == PAIR_X)
-    .select(["timestamp", "close"])
-    .rename({"close": "X"})
-    .sort("timestamp")
+print(
+    f"Hedge ratio implied by the leading Johansen vector: {-johansen_vector[1] / johansen_vector[0]:.4f}"
 )
 
-# Join on date (inner join to align dates)
-df_pl = pair_y.join(pair_x, on="timestamp", how="inner")
-
-# Convert to pandas for statsmodels/sklearn
-df = df_pl.to_pandas().set_index("timestamp")
-df.index = pd.DatetimeIndex(df.index)
-
-print(f"Pair: {PAIR_Y}/{PAIR_X}")
-print(f"Data: {len(df)} observations from {df.index.min()} to {df.index.max()}")
-print(f"{PAIR_Y} range: ${df['Y'].min():.2f} - ${df['Y'].max():.2f}")
-print(f"{PAIR_X} range: ${df['X'].min():.2f} - ${df['X'].max():.2f}")
+# %% [markdown]
+# This pair is the lesson rather than the demonstration. An energy sector fund and a crude oil
+# fund are related by something a reader can state in a sentence, and neither test calls them
+# cointegrated over this sample. The reason is visible in the funds: one holds equity in companies
+# whose earnings depend on the oil price, the other holds futures and pays to roll them, and a
+# roll cost accumulates as a drift that no fixed combination removes.
+#
+# The implied hedge ratio printed above is a good place to see what a rejected test means. It is
+# far from the regression's, and on a pair where no stationary combination is found the leading
+# eigenvector is not estimating one: it is the least badly behaved direction in a system that has
+# no well behaved one, and its ratio is not a number to hold a position on.
+#
+# The mechanics below are worth working through anyway, because every step still computes and
+# every step's output says something about a pair that fails.
 
 # %% [markdown]
-# ## Cointegration Testing
+# ## Two hedge ratios
 #
-# Two standard approaches:
-# - **Engle-Granger**: Two-step test - regress Y on X, then test residuals for stationarity
-# - **Johansen**: System-based test for multiple cointegrating relationships
+# The spread needs a ratio: how many units of one series to hold against one unit of the other.
+# A regression over the whole sample gives one number and a filter gives a series, and the
+# difference between them is not a matter of preference.
 #
-# We apply both tests - if they agree, we have stronger evidence of cointegration.
+# The regression is fitted on everything, which makes its ratio unavailable at every date
+# except the last. It is reported because it is the number the cointegration test used, and its
+# spread is what the stationarity test below is run on.
+#
+# The **Kalman filter** treats the intercept and the ratio as a two-dimensional state following
+# a random walk and updates it one session at a time. Its estimate at session $t$ has seen
+# sessions up to $t$ and no more, which is what a hedge ratio has to be if a position is taken
+# on it. The two parameters that decide its behaviour are the measurement noise and the process
+# noise, and their ratio is the whole tuning: a larger process noise lets the ratio move faster
+# and tracks a genuine structural change sooner, at the cost of chasing noise.
 
 # %%
-# Engle-Granger cointegration test
-eg_stat, eg_pval, _ = coint(df["Y"], df["X"], trend="c")[:3]
+MEASUREMENT_NOISE = 1e-3
+PROCESS_NOISE = 1e-5
 
-print("=== Engle-Granger Cointegration Test ===")
-print(f"Test statistic: {eg_stat:.4f}")
-print(f"P-value: {eg_pval:.4f}")
-print(f"Conclusion: {'Cointegrated' if eg_pval < 0.05 else 'Not cointegrated'} at 5% level")
+regression = LinearRegression().fit(pair[["independent"]], pair["dependent"])
+static_ratio = float(regression.coef_[0])
+pair["spread_static"] = pair["dependent"] - static_ratio * pair["independent"]
 
-# %%
-# Johansen cointegration test
-joh_result = coint_johansen(df[["Y", "X"]], det_order=0, k_ar_diff=1)
-trace_stats = joh_result.lr1
-crit_values = joh_result.cvt[:, 1]  # 95% critical values
+adf_statistic, adf_p_value = adfuller(pair["spread_static"], autolag="AIC")[:2]
 
-print("\n=== Johansen Cointegration Test ===")
-print(f"Trace statistic (r=0): {trace_stats[0]:.4f} (critical: {crit_values[0]:.4f})")
-print(f"Trace statistic (r≤1): {trace_stats[1]:.4f} (critical: {crit_values[1]:.4f})")
 
-# Reject if trace stat > critical value
-johansen_sig = trace_stats[0] > crit_values[0]
-print(f"Conclusion: {'Cointegrated' if johansen_sig else 'Not cointegrated'} at 5% level")
+def kalman_hedge_ratio(
+    dependent: np.ndarray, independent: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Filter an intercept and a hedge ratio forward, one session at a time."""
+    filter_ = KalmanFilter(dim_x=2, dim_z=1)
+    filter_.F = np.eye(2)
+    filter_.x = np.array([[0.0], [1.0]])
+    filter_.P = np.eye(2)
+    filter_.R = np.array([[MEASUREMENT_NOISE]])
+    filter_.Q = np.eye(2) * PROCESS_NOISE
 
-# Cointegrating vector (normalized)
-coint_vector = joh_result.evec[:, 0]
-hedge_ratio_joh = -coint_vector[1] / coint_vector[0]
-print(f"\nImplied hedge ratio from Johansen: {hedge_ratio_joh:.4f}")
+    intercepts = np.empty(len(dependent))
+    ratios = np.empty(len(dependent))
+    for step in range(len(dependent)):
+        filter_.H = np.array([[1.0, independent[step]]])
+        filter_.predict()
+        filter_.update(np.array([[dependent[step]]]))
+        intercepts[step] = filter_.x[0, 0]
+        ratios[step] = filter_.x[1, 0]
+    return ratios, intercepts
 
-# %% [markdown]
-# When both tests agree on cointegration, we have stronger evidence of a
-# long-run equilibrium relationship. When they disagree, treat the pair
-# with caution — the relationship may be fragile or sensitive to the
-# sample period. The Johansen-implied hedge ratio often differs from OLS
-# because the two methods weight observations differently.
 
-# %% [markdown]
-# ## Spread Construction
-#
-# ### Static Hedge Ratio (OLS)
-#
-# The simplest approach: regress Y on X to find the hedge ratio $\beta$.
-# Spread $= Y - \beta X$
+pair["hedge_ratio"], _ = kalman_hedge_ratio(
+    pair["dependent"].to_numpy(), pair["independent"].to_numpy()
+)
+pair["spread"] = pair["dependent"] - pair["hedge_ratio"] * pair["independent"]
 
-# %%
-# OLS hedge ratio
-ols = LinearRegression()
-ols.fit(df[["X"]], df["Y"])
-hedge_ratio_ols = ols.coef_[0]
-intercept_ols = ols.intercept_
-
-print(f"OLS Hedge Ratio: {hedge_ratio_ols:.4f}")
-print(f"OLS Intercept: {intercept_ols:.4f}")
-
-# Compute spread
-df["spread_ols"] = df["Y"] - hedge_ratio_ols * df["X"]
-
-# Test spread stationarity
-adf_stat, adf_pval, _, _, _, _ = adfuller(df["spread_ols"], autolag="AIC")
-print(f"\nSpread ADF test: stat={adf_stat:.4f}, p-value={adf_pval:.4f}")
-print(f"Spread is {'stationary' if adf_pval < 0.05 else 'non-stationary'}")
+print(f"Hedge ratio from a regression on the whole sample: {static_ratio:.4f}")
+print(
+    f"Its spread, augmented Dickey-Fuller: statistic {adf_statistic:.4f}, p value {adf_p_value:.4f}"
+)
+print(
+    f"Filtered hedge ratio: from {pair['hedge_ratio'].min():.4f} to "
+    f"{pair['hedge_ratio'].max():.4f}, ending at {pair['hedge_ratio'].iloc[-1]:.4f}"
+)
 
 # %% [markdown]
-# ### Dynamic Hedge Ratio (Kalman Filter)
+# ## How fast the spread comes back
 #
-# The hedge ratio may change over time. A Kalman filter provides:
-# - Adaptive estimation as new data arrives
-# - Smooth transitions in the hedge ratio
-# - Natural handling of non-stationarity in the relationship
-
-
-# %%
-def kalman_hedge_ratio(y: np.ndarray, x: np.ndarray) -> tuple:
-    """
-    Estimate time-varying hedge ratio using Kalman filter.
-
-    Returns:
-        hedge_ratios: Array of time-varying hedge ratios
-        intercepts: Array of time-varying intercepts
-    """
-    n = len(y)
-
-    # State: [intercept, hedge_ratio]
-    kf = KalmanFilter(dim_x=2, dim_z=1)
-
-    # Transition matrix (random walk for states)
-    kf.F = np.eye(2)
-
-    # Measurement function: y_t = [1, x_t] @ [alpha, beta]
-    # We'll update H at each step
-
-    # Initial state
-    kf.x = np.array([[0.0], [1.0]])  # Start with hedge ratio = 1
-
-    # Covariance matrices
-    kf.P = np.eye(2) * 1.0  # Initial state covariance
-    kf.R = np.array([[1e-3]])  # Measurement noise (small)
-    kf.Q = np.eye(2) * 1e-5  # Process noise (slow-changing states)
-
-    hedge_ratios = np.zeros(n)
-    intercepts = np.zeros(n)
-
-    for t in range(n):
-        # Update measurement matrix for current x value
-        kf.H = np.array([[1.0, x[t]]])
-
-        # Predict
-        kf.predict()
-
-        # Update with measurement y_t
-        kf.update(np.array([[y[t]]]))
-
-        # Store estimates
-        intercepts[t] = kf.x[0, 0]
-        hedge_ratios[t] = kf.x[1, 0]
-
-    return hedge_ratios, intercepts
-
-
-# Apply Kalman filter
-hedge_ratios_kf, intercepts_kf = kalman_hedge_ratio(df["Y"].values, df["X"].values)
-
-df["hedge_ratio_kf"] = hedge_ratios_kf
-df["spread_kf"] = df["Y"] - df["hedge_ratio_kf"] * df["X"]
-
-print(f"Kalman hedge ratio range: [{hedge_ratios_kf.min():.4f}, {hedge_ratios_kf.max():.4f}]")
-print(f"Final hedge ratio: {hedge_ratios_kf[-1]:.4f}")
-
-# %% [markdown]
-# ## Mean-Reversion Half-Life
+# Fit an autoregression of order one to the spread and the coefficient says what fraction of a
+# deviation is still there one session later. Written as a change,
 #
-# The half-life measures how quickly the spread reverts to its mean.
-# Estimated from an AR(1) model: spread_t = α + ρ * spread_{t-1} + ε
-# Half-life = -ln(2) / ln(ρ)
+# $$\Delta s_t = \alpha + \phi\, s_{t-1} + \varepsilon_t$$
+#
+# a negative $\phi$ means the spread is pulled back toward its level, and the **half-life** is
+# the number of sessions over which half of a deviation is expected to have gone:
+# $-\ln 2 / \ln(1 + \phi)$. A non-negative $\phi$ says the spread is not being pulled anywhere
+# and there is no half-life to report.
+#
+# The half-life is used below to choose the window the trading signal's mean and standard
+# deviation are computed over, which is why it is estimated on the first `TRAIN_FRACTION` of the
+# sample only. A window length chosen from the whole sample is a small leak and an easy one to
+# miss, because a length does not look like a parameter.
 
 
 # %%
 def estimate_half_life(spread: pd.Series) -> float:
-    """Estimate mean-reversion half-life from spread series."""
-    spread = spread.dropna()
-    spread_lag = spread.shift(1).dropna()
-    spread_diff = spread.diff().dropna()
+    """Sessions over which half a deviation decays, from an autoregression of order one."""
+    level = spread.dropna()
+    change = level.diff().dropna()
+    lagged = level.shift(1).dropna().loc[change.index]
 
-    # Align indices
-    spread_lag = spread_lag.iloc[:-1] if len(spread_lag) > len(spread_diff) else spread_lag
-
-    # Regress spread_diff on spread_lag
-    X = spread_lag.values.reshape(-1, 1)
-    y = spread_diff.values[: len(X)]
-
-    reg = LinearRegression()
-    reg.fit(X, y)
-    phi = reg.coef_[0]
-
-    # Half-life = -ln(2) / ln(1 + phi)
-    # For small phi: half-life ≈ -ln(2) / phi
-    if phi >= 0:
-        return np.inf  # No mean reversion
-    half_life = -np.log(2) / phi
-    return max(1, half_life)
+    coefficient = float(
+        LinearRegression().fit(lagged.to_numpy().reshape(-1, 1), change.to_numpy()).coef_[0]
+    )
+    if coefficient >= 0.0:
+        return float("inf")
+    return float(-np.log(2.0) / np.log1p(coefficient))
 
 
-half_life_ols = estimate_half_life(df["spread_ols"])
-half_life_kf = estimate_half_life(df["spread_kf"])
+half_life_train = estimate_half_life(pair["spread"].iloc[:train_end])
+half_life_full = estimate_half_life(pair["spread"])
+LOOKBACK = max(int(2 * half_life_train), MINIMUM_LOOKBACK)
 
-print(f"Half-life (OLS spread): {half_life_ols:.1f} days")
-print(f"Half-life (Kalman spread): {half_life_kf:.1f} days")
+print(f"Half-life on the first block: {half_life_train:.1f} sessions")
+print(f"Half-life on the whole sample, for comparison only: {half_life_full:.1f} sessions")
+print(f"Signal window, twice the first block's half-life: {LOOKBACK} sessions")
 
 # %% [markdown]
-# The half-life estimate uses full-sample OLS on the spread — in a
-# walk-forward context, only past data should be used. The Kalman spread
-# typically yields shorter half-lives because the adaptive hedge ratio
-# removes low-frequency drift from the spread, leaving a faster-reverting residual.
+# The two half-lives differ, and the gap between them is how far the window length would have
+# moved. Neither is more correct as an estimate. The first is the only one available at the
+# moment the window has to be chosen.
 
 # %% [markdown]
-# ## Trading Signals: Z-Score and Bollinger Bands
+# ## From spread to position
 #
-# Entry/exit rules based on spread deviation from mean:
-# - **Long spread** (buy Y, sell X): Z-score < -2 (spread too low)
-# - **Short spread** (sell Y, buy X): Z-score > +2 (spread too high)
-# - **Exit**: Z-score crosses zero (mean reversion complete)
+# The signal is the spread measured against its own recent history: subtract a rolling mean,
+# divide by a rolling standard deviation, and the result is in units of its own variability. A
+# spread `ENTRY_THRESHOLD` standard deviations below its recent mean is an entry on the long
+# side, meaning long the dependent series and short `hedge_ratio` units of the other, and the
+# position is held until the spread crosses back through the mean.
+#
+# Both the mean and the standard deviation are rolling and both use the window chosen above, so
+# every value is available on its own session. The position is stepped forward one session at a
+# time rather than computed with a vector operation, because it depends on its own previous
+# value: an entry that has not yet reverted stays open.
 
 # %%
-# Z-score and Bollinger bands from Kalman spread
-spread = df["spread_kf"]
+rolling_mean = pair["spread"].rolling(LOOKBACK).mean()
+rolling_deviation = pair["spread"].rolling(LOOKBACK).std()
+pair["spread_mean"] = rolling_mean
+pair["upper_band"] = rolling_mean + ENTRY_THRESHOLD * rolling_deviation
+pair["lower_band"] = rolling_mean - ENTRY_THRESHOLD * rolling_deviation
+pair["z_score"] = (pair["spread"] - rolling_mean) / rolling_deviation
 
-lookback = max(int(2 * half_life_kf), 20)  # At least 20 days
-rolling_mean = spread.rolling(window=lookback).mean()
-rolling_std = spread.rolling(window=lookback).std()
+scores = pair["z_score"].to_numpy()
+position = np.zeros(len(pair), dtype=np.int64)
+held = 0
+for step in range(1, len(pair)):
+    if step < train_end:
+        continue
+    if scores[step] < -ENTRY_THRESHOLD:
+        held = 1
+    elif scores[step] > ENTRY_THRESHOLD:
+        held = -1
+    elif held * scores[step] > 0:
+        held = 0
+    position[step] = held
 
-df["z_score"] = (spread - rolling_mean) / rolling_std
-df["spread_mean"] = rolling_mean
-df["upper_band"] = rolling_mean + 2 * rolling_std
-df["lower_band"] = rolling_mean - 2 * rolling_std
+pair["position"] = position
 
-print(f"Lookback window: {lookback} days (2x half-life)")
-
-# %% [markdown]
-# The z-score normalizes the spread by its rolling mean and standard
-# deviation — it is the natural signal for mean-reverting spreads because
-# cointegration implies the spread is stationary around a fixed level.
-# Entry at $\pm 2\sigma$ captures significant deviations while filtering noise.
-
-# %%
-# Trading signals: enter at ±2σ, exit at mean crossing
-df["signal"] = 0
-df.loc[df["z_score"] < -2, "signal"] = 1  # Long spread
-df.loc[df["z_score"] > 2, "signal"] = -1  # Short spread
-
-# Position tracking (hold until mean reversion)
-signals = df["signal"].values
-z_scores = df["z_score"].values
-positions = [0] * len(df)
-in_trade = 0
-
-for i in range(1, len(df)):
-    if signals[i] != 0:
-        in_trade = signals[i]
-    elif in_trade != 0:
-        if (in_trade > 0 and z_scores[i] > 0) or (in_trade < 0 and z_scores[i] < 0):
-            in_trade = 0
-    positions[i] = in_trade
-
-df["position"] = positions
-
-print(f"Number of trades: {(df['signal'] != 0).sum()}")
-print(f"Days in position: {(df['position'] != 0).sum()}")
-
-# %% [markdown]
-# ## Visualize Trading System
+print(f"Sessions with a position open: {int((pair['position'] != 0).sum()):,}")
+print(f"Entries: {int((np.diff(pair['position'].to_numpy(), prepend=0) != 0).sum()):,}")
 
 # %%
-fig, axes = plt.subplots(4, 1, figsize=(14, 14), sharex=True)
+fig, axes = plt.subplots(4, 1, figsize=FIGSIZE["grid_3x2"], sharex=True)
 
-# Price series
 ax = axes[0]
-ax.plot(df.index, df["Y"], label=PAIR_Y, linewidth=0.8)
-ax.plot(df.index, df["X"], label=PAIR_X, linewidth=0.8)
-ax.set_ylabel("Price ($)")
-ax.set_title(f"{PAIR_Y}/{PAIR_X} Price Series")
-ax.legend()
+ax.plot(pair.index, pair["dependent"], linewidth=0.8, color=COLORS["blue"], label=DEPENDENT)
+ax.plot(pair.index, pair["independent"], linewidth=0.8, color=COLORS["copper"], label=INDEPENDENT)
+ax.set_ylabel("US dollars")
+ax.set_title("Two funds with a reason to move together", fontsize=9)
+ax.legend(fontsize=7)
 
-# Hedge ratio evolution
 ax = axes[1]
-ax.axhline(hedge_ratio_ols, color="#d62728", linestyle="--", label=f"OLS: {hedge_ratio_ols:.3f}")
-ax.plot(df.index, df["hedge_ratio_kf"], label="Kalman", linewidth=0.8)
-ax.set_ylabel("Hedge Ratio")
-ax.set_title("Dynamic vs Static Hedge Ratio")
-ax.legend()
+ax.plot(pair.index, pair["hedge_ratio"], linewidth=0.9, color=COLORS["blue"], label="filtered")
+ax.axhline(static_ratio, color=COLORS["amber"], linestyle="--", linewidth=0.9, label="whole sample")
+ax.set_ylabel("Units held short")
+ax.set_title("The filtered hedge ratio moves; the regression cannot", fontsize=9)
+ax.legend(fontsize=7)
 
-# Spread with Bollinger bands
 ax = axes[2]
-ax.plot(df.index, df["spread_kf"], label="Spread", linewidth=0.8)
-ax.plot(df.index, df["spread_mean"], color="#d62728", linestyle="--", linewidth=0.8, label="Mean")
+ax.plot(pair.index, pair["spread"], linewidth=0.8, color=COLORS["blue"])
+ax.plot(pair.index, pair["spread_mean"], linewidth=0.8, color=COLORS["amber"], linestyle="--")
 ax.fill_between(
-    df.index, df["lower_band"], df["upper_band"], alpha=0.2, color="gray", label="±2σ bands"
+    pair.index, pair["lower_band"], pair["upper_band"], alpha=0.2, color=COLORS["silver_muted"]
 )
-ax.set_ylabel("Spread")
-ax.set_title("Spread with Bollinger Bands")
-ax.legend()
+ax.set_ylabel("US dollars")
+ax.set_title("The spread against a band of its own recent variability", fontsize=9)
 
-# Z-score with entry/exit zones
 ax = axes[3]
-ax.plot(df.index, df["z_score"], linewidth=0.8)
-ax.axhline(2, color="#d62728", linestyle="--", alpha=0.5, label="Short entry")
-ax.axhline(-2, color="#1f77b4", linestyle="--", alpha=0.5, label="Long entry")
-ax.axhline(0, color="black", linestyle="-", alpha=0.3)
-ax.fill_between(df.index, -0.5, 0.5, alpha=0.1, color="gray", label="Exit zone")
-ax.set_ylabel("Z-Score")
-ax.set_title("Z-Score with Entry/Exit Thresholds")
-ax.legend()
+ax.plot(pair.index, pair["z_score"], linewidth=0.8, color=COLORS["blue"])
+for level in (-ENTRY_THRESHOLD, ENTRY_THRESHOLD):
+    ax.axhline(level, color=COLORS["negative"], linestyle="--", linewidth=0.7)
+ax.axhline(0, color=COLORS["recede"], linewidth=0.7)
+ax.axvline(pair.index[train_end], color=COLORS["neutral"], linestyle=":", linewidth=0.9)
+ax.set_ylabel("Standard deviations")
+ax.set_xlabel("Session")
+ax.set_title("Entries at the dashed lines, exits at the crossing", fontsize=9)
 
-plt.tight_layout()
-plt.show()
-
-# %% [markdown]
-# ## Illustrative Backtest
-#
-# A compact backtest demonstrates how cointegration features translate into
-# tradable signals. This ignores transaction costs and slippage — see
-# Chapters 18–19 for proper strategy evaluation with realistic cost models.
-
-# %%
-# Spread returns (long Y, short X when position = 1)
-df["ret_y"] = df["Y"].pct_change()
-df["ret_x"] = df["X"].pct_change()
-df["spread_ret"] = df["position"].shift(1) * (df["ret_y"] - df["ret_x"])
-df["spread_ret"] = df["spread_ret"].fillna(0)
-df["cumulative_ret"] = (1 + df["spread_ret"]).cumprod() - 1
-
-total_return = df["cumulative_ret"].iloc[-1]
-ann_return = (1 + total_return) ** (252 / len(df)) - 1
-volatility = df["spread_ret"].std() * np.sqrt(252)
-sharpe = ann_return / volatility if volatility > 0 else 0
-rolling_max = (1 + df["cumulative_ret"]).cummax()
-max_dd = ((1 + df["cumulative_ret"]) / rolling_max - 1).min()
-
-backtest_summary = pd.DataFrame(
-    {
-        "Total Return": [f"{total_return:.1%}"],
-        "Ann. Return": [f"{ann_return:.1%}"],
-        "Ann. Vol": [f"{volatility:.1%}"],
-        "Sharpe": [f"{sharpe:.2f}"],
-        "Max DD": [f"{max_dd:.1%}"],
-    }
+fig.suptitle(f"{DEPENDENT} against {INDEPENDENT}: spread, band and signal")
+show_with_alt(
+    fig,
+    "Four stacked panels for one pair of funds. The top plots both price series. The second "
+    "plots the filtered hedge ratio as a moving line against a flat dashed line for the "
+    "whole-sample regression, and the two are far apart for long stretches. The third plots the "
+    "spread with a shaded band around a dashed rolling mean. The bottom plots the spread's "
+    "standardised deviation with dashed entry lines above and below zero and a dotted vertical "
+    "line where the estimation block ends.",
 )
-display(backtest_summary)
 
 # %% [markdown]
-# ## Summary: Primary Pair Analysis
-
-# %%
-summary_df = pd.DataFrame(
-    {
-        "Metric": [
-            "Observations",
-            "EG p-value",
-            "Johansen sig.",
-            "OLS hedge ratio",
-            "Kalman hedge ratio (final)",
-            "Half-life (days)",
-        ],
-        "Value": [
-            f"{len(df):,}",
-            f"{eg_pval:.4f}",
-            str(johansen_sig),
-            f"{hedge_ratio_ols:.4f}",
-            f"{hedge_ratios_kf[-1]:.4f}",
-            f"{half_life_kf:.1f}",
-        ],
-    }
-)
-display(summary_df)
-
-# %% [markdown]
-# ## Cointegration Screening: Multiple ETF Pairs
+# ## What the position would have returned
 #
-# In practice, we screen multiple pairs to find cointegrated relationships.
-# Not all pairs that seem related are actually cointegrated.
+# The position is in a spread, so its profit is the change in the spread and not the difference
+# between two returns. Holding one unit of the dependent fund against `hedge_ratio` units of the
+# other, over one session, the profit in dollars is
+#
+# $$\Delta P_t - \beta_{t-1}\, \Delta Q_t$$
+#
+# and to express it as a return it is divided by what was committed to hold it, which is the
+# value of both legs. Dividing by one leg, or taking the difference of the two funds' returns
+# and calling it a spread return, silently sets the hedge ratio to one and reports the P&L of a
+# position nobody held.
+#
+# Three limits, all of them structural rather than fixable here. No transaction costs and no
+# slippage are charged, and this strategy trades a spread that mean-reverts, which is the kind
+# most sensitive to both. The short leg is assumed available at no borrowing cost. And the pair
+# was chosen by looking at the same history, which the screening section takes up.
 
 # %%
-# Screen multiple ETF pairs for cointegration
+evaluated = pair.index >= pair.index[train_end]
+
+profit = pair["position"].shift(1) * (
+    pair["dependent"].diff() - pair["hedge_ratio"].shift(1) * pair["independent"].diff()
+)
+committed = pair["dependent"].shift(1) + pair["hedge_ratio"].shift(1).abs() * pair[
+    "independent"
+].shift(1)
+pair["strategy_return"] = (profit / committed).fillna(0.0)
+
+realised = pair.loc[evaluated, "strategy_return"]
+curve = (1.0 + realised).cumprod()
+
+display(
+    pd.DataFrame(
+        [
+            {
+                "sessions evaluated": int(len(realised)),
+                "sessions with a position": int((pair.loc[evaluated, "position"] != 0).sum()),
+                "total return": float(curve.iloc[-1] - 1.0),
+                "annualised mean return": float(realised.mean() * SESSIONS_PER_YEAR),
+                "annualised volatility": float(realised.std() * np.sqrt(SESSIONS_PER_YEAR)),
+                "deepest drawdown": float((curve / curve.cummax() - 1.0).min()),
+            }
+        ]
+    ).T.rename(columns={0: DEPENDENT + " against " + INDEPENDENT})
+)
+
+# %% [markdown]
+# The entry count is the number to read, and it is the section's conclusion. A half-life of
+# months sets a window of about a year, a band that wide is crossed rarely, and the result is a
+# handful of entries over five years with a position open for more than half of them. That is not
+# a mean-reversion strategy; it is a slow directional bet on a spread, which is what the
+# cointegration tests said would happen when they declined to find a stationary combination.
+#
+# The return is therefore not evidence about the method. It is one draw from three trades. The
+# drawdown is the one figure here worth carrying: it is what a position of that duration exposed
+# a holder to while waiting for a reversion the spread had no mechanism to deliver.
+
+# %% [markdown]
+# ## Screening, and what a screen costs
+#
+# Six candidate pairs, each with a stated reason to be related, run through the same two tests.
+# The table is the point of the section: a reason is not evidence, and the two tests do not
+# always agree.
+#
+# The screen also carries a cost that the table cannot show. Testing six pairs at the same
+# level and reporting whichever passes makes the reported level wrong, because the chance that
+# at least one of six independent tests rejects a true null is far above the level of any one of
+# them. What follows from that is not a correction to apply here but a rule for reading: a pair
+# that passes a screen has cleared a lower bar than a pair tested on its own, and its spread
+# needs to hold up on data the screen did not see.
+
+# %%
 CANDIDATE_PAIRS = [
-    ("GLD", "SLV", "Gold vs Silver"),
-    ("XLE", "USO", "Energy vs Crude Oil"),
-    ("QQQ", "SMH", "Nasdaq 100 vs Semis"),
-    ("SPY", "VTI", "S&P 500 vs Total Mkt"),
-    ("TLT", "IEF", "Long vs Mid Treasuries"),
-    ("EEM", "VWO", "EM (iShares vs Vanguard)"),
+    ("GLD", "SLV", "gold against silver"),
+    ("XLE", "USO", "energy equity against crude oil"),
+    ("QQQ", "SMH", "the Nasdaq 100 against semiconductors"),
+    ("SPY", "VTI", "the S&P 500 against the total market"),
+    ("TLT", "IEF", "long against intermediate Treasuries"),
+    ("EEM", "VWO", "two emerging market funds"),
 ]
 
-screening_results = []
-
-# %%
-for pair_y, pair_x, description in CANDIDATE_PAIRS:
-    y_data = (
-        etf_data.filter(pl.col("symbol") == pair_y).select(["timestamp", "close"]).sort("timestamp")
-    )
-    x_data = (
-        etf_data.filter(pl.col("symbol") == pair_x).select(["timestamp", "close"]).sort("timestamp")
-    )
-
-    if len(y_data) < 252 or len(x_data) < 252:
+screen_rows = []
+for dependent, independent, description in CANDIDATE_PAIRS:
+    if not {dependent, independent} <= available:
+        continue
+    candidate = pair_frame(dependent, independent)
+    if len(candidate) < MINIMUM_SESSIONS:
         continue
 
-    y_df = y_data.rename({"close": "Y"})
-    x_df = x_data.rename({"close": "X"})
-    pair_df = y_df.join(x_df, on="timestamp", how="inner").to_pandas().set_index("timestamp")
+    candidate_p_value = coint(candidate["dependent"], candidate["independent"], trend="c")[1]
+    candidate_johansen = coint_johansen(
+        candidate[["dependent", "independent"]].to_numpy(), det_order=0, k_ar_diff=1
+    )
+    ratio = float(
+        LinearRegression().fit(candidate[["independent"]], candidate["dependent"]).coef_[0]
+    )
+    spread = candidate["dependent"] - ratio * candidate["independent"]
 
-    if len(pair_df) < 252:
-        continue
-
-    # Engle-Granger test
-    eg_stat, eg_pval_pair, _ = coint(pair_df["Y"], pair_df["X"], trend="c")[:3]
-
-    # Johansen test
-    joh = coint_johansen(pair_df[["Y", "X"]], det_order=0, k_ar_diff=1)
-    joh_sig = joh.lr1[0] > joh.cvt[0, 1]
-
-    # Hedge ratio and half-life
-    ols_temp = LinearRegression()
-    ols_temp.fit(pair_df[["X"]], pair_df["Y"])
-    hedge = ols_temp.coef_[0]
-    hl = estimate_half_life(pair_df["Y"] - hedge * pair_df["X"])
-
-    screening_results.append(
+    screen_rows.append(
         {
-            "Pair": f"{pair_y}/{pair_x}",
-            "Description": description,
-            "Obs": len(pair_df),
-            "EG p-value": eg_pval_pair,
-            "Johansen": "Yes" if joh_sig else "No",
-            "Hedge Ratio": hedge,
-            "Half-life (d)": hl,
+            "pair": f"{dependent} / {independent}",
+            "why it might hold": description,
+            "sessions": len(candidate),
+            "Engle-Granger p value": candidate_p_value,
+            "Johansen rejects": bool(candidate_johansen.lr1[0] > candidate_johansen.cvt[0, 1]),
+            "hedge ratio": ratio,
+            "half-life in sessions": estimate_half_life(spread),
         }
     )
 
-# %%
-# Display screening results as a formatted table
-screening_df = pd.DataFrame(screening_results)
-display_df = screening_df[
-    ["Pair", "Description", "EG p-value", "Johansen", "Hedge Ratio", "Half-life (d)"]
-].copy()
-display_df["EG p-value"] = display_df["EG p-value"].map(lambda x: f"{x:.4f}")
-display_df["Hedge Ratio"] = display_df["Hedge Ratio"].map(lambda x: f"{x:.3f}")
-display_df["Half-life (d)"] = display_df["Half-life (d)"].map(
-    lambda x: f"{x:.1f}" if x < 1000 else "N/A"
+screen = pd.DataFrame(screen_rows).set_index("pair")
+display(screen)
+
+print(
+    f"Pairs both tests reject no cointegration for: {int(((screen['Engle-Granger p value'] < SIGNIFICANCE) & screen['Johansen rejects']).sum())}"
 )
-display(display_df)
+print(
+    f"Pairs exactly one test rejects for: {int(((screen['Engle-Granger p value'] < SIGNIFICANCE) ^ screen['Johansen rejects']).sum())}"
+)
 
 # %% [markdown]
-# Economic relatedness does not guarantee cointegration — several
-# apparently related pairs fail the Engle-Granger test, and the two
-# tests sometimes disagree. Half-lives range from days to months,
-# reflecting the speed at which different pair relationships mean-revert.
-# Only pairs with short half-lives (days to weeks) are practical for
-# trading at daily frequency.
-
-# %% [markdown]
-# ## Save Pairs Trading Features for Downstream Chapters
+# Read the two counts printed under the table first. Over this sample no pair clears the
+# Engle-Granger test at the stated level, and one pair is called cointegrated by Johansen alone.
+# Six pairs with a stated reason, one weak signal: that is the result, and it is more useful than
+# a table of successes would have been, because the reasons were not bad ones.
 #
-# Spread signals and hedge ratios are consumed by:
-# - Chapter 18: Strategy simulation (pairs trading backtest)
-# - Chapter 19: Portfolio construction (market-neutral portfolios)
-
-# %%
-# Save pairs trading data to output directory for ALL cointegrated pairs
-MODEL_DIR = get_case_study_dir("etfs") / "models" / "time_series"
-MODEL_DIR.mkdir(parents=True, exist_ok=True)
+# The half-life column decides something different from whether the relationship exists. A
+# half-life of a few sessions leaves room to enter and exit inside the reversion. Every half-life
+# here is measured in months, and the shortest of them still holds a position through a quarter in
+# which the relationship may have changed for reasons no test on past data can see. A pair needs
+# both: a spread that reverts, and reversion fast enough to trade.
 
 # %% [markdown]
-# ### Generate Signals for Cointegrated Pairs
+# ## The same features as library expressions
 #
-# We save signals for any pair with cointegration evidence from either
-# test (Engle-Granger at 5% or Johansen at 5%). The primary demonstration
-# pair XLE/USO illustrates the mechanics above but is not saved: it fails
-# both tests over this sample. Downstream strategy evaluation in Chapters
-# 18 and 19 consumes only pairs the screening supports.
-
-
-# %%
-def generate_pair_signals(pair_y: str, pair_x: str) -> pl.DataFrame | None:
-    """Generate Kalman-filtered spread signals for a single pair."""
-    y_data = (
-        etf_data.filter(pl.col("symbol") == pair_y).select(["timestamp", "close"]).sort("timestamp")
-    )
-    x_data = (
-        etf_data.filter(pl.col("symbol") == pair_x).select(["timestamp", "close"]).sort("timestamp")
-    )
-
-    if len(y_data) < 252 or len(x_data) < 252:
-        return None
-
-    y_df = y_data.rename({"close": "Y"})
-    x_df = x_data.rename({"close": "X"})
-    pair_df = y_df.join(x_df, on="timestamp", how="inner").to_pandas().set_index("timestamp")
-    pair_df.index = pd.DatetimeIndex(pair_df.index)
-
-    if len(pair_df) < 252:
-        return None
-
-    # Kalman filter hedge ratio and spread
-    kf_hedges, _ = kalman_hedge_ratio(pair_df["Y"].values, pair_df["X"].values)
-    pair_df["spread_kf"] = pair_df["Y"] - kf_hedges * pair_df["X"]
-
-    # Z-score from half-life based lookback
-    hl = estimate_half_life(pair_df["spread_kf"])
-    lb = max(int(2 * hl), 20)
-    rm = pair_df["spread_kf"].rolling(window=lb).mean()
-    rs = pair_df["spread_kf"].rolling(window=lb).std()
-    pair_df["z_score"] = (pair_df["spread_kf"] - rm) / rs
-
-    pair_df["signal"] = 0
-    pair_df.loc[pair_df["z_score"] < -2, "signal"] = 1
-    pair_df.loc[pair_df["z_score"] > 2, "signal"] = -1
-
-    return pl.DataFrame(
-        {
-            "timestamp": pair_df.index.values,
-            "pair": f"{pair_y}/{pair_x}",
-            "asset_y": pair_y,
-            "asset_x": pair_x,
-            "hedge_ratio": kf_hedges,
-            "spread": pair_df["spread_kf"].values,
-            "z_score": pair_df["z_score"].values,
-            "signal": pair_df["signal"].values,
-        }
-    ).drop_nulls()
-
-
-# %%
-# Save signals for every pair with cointegration evidence from either test
-# (Engle-Granger at 5% or Johansen at 5%). A pair flagged by only one test is
-# kept but treated with caution downstream; a pair that fails both is excluded.
-all_signals = []
-eligible_pairs = [r for r in screening_results if r["EG p-value"] < 0.05 or r["Johansen"] == "Yes"]
-
-print(f"Processing {len(eligible_pairs)} pairs with cointegration evidence...")
-
-for r in eligible_pairs:
-    pair_y, pair_x = r["Pair"].split("/")
-    signals = generate_pair_signals(pair_y, pair_x)
-    if signals is not None:
-        all_signals.append(signals)
-        print(
-            f"  {r['Pair']}: EG p={r['EG p-value']:.4f}, "
-            f"Johansen={r['Johansen']}, {len(signals):,} obs"
-        )
-
-# %%
-# Combine and save
-if all_signals:
-    combined_signals = pl.concat(all_signals)
-    output_path = MODEL_DIR / "pairs_trading_signals.parquet"
-    combined_signals.write_parquet(output_path)
-
-    print(f"\n[OK] Saved pairs trading signals to {output_path}")
-    print(f"  Shape: {combined_signals.shape}")
-    print(f"  Pairs: {combined_signals['pair'].unique().to_list()}")
-    print(
-        f"  Date range: {combined_signals['timestamp'].min()} to {combined_signals['timestamp'].max()}"
-    )
-
-    # Per-pair summary
-    print("\n  Per-pair summary:")
-    summary = combined_signals.group_by("pair").agg(pl.len().alias("n_rows")).sort("pair")
-    for row in summary.iter_rows(named=True):
-        print(f"    {row['pair']}: {row['n_rows']:,} rows")
-else:
-    print("\nWARNING: No pairs trading signals generated")
-
-# %% [markdown]
-# ## ml4t-engineer: Cross-Asset Features as Polars Expressions
+# The pairwise work above is written out with statsmodels and numpy, one pair at a time.
+# `ml4t-engineer` supplies the rolling versions as Polars expressions, which is the form a
+# pipeline over many pairs wants: `rolling_correlation` and `beta_to_market` read return
+# columns, `co_integration_score` reads price columns, and `correlation_regime_indicator` reads
+# a correlation column and emits flags for its level.
 #
-# The manual pairwise analysis above uses statsmodels and numpy for each pair.
-# `ml4t-engineer` provides cross-asset features as Polars expressions for
-# multi-pair pipelines: rolling correlation, beta, dispersion, and
-# cointegration scoring.
+# What these are not is a replacement for the tests above. A rolling score computed over a
+# window is a description of that window, and cointegration is a statement about a relationship
+# holding over a long sample. The two answer different questions.
 
 # %%
-# Demonstrate cross-asset features on a pair
-gld = etf_data.filter(pl.col("symbol") == "GLD").select(["timestamp", "close"]).sort("timestamp")
-slv = etf_data.filter(pl.col("symbol") == "SLV").select(["timestamp", "close"]).sort("timestamp")
+LIBRARY_PAIR = ("GLD", "SLV") if {"GLD", "SLV"} <= available else (DEPENDENT, INDEPENDENT)
 
-pair_df = (
-    gld.rename({"close": "gld_close"})
-    .join(slv.rename({"close": "slv_close"}), on="timestamp", how="inner")
+library = (
+    pair_frame(*LIBRARY_PAIR)
+    .pipe(pl.from_pandas, include_index=True)
+    .rename({"dependent": "first_close", "independent": "second_close"})
     .with_columns(
-        gld_ret=pl.col("gld_close").pct_change(),
-        slv_ret=pl.col("slv_close").pct_change(),
+        first_return=pl.col("first_close").pct_change(),
+        second_return=pl.col("second_close").pct_change(),
     )
     .drop_nulls()
-)
-
-# Cross-asset features in one pipeline
-pair_features = pair_df.with_columns(
-    corr=rolling_correlation("gld_ret", "slv_ret", window=60),
-    beta=beta_to_market("slv_ret", "gld_ret", window=60),
-    coint_score=co_integration_score("gld_close", "slv_close", window=120),
-)
-
-# Correlation regime indicators (returns dict)
-corr_regime = correlation_regime_indicator("corr")
-pair_features = pair_features.with_columns(**corr_regime)
-
-print("=== ml4t-engineer: Cross-Asset Features (GLD/SLV) ===")
-for col in ["corr", "beta", "coint_score"]:
-    vals = pair_features[col].drop_nulls()
-    _m, _s = vals.mean(), vals.std()
-    print(
-        f"  {col:<14}: mean={_m:.4f}, std={_s:.4f}"
-        if _m is not None
-        else f"  {col:<14}: insufficient data"
+    .with_columns(
+        correlation=rolling_correlation("first_return", "second_return", window=CORRELATION_WINDOW),
+        beta=beta_to_market("second_return", "first_return", window=CORRELATION_WINDOW),
+        cointegration_score=co_integration_score(
+            "first_close", "second_close", window=COINTEGRATION_WINDOW
+        ),
     )
+)
+library = library.with_columns(**correlation_regime_indicator("correlation"))
+
+print(f"Library pair: {LIBRARY_PAIR[0]} against {LIBRARY_PAIR[1]}, {library.height:,} sessions")
+display(
+    library.select(["correlation", "beta", "cointegration_score"])
+    .describe()
+    .filter(pl.col("statistic").is_in(["mean", "std", "min", "max"]))
+)
+display(library.select(pl.col("^corr_regime.*$")).mean())
 
 # %% [markdown]
-# The library expressions compose naturally in `with_columns()`, making it
-# straightforward to compute cross-asset features across many pairs in a
-# single Polars pipeline. `correlation_regime_indicator()` adds binary
-# regime flags based on rolling correlation levels — useful for
-# conditional feature engineering.
-
-# %% [markdown]
-# ## Cross-Sectional Ranking of Temporal Features
+# ## A level replaced by a position
 #
-# Raw temporal features (momentum, conditional volatility, regime
-# probabilities) vary in scale across assets. Cross-sectional ranking
-# converts them to universe-relative signals — essential for panel models
-# that predict cross-sectional returns.
+# The second half of the notebook changes what a feature is computed over. Nothing here is a
+# rolling window: the operation reads one date across many assets and returns each asset's
+# standing among them on that date.
+#
+# Three versions of the same idea, and they are not interchangeable. A **rank** is an integer
+# position and is bounded by the number of assets, so it says nothing about how far apart the
+# assets are. A **percentile** divides the rank by the count, which makes a universe of ten
+# comparable with one of five hundred. A **z-score** subtracts the cross-sectional mean and
+# divides by the cross-sectional standard deviation, which keeps the distances and therefore
+# keeps the outliers, and on a date when one asset moved five times as far as the rest it is the
+# only one of the three that says so.
+#
+# None of the three uses a future date. That is worth stating because the causality question
+# looks the same as everywhere else in the chapter and has a different answer: a cross-sectional
+# operation reads across assets at one date, so it cannot look forward in time whatever else it
+# does.
 
 # %%
-# Compute temporal features for a multi-asset ETF universe
 RANK_SYMBOLS = ["SPY", "QQQ", "IWM", "EFA", "EEM", "TLT", "GLD", "XLE", "XLF", "XLV"]
-rank_symbols = [s for s in RANK_SYMBOLS if s in available_symbols]
+selected = [symbol for symbol in RANK_SYMBOLS if symbol in available]
 
 panel = (
-    etf_data.filter(pl.col("symbol").is_in(rank_symbols))
+    universe.filter(pl.col("symbol").is_in(selected))
     .select(["timestamp", "symbol", "close"])
     .sort(["symbol", "timestamp"])
+    .with_columns(returns=pl.col("close").pct_change().over("symbol"))
+    .with_columns(
+        momentum=pl.col("returns").rolling_mean(FEATURE_WINDOW).over("symbol"),
+        volatility=pl.col("returns").rolling_std(FEATURE_WINDOW).over("symbol")
+        * np.sqrt(SESSIONS_PER_YEAR),
+    )
+    .drop_nulls()
+    .with_columns(
+        momentum_rank=pl.col("momentum").rank().over("timestamp"),
+        volatility_rank=pl.col("volatility").rank().over("timestamp"),
+        momentum_percentile=(pl.col("momentum").rank().over("timestamp") - 1)
+        / (pl.col("momentum").count().over("timestamp") - 1),
+        momentum_z_score=(pl.col("momentum") - pl.col("momentum").mean().over("timestamp"))
+        / pl.col("momentum").std().over("timestamp"),
+    )
 )
 
-# Temporal features: momentum (60d return) and volatility (60d rolling std of returns)
-panel = (
-    panel.with_columns(
-        ret=pl.col("close").pct_change().over("symbol"),
+print(f"Panel: {panel['symbol'].n_unique()} symbols, {panel.height:,} rows")
+snapshot_date = panel["timestamp"].unique().sort().to_list()[-REGIME_WINDOW]
+display(
+    panel.filter(pl.col("timestamp") == snapshot_date)
+    .select(["symbol", "momentum", "momentum_rank", "momentum_percentile", "momentum_z_score"])
+    .sort("momentum_rank")
+)
+
+# %% [markdown]
+# Read the snapshot's last two columns against each other. The percentiles are evenly spaced by
+# construction, one step per asset, whatever the momentum values were. The z-scores are not, and
+# where they bunch together the percentile has manufactured a distinction between assets that
+# were nearly identical. That is the trade: a rank is robust because it discards the distances,
+# and it is misleading for the same reason.
+
+# %%
+fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True)
+HIGHLIGHT = [symbol for symbol in ("SPY", "GLD", "XLE") if symbol in selected]
+palette = [COLORS["blue"], COLORS["amber"], COLORS["copper"]]
+
+for symbol, color in zip(HIGHLIGHT, palette, strict=False):
+    series = panel.filter(pl.col("symbol") == symbol).to_pandas()
+    axes[0].plot(
+        series["timestamp"],
+        series["momentum_percentile"],
+        linewidth=0.8,
+        color=color,
+        label=symbol,
     )
+    axes[1].plot(
+        series["timestamp"], series["volatility_rank"], linewidth=0.8, color=color, label=symbol
+    )
+
+axes[0].axhline(0.5, color=COLORS["recede"], linestyle="--", linewidth=0.7)
+axes[0].set_ylabel("Percentile")
+axes[0].set_title("Momentum measured against the rest of the universe", fontsize=9)
+axes[0].legend(fontsize=7)
+
+axes[1].set_ylabel("Rank")
+axes[1].set_xlabel("Session")
+axes[1].set_title("Volatility rank, where one is the calmest of the universe", fontsize=9)
+
+fig.suptitle("A cross-sectional feature is bounded whatever the market does")
+show_with_alt(
+    fig,
+    "Two stacked panels tracking three funds. The top plots each fund's momentum percentile "
+    "against a dashed line at one half; the lines travel the full range and cross often. The "
+    "bottom plots each fund's volatility rank, which steps between integer levels and holds "
+    "for months at a time.",
+)
+
+# %% [markdown]
+# The rank in the lower panel holds for long stretches and then steps, which is a different
+# statistical object from the series it was computed from: a rolling standard deviation moves
+# every session, and its rank moves only when the ordering changes. A downstream model reading
+# the rank sees a step function, and one reading the raw volatility sees a continuous series.
+# Which is wanted depends on whether the question is how volatile an asset is or which assets
+# are the volatile ones.
+
+# %% [markdown]
+# ## A level replaced by a difference from a benchmark
+#
+# The other way to place a feature in context is to subtract a benchmark's version of it, which
+# keeps the units. Momentum minus the market's momentum is a momentum, in the same units, with
+# the part every asset shared removed. Volatility divided by the market's volatility is a
+# ratio, and above one says the asset moved more than the market did.
+#
+# How the benchmark enters the feature decides which of the two operations to use. A momentum is
+# a sum of returns and the market component is additive in it, so subtraction removes it. A
+# volatility is a scale and the market's stress multiplies it, so a ratio removes it and a
+# difference does not.
+
+# %%
+BENCHMARK = "SPY" if "SPY" in selected else selected[0]
+COMPARED = "XLE" if "XLE" in selected else selected[-1]
+
+benchmark = (
+    panel.filter(pl.col("symbol") == BENCHMARK)
+    .select(["timestamp", "momentum", "volatility"])
+    .rename({"momentum": "market_momentum", "volatility": "market_volatility"})
+)
+
+relative = panel.join(benchmark, on="timestamp", how="inner").with_columns(
+    momentum_less_market=pl.col("momentum") - pl.col("market_momentum"),
+    volatility_over_market=pl.col("volatility") / pl.col("market_volatility"),
+)
+
+compared = relative.filter(pl.col("symbol") == COMPARED).to_pandas()
+
+fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True)
+
+axes[0].plot(
+    compared["timestamp"],
+    compared["momentum"],
+    linewidth=0.8,
+    color=COLORS["blue"],
+    label="its own",
+)
+axes[0].plot(
+    compared["timestamp"],
+    compared["momentum_less_market"],
+    linewidth=0.8,
+    color=COLORS["copper"],
+    label="less the market's",
+)
+axes[0].axhline(0, color=COLORS["recede"], linestyle="--", linewidth=0.7)
+axes[0].set_ylabel("Mean daily return")
+axes[0].set_title("Subtracting the market leaves what was specific to the fund", fontsize=9)
+axes[0].legend(fontsize=7)
+
+axes[1].plot(
+    compared["timestamp"],
+    compared["volatility_over_market"],
+    linewidth=0.8,
+    color=COLORS["blue"],
+)
+axes[1].axhline(1.0, color=COLORS["recede"], linestyle="--", linewidth=0.7)
+axes[1].set_ylabel("Ratio")
+axes[1].set_xlabel("Session")
+axes[1].set_title("Volatility as a multiple of the market's, not a difference", fontsize=9)
+
+fig.suptitle(f"{COMPARED} against {BENCHMARK}, in units that survive the comparison")
+show_with_alt(
+    fig,
+    f"Two stacked panels for {COMPARED}. The top plots its own momentum and its momentum less "
+    f"{BENCHMARK}'s, both against a dashed zero line; the two diverge most where the market "
+    "itself moved. The bottom plots the ratio of its volatility to the market's against a "
+    "dashed line at one, and the ratio stays above one for most of the sample.",
+)
+
+# %% [markdown]
+# The lower panel is the one that changes a reading. A ratio near one during a market-wide
+# selloff says this fund was no more volatile than everything else, which the absolute
+# volatility could not have said: that number was high because every number was high.
+
+# %% [markdown]
+# ## One measure aggregated across the universe
+#
+# The last construction turns a per-asset regime measure into universe-level features. Three
+# aggregates, each answering a different question about the same date:
+#
+# - The **mean** stress across assets, which is the level.
+# - The **breadth**, the fraction of assets above a threshold, which distinguishes a few assets
+#   in trouble from all of them.
+# - The **dispersion**, the standard deviation across assets, which is low when everything moves
+#   together and high when the universe has split.
+#
+# The per-asset measure here is each asset's volatility ranked within a trailing window of
+# `REGIME_WINDOW` sessions, a stand-in for the filtered regime probability that
+# `11_hmm_regimes` produces. `rolling_rank` is what makes it a stand-in rather than a leak:
+# ranking each asset's volatility over its whole history would place today's value against
+# values from years that had not happened, and the resulting series would look like a regime
+# indicator while being unavailable on every date but the last.
+
+# %%
+STRESS_THRESHOLD = 0.7
+
+stress = (
+    panel.select(["timestamp", "symbol", "volatility"])
+    .sort(["symbol", "timestamp"])
     .with_columns(
-        momentum_60d=pl.col("ret").rolling_mean(60).over("symbol"),
-        vol_60d=pl.col("ret").rolling_std(60).over("symbol"),
+        stress=pl.col("volatility").rolling_rank(window_size=REGIME_WINDOW).over("symbol")
+        / REGIME_WINDOW
     )
     .drop_nulls()
 )
 
-print(f"Panel: {panel['symbol'].n_unique()} assets, {len(panel):,} obs")
-
-# %%
-# Cross-sectional rank, percentile, and z-score at each date
-panel = panel.with_columns(
-    rank_momentum=pl.col("momentum_60d").rank().over("timestamp"),
-    rank_vol=pl.col("vol_60d").rank().over("timestamp"),
-    pct_momentum=(pl.col("momentum_60d").rank().over("timestamp") - 1)
-    / (pl.col("momentum_60d").count().over("timestamp") - 1),
-    zscore_momentum=(
-        (pl.col("momentum_60d") - pl.col("momentum_60d").mean().over("timestamp"))
-        / pl.col("momentum_60d").std().over("timestamp")
-    ),
-)
-
-# Show a snapshot for one date
-snapshot_date = panel["timestamp"].unique().sort().to_list()[-252]  # ~1 year ago
-snapshot = (
-    panel.filter(pl.col("timestamp") == snapshot_date)
-    .select(["symbol", "momentum_60d", "rank_momentum", "pct_momentum", "zscore_momentum"])
-    .sort("rank_momentum")
-)
-print(f"\nCross-sectional snapshot ({snapshot_date}):")
-display(snapshot.to_pandas())
-
-# %%
-# Visualize rank evolution over time for selected assets
-fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
-
-highlight = ["SPY", "GLD", "XLE"]
-for sym in highlight:
-    sym_data = panel.filter(pl.col("symbol") == sym).to_pandas()
-    axes[0].plot(sym_data["timestamp"], sym_data["pct_momentum"], label=sym, linewidth=0.8)
-    axes[1].plot(sym_data["timestamp"], sym_data["rank_vol"], label=sym, linewidth=0.8)
-
-axes[0].set_ylabel("Momentum Percentile")
-axes[0].set_title("Cross-Sectional Momentum Percentile Over Time")
-axes[0].legend()
-axes[0].axhline(0.5, color="gray", linestyle="--", alpha=0.3)
-
-axes[1].set_ylabel("Volatility Rank")
-axes[1].set_title("Cross-Sectional Volatility Rank Over Time")
-axes[1].legend()
-
-plt.tight_layout()
-plt.show()
-
-# %% [markdown]
-# Ranks are bounded, stationary, and immune to outliers. A high
-# momentum rank (top of universe) followed by rank decay signals
-# momentum exhaustion — a feature that absolute momentum values
-# cannot express because their scale drifts with market conditions.
-
-# %% [markdown]
-# ## Relative Temporal Features
-#
-# Many temporal features gain signal when expressed relative to a
-# benchmark — isolating idiosyncratic dynamics from systematic exposure.
-# We demonstrate market-relative features (vs SPY). Sector-relative
-# features follow the same pattern with a sector ETF as benchmark
-# (e.g., XLE momentum minus XLF momentum isolates energy-specific signal).
-
-# %%
-# Compute relative features: asset vs. market (SPY as proxy)
-spy_features = (
-    panel.filter(pl.col("symbol") == "SPY")
-    .select(["timestamp", "momentum_60d", "vol_60d"])
-    .rename({"momentum_60d": "mkt_momentum", "vol_60d": "mkt_vol"})
-)
-
-panel_rel = panel.join(spy_features, on="timestamp", how="inner")
-
-panel_rel = panel_rel.with_columns(
-    momentum_vs_market=pl.col("momentum_60d") - pl.col("mkt_momentum"),
-    vol_vs_market=pl.col("vol_60d") / pl.col("mkt_vol"),
-)
-
-# Compare absolute vs relative for one asset
-xle = panel_rel.filter(pl.col("symbol") == "XLE").to_pandas()
-
-fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
-
-axes[0].plot(xle["timestamp"], xle["momentum_60d"], label="Absolute momentum", linewidth=0.8)
-axes[0].plot(
-    xle["timestamp"], xle["momentum_vs_market"], label="Momentum vs. market", linewidth=0.8
-)
-axes[0].axhline(0, color="gray", linestyle="--", alpha=0.3)
-axes[0].set_ylabel("60-Day Momentum")
-axes[0].set_title("XLE: Absolute vs. Relative Momentum")
-axes[0].legend()
-
-# Absolute vol (~0.005 daily) and the vol-ratio (~1-3.5) live on different scales,
-# so use twin y-axes to keep both visible.
-ax_abs = axes[1]
-ax_rel = ax_abs.twinx()
-(l_abs,) = ax_abs.plot(
-    xle["timestamp"], xle["vol_60d"], label="Absolute volatility", linewidth=0.8, color="#1f77b4"
-)
-(l_rel,) = ax_rel.plot(
-    xle["timestamp"],
-    xle["vol_vs_market"],
-    label="Vol / Market vol",
-    linewidth=0.8,
-    color="#d62728",
-)
-ax_rel.axhline(1.0, color="gray", linestyle="--", alpha=0.3)
-ax_abs.set_ylabel("Absolute Volatility (60-day)", color="#1f77b4")
-ax_rel.set_ylabel("Vol / Market Vol", color="#d62728")
-ax_abs.tick_params(axis="y", labelcolor="#1f77b4")
-ax_rel.tick_params(axis="y", labelcolor="#d62728")
-ax_abs.set_title("XLE: Absolute vs. Relative Volatility")
-ax_abs.legend(handles=[l_abs, l_rel], loc="upper left")
-
-plt.tight_layout()
-plt.show()
-
-# %% [markdown]
-# Relative momentum removes the market component — XLE's energy-sector
-# bets become visible only after subtracting the broad equity trend.
-# Relative volatility (vol / market vol) distinguishes periods where an
-# asset is genuinely more volatile from periods where the entire market
-# is stressed. Values above 1.0 indicate the asset carries more risk
-# than the market; values below 1.0 indicate relative calm.
-
-# %% [markdown]
-# ## Multi-Asset Regime Aggregation (Illustrative)
-#
-# Individual regime classifications (from `11_hmm_regimes`) gain
-# power when aggregated across the universe. We approximate per-asset
-# regime probabilities from realized volatility percentiles to
-# demonstrate the aggregation mechanics. This is exploratory — the
-# full-history ranking introduces look-ahead. In production, use
-# HMM-filtered regime probabilities estimated within walk-forward folds.
-
-# %%
-# Illustrative regime probabilities from rolling volatility (proxy for HMM crisis probs).
-# WARNING: This ranks each asset's volatility over its FULL history — a look-ahead
-# shortcut for demonstrating the aggregation mechanics. In production, use per-asset
-# HMM filtered probabilities estimated inside walk-forward folds (see 11_hmm_regimes).
-vol_panel = panel.select(["timestamp", "symbol", "vol_60d"]).with_columns(
-    crisis_prob=(
-        pl.col("vol_60d").rank().over(["symbol"]) / pl.col("vol_60d").count().over(["symbol"])
-    ),
-)
-
-# Universe-level aggregations at each timestamp
-regime_agg = (
-    vol_panel.group_by("timestamp")
+aggregates = (
+    stress.group_by("timestamp")
     .agg(
-        universe_crisis_prob=pl.col("crisis_prob").mean(),
-        crisis_breadth=(pl.col("crisis_prob") > 0.7).mean(),  # fraction above 70th pct
-        regime_dispersion=pl.col("crisis_prob").std(),
+        mean_stress=pl.col("stress").mean(),
+        breadth=(pl.col("stress") > STRESS_THRESHOLD).mean(),
+        dispersion=pl.col("stress").std(),
+        assets=pl.len(),
     )
     .sort("timestamp")
 )
 
-# Plot against SPY returns
-spy_ret = (
-    etf_data.filter(pl.col("symbol") == "SPY")
+benchmark_level = (
+    universe.filter(pl.col("symbol") == BENCHMARK)
     .select(["timestamp", "close"])
     .sort("timestamp")
-    .with_columns(spy_cumret=(pl.col("close") / pl.col("close").first() - 1) * 100)
+    .with_columns(cumulative=(pl.col("close") / pl.col("close").first() - 1.0) * 100)
 )
 
-agg_pd = regime_agg.join(
-    spy_ret.select(["timestamp", "spy_cumret"]), on="timestamp", how="inner"
+aggregated = aggregates.join(
+    benchmark_level.select(["timestamp", "cumulative"]), on="timestamp", how="inner"
 ).to_pandas()
 
+print(
+    f"Aggregate rows: {len(aggregated):,}, assets per date: {aggregates['assets'].min()} to {aggregates['assets'].max()}"
+)
+display(aggregates.select(["mean_stress", "breadth", "dispersion"]).describe())
+
 # %%
-fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
+fig, axes = plt.subplots(3, 1, figsize=FIGSIZE["grid_3x2"], sharex=True)
 
-axes[0].plot(agg_pd["timestamp"], agg_pd["spy_cumret"], linewidth=0.8, color="gray")
-axes[0].set_ylabel("SPY Cumulative Return (%)")
-axes[0].set_title("Market Context")
+axes[0].plot(
+    aggregated["timestamp"], aggregated["cumulative"], linewidth=0.8, color=COLORS["neutral"]
+)
+axes[0].set_ylabel("Percent")
+axes[0].set_title(f"{BENCHMARK} cumulative return, for context", fontsize=9)
 
-axes[1].plot(agg_pd["timestamp"], agg_pd["crisis_breadth"], linewidth=0.8, color="#d62728")
-axes[1].fill_between(agg_pd["timestamp"], 0, agg_pd["crisis_breadth"], alpha=0.2, color="#d62728")
-axes[1].set_ylabel("Crisis Breadth")
-axes[1].set_title("Fraction of Assets in High-Volatility Regime")
+axes[1].fill_between(
+    aggregated["timestamp"], 0, aggregated["breadth"], alpha=0.4, color=COLORS["copper"]
+)
+axes[1].set_ylabel("Fraction")
+axes[1].set_title("Breadth: how much of the universe is in its own high-stress range", fontsize=9)
 
-axes[2].plot(agg_pd["timestamp"], agg_pd["regime_dispersion"], linewidth=0.8, color="#1f77b4")
-axes[2].set_ylabel("Regime Dispersion")
-axes[2].set_title("Cross-Sectional Dispersion of Regime Probabilities")
+axes[2].plot(aggregated["timestamp"], aggregated["dispersion"], linewidth=0.8, color=COLORS["blue"])
+axes[2].set_ylabel("Standard deviation")
+axes[2].set_xlabel("Session")
+axes[2].set_title("Dispersion: whether the universe agrees about the stress", fontsize=9)
 
-plt.tight_layout()
-plt.show()
+fig.suptitle("Three aggregates of one per-asset measure, each saying something different")
+show_with_alt(
+    fig,
+    f"Three stacked panels. The top plots {BENCHMARK}'s cumulative return. The middle fills the "
+    "fraction of the universe in its own high-stress range, which rises to near one during the "
+    "sharp declines above it. The bottom plots the cross-sectional dispersion of the stress "
+    "measure, which falls when the breadth is at its highest.",
+)
 
 # %% [markdown]
-# Crisis breadth spikes during market selloffs (visible as SPY drawdowns),
-# confirming that aggregating individual regime indicators produces
-# a useful system-wide stress signal. Regime dispersion is low during
-# broad crises (all assets move together) and high during sector
-# rotations (differentiated behavior) — making it a complement to
-# crisis breadth rather than a substitute.
+# Breadth and dispersion move against each other at the extremes, and that is the reason to
+# carry both. When everything is stressed the breadth is near one and there is nothing left for
+# the assets to disagree about, so the dispersion falls to near zero. A high dispersion is a
+# universe where some assets are under stress and others are not, which is a different
+# environment and not a milder version of the same one.
+#
+# Both are computed from a trailing rank, so both are available on the session they describe.
+# What neither is, is a regime probability: a rank says where today sits among the last
+# `REGIME_WINDOW` sessions of the same asset, and a fitted model says how likely a state is
+# given everything observed. The aggregation mechanics are the same either way, which is what
+# this section is for.
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Takeaways
 #
-# 1. **Cross-sectional ranking normalizes temporal features** — ranks are
-#    scale-invariant, outlier-robust, and stationary, making heterogeneous
-#    assets comparable for panel models
-# 2. **Relative features decompose alpha from beta** — asset momentum minus
-#    sector momentum isolates idiosyncratic signal from systematic exposure
-# 3. **Two cointegration tests for robustness** — Engle-Granger and Johansen
-#    may disagree; treat pairs with caution when they do
-# 4. **Kalman filter adapts** — dynamic hedge ratios track structural shifts
-#    that a static OLS estimate misses
-# 5. **Half-life guides lookback** — use 2x half-life for rolling z-score
-#    windows; short half-lives are more practical for trading
-# 6. **Screen multiple pairs** — economic relatedness does not guarantee
-#    cointegration; the `ml4t-engineer` library scales this analysis
-#    with Polars-native expressions
+# 1. **Cointegration is a claim about drift, not about co-movement.** Two funds can track each
+#    other daily and still fail both tests, and one of the two funds carrying a roll cost is
+#    enough to do it. A stated economic reason is where a screen starts and not evidence: six
+#    pairs with good reasons produced no Engle-Granger rejection at the level used here.
+# 2. **Engle-Granger and Johansen can disagree, and the disagreement is information.** One takes
+#    a dependent variable and one treats the pair as a system. A pair only one of them rejects
+#    for is a pair whose relationship depends on how the question was asked.
+# 3. **A hedge ratio used to hold a position has to be filtered.** A regression over the whole
+#    sample gives one number that was unavailable on every date but the last. The Kalman
+#    recursion gives a series, and its process noise is the choice between tracking a real
+#    change and chasing noise.
+# 4. **A window length is a parameter and leaks like one.** The half-life that sizes the signal
+#    window is estimated on the first block only, because a length chosen from the whole sample
+#    is a leak that does not look like one.
+# 5. **A spread's profit is the change in the spread.** Taking the difference of the two funds'
+#    returns sets the hedge ratio to one and reports the P&L of a position nobody held.
+# 6. **Rank, percentile and z-score discard different things.** Ranks and percentiles throw away
+#    the distances between assets, which is what makes them robust and what makes them invent
+#    distinctions between assets that were nearly identical.
+# 7. **A cross-sectional operation cannot look forward, and a rank over an asset's own history
+#    can.** The first reads one date across assets. The second is the same word applied along
+#    time, where it needs a trailing window like every other temporal feature.
 #
-# **Previous**: `13_regime_as_feature` for regime features in ML pipelines.
-# **Book**: Chapter 9, Section 9.6 discusses cross-sectional ranking,
-# relative features, and panel aggregation in depth.
+# **Previous**: `13_regime_as_feature` puts a regime column into a downstream model.
+# **Next**: `case_study_temporal_summary` collects what this chapter's notebooks produced.
