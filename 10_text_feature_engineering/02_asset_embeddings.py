@@ -461,10 +461,12 @@ ax.set_title("Cosine similarity among widely recognized holdings")
 
 show_with_alt(
     fig,
-    "A square matrix of cosine similarities between the embeddings of about ten large, widely "
-    "recognized companies, shaded light at zero and dark at one. Away from the dark diagonal "
-    "where each company meets itself, the cells are uniformly dark, so every pair of these "
-    "companies is close to every other pair rather than a few pairs standing out.",
+    "A square matrix of cosine similarities between the embeddings of nine large, widely "
+    "recognized companies, shaded light at zero and dark at one. Two darker blocks are "
+    "visible along the diagonal: the software and consumer-technology names in the upper left "
+    "are very close to one another, and the bank, oil, carmaker and conglomerate in the lower "
+    "right form a second, looser group. The cells linking one block to the other are "
+    "noticeably lighter than the cells inside either.",
 )
 
 # %% [markdown]
@@ -472,6 +474,12 @@ show_with_alt(
 # close to one another and further from a random draw of other widely-held stocks, which is
 # what co-ownership predicts: an institution large enough to file a 13F holds most of them,
 # so they appear in the same portfolios in the same region of the ordering.
+#
+# The matrix carries something the means do not. It splits into two blocks - the technology
+# names close to one another, the bank, oil major, carmaker and conglomerate forming a
+# looser second group - with lighter cells between them. All nine are widely held, so
+# popularity alone cannot produce that split; something in the co-holding patterns
+# distinguishes which institutions hold which.
 #
 # It is worth being clear about what that does not establish. These are the most widely held
 # stocks in the sample, so they co-occur with almost everything, and a method that placed all
@@ -927,10 +935,10 @@ show_with_alt(
     fig,
     "Two panels sharing the same three position buckets on their horizontal axes, ordered "
     "from the largest holdings in a portfolio to the smallest. The left panel has a pair of "
-    "bars per bucket for the top-5 and top-10 recovery rates against a dashed line near zero "
-    "for the random baseline; both bars fall steeply from the first bucket to the third, and "
-    "by the third they are close to the baseline. The right panel shows mean reciprocal rank "
-    "over the same buckets and falls in the same way.",
+    "bars per bucket for the two recovery rates named in its legend, against a dashed line "
+    "near zero for the uniform-random baseline; both bars fall steeply from the first bucket "
+    "to the third, and by the third they sit close to that line. The right panel shows mean "
+    "reciprocal rank over the same buckets and falls in the same way.",
 )
 
 # %% [markdown]
