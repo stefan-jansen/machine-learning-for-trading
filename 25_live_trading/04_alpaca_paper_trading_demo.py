@@ -18,32 +18,29 @@
 #
 # **Docker image**: `ml4t`
 #
-# **Chapter**: 25 - Live Trading Systems
-# **Section**: 25.3 (Alpaca Integration)
-# **Learning Outcome**: LO2 - Connect ml4t-backtest strategies to live brokers
+# **Book Reference**: Chapter 25, Section 25.3 (Integrating with Alpaca)
 #
-# This notebook demonstrates:
-# 1. Connecting to Alpaca paper trading account
-# 2. Querying account information and positions
-# 3. Real-time data feed with bar/quote/trade streaming
-# 4. Safe order submission in shadow mode
-# 5. Strategy execution with ETF momentum signals
+# [`03_ib_paper_trading_demo`](03_ib_paper_trading_demo.ipynb) connected the same strategy to
+# Interactive Brokers. This notebook connects it to Alpaca, and the interesting part is how little
+# changes: a different broker class, a different feed class, the same `Strategy`, the same shadow
+# mode, the same order log. The two brokers differ in what they cost to reach, not in what the
+# strategy has to know about them.
+#
+# It also runs, by default, without an Alpaca account at all. The offline path uses a simulated
+# broker over deterministic bars, which is what makes this notebook executable in continuous
+# integration and readable by anyone who has not signed up for anything. Everything that path
+# demonstrates about the strategy interface is real; everything it would demonstrate about Alpaca
+# is not, and the notebook is explicit about which is which at each step.
 #
 # **Learning Objectives**
-# - Verify the environment, SDK, and account state before connecting a strategy to a live broker.
-# - See how the same backtest strategy is wrapped with shadow-mode risk controls for production use.
-# - Compare the optional live-feed wiring with the default offline simulation path.
+# - Check the environment, the SDK and the account state before a strategy is allowed near a
+#   broker, and treat each as a separate gate
+# - Wrap a strategy in shadow mode, so orders are logged and never sent
+# - Tell what a run established from what it merely exercised, when the broker was simulated
 #
-# **Prerequisites**:
-# - Alpaca account with API keys (paper trading enabled)
-# - Environment variables: ALPACA_API_KEY, ALPACA_SECRET_KEY
-# - Familiarity with the ETF case study strategy used earlier in the book
-#
-# **Why Alpaca alongside IB**: see §25.3 for the broker-comparison narrative.
-#
-# **Data Contract**:
-# - **Input**: Deterministic simulated bars by default; Alpaca bars after explicit opt-in
-# - **Output**: Virtual portfolio state, signals, order logs
+# **Prerequisites**: [`01_unified_framework_demo`](01_unified_framework_demo.ipynb) for the shared
+# `Strategy` interface. An Alpaca paper account and `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` are
+# needed only for the live path, which is off by default.
 
 # %%
 """Connect ml4t strategies to Alpaca with shadow-mode risk controls."""
@@ -75,12 +72,20 @@ try:
 except ImportError:
     pass
 
-warnings.filterwarnings("ignore")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-logger = logging.getLogger(__name__)
+# The broker adapters pull in websockets' legacy module, which deprecates itself on import. It
+# is the library's business rather than this notebook's and nothing in the result depends on it.
+warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"websockets\.legacy")
+
+# Give this notebook its own logger rather than configuring the root one: basicConfig is a no-op
+# once an imported library has attached a handler, and reconfiguring the root would either do
+# nothing or print every line twice.
+logger = logging.getLogger("alpaca_paper_demo")
+logger.setLevel(logging.INFO)
+logger.propagate = False
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    logger.addHandler(_handler)
 logging.getLogger("alpaca").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
@@ -96,12 +101,17 @@ SIMULATION_STEPS = 10
 LIVE_FEED = 0  # explicit opt-in; default execution is offline and paper-safe
 SEED = 42
 
+# %% [markdown]
+# One environment override before anything else. Alpaca's WebSocket loop and the nested event loop
+# a headless notebook runner installs do not cooperate: `asyncio.wait_for` cannot reliably cancel
+# the inner streaming task, so an unattended run would sit past its own duration limit instead of
+# finishing. When the runner announces itself, the live feed is turned off and the simulated path
+# runs. An interactive Jupyter session is unaffected.
+#
+# Forcing the safe path in the environment that cannot supervise itself is the right default, and
+# the run says so in its output rather than silently taking a different branch.
+
 # %%
-# The Alpaca WebSocket loop is incompatible with papermill's nest_asyncio:
-# `asyncio.wait_for` cannot reliably cancel the inner streaming task, so a
-# headless run hangs past DEMO_DURATION_SECONDS. Detect papermill via its
-# injected env var and fall back to the simulated path. Interactive Jupyter is
-# unaffected.
 if os.environ.get("ML4T_HEADLESS_PAPERMILL") == "1":
     LIVE_FEED = 0
     print("Headless papermill detected: LIVE_FEED disabled, simulated path will run")
@@ -789,12 +799,28 @@ print("The same ETFMomentumStrategy interface drives the selected execution path
 # %% [markdown]
 # ## Key Takeaways
 #
-# **Finding**: Alpaca provides a compact optional live-trading stack, while the default run demonstrates
-# the shared strategy interface and offline broker without claiming that live controls executed.
+# 1. **The broker is the smallest part of the change.** Moving from Interactive Brokers to Alpaca
+#    swaps a broker class and a feed class. The strategy, the risk wrapper, the order log and the
+#    engine are the same objects. That is what a broker abstraction is for, and it is the reason
+#    the choice of venue is an operational decision rather than a research one.
+# 2. **Check the environment, the SDK and the account separately.** They fail differently and are
+#    fixed differently: a missing key is a setup problem, a missing package is an install problem,
+#    and a rejected account is an entitlement problem. One combined "connection failed" hides all
+#    three.
+# 3. **Shadow mode is where a live deployment should start.** Real prices, real account state,
+#    real strategy, and orders that are logged instead of sent. Everything except the one step
+#    that cannot be undone.
+# 4. **Say which parts of a run were real.** This one ran offline, so it established that the
+#    strategy interface and the order log work, and established nothing whatever about Alpaca's
+#    fills, latency or rejections. A demonstration that does not distinguish the two teaches a
+#    reader to trust the wrong half.
 #
-# **Trading implication**: The portability of the strategy object matters more than the specific broker API.
-# If strategy logic survives the move from backtest to shadow mode unchanged, the remaining work is mostly
-# about operational controls.
+# **Known limitations of what is built here.** The default path never contacts Alpaca, so none of
+# the failure modes that matter live - a rejected order, a partial fill, a disconnected socket, a
+# stale quote - appears anywhere in it. The simulated bars are drawn from a fixed seed rather than
+# from a market. And shadow mode proves that orders were not sent, not that they would have been
+# filled at the prices assumed.
 #
-# **Next**: Compare this flow with `03_ib_paper_trading_demo.py` and then use
-# `05_alpaca_crypto_live_demo.py` for the 24/7 crypto variant of the same deployment pattern.
+# **Next**: [`05_alpaca_crypto_live_demo`](05_alpaca_crypto_live_demo.ipynb) takes the same
+# deployment pattern to a market that never closes, which removes the session boundaries this
+# notebook could rely on.
