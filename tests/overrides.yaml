@@ -366,9 +366,10 @@
     MAX_TRAIN_STEPS: 20
   timeout: 600
 10_text_feature_engineering/05_financial_ner_finetuning:
-  env:
-    TEST: '1'
   gpu: true
+  parameters:
+    N_EPOCHS: 1
+    N_SAMPLES: 100
   timeout: 600
 10_text_feature_engineering/06_finbert_cross_dataset:
   gpu: true

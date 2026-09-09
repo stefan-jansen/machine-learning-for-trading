@@ -28,37 +28,66 @@
 # > ```
 #
 #
-# ## Purpose
-# This notebook demonstrates how to fine-tune a Transformer for Named Entity
-# Recognition (NER) on financial text. NER extracts structured entities
-# (companies, amounts, dates) from unstructured text, enabling automated
-# information extraction from earnings calls, SEC filings, and news.
+# ## What this notebook is for
 #
-# ## Learning Objectives
-# After completing this notebook, you will be able to:
-# - Understand BIO tagging for multi-word entity annotation
-# - Align subword tokens with word-level labels
-# - Fine-tune a Transformer for token classification (NER)
-# - Extract entities from financial text with the trained model
-# - Evaluate NER performance with precision, recall, and F1
+# Named entity recognition turns a sentence into structured fields: which spans are
+# organizations, which are amounts, which are dates. That is what makes a filing or an
+# earnings call queryable, and it is the step between having text and having a table.
 #
-# ## Cross-References
-# - **Upstream**: `bert_finetuning.py` (fine-tuning basics), Chapter 5 (text data)
-# - **Downstream**: Chapter 10 (structured features from text)
-# - **Related**: Information extraction pipelines, knowledge graphs
+# The task differs from the sentiment classification in `04_bert_finetuning` in a way that
+# causes most of the difficulty: a tag marks part of a sentence rather than the whole of it,
+# and a transformer works in subword pieces that do not line up with words. So
+# most of the work below is alignment, and the piece worth reading closely is the function
+# that maps word-level tags onto subword tokens.
+#
+# The span is the unit here: a tag names where an entity starts and where it ends, not what
+# the sentence as a whole is about.
+#
+# The data here is generated from templates rather than annotated by hand. That keeps the
+# notebook runnable, and it has a consequence the notebook measures rather than glosses: the
+# generator repeats itself, so much of the test set is also in the training set and the
+# scores are near the ceiling for that reason.
+#
+# ## Learning objectives
+#
+# After working through this notebook you will be able to:
+#
+# - Read and write BIO tags, and say what goes wrong if a multi-word entity opens with `I-`.
+# - Align word-level labels to a transformer's subword tokens, and explain which subwords get
+#   a label and which get ignored by the loss.
+# - Fine-tune a transformer for token classification and score it entity by entity rather
+#   than token by token.
+# - Check whether a held-out split of generated data is actually held out.
+#
+# ## Prerequisites
+#
+# - Section 10.4 of the chapter.
+# - `04_bert_finetuning.py` for the Trainer mechanics, which are not re-explained here.
+#
+# ## Related notebooks
+#
+# - `04_bert_finetuning.py` - the same Trainer applied to whole-sentence classification
+# - `09_filing_text_signals.py` - extracting features from filings at scale
 
 # %%
-"""Financial Named Entity Recognition Fine-Tuning - fine-tune a Transformer for NER on financial text."""
+"""Fine-tune a transformer for financial named entity recognition."""
 
 import json
+import random
 import warnings
 from collections import Counter
 
-import evaluate
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from datasets import Dataset
+
+# `multiprocess`, reached through these two, raises a SyntaxWarning at COMPILE time, so a
+# module-level filter set afterwards is too late and it reached the committed render carrying
+# the absolute path of the environment that produced it.
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", SyntaxWarning)
+    import evaluate
+    from datasets import Dataset
 from transformers import (
     AutoModelForTokenClassification,
     AutoTokenizer,
@@ -72,17 +101,19 @@ from transformers import (
 
 from utils.paths import get_chapter_dir
 from utils.reproducibility import set_global_seeds
-
-warnings.filterwarnings("ignore")
+from utils.style import COLORS, FIGSIZE, show_with_alt
 
 # %% tags=["parameters"]
 SEED = 42
 N_SAMPLES = 500
 N_EPOCHS = 3
 
+# %% [markdown]
+# `set_global_seeds` covers Python, NumPy and Torch. The Trainer draws from its own generator
+# for shuffling and dropout, which needs seeding separately or the run is not reproducible.
+
+
 # %%
-# Reproducibility - set_global_seeds covers Python random / NumPy / Torch.
-# transformers Trainer uses its own RNG that needs explicit seeding.
 set_global_seeds(SEED)
 set_transformers_seed(SEED)
 
@@ -108,42 +139,33 @@ CONFIG = {
     },
 }
 
-print("=" * 70)
-print("EXPERIMENT CONFIGURATION")
-print("=" * 70)
 print(json.dumps(CONFIG, indent=2))
-print("=" * 70)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"\nUsing device: {device}")
+print(f"Device: {device}")
 
 
 # %% [markdown]
-# ## 2. Generate Synthetic Financial NER Dataset
+# ## The data, and why it is generated
 #
-# This is a teaching-focused demo: we generate synthetic financial sentences
-# annotated with coarse-grained entity types (the next cell builds them from a
-# small set of templates). For a production NER benchmark, use a real annotated
-# corpus such as CoNLL-2003 or FiNER-139 - the training pipeline below is
-# identical.
-
-
-# %% [markdown]
-# ### Generate Synthetic NER Data
-# Create realistic financial sentences with BIO-tagged entities for training.
+# Annotated NER corpora are expensive because a person has to mark every span, so this
+# notebook generates its sentences from templates instead. The tradeoff is explicit: the
+# pipeline that follows is exactly what you would run on CoNLL-2003 or FiNER-139 or your own
+# annotations, and the scores it produces on this data are not.
+#
+# The generator fills five sentence templates from five options per entity slot, tagging as
+# it goes so the labels are correct by construction rather than by annotation.
 
 
 # %%
 def generate_synthetic_ner_data(n_samples: int = 500, seed: int = 42):
-    """Generate synthetic financial NER data for testing/demo purposes.
+    """Draw *n_samples* template-generated financial sentences with BIO tags.
 
-    Creates realistic-looking financial sentences with entity annotations.
+    The vocabulary per slot is deliberately small, so the number of distinct sentences this
+    can produce is bounded and drawing more samples than that repeats them.
     """
-    import random
-
     random.seed(seed)
 
-    # Template components
     orgs = ["Apple Inc.", "Microsoft", "Goldman Sachs", "JPMorgan Chase", "Tesla Motors"]
     people = ["Tim Cook", "Satya Nadella", "Warren Buffett", "Elon Musk", "Janet Yellen"]
     money = ["$500 million", "$1.2 billion", "$50,000", "€10 million", "£5.5 billion"]
@@ -205,8 +227,8 @@ def generate_synthetic_ner_data(n_samples: int = 500, seed: int = 42):
 
 
 # %% [markdown]
-# ### Load NER Dataset
-# Load the dataset with provenance tracking, using the synthetic data generator.
+# The tag vocabulary is fixed here rather than inferred from the data, so a label id means
+# the same thing on every run and a class absent from one sample does not renumber the rest.
 
 
 # %%
@@ -253,34 +275,60 @@ def load_ner_dataset():
 
 
 # %%
-# Load dataset and label scheme
 dataset, LABEL_LIST = load_ner_dataset()
 
-# Create label mappings from the dataset's label scheme
 id2label = dict(enumerate(LABEL_LIST))
 label2id = {label: i for i, label in id2label.items()}
 
-# Train/test split
 split = dataset.train_test_split(test_size=0.2, seed=SEED)
 print(f"Train: {len(split['train'])}, Test: {len(split['test'])}")
 
+# %% [markdown]
+# ### How much of the test set is already in training
+#
+# A generator drawing from five templates and five options per slot can only produce so many
+# distinct sentences, and this notebook draws more samples than that ceiling. So the draws
+# repeat, a random split puts copies of the same sentence on both sides, and the model is
+# scored partly on sentences it was trained on.
+#
+# That is worth measuring rather than assuming, because it is the reason the scores below
+# look the way they do. The count is over exact token sequences.
+
 # %%
-# Preview data
-print("\nSample tokens and tags:")
+train_sentences = [" ".join(row) for row in split["train"]["tokens"]]
+test_sentences = [" ".join(row) for row in split["test"]["tokens"]]
+distinct_test = set(test_sentences)
+memorized = distinct_test & set(train_sentences)
+
+print(f"Sentences drawn: {len(dataset):,}, distinct: {len(set(train_sentences) | distinct_test):,}")
+print(f"Distinct test sentences: {len(distinct_test)}")
+print(f"  of which also appear verbatim in training: {len(memorized)}")
+
+# %% [markdown]
+# One example, with the tag on each token. `B-` opens an entity, `I-` continues the one
+# before it, and `O` is everything outside an entity. A two-word company name is therefore
+# `B-ORG` followed by `I-ORG`, which is what lets the scheme mark where one entity ends and
+# the next begins.
+
+# %%
 example = split["train"][0]
-for token, tag in zip(example["tokens"][:10], example["ner_tags"][:10], strict=False):
+for token, tag in zip(example["tokens"][:10], example["ner_tags"][:10], strict=True):
     print(f"  {token:15} -> {id2label[tag]}")
 
 # %% [markdown]
-# ## Tokenization for Token Classification
+# ## Aligning labels to subwords
 #
-# Token classification requires aligning labels with subword tokens.
-# When a word is split into multiple subwords, we assign the label
-# only to the first subword and use -100 (ignore) for the rest.
+# The labels are one per word; the model reads one token per subword, and "JPMorgan" may
+# arrive as three of them. Something has to decide which subword carries the word's label.
+#
+# The convention below gives the label to the first subword of each word and marks the rest
+# -100, which is the value PyTorch's cross-entropy ignores. So the loss is computed once per
+# word rather than once per subword, and a word that happens to split into many pieces does
+# not outweigh a word that does not. Getting this wrong is the most common way an NER
+# pipeline trains without error and scores badly.
 
 # %%
-# Load tokenizer
-model_name = "ProsusAI/finbert"  # Use FinBERT for financial domain
+model_name = "ProsusAI/finbert"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
 
@@ -445,11 +493,9 @@ trainer = Trainer(
 )
 
 # %%
-# Train
 print("Training NER model...")
 trainer.train()
 
-# Evaluate
 results = trainer.evaluate()
 print("\nTest Results:")
 print(f"  Precision: {results['eval_precision']:.3f}")
@@ -457,29 +503,36 @@ print(f"  Recall: {results['eval_recall']:.3f}")
 print(f"  F1: {results['eval_f1']:.3f}")
 
 # %% [markdown]
-# ### Reading these scores honestly
+# ### What these scores are measuring
 #
-# The model reports near-perfect precision/recall/F1. **This is an artifact of the
-# synthetic data, not evidence that NER is solved.** Our generator draws from a
-# handful of templates with a fixed vocabulary per entity type, so the task is
-# trivially memorizable and the held-out split contains the same surface forms as
-# training. On a real corpus such as CoNLL-2003 or an annotated filings set, F1
-# lands far lower (mid-0.80s to low-0.90s for strong models) and the interesting
-# errors - boundary mistakes, ambiguous tickers, unseen entities - appear. Treat
-# the number here as a plumbing check that the training loop and label alignment
-# work, then re-run on real annotations to measure quality.
+# The scores are near the ceiling, and the count printed after the split says why: most of
+# the distinct test sentences appear verbatim in the training set. The model is being asked
+# to reproduce sentences it has already seen, which it can do, and the metric is reporting
+# that it did.
 #
-# One more caveat on *what* is being measured: the canonical NER metric is
-# entity-level (a span counts only if its full extent and type match), computed
-# with `seqeval`. When `seqeval` is not installed the notebook falls back to a
-# token-level `sklearn` F1, which is more lenient. On this saturated toy data both
-# read 1.0, but on real data the entity-level score is the honest one - install
-# `seqeval` before trusting the number.
+# So read this number as a plumbing check. It says the tokenizer, the subword-to-word label
+# alignment, the collator and the training loop are wired up correctly, which is genuinely
+# worth confirming and is the thing most likely to be silently wrong in an NER pipeline. It
+# says nothing about whether the model can find an entity it has not seen before.
+#
+# On a real annotated corpus - CoNLL-2003, FiNER-139, or your own filings - the interesting
+# errors appear: boundaries in the wrong place, a ticker read as an ordinary word, an
+# organization the model has never encountered. The pipeline below is unchanged for those;
+# only the data is.
+#
+# There is a second thing to check before trusting an NER number anywhere. The canonical
+# metric is entity-level, meaning a span counts only when both its full extent and its type
+# match, and `seqeval` computes it. Without `seqeval` installed this notebook falls back to a
+# token-level score from `sklearn`, which is more lenient because a span with one token wrong
+# still earns credit for the rest. On data this saturated the two agree; on real data they do
+# not, and the entity-level one is the number to quote.
 
 # %% [markdown]
-# ## Entity Extraction Examples
+# ## Reading entities back out
 #
-# Let's see the model in action on sample financial sentences.
+# A token-classification model emits one label per subword token. Turning that into the spans
+# a downstream system wants means grouping consecutive tokens by their tag, which is what the
+# `B-`/`I-` distinction exists for and what the function below does.
 
 
 # %%
@@ -571,60 +624,81 @@ for sentence in test_sentences:
     else:
         print("  (No entities detected)")
 
-# %%
-# Entity distribution visualization
+# %% [markdown]
+# ## How many of each type it found, against how many there were
+#
+# Counting only `B-` tags counts entities. Counting every non-`O` tag counts tagged tokens,
+# which double-counts every multi-word span - and since organizations and people here are
+# usually two words while percentages are one, that would inflate the types unevenly and make
+# the distribution say something about span length rather than about frequency.
+#
+# Predicted counts alone would also not answer the question the chart implies. The true
+# labels are already in hand, so both go on the axis.
 
-# Get predictions on test set
+# %%
 predictions = trainer.predict(tokenized_dataset["test"])
 pred_labels = np.argmax(predictions.predictions, axis=2)
 
-# Count entity types (excluding O and -100)
-entity_counts = Counter()
-for pred_seq, label_seq in zip(pred_labels, predictions.label_ids, strict=False):
-    for p, l in zip(pred_seq, label_seq, strict=False):
-        if l != -100 and id2label[p] != "O":
-            entity_type = id2label[p].split("-")[1]
-            entity_counts[entity_type] += 1
+predicted_counts, true_counts = Counter(), Counter()
+for pred_seq, label_seq in zip(pred_labels, predictions.label_ids, strict=True):
+    for predicted, actual in zip(pred_seq, label_seq, strict=True):
+        if actual == -100:
+            continue
+        # `B-` opens an entity, so one `B-` is one entity; `I-` continues the same one.
+        if id2label[predicted].startswith("B-"):
+            predicted_counts[id2label[predicted][2:]] += 1
+        if id2label[actual].startswith("B-"):
+            true_counts[id2label[actual][2:]] += 1
 
-fig, ax = plt.subplots(figsize=(8, 5))
-types = list(entity_counts.keys())
-counts = list(entity_counts.values())
+entity_types = sorted(set(predicted_counts) | set(true_counts))
+print({t: (true_counts[t], predicted_counts[t]) for t in entity_types})
 
-bars = ax.bar(types, counts, color="#0a1628")
-ax.set_xlabel("Entity Type")
-ax.set_ylabel("Count")
-ax.set_title("Predicted Entity Distribution on Test Set")
+# %%
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+positions = np.arange(len(entity_types))
+width = 0.38
 
-for bar in bars:
-    height = bar.get_height()
-    ax.annotate(
-        f"{height}",
-        xy=(bar.get_x() + bar.get_width() / 2, height),
-        xytext=(0, 3),
-        textcoords="offset points",
-        ha="center",
-    )
+ax.bar(
+    positions - width / 2,
+    [true_counts[t] for t in entity_types],
+    width,
+    label="In the labels",
+    color=COLORS["blue"],
+)
+ax.bar(
+    positions + width / 2,
+    [predicted_counts[t] for t in entity_types],
+    width,
+    label="Predicted",
+    color=COLORS["amber"],
+)
 
-plt.tight_layout()
-plt.show()
+ax.set_xticks(positions)
+ax.set_xticklabels(entity_types)
+ax.set_xlabel("Entity type")
+ax.set_ylabel("Entities in the test split")
+ax.set_title("Entity counts by type, labeled against predicted")
+ax.legend(fontsize=7)
+
+show_with_alt(
+    fig,
+    "A grouped bar chart with one pair of bars per entity type, the left bar of each pair "
+    "counting the entities in the test labels and the right bar counting those the model "
+    "predicted. Within every pair the two bars are the same height or very close to it, and "
+    "the types differ from one another in height far more than the two bars within any pair "
+    "differ from each other.",
+)
 
 # %% [markdown]
 # ## Downstream Feature Engineering: From Entities to ML Features
 #
-# NER output is only useful if we convert it to structured features for ML models.
-# This section demonstrates how to create quantitative features from entity extractions.
+# Counting the entities a document mentions is the simplest feature that NER makes possible,
+# and it is the one to start with: how many organizations a filing names, how many dated
+# commitments it makes, how many figures it quotes. These are counts a model can read
+# directly, and they exist only because the spans were identified first.
+
 
 # %%
-# ============================================================================
-# DOWNSTREAM FEATURE EXAMPLE: Entity Counts as Features
-# ============================================================================
-# This bridges NER to feature engineering for ML models.
-
-print("\n" + "=" * 70)
-print("DOWNSTREAM FEATURE ENGINEERING")
-print("=" * 70)
-
-
 def extract_entity_features(text: str) -> dict:
     """
     Extract NER-based features from text for ML modeling.
@@ -688,24 +762,25 @@ features_df = pl.DataFrame(feature_records).select(
 features_df
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **Token classification** extends Transformers from document-level to
-#    word-level predictions, enabling structured extraction from unstructured text.
-#
-# 2. **BIO tagging** handles multi-word entities: B-ORG marks the beginning,
-#    I-ORG continues, O marks non-entities.
-#
-# 3. **Subword alignment** is critical: when tokenizers split words, only the
-#    first subword receives the label; others get -100 (ignored in loss).
-#
-# 4. Financial NER enables **automated extraction** of companies, amounts,
-#    dates, and people from earnings calls, filings, and news.
-#
-# 5. **Entity counts as features**: The number and types of entities in a document
-#    create structured features for ML models, complementing sentiment analysis.
-#
-# 6. **Synthetic data saturates**: the perfect scores above reflect a trivially
-#    memorizable toy corpus, not NER quality. Validate on real annotations
-#    (CoNLL-2003, hand-labeled filings) with entity-level `seqeval` before drawing
-#    any conclusion about how well extraction works in production.
+# 1. **Check whether a generated split is actually held out.** A generator with a bounded
+#    vocabulary repeats itself, and a random split then puts the same sentence on both sides.
+#    Counting distinct sequences across the two halves takes one line and tells you what the
+#    score can mean; without it a saturated metric is indistinguishable from a good model.
+# 2. **Subword alignment is where a token-classification pipeline goes wrong quietly.** The
+#    label is per word, the model reads subwords, and only the first subword should carry it
+#    while the rest are ignored by the loss. Get this wrong and the code runs, trains
+#    and reports a number.
+# 3. **BIO exists to mark boundaries, not just types.** `B-` opening and `I-` continuing is
+#    what distinguishes two adjacent organizations from one two-word organization. A scheme
+#    that only labeled tokens by type could not tell those apart.
+# 4. **Count entities by their opening tag.** Counting every non-`O` token counts tokens, and
+#    since span length varies by entity type that turns a distribution over types into a
+#    distribution over how many words each type usually takes.
+# 5. **Entity-level and token-level scores are different metrics.** A span counts only when
+#    its extent and its type both match, which is what `seqeval` computes and what to quote.
+#    A token-level score gives partial credit for a span whose boundary is wrong.
+# 6. **The output is a feature, not an answer.** Counts of organizations, amounts and dates
+#    per document are structured columns a model can read, and producing them is the reason to
+#    run NER over a corpus of filings at all.
