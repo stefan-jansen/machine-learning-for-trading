@@ -79,6 +79,7 @@ from utils.style import COLORS, ml4t_palette, show_plotly_with_alt
 SEED = 42
 RISK_FREE_RATE = 0.02
 TRAIN_END = "2019-12-31"
+ROLLING_WINDOW_YEARS = 5
 
 # %%
 set_global_seeds(SEED)
@@ -565,11 +566,28 @@ print(f"  Observed-return leverage boundary: {max_observed_safe:.1%}")
 
 # %% [markdown]
 # ### Rolling Kelly Fraction
+#
+# The fraction above is one number computed from the whole history. Recomputing it inside a
+# moving window asks the question a position sizer actually faces: what would this formula have
+# told someone acting on it at each point in time.
+#
+# The window length is the trade-off. Kelly divides an expected return by a variance, and the
+# expected return is the badly estimated half - its standard error falls with the square root of
+# the window, so a short window produces a fraction that swings on noise. Five years is long
+# enough that the estimate is not dominated by a single year's returns and short enough that the
+# series still moves, which is what makes the instability visible rather than smoothed away.
+# Shortening it widens the swings below; lengthening it flattens them without making the
+# estimate any more actionable.
 
 # %%
-# Compute rolling Kelly fraction
-rolling_window = min(252 * 5, max(63, sp500_returns.height // 2))
-rolling_window_years = rolling_window / 252
+rolling_window = int(ROLLING_WINDOW_YEARS * 252)
+rolling_window_years = ROLLING_WINDOW_YEARS
+if sp500_returns.height < 2 * rolling_window:
+    raise ValueError(
+        f"A {ROLLING_WINDOW_YEARS}-year rolling window needs at least "
+        f"{2 * rolling_window} returns to show any variation; the series has "
+        f"{sp500_returns.height}."
+    )
 
 # Rolling mean and std
 rolling_stats = sp500_returns.with_columns(
