@@ -1178,7 +1178,7 @@ display(
 # The two differ, and the difference is the input rather than the implementation. Use the
 # expression where a rolling exponent of the price is what is wanted and the cost of the
 # manual version across a panel is prohibitive; use the manual version where the series
-# being characterised is a return or a volatility, which is most of the time in this
+# being characterized is a return or a volatility, which is most of the time in this
 # chapter.
 
 # %% [markdown]

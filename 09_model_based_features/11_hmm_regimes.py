@@ -245,7 +245,7 @@ show_with_alt(
 #
 # The **forward algorithm** does that one observation at a time. It carries a probability
 # over states, advances it through the transition matrix, multiplies by how likely the new
-# observation is under each state, and renormalises. What comes out at each step is
+# observation is under each state, and renormalizes. What comes out at each step is
 # $P(\text{state}_t \mid \text{observations up to } t)$, which is called the **filtered**
 # probability and is the quantity a feature has to be.
 #
@@ -295,7 +295,7 @@ print(f"Observations:  {np.round(observations, 4)}")
 #
 # $$\alpha_t(k) = b_k(o_t) \sum_{j} \alpha_{t-1}(j)\, A_{jk}$$
 #
-# Normalising $\alpha_t$ across states gives the filtered probability. Nothing after step
+# Normalizing $\alpha_t$ across states gives the filtered probability. Nothing after step
 # $t$ enters it, which is the whole point.
 
 
@@ -406,7 +406,7 @@ print(
 # Three things go wrong when this model is estimated rather than given, and each has a
 # standard answer.
 #
-# **The optimiser finds a local maximum.** Expectation-maximisation climbs from wherever it
+# **The optimizer finds a local maximum.** Expectation-maximization climbs from wherever it
 # starts and stops at the first peak it reaches, so different starts give different models.
 # The answers are to start from several places and keep whichever reached the highest
 # likelihood, or to start somewhere sensible: a clustering of the observations puts the initial emission parameters near
@@ -463,7 +463,7 @@ display(
 
 # %% [markdown]
 # The spread across random starts is the size of the problem: it is how much of the fitted
-# log-likelihood is decided by where the optimiser happened to begin rather than by the
+# log-likelihood is decided by where the optimizer happened to begin rather than by the
 # data. A seeded start reaches its answer once, which is not the same as reaching a better
 # one, and the two numbers beside each other say which happened here.
 
@@ -547,13 +547,13 @@ display(
 
 # %% [markdown]
 # Sorting by variance is what makes the table above readable, and it is the step most
-# easily skipped. Without it the row labelled zero would be whichever state the optimiser
+# easily skipped. Without it the row labeled zero would be whichever state the optimizer
 # happened to number first, so the same column computed in two windows could carry opposite
 # meanings and a model reading it across a refit would learn nothing.
 #
 # The hard state above is the argmax of the **filtered** probabilities rather than the
 # model's own `predict`, which runs the Viterbi algorithm over the whole sequence and
-# therefore reads the future. Two ways of labelling the same sessions, one of which is a
+# therefore reads the future. Two ways of labeling the same sessions, one of which is a
 # feature.
 
 # %% [markdown]
@@ -676,7 +676,7 @@ display(
 # **Markov switching autoregression** describes the same picture with a different mechanism.
 # Instead of a state that emits observations, it fits an autoregression whose variance, and
 # optionally whose coefficients, switch between regimes. It is estimated by maximum
-# likelihood rather than by expectation-maximisation, and it produces the same two readings.
+# likelihood rather than by expectation-maximization, and it produces the same two readings.
 #
 # Fitting both is worth the cell it costs, because agreement between two differently
 # specified models is much better evidence that a regime is in the data than either one's

@@ -37,7 +37,7 @@
 #   restricts you to saying.
 # - Compare which families of model-based feature appear across nine markets, and see that the
 #   coverage is uneven for reasons specific to each market.
-# - Recognise the difference between a naming-convention check and a model inventory, which is
+# - Recognize the difference between a naming-convention check and a model inventory, which is
 #   what a substring match on column names actually gives you.
 #
 # **Book reference**

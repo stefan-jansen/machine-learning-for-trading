@@ -29,7 +29,7 @@
 # hedge ratio, and a speed of reversion.
 #
 # A **cross-sectional** feature reads one quantity across many assets on the same date and
-# replaces its level with its position among them. An annualised volatility of a quarter means
+# replaces its level with its position among them. An annualized volatility of a quarter means
 # one thing for a Treasury fund and another for an energy fund, and a rank says which of the
 # two a reader is looking at without needing to know.
 #
@@ -234,7 +234,7 @@ print(
 # The **Kalman filter** treats the intercept and the ratio as a two-dimensional state following
 # a random walk and updates it one session at a time. Its estimate at session $t$ has seen
 # sessions up to $t$ and no more, which is what a hedge ratio has to be if a position is taken
-# on it. The two parameters that decide its behaviour are the measurement noise and the process
+# on it. The two parameters that decide its behavior are the measurement noise and the process
 # noise, and their ratio is the whole tuning: a larger process noise lets the ratio move faster
 # and tracks a genuine structural change sooner, at the cost of chasing noise.
 
@@ -420,7 +420,7 @@ show_with_alt(
     "plots the filtered hedge ratio as a moving line against a flat dashed line for the "
     "whole-sample regression, and the two are far apart for long stretches. The third plots the "
     "spread with a shaded band around a dashed rolling mean. The bottom plots the spread's "
-    "standardised deviation with dashed entry lines above and below zero and a dotted vertical "
+    "standardized deviation with dashed entry lines above and below zero and a dotted vertical "
     "line where the estimation block ends.",
 )
 
@@ -462,18 +462,18 @@ committed = pair["dependent"].shift(1) + pair["hedge_ratio"].shift(1).abs() * pa
 ].shift(1)
 pair["strategy_return"] = (profit / committed).fillna(0.0)
 
-realised = pair.loc[evaluated, "strategy_return"]
-curve = (1.0 + realised).cumprod()
+realized = pair.loc[evaluated, "strategy_return"]
+curve = (1.0 + realized).cumprod()
 
 display(
     pd.DataFrame(
         [
             {
-                "sessions evaluated": int(len(realised)),
+                "sessions evaluated": int(len(realized)),
                 "sessions with a position": int((pair.loc[evaluated, "position"] != 0).sum()),
                 "total return": float(curve.iloc[-1] - 1.0),
-                "annualised mean return": float(realised.mean() * SESSIONS_PER_YEAR),
-                "annualised volatility": float(realised.std() * np.sqrt(SESSIONS_PER_YEAR)),
+                "annualized mean return": float(realized.mean() * SESSIONS_PER_YEAR),
+                "annualized volatility": float(realized.std() * np.sqrt(SESSIONS_PER_YEAR)),
                 "deepest drawdown": float((curve / curve.cummax() - 1.0).min()),
             }
         ]

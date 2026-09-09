@@ -165,9 +165,9 @@ def lift_stream(returns: FloatArray, window_len: int, overlap: int) -> LiftedStr
 # few returns registers here and not in a variance.
 #
 # Clustering needs an average as well as a distance, and the average that goes with this
-# distance is the **barycenter**: the sample minimising the sum of $W_p^p$ to the members of
+# distance is the **barycenter**: the sample minimizing the sum of $W_p^p$ to the members of
 # a group. Because the distance decomposes across matched quantiles, so does the
-# minimisation, and it has a closed form. For $p = 1$ the barycenter is the quantile-wise
+# minimization, and it has a closed form. For $p = 1$ the barycenter is the quantile-wise
 # median of the members; for $p = 2$ it is the quantile-wise mean.
 
 
@@ -204,7 +204,7 @@ def wasserstein_barycenter_1d(sorted_members: FloatArray, p: float) -> FloatArra
 #
 # With a distance and an average in hand, k-means needs nothing else. Assign every window to
 # its nearest centroid, replace each centroid with the barycenter of its members, and repeat
-# until the centroids stop moving. The initialisation is the k-means++ rule with the
+# until the centroids stop moving. The initialization is the k-means++ rule with the
 # Wasserstein distance in place of the Euclidean one, and the whole fit is repeated `N_INIT`
 # times because Lloyd's algorithm finds a local optimum and which one depends on where it
 # started.
@@ -321,7 +321,7 @@ class WassersteinKMeans1D:
 # The comparison the section is built around replaces the distribution with a short list of
 # moments and clusters those instead. Each window becomes its first `n_moments` raw moments,
 # scaled by the reciprocal factorial so the list is a truncated series expansion rather than
-# a set of numbers on incomparable scales, and the moments are standardised because k-means
+# a set of numbers on incomparable scales, and the moments are standardized because k-means
 # in Euclidean space is not scale-free.
 #
 # This is the baseline the distributional method has to beat, and it is not a straw man: the
@@ -330,7 +330,7 @@ class WassersteinKMeans1D:
 #
 # Two models are fitted on those features rather than one, because the comparison would
 # otherwise confound the features with the algorithm. k-means in that space assigns a window
-# to the nearest centre, which draws spherical clusters of equal size; a Gaussian mixture
+# to the nearest center, which draws spherical clusters of equal size; a Gaussian mixture
 # fits a covariance per component and can draw elongated ones. Whatever separates the results
 # of those two is the geometry, since the features they read are identical.
 
@@ -355,7 +355,7 @@ class MomentClustering:
     model: KMeans | GaussianMixture
 
     def predict(self, segments: FloatArray, n_moments: int) -> IntArray:
-        """Assign windows the fit never saw, standardising them the way the fit was."""
+        """Assign windows the fit never saw, standardizing them the way the fit was."""
         features = self.scaler.transform(moment_features(segments, n_moments))
         return self.model.predict(features).astype(np.int64)
 
@@ -363,7 +363,7 @@ class MomentClustering:
 def fit_moment_kmeans(
     segments: FloatArray, n_clusters: int, n_moments: int, random_state: int | None
 ) -> MomentClustering:
-    """k-means on standardised moment features."""
+    """k-means on standardized moment features."""
     scaler = StandardScaler()
     features = scaler.fit_transform(moment_features(segments, n_moments))
     model = KMeans(n_clusters=n_clusters, n_init="auto", random_state=random_state)
@@ -375,7 +375,7 @@ def fit_moment_kmeans(
 def fit_moment_mixture(
     segments: FloatArray, n_components: int, n_moments: int, random_state: int | None
 ) -> MomentClustering:
-    """A Gaussian mixture on the same standardised moment features."""
+    """A Gaussian mixture on the same standardized moment features."""
     scaler = StandardScaler()
     features = scaler.fit_transform(moment_features(segments, n_moments))
     model = GaussianMixture(n_components=n_components, random_state=random_state, reg_covar=1e-6)
@@ -388,7 +388,7 @@ def fit_moment_mixture(
 # %% [markdown]
 # ## Reordering the clusters so the labels mean something
 #
-# k-means returns cluster numbers in whatever order the initialisation produced them, and
+# k-means returns cluster numbers in whatever order the initialization produced them, and
 # nothing ties cluster zero of one fit to cluster zero of another. Two fits are compared
 # below and their labels go into a feature, so both need a rule that fixes the numbering from
 # the data. The rule here is the same one `11_hmm_regimes` uses: order the clusters by the
@@ -413,7 +413,7 @@ def order_by_dispersion(segments: FloatArray, labels: IntArray, n_clusters: int)
 # ## A second opinion that does not depend on the distance used to cluster
 #
 # Inertia cannot compare the two methods, because each reports it in its own geometry. The
-# **maximum mean discrepancy** gives a number that neither method optimises: it embeds two
+# **maximum mean discrepancy** gives a number that neither method optimizes: it embeds two
 # samples through a kernel and measures the distance between their mean embeddings, so a
 # small value says the two samples look like draws from one distribution.
 #
@@ -585,7 +585,7 @@ methods = {
 }
 
 print(f"Wasserstein k-means converged: {simulated_wasserstein.converged}")
-print(f"Iterations of the best of {N_INIT} initialisations: {simulated_wasserstein.n_iter}")
+print(f"Iterations of the best of {N_INIT} initializations: {simulated_wasserstein.n_iter}")
 for name, labels in methods.items():
     print(f"Windows per cluster, {name}: {np.bincount(labels).tolist()}")
 
@@ -598,7 +598,7 @@ for name, labels in methods.items():
 # The table reports it alongside the discrepancy within each cluster and between the two.
 # A silhouette score is not reported: it would be computed in a chosen space, and each of
 # these methods clusters in a different one, so whichever space is picked flatters the method
-# that optimises in it.
+# that optimizes in it.
 
 # %%
 sigma = median_kernel_width(simulated.sorted_segments, np.random.default_rng(SEED))
@@ -632,7 +632,7 @@ display(pd.DataFrame(comparison_rows).set_index("method"))
 # mixture lands close to the Wasserstein result. What separates the two moment fits is not
 # the information available to them but the shape of cluster each can draw, so most of the
 # gap between the first row and the second is the equal-size spherical geometry that k-means
-# imposes on standardised moments and not a limitation of moments as such.
+# imposes on standardized moments and not a limitation of moments as such.
 #
 # The discrepancies say something the Rand index does not. Every method produces clusters
 # whose members resemble each other far more than they resemble the other cluster's, so all
@@ -679,7 +679,7 @@ for regime, color, name in ((0, COLORS["blue"], "calm"), (1, COLORS["copper"], "
 ax.axhline(0, color=COLORS["recede"], linestyle="--", linewidth=0.6)
 ax.set_xlabel("Session")
 ax.set_ylabel("Log return")
-ax.set_title("The simulated series, coloured by the regime that drew it", fontsize=9)
+ax.set_title("The simulated series, colored by the regime that drew it", fontsize=9)
 ax.legend(fontsize=7, markerscale=4)
 
 ax = axes[0, 1]
@@ -724,8 +724,8 @@ fig.suptitle("What the clustering recovers from a series whose regimes are known
 show_with_alt(
     fig,
     "Four panels on simulated data. The top left scatters returns against session with the "
-    "two regimes in different colours, the stressed blocks visibly wider. The top right plots "
-    "each window's mean against its standard deviation, coloured by cluster, and the split "
+    "two regimes in different colors, the stressed blocks visibly wider. The top right plots "
+    "each window's mean against its standard deviation, colored by cluster, and the split "
     "runs vertically along the standard deviation with the means overlapping. The bottom left "
     "steps the drawn regime and the assigned one against session; they agree except for a "
     "short lag after each switch. The bottom right draws the two cluster barycenters as "
@@ -848,12 +848,12 @@ for cluster, name in ((0, "calmer"), (STRESSED_CLUSTER, "more volatile")):
             "regime": name,
             "sessions": int(inside.sum()),
             "share of the evaluated block": inside.sum() / int(evaluated.sum()),
-            "annualised mean, in this regime": SESSIONS_PER_YEAR * while_inside.mean(),
-            "annualised volatility, in this regime": np.sqrt(SESSIONS_PER_YEAR)
+            "annualized mean, in this regime": SESSIONS_PER_YEAR * while_inside.mean(),
+            "annualized volatility, in this regime": np.sqrt(SESSIONS_PER_YEAR)
             * while_inside.std(),
             "worst single session, in this regime": while_inside.min(),
-            "annualised mean, holding only here": SESSIONS_PER_YEAR * rule.mean(),
-            "annualised volatility, holding only here": np.sqrt(SESSIONS_PER_YEAR) * rule.std(),
+            "annualized mean, holding only here": SESSIONS_PER_YEAR * rule.mean(),
+            "annualized volatility, holding only here": np.sqrt(SESSIONS_PER_YEAR) * rule.std(),
             "deepest drawdown, holding only here": float(
                 (curve / np.maximum.accumulate(curve) - 1.0).min()
             ),
@@ -942,8 +942,8 @@ ax.fill_between(
     index_dates, 0, float(rolling.max()), where=stressed_mask, alpha=0.2, color=COLORS["copper"]
 )
 ax.axvline(test_start, color=COLORS["neutral"], linestyle="--", linewidth=0.8)
-ax.set_ylabel("Annualised")
-ax.set_title(f"Realised volatility over the same {WINDOW_LEN} sessions", fontsize=9)
+ax.set_ylabel("Annualized")
+ax.set_title(f"Realized volatility over the same {WINDOW_LEN} sessions", fontsize=9)
 
 ax = axes[2]
 ax.plot(index_dates, index_label_series, linewidth=0.6, color=COLORS["neutral"])
@@ -959,7 +959,7 @@ show_with_alt(
     "Three stacked panels over the index history with a dashed vertical line at the end of "
     "the fitted block. The top plots the cumulative index on a log scale with shaded bands "
     "where the label is the volatile cluster; the bands sit on the sharp declines. The middle "
-    "plots rolling realised volatility with the same shading, and the shaded stretches line "
+    "plots rolling realized volatility with the same shading, and the shaded stretches line "
     "up with the peaks. The bottom draws the label as a two-level line, flat for long "
     "stretches and switching in short bursts.",
 )
@@ -1068,7 +1068,7 @@ display(features.tail(3))
 # 1. **The stream lift turns one series into many samples, and sorting is the whole
 #    computation.** The one-dimensional Wasserstein distance between two equal-sized samples
 #    is an average over matched quantiles, and its barycenter is the quantile-wise median or
-#    mean, so k-means needs no optimiser it did not already have.
+#    mean, so k-means needs no optimizer it did not already have.
 # 2. **A method that reads the whole distribution beat one that read four moments of it, and
 #    the reason was the geometry.** A Gaussian mixture on the same four moments came close to
 #    the distributional result while k-means on them did not, which puts most of the gap in

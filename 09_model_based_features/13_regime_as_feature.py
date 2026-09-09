@@ -178,7 +178,7 @@ display(frame[[*BASE_FEATURES, "target"]].tail(3))
 #    several starts, keeping the fit with the highest training likelihood. Nothing from the
 #    test block enters the fit.
 # 2. Its states are renumbered by fitted variance, so state one is the more volatile one in
-#    every fold. Expectation maximisation returns states in an arbitrary order, and a feature
+#    every fold. Expectation maximization returns states in an arbitrary order, and a feature
 #    named for one of them means different things across folds without this step.
 # 3. Filtered probabilities are computed by forward recursion over every session up to the end
 #    of the test block. The recursion at session $t$ conditions on sessions up to $t$, and the
@@ -475,7 +475,7 @@ show_with_alt(
     "with shaded bands where the hard state is the volatile one, and the bands cover the "
     "declines. The middle fills the filtered probability of that state against a dashed line "
     "at one half; it rises and falls smoothly rather than stepping. The bottom scatters the "
-    "prediction error coloured by state, and the volatile points spread further from zero "
+    "prediction error colored by state, and the volatile points spread further from zero "
     "than the calm ones.",
 )
 

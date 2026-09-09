@@ -34,7 +34,7 @@
 #   what the cost of doing so is when each fit takes minutes.
 # - Check that the sampler that produced the posterior actually converged, rather than
 #   assuming it, and know which two numbers say so.
-# - Turn a forecast interval into a feature, and recognise when the interval is telling you
+# - Turn a forecast interval into a feature, and recognize when the interval is telling you
 #   about the data and when it is telling you about the model.
 #
 # **Book reference**
@@ -365,7 +365,7 @@ display(
 #
 # This is a property of the model rather than of the data, and it is worth knowing which
 # models have it. A likelihood with a narrow curved region takes many draws to explore
-# whichever way it is sampled, and the standard responses are a non-centred
+# whichever way it is sampled, and the standard responses are a non-centered
 # parameterization of the latent path, far longer chains, or a sampler built for
 # state-space models rather than a general-purpose one.
 
@@ -652,7 +652,7 @@ display(
 # That is the useful negative result of this half of the notebook, and it separates the two
 # sources cleanly. The sampler's posterior width above changes because the data changes what
 # is knowable; a fixed-order ARIMA's interval width changes almost entirely with the level
-# it is centred on.
+# it is centered on.
 
 # %% [markdown]
 # ## The features this notebook produces
@@ -692,7 +692,7 @@ display(
 #    back-transform nothing is.** Keep the uncertainty on the scale it was estimated on and
 #    exponentiate only the endpoints, which is exact.
 # 5. **Check whether the uncertainty feature moves.** A fixed-order model's interval width
-#    tracks the level it is centred on, which makes it a volatility feature with a
+#    tracks the level it is centered on, which makes it a volatility feature with a
 #    misleading name; the coverage check and the spread of the ratio are what reveal that.
 #
 # **Known limitations.** Four refits over one year is too few to say anything about how the
