@@ -46,7 +46,7 @@ subset requires a non-default profile such as `py312`, `benchmark`, or `rapids`.
 | Docker-Only Notebooks | Reason | Image |
 |----------------------|--------|-------|
 | Ch05 `03_sigcwgan_signatures` | signatory (no Python 3.14 wheel) | py312 |
-| Ch09 `06_path_signatures`, `12_wasserstein_regimes` | signatory, esig (no Python 3.14 wheel) | py312 |
+| Ch09 `06_path_signatures` | signatory, esig (no Python 3.14 wheel) | py312 |
 | Ch10 `01_word2vec`, `02_asset_embeddings`, `03_sentiment_evolution` | gensim (no Python 3.14 wheel) | py312 |
 | Ch12 `10_shap_nlp_sentiment` | torch CUDA bug on 3.14 + shap | py312 |
 | Ch14 `06_conditional_autoencoder` | torch CUDA bug on 3.14 + shap | py312 |

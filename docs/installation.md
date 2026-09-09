@@ -512,7 +512,7 @@ A small number of notebooks require Python 3.12 libraries not available on Pytho
 | Notebook | Library | Chapter |
 |----------|---------|---------|
 | `01_timegan`, `03_sigcwgan_signatures`, `07_dp_gan` | signatory, torch CUDA bug on 3.14 | Ch05 |
-| `06_path_signatures`, `12_wasserstein_regimes` | signatory, esig | Ch09 |
+| `06_path_signatures` | signatory, esig | Ch09 |
 | `01_word2vec`, `02_asset_embeddings`, `03_sentiment_evolution` | gensim | Ch10 |
 | `10_shap_nlp_sentiment` | torch CUDA bug + shap | Ch12 |
 | `06_conditional_autoencoder` | torch CUDA bug + shap | Ch14 |

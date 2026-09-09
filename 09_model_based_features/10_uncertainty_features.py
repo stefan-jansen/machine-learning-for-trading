@@ -16,27 +16,45 @@
 # %% [markdown]
 # # Uncertainty Features
 #
+# **Chapter 9 | Section 9.4**
+#
 # **Docker image**: `ml4t`
 #
-# This notebook demonstrates Bayesian and frequentist approaches to extracting
-# **uncertainty features** — posterior distributions and prediction intervals
-# become ML inputs, not just diagnostics.
+# Every model in this chapter has produced an estimate. A model that also produces a
+# statement about how sure it is of that estimate is producing two features, and the second
+# one is often the more useful: a signal the model is confident about and a signal it is
+# guessing at should not be traded the same size, and only the second feature can tell them
+# apart.
 #
-# **Learning Objectives**:
-# - Understand the uncertainty-as-feature principle
-# - Implement a walk-forward stochastic volatility (SV) model with filtered posteriors
-# - Extract `vol_posterior_std`, `vol_ci_width`, `vol_of_vol`, and `vol_persistence`
-# - Compute ARIMA forecast uncertainty on log-volatility with proper back-transform
+# **Learning objectives**
 #
-# **Book Reference**: Chapter 9, Section 9.4 (Uncertainty Features)
+# - Fit a volatility model that returns a distribution over its estimate rather than a
+#   single number, and extract the width of that distribution as a column.
+# - Refit it forward through a sample so that no posterior reads its own future, and say
+#   what the cost of doing so is when each fit takes minutes.
+# - Check that the sampler that produced the posterior actually converged, rather than
+#   assuming it, and know which two numbers say so.
+# - Turn a forecast interval into a feature, and recognize when the interval is telling you
+#   about the data and when it is telling you about the model.
 #
-# **Prerequisites**: `08_garch_volatility` for frequentist volatility modeling
-# (GARCH provides point estimates; this notebook adds uncertainty quantification).
-# `09_har_rough_volatility` for realized volatility estimators.
+# **Book reference**
+#
+# Chapter 9, Section 9.4 (Uncertainty features).
+#
+# **Prerequisites**
+#
+# `08_garch_volatility` for a point-estimate volatility model and for the filter-forward
+# construction this notebook's cost forces it to approximate. `09_har_rough_volatility` for
+# the Garman-Klass estimator used as the target here.
+
+# %% [markdown]
+# ## Setup
 
 # %%
-"""Uncertainty Features — walk-forward SV posteriors and ARIMA forecast intervals."""
+"""Uncertainty features - posterior widths and forecast intervals as columns."""
 
+import logging
+import warnings
 from datetime import datetime
 
 import arviz as az
@@ -48,611 +66,643 @@ import pymc as pm
 from IPython.display import display
 from ml4t.diagnostic.evaluation.autocorrelation import analyze_autocorrelation
 from ml4t.diagnostic.evaluation.stationarity import analyze_stationarity
+from ml4t.diagnostic.logging import LogLevel, configure_logging
 from ml4t.engineer.features.volatility import garman_klass_volatility
 from statsforecast import StatsForecast
-from statsforecast.models import AutoARIMA
+from statsforecast.models import ARIMA, AutoARIMA
+from statsmodels.tools.sm_exceptions import InterpolationWarning
 
 from data import load_etfs
-from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, FIGSIZE, show_with_alt
+
+# A KPSS p-value is read off a published table and saturates at its ends; the returned
+# p-value already reports that, and the section below reads it.
+warnings.filterwarnings(
+    "ignore",
+    message="The test statistic is outside of the range of p-values",
+    category=InterpolationWarning,
+)
+configure_logging(LogLevel.WARNING)  # the diagnostic library logs each test at INFO
+# The line search is a step of the optimizer, not a statement about the posterior, and it
+# reports non-convergence thousands of times per fit. Both messages are named, so overflow,
+# divide-by-zero and invalid-value stay visible.
+warnings.filterwarnings(
+    "ignore", message="The line search algorithm did not converge", category=RuntimeWarning
+)
+warnings.filterwarnings(
+    "ignore",
+    message="Rounding errors prevent the line search from converging",
+    category=RuntimeWarning,
+)
+# PyTensor announces at import whether it found a BLAS library. That is a fact about the
+# machine, it repeats on every run, and it says nothing about the model.
+warnings.filterwarnings("ignore", message="PyTensor could not link to a BLAS", category=UserWarning)
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
+START_DATE = "2015-01-01"
+END_DATE = "2024-12-31"
 N_DRAWS = 1000
 N_TUNE = 2000
 N_CHAINS = 2
-REFIT_INTERVAL = 63  # Quarterly (~252/4 trading days)
+REFIT_INTERVAL = 63  # sessions between refits: about one quarter
+TRAIN_DAYS = 252  # sessions each fit reads: about one year
 ARIMA_WINDOW = 252
-TRAIN_DAYS = 252
 SEED = 42
 
 # %%
 set_global_seeds(SEED)
 
 # %% [markdown]
-# ## Load Data
+# ## The data
+#
+# SPY daily bars, with returns in percent and a Garman-Klass volatility as the target for
+# the forecasting half. `09_har_rough_volatility` is where that estimator is compared
+# against the alternatives; it is used here because it reads the whole daily bar rather
+# than only the close.
 
 # %%
-etfs = load_etfs(symbols=["SPY"])
-sp500 = etfs.select(["timestamp", "open", "high", "low", "close"]).sort("timestamp")
+SESSIONS_PER_YEAR = 252
+VOLATILITY_WINDOW = 21
 
-start_date = datetime(2015, 1, 1)
-end_date = datetime(2024, 12, 31)
+spy = (
+    load_etfs(symbols=["SPY"])
+    .select(["timestamp", "open", "high", "low", "close"])
+    .filter(pl.col("timestamp") >= datetime.strptime(START_DATE, "%Y-%m-%d").date())
+    .filter(pl.col("timestamp") <= datetime.strptime(END_DATE, "%Y-%m-%d").date())
+    .sort("timestamp")
+    .with_columns(
+        returns=pl.col("close").pct_change() * 100,
+        volatility=garman_klass_volatility(
+            "open", "high", "low", "close", period=VOLATILITY_WINDOW
+        ),
+    )
+    .drop_nulls()
+)
 
-sp500 = sp500.filter((pl.col("timestamp") >= start_date) & (pl.col("timestamp") <= end_date))
+frame = spy.to_pandas().set_index("timestamp")
+returns = frame["returns"]
+realized_volatility = frame["volatility"]
 
-sp500 = sp500.with_columns(
-    returns=pl.col("close").pct_change() * 100,
-).drop_nulls()
-
-returns = sp500.to_pandas().set_index("timestamp")["returns"]
-
-print(f"Returns: {len(returns)} observations")
-print(f"Date range: {returns.index.min()} to {returns.index.max()}")
-print(f"Sample mean: {returns.mean():.4f}%, Sample std: {returns.std():.4f}%")
+print(f"SPY: {len(frame):,} sessions, {frame.index.min().date()} to {frame.index.max().date()}")
+print(f"Daily return: mean {returns.mean():.4f} percent, standard deviation {returns.std():.4f}")
+print(
+    f"Garman-Klass volatility over {VOLATILITY_WINDOW} sessions: mean {realized_volatility.mean():.4f}"
+)
 
 # %% [markdown]
-# ## Garman-Klass Realized Volatility
+# ## What an uncertainty feature is
 #
-# ARIMA forecast uncertainty requires a volatility target series. We use the
-# Garman-Klass estimator (Garman and Klass, 1980) rather than close-to-close
-# rolling standard deviation. GK incorporates open, high, low, and close prices,
-# producing a more efficient estimator — see `09_har_rough_volatility` for the
-# full comparison of range-based estimators.
+# Take any statistic a model produces. Estimated by maximum likelihood it is one number;
+# estimated by sampling from a posterior it is a distribution, and the width of that
+# distribution is a second quantity that varies over time for reasons the point estimate
+# does not. A Sharpe ratio computed from a hundred sessions and one computed from a
+# thousand can be the same number and mean entirely different things.
+#
+# The example below is the smallest version of that: the Sharpe ratio of this sample as a
+# single number, with nothing attached saying how far it could be from the truth. Chapter
+# 17 develops the Bayesian version in full. This notebook applies the same idea to
+# volatility, where the payoff is larger because the quantity being estimated moves.
 
 # %%
-sp500_gk = sp500.with_columns(
-    rv_gk_21=garman_klass_volatility("open", "high", "low", "close", period=21),
-).drop_nulls(subset=["rv_gk_21"])
-
-rv_gk = sp500_gk.select(["timestamp", "rv_gk_21"]).to_pandas().set_index("timestamp")["rv_gk_21"]
-
-print(f"Garman-Klass RV (21-day): {len(rv_gk)} observations")
-print(f"Mean: {rv_gk.mean():.4f}, Std: {rv_gk.std():.4f}")
-
-# %%
-fig, ax = plt.subplots(figsize=(14, 4))
-ax.plot(rv_gk.index, rv_gk.values, linewidth=0.5, alpha=0.8)
-ax.set_title("21-Day Garman-Klass Realized Volatility (SPY)")
-ax.set_ylabel("Annualized Volatility")
-ax.set_xlabel("Date")
-plt.tight_layout()
-plt.show()
+sharpe = returns.mean() / returns.std() * np.sqrt(SESSIONS_PER_YEAR)
+print(f"Sharpe ratio over the whole sample: {sharpe:.3f}")
+print(f"Sessions it was computed from: {len(returns):,}")
 
 # %% [markdown]
-# ## The Uncertainty-as-Feature Principle
+# ## A volatility model that returns a distribution
 #
-# Any point estimate becomes a distributional feature under Bayesian inference.
-# A brief example: the Sharpe ratio. The frequentist estimate is a single number;
-# the Bayesian posterior reveals how uncertain that number is. The same principle
-# applies to volatility, hedge ratios, and any model parameter — the posterior
-# width is itself a feature. Chapter 17 develops Bayesian Sharpe estimation fully;
-# here we apply the principle to volatility and forecasts.
-
-# %%
-freq_sharpe = (returns.mean() / returns.std()) * np.sqrt(252)
-print(f"Frequentist Sharpe (annualized): {freq_sharpe:.3f}")
-print("A single number with no uncertainty quantification.")
-print("The Bayesian version (Chapter 17) produces a full posterior distribution,")
-print("yielding credible intervals and probability statements like P(SR > 0).")
-
-# %% [markdown]
-# ## Stochastic Volatility Model — Walk-Forward
+# The **stochastic volatility** model treats log-volatility as an unobserved series that
+# follows its own autoregression, and the returns as draws whose scale is that hidden
+# series:
 #
-# The canonical SV model specifies an AR(1) process in log-volatility:
+# $$\log \sigma_t = \mu_h + \phi\,(\log \sigma_{t-1} - \mu_h) + \sigma_\eta\,\eta_t$$
 #
-# $$\log(\sigma_t) = \mu_h + \phi \cdot (\log(\sigma_{t-1}) - \mu_h) + \sigma_\eta \cdot \eta_t$$
+# It differs from GARCH in what it treats as unknown. GARCH says the variance is a
+# deterministic function of past returns, so given the parameters there is one variance
+# path and no uncertainty about it. Stochastic volatility says the variance has its own
+# noise, so even with the parameters known the path is uncertain, and fitting it produces
+# a distribution at every session rather than a number.
 #
-# We implement this using `pm.AR` with the centered parameterization:
-# $\tilde{h}_t = \phi \cdot \tilde{h}_{t-1} + \sigma_\eta \cdot \eta_t$
-# where $\tilde{h}_t = h_t - \mu_h$. The observation model uses Student-t
-# rather than Gaussian to handle fat tails in financial returns.
-#
-# ### Walk-Forward Protocol
-#
-# To maintain point-in-time integrity, we refit the SV model at quarterly
-# boundaries on a trailing training window. At each refit, we extract the
-# **filtered final state** — the posterior at the last time step, conditioned
-# only on data up to that point. Between refits, features carry forward the
-# most recent posterior state. This mirrors the GARCH walk-forward in
-# `08_garch_volatility` but with quarterly cadence due to MCMC cost.
-
-# %% [markdown]
-# ### SV Model Specification
-#
-# Define the model as a function for reuse across walk-forward folds.
+# Three parameters carry the model. $\phi$ is how persistent volatility is, $\sigma_\eta$
+# is how much the volatility process itself moves, and the observation distribution is
+# Student-t rather than normal, whose degrees of freedom $\nu$ is estimated: a small $\nu$
+# says the returns have tails a normal cannot produce, and a large one says a normal would
+# have done.
 
 
 # %%
-def fit_sv_model(returns_array, n_draws, n_tune, n_chains):
-    """Fit AR(1) stochastic volatility with Student-t observations.
-
-    Returns the MCMC trace (InferenceData object).
-    """
-    with pm.Model() as sv_model:
+def fit_stochastic_volatility(observations: np.ndarray):
+    """Sample the posterior of an autoregressive stochastic volatility model."""
+    with pm.Model():
         mu_h = pm.Normal("mu_h", mu=0, sigma=5)
         phi = pm.Uniform("phi", lower=0, upper=1)
         sigma_eta = pm.Exponential("sigma_eta", lam=2)
-        nu = pm.Deterministic("nu", pm.Gamma("nu_minus2", alpha=2, beta=0.1) + 2)
+        nu = pm.Deterministic("nu", pm.Gamma("nu_minus_two", alpha=2, beta=0.1) + 2)
 
-        h_centered = pm.AR(
-            "h_centered",
+        centered = pm.AR(
+            "centered",
             rho=[phi],
             sigma=sigma_eta,
             init_dist=pm.Normal.dist(0, 1),
-            shape=len(returns_array),
+            shape=len(observations),
         )
-        h = pm.Deterministic("h", h_centered + mu_h)
-        volatility = pm.Deterministic("volatility", pm.math.exp(h / 2))
+        volatility = pm.Deterministic("volatility", pm.math.exp((centered + mu_h) / 2))
+        pm.StudentT("observed_returns", nu=nu, mu=0, sigma=volatility, observed=observations)
 
-        pm.StudentT("obs", nu=nu, mu=0, sigma=volatility, observed=returns_array)
-
-    with sv_model:
-        trace = pm.sample(
-            n_draws,
-            tune=n_tune,
-            chains=n_chains,
+        return pm.sample(
+            N_DRAWS,
+            tune=N_TUNE,
+            chains=N_CHAINS,
             cores=1,
             progressbar=False,
             random_seed=SEED,
             target_accept=0.99,
         )
-    return trace
 
 
 # %% [markdown]
-# ### Walk-Forward Execution
+# ## Refitting forward, and what it costs
 #
-# Refit every `REFIT_INTERVAL` trading days (~quarterly). Each refit trains
-# on the preceding `TRAIN_DAYS` observations. Between refits, we carry forward
-# the filtered posterior from the training window's final state.
+# Each fit takes minutes, which decides the shape of everything below. The model is refit
+# quarterly on the preceding year of returns, and from each fit two kinds of feature come
+# out.
+#
+# The **parameters** are one number per fit by construction: how persistent volatility is
+# and how much the volatility process moves are properties of a window, not of a session,
+# so a column holding them is genuinely constant between refits and nothing is lost.
+#
+# The **level** is not. What is extracted here is the posterior at the last session of the
+# training window, which is a filtered quantity conditioned only on data up to that point
+# and therefore causal. Carried forward for a quarter it stops being a volatility estimate:
+# by the end of the quarter it describes a session three months old. Use it as written for
+# the parameter columns and read `08_garch_volatility` for the level, where a cheap
+# recursion filters forward between refits at no cost. Making the same thing work here
+# needs a particle filter, which is the standard answer and is outside this notebook.
 
 # %%
 forecast_start = len(returns) - TRAIN_DAYS
 refit_points = list(range(forecast_start, len(returns), REFIT_INTERVAL))
-n_refits = len(refit_points)
 
-print(f"Walk-forward: {n_refits} refits, interval={REFIT_INTERVAL} days")
-print(f"Training window: {TRAIN_DAYS} days, forecast horizon: {len(returns) - forecast_start} days")
-
-sv_features_list = []
-last_trace = None
+print(f"Refits: {len(refit_points)}, one every {REFIT_INTERVAL} sessions")
+print(f"Each reads the preceding {TRAIN_DAYS} sessions")
+print(f"Sessions covered: {len(returns) - forecast_start}")
 
 # %%
-for refit_idx, t in enumerate(refit_points):
-    train_start = max(0, t - TRAIN_DAYS)
-    train_data = returns.iloc[train_start:t].values
+posterior_rows = []
+traces = []
 
-    carry_end = min(t + REFIT_INTERVAL, len(returns))
-    carry_dates = returns.index[t:carry_end]
+for index, cut in enumerate(refit_points, start=1):
+    training = returns.iloc[max(0, cut - TRAIN_DAYS) : cut].to_numpy()
+    trace = fit_stochastic_volatility(training)
+    traces.append(trace)
 
-    print(
-        f"  Refit {refit_idx + 1}/{n_refits}: train [{train_start}:{t}] ({len(train_data)} obs), "
-        f"carry [{t}:{carry_end}] ({len(carry_dates)} days)"
-    )
-
-    trace = fit_sv_model(train_data, N_DRAWS, N_TUNE, N_CHAINS)
-    last_trace = trace
-
-    # Extract FILTERED final state — posterior at the last training time step
-    vol_final = trace.posterior["volatility"].values[:, :, -1].flatten()
-    phi_post = trace.posterior["phi"].values.flatten()
-    sigma_eta_post = trace.posterior["sigma_eta"].values.flatten()
-    nu_post = trace.posterior["nu"].values.flatten()
-
+    final_volatility = trace.posterior["volatility"].values[:, :, -1].flatten()
     features = {
-        "vol_posterior_mean": vol_final.mean(),
-        "vol_posterior_std": vol_final.std(),
-        "vol_ci_width": np.percentile(vol_final, 97.5) - np.percentile(vol_final, 2.5),
-        "vol_of_vol": sigma_eta_post.mean(),
-        "vol_persistence": phi_post.mean(),
+        "posterior_mean": float(final_volatility.mean()),
+        "posterior_std": float(final_volatility.std()),
+        "interval_width": float(np.diff(np.percentile(final_volatility, [2.5, 97.5]))[0]),
+        "vol_of_vol": float(trace.posterior["sigma_eta"].values.mean()),
+        "persistence": float(trace.posterior["phi"].values.mean()),
+        "tail_parameter": float(trace.posterior["nu"].values.mean()),
+        "divergences": int(trace.sample_stats["diverging"].values.sum()),
     }
+    for stamp in returns.index[cut : min(cut + REFIT_INTERVAL, len(returns))]:
+        posterior_rows.append({"timestamp": stamp, "refit": index, **features})
 
-    # Carry forward to each day until next refit
-    for dt in carry_dates:
-        row = {"timestamp": dt, **features}
-        sv_features_list.append(row)
+posteriors = pd.DataFrame(posterior_rows).set_index("timestamp")
+per_refit = posteriors.groupby("refit").first()
+display(per_refit)
 
-    # Per-refit diagnostics
-    n_div = int(trace.sample_stats["diverging"].values.sum())
-    print(
-        f"    phi={phi_post.mean():.3f}, sigma_eta={sigma_eta_post.mean():.3f}, "
-        f"nu={nu_post.mean():.1f}, divergences={n_div}"
+# %% [markdown]
+# ## Did the sampler converge
+#
+# A posterior is only worth reading if the sampler explored it, and three numbers say
+# whether it did. **Divergences** are steps the sampler could not take and are counted
+# above; any at all are a warning. $\hat{R}$ compares the variance between chains against
+# the variance within them and should be at or very near one. The **effective sample size**
+# is how many independent draws the correlated ones are worth, and a few hundred is the
+# usual floor for a stable posterior mean.
+#
+# This model is a hard one for the sampler, and the reason is structural rather than a
+# matter of tuning: the persistence, the volatility of volatility and the hidden path are
+# not separately identified by the data, so the posterior has a narrow curved region the
+# sampler has to follow. Expect the two parameters to have lower effective sample sizes
+# than the ones the returns pin down directly.
+
+# %%
+R_HAT_CEILING = 1.01
+EFFECTIVE_SAMPLE_FLOOR = 200
+DIAGNOSTIC_PARAMETERS = ["phi", "sigma_eta", "mu_h", "nu"]
+
+diagnostics = (
+    pd.concat(
+        az.summary(trace, var_names=DIAGNOSTIC_PARAMETERS)[
+            ["mean", "sd", "r_hat", "ess_bulk", "mcse_mean"]
+        ]
+        .rename_axis("parameter")
+        .assign(refit=index)
+        for index, trace in enumerate(traces, start=1)
     )
-
-sv_features_df = pd.DataFrame(sv_features_list).set_index("timestamp")
-print(f"\nSV features: {len(sv_features_df)} daily observations ({n_refits} refit points)")
-
-# %% [markdown]
-# ### MCMC Diagnostics
-#
-# Beyond divergence counts, we check $\hat{R}$ (convergence across chains) and
-# effective sample size (ESS). $\hat{R} > 1.05$ or ESS below 100 indicate the
-# sampler has not explored the posterior adequately.
-#
-# SV models are notoriously difficult for NUTS because the latent AR(1) path
-# creates a funnel geometry between $\phi$, $\sigma_\eta$, and the 252 latent
-# states. Expect lower ESS for these parameters than for $\mu_h$ and $\nu$,
-# which are better identified. This is a genuine operational consideration:
-# production SV implementations often use particle MCMC or sequential Monte
-# Carlo rather than NUTS to handle this geometry.
-
-# %%
-# Diagnostics from the last refit
-diag_vars = ["phi", "sigma_eta", "mu_h", "nu"]
-summary = az.summary(last_trace, var_names=diag_vars)
-display(summary)
-
-n_divergences = int(last_trace.sample_stats["diverging"].values.sum())
-print(f"\nDivergences: {n_divergences}")
-
-# %% [markdown]
-# ### Walk-Forward SV Features
-#
-# The plot shows piecewise-constant features that update at each quarterly
-# refit. This honestly reflects the production protocol: features carry the
-# last filtered state forward between re-estimations.
-
-# %%
-fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
-
-ax = axes[0]
-wf_dates = sv_features_df.index
-ax.plot(
-    returns.loc[wf_dates].index,
-    returns.loc[wf_dates].values,
-    linewidth=0.4,
-    alpha=0.6,
-    label="Returns",
+    .set_index("refit", append=True)
+    .reorder_levels(["refit", "parameter"])
+    .sort_index()
 )
-ax.fill_between(
-    wf_dates,
-    -2 * sv_features_df["vol_posterior_mean"],
-    2 * sv_features_df["vol_posterior_mean"],
-    alpha=0.15,
-    color=COLORS["negative"],
-    label="±2σ (filtered)",
-)
-ax.set_title("Returns with Walk-Forward Volatility Bands")
-ax.set_ylabel("Return (%)")
-ax.legend()
+display(diagnostics)
 
-ax = axes[1]
-ax.plot(
-    wf_dates,
-    sv_features_df["vol_posterior_mean"],
-    linewidth=1.5,
-    label="Posterior mean (filtered)",
-    drawstyle="steps-post",
-)
-ax.fill_between(
-    wf_dates,
-    sv_features_df["vol_posterior_mean"] - sv_features_df["vol_ci_width"] / 2,
-    sv_features_df["vol_posterior_mean"] + sv_features_df["vol_ci_width"] / 2,
-    alpha=0.3,
-    label="95% CI width",
-)
-for rp in refit_points:
-    if rp < len(returns):
-        ax.axvline(returns.index[rp], color="gray", linestyle=":", linewidth=0.5)
-ax.set_title("Filtered Posterior Volatility (Step-Function at Refit Points)")
-ax.set_ylabel("Volatility (%)")
-ax.set_xlabel("Date")
-ax.legend()
-
-plt.tight_layout()
-plt.show()
-
-# %% [markdown]
-# **Interpretation**: The step-function updates show how SV features evolve at
-# quarterly refits. Between refits, features are constant — reflecting the
-# production reality that MCMC is too expensive to run daily. The CI width
-# varies across refits, widening during uncertain periods.
-
-# %% [markdown]
-# ### Parameter Posteriors (Last Refit)
-
-# %%
-phi_samples = last_trace.posterior["phi"].values.flatten()
-sigma_eta_samples = last_trace.posterior["sigma_eta"].values.flatten()
-mu_h_samples = last_trace.posterior["mu_h"].values.flatten()
-nu_samples = last_trace.posterior["nu"].values.flatten()
-
-print("=== SV Parameter Posteriors (Last Refit) ===")
-print(f"phi (persistence):     mean={phi_samples.mean():.3f}, std={phi_samples.std():.3f}")
+print(f"Parameter fits in total: {len(diagnostics)}")
+print(f"Above the r_hat ceiling: {(diagnostics['r_hat'] > R_HAT_CEILING).sum()}")
 print(
-    f"sigma_eta (vol-of-vol): mean={sigma_eta_samples.mean():.3f}, std={sigma_eta_samples.std():.3f}"
+    f"Below the effective sample floor: {(diagnostics['ess_bulk'] < EFFECTIVE_SAMPLE_FLOOR).sum()}"
 )
-print(f"mu_h (mean log-vol):   mean={mu_h_samples.mean():.3f}, std={mu_h_samples.std():.3f}")
-print(f"nu (Student-t df):     mean={nu_samples.mean():.1f}, std={nu_samples.std():.1f}")
-
-fig, axes = plt.subplots(1, 4, figsize=(16, 4))
-
-for ax, samples, label, title in zip(
-    axes,
-    [phi_samples, sigma_eta_samples, mu_h_samples, nu_samples],
-    ["φ (persistence)", "σ_η (vol-of-vol)", "μ_h (mean log-vol)", "ν (Student-t df)"],
-    ["Volatility Persistence", "Volatility of Volatility", "Mean Log-Volatility", "Tail Thickness"],
-    strict=False,
-):
-    ax.hist(samples, bins=30, density=True, alpha=0.7, edgecolor="white")
-    ax.axvline(
-        samples.mean(),
-        color=COLORS["negative"],
-        linestyle="--",
-        label=f"Mean: {samples.mean():.2f}",
-    )
-    ax.set_xlabel(label)
-    ax.set_title(title)
-    ax.legend(fontsize=8)
-
-plt.tight_layout()
-plt.show()
+print(f"Divergences in the worst refit: {posteriors['divergences'].max()}")
 
 # %% [markdown]
-# **Interpretation**: The $\phi$ posterior captures volatility persistence — values
-# near 1 mean shocks decay slowly (clustering), lower values indicate faster
-# mean-reversion. The $\nu$ posterior indicates tail thickness: values near 4–6
-# confirm that Student-t is substantially better than Gaussian ($\nu \to \infty$);
-# values above 30 suggest Gaussian is adequate. Both $\sigma_\eta$ (vol-of-vol)
-# and $\phi$ are re-estimated quarterly and serve as slowly varying features.
-
-# %% [markdown]
-# ### Scalability
+# ## Whether the sampler noise is large enough to matter
 #
-# Full MCMC-based SV is practical for small universes (tens of assets). For
-# large panels (1000+ assets), pragmatic alternatives include:
-# - **Sector aggregates**: Run SV on sector ETFs, broadcast uncertainty features
-# - **Variational inference**: `pm.fit()` gives faster but less accurate posteriors
-# - **GARCH baseline with SV overlay**: Reserve SV for portfolio-level risk
+# Two of these parameters are features, so a failed diagnostic is not an academic point
+# about the fit; it decides whether the column carries anything. Two quantities bound the
+# question. The **Monte Carlo standard error** is how far one fit's posterior mean could be
+# from the mean the sampler was estimating, purely because it took finitely many draws; it is
+# reported per refit above because it differs between them. The **spread across refits** is
+# how much the feature moves from quarter to quarter, which is the variation a model would
+# read.
 #
-# See the chapter text (§9.4) for universe-size guidance.
-
-# %% [markdown]
-# ## ARIMA Forecast Uncertainty on Log-Volatility
-#
-# ARIMA produces prediction intervals alongside point forecasts. We apply it
-# to **log-volatility** rather than raw volatility for two reasons:
-#
-# 1. Log-transform ensures forecasts stay positive (volatility cannot be negative)
-# 2. ARIMA residuals on log-vol are more Gaussian, improving interval coverage
-#
-# The back-transform uses the log-normal property: $\exp(\mu_f)$ gives the
-# **median** forecast on the original scale (not the mean, which is
-# $\exp(\mu_f + \sigma_f^2/2)$). The prediction interval is
-# $[\exp(\mu_f - z \cdot \sigma_f),\; \exp(\mu_f + z \cdot \sigma_f)]$.
-# Both the median and the interval are exact, not approximations.
-
-# %% [markdown]
-# ### Pre-ARIMA Diagnostics
-#
-# Before fitting, examine stationarity and autocorrelation structure. ADF and
-# Phillips-Perron reject a unit root while KPSS disagrees (consensus: likely
-# stationary, 0.67 agreement), so the differencing order is genuinely ambiguous.
-# We let AutoARIMA's AIC search settle it below — it selects a first difference.
+# Putting the largest error next to that spread says whether sampling error is large enough
+# to matter. It does not divide the spread into signal and noise: each fit's error is a
+# separate quantity, and a fit whose diagnostics failed makes its own error estimate
+# unreliable.
 
 # %%
-log_rv = np.log(rv_gk.clip(lower=1e-8))
+FEATURE_PARAMETERS = {"phi": "persistence", "sigma_eta": "vol_of_vol"}
 
-stat_check = analyze_stationarity(log_rv.dropna().values)
-acf_analysis = analyze_autocorrelation(log_rv.dropna().values)
 
-print("=== Pre-ARIMA Diagnostics (log Garman-Klass RV) ===")
-print(f"Stationarity: {stat_check.consensus} (agreement: {stat_check.agreement_score:.2f})")
-print(f"Suggested ARIMA order: {acf_analysis.suggested_arima_order}")
-
-# %% [markdown]
-# ### Order Selection and Rolling Forecast via Nixtla
-#
-# We use Nixtla's `AutoARIMA` (compiled C, AIC-based order selection) on the
-# first training window to choose (p, d, q), then roll forward with that fixed
-# order using Nixtla's `ARIMA` for speed. The model operates on
-# $\log(\text{RV}_{GK})$; we back-transform to the original scale afterward.
-#
-# $\exp(\hat{\mu}_f)$ gives the **median** forecast on the original scale
-# (not the mean $\exp(\hat{\mu}_f + \hat{\sigma}_f^2/2)$), which is more
-# robust for position sizing.
-
-# %%
-from statsforecast.models import ARIMA as NixtlaARIMA
-
-log_rv_clean = log_rv.dropna()
-
-# Step 1: AutoARIMA order selection on first training window
-first_window_df = pd.DataFrame(
-    {
-        "unique_id": "SPY",
-        "ds": log_rv_clean.index[:ARIMA_WINDOW],
-        "y": log_rv_clean.values[:ARIMA_WINDOW],
+def sampling_error_row(name: str, column: str) -> dict:
+    """The Monte Carlo error of the noisiest fit against the spread across all of them."""
+    errors = diagnostics.xs(name, level="parameter")["mcse_mean"]
+    spread = per_refit[column].std()
+    return {
+        "parameter": column,
+        "smallest Monte Carlo error across refits": errors.min(),
+        "largest Monte Carlo error across refits": errors.max(),
+        "spread across refits": spread,
+        "ratio of the largest error to the spread": errors.max() / spread,
     }
+
+
+display(
+    pd.DataFrame([sampling_error_row(name, column) for name, column in FEATURE_PARAMETERS.items()])
 )
 
-sf_auto = StatsForecast(models=[AutoARIMA(season_length=1)], freq="B", n_jobs=1)
-sf_auto.fit(first_window_df)
-selected_order = sf_auto.fitted_[0, 0].model_["arma"]
-p, q, P, Q, s, d, D = selected_order
-print(f"AutoARIMA selected: ARIMA({p},{d},{q})")
+# %% [markdown]
+# Read the last column before using either parameter as a feature. A ratio that is a
+# meaningful fraction of one says the sampler alone could move the column by an amount
+# comparable to what it moves between quarters, which is enough to make the
+# quarter-to-quarter path unreliable at that resolution. It does not say what share of the
+# path is sampling error; establishing that means rerunning the fits with more draws and
+# watching whether the spread stays where it was. The draws needed scale with the square of
+# how much further the error has to fall.
+#
+# This is a property of the model rather than of the data, and it is worth knowing which
+# models have it. A likelihood with a narrow curved region takes many draws to explore
+# whichever way it is sampled, and the standard responses are a non-centered
+# parameterization of the latent path, far longer chains, or a sampler built for
+# state-space models rather than a general-purpose one.
 
 # %%
-# Step 2: Rolling forecast with fixed order (fast)
-n_total = len(log_rv_clean)
-n_windows = n_total - ARIMA_WINDOW
+fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True)
 
-arima_input = pd.DataFrame(
-    {
-        "unique_id": "SPY",
-        "ds": log_rv_clean.index,
-        "y": log_rv_clean.values,
-    }
-)
-
-sf = StatsForecast(
-    models=[NixtlaARIMA(order=(p, d, q), season_length=1)],
-    freq="B",
-    n_jobs=1,
-)
-cv_result = sf.cross_validation(
-    df=arima_input,
-    h=1,
-    step_size=1,
-    n_windows=n_windows,
-    level=[95],
-)
-
-# Back-transform from log scale to original scale
-col = "ARIMA"
-arima_df = pd.DataFrame(
-    {
-        "timestamp": cv_result["ds"].values,
-        "arima_forecast": np.exp(cv_result[col].values),
-        "arima_lo_95": np.exp(cv_result[f"{col}-lo-95"].values),
-        "arima_hi_95": np.exp(cv_result[f"{col}-hi-95"].values),
-        "actual": np.exp(cv_result["y"].values),
-    }
-)
-arima_df["arima_ci_width"] = arima_df["arima_hi_95"] - arima_df["arima_lo_95"]
-arima_df["forecast_uncertainty_ratio"] = arima_df["arima_ci_width"] / arima_df["arima_forecast"]
-
-# Forecast std from the CI width on original scale (robust to negative log-CIs)
-arima_df["arima_forecast_std"] = arima_df["arima_ci_width"] / (2 * 1.96)
-
-arima_df = arima_df.set_index("timestamp")
-
-print(f"ARIMA({p},{d},{q}) forecast features: {len(arima_df)} observations")
-
-# %%
-fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
-
+covered = posteriors.index
 ax = axes[0]
 ax.plot(
-    arima_df.index,
-    arima_df["arima_forecast"],
-    linewidth=0.8,
-    label=f"ARIMA({p},{d},{q}) forecast (median)",
-)
-ax.plot(
-    arima_df.index,
-    arima_df["actual"],
-    linewidth=0.5,
-    alpha=0.6,
-    color=COLORS["amber"],
-    label="Actual GK RV",
+    covered, returns.loc[covered], linewidth=0.5, alpha=0.7, color=COLORS["neutral"], label="Return"
 )
 ax.fill_between(
-    arima_df.index,
-    arima_df["arima_lo_95"],
-    arima_df["arima_hi_95"],
+    covered,
+    -2 * posteriors["posterior_mean"],
+    2 * posteriors["posterior_mean"],
     alpha=0.2,
-    label="95% PI (log-normal)",
+    color=COLORS["blue"],
+    label="Twice the carried-forward posterior mean scale",
 )
-ax.set_title(f"ARIMA({p},{d},{q}) Forecast on Garman-Klass RV (Log-Normal Back-Transform)")
-ax.set_ylabel("Annualized Volatility")
-ax.legend()
+ax.set_ylabel("Percent")
+ax.set_title("Returns against twice the scale the model carries for them")
+ax.legend(fontsize=7)
 
 ax = axes[1]
-ax.plot(arima_df.index, arima_df["arima_forecast_std"], linewidth=0.8, color=COLORS["amber"])
-ax.set_title("Forecast Standard Error (Original Scale, from 95% CI Width)")
-ax.set_ylabel("Std Error (Annualized Vol)")
+ax.plot(
+    covered,
+    posteriors["posterior_mean"],
+    linewidth=1.4,
+    drawstyle="steps-post",
+    color=COLORS["blue"],
+    label="Posterior mean",
+)
+ax.fill_between(
+    covered,
+    posteriors["posterior_mean"] - posteriors["interval_width"] / 2,
+    posteriors["posterior_mean"] + posteriors["interval_width"] / 2,
+    step="post",
+    alpha=0.3,
+    color=COLORS["blue"],
+    label="Credible interval width",
+)
+for cut in refit_points:
+    ax.axvline(returns.index[cut], color=COLORS["recede"], linestyle=":", linewidth=0.6)
+ax.set_ylabel("Percent per session")
+ax.set_xlabel("Session")
+ax.set_title("The level is a step function, and each step is a quarter wide")
+ax.legend(fontsize=7)
+
+fig.suptitle("What a quarterly refit can and cannot give you")
+show_with_alt(
+    fig,
+    "Two stacked panels over the last year of the sample. The top draws daily returns "
+    "against a shaded band at twice the posterior mean of the scale parameter, which steps "
+    "to a new level at each refit and does not follow the returns within a quarter. The "
+    "bottom draws the "
+    "posterior mean as a step function with its credible interval shaded around it and "
+    "dotted vertical lines at the refit dates; the steps differ in level and the interval "
+    "differs in width between them.",
+)
+
+# %% [markdown]
+# The bottom panel is the argument of the section above, drawn. The level steps once a
+# quarter and holds, so within a quarter it says nothing about which sessions were volatile.
+# What does carry information at that cadence is the width of the interval relative to the
+# level, and how the parameters move between fits.
+
+# %%
+posteriors["relative_width"] = posteriors["interval_width"] / posteriors["posterior_mean"]
+display(
+    per_refit.assign(relative_width=per_refit["interval_width"] / per_refit["posterior_mean"])[
+        ["posterior_mean", "interval_width", "relative_width", "persistence", "vol_of_vol"]
+    ]
+)
+
+# %% [markdown]
+# ## The parameter posteriors
+#
+# The four histograms are the model's statement about how well each parameter is pinned
+# down. A narrow posterior is a parameter the data determined; a wide one spanning most of
+# its prior is a parameter the data had little to say about, and reading its mean as an
+# estimate would be reading the prior back.
+
+# %%
+POSTERIOR_LABELS = {
+    "phi": "Persistence of volatility",
+    "sigma_eta": "Volatility of volatility",
+    "mu_h": "Mean log-volatility",
+    "nu": "Student-t degrees of freedom",
+}
+
+fig, axes = plt.subplots(1, len(POSTERIOR_LABELS), figsize=FIGSIZE["dashboard_2x3"])
+
+for ax, (name, label) in zip(axes, POSTERIOR_LABELS.items()):
+    samples = traces[-1].posterior[name].values.flatten()
+    ax.hist(samples, bins=30, density=True, color=COLORS["blue"])
+    ax.axvline(samples.mean(), color=COLORS["negative"], linestyle="--", linewidth=1)
+    ax.set_xlabel(label, fontsize=7)
+    ax.tick_params(labelsize=6)
+axes[0].set_ylabel("Density")
+
+fig.suptitle("How much the data determined each parameter")
+show_with_alt(
+    fig,
+    "Four histograms of the posterior draws from the most recent fit, one per parameter, "
+    "each with a dashed line at its mean. The persistence and the mean log-volatility are "
+    "concentrated; the volatility of volatility is narrower still; the Student-t degrees of "
+    "freedom is broad and skewed to the right, spanning a wide range of values.",
+)
+
+# %% [markdown]
+# The degrees-of-freedom posterior is the one to read carefully. It is bounded below by two
+# and unbounded above, and a large value means the Student-t has become a normal. A broad
+# right tail therefore says the data does not rule out a normal rather than that the tails
+# are thick, and the parameter's mean is a poor summary of a distribution shaped like that.
+
+# %% [markdown]
+# ## Forecast intervals as a feature
+#
+# The second source of uncertainty in this notebook is cheaper and different in kind. An
+# ARIMA forecast comes with a prediction interval, and that interval widens when the model
+# fits the recent past badly. It is available at every session at negligible cost, which is
+# the opposite trade from the sampler above.
+#
+# The model is fitted to the **logarithm** of volatility, for two reasons. A forecast on
+# the log scale exponentiates to something positive, which a volatility has to be. And the
+# residuals of a log-volatility model are much closer to normal than those of a
+# volatility model, which is what the interval's construction assumes.
+#
+# The back-transform is exact rather than approximate, and it is worth being precise about
+# what it gives. If the forecast on the log scale is normal with mean $\mu$ and standard
+# deviation $s$, then on the original scale $e^{\mu}$ is the **median** and
+# $e^{\mu + s^2/2}$ is the mean, and exponentiating the endpoints of the interval on the
+# log scale gives an interval on the original scale with exactly the stated coverage. The interval is asymmetric around the median, wider
+# above than below, which is right for a quantity with a floor at zero and no ceiling.
+
+# %%
+log_volatility = np.log(realized_volatility.clip(lower=1e-8))
+
+stationarity = analyze_stationarity(log_volatility.dropna().to_numpy())
+autocorrelation = analyze_autocorrelation(log_volatility.dropna().to_numpy())
+
+display(stationarity.summary_df)
+print(f"Consensus: {stationarity.consensus}, agreement {stationarity.agreement_score:.2f}")
+print(f"Order suggested from the correlogram: {autocorrelation.suggested_arima_order}")
+
+# %% [markdown]
+# The three tests do not agree, which is the useful outcome here rather than an obstacle.
+# The differencing order is exactly what they disagree about, so rather than picking one
+# test's answer the order is chosen by an information criterion over the first training
+# window and then held fixed, and the selected order is printed below.
+
+# %%
+NIXTLA_FREQUENCY = "B"
+CONFIDENCE = 95
+Z_SCORE = 1.959964
+
+series = pd.DataFrame(
+    {
+        "unique_id": "SPY",
+        "ds": log_volatility.dropna().index,
+        "y": log_volatility.dropna().to_numpy(),
+    }
+)
+
+selector = StatsForecast(models=[AutoARIMA(season_length=1)], freq=NIXTLA_FREQUENCY, n_jobs=1)
+selector.fit(series.head(ARIMA_WINDOW))
+p, q, _seasonal_p, _seasonal_q, _season, d, _seasonal_d = selector.fitted_[0, 0].model_["arma"]
+print(f"Order selected on the first {ARIMA_WINDOW} sessions: ARIMA({p}, {d}, {q})")
+
+# %%
+rolling = StatsForecast(
+    models=[ARIMA(order=(p, d, q), season_length=1)], freq=NIXTLA_FREQUENCY, n_jobs=1
+).cross_validation(
+    df=series, h=1, step_size=1, n_windows=len(series) - ARIMA_WINDOW, level=[CONFIDENCE]
+)
+
+forecasts = pd.DataFrame(
+    {
+        "timestamp": rolling["ds"].to_numpy(),
+        # On the log scale the interval is symmetric, so half its width over the z-score is
+        # the forecast standard deviation. That quantity does not survive the back-transform.
+        "log_forecast_std": (
+            rolling[f"ARIMA-hi-{CONFIDENCE}"].to_numpy()
+            - rolling[f"ARIMA-lo-{CONFIDENCE}"].to_numpy()
+        )
+        / (2 * Z_SCORE),
+        "median_forecast": np.exp(rolling["ARIMA"].to_numpy()),
+        "lower": np.exp(rolling[f"ARIMA-lo-{CONFIDENCE}"].to_numpy()),
+        "upper": np.exp(rolling[f"ARIMA-hi-{CONFIDENCE}"].to_numpy()),
+        "actual": np.exp(rolling["y"].to_numpy()),
+    }
+).set_index("timestamp")
+
+forecasts["interval_ratio"] = forecasts["upper"] / forecasts["lower"]
+forecasts["interval_width"] = forecasts["upper"] - forecasts["lower"]
+
+print(f"One-step forecasts: {len(forecasts):,}")
+print(
+    "Coverage of the stated interval: "
+    f"{((forecasts['actual'] >= forecasts['lower']) & (forecasts['actual'] <= forecasts['upper'])).mean():.1%}"
+    f", against the {CONFIDENCE}% claimed"
+)
+
+# %% [markdown]
+# The coverage line is the check the interval exists to pass, and it is the one number in
+# this section that says whether the uncertainty estimate is any good. An interval that
+# contains the outcome far more often than it claims is too wide and one that contains it
+# less often is too narrow; either way the width is not the quantity it says it is.
+
+# %%
+fig, axes = plt.subplots(3, 1, figsize=FIGSIZE["grid_3x2"], sharex=True)
+
+ax = axes[0]
+ax.fill_between(
+    forecasts.index,
+    forecasts["lower"],
+    forecasts["upper"],
+    alpha=0.25,
+    color=COLORS["blue"],
+    label=f"{CONFIDENCE} percent interval",
+)
+ax.plot(
+    forecasts.index,
+    forecasts["actual"],
+    linewidth=0.5,
+    alpha=0.7,
+    color=COLORS["neutral"],
+    label="Realized",
+)
+ax.plot(
+    forecasts.index,
+    forecasts["median_forecast"],
+    linewidth=0.8,
+    color=COLORS["blue"],
+    label="Median forecast",
+)
+ax.set_ylabel("Annualized volatility")
+ax.set_title("Forecast and interval, back-transformed from the log scale")
+ax.legend(fontsize=7)
+
+ax = axes[1]
+ax.plot(forecasts.index, forecasts["log_forecast_std"], linewidth=0.8, color=COLORS["amber"])
+ax.set_ylabel("Log points")
+ax.set_title("Forecast standard deviation, on the scale where it is one")
 
 ax = axes[2]
-ax.plot(
-    arima_df.index, arima_df["forecast_uncertainty_ratio"], linewidth=0.8, color=COLORS["copper"]
+ax.plot(forecasts.index, forecasts["interval_ratio"], linewidth=0.8, color=COLORS["copper"])
+ax.set_ylabel("Upper over lower")
+ax.set_xlabel("Session")
+ax.set_title("The interval as a multiple, which is what a log-normal interval is")
+
+fig.suptitle("Uncertainty that moves, and uncertainty that does not")
+show_with_alt(
+    fig,
+    "Three stacked panels sharing a time axis. The top draws the realized volatility and "
+    "the median forecast inside a shaded interval that widens where volatility is high. "
+    "The middle draws the forecast standard deviation on the log scale, which drifts down "
+    "across the sample with a small step up at each refit rather than rises "
+    "and falls over the sample. The bottom draws the ratio of the interval's upper end to "
+    "its lower end, which stays within a narrow band throughout.",
 )
-ax.axhline(
-    arima_df["forecast_uncertainty_ratio"].median(),
-    color="red",
-    linestyle="--",
-    linewidth=0.5,
-    label=f"Median: {arima_df['forecast_uncertainty_ratio'].median():.2f}",
-)
-ax.set_title("Forecast Uncertainty Ratio (CI Width / Forecast Level)")
-ax.set_ylabel("Ratio")
-ax.set_xlabel("Date")
-ax.legend()
-
-plt.tight_layout()
-plt.show()
-
-# %% [markdown]
-# **Interpretation**: The forecast standard error spikes during volatile periods
-# (COVID, 2022 rate hikes) — precisely when the model is least confident.
-# The log-normal back-transform produces asymmetric prediction intervals on the
-# original scale: wider on the upside, reflecting that volatility spikes are
-# unbounded while the floor is zero. The order was selected by AutoARIMA on
-# the first window; periodic reselection would guard against structural change.
-
-# %% [markdown]
-# ## Feature Summary
 
 # %%
-print("SV Uncertainty Features (Walk-Forward):")
-display(sv_features_df.describe().round(4))
-
-print("ARIMA Uncertainty Features (AutoARIMA on Log-Vol):")
 display(
-    arima_df[["arima_forecast_std", "arima_ci_width", "forecast_uncertainty_ratio"]]
+    forecasts[["log_forecast_std", "interval_width", "interval_ratio"]]
     .describe()
+    .loc[["mean", "std", "min", "max"]]
     .round(4)
 )
 
 # %% [markdown]
-# ### Production Notes
+# The three columns are not three features. On a log-normal interval the ratio of the
+# endpoints is the exponential of twice the z-score times the forecast standard deviation,
+# a function of that standard deviation and nothing else, so it carries exactly the
+# information the middle panel does and adds none.
+# The width in the original units is that same quantity multiplied by the level, so it is
+# mostly a volatility feature wearing an uncertainty label.
 #
-# The walk-forward protocol implemented above is the correct production pattern:
-# SV features are re-estimated at periodic boundaries and carried forward between
-# refits. ARIMA features update daily with negligible cost (refit on a rolling
-# window and call `get_forecast()`).
+# The describe table says how little room the ratio has: its spread across the whole sample
+# is a small fraction of its mean, because the forecast standard deviation of a fixed-order
+# model barely moves. **The uncertainty of this model is nearly constant.** Its interval
+# widens in volatile periods because the level widens, not because the model becomes less
+# sure, and a feature built from the width would be a volatility feature.
 #
-# For production hardening beyond this notebook:
-# - **Particle filtering** provides online posterior updates without full MCMC
-#   re-estimation — useful for daily SV updates between quarterly refits
-# - AutoARIMA reselects the order at each window automatically; for even
-#   faster rolling forecasts, fix the order after an initial selection pass
+# That is the useful negative result of this half of the notebook, and it separates the two
+# sources cleanly. The sampler's posterior width above changes because the data changes what
+# is knowable; a fixed-order ARIMA's interval width changes almost entirely with the level
+# it is centered on.
 
 # %% [markdown]
-# ## Save Uncertainty Features
-
-# %%
-MODEL_DIR = get_case_study_dir("etfs") / "models" / "time_series"
-MODEL_DIR.mkdir(parents=True, exist_ok=True)
-
-arima_save_cols = [
-    "arima_forecast",
-    "arima_forecast_std",
-    "arima_ci_width",
-    "forecast_uncertainty_ratio",
-]
-arima_output = pl.from_pandas(arima_df[arima_save_cols].reset_index())
-arima_path = MODEL_DIR / "arima_uncertainty.parquet"
-arima_output.write_parquet(arima_path)
-print(f"Saved ARIMA uncertainty features to {arima_path}")
-print(f"  Shape: {arima_output.shape}")
-
-sv_output = pl.from_pandas(sv_features_df.reset_index())
-sv_path = MODEL_DIR / "sv_uncertainty.parquet"
-sv_output.write_parquet(sv_path)
-print(f"Saved SV uncertainty features to {sv_path}")
-print(f"  Shape: {sv_output.shape}")
+# ## The features this notebook produces
+#
+# | Column | What it is | Cadence |
+# |---|---|---|
+# | `persistence`, `vol_of_vol` | posterior means of the two volatility-process parameters | one value per refit, and only where the Monte Carlo error is small beside their spread |
+# | `posterior_std`, `interval_width` | how wide the posterior over the filtered volatility is | one value per refit |
+# | `relative_width` | that width over the level, so it is comparable across refits | one value per refit |
+# | `log_forecast_std` | the forecast standard deviation on the log scale | every session |
+# | `median_forecast` | the back-transformed point forecast | every session |
+#
+# `interval_ratio` and the original-scale `interval_width` are deliberately absent. The
+# first is a function of `log_forecast_std` alone and the second is that function times the
+# level, so a model given either alongside the columns above is given nothing new.
+#
+# The posterior columns are causal: each is the posterior at the last session of a training
+# window that ended before the sessions it is stamped on. The level column is causal in the
+# same sense and stale for the reason the section above gives.
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **Walk-forward SV preserves point-in-time integrity** — the filtered final
-#    state from each training window produces features conditioned only on past
-#    data, unlike full-sample smoothed posteriors
-# 2. **Student-t observation model handles fat tails** — the estimated $\nu$
-#    posterior confirms whether Gaussian is adequate; values near 4–6 show
-#    Student-t materially improves the fit
-# 3. **Vol persistence ($\phi$) and vol-of-vol ($\sigma_\eta$)** are complementary:
-#    $\phi$ near 1 means shocks decay slowly; high $\sigma_\eta$ means the
-#    volatility process itself is unstable
-# 4. **Log-vol ARIMA ensures positive forecasts** — the log-normal back-transform
-#    produces exact, asymmetric prediction intervals on the original scale
-# 5. **MCMC diagnostics go beyond divergences** — $\hat{R}$, ESS, and the $\nu$
-#    posterior all provide information about posterior reliability
-# 6. **Computational cost scales with universe** — full MCMC is practical for
-#    tens of assets; large panels require variational inference or sector aggregates
+# 1. **A posterior width is a second feature, free with the first.** A model fitted by
+#    sampling produces a distribution at every session, and how wide it is says something
+#    the point estimate does not.
+# 2. **Cost decides cadence, and cadence decides which features survive it.** A model that
+#    takes minutes to fit is refitted quarterly, which is fine for parameters that describe
+#    a window and useless for a level that describes a session.
+# 3. **Check that the sampler converged, and then check whether it matters.** Divergences,
+#    the between-chain to within-chain variance ratio, and the effective sample size say
+#    whether the posterior was explored. What decides whether a parameter is usable as a
+#    feature is the next comparison: its Monte Carlo standard error against how much it
+#    moves between refits. This model's geometry makes both numbers bad for exactly the two
+#    parameters that would otherwise be the features.
+# 4. **On a log scale the forecast standard deviation is a standard deviation; after the
+#    back-transform nothing is.** Keep the uncertainty on the scale it was estimated on and
+#    exponentiate only the endpoints, which is exact.
+# 5. **Check whether the uncertainty feature moves.** A fixed-order model's interval width
+#    tracks the level it is centered on, which makes it a volatility feature with a
+#    misleading name; the coverage check and the spread of the ratio are what reveal that.
 #
-# **Previous**: `09_har_rough_volatility` for multi-horizon volatility decomposition.
-# **Next**: `11_hmm_regimes` for regime detection via Hidden Markov Models.
+# **Known limitations.** Four refits over one year is too few to say anything about how the
+# posterior width behaves across regimes. The sampler's effective sample sizes for the
+# persistence and the volatility of volatility are low enough that their posterior means
+# carry real Monte Carlo error, which is stated rather than corrected. The ARIMA order is
+# selected once on the first window and held for the whole sample. And the coverage check
+# is over one symbol with overlapping windows, so it establishes the level of coverage and
+# not its standard error.
+#
+# **Previous**: `09_har_rough_volatility` for the volatility target used here.
+# **Next**: `11_hmm_regimes`, which infers a hidden state rather than a hidden level.

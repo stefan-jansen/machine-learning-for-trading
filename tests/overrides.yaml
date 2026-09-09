@@ -325,7 +325,7 @@
 09_model_based_features/09_har_rough_volatility:
   parameters:
     INTRADAY_SYMBOL: AMD
-    MIN_BARS_PER_DAY: 100
+    MINIMUM_BARS_PER_SESSION: 100
   timeout: 300
 09_model_based_features/10_uncertainty_features:
   parameters:
@@ -337,7 +337,6 @@
 09_model_based_features/11_hmm_regimes:
   timeout: 300
 09_model_based_features/12_wasserstein_regimes:
-  docker_env: py312
   timeout: 300
 09_model_based_features/13_regime_as_feature:
   timeout: 300
