@@ -493,25 +493,31 @@ if embeddings_2d is not None:
 # as a pair trade are held together precisely because they are expected to move apart. The
 # question to bring to the next notebook is which of those two things its embedding measures.
 #
-# ## What static embeddings cannot do
+# ## What static embeddings do not encode
 #
-# Four limits, in the order they cost you something:
+# Four limits, in the order they cost you something. Each is about what the geometry carries,
+# not about what can eventually be built on it.
 #
-# 1. **Opposites share contexts.** Demonstrated above. Anything that must distinguish
-#    direction - sentiment, surprise, upgrade against downgrade - needs a representation
-#    built from something other than co-occurrence alone.
-# 2. **One vector per word, whatever it meant.** `Apple` the company and `apple` the fruit
-#    are averaged into a single point, and so are `charge` the fee and `charge` the
-#    accusation.
+# 1. **Polarity is not a direction in this space.** Demonstrated above: distance measures
+#    interchangeable usage, so `profit` and `loss` are close. A supervised classifier trained
+#    on labeled sentences can still separate them - `03_sentiment_evolution` does exactly
+#    that on averaged vectors - because two vectors that sit close together are still distinct
+#    points. What the labels have to supply is the direction itself, which is why an
+#    unsupervised method that ranks by similarity alone conflates the two.
+# 2. **One vector per word, whatever it meant.** `Apple` the company and `apple` the fruit are
+#    averaged into a single point, and so are `charge` the fee and `charge` the accusation.
+#    Nothing downstream can recover a distinction the representation has already averaged out.
 # 3. **Nothing to say about a word it never saw.** A ticker that listed last month, a term of
-#    art absent from the corpus, and any typo are all out of vocabulary and have no vector at
-#    all, not a poor one.
+#    art absent from the corpus, and any typo are out of vocabulary and have no vector at all,
+#    not a poor one.
 # 4. **No unit above the word.** "Net loss narrowed" is positive and none of its three words
-#    is; there is no operation on the three vectors that recovers that.
+#    is. Averaging or summing the three ignores order and negation, so composition is
+#    something the downstream model has to learn rather than something the vectors provide.
 #
-# Section 10.4's contextual models address the first three by making a word's vector a
-# function of the sentence it appears in, and the fourth by producing a vector for the
-# sentence itself.
+# Section 10.4's contextual models change what is encoded rather than what can be learned on
+# top: a word's vector becomes a function of the sentence it appears in, which addresses the
+# first three, and the model emits a vector for the sentence itself, which addresses the
+# fourth.
 #
 # ## Key takeaways
 #
@@ -529,8 +535,10 @@ if embeddings_2d is not None:
 #    is the OS's decision and the seed no longer determines the result.
 
 # %% [markdown]
-# The trained model and a short summary are written to the chapter's output directory, so
-# `02_asset_embeddings` and `03_sentiment_evolution` can read them rather than retrain.
+# The trained model and a short summary are written to the chapter's output directory. No
+# other notebook reads them - `02_asset_embeddings` trains its own model on portfolios and
+# `03_sentiment_evolution` downloads pretrained vectors - so this is here for a reader who
+# wants to load the vectors and probe them without paying for the training run again.
 
 
 # %%
