@@ -148,7 +148,7 @@ fig.add_trace(
     )
 )
 fig.update_layout(
-    title="The universe fills up and then holds, where the equities panel fell away",
+    title="ETFs with data available at each year-end",
     xaxis_title="Year",
     yaxis_title="ETFs available",
     yaxis_range=[0, 105],
@@ -160,6 +160,13 @@ show_plotly_with_alt(
     "through the first decade as new products launch, reaches the full universe, and then "
     "runs flat to the end of the panel with no decline.",
 )
+
+# %% [markdown]
+# The count climbs while new products list and then runs flat: nothing leaves. That is the
+# opposite of the equities panel in `01_us_equities_eda`, which falls away at the end, and the
+# difference is not a fact about the two markets. ETFs close down too. What differs is how each
+# panel was assembled, and a universe that never loses a member is the signature of a
+# survivorship-filtered one.
 
 # %% [markdown]
 # ## 3. The nine groups
@@ -204,7 +211,7 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title="The groups are uneven, and every symbol belongs to exactly one",
+    title="ETFs per group",
     xaxis_title="ETFs",
     yaxis=dict(autorange="reversed"),
     height=420,
@@ -215,6 +222,12 @@ show_plotly_with_alt(
     "smallest, with the count written at the end of each bar. The largest group holds "
     "several times what the smallest does.",
 )
+
+# %% [markdown]
+# The groups are uneven - the largest holds several times what the smallest does - and the
+# counts sum to the universe total, so no symbol is dropped or counted twice. That matters for
+# anything that aggregates by group later: an equal-weighted average across groups is not an
+# equal-weighted average across ETFs.
 
 # %% [markdown]
 # ## 4. Data quality
@@ -315,7 +328,7 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title="Volume spans more than an order of magnitude across the groups",
+    title="Average daily share volume by group",
     xaxis_title="Shares/day (log scale)",
     xaxis_type="log",
     yaxis=dict(autorange="reversed"),
@@ -327,6 +340,11 @@ show_plotly_with_alt(
     "The broad US equity group sits at the far right and the currency group at the far "
     "left, with the rest spread between them.",
 )
+
+# %% [markdown]
+# The axis is logarithmic because the spread demands it: average daily volume runs over more
+# than an order of magnitude from the broad US equity group down to the currency group. Any
+# cost or capacity assumption applied uniformly across this universe is wrong at one end of it.
 
 # %% [markdown]
 # ## 6. Price levels

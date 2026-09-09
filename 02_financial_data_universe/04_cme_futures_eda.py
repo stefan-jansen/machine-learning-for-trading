@@ -146,7 +146,7 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title="The universe is spread across asset classes, not concentrated in one",
+    title="Products per asset class",
     xaxis_title="Asset class",
     yaxis_title="Number of products",
     height=420,
@@ -158,6 +158,11 @@ show_plotly_with_alt(
     "smallest, with the count written above each bar. No bucket holds more than about a "
     "fifth of the universe.",
 )
+
+# %% [markdown]
+# The universe is spread across asset classes rather than concentrated in one, which is what
+# makes it usable for cross-asset work later. It is not balanced, though, so the counts above
+# are worth carrying forward rather than assuming an even split.
 
 # %% [markdown]
 # ## 2. Data Structure Example: E-mini S&P 500 (ES)
@@ -209,7 +214,7 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title="Splicing contracts at the volume roll leaves no visible break",
+    title="ES front-month close, spliced at the volume roll",
     xaxis_title="Date",
     yaxis_title="Price",
     height=420,
@@ -220,6 +225,12 @@ show_plotly_with_alt(
     "runs unbroken across the whole window, rising overall with the drawdowns of 2020 and "
     "2022 visible, and shows no step or gap where one contract hands over to the next.",
 )
+
+# %% [markdown]
+# No break is visible at the splices, which is the point and also the risk: the series looks
+# continuous whether or not the roll was handled correctly, so nothing about this chart
+# establishes that it was. `06_futures_continuous` builds the same series from individual
+# contracts and checks it against the vendor's, which is the test this picture cannot perform.
 
 # %% [markdown]
 # Each individual contract trades for a finite window before expiry. Aggregating
@@ -261,7 +272,7 @@ for row in recent.iter_rows(named=True):
         )
     )
 fig.update_layout(
-    title="Each contract trades for months, and neighbours overlap at the roll",
+    title="Trading window of each ES contract",
     xaxis_title="Date",
     yaxis_title="Contract (instrument_id)",
     yaxis=dict(type="category"),
@@ -273,6 +284,12 @@ show_plotly_with_alt(
     "several months and starts before the bar below it ends, so consecutive contracts are "
     "quoted at the same time for part of their lives.",
 )
+
+# %% [markdown]
+# Each contract trades for months, and neighbouring contracts overlap for a stretch around the
+# roll. That overlap is what makes a volume-based roll possible at all: for those weeks both
+# contracts are liquid, and the question of which one is the front month has an answer that
+# changes day to day.
 
 # %% [markdown]
 # ## 3. Coverage Summary
@@ -339,7 +356,7 @@ for row in cov_timeline.iter_rows(named=True):
     )
     seen.add(cls)
 fig.update_layout(
-    title="Most products cover the whole window; a few enter part-way through",
+    title="First and last session per product",
     xaxis_title="Date",
     yaxis_title="Product",
     height=760,
@@ -351,6 +368,11 @@ show_plotly_with_alt(
     "by asset class. Most bars start at the left edge and run to the right edge; a small "
     "number begin several years in, and none stops early.",
 )
+
+# %% [markdown]
+# Most products cover the whole window and a few enter part-way through, so a panel built by
+# requiring every product on every date would be shorter than the data allows. The start dates
+# above are the ones to check against before choosing a common sample.
 
 # %% [markdown]
 # ## 4. Data Quality

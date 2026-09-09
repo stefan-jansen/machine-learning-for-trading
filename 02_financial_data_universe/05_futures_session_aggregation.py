@@ -277,7 +277,7 @@ for sess in _sessions:
         )
     )
 fig.update_layout(
-    title="One colour per CME session: Sunday evening is already Monday",
+    title="Hourly bars coloured by CME session date",
     xaxis_title="Timestamp (Central Time)",
     yaxis_title="ES front-month close",
     height=420,
@@ -289,6 +289,12 @@ show_plotly_with_alt(
     "is assigned to. The colour changes at 4 PM rather than at midnight, so a Sunday evening "
     "and the Monday after it carry one colour between them.",
 )
+
+# %% [markdown]
+# The colours make the session boundary visible: bars that trade on Sunday evening carry
+# Monday's colour, because their CME session runs on until Monday afternoon. A calendar date
+# would have split them off into a day of their own holding a few evening hours and nothing
+# else.
 
 # %% [markdown]
 # ## 3b. Ratio Back-Adjustment
@@ -508,7 +514,7 @@ fig.add_trace(
 )
 fig.add_hline(y=1.0, line=dict(color=COLORS["neutral"], width=1, dash="dot"), row=2, col=1)
 fig.update_layout(
-    title="ES front month: ratio back-adjustment removes roll gaps",
+    title="ES front month, raw and ratio-adjusted close",
     height=560,
     legend_title="Price series",
 )
@@ -622,7 +628,7 @@ fig.add_annotation(
     yshift=6,
 )
 fig.update_layout(
-    title="Hourly bars per session: the full 23-hour day dominates",
+    title="Hourly bars per session",
     xaxis_title="Hourly bars in the session",
     yaxis_title="Number of daily bars",
     height=420,
@@ -634,6 +640,12 @@ show_plotly_with_alt(
     "A histogram of how many hourly bars each daily session contains. One column towers over "
     "the rest at the full-length session, with a thin tail of shorter sessions to its left.",
 )
+
+# %% [markdown]
+# One bucket dominates: the full-length session is the overwhelming mode, and everything to its
+# left has a reason - holidays, half days, and deferred tenors thin enough to stop printing for
+# part of the day. The tail is small in count and worth keeping visible, because a session with
+# a handful of bars produces a daily bar whose high and low mean much less than the others.
 
 # %%
 # OHLC invariant check

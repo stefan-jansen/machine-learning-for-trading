@@ -195,7 +195,7 @@ fig.add_annotation(
     font=dict(color=COLORS["copper"]),
 )
 fig.update_layout(
-    title="The quoted universe grows for decades, peaks, and then shrinks",
+    title="Distinct symbols quoted per year",
     xaxis_title="Year",
     yaxis_title="Distinct symbols",
     height=420,
@@ -263,7 +263,7 @@ fig.add_annotation(
 )
 fig.add_hline(y=0, line_color=COLORS["neutral"], line_width=1)
 fig.update_layout(
-    title="Entries run through the whole panel; exits appear only at the end",
+    title="First and last observations per year",
     xaxis_title="Year",
     yaxis_title="Symbols",
     barmode="relative",

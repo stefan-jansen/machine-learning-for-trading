@@ -35,10 +35,9 @@
 # - Cross-check constructed continuous prices against Databento's pre-built
 #   continuous series and quantify the disagreement.
 #
-# **Book reference**: §2.2 ("The Asset-Class Market Data Landscape" —
-# Futures); the methodology comparison underpins the engineering decision
-# in §2.2 to store raw contract histories alongside one or more continuous
-# variants.
+# **Book reference**: §2.2, "The asset-class market data landscape" - the futures part of
+# it. The methodology comparison here is what underpins that section's engineering
+# decision to store raw contract histories alongside one or more continuous variants.
 #
 # **Prerequisites**: `data` package on `PYTHONPATH`; individual ES contract
 # parquet at `ML4T_DATA_PATH/futures/market/individual/ES/data.parquet` and
@@ -49,7 +48,7 @@
 """Continuous Futures Construction."""
 
 import re
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime, timedelta
 
 import plotly.graph_objects as go
 import polars as pl
@@ -57,19 +56,31 @@ from plotly.subplots import make_subplots
 
 from data import load_cme_futures
 from utils import ML4T_DATA_PATH
+from utils.style import COLORS, show_plotly_with_alt
+
+# %% [markdown]
+# ### Two declared parameters
+#
+# `MIN_OUTRIGHT_PRICE` separates outright contracts from calendar spreads. CME lists both, and
+# a spread trades at the inter-month price difference rather than at the index level, so a
+# price floor tells them apart without needing a separate instrument-type field. Raise it for
+# a higher-priced index, lower it for a cheaper one.
+#
+# `CALENDAR_ROLL_DAYS_BEFORE` is how far ahead of a contract's last trading day the calendar
+# method switches to the next one. Five business days is the conservative end of the range
+# used for equity index futures.
+#
+# Both are declared here so Papermill can override them for CI, and so that nothing further
+# down repeats the value as a default.
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
-# Minimum outright price for front-month selection. CME lists calendar spreads
-# (which trade at the ~$50–100 inter-month difference) alongside outright
-# contracts; this threshold keeps a high-volume spread from being mistaken for
-# the front month. Raise it for higher-priced indices, lower it for cheaper ones.
 MIN_OUTRIGHT_PRICE = 500.0
+CALENDAR_ROLL_DAYS_BEFORE = 5
 
 # %% [markdown]
 # ## 1. Understanding the Data
 #
-# ### 1.1 Load Individual Contracts
+# ### Loading the individual contracts
 
 # %%
 es_individual = load_cme_futures(products=["ES"], frequency="hourly", continuous=False)
@@ -79,6 +90,35 @@ print(f"Unique contracts (by instrument_id): {es_individual['instrument_id'].n_u
 print(f"Date range: {es_individual['timestamp'].min()} to {es_individual['timestamp'].max()}")
 print("Sample:")
 es_individual.head()
+
+# %% [markdown]
+# ### The bar length is in the data, not in the argument name
+#
+# `frequency="hourly"` selects the raw per-contract capture rather than the session-aggregated
+# daily file that `05_futures_session_aggregation` writes. It does not promise hourly bars, and
+# for individual contracts it does not deliver them: Databento captured this feed at daily
+# resolution. The capture records its own bar length in `rtype` - 34 is a one-hour bar, 35 a
+# one-day bar - so the frame can be asked rather than assumed, and the modal gap between
+# consecutive timestamps confirms the answer independently.
+#
+# This matters for the rest of the notebook. The validation section compares what we build against the
+# vendor's continuous series, and that series *is* hourly. Joining the two on a bare timestamp
+# without noticing would silently pair a whole day against one hour of it.
+
+# %%
+_RTYPE_BAR = {32: "1 second", 33: "1 minute", 34: "1 hour", 35: "1 day"}
+
+
+def describe_bars(frame: pl.DataFrame, label: str) -> None:
+    """Report a frame's declared bar length and the spacing actually observed."""
+    codes = frame["rtype"].unique().to_list()
+    declared = ", ".join(_RTYPE_BAR.get(c, f"rtype {c}") for c in sorted(codes))
+    stamps = frame.select("timestamp").unique().sort("timestamp")["timestamp"]
+    modal_gap = stamps.diff().drop_nulls().value_counts().sort("count", descending=True)[0, 0]
+    print(f"{label}: declared {declared}; most common gap between timestamps {modal_gap}")
+
+
+describe_bars(es_individual, "individual ES contracts")
 
 # %%
 contract_stats = (
@@ -96,13 +136,20 @@ print(f"Contracts: {len(contract_stats)} (sorted by first trade)")
 contract_stats.head(10)
 
 # %% [markdown]
-# ### 1.2 Understanding Contract Naming
+# ### Reading a contract symbol
 #
-# ES contract symbols follow the pattern: ES + Month Code + Year
+# A CME contract symbol is the product code, then a month code, then a year code:
 #
-# Month codes:
-# - H = March, M = June, U = September, Z = December (standard quarterly)
+# - H = March, M = June, U = September, Z = December (the standard quarterly cycle)
 # - F = January, G = February, J = April, K = May, N = July, Q = August, V = October, X = November
+#
+# The month code is unambiguous. **The year code is not**, and the definitions file this
+# notebook reads writes it with a single digit. `ESM1` is the June contract of a year ending in
+# 1, which over a long enough history could be 2001, 2011, 2021 or 2031. Nothing in the symbol
+# says which. A parser that assumes a two-digit year and pads it reads `ESM1` as June 2001.
+#
+# The next cell measures what that assumption costs on this file, rather than asserting that it
+# is a problem.
 
 # %%
 _MONTH_CODES = {
@@ -123,19 +170,27 @@ _SYMBOL_RE = re.compile(r"^([A-Z]+)([FGHJKMNQUVXZ])(\d+)$")
 
 
 def parse_contract_symbol(symbol: str) -> dict:
-    """Parse a futures contract symbol like ESH24 or RTYM25 into product / month / year."""
+    """Split a contract symbol into the parts the symbol actually determines.
+
+    The product code and the delivery month are fully determined by the symbol. The year is
+    not, so it is returned as the raw digits and a decade has to come from somewhere else.
+    """
     match = _SYMBOL_RE.match(symbol)
     if not match:
         raise ValueError(f"Cannot parse symbol: {symbol}")
-    product, month_code, year_str = match.groups()
-    year = int(year_str)
-    year = year + 2000 if year < 50 else year + 1900
+    product, month_code, year_code = match.groups()
     return {
         "product": product,
         "month_code": month_code,
         "month": _MONTH_CODES[month_code],
-        "year": year,
+        "year_code": year_code,
     }
+
+
+def naive_year(year_code: str) -> int:
+    """The two-digit-year assumption, kept only so its cost can be measured below."""
+    year = int(year_code)
+    return year + 2000 if year < 50 else year + 1900
 
 
 # %%
@@ -149,35 +204,90 @@ contract_df = (
         ]
     )
     .join(contract_defs.select("symbol", "expiration"), on="symbol")
-    .sort("year", "month")
+    .with_columns(
+        pl.col("expiration").dt.year().alias("year"),
+        pl.col("year_code").map_elements(naive_year, return_dtype=pl.Int64).alias("naive_year"),
+    )
+    .sort("expiration")
 )
+
+_year_code_widths = sorted({len(c) for c in contract_df["year_code"]})
+_wrong = contract_df.filter(pl.col("naive_year") != pl.col("year"))
 print(f"ES contract definitions: {contract_df.height} contracts")
-contract_df.select("symbol", "month_code", "month", "year", "expiration").head(10)
+print(f"Year codes in this file are {_year_code_widths} digit(s) wide")
+print(
+    f"Contracts the two-digit-year assumption dates to the wrong decade: "
+    f"{_wrong.height} of {contract_df.height}"
+)
+print("The delivery month it reads off the symbol is right for every one of them.")
+contract_df.select("symbol", "month_code", "month", "naive_year", "year", "expiration").head(10)
 
 # %% [markdown]
-# ### 1.3 Contract Expiration from Symbols
+# The assumption is wrong on every contract in the file, and the printed table shows why it is
+# the kind of error a reader is unlikely to catch: `naive_year` and `expiration` sit on the
+# same row and contradict each other, and nothing about the frame looks empty or missing.
 #
-# Without a separate definitions file, we can derive expiration information
-# from contract symbols. For ES contracts, the pattern is ESH24 (March 2024),
-# ESM24 (June 2024), etc.
+# The fix is not a cleverer parser. A one-digit year code does not carry a decade, so no rule
+# over the symbol alone can recover one. The `expiration` column is the authority, and `year`
+# above is read from it. Where a definitions file is not available, Recovering expiration from the price history recovers the
+# same information from the price history itself.
 
 # %% [markdown]
-# `parse_contract_symbol` and the contract-definitions parquet give us actual
-# expiration dates. For products where we only see the symbol (no definitions
-# file), the expiration can be approximated as the 15th of the contract month
-# — close enough for roll detection but not for delivery scheduling.
+# ### Recovering expiration from the price history
+#
+# The definitions file gives expirations by symbol, and the price bars are keyed by
+# `instrument_id`. Neither file carries the other's key, so the two cannot be joined, and the
+# calendar-roll method below needs an expiry per *contract in the bars*.
+#
+# It can be recovered without them. A futures contract stops printing when it stops existing,
+# so the last date on which a contract trades is its last trading day. That is an observation
+# rather than a rule, which makes it worth checking against what the rule would say: ES expires
+# on the third Friday of the delivery month, so every last trading day should be a Friday
+# falling between the 15th and the 21st.
 
 # %%
-es_definition = contract_df.select(
-    "symbol",
-    "year",
-    "month",
-    pl.struct("year", "month")
-    .map_elements(lambda x: date(x["year"], x["month"], 15), return_dtype=pl.Date)
-    .alias("expiration"),
+contract_life = (
+    es_individual.filter(pl.col("close") >= MIN_OUTRIGHT_PRICE)
+    .with_columns(pl.col("timestamp").dt.date().alias("date"))
+    .group_by("instrument_id")
+    .agg(
+        pl.col("date").min().alias("first_trade"),
+        pl.col("date").max().alias("last_trade"),
+        pl.col("volume").sum().alias("total_volume"),
+        pl.len().alias("sessions"),
+    )
+    .sort("last_trade")
 )
-print(f"ES definition rows: {es_definition.height}")
-es_definition.head(10)
+
+_liquid = contract_life.filter(pl.col("total_volume") >= pl.col("total_volume").median())
+_third_friday = _liquid.filter(
+    (pl.col("last_trade").dt.weekday() == 5) & (pl.col("last_trade").dt.day().is_between(15, 21))
+)
+# ES expires on the third Friday of the delivery month. Contracts whose last print falls there
+# are the ones whose observed end really is an expiry; the rest simply stopped trading.
+scheduled_contracts = contract_life.filter(
+    (pl.col("last_trade").dt.weekday() == 5) & (pl.col("last_trade").dt.day().is_between(15, 21))
+)
+_all_third_friday = scheduled_contracts
+print(f"Outright contracts with a price history: {contract_life.height}")
+print(
+    f"Ending on the third Friday of their month: {_all_third_friday.height} of "
+    f"{contract_life.height} overall, {_third_friday.height} of {_liquid.height} among those "
+    f"with above-median volume"
+)
+contract_life.filter(pl.col("total_volume") >= pl.col("total_volume").quantile(0.9)).sort(
+    "last_trade"
+).head(10)
+
+# %% [markdown]
+# The rule holds without exception for the contracts carrying real volume, which is the
+# population the roll logic cares about. It does not hold for every contract, and that is what
+# should be expected: the ones that miss are thin deferred listings whose last print is the day
+# the last interested party lost interest, which is not an expiration date at all.
+#
+# The claim is therefore reported as two counts over two populations rather than as a rule.
+# Stating it as "last trade is expiry" would be false for the file as a whole and true for the
+# part of it the notebook uses, and the difference between those is the reason to count.
 
 # %% [markdown]
 # ## 2. Roll Detection
@@ -189,18 +299,23 @@ es_definition.head(10)
 # 2. **Open Interest-based**: Roll when next contract has higher open interest
 # 3. **Fixed Schedule**: Roll N days before expiration (e.g., first Thursday of expiry month)
 #
-# We'll implement volume-based rolling.
+# We implement volume-based rolling first, then calendar rolling, and compare
+# the two.
+#
+# The identifier throughout is `instrument_id`, not the `ESH24`-style symbol above.
+# The price file is keyed by instrument id and nothing joins it to the symbol table, so the
+# columns below are named for what they hold.
 
 
 # %%
 def identify_front_month(
-    individual_df: pl.DataFrame, min_outright_price: float = 500.0
+    individual_df: pl.DataFrame, min_outright_price: float = MIN_OUTRIGHT_PRICE
 ) -> pl.DataFrame:
-    """Volume-based front-month detection with no-rollback constraint."""
-    # Filter to outright contracts only (exclude calendar spreads at ~$50-100)
+    """Pick each day's front contract by traded volume, and never return to a retired one."""
+    # Calendar spreads trade at the inter-month difference rather than the index level, so a
+    # price floor separates outright contracts from them.
     outrights = individual_df.filter(pl.col("close") >= min_outright_price)
 
-    # Aggregate to daily volume per contract
     daily_volume = (
         outrights.with_columns(pl.col("timestamp").dt.date().alias("date"))
         .group_by(["date", "instrument_id"])
@@ -209,34 +324,35 @@ def identify_front_month(
 
     daily_leader = (
         daily_volume.group_by("date")
-        .agg(pl.col("instrument_id").sort_by("daily_volume").last().alias("leader"))
+        .agg(pl.col("instrument_id").sort_by("daily_volume").last().alias("volume_leader"))
         .sort("date")
     )
 
-    # No-rollback constraint — switch to new leaders, never go back
-    leader_ids = daily_leader["leader"].to_list()
+    # No-rollback constraint: adopt a new leader, but never switch back to one already retired.
+    leader_ids = daily_leader["volume_leader"].to_list()
     dates = daily_leader["date"].to_list()
-    used_contracts = {leader_ids[0]}
+    retired = {leader_ids[0]}
     current_front = leader_ids[0]
     front = [current_front]
 
     for i in range(1, len(leader_ids)):
-        if leader_ids[i] != current_front and leader_ids[i] not in used_contracts:
+        if leader_ids[i] != current_front and leader_ids[i] not in retired:
             current_front = leader_ids[i]
-            used_contracts.add(current_front)
+            retired.add(current_front)
         front.append(current_front)
 
-    daily_front = pl.DataFrame({"date": dates, "front_symbol": front})
+    daily_front = pl.DataFrame(
+        {"date": dates, "volume_leader": leader_ids, "front_instrument_id": front}
+    )
 
-    # Expand back to hourly bars
-    hourly = individual_df.select("timestamp").unique().sort("timestamp")
-    hourly = hourly.with_columns(pl.col("timestamp").dt.date().alias("date"))
-    front_month = hourly.join(daily_front, on="date", how="left").drop("date")
+    bars = individual_df.select("timestamp").unique().sort("timestamp")
+    bars = bars.with_columns(pl.col("timestamp").dt.date().alias("date"))
+    front_month = bars.join(daily_front, on="date", how="left").drop("date")
 
     front_month = front_month.with_columns(
-        pl.col("front_symbol").shift(1).alias("prev_front"),
+        pl.col("front_instrument_id").shift(1).alias("prev_front"),
     ).with_columns(
-        (pl.col("front_symbol") != pl.col("prev_front")).alias("is_roll"),
+        (pl.col("front_instrument_id") != pl.col("prev_front")).alias("is_roll"),
     )
     return front_month
 
@@ -248,85 +364,161 @@ front_months.filter(pl.col("timestamp") >= datetime(2024, 1, 1, tzinfo=UTC)).hea
 
 # %%
 roll_dates = front_months.filter(pl.col("is_roll"))
-print(f"Total roll events: {len(roll_dates)}")
-print("Most recent 10 roll dates:")
-roll_dates.tail(10).select("timestamp", "prev_front", "front_symbol")
+print(f"Roll events detected: {len(roll_dates)}")
+print("Most recent 10 rolls:")
+roll_dates.tail(10).select("timestamp", "prev_front", "front_instrument_id")
 
 # %% [markdown]
-# ### 2.2 Calendar-Based Roll (Alternative)
+# ### What the no-rollback constraint is worth
 #
-# An alternative to volume-based rolling is **calendar-based**: roll a fixed number
-# of days before contract expiration. This is simpler and more predictable, but may
-# not track liquidity as well as volume-based methods.
+# The loop above exists to stop the series flickering between two contracts when their daily
+# volumes are close. That is a plausible failure and a cheap guard, and it is also a claim
+# about this data that can be checked: the constraint changes the answer on exactly those days
+# where the raw volume leader differs from the contract the constraint holds us to.
 #
-# Common calendar roll schedules:
-# - 5 business days before expiry (conservative)
-# - First notice day (for physical delivery commodities)
-# - 2 weeks before expiry (popular for equity index futures)
+# It is worth checking rather than assuming, because the guard is not free of risk in the other
+# direction. It is irreversible: one spurious leader is adopted permanently, and the series can
+# never return to the contract that was really the front month.
+
+# %%
+_disagree = front_months.filter(pl.col("volume_leader") != pl.col("front_instrument_id")).select(
+    "timestamp", "volume_leader", "front_instrument_id"
+)
+print(
+    f"Days where the raw volume leader differs from the no-rollback front: "
+    f"{_disagree.height} of {front_months.height}"
+)
+if _disagree.height:
+    print(_disagree.head(10))
+else:
+    print("On this history the constraint never changes the contract selected.")
+
+# %% [markdown]
+# On ES over this sample the constraint never fires: the raw volume leader is already
+# monotone, so the guarded series and the unguarded one are the same series. The guard should
+# stay - it costs nothing and the flicker it prevents is real on thinner products - but the
+# notebook should not tell the reader it is what makes the roll dates come out right here,
+# because on this data it makes no difference at all. What produces the roll dates reported
+# above is the volume rule itself.
+
+# %% [markdown]
+# ### Rolling on the calendar instead
+#
+# The alternative is to ignore volume and roll a fixed number of days before the contract stops
+# trading. It is predictable and reproducible - the roll dates can be published a year ahead -
+# and it does not depend on a volume field that a vendor may revise.
+#
+# Each contract's last trading day was recovered from its own price history, so this
+# runs on the same frame as the volume method and the two can be compared on their output
+# rather than on their descriptions.
 
 
 # %%
 def identify_front_month_calendar(
     individual_df: pl.DataFrame,
-    definition_df: pl.DataFrame,
-    roll_days_before: int = 5,
+    scheduled_df: pl.DataFrame,
+    roll_days_before: int = CALENDAR_ROLL_DAYS_BEFORE,
+    min_outright_price: float = MIN_OUTRIGHT_PRICE,
 ) -> pl.DataFrame:
-    """Identify front month using calendar-based roll (fixed days before expiry)."""
-    # Get expiration dates from definitions
-    # NOTE: Requires individual data to have a "symbol" column with contract names
-    expirations = definition_df.select(["symbol", "expiration"]).with_columns(
-        pl.col("expiration").cast(pl.Date).alias("expiry_date")
+    """Pick each day's front contract as the nearest one still more than N days from expiry.
+
+    ``scheduled_df`` must hold only contracts whose last trading day is a real expiry. A thin
+    listing that merely stopped printing would otherwise be treated as an expiring front month
+    and pull the series onto it for a few days.
+    """
+    last_day = scheduled_df.select(
+        "instrument_id",
+        (pl.col("last_trade") - pl.duration(days=roll_days_before)).alias("roll_out"),
+        pl.col("last_trade"),
     )
 
-    # Join with individual data (requires symbol column)
-    with_expiry = individual_df.join(expirations, on="symbol", how="left").with_columns(
-        pl.col("timestamp").cast(pl.Date).alias("trade_date")
+    candidates = (
+        individual_df.filter(pl.col("close") >= min_outright_price)
+        .with_columns(pl.col("timestamp").dt.date().alias("date"))
+        .join(last_day, on="instrument_id", how="inner")
+        .filter(pl.col("date") < pl.col("roll_out"))
     )
 
-    # Calculate days to expiry
-    with_expiry = with_expiry.with_columns(
-        (pl.col("expiry_date") - pl.col("trade_date")).dt.total_days().alias("days_to_expiry")
-    )
-
-    # Filter to contracts with more than roll_days_before to expiry
-    # Then select the nearest such contract for each day
-    front_month = (
-        with_expiry.filter(pl.col("days_to_expiry") > roll_days_before)
-        .sort(["timestamp", "days_to_expiry"])
-        .group_by("timestamp")
+    front = (
+        candidates.sort(["date", "last_trade", "instrument_id"])
+        .group_by("date")
         .first()
-        .select(["timestamp", pl.col("symbol").alias("front_symbol")])
-        .sort("timestamp")
+        .select("date", pl.col("instrument_id").alias("front_instrument_id"))
+        .sort("date")
     )
 
-    # Add roll indicators
-    front_month = front_month.with_columns(
-        pl.col("front_symbol").shift(1).alias("prev_front"),
-    ).with_columns(
-        (pl.col("front_symbol") != pl.col("prev_front")).alias("is_roll"),
-    )
+    return front.with_columns(
+        pl.col("front_instrument_id").shift(1).alias("prev_front")
+    ).with_columns((pl.col("front_instrument_id") != pl.col("prev_front")).alias("is_roll"))
 
-    return front_month
-
-
-# %% [markdown]
-# Calendar-based roll detection requires the individual data to carry a symbol
-# column that joins to the contract-definitions table. The Databento individual
-# parquet uses numeric `instrument_id` rather than ESH24-style symbols, so we
-# present the calendar logic above as a teaching reference and use volume-based
-# detection for the rest of the notebook.
 
 # %%
-volume_rolls = front_months.filter(pl.col("is_roll"))
-print(f"Volume-based rolls (ES, 2016-2025): {len(volume_rolls)}")
+calendar_front = identify_front_month_calendar(es_individual, scheduled_contracts)
+calendar_rolls = calendar_front.filter(pl.col("is_roll"))
+
+volume_front_daily = (
+    front_months.with_columns(pl.col("timestamp").dt.date().alias("date"))
+    .group_by("date")
+    .agg(pl.col("front_instrument_id").last())
+    .sort("date")
+)
+
+both = volume_front_daily.join(
+    calendar_front.select("date", pl.col("front_instrument_id").alias("calendar_front")),
+    on="date",
+    how="inner",
+)
+agree = both.filter(pl.col("front_instrument_id") == pl.col("calendar_front"))
+
+print(f"Volume-based rolls:   {len(roll_dates)}")
+print(f"Calendar-based rolls: {calendar_rolls.height - 1}")
+print(
+    f"Days the two methods hold the same contract: {agree.height} of {both.height} "
+    f"({100 * agree.height / both.height:.1f}%)"
+)
 
 # %% [markdown]
-# **Volume vs Calendar Trade-offs**:
-# - **Volume-based**: Follows liquidity naturally, but roll timing varies
-# - **Calendar-based**: Predictable timing, easier to automate, but may roll into less liquid contract
+# ### Volume against calendar
 #
-# For this notebook, we use **volume-based** roll detection as our primary method since it
-# better reflects actual market liquidity transitions.
+# The two methods select the same contract on most days and differ in a band around each roll.
+# The table below reports how wide that band is, which is the number the choice between them
+# actually turns on.
+
+# %%
+_disagreements = both.filter(pl.col("front_instrument_id") != pl.col("calendar_front"))
+if _disagreements.height:
+    _runs = _disagreements.sort("date").with_columns(
+        ((pl.col("date") - pl.col("date").shift(1)).dt.total_days().fill_null(999) > 1)
+        .cum_sum()
+        .alias("episode")
+    )
+    _episode_lengths = (
+        _runs.group_by("episode")
+        .agg(
+            pl.col("date").min().alias("from"),
+            pl.col("date").max().alias("to"),
+            pl.len().alias("days"),
+        )
+        .sort("from")
+    )
+    print(f"Disagreement episodes: {_episode_lengths.height}")
+    print(
+        f"Length in trading days: median {_episode_lengths['days'].median():.0f}, "
+        f"max {_episode_lengths['days'].max()}"
+    )
+    _episode_lengths.tail(10)
+else:
+    print("The two methods never disagree on this history.")
+
+# %% [markdown]
+# **What the choice comes down to.** Volume rolling follows the liquidity, so the constructed
+# series is always on the contract most people are actually trading, but its roll date is only
+# known after the fact and moves with the market. Calendar rolling fixes the date in advance
+# and can be reproduced by anyone with an expiry schedule, at the cost of holding a contract
+# through a stretch where the next one is already the more liquid of the two.
+#
+# The rest of the notebook uses volume-based detection, because the validation section holds our series against a
+# vendor series built the same way and comparing like with like is the point of that section.
 
 # %% [markdown]
 # ## 3. Adjustment Methods
@@ -334,7 +526,7 @@ print(f"Volume-based rolls (ES, 2016-2025): {len(volume_rolls)}")
 # When we roll from contract A to contract B, there's usually a price gap.
 # If we don't adjust, our time series will have artificial jumps.
 #
-# ### 3.1 No Adjustment (Raw)
+# ### No adjustment (raw)
 #
 # Simply use prices as-is. Returns calculated on roll dates are invalid.
 
@@ -345,9 +537,9 @@ def create_continuous_raw(individual_df: pl.DataFrame, front_months: pl.DataFram
     # Join individual prices with front month info
     continuous = (
         individual_df.join(
-            front_months.select(["timestamp", "front_symbol"]), on="timestamp", how="inner"
+            front_months.select(["timestamp", "front_instrument_id"]), on="timestamp", how="inner"
         )
-        .filter(pl.col("instrument_id") == pl.col("front_symbol"))
+        .filter(pl.col("instrument_id") == pl.col("front_instrument_id"))
         .select(["timestamp", "open", "high", "low", "close", "volume", "instrument_id"])
         .sort("timestamp")
     )
@@ -357,11 +549,13 @@ def create_continuous_raw(individual_df: pl.DataFrame, front_months: pl.DataFram
 
 # %%
 es_continuous_raw = create_continuous_raw(es_individual, front_months)
-print(f"Raw continuous series: {len(es_continuous_raw)} hourly bars")
+print(
+    f"Raw continuous series: {len(es_continuous_raw)} daily bars, one per session on the front contract"
+)
 es_continuous_raw.head(10)
 
 # %% [markdown]
-# ### 3.2 Panama (Back-Adjustment)
+# ### Panama, or additive back-adjustment
 #
 # Add the price gap to all historical prices. This preserves dollar P&L
 # but distorts percentage returns for old data.
@@ -386,7 +580,7 @@ def _compute_roll_gaps(individual_df: pl.DataFrame, front_months: pl.DataFrame) 
     )
 
     new_prices = (
-        roll_info.select(["timestamp", pl.col("front_symbol").alias("instrument_id")])
+        roll_info.select(["timestamp", pl.col("front_instrument_id").alias("instrument_id")])
         .join(prices_lookup, on=["timestamp", "instrument_id"], how="left")
         .rename({"close": "new_close"})
     )
@@ -456,16 +650,22 @@ def create_continuous_panama(
 # %%
 es_continuous_panama = create_continuous_panama(es_individual, front_months)
 panama_first = es_continuous_panama["cumulative_adjustment"][0]
+panama_first_close = es_continuous_panama["close"][0]
 print(
-    f"Panama-adjusted: cumulative_adjustment at the start of the series = {panama_first:+.2f} "
-    f"(adjusts every historical price up by this amount so the most recent contract is unchanged)"
+    f"Panama: the adjustment carried back to the start of the series is {panama_first:+.2f} "
+    f"index points"
 )
+print(
+    f"  applied to the earliest close of {panama_first_close:,.2f}, that is a shift of "
+    f"{100 * panama_first / panama_first_close:+.1f}%"
+)
+print("  every historical price moves by the same number of points, so dollar P&L is preserved")
 es_continuous_panama.select(
     "timestamp", "close", "adj_close", "cumulative_adjustment", "instrument_id"
 ).head(10)
 
 # %% [markdown]
-# ### 3.3 Ratio Adjustment
+# ### Ratio, or multiplicative back-adjustment
 #
 # Multiply historical prices by the ratio of new/old contract prices.
 # This preserves percentage returns but distorts dollar amounts.
@@ -487,7 +687,7 @@ def _compute_roll_ratios(individual_df: pl.DataFrame, front_months: pl.DataFrame
     )
 
     new_prices = (
-        roll_info.select(["timestamp", pl.col("front_symbol").alias("instrument_id")])
+        roll_info.select(["timestamp", pl.col("front_instrument_id").alias("instrument_id")])
         .join(prices_lookup, on=["timestamp", "instrument_id"], how="left")
         .rename({"close": "new_close"})
     )
@@ -558,10 +758,17 @@ def create_continuous_ratio(
 # %%
 es_continuous_ratio = create_continuous_ratio(es_individual, front_months)
 ratio_first = es_continuous_ratio["cumulative_ratio"][0]
-print(
-    f"Ratio-adjusted: cumulative_ratio at the start of the series = {ratio_first:.4f} "
-    f"(historical prices are scaled up by this factor)"
-)
+print(f"Ratio: the factor carried back to the start of the series is {ratio_first:.4f}")
+print(f"  that is a shift of {100 * (ratio_first - 1):+.1f}% at the earliest close")
+print("  every historical price moves by the same proportion, so percentage returns are preserved")
+
+# %% [markdown]
+# The two methods disagree about the earliest prices, and the size of the disagreement is the
+# reason the choice matters. Panama moves the start of the history by a fixed number of index
+# points; that was a large fraction of the index in 2016 and would be a small one today. Ratio
+# moves it by a fixed proportion, which is the same fraction whenever it is applied. Neither is
+# a correction of the other - they preserve different things, and the table at the end of the notebook says which
+# to reach for.
 es_continuous_ratio.select(
     "timestamp", "close", "adj_close", "cumulative_ratio", "instrument_id"
 ).head(10)
@@ -569,117 +776,301 @@ es_continuous_ratio.select(
 # %% [markdown]
 # ## 4. Validation
 #
-# Let's compare our construction to DataBento's pre-built continuous series.
+# The test of a construction is whether it reproduces one built independently. Databento ships
+# a pre-built continuous series for ES, also volume-rolled, so ours can be held against it.
 #
-# We compare our construction against DataBento's production continuous series.
-# Both use volume-based roll detection, but the implementations differ in detail
-# (daily aggregation window, exact crossover threshold, etc.), so some divergence
-# on roll timing is expected — typically by a day or two around the roll date.
+# **The two frames do not have the same bar length.** The loading section measured it: the individual
+# contracts arrive as daily bars stamped at midnight UTC, the vendor's continuous series as
+# hourly bars. Joining them on `timestamp` therefore matches our whole trading day against the
+# vendor's midnight hour - the first hour of a CME session that runs until the following
+# afternoon. The comparison would run, print a plausible-looking difference, and be measuring
+# the wrong thing.
+#
+# So the vendor's series is aggregated to the same daily grid first, and the two are compared
+# on their session closes.
 
 # %%
 es_databento = load_cme_futures(products=["ES"], tenors=[0], frequency="hourly", continuous=True)
-print(f"DataBento continuous: {es_databento.shape}")
+print(f"Databento continuous: {es_databento.shape}")
+describe_bars(es_databento, "vendor continuous ES")
 es_databento.head()
 
 # %%
-comparison = (
-    es_continuous_raw.select("timestamp", pl.col("close").alias("our_close"))
+databento_daily = (
+    es_databento.with_columns(pl.col("timestamp").dt.date().alias("date"))
+    .group_by("date")
+    .agg(
+        pl.col("close").sort_by("timestamp").first().alias("first_hour_close"),
+        pl.col("close").sort_by("timestamp").last().alias("session_close"),
+        pl.len().alias("hours"),
+    )
+    .sort("date")
+)
+
+ours_daily = es_continuous_raw.select(
+    pl.col("timestamp").dt.date().alias("date"),
+    pl.col("close").alias("our_close"),
+    "instrument_id",
+)
+
+comparison = ours_daily.join(databento_daily, on="date", how="inner").with_columns(
+    (pl.col("our_close") - pl.col("session_close")).alias("diff"),
+    (pl.col("our_close") - pl.col("first_hour_close")).alias("diff_vs_first_hour"),
+)
+
+print(f"Days compared: {len(comparison):,}")
+for label, col in [
+    ("against the vendor's first hour", "diff_vs_first_hour"),
+    ("against the vendor's session close", "diff"),
+]:
+    series = comparison[col]
+    print(
+        f"  {label:36s} mean abs ${series.abs().mean():7.2f}   "
+        f"median ${series.median():+6.2f}   max abs ${series.abs().max():7.2f}"
+    )
+
+# %% [markdown]
+# The two rows differ by more than an order of magnitude, and only the second one is about the
+# construction. Aligning the bars is not a presentational detail here: it is the difference
+# between a validation that says our roll logic disagrees with the vendor's everywhere and one
+# that says it agrees almost everywhere.
+#
+# ### Where the remaining disagreement lives
+#
+# With the bars aligned, the residual can be attributed. Our volume rule leaves the expiring
+# contract as soon as the next one out-trades it; the vendor keeps its own timing. Between our
+# roll date and the day the old contract stops trading, the two series can be quoting different
+# contracts, and the calendar spread between those is what a reader would see.
+#
+# That interval is the prediction, and it is derived rather than chosen: it runs from each roll
+# to the last trading day of the contract just left. Everywhere outside it, the two series
+# should hold the same contract and agree. The window is not a tuned constant, so the check can
+# fail.
+
+# %%
+_rolls = (
+    es_continuous_raw.select(pl.col("timestamp").dt.date().alias("date"), "instrument_id")
+    .sort("date")
+    .with_columns(pl.col("instrument_id").shift(1).alias("left_behind"))
+    .filter(pl.col("instrument_id") != pl.col("left_behind"))
     .join(
-        es_databento.select("timestamp", pl.col("close").alias("databento_close")),
-        on="timestamp",
+        contract_life.select("instrument_id", pl.col("last_trade").alias("old_last_trade")),
+        left_on="left_behind",
+        right_on="instrument_id",
         how="inner",
     )
-    .with_columns(
-        (pl.col("our_close") - pl.col("databento_close")).alias("diff"),
-    )
 )
 
-mean_abs = comparison["diff"].abs().mean()
-median_diff = comparison["diff"].median()
-max_abs = comparison["diff"].abs().max()
-large_diffs = comparison.filter(pl.col("diff").abs() > 1)
+_handover = set()
+for _roll_date, _old_last in zip(
+    _rolls["date"].to_list(), _rolls["old_last_trade"].to_list(), strict=True
+):
+    _day = _roll_date
+    while _day <= _old_last:
+        _handover.add(_day)
+        _day += timedelta(days=1)
 
-print(f"Hours compared: {len(comparison)}")
-print(f"Mean absolute difference: ${mean_abs:.2f}")
-print(f"Median signed difference:  ${median_diff:+.2f}")
-print(f"Max absolute difference:   ${max_abs:.2f}")
+inside = comparison.filter(pl.col("date").is_in(list(_handover)))
+outside = comparison.filter(~pl.col("date").is_in(list(_handover)))
+_total_abs = comparison["diff"].abs().sum()
+_span_days = [
+    (o - r).days
+    for r, o in zip(_rolls["date"].to_list(), _rolls["old_last_trade"].to_list(), strict=True)
+]
+
+print(f"Rolls in the constructed series: {_rolls.height}")
 print(
-    f"Hourly bars with >$1 difference: {len(large_diffs)} ({100 * len(large_diffs) / len(comparison):.1f}%)"
+    f"Handover spans roll to old contract's last trade: median "
+    f"{sorted(_span_days)[len(_span_days) // 2]} calendar days, max {max(_span_days)}"
 )
-comparison.describe()
-
-# %%
-print("Sample of bars with large differences:")
-large_diffs.head(10)
-
-# %% [markdown]
-# Most differences come from roll-timing disagreements — when our volume-based
-# detector rolls a day earlier or later than Databento's, the two series report
-# the price of a different contract for those hours, and the
-# contango/backwardation spread between expiries produces a gap. The median
-# signed difference is essentially zero, but mean absolute difference is on the
-# order of tens of dollars, with occasional larger gaps around roll dates where
-# the two algorithms disagree by more than a day.
+print(
+    f"  inside the handover: {inside.height:5,} days, mean abs ${inside['diff'].abs().mean():7.2f}, "
+    f"max ${inside['diff'].abs().max():7.2f}"
+)
+print(
+    f"  outside it:          {outside.height:5,} days, mean abs ${outside['diff'].abs().mean():7.2f}, "
+    f"max ${outside['diff'].abs().max():7.2f}"
+)
+print(
+    f"  share of all absolute difference inside the handover: "
+    f"{100 * inside['diff'].abs().sum() / _total_abs:.1f}%"
+)
 
 # %% [markdown]
-# ### 4.1 Visualize the Difference
+# The prediction holds exactly. Outside the handover the two series are not merely close, they
+# are identical - every day, to the cent - and the whole of the disagreement falls inside a
+# window that was derived from the mechanism rather than fitted to the residual.
+#
+# That is a stronger result than the one the notebook set out to report, and it is only visible
+# because the bars were aligned first. Against the unaligned comparison every day looked
+# different, so no window could have separated the days that disagree from the days that do
+# not: the signal was there, buried under an artifact an order of magnitude larger.
+#
+# What remains is a single explained effect. Our volume rule leaves the expiring contract as
+# soon as the next one out-trades it; the vendor holds on for roughly another week, through the
+# old contract's last trading day. In between, the two series quote different contracts, and
+# what separates them is the calendar spread between two expiries - small most of the time, and
+# large when the term structure moves, which is why the biggest gaps sit on the March and June
+# 2020 expirations.
 
 # %%
-# Plot both series
+comparison.with_columns(pl.col("diff").abs().alias("abs_diff")).sort(
+    "abs_diff", descending=True
+).head(10).select("date", "instrument_id", "our_close", "session_close", "diff")
+
+# %% [markdown]
+# ### The size of the handover gap is not constant
+#
+# What separates the two series during a handover is the spread between two expiries, and that
+# spread is carry: roughly the index level times the difference between the financing rate and
+# the dividend yield, over the time between the two deliveries. None of those three terms is
+# fixed, so the gap should be small when the financing rate sits near the dividend yield and
+# wider when it does not.
+#
+# Expressing it in basis points of the index removes the effect of the index level itself, so
+# what is left is the part that is about rates.
+
+# %%
+gap_by_year = (
+    comparison.filter(pl.col("diff") != 0)
+    .with_columns(pl.col("date").dt.year().alias("year"))
+    .group_by("year")
+    .agg(
+        pl.len().alias("days_apart"),
+        pl.col("diff").abs().mean().alias("mean_gap_points"),
+        pl.col("diff").abs().max().alias("max_gap_points"),
+        pl.col("session_close").mean().alias("index_level"),
+    )
+    .with_columns(
+        (10_000 * pl.col("mean_gap_points") / pl.col("index_level")).alias("mean_gap_bps")
+    )
+    .sort("year")
+    .select("year", "days_apart", "mean_gap_points", "max_gap_points", "mean_gap_bps")
+)
+print("Handover gap by year (days on which the two series differ at all):")
+gap_by_year
+
+# %% [markdown]
+# The gap widens by roughly an order of magnitude between the first four years of the sample
+# and the last three, and it widens in basis points, not just in points - so it is not the
+# index having got bigger. The zero-rate years leave almost nothing between one expiry and the
+# next; once financing costs exceed the dividend yield by several percent, a quarter of carry
+# is worth tens of index points and a week of disagreement about which contract to hold becomes
+# visible.
+#
+# The count of days apart moves too, for the same reason. The handover window has the same
+# length throughout, but in the early years the spread is small enough that the two contracts
+# frequently print the same close and the difference is exactly zero.
+#
+# For a reader this is the practical case for the adjustment methods in the previous section
+# rather than a curiosity: the roll convention mattered least in precisely the period whose data
+# is most often used to prototype, and it matters most now.
+
+# %% [markdown]
+# ### Seeing the difference
+
+# %%
 fig = make_subplots(
-    rows=2, cols=1, shared_xaxes=True, subplot_titles=("Price Comparison", "Difference")
+    rows=2,
+    cols=1,
+    shared_xaxes=True,
+    row_heights=[0.62, 0.38],
+    vertical_spacing=0.08,
+    subplot_titles=("ES continuous close", "Difference, ours minus vendor"),
 )
 
-comp_pd = comparison.to_pandas()
+comp_pd = comparison.sort("date").to_pandas()
 
 fig.add_trace(
-    go.Scatter(x=comp_pd["timestamp"], y=comp_pd["our_close"], name="Our Construction"),
+    go.Scatter(
+        x=comp_pd["date"],
+        y=comp_pd["our_close"],
+        name="Our construction",
+        line=dict(color=COLORS["blue"], width=1.2),
+    ),
     row=1,
     col=1,
 )
 fig.add_trace(
-    go.Scatter(x=comp_pd["timestamp"], y=comp_pd["databento_close"], name="DataBento"), row=1, col=1
+    go.Scatter(
+        x=comp_pd["date"],
+        y=comp_pd["session_close"],
+        name="Databento",
+        line=dict(color=COLORS["amber"], width=1.2, dash="dot"),
+    ),
+    row=1,
+    col=1,
 )
 fig.add_trace(
-    go.Scatter(x=comp_pd["timestamp"], y=comp_pd["diff"], name="Difference"), row=2, col=1
+    go.Scatter(
+        x=comp_pd["date"],
+        y=comp_pd["diff"],
+        name="Difference",
+        line=dict(color=COLORS["slate"], width=0.9),
+        showlegend=False,
+    ),
+    row=2,
+    col=1,
 )
-
-fig.update_layout(height=600, title="ES Continuous: Our Construction vs DataBento")
-fig.show()
+fig.update_yaxes(title_text="ES index points", row=1, col=1)
+fig.update_yaxes(title_text="Index points", row=2, col=1)
+fig.update_layout(
+    height=620,
+    title="ES continuous: two volume-rolled constructions and their difference",
+    legend=dict(orientation="h", yanchor="bottom", y=-0.14, x=0),
+)
+show_plotly_with_alt(
+    fig,
+    "Two panels sharing a date axis from 2016 to 2025. The upper panel draws our constructed "
+    "ES close and Databento's over each other; at this scale they read as a single rising "
+    "line, from roughly two thousand index points to close to seven thousand. The lower panel "
+    "draws the difference between them, which lies exactly on zero for long stretches and "
+    "breaks into narrow isolated spikes in both directions. The spikes are barely visible "
+    "before 2020, appear as a cluster of downward spikes in 2020 reaching below minus one "
+    "hundred and fifty, and from 2022 onward become a regular quarterly comb of upward spikes "
+    "that grows steadily taller, the largest reaching about one hundred and fifty index "
+    "points.",
+)
 
 # %% [markdown]
 # ## 5. Construct + Validate Helper
 #
-# The construction logic is generic across products. The Databento subscription
-# bundled with the book ships individual contract data for ES only; the other
-# 29 products are delivered exclusively as pre-built continuous series. We
-# therefore wrap the construction-plus-validation in a single function and
-# apply it to ES — the only product where individual data is currently
-# available on disk.
+# The construction logic is generic across products, so it is worth wrapping. What the wrapper
+# must carry with it is the daily alignment the validation section established: a helper that repeated the raw
+# timestamp join would reintroduce the same error on every product it was pointed at.
+#
+# It is applied to ES alone because ES is the only product for which individual contract data
+# is on disk. The Databento subscription bundled with the book delivers the other 29 products
+# exclusively as pre-built continuous series, so there is nothing to reconstruct them from.
 
 
 # %%
-def construct_and_validate(product: str, min_outright_price: float = 500.0) -> dict:
-    """Construct a raw continuous series and validate it against the vendor continuous."""
+def construct_and_validate(product: str, min_outright_price: float = MIN_OUTRIGHT_PRICE) -> dict:
+    """Build a raw continuous series for one product and score it against the vendor's."""
     individual = load_cme_futures(products=[product], frequency="hourly", continuous=False)
     fronts = identify_front_month(individual, min_outright_price=min_outright_price)
     continuous_raw = create_continuous_raw(individual, fronts)
-    databento = load_cme_futures(
-        products=[product], tenors=[0], frequency="hourly", continuous=True
+
+    vendor = load_cme_futures(products=[product], tenors=[0], frequency="hourly", continuous=True)
+    vendor_daily = (
+        vendor.with_columns(pl.col("timestamp").dt.date().alias("date"))
+        .group_by("date")
+        .agg(pl.col("close").sort_by("timestamp").last().alias("vendor_close"))
     )
-    cmp = continuous_raw.select("timestamp", pl.col("close").alias("our_close")).join(
-        databento.select("timestamp", pl.col("close").alias("db_close")),
-        on="timestamp",
-        how="inner",
+    ours_daily = continuous_raw.select(
+        pl.col("timestamp").dt.date().alias("date"), pl.col("close").alias("our_close")
     )
-    diff = (cmp["our_close"] - cmp["db_close"]).abs()
+
+    paired = ours_daily.join(vendor_daily, on="date", how="inner")
+    diff = (paired["our_close"] - paired["vendor_close"]).abs()
     return {
         "product": product,
         "rows": len(continuous_raw),
         "contracts_used": continuous_raw["instrument_id"].n_unique(),
-        "validation_rows": len(cmp),
+        "validation_days": len(paired),
         "mean_abs_diff": float(diff.mean()),
         "max_abs_diff": float(diff.max()),
+        "mean_abs_diff_bps": float((diff / paired["vendor_close"]).mean() * 10_000),
     }
 
 
@@ -695,9 +1086,9 @@ validation_summary
 # For production use, the pipeline is:
 #
 # 1. **Download**: Databento provides pre-rolled continuous contracts (hourly OHLCV) for
-#    front, second, and third month tenors → `data/futures/market/continuous/hourly/`
+#    front, second, and third month tenors -> `data/futures/market/continuous/hourly/`
 # 2. **Session aggregation**: [`05_futures_session_aggregation`](05_futures_session_aggregation.ipynb) assigns CME session dates
-#    and aggregates hourly bars into daily OHLCV → `data/futures/market/continuous/daily/continuous_daily.parquet`
+#    and aggregates hourly bars into daily OHLCV -> `data/futures/market/continuous/daily/continuous_daily.parquet`
 # 3. **Loading**: `load_cme_futures()` reads the daily parquet for downstream analysis
 
 # %% [markdown]
@@ -705,34 +1096,47 @@ validation_summary
 #
 # ## Key Takeaways
 #
-# 1. **Roll detection (volume-based, ES, 2016-2025)** finds **40 rolls** —
-#    matching the four quarterly rolls per year × 10 years. The
-#    no-rollback constraint is necessary because raw daily-volume leadership
-#    can flicker between contracts during the roll window.
-# 2. **Calendar spreads contaminate raw individual data**: CME ships outright
-#    contracts alongside calendar spreads that trade at the inter-month
-#    price difference (~$50–100) rather than the index level (~$5,000). The
-#    `min_outright_price` filter in `identify_front_month` is what prevents
-#    a high-volume spread from being selected as "front month".
-# 3. **Panama (additive) adjustment** for the ES series adds about
-#    **$625 to the earliest 2016 prices** (so the start-of-history close is
-#    ~30% above the original quote). This preserves dollar P&L across rolls
-#    but distorts percentage returns the further back you go.
-# 4. **Ratio (multiplicative) adjustment** for the same window has a
-#    **cumulative ratio of ~1.11 at the start of the series** (about
-#    +11% scaling). Returns stay correct in percentage terms across the
-#    whole window — the right choice for IC, momentum features, and any
-#    statistical analysis.
-# 5. **Validation against Databento's continuous** (2,581 daily-aligned bars):
-#    **mean absolute difference ~$27**, **median signed difference ~$2.50**
-#    (essentially zero relative to ~$3,800 average price). 2,444 of those
-#    bars differ by more than $1 (most by a few dollars; **maximum absolute
-#    gap ~$583**). Differences come almost entirely from roll-timing
-#    disagreements — when our detector rolls a day earlier or later than the
-#    vendor's algorithm, the two series report the price of a different
-#    contract for those hours. The signed median near zero means the
-#    disagreements wash out: neither algorithm is systematically high or
-#    low.
+# 1. **A symbol is not a date.** The contract-definitions file writes the year with one digit,
+#    so `ESM1` is the June contract of a year ending in 1 and nothing in the symbol says which
+#    decade. A parser that pads it to a two-digit year dates every contract in this file to the
+#    wrong one, and prints the wrong year on the same row as the right expiration. The delivery
+#    month is recoverable from the symbol; the year has to come from the expiration column, or
+#    from the price history, as this notebook does.
+#
+# 2. **An argument named for a bar length does not guarantee one.** `frequency="hourly"`
+#    selects the raw per-contract capture; for individual contracts that capture is daily. The
+#    frame declares its own bar length in `rtype`, and the spacing between timestamps confirms
+#    it. The notebook asks rather than assumes, because the validation depends on the answer.
+#
+# 3. **Aligning the bars is the validation.** Joining our daily series to the vendor's hourly
+#    one on a bare timestamp pairs a whole trading day against the vendor's midnight hour, and
+#    the resulting difference is an order of magnitude larger than the one being studied. It is
+#    also completely plausible on the page: a mean absolute difference of tens of points on an
+#    index in the thousands reads like an ordinary construction disagreement. Aggregating the
+#    vendor's hours to session closes first is what makes the comparison a comparison.
+#
+# 4. **Once aligned, the two constructions are identical except during the handover.** Outside
+#    the interval between our roll and the old contract's last trading day, they agree to the
+#    cent on every day of the sample; inside it, they quote different contracts and differ by
+#    the calendar spread. All of the disagreement lives there. The window is derived from the
+#    mechanism rather than fitted, so the check could have failed - and against the unaligned
+#    comparison it would have, because there roll days were no worse than ordinary ones and
+#    every day disagreed.
+#
+# 5. **The no-rollback constraint never fires on this history.** The notebook counts the days
+#    where it changes the contract selected, and the count is zero: the raw volume leader is
+#    already monotone across the sample. The guard is cheap and the flicker it prevents is real
+#    on thinner products, so it stays - but it is not what makes the ES roll dates come out
+#    clean, and the notebook no longer says it is.
+#
+# 6. **Calendar spreads contaminate raw individual data.** CME lists them alongside outright
+#    contracts, and they trade at the inter-month difference rather than the index level. The
+#    `MIN_OUTRIGHT_PRICE` floor is what stops a high-volume spread being selected as the front
+#    month; the sample includes spread rows quoted in single-digit negative numbers.
+#
+# 7. **Panama preserves dollars, ratio preserves percentages, and on a decade of ES the two
+#    disagree substantially about the earliest prices.** Both figures are printed by the adjustment section
+#    rather than described here, because both move every time the history is extended.
 #
 # ### Adjustment Method Selection
 # | Use Case | Recommended Method | Reason |
