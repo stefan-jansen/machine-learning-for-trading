@@ -127,10 +127,10 @@ split_only = first_split["close"] / split_product
 display(
     Markdown(
         f"The {first_split['timestamp']:%B %Y} close of "
-        f"**${first_split['close']:.2f}** divided by the "
+        f"**\\${first_split['close']:.2f}** divided by the "
         f"**{' x '.join(f'{r:.0f}' for r in later_splits)} = {split_product:.0f}** of the "
-        f"{len(later_splits)} later splits is **${split_only:.2f}**. The adjusted close on "
-        f"that row is **${first_split['adj_close']:.2f}**, and the difference is every "
+        f"{len(later_splits)} later splits is **\\${split_only:.2f}**. The adjusted close "
+        f"on that row is **\\${first_split['adj_close']:.2f}**, and the difference is every "
         f"dividend Apple has paid since."
     )
 )

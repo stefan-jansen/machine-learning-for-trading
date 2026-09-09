@@ -39,6 +39,7 @@
 # %%
 """ETFs — Exploratory data analysis of the multi-asset ETF universe."""
 
+import numpy as np
 import plotly.graph_objects as go
 import polars as pl
 from ml4t.data.etfs import ETFDataManager
@@ -246,17 +247,44 @@ print(
     f"\nTotal OHLC violations: {violations.height} ({100 * violations.height / etfs.height:.3f}%)"
 )
 
+# How far outside the bound, as a fraction of the price on that row. A count says something
+# failed; the size says what kind of thing failed.
+breach = violations.select(
+    (
+        pl.max_horizontal(
+            pl.col("close") - pl.col("high"),
+            pl.col("open") - pl.col("high"),
+            pl.col("low") - pl.col("close"),
+            pl.col("low") - pl.col("open"),
+            pl.col("low") - pl.col("high"),
+        )
+        / pl.col("close")
+    ).alias("relative")
+)["relative"]
+if breach.len():
+    print(f"Largest breach: {breach.max():.2e} of the close (median {breach.median():.2e})")
+    print(f"Float64 epsilon: {float(np.finfo(np.float64).eps):.2e}")
+
 # %% [markdown]
-# The count above is the union: rows breaking any one of the five ordering invariants, where
-# the table above it reports each invariant separately. Both are worth having, because a
-# single figure hides which invariant broke.
+# Three numbers, and they answer different questions. The per-invariant table says *which*
+# ordering fails. The union count says *how many* rows fail at least one. The breach size says
+# *by how much*, and it is the one that identifies the cause.
 #
-# The two that break are `high < close` and `low > close`, and the cause is the adjustment
-# rather than the quotes. Yahoo applies the same cumulative split and dividend ratio to all
-# four price fields, and rounding each one separately can push a close a fraction above the
-# high that contained it. At this rate the rows are immaterial for returns and features, and
-# they are not immaterial for anything computed from the intraday range, which is why the
-# rate is reported rather than the rows being dropped.
+# The largest breach in the whole panel is about the size of float64 epsilon, printed beside
+# it: the smallest relative difference a double-precision number can represent. On those rows
+# the close and the high are the same price, and the adjustment arithmetic left them one bit
+# apart. Nothing is wrong with the data.
+#
+# What is wrong is the comparison. `high >= close` is a strict test on floating-point values,
+# and a strict test on quantities that went through a multiplication will fail on ties. The
+# right form compares against a tolerance scaled to the price, and until it does, a check that
+# reports under a hundred percent here is reporting on arithmetic rather than on the panel.
+#
+# This is worth dwelling on because the plausible explanation is the wrong one. Per-field
+# vendor rounding would also produce failed ordering checks, and it would produce them at a
+# size a price could notice - a fraction of a cent, not a fraction of a trillionth. The count
+# alone cannot tell the two apart, and a reader who stops at the count will believe whichever
+# story they were told.
 
 # %% [markdown]
 # ## 5. Liquidity across the groups
@@ -348,16 +376,18 @@ print(f"  Configured symbols: {configured} across {len(etf_mgr.config.tickers)} 
 # - **Check the panel against the dictionary that built it, both ways.** Symbols in the
 #   config with no prices, and prices with no group, are different failures with different
 #   causes, and a single count of matches hides both.
-# - **Report the rate of an invariant break, and say which invariant broke.** A union count
-#   tells you something is wrong; the per-check table tells you it is the adjustment rounding
-#   two fields against each other rather than a corrupted quote. Only the second answers
-#   whether the rows are safe for what you are about to compute.
+# - **A failed check needs a magnitude before it needs an explanation.** The count of ordering
+#   violations here looks like a data-quality finding and is an artifact of comparing floats
+#   with `>=`. The same count, at a size a price could notice, would be a real defect. Measure
+#   the breach before writing the sentence that explains it.
 # - **A spread in liquidity is a constraint on the strategy, not a footnote about the data.**
 #   The groups here differ by more than an order of magnitude in daily volume, so a rotation
 #   that can trade one bucket at negligible cost cannot assume the same fills in another.
 #
-# **Known limitations.** The universe is fixed and every member is still quoted, so this panel
-# says nothing about ETF closures - a real ETF universe does lose members, and a backtest that
+# **Known limitations.** `check_ohlc_invariants` compares strictly, so it reports these
+# tie-at-the-last-bit rows as violations on any adjusted panel; the rate it prints for this
+# dataset is a property of that comparison rather than of the data. The universe is fixed and
+# every member is still quoted, so this panel says nothing about ETF closures - a real ETF universe does lose members, and a backtest that
 # selects from this pool inherits the survivorship its construction removed. Volume is in
 # shares rather than notional, so it is not comparable across price levels without converting.
 # And the group classification comes from the download config, which is a choice made by this

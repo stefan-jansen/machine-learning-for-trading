@@ -272,9 +272,10 @@ fig.update_layout(
 show_plotly_with_alt(
     fig,
     "Bars above the axis count symbols recording their first observation in each year and "
-    "bars below it count those recording their last. The upper bars are present in every "
-    "year of the panel; the lower bars are empty until a dashed rule near the right edge, "
-    "after which they appear in every remaining year.",
+    "bars below it count those recording their last. The upper bars run through the whole "
+    "span, sparse and intermittent in the earliest years and growing steadily after that; "
+    "the lower bars are absent entirely until a dashed rule near the right edge, after "
+    "which they appear in every remaining year.",
 )
 
 # %% [markdown] tags=[]
