@@ -678,9 +678,10 @@ show_plotly_with_alt(
 # by the root-mean-square size of the original predictions. Zero means the model
 # emitted the same numbers from the reordered window and therefore did not read
 # position - within these test windows and this one shuffle. A value of one means the
-# reordering moved the forecast by as much as the whole forecast is worth, and a value
-# above one means the two disagree by more than that, which is what happens when the
-# reordered prediction is not merely different but points the other way.
+# two prediction sets differ, in root-mean-square, by as much as the original forecasts
+# are large; above one, by more than that. It is a size and nothing else: it does not
+# say which way either forecast pointed, and a shuffled prediction that is simply a
+# multiple of the original registers here too.
 #
 # It is a gap and not a correlation on purpose. A correlation of one would be satisfied
 # by predictions that are twice the originals plus a constant, which is a model whose
